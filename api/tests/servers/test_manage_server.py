@@ -66,6 +66,12 @@ from mc_server_dashboard_api.servers.domain.plugin import (
     ServerPlugin,
 )
 from mc_server_dashboard_api.servers.domain.ports import PortRange
+from mc_server_dashboard_api.servers.domain.resource_pack import (
+    ResourcePack,
+    ResourcePackAssignment,
+    ResourcePackId,
+)
+from mc_server_dashboard_api.servers.domain.server_properties import RCON_PORT
 from mc_server_dashboard_api.servers.domain.value_objects import (
     JAR_KEY_CONFIG_FIELD,
     JAR_SOURCE_CONFIG_FIELD,
@@ -1074,12 +1080,16 @@ def _updater(
     *,
     file_store: FakeFileStore | None = None,
     min_interval_seconds: int = 0,
+    public_base_url: str = "",
 ) -> Callable[..., Awaitable[Server]]:
     """Build an :class:`UpdateServer` with the file seam + port range bound (#311).
 
     ``authorize`` is required on :class:`UpdateServer` (issue #458). Call sites that
     do not exercise the gate omit it and get a permit-all default; gate tests pass an
     explicit ``authorize=`` which overrides the default.
+
+    ``token_generator`` is pinned so the RCON password the overrides path seeds into
+    an absent ``server.properties`` (issue #2810) is deterministic.
     """
 
     use_case = UpdateServer(
@@ -1088,6 +1098,8 @@ def _updater(
         file_store=file_store or FakeFileStore(),
         port_range=_PORTS,
         min_interval_seconds=min_interval_seconds,
+        public_base_url=public_base_url,
+        token_generator=lambda: "tok",
     )
 
     async def call(
@@ -1846,10 +1858,13 @@ async def test_update_no_override_change_skips_file_rewrite() -> None:
 
 
 async def test_update_config_overrides_creates_properties_when_absent() -> None:
-    # A legacy server with no server.properties gets one created from the overrides.
+    # A server with no server.properties gets one carrying the FULL platform half
+    # (issue #2810), not an overrides-only file: an overrides-only file has no
+    # rcon.password for the worker to reach the server with, and no server-port,
+    # so the server silently binds Mojang's 25565.
     uow = FakeUnitOfWork()
     community = CommunityId(uuid.uuid4())
-    server = _server(community_id=community)
+    server = _server(community_id=community, game_port=25570)
     server.config = {}
     uow.servers.seed(server)
     file_store = FakeFileStore()
@@ -1859,7 +1874,80 @@ async def test_update_config_overrides_creates_properties_when_absent() -> None:
         config={"motd": "hello"},
     )
     assert updated.config == {"motd": "hello"}
-    assert file_store.files["server.properties"] == b"motd=hello\n"
+    props = file_store.files["server.properties"].decode()
+    assert "server-port=25570" in props
+    assert "enable-rcon=true" in props
+    assert f"rcon.port={RCON_PORT}" in props
+    assert "rcon.password=tok" in props
+    assert "motd=hello" in props
+
+
+async def test_update_config_overrides_absent_file_omits_untracked_port() -> None:
+    # A legacy row with no tracked game_port owns no port value, so the seeded
+    # file carries the RCON triple but no server-port line (issue #2810).
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community, game_port=None)
+    server.config = {}
+    uow.servers.seed(server)
+    file_store = FakeFileStore()
+    await _updater(uow, file_store=file_store)(
+        community_id=community,
+        server_id=server.id,
+        config={"motd": "hello"},
+    )
+    props = file_store.files["server.properties"].decode()
+    assert "server-port" not in props
+    assert "enable-rcon=true" in props
+    assert f"rcon.port={RCON_PORT}" in props
+    assert "rcon.password=tok" in props
+
+
+async def test_update_config_overrides_absent_file_carries_assigned_pack() -> None:
+    # The seeded platform half includes the resource-pack keys the assignment row
+    # holds, so healing an absent file does not drop the server's pack (#2810).
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community, game_port=25570)
+    server.config = {}
+    uow.servers.seed(server)
+    pack = ResourcePack(
+        id=ResourcePackId.new(),
+        filename="pack.zip",
+        display_name="Pack",
+        description=None,
+        sha1_hash="abc123",
+        sha256_hash="def456",
+        size_bytes=10,
+        uploaded_by=uuid.uuid4(),
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    uow.resource_packs.packs[pack.id] = pack
+    uow.resource_packs.assignments[server.id] = ResourcePackAssignment(
+        server_id=server.id,
+        resource_pack_id=pack.id,
+        require_resource_pack=True,
+        resource_pack_prompt="Install this",
+        assigned_by=uuid.uuid4(),
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    file_store = FakeFileStore()
+    await _updater(uow, file_store=file_store, public_base_url="https://mcsd.example")(
+        community_id=community,
+        server_id=server.id,
+        config={"motd": "hello"},
+    )
+    props = file_store.files["server.properties"].decode()
+    assert (
+        "resource-pack=https://mcsd.example/api/public/resource-packs/"
+        f"{pack.id.value}/pack.zip" in props
+    )
+    assert "resource-pack-sha1=abc123" in props
+    assert "require-resource-pack=true" in props
+    assert "resource-pack-prompt=Install this" in props
+    assert "motd=hello" in props
 
 
 async def test_update_config_overrides_file_failure_after_commit() -> None:

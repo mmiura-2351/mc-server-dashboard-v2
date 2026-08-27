@@ -17,19 +17,23 @@ import asyncio
 import hashlib
 import logging
 import uuid
-from dataclasses import dataclass
-from urllib.parse import quote
+from collections.abc import Callable
+from dataclasses import dataclass, field
 
+from mc_server_dashboard_api.servers.application.platform_properties import (
+    pack_download_url,
+    read_properties,
+)
 from mc_server_dashboard_api.servers.application.resource_pack_zip import (
     validate_and_normalize,
 )
 from mc_server_dashboard_api.servers.domain.clock import Clock
+from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
     PermissionDeniedError,
     ResourcePackInUseError,
     ResourcePackNotFoundError,
-    ServerFileNotFoundError,
     ServerFilesUnsettledError,
     ServerNotFoundError,
 )
@@ -48,7 +52,11 @@ from mc_server_dashboard_api.servers.domain.resource_pack_store import (
     ResourcePackStore,
 )
 from mc_server_dashboard_api.servers.domain.server_properties import (
+    ResourcePackProperties,
+    apply_platform_properties,
     clear_resource_pack_properties,
+    new_rcon_password,
+    remove_keys,
     set_resource_pack_properties,
 )
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
@@ -61,6 +69,11 @@ logger = logging.getLogger(__name__)
 
 # 256 MiB upload cap for resource packs (issue #1176).
 MAX_RESOURCE_PACK_BYTES = 256 * 1024 * 1024
+
+# The one platform-managed key ``set_resource_pack_properties`` leaves alone when
+# the assignment carries no prompt; an assign then has to remove it explicitly, or
+# a previous assignment's prompt outlives the row that justified it (issue #2792).
+_RESOURCE_PACK_PROMPT_KEY = "resource-pack-prompt"
 
 
 async def _bytes_stream(data: bytes) -> ByteStream:
@@ -226,23 +239,15 @@ class DownloadResourcePack:
 
 async def _load_server_at_rest(
     uow: UnitOfWork, community_id: CommunityId, server_id: ServerId
-) -> None:
-    """Validate the server exists, belongs to community, and is at rest."""
+) -> Server:
+    """Return the server, validating it exists, is in community, and is at rest."""
 
     server = await uow.servers.get_by_id(server_id)
     if server is None or server.community_id != community_id:
         raise ServerNotFoundError(str(server_id.value))
     if not server.is_at_rest():
         raise ServerFilesUnsettledError(str(server_id.value))
-
-
-def pack_download_url(
-    public_base_url: str, pack_id: ResourcePackId, filename: str
-) -> str:
-    return (
-        f"{public_base_url}/api/public/resource-packs/"
-        f"{pack_id.value}/{quote(filename, safe='')}"
-    )
+    return server
 
 
 @dataclass(frozen=True)
@@ -251,12 +256,26 @@ class AssignResourcePack:
 
     Validates server at-rest state, holds the lifecycle lock, reads/writes
     ``server.properties``, and upserts the assignment row.
+
+    An assignment with no prompt removes any ``resource-pack-prompt`` line the
+    previous assignment left behind (issue #2792): the row now says "no prompt", and
+    :func:`set_resource_pack_properties` alone would leave the stale line to drift
+    from it until the next restore re-applied the DB's view.
+
+    A server with no ``server.properties`` at all gets the WHOLE platform half
+    seeded, pack keys included (issue #2810) — writing only the pack keys would
+    publish a file with no ``rcon.password`` for the worker to reach the server with
+    and no ``server-port``, so the server would silently bind Mojang's 25565. An
+    existing file is left otherwise untouched, exactly as before.
     """
 
     uow: UnitOfWork
     file_store: FileStore
     clock: Clock
     lifecycle_lock: LifecycleLock = NullLifecycleLock()
+    # Fills in ``rcon.password`` when the platform half is seeded from scratch
+    # (issue #2810). Injected so tests are deterministic.
+    token_generator: Callable[[], str] = field(default=new_rcon_password)
 
     async def __call__(
         self,
@@ -271,30 +290,45 @@ class AssignResourcePack:
     ) -> tuple[ResourcePackAssignment, ResourcePack]:
         async with self.lifecycle_lock.hold(server_id):
             async with self.uow:
-                await _load_server_at_rest(self.uow, community_id, server_id)
+                server = await _load_server_at_rest(self.uow, community_id, server_id)
 
                 pack = await self.uow.resource_packs.get_by_id(resource_pack_id)
                 if pack is None:
                     raise ResourcePackNotFoundError(str(resource_pack_id.value))
 
-            # Read server.properties (create empty if absent).
-            try:
-                props = await self.file_store.read_file(
-                    community_id=community_id,
-                    server_id=server_id,
-                    rel_path="server.properties",
-                )
-            except ServerFileNotFoundError:
-                props = b""
+            props = await read_properties(
+                self.file_store, community_id=community_id, server_id=server_id
+            )
 
             url = pack_download_url(public_base_url, pack.id, pack.filename)
-            new_props = set_resource_pack_properties(
-                props,
-                url=url,
-                sha1=pack.sha1_hash,
-                require=require_resource_pack,
-                prompt=resource_pack_prompt,
-            )
+            if props is None:
+                # No file to preserve: seed the whole platform half, the pack keys
+                # included (issue #2810). The pack values come from THIS call's
+                # arguments, never from the assignment row -- the row is upserted
+                # below, so reading it here would write the previous assignment.
+                new_props = apply_platform_properties(
+                    b"",
+                    game_port=server.game_port,
+                    rcon_password=self.token_generator(),
+                    resource_pack=ResourcePackProperties(
+                        url=url,
+                        sha1=pack.sha1_hash,
+                        require=require_resource_pack,
+                        prompt=resource_pack_prompt,
+                    ),
+                )
+            else:
+                new_props = set_resource_pack_properties(
+                    props,
+                    url=url,
+                    sha1=pack.sha1_hash,
+                    require=require_resource_pack,
+                    prompt=resource_pack_prompt,
+                )
+                if resource_pack_prompt is None:
+                    # The row says "no prompt", so the file must not keep a
+                    # previous assignment's prompt line (issue #2792).
+                    new_props = remove_keys(new_props, {_RESOURCE_PACK_PROMPT_KEY})
 
             await self.file_store.write_file(
                 community_id=community_id,
@@ -329,6 +363,11 @@ class UnassignResourcePack:
 
     Validates server at-rest state, holds the lifecycle lock, clears the
     ``server.properties`` keys, and deletes the assignment row.
+
+    A server with no ``server.properties`` has no pack keys to clear, so the file
+    write is skipped entirely and only the row goes (issue #2810). Clearing from
+    empty would publish a lone-newline file whose platform half is missing
+    altogether — strictly worse than the absent file it replaces.
     """
 
     uow: UnitOfWork
@@ -351,24 +390,16 @@ class UnassignResourcePack:
                 if assignment is None:
                     raise ResourcePackNotFoundError(str(server_id.value))
 
-            # Read server.properties (gracefully handle missing).
-            try:
-                props = await self.file_store.read_file(
+            props = await read_properties(
+                self.file_store, community_id=community_id, server_id=server_id
+            )
+            if props is not None:
+                await self.file_store.write_file(
                     community_id=community_id,
                     server_id=server_id,
                     rel_path="server.properties",
+                    content=clear_resource_pack_properties(props),
                 )
-            except ServerFileNotFoundError:
-                props = b""
-
-            new_props = clear_resource_pack_properties(props)
-
-            await self.file_store.write_file(
-                community_id=community_id,
-                server_id=server_id,
-                rel_path="server.properties",
-                content=new_props,
-            )
 
             async with self.uow:
                 await self.uow.resource_packs.delete_assignment(server_id)
