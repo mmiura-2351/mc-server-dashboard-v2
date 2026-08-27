@@ -540,12 +540,13 @@ class UpdateServer:
     deployment-wide (409 taken), the deployment-wide ``UNIQUE(game_port)`` the
     ultimate backstop (#261). It rewrites ``server-port=<port>`` in the at-rest
     ``server.properties`` through the file write seam so the DB ``game_port`` and
-    the real bind port stay in sync; a legacy server with no properties file gets
-    one created with just the port line. The range check runs before the state
-    gate (the same 422-before-409 precedence); the file rewrite happens after the
-    DB commit (#1705) so a commit failure (e.g. a unique-violation race) does not
-    leave the file and row out of step. The inverse divergence — committed row,
-    failed file write — is the self-healing direction (retryable).
+    the real bind port stay in sync; a server with no properties file is refused
+    (#2623) rather than handed a file holding only the port line. The range check
+    runs before the state gate (the same 422-before-409 precedence); the file
+    rewrite happens after the DB commit (#1705) so a commit failure (e.g. a
+    unique-violation race) does not leave the file and row out of step. The
+    inverse divergence — committed row, failed file write — is the self-healing
+    direction (retryable).
 
     A **config-overrides** edit on a server whose ``server.properties`` is absent
     seeds the whole platform half before applying the overrides (issue #2810), so
