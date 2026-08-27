@@ -1,13 +1,16 @@
 # Dependency Policy
 
 How v2 takes on and updates third-party dependencies. This document fixes the
-*policy*; the concrete mechanisms (lockfile commands, automated-updater
-configuration, the cooldown enforcement per tool) are set up as the toolchain
-lands and are marked *(forthcoming)*.
+*policy* and names the concrete mechanisms that enforce it: lockfile commands
+(Section 2), cooldown enforcement (Section 3), and the automated updater
+(Section 6).
 
-> **Two ecosystems.** `api/` is Python; `worker/` and `relay/` are Go. The
-> policy below applies to both; where a rule is expressed per-tool, each
-> ecosystem's section states its own form.
+> **Three language ecosystems, plus images and actions.** `api/` is Python;
+> `worker/` and `relay/` are Go; `webui/` is Node. Container base images
+> (`docker`), the compose service images (`docker-compose`) and the CI actions
+> (`github-actions`) are dependencies too, tracked by the same updater
+> (Section 6). The policy below applies to all of them; where a rule is
+> expressed per-tool, each ecosystem's section states its own form.
 
 ## 1. Pinning style
 
@@ -19,6 +22,8 @@ lands and are marked *(forthcoming)*.
   - Go (`worker/`, `relay/`): a major version is part of the module import
     path, so a major bump is inherently a separate, explicit change;
     minor/patch updates are selected by the module graph.
+  - Node (`webui/`): caret ranges (`^x.y.z`), which admit minor/patch and cap
+    the next major (for a `0.x` library, the next minor).
 - **Dev / tooling dependencies** (linters, test runners, type checkers, build
   helpers) are kept current with lower-bound-style ranges that still **cap the
   next major** (e.g. `mypy-protobuf<6`, `pytest-asyncio<2`, `pytest-timeout<3`):
@@ -31,13 +36,14 @@ lands and are marked *(forthcoming)*.
 
 ## 2. Lockfiles
 
-- Each ecosystem commits its lockfile (`api/`: the uv lockfile; `worker/` and
-  `relay/`: `go.sum` with `go.mod`). Lockfiles are the reproducibility boundary
-  and must be committed. (`go.sum` is generated, and from then on committed,
-  only once the module has external dependencies; a dependency-free module has
-  only `go.mod`.)
+- Each ecosystem commits its lockfile (`api/`: `uv.lock`; `worker/` and
+  `relay/`: `go.sum` with `go.mod`; `webui/`: `package-lock.json`). Lockfiles
+  are the reproducibility boundary and must be committed. (`go.sum` is
+  generated, and from then on committed, only once the module has external
+  dependencies; a dependency-free module has only `go.mod`.)
 - Reproducible installs resolve from the lockfile; routine updates regenerate it
-  through the ecosystem's own command *(forthcoming)*.
+  through the ecosystem's own command: `uv lock` (api), `go get` /
+  `go mod tidy` (worker, relay), `npm install` / `npm update` (webui).
 
 ## 3. Supply-chain cooldown
 
@@ -46,13 +52,14 @@ releases — which can take several days to detect and retract — **do not adop
 any release published within the last 7 days**. Holding a 7-day window absorbs
 most public-incident timelines.
 
-- The cooldown applies to **both** ecosystems.
-- It is enforced at dependency-resolution and at the automated-update layer. The
-  automated-updater layer is configured: `.github/dependabot.yml` sets
+- The cooldown applies to **every** ecosystem.
+- It is enforced at the automated-update layer: `.github/dependabot.yml` sets
   `cooldown: {default-days: 7}` on every ecosystem, so Dependabot never opens a
-  version-update PR for a release younger than 7 days. The dependency-resolution
-  mechanism for `api/` (an "exclude releases newer than N days" resolver option)
-  is per-tool *(forthcoming)*.
+  version-update PR for a release younger than 7 days. A resolver-side cooldown
+  for `api/` (uv's `exclude-newer` option) is not configured; the cooldown is
+  enforced by Dependabot's `cooldown` setting and by the merge-time
+  `supply-chain-cooldown` status (next bullet). Whether to add a resolver-side
+  cooldown is undecided.
 - It is also enforced at **merge time** as a backstop to the opening-side
   `cooldown` setting. The `supply-chain-cooldown` workflow
   (`.github/workflows/supply-chain-cooldown.yml`, driving

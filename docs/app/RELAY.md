@@ -1,15 +1,14 @@
 # Game Ingress Relay
 
-> Status: **Implemented** (epic #659; Bedrock ingress epic #1540) · Audience:
+> Status: **Implemented** · Audience:
 > contributors to `api/`, `worker/`, `relay/`, `proto/`, `webui/`
 >
-> This document is the design for epic
-> [#659](https://github.com/mmiura-2351/mc-server-dashboard-v2/issues/659):
+> This document is the design of the game-ingress path:
 > players join a server at `<slug>.<base_domain>` with no port number, the
 > Worker's IP is never exposed, and a Worker behind NAT (no public IP, no
-> inbound ports) can serve players. It specifies the new **relay** component,
+> inbound ports) can serve players. It specifies the **relay** component,
 > the dial-back **tunnel contract**, hostname routing, and session recording.
-> Once the proto messages exist, the buf module under
+> The buf module under
 > [`../../proto/`](../../proto/) is the binding contract and this document
 > explains it; where they disagree, the `.proto` files win.
 
@@ -28,8 +27,8 @@
 11. [Security posture](#11-security-posture)
 12. [Operational requirements](#12-operational-requirements)
 13. [Configuration](#13-configuration)
-14. [Database changes](#14-database-changes)
-15. [HTTP API and Web UI changes](#15-http-api-and-web-ui-changes)
+14. [Database schema](#14-database-schema)
+15. [HTTP API and Web UI surface](#15-http-api-and-web-ui-surface)
 16. [Decision log](#16-decision-log)
 17. [Out of scope / future work](#17-out-of-scope--future-work)
 
@@ -37,13 +36,13 @@
 
 ## 1. Scope
 
-Today players connect directly to the host running the Worker on
+On the direct path (Section 9) players connect to the host running the Worker on
 `server.game_port` (DEPLOYMENT.md), which requires the Worker host to have a
 reachable address and an open inbound port. In the target topology — each user
 runs a Worker on their own PC — that exposes the operator's home IP and forces
 port-forwarding.
 
-This design adds an ingress path with these properties (epic #659 outcomes):
+The relay is the ingress path with these properties:
 
 - A player joins using **only a hostname** (`<slug>.<base_domain>`), no port.
 - The **Worker's IP is never visible** to players; players only ever talk to
@@ -62,13 +61,13 @@ This design adds an ingress path with these properties (epic #659 outcomes):
 
 The architecture is forced by the constraints: a vanilla client can only open
 a plain TCP connection, so NAT traversal without client-side software is not
-possible. The only shape that satisfies the epic is a **public relay** plus a
+possible. The only shape that satisfies these properties is a **public relay** plus a
 **Worker-initiated outbound tunnel**. The hostname-routing trick is that the
 Minecraft handshake packet carries the hostname the player typed, so the relay
 can route by hostname after reading one plaintext packet (the Minecraft
 analogue of SNI; the same principle as Infrared / mc-router).
 
-General-purpose OSS tunnels (frp, rathole, …) were considered and rejected:
+General-purpose OSS tunnels (frp, rathole, …) are rejected as the transport:
 they cannot route raw TCP by Minecraft hostname, so each server would need its
 own public port — which contradicts the port-less goal — and they would add a
 second credential/config surface. The relay is purpose-built and small.
@@ -89,7 +88,7 @@ second credential/config surface. The relay is purpose-built and small.
                               │ gRPC (TLS + relay credential)
                               ▼
                    ┌─────────────────────┐
-                   │  api                │ ──existing gRPC stream──► worker
+                   │  api                │ ──control-plane stream──► worker
                    │  - RelayService     │      (TunnelDial command)
                    │  - session records  │
                    └─────────────────────┘
@@ -97,19 +96,19 @@ second credential/config surface. The relay is purpose-built and small.
 
 | Component | Role |
 |---|---|
-| **`relay/`** (new top-level Go module, sibling of `worker/`) | Public data path. Accepts player TCP on the game listener, parses the handshake, resolves the hostname via the API, accepts the Worker's dial-back on the tunnel listener, and splices the two connections. Reports sessions to the API. Holds no persistent state. |
-| **`api/`** | Control plane and source of truth, as today. Gains a `RelayService` gRPC service (served on the existing gRPC listener), a `TunnelDial` command on the existing Worker stream, the `slug` column, the `game_session` table, and a retention prune loop. |
-| **`worker/`** | Gains one new command handler: `TunnelDial` — dial the relay's tunnel endpoint, present a token, splice to the local game port. No new config, no new persistent connections, stateless as before. |
+| **`relay/`** (top-level Go module, sibling of `worker/`) | Public data path. Accepts player TCP on the game listener, parses the handshake, resolves the hostname via the API, accepts the Worker's dial-back on the tunnel listener, and splices the two connections. Reports sessions to the API. Holds no persistent state. |
+| **`api/`** | Control plane and source of truth. Serves the `RelayService` gRPC service (on the same gRPC listener as `WorkerService`), dispatches the `TunnelDial` command on the Worker stream, and owns the `slug` column, the `game_session` table, and a retention prune loop. |
+| **`worker/`** | One relay-specific command handler: `TunnelDial` — dial the relay's tunnel endpoint, present a token, splice to the local game port. No relay-specific config, no additional persistent connections, stateless. |
 
-The relay is a **separate Go service** (owner decision, Section 16): all game
+The relay is a **separate Go service** (Section 16): all game
 traffic is a data path, so it must not share a process with the API — an API
 restart must not drop players, and Go matches the Worker toolchain and suits
-a TCP splice engine. In the single-host compose deployment it runs as a new
+a TCP splice engine. In the single-host compose deployment it runs as the
 `relay` service next to `api`; in the target topology it runs wherever a
 public IP lives (naturally the API host, which is already public because
 Workers dial into it).
 
-The relay is **stateless** in the Section-3 terminology sense: its only state
+The relay is **stateless** in the REQUIREMENTS.md Section 3 sense: its only state
 is in-flight TCP sessions and a short-lived status cache. Restarting it drops
 active player connections (players reconnect) and loses nothing else.
 
@@ -139,10 +138,10 @@ is unique per community, because the hostname namespace is global).
   (1–63 chars, no leading/trailing hyphen).
 - **Auto-generated on create** by default: a 6-character random
   lowercase-alphanumeric string (`[a-z0-9]{6}`, e.g. `k7m2p9`) via
-  `secrets.choice` (changed by issue #981). Retry on the (unlikely) uniqueness
+  `secrets.choice`. Retry on the (unlikely) uniqueness
   collision. Generation does not derive from `server.name` — names are
   free-form display text (often non-ASCII) and do not slugify reliably.
-- **Optional explicit slug at create** (issue #981): `CreateServerRequest`
+- **Optional explicit slug at create**: `CreateServerRequest`
   accepts an optional `slug` field. When supplied, it is validated (422
   invalid/reserved) and checked for global uniqueness (409 taken); when
   omitted or blank, a slug is auto-generated as above.
@@ -150,11 +149,13 @@ is unique per community, because the hostname namespace is global).
   endpoint. Validation: charset, global uniqueness (friendly 409), and a
   reserved-word list (`www`, `api`, `mail`, `relay`, `admin`, `ns1`, `ns2`,
   `mc`, …) to keep operational hostnames usable under the same domain.
-- **Released on delete or rename and immediately reusable** (owner decision —
+- **Released on delete or rename and immediately reusable** (Section 16 —
   no cooldown). Accepted risk: a stale hostname (old invite link) can resolve
   to a different owner's new server if the slug is re-claimed. Revisit if it
   bites; a cooldown table is a small additive change.
-- **Backfill**: the migration generates slugs for existing rows.
+- **Every row has one**: the column is `NOT NULL`, and the schema migration
+  that introduces it generates a unique slug for every server row that
+  predates it.
 
 ### Matching at the relay
 
@@ -201,7 +202,7 @@ player        relay              api                worker            mc server
 3. The API validates: slug exists → server `observed_state = running` →
    assigned Worker online. On success it mints a **single-use token**
    (128-bit random, 10 s TTL), dispatches a `TunnelDial` command to that
-   Worker over the existing control-plane stream, and returns
+   Worker over the control-plane stream, and returns
    `{decision: TUNNEL, token}` to the relay. On a stopped server it returns
    `{decision: STOPPED}` (relay answers in-protocol, Section 7); on no such
    slug, `{decision: NOT_FOUND}` (relay drops silently).
@@ -241,10 +242,10 @@ flow control and congestion handling per player, isolate failures, and reduce
 the relay and Worker to dumb `io.Copy` splices. The cost — one extra TLS
 handshake per join, and one outbound NAT entry per active player — is
 negligible at this system's scale (NFR-SCALE-1). There is **no persistent
-Worker↔relay connection**; the only always-on channel remains the existing
+Worker↔relay connection**; the only always-on channel is the
 Worker↔API gRPC stream.
 
-**`TunnelDial`** — new `ApiCommand` payload on the existing control-plane
+**`TunnelDial`** — an `ApiCommand` payload on the control-plane
 stream (CONTROL_PLANE.md Section 5):
 
 | Field | Meaning |
@@ -252,10 +253,10 @@ stream (CONTROL_PLANE.md Section 5):
 | `server_id` | Which local server the session is for. The Worker resolves it to the running instance's published loopback game port; if the server is not running locally, it returns a `CommandResult` error. |
 | `endpoint` | The relay tunnel endpoint to dial, `host:port` (from the relay's registration, Section 6). |
 | `token` | The single-use session token to present. |
-| `tls_ca_pem` | Optional PEM bundle to verify the relay's tunnel certificate against; empty means system roots (public CA). Delivered in-band so the **Worker needs zero new configuration** — it already trusts the API over the authenticated control channel. |
+| `tls_ca_pem` | Optional PEM bundle to verify the relay's tunnel certificate against; empty means system roots (public CA). Delivered in-band so the **Worker needs zero relay configuration** — it already trusts the API over the authenticated control channel. |
 
 `TunnelDial` is a quick command: it **bypasses the Worker's slow-lane
-concurrency cap** exactly like `ServerCommand` (issue #169) — a join must not
+concurrency cap** exactly like `ServerCommand` — a join must not
 queue behind a hydrate.
 
 **Dial-back handshake** (Worker → relay tunnel listener, after TLS):
@@ -266,7 +267,7 @@ queue behind a hydrate.
 
 The relay matches the token against its table of waiting player connections
 (consuming it — tokens are single-use), responds with `"OK\n"`, and starts the
-splice. Unknown, expired, or reused tokens: the relay closes the connection
+splice. Unknown, expired, or replayed tokens: the relay closes the connection
 without a response. Tunnel connections that send nothing within 5 s are
 dropped.
 
@@ -282,8 +283,8 @@ operation.
 
 ## 6. Relay-to-API contract
 
-A new gRPC service in a new buf package (`mcsd.relay.v1`), served on the
-API's **existing gRPC listener** (`server.grpc_port`) alongside
+A gRPC service in its own buf package (`mcsd.relay.v1`), served on the
+API's **gRPC listener** (`server.grpc_port`) alongside
 `WorkerService`. Same transport posture as the Worker (CONTROL_PLANE.md
 Section 2): server-side TLS, shared-secret auth in call metadata — but a
 **separate credential** (`relay.credential` on the API side), so relay and
@@ -308,7 +309,7 @@ service RelayService {
   relay. The API stores the endpoint/CA for use in `TunnelDial` commands and
   **closes any `game_session` rows that are open but absent from the active
   set** — this is how sessions orphaned by a relay crash get an `ended_at`.
-  One relay per deployment at M-this; a second `Register` from a different
+  One relay per deployment; a second `Register` from a different
   relay instance simply replaces the stored endpoint (last-writer-wins).
 - **`ResolveJoin`** — the per-connection routing decision described in
   Section 4. Request: `{slug, player_ip, intent: STATUS|LOGIN}`. Response:
@@ -367,7 +368,7 @@ per-slug **status cache** (default 5 s TTL):
   the exchange and the rest wait for its result (success or failure fallback
   alike), so a burst of pings costs one ResolveJoin and one dial-back.
 
-**Stopped servers answer in-protocol** (owner decision):
+**Stopped servers answer in-protocol** (Section 16):
 
 - Status ping → synthesized response: MOTD `"<name> — stopped. Start it from
   the dashboard."`, `version.protocol = -1` (renders as an incompatible
@@ -391,20 +392,19 @@ null username.
 
 Behind the relay, the Minecraft server process sees every connection as
 coming from the tunnel's local address, so **server-side IP bans stop
-working**. UUID/name bans are unaffected (`online-mode` stays on). The epic
-requires moderation not to degrade, so the relay becomes the IP-visibility
-point (owner decision: record at the relay and surface in the dashboard; no
+working**. UUID/name bans are unaffected (`online-mode` stays on). Moderation
+must not degrade (Section 1), so the relay is the IP-visibility
+point (Section 16: record at the relay and surface in the dashboard; no
 PROXY-protocol passthrough — it is Paper-only and would not cover vanilla).
 
-New table **`game_session`** (see Section 14) populated via
+The **`game_session`** table (Section 14) is populated via
 `ReportSessions`. One row per accepted **login** session (status pings are
 not recorded). `username` / `player_uuid` are the values *claimed* in Login
 Start — pre-authentication. With `online-mode` on, an impostor fails Mojang
 auth seconds later, so a session of meaningful duration implies a verified
-identity; the docs and UI should still label the column "claimed identity"
-honestly.
+identity; the docs and UI nonetheless label the column "claimed identity".
 
-**Bedrock flows** (issue #1904) are reported through the same `ReportSessions`
+**Bedrock flows** are reported through the same `ReportSessions`
 path and `session.Reporter`, but the unit is a UDP flow, not an authenticated
 login: the relay never parses RakNet, so a flow becomes a session only once it
 crosses a threshold of *connected* client→worker datagrams (RakNet FLAG_VALID,
@@ -416,11 +416,11 @@ forwarder and accepted: `player_uuid` / `username` are null (Floodgate identity
 is Geyser-side, invisible to the relay) while `player_ip` is the client's true
 UDP source; and `started_at` is the promotion time (~≤1 s after connect) while
 `ended_at` lags the true disconnect by up to `flowIdleTimeout` (60 s, the
-idle-eviction window). Honest Java-vs-Bedrock labelling shipped with #1912:
+idle-eviction window). Java and Bedrock sessions are labelled honestly:
 `SessionStart.source` (a `SessionSource` enum — `JAVA` / `BEDROCK`) is set by
-the relay and persisted in the `game_session.source` column (migration 0034).
+the relay and persisted in the `game_session.source` column.
 
-**Access control** (owner decision): a new permission **`session:read`**,
+**Access control** (Section 16): the permission **`session:read`**,
 granted to the seeded Owner role by default (DATABASE.md role seeding). The
 sessions endpoint (Section 15) requires it; members with only `server:read`
 do not see session data at all. Player IPs are PII — this keeps them
@@ -435,12 +435,12 @@ when their server is deleted.
 
 ## 9. Coexistence with the direct path
 
-The relay is **config-selectable, default off** (`relay.enabled`, API side) —
-the epic's outcome for new deployments, but a domain + public relay is a real
-prerequisite, so single-host operators keep the current behavior with zero
-new setup (owner decision: keep the direct path as a fallback).
+The relay is **config-selectable, default off** (`relay.enabled`, API side): a
+domain + public relay is a real prerequisite, so a single-host operator runs the
+direct path with no relay setup at all (Section 16: the direct path is kept as a
+fallback).
 
-| | Direct path (today) | Relay path |
+| | Direct path | Relay path |
 |---|---|---|
 | `relay.enabled` | `false` (default) | `true` |
 | Player address | `<worker host>:<game_port>` | `<slug>.<base_domain>` |
@@ -448,20 +448,20 @@ new setup (owner decision: keep the direct path as a fallback).
 | Host firewall | game-port range open | nothing inbound on the Worker |
 
 The two paths are not mutually exclusive at the protocol level (a server can
-be reachable both ways during migration); `relay.enabled` governs whether the
-relay control surface (RelayService, slug display in the UI) is active.
-`game_port` allocation (`ports.py`) is unchanged in both modes — the relay
-path still uses it as the container's published loopback port that the Worker
-dials.
+be reachable both ways while a deployment switches from one to the other);
+`relay.enabled` governs whether the relay control surface (RelayService, slug
+display in the UI) is active. `game_port` allocation (`ports.py`) is the same in
+both modes — the relay path uses it as the container's published loopback port
+that the Worker dials.
 
 **Single-host caveat:** the relay's `0.0.0.0:25565` bind overlaps the default
 game-port range (`25565..25664`). This is handled automatically: when
 `relay.enabled=true` the allocator excludes any relay host binds that fall inside
-the range, so the first server is assigned `25566` (issue #1002). Only binds
+the range, so the first server is assigned `25566`. Only binds
 inside the range are excluded; by default that is just 25565, since the tunnel's
-25665 sits above `range_end`. `ports.range_start` remains as a fallback knob for
+25665 sits above `range_end`. `ports.range_start` is a fallback knob for
 shifting the range but is not needed for the documented relay setup. A server
-created *before* relay enablement keeps its `game_port` and can still collide —
+created *before* the relay is enabled keeps its `game_port` and can still collide —
 see `docs/dev/DEPLOYMENT.md`
 [Single-host port collision](../dev/DEPLOYMENT.md#single-host-port-collision).
 
@@ -471,9 +471,9 @@ see `docs/dev/DEPLOYMENT.md`
 
 | Failure | Effect | Recovery |
 |---|---|---|
-| **Relay restart/crash** | All active player sessions drop (every session's splice lives in the relay). Worst blast radius in the design — accepted for one relay; multiple relays are future work. | Players reconnect; tunnels re-establish per session. Orphaned open `game_session` rows are closed at the next `Register`. |
+| **Relay restart/crash** | All active player sessions drop (every session's splice lives in the relay). Worst blast radius in the design — accepted for one relay; multiple relays are not provided (Section 17). | Players reconnect; tunnels re-establish per session. Orphaned open `game_session` rows are closed at the next `Register`. |
 | **API down** | Existing sessions unaffected (splices are relay↔worker, no API in the data path). New joins fail: relay disconnects with an in-protocol "try again shortly" reason. Status answered from cache while it lasts; cache-miss pings get the stopped-style response with a "dashboard unavailable" MOTD. | Relay retries gRPC with backoff; service resumes when API returns. |
-| **Worker process dies mid-session** | Its tunnel connections die with it, so its players drop — even though the MC containers keep running (tunnel sockets are owned by the Worker process). Same blast-radius class as today's worker-restart behavior. | Players rejoin after the Worker reconnects and the orphan sweep settles. |
+| **Worker process dies mid-session** | Its tunnel connections die with it, so its players drop — even though the MC containers keep running (tunnel sockets are owned by the Worker process). Same blast-radius class as a Worker restart. | Players rejoin after the Worker reconnects and the orphan sweep settles. |
 | **Worker never dials back** (crashed between command and dial, token expired) | Relay times out at 10 s, player gets Login Disconnect "could not reach the server". The Worker's `CommandResult` error (if any) is logged API-side. | Player retries. |
 | **Slug renamed mid-session** | No effect; the hostname is only consulted at join time. | — |
 | **Stale hostname after delete + slug re-claimed** | Players using an old link land on the new claimant's server (immediate-reuse decision, Section 3). | Operator-level concern; revisit with a cooldown if it bites. |
@@ -498,8 +498,8 @@ see `docs/dev/DEPLOYMENT.md`
   silent close.
 - **Relay↔API** matches the Worker posture: server-side TLS on the gRPC
   listener + a dedicated shared secret (`relay.credential`), constant-time
-  compared (NFR-SEC-1). mTLS rides the existing deferred plan
-  (CONTROL_PLANE.md Section 2) and will cover this channel when it lands.
+  compared (NFR-SEC-1). mTLS is reserved, not implemented, on this channel as
+  on the Worker channel (CONTROL_PLANE.md Section 2).
 - **Game payload privacy**: after Login Start, Minecraft's protocol
   encryption is end-to-end client↔server; the relay relays ciphertext and
   never holds key material.
@@ -518,7 +518,7 @@ The relay proxies player connections, so the Minecraft server sees the
 **relay's IP** as every player's source address, not the player's real IP.
 When `prevent-proxy-connections=true`, the server sends that source IP to
 Mojang's `hasJoined` session endpoint for verification; Mojang compares it
-against the IP the client originally authenticated from. Because these two
+against the IP the client authenticated from. Because these two
 IPs differ (relay vs. player), **online-mode authentication fails** and
 players are kicked.
 
@@ -530,16 +530,16 @@ Operators only hit this issue if they have explicitly enabled the property.
 ## 13. Configuration
 
 Follows CONFIGURATION.md conventions: TOML + env override
-(`MCD_RELAY_*` for the new binary), secrets via env, fail-fast on invalid
+(`MCD_RELAY_*` for the relay binary), secrets via env, fail-fast on invalid
 config, wiring at the edge.
 
-**API — new `[relay]` section:**
+**API — `[relay]` section:**
 
 | Key | Default | Meaning |
 |---|---|---|
 | `relay.enabled` | `false` | Master switch: serve RelayService, expose `join_hostname`, run the prune loop. |
 | `relay.credential` | — (required when enabled; secret) | Shared secret the relay presents. |
-| `relay.base_domain` | — (required when enabled) | e.g. `mc.example.com`; used to build `join_hostname` and validate registration. |
+| `relay.base_domain` | — (required when enabled) | e.g. `mc.example.com`; builds `join_hostname` and validates registration. |
 | `relay.game_port` | `25565` | Relay container's published game-listener host port. The allocator excludes it from the assignable game-port range when the relay is enabled. |
 | `relay.tunnel_port` | `25665` | Relay container's published tunnel-listener host port. Excluded from the assignable range like `game_port`. |
 | `relay.bedrock_enabled` | `false` | Bedrock ingress gate. When on (with `relay.enabled`), Geyser detection allocates a Bedrock port and server responses surface `bedrock_address`/`bedrock_port`. |
@@ -560,7 +560,7 @@ config, wiring at the edge.
 | `tunnel.public_endpoint` | — (required) | `host:port` advertised to Workers via `Register` → `TunnelDial`. |
 | `tunnel.tls.cert_file` / `tunnel.tls.key_file` | — (required) | Tunnel listener TLS material. Self-signed is fine: the matching CA PEM travels `Register` → API → `TunnelDial` → Worker verification. |
 | `tunnel.tls.advertised_ca_file` | — (derive from `cert_file`) | CA bundle advertised to Workers for verifying the tunnel cert. Unset → derive from `cert_file` (self-signed). `system` → advertise empty (Workers use system roots; for a publicly-issued cert). A path → advertise that PEM. |
-| `bedrock.enabled` | `false` | Master switch for the Bedrock QUIC/UDP tunnel listener (issue #1584). Off by default so a Java-only relay neither binds nor requires the Bedrock UDP ports below on upgrade. Wired from the same operator setting as the API's `relay.bedrock_enabled`, via `MCD_RELAY_BEDROCK_ENABLED` (compose sets it from `MCD_API_RELAY__BEDROCK_ENABLED`). |
+| `bedrock.enabled` | `false` | Master switch for the Bedrock QUIC/UDP tunnel listener. Off by default so a Java-only relay neither binds nor requires the Bedrock UDP ports below. Wired from the same operator setting as the API's `relay.bedrock_enabled`, via `MCD_RELAY_BEDROCK_ENABLED` (compose sets it from `MCD_API_RELAY__BEDROCK_ENABLED`). |
 | `bedrock.tunnel_listen` | `:25675` | Bedrock QUIC tunnel listener (RFC 9221 DATAGRAM) — see [`BEDROCK_TUNNEL.md`](BEDROCK_TUNNEL.md). Reuses `tunnel.tls.{cert_file,key_file}` with a distinct ALPN; no separate cert/key config. Bound only when `bedrock.enabled` is true. |
 | `bedrock.tunnel_max_conns_per_ip` | `64` | Per-IP concurrent cap on unauthenticated handshake windows on the Bedrock QUIC listener, mirroring `tunnel.max_conns_per_ip` (Section 11) — see `BEDROCK_TUNNEL.md` Section 8. |
 | `bedrock.max_flows_per_ip` / `bedrock.new_flows_per_ip_per_second` | `32` / `10` | Hygiene caps on a bound Bedrock `bedrock_port`, same posture as `game.max_conns_per_ip` / `game.joins_per_ip_per_second` — see `BEDROCK_TUNNEL.md` Section 8. |
@@ -568,52 +568,57 @@ config, wiring at the edge.
 | `metrics.listen` | `127.0.0.1:9090` | Metrics/health listener address. Loopback by default so the endpoint is never exposed on the public interface without an explicit choice. Via `MCD_RELAY_METRICS_LISTEN`. |
 | `log.level` / `log.format` | as Worker | Standard logging keys. |
 
-**Worker: no new configuration.** Everything a `TunnelDial` needs arrives in
+**Worker: no relay configuration.** Everything a `TunnelDial` needs arrives in
 the command.
 
-**Compose**: a new `relay` service (image `mcsd-relay:dev`) joining the
-`mcsd` network, publishing `25565` and `25665`; with the object-store profile
-precedent, gate it behind a `relay` profile so default bring-up is unchanged.
+**Compose**: the `relay` service (image `mcsd-relay:dev`) joins the
+`mcsd` network and publishes `25565` and `25665`; like the object-store profile,
+it is gated behind the `relay` compose profile so default bring-up does not start
+it (DEPLOYMENT.md Section 12).
 
 ---
 
-## 14. Database changes
+## 14. Database schema
 
-Migration `0016_relay_ingress` (shipped with issue #955) adds the slug column.
-`game_session`, permission seeding, and further relay infrastructure arrive in
-a later migration with issue #957.
+The relay's persistent state lives in the API database (DATABASE.md is the
+authoritative persistence reference):
 
-- **`server.slug`** — `TEXT NOT NULL`, `UNIQUE` deployment-wide, backfilled
-  with generated slugs for existing rows. (Distinct from the per-community
-  `UNIQUE(community_id, name)` on display names.)
-- **`game_session`** — new table (issue #957):
+- **`server.slug`** — `TEXT NOT NULL`, `UNIQUE` deployment-wide. (Distinct from
+  the per-community `UNIQUE(community_id, name)` on display names.)
+- **`game_session`** — one row per accepted login session:
 
 | Column | Type | Notes |
 |---|---|---|
 | `id` | UUID PK | Relay-minted session id (idempotency key). |
-| `server_id` | UUID FK → `server.id` `ON DELETE CASCADE` | Indexed; sessions die with the server. |
-| `hostname` | TEXT | The slug actually used at join (slugs are renameable; this is the historical value). |
-| `player_ip` | INET | The player's source address as seen by the relay. |
+| `server_id` | UUID FK → `server.id` `ON DELETE CASCADE`, NULL | Indexed with `started_at` for the newest-first listing; sessions die with the server. |
+| `hostname` | TEXT NULL | The slug actually used at join (slugs are renameable; this is the hostname as typed at join time, unaffected by a later rename). |
+| `player_ip` | INET NULL | The player's source address as seen by the relay. |
 | `username` | TEXT NULL | Claimed in Login Start (Section 8). |
 | `player_uuid` | UUID NULL | Claimed; present on protocols that send it. |
-| `started_at` | timestamptz | |
+| `started_at` | timestamptz NULL | |
 | `ended_at` | timestamptz NULL | NULL = still open (or relay crashed; healed on `Register`). |
-| `source` | TEXT NULL | Relay ingress path (`java` / `bedrock`); NULL for sessions predating #1912 (migration 0034). |
+| `source` | TEXT NULL | Relay ingress path (`java` / `bedrock`); NULL when `SessionStart.source` is `UNSPECIFIED` (a relay that does not set the field). |
 
-- **Permission seeding**: add `session:read` to the seeded Owner role
-  (DATABASE.md role model). Existing deployments: the migration appends
-  `session:read` to roles named `Owner` that hold the full M1 permission
-  set, mirroring how previous permission additions were rolled out.
+`server_id` / `hostname` / `player_ip` / `started_at` are nullable only so that
+a `SessionEnd` arriving before its `SessionStart` (an out-of-order batch retry,
+Section 6) can create a placeholder row carrying `id` + `ended_at`; the start
+fills the rest in, so in steady state every row has them.
+
+- **Permission seeding**: `session:read` is in the permission catalog
+  (REQUIREMENTS.md Appendix A), so the preset Owner role of a new community
+  carries it (DATABASE.md role model). The Alembic migration that creates
+  `game_session` also appends it, idempotently, to every preset Owner role that
+  lacks it (`is_preset = true AND name = 'Owner'`).
 
 ---
 
-## 15. HTTP API and Web UI changes
+## 15. HTTP API and Web UI surface
 
 **API surface:**
 
-- `ServerResponse` gains `slug` and `join_hostname` (`<slug>.<base_domain>`
+- `ServerResponse` carries `slug` and `join_hostname` (`<slug>.<base_domain>`
   when `relay.enabled`, else `null` — the UI's display switch).
-- Server create (`POST`) accepts an optional `slug` (issue #981): omitted or
+- Server create (`POST`) accepts an optional `slug`: omitted or
   blank auto-generates a 6-char random slug; supplied, it is validated (422
   invalid/reserved) and checked for global uniqueness (409 taken).
 - Server update (`PATCH`) accepts `slug` (permission `server:update`;
@@ -624,9 +629,8 @@ a later migration with issue #957.
 
 **Web UI:**
 
-- Server detail header: show `join_hostname` with a copy button when present
-  (today it shows only `:game_port`); fall back to the current port display
-  otherwise.
+- Server detail header: shows `join_hostname` with a copy button when present;
+  falls back to the `:game_port` display otherwise.
 - Settings tab: slug rename field with inline validation.
 - Players tab: a "Sessions" view (the moderation surface), rendered only for
   holders of `session:read`.
@@ -635,23 +639,23 @@ a later migration with issue #957.
 
 ## 16. Decision log
 
-Owner decisions, 2026-06-12 (issue #659 comments):
+Decisions and the alternatives considered:
 
 | Decision | Choice | Rejected alternative |
 |---|---|---|
 | DNS | Single wildcard record; hostname mapping in DB | Per-server DNS records via provider API (propagation waits, more failure modes) |
 | Player-IP moderation | Record at relay, surface in dashboard | PROXY protocol passthrough (Paper-only, misses vanilla) |
-| Slug origin | Auto-generated (6-char random `[a-z0-9]{6}`), owner-renameable; optional user-supplied slug at create (issue #981) | ID-derived fixed |
+| Slug origin | Auto-generated (6-char random `[a-z0-9]{6}`), owner-renameable; optional user-supplied slug at create | ID-derived fixed |
 | Direct path | Kept, config-selectable; relay default-off | Tunnel-only (forces domain ownership on single-host operators) |
 | Relay placement | Separate Go service | In-API asyncio (couples data path to control plane, API restart drops players); separate Python service |
 | Stopped-server UX | In-protocol status MOTD + disconnect reason | Silent drop (indistinguishable from a typo) |
 | Slug reuse | Immediate on release — accepted stale-link risk | 30-day cooldown; permanent reservation |
-| IP visibility | New `session:read` permission, Owner-seeded | Bundled into `server:read` |
+| IP visibility | A dedicated `session:read` permission, Owner-seeded | Bundled into `server:read` |
 
-Design-level choices made here (not owner-arbitrated, recorded for review):
+Further design choices, each with its rationale in the section named:
 per-session dial-back over a multiplexed tunnel (Section 5); API-mediated
 join signaling over a persistent relay↔worker channel (keeps the Worker's
-single control connection and zero new Worker config; cost: API must be up
+single control connection and zero Worker-side config; cost: API must be up
 for *new* joins); relay-mediated status pings with a 5 s cache (Section 7).
 
 ## 17. Out of scope / future work
@@ -664,14 +668,13 @@ for *new* joins); relay-mediated status pings with a 5 s cache (Section 7).
   metering point; not designed here.
 - **PROXY protocol to Paper-family servers** — would restore native IP bans
   on servers that support it; revisit on demand.
-- ~~**Bedrock** (UDP/RakNet) — the application targets Java (epic scope).~~
-  **In scope as of epic [#1540](https://github.com/mmiura-2351/mc-server-dashboard-v2/issues/1540).**
-  Bedrock rides a separate QUIC/DATAGRAM tunnel and public UDP ingress, not
-  this document's TCP tunnel contract — see
-  [`BEDROCK_TUNNEL.md`](BEDROCK_TUNNEL.md).
+- **Bedrock** (UDP/RakNet) over this document's TCP tunnel contract — not
+  provided. Bedrock ingress rides a separate QUIC/DATAGRAM tunnel and public
+  UDP ingress — see [`BEDROCK_TUNNEL.md`](BEDROCK_TUNNEL.md).
 - **SRV-based custom domains** (player-owned domains pointing at the relay)
-  — possible later; routing already keys on the full hostname.
-- **Observability / metrics** — the relay exposes a Prometheus `/metrics`
+  — not provided; routing already keys on the full hostname, so it is additive.
+- **Tracing (OpenTelemetry)** — not provided; the relay's observability is
+  metrics only. The relay exposes a Prometheus `/metrics`
   endpoint plus a `/healthz` liveness probe (opt-in via `metrics.enabled`,
   default off and loopback-bound; Section 13). It carries the process/Go
   collectors (`go_goroutines`, `process_start_time_seconds`),
@@ -681,7 +684,7 @@ for *new* joins); relay-mediated status pings with a 5 s cache (Section 7).
   (`relay_game_sessions_accepted_total`, `relay_game_active_sessions`), tunnel
   dial-back results (`relay_tunnel_dialbacks_total{result}`), and session-report
   flush failures (`relay_session_report_flush_failures_total`). The
-  **Bedrock-path** series (issue #1909) land on the same endpoint: active
+  **Bedrock-path** series land on the same endpoint: active
   tunnels/flows gauges (`relay_bedrock_active_tunnels`,
   `relay_bedrock_active_flows`), flow lifecycle counters
   (`relay_bedrock_flows_created_total`, `relay_bedrock_flows_evicted_total`),
@@ -692,7 +695,6 @@ for *new* joins); relay-mediated status pings with a 5 s cache (Section 7).
   `relay_bedrock_tunnels_rejected_total{reason}`), UDP bind failures
   (`relay_bedrock_bind_failures_total`), and the shared per-IP cap rejections
   reused with `listener="bedrock"`. All labels are bounded enums — no
-  per-client-IP/source-address label. Tracing (OpenTelemetry) is still future
-  work; add on demand.
+  per-client-IP/source-address label.
 - **Graceful drain on shutdown** — restart drops in-flight sessions rather
-  than draining them; a drain window is future work.
+  than draining them; a drain window is not provided.

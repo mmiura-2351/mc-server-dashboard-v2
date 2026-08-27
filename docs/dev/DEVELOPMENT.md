@@ -116,8 +116,8 @@ boundaries) and Section 2 (the layering). A pointer map:
 
 The Hexagonal quadrants (`domain`, `application`, `adapters`, edge) and the Port
 catalog are in [`ARCHITECTURE.md`](../app/ARCHITECTURE.md) Sections 2 and 5. On
-the `api/` side the per-domain quadrant layout (a `domain/ application/
-adapters/ api/` set per bounded context) lands with the domain code.
+the `api/` side the bounded contexts under `api/src/mc_server_dashboard_api/`
+keep their own `domain/ application/ adapters/ api/` quadrants.
 
 ## 5. Import-direction rules
 
@@ -142,9 +142,12 @@ make lint                  # runs import-linter as part of api-lint
 cd api && uv run lint-imports   # just the import contracts
 ```
 
-The contract is minimal until the domain packages exist; it grows with them. On
-the `worker/` (Go) side the inward direction is currently a convention checked
-in review; `go vet` and golangci-lint run via `make lint`.
+Each bounded context carries its own contracts — a layered contract
+(`domain ← application ← api`) plus forbidden-import contracts that keep
+`adapters` out of `domain` / `application` and keep contexts independent of
+each other; a new context adds its own. On the `worker/` (Go) side the inward
+direction is a convention checked in review; `go vet` and golangci-lint run via
+`make lint`.
 
 ## 6. Proto regeneration
 

@@ -37,17 +37,17 @@ reaches authoritative data exclusively through the API-mediated data plane
 object storage — and switching it is a configuration change, not a code change
 (FR-DATA-2).
 
-This document specifies **what the Port guarantees**, not how the bytes move
-between API and Worker. The data-plane HTTP transfer endpoints (hydrate /
-snapshot wire format, chunking, resumption) are epic #8 and out of scope here;
-this document only fixes the API-side store contract that those endpoints plug
-into. Where the data plane meets `Storage`, the boundary is named but not
-specified (Sections 3.1, 4).
+The Port contract (Sections 3–7) specifies **what the Port guarantees**, not
+how the bytes move between API and Worker. The data-plane HTTP transfer
+endpoints (hydrate / snapshot wire format, chunking) are the
+transport those guarantees plug into; they are outside the Port and are
+specified separately in Section 8. Where the data plane meets `Storage`, the
+boundary is named but not specified (Sections 3.1, 4).
 
 Target scale is small (NFR-SCALE-1): a few dozen Communities, tens of concurrent
 servers, a single API instance. The contract is therefore deliberately thin —
 enough operations to satisfy Sections 6.8–6.12, no speculative generality — while
-keeping the *shape* backend-neutral so a larger backend can replace the M1 one
+keeping the *shape* backend-neutral so a larger backend can replace the default one
 without touching business logic (REQUIREMENTS.md Section 1.1).
 
 ### 1.1 What lives behind the Port vs. above it
@@ -55,15 +55,15 @@ without touching business logic (REQUIREMENTS.md Section 1.1).
 - **Blob layout** (the byte-level on-backend layout of working sets, JARs,
   backup archives, and file versions) is owned by this document.
 - **Metadata** (the `Server`, `Backup` rows that index those blobs, schedules,
-  audit) lives in the database and is owned by `DATABASE.md` (#15). File
+  audit) lives in the database and is owned by `DATABASE.md`. File
   versions are the exception: they carry no metadata rows and live wholly
   behind the Port (Section 5). `Storage` returns opaque keys/handles; the metadata
   layer records them. The Port never queries the database and the database never
   reaches into the backend.
 - **Config key names** for selecting and tuning a backend are owned by
-  `CONFIGURATION.md` (#16). This document defines **what** is selectable and
-  tunable (the backend family, the snapshot/version-retention knobs); #16 names
-  the keys.
+  `CONFIGURATION.md`. This document defines **what** is selectable and
+  tunable (the backend family, the snapshot/version-retention knobs);
+  `CONFIGURATION.md` names the keys.
 
 ---
 
@@ -81,7 +81,7 @@ across servers (FR-VER-3) and contain no Community data.
 │       └── servers/
 │           └── <server-id>/
 │               ├── current -> snapshots/<snapshot-id>/  # symlink to the live snapshot; the publish pointer (Section 4)
-│               ├── generation                # combined marker (Section 3.1): line 1 the monotonic working-set generation counter (bumped on each authoritative publish: commit_snapshot + restore_backup #873 + authoritative file edits #889), line 2 (optional) the publishing Worker id (#847)
+│               ├── generation                # combined marker (Section 3.1): line 1 the monotonic working-set generation counter (bumped on each authoritative publish: commit_snapshot, restore_backup, and authoritative file edits), line 2 (optional) the publishing Worker id
 │               ├── snapshots/                # published working-set snapshots; current points at the live one
 │               │   └── <snapshot-id>/        # the full working directory for one published state
 │               │       ├── world/
@@ -109,9 +109,10 @@ Notes:
   Dereferencing `current/` reaches the authoritative working set. While a server
   is running that copy is temporarily stale (FR-DATA-4); `Storage` does not know
   server state — the application layer decides when to read `current/` vs.
-  read-through to the Worker per the Section 6.9 state-branching policy.
+  read-through to the Worker per the REQUIREMENTS.md Section 6.9 state-branching
+  policy.
 - `snapshots/<snapshot-id>/` holds published working-set states. Only the one
-  targeted by the `current` symlink is authoritative; superseded snapshots are
+  targeted by the `current` symlink is authoritative; prior snapshots are
   reclaimed after a publish (Section 4.3). Single-file edits (Section 4.4) mutate
   the live snapshot in place via a temp-sibling rename, atomic at file
   granularity; whole-working-set publishes mint a new snapshot and flip the
@@ -126,49 +127,51 @@ Notes:
   that does **not** depend on a specific Worker (FR-BAK-2); restoring one
   republishes it into `current/`. The archive codec (`<archive-ext>`) is
   **adapter-internal** — callers hold only the opaque `BackupKey` and never the
-  on-disk name; the M1 `fs` adapter uses gzip (`.tar.gz`), with zstd deferred.
+  on-disk name; the `fs` adapter uses gzip (`.tar.gz`); zstd is reserved, not
+  implemented.
 - `generation` is a plain-text marker holding **two** values: line 1 is the
   current authoritative working-set generation counter (a monotonically
   increasing integer, starting at 1 after the first publish); line 2 (optional)
-  is the **publishing Worker id** — the id of the Worker that produced `current`
-  (issue #847), used by the publish-time generation guard (Section 8) to tell a
+  is the **publishing Worker id** — the id of the Worker that produced `current`,
+  used by the publish-time generation guard (Section 8) to tell a
   same-Worker re-publish (lost-response self-heal) from a different-Worker stale
   publish (A→B→A). Both are written as **one atomic marker** (a single
   temp-sibling + atomic rename on `fs`, a single object `PUT` on object backends):
-  a crash between two separate writes could attribute the *previous* publisher to
+  a crash between two separate writes could attribute the *prior* publisher to
   the *new* generation and invert the guard, so the pair must be all-or-nothing.
   The marker is written immediately after the `current` pointer flip inside a
-  **pointer-flip publish** — `commit_snapshot` and `restore_backup` (#873) — as a
+  **pointer-flip publish** — `commit_snapshot` and `restore_backup` — as a
   separate sequential write; a crash in the window between the flip and the marker
   write leaves the generation one behind (under-states by one — the safe direction:
   `current` already names the new world the producing Worker also holds in scratch,
   so a hydrate-skip cannot serve a *stale* world, and the failed call's retry
   republishes and bumps the marker into agreement). An **in-place authoritative
   file edit** (`write_file` / `delete_file` / `delete_dir` / `make_dir` /
-  `rollback_file`, #889) instead mutates `current/` itself rather than flipping a
+  `rollback_file`) instead mutates `current/` itself rather than flipping a
   fresh pointer, so its mutate→bump crash window is **not** the safe direction: a
   crash after the mutation but before the bump leaves the edited world live at the
   OLD generation. Multi-member edits (`delete_dir` on fs uses `rmtree` —
   per-member unlinks; on object backends `delete_dir` / `rename_dir` /
   `rename_file` are per-object loops) additionally have a **mid-mutation window**:
   a crash partway through the loop leaves `current/` partially mutated at a stale
-  generation (see Section 4.4 accepted gap, issue #1608). A same-Worker scratch with `held == store` would then skip the
-  post-edit hydrate (#767) and boot the PRE-edit world — re-opening #889's staleness
-  for that edit until the next bump. To keep that window crash-recoverable rather
+  generation (see Section 4.4 accepted gap). A same-Worker scratch with
+  `held == store` would then skip the post-edit hydrate and boot the PRE-edit
+  world — the very staleness the bump exists to prevent — for that edit until the
+  next bump. To keep that window crash-recoverable rather
   than racy against a concurrent publish, the edit's mutate+bump — and a
-  `commit_snapshot`'s stale re-check + flip + bump (#899) — run under a per-server
+  `commit_snapshot`'s stale re-check + flip + bump — run under a per-server
   lock so a concurrent publish/edit cannot interleave between the two steps. An edit
-  resolves its read-set (the live pointer / `current` symlink) **inside** that lock
-  (#920): resolving it outside would let it write back a snapshot the commit has
+  resolves its read-set (the live pointer / `current` symlink) **inside** that
+  lock: resolving it outside would let it write back a snapshot the commit has
   already flipped away and reclaimed, losing the world. The lock covers only the
   re-check + pointer flip + bump (and the gates that must be atomic with the flip);
-  a publish's bulk staging→snapshot copy runs **before** the lock and the superseded
+  a publish's bulk staging→snapshot copy runs **before** the lock and the prior
   snapshot's reclaim runs **after** it, so a multi-minute copy never blocks edits.
-  The post-lock reclaim is safe because an edit can no longer observe the pre-flip
-  snapshot once it re-reads the pointer under the lock. The lock is **in-process
-  only** (one uvicorn process today); a multi-process deployment would need a shared
-  lock. After any successful publish/edit return the pointer, generation, and
-  publisher are in agreement. A publish that declared no
+  The post-lock reclaim is safe because once an edit re-reads the pointer under
+  the lock it cannot observe the pre-flip snapshot. The lock is **in-process
+  only** (the API runs as a single uvicorn process); a multi-process deployment
+  would need a shared lock. After any successful publish/edit return the pointer,
+  generation, and publisher are in agreement. A publish that declared no
   Worker id omits line 2 (no publisher claim, so the guard stays permissive). A
   server with no published snapshot has no `generation` marker; reading it in that
   state returns generation 0 / no publisher. On object backends it is a single key
@@ -177,7 +180,7 @@ Notes:
 - On object backends the tree above is a **key prefix scheme**, not real
   directories (Section 7.3); the same logical layout applies.
 
-### 2.1 Post-delete retention (issue #777)
+### 2.1 Post-delete retention
 
 Deleting a server cascades its DB rows (the server row, its backup rows) but does
 **not** wipe its Storage. To bound the disk cost while never destroying the latest
@@ -189,8 +192,8 @@ state, `DeleteServer` retains **exactly two** artifacts under the server directo
    archive-first per the `delete_backup` ordering convention (Section 3.3). (The
    per-file `versions/` tree is not pruned here — it is removed by the working-set
    prune in point 2, before any archive delete.) Selection is the literal
-   latest-by-`created_at` **regardless of `health`** (owner ruling on #777: "latest existing"): a
-   QUARANTINED newest archive is still the one kept. The mandatory `final.tar.gz`
+   latest-by-`created_at` **regardless of `health`** ("latest existing", not
+   "latest healthy"): a QUARANTINED newest archive is still the one kept. The mandatory `final.tar.gz`
    below is the safety net — it is strictly newer and is the recommended recovery
    source if the retained backup is suspect.
 2. **The current working set, packed as `final.tar.gz`** — mandatory. The live
@@ -199,7 +202,7 @@ state, `DeleteServer` retains **exactly two** artifacts under the server directo
    the `current` pointer, and the generation marker) is removed. Packing is
    **fail-closed**: if it fails, the working set is left intact and the delete fails,
    so a deletion never silently loses the latest state. A server that never published
-   a snapshot has no `final.tar.gz`. The pack deliberately **bypasses the #764 `.mca`
+   a snapshot has no `final.tar.gz`. The pack deliberately **bypasses the `.mca`
    integrity gate** (the gate applied to `create_backup_from_current`): a corrupt
    server must still be deletable, so torn regions are packed as-is.
 
@@ -220,7 +223,7 @@ and finishes the GC without re-packing, so it can never overwrite a good
 **Operator recovery / disk reclaim.** Both retained artifacts are plain `tar.gz`
 archives in the server's prior directory. To recover the data, an operator creates
 a fresh server and **uploads** the chosen archive as a backup (the upload-backup
-flow, issue #281), then **restores** it — `restore_backup` republishes the `tar.gz`
+flow, Section 3.3), then **restores** it — `restore_backup` republishes the `tar.gz`
 into the new server's `current/`. To reclaim the disk instead, delete the server
 directory tree.
 
@@ -234,13 +237,14 @@ The Port is defined in `api/`'s domain layer and depended on by use cases
 the namespace and enforce isolation; no operation accepts an absolute path.
 
 Operations are grouped by the requirement area they serve. Signatures are
-language-neutral sketches; the binding Python interface lands with the toolchain.
+language-neutral sketches; the binding Python interface is the `Storage` ABC in
+`api/`'s storage domain layer (`storage/domain/port.py`).
 
 ### 3.1 Working-set hydrate / snapshot
 
 Serve the runtime data lifecycle (FR-DATA-4). These move the whole working set
 between `current/` and the data plane; they do **not** transfer to the Worker
-directly (that is the data-plane endpoint's job, epic #8). `Storage` provides the
+directly (that is the data-plane endpoint's job, Section 8). `Storage` provides the
 authoritative-side stream and the atomic-publish handshake.
 
 | Operation | Purpose | Notes |
@@ -248,15 +252,15 @@ authoritative-side stream and the atomic-publish handshake.
 | `open_hydrate_source(community_id, server_id) -> ReadStream` | Open a read stream over the current authoritative working set | The data plane reads from this to feed a Worker on start/relocation (hydrate). Reads `current/`. |
 | `begin_snapshot(community_id, server_id) -> SnapshotHandle` | Start an incoming snapshot transfer | Allocates an isolated `incoming/<transfer-id>/` staging area. |
 | `write_snapshot(handle, WriteStream)` | Stream the Worker's working set into staging | Writes only into staging, never `current/`. May be called incrementally. |
-| `commit_snapshot(handle, *, publisher=None, expected_base=None) -> int` | Atomically publish the staged snapshot as the new authoritative copy; return the new generation | Atomic publish (Section 4). After return, `current/` reflects the complete transfer or the prior copy — never a partial. Bumps and returns the working-set generation counter (the new integer the Worker records as the generation its scratch is at) and records `publisher` (the producing Worker's id, issue #847) alongside it in one atomic marker, read back via `current_publisher`. A `None` publisher records no id (the guard stays permissive). `expected_base` is the commit-time stale re-check (issue #899): the generation the data-plane publish guard validated against before the upload stream (what `current` was at guard time). The commit re-reads the generation under the per-server publish/edit lock (Section 2 generation marker) and refuses with `StaleGenerationError` when it advanced past `expected_base` — an at-rest edit or restore that landed DURING the (multi-minute) upload window — so the just-bumped `current` is not clobbered; `None` skips the re-check (no base claim). Refuses with `IncompleteTransferError` if the transfer was not signalled complete. Refuses with `IntegrityCheckError` if the staged set contains corrupt `.mca` region files (issue #739), using the single region rule set (issue #927): a non-4096-aligned tail is the normal on-disk shape of a 26.x world, not a tear, on any source — the byte-precise check still catches realistic tears. Refuses with `MissingRegionsError` if the staged set dropped some-but-not-all `.mca` files of a still-live dimension (the partial-loss corruption signature, issue #854) — a full-dimension delete (ALL regions of a dir gone) is allowed, only a partial loss is refused; the error carries the per-directory lost names (recovery in Section 4.5). Refused publishes do NOT bump the generation; the staging is discarded. |
+| `commit_snapshot(handle, *, publisher=None, expected_base=None) -> int` | Atomically publish the staged snapshot as the new authoritative copy; return the new generation | Atomic publish (Section 4). After return, `current/` reflects the complete transfer or the prior copy — never a partial. Bumps and returns the working-set generation counter (the new integer the Worker records as the generation its scratch is at) and records `publisher` (the producing Worker's id) alongside it in one atomic marker, read back via `current_publisher`. A `None` publisher records no id (the guard stays permissive). `expected_base` is the commit-time stale re-check: the generation the data-plane publish guard validated against before the upload stream (what `current` was at guard time). The commit re-reads the generation under the per-server publish/edit lock (Section 2 generation marker) and refuses with `StaleGenerationError` when it advanced past `expected_base` — an at-rest edit or restore that landed DURING the (multi-minute) upload window — so the just-bumped `current` is not clobbered; `None` skips the re-check (no base claim). Refuses with `IncompleteTransferError` if the transfer was not signalled complete. Refuses with `IntegrityCheckError` if the staged set contains corrupt `.mca` region files, using the single region rule set (Section 8): a non-4096-aligned tail is the normal on-disk shape of a 26.x world, not a tear, on any source — the byte-precise check catches realistic tears. Refuses with `MissingRegionsError` if the staged set dropped some-but-not-all `.mca` files of a still-live dimension (the partial-loss corruption signature) — a full-dimension delete (ALL regions of a dir gone) is allowed, only a partial loss is refused; the error carries the per-directory lost names (recovery in Section 4.5). Refused publishes do NOT bump the generation; the staging is discarded. |
 | `abort_snapshot(handle)` | Discard an incomplete/failed transfer | Deletes the staging area; `current/` is untouched. Also the cleanup path for crash recovery (Section 4.3). |
 | `current_generation(community_id, server_id) -> int` | Return the current authoritative working-set generation | The counter `commit_snapshot` bumps, read back so the hydrate data plane can stamp the generation it serves (Section 8). Returns 0 when no snapshot has been published. |
-| `current_publisher(community_id, server_id) -> str \| None` | Return the Worker id that published `current` | Read back from the combined `generation` marker (issue #847) so the publish-time generation guard (Section 8) can allow a same-Worker re-publish (lost-response self-heal) while refusing a different-Worker stale publish (A→B→A). `None` when no snapshot has been published, or the last publish declared no id (an older Worker) — in which case the guard cannot prove a foreign publisher and stays permissive. |
-| `check_current_health(community_id, server_id) -> WorkingSetReport \| None` | Structurally fsck the on-disk authoritative snapshot | Walk `current/` for corrupt `.mca` region files (issue #744). Read-only — never mutates `current/`. Raises `NotFoundError` if no snapshot has been published. `None` means the backend **examined nothing** (issue #2377) — the answer of an adapter with no local working set to walk (object, the #926 limitation, Section 7.3), deliberately not a healthy report, so the sweep can tell "nothing was looked at" from "looked at and clean". A backend answering `None` answers it for every server, published or not, since it reads nothing that would tell the two apart; the `NotFoundError` clause is the contract of an adapter that does examine. |
-| `prune_to_final_snapshot(community_id, server_id)` | Collapse the working set to one retained `final.tar.gz` and drop the tree | The `DeleteServer` reclaim path (Section 2.1, issue #777). Packs `current/` then removes `snapshots/`, `incoming/`, `versions/`, the `current` pointer, and the combined `generation`+publisher marker; leaves `backups/`. The pointer/symlink is invalidated the instant `final.tar.gz` is durable, so a crash-retry is idempotent and never re-packs over a good final. Fail-closed on a pack failure; bypasses the #764 `.mca` gate so a corrupt server stays deletable; no-op if nothing is published. |
+| `current_publisher(community_id, server_id) -> str \| None` | Return the Worker id that published `current` | Read back from the combined `generation` marker so the publish-time generation guard (Section 8) can allow a same-Worker re-publish (lost-response self-heal) while refusing a different-Worker stale publish (A→B→A). `None` when no snapshot has been published, or the last publish declared no id (a Worker that sent no `X-Worker-Id`) — in which case the guard cannot prove a foreign publisher and stays permissive. |
+| `check_current_health(community_id, server_id) -> WorkingSetReport \| None` | Structurally fsck the on-disk authoritative snapshot | Walk `current/` for corrupt `.mca` region files. Read-only — never mutates `current/`. Raises `NotFoundError` if no snapshot has been published. `None` means the backend **examined nothing** — the answer of an adapter with no local working set to walk (object, the Section 7.3 limitation), deliberately not a healthy report, so the sweep can tell "nothing was looked at" from "looked at and clean". A backend answering `None` answers it for every server, published or not, since it reads nothing that would tell the two apart; the `NotFoundError` clause is the contract of an adapter that does examine. |
+| `prune_to_final_snapshot(community_id, server_id)` | Collapse the working set to one retained `final.tar.gz` and drop the tree | The `DeleteServer` reclaim path (Section 2.1). Packs `current/` then removes `snapshots/`, `incoming/`, `versions/`, the `current` pointer, and the combined `generation`+publisher marker; leaves `backups/`. The pointer/symlink is invalidated the instant `final.tar.gz` is durable, so a crash-retry is idempotent and never re-packs over a good final. Fail-closed on a pack failure; bypasses the `.mca` gate so a corrupt server stays deletable; no-op if nothing is published. |
 
 The hydrate/snapshot **wire transport** (how `ReadStream`/`WriteStream` bytes
-cross the API↔Worker boundary) is the data plane (epic #8). `Storage` only
+cross the API↔Worker boundary) is the data plane (Section 8). `Storage` only
 guarantees the authoritative-side semantics above.
 
 ### 3.2 JAR store / reuse
@@ -270,11 +274,11 @@ Communities.
 | `put_jar(ReadStream) -> JarKey` | Store a JAR, returning its content key | Idempotent: storing the same bytes yields the same key and no duplicate. Key = `sha256`. |
 | `has_jar(JarKey) -> bool` | Test presence before downloading from an external source | Lets the `VersionCatalog` adapter skip a redundant fetch. |
 | `open_jar(JarKey) -> ReadStream` | Read a stored JAR | The data plane streams this to a Worker as part of hydrate. |
-| `jar_pool_stats() -> JarPoolStats` | Count + total bytes of the pooled JARs | A bounded scan of the one `jars/` namespace; platform-admin operational visibility (#286). |
-| `list_jars() -> [JarPoolEntry]` | Enumerate pooled JARs with key, size, and store time | The input the reference-counted GC diffs against the live reference set; each entry's `modified_at` feeds the GC safety window (#293). |
+| `jar_pool_stats() -> JarPoolStats` | Count + total bytes of the pooled JARs | A bounded scan of the one `jars/` namespace; platform-admin operational visibility. |
+| `list_jars() -> [JarPoolEntry]` | Enumerate pooled JARs with key, size, and store time | The input the reference-counted GC diffs against the live reference set; each entry's `modified_at` feeds the GC safety window. |
 | `delete_jar(JarKey)` | Remove a pooled JAR | Idempotent (no error if absent). The reclaim primitive the GC calls on an unreferenced JAR; the reference decision is the GC's, not Storage's. |
 
-**Reference-counted GC (D4, #293).** The pool is reclaimed by a reference-counted
+**Reference-counted GC.** The pool is reclaimed by a reference-counted
 garbage collector: a periodic API-side loop (config `jar_gc.interval_seconds`,
 default daily, gated on the control plane with the other schedulers) plus a
 platform-admin `POST /versions/jar-pool/gc` manual trigger (audited; returns
@@ -286,7 +290,7 @@ reference set is that bounded DB scan. Snapshots and backups do **not** pin pool
 JARs: the hydrate endpoint *injects* the resolved JAR into the working-set tar at
 transfer time (Section 8), so the Worker's working dir carries `server.jar` and a
 snapshot/backup of it **embeds the JAR inside its own tar** (the Worker excludes
-nothing when packing at M1). A restore therefore needs no pool copy, and deleting
+nothing when packing). A restore therefore needs no pool copy, and deleting
 a server (which removes its rows, working set, and backups together) drops the
 only reference pinning its JAR. Everything in the pool referenced by no row is an
 orphan to reclaim.
@@ -302,20 +306,20 @@ off the JAR's store/upload time.
 ### 3.3 Backup archive create / list / restore / delete / transfer
 
 Serve backup management (FR-BAK-1, FR-BAK-2, FR-BAK-4) and off-host transfer
-(issue #281). A backup is a self-contained archive of a working set; it does not
+(download / upload). A backup is a self-contained archive of a working set; it does not
 depend on a Worker.
 
 | Operation | Purpose | Notes |
 |---|---|---|
-| `create_backup_from_current(community_id, server_id) -> BackupKey` | Archive the authoritative `current/` into `backups/` | The **stopped-server** path (Section 6.9). For a **running** server the Worker quiesces the live world (save-off → save-all → settle-wait) and commits an on-demand snapshot (`commit_snapshot`) → then the application calls this; `Storage` only ever archives the authoritative copy. |
-| `list_backups(community_id, server_id) -> [BackupKey]` | Enumerate a server's backups | Metadata (label, timestamp, size) lives in the DB (#15); this returns the keys. |
-| `restore_backup(community_id, server_id, BackupKey, force=False)` | Atomically republish a backup into `current/` | Atomic publish (Section 4). Caller must ensure the server is **stopped** (FR-BAK-4); `Storage` enforces atomicity, the application enforces the stop precondition. A restore replaces `current/`, so it **bumps the working-set generation** like a `commit_snapshot` (issue #873) — otherwise a same-Worker scratch with `held == store` would skip the post-restore hydrate (#767) on the next start and boot the PRE-restore world. The publisher is stamped with the `api-restore` sentinel (no producing Worker), so the publish-time guard (Section 8) treats an in-flight stale snapshot from a real Worker as a different-publisher publish and refuses it, closing the restore-clobber window. The extracted backup is validated through the integrity gate (issue #743): a corrupt backup is refused with `IntegrityCheckError` (carrying the `WorkingSetReport`); `current/` is left untouched. Quarantining the backup is an application-layer concern — the caller receives the report and decides what to do. `force=True` (the `?force=true` API override, operator-only) publishes despite corruption and returns the `WorkingSetReport` so the caller can quarantine and audit. A restore **bypasses the missing-region gate (#854) by design**: that gate diffs a staged set against the prior `current/` to catch a Worker accidentally dropping live regions, but a backup is a **complete, self-consistent set captured as a whole** — it is the authoritative replacement, not an incremental delta over `current/`, so a backup that legitimately holds fewer regions than the current world (an older/smaller world being restored) is exactly the intended operation and must not be refused. The structural `.mca` integrity gate (#743) still applies (a backup cannot be *internally* corrupt); only the prior-set partial-loss comparison is skipped. **Restore flip↔marker crash window:** like `commit_snapshot`, the generation/publisher marker is a separate write after the `current` flip (Section 2 generation marker), so a crash in that window leaves `current` = the restored world but the marker stale (old generation/publisher); the restore call itself then fails so the caller knows it did not complete, a retry republishes and bumps the marker into agreement (self-healing), and the #827 restore lock serializes the window so no concurrent publish can interleave. |
+| `create_backup_from_current(community_id, server_id) -> BackupKey` | Archive the authoritative `current/` into `backups/` | The **stopped-server** path (REQUIREMENTS.md Section 6.9). For a **running** server the Worker quiesces the live world (save-off → save-all → settle-wait) and commits an on-demand snapshot (`commit_snapshot`) → then the application calls this; `Storage` only ever archives the authoritative copy. |
+| `list_backups(community_id, server_id) -> [BackupKey]` | Enumerate a server's backups | Metadata (label, timestamp, size) lives in the DB (DATABASE.md); this returns the keys. |
+| `restore_backup(community_id, server_id, BackupKey, force=False)` | Atomically republish a backup into `current/` | Atomic publish (Section 4). Caller must ensure the server is **stopped** (FR-BAK-4); `Storage` enforces atomicity, the application enforces the stop precondition. A restore replaces `current/`, so it **bumps the working-set generation** like a `commit_snapshot` — otherwise a same-Worker scratch with `held == store` would skip the post-restore hydrate on the next start and boot the PRE-restore world. The publisher is stamped with the `api-restore` sentinel (no producing Worker), so the publish-time guard (Section 8) treats an in-flight stale snapshot from a real Worker as a different-publisher publish and refuses it, closing the restore-clobber window. The extracted backup is validated through the integrity gate: a corrupt backup is refused with `IntegrityCheckError` (carrying the `WorkingSetReport`); `current/` is left untouched. Quarantining the backup is an application-layer concern — the caller receives the report and decides what to do. `force=True` (the `?force=true` API override, operator-only) publishes despite corruption and returns the `WorkingSetReport` so the caller can quarantine and audit. A restore **bypasses the missing-region gate (Section 4.5) by design**: that gate diffs a staged set against the prior `current/` to catch a Worker accidentally dropping live regions, but a backup is a **complete, self-consistent set captured as a whole** — it is the authoritative replacement, not an incremental delta over `current/`, so a backup that legitimately holds fewer regions than the current world (an older/smaller world being restored) is exactly the intended operation and must not be refused. The structural `.mca` integrity gate applies regardless (a backup cannot be *internally* corrupt); only the prior-set partial-loss comparison is skipped. **Restore flip↔marker crash window:** like `commit_snapshot`, the generation/publisher marker is a separate write after the `current` flip (Section 2 generation marker), so a crash in that window leaves `current` = the restored world but the marker stale (old generation/publisher); the restore call itself then fails so the caller knows it did not complete, a retry republishes and bumps the marker into agreement (self-healing), and the per-server restore lock serializes the window so no concurrent publish can interleave. |
 | `delete_backup(community_id, server_id, BackupKey)` | Remove a backup archive | Idempotent. |
-| `open_backup(community_id, server_id, BackupKey, byte_range=None) -> ReadStream` | Stream a stored archive (or one byte range of it) in its native format | Download (issue #281): yields the archive bytes **verbatim** — the adapter-internal `tar.gz` (Section 2), no recompression. `NotFoundError` for an unknown key. `byte_range` is an **inclusive** `(first, last)` pair the caller has already resolved against `backup_size`, and the stream then yields exactly `last - first + 1` bytes — how a download interrupted mid-transfer resumes (issue #2372). It is a real ranged read (an object-store ranged GET; a filesystem seek), never a prefix discarded off the full stream: serving the tail of a multi-GB archive must not re-read its head. |
-| `put_backup(community_id, server_id, WriteStream) -> BackupKey` | Store an uploaded archive verbatim under a fresh key | Upload (issue #281): the **application** has already validated the archive (opens + traversal-safe entries) before this is called; `Storage` only stores the bytes, so the new backup is restorable through `restore_backup` like a created one. |
-| `backup_size(community_id, server_id, BackupKey) -> int` | Report a stored archive's byte count | The size recorded as `size_bytes` at create/upload (issue #281). `NotFoundError` for an unknown key. |
+| `open_backup(community_id, server_id, BackupKey, byte_range=None) -> ReadStream` | Stream a stored archive (or one byte range of it) in its native format | Download: yields the archive bytes **verbatim** — the adapter-internal `tar.gz` (Section 2), no recompression. `NotFoundError` for an unknown key. `byte_range` is an **inclusive** `(first, last)` pair the caller has already resolved against `backup_size`, and the stream then yields exactly `last - first + 1` bytes — how a download interrupted mid-transfer resumes. It is a real ranged read (an object-store ranged GET; a filesystem seek), never a prefix discarded off the full stream: serving the tail of a multi-GB archive must not re-read its head. |
+| `put_backup(community_id, server_id, WriteStream) -> BackupKey` | Store an uploaded archive verbatim under a fresh key | Upload: the **application** has already validated the archive (opens + traversal-safe entries) before this is called; `Storage` only stores the bytes, so the new backup is restorable through `restore_backup` like a created one. |
+| `backup_size(community_id, server_id, BackupKey) -> int` | Report a stored archive's byte count | The size recorded as `size_bytes` at create/upload. `NotFoundError` for an unknown key. |
 
-**Backup size impact of plugin/mod JARs (issue #1164).** Backups archive the
+**Backup size impact of plugin/mod JARs.** Backups archive the
 entire authoritative `current/` working set, which includes all plugin and mod
 JARs deployed into the server's content directory (`mods/`, `plugins/`). A
 server with 500 MiB of mods will produce backups of at least that size (plus
@@ -332,15 +336,15 @@ paths are not part of this Port.
 
 | Operation | Purpose | Notes |
 |---|---|---|
-| `read_file(community_id, server_id, rel_path) -> bytes` | Read one file from `current/` (whole bytes) | `rel_path` is validated against traversal (Section 6). Whole-bytes by design: the small-edit / preview read, and the base64-payload `GET ?path=` route where the bytes *are* the JSON body. A large single-file **download** uses `open_file_stream` (issue #265). |
-| `open_file_stream(community_id, server_id, rel_path) -> ReadStream` | Open a chunked read stream over one file in `current/` | The per-file analogue of `open_hydrate_source` (issue #265): a large single-file download streams without buffering the whole file in RAM. Same lease contract — the live snapshot is resolved and the active-reader lease taken on the FIRST iteration, released on finish/early-close/error (Section 4.2). `NotFoundError` for a missing file or unpublished snapshot. |
+| `read_file(community_id, server_id, rel_path) -> bytes` | Read one file from `current/` (whole bytes) | `rel_path` is validated against traversal (Section 6). Whole-bytes by design: the small-edit / preview read, and the base64-payload `GET ?path=` route where the bytes *are* the JSON body. A large single-file **download** uses `open_file_stream`. |
+| `open_file_stream(community_id, server_id, rel_path) -> ReadStream` | Open a chunked read stream over one file in `current/` | The per-file analogue of `open_hydrate_source`: a large single-file download streams without buffering the whole file in RAM. Same lease contract — the live snapshot is resolved and the active-reader lease taken on the FIRST iteration, released on finish/early-close/error (Section 4.2). `NotFoundError` for a missing file or unpublished snapshot. |
 | `list_dir(community_id, server_id, rel_path) -> [entry]` | Browse a directory in `current/` | Same path validation. |
-| `write_file(community_id, server_id, rel_path, bytes)` | Edit one file in `current/`, retaining the prior version | Captures the previous content into `versions/` (Section 5) before overwriting. The per-file write is atomic (Section 4.4). Bumps the generation + stamps the `api-edit` sentinel (#889). |
-| `delete_file(community_id, server_id, rel_path)` | Delete one file from `current/`, retaining the prior content | Captures the content into `versions/` (Section 5) **before** removing, so a delete is reversible by rollback exactly like an edit. Missing path → `NotFoundError`. Bumps the generation + stamps the `api-edit` sentinel (#889). |
-| `delete_dir(community_id, server_id, rel_path)` | Recursively delete a directory subtree from `current/` | **No** per-file version capture: file versioning (Section 5) is the fine-grained single-file mechanism, whereas whole-subtree recovery is what backups (Section 3.3) exist for; capturing a version per member of a large subtree would be a storage-amplification bomb. Missing dir → `NotFoundError`. Bumps the generation + stamps the `api-edit` sentinel (#889). **Not crash-atomic across the subtree:** fs uses `rmtree` (per-member unlinks); object uses a per-object delete loop. A crash mid-op leaves a partially deleted subtree at a stale generation (Section 4.4 accepted gap, #1608). |
-| `rename_file(community_id, server_id, from_path, to_path)` | Rename/move a single file within `current/` | **No** version capture on either side (issue #1164): a rename does not change the content, so retaining versions would waste storage; the caller's content-addressed cache (plugin JARs) or backups cover recovery. Missing source → `NotFoundError`. Bumps the generation + stamps the `api-edit` sentinel (#889). Atomic on fs (`rename(2)`); on object backends it is a copy+delete pair — not crash-atomic (#1608). |
-| `rename_dir(community_id, server_id, from_path, to_path)` | Rename/move a directory within `current/` | **No** per-file version capture (same reasoning as `delete_dir`, issue #1191). Missing source dir → `NotFoundError`. Bumps the generation + stamps the `api-edit` sentinel (#889). Atomic on fs (`rename(2)`); on object backends it is a per-object copy+delete loop — not crash-atomic (#1608). |
-| `make_dir(community_id, server_id, rel_path)` | Create an (empty) directory in `current/` | Backend-dependent (see note). Idempotent. **Requires a published snapshot** — a never-snapshotted server has no live `current/` to create the directory under, so `make_dir` raises `NotFoundError` (behaviour aligned across both adapters in #896, including object which previously bumped the generation with no snapshot). Bumps the generation + stamps the `api-edit` sentinel (#889), uniformly with the other edits. On object backends it also writes a zero-byte `.dir` marker object under the prefix so the otherwise-empty directory is visible in listings (#1125; see note). |
+| `write_file(community_id, server_id, rel_path, bytes)` | Edit one file in `current/`, retaining the prior version | Captures the prior content into `versions/` (Section 5) before overwriting. The per-file write is atomic (Section 4.4). Bumps the generation + stamps the `api-edit` sentinel (Section 4.4). |
+| `delete_file(community_id, server_id, rel_path)` | Delete one file from `current/`, retaining the prior content | Captures the content into `versions/` (Section 5) **before** removing, so a delete is reversible by rollback exactly like an edit. Missing path → `NotFoundError`. Bumps the generation + stamps the `api-edit` sentinel (Section 4.4). |
+| `delete_dir(community_id, server_id, rel_path)` | Recursively delete a directory subtree from `current/` | **No** per-file version capture: file versioning (Section 5) is the fine-grained single-file mechanism, whereas whole-subtree recovery is what backups (Section 3.3) exist for; capturing a version per member of a large subtree would be a storage-amplification bomb. Missing dir → `NotFoundError`. Bumps the generation + stamps the `api-edit` sentinel (Section 4.4). **Not crash-atomic across the subtree:** fs uses `rmtree` (per-member unlinks); object uses a per-object delete loop. A crash mid-op leaves a partially deleted subtree at a stale generation (Section 4.4 accepted gap). |
+| `rename_file(community_id, server_id, from_path, to_path)` | Rename/move a single file within `current/` | **No** version capture on either side: a rename does not change the content, so retaining versions would waste storage; the caller's content-addressed cache (plugin JARs) or backups cover recovery. Missing source → `NotFoundError`. Bumps the generation + stamps the `api-edit` sentinel (Section 4.4). Atomic on fs (`rename(2)`); on object backends it is a copy+delete pair — not crash-atomic (Section 4.4). |
+| `rename_dir(community_id, server_id, from_path, to_path)` | Rename/move a directory within `current/` | **No** per-file version capture (same reasoning as `delete_dir`). Missing source dir → `NotFoundError`. Bumps the generation + stamps the `api-edit` sentinel (Section 4.4). Atomic on fs (`rename(2)`); on object backends it is a per-object copy+delete loop — not crash-atomic (Section 4.4). |
+| `make_dir(community_id, server_id, rel_path)` | Create an (empty) directory in `current/` | Backend-dependent (see note). Idempotent. **Requires a published snapshot** — a never-snapshotted server has no live `current/` to create the directory under, so `make_dir` raises `NotFoundError` on both adapters. Bumps the generation + stamps the `api-edit` sentinel (Section 4.4), uniformly with the other edits. On object backends it also writes a zero-byte `.dir` marker object under the prefix so the otherwise-empty directory is visible in listings (see note). |
 
 **Empty-directory representation (`make_dir`).** fs / remote-fs materialize a real
 empty directory, which rides the hydrate tar as a directory member (the tar is
@@ -348,7 +352,7 @@ built recursively, so empty dirs survive a snapshot round-trip). **Object storag
 has no real directories** — a directory exists only as the shared key-prefix of
 its files (Section 7.3), so an *empty* directory has no key to make it visible. To
 give it one, `make_dir` writes a zero-byte `.dir` marker object under the directory
-prefix (#1125), so the otherwise-empty directory shows up in listings. `list_dir`
+prefix, so the otherwise-empty directory shows up in listings. `list_dir`
 filters the `.dir` marker out of its entries (`_entries_at_level`), so the API
 never surfaces it as a file. The marker is a real object, though: it rides the
 hydrate tar to the Worker (a literal `foo/.dir` file appears in the live working
@@ -356,7 +360,7 @@ directory), is re-packed into the next snapshot, and is carried into
 `create_backup_from_current`/restore — so on object backends the empty directory
 persists as a `.dir` marker throughout the working-set lifecycle rather than as a
 true directory entry. On both backends `make_dir` bumps the generation marker
-(#889, see Section 4.4), so the store generation stays in lockstep across adapters.
+(Section 4.4), so the store generation stays in lockstep across adapters.
 
 ### 3.5 File version retention / rollback
 
@@ -366,7 +370,7 @@ Serve versioned edits (FR-FILE-3). See Section 5 for the retention scheme.
 |---|---|---|
 | `list_file_versions(community_id, server_id, rel_path) -> [VersionId]` | List retained prior versions of a file | Ordered newest-first. Versions are storage-only — the ids are enumerated from the backend, not from a DB index (Section 5). |
 | `read_file_version(community_id, server_id, rel_path, VersionId) -> bytes` | Read a specific retained version | For preview/diff before rollback. |
-| `rollback_file(community_id, server_id, rel_path, VersionId)` | Restore a file to a retained version | Implemented as a `write_file` of the old content, so the pre-rollback content is itself retained (rollback is reversible) and the generation bump + `api-edit` sentinel ride that delegated write (#889). |
+| `rollback_file(community_id, server_id, rel_path, VersionId)` | Restore a file to a retained version | Implemented as a `write_file` of the old content, so the pre-rollback content is itself retained (rollback is reversible) and the generation bump + `api-edit` sentinel ride that delegated write. |
 
 ---
 
@@ -374,7 +378,7 @@ Serve versioned edits (FR-FILE-3). See Section 5 for the retention scheme.
 
 **Requirement (FR-DATA-6).** A snapshot or backup restore must never overwrite
 the authoritative copy with a partial transfer. The authoritative `current/`
-must, at every instant and after any crash, reflect either the *previous*
+must, at every instant and after any crash, reflect either the *prior*
 complete state or a *new* complete state — never a half-written mix.
 
 ### 4.1 The staging-then-publish protocol
@@ -388,13 +392,13 @@ follows the same two-phase shape:
 2. **Publish.** Once the staged copy is **proven complete**, move it into
    `snapshots/<snapshot-id>/` and make it authoritative by a single atomic
    pointer switch (Section 4.2). The pointer switch is the only step that changes
-   what `current` resolves to. Only after it succeeds is the superseded snapshot
+   what `current` resolves to. Only after it succeeds is the prior snapshot
    reclaimed.
 
 A transfer is "proven complete" before publish by the caller signalling
 end-of-stream plus an integrity check (size/manifest match between what the
 Worker sent and what landed in staging). The exact completeness signal is part of
-the data-plane contract (epic #8); `Storage.commit_snapshot` is the gate that
+the data-plane contract (Section 8); `Storage.commit_snapshot` is the gate that
 refuses to publish without it.
 
 An empty staging area is not a publishable transfer: a worker packing an empty
@@ -415,15 +419,15 @@ The publish step's atomicity is realized differently per adapter family, but the
   `current`** (`rename(2)` of one symlink onto another, within the server
   directory). Same-directory rename is atomic on POSIX filesystems, so `current`
   resolves to either the old snapshot or the new one at every instant — it is
-  never absent and never partial. The superseded snapshot is deleted only after
+  never absent and never partial. The prior snapshot is deleted only after
   the flip returns.
 
   This is chosen over `renameat2(RENAME_EXCHANGE)` (Linux-only; commonly
   unsupported over NFS/SMB) and over deleting `current/` then renaming the new
-  copy into place (which leaves a window where `current` does not exist — the
-  exact defect being fixed). A symlink flip needs only atomic same-directory
-  rename, which is already the guarantee the remote-fs adapter requires of its
-  mount (Section 7.2), so it is the portable option across all path-based
+  copy into place (which leaves a window where `current` does not exist —
+  exactly what FR-DATA-6 forbids). A symlink flip needs only atomic same-directory
+  rename, which is the guarantee the remote-fs adapter requires of its mount in
+  any case (Section 7.2), so it is the portable option across all path-based
   backends.
 - **object:** there is no atomic multi-object rename, so the published state is
   named by a **single pointer object** (a small `current.json`-style manifest
@@ -450,18 +454,20 @@ the FR-DATA-5 RPO.
 | After stage, before the staged copy is **moved into `snapshots/`** | `current` unchanged (old snapshot); the staged dir in `incoming/` is an orphan, cleaned on recovery | pointer still references old prefix; new prefix is orphaned and GC'd |
 | After move into `snapshots/`, before the **symlink flip** | `current` still points at the old snapshot; the freshly moved `snapshots/<snapshot-id>/` is not yet referenced, so it is an orphan, cleaned by the sweep (it is unreferenced because no symlink targets it) | (no analogue — object stage writes directly under the new prefix) |
 | During the **symlink flip** | same-directory rename is atomic — `current` resolves to either the old or the new snapshot; it is never absent and never a partial pointer | the pointer PUT is atomic — it either references the old or the new prefix |
-| After the flip, before superseded-snapshot reclaim | `current` points at the new snapshot; the superseded `snapshots/<snapshot-id>/` is an orphan (unreferenced by `current`), cleaned on recovery | pointer references the new prefix; old prefix is an orphan, GC'd |
+| After the flip, before prior-snapshot reclaim | `current` points at the new snapshot; the prior `snapshots/<snapshot-id>/` is an orphan (unreferenced by `current`), cleaned on recovery | pointer references the new prefix; old prefix is an orphan, GC'd |
 
 The invariant in every row: **`current` (or the object pointer) always resolves
 to one complete snapshot — never absent, never partial.** Recovery is
 idempotent: the startup sweep reclaims any `snapshots/<snapshot-id>/` not
 targeted by `current` and any leftover `incoming/` staging dir, and re-running
-`abort_snapshot` or the sweep is always safe.
+`abort_snapshot` or the sweep is always safe. The sweep runs at API startup and
+then on a periodic loop (`storage_sweep.interval_seconds`, daily by default;
+CONFIGURATION.md Section 5.15).
 
 For the fs / remote-fs backends, the staged tree's file data is fsynced
-(`_fsync_tree`) before the flip and the superseded snapshot is reclaimed only
+(`_fsync_tree`) before the flip and the prior snapshot is reclaimed only
 after the flip, so `current` never resolves to a tree whose data blocks are
-unflushed while the prior copy is already deleted (#1943).
+unflushed while the prior copy is already deleted.
 
 The sweep also reclaims the **spool temp files** a crash leaves at a backup
 write site — the fs adapter's `.backup.*.tmp` (create / upload) and
@@ -472,8 +478,8 @@ see them; the object sweep lists them via `ListMultipartUploads` and aborts them
 via `AbortMultipartUpload`. Both reclaim paths apply an **mtime / `Initiated` age
 threshold** (1 h): a spool or upload younger than the threshold may belong to a
 live write still in flight, so it is left alone — mirroring the `incoming/`
-lease-guard discipline (#183) and keeping the sweep safe even if it ever runs
-periodically rather than only at startup (Section 9.5).
+lease-guard discipline and keeping the periodic passes as safe as the startup
+one (the long-upload caveat is in Section 9.5).
 
 `Initiated` is **optional** in the S3 `ListMultipartUploads` response, and
 SeaweedFS 4.33 omits it. When it is absent the adapter age-gates the upload by
@@ -502,26 +508,27 @@ consistent.
 Like a `commit_snapshot` or `restore_backup`, an authoritative file edit replaces
 the published world, so **every authoritative `current/` mutation bumps the
 working-set generation** (`write_file`, `delete_file`, `delete_dir`, `make_dir`,
-`rollback_file`, #889) and stamps the **`api-edit` sentinel** as the publisher
+`rollback_file`) and stamps the **`api-edit` sentinel** as the publisher
 (Section 3.1). Otherwise a same-Worker scratch with `held == store` would skip the
-post-edit hydrate (#767) on the next start and boot the PRE-edit world, and that
+post-edit hydrate on the next start and boot the PRE-edit world, and that
 scratch's in-flight stale snapshot — the same Worker, `base == current` — would
 pass the publish-time guard (Section 8) and clobber the edit; the sentinel makes it
 a different-publisher publish whose base now lags, so the guard refuses it. The bump
 is uniform across all five ops for a simple invariant: even `make_dir` (which only
 creates an empty directory — a real one on `fs`, a zero-byte `.dir` marker on
-object backends per #1125) bumps, so the staleness reasoning never special-cases
+object backends) bumps, so the staleness reasoning never special-cases
 which edit "really" changed the world.
 
 A single-file `write_file` and a whole-working-set publish/restore are never
 issued concurrently for the same server: they are serialized at the application
-layer per the Section 6.9 state-branching policy and decision 9.2 (Storage file
-edits happen only on a stopped server, while publish happens for a running
-server's snapshot or during restore, which requires a stop). The Storage adapter
+layer per the state-branching policy (REQUIREMENTS.md Section 6.9, Section 9
+decision 3: Storage file edits happen only on a stopped server, while publish
+happens for a running server's snapshot or during restore, which requires a
+stop). The Storage adapter
 itself does not arbitrate concurrent publish and `write_file` on the same server;
 the application layer is responsible for not issuing them concurrently.
 
-**Accepted gap: multi-member edits are not crash-atomic (issue #1608).**
+**Accepted gap: multi-member edits are not crash-atomic.**
 Single-file mutations (`write_file`, `delete_file`) are atomic at file
 granularity (temp-sibling rename on fs, single-object PUT on object), but
 multi-member edits span several non-atomic steps before the generation bump:
@@ -550,7 +557,7 @@ op on a stopped server).
 converges (the remaining members are deleted/renamed, then the generation bumps),
 or a backup restore (Section 3.3) replaces the torn `current/` wholesale.
 
-### 4.5 Recovering from a refused `working_set_incomplete` publish (#854/#887)
+### 4.5 Recovering from a refused `working_set_incomplete` publish
 
 When the missing-region gate refuses a snapshot publish, the Worker's `POST
 …/snapshot` returns `422 working_set_incomplete` and **`current/` keeps the prior
@@ -572,7 +579,7 @@ silently-holed world. There are two legitimate causes and one corruption cause:
   loss is refused. So the documented override for an intentional shrink is to
   delete the *whole* dimension dir, not a subset of its regions.
 - **Intentional removal of specific regions.** If the operator genuinely wants
-  `current/` to no longer carry those regions, delete the listed names from
+  `current/` to drop those regions, delete the listed names from
   `current/` itself via the at-rest file API (`delete_file` /
   `DELETE …?path=…`, Section 3.4) with the server **stopped**. On the next
   start the Worker re-hydrates from the reconciled `current/` (the generation
@@ -593,32 +600,32 @@ generation, so the Worker always sees `held < store` on the next start and
 re-hydrates rather than reusing a stale scratch; see Section 3.3 `restore_backup`
 row). Subsequent snapshots then publish cleanly against the reconciled world.
 
-### 4.6 Worker `.displaced-<id>` trees: lifecycle, operator recovery, and cleanup (#906/#910/#911/#2278)
+### 4.6 Worker `.displaced-<id>` trees: lifecycle, operator recovery, and cleanup
 
 #### What creates a `.displaced-<id>` tree
 
 When a server's final stop snapshot **definitively fails** — refused by the
-integrity gate (#739/#927), refused by the missing-region gate (#854), or
-otherwise non-transiently rejected — issue #845 retains the Worker's scratch dir
-so the only copy of the world survives. On the **next start**, the `HydrateTrigger`
-would normally overwrite the scratch dir with the authoritative snapshot.
-Issue #910 changes that overwrite to a **rename aside**: the old scratch
-`<scratch>/<id>` is moved to `<scratch>/.displaced-<id>` before the new working
-set is unpacked in its place. The displaced tree is the retained-for-recovery copy
-of the world as it stood before the failed final snapshot.
+integrity gate (Section 8), refused by the missing-region gate (Section 4.5), or
+otherwise non-transiently rejected — the Worker retains its scratch dir so the
+only copy of the world survives. On the **next start**, the `HydrateTrigger` does
+not overwrite that scratch dir with the authoritative snapshot; it **renames it
+aside**: the old scratch `<scratch>/<id>` is moved to `<scratch>/.displaced-<id>`
+before the new working set is unpacked in its place. The displaced tree is the
+retained-for-recovery copy of the world as it stood before the failed final
+snapshot.
 
 **Location on the Worker.** `<worker.scratch_dir>/.displaced-<server-id>` — a
 dot-prefixed sibling of the server's normal scratch dir. Only one displaced tree
 exists per server at any time; a hydrate that finds the slot already occupied **keeps
-the existing tree** and discards the working set it just displaced (oldest-wins, #2278,
+the existing tree** and discards the working set it just displaced (oldest-wins,
 below).
 
-**Which copy wins: oldest-wins (#2278).** A hydrate that displaces a live working set
+**Which copy wins: oldest-wins.** A hydrate that displaces a live working set
 while a `.displaced-<id>` is already present must choose between two trees, and
 **neither is guaranteed to be in the store**: a surviving `.displaced-<id>` almost always
 means that tree was never published *from this Worker* (any snapshot succeeding here calls
 `sweepDisplaced`, unless it declined the sweep because the working dir it packed had been
-replaced meanwhile — #2291, below — in which case the survivor does carry a published
+replaced meanwhile — "when it declines", below — in which case the survivor does carry a published
 prefix, which only makes retaining it easier to justify), and the live set may itself be
 torn or simply un-snapshotted. The Worker retains the **first-displaced** tree and drops
 the newer one.
@@ -629,14 +636,14 @@ reclaim this tree. A retained tree can therefore be arbitrarily old even while t
 snapshotted successfully elsewhere — what remains true is that a success on B publishes
 B's working set, never this tree.
 
-The case this gets right is the torn-world path (#834): a torn `<scratch>/<id>` fails the
+The case this gets right is the torn-world path: a torn `<scratch>/<id>` fails the
 boot region fsck and advertises generation 0, so the API's skip gate dispatches a hydrate
 — and retaining the older *intact* tree is better than retaining the torn one. The cost is
 real and goes the other way when the newer tree is fine: the discarded set is the store
 copy **plus everything Minecraft wrote since**, none of which was published either, so it
 can be strictly newer than the tree retained. (Concretely: a server whose snapshots keep
 being refused by the integrity gate runs for days, an operator's `restore_backup` bumps
-the store generation so the skip gate no longer skips, and the resulting hydrate discards
+the store generation so the skip gate stops skipping, and the resulting hydrate discards
 those days.) Because that loss is otherwise invisible, the Worker emits a `WARN` naming
 **both** paths at the moment it decides:
 
@@ -653,7 +660,7 @@ and the ordinary displace path runs, so world-less junk in the slot can never sh
 real world. That is the same "holds a working set" test the held-server scan applies.
 
 The policy is deliberately **not** health-aware — the Worker does not fsck both trees to
-pick the better one (option C in #2278), because that puts a region scan on the hydrate
+pick the better one, because that puts a region scan on the hydrate
 path and makes the rule unpredictable under partial failures.
 
 **Lifecycle.** The displaced tree is **never GC'd automatically on server delete**
@@ -661,19 +668,20 @@ path and makes the rule unpredictable under partial failures.
 reclaimed only when a subsequent snapshot **succeeds** for the same server id
 (`sweepDisplaced`, called from both the running-id and stopped-id
 snapshot-success branches — the running-id branch reclaims only while the working
-directory is still the tree it packed, #2291 below): that success proves the store
-supersedes the displaced world, making the local copy redundant. A server deleted after
+directory is still the tree it packed, "when it declines" below): that success proves
+the store holds a state newer than the displaced world, making the local copy
+redundant. A server deleted after
 a failed final
 snapshot never snapshots again and its displaced tree therefore **persists on the
 Worker indefinitely** — bounded to one working-set worth of disk per deleted
-server. Note: the issue #924 scratch reclaim (`ReclaimDeletedScratches`)
+server. Note: the deleted-server scratch reclaim (`ReclaimDeletedScratches`)
 intentionally does **not** reclaim `.displaced-<id>` trees — only the scratch dir
 and `.hydrate-<id>-*` leftovers.
 
 **Scratch capacity.** One hydrate that displaces a live working set peaks at **three
 world-sized copies of that server**: the unpacked temp tree, the retained
 `.displaced-<id>` (left untouched), and the live set parked aside until the swap-in
-succeeds (#917/#2278). The retained displaced tree is one of the three, not a fourth term.
+succeeds. The retained displaced tree is one of the three, not a fourth term.
 Hydrates for distinct servers can be at that peak simultaneously — the Worker runs up to
 `maxConcurrentLanes` (4) command lanes concurrently — so budget `worker.scratch_dir` as
 **3× the largest world × the number of overlapping hydrates** (4 in the worst case), plus
@@ -699,7 +707,7 @@ then fix its permissions or remove it.
 
 **Boot detection.** At Worker boot, after the held-server scan,
 `WarnOrphanDisplacedTrees` logs a `WARN` for each `.displaced-<id>` tree whose
-server id is **not** in the held-server set. Since #2278 the tree it names is the
+server id is **not** in the held-server set. The tree it names is the
 **first-retained** branch, which can be frozen at a displacement much older than the last
 world this Worker held — read its mtime, not its existence, when judging how current it
 is. A tree is "assigned" (not logged) if
@@ -724,14 +732,14 @@ WARN  displaced recovery tree for unknown/unassigned server found at boot; manua
    region dirs live under `world/` inside the displaced tree (e.g.
    `.displaced-<id>/world/level.dat`, `.displaced-<id>/world/region/`). Inspect
    those paths to confirm the world data looks intact. **Check its age.** Under
-   oldest-wins (#2278) this is the EARLIEST retained local branch, not the latest: later
+   oldest-wins this is the EARLIEST retained local branch, not the latest: later
    hydrates may have displaced and discarded newer working sets while this tree sat in the
    slot. Each such discard logged the `WARN` above, so grep the Worker log for
    `discarding the working set` on this server id to see whether newer branches existed.
 3. **Recover the world.** Two options:
 
    - **Repack as a new backup (recommended).** Tar the displaced tree, upload it
-     as a backup to a server (the upload-backup flow, issue #281 / `POST
+     as a backup to a server (the upload-backup flow, `POST
      /api/communities/{community_id}/servers/{server_id}/backups/upload`), and restore it
      (`restore_backup`). This brings the world back into the authoritative store
      and into a new or existing server — no manual SSH to the Worker host needed
@@ -773,29 +781,29 @@ free.
 #### When a running-id snapshot sweeps a displaced tree — and when it declines
 
 A running-id periodic snapshot for server id S succeeds and calls `sweepDisplaced`
-even if S had a stop→failed-final→re-place→hydrate sequence in the interim: the
+even if S had a stop→failed-final→re-place→hydrate sequence in between: the
 new scratch for S (delivered by the hydrate) is the current authoritative world,
 so sweeping `.displaced-S` at that snapshot is correct — the displaced tree is
-no longer the only copy. The `#739` integrity checks gate the publish, so a
+not the only copy any more. The integrity checks (Section 8) gate the publish, so a
 genuinely torn new scratch is refused and the displaced tree is retained until a
-clean snapshot lands. This sequence is a non-regression micro-edge: the recovery
+clean snapshot lands. This sequence is a micro-edge handled by construction: the recovery
 insurance (`sweepDisplaced` only on success) and the integrity gate together keep
 the displaced tree alive exactly as long as it is needed.
 
-A second, narrower sequence was accepted in the same spirit until #2291 closed it. A
-running-id snapshot takes no per-server reservation, so the success that triggers
-`sweepDisplaced` for S may belong to an **older, already-dropped Worker stream** rather
+A second, narrower sequence is why the running-id branch pins the working directory's
+identity before it sweeps. A running-id snapshot takes no per-server reservation, so the
+success that triggers `sweepDisplaced` for S may belong to an **older, already-dropped Worker stream** rather
 than to the stream that currently owns S — and the tree it would remove is then one a NEW
 stream's re-placement hydrate has just created. The exposed window is small (the dropped
 stream's upload is cancelled with its stream, so only the brief post-upload tail can still
 sweep), but the tree removed there is not redundant: it holds the published state **plus**
 whatever the world progressed since that snapshot's *pack* — auto-save resumes before the
 upload, and the racing stop's shutdown save lands after it. That bound assumes the racing
-hydrate *created* the tree; under oldest-wins (#2278) a hydrate that finds the slot
+hydrate *created* the tree; under oldest-wins a hydrate that finds the slot
 occupied creates none, so what such a sweep removes is instead the older retained tree,
 which the bound does not describe at all. The Worker therefore **declines the sweep**
-whenever the working directory is no longer the tree the snapshot packed, using the same
-identity pin that guards the snapshot's generation stamp (#2284, CONTROL_PLANE.md
+whenever the working directory is not the tree the snapshot packed, using the same
+identity pin that guards the snapshot's generation stamp (CONTROL_PLANE.md
 Section 4.1). The publish still succeeds — only the GC is skipped, with an `INFO` line
 naming the reason:
 
@@ -803,19 +811,19 @@ naming the reason:
 INFO  skipped sweeping the displaced recovery tree: the working dir is no longer the directory this snapshot packed  server_id=<id>  reason=working_dir_replaced
 ```
 
-**The tradeoff.** The GC will occasionally decline to reclaim disk it would have reclaimed
-before: a `.displaced-<id>` tree can now survive a snapshot that succeeded, and it is
-reclaimed only by the next successful snapshot for that id — the ordinary GC-on-success
-contract (#906), so a server that keeps snapshotting reclaims it on the following tick. A
-server that stops snapshotting right after such a skip keeps the tree until one of the
-other reclamation paths applies, so treat it as one more world-sized copy under "Scratch
-capacity" above. What is no longer true is the reverse: a `.displaced-<id>` tree can no
-longer disappear on a snapshot success that published some *other* tree, so a displaced
-tree you care about is not on a clock — recover it (the procedure above) at your
-convenience rather than promptly. A microseconds-wide residual remains, since the working
-directory can still be replaced between the identity check and the removal; closing that
-too would require a per-server reservation on running-id snapshots, which is deliberately
-not taken (#829 item 4).
+**The tradeoff.** The GC occasionally declines to reclaim disk: a `.displaced-<id>` tree
+can survive a snapshot that succeeded, and it is then reclaimed only by the next successful
+snapshot for that id — the ordinary GC-on-success contract, so a server that keeps
+snapshotting reclaims it on the following tick. A server that stops snapshotting right
+after such a skip keeps the tree until one of the other reclamation paths applies, so
+treat it as one more world-sized copy under "Scratch capacity" above. What the decline
+buys is the reverse guarantee: a `.displaced-<id>` tree never disappears on a snapshot
+success that published some *other* tree, so a displaced tree you care about is not on a
+clock — recover it (the procedure above) at your convenience rather than promptly. A
+microseconds-wide residual remains, since the working directory can still be replaced
+between the identity check and the removal; closing that too would require a per-server
+reservation on running-id snapshots, which is deliberately not taken (CONTROL_PLANE.md
+Section 4.1).
 
 ---
 
@@ -825,7 +833,7 @@ not taken (#829 item 4).
 can be restored.
 
 **Decision — copy-on-write per file, count-bounded retention.** On every
-`write_file` (and `rollback_file`), the **previous** content of that file is
+`write_file` (and `rollback_file`), the **prior** content of that file is
 copied into `versions/<rel-path>/<version-id>` before the new content is
 published. `version-id` is a monotonic, opaque id whose lexicographic order is
 creation order, so listing and pruning are a plain enumeration of the version
@@ -834,13 +842,13 @@ directory. Versions are **storage-only** — no database table indexes them
 ("who edited this file") is not available from any layer.
 
 Retention is bounded by a **configurable per-file version count** (default and
-key owned by #16); when the count is exceeded the oldest version of that file is
+key owned by CONFIGURATION.md); when the count is exceeded the oldest version of that file is
 pruned. Versioning applies to the **authoritative copy only** — edits to a
 running server's live working set go over the control plane (ARCHITECTURE.md
 Section 7.2) and are captured as versions when that working set is next
 snapshotted and the resulting file differs, not on each keystroke.
 
-**Crash-safe capture (issue #1955).** The version capture uses the same
+**Crash-safe capture.** The version capture uses the same
 temp-sibling + fsync + atomic rename discipline as Section 4.4 single-file
 writes: the prior content is streamed into a dot-prefixed temp sibling
 (`.{version-id}.*.tmp`) in the target `versions/` directory, fsynced, then
@@ -849,7 +857,7 @@ sibling — never a truncated file under a valid version id. The enumerators
 (`list_file_versions`, `_matches_newest_version`, `_prune_versions`) filter
 dot-prefixed entries so leftover temps are invisible to callers. The startup
 sweep (`_sweep_server`) reclaims stale `.*.tmp` files under `versions/` using
-the same mtime age threshold as backup spool litter (issue #903).
+the same mtime age threshold as backup spool litter (Section 4.3).
 
 **Alternatives considered.**
 1. *Whole-working-set versioning* (snapshot the entire `current/` per edit) —
@@ -859,8 +867,8 @@ the same mtime age threshold as backup spool litter (issue #903).
    step and a corruption-propagation risk across the chain; rejected as
    premature optimization for small files like configs (NFR-SCALE-1).
 3. *Time-windowed retention* instead of count-bounded — harder to reason about
-   storage bounds; count is simpler and predictable. (A future milestone can add
-   a time policy behind the same Port.)
+   storage bounds; count is simpler and predictable. (A time policy is not
+   provided; the Port shape leaves room for one.)
 
 **Rationale.** Full-content copies of individual files are tiny (configs,
 properties, scripts), so copy-on-write is the simplest correct scheme and makes
@@ -894,7 +902,7 @@ This is enforced in the adapter (not the use case) so that **every** backend get
 the protection and a future backend cannot forget it; the rejection is a typed
 domain error so the API surface can map it to a uniform response.
 
-### 6.1 The per-component symlink rule (#2432)
+### 6.1 The per-component symlink rule
 
 **Symlinks in a working set are unsupported, full stop — at rest included.** A
 working set cannot acquire one through any supported write: uploads refuse symlink
@@ -908,8 +916,8 @@ Every operation that takes a `rel_path` resolves it the same way, in this order:
    of the root always reports the escape rather than the refusal below.
 2. **The symlink refusal** — if resolving the path crossed a symlink at any
    component, it is `SymlinkRefusedError`, distinct from `PathTraversalError`. The
-   edge renders it as `422 symlink_refused`, which is the reason the Worker's
-   running-server path already returns (`FileAccessReasonSymlinkRefused`), so one
+   edge renders it as `422 symlink_refused`, which is the same reason the Worker's
+   running-server path returns (`FileAccessReasonSymlinkRefused`), so one
    browser click gets the same sentence whether the server is at rest or running.
 3. **The literal join is opened** — nothing has been followed, so the open answers
    what is really at the path.
@@ -918,15 +926,15 @@ Consequences worth stating:
 
 - Read-through of an operator-created **intermediate** symlink is deliberately
   foreclosed on the fs backend (browsing a subfolder SSH-symlinked onto another
-  disk, say). That workflow is already broken system-wide — the running path
+  disk, say). That workflow is unsupported system-wide — the running path
   refuses it and hydrate will not start such a server at all.
 - A symlink **loop** and an over-long component stay the modelled **miss**: a
   non-strict canonicalization leaves both literal, so step 2 sees nothing crossed
-  and the open reports `ELOOP` / `ENAMETOOLONG`, which the read paths already fold
-  into the miss (#2393/#2394).
+  and the open reports `ELOOP` / `ENAMETOOLONG`, which the read paths fold
+  into the miss.
 - **Mutations** apply the rule to their parent chain, and a symlink **dirent** (a
-  leaf link) supports exactly two operations — being listed and being deleted
-  (#2429). `delete_file` unlinks the link itself (working, dangling and looping
+  leaf link) supports exactly two operations — being listed and being deleted.
+  `delete_file` unlinks the link itself (working, dangling and looping
   alike), capturing no version because a link has no readable content to retain;
   every other mutation refuses it — `write_file`, a `rename` **source**, and
   `make_dir` are `symlink_refused`, `delete_dir` misses (a link is never a
@@ -934,12 +942,12 @@ Consequences worth stating:
   matches the listing: the delete button acts on the dirent the browser shows, and
   nothing writes through, moves, or destroys a link's target.
 - `path_exists` likewise applies it to the parent chain only: its leaf is described
-  as itself, because a link occupies its name whatever it points at (#2426).
+  as itself, because a link occupies its name whatever it points at.
 - The fs realization compares the already-computed canonical path against the
-  literal join, so the rule costs no syscall beyond the one every resolve already
-  paid; it replaces the `lstat` the leaf-only rule needed. It leaves a
-  resolve-then-open window (only operator SSH can race it at rest); closing that
-  wants an `O_NOFOLLOW` open and is not done.
+  literal join, so the rule costs no syscall beyond the one every resolve pays
+  anyway (no `lstat` is needed). It leaves a resolve-then-open window (only
+  operator SSH can race it at rest); closing that wants an `O_NOFOLLOW` open and
+  is not provided.
 - On a backend without symlinks (object storage, Section 7.3) step 2 is vacuous.
 
 ---
@@ -948,11 +956,11 @@ Consequences worth stating:
 
 All three families implement the **same `Storage` Port** (Section 3) and provide
 the **same observable atomic-publish guarantee** (Section 4); they differ only in
-how they realize it. Selection is by configuration (#16); no caller changes when
+how they realize it. Selection is by configuration (CONFIGURATION.md Section 5.2); no caller changes when
 the backend changes (FR-DATA-2). Adapters are named `<Tech><Port>` per
 ARCHITECTURE.md Section 6 (e.g. `FsStorage`, `ObjectStorage`).
 
-### 7.1 fs (local filesystem) — M1 default
+### 7.1 fs (local filesystem) — default
 
 | Aspect | Guarantee / mechanism |
 |---|---|
@@ -960,7 +968,7 @@ ARCHITECTURE.md Section 6 (e.g. `FsStorage`, `ObjectStorage`).
 | Atomic publish | `current` symlink flip via same-directory `rename(2)` (Section 4.2). |
 | Single-file write | temp-write + fsync + atomic rename (Section 4.4). |
 | Path-traversal | canonicalize + root-containment check (Section 6). |
-| Best for | The legacy single-host posture and the simplest M1 deployment. |
+| Best for | A single-host deployment where the API and its store share one disk — the simplest deployment. |
 | Caveat | `<root>` must be a single filesystem so the snapshot move and the symlink rename stay atomic; staging, snapshots, and the symlink must not straddle a mount boundary (a cross-device rename is not atomic). |
 
 ### 7.2 remote-fs (network/shared filesystem)
@@ -976,7 +984,7 @@ ARCHITECTURE.md Section 6 (e.g. `FsStorage`, `ObjectStorage`).
 
 `remote-fs` may share most code with `fs` (both are path-based); they are
 distinct entries because their **operational guarantees and failure modes
-differ**, and #16 selects between them explicitly. Config: set
+differ**, and `storage.backend` selects between them explicitly. Config: set
 `storage.backend = remote-fs` and point `storage.fs.root` at the mount path
 (CONFIGURATION.md Section 5.2).
 
@@ -990,24 +998,24 @@ differ**, and #16 selects between them explicitly. Config: set
 | Path-traversal | The same canonicalization is applied to derive the **key** from `rel_path`; a `rel_path` that would escape the server's key prefix is rejected (Section 6). No symlinks exist, removing that vector. |
 | Garbage collection | Orphaned prefixes (from aborted/crashed publishes, or old prefixes after a flip) are reclaimed by a sweep keyed off the live pointer (Section 4.3). |
 | Best for | Decoupling the authoritative store from any host filesystem; durability/scale beyond local disk. |
-| Caveat | No atomic multi-object rename and no real directories — hence the pointer-flip design. List operations are prefix scans. Multi-member at-rest edits (`delete_dir`, `rename_dir`, `rename_file`) are per-object loops, not crash-atomic (Section 4.4 accepted gap, #1608). |
+| Caveat | No atomic multi-object rename and no real directories — hence the pointer-flip design. List operations are prefix scans. Multi-member at-rest edits (`delete_dir`, `rename_dir`, `rename_file`) are per-object loops, not crash-atomic (Section 4.4 accepted gap). |
 
-**Shipped deployment (issue #702).** This is the **default** backend for the
+**Compose deployment.** This is the **default** backend for the
 compose deployment, realized over **SeaweedFS** (Apache-2.0, master/volume,
 designed for many small files). The deployment wiring, credentials, opt-out, and
 the live contract tests are in
 [DEPLOYMENT.md Section 5](../dev/DEPLOYMENT.md#5-storage-backend-object-on-seaweedfs-default).
 The app implements its own snapshot/version logic, so S3 versioning / object-lock
-are not required. Orphan multipart reclamation is **defense-in-depth (issue
-#2260)**: the startup sweep age-gates uploads via `ListParts` when SeaweedFS omits
+are not required. Orphan multipart reclamation is **defense-in-depth**:
+the startup sweep age-gates uploads via `ListParts` when SeaweedFS omits
 `Initiated` (Section 4.3), and behind it a bucket-level
 `AbortIncompleteMultipartUpload` lifecycle rule reclaims the residual gap the
 sweep cannot age-gate — an upload that crashes after `CreateMultipartUpload` but
 before its first part, which carries no timestamp. The rule is applied by a
 one-shot compose service (`seaweedfs-lifecycle`) on startup and self-verifies
 that SeaweedFS honored it (DEPLOYMENT.md Section 5); `weed shell
-s3.clean.uploads` remains an optional operator-side cleanup.
-**Bucket provisioning (issue #946).**
+s3.clean.uploads` is an optional operator-side cleanup as well.
+**Bucket provisioning.**
 SeaweedFS auto-creates the bucket on the first **write**, not on read, so a fresh
 deployment needs no manual bucket setup: every **read** against the not-yet-created
 bucket returns `NoSuchBucket`, which the adapter treats as empty/not-found, so the
@@ -1020,10 +1028,11 @@ operating cost/latency scale with **operation count** (files × snapshot
 frequency), not stored size or egress; keep the snapshot interval coarse enough
 that a publish completes well within it.
 
-**Explicit transport budget (issue #2249).** The S3 client is built with an
+**Explicit transport budget.** The S3 client is built with an
 explicit `botocore.config.Config` rather than inheriting botocore's hidden
-defaults (60s connect/read + legacy retries), so every object operation — hydrate,
-snapshot, upload, restore, and the at-rest backup archive — runs against a known,
+defaults (60 s connect/read timeouts and the `legacy` retry mode), so every
+object operation — hydrate, snapshot, upload, restore, and the at-rest backup
+archive — runs against a known,
 operator-sized ceiling and a stalled read fails fast instead of silently hanging.
 The three knobs (`storage.object.connect_timeout_seconds`,
 `read_timeout_seconds`, `retry_max_attempts`; CONFIGURATION.md Section 5.2) are
@@ -1032,7 +1041,7 @@ socket read, not a whole transfer, so a multi-GB stream (chunked at 8 MiB) is
 unaffected while a genuinely stalled read is still capped; retries use botocore's
 `standard` mode (capped exponential backoff, broader retryable-error set).
 
-**At-rest integrity sweep limitation (issue #926).** The at-rest **structural**
+**At-rest integrity sweep limitation.** The at-rest **structural**
 fsck (`check_current_health`, Section 3.1; the `.mca` walk behind
 `check_backup_health`) does not inspect the stored regions on the object backend.
 The reason is structural: the object backend has no local working-set directory to
@@ -1040,35 +1049,36 @@ walk; the fsck implementation walks a local filesystem tree (the `current/` syml
 target on fs), and no equivalent materialisation exists on the object side. The
 **publish-time** fsck (`_check_staged_regions`, wired on `commit_snapshot`,
 `restore_backup`, and `create_backup_from_current`) **is** implemented on the
-object adapter and remains the authoritative gate — it downloads and validates
+object adapter and is the authoritative gate — it downloads and validates
 each `.mca` member during staging, so a corrupt region is refused before it
 becomes authoritative. The gap is limited to the **read-only sweep** that
 re-checks already-published snapshots at rest: on the object backend that sweep
-examines no server's `current` at all. A future enhancement could fetch and
-structurally check the `.mca` objects from the store (downloading headers only,
-mirroring the fs walker), but it is not implemented — the publish-time gate is the
-correctness guarantee today, and the sweep is defense-in-depth.
+examines no server's `current` at all. Fetching and structurally checking the
+`.mca` objects from the store (downloading headers only, mirroring the fs walker)
+is not implemented — the publish-time gate is the correctness guarantee, and the
+sweep is defense-in-depth.
 
-**Saying so in the sweep summary (issue #2377).** `check_current_health` used to
-return a healthy `WorkingSetReport` unconditionally here, and the sweep counted it
-as a scanned, clean snapshot — a verdict nothing produced, and one an operator
-could not tell apart from a real one now that `check_backup_health` on this backend
-*does* read the bytes (#2371, below). The object adapter returns `None` instead —
-**not examined** — which the servers seam reports as `SnapshotScan.NOT_EXAMINED`
-and the sweep counts as `snapshots_not_examined`, printed on its own
-`integrity_sweep_cli` line and kept out of `snapshots scanned`. A backend that
-examines nothing answers this for **every** server, published or not: it reads
-nothing that would tell the two apart, so unlike fs it cannot skip the
-never-published ones. The limitation above is unchanged — no published snapshot is
-read at rest on this backend; the sweep just no longer claims otherwise.
+**Saying so in the sweep summary.** On this backend `check_current_health`
+returns `None` — **not examined** — rather than a healthy `WorkingSetReport`: a
+healthy report here would be a verdict nothing produced, and one an operator could
+not tell apart from a real one, given that `check_backup_health` on this backend
+*does* read the bytes (below). The servers seam reports `None` as
+`SnapshotScan.NOT_EXAMINED` and the sweep counts it as `snapshots_not_examined`,
+printed on its own `integrity_sweep_cli` line and kept out of `snapshots scanned`.
+A backend that examines nothing answers this for **every** server, published or
+not: it reads nothing that would tell the two apart, so unlike fs it cannot skip
+the never-published ones. The limitation above stands — no published snapshot is
+read at rest on this backend; the sweep summary says so rather than claiming
+otherwise.
 
-**Backup readability probe (issue #2371).** `check_backup_health` on the object
-backend is *not* limited that way: it answers the question a `HEAD` never could —
-can the store still **produce** this archive? A deployment was found serving
-backups whose body ended deterministically short of the `Content-Length` its
-`HEAD` declared (the connection aborting after a ~12s stall at the same offset on
-every attempt, days apart). Those backups are unrestorable, and every one of them
-listed as `health: healthy`, because the probe read no bytes.
+**Backup readability probe.** `check_backup_health` on the object backend is
+*not* limited that way: it answers the question a `HEAD` never could — can the
+store still **produce** this archive? A store can serve an archive whose body ends
+deterministically short of the `Content-Length` its `HEAD` declares. The
+signature of that failure: the connection stalls for ~12 s at the same offset on
+every attempt and then aborts, reproducibly across days. Such a backup is
+unrestorable, yet a probe that reads no bytes would list it as
+`health: healthy`.
 
 The probe therefore streams the stored object end to end — the same object the
 download and restore paths read — and requires both that the delivered byte count
@@ -1082,7 +1092,7 @@ translates to `BackupUnreadableError` and the sweep records as `QUARANTINED`,
 counted and logged apart from a structural quarantine so an operator can tell "the
 bytes are gone" from "the world is corrupt".
 
-A false *unhealthy* is as harmful as the false *healthy* being fixed — it
+A false *unhealthy* is as harmful as a false *healthy* — it
 quarantines a restorable backup and emits a spurious audit entry — so the probe's
 leniency is pinned to what restore accepts. Restore reads the archive with
 `tarfile.open(mode="r:gz")`, which stops at the tar end-of-archive marker inside
@@ -1102,8 +1112,9 @@ config knob.
 **Damage vs. outage.** A body that ends early looks identical whether the object's
 bytes are damaged or the store is merely having a bad minute — and quarantining on
 the latter would condemn every backup in the deployment over one outage. The
-observed defect is *deterministic*: the transfer stops at one fixed point on every
-attempt. So the probe re-reads (after a short backoff, so a momentary fault has a
+damage class the probe exists to catch presents *deterministically* — the transfer
+stops at one fixed point on every attempt — while an outage's cut points scatter.
+So the probe re-reads (after a short backoff, so a momentary fault has a
 chance to clear) and calls the archive unreadable only when the body reproducibly
 ends at the **same non-zero point**. A different point, no byte delivered at all
 (the store refusing outright), or a complete read the second time all stay
@@ -1120,8 +1131,8 @@ Supporting this, `_iter_body` translates **any** exception raised while reading 
 response body to `ObjectStoreUnavailableError`, so a teardown is a typed storage
 outcome rather than a raw third-party type crossing the Port. The breadth is
 deliberate: the shapes a short body produces are spread across three libraries and
-none is in the upload-failure tuple — aiohttp's `ClientPayloadError` (what the
-reported defect raises) is a *sibling* of `ClientConnectionError`, which is all
+none is in the upload-failure tuple — aiohttp's `ClientPayloadError` (what a
+short body raises) is a *sibling* of `ClientConnectionError`, which is all
 aiobotocore's `StreamingBody.read` maps, and botocore's `IncompleteReadError` is a
 bare `BotoCoreError`. A name-based enumeration there is a standing bug, because a
 miss does not degrade the probe, it disables it. `BaseException` is not caught, so
@@ -1159,38 +1170,36 @@ credential as their `transfer_token` and the full endpoint URL as
 `(community, server)` scope itself.
 
 **Archive format.** A stdlib **tar stream** of the working-set root (the same
-format `open_hydrate_source` / `write_snapshot` already produce/consume,
-Section 7.1). No compression at M1.
+format `open_hydrate_source` / `write_snapshot` produce/consume,
+Section 7.1). No compression.
 
 **Endpoints** (scoped by `(community_id, server_id)`). Like the rest of the HTTP
-API these are namespaced under `/api` (issue #498); the API builds the full
+API these are namespaced under `/api`; the API builds the full
 `transfer_url` it hands the Worker over the control plane, so the Worker follows
 whatever path the API emits:
 
 | Method & path | Meaning | Success | Errors |
 |---|---|---|---|
-| `GET /api/data-plane/communities/{c}/servers/{s}/working-set` | Hydrate: stream the authoritative working set as a tar (with the resolved `server.jar` injected when present, #118). Response always carries `X-Working-Set-Generation: <n>` (the generation of the snapshot served; 0 when no snapshot has been published). | `200` tar body | `204` no published snapshot *and* no resolved JAR (Worker starts from an empty dir, generation header still present); `401` |
-| `POST /api/data-plane/communities/{c}/servers/{s}/snapshot` | Snapshot: stream a tar into staging and atomically publish it. The request MAY carry `X-Working-Set-Base-Generation: <n>` (the store generation this set was hydrated from) and `X-Worker-Id: <id>` (the publishing Worker), both read by the publish-time generation guard (#847); a never-hydrated/older Worker omits them and the guard stays permissive. The content-integrity gate uses the single region rule set (#927): a non-4096-aligned tail is the normal on-disk format of a 26.x world, not corruption (byte-precise per-chunk bounds), on any source — the `X-Snapshot-Source` mode header (#923) is removed. On success the response carries `X-Working-Set-Generation: <n>` (the new generation minted by the publish). | `204` | `400` length mismatch / incomplete; `400` `empty_snapshot` (staged an empty working set); `409` `stale_generation` + `base_generation` + `current` (the declared base is older than the store's current generation AND that current was published by a *different* Worker — an A→B→A stale-scratch publish; a same-Worker lag is a lost response and is allowed to self-heal, #847); `409` `deleted_during_upload` + `base_generation` + `current` (a concurrent delete's retention prune removed the generation marker under the per-server lock during the upload window, so the commit's re-check read generation 0 while the base was ≥1 — the delete wins and the staging is discarded, #921); `411` no `Content-Length`; `413` over the size cap; `422` `working_set_corrupt` + `corrupt_count` (integrity gate refused the staged set, #739); `422` `working_set_incomplete` + `affected_count` + `directories` + `truncated` (the missing-region gate refused a staged set that dropped some-but-not-all region files of a still-live dimension, #854; `directories` is a **bounded** per-directory list of the lost `.mca` names — `{directory, missing[]}` capped per #887 — so the operator can drive the recovery in Section 4.5, `truncated` flags that the list was capped); `401` |
+| `GET /api/data-plane/communities/{c}/servers/{s}/working-set` | Hydrate: stream the authoritative working set as a tar (with the resolved `server.jar` injected when present). Response always carries `X-Working-Set-Generation: <n>` (the generation of the snapshot served; 0 when no snapshot has been published). | `200` tar body | `204` no published snapshot *and* no resolved JAR (Worker starts from an empty dir, generation header still present); `401` |
+| `POST /api/data-plane/communities/{c}/servers/{s}/snapshot` | Snapshot: stream a tar into staging and atomically publish it. The request MAY carry `X-Working-Set-Base-Generation: <n>` (the store generation this set was hydrated from) and `X-Worker-Id: <id>` (the publishing Worker), both read by the publish-time generation guard; a never-hydrated Worker omits them and the guard stays permissive. The content-integrity gate uses the single region rule set (below): a non-4096-aligned tail is the normal on-disk format of a 26.x world, not corruption (byte-precise per-chunk bounds), on any source — no request header declares a snapshot source. On success the response carries `X-Working-Set-Generation: <n>` (the new generation minted by the publish). | `204` | `400` length mismatch / incomplete; `400` `empty_snapshot` (staged an empty working set); `409` `stale_generation` + `base_generation` + `current` (the declared base is older than the store's current generation AND that current was published by a *different* Worker — an A→B→A stale-scratch publish; a same-Worker lag is a lost response and is allowed to self-heal); `409` `deleted_during_upload` + `base_generation` + `current` (a concurrent delete's retention prune removed the generation marker under the per-server lock during the upload window, so the commit's re-check read generation 0 while the base was ≥1 — the delete wins and the staging is discarded); `411` no `Content-Length`; `413` over the size cap; `422` `working_set_corrupt` + `corrupt_count` (integrity gate refused the staged set); `422` `working_set_incomplete` + `affected_count` + `directories` + `truncated` (the missing-region gate refused a staged set that dropped some-but-not-all region files of a still-live dimension; `directories` is a **bounded** per-directory list of the lost `.mca` names — `{directory, missing[]}`, capped — so the operator can drive the recovery in Section 4.5, `truncated` flags that the list was capped); `401` |
 
-**`X-Worker-Id` trust (M1).** The `X-Worker-Id` the guard reads is **not**
+**`X-Worker-Id` trust.** The `X-Worker-Id` the guard reads is **not**
 authenticated within the shared-credential data plane: any Worker holding the
-transfer token can claim any id (consistent with the #779 trust model). This is
-acceptable — the guard is defense-in-depth behind #847's primary fix (the API
-holds the assignment across the final snapshot, so the genuine stale cross-worker
-publish never arises), and a spoofed id can at worst weaken (never strengthen) the
-guard for a caller already trusted to write the working set.
+transfer token can claim any id (consistent with the shared-credential trust model
+above). This is acceptable — the guard is defense-in-depth behind the primary
+protection (the API holds the assignment across the final snapshot, so the genuine
+stale cross-worker publish never arises), and a spoofed id can at worst weaken
+(never strengthen) the guard for a caller already trusted to write the working set.
 
-**JAR posture (M1).** ARCHITECTURE.md Section 7.3 says the resolved server JAR
-reaches the Worker as part of hydrate. As of issue #118 (version catalog + JAR
-resolution) this is realised: `StartServer` ensures the resolved JAR is in the
+**JAR posture.** The resolved server JAR reaches the Worker as part of hydrate
+(ARCHITECTURE.md Section 7.3): `StartServer` ensures the resolved JAR is in the
 content-addressed pool before placement and records its content key on the
 `server` record (in the `config` JSONB blob, key `resolved_jar_sha256` — DATABASE.md
 Section 7 has no dedicated JAR column), and the hydrate endpoint **injects** that
 JAR into the working-set tar at the conventional `server.jar` relpath. The JAR is
-still *omitted when not present* (no resolved JAR recorded, or the recorded JAR not
-in the pool), so a working set with no resolved JAR is sent alone — the contract
-above is unchanged. The injection prepends a single tar member to the working
-set's members; when there is a resolved JAR but no published snapshot, the body is
+*omitted when not present* (no resolved JAR recorded, or the recorded JAR not
+in the pool), so a working set with no resolved JAR is sent alone. The injection
+prepends a single tar member to the working set's members; when there is a resolved JAR but no published snapshot, the body is
 a tar carrying just `server.jar` (a `200`, not the `204` of the nothing-to-send
 case) so the Worker can still launch.
 
@@ -1218,52 +1227,54 @@ off the gRPC stream: hydrate = GET + stream-unpack into the instance working dir
 (members path-sanitized — absolute paths, `..`, and symlink/hardlink members are
 rejected, mirroring the API-side `filter="data"` discipline); snapshot = pack the
 working dir into a tar and POST it with a `Content-Length`. Before packing, the
-Worker runs a structural region fsck over the working set (issue #765): if any
+Worker runs a structural region fsck over the working set: if any
 `.mca` file is found corrupt, the snapshot is refused at source with a
-`TRANSFER_FAILED` outcome — a clear failure with no wasted tar+upload — rather
+`TRANSFER_FAILED` outcome whose message reads `snapshot refused: <n>/<total>
+region files corrupt (e.g. <file>: <reason>)` — a clear failure with no wasted
+tar+upload — rather
 than shipping a corrupt set the API gate (the `422` above) would reject after a
 full round-trip. A fsck I/O error is best-effort (logged, transfer proceeds) so
 the fsck never wedges a snapshot; the API integrity gate is the correctness
 guarantee.
 
-**One region rule set, applied everywhere (issue #927).** The structural fsck and
+**One region rule set, applied everywhere.** The structural fsck and
 the API integrity gate run **one rule set** at every gate — no source-keyed mode
 split. MC 26.x pads region files to a 4096-byte sector boundary only on
 shutdown/close, so a **running** (even quiesced) world legitimately keeps an
 **unpadded tail** — the last chunk ends mid-sector and the file size is not a 4096
-multiple. (Verified on a live 26.1.2 server: the trailing chunk is complete and
-decompresses cleanly.) The rule accepts that unpadded tail and applies a
+multiple (the trailing chunk is complete and decompresses cleanly). The rule
+accepts that unpadded tail and applies a
 **byte-precise** per-chunk bound (`offset*4096 + 4 + length <= size`): a trailing
 chunk whose declared length overruns the real EOF is still corrupt, an entry
 pointing at/past EOF is `sector_out_of_bounds`, a severed prefix is a short-read
 `truncated_chunk`. Alignment is retained as a signal only for the
 **sub-header-size** case (a non-zero size below the two 4096-byte header sectors is
 a torn save, reported `not_4096_aligned`). A 0-byte file is an empty container
-(healthy, #905).
+(healthy).
 
-The earlier design (#923/#925) split the rule by snapshot **source**: a **stopped**
-world was assumed 4096-padded, so a non-4096 size there was treated as a torn save
-(strict), while a running source ran the byte-precise rule (live), declared via an
-`X-Snapshot-Source` request header. That `stopped => 4096-padded` invariant **does
-not hold**: a sweep-stop timeout, SIGKILL, OOM, crash, or host loss can leave a
-stopped world's regions unpadded, and the strict rule then refused the **stop-leg
-checkpoint exactly when it is the last chance to capture the world** (observed
-2026-06-12 local: the orphan sweep stopped a running 26.1.2 server, the stop-leg
-redispatch issued a stopped-id snapshot, and the pre-pack fsck refused in 7ms —
-`snapshot refused: 5/22 region files corrupt (e.g. r.-1.-2.mca: not_4096_aligned)`
-— 5 regions still unpadded after the stop timeout). Strict added detection power
-**only** under that invalid invariant, so the split is collapsed and the
-`X-Snapshot-Source` header is removed end-to-end. Every gate — the Worker's pre-pack
-fsck on either path, the API publish gate, `create_backup_from_current`,
-`restore_backup`, `check_current_health`, `check_backup_health`, and the
-integrity-sweep fscks — runs the single rule set, so a legitimately unpadded set
-committed into `current/` (or any archive derived from it) is never falsely rejected.
+**Why no source-keyed split.** The alternative is to split the rule by snapshot
+**source**: assume a **stopped** world is 4096-padded, so a non-4096 size there is
+a torn save (strict), while a running source runs the byte-precise rule (live),
+with the source declared via a request header. That `stopped => 4096-padded`
+invariant **does not hold**: a sweep-stop timeout, SIGKILL, OOM, crash, or host
+loss can leave a stopped world's regions unpadded, and a strict rule would then
+refuse the **stop-leg checkpoint exactly when it is the last chance to capture the
+world** (a running server the orphan sweep stops on a timeout can keep several
+regions unpadded after the stop, and the pre-pack fsck would refuse the stopped-id
+snapshot with `not_4096_aligned`). Strict adds detection power **only** under that
+invalid invariant, so there is one rule set and no source header. Every gate — the
+Worker's pre-pack fsck on either path, the API publish gate,
+`create_backup_from_current`, `restore_backup`, `check_current_health`,
+`check_backup_health`, and the integrity-sweep fscks — runs the single rule set, so
+a legitimately unpadded set committed into `current/` (or any archive derived from
+it) is never falsely rejected.
 
 Because `check_backup_health` runs the single rule set and the sweep rewrites the
-health column every pass, a backup quarantined before #925 whose **only** finding
-was `not_4096_aligned` (all referenced chunk extents within EOF) is re-marked
-HEALTHY on the next sweep. This rescue is intentional: such a backup is loadable
-content, and the realistic torn shapes stay caught (a location entry at/past EOF →
+health column every pass, a quarantine is not sticky: a backup whose recorded
+quarantine rests **only** on `not_4096_aligned` while all referenced chunk extents
+lie within EOF — a shape the single rule set accepts — is marked HEALTHY on the
+next sweep. This rescue is intentional: such a backup is loadable content, and the
+realistic torn shapes stay caught (a location entry at/past EOF →
 `sector_out_of_bounds`; truncation severing a referenced chunk → byte-precise
 `truncated_chunk`/short-prefix).
 
@@ -1275,11 +1286,11 @@ hydrate/snapshot as well as lifecycle/file commands — to a per-server lane off
 the receive loop: one server's commands run serially (start/stop never
 interleave), but distinct servers' lanes run concurrently under a bounded
 concurrency cap, so a slow transfer or graceful stop never delays another
-server's command (issue #95).
+server's command.
 
 **Lifecycle wiring (FR-DATA-4).** `StartServer` hydrates before the launch (the
 API issues a hydrate trigger, then `StartServer`). A stop takes the final
-snapshot **before** it releases the Worker assignment (issue #847): the API
+snapshot **before** it releases the Worker assignment: the API
 issues the stop, then — once the Worker confirms the process is gone — records
 observed=stopped, issues the snapshot trigger, and only then clears the
 assignment. Holding the assignment across the snapshot is what keeps a release
@@ -1287,7 +1298,7 @@ from discarding a capturable working set: a start racing the in-flight upload
 finds the server still assigned and 409s on its `require_unassigned`
 compare-and-set instead of re-placing it on a different Worker that would
 hydrate the pre-snapshot generation. Scratch is reclaimed only after the
-snapshot publishes (issue #845).
+snapshot publishes.
 
 The snapshot does not decide the stop's outcome, but it does decide the
 release:
@@ -1308,16 +1319,16 @@ release:
   late); releasing would reopen the very race above, whereas an upload that
   lands while the row is still held publishes against the base it hydrated from.
   The Worker's late `CommandResult` releases the hold as soon as the upload
-  settles (issue #891), and the reconciler is the backstop once the stop grace
+  settles, and the reconciler is the backstop once the stop grace
   lapses.
 
 Wherever a final snapshot is taken, it precedes the clear: on the graceful
 `StopServer`, on the reconciler's `redispatch_stop` replay of it, on the
 `SERVER_NOT_FOUND` release those two share when the Worker holds no live
-instance for the id (issue #2448 — that is the answer a Worker gives for a
+instance for the id (that is the answer a Worker gives for a
 *crashed* instance, whose retained scratch still holds the crash-window world),
 and on the reconciler's stale-assignment arm for a stopped or crashed server
-whose Worker is still connected (issues #1004/#2439). The remaining legs of that
+whose Worker is still connected. The remaining legs of that
 arm release with **no** snapshot at all: a disconnected Worker cannot be asked
 for one, and an `unknown` or `stopping` row may still have a live process, so
 there is no settled working set to capture. A `HydrateTrigger` is only valid for
@@ -1360,20 +1371,21 @@ ops).
 
 **Rationale.** `Storage` has no notion of server runtime state (that lives on the
 Worker / in the API records); injecting it would couple the Port to lifecycle
-concerns and the control plane. The Section 6.9 policy is a business rule and
-belongs in the use case. `Storage` stays a pure store: always-safe primitives,
+concerns and the control plane. The REQUIREMENTS.md Section 6.9 policy is a
+business rule and belongs in the use case. `Storage` stays a pure store:
+always-safe primitives,
 no policy.
 
 ### 9.3 The Port hides the data-plane transport
 
 **Decision.** `Storage` exposes streams and a publish handshake (Section 3.1);
-the API↔Worker transfer wire format is the data plane (epic #8), not part of this
+the API↔Worker transfer wire format is the data plane (Section 8), not part of this
 Port.
 
 **Alternatives.** Fold the transfer protocol into `Storage`.
 
 **Rationale.** Keeps `Storage` about the authoritative store and lets the data
-plane evolve (chunking, resumable transfer, future delta sync — FR-DATA-5)
+plane evolve (chunking, resumable transfer, delta sync — FR-DATA-5)
 without changing the store contract. The two meet at the stream boundary only.
 
 ### 9.4 Backups are whole-working-set archives, not Storage-internal links
@@ -1390,47 +1402,42 @@ deletion of the live working set and restores cleanly via the same atomic-publis
 path. In-place clones would couple a backup's integrity to the live copy's
 lifecycle and are backend-specific (not all backends offer cheap clones).
 
-### 9.5 Out of scope / deferred (carried as follow-ups, not implemented here)
+### 9.5 Out of scope (not implemented)
 
-- **Orphan-sweep scheduling** (Section 4.3): **now implemented** — the recovery
-  sweep runs at API startup and then on a periodic loop
-  (`storage_sweep.interval_seconds`, daily by default; issue #2252, PR #2255). The
-  spool / multipart reclaim paths apply a 1 h age threshold (Section 4.3, #903), so
-  the periodic pass does not eat a live write's temp spool. What remains a carried
-  follow-up is the multipart long-upload caveat below and its storage-layer
-  mitigation (#2251).
-  **Multipart long-upload caveat** (#916): the threshold is *not* fully safe for a
-  long-running multipart upload. Unlike an fs spool's mtime — which advances as the
-  write progresses — the S3 `Initiated` timestamp is fixed at create time and never
-  refreshes, so a legitimate upload still streaming past the 1 h threshold *can now
-  be aborted mid-flight* by a periodic sweep pass. This is a real risk under the
-  periodic loop, where it was structurally impossible while the sweep ran at startup
-  only (no live upload during recovery). The failure is loud, not silent — the
-  upload's next `upload_part`/`complete` gets `NoSuchUpload`, which surfaces as the
-  backup error and **must be retried** (`upload_multipart`'s cleanup routes through
-  the *translated* idempotent abort, so a complete-vs-abort race makes that cleanup a
-  no-op and the original error is no longer masked — issue #935). Mitigations: the
-  daily loop cadence keeps the sweep cold, so overlap with a multipart upload still
-  running after an hour stays rare; and the storage-layer
-  `AbortIncompleteMultipartUpload` bucket lifecycle rule (umbrella #2251) is the
-  primary defense — it reclaims orphan parts natively with its own generous age, so
-  the sweep's in-process multipart abort is a backstop rather than the mechanism that
-  must catch every orphan within a tight window.
-- **Continuous delta sync** (FR-DATA-5) is explicitly deferred; the streaming
-  Port shape leaves room for it.
-- **WebUI surfacing of `working_set_incomplete`** (tracked: #900). The 422 the
-  missing-region gate returns is today a transient response to the *Worker's*
-  snapshot `POST` (Section 4.5); the WebUI never makes that call and no
-  control-plane route exposes a server-level "last snapshot was refused as
-  incomplete" condition (unlike backup `health`, #745, which the
-  WebUI already badges). Surfacing it would need new machinery — persist the
-  refused condition on the server record (or expose `check_current_health`,
-  Section 3.1, over a control-plane route) and add a server-page badge/notice —
-  which is out of scope for this gate-hardening change. **API contract for the
-  follow-up:** reuse the 422 body shape above (`reason: "working_set_incomplete"`,
-  `affected_count`, bounded `directories: [{directory, missing[]}]`, `truncated`)
-  and badge the server following the #739/#745 health-badge pattern, pointing the
-  operator at the Section 4.5 recovery.
+- **A sweep-side guard for long multipart uploads.** The recovery sweep runs at
+  API startup and then periodically (Section 4.3), and its spool / multipart
+  reclaim paths apply the 1 h age threshold so a periodic pass does not eat a
+  live write's temp spool. That threshold is *not* fully safe for a long-running
+  multipart upload: unlike an fs spool's mtime — which advances as the write
+  progresses — the S3 `Initiated` timestamp is fixed at create time and never
+  refreshes, so a legitimate upload still streaming past the 1 h threshold *can
+  be aborted mid-flight* by a periodic sweep pass (a startup-only sweep cannot
+  collide with a live upload; a periodic one can). The failure is loud, not
+  silent — the upload's next `upload_part`/`complete` gets `NoSuchUpload`, which
+  surfaces as the backup error and **must be retried** (`upload_multipart`'s
+  cleanup routes through the *translated* idempotent abort, so a
+  complete-vs-abort race makes that cleanup a no-op and the original error is
+  not masked). No in-sweep detection of a live upload is provided; the
+  mitigations are the daily loop cadence, which keeps the sweep cold so overlap
+  with a multipart upload still running after an hour stays rare, and the
+  storage-layer `AbortIncompleteMultipartUpload` bucket lifecycle rule
+  (Section 7.3), the primary defense — it reclaims orphan parts natively with
+  its own generous age, so the sweep's in-process multipart abort is a backstop
+  rather than the mechanism that must catch every orphan within a tight window.
+- **Continuous delta sync** (FR-DATA-5) is not implemented; the streaming Port
+  shape leaves room for it.
+- **WebUI surfacing of `working_set_incomplete`.** The 422 the missing-region
+  gate returns is a transient response to the *Worker's* snapshot `POST`
+  (Section 4.5); the WebUI never makes that call and no control-plane route
+  exposes a server-level "last snapshot was refused as incomplete" condition
+  (unlike backup `health`, which the WebUI badges). Surfacing it would need new
+  machinery — persist the refused condition on the server record (or expose
+  `check_current_health`, Section 3.1, over a control-plane route) and add a
+  server-page badge/notice — none of which is provided. **API contract if it is
+  added:** reuse the 422 body shape above (`reason: "working_set_incomplete"`,
+  `affected_count`, bounded `directories: [{directory, missing[]}]`,
+  `truncated`) and badge the server following the backup health-badge pattern,
+  pointing the operator at the Section 4.5 recovery.
 
 ---
 

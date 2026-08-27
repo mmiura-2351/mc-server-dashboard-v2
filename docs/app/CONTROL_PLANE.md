@@ -73,12 +73,12 @@ gRPC listener. The TLS material and the Worker credential are configuration
 (CONFIGURATION.md Sections 5.1 and 6.1). Transport security sits below this
 contract and is not modelled in the `.proto`.
 
-**mTLS is deferred (M1).** The control channel currently uses server-side TLS
+**mTLS is reserved, not implemented.** The control channel uses server-side TLS
 only: the API presents a certificate the Worker verifies, and the shared
 credential authenticates the Worker. Client-certificate (mTLS) verification is
 not implemented; the `control.tls.client_ca_file` / `api.tls.client_cert_file` /
-`api.tls.client_key_file` keys are documented-deferred placeholders that keep the
-config shape forward-compatible (CONFIGURATION.md Sections 5.1, 6.1).
+`api.tls.client_key_file` keys are reserved placeholders that keep the config
+shape forward-compatible (CONFIGURATION.md Sections 5.1, 6.1).
 
 ### Deployment posture
 
@@ -146,7 +146,7 @@ backward-compatible change under the module's `FILE` breaking rule.
 `Register` MUST be the first message on a fresh stream, and the API bounds the
 wait for it to a few seconds: a credentialed client that connects and sends
 nothing is aborted with `DEADLINE_EXCEEDED`, so an idle connect cannot park a
-servicer coroutine forever (issue #1700). It advertises the
+servicer coroutine forever. It advertises the
 Worker's id, version, and `WorkerCapabilities` (available drivers, capacity
 hint, host resources) — the input to the API's greedy placement
 (FR-WRK-1, FR-WRK-3). It also carries `held_servers`: each server whose working
@@ -157,23 +157,22 @@ snapshotted to, persisted in the scratch. The API records this so it can skip th
 destructive hydrate on a same-worker restart **only when the held generation is
 fresh enough** — hydrating a live, newer set would unpack the last authoritative
 snapshot over it and roll the world back, while a *stale* held set (e.g. an
-A→B→A leftover scratch B has advanced past) must still hydrate (issue #763,
-generalizing #696, see Section 5).
+A→B→A leftover scratch B has advanced past) must still hydrate (Section 5.1).
 
 `Register` only ever describes the Worker's scratch *at connect time*, so the API
 also refreshes its record **within** the session: from a successful hydrate, at the
-generation that transfer served (issue #2477), and from a snapshot publish on which
-the Worker **declared** the generation it still holds (`CommandResult.held_generation`,
-issue #2481). Without that refresh every server **placed since** the Worker last
-registered was absent from the advertisement and read back as "nothing held" for the
-whole session — so the skip gate below, and the reconciler's short held-start grace,
-almost never applied. A re-registration replaces the whole record: the Worker's own
-on-disk scan always wins over the API's within-session tracking. The API never records
-a generation it cannot *prove* the Worker holds — see Section 5.1.
+generation that transfer served, and from a snapshot publish on which
+the Worker **declared** the generation it still holds (`CommandResult.held_generation`).
+Without that refresh every server **placed since** the Worker last
+registered would be absent from the advertisement and read back as "nothing held" for
+the whole session — so the skip gate below, and the reconciler's short held-start
+grace, would almost never apply. A re-registration replaces the whole record: the
+Worker's own on-disk scan always wins over the API's within-session tracking. The API
+never records a generation it cannot *prove* the Worker holds — see Section 5.1.
 
 A snapshot advances that persisted generation **only while the working dir is still the
-directory the snapshot pinned when it began** (issue #2284). A running-id snapshot holds
-no per-server reservation (#829 item 4), so a new stream can re-place the server onto
+directory the snapshot pinned when it began**. A running-id snapshot holds
+no per-server reservation, so a new stream can re-place the server onto
 this Worker and hydrate it while an older, dropped stream's snapshot is still finishing
 — and stamping the freshly published generation onto that replacement tree would leave
 the marker *newer* than the world it names, which is precisely the case the skip gate
@@ -182,31 +181,31 @@ skips the stamp instead (a `WARN` naming the reason; the publish itself still su
 so the set stays advertised at the hydrate's generation and the next start re-hydrates.
 
 Before advertising a held set's generation the
-Worker structurally fsck's its region files (issue #834): a periodic running-id
+Worker structurally fsck's its region files: a periodic running-id
 snapshot makes the generation marker durable while the live world files are never
 fsynced by the Worker, so a power loss can leave a durable gen-N marker next to a
 torn local world. A held set whose region is torn is advertised at **generation 0**
 — treated as stale, forcing the hydrate that recovers the consistent store copy
-rather than booting the torn world. The fsck applies the single byte-precise
-region rule (issue #927/#926 item 1): a *structurally sound* scratch left by a
+rather than booting the torn world. The fsck applies a single byte-precise
+region rule: a *structurally sound* scratch left by a
 crashed or non-gracefully-stopped 26.x server is **live-format** — its region
-files carry the legitimate unpadded (non-4096-aligned) tail — so it now PASSES and
-the Worker advertises its **held generation**. The #767 skip gate can then boot
+files carry the legitimate unpadded (non-4096-aligned) tail — so it PASSES and
+the Worker advertises its **held generation**. The skip gate (Section 5.1) can then boot
 that world directly, preserving the crashed server's progression, instead of a
 forced gen-0 hydrate that would roll it back by up to a snapshot interval. Only a
 *genuinely* torn scratch (a chunk overrunning EOF, an entry past EOF, a severed
 prefix) falls back to generation 0. The fsck requires a quiesced working set
 (regionfsck's safety contract), so the Worker's startup sequence runs the
-container orphan sweep first to stop any live writers before scanning. A Worker that reports nothing held, or an
-older Worker that does not set the field, hydrates as before. The
+container orphan sweep first to stop any live writers before scanning. A Worker that reports nothing held, or one
+that does not set the field, always hydrates. The
 API answers `RegisterAck`: the `heartbeat_interval` it expects,
 the `transfer_deadline` that bounds one data-plane transfer Worker-side
-(Section 5), and `unknown_held_server_ids` — the subset of `held_servers` whose
-server no longer exists in the API (deleted while the scratch was live, issue
-#924). The Worker reclaims the scratch dir and `.hydrate-<id>-*` leftovers for
-each listed id but does **not** reclaim `.displaced-<id>` trees (issue #911:
-retained for operator recovery). The list is fail-safe: a DB error on the API
-side yields an empty list rather than misclassifying a live server as deleted.
+(Section 5.2), and `unknown_held_server_ids` — the subset of `held_servers` whose
+server the API has since deleted while the scratch was live. The Worker
+reclaims the scratch dir and `.hydrate-<id>-*` leftovers for
+each listed id but does **not** reclaim `.displaced-<id>` trees (retained for
+operator recovery, STORAGE.md Section 4.6). The list is fail-safe: a DB error on
+the API side yields an empty list rather than misclassifying a live server as deleted.
 A refusal never rides in the ack: `RegisterAck` carries no accept/reject flag —
 the API aborts the `Session` stream with a gRPC status instead — `UNAUTHENTICATED`
 for a missing or wrong credential, `FAILED_PRECONDITION` when the first message is
@@ -247,19 +246,19 @@ The Worker emits `Event{Heartbeat}` every `heartbeat_interval` (returned in
 its liveness window, `control.heartbeat_timeout_seconds` (CONFIGURATION.md
 Section 5.1), which is set comfortably above the interval (FR-WRK-2).
 
-**Enforcement** (issue #1600): Two complementary mechanisms detect a dead peer:
+**Enforcement.** Two complementary mechanisms detect a dead peer:
 
 1. **Server-side gRPC keepalive.** The server sends HTTP/2 PINGs at
    `heartbeat_timeout` intervals; if the peer does not ACK within 20 s the
-   transport closes, ending the `Session` and triggering the existing teardown
+   transport closes, ending the `Session` and triggering the session teardown
    (`mark_disconnected` + `mark_worker_servers_unknown`).
 2. **Per-session heartbeat watchdog.** A coroutine polls the registry's derived
    liveness every `heartbeat_interval` (timeout / 3). When `Worker.status`
    returns `OFFLINE` (heartbeats lapsed past the timeout), the watchdog returns,
    ending the `Session` generator's `asyncio.wait` and triggering the same
    teardown. The watchdog checks `is_current_session` before acting, so a stale
-   watchdog on a superseded session exits without clobbering the reconnected
-   worker.
+   watchdog on a session that a newer one has replaced exits without clobbering
+   the reconnected worker.
 
 ### 4.4 Disconnect and reconnect
 
@@ -283,18 +282,18 @@ running-server file access.
 
 | Command | Meaning | Result payload | Req. ref |
 |---|---|---|---|
-| `StartServer` | Launch the server (after a preceding hydrate). Carries the driver, JAR relpath, MC version (Worker picks the Java runtime), launch mode (`jar` is the default JAR launch; `forge-argsfile` launches Forge via its generated args file, running a supervised installer first when the working set is uninstalled), optional `memory_limit_bytes` (per-server memory ceiling; 0/unset = driver default; #706), and optional `cpu_millis` (soft CPU allocation in millicores; 0/unset = driver default; #723). The "after a preceding hydrate" is enforced, not assumed: a start whose working dir is absent at the scratch root is refused `SERVER_NOT_FOUND` rather than launched into an empty directory the start itself creates (issue #2499, Section 7). | none | FR-SRV-2, FR-EXE-5, ARCHITECTURE.md Section 7.3 |
+| `StartServer` | Launch the server (after a preceding hydrate). Carries the driver, JAR relpath, MC version (Worker picks the Java runtime), launch mode (`jar` is the default JAR launch; `forge-argsfile` launches Forge via its generated args file, running a supervised installer first when the working set is uninstalled), optional `memory_limit_bytes` (per-server memory ceiling; 0/unset = driver default), and optional `cpu_millis` (soft CPU allocation in millicores; 0/unset = driver default). The "after a preceding hydrate" is enforced, not assumed: a start whose working dir is absent at the scratch root is refused `SERVER_NOT_FOUND` rather than launched into an empty directory the start itself creates (Section 7). | none | FR-SRV-2, FR-EXE-5, ARCHITECTURE.md Section 7.3 |
 | `StopServer` | Stop the server; graceful stop triggers an event-driven snapshot. `force` skips graceful. | none | FR-SRV-2, FR-DATA-7 |
 | `RestartServer` | Stop then start in place. | none | FR-SRV-2 |
 | `ServerCommand` | Forward an RCON/console line. | `command_output` | FR-SRV-5 |
 | `HydrateTrigger` | Pull the working set from the data plane before launch; carries the transfer URL + one-time token. | none | FR-DATA-4 |
-| `SnapshotTrigger` | Push the working set back to the data plane (a running server's copy is bracketed save-off → async save-all → settle-wait → copy → save-on so the world is fully on disk and a region file is not captured torn — NOT `save-all flush`, whose synchronous main-thread flush crashed a live server via the watchdog, #693; a running snapshot that cannot quiesce — RCON down, save-off/save-all failing, or the save never settling — is refused `quiesce_unavailable` rather than packing a live world, #907; a stopped-id snapshot whose working dir is absent — already GC'd after a published final snapshot, or never hydrated — is refused `SERVER_NOT_FOUND` rather than packing an empty tar with the base-generation guard disabled, #1713). | none | FR-DATA-4, FR-DATA-7, Section 6.9 |
-| `ReadFile` | Read a path from a running server's live working set. | `file_content` | Section 6.9, Section 7.2 |
-| `EditFile` | Write a path in a running server's live working set. | none | Section 6.9, Section 7.2 |
-| `ListFiles` | List a directory in a running server's live working set (read-only). | `file_listing` | Section 6.9, Section 7.2 |
-| `TunnelDial` | Dial back the relay's tunnel listener for one player session and splice it to the running server's loopback game port. Carries `endpoint`, single-use `token`, and optional `tls_ca_pem` (everything in-band — no new Worker config). | none | RELAY.md Section 5 |
-| `OpenBedrockTunnel` | Open a Bedrock relay tunnel for a server that reached running state. Carries `relay_endpoint`, `bedrock_port`, a `token` valid for the tunnel's whole lifetime (relay-validated against the API, not matched locally), and optional `tls_ca_pem`. Dispatched once per running transition, not per player. The Worker dials the relay's Bedrock QUIC tunnel listener, handshakes, and forwards RakNet datagrams to the container's Geyser port, reconnecting with backoff while the tunnel drops; a repeated Open with the same credential is idempotent. | none | epic #1540, issue #1546, docs/app/BEDROCK_TUNNEL.md |
-| `CloseBedrockTunnel` | Close a server's Bedrock relay tunnel; dispatched when its observed state leaves running. The Worker also closes the tunnel locally on a confirmed StopServer, without waiting for this command. | none | epic #1540, issue #1546, docs/app/BEDROCK_TUNNEL.md |
+| `SnapshotTrigger` | Push the working set back to the data plane (a running server's copy is bracketed save-off → async save-all → settle-wait → copy → save-on so the world is fully on disk and a region file is not captured torn — NOT `save-all flush`, whose synchronous main-thread flush can trip the server watchdog and crash a live server; a running snapshot that cannot quiesce — RCON down, save-off/save-all failing, or the save never settling — is refused `quiesce_unavailable` rather than packing a live world; a stopped-id snapshot whose working dir is absent — already GC'd after a published final snapshot, or never hydrated — is refused `SERVER_NOT_FOUND` rather than packing an empty tar with the base-generation guard disabled). | none | FR-DATA-4, FR-DATA-7, REQUIREMENTS.md Section 6.9 |
+| `ReadFile` | Read a path from a running server's live working set. | `file_content` | REQUIREMENTS.md Section 6.9, ARCHITECTURE.md Section 7.2 |
+| `EditFile` | Write a path in a running server's live working set. | none | REQUIREMENTS.md Section 6.9, ARCHITECTURE.md Section 7.2 |
+| `ListFiles` | List a directory in a running server's live working set (read-only). | `file_listing` | REQUIREMENTS.md Section 6.9, ARCHITECTURE.md Section 7.2 |
+| `TunnelDial` | Dial back the relay's tunnel listener for one player session and splice it to the running server's loopback game port. Carries `endpoint`, single-use `token`, and optional `tls_ca_pem` (everything in-band — no Worker-side config). | none | RELAY.md Section 5 |
+| `OpenBedrockTunnel` | Open a Bedrock relay tunnel for a server that reached running state. Carries `relay_endpoint`, `bedrock_port`, a `token` valid for the tunnel's whole lifetime (relay-validated against the API, not matched locally), and optional `tls_ca_pem`. Dispatched once per running transition, not per player. The Worker dials the relay's Bedrock QUIC tunnel listener, handshakes, and forwards RakNet datagrams to the container's Geyser port, reconnecting with backoff while the tunnel drops; a repeated Open with the same credential is idempotent. | none | BEDROCK_TUNNEL.md |
+| `CloseBedrockTunnel` | Close a server's Bedrock relay tunnel; dispatched when its observed state leaves running. The Worker also closes the tunnel locally on a confirmed StopServer, without waiting for this command. | none | BEDROCK_TUNNEL.md |
 
 Notes:
 
@@ -304,7 +303,7 @@ Notes:
   endpoint spec is STORAGE.md Section 8; Section 5.1 cross-references it.
 - **File access rides the control plane** for *running* servers only; a stopped
   server's files are served from authoritative Storage by the API directly
-  (Section 6.9). This covers `ReadFile`, `EditFile`, and `ListFiles` — a running
+  (REQUIREMENTS.md Section 6.9). This covers `ReadFile`, `EditFile`, and `ListFiles` — a running
   server's browse view lists the live working set rather than the snapshot-stale
   authoritative copy. Path-traversal protection is enforced Worker-side
   (FR-FILE-4), realized by the Worker's `WorkingDir` Port (ARCHITECTURE.md
@@ -359,7 +358,7 @@ the API would proceed against an unhydrated or unpublished working set with no
 error.
 
 The API hydrates **only when the Worker does not already hold a fresh-enough
-working set**, not on every start (issue #763, generalizing #696). A same-worker
+working set**, not on every start. A same-worker
 restart (the reconciler's same-worker re-dispatch, where the assigned Worker is
 unchanged) starts on the Worker's **existing** working set when it is current: the
 persistent scratch is the live, newer copy (snapshots are pushed *from* it), so a
@@ -367,7 +366,7 @@ hydrate there would clobber it with the last snapshot and roll the world back. T
 API skips the hydrate when, and only when, the assigned Worker is known to hold that
 server's working set at a **generation at least the authoritative store generation**
 — so a fresh/wiped/GC'd scratch (reported as not
-held, or a Worker too old to report) AND a *stale* held set (a generation older
+held, or a Worker that does not report it) AND a *stale* held set (a generation older
 than the store) both still hydrate, rather than booting an empty world or starting
 on stale leftover scratch.
 
@@ -375,15 +374,15 @@ That knowledge comes from `Register.held_servers` (Section 4.1) plus the two
 within-session events the API can *prove* advance the Worker's scratch:
 
 - A **successful hydrate**, recorded at the generation the Worker **declares** it
-  served in `CommandResult.held_generation` (issue #2500), stamped from its own marker
+  served in `CommandResult.held_generation`, stamped from its own marker
   write at hydrate completion — the same on-disk fact the snapshot case below states.
-  For a Worker too old to declare the field the API falls back to the store generation
-  it read immediately *before* the transfer (issue #2477): the data plane serves the
+  For a Worker that does not declare the field the API falls back to the store generation
+  it read immediately *before* the transfer: the data plane serves the
   generation current at pull time, which the monotonic counter puts at or after that
   read, so that pre-read can only understate what the Worker ends up holding. The
   declaration, taken at completion, cannot understate that way, so preferring it when
   present and the pre-read otherwise records the greater of the two.
-- A **snapshot publish the Worker declared it retained** (issue #2481), recorded at
+- A **snapshot publish the Worker declared it retained**, recorded at
   the generation the Worker states in `CommandResult.held_generation`.
 
 The asymmetry is the point: understating what a Worker holds only costs an
@@ -391,7 +390,7 @@ unnecessary hydrate, while overstating it would make a start skip a hydrate it n
 and boot a stale or absent world. The snapshot case is the one where only the Worker
 can supply the proof, so the API does not infer it. Whether the Worker still holds
 what it published depends on which branch it took — a running-id snapshot keeps the
-scratch, a stopped-id one GCs it (issue #762/#841) and then holds nothing at all —
+scratch, a stopped-id one GCs it and then holds nothing at all —
 and that choice is made Worker-side from its own instance map. A server observed
 **crashed** under `desired=running` reaches the stopped-id branch with no race
 involved, since the crash drops the instance from that map. So the Worker states the
@@ -399,7 +398,7 @@ outcome rather than the API guessing it, and states it from the *same fact that
 decides the deletion*: the field is set from the result of writing the Worker's own
 generation marker — the on-disk value `Register.held_servers` re-advertises — and the
 deleting branch never reaches that write. A running-id snapshot whose marker stamp is
-refused because the working dir was replaced mid-flight (issue #2284) likewise
+refused because the working dir was replaced mid-flight likewise
 declares nothing, so the wire signal cannot claim a generation the marker does not
 carry. An absent declaration leaves the record untouched, the publish advances the
 store past it, and the next start hydrates. The store generation is a per-server counter the
@@ -414,18 +413,19 @@ because B advanced and snapshotted it).
 
 The Worker bounds each data-plane transfer (the snapshot upload and the hydrate
 download) with a per-transfer context deadline carried in `RegisterAck.transfer_deadline`
-(Section 4.1, issue #874). Without it a transfer has no deadline at all — the
+(Section 4.1). Without it a transfer would have no deadline at all — the
 HTTP client carries no timeout and the trigger's context none either — so a
 stalled upload could outlive the API's `snapshot_timeout_seconds` indefinitely,
-the exact case the API-side timeout-hold (issue #869) recovers from. The bound
+the case the API-side snapshot-timeout hold (CONFIGURATION.md Section 5.1,
+`control.snapshot_timeout_seconds`) recovers from. The bound
 structurally closes it: once it fires Worker-side, no late publish can exist.
 
 The API derives the deadline as `max(hydrate_timeout_seconds, snapshot_timeout_seconds)
 + margin`, so it is always **>=** the API budget. The API-side dispatch timeout
 therefore fires first on a genuinely slow-but-healthy transfer; the Worker bound
 is the cleanup backstop, not the primary deadline, and never kills a transfer the
-API still considers in flight. A non-positive or unset value (an older API) leaves
-the transfer unbounded, the prior behavior.
+API still considers in flight. A non-positive or unset value leaves the transfer
+unbounded.
 
 ---
 
@@ -449,7 +449,7 @@ is the full set of values a Worker can report; the API caches the last-reported
 value in `observed_state` ([`DATABASE.md`](DATABASE.md)), whose value set this
 enum mirrors exactly.
 
-`SERVER_STATE_UNKNOWN` is part of that set as of issue #2474. It has two
+`SERVER_STATE_UNKNOWN` is part of that set. It has two
 producers, and the wire value exists for the second:
 
 - the **API** infers it for every server assigned to a Worker whose session drops
@@ -477,9 +477,9 @@ classes a Worker can hit:
 
 | Code | When |
 |---|---|
-| `SERVER_NOT_FOUND` | The target server is unknown to this Worker (no live instance: stop/restart/command on a not-running server, a missing file target, or a stopped-id snapshot whose working dir is absent — already GC'd after a published final snapshot, or never hydrated; issue #1713). On a `StartServer` it is the same statement about the working set rather than about an instance: the API issues a `HydrateTrigger` before every start that needs one, so an absent working dir at launch means the API skipped the hydrate — its held-working-set inventory said this Worker holds a generation at least as fresh as the store — over a set the Worker does not actually hold. Launching would boot the server into an empty directory and the next snapshot would publish that, so the start is refused instead and the API re-launches WITH a full hydrate (issue #2499). Both cases carry the phrase `working dir absent` in the message, which is how the API tells them from any other `SERVER_NOT_FOUND`. Where a command's precondition is "this server is running", the code means the Worker holds neither an instance nor a **failed-stop orphan** for the id: the orphan answers `INVALID_STATE` or `BUSY` instead, per the split below (issue #2466/#2476). |
-| `INVALID_STATE` | The command is invalid for the current **settled** state: start or hydrate a running server, or a restart, console command, relay tunnel dial or Bedrock tunnel open over a server with a failed-stop orphan pending termination (issue #2466). The orphan is a process this Worker could not confirm dead, so it may still be alive holding its port and writing its world; reporting it as not-running would tell the operator a live server is down. Those four verbs are refused for **what the state is** and are never carried out later, so naming the state is the honest answer — unlike start / hydrate / stopped-id snapshot over the same orphan, which will succeed once it converges and therefore answer `BUSY` (issue #2476). Two commands are deliberately exempt from the orphan refusal entirely: `StopServer` *takes* the orphan and re-attempts the driver Stop (the path that resolves it on demand), and `CloseBedrockTunnel` takes no running check at all, so a tunnel that outlived its server can still be torn down. |
-| `BUSY` | The command was refused without being applied because the server's id is not free yet, and the refusal is **not** a statement about a settled state: either another mutating lifecycle command is already in flight (the reservation race, issue #824) or the Worker holds a failed-stop orphan it is still converging (issue #2476). In both cases the outcome is not yet known and **this same command will be accepted once the Worker settles**, so the API keeps the assignment/intent and retries on a later tick rather than converging an observed state. Answering `INVALID_STATE` for the orphan was issue #2467's wedge: the API reads `INVALID_STATE` on a start as "already running", so a refusal over an orphan whose process was already **dead** manufactured a permanent false `observed=running` — a converged row is settled, so the reconciler never re-selected it and no `StatusChange` was ever coming. As of issue #2475 the Worker converges the orphan itself — it probes the instance's real liveness on a backoff, retries the stop while it is alive, retires the record and reports `stopped` once it is confirmed gone, and reports `SERVER_STATE_UNKNOWN` while the backend cannot answer — which is what makes the `BUSY` promise true. The record also still clears on its own if the process exits, via the instance's status pump. |
+| `SERVER_NOT_FOUND` | The target server is unknown to this Worker (no live instance: stop/restart/command on a not-running server, a missing file target, or a stopped-id snapshot whose working dir is absent — already GC'd after a published final snapshot, or never hydrated). On a `StartServer` it is the same statement about the working set rather than about an instance: the API issues a `HydrateTrigger` before every start that needs one, so an absent working dir at launch means the API skipped the hydrate — its held-working-set inventory said this Worker holds a generation at least as fresh as the store — over a set the Worker does not actually hold. Launching would boot the server into an empty directory and the next snapshot would publish that, so the start is refused instead and the API re-launches WITH a full hydrate. Both cases carry the phrase `working dir absent` in the message, which is how the API tells them from any other `SERVER_NOT_FOUND`. Where a command's precondition is "this server is running", the code means the Worker holds neither an instance nor a **failed-stop orphan** for the id: the orphan answers `INVALID_STATE` or `BUSY` instead, per the split below. |
+| `INVALID_STATE` | The command is invalid for the current **settled** state: start or hydrate a running server, or a restart, console command, relay tunnel dial or Bedrock tunnel open over a server with a failed-stop orphan pending termination. The orphan is a process this Worker could not confirm dead, so it may still be alive holding its port and writing its world; reporting it as not-running would tell the operator a live server is down. Those four verbs are refused for **what the state is** and are never carried out later, so naming the state is the honest answer — unlike start / hydrate / stopped-id snapshot over the same orphan, which will succeed once it converges and therefore answer `BUSY`. Two commands are deliberately exempt from the orphan refusal entirely: `StopServer` *takes* the orphan and re-attempts the driver Stop (the path that resolves it on demand), and `CloseBedrockTunnel` takes no running check at all, so a tunnel that outlived its server can still be torn down. |
+| `BUSY` | The command was refused without being applied because the server's id is not free yet, and the refusal is **not** a statement about a settled state: either another mutating lifecycle command is already in flight (the reservation race) or the Worker holds a failed-stop orphan it is still converging. In both cases the outcome is not yet known and **this same command will be accepted once the Worker settles**, so the API keeps the assignment/intent and retries on a later tick rather than converging an observed state. Answering `INVALID_STATE` for the orphan would wedge the reconciler: the API reads `INVALID_STATE` on a start as "already running", so a refusal over an orphan whose process is already **dead** would manufacture a permanent false `observed=running` — a converged row is settled, so the reconciler would never re-select it and no `StatusChange` would ever come. The Worker converges the orphan itself — it probes the instance's real liveness on a backoff, retries the stop while it is alive, retires the record and reports `stopped` once it is confirmed gone, and reports `SERVER_STATE_UNKNOWN` while the backend cannot answer — which is what makes the `BUSY` promise true. The record also clears on its own if the process exits, via the instance's status pump. |
 | `DRIVER_UNAVAILABLE` | The requested execution driver is not offered by this Worker. |
 | `FILE_ACCESS_DENIED` | A file path was rejected. A refining `file_access_reason` (Section 7.2) splits the distinct conditions so the API maps each to an honest HTTP reason instead of one blanket `invalid_path`. |
 | `TRANSFER_FAILED` | A hydrate/snapshot data-plane transfer failed. |
@@ -502,8 +502,8 @@ is pinned, as data, by
 classifies the codes; the JSON binds the exact `(kind, precondition) -> code`
 rows.
 
-The table is **exhaustive over Worker emissions**, not over API match sites
-(issue #2472): it declares every kind `Manager.Handle` dispatches and every
+The table is **exhaustive over Worker emissions**, not over API match sites:
+it declares every kind `Manager.Handle` dispatches and every
 precondition the rows key on, and carries one row for each cell of that matrix.
 A cell whose precondition determines no emission for that kind carries the code
 `unaffected` plus a `why` saying how we know, so an absent row always means
@@ -512,7 +512,7 @@ states how the API treats it: the sites that match it, the catch-all
 `command_failed`, or `fire_and_forget` for a kind whose result the API never
 awaits.
 
-Three table-driven tests hold both sides to it (issues #204, #2472):
+Three table-driven tests hold both sides to it:
 
 - the Worker test
   (`worker/internal/application/instancemanager/contract_test.go`) drives the
@@ -520,25 +520,26 @@ Three table-driven tests hold both sides to it (issues #204, #2472):
   table, so a code change without a table update fails the Worker suite;
 - the same file checks the table against the *matrix* and against `Handle`'s
   switch, so a precondition or a command kind with no row fails there too — the
-  gap that let a Worker emission stay unrecorded while both suites were green;
+  gap that would otherwise let a Worker emission stay unrecorded while both suites
+  are green;
 - the API test (`api/tests/servers/test_command_error_contract.py`) derives its
   expectations from the rows' API column: the sites the table declares must be
   exactly the `CommandStatus` matches an `ast` scan finds under
   `api/src/mc_server_dashboard_api/servers/application/`, so an API match on a
-  code the Worker never produces (the #202 incident) has no row to live on, and
+  code the Worker never produces has no row to live on, and
   a site added or removed in source fails the API suite.
 
 Add a new convergence match or change a Worker emission only together with the
 table; the asymmetry is intentional — drift on either side fails that side's CI.
 
-### 7.2 File-access reason (issue #548)
+### 7.2 File-access reason
 
 `FILE_ACCESS_DENIED` is an umbrella for several conditions, only one of which is a
 path-syntax problem. The Worker carries which one in `CommandError.file_access_reason`
 (a `FileAccessReason` enum) so the API surfaces an honest HTTP reason instead of
 collapsing every file denial into a misleading `invalid_path`. The field is
-additive: `UNSPECIFIED` is the proto3 default, so an older Worker that never sets
-it — and a genuine path denial — both keep the historical behaviour.
+additive: `UNSPECIFIED` is the proto3 default, so a Worker that never sets
+it — and a genuine path denial — both map to `invalid_path`.
 
 | `file_access_reason` | Worker condition (read / edit / list) | API result |
 |---|---|---|
@@ -558,7 +559,7 @@ code. The HTTP mapping lives at the file routes
 
 | Requirement | Where in the contract |
 |---|---|
-| Section 5.1 (one Worker-initiated bidi stream) | `WorkerService.Session`; `Register` is the first Worker message (Section 2, Section 4.1) |
+| REQUIREMENTS.md Section 5.1 (one Worker-initiated bidi stream) | `WorkerService.Session`; `Register` is the first Worker message (Section 2, Section 4.1) |
 | FR-WRK-1 (register + advertise capabilities) | `Register`, `WorkerCapabilities`, `HostResources` (Section 4.1) |
 | FR-WRK-2 (liveness via heartbeat) | `Event{Heartbeat}`, `RegisterAck.heartbeat_interval` (Section 4.3) |
 | FR-WRK-3 (greedy placement input) | `WorkerCapabilities.drivers` / `max_servers` / `resources` |
@@ -567,7 +568,7 @@ code. The HTTP mapping lives at the file routes
 | FR-SRV-4 (observed runtime state) | `StatusChange`, `ServerState` (Section 6) |
 | FR-SRV-5 (RCON/server command forwarding) | `ServerCommand` → `command_output` (Section 5) |
 | FR-DATA-4 / FR-DATA-7 (hydrate/snapshot triggers) | `HydrateTrigger`, `SnapshotTrigger` (triggers only; Section 5) |
-| Section 6.9 / Section 7.2 (running-server file access) | `ReadFile`, `EditFile`, `ListFiles` (Section 5) |
+| REQUIREMENTS.md Section 6.9 / ARCHITECTURE.md Section 7.2 (running-server file access) | `ReadFile`, `EditFile`, `ListFiles` (Section 5) |
 | FR-MON-1..3 (status/log/metrics) | `StatusChange`, `LogLine`, `Metrics` (Section 6) |
 | FR-EXE-5 (Worker picks Java runtime) | `StartServer.minecraft_version`; no Java field from the API (Section 5) |
 | NFR-OBS-1 (correlation IDs, error reporting) | `correlation_id`, `command_id`, `CommandError` (Section 3, Section 7) |
@@ -580,5 +581,5 @@ code. The HTTP mapping lives at the file routes
 |---|---|
 | [`../REQUIREMENTS.md`](../REQUIREMENTS.md) | What v2 must do; the source of truth for scope. |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | The two planes (Section 4), the `ControlPlane`/`APIClient` Ports (Section 5), and file-access-on-control-plane (Section 7.2). |
-| [`CONFIGURATION.md`](CONFIGURATION.md) | Control-channel ports, TLS material, and the heartbeat-timeout key (Sections 5.1, 6.1). |
+| [`CONFIGURATION.md`](CONFIGURATION.md) | Control-channel ports, TLS material, and the heartbeat-timeout key (CONFIGURATION.md Sections 5.1 and 6.1). |
 | [`../../proto/README.md`](../../proto/README.md) | The buf module: install, lint, and conventions. The binding `.proto` contract lives there. |

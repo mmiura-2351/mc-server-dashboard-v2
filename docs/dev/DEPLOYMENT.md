@@ -1,7 +1,7 @@
 # Deployment
 
 How to run mc-server-dashboard v2 on a single host with Docker Compose. This is
-the minimum container-first deployment (issue #189): one `db`, one `api`, one
+the minimum container-first deployment: one `db`, one `api`, one
 `worker`, and the Minecraft server containers the worker creates at runtime. It
 covers the in-compose single-host topology; multi-host workers are out of scope
 here. TLS for the browser UI plane is covered in
@@ -19,10 +19,10 @@ Docker daemon, mounting the server's working directory and publishing its game
 port. The worker attaches every MC container to **`mcsd-servers`**, a second
 pinned network kept separate from the control-plane network `mcsd`, and reaches
 each server's RCON by container name over it, so **RCON never leaves the docker
-network** (the host RCON publication is dropped; see Section 7). The `migrate`
+network** (RCON is not published to the host; see Section 7). The `migrate`
 service is a one-shot that applies the database schema before `api` starts.
 
-**Two networks, split by trust (issue #2590).** `mcsd` carries the control and
+**Two networks, split by trust.** `mcsd` carries the control and
 data planes — `api`, `db`, `seaweedfs`, the two one-shots, `relay`, `cloudflared`
 and the worker. `mcsd-servers` carries the Minecraft server containers, which run
 operator- and community-supplied JARs, plugins and mods. The `worker` is the only
@@ -35,8 +35,9 @@ or object-store ports (enumerated by probe from a booted server —
 **not** cover, both of which an operator controls: a port **published to the
 host** on a non-loopback interface stays reachable from `mcsd-servers` through
 the bridge gateway, so `API_HTTP_BIND_IP=0.0.0.0` re-opens `api:8000` to every
-Minecraft container (Section 8); and a server that was **already running** when
-you upgraded stays on `mcsd` until it is restarted (Section 9). A Minecraft
+Minecraft container (Section 8); and a server that is **already running** when
+the server network changes keeps the network it was started on until it is
+restarted (Section 9). A Minecraft
 container also keeps outbound internet — Mojang online-mode authentication and
 plugin/mod downloads need it — and can still reach the *other* Minecraft
 containers. `SECURITY.md` Section 6 states the full residual, including what
@@ -47,9 +48,9 @@ containers. `SECURITY.md` Section 6 states the full residual, including what
 The worker creates every Minecraft container with an elevated CPU weight
 (`CpuShares` 2048, double the Docker default of 1024), so a game server wins CPU
 contention against batch workloads — CI builds, test suites, image builds —
-sharing the same host. This was added after a running server starved under heavy
-host load: the MC server thread stalled tens of seconds ("Running 837 ticks
-behind") and players keepalive-dropped. Shares are a **relative weight, not a
+sharing the same host. Without it, a server starves under heavy host load: the
+MC server thread stalls for tens of seconds (the server logs "Running … ticks
+behind") and players keepalive-drop. Shares are a **relative weight, not a
 cap** (the Engine translates them to `cpu.weight` on cgroup v2): they only
 arbitrate who wins when the CPU is saturated. They do **not** raise absolute
 capacity, so running heavy builds on the game host still degrades a server's
@@ -68,9 +69,9 @@ on it as a substitute for keeping heavy build pipelines off the game host.
 
   The floor comes from one feature: `compose.yaml` sets `gw_priority` on the
   `worker` service's network attachments to pin which of its two networks
-  provides the default route (issue #2590, Section 1). `GwPriority` arrived in
+  provides the default route (Section 1). `GwPriority` arrived in
   Engine API `v1.48` (Engine 28.0), and Compose honours it from v2.34.0
-  (docker/compose#12574). What an under-floor host actually does, measured:
+  (docker/compose#12574). What an under-floor host does:
 
   | Compose | Engine | Result |
   |---|---|---|
@@ -182,7 +183,7 @@ restart or rebuild.
 
 `docker compose` builds the images from this checkout (the repo root is the
 deploy source), so the checkout must be on a clean `main` — a stray branch or
-dirty tree silently ships the wrong ref ([`AGENTS.md`](AGENTS.md) Section 1, issue #432).
+dirty tree silently ships the wrong ref ([`AGENTS.md`](AGENTS.md) Section 1).
 Run the preflight, which refuses (exit 1) when the checkout is not on `main` or
 is dirty, then build:
 
@@ -207,7 +208,7 @@ docker compose logs -f api worker
 
 The API HTTP surface is then on `http://127.0.0.1:${API_HTTP_PORT}` (default
 8000) — the port binds to loopback by default (`API_HTTP_BIND_IP`, Section 3);
-the entire HTTP API is namespaced under `/api` (issue #498), so `GET
+the entire HTTP API is namespaced under `/api`, so `GET
 /api/healthz` returns the liveness + database-reachability probe.
 
 ### Compose healthcheck
@@ -224,20 +225,20 @@ for `migrate`).
 ### How the Web UI ships
 
 The browser UI is served by the `api` container itself — there is **no separate
-UI service and no reverse proxy** (WEBUI_SPEC 7.7, issue #386). The `api` image
+UI service and no reverse proxy** (WEBUI_SPEC 7.7). The `api` image
 is multi-stage: a Node stage builds the React SPA (`webui/dist`, Node major pinned
 by `webui/.nvmrc`, npm pinned by `webui/package.json` `engines`), and the runtime
 stage copies that build in. `compose.yaml` points the API at it with
 `MCD_API_WEBUI__DIST_DIR=/app/webui/dist`, so the SPA is served on the **same
 origin** as the API at `http://127.0.0.1:${API_HTTP_PORT}/`.
 
-The entire HTTP API is namespaced under `/api` (issue #498), so `/api/*` is the
+The entire HTTP API is namespaced under `/api`, so `/api/*` is the
 API (REST, WebSocket, the OpenAPI schema/docs, and the health/readiness probes)
 and `/assets/*` is the built SPA chunks — both are excluded from the SPA
 fallback. The Prometheus exposition is **not** on this port at all; it has its
-own listener (Section 8, issue #2565). A `/api/*` miss is a wrong/removed route
+own listener (Section 8). A `/api/*` miss is a wrong/removed route
 and an unmatched `/assets/*` request returns 404 (a stale/renamed chunk, never
-a client-side route; issue #634); *every other unmatched path* falls back to
+a client-side route); *every other unmatched path* falls back to
 the SPA's `index.html` so
 client-side routing works on deep links and reloads with no path ever colliding. Same-origin
 serving is why the API ships **no CORS** and the refresh cookie is
@@ -282,7 +283,7 @@ still starts cleanly after the fs opt-out drops the service). No bucket
 pre-creation or init job is required: on a fresh store the bucket does not yet
 exist, every **read** against it returns `NoSuchBucket`, and the adapter treats
 that as empty/not-found so the API's startup sweep boots cleanly — the first
-publish then creates the bucket (issue #946). A **non-SeaweedFS** S3 backend that
+publish then creates the bucket. A **non-SeaweedFS** S3 backend that
 does not auto-create buckets must have the bucket **pre-provisioned** before the
 API starts.
 
@@ -327,7 +328,7 @@ than its default 24h); it is optional and complementary to the API sweep.
 
 Behind the API sweep, a bucket-level `AbortIncompleteMultipartUpload` lifecycle
 rule on the `mcsd` bucket is the storage-layer backstop for the residual gap
-above — the partless orphan the sweep cannot age-gate (issue #2260). It is
+above — the partless orphan the sweep cannot age-gate. It is
 applied by a one-shot compose service, `seaweedfs-lifecycle`, that mirrors
 `migrate`: gated behind the `object` profile, it waits for the SeaweedFS S3
 gateway to be healthy and then runs `scripts/provision_object_lifecycle.py` (sync
@@ -346,8 +347,8 @@ integer-days, actual abort execution is not observable at deploy time.
 
 ### Opting back to the fs backend
 
-To run the local-volume **`fs`** backend instead (the previous default; STORAGE.md
-Section 2), set both of these in `.env` — clear `COMPOSE_PROFILES` and pin the
+To run the local-volume **`fs`** backend instead (STORAGE.md Section 2), set
+both of these in `.env` — clear `COMPOSE_PROFILES` and pin the
 backend:
 
 ```sh
@@ -357,7 +358,7 @@ MCD_API_STORAGE__BACKEND=fs
 ```
 
 Clearing `COMPOSE_PROFILES` drops the `seaweedfs` service entirely (it is gated
-behind the `object` profile), so the stack no longer runs — or waits on — a
+behind the `object` profile), so the stack neither runs nor waits on a
 SeaweedFS instance it does not use; the api's dependency on it is `required: false`,
 so the api starts cleanly. With the service gone, the S3 credential keys
 (`MCD_API_STORAGE__OBJECT__*`) are **not required** and may stay blank.
@@ -370,7 +371,7 @@ stack to apply:
 docker compose up -d --remove-orphans
 ```
 
-`--remove-orphans` clears the now-deselected `seaweedfs` container if it was
+`--remove-orphans` clears the deselected `seaweedfs` container if it was
 running before the opt-out (its `seaweedfs-data` volume is left intact).
 
 ### Caveat: switching an existing deployment is a data cutover
@@ -391,15 +392,15 @@ object-store assumptions (read-after-write on the pointer overwrite PUT,
 server-side CopyObject, multipart + prefix list, and the startup sweep) against a
 real endpoint. `api/tests/servers/test_resource_pack_store_contract.py` runs its
 `live-s3` parametrization against the same endpoint (the resource pack store's
-`size()` == `open()` byte-count invariant, #2320). Both are skipped unless
+`size()` == `open()` byte-count invariant). Both are skipped unless
 `MCD_TEST_S3_ENDPOINT` is set, so `make check` and the main `check` CI job stay
 green without an S3 instance. CI runs them in the api workflow's separate
-`live-s3` job, which starts a SeaweedFS container and supplies the endpoint
-(#2331); that job fails if either module skips. To run them locally against a
+`live-s3` job, which starts a SeaweedFS container and supplies the endpoint;
+that job fails if either module skips. To run them locally against a
 throwaway SeaweedFS, run this from the repository root — the first line reads
 the image out of `compose.yaml`'s `seaweedfs` pin instead of restating it, so a
 local run exercises the deployed version and there is no second copy of the tag
-to keep in sync (issue #2614):
+to keep in sync:
 
 ```sh
 SWFS_IMAGE=$(sed -n 's/^ *image: \(chrislusf\/seaweedfs:.*\)$/\1/p' compose.yaml)
@@ -418,17 +419,16 @@ docker rm -f swfs-test
 
 One `swfs-test` serves as many pytest runs as you like — the suite drops the
 bucket it creates, and `-volume.max=24` gives the store room for the buckets it
-creates while it runs. Both halves are needed, and neither is optional (issue
-#2614). SeaweedFS backs every S3 bucket with a *collection* and grows a batch of
+creates while it runs. Both halves are needed, and neither is optional.
+SeaweedFS backs every S3 bucket with a *collection* and grows a batch of
 up to seven volumes into it out of the `-volume.max` budget, which it does not
 reclaim while the collection lives; three collections are in play here (the
 `mcsd` bucket, the bucketless-store test's own bucket, and the filer's internal
-metadata log), so the stock budget of 8 cannot hold them. Measured on 4.41 at
-the stock budget: runs 1-4 pass, the filer's metadata log then claims the last
-free volume, and every run from the fifth on fails with `No writable volumes and
-no free volumes left`. At 24 the same ten runs pass with the volume count flat
-at 14. The deployment itself is unaffected and keeps the stock budget — it only
-ever has the one bucket.
+metadata log), so the stock budget of 8 cannot hold them: after a few runs the
+filer's metadata log claims the last free volume, and every run from then on
+fails with `No writable volumes and no free volumes left`. At 24 repeated runs
+pass with the volume count flat. The deployment itself is unaffected and keeps
+the stock budget — it only ever has the one bucket.
 
 ### Vacuum tuning and manual recovery
 
@@ -437,19 +437,20 @@ snapshot's CopyObject churn and pointer overwrites generate this garbage) by
 **vacuuming** — compacting a volume into a fresh copy that drops the dead data.
 A built-in vacuum runs periodically and fires only once a volume's garbage ratio
 crosses `-master.garbageThreshold`. `compose.yaml` sets this to **`0.1`** (10%),
-down from SeaweedFS's `0.3` (30%) default, so compaction kicks in earlier and
+below SeaweedFS's `0.3` (30%) default, so compaction kicks in earlier and
 runs more often against smaller amounts of garbage.
 
-The lower threshold is a response to the 2026-07-23 incident: garbage had reached
-~63% — already well above the `0.3` default — yet the host still spiraled to 97%
-disk. Compaction is not free space, it *needs* free space: it writes the
-compacted volume alongside the original before swapping, so once headroom is gone
-the auto-vacuum can no longer complete. Triggering it earlier (at 10%) keeps the
-garbage — and the peak disk needed to compact it — small enough that headroom is
-always available.
+The lower threshold exists because compaction is not free space, it *needs*
+free space: it writes the compacted volume alongside the original before
+swapping, so once headroom is gone the auto-vacuum cannot complete. The failure
+the value guards against looks like this: garbage at ~63% of a volume — well
+past the `0.3` default, so the threshold tripped long ago — on a host that has
+climbed to 97% disk, with no room left to write the compacted copy. Triggering
+compaction earlier (at 10%) keeps the garbage — and the peak disk needed to
+compact it — small enough that headroom is always available.
 
-If a deployment has already run out of headroom and the auto-vacuum can no longer
-keep up, reclaim space **on demand** from the SeaweedFS shell:
+If a deployment has run out of headroom and the auto-vacuum cannot keep up,
+reclaim space **on demand** from the SeaweedFS shell:
 
 ```sh
 docker compose exec seaweedfs weed shell
@@ -464,15 +465,15 @@ run. It is an **incident-recovery lever, not a second scheduled mechanism** — 
 ### Storage-capacity incident runbook (disk-full diagnosis and recovery)
 
 When the SeaweedFS store fills the host disk, publishes and backups start
-failing and the deployment can spiral — the 2026-07-23 incident reached 97% host
-disk. This is the diagnose-then-recover procedure for that class of incident; the
-steady-state mechanisms that keep it from recurring are cross-linked at the end.
-Host disk-usage **alerting** is a known gap — see the note below.
+failing and the deployment can spiral. This is the diagnose-then-recover
+procedure for that class of incident; the steady-state mechanisms that keep it
+from happening are cross-linked at the end. Host disk-usage **alerting** is not
+provided — see the note below.
 
 #### Diagnosis
 
 **Confirm the signature.** A store with no room left surfaces as S3 write
-failures in the api container log; the 2026-07-23 signature was `InternalError`
+failures in the api container log; the signature is `InternalError`
 raised on the `UploadPart` operation (a multipart part that could not land):
 
 ```sh
@@ -539,7 +540,7 @@ Work from the cheapest, most-reversible step to the most invasive, and re-check
 
 #### Steady-state prevention
 
-Three landed mechanisms keep the store from filling in normal operation; this
+Three steady-state mechanisms keep the store from filling in normal operation; this
 runbook is the fallback for when they have already fallen behind. Do not re-tune
 them here — each has its own subsection:
 
@@ -558,19 +559,18 @@ them here — each has its own subsection:
   `storage_sweep.interval_seconds`). See CONFIGURATION.md
   [Section 5.15](../app/CONFIGURATION.md#515-crash-recovery-storage-sweep).
 
-#### Known gap: no disk-usage alerting
+#### Not provided: disk-usage alerting
 
-There is currently **no automated early warning** before the disk fills — host
-disk-usage alerting was deferred by owner decision (umbrella issue #2251). Until
-it lands, check capacity by hand on a regular cadence: `df -h` on the host for
-overall free space, and `volume.list` from the SeaweedFS shell (as in Diagnosis
-above) for the per-volume garbage backlog.
+There is **no automated early warning** before the disk fills — host disk-usage
+alerting is not provided. Check capacity by hand on a regular cadence: `df -h`
+on the host for overall free space, and `volume.list` from the SeaweedFS shell
+(as in Diagnosis above) for the per-volume garbage backlog.
 
 ## 6. First-run bootstrap (create the platform admin)
 
 There is no seeded admin and **no manual database step**. The first user
 registered over HTTP on a fresh database automatically becomes the platform
-admin (issue #909); just register it:
+admin; just register it:
 
 ```sh
 curl -X POST http://localhost:8000/api/users \
@@ -587,14 +587,14 @@ admins cannot silently re-open the bootstrap.
 
 **Closed registration**: if you run with `auth.registration.open=false` (the
 admin-provisioned posture, CONFIGURATION.md Section 7.4), the *first* registration
-on an empty database is still allowed — it is the only way to create the bootstrap
-admin and shares the same trust model as the old manual step. The open flag is
+on an empty database is allowed even so — it is the only way to create the
+bootstrap admin. The open flag is
 enforced normally for every registration after the first user exists.
 
 From here on, that admin manages all further accounts through the authenticated,
 audited admin API (granting/revoking the admin flag, deactivating/reactivating,
 deleting, and listing users; `PUT /api/users/{id}/platform-admin`,
-`POST /api/users/{id}/deactivate` and friends; issue #278) — for example,
+`POST /api/users/{id}/deactivate` and friends) — for example,
 promoting an additional admin:
 
 ```sh
@@ -646,23 +646,23 @@ the host. Players connect to the host on the server's game port. Because these M
 containers are created at runtime — not declared in `compose.yaml` — the host
 firewall must allow inbound traffic to whichever game ports your servers use.
 
-An **absent** `server.properties` still takes the 25565 default. A file that
+An **absent** `server.properties` takes the 25565 default. A file that
 exists but cannot be read to the end — a line longer than 64 KiB, a permission
 problem — fails the start with an error naming the file instead: 25565 is the
 relay's port, so a silent fallback turns a correctly tracked server into a
 host-port collision that never starts.
 
-**Distinct ports are now automatic at create.** The API tracks each server's game
+**Distinct ports are assigned at create.** The API tracks each server's game
 port (`server.game_port`, DATABASE.md Section 7) and, at create, assigns the
 lowest free in-range port (configurable via `ports.range_start`/`ports.range_end`,
 default `25565..25664`; CONFIGURATION.md Section 5.8), unique deployment-wide, and
 seeds `server-port=<port>` into the new server's `server.properties`. So
-operator-created servers no longer need manual `server-port` editing to avoid
-host-port collisions. An operator may still pass an explicit `game_port` at create
+operator-created servers need no manual `server-port` editing to avoid
+host-port collisions. An operator may pass an explicit `game_port` at create
 (rejected 422 out of range, 409 taken); a delete frees the port for reuse.
 
 **Changing a server's port after create.** A stopped server can be re-ported via
-`PATCH /api/communities/{id}/servers/{id}` with a `game_port` field (issue #311). It
+`PATCH /api/communities/{id}/servers/{id}` with a `game_port` field. It
 validates the new port like create (422 out of range, 409 taken), rewrites
 `server-port` in the at-rest `server.properties`, and updates `server.game_port`
 together, so under normal operation the DB and the real bind port stay in sync.
@@ -693,29 +693,30 @@ world data is restored, the seed is not — retry the restore).
   `server.properties` may already hold the new port while the row keeps the old.
   Retry the PATCH, which rewrites both to a consistent state.
 - The files API refuses a `PUT` that changes a platform-managed key, but its
-  sibling routes (delete, rename, upload, rollback) do not yet consult that guard,
-  so they can still remove or replace the file — tracked in issue #2789. Until
-  then, treat `server.properties` as platform-owned and re-port via the `PATCH`
-  above rather than through the files API.
-- A legacy row with `game_port = NULL` tracks no port, so nothing is re-applied
-  to its file (import and restore leave `server-port` as it found it); backfill it
-  as described below.
+  sibling routes (delete, rename, upload, rollback) do not consult that guard,
+  so they can remove or replace the file. Treat `server.properties` as
+  platform-owned and re-port via the `PATCH` above rather than through the
+  files API.
+- A row with `game_port = NULL` tracks no port, so nothing is re-applied to its
+  file (a restore leaves `server-port` as it found it); backfill it as
+  described below.
 
 A drift you find in the field is fixed by the `PATCH` above, which rewrites the
 row and the file together.
 
-For an **imported or legacy server** whose row predates port tracking
-(`game_port` is `NULL`), nothing is auto-assigned. Prefer the update-port API
-above to set its port (it backfills `game_port` and rewrites `server.properties`
-together); the manual SQL backfill below is the fallback when you have already set
-`server-port` directly in the file.
+Every API path — create and import alike — assigns a port, so a row with
+`game_port = NULL` arises only outside the API (a direct SQL write). For such a
+**row without a tracked port**, nothing is auto-assigned. Prefer the update-port
+API above to set its port (it backfills `game_port` and rewrites
+`server.properties` together); the manual SQL backfill below is the fallback
+when you have already set `server-port` directly in the file.
 
-### Backfilling legacy `game_port` rows
+### Backfilling rows without a tracked `game_port`
 
 A row with `game_port = NULL` is **invisible to port auto-assignment**: it is
 excluded from the deployment-wide taken-port set, so the next auto-assigned
-server can be handed the very host port the legacy server already binds (via its
-`server.properties`) — a guaranteed host-port collision when both run. To make
+server can be handed the very host port that untracked server already binds (via
+its `server.properties`) — a guaranteed host-port collision when both run. To make
 the gap discoverable, the API logs a **startup WARN** listing the count and ids
 of every `game_port = NULL` server. When you see it, backfill those rows so the
 taken-set math becomes correct again.
@@ -748,20 +749,20 @@ Its handling depends on `driver.container.network` (env
 - **Set** (this `compose.yaml`, rendering `mcsd-servers` — the value is
   `${COMPOSE_PROJECT_NAME:-mcsd}-servers`, the same expression as
   `networks.servers.name`, so a stack brought up under another project name
-  keeps the two in step, issue #2609): the worker attaches each
+  keeps the two in step): the worker attaches each
   MC container to that user-defined network and dials RCON at the container's
-  name over the network. The host RCON publication is **dropped** — RCON never
+  name over the network. There is **no host RCON publication** — RCON never
   leaves the docker network. This is required for the containerized worker, whose
-  own loopback is not the host loopback where a published RCON port would land
-  (issue #218). `mcsd-servers` is pinned as a second network, separate from the
+  own loopback is not the host loopback where a published RCON port would land.
+  `mcsd-servers` is pinned as a second network, separate from the
   control-plane `mcsd`, and the `worker` service is attached to both so it shares
-  container-name DNS with the MC containers it creates while still reaching
-  `api:50051` / `api:8000` (issue #2590). The network **must be user-defined**
+  container-name DNS with the MC containers it creates while also reaching
+  `api:50051` / `api:8000`. The network **must be user-defined**
   (a `docker network create` network, as the pinned `mcsd-servers` is): the
   default `bridge` has no container-name DNS, so pointing this at `bridge` lets
   the attach succeed but the RCON dial silently fails.
 - **Unset** (bare-metal worker): RCON is published to the host loopback
-  (`127.0.0.1`) and dialed there, the historical behavior.
+  (`127.0.0.1`) and dialed there.
 
 ## 8. TLS guidance
 
@@ -778,7 +779,7 @@ hard-logged-out because the refresh cookie was never stored.
 
 #### Cloudflare Tunnel (recommended)
 
-The `cloudflared` service in `compose.yaml` (issue #1090) is the supported
+The `cloudflared` service in `compose.yaml` is the supported
 HTTPS path. It is gated behind the `tunnel` compose profile (the relay uses a
 separate `relay` profile).
 
@@ -823,7 +824,7 @@ To enable:
 The browser now reaches the UI over HTTPS at the public hostname, the `Secure`
 cookie is stored, and silent refresh works.
 
-**Edge body-size caps and the data-plane URL (issue #1549):** if
+**Edge body-size caps and the data-plane URL:** if
 `MCD_API_SERVER__PUBLIC_BASE_URL` is overridden to the tunnel's public
 hostname (e.g. so a public-facing link is externally reachable), do not let
 that also become the URL the Worker uses for hydrate/snapshot transfers.
@@ -837,14 +838,14 @@ reason; any other topology with a co-located Worker behind a body-size-capped
 edge must set `server.data_plane_base_url` to an internal address the Worker
 can reach directly (CONFIGURATION.md Section 5.1).
 
-**The tunnel publishes every path on `api:8000` (issue #2565).** `cloudflared`
+**The tunnel publishes every path on `api:8000`.** `cloudflared`
 forwards the whole hostname to `api:8000` and path-scopes nothing, so the
 loopback publish in `compose.yaml` constrains only *host* reachability — the
 tunnel reaches the API over the `mcsd` network, past that bind. Treat
 anything you mount on the API's HTTP port as internet-facing. This is why the
 Prometheus exposition is not on that port (see the metrics subsection at the end
-of this section), and why the OpenAPI schema, the docs routes and `/api/readyz`
-are reachable from the internet today (tracked in issue #2568). To restrict a
+of this section); the OpenAPI schema, the docs routes and `/api/readyz`
+are reachable from the internet. To restrict a
 path, use a Cloudflare Access policy on the public hostname; the repo ships no
 such rule.
 
@@ -942,15 +943,15 @@ sets `MCD_WORKER_API_TLS_INSECURE=true`. This rests on two conditions, both of
 which have to keep holding: the gRPC control listener is not published to the
 host, and the traffic stays on `mcsd`, whose only members are first-party
 services. The Minecraft containers — the one place third-party code runs — are
-on `mcsd-servers` and cannot reach `mcsd` at all (issue #2590,
-[`../app/SECURITY.md`](../app/SECURITY.md) Section 6). Attaching anything that
-runs untrusted code to `mcsd`, or moving the MC containers back onto it,
+on `mcsd-servers` and cannot reach `mcsd` at all
+([`../app/SECURITY.md`](../app/SECURITY.md) Section 6). Attaching anything that
+runs untrusted code to `mcsd`, or moving the MC containers onto it,
 invalidates the plaintext posture: the worker credential rides this channel in
 the clear.
 
 A **multi-host** worker (a worker on a different machine dialing this API over a
 real network) must not use the insecure posture, and the gRPC control plane must
-not be exposed off-host while it is still plaintext. Reaching a cross-host worker
+not be exposed off-host while it is plaintext. Reaching a cross-host worker
 requires **both** of the following together — never publish the gRPC port
 without first putting TLS on the listener:
 
@@ -972,7 +973,7 @@ TLS is not the only thing a cross-host worker needs: it also has to be able to
 reach the HTTP **data plane**, which is a separate port and a separate setting —
 see the next subsection.
 
-### The data-plane URL for a cross-host worker (issue #2564)
+### The data-plane URL for a cross-host worker
 
 A cross-host worker **must** be given an `MCD_API_SERVER__DATA_PLANE_BASE_URL`
 that the worker itself can reach. On a deployment running the shipped
@@ -993,7 +994,7 @@ back to `server.public_base_url` when that is unset (CONFIGURATION.md Section
   the `mcsd` network. A worker on another machine cannot resolve it at all.
 - The fallback hands the worker `PUBLIC_BASE_URL`. If that is a Cloudflare
   Tunnel hostname, every snapshot larger than the tunnel's ~100 MB body cap is
-  rejected (issue #1549 — a booted Paper server alone is ~200+ MB), so world
+  rejected (a booted Paper server alone is ~200+ MB), so world
   progression is lost on every stop. Registration still succeeds and the control
   plane still looks healthy; the failure appears at the first snapshot of a
   non-trivial server, on the worker's host, with nothing pointing back at the
@@ -1022,8 +1023,8 @@ always sets the variable.
 Which leaves the case this subsection opens with — compose's default kept, a
 worker added on a second host — with **no boot-time signal at all**: the
 variable is set, so the warning has nothing to fire on, and at startup the API
-does not yet know that a worker on another host is going to register (issue
-#2595). The first signal is the first failed hydrate or snapshot, and it names
+cannot know that a worker on another host is going to register. The first
+signal is the first failed hydrate or snapshot, and it names
 the URL the worker was handed, so the misconfiguration is read off that failure
 rather than inferred. Both sides log it — the worker's `command failed` WARN on
 the worker host (with the true `kind`, `HydrateTrigger` / `SnapshotTrigger`),
@@ -1038,8 +1039,8 @@ dial tcp: lookup api on 127.0.0.11:53: no such host
 
 That message is a single line, wrapped above to fit. Reading `http://api:8000`
 back out of a transfer failure means exactly this misconfiguration: the worker
-was handed compose's internal default. The fix is in `.env` on the **API**
-host — nothing changes on the worker.
+was handed compose's internal default. Set `MCD_API_SERVER__DATA_PLANE_BASE_URL`
+in `.env` on the **API** host — nothing changes on the worker.
 
 **Protect this port like the control plane — the bearer token on it *is* the
 control credential.** Data-plane requests carry the shared worker credential as
@@ -1058,7 +1059,7 @@ HTTP surface on that interface, not only the data-plane routes (one bind serves
 the whole REST API, `compose.yaml`), so the non-loopback-bind caveats elsewhere
 in this section apply here in full.
 
-### The relay tunnel port for a cross-host worker (issue #2627)
+### The relay tunnel port for a cross-host worker
 
 A cross-host worker on a **relay-enabled** deployment needs one more thing: the
 relay's Worker dial-back port, `25665`, published on an address it can reach.
@@ -1085,7 +1086,7 @@ dial is refused; setting only the bind leaves the worker still dialling
 `relay:25665`, which does not resolve off the `mcsd` network. The tunnel
 certificate's SAN must match the hostname part of the endpoint you advertise —
 regenerate it when you change that value (see the relay TLS material
-subsection in [Section 12](#12-relay-game-ingress-epic-659)); for a raw-IP
+subsection in [Section 12](#12-relay-game-ingress)); for a raw-IP
 endpoint the SAN has to be an IP SAN.
 
 This is a real interface, not a private one: `25665` carries the TLS tunnel the
@@ -1103,12 +1104,12 @@ before the new `api` starts, so the schema is brought current automatically:
 `compose.yaml` brings `api` up before `worker`, so the default `docker compose
 up -d --build` already applies the correct order. However, if you update
 containers individually, always update `api` first (or together with `worker`).
-An old API receiving a `CommandErrorCode` it does not recognise falls back to
-`INTERNAL` and its compensation logic may orphan a live instance — the #866 BUSY
-precedent: an old API that had no BUSY handling treated it as INTERNAL and
-unassigned the server, stranding the running instance. Updating `api` first (or
-atomically via `docker compose up`) ensures the API's handler for any new code
-is in place before the worker starts emitting it.
+An API at the older revision receiving a `CommandErrorCode` it does not
+recognise falls back to `INTERNAL` and its compensation logic may orphan a live
+instance — for example, an API with no `BUSY` handling treats `BUSY` as
+`INTERNAL` and unassigns the server, stranding the running instance. Updating
+`api` first (or atomically via `docker compose up`) ensures the API's handler
+for any new code is in place before the worker starts emitting it.
 
 ```sh
 ./scripts/deploy_preflight.sh && git pull --ff-only origin main && docker compose up -d --build
@@ -1123,8 +1124,8 @@ servers), starts the stack, stamps the started revision, and runs a post-deploy
 ### The two deploy records
 
 `make deploy` and `make update` write two gitignored files in the repo root.
-They record **different facts**, and conflating them is what made change
-detection diff from a revision that had stopped running (issue #2311):
+They record **different facts**, and conflating them makes change detection
+diff from a revision that has stopped running:
 
 | File | Means | Written |
 |---|---|---|
@@ -1134,9 +1135,8 @@ detection diff from a revision that had stopped running (issue #2311):
 The stamp is written before the healthcheck deliberately: once compose has
 recreated the containers they are running the new revision whether or not the
 API answers in time, and that is the base the next run has to compute "what
-changed" from. Writing it only on the verified path left the previous stamp
-behind while the containers ran something newer — measured 24 commits stale on
-the canonical host — so the next `make update` diffed from the wrong base and
+changed" from. A stamp written only on the verified path would lag the
+containers, and the next `make update` would diff from the wrong base and
 could skip rebuilding a component that had genuinely changed.
 
 What the records drive on the next `make update`:
@@ -1160,141 +1160,140 @@ What the records drive on the next `make update`:
 A failed build (before `docker compose up`) changes neither record: no
 container was replaced, so the existing stamp still describes what is running.
 
-> **Breaking change — the default storage backend is now `object` (SeaweedFS).**
-> Before this revision the shipped default was the local-volume `fs` backend. The
-> `api` service now resolves `MCD_API_STORAGE__BACKEND` to `object` **unless your
-> `.env` pins it to `fs`**. An existing fs deployment that simply `git pull`s and
-> rebuilds will start the API against an **empty** SeaweedFS store — its servers,
-> snapshots, and backups live in the `api-storage` (fs) volume and do **not**
-> migrate automatically (Section 5 "data cutover" caveat). To keep your existing
-> fs data, opt back to fs **before** rebuilding — pin the backend and drop the
-> SeaweedFS service (Section 5 "Opting back to the fs backend"):
+> **Caveat — the default storage backend is `object` (SeaweedFS); an fs
+> deployment must pin it.** The `api` service resolves
+> `MCD_API_STORAGE__BACKEND` to `object` **unless your `.env` pins it to
+> `fs`**. An fs deployment whose `.env` does not carry that pin and simply
+> `git pull`s and rebuilds starts the API against an **empty** SeaweedFS store —
+> its servers, snapshots, and backups live in the `api-storage` (fs) volume and
+> do **not** move across automatically (Section 5 "data cutover" caveat). To
+> keep the fs data, pin the backend and drop the SeaweedFS service **before**
+> rebuilding (Section 5 "Opting back to the fs backend"):
 >
 > ```sh
 > printf 'COMPOSE_PROFILES=\nMCD_API_STORAGE__BACKEND=fs\n' >> .env
 > ```
 >
-> To deliberately adopt the object backend on an existing deployment, treat it as
-> a cutover: back up both volumes first, then expect an empty store until servers
-> are re-hydrated/re-created (Section 5).
+> To deliberately adopt the object backend on an existing fs deployment, treat
+> it as a cutover: back up both volumes first, then expect an empty store until
+> servers are re-hydrated/re-created (Section 5).
 
-> **Upgrade note — the `seaweedfs` service is now profile-gated.** The service is
+> **Caveat — the `seaweedfs` service is profile-gated.** The service is
 > behind the `object` compose profile, which `.env.example` activates with
-> `COMPOSE_PROFILES=object`. An existing **object** deployment whose `.env` predates
-> this revision has no `COMPOSE_PROFILES` line; after `git pull` the next
-> `docker compose up` would **not** start `seaweedfs` (an unset `COMPOSE_PROFILES`
-> selects no profiles); the api boots and serves but all storage operations
-> (snapshot, backup, file reads/writes) error at runtime because the S3 client
-> cannot reach the object store. Add the line once before rebuilding:
+> `COMPOSE_PROFILES=object`. An **object** deployment whose `.env` has no
+> `COMPOSE_PROFILES` line (one not derived from `.env.example`) does **not**
+> start `seaweedfs` on `docker compose up` (an unset `COMPOSE_PROFILES` selects
+> no profiles); the api boots and serves but all storage operations (snapshot,
+> backup, file reads/writes) error at runtime because the S3 client cannot reach
+> the object store. Add the line once before rebuilding:
 >
 > ```sh
 > echo 'COMPOSE_PROFILES=object' >> .env
 > ```
 >
-> (fs deployments set `COMPOSE_PROFILES=` empty instead — see the breaking-change
-> box above.)
+> (fs deployments set `COMPOSE_PROFILES=` empty instead — see the caveat box
+> above.)
 
-> **Upgrade note — Bedrock is opt-in on the relay (issue #1584).** The relay's
+> **Caveat — Bedrock is opt-in on the relay.** The relay's
 > Bedrock QUIC/UDP tunnel listener is gated on `bedrock.enabled` (`relay.toml`) /
 > `MCD_RELAY_BEDROCK_ENABLED` (env), default **false** — `compose.yaml` feeds it
-> from the same `MCD_API_RELAY__BEDROCK_ENABLED` flag the API already reads (see
+> from the same `MCD_API_RELAY__BEDROCK_ENABLED` flag the API reads (see
 > `.env.example`), so operators toggle Bedrock in one place for both services. A
-> Java-only / Bedrock-off relay upgrading to a revision carrying the Bedrock epic
-> binds neither the Bedrock tunnel port (`25675/udp`) nor the per-server
-> `19132-19231/udp` window, so it is unaffected and cannot fail to start on a
-> host-port conflict there. `compose.yaml` still *publishes* both Bedrock UDP
-> port entries unconditionally (Compose has no clean per-port conditional syntax
-> on a single service) — if a host already has something else bound to
-> `25675/udp` or a port in `19132-19231/udp`, the relay container can still fail
-> Docker's own port allocation even with Bedrock disabled; free the conflicting
-> port or move the relay to a host without one. See
+> Java-only / Bedrock-off relay binds neither the Bedrock tunnel port
+> (`25675/udp`) nor the per-server `19132-19231/udp` window, so it cannot fail
+> to start on a host-port conflict there. `compose.yaml` does, however,
+> *publish* both Bedrock UDP port entries unconditionally (Compose has no clean
+> per-port conditional syntax on a single service) — if a host already has
+> something else bound to `25675/udp` or a port in `19132-19231/udp`, the relay
+> container can fail Docker's own port allocation even with Bedrock disabled;
+> free the conflicting port or move the relay to a host without one. See
 > [`../app/RELAY.md`](../app/RELAY.md) Section 13 and
 > [`../app/BEDROCK_TUNNEL.md`](../app/BEDROCK_TUNNEL.md) Section 9 for the
 > `bedrock.enabled` key, and "Bedrock (Geyser)" below for turning Bedrock on.
 
-> **Upgrade note — Minecraft containers move to their own network (issue
-> #2590).** `compose.yaml` now declares a second pinned network,
-> `mcsd-servers`, attaches `worker` to both it and `mcsd`, and points
-> `MCD_WORKER_DRIVER_CONTAINER_NETWORK` at it, so newly started MC containers no
-> longer sit on the control-plane network.
+> **Caveat — a running Minecraft container keeps the network it was started
+> on.** `compose.yaml` declares a second pinned network, `mcsd-servers`,
+> attaches `worker` to both it and `mcsd`, and points
+> `MCD_WORKER_DRIVER_CONTAINER_NETWORK` at it, so an MC container is attached to
+> `mcsd-servers` at the moment the worker starts it — and never re-attached
+> afterwards.
 >
-> **Restart every running server to get the mitigation.** `docker compose up -d`
-> creates the network and recreates `worker`. A Minecraft container that was
-> already running is **not** moved: it stays attached to `mcsd` and keeps the
-> full pre-upgrade reach — measured after a real upgrade,
-> `grpcurl -plaintext seaweedfs:18333 list` still answered from one. Each server
-> lands on `mcsd-servers` only at its next start, so until you cycle them the
-> segmentation is not in effect for them. Nothing breaks in the meantime — the
-> dual-homed worker still resolves them by name, so the upgrade itself is
-> non-disruptive — but "non-disruptive" and "mitigated" are different states, and
-> `up -d` alone only gives you the first.
+> **Restart every running server after a network change.** `docker compose up
+> -d` creates or renames networks and recreates `worker`. A Minecraft container
+> that is already running is **not** moved: it stays attached to the network it
+> was started on and keeps that network's full reach — a container started on
+> `mcsd` (by an override that points the worker there) reaches everything on
+> it; `grpcurl -plaintext seaweedfs:18333 list` answers from inside it. Each
+> server lands on the configured network only at its next start, so until you
+> cycle them the segmentation is not in effect for them. Whether anything breaks
+> in the meantime depends on the old network. If the worker is still attached
+> to it (as it is to `mcsd`), the dual-homed worker resolves the containers by
+> name and the change is non-disruptive — but "non-disruptive" and "segmented"
+> are different states, and `up -d` alone only gives you the first. If the
+> network was renamed out from under them (a `COMPOSE_PROJECT_NAME` change; see
+> the project-name caveat below), the worker loses container-name DNS to them
+> and their RCON dials fail until each is restarted.
 >
 > **React if your compose file is customised**: an override that redefines the
 > `worker` service's `networks:` list, or a second stack that renames the pinned
-> network (as `scripts/compose.relay-e2e.yaml` does), must now name **both**
+> network (as `scripts/compose.relay-e2e.yaml` does), must name **both**
 > networks — listing only `default` silently strands the worker without
 > container-name DNS and every RCON dial fails. Anything you deliberately
 > attached to `mcsd` to talk to a Minecraft container needs moving to
 > `mcsd-servers`.
 
-> **Upgrade note — the API port now binds to loopback by default (issue
-> #1609).** `compose.yaml` now publishes the API HTTP port on `127.0.0.1`
-> (loopback) instead of `0.0.0.0` (all interfaces). This closes an unintended
-> direct-access surface: an operator running the Cloudflare Tunnel profile
-> previously had the plaintext API reachable on `http://<host-ip>:8000` even
-> though the tunnel section promised no inbound port. After this change, only
-> `cloudflared` (on `mcsd`) and same-host processes reach
-> the API by default. **If your deployment relies on the API being reachable
-> from the network** (no tunnel, no same-host reverse proxy, or LAN/dev
-> setups), add to `.env` before rebuilding:
+> **Caveat — the API port binds to loopback by default.** `compose.yaml`
+> publishes the API HTTP port on `127.0.0.1` (loopback), not `0.0.0.0` (all
+> interfaces), so that an operator running the Cloudflare Tunnel profile does
+> not also have the plaintext API reachable on `http://<host-ip>:8000` — the
+> tunnel section promises no inbound port. Only `cloudflared` (on `mcsd`) and
+> same-host processes reach the API by default. **If your deployment relies on
+> the API being reachable from the network** (no tunnel, no same-host reverse
+> proxy, or LAN/dev setups), add to `.env` before rebuilding:
 >
 > ```sh
 > API_HTTP_BIND_IP=0.0.0.0
 > ```
 
-> **Upgrade note — the relay's Worker dial-back port now binds to loopback by
-> default (issue #2627).** `compose.yaml` publishes the relay's `25665` on
-> `${RELAY_CONTROL_BIND_IP:-127.0.0.1}` instead of on every interface. The three
+> **Caveat — the relay's Worker dial-back port binds to loopback by
+> default.** `compose.yaml` publishes the relay's `25665` on
+> `${RELAY_CONTROL_BIND_IP:-127.0.0.1}`, not on every interface. The three
 > other relay publications — `25565`, `25675/udp` and `19132-19231/udp` — are
-> unchanged. This closes a path that network segmentation does not: a port
-> published with no host IP is DNATed from every interface, so a plugin in a
-> Minecraft container reached the dial-back tunnel through the bridge gateway
-> even after the MC containers moved off `mcsd`
+> on every interface. The loopback bind closes a path that network segmentation
+> does not: a port published with no host IP is DNATed from every interface, so
+> a plugin in a Minecraft container would reach the dial-back tunnel through the
+> bridge gateway even though the MC containers are off `mcsd`
 > ([`../app/SECURITY.md`](../app/SECURITY.md) Section 6).
 >
 > **A single-host deployment needs `MCD_RELAY_TUNNEL_PUBLIC_ENDPOINT=relay:25665`
 > in `.env`.** The in-compose worker dials whatever that variable advertises; on
 > the internal `mcsd` network the relay answers as `relay:25665` and no host
-> publication is involved. If yours advertises a **host** address instead — the
-> shape earlier revisions of this document suggested — the worker's dial is
-> refused after this upgrade, and the tunnel never comes up. Either switch the
-> endpoint to `relay:25665` and regenerate the tunnel certificate with a
-> matching SAN (`subjectAltName=DNS:relay`, see "TLS material" in
-> [Section 12](#12-relay-game-ingress-epic-659)), or keep the host address and
-> add `RELAY_CONTROL_BIND_IP=<that address>` to `.env` before rebuilding.
+> publication is involved. If yours advertises a **host** address instead, the
+> worker's dial is refused (the port is on loopback) and the tunnel never comes
+> up. Either switch the endpoint to `relay:25665` and regenerate the tunnel
+> certificate with a matching SAN (`subjectAltName=DNS:relay`, see "TLS
+> material" in [Section 12](#12-relay-game-ingress)), or keep the host address
+> and add `RELAY_CONTROL_BIND_IP=<that address>` to `.env` before rebuilding.
 >
-> **A worker on another host** keeps needing the port off loopback: set both
+> **A worker on another host** needs the port off loopback: set both
 > `RELAY_CONTROL_BIND_IP` and `MCD_RELAY_TUNNEL_PUBLIC_ENDPOINT` to an address
 > that worker can reach ([Section 8](#8-tls-guidance)).
 
-> **Breaking change — PostgreSQL 17 to 18, and `db-data` now mounts at
-> `/var/lib/postgresql` (issue #2133).** `compose.yaml` runs `postgres:18`, which
-> moved `PGDATA` to `/var/lib/postgresql/<major>/docker` and declares its volume
-> at that parent directory; the mount moved with it. An existing deployment's
-> `db-data` volume holds PostgreSQL 17-format data that `postgres:18` cannot
-> read: the container aborts during entrypoint init — loudly, and without
-> touching your data — and because `migrate` and `api` both gate on `db` being
-> healthy, the whole stack stays down until the data is migrated.
-> `scripts/deploy_preflight.sh` detects this and refuses the deploy, so
-> `make update` stops before it takes the stack down, and names the script below.
->
-> **The guard cannot protect this particular upgrade, only the next one (issue
-> #2309).** It ships in the same revision as the bump it guards against, so a
-> deployment that has not pulled yet is running the *older* preflight — the one
-> with no Postgres check at all. It prints `on clean 'main' -- ok to build.` and
-> `make update` proceeds to pull, rebuild, and take the stack down. Do not rely
-> on it for this upgrade; follow the procedure below instead. (Verified on the
-> canonical host at `964f4fc6`.)
+> **Caveat — PostgreSQL major upgrades; `db-data` mounts at
+> `/var/lib/postgresql`.** `compose.yaml` runs `postgres:18`, whose image keeps
+> `PGDATA` at `/var/lib/postgresql/<major>/docker` and declares its volume at
+> that parent directory; the mount follows that layout. When a revision bumps
+> the PostgreSQL major, an existing deployment's `db-data` volume holds data in
+> the older major's format, which the new image cannot read: the container
+> aborts during entrypoint init — loudly, and without touching your data — and
+> because `migrate` and `api` both gate on `db` being healthy, the whole stack
+> stays down until the data is restored into the new major.
+> `scripts/deploy_preflight.sh` detects a pending major bump and refuses the
+> deploy, so `make update` stops before it takes the stack down, and names the
+> script below. The preflight runs from the already-checked-out revision (it
+> validates before the pull), so it enforces only the checks that revision
+> carries. The procedure below is written for the `postgres:17` → `postgres:18`
+> case; substitute the majors for any other bump.
 >
 > **Take the dump while the stack is still running `postgres:17` — before
 > `docker compose up` swaps the image.** The `postgres:18` image ships no
@@ -1313,22 +1312,21 @@ container was replaced, so the existing stamp still describes what is running.
 > docker compose up -d --build     # 3. only once step 2 exited 0
 > ```
 >
-> The pull comes first because it has to: the script ships **in** the revision
-> that bumps Postgres, so on the deployment that needs it, there is no copy to
-> run until you have pulled. It is safe in either order for the *data* — see the
-> paragraph above — but running it before the pull leaves it validating the
-> revision you are replacing, so it reports `nothing to do` and tells you to
-> pull. That sequence is the same on every future upgrade, major or not: step 2
-> is a no-op when nothing is pending.
+> The pull comes first because it has to: the script validates the revision it
+> runs from, so running it before the pull leaves it validating the revision
+> you are replacing — it reports `nothing to do` and tells you to pull. It is
+> safe in either order for the *data* — see the paragraph above. That sequence
+> is the same on every upgrade, major or not: step 2 is a no-op when nothing is
+> pending.
 >
-> **Already pulled, or already read this after a `make update`?** Nothing is
-> lost either way. A pull on its own leaves the running stack exactly as it was —
-> pick the sequence up at step 2. If `make update` got past the older preflight
-> and took the stack down, the `db` container is now `postgres:18` aborting on a
-> PostgreSQL 17 volume and **your data is untouched** — that abort happens before
-> postgres starts. Run step 2 anyway: it refuses, because the running `db` is no
-> longer the major that wrote the volume, and the refusal names the revision to
-> put back. Then:
+> **Already pulled, or already brought the stack up?** Nothing is lost either
+> way. A pull on its own leaves the running stack exactly as it was — pick the
+> sequence up at step 2. If the stack was brought up on the new image without
+> the preflight (a plain `docker compose up`, or an update that skipped it), the
+> `db` container is now `postgres:18` aborting on a PostgreSQL 17 volume and
+> **your data is untouched** — that abort happens before postgres starts. Run
+> step 2 anyway: it refuses, because the running `db` is not the major that
+> wrote the volume, and the refusal names the revision to put back. Then:
 >
 > ```sh
 > MCSD_ALLOW_PRIMARY_BRANCH=1 git checkout <the revision it named>
@@ -1377,8 +1375,8 @@ container was replaced, so the existing stamp still describes what is running.
 > records which revision the running stack was built from (`.last-deploy-sha` is
 > written only by `make deploy` / `make update`, so a deployment ever brought up
 > with the plain `docker compose up -d --build` of Section 4 has none, and
-> nothing about the file distinguishes that from a current value — on the
-> canonical host it was 24 commits stale). So the script derives it from this repo's own
+> nothing about the file distinguishes a stale value from a current one). So
+> the script derives it from this repo's own
 > history: the newest revision whose `compose.yaml` deploys the major the volume
 > holds, **verified** by reading that revision's image the same way it read
 > `HEAD`'s. If history contains no such revision, it says so up front, before
@@ -1433,10 +1431,10 @@ container was replaced, so the existing stamp still describes what is running.
 > #    entrypoint runs a TEMPORARY server on that same socket to execute its init
 > #    scripts before shutting it down and starting the real one. `--wait` can
 > #    therefore return mid-bootstrap and the restore then dies with
-> #    "FATAL: the database system is shutting down". Measured on this image:
-> #    the socket answered from t=1.6s while TCP stayed closed until t=10.6s.
-> #    The temp server runs with `listen_addresses=''`, so waiting for TCP tells
-> #    the two apart structurally -- it can never answer.
+> #    "FATAL: the database system is shutting down". The socket answers
+> #    seconds before TCP opens. The temp server runs with
+> #    `listen_addresses=''`, so waiting for TCP tells the two apart
+> #    structurally -- it can never answer.
 > docker compose up -d --wait db
 > until docker compose exec -T db pg_isready -q -h 127.0.0.1 -U mcsd -d postgres
 > do sleep 1; done
@@ -1474,46 +1472,45 @@ container was replaced, so the existing stamp still describes what is running.
 > prints three `ERROR:` lines where a good run prints two, and nothing marks
 > which is which.
 >
-> (The volume name is `<project>_db-data`, and step 0's `git pull` may change
-> what `<project>` is: a deployment that predates the #2609 pin below is named
-> after its checkout directory, and every `docker compose` line here then needs
-> `-p <that directory>` to address it. `docker volume ls` shows the exact names.
-> Naming `relay`/`cloudflared` is harmless when
+> (The volume name is `<project>_db-data`, where `<project>` is `mcsd` unless
+> the deployment runs under another project name (`-p`, `COMPOSE_PROJECT_NAME`
+> — see the project-name caveat below), in which case every `docker compose`
+> line here needs `-p <that name>` to address it. `docker volume ls` shows the
+> exact names. Naming `relay`/`cloudflared` is harmless when
 > those profiles are inactive. `-T` on the dump matters: without it Compose
 > allocates a TTY and the redirected SQL is line-ending mangled. `mcsd` above is
 > `POSTGRES_USER` / `POSTGRES_DB` from your `.env` — substitute yours in all
 > four places.)
 >
 > For a large cluster, `pg_upgrade --link` converts in place much faster, but it
-> needs both majors' binaries in one image and is not covered here. Performing
-> this migration on the canonical host is tracked as issue #2293.
+> needs both majors' binaries in one image and is not covered here.
 
-> **Breaking change — the compose project is pinned to `mcsd`, so the named
-> volumes move (issue #2609).** `compose.yaml` now carries a top-level
+> **Caveat — the compose project is pinned to `mcsd`, and changing the project
+> name moves the named volumes.** `compose.yaml` carries a top-level
 > `name: mcsd` and derives both network names from it
 > (`${COMPOSE_PROJECT_NAME:-mcsd}` / `${COMPOSE_PROJECT_NAME:-mcsd}-servers`),
 > so a second stack brought up with `-p <name>` gets its own fabric instead of
-> joining this one. **The network names are unchanged** — a deployment that
-> takes the default still renders `mcsd` and `mcsd-servers`, and the worker
-> still attaches MC containers to `mcsd-servers`.
+> joining this one. A deployment that takes the default renders `mcsd` and
+> `mcsd-servers`, and the worker attaches MC containers to `mcsd-servers`.
 >
-> **The project name is not unchanged, and compose scopes volumes by project.**
-> Until this revision the project defaulted to the checkout's directory name —
-> on the canonical host, `mc-server-dashboard-v2` — so the live data sits in
-> `mc-server-dashboard-v2_db-data`, `mc-server-dashboard-v2_api-storage` and
-> `mc-server-dashboard-v2_seaweedfs-data`. Project `mcsd` does not see those
-> volumes: a plain `docker compose up -d` after this revision creates **empty**
-> `mcsd_*` volumes beside them and boots an empty database and object store,
-> while the old containers are still running and holding the host ports. Nothing
-> is deleted, and nothing warns you either.
+> **Compose scopes volumes by project.** A stack brought up under a different
+> project name — an explicit `-p <name>` or a `COMPOSE_PROJECT_NAME` in `.env`
+> — holds its live data in `<name>_db-data`, `<name>_api-storage` and
+> `<name>_seaweedfs-data`.
+> Project `mcsd` does not see those volumes: a plain `docker compose up -d`
+> creates **empty** `mcsd_*` volumes beside them and boots an empty database and
+> object store, while the old containers are still running and holding the host
+> ports. Nothing is deleted, and nothing warns you either.
 >
-> Copy the data across once, with the stack down. Stop every Minecraft server
-> from the dashboard first — their containers sit on `mcsd-servers` and hold it
-> open — then, from the repo root:
+> To move such a stack onto the pinned name, copy the data across once, with the
+> stack down. Stop every Minecraft server from the dashboard first — their
+> containers sit on the old stack's servers network and hold it open — then,
+> from the repo root (the commands use `mc-server-dashboard-v2` as the example
+> old name; substitute yours):
 >
 > ```sh
 > docker compose -p mc-server-dashboard-v2 down          # the -p is required:
->                                                        # a bare `down` now
+>                                                        # a bare `down`
 >                                                        # resolves to `mcsd`
 >                                                        # and stops nothing
 > for v in db-data api-storage seaweedfs-data; do
@@ -1532,14 +1529,14 @@ container was replaced, so the existing stamp still describes what is running.
 > affected.
 >
 > `scripts/deploy_preflight.sh` reads the db volume name out of the rendered
-> compose config, so between the pull and the copy it looks for `mcsd_db-data`,
-> finds nothing, and reports "no db-data volume yet (fresh deployment)" — its
+> compose config, so until the copy is done it looks for `mcsd_db-data`, finds
+> nothing, and reports "no db-data volume yet (fresh deployment)" — its
 > PostgreSQL-major guard is inert for that window, which is one more reason not
-> to leave the two steps apart.
+> to put the copy off.
 >
-> **A deployment whose project name was already `mcsd`** (an `-p mcsd`
-> invocation, or `COMPOSE_PROJECT_NAME=mcsd` in `.env`) has nothing to do: the
-> pin only writes down what it was already using.
+> **A deployment already under project `mcsd`** (an `-p mcsd` invocation, or
+> `COMPOSE_PROJECT_NAME=mcsd` in `.env`) has nothing to do: the pin only writes
+> down what it is using.
 >
 > **The cheaper alternative, and what it costs.** `COMPOSE_PROJECT_NAME` in
 > `.env` overrides the `name:` key, so pinning your existing project name there
@@ -1550,16 +1547,20 @@ container was replaced, so the existing stamp still describes what is running.
 > ```
 >
 > The trade is the mirror image: the **networks** are then named after that
-> project (`mc-server-dashboard-v2` / `mc-server-dashboard-v2-servers`), so the
-> next `up` recreates every service container, and Minecraft containers that
-> were already running stay on the old `mcsd-servers` — the worker loses
-> container-name DNS to them and their RCON dials fail until each is restarted
-> (the same cycle-your-servers step the #2590 note above describes). Take this
-> path only if you would rather cycle servers than copy volumes.
+> project (`mc-server-dashboard-v2` / `mc-server-dashboard-v2-servers`), so if
+> the stack's networks are named differently (the `mcsd` / `mcsd-servers`
+> default), the next `up` recreates every service container, and Minecraft
+> containers that are already running stay on the old servers network — the
+> worker loses container-name DNS to them and their RCON dials fail until each
+> is restarted (the same cycle-your-servers step the network caveat above
+> describes). Take this path only if you would rather cycle servers than copy
+> volumes.
 
-Stacks that were first deployed before the `api` image pre-created the storage
-mount point have an `api-storage` volume owned by root, so the non-root app
-(uid 10001) cannot write to it. Fix the ownership once, then bring the stack up:
+The `api` image pre-creates the storage mount point owned by the app user, so a
+fresh `api-storage` volume is writable. An `api-storage` volume owned by root
+(its ownership is fixed when the volume is first populated) is not: the non-root
+app (uid 10001) cannot write to it. Fix the ownership once, then bring the stack
+up:
 
 ```sh
 docker run --rm -v mcsd_api-storage:/fix \
@@ -1568,8 +1569,7 @@ docker run --rm -v mcsd_api-storage:/fix \
 
 (The volume name is `<project>_api-storage`, where `<project>` is the project
 name `compose.yaml` pins — `mcsd` — unless you override it with
-`COMPOSE_PROJECT_NAME` / `-p`; a deployment that predates that pin is named
-after its checkout directory instead. `docker volume ls` shows the exact names.)
+`COMPOSE_PROJECT_NAME` / `-p`. `docker volume ls` shows the exact names.)
 
 ## 10. Backups
 
@@ -1625,7 +1625,7 @@ A whole server moves in and out as a single ZIP archive:
 
 | field         | meaning                                              |
 | ------------- | ---------------------------------------------------- |
-| `format`      | the format version — currently `1`                   |
+| `format`      | the format version — `1`                             |
 | `name`        | the source server's name (informational; import uses the request name) |
 | `mc_edition`  | the Minecraft edition (`java`)                       |
 | `mc_version`  | the Minecraft version                                |
@@ -1637,19 +1637,17 @@ re-validated against the version catalog (the same check `create` runs), so an
 unsupported type is rejected. The `export_metadata.json` member
 itself is never written into the new working set.
 
-**Legacy incompatibility (one honest line):** archives produced by the legacy
-system carry a different metadata shape and are **not** importable here; a
-converter to the `format: 1` shape can be written later against this spec.
+Only archives produced by this system's export (`format: 1`) are importable.
 
-## 12. Relay (game ingress, epic #659)
+## 12. Relay (game ingress)
 
 The relay lets players join at `<slug>.<base_domain>` (e.g.
 `amber-falcon-42.mc.example.com`) with no port number and no client mods, and
 it keeps the Worker's IP off the internet — including when the Worker runs
 behind NAT. See `docs/app/RELAY.md` for the full design.
 
-The relay is **opt-in**: the `relay` compose profile is inactive by default, so
-all existing deployments are unaffected. Enable it only when you have a public
+The relay is **opt-in**: the `relay` compose profile is inactive by default.
+Enable it only when you have a public
 IP for the relay host and a wildcard DNS record in place.
 
 ### DNS setup
@@ -1729,14 +1727,14 @@ relay advertises an empty CA bundle and Workers fall back to their system roots.
    | `RELAY_CONTROL_BIND_IP` | leave unset (loopback) for the in-compose worker; the same reachable address for a worker on another host |
    | `MCD_RELAY_TLS_DIR` | host path to `tunnel-cert.pem` / `tunnel-key.pem` |
 
-   The last two go together (issue #2627). `25665` is the Worker dial-back, not
+   The last two go together. `25665` is the Worker dial-back, not
    a player port, so `compose.yaml` publishes it on `127.0.0.1` by default: the
    in-compose worker reaches the relay over the `mcsd` network as `relay:25665`
    and never touches the host port, and the loopback bind is what keeps the
    dial-back out of reach of the Minecraft containers
    ([`../app/SECURITY.md`](../app/SECURITY.md) Section 6). Only a worker on
    another host needs the port off loopback — see
-   [Section 8](#the-relay-tunnel-port-for-a-cross-host-worker-issue-2627). The
+   [Section 8](#the-relay-tunnel-port-for-a-cross-host-worker). The
    three player-facing / Bedrock publications (`25565`, `25675/udp`,
    `19132-19231/udp`) are on every interface either way.
 
@@ -1753,12 +1751,12 @@ default game-port allocator range (`25565..25664`). This is handled
 automatically: when `relay.enabled=true` — which the relay setup above requires —
 the allocator excludes the relay's published host binds (`relay.game_port`,
 `relay.tunnel_port`) from the assignable range, so the first server created on a
-single host is assigned `25566` (issue #1002). Only binds inside the range are
+single host is assigned `25566`. Only binds inside the range are
 excluded; by default that is just 25565, since the tunnel's 25665 sits above
 `range_end`. The exclusion covers auto-assignment, explicit `game_port` requests
 (rejected as taken), and the free-port listings alike.
 
-`MCD_API_PORTS__RANGE_START` (e.g. `25566`) remains as a fallback knob for
+`MCD_API_PORTS__RANGE_START` (e.g. `25566`) is available as a fallback knob for
 shifting the range; the documented single-host relay setup does not need it.
 
 **Residual case:** the exclusion applies at assignment time only. A server
@@ -1771,7 +1769,7 @@ before enabling the relay.
 When a worker or the `api` container is recreated (e.g. a UI-only redeploy), the
 startup reset / worker orphan sweep marks the bounced servers `observed=unknown`;
 the reconciler then waits for the divergence to outlast a **grace window** before
-re-dispatching the start. The grace is per-action (issue #999):
+re-dispatching the start. The grace is per-action:
 
 - **Fast held-restart path** — a same-worker restart where the worker is back
   online **and** still holds a fresh-enough working set (its persistent scratch is
@@ -1784,17 +1782,16 @@ re-dispatching the start. The grace is per-action (issue #999):
   hold a fresh working set (hydrate will run) waits the full
   `reconciler.grace_seconds` (default **660 s ≈ 11 min**). That long grace is
   dominated by the hydrate budget and keeps the reconciler from racing an in-flight
-  first dispatch and spawning a duplicate live instance on another worker (#822), so
+  first dispatch and spawning a duplicate live instance on another worker, so
   it is **not** safe to shorten on these paths.
 
 During the grace window the relay maps `observed=unknown` → `STOPPED` and players
-get a "server stopped" MOTD even though the MC containers are healthy (issue #985);
+get a "server stopped" MOTD even though the MC containers are healthy;
 the fast held path keeps that window short for routine single-host restarts without
 the operator lowering `grace_seconds` below its safety floor.
 
 Both knobs have boot-time safety floors (a warning, not fatal): `grace_seconds`
-must exceed `max(hydrate_timeout + command_timeout, snapshot_timeout, stop_timeout)`
-(#822/#847/#930),
+must exceed `max(hydrate_timeout + command_timeout, snapshot_timeout, stop_timeout)`,
 and `held_start_grace_seconds` must exceed `command_timeout_seconds` (it only covers
 a command-only start). Lowering `grace_seconds` below its floor reopens the
 duplicate-start / stale-snapshot / stale-stop-replay races; prefer the (already
@@ -1810,7 +1807,7 @@ their defaults and `api/src/mc_server_dashboard_api/config.py` for constraints
 
 ### Direct path vs relay path
 
-| | Direct path (today) | Relay path |
+| | Direct path (default) | Relay path |
 |---|---|---|
 | `relay.enabled` (API) | `false` (default) | `true` |
 | Player address | `<worker host>:<game_port>` | `<slug>.<base_domain>` |
@@ -1826,7 +1823,7 @@ the allocator keeps new servers off that port automatically (see
 [Single-host port collision](#single-host-port-collision)).
 
 The two paths are not mutually exclusive at the protocol level (a server is
-reachable both ways during migration); `relay.enabled` governs whether the
+reachable both ways while switching between them); `relay.enabled` governs whether the
 relay control surface is active.
 
 ### Firewall summary (relay host)
@@ -1834,8 +1831,8 @@ relay control surface is active.
 | Port | Protocol | Direction | Purpose |
 |---|---|---|---|
 | 25565 | TCP | inbound | player game connections |
-| 25665 | TCP | host-local (loopback) by default | Worker dial-back (TLS tunnel). Published on `${RELAY_CONTROL_BIND_IP:-127.0.0.1}`, so the in-compose worker (which dials `relay:25665` over `mcsd`) needs nothing inbound here. Open it — and set both `RELAY_CONTROL_BIND_IP` and `MCD_RELAY_TUNNEL_PUBLIC_ENDPOINT` — only for a worker on another host (issue #2627, Section 8) |
-| 25675 | UDP | inbound | Worker's Bedrock QUIC tunnel dial-back (epic #1540, `bedrock.tunnel_listen`) — only when the Bedrock gate is on |
+| 25665 | TCP | host-local (loopback) by default | Worker dial-back (TLS tunnel). Published on `${RELAY_CONTROL_BIND_IP:-127.0.0.1}`, so the in-compose worker (which dials `relay:25665` over `mcsd`) needs nothing inbound here. Open it — and set both `RELAY_CONTROL_BIND_IP` and `MCD_RELAY_TUNNEL_PUBLIC_ENDPOINT` — only for a worker on another host (Section 8) |
+| 25675 | UDP | inbound | Worker's Bedrock QUIC tunnel dial-back (`bedrock.tunnel_listen`) — only when the Bedrock gate is on |
 | 19132-19231 | UDP | inbound | Bedrock player connections (`ports.bedrock_range_start..end` default window) — only when the Bedrock gate is on |
 | 50051 | TCP | internal (the `mcsd` network only — not `mcsd-servers`) | gRPC control plane (not published) |
 | 9090 | TCP | internal (the `mcsd` network only — not `mcsd-servers`) | API Prometheus exposition (not published; off unless `MCD_API_METRICS__ENABLED=true` — see Section 8) |
@@ -1865,8 +1862,8 @@ record — see below) and needs these additional steps:
    Bedrock's "Server address is not correctly formatted" (its message for a
    hostname it can't resolve).
 2. Set `MCD_API_RELAY__BEDROCK_ENABLED=true` in `.env` (see `.env.example`) —
-   this single flag now also gates the relay's own Bedrock listener (issue
-   #1584; see the upgrade note in [Section 9](#9-upgrade)).
+   this single flag also gates the relay's own Bedrock listener (see the
+   Bedrock caveat in [Section 9](#9-upgrade)).
 3. Open the two additional firewall rows above on the relay host: the Bedrock
    QUIC tunnel port (25675/udp) and the client-facing UDP window
    (19132-19231/udp, `compose.yaml`'s relay service already publishes both).
@@ -1874,7 +1871,7 @@ record — see below) and needs these additional steps:
    [Enabling the relay profile](#enabling-the-relay-profile).
 
 No other configuration is required: installing Geyser (Modrinth catalog) and
-Floodgate (jar upload — no Spigot build on Modrinth, issue #1548) on a Paper
+Floodgate (jar upload — no Spigot build on Modrinth) on a Paper
 server through the normal plugin flow is what allocates its `bedrock_port` and
 opens the tunnel on start (`docs/app/BEDROCK.md` "Activation").
 
@@ -1884,7 +1881,7 @@ For a Bedrock-enabled relay expecting load, raise the host's maximum UDP socket
 receive buffer. On each bound Bedrock UDP port the relay requests a 4 MiB
 receive buffer (`SO_RCVBUF`) so it can keep draining inbound RakNet datagrams
 across a transient stall in its outbound QUIC send path, instead of letting the
-kernel drop a burst for every flow on that port (issue #1721). On a default
+kernel drop a burst for every flow on that port. On a default
 Linux host `net.core.rmem_max` is ~208 KiB, so the kernel silently clamps the
 4 MiB request and the enlargement has little effect — the relay logs a
 `UDP receive buffer clamped below requested size` warning when this happens
@@ -1900,7 +1897,7 @@ sysctl -w net.core.rmem_default=7500000
 
 Persist it across reboots with a drop-in such as
 `/etc/sysctl.d/99-mcsd-relay.conf`. This only matters for Bedrock-enabled
-relays under load: the reader/sender decoupling from #1721 already keeps one
+relays under load: the relay's reader/sender decoupling already keeps one
 congested flow from stalling the others regardless of buffer size, so leaving
 `rmem_max` at its default is safe — just less resilient to inbound datagram
 bursts.
@@ -1934,5 +1931,4 @@ Bedrock client. Verify those manually against a live deployment:
    reported `bedrock_address`/`bedrock_port`; no SRV record, the port must be
    typed). Expect Floodgate auth (no Java account) and, on an older Java
    server version, degraded compatibility unless ViaVersion is installed (see
-   `docs/app/BEDROCK.md` "Limitations" — observed live on Paper 1.21.1, issue
-   #1542).
+   `docs/app/BEDROCK.md` "Limitations").

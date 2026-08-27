@@ -1,10 +1,11 @@
 # Release Policy
 
 Versioning and release conventions for Minecraft Server Dashboard v2. This
-document fixes the *policy*. The version source-of-truth, release-notes
-generation, and the tag-driven release workflow are in place (Sections 3 and 4).
-Building and publishing deployable artifacts stays aspirational until a
-packaging/deployment design exists, and is marked *(forthcoming)* below.
+document fixes the *policy*: the version source of truth (Section 4.1),
+release-notes generation (Section 3), and the tag-driven release workflow
+(Section 4.3). A release does not build or publish component artifacts;
+components are built from the checked-out revision by the deployment procedure
+([`DEPLOYMENT.md`](DEPLOYMENT.md); Section 4.2 item 3 below).
 
 > **One version for the whole monorepo.** `api/`, `worker/`, `relay/`, `webui/`,
 > and `proto/` ship together and are kept in lock-step (see
@@ -36,11 +37,12 @@ While the public surface is unstable (`0.x.y`):
 Reaching `1.0.0` is decided separately, when the API and `proto/` contract are
 judged stable enough for production use.
 
-### 1.2 Milestones vs versions
+### 1.2 Scope vs versions
 
-The milestone labels from `REQUIREMENTS.md` (**M1**, M2, …) describe *scope*,
-not release numbers. A milestone may span several releases. Do not encode "M1"
-into a version string; use SemVer numbers for releases.
+Versions are the SemVer tags of Section 2 and number *releases*. Scope is
+defined by [`../REQUIREMENTS.md`](../REQUIREMENTS.md) Section 2 and is
+independent of release numbers: a scope item may span several releases. Do not
+encode scope names into a version string; use SemVer numbers for releases.
 
 ## 2. Tag naming
 
@@ -57,7 +59,7 @@ generated from the pull requests merged into a release, using their titles and
 labels. This avoids the toil and the merge conflicts of a shared `[Unreleased]`
 section, and it stays accurate because it derives from the merge history.
 
-It works because of two conventions the project already follows:
+It works because of two conventions the project follows:
 
 - PRs are **squash-merged**, so each release's history is one commit per PR with
   the PR title as the subject.
@@ -70,7 +72,7 @@ Documentation, with anything else under Other Changes) and with noise (the
 live in [`.github/release.yml`](../../.github/release.yml); the labels driving
 them are defined in [`CONTRIBUTING.md`](CONTRIBUTING.md) Section 5.
 
-A curated `CHANGELOG.md` may be reintroduced if external consumers appear or at
+A curated `CHANGELOG.md` may be introduced if external consumers appear or at
 `1.0.0`. Until then, the generated notes on each GitHub Release are the
 changelog.
 
@@ -84,7 +86,7 @@ the release version. The only checked-in `version` fields, `api/pyproject.toml`
 and `webui/package.json`, are held at a frozen `0.0.0`: their manifests carry a
 `version` field by convention (PEP 621 requires it; npm's manifest expects it),
 but neither is a release version — neither is read at runtime and both are
-intentionally never bumped. This is the simplest correct choice at this stage:
+intentionally never bumped. This is the simplest correct choice:
 one repository-wide SemVer (per the monorepo note above), releases cut by tag
 push (Section 4.3), and nothing that can drift out of step.
 
@@ -113,12 +115,14 @@ fallback, which is correct for local development.
 2. Cut a release by tagging `vX.Y.Z` on a green `main` commit and pushing the
    tag; the release workflow publishes the GitHub Release with notes generated
    from the PRs merged since the previous tag (Section 3).
-3. *(forthcoming)* A release builds and publishes all components (`api/`,
-   `worker/`, `relay/`, `webui/`) from the same tagged commit, so the artifacts
-   of a release come from one source revision. All runtime components now have
+3. A release does not build or publish the components (`api/`, `worker/`,
+   `relay/`, `webui/`): the workflow in Section 4.3 only publishes the GitHub
+   Release, and no registry-publish target exists. The runtime components have
    Dockerfiles and a single-host compose stack
-   ([`DEPLOYMENT.md`](DEPLOYMENT.md)), but no registry-publish target exists yet;
-   the workflow in Section 4.3 only publishes the GitHub Release.
+   ([`DEPLOYMENT.md`](DEPLOYMENT.md)), and the deployment procedure builds them
+   from the checked-out revision, stamping `git describe --tags --always` as
+   the version (Section 4.1) — deploying the tagged commit is what makes a
+   release's artifacts come from one source revision.
 
 ### 4.3 Cutting a release (operator steps)
 
@@ -157,11 +161,12 @@ the main line.
 
 ## 6. Open decisions
 
-- **Artifact build/publish** for `api/` and `worker/` (Section 4.2 item 3):
-  deferred until a packaging/deployment design exists.
+- **Artifact build/publish** (Section 4.2 item 3): not provided; whether a
+  release should build and publish component images to a registry is
+  undecided.
 - **Automated version bumping / PR-driven release cutting:** not adopted —
-  manual tag push (Section 4.3) is the flow for now.
+  manual tag push (Section 4.3) is the flow.
 
-Resolved: the **version source of truth** is the git tag (Section 4.1), and the
+Decided: the **version source of truth** is the git tag (Section 4.1), and the
 **release automation** is the tag-driven workflow (Section 4.3) plus the
 release-notes config (Section 3).

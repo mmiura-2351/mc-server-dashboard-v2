@@ -14,15 +14,13 @@
 > **Scope.** Authentication-hardening behaviour, plus
 > [Section 6](#6-minecraft-server-container-trust-model), which records what a
 > Minecraft server container is trusted to do, which of the two docker networks
-> each service is attached to, and what was measured reachable from where. The
-> tunable thresholds and
-> defaults are owned by [`CONFIGURATION.md`](CONFIGURATION.md) Section 7 and are
+> each service is attached to, and what is reachable from where. This document
+> specifies the values and their semantics; the tunable keys and their defaults
+> are carried by [`CONFIGURATION.md`](CONFIGURATION.md) Section 7 and are
 > referenced, not duplicated, here. Token issuance/verification (FR-AUTH-2) and
 > password hashing (FR-AUTH-3) are separate concerns owned by the `TokenService`
 > and `PasswordHasher` Ports ([`ARCHITECTURE.md`](ARCHITECTURE.md) Section 5.1).
-> The proven baseline for the exact values is the legacy
-> [`SECURITY.md`](https://github.com/mmiura-2351/mc-server-dashboard-api/blob/master/docs/app/SECURITY.md),
-> adopted as-is for M1 (reference only; the FR-AUTH-4 bullets are binding).
+> The FR-AUTH-4 bullets are binding.
 
 ## Table of Contents
 
@@ -57,8 +55,10 @@ The candidate rules:
   **or** at least 16 characters, where *N* is the preset's class count (`middle`
   = 2, `high` = 3; `low` does not enforce this rule). Whitespace counts toward
   the symbol class, so passphrases with spaces get the credit.
-- **Common-password blocklist** — reject passwords on a published list (legacy
-  baseline: SecLists xato-net top-10,000).
+- **Common-password blocklist** — reject passwords on the bundled blocklist:
+  SecLists `Passwords/Common-Credentials/10k-most-common.txt` (the
+  xato-net-derived 10,000 most common passwords), packaged with the API as
+  `common_passwords.txt` and matched case-insensitively.
 - **User-info rejection** — reject a password containing the username or the
   email local-part.
 - **Simple-pattern rejection** — reject 4+ repeated characters or 4+ sequential
@@ -72,12 +72,11 @@ The candidate rules:
 | `middle` *(default)* | 10 | 2 of 4 (or 16+ chars) | on | on | on |
 | `high` | 12 | 3 of 4 (or 16+ chars) | on | on | on |
 
-The default is `middle`. This is a deliberate change from the historical fixed
-posture, which was equivalent to `high`. The default applies only to the
-validation of *newly set* passwords (registration and password change); existing
-password hashes are unaffected. Operators who want the stricter posture set
-`auth.password.policy=high` explicitly. (An admin-UI selector for the preset is a
-possible follow-up; today it is deployment configuration only.)
+The default is `middle`. The preset applies only to the validation of *newly
+set* passwords (registration and password change); existing password hashes are
+unaffected by a preset change. Operators who want the stricter posture set
+`auth.password.policy=high` explicitly. The preset is deployment configuration
+only; no admin-UI selector is provided.
 
 Policy is pure, deterministic domain logic: it depends on no persistent state and
 sits in the domain layer, callable from the registration and password-change use
@@ -163,19 +162,19 @@ record. Where that state lives is decided in Section 3.
 ## 3. Lockout-state home (decision)
 
 [`DATABASE.md`](DATABASE.md) Section 4 deliberately omits this state from the
-core entity model, deferring the storage decision to this document. The
+core entity model, delegating the storage decision to this document. The
 brute-force / lockout state is auth-hardening runtime state, not a core domain
 entity; this section decides its home and keeps it consistent with that note.
 
-**Decision.** M1 persists brute-force / lockout state in the **relational
+**Decision.** Brute-force / lockout state is persisted in the **relational
 database** (the same PostgreSQL instance as the core model,
 [`DATABASE.md`](DATABASE.md) Section 1), in two dedicated auth-hardening tables
-kept **separate from the core entity model**, behind a new API-side Port — call
-it `LoginAttemptStore` (naming per [`ARCHITECTURE.md`](ARCHITECTURE.md)
-Section 6). Business logic depends only on the Port; the M1 adapter is the
-DB-backed implementation, bound at the edge.
+kept **separate from the core entity model**, behind an API-side Port,
+`LoginAttemptStore` (naming per [`ARCHITECTURE.md`](ARCHITECTURE.md) Section 6).
+Business logic depends only on the Port; the adapter is the DB-backed
+implementation, bound at the edge.
 
-The two tables follow the legacy proven baseline:
+The two tables:
 
 - **`login_attempt`** — append-only record of each authentication attempt
   (username, source IP, success flag, failure reason, timestamp). The sliding
@@ -186,9 +185,10 @@ The two tables follow the legacy proven baseline:
   lockout (`locked_until`) and the historic lockout count that drives the
   exponential back-off.
 
-The open-registration per-IP cap ([`CONFIGURATION.md`](CONFIGURATION.md)
-Section 7.4, issue #362) reuses the **same** `login_attempt` table and `(ip,
-created_at)` index rather than a parallel mechanism: a registration is recorded as
+The open-registration per-IP cap
+([`CONFIGURATION.md`](CONFIGURATION.md) Section 7.4) reuses the **same**
+`login_attempt` table and `(ip, created_at)` index rather than a parallel
+mechanism: a registration is recorded as
 a row marked so it is isolated from the login failure counts, and the per-IP cap
 is a `COUNT` over those marked rows within its window. The same prune triggers age
 the rows out, and they fold the registration window into their horizon (below) so a
@@ -196,9 +196,9 @@ marked row survives its full window rather than being pruned at the login horizo
 
 Because these are auth-hardening state and not part of the core graph, they are
 specified here rather than in [`DATABASE.md`](DATABASE.md), and they do not
-participate in the core cascade rules. Column-level detail lands with epic #4
-when the schema is implemented; this document fixes only their existence, purpose,
-and the Port seam.
+participate in the core cascade rules. Column-level detail lives in the schema
+(the API's Alembic migrations); this document fixes only their existence,
+purpose, and the Port seam.
 
 **Cleanup.** `login_attempt` is append-only and grows without bound otherwise, so
 rows older than the longest configured sliding window are pruned through two
@@ -226,8 +226,8 @@ eagerly.
 
 1. **In-memory store inside the API process** — counters and lockouts held in
    process memory. Simplest possible, no schema, no cleanup job. The
-   single-API-instance assumption (NFR-SCALE-1) makes in-process state *correct*
-   today: there is no second instance to disagree with. **Rejected** because a
+   single-API-instance assumption (NFR-SCALE-1) makes in-process state *correct*:
+   there is no second instance to disagree with. **Rejected** because a
    process restart clears all state, which hands an attacker a free lockout reset
    — restarting the API (a deploy, a crash, an `OOM`) wipes every active lockout
    and every in-window failure count. For a control surface that can start/stop
@@ -240,17 +240,15 @@ eagerly.
 
 **Rationale.** The deciding factor is durability across restart versus
 operational simplicity. The database already exists, is already a hard
-dependency, and gives the state durability for free — a restart no longer resets
-lockouts — at the cost of two small tables and one prune job, which is cheap. This
-also matches the legacy system's proven design (the `BruteForceService` over
-`login_attempts` / `account_lockouts`), so M1 adopts a known-good shape rather
-than inventing one. The in-process option would be simpler but trades away the
-one property (surviving restart) that makes lockout meaningful against a
-determined attacker. Crucially, the choice is sealed behind the
-`LoginAttemptStore` Port (NFR-PORT-1): if M1's single-instance assumption ever
-changes, or a deployment prefers in-memory or a cache, the adapter is swapped
-without touching the brute-force use case. The in-process correctness note above
-is therefore a property of the *current adapter*, not of the design.
+dependency, and gives the state durability for free — a restart does not reset
+lockouts — at the cost of two small tables and one prune job, which is cheap.
+The in-process option would be simpler but trades away the one property
+(surviving restart) that makes lockout meaningful against a determined attacker.
+Crucially, the choice is sealed behind the `LoginAttemptStore` Port
+(NFR-PORT-1): if the single-instance assumption (NFR-SCALE-1) changes, or a
+deployment prefers in-memory or a cache, the adapter is swapped without touching
+the brute-force use case. The in-process correctness note above is therefore a
+property of the *chosen adapter and deployment*, not of the design.
 
 ---
 
@@ -274,10 +272,10 @@ thereby evade or poison the per-IP brute-force counter.
 
 ## 5. Observability endpoints
 
-The API exposes two unauthenticated probes on its HTTP port, for orchestrators
-(issue #282). Like the rest of the HTTP API they are namespaced under `/api`
-(issue #498) — the probes share the `/api` prefix rather than carving a
-root-level exception out of the SPA fallback (WEBUI_SPEC 7.7):
+The API exposes two unauthenticated probes on its HTTP port, for orchestrators.
+Like the rest of the HTTP API they are namespaced under `/api` — the probes
+share the `/api` prefix rather than carving a root-level exception out of the
+SPA fallback (WEBUI_SPEC 7.7):
 
 - `GET /api/healthz` — liveness; reports the database-connectivity readiness inline.
 - `GET /api/readyz` — readiness; 200 with per-component booleans when every critical
@@ -293,20 +291,17 @@ listener, described below.
 ### The port-publishing argument does not cover the HTTP port
 
 Anything mounted on the API's HTTP port is on the internet in this repo's
-recommended topology. The `cloudflared` service (`compose.yaml`, issue #1090)
-forwards the whole public hostname to `api:8000`, path-scoped by nothing, so the
-loopback publish (`127.0.0.1:${API_HTTP_PORT}:8000`) constrains only *host*
-reachability — not the tunnel, which reaches the API over the `mcsd`
-network. Any statement of the form "Compose publishes only the API port, so X is
-not exposed" is therefore false for X on that port. (This document made exactly
-that claim about `/api/metrics` from #285 until #2565; the tunnel landed after it
-and invalidated the premise. The claim was confirmed false by probe on both the
-dev and production deployments, which returned the full exposition to an
-unauthenticated request.)
+recommended topology. The `cloudflared` service (`compose.yaml`) forwards the
+whole public hostname to `api:8000`, path-scoped by nothing, so the loopback
+publish (`127.0.0.1:${API_HTTP_PORT}:8000`) constrains only *host*
+reachability — not the tunnel, which reaches the API over the `mcsd` network.
+Any statement of the form "Compose publishes only the API port, so X is not
+exposed" is therefore false for X on that port: the tunnel returns whatever is
+mounted there to an unauthenticated request.
 
-`/api/healthz` and `/api/readyz` are reachable that way today, and are accepted
-as such on their content. Tightening `/api/readyz` (and the OpenAPI schema/docs
-routes, which are exposed the same way) is tracked separately in issue #2568.
+`/api/healthz` and `/api/readyz` are reachable that way, and are accepted as
+such on their content. Tightening `/api/readyz` (and the OpenAPI schema/docs
+routes, which are exposed the same way) is not implemented.
 
 ### The Prometheus exposition (`metrics.*`)
 
@@ -319,7 +314,7 @@ that — but it is not an absolute. `cloudflared` is a sibling container on the
 same network and would route to `api:9090` just as readily if an operator mapped
 a second public hostname to it. The repo cannot enforce that (the mapping lives
 in the Cloudflare Zero Trust dashboard), which is why "do not add one" is
-documented below. This is the posture the relay already takes for its own
+documented below. This is the same posture the relay takes for its own
 metrics endpoint (RELAY.md Section 13).
 
 The content is aggregates only — no names, ids, emails or IPs, and the label
@@ -345,16 +340,17 @@ any scraper. What keeps it private differs by deployment:
   entry to interpolate into. The two things not to do are add one, and map a
   second Cloudflare public hostname to the port.
 
-  **What "only the `mcsd` network" is worth.** It used to be worth little: the
-  Worker attached every MC server container it creates to that same network, so
-  the phrase meant "and anything running inside a managed Minecraft server". Since
-  issue #2590 those containers sit on a separate `mcsd-servers` network and cannot
-  reach `mcsd` at all, so an uploaded plugin can no longer read the exposition —
-  see [Section 6](#6-minecraft-server-container-trust-model), which also states
-  what that split does not cover. What remains on `mcsd` is first-party only:
-  `db`, `seaweedfs`, `relay`, `cloudflared` and the Worker. The `cloudflared`
-  caveat above is the live one — it would route a second public hostname to
-  `api:9090` as readily as to `api:8000`.
+  **What "only the `mcsd` network" is worth.** The phrase would be worth little
+  if the Minecraft server containers shared that network — it would then mean
+  "and anything running inside a managed Minecraft server". They do not: the
+  Worker attaches every MC server container it creates to a separate
+  `mcsd-servers` network, from which `mcsd` is unreachable, so an uploaded
+  plugin cannot read the exposition — see
+  [Section 6](#6-minecraft-server-container-trust-model), which also states
+  what that split does not cover. `mcsd` is first-party only: `db`,
+  `seaweedfs`, `relay`, `cloudflared` and the Worker. The `cloudflared` caveat
+  above is the live one — it would route a second public hostname to `api:9090`
+  as readily as to `api:8000`.
 - **Non-compose runs** — bare metal, systemd, or any process started outside
   compose (DEPLOYMENT.md Section 8). Here `0.0.0.0` genuinely is a **second
   network-reachable port**, and a reverse proxy in front of the API's HTTP port
@@ -381,7 +377,7 @@ rather than assert that something is safe.
 
 ### The two networks
 
-`compose.yaml` ships **two** user-defined networks (issue #2590):
+`compose.yaml` ships **two** user-defined networks:
 
 | Network | Members | What runs there |
 |---|---|---|
@@ -398,68 +394,66 @@ dials — so being adjacent to it grants no service to talk to.
 
 Enumerated 2026-08-02 by TCP connect from inside a **booted** Minecraft server
 container on `mcsd-servers`, by service name and by raw control-plane IP, with a
-positive control from a container on `mcsd` confirming each target was live:
+positive control from a container on `mcsd` confirming each target was live. Two
+entries, marked (†) and (‡), are closed by a bind or a flag rather than by the
+network split; their control column reports the post-deploy probe of 2026-08-25
+from the `api` container (an `mcsd` peer), not the 2026-08-02 enumeration:
 
 | Target | From `mcsd` (control) | From `mcsd-servers` |
 |---|---|---|
-| `seaweedfs` `8333` S3, `8888` filer, `9333` master, `8080` volume, `8181` Iceberg REST (‡), `18333` S3 gRPC, `18080` volume gRPC, `18888` filer gRPC, `19333` master gRPC | all open | all blocked |
+| `seaweedfs` `8333` S3, `8888` filer, `9333` master, `8080` volume, `18333` S3 gRPC, `18080` volume gRPC, `18888` filer gRPC, `19333` master gRPC; `8181` Iceberg REST (‡) | all open; `8181` refused — disabled by flag (‡) | all blocked |
 | `api` `8000`, `api` `50051` | open | blocked |
 | `db` `5432` | open | blocked |
-| `cloudflared` `20241` | open (†) | blocked |
+| `cloudflared` `20241` | refused — loopback bind (†) | blocked |
 | `grpcurl -plaintext seaweedfs:18333 list` | lists `SeaweedS3IamCache`, `SeaweedS3LifecycleInternal` | dial fails |
 
 Blocked, not refused: the packets are dropped between bridges, so this holds by
 raw IP as well as by name — a plugin that hardcodes the control-plane subnet
 gets the same result as one that resolves `api`.
 
-(†) **`cloudflared` `20241` — measured before the bind changed, not re-measured
-since (issue #2601).** That listener carries cloudflared's own `/metrics`,
-`/debug/pprof/` and `/diag/*`, all unauthenticated, and with no `--metrics`
-argument cloudflared binds it on `0.0.0.0` — which is what the `open` column
-records for a peer on `mcsd`. `compose.yaml` now passes
+(†) **`cloudflared` `20241` — a loopback bind, independent of topology.** That
+listener carries cloudflared's own `/metrics`, `/debug/pprof/` and `/diag/*`,
+all unauthenticated, and with no `--metrics` argument cloudflared binds it on
+`0.0.0.0` — open to every peer on `mcsd`. `compose.yaml` passes
 `--metrics 127.0.0.1:20241` to the `tunnel` command, so the listener binds the
 container's own loopback interface and no peer on either network has a path to
 it. That is a control independent of topology: segmentation removes the
 `mcsd-servers` path, the loopback bind removes the `mcsd` path as well, and
-neither depends on the other holding. **The row above still reports the
-2026-08-02 probe**, because the flag ships in `compose.yaml` but the deployment
-it describes has not been rebuilt on it. Re-probe from an `mcsd` peer after the
-next deploy — `docker compose exec api python -c "import urllib.request;
-urllib.request.urlopen('http://cloudflared:20241/metrics', timeout=3)"`,
-expecting a connection refusal — and record the result here; issue #2601 stays
-open until then.
+neither depends on the other holding. Probed 2026-08-25 on the canonical host
+after a deploy, from the `api` container — `docker compose exec api python -c
+"import urllib.request;
+urllib.request.urlopen('http://cloudflared:20241/metrics', timeout=3)"` — and
+refused (`Errno 111`). The same command re-checks it after any change to the
+`cloudflared` command line.
 
-(‡) **`seaweedfs` `8181` — the listener is now disabled by flag; the row reports
-the 2026-08-02 probe, taken before it was (issue #2626).** `compose.yaml`'s
-`weed server` command now passes `-s3.port.iceberg=0`, which `weed server -h` on
-the pinned `chrislusf/seaweedfs:4.41` documents as `Iceberg REST Catalog server
-listen port (0 to disable)`. Verified 2026-08-21 against that image outside
-compose, on a throwaway internal docker network: with the flag, `8181` is absent
-from `netstat -lnt` in the container and a peer container's
-`GET http://<container>:8181/v1/config` is refused; without it, the same request
-answers 200. The other eight listeners are unchanged, and `8333` and `8888` still
-answer from a peer. **The row above still reports the 2026-08-02 probe**, because
-the flag ships in `compose.yaml` but the deployment it describes has not been
-rebuilt on it. Re-probe from an `mcsd` peer after the next deploy —
-`docker compose exec api python -c "import urllib.request;
-urllib.request.urlopen('http://seaweedfs:8181/', timeout=3)"`, expecting a
-connection refusal — and record the result here; issue #2626 stays open until
-then.
+(‡) **`seaweedfs` `8181` — disabled by flag.** `compose.yaml`'s `weed server`
+command passes `-s3.port.iceberg=0`, which `weed server -h` on the
+`chrislusf/seaweedfs` image pinned in `compose.yaml` documents as `Iceberg REST
+Catalog server listen port (0 to disable)`. Verified 2026-08-21 against that
+image at `4.41`, outside compose, on a throwaway internal docker network: with
+the flag, `8181` is absent from `netstat -lnt` in the container and a peer
+container's `GET http://<container>:8181/v1/config` is refused; without it, the
+same request answers 200. The other eight listeners are unaffected, and `8333`
+and `8888` answer from a peer. Probed 2026-08-25 on the canonical host after a
+deploy, from the `api` container — `docker compose exec api python -c "import
+urllib.request; urllib.request.urlopen('http://seaweedfs:8181/', timeout=3)"` —
+and refused (`Errno 111`). The same command re-checks it after an image bump or
+a change to the `weed server` command line.
 
 **This covers docker-network paths only.** A port **published to the host** on a
 non-loopback interface is reachable from `mcsd-servers` through the bridge
 gateway (`172.17.0.1`, each bridge's own gateway address, or the host's LAN
 address), because Docker DNATs published ports from every interface.
 Segmentation removes the docker-network path; it does not remove host-published
-ports. Two cases, and the second is not hypothetical:
+ports. Two cases:
 
 - **The API is loopback by default, and refused from both networks as shipped.**
   `API_HTTP_BIND_IP` defaults to `127.0.0.1`. But `API_HTTP_BIND_IP=0.0.0.0` and
   `API_HTTP_BIND_IP=<lan-ip>` are documented, supported configurations
   ([`../dev/DEPLOYMENT.md`](../dev/DEPLOYMENT.md) Section 8), and either one
-  re-opens `api:8000` to every Minecraft container on the host.
+  opens `api:8000` to every Minecraft container on the host.
 - **The relay publishes its player ports on every interface; only the Worker
-  dial-back is bind-scoped (issue #2627).** With the `relay` profile active,
+  dial-back is bind-scoped.** With the `relay` profile active,
   `compose.yaml` publishes `25565/tcp`, `25675/udp` and `19132-19231/udp` with
   **no host IP**, and `25665/tcp` on `${RELAY_CONTROL_BIND_IP:-127.0.0.1}`. So on
   any relay-enabled deployment a Minecraft container reaches the three
@@ -469,22 +463,21 @@ ports. Two cases, and the second is not hypothetical:
   unbound one gets a refusal, not a service).
 
   **`25565` and the Bedrock UDP sets reaching a plugin is accepted, not
-  scheduled (decided 2026-08-20).** They are the product: a relay that players
-  cannot reach relays nothing, and Docker's DNAT does not distinguish a packet
-  from a Minecraft container from one off the internet. What a plugin gains
-  there is what any internet client already has — the relay's own player
-  listener, behind its per-IP hygiene caps ([`RELAY.md`](RELAY.md) Section 11) —
-  not a control-plane surface. `25675/udp` is the Bedrock **Worker** dial-back
-  and by that argument would be bind-scoped like `25665`; it is not, because the
-  decision took a single bind variable for the Java control port. It stays a
-  recorded residual: reachable from a Minecraft container whenever the Bedrock
-  gate is on.
+  scheduled.** They are the product: a relay that players cannot reach relays
+  nothing, and Docker's DNAT does not distinguish a packet from a Minecraft
+  container from one off the internet. What a plugin gains there is what any
+  internet client already has — the relay's own player listener, behind its
+  per-IP hygiene caps ([`RELAY.md`](RELAY.md) Section 11) — not a control-plane
+  surface. `25675/udp` is the Bedrock **Worker** dial-back and by that argument
+  would be bind-scoped like `25665`; it is not, because the bind variable is a
+  single one, scoped to the Java control port by decision. It is a recorded
+  residual: reachable from a Minecraft container whenever the Bedrock gate is
+  on.
 
-  **`25665`, the Worker dial-back, is the one that was closed — by the bind, and
-  not yet re-measured on a rebuilt deployment.** It was published on every
-  interface up to this revision. What established that is a relay-shaped
-  listener (published with no host IP) on a container attached to `mcsd`,
-  TCP-connect probed from the servers network:
+  **`25665`, the Worker dial-back, is closed by the bind.** Why the bind is the
+  control, and not the network split: a relay-shaped listener (published with
+  no host IP) on a container attached to `mcsd`, TCP-connect probed from the
+  servers network, shows
 
   ```text
   172.20.0.1:<port>      servers-bridge gateway           OPEN
@@ -496,17 +489,14 @@ ports. Two cases, and the second is not hypothetical:
   The last line is the finding: the container is unreachable at its `mcsd`
   address and reachable at three host addresses at the same time. Segmentation
   blocks the docker-network path to a service while the host-published path to
-  the *same* service stays open. `RELAY_CONTROL_BIND_IP` now defaults to
+  the *same* service stays open. `RELAY_CONTROL_BIND_IP` defaults to
   `127.0.0.1`, which removes all three — Docker's DNAT rule then matches only
   packets destined to loopback, the same mechanism that makes the API refuse
-  from both networks in the case above. **That is the shipped configuration, not
-  a measurement**: the bind ships in `compose.yaml` but the deployment this
-  section describes has not been rebuilt on it, and no Minecraft server
-  container was running to probe from when it landed. Re-probe from inside a
-  **booted** MC server container after the next deploy, by every host address —
-  gateways from `docker network inspect mcsd-servers` / `mcsd`, the rest from
-  `ip -4 addr` on the host — and record the result here; issue #2627 stays open
-  until then:
+  from both networks in the case above. Probed 2026-08-25 on the canonical host
+  after a deploy, from inside a **booted** MC server container, by every host
+  address — gateways from `docker network inspect mcsd-servers` / `mcsd`, the
+  rest from `ip -4 addr` on the host — with `25665` refused at all four and
+  `25565` OPEN at all four. The probe, for re-checking after a compose change:
 
   ```sh
   docker exec <mc-container> sh -c '
@@ -525,8 +515,8 @@ ports. Two cases, and the second is not hypothetical:
     done'
   ```
 
-  Expected: `25665` **refused** at every host address, `25565` still OPEN at
-  every one of them. Refused, not blocked — the loopback bind leaves no DNAT
+  Expected: `25665` **refused** at every host address, `25565` OPEN at every
+  one of them. Refused, not blocked — the loopback bind leaves no DNAT
   rule to match and no listener to answer, so the connect gets an RST, which is
   the API's mechanism above and not the inter-bridge packet drop this section
   calls "blocked"; the probe above prints `blocked` for any failed connect, so
@@ -548,23 +538,23 @@ security model, and the following remain true:
   traffic on that segment. Impact is bounded to other Minecraft servers rather
   than the object store or the worker credential, but it is not zero. Closing it
   needs a per-server network, or `enable_icc=false` on `mcsd-servers` plus
-  dropping `NET_RAW`; both are out of scope for the segmentation change and are
-  tracked with the rest of the container hardening (issue #2600).
+  dropping `NET_RAW`; neither is implemented — both belong with the rest of the
+  container hardening (next item).
 - **Outbound internet is unrestricted, on purpose.** `mcsd-servers` is a normal
   bridge, not `internal: true`: Minecraft servers need egress for Mojang
   online-mode authentication and for plugin and mod downloads. A hostile plugin
   can therefore still exfiltrate anything it can read inside its own container
   and fetch a second stage.
-- **The host, not the network.** MC containers currently run as root with the
-  default capability set, and the worker holds the Docker socket. Container-level
+- **The host, not the network.** MC containers run as root with the default
+  capability set, and the worker holds the Docker socket. Container-level
   hardening — dropping capabilities, non-root execution, TLS on the control and
-  data planes — is defence in depth underneath this boundary and is tracked
-  separately (issue #2600). Neither is a substitute for the other: hardening is a
-  checklist where every item must land, segmentation removes the class in one
-  topology change.
-- **`mcsd` itself is not hardened — only its membership changed, and the rest is
-  an accepted residual.** Everything on it still has unauthenticated read, write
-  and delete over **every tenant's** worlds, snapshots and JARs: the SeaweedFS
+  data planes — is defence in depth underneath this boundary, not part of it,
+  and is not implemented.
+  Neither is a substitute for the other: hardening is a checklist where every
+  item must land, segmentation removes the class in one topology choice.
+- **`mcsd` itself is not hardened; that is an accepted residual.** Everything
+  on it has unauthenticated read, write and delete over **every tenant's**
+  worlds, snapshots and JARs: the SeaweedFS
   filer (`8888`), master (`9333`) and volume (`8080`) ports take no credential,
   and the S3 gRPC port (`18333`) serves reflection uncredentialed, handing out
   `SeaweedS3IamCache` and `SeaweedS3LifecycleInternal` — and behind that
@@ -573,23 +563,22 @@ security model, and the following remain true:
   does not guard that path. Only the S3 gateway (`8333`) enforces on every
   data-path call (its `/status` probe answers 200 uncredentialed, which is what
   the compose healthcheck uses). The ninth listener, the Iceberg REST port
-  (`8181`), no longer binds — see the (‡) footnote above. Who reaches the
-  remaining eight: after segmentation the long-running members of `mcsd` are
+  (`8181`), does not bind — see the (‡) footnote above. Who reaches the
+  remaining eight: the long-running members of `mcsd` are
   `api`, `db`, `worker`, `relay` and `cloudflared` (the table above names three
   more — `seaweedfs` itself, and the one-shots `migrate` and
   `seaweedfs-lifecycle`, which run to completion and exit). Membership of `mcsd`
   is therefore equivalent to object-store admin for those five, two of which,
   `relay` and `cloudflared`, terminate internet traffic.
 
-  **That is accepted, not scheduled (issue #2626, decided 2026-08-20).** Each of
-  the five is a first-party control-plane service, and the only control that
-  would close the surface is cluster-wide mTLS: `weed server` exposes no
-  `-jwt.*` flags (SeaweedFS carries JWT in `security.toml`), and
-  `security.toml`'s `grpc.s3` mTLS cannot be scoped to the S3 gRPC port —
-  turning it on escalates to mTLS across the whole cluster, all-or-nothing
-  (established on PR #2608, closed without a change). The one reduction
-  available without that escalation was taken instead: `-s3.port.iceberg=0`,
-  above. So read "first-party" in the table above as a statement about *who is
+  **That is accepted, not scheduled.** Each of the five is a first-party
+  control-plane service, and the only control that would close the surface is
+  cluster-wide mTLS: `weed server` exposes no `-jwt.*` flags (SeaweedFS carries
+  JWT in `security.toml`), and `security.toml`'s `grpc.s3` mTLS cannot be
+  scoped to the S3 gRPC port — turning it on escalates to mTLS across the whole
+  cluster, all-or-nothing. The one reduction available without that escalation
+  is applied instead: `-s3.port.iceberg=0`, above. So read "first-party" in the
+  table above as a statement about *who is
   attached*, never about what an attached process would have to prove — a
   compromise of `relay` or `cloudflared` lands on a network where every storage
   listener but the S3 gateway answers with no credential, and `18333`'s IAM RPCs
@@ -597,28 +586,27 @@ security model, and the following remain true:
 - **Two members of `mcsd` terminate internet traffic.** `relay` accepts arbitrary
   inbound connections — players on `25565` and `19132-19231/udp`, Worker
   dial-back tunnels on `25665` and `25675/udp` — and `cloudflared` terminates a
-  public tunnel. Compromising either puts an attacker exactly where the Minecraft
-  containers were just removed from, with the unauthenticated storage surface
-  above in reach. Segmentation raised the bar for a hostile *plugin*; it did not
-  raise it for a hostile *packet* arriving at the relay. And the relay is still
-  reachable from **both** directions: its player publications carry no host IP,
-  so a Minecraft container reaches them through the host gateway even though
-  `relay` is not on `mcsd-servers` — the plugin path to the relay's *player*
-  listener survives segmentation. What no longer survives is the plugin path to
-  the **Worker dial-back**: `25665` is published on loopback by default (issue
-  #2627, see "What an MC container can reach" above).
+  public tunnel. Compromising either puts an attacker on `mcsd`, with the
+  unauthenticated storage surface above in reach. Segmentation raises the bar
+  for a hostile *plugin*; it does not raise it for a hostile *packet* arriving
+  at the relay. And the relay is reachable from **both** directions: its player
+  publications carry no host IP, so a Minecraft container reaches them through
+  the host gateway even though `relay` is not on `mcsd-servers` — the plugin
+  path to the relay's *player* listener survives segmentation. The plugin path
+  to the **Worker dial-back** does not: `25665` is published on loopback by
+  default (see "What an MC container can reach" above).
 - **Host-published ports bypass the split entirely.** See the note at the end of
   "What an MC container can reach": publishing the API off loopback, and the
   relay's `25565` / `25675/udp` / `19132-19231/udp`, are reachable from every
   Minecraft container on the host. The bind default on the relay's `25665`
   removes that one port from the list; it does not change the mechanism for the
   rest.
-- **The split applies at a server's next start, not at upgrade.** A Minecraft
-  container that was already running when the operator upgraded stays attached to
-  `mcsd` and keeps its full pre-upgrade reach until it is restarted — measured
-  after a real upgrade. The reachability table above describes a server started
-  on the current topology. See [`../dev/DEPLOYMENT.md`](../dev/DEPLOYMENT.md)
-  Section 9.
+- **A running server keeps the network it was started on.** An MC container is
+  attached to its network when the Worker starts it and is never re-attached; a
+  container already running when the server network changes keeps the earlier
+  network's full reach until it is restarted. The reachability table above
+  describes a server started on the current topology. See
+  [`../dev/DEPLOYMENT.md`](../dev/DEPLOYMENT.md) Section 9.
 - **The server's own working directory.** Everything bind-mounted into an MC
   container — its world, its `server.properties`, its RCON password — is
   readable and writable by the code running there. That is inherent to running

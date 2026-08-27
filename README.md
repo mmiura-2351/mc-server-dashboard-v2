@@ -11,11 +11,12 @@ into it rather than duplicating it.
 
 ## Philosophy & goals
 
-v2 is a greenfield rebuild of the legacy `mc-server-dashboard-api`, which ran the
-API and every Minecraft process on one machine with a fixed role set and no
-multi-tenancy. The rebuild removes those structural limits.
+The system manages Minecraft servers for small communities. It keeps the
+machine that owns state and business logic apart from the machines that run
+Minecraft, treats the way a server is run as a pluggable backend, and decides
+what each member may do per operation inside a Community.
 [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) is the source of truth for scope;
-the resolved design principles are:
+the design principles are:
 
 - **API ↔ Worker separation.** The authoritative API is split from the machines
   that run Minecraft. Execution is delegated to **Workers** on separate hosts,
@@ -27,23 +28,22 @@ the resolved design principles are:
   (REQUIREMENTS.md Section 8).
 - **The Community model.** Resources belong to **Communities** — a lightweight
   multi-tenancy for small groups. A user account is global and may join many
-  Communities, holding different roles in each (REQUIREMENTS.md Section 6.2,
-  Section 6.3).
+  Communities, holding different roles in each (REQUIREMENTS.md Sections 6.2
+  and 6.3).
 - **Two-layer authorization.** Layer 1 is visibility: non-members get no
   existence signal for a Community's resources. Layer 2 is operations within a
   Community, decided by custom roles plus per-resource grants
   (REQUIREMENTS.md Section 6.4).
 - **Simplicity first, with the right seams.** Target scale is small (a few dozen
-  Communities, tens of concurrent servers). M1 implementations stay simple, but
+  Communities, tens of concurrent servers). Implementations stay simple, but
   the abstractions never assume small scale in their *shape*
   (REQUIREMENTS.md Section 1.1).
-- **Correctness over backward compatibility.** Compatibility with the legacy
-  codebase is deliberately abandoned; the legacy system is reference-only
-  (REQUIREMENTS.md Section 1).
 
 ## Architecture
 
-The system is two cooperating services plus a shared contract and a browser UI:
+The system is two cooperating services plus a shared contract and a browser UI;
+an optional game-ingress relay ([`docs/app/RELAY.md`](docs/app/RELAY.md)) lets
+Workers behind NAT serve players without exposing their IP.
 
 ```
         ┌───────────┐   HTTP (same-origin)   ┌──────────────────────────┐
@@ -88,6 +88,7 @@ contract.
 |---|---|
 | [`api/`](api/README.md) | Authoritative API service (Python / FastAPI). |
 | [`worker/`](worker/README.md) | Stateless Minecraft execution agent (Go). |
+| [`relay/`](relay/README.md) | Optional game-ingress relay (Go): hostname-routed player traffic; NAT'd Workers dial back to it. |
 | [`webui/`](webui/README.md) | Single-page web UI (React + TypeScript + Vite). |
 | [`proto/`](proto/README.md) | Shared protobuf / gRPC control-plane contract (buf). |
 | [`docs/`](docs/README.md) | Long-form requirements, architecture, and developer docs. |

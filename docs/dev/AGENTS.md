@@ -18,12 +18,12 @@ surgical changes), [`CONTRIBUTING.md`](CONTRIBUTING.md) (the change workflow),
 On the canonical host, the repo root checkout is what `docker compose` builds
 and deploys (`compose.yaml` + `.env`; [`DEPLOYMENT.md`](DEPLOYMENT.md)
 Section 4). A stray branch or dirty tree silently changes what the next
-rebuild ships (issue #432).
+rebuild ships.
 
 - **Never** run `git checkout` / `git switch` / `gh pr checkout` in the repo
   root. All branch work happens in a worktree (Section 2).
 - The `post-checkout` hook auto-restores the root checkout to `main` whenever
-  a checkout moves it off (issue #809). Edge cases:
+  a checkout moves it off. Edge cases:
   - **Dirty tree** — auto-restore is refused to protect the changes; a loud
     error is printed. Stash or commit, then `git checkout main` manually.
   - **Intentional inspection** — set `MCSD_ALLOW_PRIMARY_BRANCH=1` to suppress
@@ -41,10 +41,12 @@ rebuild ships (issue #432).
   `docker compose up` in **any** checkout of this repository — the deploy root
   or your own worktree — resolves to project `mcsd`, *which is the live
   deployment*: it recreates the live containers and mounts the live volumes.
-  Nothing in the command or the directory signals that (issue #2609). Before
-  the pin the same command from a worktree got its own project but still landed
-  its containers on the live `mcsd` network, container-name DNS included,
-  because a named network is shared rather than namespaced by project.
+  Nothing in the command or the directory signals that. The project name alone
+  is not the whole isolation either: a named network is shared rather than
+  namespaced by project, so a stack that kept the live network names would
+  land its containers on the live `mcsd` network, container-name DNS included,
+  even under its own project name — which is why `compose.yaml` derives the
+  network names from `${COMPOSE_PROJECT_NAME}` (next bullet).
 - **A probe stack is a different *project*, and that means all of these, not
   just the first.** The recipe exists for a sanctioned probe that was
   explicitly asked for; it does not lift the rule above.
@@ -92,28 +94,26 @@ Each one succeeds, or appears to; the damage surfaces later.
 - **The scratchpad is shared across concurrently running agents, not
   session-private, so any generically named file a later command reads back
   collides by construction.** Mutation-testing production code to prove a test
-  is a real pin has an edit-then-revert shape; the reflex revert
+  is a real pin has an edit-then-revert shape, and the obvious revert
   `git checkout <path>` restores from the index, not `HEAD`, eating any
   unstaged edits with no confirmation, no reflog entry, nothing to recover
-  from — so PR #2521 copied the file aside and restored from the copy instead.
-  But two agents mutating the same file — normal, not exotic, when several
-  review or implement against one module — both write
+  from — so the temptation is to copy the file aside and restore from the
+  copy. But two agents mutating the same file — normal, not exotic, when
+  several review or implement against one module — both write
   `<scratchpad>/app.py.orig`; the restore then silently writes the *other*
   agent's file into this worktree, with no error, no conflict marker, and a
-  plausible-looking `git diff` (PR #2591). Every consumer that reads a file
-  back has this shape: `gh pr create --body-file <scratchpad>/pr_body.md`
-  opened PR #2746 carrying a concurrent agent's body and its
-  `Resolves #2605`, which would have closed the wrong issue at merge. So name
-  uniquely whatever a later command reads back — PR and issue bodies, review
-  comments, generated patches, backups: `mktemp`, or embed the agent id or
-  branch name. Better still, keep no file: `git checkout -- <path>` reverts a
-  mutation on an otherwise-clean file with no copy to collide.
+  plausible-looking `git diff`. Every consumer that reads a file back has this
+  shape: `gh pr create --body-file <scratchpad>/pr_body.md` opens a PR carrying
+  a concurrent agent's body and its `Resolves #N`, which closes the wrong issue
+  at merge. So name uniquely whatever a later command reads back — PR and issue
+  bodies, review comments, generated patches, backups: `mktemp`, or embed the
+  agent id or branch name. Better still, keep no file: `git checkout -- <path>`
+  reverts a mutation on an otherwise-clean file with no copy to collide.
 - **`--no-verify` cannot establish what the gate establishes.** The rule is in
   [`CONTRIBUTING.md`](CONTRIBUTING.md) Section 4; it is unconditional because a
   bypass is only known to have been harmless *afterwards* — the very fact the
   gate exists to establish beforehand. "Only the known flake" is a prediction,
-  not a result. Escalate a flaky gate as an issue (#2513) and re-run instead
-  (PR #2517).
+  not a result. Escalate a flaky gate as an issue and re-run instead.
 - **`pgrep -f <pattern>` matches the waiting shell itself.** `pgrep` omits only
   its own process, not the shell that invoked it — whose command line contains
   the pattern. So `until ! pgrep -f "make check"; do sleep 30; done` never
@@ -122,16 +122,20 @@ Each one succeeds, or appears to; the damage surfaces later.
   block; if a poll is genuinely needed, bracket one character so the pattern
   cannot match its own literal text — `pgrep -f "make chec[k]"` matches the
   gate but not the waiter. A self-deadlocked waiter is indistinguishable from a
-  contended host (#2513), so it never diagnoses itself.
+  contended host, so it never diagnoses itself.
 - **Killing a backgrounded `git push` does not kill the gate it started.** The
   push dies; the pre-push tree it spawned — `make check` →
   `scripts/check_parallel.sh` → sub-makes → pytest — keeps running in that
-  worktree. While the orphan lives, the next gate run there has been seen dying
-  mid-suite (`api-test Terminated`, at 42%): a red that looks exactly like the
-  #2228 / #2513 timeout flakes, in the same fs-heavy modules, and that a re-run
-  does not clear — so the reflex response buys another full gate of the same
-  (issue #2605, found on PR #2603). Before attributing a red to a flake in a
-  worktree whose push was interrupted, look for the survivor.
+  worktree. The gate takes a host-global `flock` (`/tmp/mcsd-check.lock`)
+  before it does any work and every process it spawns inherits the descriptor,
+  so a survivor holds the lock until it finishes and the next run in that
+  worktree waits instead of racing it (unserialised, the second run would die
+  mid-suite in the same fs-heavy modules with a red indistinguishable from a
+  timeout flake, and one that a re-run does not clear). The wait prints
+  `held by: <worktree> (pid N, since ...)` — when the worktree it names is your
+  own, the holder *is* the survivor, and the `pgrep` below turns the message
+  into a pid. Before attributing a stalled or red gate in a worktree whose push
+  was interrupted to a flake or a contended host, look for the survivor.
   `pgrep -af "<worktree-pat[h]>"` names `scripts/check_parallel.sh` and its
   chain subshells (forks share its argv): `make check` passes `$(CURDIR)` to it
   for exactly this purpose. Bracket one character of the path every time, even
@@ -143,19 +147,13 @@ Each one succeeds, or appears to; the damage surfaces later.
   identified only by `readlink /proc/<pid>/cwd`. Kill by process group rather
   than by pid — `pgid=$(ps -o pgid= -p <pid> | tr -d ' '); kill -- -"$pgid"` —
   because the script's own TERM trap reaches its subshells but not their
-  sub-makes. The orphan can still happen, but it no longer produces the red:
-  the gate takes a host-global `flock` (`/tmp/mcsd-check.lock`, #2513) before it
-  does any work and every process it spawns inherits the descriptor, so a
-  survivor holds the lock until it finishes and the next run in that worktree
-  waits instead of racing it. That wait prints `held by: <worktree> (pid N,
-  since ...)` — when the worktree it names is your own, the holder *is* the
-  survivor, and the `pgrep` above turns the message into a pid.
+  sub-makes.
 - **`uv run --active` in a worktree re-points the primary checkout's
   `api/.venv`.** Worktree shells inherit `VIRTUAL_ENV` from the repo root;
   plain `uv run` ignores it and uses the worktree's own `.venv`, but `--active`
   adopts the inherited one and installs the *branch's* `api/src` into it, so
   the primary checkout imports branch sources. Nothing reports this: the
-  `api-env-check` preflight (`scripts/check_api_env.py`, issue #566) would fail
+  `api-env-check` preflight (`scripts/check_api_env.py`) would fail
   on the mismatch, but the plain `uv run` in front of it re-syncs the damage
   away first, so the gate prints `OK`. Never pass `--active`; repair a checkout
   explicitly with `cd api && uv sync`.
@@ -188,18 +186,18 @@ Each one succeeds, or appears to; the damage surfaces later.
 
 - **Don't run the full `make check` by hand before pushing.** The pre-push
   hook runs exactly it, so a manual run pays the whole gate twice on an
-  unchanged tree — 10-40 min each on a contended host, and two chances at the
-  #2228 / #2513 timeout flakes instead of one (issue #2574). Gates are now
-  serialised host-wide (Section 3), so a stray manual run also makes every
-  other worktree's push wait for it. Iterate with the targeted subset
-  instead: `make <module>-lint` / `make <module>-test` for the
+  unchanged tree — 10-40 min each on a contended host, and two chances at a
+  timeout flake instead of one. Gates are serialised host-wide (Section 3), so
+  a stray manual run also makes every other worktree's push wait for it.
+  Iterate with the targeted subset instead: `make <module>-lint` /
+  `make <module>-test` for the
   touched module (`api`, `worker`, `relay`, `webui`), `make proto-lint` for
   `proto/`, `make docs-check` for docs, `make migrations-check` for
   `api/migrations/` (~0.1 s, and a late failure there costs a rebase renumber).
   Let the hook be the single full-gate run: a failed **pre-push** hook leaves
-  the commit intact and only the push undone, so the fix is a follow-up commit,
-  squashed away at merge (CONTRIBUTING.md Section 4). The gate itself is
-  unchanged — never `--no-verify` (Section 3).
+  the commit intact and only the push undone, so the remedy is a follow-up
+  commit, squashed away at merge (CONTRIBUTING.md Section 4). The gate itself
+  is unchanged — never `--no-verify` (Section 3).
 - `proto/` changed → one atomic change set: `make proto-gen`, update `api/`
   **and** `worker/` together; an intentional contract break carries the
   `breaking` label (CONTRIBUTING.md Section 5).

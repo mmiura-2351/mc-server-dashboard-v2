@@ -5,18 +5,18 @@
 > This document defines the persistence model for the core entities sketched in
 > [`REQUIREMENTS.md`](../REQUIREMENTS.md) Appendix B: the tables, their keys and
 > relationships, the desired-state / observed-state split on `Server`, and the
-> persistence-technology decision for M1. It refines, but does not contradict,
+> persistence-technology decision. It refines, but does not contradict,
 > the requirements and [`ARCHITECTURE.md`](ARCHITECTURE.md); where they disagree,
 > the requirements win and this document is wrong.
 >
 > **Scope.** This document covers **metadata only** — the relational records the
 > API owns. Bulk artifacts (world data, server JARs, backup archives) are **not**
 > stored here; they live behind the `Storage` Port and are specified in
-> [`STORAGE.md`](STORAGE.md) (issue #17). A `Backup` row here is the *metadata* of
+> [`STORAGE.md`](STORAGE.md). A `Backup` row here is the *metadata* of
 > a retained snapshot; the archive bytes are in `Storage`. The schema is versioned
 > and applied by **Alembic** (`api/migrations/`); this document specifies the
 > logical model, not the per-migration DDL. Runtime configuration is in
-> `CONFIGURATION.md` (issue #16).
+> `CONFIGURATION.md`.
 
 ## Table of Contents
 
@@ -43,8 +43,8 @@ depends only on those Port interfaces; the concrete database is a single adapter
 bound at the edge. The choice below is therefore an **adapter** choice — it can
 be replaced without touching `domain` or `application` code.
 
-**Decision.** M1 uses **PostgreSQL** as the relational store behind the
-persistence Port.
+**Decision.** **PostgreSQL** is the relational store behind the persistence
+Port.
 
 **Alternatives considered.**
 
@@ -68,10 +68,10 @@ state; SQLite's single-writer lock makes that contention awkward. PostgreSQL als
 gives first-class `timestamptz`, native `uuid`, partial/expression indexes (used
 for the refresh-token and audit-query paths), and `ON DELETE` cascade semantics
 the model relies on. The operational cost is one managed process, acceptable at
-this scale and already implied by a server-side deployment. Because everything is
-behind the persistence Port, a deployment that genuinely wants a single file can
-provide a SQLite adapter later without a domain change — the Port shape does not
-assume small scale (REQUIREMENTS.md Section 1.1).
+this scale and implied in any case by a server-side deployment. Because
+everything is behind the persistence Port, a deployment that genuinely wants a
+single file can provide a SQLite adapter later without a domain change — the
+Port shape does not assume small scale (REQUIREMENTS.md Section 1.1).
 
 The concrete migration toolchain is **Alembic**, with the migrations under
 `api/migrations/`.
@@ -85,7 +85,7 @@ The concrete migration toolchain is **Alembic**, with the migrations under
   entity be referenced (e.g. in an `AuditLog` target) without a round-trip.
 - **Timestamps** are `timestamptz` (UTC). Every entity carries `created_at`;
   mutable entities also carry `updated_at`.
-- **Soft vs hard delete.** M1 hard-deletes. The audit trail (Section 9) is the
+- **Soft vs hard delete.** Rows are hard-deleted. The audit trail (Section 9) is the
   record of what happened; entities themselves are removed on delete, with
   cascades (Section 10) keeping the graph consistent. `AuditLog` rows are
   retained even when their referenced actors/targets are gone (Section 9).
@@ -125,7 +125,7 @@ The concrete migration toolchain is **Alembic**, with the migrations under
        │
    ┌───┴────┐ 1      N ┌──────────┐    server.assigned_worker_id: nullable uuid,
    │community│────────▶│  server  │    a soft reference to the in-memory fleet
-   └────────┘          └────┬─────┘    registry (no `worker` table at M1, Section 7)
+   └────────┘          └────┬─────┘    registry (no `worker` table, Section 7)
                             │ 1
                 ┌───────────┼────────────────┬────────────────────────┐
                 │ N         │ N              │ 0..1                   │ N
@@ -148,11 +148,11 @@ Reading aids:
 - **Roles are Community-scoped** (FR-AUTHZ-4): a `role` belongs to exactly one
   `community`; the same name in two Communities is two independent rows.
 - **A `server` belongs to one `community`** (FR-SRV-3) and is optionally assigned
-  to one Worker (FR-WRK-3, nullable — unassigned when stopped/unplaced). At M1 the
+  to one Worker (FR-WRK-3, nullable — unassigned when stopped/unplaced). The
   assignment is a plain `assigned_worker_id` uuid with no FK; there is no durable
   `worker` table (Section 7).
 - **`resource_grant`** ties a `user` to a specific resource with an extra
-  permission set (FR-AUTHZ-2); in M1 the resource is a server (or a
+  permission set (FR-AUTHZ-2); the resource is a server (or a
   community-level resource).
 
 ---
@@ -163,7 +163,8 @@ Reading aids:
 
 A global identity (FR-AUTH-5): not owned by any Community, so one account can join
 many. The platform-administrator capability is a flag on this same record
-(FR-AUTH-6, decision #8) — there is no separate admin table.
+(FR-AUTH-6; REQUIREMENTS.md Section 9, decision 8) — there is no separate admin
+table.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -171,8 +172,8 @@ many. The platform-administrator capability is a flag on this same record
 | `username` | text | unique; case-insensitive uniqueness recommended |
 | `email` | text | unique |
 | `password_hash` | text | bcrypt/argon2 output incl. per-user salt (FR-AUTH-3) |
-| `is_platform_admin` | bool | the admin axis (FR-AUTH-6, FR-AUTHZ-5); default false, **except** the first user created on an empty table, which is auto-granted true at registration to bootstrap the platform admin (issue #909) — no manual DB step |
-| `active` | bool | account lifecycle flag (issue #278); default true. A deactivated account keeps its row but cannot authenticate: login refuses it with the uniform 401, and an outstanding access token is rejected on its next request |
+| `is_platform_admin` | bool | the admin axis (FR-AUTH-6, FR-AUTHZ-5); default false, **except** the first user created on an empty table, which is auto-granted true at registration to bootstrap the platform admin — no manual DB step |
+| `active` | bool | account lifecycle flag; default true. A deactivated account keeps its row but cannot authenticate: login refuses it with the uniform 401, and an outstanding access token is rejected on its next request |
 | `created_at` / `updated_at` | timestamptz | |
 
 Constraints: `UNIQUE(username)`, `UNIQUE(email)`.
@@ -198,17 +199,17 @@ revocation/expiry record.
 | `issued_at` | timestamptz | |
 | `expires_at` | timestamptz | |
 | `revoked_at` | timestamptz nullable | set on logout; non-null ⇒ invalid |
-| `revoked_reason` | text nullable | why revoked (`rotated` / `family` / `logout` / `user_revoked` / `superseded`); null exactly when `revoked_at` is null. **No CHECK constraint** — unlike other enum-like columns (Section 2), this column is a plain `text` validated in application code; the migration (0014) added it as a bare `String` column. The null-exactly-when pairing is an application invariant, not a DB constraint |
+| `revoked_reason` | text nullable | why revoked (`rotated` / `family` / `logout` / `user_revoked` / `superseded`); null exactly when `revoked_at` is null. **No CHECK constraint** — unlike other enum-like columns (Section 2), this column is a plain `text` validated in application code, a bare `String` column. The null-exactly-when pairing is an application invariant, not a DB constraint |
 
 Constraints: `UNIQUE(token_hash)`. Index on `(user_id)` for "revoke all sessions"
 and a partial index on `expires_at` for expiry sweeps. A token is valid iff
 `revoked_at IS NULL AND expires_at > now()`.
 
 `revoked_reason` records the *cause* so the refresh-token reuse grace window
-(issue #369) can grace only a `rotated` predecessor (a legitimate concurrent
-refresh / lost-response retry): a `family`- or `logout`-revoked token is never
-re-issued, so an attacker cannot escape a family revoke by re-presenting a
-just-revoked successor inside the window.
+(AUTH_API.md Section 4) can grace only a `rotated` predecessor (a legitimate
+concurrent refresh / lost-response retry): a `family`- or `logout`-revoked token
+is never re-issued, so an attacker cannot escape a family revoke by re-presenting
+a just-revoked successor inside the window.
 
 ---
 
@@ -217,19 +218,19 @@ just-revoked successor inside the window.
 ### `community`
 
 The isolation/ownership unit (FR-COMM-1). Created only by a platform administrator
-(FR-COMM-2, decision #1).
+(FR-COMM-2; REQUIREMENTS.md Section 9, decision 1).
 
 | Column | Type | Notes |
 |---|---|---|
 | `id` | uuid PK | |
 | `name` | text | unique |
-| `max_servers` | int nullable | **optional quota, unused in M1** (decision #9) |
-| `max_members` | int nullable | **optional quota, unused in M1** (decision #9) |
+| `max_servers` | int nullable | **optional quota; reserved, unused** (REQUIREMENTS.md Section 9, decision 9) |
+| `max_members` | int nullable | **optional quota; reserved, unused** (REQUIREMENTS.md Section 9, decision 9) |
 | `created_at` / `updated_at` | timestamptz | |
 
-The two `max_*` columns are the room-for-quotas left by decision #9: nullable,
-unread by M1 business logic. They exist so a future milestone can enforce limits
-without a schema change. M1 never writes or checks them.
+The two `max_*` columns are the room for quotas left by REQUIREMENTS.md Section 9,
+decision 9: nullable and unread by business logic. They exist so a later design
+can enforce limits without a schema change. Nothing writes or checks them.
 
 ### `membership`
 
@@ -270,7 +271,7 @@ globally (FR-AUTHZ-4).
 > `role_permission` join table and is queried as a whole when computing the
 > effective set (FR-AUTHZ-2); the array is validated against the authoritative
 > catalog in `domain`. A join table is the alternative if per-permission querying
-> is ever needed — not in M1.
+> is ever needed.
 
 ### `membership_role`
 
@@ -315,8 +316,8 @@ member per resource (its `permissions` set is amended in place).
 > FR-MEM-3 invariant (removing a member revokes that Community's grants), grants
 > also carry `community_id` and are deleted when the membership is removed — see
 > Section 10. `resource_id` is a soft reference (no DB-level FK) because
-> `resource_type` is polymorphic; referential cleanup for the M1 resource type
-> (server) is handled in the delete use case and by the membership-removal cascade.
+> `resource_type` is polymorphic; referential cleanup for the `server` resource
+> type is handled in the delete use case and by the membership-removal cascade.
 > Because there is no FK on `resource_id`, deleting a single server does not
 > remove its grants automatically: the server-delete use case must also delete the
 > `resource_grant` rows for `(resource_type='server', resource_id=<server.id>)` in
@@ -341,20 +342,20 @@ assigned Worker.
 | `mc_version` | text | e.g. `1.21.1` (FR-SRV-1) |
 | `server_type` | text | `vanilla` / `paper` / `fabric` / `forge` (CHECK enum). All are resolvable by the version catalog (forge resolves to the installer JAR — the worker runs `--installServer` on first start) |
 | `config` | jsonb | server configuration blob (properties, JVM args, plus the reserved keys catalogued below) |
-| `game_port` | integer nullable | the Minecraft game port (issue #243), assigned at create from the configured range (CONFIGURATION.md Section 5.8) and **unique deployment-wide**. Nullable: legacy/imported rows predating port tracking carry none, and Postgres treats `NULL`s as distinct so they never collide |
-| `bedrock_port` | integer nullable | the server's public Bedrock **UDP** port (issue #1541), allocated from the dedicated UDP window (CONFIGURATION.md Section 5.8) when Geyser is detected among the server's plugins and released (`NULL`) on Geyser uninstall; a server delete drops the row and with it the port. **Unique deployment-wide.** Non-`NULL` *is* the Bedrock-enabled state — there is no separate boolean |
-| `slug` | text | the relay hostname prefix (RELAY.md Section 3, issue #955), e.g. `amber-falcon-42`. Auto-generated at create as `<word>-<word>-<NN>` and **unique deployment-wide** (the hostname namespace is global). Renameable via the server update PATCH; released slugs are immediately reusable (owner decision, RELAY.md Section 16). Validated as a lowercase DNS label (`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`) with a reserved-word list (`www`, `api`, `relay`, …). Pre-existing rows are backfilled by migration 0016. |
-| `backup_retention` | jsonb nullable | the scheduled-backup retention policy (issue #1841, migration 0032): `{"keep_last": N}` (keep the newest N, N ≥ 1) **or** `{"daily": D, "weekly": W, "monthly": M}` (keep the newest scheduled backup per UTC calendar day / ISO week / calendar month over those windows; each ≥ 0, at least one > 0). `NULL` means no retention — scheduled backups accumulate unbounded. Applies **only** to `source = scheduled` backup rows (Section 8); manual / uploaded / event rows are never auto-pruned. Validated in the domain (`RetentionPolicy`), not by a CHECK — the free-form `config` posture |
+| `game_port` | integer nullable | the Minecraft game port, assigned at create from the configured range (CONFIGURATION.md Section 5.8) and **unique deployment-wide**. Nullable at the schema level only: every API path (create, import) assigns a port, so a row without a tracked port can arise only outside the API (direct SQL); such a row is excluded from the taken-port set, and Postgres treats `NULL`s as distinct so they never collide |
+| `bedrock_port` | integer nullable | the server's public Bedrock **UDP** port, allocated from the dedicated UDP window (CONFIGURATION.md Section 5.8) when Geyser is detected among the server's plugins and released (`NULL`) on Geyser uninstall; a server delete drops the row and with it the port. **Unique deployment-wide.** Non-`NULL` *is* the Bedrock-enabled state — there is no separate boolean |
+| `slug` | text | the relay hostname prefix (RELAY.md Section 3), e.g. `k7m2p9`. Auto-generated at create as a 6-character random lowercase-alphanumeric string (`[a-z0-9]{6}`) unless supplied, and **unique deployment-wide** (the hostname namespace is global). Renameable via the server update PATCH; released slugs are immediately reusable (RELAY.md Section 16). Validated as a lowercase DNS label (`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`) with a reserved-word list (`www`, `api`, `relay`, …). NOT NULL: every row carries one |
+| `backup_retention` | jsonb nullable | the scheduled-backup retention policy: `{"keep_last": N}` (keep the newest N, N ≥ 1) **or** `{"daily": D, "weekly": W, "monthly": M}` (keep the newest scheduled backup per UTC calendar day / ISO week / calendar month over those windows; each ≥ 0, at least one > 0). `NULL` means no retention — scheduled backups accumulate unbounded. Applies **only** to `source = scheduled` backup rows (Section 8); manual / uploaded / event rows are never auto-pruned. Validated in the domain (`RetentionPolicy`), not by a CHECK — the free-form `config` posture |
 | `desired_state` | text | what the operator wants: `running` / `stopped` (CHECK enum) |
 | `observed_state` | text | last state reported by the Worker: `starting` / `running` / `stopping` / `stopped` / `restarting` / `crashed` / `unknown` (CHECK enum) |
 | `observed_at` | timestamptz nullable | when `observed_state` was last updated |
-| `assigned_worker_id` | uuid nullable | the assigned Worker (FR-WRK-3); **no FK at M1** — there is no `worker` table (Section 7). A soft reference to the in-memory fleet registry; cleared by the API on Worker disconnect (FR-WRK-4) |
+| `assigned_worker_id` | uuid nullable | the assigned Worker (FR-WRK-3); **no FK** — there is no `worker` table (Section 7). A soft reference to the in-memory fleet registry; cleared by the API on Worker disconnect (FR-WRK-4) |
 | `created_at` / `updated_at` | timestamptz | |
 
 Constraints: `UNIQUE(community_id, name)`, `UNIQUE(game_port)` (deployment-wide,
-`NULL`s allowed and non-colliding; issue #243), `UNIQUE(bedrock_port)`
-(deployment-wide, `NULL`s allowed and non-colliding; issue #1541), `UNIQUE(slug)`
-(deployment-wide, NOT NULL; issue #955). Index on `(assigned_worker_id)` for "all
+`NULL`s allowed and non-colliding), `UNIQUE(bedrock_port)` (deployment-wide,
+`NULL`s allowed and non-colliding), `UNIQUE(slug)` (deployment-wide, NOT NULL).
+Index on `(assigned_worker_id)` for "all
 servers on Worker X" (used on Worker disconnect, FR-WRK-4).
 
 **Reserved `config` keys.** Alongside the free-form server properties and JVM
@@ -362,21 +363,22 @@ args, the `config` blob carries a small set of **reserved keys** with fixed
 meaning. This table is the canonical list: a new reserved key must be registered
 here when it is added, so the blob does not accumulate undocumented keys.
 
-| Key | Unit / type | Set by | Feature / issue |
-|---|---|---|---|
-| `resolved_jar_sha256` | string (JAR content hash) | **system** — written by the start use case when a JAR is resolved; hidden from the config-overrides editor (issue #701) and never operator-settable | issue #118 |
-| `resolved_jar_source` | string (source fingerprint) | **system** — written by the start use case alongside `resolved_jar_sha256`; records the catalog's published digest or URL so a subsequent start can detect upstream updates without re-downloading (issue #1676). Format: `"{algorithm}:{hash}"` (e.g. `sha1:ab…`, `sha256:cd…`) or `"url:{download_url}"` (Fabric) | issue #1676 |
-| `snapshot_interval_seconds` | integer seconds | **operator** — per-server snapshot-cadence override (FR-DATA-7), clamped up to the configured floor | issue #107 |
-| `memory_limit_mb` | integer mebibytes (MiB) | **operator** — per-server memory limit; absent means no limit (the JVM heap stays at its default). The worker derives the JVM heap from it; the `container` driver also enforces it as a *hard* ceiling (see [`CONFIGURATION.md`](CONFIGURATION.md) Section 6.3) | issue #705 |
-| `cpu_millis` | integer millicores (1000 = one core) | **operator** — per-server CPU allocation; absent means no allocation (the driver's default share). A **soft, rough relative share** (owner decision), not a hard cap; the `container` driver translates it to a relative weight `CPUShares` that bites only under contention (see [`CONFIGURATION.md`](CONFIGURATION.md) Section 6.3) | issue #722 |
+| Key | Unit / type | Set by |
+|---|---|---|
+| `resolved_jar_sha256` | string (JAR content hash) | **system** — written by the start use case when a JAR is resolved; hidden from the config-overrides editor and never operator-settable |
+| `resolved_jar_source` | string (source fingerprint) | **system** — written by the start use case alongside `resolved_jar_sha256`; records the catalog's published digest or URL so a subsequent start can detect upstream updates without re-downloading. Format: `"{algorithm}:{hash}"` (e.g. `sha1:ab…`, `sha256:cd…`) or `"url:{download_url}"` (Fabric) |
+| `snapshot_interval_seconds` | integer seconds | **operator** — per-server snapshot-cadence override (FR-DATA-7), clamped up to the configured floor |
+| `memory_limit_mb` | integer mebibytes (MiB) | **operator** — per-server memory limit; absent means no limit (the JVM heap stays at its default). The worker derives the JVM heap from it; the `container` driver also enforces it as a *hard* ceiling (see [`CONFIGURATION.md`](CONFIGURATION.md) Section 6.3) |
+| `cpu_millis` | integer millicores (1000 = one core) | **operator** — per-server CPU allocation; absent means no allocation (the driver's default share). A **soft, rough relative share** (owner decision), not a hard cap; the `container` driver translates it to a relative weight `CPUShares` that bites only under contention (see [`CONFIGURATION.md`](CONFIGURATION.md) Section 6.3) |
 
 The operator-settable keys are validated on write (a bad value is `422`), and
 every edit — a name, port, or any config key — is gated by `server:update`. The
 system-written `resolved_jar_sha256` is not editable through the config-overrides
-surface. `backup_interval_hours` was retired at the general-scheduler cutover
-(issue #1840): it is no longer a reserved key, and a create/update still carrying
-it is a `422` (`retired_config_key`) — the backup cadence is now a first-class
-`backup` schedule (Section 8).
+surface. `backup_interval_hours` is **not** a config key but a *retired* one: the
+API keeps a list of retired keys — names it recognises and deliberately refuses
+rather than passing through to `server.properties` — and a create/update carrying
+one is rejected with `422` `retired_config_key`. The backup cadence is a
+first-class `backup` schedule (Section 8), the only cadence mechanism.
 
 **Desired / observed split (FR-SRV-3, FR-SRV-4).** The two state columns are the
 heart of the model. `desired_state` is the **source of truth for intent**, mutated
@@ -389,41 +391,39 @@ expected (a server can be `desired=running, observed=crashed`); reconciliation
 reports observed state). The values (`starting` / `running` / `stopping` /
 `stopped` / `restarting` / `crashed` / `unknown`) mirror the control-plane
 `ServerState` enum ([`CONTROL_PLANE.md`](CONTROL_PLANE.md)) exactly. `unknown` has
-two producers (issue #2474): the API infers it when the owning Worker disconnects,
+two producers: the API infers it when the owning Worker disconnects,
 and a Worker reports it when it cannot currently confirm an instance's fate.
 
 **`assigned_worker_id` nullability and the missing FK.** A server is not
 permanently pinned to a Worker (FR-WRK-6). The column is null when stopped/unplaced,
 set on placement (FR-WRK-3), and cleared by the API if its Worker
 disconnects/decommissions so the server can be re-placed after hydrate (FR-WRK-4).
-The server row survives the Worker; the Worker holds no authoritative state. At M1
-this is a **plain nullable uuid with no foreign key**: there is no durable `worker`
+The server row survives the Worker; the Worker holds no authoritative state. The
+column is a **plain nullable uuid with no foreign key**: there is no durable `worker`
 table to reference (Section 7), so clearing on disconnect is done by the API
-against the in-memory fleet registry, not by a DB `ON DELETE SET NULL`. If a
-`worker` table is added by a later migration, the FK (with `ON DELETE SET NULL`)
-can be introduced alongside it without changing this column's semantics.
+against the in-memory fleet registry, not by a DB `ON DELETE SET NULL`. Should a
+later design add a `worker` table, the FK (with `ON DELETE SET NULL`) can be
+introduced alongside it without changing this column's semantics.
 
-### `worker` — deferred beyond M1 (no table)
+### `worker` — no table (in-memory registry)
 
-**Decision: M1 has no durable `worker` table.** Worker registration,
+**Decision: there is no durable `worker` table.** Worker registration,
 capabilities, and liveness live **only** in the in-memory `WorkerRegistry`
 ([`ARCHITECTURE.md`](ARCHITECTURE.md) Section 5.1), fed by the control stream.
 
 *Rationale.* Workers are stateless and **re-register on every connect**
 (FR-WRK-4), so the registry is rebuilt from live connections rather than read
 from the DB on startup. Liveness (FR-WRK-2) is inherently runtime state, not
-durable data. At M1 scale — a single API instance (NFR-SCALE-1) — a durable
-worker table adds nothing the registry does not already provide, while creating a
-DB ↔ registry sync liability (stale rows, write-through on every heartbeat). The
-control plane already ships this way: the registry is in-memory (PRs #83/#86) and
-`server.assigned_worker_id` is a plain nullable uuid with no FK (migration 0005,
-PR #91).
+durable data. With a single API instance (NFR-SCALE-1) a durable worker table
+adds nothing the registry does not provide, while creating a DB ↔ registry sync
+liability (stale rows, write-through on every heartbeat). Accordingly the registry
+is in-memory and `server.assigned_worker_id` is a plain nullable uuid with no FK.
 
-*Future shape.* If a later milestone needs registrations to survive API restarts
-or wants cross-instance visibility, a `worker` table can be added by a follow-up
+*Possible later shape.* A later design that needs registrations to survive API
+restarts, or wants cross-instance visibility, can add a `worker` table by
 migration **without breaking changes** — the `server.assigned_worker_id` column
-already exists and the FK (`ON DELETE SET NULL`) is layered on at that time. The
-deferred shape would be, roughly:
+exists and the FK (`ON DELETE SET NULL`) is layered on at that time. That shape
+would be, roughly:
 
 > | Column | Type | Notes |
 > |---|---|---|
@@ -433,10 +433,10 @@ deferred shape would be, roughly:
 > | `last_seen_at` | timestamptz nullable | last heartbeat (FR-WRK-2); a durable echo of live liveness, not the placement source of truth |
 > | `created_at` / `updated_at` | timestamptz | |
 >
-> This sketch is **not** part of the M1 schema; it documents the intended future
-> table only.
+> This table is **not** part of the schema; it documents a possible later shape
+> only.
 
-### Player groups (issue #276)
+### Player groups
 
 Reusable, Community-scoped player lists (OP / whitelist) attached to many servers
 and synced to a server's `ops.json` / `whitelist.json`. Three normalized tables
@@ -486,7 +486,7 @@ group or a server tidies its attachments automatically. Index
 `ix_server_group_server_id` on `server_id` covers the reverse lookup direction
 (`list_groups_for_server`).
 
-**File-sync posture (issue #276, the smallest honest M2 choice).** On any change
+**File-sync posture.** On any change
 that affects an attached server's authoritative player file — attach, detach, or a
 player add/remove on an attached group — the API regenerates that server's
 `ops.json` (kind `op`; entries `{uuid, name, level, bypassesPlayerLimit}`, level
@@ -497,17 +497,16 @@ byte-stable diff-to-diff. **Only at-rest servers are written**; a running or
 otherwise unsettled server is left pending and ships the updated authoritative
 copy on its next natural hydrate (hydrate always carries the authoritative working
 set). Pushing live changes to a running server via the Worker (EditFile + RCON
-reload) is deferred.
+reload) is deferred: not implemented.
 
-### Server plugins (epic #650)
+### Server plugins
 
 One row per plugin/mod jar installed in a server's content directory (`mods/`
-for Fabric/Forge, `plugins/` for Paper), added by migration 0019 and extended by
-0020–0023 and 0033. Like player groups, the tooling lives inside the servers
-bounded context — a plugin shares the `Server` aggregate and its at-rest state
-policy. **Metadata only**: the jar bytes live behind the `Storage` Port
-(STORAGE.md) in the content-addressed plugin cache, keyed by `sha256`; a cached
-blob no row references is reclaimed by the plugin-cache GC
+for Fabric/Forge, `plugins/` for Paper). Like player groups, the tooling lives
+inside the servers bounded context — a plugin shares the `Server` aggregate and
+its at-rest state policy. **Metadata only**: the jar bytes live behind the
+`Storage` Port (STORAGE.md) in the content-addressed plugin cache, keyed by
+`sha256`; a cached blob no row references is reclaimed by the plugin-cache GC
 ([`CONFIGURATION.md`](CONFIGURATION.md) Section 5.12). The endpoints are guarded
 by the `plugin:read` / `plugin:manage` permission codes (Appendix A).
 
@@ -522,30 +521,30 @@ by the `plugin:read` / `plugin:manage` permission codes (Appendix A).
 | `display_name` | text | operator- / catalog-facing name |
 | `description` | text nullable | optional description |
 | `loader_type` | text | `mod` / `plugin` (CHECK enum) — the loader family the jar targets |
-| `source` | text | `local` / `modrinth` / `geyser` / `unknown` (CHECK enum; migration 0033 widened the 0019 two-value CHECK, migration 0035 added `unknown`). `geyser` is GeyserMC's own download API (issue #1905), the only publisher of the Floodgate-Spigot build Modrinth does not carry for Paper ([`BEDROCK.md`](BEDROCK.md)). `unknown` is provenance lost in a backup restore (issue #2059): a jar re-ingested against the restored filesystem is matched by `checksum_sha512` against catalog installs elsewhere to recover its origin, and marked `unknown` only when no match is found — so the loss is recorded honestly instead of asserting a `local` manual upload. `modrinth` / `geyser` are the catalog sources whose latest version is re-resolvable, so only they support an in-place update check (issue #1916); a `local` upload or an `unknown` row has no upstream |
+| `source` | text | `local` / `modrinth` / `geyser` / `unknown` (CHECK enum). `geyser` is GeyserMC's own download API, the only publisher of the Floodgate-Spigot build Modrinth does not carry for Paper ([`BEDROCK.md`](BEDROCK.md)). `unknown` is provenance lost in a backup restore: a jar re-ingested against the restored filesystem is matched by `checksum_sha512` against catalog installs elsewhere to recover its origin, and marked `unknown` only when no match is found — so the loss is recorded honestly instead of asserting a `local` manual upload. `modrinth` / `geyser` are the catalog sources whose latest version is re-resolvable, so only they support an in-place update check; a `local` upload or an `unknown` row has no upstream |
 | `source_project_id` | text nullable | catalog project id, when catalog-sourced; the key catalog dependencies are matched against |
 | `source_version_id` | text nullable | catalog version id, when catalog-sourced |
 | `version_number` | text nullable | the version string as published |
-| `checksum_sha512` | text nullable | SHA-512 of the jar bytes at install (Modrinth integrity verification). Indexed (`ix_server_plugin_checksum_sha512`, migration 0020): the download cache maps a published SHA-512 to the cached `sha256`, so the same version is not re-downloaded per server (issue #1306) |
-| `sha256` | text(64) nullable | content address of the jar in the content-addressed cache (issue #1306, migration 0020): identical content shares one cached blob keyed by this hash. Rows installed before the cache stay NULL and are simply not deduped |
+| `checksum_sha512` | text nullable | SHA-512 of the jar bytes at install (Modrinth integrity verification). Indexed (`ix_server_plugin_checksum_sha512`): the download cache maps a published SHA-512 to the cached `sha256`, so the same version is not re-downloaded per server |
+| `sha256` | text(64) nullable | content address of the jar in the content-addressed cache: identical content shares one cached blob keyed by this hash. A row with no cached blob recorded is NULL and is simply not deduped |
 | `size_bytes` | bigint nullable | jar size |
 | `enabled` | bool | NOT NULL, defaults true. Tracks the `.disabled`-suffix rename convention: a disabled plugin's `rel_path` ends with `.disabled` |
 | `installed_by` | uuid nullable | the user who installed it; **soft reference** (no FK) so the row survives the actor's deletion (Section 9) |
-| `mod_identifier` | text nullable | the jar manifest's declared id (issue #1307, migration 0021); NULL when the jar carried no recognized manifest |
+| `mod_identifier` | text nullable | the jar manifest's declared id; NULL when the jar carried no recognized manifest |
 | `provides` | jsonb nullable | alias ids the jar also satisfies |
 | `dependencies` | jsonb nullable | manifest dependencies: `[{mod_identifier, version_range, required, conflict}]` |
 | `mc_versions` | jsonb nullable | the declared compatible Minecraft versions |
-| `side` | text | `server` / `client` / `both` (CHECK enum, issue #1308, migration 0022). NOT NULL, server default `both` (the safe default — a `both` jar is present everywhere — so pre-migration rows backfilled to it). Governs working-set presence: only a jar with side in {`server`, `both`} deploys to the running server; a `client`-only jar is tracked and cached but never placed. Migration 0024 corrected existing Paper plugins to `server` (Paper/Bukkit plugins are always server-side) |
-| `catalog_dependencies` | jsonb nullable | the **required** Modrinth catalog dependencies of the selected version, keyed by project id: `[{project_id, required, slug, title}]` (issue #1321, migration 0023). A different namespace from the manifest `dependencies`, which many popular mods leave empty; local uploads carry none |
+| `side` | text | `server` / `client` / `both` (CHECK enum). NOT NULL, server default `both` (the safe default — a `both` jar is present everywhere). Governs working-set presence: only a jar with side in {`server`, `both`} deploys to the running server; a `client`-only jar is tracked and cached but never placed. Paper plugins are always `server` (Paper/Bukkit plugins are server-side only; a Paper server accepts no other value) |
+| `catalog_dependencies` | jsonb nullable | the **required** Modrinth catalog dependencies of the selected version, keyed by project id: `[{project_id, required, slug, title}]`. A different namespace from the manifest `dependencies`, which many popular mods leave empty; local uploads carry none |
 | `created_at` / `updated_at` | timestamptz | |
 
 Constraints: `UNIQUE(server_id, rel_path)` (`uq_server_plugin_server_rel`) — one
 row per jar path per server. Indexes on `(server_id)` and `(checksum_sha512)`.
 Rows cascade away when their server is deleted, and with it when the server's
 Community is deleted (Section 10). The four manifest columns and
-`catalog_dependencies` are nullable because rows installed before their
-migrations carry NULL until re-ingested (no backfill — a re-install picks the
-metadata up); the repository maps a NULL JSON column to an empty list.
+`catalog_dependencies` are nullable: a row carries NULL for metadata its ingest
+did not produce, until it is re-ingested (a re-install picks the metadata up);
+the repository maps a NULL JSON column to an empty list.
 
 A server whose plugin set carries Geyser is what drives `server.bedrock_port`
 allocation (Section 7): the port is allocated on detection and released on
@@ -560,7 +559,7 @@ Section 5.13).
 
 Retained-snapshot **metadata** for a server (FR-BAK-1, Appendix B). A backup is
 effectively a retained snapshot and does **not** depend on a specific Worker
-(FR-BAK-2). The archive bytes live behind the `Storage` Port (STORAGE.md, #17);
+(FR-BAK-2). The archive bytes live behind the `Storage` Port (STORAGE.md);
 this row only points at them.
 
 | Column | Type | Notes |
@@ -568,9 +567,9 @@ this row only points at them.
 | `id` | uuid PK | |
 | `server_id` | uuid FK → `server.id` | `ON DELETE CASCADE` |
 | `storage_ref` | text | locator of the archive in `Storage` (opaque to the DB) |
-| `size_bytes` | bigint nullable | recorded archive size; set at create/upload (issue #281). Legacy rows predating this stay NULL and are reported as "unknown" in statistics — an honest gap, not a wrong total |
-| `source` | text | `manual` / `scheduled` / `event` / `uploaded` (CHECK enum). `uploaded` is an off-host archive brought in via the upload endpoint (issue #281; migration 0013 widened the CHECK) |
-| `health` | text | `healthy` / `quarantined` / `unknown` (CHECK enum, issue #742; migration 0015). Structural health of the archived contents. A backup created through the integrity-gated create path (#749) is `healthy` by construction; legacy rows and `uploaded` archives (which bypass that gate) are `unknown` until the one-shot sweep (#744) classifies them; a row a check found corrupt is `quarantined`. NOT NULL, defaults `unknown` |
+| `size_bytes` | bigint nullable | recorded archive size; set at create/upload. NULL is reported as "unknown" in statistics — an honest gap, not a wrong total |
+| `source` | text | `manual` / `scheduled` / `event` / `uploaded` (CHECK enum). `uploaded` is an off-host archive brought in via the upload endpoint |
+| `health` | text | `healthy` / `quarantined` / `unknown` (CHECK enum). Structural health of the archived contents. A backup created through the integrity-gated create path is `healthy` by construction; an `uploaded` archive (which bypasses that gate) is `unknown` until the operator-run integrity sweep (`integrity_sweep_cli`, STORAGE.md) classifies it; a row a check found corrupt is `quarantined`. NOT NULL, defaults `unknown` |
 | `created_by` | uuid nullable | the user who triggered the backup; **soft reference** (no FK) so the row survives the actor's deletion (Section 9) |
 | `created_at` | timestamptz | |
 
@@ -579,7 +578,7 @@ newest-first. Deleting a backup row must also delete the archive in `Storage`;
 that two-store cleanup is a use-case concern (orchestrated in `application`), not a
 DB cascade.
 
-Backups are downloadable and uploadable (issue #281): download streams the
+Backups are downloadable and uploadable: download streams the
 archive in its native `tar.gz` form (no recompression); upload validates the
 archive (it must open as a gzip tar with traversal-safe entries, bounded by the
 shared upload cap) before storing it as a `source = uploaded` row, restorable
@@ -589,13 +588,14 @@ newest+oldest from these rows.
 
 > **Scheduled backups (FR-BAK-3)** need a schedule (cron-like) and execution
 > history. The schedule is a first-class `backup`-action row of the `schedule`
-> table (this Section; issue #1840 retired the legacy `server.config` cadence
-> key), and each run produces a `backup` row with `source = scheduled` — which
+> table (this Section) — the only cadence mechanism; `backup_interval_hours` is
+> not a `server.config` key (Section 7) — and each run produces a `backup` row
+> with `source = scheduled` — which
 > *is* the archive history (a listing of scheduled rows with their
 > `created_at`), alongside the runner's `schedule_run` outcome rows.
 
 `source = scheduled` rows are additionally subject to the server's
-`backup_retention` policy (Section 7, issue #1841): after each successful
+`backup_retention` policy (Section 7): after each successful
 scheduled backup run — and on every policy write — the rows the policy no
 longer keeps are pruned through the same archive-first/row-last delete path as
 a manual delete, each deletion audited as `backup:delete` with no actor.
@@ -606,9 +606,8 @@ Manual / uploaded / event rows are never auto-pruned.
 Versioned file changes for rollback (FR-FILE-3, Appendix B). Each edit retains the
 prior version so a file can be rolled back to any retained version.
 
-**Implementation note.** This entity has **no database table**. The original
-design above described a relational version index; the actual implementation
-stores prior file versions entirely in the `Storage` layer as immutable blobs
+**Implementation note.** This entity has **no database table**. Prior file
+versions are stored entirely in the `Storage` layer as immutable blobs
 under `versions/<relative-file-path>/<version-id>` inside each server's
 authoritative namespace (STORAGE.md Section 5). Version listing and rollback
 are `Storage` Port operations (`list_file_versions`, `read_file_version`,
@@ -616,7 +615,7 @@ are `Storage` Port operations (`list_file_versions`, `read_file_version`,
 retention count is bounded by `storage.version_retention` (CONFIGURATION.md
 Section 5.2). There is no `file_edit_history` table in the migration set.
 
-### Game sessions (issue #957)
+### Game sessions
 
 Relay-originated player session records (RELAY.md Section 8, Section 14). One row
 per accepted **login** session recorded by the relay; status pings are not
@@ -631,13 +630,13 @@ the column is labelled "claimed identity" in the UI).
 |---|---|---|
 | `id` | uuid PK | Relay-minted session id (the `ReportSessions` idempotency key) |
 | `server_id` | uuid FK → `server.id` nullable | `ON DELETE CASCADE`; indexed with `started_at` for newest-first listing. Nullable so a `SessionEnd` arriving before its `SessionStart` (an out-of-order batch retry) can create a placeholder row |
-| `hostname` | text nullable | The slug actually used at join (slugs are renameable; this is the historical value) |
+| `hostname` | text nullable | The slug actually used at join (slugs are renameable; this is the value at join time, not the server's current slug) |
 | `player_ip` | inet nullable | The player's source address as seen by the relay |
 | `username` | text nullable | Claimed in Login Start (RELAY.md Section 8) |
 | `player_uuid` | uuid nullable | Claimed; present on protocols that send it |
 | `started_at` | timestamptz nullable | |
 | `ended_at` | timestamptz nullable | NULL = still open (or relay crashed; healed on `Register`) |
-| `source` | text nullable | the relay ingress path the session was accepted on: `java` / `bedrock` (issue #1912, migration 0034), so a Bedrock flow-session is labelled honestly rather than as a Java login-session with an unparseable claimed identity. NULL = legacy/unspecified: rows predating the column, or a relay too old to report `SessionStart.source`. **No CHECK constraint** — like `refresh_token.revoked_reason` (Section 4), the column is a plain `text` validated in application code |
+| `source` | text nullable | the relay ingress path the session was accepted on: `java` / `bedrock`, so a Bedrock flow-session is labelled honestly rather than as a Java login-session with an unparseable claimed identity. NULL = unspecified: the relay left `SessionStart.source` unset (a relay build that does not send the field). **No CHECK constraint** — like `refresh_token.revoked_reason` (Section 4), the column is a plain `text` validated in application code |
 
 Index: `(server_id, started_at)` for the newest-first paginated listing.
 Rows cascade away when their server is deleted. A retention prune loop
@@ -646,10 +645,10 @@ Rows cascade away when their server is deleted. A retention prune loop
 Access is gated by the `session:read` permission (RELAY.md Section 8, Appendix A);
 player IPs are PII so the data is role-restricted.
 
-### Resource packs (issue #1175)
+### Resource packs
 
 Global resource pack library (not community-scoped) and per-server assignment. Two
-tables added by migration 0018.
+tables.
 
 #### `resource_packs`
 
@@ -680,20 +679,17 @@ reverse lookup (`list_assignments_for_pack`).
 | `assigned_by` | uuid | **soft reference** (no FK) |
 | `created_at` / `updated_at` | timestamptz | |
 
-### Schedules (epic #649)
+### Schedules
 
 The general scheduler: per-server recurring actions and their execution
-history (migration 0029). A schedule fires on a **cron expression XOR a fixed
+history. A schedule fires on a **cron expression XOR a fixed
 interval**, evaluated in a per-schedule IANA timezone (cron) or as absolute
 elapsed time with a deterministic per-schedule jitter (interval). The runner
-(#1838) polls `next_run_at` over enabled schedules. The legacy FR-BAK-3
-`backup_interval_hours` config cadence is retired into `action = backup`
-schedules (issue #1840): migration 0031 converts each server that carries the key
-into an equivalent enabled interval `backup` schedule (named "Scheduled backup",
-`next_run_at` staggered within ~1 hour so the runner picks it up soon without a
-fleet-wide thundering herd) and strips the key. A failed scheduled backup no
-longer retries every tick — it gets the runner's bounded retry (one, ~30 minutes)
-plus a notification, then waits for the next occurrence.
+polls `next_run_at` over enabled schedules. Scheduled backups (FR-BAK-3) are
+`action = backup` schedules; this table is the only backup-cadence mechanism
+(`backup_interval_hours` is not a config key, Section 7). A failed scheduled
+backup does not retry every tick — it gets the runner's bounded retry (one,
+~30 minutes) plus a notification, then waits for the next occurrence.
 
 #### `schedule`
 
@@ -716,7 +712,7 @@ plus a notification, then waits for the next occurrence.
 #### `schedule_run`
 
 One row per fired occurrence, written after it completes. History is capped at
-50 rows per schedule by the runner's prune (#1838), not by the schema.
+50 rows per schedule by the runner's prune, not by the schema.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -814,7 +810,7 @@ holds atomically.
 
 | Doc | Covers |
 |---|---|
-| [`../REQUIREMENTS.md`](../REQUIREMENTS.md) | What v2 must do; entity sketch (Appendix B), permission catalog (Appendix A), resolved decisions (Section 9) |
+| [`../REQUIREMENTS.md`](../REQUIREMENTS.md) | What v2 must do; entity sketch (Appendix B), permission catalog (Appendix A), design decisions (Section 9) |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Hexagonal layering, the persistence Port (`<Entity>Repository` + `UnitOfWork`), the desired/observed authority split |
 | [`STORAGE.md`](STORAGE.md) | The `Storage` Port: world/JAR/backup-archive bytes that this model references but does not store |
 | [`CONFIGURATION.md`](CONFIGURATION.md) | Runtime configuration & adapter selection (incl. which persistence adapter is bound) |

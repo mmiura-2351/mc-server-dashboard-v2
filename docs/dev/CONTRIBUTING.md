@@ -5,9 +5,8 @@ requests, review, and merge. Behavioral guidance for *how to write the code* is
 in [`../../CLAUDE.md`](../../CLAUDE.md); documentation conventions are in
 [`../README.md`](../README.md).
 
-> Hooks and CI are wired (see Section 4 and `.github/workflows/`); the commands
-> below are concrete and enforced (the pre-push `make check` and the CI
-> workflows).
+> The commands below are enforced by the git hooks (Section 4; the pre-push
+> `make check`) and by the CI workflows (`.github/workflows/`).
 
 > **LLM agents** — and anyone working on the shared deployment host — must
 > also read [`AGENTS.md`](AGENTS.md), the agent-facing operational manual
