@@ -2532,3 +2532,21 @@ def test_delete_symlink_refused_renders_invalid_path() -> None:
     )
     assert resp.status_code == 422
     assert resp.json()["reason"] == "invalid_path"
+
+
+def test_rollback_oversized_version_is_413() -> None:
+    # Centralizing the cap inside the shared guard made FileTooLargeError
+    # reachable from rollback: it reads the retained version to compare it, and a
+    # legacy oversized version of the root server.properties predates the cap
+    # every write door now enforces. Without this mapping it escapes as a 500.
+    app = _app(
+        member=True, allow=True, rollback=_FakeUseCase(error=FileTooLargeError("x"))
+    )
+    client = _client(app)
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/rollback"),
+        params={"path": "server.properties"},
+        json={"version_id": "v1"},
+    )
+    assert resp.status_code == 413
+    assert resp.json()["reason"] == "file_too_large"

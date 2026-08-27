@@ -252,6 +252,11 @@ def _refuse_platform_key_change(current: bytes, incoming: bytes) -> None:
     Only *incoming* is capped. An oversized *current* — which this API can no
     longer produce — is still compared rather than refused, because refusing it
     would leave exactly that pathological file undeletable.
+
+    Every route that can reach this must map :class:`FileTooLargeError` to 413.
+    The PUT, upload, rename and rollback routes all do. The removal guards
+    (delete, and a rename's ``from`` side) pass ``incoming=b""``, so they can
+    never trip the cap and need no mapping of their own.
     """
 
     if len(incoming) > MAX_EDIT_BYTES:

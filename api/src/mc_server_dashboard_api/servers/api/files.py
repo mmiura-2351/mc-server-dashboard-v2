@@ -555,6 +555,12 @@ async def rollback_file(
         raise _unprocessable("invalid_version_id") from exc
     except PlatformManagedKeyError as exc:
         raise _platform_managed_key(exc) from exc
+    except FileTooLargeError as exc:
+        # The platform-key guard reads the retained version to compare it, and
+        # that comparison is capped (issue #2809): an oversized version of the
+        # root server.properties is a 413, matching the sibling routes, rather
+        # than an escaped 500.
+        raise _too_large() from exc
     except ServerNotStoppedError as exc:
         await _record_file_failure(
             recorder, ops.FILE_ROLLBACK, authorized, community_id, server_id

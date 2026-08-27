@@ -3569,3 +3569,24 @@ async def test_rollback_unknown_version_of_root_properties_is_not_found() -> Non
             version_id="v-nope",
         )
     assert store.rollbacks == []
+
+
+async def test_rollback_to_an_oversized_version_is_too_large() -> None:
+    # What makes the route's 413 reachable: the guard compares the retained
+    # version's bytes, and the cap applies to them like any other incoming write.
+    # A version this large predates the cap every write door now enforces.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.files["server.properties"] = _CURRENT_PROPS
+    store.versions["server.properties"] = ["v1"]
+    store.version_bytes[("server.properties", "v1")] = b"x" * (MAX_EDIT_BYTES + 1)
+    use_case = RollbackFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(FileTooLargeError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="server.properties",
+            version_id="v1",
+        )
+    assert store.rollbacks == []
