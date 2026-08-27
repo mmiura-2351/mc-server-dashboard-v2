@@ -700,8 +700,9 @@ world data is restored, the seed is not — retry the restore).
 A drift you find in the field is fixed by a `PATCH` that actually **changes**
 the port, which rewrites the row and the file together. When the row already
 holds the port you want and only the file is stale, that `PATCH` is a no-op —
-re-port to a spare in-range port and back, or run an import or restore, each of
-which re-applies the tracked port to the file.
+re-port to a spare in-range port and back, or restore a backup, which re-applies
+the tracked port to the file. An import does not repair this: it creates a new
+server rather than rewriting an existing one.
 
 Every API path — create and import alike — assigns a port, so a row with
 `game_port = NULL` arises only outside the API (a direct SQL write). For such a
