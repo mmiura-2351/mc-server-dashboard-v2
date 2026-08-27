@@ -11,12 +11,13 @@
 package tunnel
 
 import (
-	"bufio"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"os"
@@ -24,6 +25,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/javaproperties"
 )
 
 // handshakePreamble is the line the Worker sends before the token, identifying
@@ -156,7 +159,12 @@ func (d *Dialer) Dial(ctx context.Context, spec Spec) error {
 		return err
 	}
 
-	gameAddr := net.JoinHostPort(d.dialHost(spec.ServerID), gamePort(spec.WorkingDir))
+	port, err := gamePort(spec.WorkingDir)
+	if err != nil {
+		_ = relayConn.Close()
+		return err
+	}
+	gameAddr := net.JoinHostPort(d.dialHost(spec.ServerID), port)
 	// Dial under setupCtx so a blackholing non-loopback game_bind_ip fails fast
 	// (within the 5 s setup budget) instead of stalling the lane for the kernel
 	// connect timeout while the relay's player window has already expired.
@@ -338,40 +346,39 @@ func (d *Dialer) closeAll() {
 
 // gamePort reads server-port from the server's working-dir server.properties,
 // falling back to the Minecraft default when the file is absent or the key is
-// unset — mirroring the container driver's published-port resolution. Keep in
-// sync with containerdriver.ports (containerdriver.go): if the driver ever maps a
-// host port that differs from the container port, the tunnel must dial the host
-// port, not server-port.
-func gamePort(workingDir string) string {
-	props := readProperties(filepath.Join(workingDir, "server.properties"))
-	if port := props["server-port"]; port != "" {
-		return port
+// unset — mirroring the container driver's published-port resolution, which
+// reads the same file through the same parser (containerdriver.ports). Keep the
+// two resolutions in sync: if the driver ever maps a host port that differs from
+// the container port, the tunnel must dial the host port, not server-port.
+//
+// An unreadable (as opposed to absent) file is an error rather than a silent
+// fallback: the fallback is 25565, the relay's own port, so a tunnel that dialed
+// it would splice the player into the relay instead of the server while the
+// driver refuses to start that same server at all (issues #2621, #2792). Only an
+// ABSENT file still takes the default.
+func gamePort(workingDir string) (string, error) {
+	props, err := readProperties(filepath.Join(workingDir, "server.properties"))
+	if err != nil {
+		return "", err
 	}
-	return defaultGamePort
+	if port := props["server-port"]; port != "" {
+		return port, nil
+	}
+	return defaultGamePort, nil
 }
 
-// readProperties parses a Java .properties file into a map, skipping blanks and
-// comments. A missing/unreadable file yields an empty map (the caller falls back
-// to defaults).
-func readProperties(path string) map[string]string {
-	out := map[string]string{}
-	f, err := os.Open(path) //nolint:gosec // path is the server's own working dir, not user-controlled.
+// readProperties reads and parses the server.properties at path with the shared
+// Java-compatible reader (internal/javaproperties), so the port dialed is the
+// one the Minecraft server bound even when the file spells it "server-port:25599"
+// or "server-port 25599" (issue #2811). An absent file yields an empty map (the
+// caller falls back to the default); every other read failure is returned.
+func readProperties(path string) (map[string]string, error) {
+	data, err := os.ReadFile(path) //nolint:gosec // path is the server's own working dir, not user-controlled.
 	if err != nil {
-		return out
-	}
-	defer func() { _ = f.Close() }()
-
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "!") {
-			continue
+		if errors.Is(err, fs.ErrNotExist) {
+			return map[string]string{}, nil
 		}
-		key, value, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
-		}
-		out[strings.TrimSpace(key)] = strings.TrimSpace(value)
+		return nil, fmt.Errorf("tunnel: read %s: %w", path, err)
 	}
-	return out
+	return javaproperties.Parse(data), nil
 }

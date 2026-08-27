@@ -193,7 +193,12 @@ func newDialerForTest(ctx context.Context, t *testing.T, game *fakeGame) (*Diale
 
 func writeServerPort(t *testing.T, workingDir, port string) {
 	t.Helper()
-	body := "server-port=" + port + "\n"
+	writeProperties(t, workingDir, "server-port="+port+"\n")
+}
+
+// writeProperties writes an arbitrary server.properties body into workingDir.
+func writeProperties(t *testing.T, workingDir, body string) {
+	t.Helper()
 	if err := os.WriteFile(filepath.Join(workingDir, "server.properties"), []byte(body), 0o600); err != nil {
 		t.Fatalf("write server.properties: %v", err)
 	}
@@ -593,6 +598,110 @@ func TestShutdownClosesTunnels(t *testing.T) {
 	buf := make([]byte, 1)
 	if _, err := relayConn.Read(buf); err == nil {
 		t.Fatal("relay conn still readable after shutdown; tunnel was not closed")
+	}
+}
+
+// TestDialUsesColonSpelledGamePort: the port dialed is the one the Minecraft
+// server bound, in whatever Java-recognized spelling the file uses — the shared
+// parser reads "server-port:<port>" exactly as the server does (issue #2811).
+func TestDialUsesColonSpelledGamePort(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	relay := newFakeRelay(t, "tok")
+	game := newFakeGame(t)
+	workingDir := t.TempDir()
+	writeProperties(t, workingDir, "server-port:"+game.port()+"\n")
+	d := New(ctx, "0.0.0.0", nil, discardLogger(t))
+
+	gotAddr := make(chan string, 1)
+	d.gameDial = func(dctx context.Context, addr string) (net.Conn, error) {
+		gotAddr <- addr
+		var dialer net.Dialer
+		return dialer.DialContext(dctx, "tcp", game.ln.Addr().String())
+	}
+
+	if err := d.Dial(ctx, Spec{
+		ServerID: "s1", WorkingDir: workingDir,
+		Endpoint: relay.addr(), Token: "tok", CAPEM: relay.caPEM,
+	}); err != nil {
+		t.Fatalf("Dial = %v, want nil", err)
+	}
+
+	want := net.JoinHostPort("127.0.0.1", game.port())
+	if got := <-gotAddr; got != want {
+		t.Fatalf("game dial target = %q, want %q", got, want)
+	}
+}
+
+// TestDialFailsOnUnreadableProperties: an unreadable server.properties fails the
+// dial with a message naming the file instead of silently falling back to 25565
+// — the relay's own port, which would splice the player back into the relay
+// while the container driver refuses to start that very server (issues #2792,
+// #2621). A directory in the file's place stands in for any such I/O failure.
+func TestDialFailsOnUnreadableProperties(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	relay := newFakeRelay(t, "tok")
+	workingDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(workingDir, "server.properties"), 0o700); err != nil {
+		t.Fatalf("mkdir server.properties: %v", err)
+	}
+	d := New(ctx, "0.0.0.0", nil, discardLogger(t))
+
+	var dialed atomic.Bool
+	d.gameDial = func(context.Context, string) (net.Conn, error) {
+		dialed.Store(true)
+		return nil, io.ErrUnexpectedEOF
+	}
+
+	err := d.Dial(ctx, Spec{
+		ServerID: "s1", WorkingDir: workingDir,
+		Endpoint: relay.addr(), Token: "tok", CAPEM: relay.caPEM,
+	})
+	if err == nil {
+		t.Fatalf("Dial = nil error, want a failure naming server.properties")
+	}
+	if !strings.Contains(err.Error(), "server.properties") {
+		t.Errorf("Dial error = %v, want it to name server.properties", err)
+	}
+	if dialed.Load() {
+		t.Error("the game port was dialed; want no dial at all when the port is unknown")
+	}
+}
+
+// TestDialReadsGamePortPastAnOverlongLine: a line longer than bufio.Scanner's
+// token cap used to truncate the parse and lose server-port, sending the tunnel
+// to the 25565 default. The shared parser reads the whole file (issue #2811).
+func TestDialReadsGamePortPastAnOverlongLine(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	relay := newFakeRelay(t, "tok")
+	game := newFakeGame(t)
+	workingDir := t.TempDir()
+	writeProperties(t, workingDir,
+		"motd="+strings.Repeat("x", bufio.MaxScanTokenSize+1)+"\nserver-port="+game.port()+"\n")
+	d := New(ctx, "0.0.0.0", nil, discardLogger(t))
+
+	gotAddr := make(chan string, 1)
+	d.gameDial = func(dctx context.Context, addr string) (net.Conn, error) {
+		gotAddr <- addr
+		var dialer net.Dialer
+		return dialer.DialContext(dctx, "tcp", game.ln.Addr().String())
+	}
+
+	if err := d.Dial(ctx, Spec{
+		ServerID: "s1", WorkingDir: workingDir,
+		Endpoint: relay.addr(), Token: "tok", CAPEM: relay.caPEM,
+	}); err != nil {
+		t.Fatalf("Dial = %v, want nil", err)
+	}
+
+	want := net.JoinHostPort("127.0.0.1", game.port())
+	if got := <-gotAddr; got != want {
+		t.Fatalf("game dial target = %q, want %q", got, want)
 	}
 }
 

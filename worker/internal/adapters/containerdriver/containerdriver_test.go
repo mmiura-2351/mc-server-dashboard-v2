@@ -1283,13 +1283,15 @@ func TestStartPublishesConfiguredGamePort(t *testing.T) {
 	}
 }
 
-// A server.properties the scanner cannot read to the end -- a line longer than
-// bufio.Scanner's token cap -- must fail the start naming the file rather than
-// silently truncating the parse and publishing the 25565 default, which is the
-// relay's port and collides on the host (issue #2621).
+// A server.properties that cannot be read must fail the start naming the file
+// rather than falling back to the 25565 default, which is the relay's port and
+// collides on the host (issue #2621). A directory in the file's place is the
+// stand-in for any such I/O failure.
 func TestStartFailsOnUnreadableProperties(t *testing.T) {
 	dir := t.TempDir()
-	writeProperties(t, dir, "motd="+strings.Repeat("x", bufio.MaxScanTokenSize+1)+"\nserver-port=26590\n")
+	if err := os.Mkdir(filepath.Join(dir, "server.properties"), 0o700); err != nil {
+		t.Fatalf("mkdir server.properties: %v", err)
+	}
 	docker := newFakeDocker()
 	d := newTestDriver(docker, nil, errors.New("no rcon"))
 
@@ -1304,6 +1306,48 @@ func TestStartFailsOnUnreadableProperties(t *testing.T) {
 	}
 	if docker.createCalls != 0 {
 		t.Errorf("createCalls = %d, want 0 (no container created on an unreadable file)", docker.createCalls)
+	}
+}
+
+// A line longer than bufio.Scanner's token cap used to truncate the parse and
+// lose every key after it; the shared parser reads the whole file, so the
+// tracked port is still published (issue #2811).
+func TestStartPublishesGamePortAfterAnOverlongLine(t *testing.T) {
+	dir := t.TempDir()
+	writeProperties(t, dir, "motd="+strings.Repeat("x", bufio.MaxScanTokenSize+1)+"\nserver-port=26590\n")
+	docker := newFakeDocker()
+	d := newTestDriver(docker, nil, errors.New("no rcon"))
+
+	s := spec()
+	s.WorkingDir = dir
+	if _, err := d.Start(context.Background(), s); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if !hasPort(docker.createSpec.Ports, "26590") {
+		t.Errorf("Ports = %v, want the server.properties game port 26590 past the overlong line", docker.createSpec.Ports)
+	}
+}
+
+// The driver publishes the port the Minecraft server will bind, whatever
+// Java-recognized spelling the file uses (issue #2811).
+func TestStartPublishesColonSpelledGamePort(t *testing.T) {
+	dir := t.TempDir()
+	writeProperties(t, dir, "motd=hi\nserver-port:26590\n")
+	docker := newFakeDocker()
+	d := newTestDriver(docker, nil, errors.New("no rcon"))
+
+	s := spec()
+	s.WorkingDir = dir
+	if _, err := d.Start(context.Background(), s); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if !hasPort(docker.createSpec.Ports, "26590") {
+		t.Errorf("Ports = %v, want the colon-spelled game port 26590", docker.createSpec.Ports)
+	}
+	if hasPort(docker.createSpec.Ports, defaultGamePort) {
+		t.Errorf("Ports = %v, want NO fallback to the default game port", docker.createSpec.Ports)
 	}
 }
 

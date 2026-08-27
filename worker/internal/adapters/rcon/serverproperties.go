@@ -1,13 +1,13 @@
 package rcon
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
-	"strings"
+
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/javaproperties"
 )
 
 // defaultRCONPort is the Minecraft default RCON port when server.properties does
@@ -48,30 +48,17 @@ func OpenFromWorkingDir(ctx context.Context, workingDir, host string) (*Client, 
 	return Dial(ctx, net.JoinHostPort(host, port), password)
 }
 
-// readProperties parses a Java .properties file into a map. Lines that are blank
-// or comments (# or !) are skipped.
+// readProperties reads and parses the server.properties at path with the shared
+// Java-compatible reader (internal/javaproperties), so the credential dialed
+// with is the one the Minecraft server itself read: a "rcon.password:secret", an
+// escaped or \uXXXX-spelled key, or a backslash continuation is no longer
+// invisible here (issue #2811). Any read failure is an error, an absent file
+// included -- without a password there is nothing to dial, and the caller falls
+// back to signals.
 func readProperties(path string) (map[string]string, error) {
-	f, err := os.Open(path) //nolint:gosec // path is the server's own working dir, not user-controlled.
+	data, err := os.ReadFile(path) //nolint:gosec // path is the server's own working dir, not user-controlled.
 	if err != nil {
 		return nil, fmt.Errorf("rcon: read server.properties: %w", err)
 	}
-	defer func() { _ = f.Close() }()
-
-	out := map[string]string{}
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "!") {
-			continue
-		}
-		key, value, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
-		}
-		out[strings.TrimSpace(key)] = strings.TrimSpace(value)
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("rcon: scan server.properties: %w", err)
-	}
-	return out, nil
+	return javaproperties.Parse(data), nil
 }
