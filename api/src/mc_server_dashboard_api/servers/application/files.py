@@ -212,6 +212,67 @@ def _is_root_server_properties(rel_path: str) -> bool:
     return str(PurePosixPath(rel_path)) == _PROPERTIES_REL_PATH
 
 
+async def _current_properties(
+    file_store: FileStore, community_id: CommunityId, server_id: ServerId
+) -> bytes:
+    """The authoritative root ``server.properties`` bytes; absent -> ``b""``.
+
+    The baseline every at-rest guard compares against. A wholly absent file is
+    ``b""`` rather than an error: nothing is republished from the baseline, so an
+    absent one simply makes every platform key in the incoming bytes an addition,
+    which :func:`_refuse_platform_key_change` then refuses.
+    """
+
+    try:
+        return await file_store.read_file(
+            community_id=community_id,
+            server_id=server_id,
+            rel_path=_PROPERTIES_REL_PATH,
+        )
+    except ServerFileNotFoundError:
+        return b""
+
+
+def _refuse_platform_key_change(current: bytes, incoming: bytes) -> None:
+    """Raise when *incoming* changes a platform-managed key relative to *current*.
+
+    The first offending key (sorted) names the refusal so the edge can say which
+    one is off limits.
+    """
+
+    changed = changed_platform_managed_keys(current, incoming)
+    if changed:
+        raise PlatformManagedKeyError(changed[0])
+
+
+async def _guard_at_rest_properties(
+    file_store: FileStore,
+    *,
+    community_id: CommunityId,
+    server_id: ServerId,
+    rel_path: str,
+    incoming: bytes,
+) -> None:
+    """Refuse an at-rest write that changes a platform-managed key (#2623, #2809).
+
+    The one guard every at-rest door to the root ``server.properties`` runs: the
+    PUT's at-rest branch, a delete or rename-away (``incoming=b""`` — removing the
+    file removes its keys), a rename onto the name, an upload, and a rollback.
+    Whatever the operation, the question is the same — do the bytes this
+    operation leaves in the file change a key the platform owns? — so the
+    baseline is always the authoritative Storage copy these paths all land on.
+
+    A path that is not the root file returns before any Storage read, so an
+    ordinary delete/rename/upload costs no extra I/O.
+    """
+
+    if not _is_root_server_properties(rel_path):
+        return
+    _refuse_platform_key_change(
+        await _current_properties(file_store, community_id, server_id), incoming
+    )
+
+
 def _is_running(server: Server) -> bool:
     return (
         server.desired_state is DesiredState.RUNNING
@@ -466,32 +527,34 @@ class WriteFile:
         :class:`ServerFilesUnsettledError` (409) without a baseline read.
         """
 
+        if worker_id is None:
+            # The at-rest baseline is the authoritative Storage copy, which is what
+            # every other at-rest write path guards against too (issue #2809).
+            await _guard_at_rest_properties(
+                self.file_store,
+                community_id=community_id,
+                server_id=server_id,
+                rel_path=rel_path,
+                incoming=content,
+            )
+            return
         if not _is_root_server_properties(rel_path):
             return
         try:
-            if worker_id is None:
-                current = await self.file_store.read_file(
-                    community_id=community_id,
-                    server_id=server_id,
-                    rel_path=_PROPERTIES_REL_PATH,
-                )
-            else:
-                outcome = await self.control_plane.read_file(
-                    worker_id=worker_id,
-                    server_id=server_id,
-                    rel_path=_PROPERTIES_REL_PATH,
-                )
-                if not outcome.success:
-                    _map_file_status(server_id, "WriteFile", outcome)
-                current = outcome.file_content
+            outcome = await self.control_plane.read_file(
+                worker_id=worker_id,
+                server_id=server_id,
+                rel_path=_PROPERTIES_REL_PATH,
+            )
+            if not outcome.success:
+                _map_file_status(server_id, "WriteFile", outcome)
+            current = outcome.file_content
         except ServerFileNotFoundError:
             # No copy to compare against. Unlike the port rewrite (#2623 item 1),
             # nothing is republished from this — it only makes every platform key
             # in the incoming text an addition, which is refused below.
             current = b""
-        changed = changed_platform_managed_keys(current, content)
-        if changed:
-            raise PlatformManagedKeyError(changed[0])
+        _refuse_platform_key_change(current, content)
 
     async def _snapshot_authoritative(
         self, community_id: CommunityId, server_id: ServerId, rel_path: str
@@ -606,6 +669,22 @@ class RollbackFile:
                 server = await _load(self.uow, community_id, server_id)
             if not server.is_at_rest():
                 raise ServerNotStoppedError(str(server_id.value))
+            if _is_root_server_properties(rel_path):
+                # Republishing a retained version is a write of those bytes, so a
+                # version predating a re-port or an RCON rotation would reinstate
+                # the stale value behind the DB's back (issue #2809). The version
+                # is read first, so an unknown version stays the 404 the rollback
+                # itself would have raised.
+                version_content = await self.file_store.read_version(
+                    community_id=community_id,
+                    server_id=server_id,
+                    rel_path=rel_path,
+                    version_id=version_id,
+                )
+                _refuse_platform_key_change(
+                    await _current_properties(self.file_store, community_id, server_id),
+                    version_content,
+                )
             await self.file_store.rollback(
                 community_id=community_id,
                 server_id=server_id,
@@ -843,8 +922,21 @@ class UploadFile:
                         )
                     )
                 )
-                for entry_path, _data in entries:
-                    _guard_content_dir(server.server_type, _join(dir_path, entry_path))
+                # A member landing on the root server.properties is a write of that
+                # file, so it faces the same platform-key guard (issue #2809) — in
+                # this same pre-write scan, against ONE baseline read taken before
+                # any write, so an offending member refuses the whole archive with
+                # nothing written (the #269 atomicity posture).
+                properties_baseline: bytes | None = None
+                for entry_path, data in entries:
+                    target = _join(dir_path, entry_path)
+                    _guard_content_dir(server.server_type, target)
+                    if _is_root_server_properties(target):
+                        if properties_baseline is None:
+                            properties_baseline = await _current_properties(
+                                self.file_store, community_id, server_id
+                            )
+                        _refuse_platform_key_change(properties_baseline, data)
                 # Duplicate entry names (two members with the same path) are written
                 # in archive order, so the last occurrence wins — the same last-write
                 # semantics a sequence of plain writes would have. Left as-is (no
@@ -858,6 +950,13 @@ class UploadFile:
                         content=data,
                     )
                 return
+            await _guard_at_rest_properties(
+                self.file_store,
+                community_id=community_id,
+                server_id=server_id,
+                rel_path=_join(dir_path, filename),
+                incoming=content,
+            )
             await self.file_store.write_file(
                 community_id=community_id,
                 server_id=server_id,
@@ -1134,10 +1233,26 @@ class DeleteFile:
                 treat_symlink_as_file=True,
             )
             if is_dir:
+                # A DIRECTORY named server.properties (possible only while the real
+                # file is absent) carries no keys, and a baseline read of it would
+                # raise — so the guard is the file branch's alone (issue #2809).
                 await self.file_store.delete_dir(
                     community_id=community_id, server_id=server_id, rel_path=rel_path
                 )
             else:
+                # Deleting the root server.properties destroys every key in it,
+                # ``rcon.password`` — which lives nowhere else — included. Guarding
+                # against ``b""`` asks exactly that: does removing the file change a
+                # platform key? A file carrying none of them still deletes, and a
+                # leaf symlink standing in for it refuses (its baseline is
+                # unreadable, so the removal cannot be shown to be key-free).
+                await _guard_at_rest_properties(
+                    self.file_store,
+                    community_id=community_id,
+                    server_id=server_id,
+                    rel_path=rel_path,
+                    incoming=b"",
+                )
                 await self.file_store.delete_file(
                     community_id=community_id, server_id=server_id, rel_path=rel_path
                 )
@@ -1241,6 +1356,38 @@ class RenameFile:
                     to_path=to_path,
                 )
             else:
+                # Both ends of a file rename are writes to the root
+                # server.properties (issue #2809). Renaming it AWAY removes its
+                # keys, exactly like a delete. Renaming another file ONTO the name
+                # publishes that file's bytes there — the delete-then-rename pair
+                # is otherwise a complete bypass of the PUT guard. The destination
+                # is always absent by here (never-clobber 409'd an occupied one
+                # above), so the source is compared against an empty baseline.
+                await _guard_at_rest_properties(
+                    self.file_store,
+                    community_id=community_id,
+                    server_id=server_id,
+                    rel_path=from_path,
+                    incoming=b"",
+                )
+                if _is_root_server_properties(to_path):
+                    source = await self.file_store.read_file(
+                        community_id=community_id,
+                        server_id=server_id,
+                        rel_path=from_path,
+                    )
+                    if len(source) > MAX_EDIT_BYTES:
+                        # A legitimate properties file cannot exceed the PUT cap,
+                        # so an oversized source is refused (413) rather than
+                        # compared key by key.
+                        raise FileTooLargeError(str(len(source)))
+                    await _guard_at_rest_properties(
+                        self.file_store,
+                        community_id=community_id,
+                        server_id=server_id,
+                        rel_path=to_path,
+                        incoming=source,
+                    )
                 await self.file_store.rename_file(
                     community_id=community_id,
                     server_id=server_id,

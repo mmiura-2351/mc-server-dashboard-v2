@@ -3160,3 +3160,301 @@ async def test_search_running_is_unsettled() -> None:
             by="name",
             max_results=10,
         )
+
+
+# --- platform-managed keys on the sibling write paths (issue #2809) --------
+#
+# The PUT guard (#2623) is not the only door to the root ``server.properties``:
+# a delete destroys ``rcon.password``, a rename removes it (or publishes
+# arbitrary content under the name), an upload overwrites the file directly or
+# through an archive member, and a rollback reinstates a stale ``server-port``.
+# Every one of them is the same invariant -- no files-API path CHANGES a key the
+# platform owns -- so each is guarded against the authoritative copy, and an
+# operation that leaves those keys byte-identical still goes through.
+
+
+_KEYS_FREE_PROPS = b"motd=hi\nmax-players=20\n"
+
+
+async def test_delete_root_properties_with_platform_keys_is_refused() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    store.files["server.properties"] = _CURRENT_PROPS
+    use_case = DeleteFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(PlatformManagedKeyError) as excinfo:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="server.properties",
+        )
+    assert excinfo.value.key == "enable-rcon"  # first offending key, sorted
+    assert store.deleted_files == []
+    assert store.files["server.properties"] == _CURRENT_PROPS
+
+
+async def test_delete_keys_free_root_properties_is_allowed() -> None:
+    # The invariant is "no write path changes a platform-managed key", not a ban
+    # on the filename: a file carrying none of them is ordinary user data.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    store.files["server.properties"] = _KEYS_FREE_PROPS
+    use_case = DeleteFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="server.properties",
+    )
+    assert store.deleted_files == ["server.properties"]
+
+
+async def test_delete_non_root_properties_is_unguarded() -> None:
+    # A same-named file elsewhere in the tree is not the file the server reads.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    store.files["backups/server.properties"] = _CURRENT_PROPS
+    use_case = DeleteFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="backups/server.properties",
+    )
+    assert store.deleted_files == ["backups/server.properties"]
+
+
+async def test_delete_root_properties_directory_is_unguarded() -> None:
+    # A DIRECTORY named server.properties carries no keys (and is only possible
+    # when the real file is absent), so the directory branch passes untouched.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    store.dirs["server.properties"] = []
+    use_case = DeleteFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="server.properties",
+    )
+    assert store.deleted_dirs == ["server.properties"]
+
+
+async def test_rename_root_properties_away_is_refused() -> None:
+    # Renaming the file away is a delete as far as the server is concerned.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    store.files["server.properties"] = _CURRENT_PROPS
+    use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(PlatformManagedKeyError) as excinfo:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            from_path="server.properties",
+            to_path="server.properties.bak",
+        )
+    assert excinfo.value.key == "enable-rcon"
+    assert store.files["server.properties"] == _CURRENT_PROPS
+    assert "server.properties.bak" not in store.files
+
+
+async def test_rename_keys_free_root_properties_away_is_allowed() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    store.files["server.properties"] = _KEYS_FREE_PROPS
+    use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        from_path="server.properties",
+        to_path="server.properties.bak",
+    )
+    assert store.files["server.properties.bak"] == _KEYS_FREE_PROPS
+    assert "server.properties" not in store.files
+
+
+async def test_rename_onto_root_properties_publishing_keys_is_refused() -> None:
+    # delete-then-rename would otherwise be a complete PUT-guard bypass: the
+    # destination is absent (never-clobber 409s an occupied one), so the source
+    # bytes are compared against an empty baseline and any platform key in them
+    # is an addition.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    store.files["staged.properties"] = _CURRENT_PROPS
+    use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(PlatformManagedKeyError) as excinfo:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            from_path="staged.properties",
+            to_path="server.properties",
+        )
+    assert excinfo.value.key == "enable-rcon"
+    assert "server.properties" not in store.files
+    assert store.files["staged.properties"] == _CURRENT_PROPS
+
+
+async def test_rename_onto_root_properties_with_keys_free_source_is_allowed() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    store.files["staged.properties"] = _KEYS_FREE_PROPS
+    use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        from_path="staged.properties",
+        to_path="server.properties",
+    )
+    assert store.files["server.properties"] == _KEYS_FREE_PROPS
+
+
+async def test_rename_onto_root_properties_over_the_edit_cap_is_too_large() -> None:
+    # A legitimate server.properties cannot exceed the PUT cap, so an oversized
+    # source is refused (413) rather than compared.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    store.files["huge.bin"] = b"x" * (MAX_EDIT_BYTES + 1)
+    use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(FileTooLargeError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            from_path="huge.bin",
+            to_path="server.properties",
+        )
+    assert "server.properties" not in store.files
+
+
+async def test_upload_overwriting_root_properties_changing_a_key_is_refused() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.files["server.properties"] = _CURRENT_PROPS
+    use_case = UploadFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(PlatformManagedKeyError) as excinfo:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            dir_path=".",
+            filename="server.properties",
+            content=_CURRENT_PROPS.replace(b"rcon.password=tok", b"rcon.password=evil"),
+            extract=False,
+        )
+    assert excinfo.value.key == "rcon.password"
+    assert store.writes == []
+
+
+async def test_upload_root_properties_leaving_keys_identical_is_allowed() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.files["server.properties"] = _CURRENT_PROPS
+    use_case = UploadFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    incoming = _CURRENT_PROPS.replace(b"motd=hi", b"motd=bye")
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        dir_path=".",
+        filename="server.properties",
+        content=incoming,
+        extract=False,
+    )
+    assert store.writes == [("server.properties", incoming)]
+
+
+async def test_upload_extract_offending_properties_member_writes_nothing() -> None:
+    # The member is guarded in the pre-write scan, so a refusal leaves the whole
+    # archive unwritten (the #269 atomicity posture).
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.files["server.properties"] = _CURRENT_PROPS
+    use_case = UploadFile(uow=_stopped_uow(community, server_id), file_store=store)
+    archive = _zip_bytes(
+        {
+            "ops.json": b"[]",
+            "server.properties": _CURRENT_PROPS.replace(
+                b"server-port=25565", b"server-port=25999"
+            ),
+        }
+    )
+
+    with pytest.raises(PlatformManagedKeyError) as excinfo:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            dir_path=".",
+            filename="bundle.zip",
+            content=archive,
+            extract=True,
+        )
+    assert excinfo.value.key == "server-port"
+    assert store.writes == []
+
+
+async def test_upload_extract_into_a_subdir_leaves_the_root_file_unguarded() -> None:
+    # Only the root-level file is the one Mojang's server reads; the same member
+    # name under a subdirectory is ordinary user data.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.files["server.properties"] = _CURRENT_PROPS
+    use_case = UploadFile(uow=_stopped_uow(community, server_id), file_store=store)
+    archive = _zip_bytes({"server.properties": b"server-port=25999\n"})
+
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        dir_path="backups",
+        filename="bundle.zip",
+        content=archive,
+        extract=True,
+    )
+    assert store.writes == [("backups/server.properties", b"server-port=25999\n")]
+
+
+async def test_rollback_root_properties_changing_a_platform_key_is_refused() -> None:
+    # A stale version reinstates the port/password the platform has since moved
+    # on from, so rollback is a write like any other.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.files["server.properties"] = _CURRENT_PROPS
+    store.versions["server.properties"] = ["v1"]
+    store.version_bytes[("server.properties", "v1")] = _CURRENT_PROPS.replace(
+        b"server-port=25565", b"server-port=25999"
+    )
+    use_case = RollbackFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(PlatformManagedKeyError) as excinfo:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="server.properties",
+            version_id="v1",
+        )
+    assert excinfo.value.key == "server-port"
+    assert store.rollbacks == []
+
+
+async def test_rollback_root_properties_differing_only_in_user_keys_is_allowed() -> (
+    None
+):
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.files["server.properties"] = _CURRENT_PROPS
+    store.versions["server.properties"] = ["v1"]
+    store.version_bytes[("server.properties", "v1")] = _CURRENT_PROPS.replace(
+        b"motd=hi", b"motd=bye"
+    )
+    use_case = RollbackFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="server.properties",
+        version_id="v1",
+    )
+    assert store.rollbacks == [("server.properties", "v1")]
