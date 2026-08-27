@@ -681,28 +681,27 @@ tracked port, not the archive's. A restore whose backup carries no
 create seeds; if that rewrite fails, the restore answers 503 `seed_failed` (the
 world data is restored, the seed is not — retry the restore).
 
-**Residual drift modes.** Four remain, all recoverable:
+**Residual drift modes.** Three remain, all recoverable:
 
 - A `server.properties` edited outside the API — on the worker host, or inside the
   running container — is invisible to the platform until the next write path runs.
   The DB keeps the tracked port and the file keeps the edit; the next port `PATCH`,
   import, or restore overwrites it.
 
-- The port `PATCH`'s file write and DB commit are not atomic: if a concurrent
-  `UNIQUE(game_port)` race loses at commit (response 409 `port_taken`),
-  `server.properties` may already hold the new port while the row keeps the old.
-  Retry the PATCH, which rewrites both to a consistent state.
-- The files API refuses a `PUT` that changes a platform-managed key, but its
-  sibling routes (delete, rename, upload, rollback) do not consult that guard,
-  so they can remove or replace the file. Treat `server.properties` as
-  platform-owned and re-port via the `PATCH` above rather than through the
-  files API.
+- The port `PATCH`'s file write and DB commit are not atomic. The file is
+  rewritten *after* the commit, so the drift is one-way: a storage failure in
+  that rewrite (response 503 `seed_failed`) leaves the row on the new port while
+  `server.properties` keeps the old one. A commit that fails never reaches the
+  rewrite, so the file cannot run ahead of the row.
 - A row with `game_port = NULL` tracks no port, so nothing is re-applied to its
   file (a restore leaves `server-port` as it found it); backfill it as
   described below.
 
-A drift you find in the field is fixed by the `PATCH` above, which rewrites the
-row and the file together.
+A drift you find in the field is fixed by a `PATCH` that actually **changes**
+the port, which rewrites the row and the file together. When the row already
+holds the port you want and only the file is stale, that `PATCH` is a no-op —
+re-port to a spare in-range port and back, or run an import or restore, each of
+which re-applies the tracked port to the file.
 
 Every API path — create and import alike — assigns a port, so a row with
 `game_port = NULL` arises only outside the API (a direct SQL write). For such a
