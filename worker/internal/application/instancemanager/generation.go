@@ -28,7 +28,13 @@ const generationFile = ".mcsd_generation"
 // "Best-effort" is bounded by DIRECTION, and the two are not symmetric (issue #2284).
 // A marker OLDER than the tree it sits in — the outcome of a missing or failed write —
 // costs one extra hydrate and nothing else, because the API's skip-hydrate gate
-// (skip_hydrate = held >= store, issue #767) then does not skip. A marker NEWER than
+// (skip_hydrate = held >= store, issue #767) then does not skip. Since issue #2802 an
+// ABSENT marker costs that same extra hydrate by a second route: it is the launch
+// guard's predicate (launchReserved), so a start the API did skip the hydrate for is
+// refused and the API replays the launch WITH the hydrate (issue #2499's replay). Both
+// routes converge on one extra transfer, so the bound is unchanged — but a scratch that
+// can never persist the marker now blocks the start rather than booting a fresh world,
+// which is the correct direction and operator-visible. A marker NEWER than
 // its tree is a correctness failure: the gate skips the hydrate that would correct the
 // tree and the Worker boots a working set that is not the generation it claims to be.
 // So a caller that cannot prove the marker still describes the directory it is writing

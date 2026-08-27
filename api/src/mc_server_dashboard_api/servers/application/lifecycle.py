@@ -164,26 +164,43 @@ _DEFAULT_JAR_RELPATH = "server.jar"
 # hypothetical OTHER SnapshotTrigger SERVER_NOT_FOUND must keep the data-loss ERROR
 # (issue #1790). The phrase is pinned on the Worker side
 # (worker/internal/application/instancemanager/instancemanager.go — handleSnapshot's
-# stopped-id refusal, issue #1713, and handleStart's launch-time guard, issue #2499)
-# with a cross-reference to this constant — reword all of them together.
+# stopped-id refusal, issue #1713, and launchReserved's guard, issue #2499/#2802)
+# with a cross-reference to this constant — reword all of them together. It is kept
+# verbatim for the emptied-in-place scratch the marker predicate also refuses (issue
+# #2802): the prose is a shade imprecise there, but the discriminator is exact.
 _WORKING_SET_ABSENT_MARKER = "working dir absent"
+
+# The 409 body reason for a RESTART the Worker refused on its relaunch because the
+# id's working set is not on its disk (issue #2802). It is not in
+# ``_SANITIZED_REASONS`` for the same reason ``FAILED_STOP_ORPHAN_REASON`` is not:
+# that map is keyed by status alone, and this refusal is told from a plain
+# ``SERVER_NOT_FOUND`` by the message phrase, not by the code. Distinct from
+# "not running" on purpose — the server is down because this restart's own stop put
+# it down, and what the operator has to act on is the scratch.
+_WORKING_SET_ABSENT_REASON = "working_set_absent"
 
 
 def is_working_set_absent_refusal(outcome: CommandOutcome) -> bool:
     """Whether an outcome is the Worker's "I hold no working set for this id" refusal.
 
     True exactly for the two Worker sites that answer SERVER_NOT_FOUND with the
-    pinned phrase, both meaning the id's working dir is not at the scratch root:
+    pinned phrase, both meaning the id's working set is not held at the scratch root
+    (since issue #2802 the launch site's predicate is the generation marker, so a
+    scratch emptied in place says it as loudly as an absent directory):
 
     * a stopped-id SnapshotTrigger whose scratch the Worker already GC'd after a
       PUBLISHED final snapshot (issue #1713) — a duplicate dispatch whose original
       result was lost, not a data-loss event (issue #1790);
-    * a StartServer the API sent WITHOUT a preceding hydrate, over a working set
-      the Worker turns out not to hold (issue #2499) — the launch-time floor under
-      the held-working-set inventory.
+    * ``launchReserved``'s guard, which serves TWO kinds because every launch goes
+      through it (issue #2802). On a StartServer the API sent WITHOUT a preceding
+      hydrate it is the launch-time floor under the held-working-set inventory
+      (issue #2499). On a RestartServer it is the RELAUNCH, refused once the
+      restart's own stop confirmed: the server is left down for the reconciler,
+      whose ``redispatch_start`` meets the same guard and takes the #2499 replay,
+      so the recovery is stop -> hydrate -> start.
 
-    The two readings do not collide: a caller matches it on the outcome of the kind
-    it dispatched, and neither kind emits the phrase for any other reason.
+    The readings do not collide: a caller matches it on the outcome of the kind it
+    dispatched, and no kind emits the phrase for any other reason.
 
     Public because the periodic snapshot scheduler reads the same refusal to mean
     "nothing left to capture" (issue #2480); the marker constant stays here, where
@@ -2047,6 +2064,43 @@ class RestartServer:
         outcome = await self.control_plane.restart(
             worker_id=worker_id, server_id=server_id
         )
+        if is_working_set_absent_refusal(outcome):
+            # The Worker refused the RELAUNCH because the id's working set is not on
+            # its disk (issue #2802). This arm must precede the generic
+            # SERVER_NOT_FOUND one below, which would otherwise call this
+            # "not running" — a statement about a server THIS restart just stopped,
+            # sending the operator to look at lifecycle state while a scratch disk is
+            # being destroyed underneath a live Worker.
+            #
+            # The refusal is emitted after the stop confirmed, which is deliberate on
+            # the Worker side: any recovery needs the server stopped, and the on-disk
+            # world is already forfeit. So there is nothing to re-dispatch from here.
+            # The corrective path is assembled from shipped parts: the row keeps
+            # desired=running and its assignment (restart commits no desired-state
+            # change — see the class docstring — and this arm adds none), so the
+            # reconciler selects desired=running / observed=stopped and calls
+            # ``redispatch_start``; that start's own skip-hydrate decision meets the
+            # SAME guard and ``_launch``'s #2499 replay re-launches WITH the full
+            # hydrate. The result is stop (this restart's own) -> hydrate -> start.
+            #
+            # Log it: the condition means a live Worker's scratch was destroyed out
+            # of band, and a self-healing recovery nobody can see is how the next
+            # occurrence gets harder to diagnose (the #2499 loud-recovery doctrine).
+            _LOG.warning(
+                "worker %s refused the restart of server %s on its relaunch: it "
+                "holds no working set for this id. The scratch was destroyed out of "
+                "band under a running Worker; the server is left down and the "
+                "reconciler re-launches it WITH a full hydrate (%s)",
+                worker_id.value,
+                server_id.value,
+                outcome.message,
+            )
+            raise _dispatch_failure(
+                server_id=server_id,
+                kind="RestartServer",
+                outcome=outcome,
+                reason=_WORKING_SET_ABSENT_REASON,
+            )
         if outcome.status is CommandStatus.SERVER_NOT_FOUND:
             # The Worker holds no live instance for this id, so there is nothing to
             # restart. Its handleRestart returns SERVER_NOT_FOUND (takeNotFound),

@@ -85,6 +85,17 @@
       ]
     },
     {
+      "name": "running_working_set_absent",
+      "description": [
+        "a tracked running instance exists but the id's working-set claim -- the",
+        "generation marker at the scratch root -- is gone: the scratch was destroyed or",
+        "emptied out of band UNDER the live process (issue #2802). The relaunch of a",
+        "RestartServer is the only launch that can meet it, because every other",
+        "reserve()-gated kind is decided by the running instance before it reaches the",
+        "working set"
+      ]
+    },
+    {
       "name": "instance_stopped",
       "description": [
         "no tracked instance, orphan or reservation for the id, and the id's working",
@@ -102,6 +113,16 @@
         "server verb meets for an id this Worker knows nothing about, so it carries that",
         "meaning too -- the former 'instance_absent' named this exact state under a",
         "second name and was retired with the matrix (issue #2472)"
+      ]
+    },
+    {
+      "name": "working_set_emptied",
+      "description": [
+        "no tracked instance, orphan or reservation; the id's dir EXISTS at the scratch",
+        "root but holds no generation marker -- the contents were destroyed in place, or",
+        "only a crashed 204 stamp's '.mcsd_generation-*' temp survives (issue #2802). The",
+        "#2499 guard was a directory stat, which this shape passed; the marker predicate",
+        "refuses it exactly as it refuses working_set_absent"
       ]
     },
     {
@@ -197,8 +218,10 @@
   ],
   "rows": [
     {"kind": "StartServer", "precondition": "instance_running", "code": "invalid_state", "api": ["lifecycle.py:StartServer.__call__", "lifecycle.py:StartServer.redispatch_start"]},
+    {"kind": "StartServer", "precondition": "running_working_set_absent", "code": "unaffected", "why": "reserve()'s running refusal precedes launchReserved's working-set guard, so a start over a running instance is decided before it ever looks at the scratch: the {StartServer, instance_running} row is this cell's answer"},
     {"kind": "StartServer", "precondition": "instance_stopped", "code": "ok"},
-    {"kind": "StartServer", "precondition": "working_set_absent", "code": "server_not_found", "why": "the API issues a HydrateTrigger before every StartServer that needs one (control_plane.proto, StartServer), so an absent working dir AT LAUNCH means a hydrate was skipped over a working set this Worker does not actually hold. Starting anyway boots the server into the empty dir launchReserved's MkdirAll creates -- the #696 class, and the one residual of the held-inventory design that fails toward a SKIPPED hydrate rather than an extra one (issue #2499). The refusal is what makes the API re-launch with a full hydrate; it does not break a first start, because a 204 hydrate still creates the dir (writeGenerationGuarded's MkdirAll)", "api": ["lifecycle.py:is_working_set_absent_refusal", "via lifecycle.py:StartServer._launch"]},
+    {"kind": "StartServer", "precondition": "working_set_absent", "code": "server_not_found", "why": "the API issues a HydrateTrigger before every StartServer that needs one (control_plane.proto, StartServer), so a working set this Worker cannot show AT LAUNCH means a hydrate was skipped over one it does not actually hold. Starting anyway boots the server into an empty directory -- the #696 class, and the one residual of the held-inventory design that fails toward a SKIPPED hydrate rather than an extra one (issue #2499). Since issue #2802 the guard lives in launchReserved (so the restart's relaunch takes it too) and its predicate is the GENERATION MARKER, not a directory stat: an absent dir fails it because the marker's path resolves to nothing, and the emptied-in-place shape is the sibling working_set_emptied row. The refusal is what makes the API re-launch with a full hydrate; it does not break a first start, because a 204 hydrate still stamps the marker (writeGenerationGuarded)", "api": ["lifecycle.py:is_working_set_absent_refusal", "via lifecycle.py:StartServer._launch"]},
+    {"kind": "StartServer", "precondition": "working_set_emptied", "code": "server_not_found", "why": "the guard's predicate is the GENERATION MARKER (exact name .mcsd_generation; '.mcsd_generation-*' temps do not count), not a directory stat (issue #2802): the marker is the Worker's held-claim token -- a 200 hydrate embeds it atomically before the swap-in (issue #917), a 204 stamps it (writeGenerationGuarded), and the Worker declares a held generation only when the stamp landed (issue #2500) -- so a dir emptied in place has lost the claim the skipped hydrate relied on and refuses exactly like an absent one, same phrase, same API replay. A marker-ONLY dir (the 204 nothing-published case) PASSES: the fresh-start boot is the 204 contract, which is why a content predicate ('level.dat present') would be wrong. Residual: a destruction that spares the marker but eats content still boots", "api": ["lifecycle.py:is_working_set_absent_refusal", "via lifecycle.py:StartServer._launch"]},
     {"kind": "StartServer", "precondition": "command_in_flight", "code": "busy", "api": ["lifecycle.py:StartServer.__call__", "lifecycle.py:StartServer.redispatch_start", "command_dispatch.py:_SANITIZED_REASONS"]},
     {"kind": "StartServer", "precondition": "orphan_pending", "code": "busy", "api": ["lifecycle.py:StartServer.__call__", "lifecycle.py:StartServer.redispatch_start", "command_dispatch.py:_SANITIZED_REASONS"]},
     {"kind": "StartServer", "precondition": "snapshot_reserve_race", "code": "unaffected", "why": "only handleSnapshot reads the running flag outside a reservation; StartServer takes its state decision in one critical section under mu, so there is no window for a start to slip into"},
@@ -210,8 +233,10 @@
     {"kind": "StartServer", "precondition": "unsafe_server_id", "code": "file_access_denied", "api": "command_failed"},
 
     {"kind": "StopServer", "precondition": "instance_running", "code": "ok"},
+    {"kind": "StopServer", "precondition": "running_working_set_absent", "code": "unaffected", "why": "StopServer takes no working-set check: it terminates the tracked instance, so what is or is not on the scratch root does not change its answer"},
     {"kind": "StopServer", "precondition": "instance_stopped", "code": "server_not_found", "api": ["lifecycle.py:StopServer.__call__", "lifecycle.py:StopServer.redispatch_stop"]},
     {"kind": "StopServer", "precondition": "working_set_absent", "code": "server_not_found", "api": ["lifecycle.py:StopServer.__call__", "lifecycle.py:StopServer.redispatch_stop"]},
+    {"kind": "StopServer", "precondition": "working_set_emptied", "code": "server_not_found", "why": "no tracked instance, so the stop answers 'server not running' before any working-set state is consulted -- the same code and reason as working_set_absent", "api": ["lifecycle.py:StopServer.__call__", "lifecycle.py:StopServer.redispatch_stop"]},
     {"kind": "StopServer", "precondition": "command_in_flight", "code": "busy", "api": ["command_dispatch.py:_SANITIZED_REASONS", "stop_dispatch_refusals.py:StopDispatchRefusals.record_refusal"]},
     {"kind": "StopServer", "precondition": "orphan_pending", "code": "ok", "why": "a stop is NOT refused over an orphan: takeStoppableReserve hands the orphan's instance back and the stop is re-attempted against it (issue #251), which is the path that resolves it. 'ok' is a confirmed termination; a retry the driver still cannot confirm re-records the orphan and answers the unpinned internal, which is the driver's outcome, not this precondition's"},
     {"kind": "StopServer", "precondition": "snapshot_reserve_race", "code": "unaffected", "why": "only handleSnapshot reads the running flag outside a reservation; StopServer takes its state decision in one critical section under mu, so there is no window for a start to slip into"},
@@ -223,8 +248,10 @@
     {"kind": "StopServer", "precondition": "unsafe_server_id", "code": "file_access_denied", "api": "command_failed"},
 
     {"kind": "RestartServer", "precondition": "instance_running", "code": "ok"},
-    {"kind": "RestartServer", "precondition": "instance_stopped", "code": "server_not_found", "api": ["lifecycle.py:RestartServer.__call__"]},
-    {"kind": "RestartServer", "precondition": "working_set_absent", "code": "server_not_found", "api": ["lifecycle.py:RestartServer.__call__"]},
+    {"kind": "RestartServer", "precondition": "running_working_set_absent", "code": "server_not_found", "why": "reached on the RELAUNCH, once the restart's stop confirmed (issue #2802): the stop is taken first because any recovery requires it (the corrective hydrate needs the server stopped) and the on-disk world is already forfeit. launchReserved's working-set guard -- shared with StartServer since #2802 moved it there -- then refuses to boot the empty directory, with the same code and 'working dir absent' phrase as the #2499 start refusal, true at emission (the instance is evicted, no working set is held). The server is left down, exactly as the port_conflict/image_missing relaunch rows; the API reports the failed restart and the reconciler's redispatch_start re-launches -- its skip-hydrate start meets the same guard and the #2499 replay re-launches WITH the full hydrate, so the recovery is stop (this restart's own) -> hydrate -> start with no new machinery", "api": ["lifecycle.py:is_working_set_absent_refusal", "lifecycle.py:RestartServer.__call__"]},
+    {"kind": "RestartServer", "precondition": "instance_stopped", "code": "server_not_found", "api": ["lifecycle.py:is_working_set_absent_refusal", "lifecycle.py:RestartServer.__call__"]},
+    {"kind": "RestartServer", "precondition": "working_set_absent", "code": "server_not_found", "api": ["lifecycle.py:is_working_set_absent_refusal", "lifecycle.py:RestartServer.__call__"]},
+    {"kind": "RestartServer", "precondition": "working_set_emptied", "code": "server_not_found", "why": "no tracked instance, so takeRunningReserve answers 'server not running' before the relaunch that would meet the guard -- the same code and reason as working_set_absent", "api": ["lifecycle.py:is_working_set_absent_refusal", "lifecycle.py:RestartServer.__call__"]},
     {"kind": "RestartServer", "precondition": "command_in_flight", "code": "busy", "api": ["command_dispatch.py:_SANITIZED_REASONS"]},
     {"kind": "RestartServer", "precondition": "orphan_pending", "code": "invalid_state", "api": ["lifecycle.py:RestartServer.__call__"]},
     {"kind": "RestartServer", "precondition": "snapshot_reserve_race", "code": "unaffected", "why": "only handleSnapshot reads the running flag outside a reservation; RestartServer takes its state decision in one critical section under mu, so there is no window for a start to slip into"},
@@ -236,8 +263,10 @@
     {"kind": "RestartServer", "precondition": "unsafe_server_id", "code": "file_access_denied", "api": "command_failed"},
 
     {"kind": "ServerCommand", "precondition": "instance_running", "code": "ok"},
+    {"kind": "ServerCommand", "precondition": "running_working_set_absent", "code": "unaffected", "why": "ServerCommand takes no working-set check: it opens RCON against the running instance, so what is or is not on the scratch root does not change its answer"},
     {"kind": "ServerCommand", "precondition": "instance_stopped", "code": "server_not_found", "api": ["lifecycle.py:SendServerCommand.__call__"]},
     {"kind": "ServerCommand", "precondition": "working_set_absent", "code": "server_not_found", "api": ["lifecycle.py:SendServerCommand.__call__"]},
+    {"kind": "ServerCommand", "precondition": "working_set_emptied", "code": "server_not_found", "why": "no tracked instance, so the console command answers 'server not running' before any working-set state is consulted -- the same code and reason as working_set_absent", "api": ["lifecycle.py:SendServerCommand.__call__"]},
     {"kind": "ServerCommand", "precondition": "command_in_flight", "code": "server_not_found", "api": ["lifecycle.py:SendServerCommand.__call__"], "why": "notRunningRefusal reads m.instances and m.orphans only, never the reservation, so a console command arriving while a lifecycle command holds the id is answered as not-running rather than busy"},
     {"kind": "ServerCommand", "precondition": "orphan_pending", "code": "invalid_state", "api": ["lifecycle.py:SendServerCommand.__call__"]},
     {"kind": "ServerCommand", "precondition": "snapshot_reserve_race", "code": "unaffected", "why": "only handleSnapshot reads the running flag outside a reservation; ServerCommand takes its state decision in one critical section under mu, so there is no window for a start to slip into"},
@@ -249,8 +278,10 @@
     {"kind": "ServerCommand", "precondition": "unsafe_server_id", "code": "file_access_denied", "api": "command_failed"},
 
     {"kind": "HydrateTrigger", "precondition": "instance_running", "code": "invalid_state", "api": ["lifecycle.py:StartServer.redispatch_start"]},
+    {"kind": "HydrateTrigger", "precondition": "running_working_set_absent", "code": "unaffected", "why": "reserve()'s running refusal precedes any working-set inspection, so a hydrate over a running instance is decided before it looks at the scratch: the {HydrateTrigger, instance_running} row is this cell's answer"},
     {"kind": "HydrateTrigger", "precondition": "instance_stopped", "code": "ok"},
     {"kind": "HydrateTrigger", "precondition": "working_set_absent", "code": "ok", "why": "hydrating is what CREATES the working set, so an absent one is the normal case, not a refusal"},
+    {"kind": "HydrateTrigger", "precondition": "working_set_emptied", "code": "ok", "why": "hydrating is what REBUILDS the working set, marker included, so an emptied one is the normal case, not a refusal"},
     {"kind": "HydrateTrigger", "precondition": "command_in_flight", "code": "busy", "api": ["lifecycle.py:StartServer.redispatch_start", "command_dispatch.py:_SANITIZED_REASONS"]},
     {"kind": "HydrateTrigger", "precondition": "orphan_pending", "code": "busy", "api": ["lifecycle.py:StartServer.redispatch_start", "command_dispatch.py:_SANITIZED_REASONS"]},
     {"kind": "HydrateTrigger", "precondition": "snapshot_reserve_race", "code": "unaffected", "why": "only handleSnapshot reads the running flag outside a reservation; HydrateTrigger takes its state decision in one critical section under mu, so there is no window for a start to slip into"},
@@ -262,8 +293,10 @@
     {"kind": "HydrateTrigger", "precondition": "unsafe_server_id", "code": "file_access_denied", "api": "command_failed"},
 
     {"kind": "SnapshotTrigger", "precondition": "instance_running", "code": "ok", "why": "the running path takes no reservation: it brackets the pack with the save-off/save-all quiesce instead (issue #829 item 4)"},
+    {"kind": "SnapshotTrigger", "precondition": "running_working_set_absent", "code": "ok", "why": "DRIVEN, and not what issue #2802 predicted (transfer_failed via the quiesce): the running path takes no working-set check by design -- it is reservation-free and the save-off/save-all bracket is its quiesce (issue #829 item 4) -- and both collaborators treat an absent root as empty rather than as an error, by explicit contract: scanRegionState yields an empty settled map, and packTar 'snapshots an empty/absent working dir to an empty tar'. So the Worker packs and offers nothing and answers ok. The production backstop is API-side: the upload stages zero files and is refused 400 empty_snapshot (dataplane/api/transfers.py) before any generation publishes, which reaches the Worker as the environment-dependent transfer_failed this table leaves unpinned -- a failed operation, not a precondition code. Recorded per the #202 discipline: the code is what driveRow shows, never the prediction"},
     {"kind": "SnapshotTrigger", "precondition": "instance_stopped", "code": "ok"},
     {"kind": "SnapshotTrigger", "precondition": "working_set_absent", "code": "server_not_found", "api": ["lifecycle.py:is_working_set_absent_refusal", "via lifecycle.py:StopServer._final_snapshot", "via snapshot_scheduler.py:RunSnapshotCadenceTick._dispatch"]},
+    {"kind": "SnapshotTrigger", "precondition": "working_set_emptied", "code": "ok", "why": "RECORDED, NOT FIXED (follow-up issue #2813): the stopped-id snapshot guard is still the bare directory stat this issue replaced on the launch path, so a dir emptied in place passes it and the pack proceeds over nothing. The production backstop is API-side, not here: the pack excludes the generation marker and its temps, so an emptied dir stages zero files and the transfer is refused 400 empty_snapshot (dataplane/api/transfers.py, storage/adapters/fs.py) before any generation is published. What it costs is a wasted pack+upload+refusal cycle, which is the same trade #1713 closed for the absent dir -- hence the follow-up rather than a silent 'ok'"},
     {"kind": "SnapshotTrigger", "precondition": "command_in_flight", "code": "busy", "api": ["command_dispatch.py:_SANITIZED_REASONS"]},
     {"kind": "SnapshotTrigger", "precondition": "orphan_pending", "code": "busy", "api": ["command_dispatch.py:_SANITIZED_REASONS"]},
     {"kind": "SnapshotTrigger", "precondition": "snapshot_reserve_race", "code": "invalid_state", "api": "command_failed", "why": "the code the API reads as 'already running' on a start, emitted here by a SNAPSHOT: sound only because no API site converges an observed state off a snapshot outcome (see the api column)"},
@@ -275,8 +308,10 @@
     {"kind": "SnapshotTrigger", "precondition": "unsafe_server_id", "code": "file_access_denied", "api": "command_failed"},
 
     {"kind": "ReadFile", "precondition": "instance_running", "code": "unaffected", "why": "the file handlers take no instance / orphan / reservation / driver check at all: they resolve a path under the scratch root and nothing else, so no state outside the path axis changes their answer"},
+    {"kind": "ReadFile", "precondition": "running_working_set_absent", "code": "unaffected", "why": "the file handlers take no instance / orphan / reservation / driver check at all: they resolve a path under the scratch root and nothing else, so no state outside the path axis changes their answer"},
     {"kind": "ReadFile", "precondition": "instance_stopped", "code": "unaffected", "why": "the file handlers take no instance / orphan / reservation / driver check at all: they resolve a path under the scratch root and nothing else, so no state outside the path axis changes their answer"},
     {"kind": "ReadFile", "precondition": "working_set_absent", "code": "unaffected", "why": "the file handlers take no instance / orphan / reservation / driver check at all: they resolve a path under the scratch root and nothing else, so no state outside the path axis changes their answer"},
+    {"kind": "ReadFile", "precondition": "working_set_emptied", "code": "unaffected", "why": "the file handlers take no instance / orphan / reservation / driver check at all: they resolve a path under the scratch root and nothing else, so no state outside the path axis changes their answer"},
     {"kind": "ReadFile", "precondition": "command_in_flight", "code": "unaffected", "why": "the file handlers take no instance / orphan / reservation / driver check at all: they resolve a path under the scratch root and nothing else, so no state outside the path axis changes their answer"},
     {"kind": "ReadFile", "precondition": "orphan_pending", "code": "unaffected", "why": "the file handlers take no instance / orphan / reservation / driver check at all: they resolve a path under the scratch root and nothing else, so no state outside the path axis changes their answer"},
     {"kind": "ReadFile", "precondition": "snapshot_reserve_race", "code": "unaffected", "why": "the file handlers take no instance / orphan / reservation / driver check at all: they resolve a path under the scratch root and nothing else, so no state outside the path axis changes their answer"},
@@ -288,8 +323,10 @@
     {"kind": "ReadFile", "precondition": "unsafe_server_id", "code": "file_access_denied", "api": ["files.py:_map_file_status"]},
 
     {"kind": "EditFile", "precondition": "instance_running", "code": "unaffected", "why": "the file handlers take no instance / orphan / reservation / driver check at all: they resolve a path under the scratch root and nothing else, so no state outside the path axis changes their answer"},
+    {"kind": "EditFile", "precondition": "running_working_set_absent", "code": "unaffected", "why": "the file handlers take no instance / orphan / reservation / driver check at all: they resolve a path under the scratch root and nothing else, so no state outside the path axis changes their answer"},
     {"kind": "EditFile", "precondition": "instance_stopped", "code": "unaffected", "why": "the file handlers take no instance / orphan / reservation / driver check at all: they resolve a path under the scratch root and nothing else, so no state outside the path axis changes their answer"},
     {"kind": "EditFile", "precondition": "working_set_absent", "code": "unaffected", "why": "the file handlers take no instance / orphan / reservation / driver check at all: they resolve a path under the scratch root and nothing else, so no state outside the path axis changes their answer"},
+    {"kind": "EditFile", "precondition": "working_set_emptied", "code": "unaffected", "why": "the file handlers take no instance / orphan / reservation / driver check at all: they resolve a path under the scratch root and nothing else, so no state outside the path axis changes their answer"},
     {"kind": "EditFile", "precondition": "command_in_flight", "code": "unaffected", "why": "the file handlers take no instance / orphan / reservation / driver check at all: they resolve a path under the scratch root and nothing else, so no state outside the path axis changes their answer"},
     {"kind": "EditFile", "precondition": "orphan_pending", "code": "unaffected", "why": "the file handlers take no instance / orphan / reservation / driver check at all: they resolve a path under the scratch root and nothing else, so no state outside the path axis changes their answer"},
     {"kind": "EditFile", "precondition": "snapshot_reserve_race", "code": "unaffected", "why": "the file handlers take no instance / orphan / reservation / driver check at all: they resolve a path under the scratch root and nothing else, so no state outside the path axis changes their answer"},
@@ -301,8 +338,10 @@
     {"kind": "EditFile", "precondition": "unsafe_server_id", "code": "file_access_denied", "api": ["files.py:_map_file_status"]},
 
     {"kind": "ListFiles", "precondition": "instance_running", "code": "unaffected", "why": "the file handlers take no instance / orphan / reservation / driver check at all: they resolve a path under the scratch root and nothing else, so no state outside the path axis changes their answer"},
+    {"kind": "ListFiles", "precondition": "running_working_set_absent", "code": "unaffected", "why": "the file handlers take no instance / orphan / reservation / driver check at all: they resolve a path under the scratch root and nothing else, so no state outside the path axis changes their answer"},
     {"kind": "ListFiles", "precondition": "instance_stopped", "code": "unaffected", "why": "the file handlers take no instance / orphan / reservation / driver check at all: they resolve a path under the scratch root and nothing else, so no state outside the path axis changes their answer"},
     {"kind": "ListFiles", "precondition": "working_set_absent", "code": "unaffected", "why": "the file handlers take no instance / orphan / reservation / driver check at all: they resolve a path under the scratch root and nothing else, so no state outside the path axis changes their answer"},
+    {"kind": "ListFiles", "precondition": "working_set_emptied", "code": "unaffected", "why": "the file handlers take no instance / orphan / reservation / driver check at all: they resolve a path under the scratch root and nothing else, so no state outside the path axis changes their answer"},
     {"kind": "ListFiles", "precondition": "command_in_flight", "code": "unaffected", "why": "the file handlers take no instance / orphan / reservation / driver check at all: they resolve a path under the scratch root and nothing else, so no state outside the path axis changes their answer"},
     {"kind": "ListFiles", "precondition": "orphan_pending", "code": "unaffected", "why": "the file handlers take no instance / orphan / reservation / driver check at all: they resolve a path under the scratch root and nothing else, so no state outside the path axis changes their answer"},
     {"kind": "ListFiles", "precondition": "snapshot_reserve_race", "code": "unaffected", "why": "the file handlers take no instance / orphan / reservation / driver check at all: they resolve a path under the scratch root and nothing else, so no state outside the path axis changes their answer"},
@@ -314,8 +353,10 @@
     {"kind": "ListFiles", "precondition": "unsafe_server_id", "code": "file_access_denied", "api": ["files.py:_map_file_status"]},
 
     {"kind": "TunnelDial", "precondition": "instance_running", "code": "ok"},
+    {"kind": "TunnelDial", "precondition": "running_working_set_absent", "code": "unaffected", "why": "the tunnel handlers take no working-set check: they refuse a not-running server and otherwise hand off to the dialer/tunneler. The dialer resolves the game port from the working dir, so a real one fails there -- but that surfaces as the unpinned 'internal' this table leaves to the environment, not as a precondition code"},
     {"kind": "TunnelDial", "precondition": "instance_stopped", "code": "server_not_found", "api": "fire_and_forget"},
     {"kind": "TunnelDial", "precondition": "working_set_absent", "code": "server_not_found", "api": "fire_and_forget"},
+    {"kind": "TunnelDial", "precondition": "working_set_emptied", "code": "server_not_found", "why": "no tracked instance, so the dial answers 'server not running' before the dialer is reached -- the same code and reason as working_set_absent", "api": "fire_and_forget"},
     {"kind": "TunnelDial", "precondition": "command_in_flight", "code": "server_not_found", "api": "fire_and_forget", "why": "notRunningRefusal reads m.instances and m.orphans only, never the reservation, so a dispatch arriving while a lifecycle command holds the id is answered as not-running rather than busy"},
     {"kind": "TunnelDial", "precondition": "orphan_pending", "code": "invalid_state", "api": "fire_and_forget"},
     {"kind": "TunnelDial", "precondition": "snapshot_reserve_race", "code": "unaffected", "why": "only handleSnapshot reads the running flag outside a reservation; TunnelDial takes its state decision in one critical section under mu, so there is no window for a start to slip into"},
@@ -327,8 +368,10 @@
     {"kind": "TunnelDial", "precondition": "unsafe_server_id", "code": "file_access_denied", "api": "fire_and_forget"},
 
     {"kind": "OpenBedrockTunnel", "precondition": "instance_running", "code": "ok"},
+    {"kind": "OpenBedrockTunnel", "precondition": "running_working_set_absent", "code": "unaffected", "why": "the tunnel handlers take no working-set check: Open registers the tunnel against the running instance and never reads the scratch root"},
     {"kind": "OpenBedrockTunnel", "precondition": "instance_stopped", "code": "server_not_found", "api": "fire_and_forget"},
     {"kind": "OpenBedrockTunnel", "precondition": "working_set_absent", "code": "server_not_found", "api": "fire_and_forget"},
+    {"kind": "OpenBedrockTunnel", "precondition": "working_set_emptied", "code": "server_not_found", "why": "no tracked instance, so Open answers 'server not running' before the tunneler is reached -- the same code and reason as working_set_absent", "api": "fire_and_forget"},
     {"kind": "OpenBedrockTunnel", "precondition": "command_in_flight", "code": "server_not_found", "api": "fire_and_forget", "why": "notRunningRefusal reads m.instances and m.orphans only, never the reservation, so a dispatch arriving while a lifecycle command holds the id is answered as not-running rather than busy"},
     {"kind": "OpenBedrockTunnel", "precondition": "orphan_pending", "code": "invalid_state", "api": "fire_and_forget"},
     {"kind": "OpenBedrockTunnel", "precondition": "snapshot_reserve_race", "code": "unaffected", "why": "only handleSnapshot reads the running flag outside a reservation; OpenBedrockTunnel takes its state decision in one critical section under mu, so there is no window for a start to slip into"},
@@ -340,8 +383,10 @@
     {"kind": "OpenBedrockTunnel", "precondition": "unsafe_server_id", "code": "file_access_denied", "api": "fire_and_forget"},
 
     {"kind": "CloseBedrockTunnel", "precondition": "instance_running", "code": "ok"},
+    {"kind": "CloseBedrockTunnel", "precondition": "running_working_set_absent", "code": "unaffected", "why": "Close takes no instance and no working-set check at all: it tears down whatever tunnel this Worker holds for the id, so no state outside that changes its answer"},
     {"kind": "CloseBedrockTunnel", "precondition": "instance_stopped", "code": "ok"},
     {"kind": "CloseBedrockTunnel", "precondition": "working_set_absent", "code": "ok", "why": "a Close for a server this Worker never opened a tunnel for still succeeds: it is also the Worker-local safety net a successful StopServer triggers on its own (attemptStop)"},
+    {"kind": "CloseBedrockTunnel", "precondition": "working_set_emptied", "code": "ok", "why": "a Close for a server this Worker never opened a tunnel for still succeeds, whatever is left on the scratch root"},
     {"kind": "CloseBedrockTunnel", "precondition": "command_in_flight", "code": "ok"},
     {"kind": "CloseBedrockTunnel", "precondition": "orphan_pending", "code": "ok", "why": "the one running-server verb with nothing for the orphan refusal to fix (issue #2470, checked rather than assumed): it takes no running check, so it never misreported an orphan, and over one it does the useful thing -- a failed stop leaves the tunnel open (issue #2468) and this is the only way to take it down short of terminating the process. Do not 'fix' it for symmetry"},
     {"kind": "CloseBedrockTunnel", "precondition": "snapshot_reserve_race", "code": "unaffected", "why": "only handleSnapshot reads the running flag outside a reservation; CloseBedrockTunnel takes its state decision in one critical section under mu, so there is no window for a start to slip into"},

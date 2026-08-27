@@ -54,7 +54,9 @@ func unalignedLiveRegion() []byte {
 	return image
 }
 
-// seedWorkingSet writes data into <scratch>/<serverID>/region/r.0.0.mca.
+// seedWorkingSet writes data into <scratch>/<serverID>/region/r.0.0.mca, plus the
+// generation marker every real hydrate leaves alongside it — the launch guard's
+// predicate since issue #2802, so a fixture without it cannot start a server.
 func seedWorkingSet(t *testing.T, m *Manager, serverID string, data []byte) {
 	t.Helper()
 	dir := filepath.Join(m.scratchDir, serverID, "region")
@@ -63,6 +65,10 @@ func seedWorkingSet(t *testing.T, m *Manager, serverID string, data []byte) {
 	}
 	if err := os.WriteFile(filepath.Join(dir, "r.0.0.mca"), data, 0o640); err != nil {
 		t.Fatalf("write region: %v", err)
+	}
+	marker := filepath.Join(m.scratchDir, serverID, generationFile)
+	if err := os.WriteFile(marker, []byte("0"), 0o640); err != nil {
+		t.Fatalf("write generation marker: %v", err)
 	}
 }
 

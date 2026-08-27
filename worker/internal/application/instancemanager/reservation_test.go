@@ -525,11 +525,17 @@ func TestRestartConcurrentStartNeverLeaksReservation(t *testing.T) {
 	for i := 0; i < iterations; i++ {
 		id := fmt.Sprintf("srv-%d", i)
 		// The window only exists if the start actually COMMITS an instance, so the id
-		// needs a working set: since issue #2499 a start over an absent working dir is
-		// refused before driver.Start, which would make every iteration a no-op and
-		// neuter this stress test silently. A bare MkdirAll is enough — the race is
-		// about the start committing, not about what the tree contains.
-		if err := os.MkdirAll(filepath.Join(m.scratchDir, id), 0o750); err != nil {
+		// needs a working set: since issue #2499 a start over one this Worker does not
+		// hold is refused before driver.Start, which would make every iteration a no-op
+		// and neuter this stress test silently. The guard's predicate is the generation
+		// marker (issue #2802), so a bare MkdirAll no longer suffices — but the marker
+		// alone does, exactly as a 204 hydrate leaves it: the race is about the start
+		// committing, not about what the tree contains.
+		dir := filepath.Join(m.scratchDir, id)
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, generationFile), []byte("0"), 0o640); err != nil {
 			t.Fatal(err)
 		}
 		var wg sync.WaitGroup
