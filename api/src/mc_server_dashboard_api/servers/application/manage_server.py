@@ -24,6 +24,10 @@ from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from typing import Any
 
+from mc_server_dashboard_api.servers.application.platform_properties import (
+    assigned_resource_pack,
+    read_properties,
+)
 from mc_server_dashboard_api.servers.domain.backup_store import BackupArchiveStore
 from mc_server_dashboard_api.servers.domain.bedrock_tunnel import (
     BedrockTunnelCredentials,
@@ -69,6 +73,7 @@ from mc_server_dashboard_api.servers.domain.ports import (
 from mc_server_dashboard_api.servers.domain.server_properties import (
     PLATFORM_MANAGED_KEYS,
     apply_overrides,
+    apply_platform_properties,
     new_rcon_password,
     remove_keys,
     set_rcon_properties,
@@ -541,6 +546,12 @@ class UpdateServer:
     DB commit (#1705) so a commit failure (e.g. a unique-violation race) does not
     leave the file and row out of step. The inverse divergence — committed row,
     failed file write — is the self-healing direction (retryable).
+
+    A **config-overrides** edit on a server whose ``server.properties`` is absent
+    seeds the whole platform half before applying the overrides (issue #2810), so
+    the published file is never overrides-only. That is the restore's posture
+    (#2621), and it heals the very file the port rewrite above refuses to write
+    over — the refusal is a transient state, not a dead end.
     """
 
     uow: UnitOfWork
@@ -552,6 +563,13 @@ class UpdateServer:
     # Operator-configurable ceiling for memory-limit validation (issue #1069).
     # ``None`` preserves the hardcoded 1 TiB ceiling.
     max_memory_limit_mb: int | None = None
+    # The deployment's public base URL, which the ``resource-pack`` line of a
+    # seeded platform half points at (the same value :class:`RestoreBackup` and
+    # :class:`AssignResourcePack` write).
+    public_base_url: str = ""
+    # Fills in ``rcon.password`` when the platform half is seeded from scratch
+    # (issue #2810). Injected so tests are deterministic.
+    token_generator: Callable[[], str] = field(default=new_rcon_password)
 
     async def __call__(
         self,
@@ -708,6 +726,7 @@ class UpdateServer:
                     server_id=server_id,
                     overrides=pending_overrides,
                     removed_keys=pending_removed_keys,
+                    game_port=server.game_port,
                 )
             if pending_port is not None:
                 await self._rewrite_server_port(
@@ -783,28 +802,42 @@ class UpdateServer:
         community_id: CommunityId,
         server_id: ServerId,
         overrides: dict[str, str],
+        game_port: int | None,
         removed_keys: AbstractSet[str] = frozenset(),
     ) -> None:
         """Sync config-carried server.properties overrides into the file (#1209).
 
         Reads the current ``server.properties``, applies the overrides via
         :func:`apply_overrides`, removes lines for keys in *removed_keys*
-        (#1242), and writes it back. A legacy server with no properties file is
-        handled by treating the absent file as empty. Called after the DB commit
-        (#1705): a storage failure is surfaced as
-        :class:`WorkingSetSeedFailedError` (mapped to 503); the config row is
-        already committed, but the divergence is the self-healing direction (the
-        file can be re-written on retry).
+        (#1242), and writes it back. Called after the DB commit (#1705): a storage
+        failure is surfaced as :class:`WorkingSetSeedFailedError` (mapped to 503);
+        the config row is already committed, but the divergence is the
+        self-healing direction (the file can be re-written on retry).
+
+        A server with **no** ``server.properties`` gets the platform half seeded
+        first (issue #2810), so the overrides land on top of a complete file
+        instead of publishing an overrides-only one: no ``rcon.password`` for the
+        control plane to quiesce, stop, and send console commands with, and no
+        ``server-port``, so the server silently binds Mojang's 25565. The values
+        come from the DB exactly as a restore re-applies them — the tracked
+        ``game_port`` (a legacy ``None`` row owns none, so no port line is
+        written), a fresh RCON password, and the assignment row's pack.
         """
 
-        try:
-            current = await self.file_store.read_file(
-                community_id=community_id,
-                server_id=server_id,
-                rel_path=_PROPERTIES_REL_PATH,
+        current = await read_properties(
+            self.file_store, community_id=community_id, server_id=server_id
+        )
+        if current is None:
+            current = apply_platform_properties(
+                b"",
+                game_port=game_port,
+                rcon_password=self.token_generator(),
+                resource_pack=await assigned_resource_pack(
+                    self.uow,
+                    server_id=server_id,
+                    public_base_url=self.public_base_url,
+                ),
             )
-        except ServerFileNotFoundError:
-            current = b""
         try:
             updated = apply_overrides(current, overrides)
             if removed_keys:

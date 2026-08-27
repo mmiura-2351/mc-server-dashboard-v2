@@ -40,6 +40,7 @@ from mc_server_dashboard_api.servers.domain.resource_pack import (
     ResourcePackAssignment,
     ResourcePackId,
 )
+from mc_server_dashboard_api.servers.domain.server_properties import RCON_PORT
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     DesiredState,
@@ -541,6 +542,7 @@ _BASE_URL = "https://example.com"
 def _at_rest_server(
     community_id: CommunityId = _COMMUNITY_ID,
     server_id: ServerId | None = None,
+    game_port: int | None = None,
 ) -> Server:
     sid = server_id or ServerId(uuid.uuid4())
     return Server(
@@ -551,6 +553,7 @@ def _at_rest_server(
         mc_version="1.21",
         server_type=ServerType("vanilla"),
         config={},
+        game_port=game_port,
         desired_state=DesiredState.STOPPED,
         observed_state=ObservedState.STOPPED,
         observed_at=_NOW,
@@ -659,12 +662,92 @@ class TestAssignResourcePack:
         )
 
     async def test_assign_creates_properties_if_missing(self) -> None:
-        server = _at_rest_server()
+        # An absent server.properties is seeded with the WHOLE platform half, not
+        # just the pack keys (issue #2810): a pack-keys-only file leaves the worker
+        # with no rcon.password and the server binding Mojang's default port.
+        server = _at_rest_server(game_port=25570)
         servers = FakeServerRepository()
         servers.seed(server)
         uow = FakeUnitOfWork(servers=servers)
         pack = _seed_pack(uow)
         file_store = FakeFileStore()  # no server.properties seeded
+
+        uc = AssignResourcePack(
+            uow=uow,
+            file_store=file_store,
+            clock=FakeClock(_NOW),
+            token_generator=lambda: "tok",
+        )
+        await uc(
+            community_id=_COMMUNITY_ID,
+            server_id=server.id,
+            resource_pack_id=pack.id,
+            require_resource_pack=False,
+            resource_pack_prompt="Install this",
+            assigned_by=uuid.uuid4(),
+            public_base_url=_BASE_URL,
+        )
+
+        assert "server.properties" in file_store.files
+        props = file_store.files["server.properties"].decode()
+        assert "server-port=25570" in props
+        assert "enable-rcon=true" in props
+        assert f"rcon.port={RCON_PORT}" in props
+        assert "rcon.password=tok" in props
+        assert (
+            f"resource-pack={_BASE_URL}/api/public/resource-packs/"
+            f"{pack.id.value}/test-pack.zip" in props
+        )
+        assert "resource-pack-sha1=abc123" in props
+        assert "require-resource-pack=false" in props
+        assert "resource-pack-prompt=Install this" in props
+
+    async def test_assign_absent_file_omits_untracked_port(self) -> None:
+        # A legacy row with no tracked game_port owns no port value, so the seeded
+        # file carries the RCON triple but no server-port line (issue #2810).
+        server = _at_rest_server(game_port=None)
+        servers = FakeServerRepository()
+        servers.seed(server)
+        uow = FakeUnitOfWork(servers=servers)
+        pack = _seed_pack(uow)
+        file_store = FakeFileStore()  # no server.properties seeded
+
+        uc = AssignResourcePack(
+            uow=uow,
+            file_store=file_store,
+            clock=FakeClock(_NOW),
+            token_generator=lambda: "tok",
+        )
+        await uc(
+            community_id=_COMMUNITY_ID,
+            server_id=server.id,
+            resource_pack_id=pack.id,
+            require_resource_pack=False,
+            resource_pack_prompt=None,
+            assigned_by=uuid.uuid4(),
+            public_base_url=_BASE_URL,
+        )
+
+        props = file_store.files["server.properties"].decode()
+        assert "server-port" not in props
+        assert "rcon.password=tok" in props
+        assert "resource-pack-prompt" not in props
+
+    async def test_assign_without_prompt_removes_stale_prompt_line(self) -> None:
+        # An assignment with no prompt writes NULL to the row, so the file's
+        # resource-pack-prompt line must go too, or the platform-managed key
+        # drifts from the row until the next restore (issue #2792).
+        server = _at_rest_server()
+        servers = FakeServerRepository()
+        servers.seed(server)
+        uow = FakeUnitOfWork(servers=servers)
+        pack = _seed_pack(uow)
+        file_store = FakeFileStore()
+        file_store.files["server.properties"] = (
+            b"motd=hi\nresource-pack=https://old/pack.zip\n"
+            b"resource-pack-sha1=oldsha\nrequire-resource-pack=true\n"
+            b"resource-pack-prompt=Old prompt\n"
+        )
 
         uc = AssignResourcePack(
             uow=uow,
@@ -681,9 +764,10 @@ class TestAssignResourcePack:
             public_base_url=_BASE_URL,
         )
 
-        assert "server.properties" in file_store.files
         props = file_store.files["server.properties"].decode()
-        assert "resource-pack=" in props
+        assert "resource-pack-prompt" not in props
+        assert "resource-pack-sha1=abc123" in props
+        assert "motd=hi" in props
 
     async def test_assign_upserts_existing_assignment(self) -> None:
         server = _at_rest_server()
@@ -849,6 +933,34 @@ class TestUnassignResourcePack:
             < write_at
             < ev.index((server.id, "release"))
         )
+        assert uow.commits == 1
+
+    async def test_unassign_writes_nothing_when_properties_absent(self) -> None:
+        # Nothing to clear: writing from empty would publish a lone-newline file
+        # with no platform half at all, so the write is skipped entirely and only
+        # the assignment row goes (issue #2810).
+        server = _at_rest_server()
+        servers = FakeServerRepository()
+        servers.seed(server)
+        uow = FakeUnitOfWork(servers=servers)
+        pack = _seed_pack(uow)
+        file_store = FakeFileStore()  # no server.properties seeded
+        uow.resource_packs.assignments[server.id] = ResourcePackAssignment(
+            server_id=server.id,
+            resource_pack_id=pack.id,
+            require_resource_pack=True,
+            resource_pack_prompt="Hi",
+            assigned_by=uuid.uuid4(),
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
+
+        uc = UnassignResourcePack(uow=uow, file_store=file_store)
+        await uc(community_id=_COMMUNITY_ID, server_id=server.id)
+
+        assert file_store.writes == []
+        assert "server.properties" not in file_store.files
+        assert server.id not in uow.resource_packs.assignments
         assert uow.commits == 1
 
     async def test_unassign_rejects_when_no_assignment(self) -> None:
