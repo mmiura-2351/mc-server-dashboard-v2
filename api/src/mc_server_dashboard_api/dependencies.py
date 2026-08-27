@@ -1467,6 +1467,10 @@ def get_update_server(
     Binds the file seam to Storage and the configured port range so an at-rest
     game-port change can validate the new port and rewrite ``server-port`` in
     ``server.properties`` (issue #311), keeping the DB and bind port in sync.
+
+    ``public_base_url`` is what the ``resource-pack`` line points at when a config
+    overrides edit seeds the platform half of an absent ``server.properties``
+    (issue #2810) — the same value :func:`get_restore_backup` hands the restore.
     """
 
     session_factory = create_session_factory(get_engine(request))
@@ -1481,6 +1485,7 @@ def get_update_server(
         min_interval_seconds=settings.snapshot.min_interval_seconds,
         lifecycle_lock=get_lifecycle_lock(request),
         max_memory_limit_mb=settings.memory_limit.max_mb,
+        public_base_url=settings.server.public_base_url or "",
     )
 
 

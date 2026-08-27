@@ -49,6 +49,67 @@ func TestOpenFromWorkingDirDefaultsToLoopback(t *testing.T) {
 	_ = client.Close()
 }
 
+// TestOpenFromWorkingDirReadsJavaSpellings verifies the credential is read from
+// the spellings java.util.Properties.load accepts — a colon separator, a
+// whitespace separator, and an escaped key — so the Worker dials with what the
+// Minecraft server itself read rather than missing the line entirely (#2811).
+func TestOpenFromWorkingDirReadsJavaSpellings(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// body renders the server.properties once the fake server's port is known.
+		body func(port string) string
+	}{
+		{"colon separator", func(p string) string {
+			return "enable-rcon:true\nrcon.port:" + p + "\nrcon.password:pw\n"
+		}},
+		{"whitespace separator", func(p string) string {
+			return "enable-rcon true\nrcon.port " + p + "\nrcon.password pw\n"
+		}},
+		{"escaped key", func(p string) string {
+			return "enable-rcon=true\nrcon.port=" + p + "\nrcon\\.password=pw\n"
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// A fakeServer accepts exactly one connection, so each case needs its own.
+			fs := newFakeServer(t, "pw")
+			dir := t.TempDir()
+			body := tc.body(listenPort(t, fs.addr()))
+			if err := os.WriteFile(filepath.Join(dir, "server.properties"), []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			client, err := OpenFromWorkingDir(ctx, dir, "")
+			if err != nil {
+				t.Fatalf("OpenFromWorkingDir = %v, want nil", err)
+			}
+			_ = client.Close()
+		})
+	}
+}
+
+// TestOpenFromWorkingDirUsesTheLastOccurrence verifies a key respelled and
+// appended after an untouched first line wins, as it does for the Minecraft
+// server — reading the stale first value would lose RCON control (#2811).
+func TestOpenFromWorkingDirUsesTheLastOccurrence(t *testing.T) {
+	fs := newFakeServer(t, "pw")
+	dir := t.TempDir()
+	port := listenPort(t, fs.addr())
+	body := "enable-rcon=true\nrcon.port=" + port + "\nrcon.password=stale\nrcon.password:pw\n"
+	if err := os.WriteFile(filepath.Join(dir, "server.properties"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	client, err := OpenFromWorkingDir(ctx, dir, "")
+	if err != nil {
+		t.Fatalf("OpenFromWorkingDir = %v, want nil (the appended password must win)", err)
+	}
+	_ = client.Close()
+}
+
 // TestOpenFromWorkingDirUsesHostOverride verifies a non-empty host is used as the
 // dial host (the container-name case), with the rcon.port from server.properties.
 func TestOpenFromWorkingDirUsesHostOverride(t *testing.T) {

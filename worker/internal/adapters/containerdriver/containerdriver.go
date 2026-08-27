@@ -1924,11 +1924,15 @@ var (
 // ports reads the server's game and RCON ports from its working-dir
 // server.properties, falling back to the Minecraft defaults when the file is
 // absent or a key is unset. Start publishes the game port on the configured host
-// interface and RCON on loopback. Keep the game-port resolution in sync with
-// tunnel.gamePort (adapters/tunnel/tunnel.go), which dials the published port.
+// interface and RCON on loopback. The file itself is parsed by the shared
+// Java-compatible reader (internal/javaproperties), which tunnel.gamePort
+// (adapters/tunnel/tunnel.go) also uses, so the two cannot disagree about what
+// the file says; keep the resolution around it in sync too — if the driver ever
+// maps a host port that differs from the container port, the tunnel must dial
+// the host port, not server-port.
 //
 // An unreadable file fails the start instead of falling back: the fallback is
-// 25565, the relay's port, so a truncated parse turns a correctly tracked server
+// 25565, the relay's port, so a failed read turns a correctly tracked server
 // into a host-port collision that never starts (issue #2621). Only an ABSENT file
 // still takes the defaults.
 func ports(workingDir string) (game, rcon string, err error) {

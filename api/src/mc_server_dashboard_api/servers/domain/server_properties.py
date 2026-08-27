@@ -6,12 +6,36 @@ with the DB ``game_port`` (#311), and the RCON keys are enforced so the console 
 graceful-stop path works out of the box (#335). These are pure,
 standard-library-only helpers that do the line edits, preserving every other line
 and its order, or appending a key when the file has no such line. A wholly absent
-file (a legacy server with no seeded properties, #243) is handled by the caller,
-which passes an empty body so the helper produces a file with just its keys.
+file (a legacy server with no seeded properties, #243) is the caller's decision,
+not this module's: the restore, config-overrides and resource-pack assign paths
+pass an empty body to :func:`apply_platform_properties`, so the file they seed
+carries the whole platform half, while unassigning a pack skips the write
+altogether rather than publishing a file that holds nothing (#2621, #2810).
 
-Mojang's ``server.properties`` is a Java ``.properties`` file; for the few keys we
-touch, ``key=value`` line matching on a comment-aware, whitespace-trimmed key is
-sufficient (we never need to parse values or escapes).
+Mojang's ``server.properties`` is a Java ``.properties`` file, so every helper here
+READS it through :func:`_parse`, a ``java.util.Properties.load``-compatible logical
+line reader: ``key=value``, ``key:value`` and ``key value`` are one key, a line
+ending in an odd backslash run continues onto the next, ``#`` and ``!`` start
+comments, escapes (``rcon\\.password``, ``\\uXXXX``) resolve in keys and values, and
+a repeated key takes its LAST occurrence. Matching only ``key=`` used to make every
+platform-managed key bypassable by respelling it -- the guard saw no change while
+the server read the respelled line (issue #2811). The Worker parses the same file
+with the same rules (``worker/internal/javaproperties``), and the two test tables
+(``PARITY_CASES`` / ``parityCases``) are mirrored to keep them from drifting.
+
+WRITES stay canonical: :func:`_set_property` always emits ``key=value``, never a
+respelling and never an escape. Two remnants follow from that and are NOT closed
+here:
+
+- A value containing a newline, or leading whitespace, or (for the first
+  character) an ``=``/``:``, round-trips as something else through Java. Nothing
+  the platform itself writes does that; :func:`apply_overrides` passes user text
+  through unescaped, which is the pre-existing gap.
+- Values are encoded UTF-8 (``surrogateescape``) while Java reads a
+  ``server.properties`` as latin-1, so a non-latin-1 value the platform writes
+  (a ``resource-pack-prompt``, say) reaches the server mojibaked. Untouched
+  bytes are spliced through verbatim, so a file the platform did not write to is
+  preserved exactly.
 """
 
 from __future__ import annotations
@@ -73,117 +97,238 @@ PLATFORM_MANAGED_KEYS: frozenset[str] = frozenset(
 )
 
 
-def _split_content_lines(content: bytes) -> list[str]:
-    """Decode ``content`` into property lines, dropping the trailing-newline empty.
+@dataclass(frozen=True)
+class _Property:
+    """One logical property line, as ``java.util.Properties.load`` sees it.
 
-    An empty input becomes no lines, so callers that only append produce a file
-    with just their appended lines.
-
-    ``surrogateescape`` because a ``server.properties`` is not required to be valid
-    UTF-8 -- a latin-1 ``motd`` is ordinary, and the comparison guard went
-    byte-level for exactly that reason (#2623). Undecodable bytes become lone
-    surrogates that :func:`_join_lines` turns back into the original bytes, so a
-    rewrite preserves them instead of raising on a file it has no business
-    rejecting (issue #2621).
+    ``start`` and ``end`` are byte offsets into the parsed content: the first byte
+    of the natural line the property begins on, and the first byte past the
+    terminator that ends it. A backslash continuation spans several natural lines
+    yet is ONE property, so dropping ``content[start:end]`` drops all of them --
+    leaving a tail behind would keep the value alive AND corrupt the next line.
     """
 
-    lines = content.decode(errors="surrogateescape").split("\n")
-    if lines and lines[-1] == "":
-        lines.pop()
-    return lines
+    key: str
+    value: str
+    start: int
+    end: int
 
 
-def _join_lines(lines: list[str]) -> bytes:
-    """Encode property ``lines`` back to file bytes, one trailing newline.
+# The characters ``Properties.load`` counts as blanks: no CR/LF (those terminate a
+# line) and no Unicode whitespace (it reads latin-1 bytes, not text).
+_BLANKS = b" \t\f"
 
-    Mojang's convention (and the create-seed format ``server-port=<port>\n``) is a
-    single trailing newline. ``surrogateescape`` restores whatever
-    :func:`_split_content_lines` could not decode.
+_HEX_DIGITS = "0123456789abcdefABCDEF"
+
+
+def _natural_line(content: bytes, offset: int) -> tuple[bytes, int]:
+    """Return the line at *offset* without its terminator, and the next offset.
+
+    ``\\r\\n``, a lone ``\\r`` and a lone ``\\n`` all terminate a line, as they do
+    for ``Properties.load``; an unterminated final line runs to the end. Splitting
+    on ``\\n`` alone would fold a CR-separated pair into one line and hide the
+    second half of it from every caller here.
     """
 
-    return ("\n".join(lines) + "\n").encode(errors="surrogateescape")
+    end = offset
+    while end < len(content) and content[end] not in b"\n\r":
+        end += 1
+    if end >= len(content):
+        return content[offset:end], end
+    if content[end : end + 2] == b"\r\n":
+        return content[offset:end], end + 2
+    return content[offset:end], end + 1
 
 
-def _is_key_line(line: str, key: str) -> bool:
-    """True when ``line`` is the live (non-comment) ``key=...`` property line."""
+def _ends_with_odd_backslash(line: bytes) -> bool:
+    """True when *line* ends in an odd backslash run, so it continues onto the next.
 
-    stripped = line.lstrip()
-    return (
-        not stripped.startswith("#")
-        and "=" in stripped
-        and stripped.split("=", 1)[0].strip() == key
-    )
-
-
-def _get_property(lines: list[str], key: str) -> str | None:
-    """Return the value of the first live ``key=...`` line, or ``None`` if absent."""
-
-    for line in lines:
-        if _is_key_line(line, key):
-            return line.split("=", 1)[1]
-    return None
-
-
-def _raw_values(content: bytes, key: str) -> list[bytes]:
-    """Return every live ``key=...`` value in *content*, in file order, as bytes.
-
-    Byte-level on purpose: this backs the comparison guard, which must not care
-    whether the file is valid UTF-8. A strict decode would turn a latin-1 ``motd``
-    into a 500, and a lossy one would collapse two DIFFERENT invalid sequences
-    into the same replacement character -- a change slipping past the guard.
-
-    Every occurrence matters, not just the first: Java's ``Properties.load`` is
-    last-occurrence-wins, so an appended second line for a key is what the server
-    actually reads. Values are trimmed so a reformatting edit (or a CRLF/LF
-    round-trip through an editor) does not read as a value change.
+    An even run is a sequence of escaped backslashes and ends the logical line.
     """
 
-    wanted = key.encode()
-    values: list[bytes] = []
-    for line in content.split(b"\n"):
-        stripped = line.lstrip()
-        if stripped.startswith(b"#"):
-            continue
-        name, sep, value = stripped.partition(b"=")
-        if sep and name.strip() == wanted:
-            values.append(value.strip())
-    return values
+    return (len(line) - len(line.rstrip(b"\\"))) % 2 == 1
 
 
-def _clear_property(lines: list[str], key: str) -> list[str]:
-    """Remove the first live ``key=...`` line entirely, if present."""
+def _load_convert(raw: bytes) -> str:
+    """Decode *raw* as latin-1 and resolve the ``.properties`` escapes.
 
-    return [line for line in lines if not _is_key_line(line, key)]
+    latin-1 is what ``Properties.load(InputStream)`` uses, and it is a
+    byte-preserving bijection: a ``server.properties`` that is not valid UTF-8 (a
+    latin-1 ``motd`` is ordinary, #2623) decodes without raising, and two DIFFERENT
+    byte sequences never collapse onto one value the way a lossy decode would --
+    which is what keeps the comparison guard honest.
 
-
-def _set_property(lines: list[str], key: str, value: str) -> list[str]:
-    """Set ``key`` to ``value`` in ``lines``, rewriting in place or appending.
-
-    Rewrites the first live (non-comment) ``key=...`` line; if none exists,
-    appends ``key=value``. Other lines and their order are preserved.
+    A malformed ``\\uXXXX`` -- which the reference implementation rejects with an
+    exception -- yields the literal ``u`` and whatever followed it, so the guard
+    reads a hand-mangled file rather than turning an ordinary write into a 500.
+    Such a file makes the Java server refuse to load it at all, so there is no
+    "right" value to agree on anyway.
     """
 
-    new_line = f"{key}={value}"
-    replaced = False
+    text = raw.decode("latin-1")
+    if "\\" not in text:
+        return text
     out: list[str] = []
-    for line in lines:
-        if not replaced and _is_key_line(line, key):
-            out.append(new_line)
-            replaced = True
+    i = 0
+    while i < len(text):
+        char = text[i]
+        i += 1
+        if char != "\\" or i >= len(text):
+            out.append(char)
+            continue
+        char = text[i]
+        i += 1
+        if char == "u":
+            digits = text[i : i + 4]
+            if len(digits) == 4 and all(d in _HEX_DIGITS for d in digits):
+                out.append(chr(int(digits, 16)))
+                i += 4
+            else:
+                out.append("u")
         else:
-            out.append(line)
-    if not replaced:
-        out.append(new_line)
-    return out
+            out.append({"t": "\t", "r": "\r", "n": "\n", "f": "\f"}.get(char, char))
+    return "".join(out)
+
+
+def _split_key_value(line: bytes) -> tuple[str, str]:
+    """Split one logical line (already left-trimmed) into its decoded key and value.
+
+    The key runs to the first UNESCAPED ``=``, ``:`` or blank. Blanks after it, then
+    one optional ``=`` / ``:``, then further blanks are skipped; everything left is
+    the value, TRAILING whitespace included -- Java keeps it, so ``25565 `` is not
+    ``25565`` and the guard must not pretend otherwise.
+    """
+
+    key_end = value_start = len(line)
+    has_sep = False
+    backslash = False
+    for i in range(len(line)):
+        char = line[i : i + 1]
+        if not backslash and char in b"=:":
+            key_end, value_start, has_sep = i, i + 1, True
+            break
+        if not backslash and char in _BLANKS:
+            key_end, value_start = i, i + 1
+            break
+        backslash = char == b"\\" and not backslash
+    while value_start < len(line):
+        char = line[value_start : value_start + 1]
+        if char not in _BLANKS:
+            if has_sep or char not in b"=:":
+                break
+            has_sep = True
+        value_start += 1
+    return _load_convert(line[:key_end]), _load_convert(line[value_start:])
+
+
+def _parse(content: bytes) -> list[_Property]:
+    """Return every property in *content*, in file order, parsed the Java way.
+
+    Blank lines and ``#`` / ``!`` comments are dropped; a comment does NOT continue
+    on a trailing backslash, while an ordinary line does and its continuation is
+    never itself a comment. Repeated keys are all returned -- callers decide
+    between "the value the server reads" (the last) and "every occurrence" (the
+    guard, which must see an appended duplicate as the change it is).
+    """
+
+    props: list[_Property] = []
+    offset = 0
+    while offset < len(content):
+        start = offset
+        line, offset = _natural_line(content, offset)
+        line = line.lstrip(_BLANKS)
+        if not line or line[:1] in (b"#", b"!"):
+            continue
+        while _ends_with_odd_backslash(line):
+            line = line[:-1]
+            if offset >= len(content):
+                break
+            continuation, offset = _natural_line(content, offset)
+            line += continuation.lstrip(_BLANKS)
+        key, value = _split_key_value(line)
+        props.append(_Property(key=key, value=value, start=start, end=offset))
+    return props
+
+
+def _normalize(content: bytes) -> bytes:
+    """Return *content* ending in the single trailing newline Mojang's files carry."""
+
+    return content if content.endswith(b"\n") else content + b"\n"
+
+
+def _raw_values(content: bytes, key: str) -> list[str]:
+    """Return every value *content* gives *key*, in file order.
+
+    Every occurrence matters, not just the last: Java's ``Properties.load`` is
+    last-occurrence-wins, so an appended second line for a key is what the server
+    actually reads -- and comparing the whole list is what makes leaving the
+    original line intact and appending a respelled one show up as a change.
+    """
+
+    return [prop.value for prop in _parse(content) if prop.key == key]
+
+
+def _get_property(content: bytes, key: str) -> str | None:
+    """Return the value the Java server reads for *key*, or ``None`` if absent."""
+
+    values = _raw_values(content, key)
+    return values[-1] if values else None
+
+
+def _clear_property(content: bytes, key: str) -> bytes:
+    """Return *content* with EVERY property line for *key* removed.
+
+    Every one, not just the first: a second line for the same key is what Java
+    reads, so a clear that left it behind would leave the pack the archive named
+    live for the server (issues #2621, #2811). Bytes outside the removed ranges are
+    spliced through untouched, so unrelated lines keep their exact encoding.
+    """
+
+    out = bytearray()
+    cursor = 0
+    for prop in _parse(content):
+        if prop.key != key:
+            continue
+        out += content[cursor : prop.start]
+        cursor = prop.end
+    out += content[cursor:]
+    return bytes(out)
+
+
+def _set_property(content: bytes, key: str, value: str) -> bytes:
+    """Return *content* with *key* set to *value*, canonically and exactly once.
+
+    The first property line for *key* is replaced in place by ``key=value``, in the
+    canonical spelling whatever spelling it had; every later line for the key is
+    removed, because Java would read that one instead. When the file has no such
+    line, ``key=value`` is appended. Other lines and their order are preserved.
+    """
+
+    new_line = f"{key}={value}".encode(errors="surrogateescape")
+    matches = [prop for prop in _parse(content) if prop.key == key]
+    if not matches:
+        if content and not content.endswith(b"\n"):
+            content += b"\n"
+        return content + new_line + b"\n"
+    out = bytearray()
+    cursor = 0
+    for index, prop in enumerate(matches):
+        out += content[cursor : prop.start]
+        if index == 0:
+            out += new_line + b"\n"
+        cursor = prop.end
+    out += content[cursor:]
+    return _normalize(bytes(out))
 
 
 def set_server_port(content: bytes, port: int) -> bytes:
     """Return ``content`` with its ``server-port`` line set to ``port``.
 
-    Rewrites the first non-comment ``server-port=...`` line in place; if none
-    exists, appends ``server-port=<port>``. Other lines and their order are
-    preserved. An empty ``content`` yields a file with just the port line. The
-    result always ends with a single trailing newline (Mojang's convention).
+    Rewrites the first ``server-port`` property line in place and drops any later
+    one; if the file has none, appends ``server-port=<port>``. Other lines and
+    their order are preserved. An empty ``content`` yields a file with just the
+    port line. The result always ends with a single trailing newline (Mojang's
+    convention).
 
     The rewritten line is normalized to ``\n`` regardless of the file's existing
     line endings, so a CRLF file gains mixed endings on that one line. This is
@@ -191,8 +336,7 @@ def set_server_port(content: bytes, port: int) -> bytes:
     stripped as whitespace.
     """
 
-    lines = _set_property(_split_content_lines(content), _PORT_KEY, str(port))
-    return _join_lines(lines)
+    return _set_property(content, _PORT_KEY, str(port))
 
 
 def set_rcon_properties(content: bytes, *, password: str) -> bytes:
@@ -202,18 +346,17 @@ def set_rcon_properties(content: bytes, *, password: str) -> bytes:
     place or appended), so a fresh or imported ``server.properties`` with RCON off
     or a stray port is corrected. ``rcon.password`` is set to ``password`` only when
     the file has no live password line or its value is empty: a non-empty existing
-    password is preserved, so an importer's known credential keeps working. Other
-    lines and their order are preserved; the result ends with a single trailing
-    newline.
+    password is preserved, so an importer's known credential keeps working -- in
+    whatever spelling the file used, since "what the file already says" is read
+    with the same Java rules the worker reads it with. Other lines and their order
+    are preserved; the result ends with a single trailing newline.
     """
 
-    lines = _split_content_lines(content)
-    lines = _set_property(lines, _ENABLE_RCON_KEY, "true")
-    lines = _set_property(lines, _RCON_PORT_KEY, str(RCON_PORT))
-    existing = _get_property(lines, _RCON_PASSWORD_KEY)
-    if not existing:
-        lines = _set_property(lines, _RCON_PASSWORD_KEY, password)
-    return _join_lines(lines)
+    content = _set_property(content, _ENABLE_RCON_KEY, "true")
+    content = _set_property(content, _RCON_PORT_KEY, str(RCON_PORT))
+    if not _get_property(content, _RCON_PASSWORD_KEY):
+        content = _set_property(content, _RCON_PASSWORD_KEY, password)
+    return content
 
 
 def set_resource_pack_properties(
@@ -231,44 +374,42 @@ def set_resource_pack_properties(
     otherwise the existing value (if any) is left untouched.
     """
 
-    lines = _split_content_lines(content)
-    lines = _set_property(lines, _RESOURCE_PACK_KEY, url)
-    lines = _set_property(lines, _RESOURCE_PACK_SHA1_KEY, sha1)
-    lines = _set_property(
-        lines, _REQUIRE_RESOURCE_PACK_KEY, "true" if require else "false"
+    content = _set_property(content, _RESOURCE_PACK_KEY, url)
+    content = _set_property(content, _RESOURCE_PACK_SHA1_KEY, sha1)
+    content = _set_property(
+        content, _REQUIRE_RESOURCE_PACK_KEY, "true" if require else "false"
     )
     if prompt is not None:
-        lines = _set_property(lines, _RESOURCE_PACK_PROMPT_KEY, prompt)
-    return _join_lines(lines)
+        content = _set_property(content, _RESOURCE_PACK_PROMPT_KEY, prompt)
+    return content
 
 
 def apply_overrides(content: bytes, overrides: dict[str, str]) -> bytes:
     """Return ``content`` with each ``key=value`` pair in *overrides* applied.
 
-    Each key is set via the same rewrite-or-append logic as the other helpers:
-    the first live (non-comment) ``key=...`` line is rewritten in place; if none
-    exists, ``key=value`` is appended. Other lines and their order are preserved;
-    the result ends with a single trailing newline (issue #1209).
+    Each key is set via the same rewrite-or-append logic as the other helpers: the
+    first property line for the key is rewritten in place (any later one for the
+    same key is dropped); if none exists, ``key=value`` is appended. Other lines
+    and their order are preserved; the result ends with a single trailing newline
+    (issue #1209).
     """
 
-    lines = _split_content_lines(content)
     for key, value in overrides.items():
-        lines = _set_property(lines, key, value)
-    return _join_lines(lines)
+        content = _set_property(content, key, value)
+    return _normalize(content)
 
 
 def remove_keys(content: bytes, keys: AbstractSet[str]) -> bytes:
     """Return ``content`` with every line matching a key in *keys* removed.
 
-    Each key's first live (non-comment) ``key=...`` line is deleted entirely.
-    Other lines and their order are preserved; the result ends with a single
-    trailing newline (issue #1242).
+    Every property line for each key is deleted entirely, in whatever spelling it
+    used and including the continuation lines it spans. Other lines and their
+    order are preserved; the result ends with a single trailing newline (#1242).
     """
 
-    lines = _split_content_lines(content)
     for key in keys:
-        lines = _clear_property(lines, key)
-    return _join_lines(lines)
+        content = _clear_property(content, key)
+    return _normalize(content)
 
 
 def changed_platform_managed_keys(current: bytes, incoming: bytes) -> list[str]:
@@ -285,9 +426,17 @@ def changed_platform_managed_keys(current: bytes, incoming: bytes) -> list[str]:
     or a second occurrence appended after an untouched first one. Returns the
     offending keys sorted, or an empty list when the write leaves them all alone.
 
-    Compares bytes, never decoded text: a ``server.properties`` is not required to
-    be valid UTF-8 (a latin-1 ``motd`` is ordinary), and a guard that raised on one
-    would turn an otherwise-fine write into a 500.
+    "Live" is decided by :func:`_parse`, i.e. exactly as ``Properties.load`` would:
+    ``rcon.password:evil`` appended below an untouched ``rcon.password=...``, a
+    whitespace separator, an escaped or ``\\uXXXX``-spelled key, a value continued
+    over a backslash -- each is the change the server would read, so each is
+    reported. Respelling a line without changing the value it parses to is not a
+    change, because the server reads the same thing either way (issue #2811).
+
+    Never decodes as UTF-8: a ``server.properties`` is not required to be valid
+    UTF-8 (a latin-1 ``motd`` is ordinary), and a guard that raised on one would
+    turn an otherwise-fine write into a 500. The latin-1 decode behind the parse is
+    byte-preserving, so two DIFFERENT invalid sequences stay different values.
 
     *current* must be the copy the write actually lands on -- the authoritative
     Storage copy at rest, the worker's live working set while running. Those two
@@ -369,13 +518,17 @@ def clear_resource_pack_properties(content: bytes) -> bytes:
     """Return ``content`` with the 4 resource pack keys removed (issue #1177).
 
     Removes ``resource-pack``, ``resource-pack-sha1``, ``require-resource-pack``,
-    and ``resource-pack-prompt`` entirely. Other lines and their order are
-    preserved; the result ends with a single trailing newline.
+    and ``resource-pack-prompt`` entirely -- every occurrence of each, in whatever
+    spelling, so an untrusted archive's ``resource-pack:http://...`` cannot survive
+    the clear that import and restore run (issues #2621, #2811). Other lines and
+    their order are preserved; the result ends with a single trailing newline.
     """
 
-    lines = _split_content_lines(content)
-    lines = _clear_property(lines, _RESOURCE_PACK_KEY)
-    lines = _clear_property(lines, _RESOURCE_PACK_SHA1_KEY)
-    lines = _clear_property(lines, _REQUIRE_RESOURCE_PACK_KEY)
-    lines = _clear_property(lines, _RESOURCE_PACK_PROMPT_KEY)
-    return _join_lines(lines)
+    for key in (
+        _RESOURCE_PACK_KEY,
+        _RESOURCE_PACK_SHA1_KEY,
+        _REQUIRE_RESOURCE_PACK_KEY,
+        _RESOURCE_PACK_PROMPT_KEY,
+    ):
+        content = _clear_property(content, key)
+    return _normalize(content)
