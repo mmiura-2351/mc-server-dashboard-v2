@@ -4,10 +4,10 @@
 >
 > This document defines the v2 architecture: the Hexagonal (Ports & Adapters)
 > layering, the `api/` / `worker/` / `proto/` module boundaries, the catalog of
-> domain Ports, and the design decisions for the architecture-level items left
-> open in [`REQUIREMENTS.md`](../REQUIREMENTS.md) Section 9.1. It refines, but
-> does not contradict, the requirements; where the two disagree, the
-> requirements win and this document is wrong.
+> domain Ports, and the design decisions for the architecture-level items
+> [`REQUIREMENTS.md`](../REQUIREMENTS.md) Section 9.1 delegates to design. It
+> refines, but does not contradict, the requirements; where the two disagree,
+> the requirements win and this document is wrong.
 
 ## Table of Contents
 
@@ -37,7 +37,7 @@ The system is two cooperating services in one repository:
 Target scale is small (REQUIREMENTS.md NFR-SCALE-1): a few dozen Communities,
 tens of concurrent servers, a single API instance. The architecture is biased
 toward **simplicity first**, while keeping each external technology behind a
-**Port** so the M1 implementation can be replaced without touching business
+**Port** so the implementation can be replaced without touching business
 logic (NFR-PORT-1). Small scale is allowed to show up in the *implementation* of
 a Port, never in the *shape* of the Port (REQUIREMENTS.md Section 1.1).
 
@@ -47,11 +47,8 @@ a Port, never in the *shape* of the Port (REQUIREMENTS.md Section 1.1).
 
 Both services follow Hexagonal (Ports & Adapters): a pure domain core, use cases
 that depend only on domain Ports, adapters that implement those Ports, and
-wiring assembled at the edge. The proven layering rules below are adapted from
-the legacy
-[`docs/app/ARCHITECTURE.md`](https://github.com/mmiura-2351/mc-server-dashboard-api/blob/master/docs/app/ARCHITECTURE.md);
-the legacy system was a single host, so its single-process specifics are dropped
-and the rules are applied independently inside each of `api/` and `worker/`.
+wiring assembled at the edge. The layering rules below apply independently
+inside each of `api/` and `worker/`.
 
 ### 2.1 Layers
 
@@ -173,13 +170,13 @@ Both planes are **API-terminated** (REQUIREMENTS.md Section 5.2).
   commands (start/stop/restart, RCON, hydrate/snapshot triggers, file-access
   requests — see Section 7.2) and Worker→API events (status, log lines, metrics,
   heartbeat). The typed contract lives in `proto/`; concrete messages are
-  defined in issue #2, not here.
+  defined in CONTROL_PLANE.md, not here.
 - **Data plane** — bulk hydrate/snapshot transfer over an **API-terminated HTTP
   endpoint**, kept off the control stream so large transfers never block command
   traffic. The Worker is storage-backend-agnostic and talks only to the API; the
   API is the sole component that touches the pluggable `Storage`
   (REQUIREMENTS.md FR-DATA-3). Snapshot atomicity (FR-DATA-6) is specified in
-  STORAGE.md (issue #17), not here.
+  STORAGE.md Section 4, not here.
 
 The control plane is a Port on the API side (`ControlPlane`, Section 5) and a
 client on the Worker side; this keeps the API's business logic independent of
@@ -191,17 +188,17 @@ gRPC.
 
 Every external technology sits behind a Port (NFR-PORT-1). The table lists the
 Ports implied by REQUIREMENTS.md, the side that **defines and depends on** each
-Port, and the M1 adapter(s). "Side" is where the Port's *interface* lives; an
+Port, and the adapter(s). "Side" is where the Port's *interface* lives; an
 adapter on the other side of the wire may fulfil it (e.g. the API's
 `ControlPlane` reaches Worker behaviour by sending commands over the stream).
 
 ### 5.1 API-side Ports
 
-| Port | Purpose (req. ref) | M1 adapter(s) |
+| Port | Purpose (req. ref) | Adapter(s) |
 |---|---|---|
-| `Storage` | Authoritative world/JAR/backup store; hydrate/snapshot source of truth (FR-DATA-1, FR-DATA-2) | fs / remote-fs / object, config-selected. Contract in STORAGE.md (#17) |
+| `Storage` | Authoritative world/JAR/backup store; hydrate/snapshot source of truth (FR-DATA-1, FR-DATA-2) | fs / remote-fs / object, config-selected. Contract in STORAGE.md Section 3 |
 | `PermissionChecker` | `can(user, operation, resource)` decision (FR-AUTHZ-1, NFR-SEC-2) | role + resource-grant evaluator |
-| `TokenService` | Issue/verify short-lived access & long-lived refresh tokens (FR-AUTH-2), plus resource-scoped download grants for URLs a browser must authenticate without a header and the longer-lived download cookies a redemption exchanges them for (AUTH_API.md Section 3, #2313, #2373) | JWT-or-equivalent adapter |
+| `TokenService` | Issue/verify short-lived access & long-lived refresh tokens (FR-AUTH-2), plus resource-scoped download grants for URLs a browser must authenticate without a header and the longer-lived download cookies a redemption exchanges them for (AUTH_API.md Section 3) | JWT-or-equivalent adapter |
 | `PasswordHasher` | Hash/verify passwords with per-user salt (FR-AUTH-3) | bcrypt/argon2 adapter |
 | `LoginAttemptStore` | Brute-force/lockout runtime state: record attempts, count per-username/per-IP failures over sliding windows, hold the per-account lockout + back-off (FR-AUTH-4). Decision in SECURITY.md Section 3 | DB-backed adapter (`login_attempt` + `account_lockout` tables) |
 | `LoginFailureDelay` | Artificial per-failure delay so the failure-timing signal is flat (FR-AUTH-4, SECURITY.md Section 2 step 5) | fixed-delay adapter over `Sleeper` |
@@ -211,7 +208,7 @@ adapter on the other side of the wire may fulfil it (e.g. the API's
 | `VersionCatalog` / JAR source | List MC versions/types, resolve & fetch the JAR (FR-VER-1, FR-VER-2) | external-manifest client with retry + cache fallback |
 | `RealTimeEvents` | Relay status/log/metric events to subscribed clients (FR-MON-1, FR-MON-2, FR-MON-4) | WebSocket/SSE publisher |
 | `AuditWriter` | Fire-after-commit, must-not-raise audit recording (FR-AUD-1, FR-AUD-2) | DB-backed writer |
-| repositories (`<Entity>Repository`) + `UnitOfWork` | Persist core entities (Appendix B) transactionally | DB adapter. Model in DATABASE.md (#15) |
+| repositories (`<Entity>Repository`) + `UnitOfWork` | Persist core entities (Appendix B) transactionally | DB adapter. Model in DATABASE.md |
 | `Clock` | Time, for tokens/schedules/snapshots | system-clock adapter |
 
 `Storage`, `RealTimeEvents`, the JAR source, persistence, and `ControlPlane`
@@ -220,10 +217,10 @@ here.
 
 ### 5.2 Worker-side Ports
 
-| Port | Purpose (req. ref) | M1 adapter(s) |
+| Port | Purpose (req. ref) | Adapter(s) |
 |---|---|---|
 | `ExecutionDriver` | Realize logical start/stop/restart for a backend (FR-EXE-1, FR-EXE-2, FR-EXE-4) | container (Docker) driver |
-| Java-major selection (FR-EXE-5) | Pick the Java major a server's MC version needs | container `ImageSelector` resolves the major to a `driver.container.images` base image (legacy JAVA_COMPATIBILITY mapping) |
+| Java-major selection (FR-EXE-5) | Pick the Java major a server's MC version needs | container `ImageSelector` resolves the major to a `driver.container.images` base image (version-to-Java table in Section 7.3) |
 | `WorkingDir` | Manage the local scratch working set per server; path-traversal-safe file access (FR-DATA-4, FR-FILE-4) | local-filesystem adapter |
 | `DataTransfer` | Pull (hydrate) / push (snapshot) the working set via the API HTTP data-plane (FR-DATA-3, FR-DATA-4) | HTTP client to the API |
 | `ServerControl` (RCON) | `save-all`, commands, graceful stop on the running process (FR-SRV-5, Section 6.9) | RCON client |
@@ -237,9 +234,9 @@ authoritative backend (FR-DATA-3). It reaches authoritative data only through
 
 ## 6. Naming conventions
 
-Reused from the legacy system where sensible (REQUIREMENTS.md Section 8). On the
-Python (`api/`) side these are binding; the Go (`worker/`) side adopts the
-spirit (idiomatic Go names) but keeps the same Port/adapter/permission concepts.
+The conventions of REQUIREMENTS.md Section 8, made concrete. On the Python
+(`api/`) side these are binding; the Go (`worker/`) side adopts the spirit
+(idiomatic Go names) but keeps the same Port/adapter/permission concepts.
 
 | Item | Convention | Example |
 |---|---|---|
@@ -252,17 +249,16 @@ spirit (idiomatic Go names) but keeps the same Port/adapter/permission concepts.
 
 The per-domain directory layout inside `api/` (a `domain/ application/ adapters/
 api/` quadrant per bounded context, with wiring isolated to a single
-dependencies file) follows the legacy layout and is detailed in
-[`../dev/DEVELOPMENT.md`](../dev/DEVELOPMENT.md) Section 4 as the Python domain
-code lands.
+dependencies file) is detailed in
+[`../dev/DEVELOPMENT.md`](../dev/DEVELOPMENT.md) Section 4.
 
 ---
 
 ## 7. Architecture decisions (Section 9.1)
 
-These resolve the architecture-level items in REQUIREMENTS.md Section 9.1. Each
-records the decision, the alternatives considered, and the rationale. They are
-design decisions and do not change the requirements.
+These settle the architecture-level items REQUIREMENTS.md Section 9.1 delegates
+to design. Each records the decision, the alternatives considered, and the
+rationale. They are design decisions and do not change the requirements.
 
 ### 7.1 Execution backend is fixed for a server's lifetime (FR-EXE-3)
 
@@ -280,17 +276,16 @@ and commands a server. Changing backend means deleting and recreating the server
 
 **Rationale.** With a single backend, a per-server backend field would record a
 value that never varies, while a mutable one would add a state-transition class
-and the edge cases of a half-migrated server — for a use case (alternative 1/2)
-that is rare at this scale and already achievable via recreate. An earlier
-iteration did store the backend as a column; #1450 dropped it once container
-became the only backend. The required `ExecutionDriver` still filters placement
-candidates by Worker capability (FR-WRK-3), but the API asks for the constant
-`container` rather than reading a per-server value. The cost is that this is now
-a structural limit, not a policy: adding a second backend in a future milestone
-means reintroducing the field — a schema change, plus its create and placement
-paths — before the mutability question (REQUIREMENTS.md Section 9.1) can be
-revisited. The `ExecutionDriver` abstraction itself stays pluggable Worker-side
-(FR-EXE-1, FR-EXE-4), so that cost falls on the API's data model alone.
+and the edge cases of a server caught mid-switch — for a use case (alternative
+1/2) that is rare at this scale and achievable via recreate. The required
+`ExecutionDriver` filters placement candidates by Worker capability (FR-WRK-3),
+but the API asks for the constant `container` rather than reading a per-server
+value. The cost is that this is a structural limit, not a policy: a second
+backend would require introducing the field — a schema change, plus its create
+and placement paths — before the mutability question (REQUIREMENTS.md Section
+9.1) arises. The `ExecutionDriver` abstraction itself stays pluggable
+Worker-side (FR-EXE-1, FR-EXE-4), so that cost falls on the API's data model
+alone.
 
 ### 7.2 Worker-side file access rides the control plane (Section 6.9)
 
@@ -299,8 +294,8 @@ revisited. The `ExecutionDriver` abstraction itself stays pluggable Worker-side
 commands over the existing gRPC control plane** to the owning Worker, which acts
 on its live local working set and returns the result. There is **no separate
 inbound file service on the Worker**. The concrete request/response message
-shapes are defined in issue #2 (`proto/`); only the architectural shape is fixed
-here.
+shapes are defined in CONTROL_PLANE.md Section 5 (`proto/`); only the
+architectural shape is fixed here.
 
 **Alternatives considered.**
 1. *Direct API→Worker file HTTP/RPC endpoint* — a second inbound surface on the
@@ -310,7 +305,7 @@ here.
 **Rationale.** Workers are Worker-initiated with **no inbound exposure**
 (REQUIREMENTS.md Section 5.1); alternative 1 would break that and re-introduce
 the inbound-port problem the connection model exists to avoid. The control plane
-already multiplexes per-server commands to the owning Worker and carries small,
+multiplexes per-server commands to the owning Worker and carries small,
 latency-sensitive messages — exactly the profile of a file read/edit. The data
 plane (alternative 2) is for bulk working-set transfer and is the wrong
 granularity for editing a single `server.properties`. Bounds: file access is
@@ -345,9 +340,17 @@ Alternative 2 leaks a host detail (which Java versions are installed *on a
 specific Worker*) into the authoritative service; the installed runtimes are a
 property of the Worker host, so the choice belongs where that knowledge lives —
 the Worker — consistent with REQUIREMENTS.md FR-EXE-5 ("this selection is the
-driver's/Worker's concern, not the API's"). The legacy
-[JAVA_COMPATIBILITY.md](https://github.com/mmiura-2351/mc-server-dashboard-api/blob/master/docs/app/JAVA_COMPATIBILITY.md)
-version-to-Java mapping is a working reference for the selector.
+driver's/Worker's concern, not the API's"). The Worker's version-to-Java mapping
+(`javaruntime.MajorsFor`):
+
+| Minecraft version | Java major |
+|---|---|
+| ≤ 1.7.9 | 7 |
+| ≤ 1.16.5 | 8 (11 as fallback) |
+| ≤ 1.17.1 | 16 |
+| ≤ 1.20.4 | 17 |
+| ≤ 1.21.11 | 21 |
+| newer | 25 (the newest configured runtime) |
 
 ### 7.4 API framework stack: FastAPI + async SQLAlchemy + Alembic
 
@@ -362,15 +365,15 @@ adapter behind the `<Entity>Repository` / `UnitOfWork` Ports (Section 5.1), and
 2. *A non-SQLAlchemy data layer* (raw asyncpg, an async ORM such as Tortoise, or
    SQLModel) instead of async SQLAlchemy + Alembic.
 
-**Rationale.** FastAPI is the proven default: the legacy system shipped on it,
-it gives request/response validation and OpenAPI for free, and its dependency
-injection is a natural fit for binding Ports at the edge (Section 2.1) — keeping
-routers thin. The alternatives in (1) are viable but offer no advantage that
-justifies diverging from a stack the team already operates; simplicity-first
-favors the known quantity. For (2), async SQLAlchemy is the mature async ORM
-with a first-class migration tool (Alembic) and the session/transaction
-primitives the `UnitOfWork` Port needs; raw asyncpg would re-implement that
-machinery, and the smaller async ORMs trade ecosystem maturity for little gain.
+**Rationale.** FastAPI gives request/response validation and OpenAPI for free,
+and its dependency injection is a natural fit for binding Ports at the edge
+(Section 2.1) — keeping routers thin. The alternatives in (1) are viable but
+offer no advantage that justifies diverging from a stack the team knows;
+simplicity-first favors the known quantity. For (2), async SQLAlchemy is the
+mature async ORM with a first-class migration tool (Alembic) and the
+session/transaction primitives the `UnitOfWork` Port needs; raw asyncpg would
+re-implement that machinery, and the smaller async ORMs trade ecosystem
+maturity for little gain.
 asyncpg is the high-performance PostgreSQL driver SQLAlchemy's async engine
 targets (DATABASE.md Section 1). All four sit *behind* Ports or at the edge, so
 this is an adapter/edge choice that does not reach `domain` or `application`

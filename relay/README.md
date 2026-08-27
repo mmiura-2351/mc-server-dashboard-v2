@@ -5,10 +5,10 @@ The Go game ingress relay of mc-server-dashboard. Players join a server at
 resolves the hostname via the `api/` RelayService, accepts the Worker's
 outbound TLS dial-back, and splices the two TCP connections. It holds no
 persistent state. See [`docs/app/RELAY.md`](../docs/app/RELAY.md) for the full
-design (epic #659); this README covers build, test, lint, configure, and run.
+design; this README covers build, test, lint, configure, and run.
 
 The relay also carries **Bedrock** (RakNet/UDP) traffic over a separate QUIC
-tunnel + per-server public UDP ingress (epic #1540); see
+tunnel + per-server public UDP ingress; see
 [`docs/app/BEDROCK_TUNNEL.md`](../docs/app/BEDROCK_TUNNEL.md).
 
 ## Layout
@@ -59,11 +59,11 @@ make relay-format       # gofmt -w
 make relay-lint         # gofmt check + go vet + golangci-lint
 make relay-test         # go test ./...
 make relay-test-race    # go test -race ./... (CI gate)
-make relay-e2e          # protocol-level E2E vs the real compose stack (issue #962)
-make bedrock-e2e        # Bedrock tunnel protocol-level E2E (epic #1540, issue #1547)
+make relay-e2e          # protocol-level E2E vs the real compose stack
+make bedrock-e2e        # Bedrock tunnel protocol-level E2E
 ```
 
-`make relay-e2e` runs the protocol-level acceptance suite (issue #962): it brings
+`make relay-e2e` runs the protocol-level acceptance suite: it brings
 up the real compose stack with the `relay` profile, seeds a stopped server, and
 drives a minimal Java-edition client (handshake/status/login packets only)
 against the real relay's player listener, asserting the stopped and unknown-slug
@@ -86,8 +86,8 @@ version manifest host.
 This is fine on GitHub-hosted runners but will fail on network-isolated CI
 environments.
 
-`make bedrock-e2e` runs the Bedrock relay tunnel protocol-level suite (epic
-#1540, issue #1547): the real `internal/bedrock.Listener` against the real
+`make bedrock-e2e` runs the Bedrock relay tunnel protocol-level suite: the real
+`internal/bedrock.Listener` against the real
 worker's `bedrocktunnel.Manager` and a real Docker container running a
 fake-Geyser RakNet responder. It needs neither Postgres nor the API — see
 [`test/e2e/bedrock_relay_e2e_test.go`](test/e2e/bedrock_relay_e2e_test.go)'s

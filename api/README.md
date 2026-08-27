@@ -4,7 +4,7 @@ Authoritative API service for mc-server-dashboard v2 (Python), built on FastAPI
 + async SQLAlchemy + Alembic
 ([`docs/app/ARCHITECTURE.md`](../docs/app/ARCHITECTURE.md) Section 7.4). Each
 bounded context follows the Hexagonal `domain / application / adapters / api`
-quadrant layout (Section 2); feature domains land on this skeleton.
+quadrant layout (Section 2).
 
 ## Prerequisites
 
@@ -54,9 +54,9 @@ database is unreachable rather than crashing.
 
 ## Migrations (Alembic)
 
-The migration chain starts from an empty baseline; entity tables land with their
-features (DATABASE.md). The DB URL is read from `MCD_API_DATABASE__URL`, not from
-`alembic.ini`.
+The Alembic chain starts from an empty baseline revision and builds the full
+schema from there (schema reference: DATABASE.md). The DB URL is read from
+`MCD_API_DATABASE__URL`, not from `alembic.ini`.
 
 ```sh
 uv run alembic upgrade head        # apply migrations
@@ -69,9 +69,10 @@ uv run alembic revision -m "..."   # author a new migration
 api/
 ├── src/mc_server_dashboard_api/   # package source (src-layout)
 │   ├── app.py dependencies.py …   # edge: app factory, DI wiring, config, logging
-│   └── core/                      # first bounded context (health + infra)
-│       ├── domain/ application/   # pure core + use cases (Ports only)
-│       └── adapters/ api/         # DB adapter + HTTP router
+│   ├── core/                      # bounded context: health + infra
+│   │   ├── domain/ application/   # pure core + use cases (Ports only)
+│   │   └── adapters/ api/         # DB adapter + HTTP router
+│   └── identity/ community/ servers/ fleet/ versions/ audit/   # bounded contexts, same quadrants
 ├── src/mcsd/                      # generated control-plane stubs (do not edit)
 ├── migrations/                    # Alembic env + versions
 └── tests/                         # pytest tests (unit) + tests/integration

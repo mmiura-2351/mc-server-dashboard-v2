@@ -4,13 +4,14 @@ v2 is developed **test-first**, following Kent Beck's Test-Driven Development.
 This document fixes the *discipline and philosophy* of testing for the project.
 The concrete tooling — test runners, commands, directory layout, CI wiring — is
 per-component (Python `api/`, Go `worker/`, Go `relay/`, TypeScript `webui/`)
-and is pinned as it lands. On mechanics, a future per-component tooling doc
-wins; on discipline, this document wins.
+and lives with each module (its README, the root `Makefile`'s
+`<module>-test` / `<module>-lint` targets, and its CI workflow). On mechanics,
+the per-component tooling wins; on discipline, this document wins.
 
-> **Status**: the per-component test toolchains are in place and CI-enforced
-> (`api/` `pytest`, `worker/` and `relay/` `go test`, `webui/` Vitest, run via
-> `make check`; see `.github/workflows/`). The discipline below applies from the
-> first line of code.
+> The per-component test toolchains are CI-enforced (`api/` `pytest`, `worker/`
+> and `relay/` `go test`, `webui/` Vitest, run via `make check`; see
+> `.github/workflows/`). The discipline below applies from the first line of
+> code.
 
 ## 1. The cycle: Red → Green → Refactor
 

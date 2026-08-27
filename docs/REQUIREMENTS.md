@@ -1,25 +1,17 @@
 # Minecraft Server Dashboard v2 — Requirements
 
-> Status: **Draft (open questions resolved)** · Phase: requirements definition · Date: 2026-06-03
+> This document defines *what* the system must do and the architectural
+> constraints it must satisfy. It does not prescribe the final module layout —
+> that is design work that follows from these requirements (the design documents
+> under `docs/app/` and `docs/ui/`).
 >
-> This is a greenfield rebuild of the Minecraft Server Dashboard. Backward
-> compatibility with the legacy codebase (`mc-server-dashboard-api`) is
-> explicitly abandoned; the legacy system is reference-only. This document
-> defines *what* the system must do and the architectural constraints it must
-> satisfy. It does not prescribe the final module layout — that is design work
-> that follows from these requirements.
->
-> **Versioning terms used in this document:**
-> - **legacy** / **the legacy system** — the existing `mc-server-dashboard-api`
->   implementation being replaced. Never called "v1" here, to avoid ambiguity.
-> - **v2** — this rebuild as a whole (the product name).
-> - **M1** — the **first milestone** (initial shippable scope) of v2. Phrases
->   like "in M1" or "M1 implements …" describe that initial scope. Deferred work
->   targets later milestones (M2, M3, …).
+> **Naming:** **v2** is the product name (Minecraft Server Dashboard v2), not a
+> version number. Never write "v1" anywhere in this repository (docs/README.md
+> Conventions).
 
 ## Table of Contents
 
-1. [Background & Goals](#1-background--goals)
+1. [Goals](#1-goals)
 2. [Scope](#2-scope)
 3. [Terminology](#3-terminology)
 4. [Actors & Roles](#4-actors--roles)
@@ -27,31 +19,30 @@
 6. [Functional Requirements](#6-functional-requirements)
 7. [Non-Functional Requirements](#7-non-functional-requirements)
 8. [Architecture Principles](#8-architecture-principles)
-9. [Resolved Design Decisions](#9-resolved-design-decisions)
-- [Appendix A — Operation permission catalog](#appendix-a--operation-permission-catalog-draft)
-- [Appendix B — Core entities](#appendix-b--core-entities-sketch)
+9. [Design Decisions](#9-design-decisions)
+- [Appendix A — Operation permission catalog](#appendix-a--operation-permission-catalog)
+- [Appendix B — Core entities](#appendix-b--core-entities)
 
 ---
 
-## 1. Background & Goals
+## 1. Goals
 
-The legacy system runs the API server and every Minecraft server process on the
-same machine. Minecraft processes are spawned as local subprocesses (double-fork
-daemon model), and world data, JARs, and backups live on the API host's local
-filesystem. Authorization is role-based with a fixed role set and no notion of
-multi-tenancy.
+The system manages Minecraft servers for small communities. Three goals shape
+its architecture:
 
-This rebuild exists to remove those structural limits. The three drivers:
-
-1. **Separate the API machine from the Minecraft execution machine.** Minecraft
-   processing is delegated to **Workers** running on separate machines.
+1. **Separate the API machine from the Minecraft execution machine.** The API
+   server owns all authoritative state and business logic; Minecraft
+   processing is delegated to **Workers** running on separate machines, which
+   hold no authoritative data and can be added, replaced, or removed
+   independently of the API host.
 2. **Make the Minecraft execution method pluggable.** The way a server is run
    is abstracted behind a driver interface (`ExecutionDriver`), so new
    execution methods can be added without touching business logic. Container
    (Docker) is the only shipped driver.
-3. **Rework authentication and authorization.** Move to a **Community**-based
-   architecture (a logical multi-tenancy for small communities) with
-   **per-operation permissions**.
+3. **Community-based, per-operation authorization.** Users and resources are
+   organized into **Communities** (a logical multi-tenancy for small
+   communities), and what a member may do is decided per operation from
+   Community-defined roles plus per-resource grants.
 
 ### 1.1 Design posture
 
@@ -60,72 +51,62 @@ of tens of concurrently running servers). The system is therefore designed for
 **simplicity first**, while keeping the right abstractions so that larger scale
 can be added later without a rewrite:
 
-- No server-placement scheduler in M1 (simple Worker assignment is enough).
-- No message broker in M1 (a direct Worker→API channel suffices).
+- No server-placement scheduler (simple Worker assignment is enough; FR-WRK-3).
+- No message broker (a direct Worker→API channel suffices).
 - A single API instance is acceptable.
 - The abstractions (`ExecutionDriver`, `Storage`, `PermissionChecker`, the
   control-plane channel) must not assume small scale in their *shape*, only in
-  their M1 *implementation*.
+  their *implementation*.
 
 ### 1.2 Repository topology
 
 The system ships as a **monorepo** containing `api/`, `worker/`, a shared
 `proto/` package (the gRPC/protobuf control-plane contract), and `webui/` (the
-Web UI, added with the UI milestone — see docs/ui/WEBUI_SPEC.md). A single repo
-keeps the API and Worker in lock-step on the shared protocol so a contract
-change and both sides land in one change set, and keeps the UI in lock-step
-with the API surface it consumes.
+Web UI — see docs/ui/WEBUI_SPEC.md). A single repo keeps the API and Worker in
+lock-step on the shared protocol so a contract change and both sides land in
+one change set, and keeps the UI in lock-step with the API surface it consumes.
 
 ---
 
 ## 2. Scope
 
-### 2.1 In scope (M1)
+### 2.1 In scope
+
+Every user use case is executable end-to-end through the API. The Web UI
+(`webui/` in this monorepo, see Section 1.2; design in docs/ui/WEBUI_SPEC.md)
+consumes this API surface; the requirements in this document cover the API +
+Worker.
 
 - Community management and membership (many-to-many users ↔ Communities).
 - Authentication, and authorization via custom roles + per-resource grants.
-- Minecraft server lifecycle (create, configure, start, stop, restart, delete).
+- Account self-service (password change, profile update, account deletion) and
+  platform-administrator user lifecycle via the API (list,
+  deactivate/reactivate, delete, grant/revoke administrator), so no direct SQL
+  is needed. Identity stays global (FR-AUTH-5); every mutation is audited.
+- Minecraft server lifecycle (create, configure, start, stop, restart, delete),
+  including the EULA acceptance flow, port management (free-port discovery and
+  auto-assignment), force stop on the HTTP API, and sanitized start-failure
+  categories.
+- Server types vanilla, paper, fabric, and forge (FR-VER-1).
 - One execution backend: **container (Docker)**.
 - Worker registration, liveness, and server assignment.
 - Pluggable authoritative storage (fs / remote-fs / object) on the API side.
 - Runtime data staging between authoritative storage and stateless Workers.
-- File management, backup management, version management.
-- Real-time monitoring (status, logs).
+- File management (including extended file operations) and server ZIP
+  import/export.
+- Backup management, including backup upload/download (off-host).
+- OP / whitelist player groups synced to the server.
+- Version management, version-catalog admin, and JAR pool garbage collection.
+- Real-time monitoring (status, logs) and a system notification stream.
+- Prometheus metrics and a readiness endpoint.
 - Audit logging.
 - A platform-administrator role above all Communities.
 
-### 2.2 In scope (M2)
+### 2.2 Explicitly out of scope
 
-M2's theme is **the use-case-enabling foundation**: every intended user use case
-can be executed end-to-end through the API. The Web UI is a separate track that
-consumes this API surface — it is not part of M2's pillars (which cover the
-API + Worker) and lives in `webui/` in this monorepo (see Section 1.2; design
-in docs/ui/WEBUI_SPEC.md).
-
-M2 is organized as four pillars, each tracked by an epic:
-
-- **Pillar A — account self-service and admin lifecycle** (epic #239): users
-  manage their own account (password change, profile update, account deletion);
-  platform administrators manage users via the API (list,
-  deactivate/reactivate, delete, grant/revoke administrator) instead of direct
-  SQL. Identity stays global (FR-AUTH-5); every mutation is audited.
-- **Pillar B — server-operation use cases complete end-to-end** (epic #240):
-  EULA acceptance flow, port management (free-port discovery and
-  auto-assignment), force stop on the HTTP API, additional server types (fabric
-  and forge are added), and
-  sanitized start-failure categories.
-- **Pillar C — data and content management** (epic #241): extended file
-  operations, server ZIP import/export, backup upload/download (off-host), and
-  OP / whitelist player groups synced to the server.
-- **Pillar D — operations and long-run robustness** (epic #242): Prometheus
-  metrics and a readiness endpoint, a system notification stream, JAR pool
-  garbage collection, and version-catalog admin.
-
-### 2.3 Explicitly dropped (not planned)
-
-These are **dropped**, not deferred: they are not required to cover the user use
-cases and are not on the roadmap. (Distinct from the M3+ deferred list in
-Section 2.4, which is still planned.)
+These are not required to cover the user use cases and are not planned.
+(Distinct from the deferred list in Section 2.3, which is planned but not
+implemented.)
 
 - Kubernetes execution backend. The `ExecutionDriver` abstraction stays
   k8s-compatible (FR-EXE-4), but there is no commitment to build a Kubernetes
@@ -137,15 +118,16 @@ Section 2.4, which is still planned.)
   hydrate → start).
 - Horizontal scaling of the API tier, message-broker transport.
 
-### 2.4 Deferred to M3+ (still planned)
+### 2.3 Deferred (planned, not implemented)
 
-Out of scope for M2 but kept on the roadmap for a later milestone:
+Planned, not implemented:
 
 - Per-Community quotas / resource limits.
-- Continuous delta replication of world data (snapshot-based sync until then).
-- Worker-restart container adoption (#102).
-- Fleet-level start idempotency (#182).
-- Lane capacity (#169).
+- Continuous delta replication of world data (sync is snapshot-based;
+  FR-DATA-4, FR-DATA-5).
+- Worker-restart container adoption.
+- Fleet-level start idempotency.
+- Lane capacity.
 
 ---
 
@@ -153,7 +135,7 @@ Out of scope for M2 but kept on the roadmap for a later milestone:
 
 | Term | Definition |
 |---|---|
-| **Community** | A set of users that owns and isolates a collection of resources (servers, data). The legacy system's "tenant"-style concept, named for community-scale use, not corporate use. The unit of resource isolation, user management, and visibility. |
+| **Community** | A set of users that owns and isolates a collection of resources (servers, data). A "tenant"-style concept, named for community-scale use, not corporate use. The unit of resource isolation, user management, and visibility. |
 | **Member** | A user who belongs to a Community. Membership is many-to-many. |
 | **Platform administrator** | An operator-level role above all Communities. Manages Workers, global monitoring, and Community provisioning. Distinct from any Community role. |
 | **Worker** | A stateless machine/agent that runs and manages Minecraft execution environments. Holds no authoritative data; replaceable at any time. |
@@ -251,11 +233,10 @@ holding different roles in each, and may also be a platform administrator.
   - **Reverse-proxy trust**: forwarded client IPs are honored only from
     explicitly trusted proxy peers.
 
-  The proven baseline for the exact defaults and overrides is the legacy
-  repository's
-  [docs/app/SECURITY.md](https://github.com/mmiura-2351/mc-server-dashboard-api/blob/master/docs/app/SECURITY.md);
-  M1 may adopt those values as-is. (Reference only — the bullets above are the
-  binding requirement.)
+  The exact defaults and overrides are specified in
+  [docs/app/SECURITY.md](app/SECURITY.md) and
+  [docs/app/CONFIGURATION.md](app/CONFIGURATION.md) Section 7. (The bullets
+  above are the binding requirement.)
 - FR-AUTH-5: A user account is global (not owned by a Community) so the same
   identity can join multiple Communities.
 - FR-AUTH-6: The platform-administrator role uses the **same identity system**
@@ -273,7 +254,8 @@ holding different roles in each, and may also be a platform administrator.
 
 - FR-COMM-1: A Community is a named container that owns servers and their data.
 - FR-COMM-2: Communities are created **only by a platform administrator**, who
-  assigns the initial owner. Self-service creation is dropped (see Section 2.3).
+  assigns the initial owner. Self-service creation is out of scope (Section
+  2.2).
 - FR-COMM-3: Each Community is isolated: its resources are invisible to
   non-members (Layer-1 visibility; see 6.4).
 - FR-COMM-4: On creation, a Community is seeded with preset roles (at minimum an
@@ -283,7 +265,7 @@ holding different roles in each, and may also be a platform administrator.
 
 - FR-MEM-1: Members are added by a Community owner/admin **manually adding an
   existing user account** to the Community. Invite links and email invitations
-  are dropped (see Section 2.3).
+  are out of scope (Section 2.2).
 - FR-MEM-2: Membership is many-to-many: a user may belong to multiple
   Communities and hold different roles in each.
 - FR-MEM-3: A member can be removed; removal revokes that Community's roles and
@@ -347,20 +329,27 @@ Requirements:
 - FR-EXE-1: Execution method is abstracted as an `ExecutionDriver` interface
   inside the Worker. The API sends logical commands ("start this server"); the
   driver realizes them for its backend.
-- FR-EXE-2: M1 ships one driver: **container (Docker)**. The `ExecutionDriver`
+- FR-EXE-2: One driver ships: **container (Docker)**. The `ExecutionDriver`
   abstraction stays pluggable (FR-EXE-1, FR-EXE-4).
-- FR-EXE-3: Container is the only backend. The M1 baseline assumption is that
-  the backend is fixed for a server's lifetime.
+- FR-EXE-3: Container is the only backend. The backend is fixed for a server's
+  lifetime (settled in docs/app/ARCHITECTURE.md Section 7.1).
 - FR-EXE-4: The interface must remain shaped so a Kubernetes driver could be
   added without interface changes. Building such a driver is not committed (see
-  Section 2.3); this is a compatibility constraint on the abstraction, not a
+  Section 2.2); this is a compatibility constraint on the abstraction, not a
   planned deliverable.
 - FR-EXE-5: The Worker selects the correct Java runtime for a server based on its
   Minecraft version (multiple Java versions may be installed; the right one is
   chosen per server). This selection is the driver's/Worker's concern, not the
-  API's. (The legacy repository's
-  [docs/app/JAVA_COMPATIBILITY.md](https://github.com/mmiura-2351/mc-server-dashboard-api/blob/master/docs/app/JAVA_COMPATIBILITY.md)
-  is a working reference for the version-to-Java mapping.)
+  API's (docs/app/ARCHITECTURE.md Section 7.3). The version-to-Java mapping:
+
+  | Minecraft version | Java major |
+  |---|---|
+  | ≤ 1.7.9 | 7 |
+  | ≤ 1.16.5 | 8 (11 as fallback) |
+  | ≤ 1.17.1 | 16 |
+  | ≤ 1.20.4 | 17 |
+  | ≤ 1.21.11 | 21 |
+  | newer | 25 (the newest configured runtime) |
 
 ### 6.7 Worker Management
 
@@ -369,18 +358,17 @@ Requirements:
 - FR-WRK-2: The API maintains a registry of connected Workers and their
   liveness (heartbeat over the control plane).
 - FR-WRK-3: When a server is started, the API assigns it to an eligible Worker.
-  M1 placement is **resource-aware** but advisory (issue #710): filter Workers by
-  capability (the required ExecutionDriver is available), then **memory-gate** and
+  Placement is **resource-aware** but advisory: filter Workers by capability
+  (the required ExecutionDriver is available), then **memory-gate** and
   **CPU-rank** the survivors. Accounting is commit-based — it sums the committed
   `memory_limit_mb` / `cpu_millis` of each Worker's running-assigned servers
   against that Worker's advertised `HostResources`. A Worker whose committed
   memory plus the request cannot fit advertised memory minus a reserve
   (`max(1024 MiB, 10%)`) is **excluded**; if none fit, placement fails with
   `NoEligibleWorker`. CPU is a soft least-loaded tie-break on committed
-  `cpu_millis` and never excludes. Memory hard-gates because it is OOM-enforced
-  (issue #707); CPU soft-ranks because shares oversubscribe (issue #724). The
-  placement function is isolated so a richer scheduler can replace it later
-  without changing callers.
+  `cpu_millis` and never excludes. Memory hard-gates because it is OOM-enforced;
+  CPU soft-ranks because shares oversubscribe. The placement function is
+  isolated so a richer scheduler can replace it later without changing callers.
 - FR-WRK-4: Workers are stateless and replaceable. If a Worker disconnects, its
   servers are marked accordingly; they can be (re)started on another eligible
   Worker after hydrate from authoritative storage.
@@ -407,22 +395,22 @@ Requirements:
     existing scratch (the live, newer working set) only when the Worker holds a
     generation at least as fresh as the authoritative store generation —
     otherwise it hydrates first, so a stale or absent scratch never silently
-    boots out-of-date world data (issues #696, #763). Each published snapshot
-    increments a monotonic generation counter; the Worker records the generation
-    locally after each snapshot commit and reports it to the API at
-    (re-)registration via `Register.held_servers`. The API also refreshes that
-    record between registrations — from a successful hydrate (issue #2477), and
-    from a snapshot publish on which the Worker declared it still holds the tree
-    it published (issue #2481; a publish that GC'd the Worker's scratch declares
-    nothing) — never claiming a generation newer than the Worker holds. The skip
-    is gated on `held_generation >= store_generation`.
+    boots out-of-date world data. Each published snapshot increments a monotonic
+    generation counter; the Worker records the generation locally after each
+    snapshot commit and reports it to the API at (re-)registration via
+    `Register.held_servers`. The API also refreshes that record between
+    registrations — from a successful hydrate, and from a snapshot publish on
+    which the Worker declared it still holds the tree it published (a publish
+    that GC'd the Worker's scratch declares nothing) — never claiming a
+    generation newer than the Worker holds. The skip is gated on
+    `held_generation >= store_generation`.
   - **Running**: MC writes to the Worker's local scratch; the authoritative copy
     is temporarily stale.
   - **Stop / interval**: the Worker's working set is snapshotted back to Storage.
   - **Relocation**: snapshot on the old Worker, hydrate on the new Worker.
 - FR-DATA-5: The RPO (Recovery Point Objective) is bounded by the snapshot
   interval; a crash may lose up to one interval of changes. This is the accepted
-  M1 trade-off. (Continuous delta sync is deferred; the sync strategy should be
+  trade-off. (Continuous delta sync is deferred; the sync strategy should be
   encapsulated so it can be upgraded.)
 - FR-DATA-6: Snapshot/hydrate must be safe against partial transfer (atomic
   publish of a completed snapshot; never overwrite the authoritative copy with a
@@ -468,16 +456,15 @@ branch on server state. This policy is shared by 6.10 (File Management) and
   save-off → save-all → settle-wait) → archive when running. A backup is effectively a retained snapshot and does not depend
   on a specific Worker.
 - FR-BAK-3: Scheduled backups are supported as a first-class `backup` schedule on
-  the general scheduler (epic #649): a per-server `schedule` row with
-  `action = backup` firing on a cron expression or a fixed interval (DATABASE.md
-  Section 8), driven by the one scheduler runner. The legacy per-server
-  `backup_interval_hours` config-key cadence is **retired** (owner decision D1,
-  issue #1840): existing keys are migrated to equivalent enabled `backup`
-  schedules and the key is stripped, so a create/update still carrying it is a
-  `422` (`retired_config_key`). Execution history is the ordered set of `backup`
-  rows with `source = scheduled`. A scheduled backup that fails no longer retries
-  on every scheduler tick: it gets the runner's bounded retry (one, ~30 minutes
-  later) plus an operator notification, then waits for the next occurrence.
+  the general scheduler: a per-server `schedule` row with `action = backup`
+  firing on a cron expression or a fixed interval (DATABASE.md Section 8),
+  driven by the one scheduler runner. Backup cadence lives only on the schedule:
+  `backup_interval_hours` is not a config key, and a server create/update
+  carrying it is rejected with `422` (`retired_config_key`). Execution history
+  is the ordered set of `backup` rows with `source = scheduled`. A scheduled
+  backup that fails does not retry on every scheduler tick: it gets the runner's
+  bounded retry (one, ~30 minutes later) plus an operator notification, then
+  waits for the next occurrence.
 - FR-BAK-4: Restore replaces a server's authoritative working set and **requires
   the server to be stopped** (per the 6.9 policy); hot-restore of a running
   server is not supported.
@@ -557,54 +544,60 @@ branch on server state. This policy is shared by 6.10 (File Management) and
 ## 8. Architecture Principles
 
 - Hexagonal (Ports & Adapters): a pure domain core, use cases depending only on
-  domain Ports, adapters implementing Ports, wiring at the edge. (The legacy
-  repository's
-  [docs/app/ARCHITECTURE.md](https://github.com/mmiura-2351/mc-server-dashboard-api/blob/master/docs/app/ARCHITECTURE.md)
-  is a proven reference for the layering rules.)
+  domain Ports, adapters implementing Ports, wiring at the edge. The layering
+  rules are specified in [docs/app/ARCHITECTURE.md](app/ARCHITECTURE.md)
+  Section 2.
 - Two planes (control / data) between API and Worker, both API-terminated.
 - Stateless Workers; authoritative state on the API side.
 - Config-driven adapter selection (Storage backend, execution driver).
-- Naming conventions reused from the legacy system where sensible
-  (`<resource>:<action>` permission codes, `<Tech><Port>` adapters,
-  present-tense use-case names).
+- Naming conventions: `<resource>:<action>` permission codes, `<Tech><Port>`
+  adapters, present-tense use-case names.
 
 ---
 
-## 9. Resolved Design Decisions
+## 9. Design Decisions
 
-The open questions from the first draft are resolved as follows:
+The requirement-level design questions and their decisions:
 
 | # | Question | Decision | Refs |
 |---|---|---|---|
-| 1 | Community provisioning flow | **Admin-only creation.** Only a platform administrator creates a Community and assigns its owner. Self-service dropped (Section 2.3). | FR-COMM-2 |
-| 2 | Invitation mechanism | **Manual add.** A Community owner/admin adds an existing user account directly. Invite links / email dropped (Section 2.3). | FR-MEM-1 |
+| 1 | Community provisioning flow | **Admin-only creation.** Only a platform administrator creates a Community and assigns its owner. Self-service creation is out of scope (Section 2.2). | FR-COMM-2 |
+| 2 | Invitation mechanism | **Manual add.** A Community owner/admin adds an existing user account directly. Invite links / email are out of scope (Section 2.2). | FR-MEM-1 |
 | 3 | File/backup semantics for running servers | **State-branching policy** (read/edit read-through to the Worker when running; backup via worker-quiesced snapshot→archive; restore requires stop). | 6.9, FR-FILE-2, FR-BAK-4 |
 | 4 | Snapshot interval policy | **Periodic default + per-server override + event-driven** (graceful stop, on-demand backup). | FR-DATA-7 |
 | 5 | Transport | **gRPC bidirectional stream** for the control plane; **API-terminated HTTP** for the bulk data plane. | 5.1, 5.2 |
-| 6 | Worker placement (M1) | **Resource-aware, advisory**: capability filter, then commit-based memory gate (hard, OOM-enforced) and CPU least-loaded rank (soft, oversubscribed) against advertised `HostResources`; `NoEligibleWorker` if memory cannot fit. Placement isolated for a future scheduler. | FR-WRK-3, #710, #707, #724 |
+| 6 | Worker placement | **Resource-aware, advisory**: capability filter, then commit-based memory gate (hard, OOM-enforced) and CPU least-loaded rank (soft, oversubscribed) against advertised `HostResources`; `NoEligibleWorker` if memory cannot fit. Placement is isolated so a richer scheduler can replace it. | FR-WRK-3 |
 | 7 | Repository topology | **Monorepo** (`api/`, `worker/`, shared `proto/`). | 1.2 |
 | 8 | Platform-admin authentication | **Same identity system + administrator role/flag.** | FR-AUTH-6 |
-| 9 | Quotas | **Deferred**; the Community data model leaves room for optional limit fields (unused in M1). | Appendix B |
+| 9 | Quotas | **Deferred**; the Community data model leaves room for optional limit fields (reserved, unused). | Appendix B |
 
-### 9.1 Remaining for the design phase
+### 9.1 Decisions delegated to the design documents
 
-These need design-level decisions but do not change the requirements:
+These are design-level decisions that do not change the requirements. Each is
+settled in the document named:
 
 - Whether and how a server's execution backend may change after creation
-  (FR-EXE-3); the M1 baseline treats it as fixed for the server's lifetime.
-- Concrete protobuf service/message definitions for the control plane.
-- Worker-side file-access protocol details for read-through edits (6.9).
+  (FR-EXE-3) — docs/app/ARCHITECTURE.md Section 7.1: the backend is fixed for
+  the server's lifetime.
+- Concrete protobuf service/message definitions for the control plane —
+  docs/app/CONTROL_PLANE.md.
+- Worker-side file-access protocol details for read-through edits (6.9) —
+  docs/app/ARCHITECTURE.md Section 7.2 (file access rides the control plane)
+  and docs/app/CONTROL_PLANE.md Section 5 (the `ReadFile` / `EditFile` /
+  `ListFiles` commands).
 - Storage adapter contracts (fs / remote-fs / object) and the atomic snapshot
-  publish mechanism (FR-DATA-6).
-- Version/JAR source adapters and Java runtime selection per server type.
-- The web UI (`webui/` in this monorepo) adaptation to the v2 API
-  (docs/ui/WEBUI_SPEC.md).
+  publish mechanism (FR-DATA-6) — docs/app/STORAGE.md Sections 3–4 (the
+  `Storage` Port contract and atomic publish) and STORAGE.md Section 7 (adapter
+  families).
+- Version/JAR source adapters and Java runtime selection per server type —
+  docs/app/ARCHITECTURE.md Section 7.3.
+- The Web UI (`webui/` in this monorepo) — docs/ui/WEBUI_SPEC.md.
 
 ---
 
-## Appendix A — Operation permission catalog (draft)
+## Appendix A — Operation permission catalog
 
-Authoritative codes are `<resource>:<action>`. Initial catalog to refine:
+Authoritative codes are `<resource>:<action>` (FR-AUTHZ-3):
 
 | Domain | Codes |
 |---|---|
@@ -618,15 +611,15 @@ Authoritative codes are `<resource>:<action>`. Initial catalog to refine:
 | Community | `community:read`, `community:update`, `community:delete` |
 | Audit | `audit:read` (community-scoped; the audit trail query for authorized members, FR-AUD-3) |
 | Session | `session:read` (community-scoped; the relay game-session moderation surface — player IPs are PII, RELAY.md Section 8) |
-| Plugin | `plugin:read`, `plugin:manage` (community-scoped; plugin/mod content management, issue #1150) |
-| Schedule | `schedule:read`, `schedule:manage` (per-server scheduler CRUD, epic #649; writes additionally require the scheduled action's own permission — `server:command` / `server:start` / `server:stop` / `server:restart` / `backup:schedule` — so `schedule:manage` alone cannot escalate) |
+| Plugin | `plugin:read`, `plugin:manage` (community-scoped; plugin/mod content management) |
+| Schedule | `schedule:read`, `schedule:manage` (per-server scheduler CRUD; writes additionally require the scheduled action's own permission — `server:command` / `server:start` / `server:stop` / `server:restart` / `backup:schedule` — so `schedule:manage` alone cannot escalate) |
 | Platform (admin axis) | `worker:manage`, `community:provision`, `platform:monitor` |
 
-## Appendix B — Core entities (sketch)
+## Appendix B — Core entities
 
 - **User** — global identity (auth, credentials).
 - **Community** — isolation/ownership unit. Leaves room for optional limit/quota
-  fields (unused in M1).
+  fields (reserved, unused).
 - **Membership** — (user, community) with role assignments.
 - **Role** — community-scoped named permission set.
 - **ResourceGrant** — (user, resource, permissions) override.

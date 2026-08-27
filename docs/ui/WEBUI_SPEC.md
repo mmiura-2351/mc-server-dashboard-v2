@@ -1,32 +1,31 @@
 # Web UI — Feature Inventory, Screen Map, and Spec
 
-> Status: **Accepted (open questions resolved)** · Date: 2026-06-06
+> Status: **Design** · Audience: contributors to `webui/`, `api/`
 >
-> This document inventories the v2 API surface as implemented today, derives
-> the full UI feature list from it, and specifies the screen structure and
-> per-screen specs for the Web UI milestone. A static mockup (no real API
-> calls) accompanies it under `docs/ui/mockup/` and is kept as a design
-> reference.
+> This document inventories the v2 API surface, derives the full UI feature
+> list from it, and specifies the screen structure and per-screen specs for the
+> Web UI. A static mockup (no real API calls) accompanies it under
+> `docs/ui/mockup/` and is kept as a design reference.
 >
 > The Web UI is built **in this monorepo** under `webui/`, alongside `api/`,
-> `worker/`, and `proto/` (REQUIREMENTS.md Section 1.2). The former open
-> questions are resolved in Section 9.
+> `worker/`, and `proto/` (REQUIREMENTS.md Section 1.2). Section 9 records the
+> decisions this specification rests on.
 
 ## Table of Contents
 
-1. [Decisions already made](#1-decisions-already-made)
+1. [Decisions](#1-decisions)
 2. [API surface inventory](#2-api-surface-inventory)
 3. [Personas and capability scoping](#3-personas-and-capability-scoping)
 4. [UI feature list](#4-ui-feature-list)
 5. [Screen map](#5-screen-map)
 6. [Screen specs](#6-screen-specs)
 7. [Cross-cutting concerns](#7-cross-cutting-concerns)
-8. [Out of scope for the first UI cut](#8-out-of-scope-for-the-first-ui-cut)
-9. [Resolved open questions](#9-resolved-open-questions)
+8. [Out of scope](#8-out-of-scope)
+9. [Design decisions](#9-design-decisions)
 
 ---
 
-## 1. Decisions already made
+## 1. Decisions
 
 | Topic | Decision |
 |---|---|
@@ -35,14 +34,14 @@
 | Mockup form | Multiple static HTML pages + shared CSS/JS, mock data embedded in JS. No real API calls. |
 | Placement | `webui/` in this monorepo, alongside `api/` / `worker/` / `proto/`. The mockup stays under `docs/ui/mockup/` as a design reference. |
 | Stack | React + TypeScript + Vite (Section 7.6). |
-| Session storage | Refresh token in an httpOnly cookie from the start (Section 7.1); requires API-side cookie support — issue #363. |
+| Session storage | Refresh token in an httpOnly cookie (Section 7.1), carried by the API's cookie transport (AUTH_API.md Section 3). |
 
 ## 2. API surface inventory
 
-Complete endpoint list as of `main` (dumped from the FastAPI OpenAPI schema).
+Complete endpoint list (generated from the FastAPI OpenAPI schema).
 `[A]` = platform-admin axis; everything else is community-permission-gated.
 
-> **`/api` prefix (issue #498).** The entire HTTP API — every path in the tables
+> **`/api` prefix.** The entire HTTP API — every path in the tables
 > below, the WebSocket endpoints in 2.5, and the OpenAPI schema/docs — is
 > namespaced under `/api` so it can never collide with an SPA client-side route
 > (see 7.7). Paths are written here without the prefix for brevity; the real path
@@ -55,8 +54,8 @@ Complete endpoint list as of `main` (dumped from the FastAPI OpenAPI schema).
 | Method | Path | Notes |
 |---|---|---|
 | POST | `/users` | Register (username, email, password). Public. |
-| POST | `/auth/login` | username + password → `{access_token, token_type}` (bearer); refresh token via cookie only (#636). |
-| POST | `/auth/session` | refresh cookie → `{access_token}` only; non-rotating bootstrap (7.1, #512). |
+| POST | `/auth/login` | username + password → `{access_token, token_type}` (bearer); refresh token via cookie only. |
+| POST | `/auth/session` | refresh cookie → `{access_token}` only; non-rotating bootstrap (7.1). |
 | POST | `/auth/refresh` | refresh token → new pair (rotates). |
 | POST | `/auth/logout` | invalidates the refresh token. |
 | GET / PATCH / DELETE | `/users/me` | Profile read / update (username, email) / account deletion. |
@@ -71,12 +70,12 @@ Complete endpoint list as of `main` (dumped from the FastAPI OpenAPI schema).
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/communities` | Communities the caller belongs to (membership-scoped; the admin axis does not pierce isolation — #489). |
-| GET | `/admin/communities` `[A]` | All communities with `member_count`/`server_count` (`limit`/`offset`, returns `total`); the platform-axis listing (#489). |
+| GET | `/communities` | Communities the caller belongs to (membership-scoped; the admin axis does not pierce isolation). |
+| GET | `/admin/communities` `[A]` | All communities with `member_count`/`server_count` (`limit`/`offset`, returns `total`); the platform-axis listing. |
 | POST | `/communities` `[A]` | Provision a community + initial owner. |
-| GET / PATCH / DELETE | `/communities/{cid}` | Read / rename / delete. Delete also allows a platform admin to remove any community (orphan cleanup, #489); read/rename stay membership-scoped. |
-| GET / POST | `/communities/{cid}/members` | List (with `username`, `role_names`) / add an existing user by exactly one of `user_id` or exact `username` (#355). |
-| GET | `/communities/{cid}/me/permissions` | Caller's own effective set: community-wide codes + per-resource grants (#354). Membership-gated only (Layer-1). |
+| GET / PATCH / DELETE | `/communities/{cid}` | Read / rename / delete. Delete also allows a platform admin to remove any community (orphan cleanup); read/rename stay membership-scoped. |
+| GET / POST | `/communities/{cid}/members` | List (with `username`, `role_names`) / add an existing user by exactly one of `user_id` or exact `username`. |
+| GET | `/communities/{cid}/me/permissions` | Caller's own effective set: community-wide codes + per-resource grants. Membership-gated only (Layer-1). |
 | DELETE | `/communities/{cid}/members/{uid}` | Remove member (revokes roles & grants). |
 | POST / DELETE | `/communities/{cid}/members/{uid}/roles[/{rid}]` | Assign / unassign a role. |
 | GET / POST | `/communities/{cid}/roles` | List / create custom role (name + permission codes). |
@@ -90,11 +89,10 @@ of truth): `server:{create,read,update,delete,start,stop,restart,command}`,
 `member:{read,add,remove}`, `role:{read,manage}`, `grant:{read,manage}`,
 `group:{read,manage}`, `community:{read,update,delete}`, `audit:read`,
 `session:read` (relay game-session moderation surface — player IPs are PII,
-RELAY.md Section 8; seeded on the Owner role by migration 0017),
-`plugin:{read,manage}` (plugin/mod content management, issue #1150;
-seeded on the Owner role by migration 0019),
-`schedule:{read,manage}` (general scheduler CRUD, issue #1837;
-seeded on the Owner role by migration 0030).
+RELAY.md Section 8; seeded on the Owner role),
+`plugin:{read,manage}` (plugin/mod content management; seeded on the Owner
+role), `schedule:{read,manage}` (general scheduler CRUD; seeded on the Owner
+role).
 Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 `community:provision`, `platform:monitor`.
 
@@ -104,15 +102,15 @@ Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 |---|---|---|
 | GET / POST | `/communities/{cid}/servers` | List / create (`name`, `mc_edition`, `mc_version`, `server_type`, `config`, `accept_eula`, optional `game_port`). |
 | POST | `/communities/{cid}/servers/import` | ZIP import (multipart). |
-| GET / HEAD | `…/{sid}/export` | ZIP export (download). Accepts the Bearer access token, or a `?grant=` download grant so the browser can stream a multi-GB export straight to disk (#2352), or the `HttpOnly` download cookie a redemption sets so an interrupted transfer can be retried (#2373). The response declares `Cache-Control: no-store` under every credential (#2491). `HEAD` is the metadata probe (#2383): the same gate and the same headers with no body — including no `Content-Length`, since the zip is built incrementally and the `GET` declares none either — and it neither builds the zip nor records a `server:export` audit event. |
+| GET / HEAD | `…/{sid}/export` | ZIP export (download). Accepts the Bearer access token, or a `?grant=` download grant so the browser can stream a multi-GB export straight to disk, or the `HttpOnly` download cookie a redemption sets so an interrupted transfer can be retried. The response declares `Cache-Control: no-store` under every credential. `HEAD` is the metadata probe: the same gate and the same headers with no body — including no `Content-Length`, since the zip is built incrementally and the `GET` declares none either — and it neither builds the zip nor records a `server:export` audit event. |
 | POST | `…/{sid}/export/download-grant` | Mint that grant: `{download_url, expires_at}`, `Cache-Control: no-store`. Same `file:read` gate as the export, and the same pre-flight — a running server is 409 `server_unsettled` and no grant is issued; `auth.token.download_grant_ttl_seconds`, 30 s by default (AUTH_API.md Section 3). |
-| GET / PATCH / DELETE | `…/{sid}` | Read / update (name, config, game_port) / delete. Every PATCH edit needs `server:update`. The retired `backup_interval_hours` key is a `422` (`retired_config_key`, #1840) — backup cadence is a `backup` schedule now. A `game_port` change against a server whose `server.properties` is missing is a `409` (`server_properties_missing`, #2623): the rewrite preserves the file's other keys, so it refuses rather than republish one without `rcon.password`. |
+| GET / PATCH / DELETE | `…/{sid}` | Read / update (name, config, game_port) / delete. Every PATCH edit needs `server:update`. `backup_interval_hours` is not a config key; a PATCH carrying it is `422` (`retired_config_key`) — backup cadence is a `backup` schedule. A `game_port` change against a server whose `server.properties` is missing is a `409` (`server_properties_missing`): the rewrite preserves the file's other keys, so it refuses rather than republish one without `rcon.password`. |
 | POST | `…/{sid}/start` · `/stop?force=` · `/restart` | Lifecycle. Stop supports force. |
 | POST | `…/{sid}/command` | RCON line → `{output}`. |
 | GET | `…/{sid}/files?path=&list=` | Read file (base64) or list directory (entries + `truncated`). |
-| PUT / DELETE | `…/{sid}/files?path=` | Write (base64, versioned) / delete. A write to the root `server.properties` that changes a platform-managed key — `server-port`, the RCON triple, the resource-pack keys — is a `422` (`platform_managed_key`, #2623) naming it in the `key` member; editing the file's other keys is unaffected. |
+| PUT / DELETE | `…/{sid}/files?path=` | Write (base64, versioned) / delete. A write to the root `server.properties` that changes a platform-managed key — `server-port`, the RCON triple, the resource-pack keys — is a `422` (`platform_managed_key`) naming it in the `key` member; editing the file's other keys is unaffected. |
 | POST | `…/{sid}/files/directories?path=` | mkdir. |
-| GET / HEAD | `…/{sid}/files/download?path=` | Raw download (file bytes, or a streamed ZIP for a directory). Accepts the Bearer access token, or a `?grant=` download grant so the browser can stream a multi-GB directory straight to disk (#2352), or the `HttpOnly` download cookie a redemption sets so an interrupted transfer can be retried (#2373). The response declares `Cache-Control: no-store` under every credential (#2491). `HEAD` is the metadata probe (#2383): the same gate and the same headers with no body — a file's `Content-Length` when it is known, none for the incrementally built directory ZIP — and it neither opens the download stream (no directory ZIP is built, no file bytes are streamed) nor records a `file:download` audit event. The file/directory dispatch itself is the `GET`'s, unchanged: resolving which branch a path takes reads the parent listing and, for a file, pulls one chunk to confirm it is readable. |
+| GET / HEAD | `…/{sid}/files/download?path=` | Raw download (file bytes, or a streamed ZIP for a directory). Accepts the Bearer access token, or a `?grant=` download grant so the browser can stream a multi-GB directory straight to disk, or the `HttpOnly` download cookie a redemption sets so an interrupted transfer can be retried. The response declares `Cache-Control: no-store` under every credential. `HEAD` is the metadata probe: the same gate and the same headers with no body — a file's `Content-Length` when it is known, none for the incrementally built directory ZIP — and it neither opens the download stream (no directory ZIP is built, no file bytes are streamed) nor records a `file:download` audit event. The file/directory dispatch itself is the `GET`'s, unchanged: resolving which branch a path takes reads the parent listing and, for a file, pulls one chunk to confirm it is readable. |
 | POST | `…/{sid}/files/download-grant?path=` | Mint that grant: `{download_url, expires_at}`, `Cache-Control: no-store`. Same `file:read` gate as the download, and the same pre-flight — missing path 404, traversal 422 `invalid_path`, running server 409 `server_unsettled`. `path` is a **query** parameter so mint and redemption bind the identical string; `auth.token.download_grant_ttl_seconds`, 30 s by default (AUTH_API.md Section 3). |
 | POST | `…/{sid}/files/upload?path=&extract=` | Multipart upload, optional ZIP extract. |
 | POST | `…/{sid}/files/rename` | `{from, to}`. |
@@ -122,17 +120,17 @@ Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 | GET / POST | `…/{sid}/backups` | List / create on-demand backup. |
 | GET | `…/{sid}/backups/statistics` | count / total bytes / newest / oldest. |
 | POST | `…/{sid}/backups/upload` | Upload an off-host backup archive. |
-| GET / HEAD | `…/{sid}/backups/{bid}/download` | Download archive. Accepts the Bearer access token, or a `?grant=` download grant so the browser can stream a multi-GB archive straight to disk (#2313), or the `HttpOnly` download cookie a redemption sets so an interrupted transfer can be retried (#2373). **Resumable** (#2372): the response declares `Accept-Ranges: bytes` and a strong `ETag`, and a single `Range` request is served `206` with `Content-Range` over a ranged read (`416` + `Content-Range: bytes */<size>` when unsatisfiable; a malformed or multi-range `Range` is ignored and the whole archive served). `If-Range` is honoured, so a resumed request that names a stale representation gets the current archive whole. The browser's own retry of an interrupted transfer authenticates with the `HttpOnly` download cookie a grant redemption sets, since the `?grant=` in the retried URL has expired by then (#2373, AUTH_API.md Section 3). The response declares `Cache-Control: no-store` on both the `200` and the `206`, under every credential (#2491). `HEAD` is the metadata probe a resumable client sends first (#2383): the same gate and the same headers with no body, so `Content-Length`, `Accept-Ranges` and the `ETag` are learned without starting a transfer. It never opens the archive stream and records no `backup:download` audit event; `Range` is not honoured on it (RFC 9110 Section 14.2 defines range handling for `GET` only), so a probe always reports the whole archive. |
+| GET / HEAD | `…/{sid}/backups/{bid}/download` | Download archive. Accepts the Bearer access token, or a `?grant=` download grant so the browser can stream a multi-GB archive straight to disk, or the `HttpOnly` download cookie a redemption sets so an interrupted transfer can be retried. **Resumable**: the response declares `Accept-Ranges: bytes` and a strong `ETag`, and a single `Range` request is served `206` with `Content-Range` over a ranged read (`416` + `Content-Range: bytes */<size>` when unsatisfiable; a malformed or multi-range `Range` is ignored and the whole archive served). `If-Range` is honoured, so a resumed request that names a stale representation gets the current archive whole. The browser's own retry of an interrupted transfer authenticates with the `HttpOnly` download cookie a grant redemption sets, since the `?grant=` in the retried URL has expired by then (AUTH_API.md Section 3). The response declares `Cache-Control: no-store` on both the `200` and the `206`, under every credential. `HEAD` is the metadata probe a resumable client sends first: the same gate and the same headers with no body, so `Content-Length`, `Accept-Ranges` and the `ETag` are learned without starting a transfer. It never opens the archive stream and records no `backup:download` audit event; `Range` is not honoured on it (RFC 9110 Section 14.2 defines range handling for `GET` only), so a probe always reports the whole archive. |
 | POST | `…/{sid}/backups/{bid}/download-grant` | Mint that grant: `{download_url, expires_at}`, `Cache-Control: no-store`. Same `backup:read` gate as the download; `auth.token.download_grant_ttl_seconds`, 30 s by default (AUTH_API.md Section 3). |
-| POST | `…/{sid}/backups/{bid}/restore[?force=true]` | **Server must be stopped.** `?force=true` overrides the quarantine gate (#703). |
+| POST | `…/{sid}/backups/{bid}/restore[?force=true]` | **Server must be stopped.** `?force=true` overrides the quarantine gate. |
 | DELETE | `…/{sid}/backups/{bid}` | Delete. |
-| PUT / DELETE | `…/{sid}/backups/retention` | Set / clear the scheduled-backup retention policy (issue #1841): `{keep_last}` (≥ 1) XOR `{daily, weekly, monthly}` (each ≥ 0, one > 0); an invalid shape is 422 `invalid_retention_policy`. Gated by `backup:schedule`. Applies only to `source=scheduled` backups — manual/uploaded rows are never auto-deleted. Setting prunes immediately; thereafter each successful scheduled backup run prunes (each deletion audited as `backup:delete`, no actor). Policy readable as `backup_retention` on the server read; null while unconfigured. |
+| PUT / DELETE | `…/{sid}/backups/retention` | Set / clear the scheduled-backup retention policy: `{keep_last}` (≥ 1) XOR `{daily, weekly, monthly}` (each ≥ 0, one > 0); an invalid shape is 422 `invalid_retention_policy`. Gated by `backup:schedule`. Applies only to `source=scheduled` backups — manual/uploaded rows are never auto-deleted. Setting prunes immediately; thereafter each successful scheduled backup run prunes (each deletion audited as `backup:delete`, no actor). Policy readable as `backup_retention` on the server read; null while unconfigured. |
 | GET | `…/{sid}/groups` | Groups attached to this server. |
 | GET / POST | `/communities/{cid}/groups` | Player groups (`kind`: `op` \| `whitelist`). |
 | GET / PATCH / DELETE | `…/groups/{gid}` | Read / rename / delete. |
 | POST / DELETE | `…/groups/{gid}/players[/{uuid}]` | Add / remove player (uuid + username). |
 | GET / PUT / DELETE | `…/groups/{gid}/servers[/{sid}]` | List / attach / detach server. |
-| GET / POST | `…/{sid}/schedules` | List / create a per-server schedule (`name`, `action` ∈ command\|start\|stop\|restart\|backup, `cron` XOR `interval_seconds`, `timezone`, `enabled`, `command` for `command`, `warning_steps` for stop/restart). Reads need `schedule:read`; writes need `schedule:manage` **and** the action's own permission (`command`→`server:command`, `start/stop/restart`→`server:{start,stop,restart}`, `backup`→`backup:schedule`) — anti-escalation. Authorization is write-time only: the runner (#1838) later executes as the system, so revoking a permission does not stop existing schedules. `next_run_at` is null while disabled, recomputed on enable. |
+| GET / POST | `…/{sid}/schedules` | List / create a per-server schedule (`name`, `action` ∈ command\|start\|stop\|restart\|backup, `cron` XOR `interval_seconds`, `timezone`, `enabled`, `command` for `command`, `warning_steps` for stop/restart). Reads need `schedule:read`; writes need `schedule:manage` **and** the action's own permission (`command`→`server:command`, `start/stop/restart`→`server:{start,stop,restart}`, `backup`→`backup:schedule`) — anti-escalation. Authorization is write-time only: the runner executes as the system, so revoking a permission does not stop existing schedules. `next_run_at` is null while disabled, recomputed on enable. |
 | GET / PATCH / DELETE | `…/{sid}/schedules/{scid}` | Read / edit (partial; action immutable) / delete a schedule. |
 | GET | `…/{sid}/schedules/{scid}/runs` | Execution history newest-first (`schedule:read`). |
 
@@ -142,18 +140,18 @@ Server response fields: `id`, `community_id`, `name`, `mc_edition`,
 `cpu_millis` (derived from `config['cpu_millis']`, null when unset),
 `game_port`, `slug` (relay hostname prefix, auto-generated at create,
 renameable via PATCH), `join_hostname` (`<slug>.<base_domain>` when relay
-enabled, else null), `bedrock_address` / `bedrock_port` (Bedrock join address,
-epic #1540: non-null only while the deployment's Bedrock gate is on AND the
-server carries at least one *enabled* Geyser plugin copy — see `BEDROCK.md`;
-Paper only today), `desired_state`, `observed_state`, `observed_at`,
+enabled, else null), `bedrock_address` / `bedrock_port` (Bedrock join address:
+non-null only while the deployment's Bedrock gate is on AND the server carries
+at least one *enabled* Geyser plugin copy — see `BEDROCK.md`),
+`desired_state`, `observed_state`, `observed_at`,
 `assigned_worker_id`, `backup_retention` (the scheduled-backup retention
-policy, issue #1841; null while unconfigured).
+policy; null while unconfigured).
 
 Server state model: `desired_state` ∈ {running, stopped};
 `observed_state` ∈ {starting, running, stopping, stopped, restarting, crashed,
 unknown} + `observed_at` + `assigned_worker_id`.
 Server types: vanilla / paper / fabric / forge.
-Execution backend: `container` (the only shipped backend).
+Execution backend: `container` (the only backend provided).
 
 ### 2.4 Versions, ports, fleet, audit, platform
 
@@ -165,14 +163,14 @@ Execution backend: `container` (the only shipped backend).
 | GET | `/versions/jar-pool/stats` `[A]` · POST `/versions/jar-pool/gc` `[A]` | JAR pool size / garbage collection. |
 | GET | `/ports/available?count=` · `/ports/check/{port}` | Free-port discovery / conflict check. |
 | GET | `/workers` `[A]` | Fleet list: status, capabilities (drivers, max_servers, cpu/mem), assigned_count, heartbeat. |
-| PUT / DELETE | `/workers/{wid}/drain` `[A]` | Set / clear drain. Set MARKS the worker's running servers `desired=stopped` and returns `servers_stopped` (the count marked, not yet stopped); the reconciler then stops each + takes the final snapshot (#845/#849) ASYNCHRONOUSLY (after the grace window, ~120s default, + a tick) and only while the worker stays connected — keep the worker up until convergence, or stops+snapshots defer to a reconnect that never happens in a decommission. Confirm convergence PER SERVER (each reaching `observed=stopped` and unassigned), NOT by assigned load: drain decrements the load synchronously, so it drops to 0 before any stop runs. Clear only re-enables placement (does not restart them; un-draining before convergence transiently oversubscribes the worker). |
+| PUT / DELETE | `/workers/{wid}/drain` `[A]` | Set / clear drain. Set MARKS the worker's running servers `desired=stopped` and returns `servers_stopped` (the count marked, not yet stopped); the reconciler then stops each + takes the final snapshot ASYNCHRONOUSLY (after the grace window, ~120s default, + a tick) and only while the worker stays connected — keep the worker up until convergence, or stops+snapshots defer to a reconnect that never happens in a decommission. Confirm convergence PER SERVER (each reaching `observed=stopped` and unassigned), NOT by assigned load: drain decrements the load synchronously, so it drops to 0 before any stop runs. Clear only re-enables placement (does not restart them; un-draining before convergence transiently oversubscribes the worker). |
 | GET | `/audit` `[A]` | Global audit (`community`, `operation`, `actor`, `since`, `until`, `limit`, `offset`). |
 | GET | `/communities/{cid}/audit` | Community-scoped audit (same filters minus `community`). |
 | GET | `/backups/statistics` `[A]` | Global backup statistics. |
-| GET | `/healthz` · `/readyz` | Liveness / readiness (ops-facing, not UI-core). The Prometheus exposition is not on this API — it has its own listener (issue #2565). |
-| GET | `/meta` | Deployment facts the Web UI reads before a server exists (issue #1002): `{relay_enabled, bedrock_enabled, default_memory_limit_mb, max_memory_limit_mb}`. Requires authentication. Used by the create wizard to decide whether to surface the game-port control (relay mode auto-allocates), and by the plugins tab to decide whether to show the Bedrock/Geyser discovery hint (epic #1540, `bedrock_enabled` = `relay_enabled` AND the deployment's Bedrock capability flag). |
+| GET | `/healthz` · `/readyz` | Liveness / readiness (ops-facing, not UI-core). The Prometheus exposition is not on this API — it has its own listener. |
+| GET | `/meta` | Deployment facts the Web UI reads before a server exists: `{relay_enabled, bedrock_enabled, default_memory_limit_mb, max_memory_limit_mb}`. Requires authentication. Used by the create wizard to decide whether to surface the game-port control (relay mode auto-allocates), and by the plugins tab to decide whether to show the Bedrock/Geyser discovery hint (`bedrock_enabled` = `relay_enabled` AND the deployment's Bedrock capability flag). |
 
-### 2.5 Resource packs (issues #1176, #1177)
+### 2.5 Resource packs
 
 Global resource pack library (not community-scoped) and per-server assignment.
 
@@ -181,8 +179,8 @@ Global resource pack library (not community-scoped) and per-server assignment.
 | POST | `/resource-packs` | Upload a resource pack (multipart; requires `server:update` in at least one community). |
 | GET | `/resource-packs` | List all resource packs (authenticated). |
 | DELETE | `/resource-packs/{id}` | Delete a resource pack (uploader or platform admin; 409 when still assigned to a server). |
-| GET / HEAD | `/resource-packs/{id}/download` | Download (authenticated). The response declares `Cache-Control: no-store` (#2519). `HEAD` is the metadata probe (#2560): the same gate and the same headers with no body, so a client learns the `Content-Length` without starting a transfer; it never opens the blob nor records a `resource_pack:download` audit event. |
-| GET / HEAD | `/public/resource-packs/{id}/{filename}` | Public download (no auth) — the URL Minecraft clients fetch. Validates `filename` matches. The two statuses declare different caching policies (#2562), because the URL ends in the stored filename and an undeclared policy is decided by the edge's extension heuristic instead: the `200` declares `Cache-Control: public, max-age=3600, immutable` — a pack is immutable and the game client verifies it against `resource-pack-sha1`, so the max-age bounds only how long a deleted pack stays fetchable from a cache — and the `404` declares `Cache-Control: no-store`, since a pack's id and filename are both fixed at creation and a URL that 404s can never later become a `200`. `HEAD` is the metadata probe (#2632): this is the unauthenticated URL a resumable-download client probes before a transfer, and it declares a `Content-Length`, so it has a real reason to. The probe answers each status with the `GET`'s headers — the same `Cache-Control` per status — and no body, so an edge does not cache a probe differently from the download; it never opens the blob. |
+| GET / HEAD | `/resource-packs/{id}/download` | Download (authenticated). The response declares `Cache-Control: no-store`. `HEAD` is the metadata probe: the same gate and the same headers with no body, so a client learns the `Content-Length` without starting a transfer; it never opens the blob nor records a `resource_pack:download` audit event. |
+| GET / HEAD | `/public/resource-packs/{id}/{filename}` | Public download (no auth) — the URL Minecraft clients fetch. Validates `filename` matches. The two statuses declare different caching policies, because the URL ends in the stored filename and an undeclared policy is decided by the edge's extension heuristic instead: the `200` declares `Cache-Control: public, max-age=3600, immutable` — a pack is immutable and the game client verifies it against `resource-pack-sha1`, so the max-age bounds only how long a deleted pack stays fetchable from a cache — and the `404` declares `Cache-Control: no-store`, since a pack's id and filename are both fixed at creation and a URL that 404s can never later become a `200`. `HEAD` is the metadata probe: this is the unauthenticated URL a resumable-download client probes before a transfer, and it declares a `Content-Length`, so it has a real reason to. The probe answers each status with the `GET`'s headers — the same `Cache-Control` per status — and no body, so an edge does not cache a probe differently from the download; it never opens the blob. |
 | POST | `…/{sid}/resource-pack` | Assign a resource pack to a server (`server:update`). Body: `{resource_pack_id, require_resource_pack, resource_pack_prompt}`. |
 | DELETE | `…/{sid}/resource-pack` | Unassign (`server:update`). |
 | GET | `…/{sid}/resource-pack` | Get the current assignment (`server:read`). |
@@ -205,7 +203,7 @@ REST keeps working if the socket dies (FR-MON-4).
 Note: the data-plane endpoints (`/api/data-plane/...`) are Worker-credential-only
 transfer endpoints — not part of the UI surface.
 
-### 2.7 Plugins & mods (issue #1150)
+### 2.7 Plugins & mods
 
 Per-server plugin/mod content management (the `#plugins` tab, Section 6.14). All
 paths hang off `/communities/{cid}/servers/{sid}`; the whole family is
@@ -219,23 +217,23 @@ family is unsupported on `vanilla` servers (422 `unsupported_server_type`).
 | GET | `…/{sid}/plugins` | List installed plugins/mods (`plugin:read`). |
 | POST | `…/{sid}/plugins` | Install a plugin jar via multipart upload (`plugin:manage`): `display_name` form field + `file`, jar ≤ 512 MiB (413 `file_too_large`). Returns `201`; a duplicate is 409 `plugin_already_exists`. |
 | GET | `…/{sid}/plugins/updates` | Batch-check every installed plugin for a newer catalog version (`plugin:read`); catalog upstream failure is 502 `catalog_upstream_failed`. |
-| GET | `…/{sid}/plugins/validate` | Phase-B dependency/compatibility checklist — missing deps, unsatisfied version ranges, conflicts, MC-version mismatch (`plugin:read`, #1307). Read-only; never mutates the set. |
-| POST | `…/{sid}/plugins/resolve` | Plan dependency auto-resolution: the transitive closure of required deps, each classified satisfied / needs-import / unresolvable / blocked (`plugin:read`, #1309). Read-only — nothing is downloaded or installed. |
-| POST | `…/{sid}/plugins/resolve/apply` | Apply that plan: install each non-blocked needs-import dep from the catalog, then re-plan (`plugin:manage`, #1309). Per-dep install failures are isolated in `failed`. |
+| GET | `…/{sid}/plugins/validate` | Phase-B dependency/compatibility checklist — missing deps, unsatisfied version ranges, conflicts, MC-version mismatch (`plugin:read`). Read-only; never mutates the set. |
+| POST | `…/{sid}/plugins/resolve` | Plan dependency auto-resolution: the transitive closure of required deps, each classified satisfied / needs-import / unresolvable / blocked (`plugin:read`). Read-only — nothing is downloaded or installed. |
+| POST | `…/{sid}/plugins/resolve/apply` | Apply that plan: install each non-blocked needs-import dep from the catalog, then re-plan (`plugin:manage`). Per-dep install failures are isolated in `failed`. |
 | GET | `…/{sid}/plugins/{pid}` | Read one installed plugin by id (`plugin:read`). |
 | DELETE | `…/{sid}/plugins/{pid}` | Remove an installed plugin (`plugin:manage`). Returns `204`. |
 | GET | `…/{sid}/plugins/{pid}/updates` | Check a single plugin for a newer catalog version (`plugin:read`). |
 | POST | `…/{sid}/plugins/{pid}/update` | Update a plugin to a specific catalog `version_id` (`plugin:manage`); missing project 404 `catalog_project_not_found`, checksum drift 502 `checksum_mismatch`. |
 | GET | `…/{sid}/plugins/{pid}/dependencies` | List a Modrinth-sourced plugin's declared dependencies, each flagged installed/missing (`plugin:read`). |
 | POST | `…/{sid}/plugins/{pid}/enable` · `/disable` | Toggle a plugin on/off (`plugin:manage`). |
-| POST | `…/{sid}/plugins/{pid}/side` | Override a mod's side — `both` / `server` / `client` (`plugin:manage`, #1308); re-materializes the working set. Invalid side is 422 `invalid_side`. |
-| GET | `…/{sid}/client-mods` | List the server's enabled client-relevant plugins (side `client` / `both`; `plugin:read`, #1308). |
-| GET / HEAD | `…/{sid}/client-mods/download` | Download those client mods bundled as `mods.zip` (`plugin:read`, #1308). The response declares `Cache-Control: no-store` (#2491, #2519) — a per-server body gated by `plugin:read` must never be served from a shared cache. `HEAD` is the metadata probe (#2560): the same gate and headers with no body, and it neither builds the zip nor pulls a jar; the zip is streamed with no `Content-Length` (assembled on the fly from a variable jar set), so the probe learns existence rather than size. |
-| GET | `…/{sid}/catalog/search` | Search the Modrinth catalog with auto-applied server facets (`plugin:read`, #1151): `q` query + `limit` (1–100, default 20) / `offset` paging. Catalog upstream failure is 502 `catalog_upstream_failed`. |
-| GET | `…/{sid}/catalog/projects/{id_or_slug}` | Fetch a catalog project's detail + its server-compatible versions (`plugin:read`, #1151); an unknown project is 404 `catalog_project_not_found`, catalog upstream failure 502 `catalog_upstream_failed`. |
-| POST | `…/{sid}/catalog/install` | Install a plugin/mod from the catalog by `project_id` + `version_id` (`plugin:manage`, #1151). Returns `201`; a missing project is 404 `catalog_project_not_found`, checksum drift 502 `checksum_mismatch`, and a duplicate 409 `plugin_already_exists`. |
+| POST | `…/{sid}/plugins/{pid}/side` | Override a mod's side — `both` / `server` / `client` (`plugin:manage`); re-materializes the working set. Invalid side is 422 `invalid_side`. |
+| GET | `…/{sid}/client-mods` | List the server's enabled client-relevant plugins (side `client` / `both`; `plugin:read`). |
+| GET / HEAD | `…/{sid}/client-mods/download` | Download those client mods bundled as `mods.zip` (`plugin:read`). The response declares `Cache-Control: no-store` — a per-server body gated by `plugin:read` must never be served from a shared cache. `HEAD` is the metadata probe: the same gate and headers with no body, and it neither builds the zip nor pulls a jar; the zip is streamed with no `Content-Length` (assembled on the fly from a variable jar set), so the probe learns existence rather than size. |
+| GET | `…/{sid}/catalog/search` | Search the Modrinth catalog with auto-applied server facets (`plugin:read`): `q` query + `limit` (1–100, default 20) / `offset` paging. Catalog upstream failure is 502 `catalog_upstream_failed`. |
+| GET | `…/{sid}/catalog/projects/{id_or_slug}` | Fetch a catalog project's detail + its server-compatible versions (`plugin:read`); an unknown project is 404 `catalog_project_not_found`, catalog upstream failure 502 `catalog_upstream_failed`. |
+| POST | `…/{sid}/catalog/install` | Install a plugin/mod from the catalog by `project_id` + `version_id` (`plugin:manage`). Returns `201`; a missing project is 404 `catalog_project_not_found`, checksum drift 502 `checksum_mismatch`, and a duplicate 409 `plugin_already_exists`. |
 
-The `…/{sid}/catalog/*` rows are a separate route family (`catalog.py`, #1151) —
+The `…/{sid}/catalog/*` rows are a separate route family (`catalog.py`) —
 the Modrinth browse/install that backs the same `#plugins` tab — folded in here
 because they share the `plugin:*` gate and the at-rest / vanilla constraints
 above.
@@ -250,7 +248,7 @@ above.
 | Unauthenticated | Login / Register only | — |
 
 The UI derives capabilities from `GET /users/me` (admin flag) +
-`GET /communities/{cid}/me/permissions` (the caller's effective set, #354),
+`GET /communities/{cid}/me/permissions` (the caller's effective set),
 **and still treats any 403/404 as the authority** (FR-AUTHZ-6: server-side
 enforcement is the truth; client scoping is convenience). The effective set is
 fetched on community switch and cached for the session (see 7.3).
@@ -417,12 +415,12 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   issued.
 - Create backup button (works on running servers — on-demand snapshot path);
   upload backup (file picker).
-- Schedule: the inline "every N hours" cadence field is **retired** (issue
-  #1840). Scheduled backups are now a first-class `backup` schedule on the
-  general scheduler (the `…/{sid}/schedules` surface); the Backups tab only
-  shows a short note pointing `backup:schedule` holders there. No PATCH of a
-  `backup_interval_hours` key remains (the API 422s it as `retired_config_key`).
-- Retention (issue #1843; `backup:schedule` only — hidden otherwise): a policy
+- Schedule: backup cadence is a first-class `backup` schedule on the general
+  scheduler (the `…/{sid}/schedules` surface, Section 6.13), not an inline
+  cadence field on this tab; the Backups tab shows a short note pointing
+  `backup:schedule` holders there. There is no `backup_interval_hours` config
+  key — a PATCH carrying one is 422 `retired_config_key`.
+- Retention (`backup:schedule` only — hidden otherwise): a policy
   editor beside the schedule note, prefilled from `backup_retention` on the
   server read. Mode select = keep-all (no policy) / keep-last-N / tiered
   (daily / weekly / monthly buckets); Save `PUT`s `…/{sid}/backups/retention`
@@ -445,7 +443,7 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 
 ### 6.10 Community settings
 - **Members**: table (username, roles as chips); add-member dialog by exact
-  username (`POST …/members {username}`, #355 — no-match is a 422
+  username (`POST …/members {username}` — no-match is a 422
   `user_not_found` rejection, same as an unknown `user_id`, already-member is
   409 `already_member`); role chips editable inline; remove with confirm
   (explains grant/role revocation).
@@ -471,8 +469,7 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   created_at); actions: deactivate/reactivate, grant/revoke admin, delete.
 - **Communities**: paginated table of all communities (name, id, member/server
   counts) from `GET /admin/communities`; provision dialog (name + initial owner
-  user); delete a community (typed-confirm) via `DELETE /communities/{cid}`
-  (#489).
+  user); delete a community (typed-confirm) via `DELETE /communities/{cid}`.
 - **Workers**: table (id, version, status incl. draining, drivers,
   assigned/max, cpu/mem, heartbeat age); drain/undrain toggle with confirm.
 - **Versions**: per-type catalog freshness, refresh button (all or one type);
@@ -481,8 +478,7 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 
 ### 6.13 Server detail — Schedules
 
-The `#schedules` tab (issue #1842; numbered out of tab order to avoid
-renumbering 6.8–6.12): the UI for the general scheduler (#1837).
+The `#schedules` tab: the UI for the general scheduler.
 
 - Table: name, action, human-readable cadence ("Every N min/h" or the cron
   expression), timezone, enabled toggle, last-run and next-run timestamps
@@ -511,17 +507,16 @@ renumbering 6.8–6.12): the UI for the general scheduler (#1837).
 
 ### 6.14 Server detail — Plugins
 
-The `#plugins` tab (issue #1153; numbered out of tab order to avoid renumbering
-6.8–6.13): plugin/mod content management for a server. The tab label and every
-content noun are loader-aware — **Plugins** for Paper, **Mods** for
-Fabric/Forge (#1320) — and the whole tab is **hidden for `vanilla`** (no
+The `#plugins` tab: plugin/mod content management for a server. The tab label
+and every content noun are loader-aware — **Plugins** for Paper, **Mods** for
+Fabric/Forge — and the whole tab is **hidden for `vanilla`** (no
 backend support; the tab body also self-guards with an "unsupported" notice).
 
 - Installed list (`GET …/plugins`): a table of name (with an "update available"
   badge when a newer catalog version exists, from `GET …/plugins/updates`),
   version, source badge (`modrinth` / `local`), status pill
   (enabled / disabled), size, and — for mod loaders only — a **Side** column
-  (`both` / `server` / `client`, #1308), editable with `plugin:manage`
+  (`both` / `server` / `client`), editable with `plugin:manage`
   (`POST …/plugins/{id}/side`). An empty list shows a "none installed" row.
 - Per-row actions (`plugin:manage`): enable / disable
   (`POST …/plugins/{id}/enable` · `/disable`), update to the offered catalog
@@ -535,17 +530,17 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   view with a per-version install picker (`POST …/catalog/install`) that marks
   the already-installed version.
 - Dependency health: a validation checklist under the table
-  (`GET …/plugins/validate`, #1307) flags missing dependencies, unsatisfied
+  (`GET …/plugins/validate`) flags missing dependencies, unsatisfied
   version ranges, conflicts, and MC-version mismatches, or shows an all-clear
-  line; **Resolve** (`POST …/plugins/resolve` → `…/resolve/apply`, #1309) plans
+  line; **Resolve** (`POST …/plugins/resolve` → `…/resolve/apply`) plans
   and then auto-imports the missing Modrinth dependencies.
 - Client modpack (mod loaders only): when at least one enabled mod is
   client-relevant (side `client` / `both`), a **Download client modpack** button
-  bundles them (`GET …/client-mods/download`, #1342; response headers and the
+  bundles them (`GET …/client-mods/download`; response headers and the
   `HEAD` metadata probe are in the Section 2.7 inventory row).
 - Bedrock hint: on a Paper server, when the deployment's Bedrock gate is on
   (`/meta`'s `bedrock_enabled`, Section 2.4) and a Geyser plugin is installed, an
-  inline note links to Floodgate setup (epic #1540).
+  inline note links to Floodgate setup.
 - Server-state gating: reads render anytime, but **every mutation requires the
   server at rest** (`desired_state` stopped and `observed_state` one of
   stopped / crashed / unknown). While not at rest a
@@ -568,41 +563,38 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   [`AUTH_API.md`](../app/AUTH_API.md).
 - Access token (short-lived; ~900 s in the live deployment) kept in memory
   only. Refresh token in an **httpOnly cookie** set by the API on login
-  (`Secure; SameSite=Strict; Path=/api/auth`) — never readable by JS; requires the
-  API-side cookie transport (issue #363). Transparent refresh on 401 +
+  (`Secure; SameSite=Strict; Path=/api/auth`) — never readable by JS; carried by
+  the API's cookie transport (AUTH_API.md Section 3). Transparent refresh on 401 +
   single-flight refresh mutex; hard logout on refresh failure. Page reload
   (bootstrap) re-establishes the session via the **non-rotating**
   `POST /api/auth/session` probe — it exchanges the cookie for an access token
   without rotating the refresh token, so a reload / F5 storm can never race an
   in-flight rotation and leave a revoked predecessor cookie in the jar (the
-  torn-rotation logout, issue #512). Rotation stays on the transparent
+  torn-rotation logout). Rotation stays on the transparent
   `POST /api/auth/refresh` (the in-session 401-retry path), where reuse-detection
   still applies; a mid-session refresh failure hard-logs-out only when the
   server's response is auth-definitive (401 or 403 — a genuinely expired /
   revoked session). Transient failures — network errors, proxy 5xx, or garbled
   bodies — do not end the session; the original request surfaces its own error
-  to the caller so the user can retry (issue #1982).
+  to the caller so the user can retry.
 - WS connections carry the access token in the `Sec-WebSocket-Protocol`
-  subprotocol header (`["access_token", "<jwt>"]`, issue #1596); on token
+  subprotocol header (`["access_token", "<jwt>"]`); on token
   rotation, sockets are reconnected (reconnect-on-rotate chosen).
 - **Authenticated downloads.** An in-memory access token cannot ride a plain
   `<a href>`, so single-file / resource-pack / plugin downloads fetch the URL
   with the Authorization header and buffer the response as a Blob, capped at
-  512 MiB to bound memory (issues #438, #1593, #2027). **Backup archives,
-  server exports and directory ZIPs are the exception**: they run to multiple
-  GB, so the tab mints a short-lived self-authenticating URL
-  (`POST …/backups/{bid}/download-grant`, #2313;
+  512 MiB to bound memory. **Backup archives, server exports and directory ZIPs
+  are the exception**: they run to multiple GB, so the tab mints a short-lived
+  self-authenticating URL (`POST …/backups/{bid}/download-grant`,
   `POST …/{sid}/export/download-grant` and
-  `POST …/{sid}/files/download-grant?path=…`, #2352 — all with the
+  `POST …/{sid}/files/download-grant?path=…` — all with the
   `auth.token.download_grant_ttl_seconds` TTL, 30 s by default) and clicks
   an `<a download>` at it — same-origin (7.7), so the browser saves the
-  response natively with no size ceiling and no bytes read by the application
-  (#2314, #2353, #2354). The grant is minted on click, never on render or on
-  selection, and the `download` attribute names the file — redundant but
-  harmless, since every download response now sends a `Content-Disposition`:
-  backups, directory ZIPs, resource packs and plugins always did, and the server
-  export joined them in #2357 (until then the attribute was load-bearing on that
-  one surface, and anything navigating the URL without it saved `export`). A
+  response natively with no size ceiling and no bytes read by the application.
+  The grant is minted on click, never on render or on selection, and the
+  `download` attribute names the file — redundant but harmless, since every
+  download response (backups, server exports, directory ZIPs, resource packs
+  and plugins) sends a `Content-Disposition`. A
   **single file deliberately stays on the capped fetch** even though it shares
   the download route with a directory: the API declares its `Content-Length`
   whenever the size resolves from the parent listing, so an oversize one is
@@ -615,7 +607,7 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   that means bytes-so-far with no total, since there is no `Content-Length`.
   The tab does nothing further to keep such a download alive: redeeming the grant
   sets an `HttpOnly` download cookie the tab cannot see, and the browser's own
-  retry of an interrupted transfer authenticates with that (#2373, AUTH_API.md
+  retry of an interrupted transfer authenticates with that (AUTH_API.md
   Section 3). It is scoped to the one download's URL path, so it is never
   attached to an API call the SPA makes, and JS never reads it — the SPA's session
   model (in-memory access token, refresh cookie on `/api/auth`) is untouched.
@@ -626,7 +618,7 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   shows degraded mode; REST polling fallback for status only.
 
 ### 7.3 Permission-driven rendering
-- Capabilities come from `GET /communities/{cid}/me/permissions` (#354):
+- Capabilities come from `GET /communities/{cid}/me/permissions`:
   fetched on community switch, cached for the session, re-fetched on a 403
   (the set may have changed since cache). Controls render from
   `permissions ∪ (matching resource grant)`.
@@ -644,35 +636,35 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   in an `errors` extension member. A 403 permission denial keeps
   `reason: "forbidden"` and carries the required permission code in a
   `permission` extension member, which the client names in the denial toast
-  (7.3). The client branches on exactly this shape; there is no legacy
-  bare-string / `{reason}` fork. The auth endpoints' reason codes and the
+  (7.3). The client branches on exactly this shape — one body, one machine
+  code, on every endpoint. The auth endpoints' reason codes and the
   `permission` member are enumerated in [`AUTH_API.md`](../app/AUTH_API.md)
   Section 2.
 - API error surfaced via toast + inline field errors (422 `errors` list).
 - Conflict-flavored errors get a "state changed — refresh" treatment, not a raw
   error dump: the lifecycle races `invalid_transition` (except on **start**,
   where it means the server is already desired-running — a pending start, not a
-  race — and gets a verb-specific message below, #2445), `transition_conflict`
+  race — and gets a verb-specific message below), `transition_conflict`
   and `server_not_running` (the last only away from **restart**, which offers
   the action for a crashed server on purpose and so gets a verb-specific message
-  below, #2441). A 409 that reports something other than a race is
+  below). A 409 that reports something other than a race is
   named instead, since refreshing is not the remedy: `server_unsettled` says the
-  server must be stopped, on every surface that can receive it (#2360);
+  server must be stopped, on every surface that can receive it;
   `worker_busy` / `server_busy` say another operation on the server is still
   running and the request was refused without being applied, so the operator
-  retries in a moment (#2400); the sanitized start/restart-failure categories
-  `port_conflict` / `image_missing` name the cause the Worker classified (#225);
+  retries in a moment; the sanitized start/restart-failure categories
+  `port_conflict` / `image_missing` name the cause the Worker classified;
   `command_failed`, the catch-all for a dispatch failure the Worker did not
   classify, says the action did not go through and sends the operator to check
   the server's state — a failed start is compensated back, but a failed stop or
-  restart can leave the server moved, and a retry is not known to help (#2420);
+  restart can leave the server moved, and a retry is not known to help;
   `failed_stop_orphan` says an earlier stop never finished, so the server's
   process may still be running — it never went down, and repeating the action is
   refused identically, so the message names that condition and says the host is
-  already converging it automatically, which it is since #2475; asking the
-  operator to stop the server again was the older, now-redundant remedy (#2466,
-  reworded in #2476). It stays verb-agnostic for that reason: the sentence
-  is about the server's state, not about what the refused verb would have done.
+  converging it automatically, which it does; asking the operator to stop the
+  server again would be redundant. It stays verb-agnostic for that reason: the
+  sentence is about the server's state, not about what the refused verb would
+  have done.
   The refetch is unconditional on every lifecycle mutation regardless of the
   toast, so a moved server still shows up.
 - On **stop** and **restart** those messages are replaced by verb-specific ones —
@@ -680,7 +672,7 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   `server_not_running` on restart (`worker_busy` on restart applied nothing, and
   `server_busy` cannot occur on either). The API dispatches after committing the
   intent and compensates only on start, so these failures leave something
-  *pending* rather than undone (#2435).
+  *pending* rather than undone.
   A failed stop keeps `desired_state=stopped` over a still-running process — no
   stop failure class proves the stop will not take effect — so the message says
   the server is still running and that the system will keep trying to stop it,
@@ -689,13 +681,13 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   the Worker refuses. A failed restart keeps `desired_state=running`, so a server
   the Worker took down comes back on its own, and the message says so.
   `server_not_running` on restart — the Worker holding no live instance for the
-  id (#2441) — shares that message: the lifecycle controls offer restart for a
+  id — shares that message: the lifecycle controls offer restart for a
   server observed crashed or unknown under a running intent, so this refusal is
   not the race it is on the command surface, and what it leaves behind is the
   same `desired_state=running` the reconciler acts on.
 - The same verb-specific treatment extends to the **503 `worker_unavailable`** —
-  the API's rendering of a dispatch that timed out or lost the Worker session
-  (#2440), where the generic "wait a moment and try again" invites a retry of an
+  the API's rendering of a dispatch that timed out or lost the Worker session,
+  where the generic "wait a moment and try again" invites a retry of an
   intent that already stands. On stop it is unambiguous: `StopServer` can only
   raise it from the dispatch itself, which runs *after* `desired_state=stopped`
   is committed and the placement load decremented, and nothing is compensated. On
@@ -708,19 +700,19 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   and `jar_unavailable` stay verb-agnostic: both are raised before any intent is
   committed.
 - On **start**, `worker_busy` gets its own message, but a *hedged* one, because
-  the reason is ambiguous at the edge (#2445). A **post-dispatch** `worker_busy`
+  the reason is ambiguous at the edge. A **post-dispatch** `worker_busy`
   keeps `desired_state=running` and the assignment so `redispatch_start` can
-  converge once the raced command settles (#824) — the start is pending; a
+  converge once the raced command settles — the start is pending; a
   **pre-dispatch** one — a refused hydrate before the start command was sent —
   compensates back to stopped, so nothing is pending. The client sees one bare
   `worker_busy` for both, so the message cannot promise the start will happen: it
   says the start *may* still be applied on its own and to start again only if the
-  server stays stopped, replacing the generic "wait and try again". That generic
-  retry was actively misleading on the pending path — a retry while
-  `desired_state=running` raises `invalid_transition`, which on **start** now
-  gets its own message ("already running or starting up") rather than the generic
+  server stays stopped, rather than the generic "wait and try again". That
+  generic retry is actively misleading on the pending path — a retry while
+  `desired_state=running` raises `invalid_transition`, which on **start** carries
+  its own message ("already running or starting up") rather than the generic
   state-changed toast, so the operator does not get a second, contradictory
-  answer (#2445). Stop and restart keep the state-changed treatment for
+  answer. Stop and restart keep the state-changed treatment for
   `invalid_transition`: neither leaves a pending intent a retry collides with.
 - **Start keeps the verb-agnostic message for 503 `worker_unavailable`.** A start
   that demonstrably did not happen is compensated back to stopped, but a
@@ -728,17 +720,16 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   while its pre-dispatch twin — a failed hydrate, or a call that never reached the
   Worker — compensates. This is the identical pre/post ambiguity as `worker_busy`
   above, but a timeout answers *nothing*, so there is no honest thing to say
-  beyond "could not reach the server host"; #2440 scoped it out and it stays
-  verb-agnostic.
+  beyond "could not reach the server host" — hence the verb-agnostic message.
 - Destructive operations (delete server/community/user/backup-restore) use
   typed-confirm dialogs.
 
 ### 7.5 i18n & theming
-- All strings through a `t('key')` dictionary; English shipped, Japanese
+- All strings through a `t('key')` dictionary; English is provided, Japanese
   addable. Dark theme via CSS custom properties (a light theme later is a
   token swap, not a rewrite).
 
-### 7.6 Tech stack (decided — for the real implementation, not the mockup)
+### 7.6 Tech stack
 - SPA: **React + TypeScript + Vite**, TanStack Query (REST cache +
   invalidation), plain WebSocket wrappers, CSS modules or vanilla-extract —
   no heavy UI kit; the design system stays ours. Generated API client from
@@ -753,18 +744,17 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   cross-origin SPA cannot authenticate — the browser would not attach the cookie
   to the refresh request. Every deployment posture below keeps the UI and the API
   on the same origin; do not add CORS to work around a split origin.
-- **`/api` namespace (issue #498).** The entire HTTP API (REST, WebSocket, and
+- **`/api` namespace.** The entire HTTP API (REST, WebSocket, and
   the OpenAPI schema/docs) lives under `/api`, so it can never share a path with
   an SPA client-side route. This makes the production fallback an absolute rule:
-  `/api/*` is the API, *everything else* is the SPA. It replaced the earlier
-  posture where three deep-links (`/communities/{cid}`,
-  `/communities/{cid}/servers/{sid}`, `/communities/{cid}/servers/new`) collided
-  with API GET routes and returned JSON on a hard reload.
+  `/api/*` is the API, *everything else* is the SPA. Without the namespace,
+  deep-links such as `/communities/{cid}`,
+  `/communities/{cid}/servers/{sid}` and `/communities/{cid}/servers/new` would
+  collide with API GET routes and return JSON on a hard reload.
 - **Development.** The Vite dev server proxies the single `/api` prefix (REST
   *and* the WebSocket event streams) to a local API instance, so the browser sees
   a single origin (the dev server). Because `/api` is never an SPA route, the
-  proxy needs no Accept-header bypass for deep-links. No CORS is added anywhere
-  (#378 Phase 1).
+  proxy needs no Accept-header bypass for deep-links. No CORS is added anywhere.
 - **Production.** The API container serves the built SPA (`webui/dist`) via
   FastAPI `StaticFiles` with an SPA fallback, on the same origin as the API. No
   reverse proxy and no new Compose service. The `/api/*` routes (including the WS
@@ -772,28 +762,29 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   chunks) are both excluded from the SPA fallback: a `/api/*` path is the API,
   and an unmatched `/assets/*` request returns 404 (a stale/renamed chunk, never
   a client-side route). Every other unmatched path falls back to the SPA's
-  `index.html` so client-side routing works on deep links and reloads (#378
-  Phase 8, #498, #634).
+  `index.html` so client-side routing works on deep links and reloads.
 
-## 8. Out of scope for the first UI cut
+## 8. Out of scope
 
-- Metrics history/persistence (only live sparklines from the WS stream).
+The Web UI does not provide:
+
+- Metrics history or persistence — only live sparklines from the WS stream.
 - `/metrics` (Prometheus) visualization — operators use Grafana.
-- Mobile-optimized layouts (responsive down to tablet only).
-- Light theme (structure ready, not shipped).
-- Active-session listing / revocation on the account page — the session API now
-  exists (`GET`/`DELETE /api/users/me/sessions`, #387 via PR #603), but the
-  account-page UI is still deferred (see #606 for the revoke-all-others
-  hardening to land before the UI is added).
+- Mobile-optimized layouts — responsive down to tablet only.
+- A light theme — the CSS custom-property structure carries one, but only the
+  dark theme is provided (7.5).
+- Active-session listing / revocation on the account page. The session API
+  exists (`GET` / `DELETE /api/users/me/sessions`, AUTH_API.md Section 7); the
+  account-page surface for it is not provided.
 
-## 9. Resolved open questions
+## 9. Design decisions
 
-All of the first draft's open questions are now decided:
+The decisions this specification rests on, with the sections that carry them:
 
-| # | Question | Decision | Refs |
+| # | Topic | Decision | Refs |
 |---|---|---|---|
-| Q1 | Stack | **React + TypeScript + Vite** (TanStack Query, generated OpenAPI client). | 7.6 |
-| Q2 | Refresh-token storage | **httpOnly cookie from the start** (no localStorage interim). Needs API-side cookie transport — issue #363. | 7.1 |
-| Q3 | "My permissions" endpoint | **Implemented**: filed as #354, landed as `GET /communities/{cid}/me/permissions` (#357). | 3, 7.3 |
-| Q4 | Member-add lookup | **Implemented**: filed as #355, landed as `POST …/members` accepting exactly one of `user_id` / exact `username` (#359). | 6.10 |
-| Q5 | Where the UI lives | **`webui/` in this monorepo**, alongside `api/` / `worker/` / `proto/` (REQUIREMENTS.md Section 1.2 updated). Mockup stays under `docs/ui/mockup/` as a design reference. | 1, header |
+| D1 | Stack | **React + TypeScript + Vite** (TanStack Query, generated OpenAPI client). | 7.6 |
+| D2 | Refresh-token storage | **httpOnly cookie** — never `localStorage`, so the refresh token is never readable by JS. Carried by the API's cookie transport (AUTH_API.md Section 3). | 7.1 |
+| D3 | "My permissions" endpoint | The API exposes the caller's effective set at `GET /communities/{cid}/me/permissions`, so the UI scopes controls from one call per community. | 3, 7.3 |
+| D4 | Member-add lookup | `POST …/members` accepts exactly one of `user_id` or an exact `username`; there is no fuzzy user search. | 6.10 |
+| D5 | Where the UI lives | **`webui/` in this monorepo**, alongside `api/` / `worker/` / `proto/` (REQUIREMENTS.md Section 1.2). Mockup stays under `docs/ui/mockup/` as a design reference. | 1, header |

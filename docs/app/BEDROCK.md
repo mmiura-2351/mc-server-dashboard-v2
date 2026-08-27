@@ -1,13 +1,12 @@
 # Bedrock (Geyser) Support
 
-> Status: **Shipped (initial release)** · Audience: contributors to `api/`,
+> Status: **Implemented** · Audience: contributors to `api/`,
 > `worker/`, `webui/`, operators
 >
-> This document is the feature-level overview of epic
-> [#1540](https://github.com/mmiura-2351/mc-server-dashboard-v2/issues/1540):
+> This document is the feature-level overview of Bedrock (Geyser) support:
 > letting Bedrock-edition players join Java servers through the relay,
 > worker-NAT-hidden. It covers what a user/operator needs to know — how
-> Bedrock gets enabled on a server, how players find it, and today's known
+> Bedrock gets enabled on a server, how players find it, and the known
 > limitations. For the network design (the QUIC datagram tunnel, the UDP
 > ingress, flow demultiplexing, framing), see
 > [`BEDROCK_TUNNEL.md`](BEDROCK_TUNNEL.md); this document does not repeat that
@@ -32,10 +31,11 @@ Paper, Fabric, and NeoForge identically, whether Geyser arrives from the plugin
 catalog or a local upload, because Geyser ships a build for each of those three
 loaders (Section 4 lists the manifest ids detection keys on). Vanilla is
 permanently unsupported: it has no plugin/mod directory, so there is nowhere to
-install Geyser. The remaining **"Paper" emphasis** is only about what is
-validated end-to-end in practice — a real Bedrock client join has been exercised
-on Paper (with Floodgate, live against a Paper 1.21.1 server; Section 4's
-version-skew note), not yet on Fabric or NeoForge (Section 2).
+install Geyser. Where these docs emphasise **Paper**, that is about
+validation coverage only: a real Bedrock client join is exercised end-to-end on
+Paper (with Floodgate; Section 4's version-skew note bounds which server
+versions such a join works against). Fabric and NeoForge are not covered by
+that end-to-end verification.
 
 ## 2. Activation
 
@@ -51,11 +51,10 @@ two plugins ship differently — latest resolved at install time either way, no
 pinning, no bundling:
 
 - **Geyser**: from Modrinth, like any other plugin.
-- **Floodgate**: Modrinth carries no Spigot/Paper build of Floodgate (issue
-  #1548), so the catalog resolves it from GeyserMC's own download API instead
-  (issue #1905); uploading the jar from
-  [geysermc.org](https://geysermc.org/download#floodgate) still works as a
-  fallback. Geyser auto-detects an installed Floodgate at runtime
+- **Floodgate**: Modrinth carries no Spigot/Paper build of Floodgate, so the
+  catalog resolves it from GeyserMC's own download API instead; uploading the
+  jar from [geysermc.org](https://geysermc.org/download#floodgate) is a
+  supported fallback. Geyser auto-detects an installed Floodgate at runtime
   (`auth-type: FLOODGATE`) — no manual configuration is needed on either plugin.
 
 The deployment-wide Bedrock gate (`relay.enabled` AND `relay.bedrock_enabled`,
@@ -85,13 +84,13 @@ next to the Java `join_hostname` badge (see `../ui/WEBUI_SPEC.md`).
 
 ## 4. Known limitations
 
-- **Real client IP is deferred.** Geyser and the server see the Worker's
-  forwarder address, not the Bedrock player's real IP — per-client IP
-  bans/rate-limits/logs are not accurate for Bedrock players today. Real-IP
+- **The server does not see the real client IP.** Geyser and the server see
+  the Worker's forwarder address, not the Bedrock player's real IP — per-client
+  IP bans/rate-limits/logs are not accurate for Bedrock players. Real-IP
   passthrough (PROXY protocol v2, minding its interaction with RakNet's
-  connection cookie) is a future extension (epic #1540 "Locked decisions").
-  The relay's own UDP ingress rate-limiting (`BEDROCK_TUNNEL.md` Section 8)
-  still sees the true client address — only the *server's* view is affected.
+  connection cookie) is not provided. The relay's own UDP ingress rate-limiting
+  (`BEDROCK_TUNNEL.md` Section 8) does see the true client address — only the
+  *server's* view is affected.
 - **Floodgate's auth model does not cover Bedrock players in moderation
   tooling keyed on Java identity.** Bedrock players join without a Java
   account (a Floodgate-prefixed username and a Floodgate UUID). Any
@@ -101,8 +100,7 @@ next to the Java `join_hostname` badge (see `../ui/WEBUI_SPEC.md`).
   latest release, which targets the newest Java Minecraft version. Geyser
   still boots and answers RakNet against an older server, but a real Bedrock
   client's join needs the two protocol versions to line up — either update
-  the server or install ViaVersion on it to bridge the gap. Observed live
-  against a Paper 1.21.1 server (epic #1540 issue #1542).
+  the server or install ViaVersion on it to bridge the gap.
 - **Detection trusts jar-declared identity.** Geyser detection keys on the
   jar's declared manifest id — `Geyser-Spigot` (Paper `plugin.yml` `name`),
   `geyser-fabric` (Fabric `fabric.mod.json` `id`), or `geyser_neoforge`
@@ -113,4 +111,4 @@ next to the Java `join_hostname` badge (see `../ui/WEBUI_SPEC.md`).
   only while the deployment gate (`relay.enabled` AND `relay.bedrock_enabled`,
   Section 2) is on. Accepted without a code guard: uploading any plugin already
   grants in-container code execution, and the gate bounds the exposure to a
-  single inbound public UDP port on the uploader's own container (issue #1589).
+  single inbound public UDP port on the uploader's own container.

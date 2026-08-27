@@ -1,6 +1,6 @@
 # Bedrock Relay Tunnel
 
-> Status: **Implemented** (e2e-verified, issue #1547) · Audience: contributors to `relay/`, `worker/`, `proto/`
+> Status: **Implemented** · Audience: contributors to `relay/`, `worker/`, `proto/`
 >
 > This document is the reference for the **relay-side Bedrock (RakNet/UDP)
 > tunnel**: the QUIC listener that authenticates a Worker's outbound dial-out,
@@ -8,19 +8,17 @@
 > that carries RakNet traffic between a Bedrock client and a Worker's Geyser
 > instance. It is a companion to [`RELAY.md`](RELAY.md) (the Java ingress
 > design) and to [`CONTROL_PLANE.md`](CONTROL_PLANE.md) (`OpenBedrockTunnel` /
-> `CloseBedrockTunnel`). It implements the network path chosen in epic
-> [#1540](https://github.com/mmiura-2351/mc-server-dashboard-v2/issues/1540)
-> and issue
-> [#1545](https://github.com/mmiura-2351/mc-server-dashboard-v2/issues/1545).
-> Once the proto messages exist, the buf module under
+> `CloseBedrockTunnel`). The buf module under
 > [`../../proto/`](../../proto/) (`mcsd.bedrocktunnel.v1`) is the binding
 > contract and this document explains it; where they disagree, the `.proto`
 > file wins.
 >
-> The Worker-side QUIC client (issue #1546, `worker/internal/adapters/bedrocktunnel/`)
-> implements this document's wire contract as the client. The feature-level
-> overview and deployment docs landed with issue #1547 -- see
-> [`BEDROCK.md`](BEDROCK.md) and `../dev/DEPLOYMENT.md` "Bedrock (Geyser)".
+> The Worker-side QUIC client (`worker/internal/adapters/bedrocktunnel/`)
+> implements this document's wire contract as the client. For the feature-level
+> overview see [`BEDROCK.md`](BEDROCK.md); for deployment (compose UDP
+> exposure, firewall guidance, the manual-verification checklist) see
+> `../dev/DEPLOYMENT.md` "Bedrock (Geyser)". The protocol-level end-to-end
+> suite is `scripts/run_bedrock_e2e.sh` (`.github/workflows/bedrock-e2e.yml`).
 
 ## Table of Contents
 
@@ -42,8 +40,9 @@
 
 The relay carries Java traffic over TCP (`RELAY.md`). Bedrock (RakNet) is UDP,
 runs its own reliability/congestion control, and must not be tunneled over TCP
-(epic #1540 "why this is non-trivial"). This adds a second, independent data
-path in the relay binary:
+-- a TCP carrier would stack a second retransmit/backoff loop under RakNet's
+own. Bedrock therefore rides a second, independent data path in the relay
+binary:
 
 - A **QUIC listener** (RFC 9221 DATAGRAM) that a Worker dials outbound to open
   a per-server Bedrock tunnel, authenticating with a credential the API minted.
@@ -57,7 +56,7 @@ Minecraft protocol byte, and moves opaque datagrams in both directions. Its
 only new state is the live tunnel itself (the bound UDP socket, the QUIC
 connection, and that connection's flow table) -- there is no separate,
 persistent server table; the authenticated QUIC dial-out from the Worker **is**
-the registration, exactly as the epic's design specifies.
+the registration.
 
 ## 2. Topology
 
@@ -72,7 +71,7 @@ RELAY (public):
      -- per-client flow table, ipcaps hygiene
    |  QUIC connection (Worker-initiated, outbound, RFC 9221 DATAGRAM frames)
    v
-WORKER (NAT-hidden, issue #1546):
+WORKER (NAT-hidden):
    QUIC client -> UDP to <container>:19132 (docker network)
    v
 MC container: Geyser (+ Floodgate), RakNet :19132 -> local Java server
@@ -89,9 +88,9 @@ talking to that server, multiplexed by flow id).
 
 1. A Bedrock-enabled server reaches `running`. The API mints a credential and
    dispatches `OpenBedrockTunnel { server_id, relay_endpoint, bedrock_port,
-   token, tls_ca_pem }` to the Worker over the existing control-plane stream
-   (`CONTROL_PLANE.md`, issue #1544, already landed).
-2. The Worker (issue #1546) dials the relay's Bedrock tunnel QUIC listener at
+   token, tls_ca_pem }` to the Worker over the control-plane stream
+   (`CONTROL_PLANE.md`).
+2. The Worker dials the relay's Bedrock tunnel QUIC listener at
    `relay_endpoint`, verifying the relay's certificate against `tls_ca_pem`
    (empty means system roots), and negotiates ALPN `mcsd-bedrock/1` (Section
    4).
@@ -99,7 +98,7 @@ talking to that server, multiplexed by flow id).
    {server_id, bedrock_port, token}`. The relay calls
    `mcsd.relay.v1.RelayService.ValidateBedrockTunnel(server_id, bedrock_port,
    token)` on the API (the relay has no local waiter to match against, unlike
-   the per-player Java token -- Section 10 explains why) and answers with
+   the per-player Java token -- RELAY.md Section 6 explains why) and answers with
    `TunnelHelloAck {accepted, reject_reason}`.
 4. **Accepted**: the relay binds `net.ListenPacket("udp", ":<bedrock_port>")`
    and maps it to this QUIC connection -- the bind IS the registration. From
@@ -117,7 +116,7 @@ talking to that server, multiplexed by flow id).
    API-side.
 
 Two obligations on the Worker's side of the connection (binding for the
-Worker implementation, issue #1546):
+Worker implementation):
 
 - **Keepalives.** The relay applies an explicit 15 s QUIC idle timeout to
   every tunnel connection (`maxIdleTimeout`,
@@ -126,24 +125,24 @@ Worker implementation, issue #1546):
   common case -- carries no datagrams, so the Worker MUST enable QUIC
   keepalives with a period well under that timeout (e.g. quic-go
   `KeepAlivePeriod` of 5 s, a third of it). This is also what holds the
-  Worker's NAT mapping open (an epic #1540 locked decision). Without
+  Worker's NAT mapping open. Without
   keepalives, every idle tunnel collapses at the idle timeout and the Worker
   redials in a loop forever.
 - **Graceful close.** On its own shutdown and on `CloseBedrockTunnel`, the
   Worker MUST close the QUIC connection (CONNECTION_CLOSE, e.g. quic-go
   `CloseWithError`) rather than just dropping it. A redial takes the port over
-  from a stale connection regardless (Section 3.1), so this no longer gates
-  reconnection -- but an unclosed connection still holds its UDP port and
-  goroutines until either that redial displaces it or the relay notices the
-  connection is gone (for a silent drop, the idle timeout), so closing
-  promptly is still the contract.
+  from a stale connection regardless (Section 3.1), so reconnection does not
+  depend on it -- but an unclosed connection holds its UDP port and goroutines
+  until either that redial displaces it or the relay notices the connection is
+  gone (for a silent drop, the idle timeout), so closing promptly is the
+  contract.
 
 ### 3.1 Redial and takeover
 
 A redial while the relay has not yet noticed the *old* QUIC connection is dead
 **displaces** it: a hello that passes `ValidateBedrockTunnel` for a port
 already bound to another connection closes the old connection and adopts the
-new one, instead of being rejected (takeover semantics, issue #1565). With a
+new one, instead of being rejected (takeover semantics). With a
 gracefully-closing Worker (Section 3) no stale connection is present at all --
 the CONNECTION_CLOSE frees the port before or with the redial. Takeover is what
 removes the outage for ungraceful ends (Worker crash, network partition),
@@ -157,7 +156,7 @@ Takeover needs only the live port-to-Tunnel index (`Listener.tunnels`,
 ports with a currently bound tunnel and is cleared when a tunnel's `run`
 returns. It is not a new auth surface: the displacing hello passes the same
 `ValidateBedrockTunnel` check as any bind, so a token holder that could claim
-the port after the idle timeout can now claim it immediately, and nothing
+the port after the idle timeout claims it immediately instead, and nothing
 weaker can. The displace-then-bind-then-register sequence runs under one mutex
 (`Listener.mu`), so concurrent redials for the same port cannot both adopt it;
 the displaced tunnel's teardown is idempotent (`Tunnel.close`, `sync.Once`) and
@@ -284,7 +283,7 @@ NAT-style address<->flow-id map, one instance per bound `bedrock_port`
 - Idle entries (default 60 s, `flowIdleTimeout`) are evicted by a periodic
   sweep (`flowSweepInterval`, 15 s) tied to the tunnel's own lifetime; eviction
   also releases the entry's `ipcaps` slot (Section 8).
-- Session reporting hangs off this same flow lifecycle (issue #1904): `Lookup` /
+- Session reporting hangs off this same flow lifecycle: `Lookup` /
   `Create` count each *connected* client->worker datagram (RakNet FLAG_VALID,
   first byte >= 0x80; offline ping/handshake packets refresh the flow but do not
   count), and once a flow crosses `flowPromoteThreshold` (a fixed const) it is
@@ -348,7 +347,7 @@ neither is a reflection vector. On an already-established flow they also mint no
 session and allocate no new relay- or worker-side flow state -- the worker
 reuses the existing flow socket. Their aggregate is instead bounded per tunnel
 by the single UDP reader feeding the bounded send-channel with per-datagram drop
-(the decoupled pump, #1721) plus the per-IP new-flow caps above -- the same
+(the decoupled pump) plus the per-IP new-flow caps above -- the same
 bound that governs the `0x80`+ connected/gameplay traffic the relay must forward
 uncapped. An attacker could flood that traffic instead for identical cost, so a
 `0x05`/`0x07`-specific cap would not lower the worst case.
@@ -358,7 +357,7 @@ RELAY.md already documents for the Java listeners (Section 11 there).
 
 The **QUIC tunnel listener itself** carries a separate per-IP cap on
 concurrent unauthenticated handshake windows
-(`bedrock.tunnel_max_conns_per_ip`, default 64) -- the same #968 posture as
+(`bedrock.tunnel_max_conns_per_ip`, default 64) -- the same posture as
 the TCP tunnel listener's `tunnel.max_conns_per_ip`. Each pre-auth connection
 holds relay resources for up to ~15 s and a parseable `TunnelHello` drives a
 `ValidateBedrockTunnel` RPC to the API, so an uncapped listener would let one
@@ -374,15 +373,15 @@ rules and RELAY.md Section 13 for the sibling Java-path keys):
 
 | Key | Default | Meaning |
 |---|---|---|
-| `bedrock.enabled` | `false` | Master switch for this listener (issue #1584). Off by default so a Java-only relay neither binds nor requires the Bedrock UDP ports (this listener and the per-tunnel `bedrock_port` window) on upgrade -- a host-port conflict on either must not take Java joins down. Wired from the same operator setting as the API's `relay.bedrock_enabled`, via `MCD_RELAY_BEDROCK_ENABLED` (compose sets it from `MCD_API_RELAY__BEDROCK_ENABLED`; see `docs/dev/DEPLOYMENT.md` "Relay" for the upgrade note). |
+| `bedrock.enabled` | `false` | Master switch for this listener. Off by default so a Java-only relay neither binds nor requires the Bedrock UDP ports (this listener and the per-tunnel `bedrock_port` window) -- a host-port conflict on either must not take Java joins down. Wired from the same operator setting as the API's `relay.bedrock_enabled`, via `MCD_RELAY_BEDROCK_ENABLED` (compose sets it from `MCD_API_RELAY__BEDROCK_ENABLED`; `docs/dev/DEPLOYMENT.md` covers the compose port-publishing caveat). |
 | `bedrock.tunnel_listen` | `:25675` | The public QUIC/UDP address Workers dial to open a Bedrock tunnel. Reuses `tunnel.tls.{cert_file,key_file}` (Section 4); no separate cert/key configuration. Bound only when `bedrock.enabled` is true. |
-| `bedrock.tunnel_max_conns_per_ip` | `64` | Per-IP concurrent cap on unauthenticated handshake windows on the QUIC listener (Section 8), mirroring `tunnel.max_conns_per_ip` on the TCP tunnel listener (issue #968). |
+| `bedrock.tunnel_max_conns_per_ip` | `64` | Per-IP concurrent cap on unauthenticated handshake windows on the QUIC listener (Section 8), mirroring `tunnel.max_conns_per_ip` on the TCP tunnel listener. |
 | `bedrock.max_flows_per_ip` | `32` | Per-IP concurrent-flow cap on a bound `bedrock_port` (Section 8). |
 | `bedrock.new_flows_per_ip_per_second` | `10` | Per-IP new-flow rate cap on a bound `bedrock_port` (Section 8). |
 
 `bedrock.tunnel_listen`'s default (`:25675`) intentionally matches the
 API-side `relay.bedrock_tunnel_port` default (`25675`, `CONFIGURATION.md`
-Section 5.13, landed with issue #1550) -- see Section 10. The QUIC idle
+Section 5.13) -- see Section 10. The QUIC idle
 timeout (15 s, Section 3) is a code constant (`maxIdleTimeout`), not a config
 key.
 
@@ -395,72 +394,47 @@ Bedrock port from the relay itself. This mirrors `relay.game_port` /
 `relay.tunnel_port`: both sides are operator-configured and must agree, and
 that agreement is not self-healing.
 
-This was flagged as an open design note both in the issue #1545 PM comment and
-directly in code: `server_state_sink.py`'s `_sync_bedrock_tunnel` carries a
-`NOTE (issue #1545)` inviting the relay implementation to have the relay
-advertise its own Bedrock endpoint over `Register` instead (mirroring how it
-already advertises the Java `tunnel_endpoint`), in which case the API's
-derivation would switch to reading that registered value.
+The alternative is self-advertisement: the relay reports its own Bedrock
+endpoint over `Register` (mirroring how it already advertises the Java
+`tunnel_endpoint`) and the API reads that registered value instead of its own
+setting. The spot that would change is the `relay_endpoint` derivation in
+`servers/adapters/bedrock_tunnel_sync.py` (`BedrockTunnelSyncer._open`).
 
-**Decision for this issue: keep the config-based derivation; do not add
-self-advertisement.** Reasons:
+**Decision: keep the config-based derivation; do not add self-advertisement.**
+Reasons:
 
-- Doing so would require a breaking-additive change to
+- Self-advertisement requires a breaking-additive change to
   `mcsd.relay.v1.RegisterRequest`/`RegisterResponse` (a new field) plus
   Python-side changes in `api/src/mc_server_dashboard_api/fleet/adapters/`
-  (`RelayRegistration`) and `servers/adapters/server_state_sink.py` --
-  cross-context, cross-language work outside this issue's stated scope (relay
-  QUIC listener + UDP ingress + flow table + rate caps).
-- The risk is bounded and precedented: it is the exact same class of risk the
-  deployment already accepts for `relay.game_port` / `relay.tunnel_port` today
-  (both operator-configured, not self-healing), with the same mitigation --
-  matching defaults out of the box (`bedrock.tunnel_listen` here defaults to
-  `:25675`, the same value as the API's `relay.bedrock_tunnel_port` default)
-  and `docs/app/CONFIGURATION.md` documenting the pairing.
-- It keeps this PR's diff scoped to `relay/` and `proto/`, matching the rest
-  of the epic's per-sub-issue split (API-side Bedrock work landed in #1544;
-  this is the relay sub-issue).
+  (`RelayRegistration`) and `servers/adapters/bedrock_tunnel_sync.py` --
+  cross-context, cross-language work for a risk the deployment already carries
+  elsewhere.
+- That risk is bounded and precedented: it is the exact same class of risk the
+  deployment accepts for `relay.game_port` / `relay.tunnel_port` (both
+  operator-configured, not self-healing), with the same mitigation -- matching
+  defaults out of the box (`bedrock.tunnel_listen` here defaults to `:25675`,
+  the same value as the API's `relay.bedrock_tunnel_port` default) and
+  `docs/app/CONFIGURATION.md` documenting the pairing.
 
-If this bites in practice, it is a small, additive follow-up flagged in both
-places it needs to change (the code `NOTE` above and this section) -- not a
-redesign.
+Should the drift bite in practice, switching is a small, additive change,
+confined to the two places it touches: the `BedrockTunnelSyncer._open`
+derivation above and this section.
 
 ## 11. Out of scope / future work
 
-- ~~**End-to-end deployment + docs** (issue #1547)~~ **Landed with #1547**:
-  the feature-level overview lives in [`BEDROCK.md`](BEDROCK.md), the
-  compose UDP exposure / firewall guidance / manual-verification checklist in
-  `../dev/DEPLOYMENT.md` "Bedrock (Geyser)", and the protocol-level e2e in
-  `scripts/run_bedrock_e2e.sh` (`.github/workflows/bedrock-e2e.yml`).
-- ~~**Stale-connection takeover on redial** (issue #1565)~~ **Landed**: a
-  validated hello for an already-bound port displaces the old connection; see
-  Section 3.1.
-- **Real-client-IP passthrough** -- deferred beyond this initial scope per
-  epic #1540; Geyser and the server see the Worker's forwarder IP.
-- ~~**Bedrock session reporting** (issue #1904)~~ **Landed with #1904**: a
-  Bedrock flow that crosses `flowPromoteThreshold` *connected* client->worker
-  datagrams (offline ping/handshake packets do not count) is reported to the API
-  through the shared `session.Reporter` (RELAY.md Section 8), landing a
-  `game_session` row like a Java login. Identity is null
-  (the relay cannot see Floodgate username/UUID) but `player_ip` is the client's
-  true UDP source, and the promotion gate keeps unconnected-ping / scan churn
-  out of the history. Honest Java-vs-Bedrock labelling shipped with #1912:
-  `SessionStart.source` (a `SessionSource` enum — `JAVA` / `BEDROCK`) is set
-  by the relay and persisted in the `game_session.source` column
-  (migration 0034).
-- ~~**Metrics** -- no Prometheus metrics for flow counts, drop counts, or bind
-  failures yet~~ **Landed with #1909**: the Bedrock path exports, on the same
-  opt-in `/metrics` endpoint as the Java path (RELAY.md Section 13), active
-  tunnels/flows gauges (`relay_bedrock_active_tunnels`,
-  `relay_bedrock_active_flows`), flow lifecycle counters
-  (`relay_bedrock_flows_created_total`, `relay_bedrock_flows_evicted_total`),
-  datagram throughput (`relay_bedrock_udp_datagrams_total{direction}`) and drops
-  (`relay_bedrock_datagrams_dropped_total{direction,reason}`), tunnel
-  open/reject outcomes (`relay_bedrock_tunnels_opened_total`,
-  `relay_bedrock_tunnels_rejected_total{reason}`), UDP bind failures
-  (`relay_bedrock_bind_failures_total`), and the shared per-IP cap rejections
+- **Real-client-IP passthrough** -- not provided. Geyser and the server see
+  the Worker's forwarder IP, so per-client IP moderation on the server side
+  does not work for Bedrock players (`BEDROCK.md` Section 4). The relay's own
+  ingress caps (Section 8) do see the true client address.
+- **Volumetric DDoS protection** -- not provided; the ingress caps are hygiene
+  only, matching the Java listeners' posture (RELAY.md Section 11).
+- **Tracing (OpenTelemetry)** -- not provided; the Bedrock path's
+  observability is metrics only. Its series ride the same opt-in `/metrics`
+  endpoint as the Java path (`metrics.enabled`, RELAY.md Section 13) and are
+  enumerated in RELAY.md Section 17: active tunnels/flows gauges, flow lifecycle counters, datagram
+  throughput and drops by reason, tunnel open/reject outcomes, UDP bind
+  failures, and the shared per-IP cap rejections
   (`relay_ipcaps_rejections_total{listener="bedrock",kind}`) for the new-flow
   cap. The active-flows gauge decrements on both idle eviction and tunnel
   teardown, so an abandoned flow table does not leak it. Every label is a
-  bounded enum -- no per-client-IP/source-address label. Tracing (OpenTelemetry)
-  is still future work.
+  bounded enum -- no per-client-IP/source-address label.

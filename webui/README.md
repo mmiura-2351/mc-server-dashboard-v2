@@ -4,11 +4,13 @@ The single-page web UI for mc-server-dashboard v2 (React + TypeScript + Vite).
 A self-contained npm package mirroring how `api/` and `worker/` are
 self-contained ([`docs/ui/WEBUI_SPEC.md`](../docs/ui/WEBUI_SPEC.md) Section 7.6).
 
-This is the Phase 1 scaffold: a placeholder `App` wired through a one-route
-router and a TanStack Query provider, plus a generated OpenAPI client and the
-dev-server API proxy. The real application shell and repo/CI integration land in
-later Phase 1 issues — the UI stays **same-origin** with the API, which ships no
-CORS (Section 7.7).
+The app is a React Router SPA: `src/App.tsx` declares the routes, `src/shell/`
+is the application shell, `src/pages/` holds the feature pages, `src/auth/` the
+session lifecycle, `src/permissions/` the active-community and permission-driven
+rendering, and `src/i18n/` the translations. Data access goes through a TanStack
+Query provider and the generated OpenAPI client (below). The UI is
+**same-origin** with the API, which ships no CORS (Section 7.7); in development
+the dev-server proxy (below) provides that single origin.
 
 ## Prerequisites
 
@@ -41,8 +43,9 @@ Run from this directory (`webui/`):
 | All gates | `npm run check` |
 | Regenerate API client | `npm run openapi` |
 
-`npm run check` aggregates lint + typecheck + test + build — the single entry
-point later repo integration hooks into. The Vitest unit suite (`npm run test`)
+`npm run check` aggregates lint + typecheck + test + build; the repo-root
+`make check` runs the same gates through the granular `webui-lint`,
+`webui-test`, and `webui-build` targets. The Vitest unit suite (`npm run test`)
 covers `src/`; the Playwright E2E suite (below) is a separate, slower path that
 is **not** part of `npm run check` or `make check`.
 
@@ -51,12 +54,12 @@ is **not** part of `npm run check` or `make check`.
 The E2E suite (`webui/e2e/`) drives the real UI in a browser against a **real
 API + Postgres** over the critical flows — register/login/session/logout, admin
 community provisioning, the server-create wizard, and community member +
-role management. Chromium only for the first cut.
+role management. Chromium only.
 
-The honest cheap setup: the suite runs against the Vite **dev** server (so the
+The suite runs against the Vite **dev** server (so the
 dev-server proxy keeps the browser same-origin with the API, exactly as
-production does), with the API booted against a throwaway Postgres, migrated,
-and seeded with a platform admin.
+production does), with the API booted against a throwaway Postgres with the
+migrations applied and seeded with a platform admin.
 
 One-time browser install:
 
@@ -99,7 +102,7 @@ The UI codes against a TypeScript client generated from the API's OpenAPI schema
 - [`src/api/schema.ts`](src/api/schema.ts) — generated types
   ([openapi-typescript](https://openapi-ts.dev/)); do not edit by hand.
 - [`src/api/client.ts`](src/api/client.ts) — a thin typed `fetch` helper keyed
-  off the generated `paths`. Feature call sites build on this in later phases.
+  off the generated `paths`. Feature call sites build on this.
 
 Both generated files are committed. Regenerate them whenever the API surface
 changes:
@@ -126,8 +129,7 @@ The browser only ever talks to the Vite dev server, which proxies the single
 to a local API, so the UI and the API share one origin and no CORS is added
 anywhere (WEBUI_SPEC.md 7.7). Start a local API on its `http_port` (default
 `8000`), then `npm run dev`; requests under `/api` reach the API, and every other
-path falls through to the SPA. Since the whole API is namespaced under `/api`
-(issue #498), no API path is ever also an SPA route, so the proxy needs no
-Accept-header bypass for deep-links — that collision class is gone. Point the
-proxy elsewhere with
+path falls through to the SPA. Because the whole API is namespaced under
+`/api`, no API path is ever also an SPA route, so the proxy needs no
+Accept-header bypass for deep links. Point the proxy elsewhere with
 `VITE_API_PROXY_TARGET` (e.g. `VITE_API_PROXY_TARGET=http://localhost:9000 npm run dev`).

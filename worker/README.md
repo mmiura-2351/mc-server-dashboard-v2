@@ -6,11 +6,12 @@ service over the gRPC control plane. See
 [`docs/app/ARCHITECTURE.md`](../docs/app/ARCHITECTURE.md) for the system design;
 this README covers how to build, test, lint, configure, and run the module.
 
-The control-plane session is implemented: the Worker loads its configuration,
-dials the API, registers with its advertised capabilities, heartbeats, and
-reconnects with backoff (see [Running against a local API](#running-against-a-local-api)).
-Execution drivers and real command handling are later epics; inbound commands
-are currently acknowledged with an "unsupported" error rather than dropped.
+The Worker loads its configuration, dials the API, registers with its
+advertised capabilities, heartbeats, and reconnects with backoff (see
+[Running against a local API](#running-against-a-local-api)). Lifecycle and
+console commands arriving on the session are handled by the instance-manager
+use case through the container execution driver; a command kind with no wired
+handler is acknowledged with an "unsupported" error result rather than dropped.
 
 ## Layout
 
@@ -21,12 +22,22 @@ worker/
 ├── cmd/worker/            # edge / wiring: config load, dial, run, signals
 └── internal/
     ├── domain/            # pure core: entities, value objects, Ports
+    │   ├── execution/     # ExecutionDriver + ServerControl Ports and their value types
     │   └── session/       # control-plane session state machine + backoff
     ├── application/       # use cases, depending only on domain
+    │   └── instancemanager/  # control-plane commands → driver calls; observed state → session
     └── adapters/          # concrete Port implementations (drivers, clients)
+        ├── bedrocktunnel/ # Worker side of the Bedrock relay QUIC tunnel
         ├── clock/         # wall-clock Clock adapter
         ├── config/        # TOML + MCD_WORKER_ env config loader
-        └── controlplane/  # gRPC client for the Session stream
+        ├── containerdriver/  # ExecutionDriver running servers in Docker containers
+        ├── controlplane/  # gRPC client for the Session stream
+        ├── datatransfer/  # HTTP data-plane client (working set snapshot/hydrate)
+        ├── hostresources/ # host CPU + memory readout
+        ├── javaruntime/   # Minecraft version → Java major mapping
+        ├── rcon/          # ServerControl over the Source RCON protocol
+        ├── regionfsck/    # structural .mca region validation before a snapshot
+        └── tunnel/        # Worker side of the relay TLS dial-back tunnel
 ```
 
 Dependency direction points inward to `domain`; see ARCHITECTURE.md Section 2.2.
@@ -81,13 +92,14 @@ see that section).
 
 `test/e2e/` drives the **real** Go data-plane client against a **real** running
 Python API, proving the tar conventions, status codes, and auth header line up
-end to end (issue #111). CI runs it in `.github/workflows/e2e.yml`; to dry-run it
-locally, boot the API and point the test at it.
+end to end. CI runs it in `.github/workflows/e2e.yml`; to dry-run it locally,
+boot the API and point the test at it.
 
 The data-plane endpoints need only Storage and the Worker credential, so the
 control plane can stay disabled. The hydrate path's resolved-JAR lookup reads the
-`servers` table, so the API needs a migrated database — point it at a local
-Postgres (the `api/` README covers spinning one up for its integration tests).
+`servers` table, so the API needs a database at migration head — point it at a local
+Postgres (`api/tests/integration/README.md` shows how to start a scratch one in
+Docker).
 
 ```sh
 # 1. From api/: migrate, then boot uvicorn with the data-plane config.
@@ -112,13 +124,14 @@ MCD_E2E_CREDENTIAL=dev-secret \
 `test/e2e/restart_e2e_test.go` drives the **real** container `ExecutionDriver`
 against a **real** Docker daemon, restarting a server through the worker's
 command path (`StartServer` → `RestartServer`) and asserting it returns to
-running in a **new** container (issue #234). It is the structural guard for the
-create-vs-async-remover restart race (#226/#229/#233): three rounds of fixes each
-passed their unit fakes while the real daemon found a new interleaving, so this
-scenario needs a real daemon to reproduce the class.
+running in a **new** container. It is the structural guard for the
+create-vs-async-remover restart race: creating the replacement container races
+the daemon's asynchronous removal of the outgoing one, and the interleavings a
+real daemon produces are not reproducible with unit fakes, so this scenario
+needs a real daemon.
 
 `test/e2e/forge_e2e_test.go` drives the same real driver+daemon through the
-Forge supervised-install path (issue #326): a Forge args-file `StartServer` whose
+Forge supervised-install path: a Forge args-file `StartServer` whose
 working set lacks the args file runs a supervised install container
 (`mcsd-<id>-install`), which the stub installer satisfies by writing the launch
 args file, then proceeds to a running launch container — asserting the args file,
@@ -163,10 +176,9 @@ On a host where Docker needs a group wrapper, prefix the commands with it
 container running a fake-Geyser RakNet responder
 (`test/e2e/stub-geyser/`), proving the relay-UDP-ingress → QUIC-tunnel →
 Worker → container-port data path, flow demultiplexing across concurrent
-clients, and relay-port unbind on tunnel teardown (epic #1540, issue #1547).
-Real Geyser is deliberately not booted (a Modrinth/GeyserMC download would make
-CI flaky; real Geyser+Floodgate behavior was already validated live, issue
-#1542).
+clients, and relay-port unbind on tunnel teardown. The suite is protocol-level:
+real Geyser is deliberately not booted, because a Modrinth/GeyserMC download at
+test time would make CI flaky, so the fake-Geyser responder stands in for it.
 
 Run it (from the repo root) the same way CI does:
 
@@ -196,7 +208,7 @@ underscores, e.g. `api.grpc_endpoint` → `MCD_WORKER_API_GRPC_ENDPOINT`.
 | `api.tls.ca_file` | `MCD_WORKER_API_TLS_CA_FILE` | yes¹ | CA bundle verifying the API's TLS. |
 | `api.tls.insecure` | `MCD_WORKER_API_TLS_INSECURE` | no | `true` opts in to a plaintext (no-TLS) dial for local dev; default `false`. |
 | `api.tls.client_cert_file` / `api.tls.client_key_file` | `…_CLIENT_CERT_FILE` / `…_CLIENT_KEY_FILE` | no | mTLS client cert/key pair. |
-| `worker.id` | `MCD_WORKER_WORKER_ID` | no | Registration id; **must be a UUID** (the API rejects a non-UUID id with `INVALID_ARGUMENT`, and the Worker fails fast at config load if you set a non-UUID). When unset, a UUID is generated and persisted at `<worker.scratch_dir>/worker-id` on first boot and reused on later restarts, so zero-config workers keep a stable id. **Upgrade impact:** a Worker that previously defaulted to its hostname gets a new UUID on first boot after upgrading, so the API sees a new Worker and the old `assigned_worker_id` rows are orphaned (recovered via the disconnect/mark-unknown path; servers restart cleanly on hydrate). One-time transition. |
+| `worker.id` | `MCD_WORKER_WORKER_ID` | no | Registration id; **must be a UUID** (the API rejects a non-UUID id with `INVALID_ARGUMENT`, and the Worker fails fast at config load if you set a non-UUID). When unset, a UUID is generated and persisted at `<worker.scratch_dir>/worker-id` on first boot and reused on later restarts, so zero-config workers keep a stable id. The persisted id is what ties the Worker to its `assigned_worker_id` rows: if it is lost (for example a wiped scratch dir), the API sees a new Worker and the servers assigned to the old id are recovered via the disconnect/mark-unknown path and restart cleanly on hydrate. |
 | `worker.drivers` | `MCD_WORKER_WORKER_DRIVERS` | yes | `container` is the only shipped driver and it requires `driver.container.images`, so there is no zero-config default: the set must be supplied and non-empty. |
 | `worker.max_servers` | `MCD_WORKER_WORKER_MAX_SERVERS` | no | Capacity hint; default `0` (no cap). |
 | `worker.scratch_dir` | `MCD_WORKER_WORKER_SCRATCH_DIR` | yes | Local working-set root. |

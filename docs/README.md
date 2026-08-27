@@ -25,22 +25,22 @@ Docs are split by intent:
 
 | Doc | What it covers |
 |---|---|
-| [`REQUIREMENTS.md`](REQUIREMENTS.md) | What v2 must do and the architectural constraints it must satisfy: the API/Worker split, pluggable execution, the Community model, two-layer authorization, data/storage lifecycle, and the resolved design decisions. The source of truth for scope. |
+| [`REQUIREMENTS.md`](REQUIREMENTS.md) | What v2 must do and the architectural constraints it must satisfy: the API/Worker split, pluggable execution, the Community model, two-layer authorization, data/storage lifecycle, and the design decisions. The source of truth for scope. |
 
 ## Application docs (`app/`)
 
 | Doc | What it covers |
 |---|---|
-| [`app/ARCHITECTURE.md`](app/ARCHITECTURE.md) | The Hexagonal (Ports & Adapters) layering, the `api/` / `worker/` / `proto/` module boundaries and dependency direction, the catalog of domain Ports per side, and the architecture-level design decisions from `REQUIREMENTS.md` Section 9.1. |
-| [`app/AUTH_API.md`](app/AUTH_API.md) | The `/auth/*` endpoint contract: per-endpoint status codes (including the `#365` empty-refresh→401 and no-token-logout→204 changes), the RFC 9457 problem+json error shape and auth reason codes, body-vs-cookie transport precedence and `Set-Cookie` gating, the refresh reuse grace window with Web UI session guidance, and the CSRF posture. |
-| [`app/BEDROCK.md`](app/BEDROCK.md) | Feature-level overview of Bedrock (Geyser) support (epic #1540): activation (installing Geyser/Floodgate as normal plugins), the address model (`<base_domain>:<bedrock_port>`, no SRV), and today's known limitations (deferred real-client-IP, Floodgate's auth model, Geyser/server version skew). |
-| [`app/BEDROCK_TUNNEL.md`](app/BEDROCK_TUNNEL.md) | The Bedrock (RakNet/UDP) relay tunnel (epic #1540): the Worker-dialed QUIC DATAGRAM tunnel and its handshake, the per-server public UDP ingress and per-client flow table, datagram framing and the MTU budget, and the ingress abuse caps. Companion to `RELAY.md` (the Java path). |
+| [`app/ARCHITECTURE.md`](app/ARCHITECTURE.md) | The Hexagonal (Ports & Adapters) layering, the `api/` / `worker/` / `proto/` module boundaries and dependency direction, the catalog of domain Ports per side, and the architecture-level decisions that [`REQUIREMENTS.md`](REQUIREMENTS.md) Section 9.1 delegates to design (execution backend fixed for a server's lifetime, file access over the control plane, JAR source on the API and Java runtime on the Worker, the API framework stack). |
+| [`app/AUTH_API.md`](app/AUTH_API.md) | The `/auth/*` endpoint contract: per-endpoint status codes (a refresh with no token in either transport is a uniform 401; a logout with no token is an idempotent 204), the cookie-only `/auth/session` bootstrap, the RFC 9457 problem+json error shape and auth reason codes, body-vs-cookie transport precedence and `Set-Cookie` gating, the refresh reuse grace window with Web UI session guidance, the CSRF posture, audit events, and the `/users/me/sessions` session-management endpoints. |
+| [`app/BEDROCK.md`](app/BEDROCK.md) | Feature-level overview of Bedrock (Geyser) support: activation (installing Geyser/Floodgate as normal plugins), the address model (`<base_domain>:<bedrock_port>`, no SRV), and the known limitations (no real-client-IP passthrough to the server, Floodgate's auth model versus Java-identity moderation, Geyser/server version skew, jar-declared Geyser detection). |
+| [`app/BEDROCK_TUNNEL.md`](app/BEDROCK_TUNNEL.md) | The Bedrock (RakNet/UDP) relay tunnel: the Worker-dialed QUIC DATAGRAM tunnel and its handshake, the per-server public UDP ingress and per-client flow table, datagram framing and the MTU budget, the ingress abuse caps, and the config-drift decision. Companion to `RELAY.md` (the Java path). |
 | [`app/CONFIGURATION.md`](app/CONFIGURATION.md) | Runtime configuration for `api/` and `worker/`: sources and precedence, secret handling, config-driven adapter selection (Storage backend, token service, execution drivers), the authentication-hardening knobs and defaults, and snapshot-cadence settings. |
 | [`app/CONTROL_PLANE.md`](app/CONTROL_PLANE.md) | The API↔Worker control-plane contract: the single gRPC bidirectional-stream service, its connect/register/heartbeat/reconnect lifecycle, the command and event messages, error reporting, and how each maps to the requirements. The binding contract is the `proto/` buf module. |
-| [`app/DATABASE.md`](app/DATABASE.md) | The persistence model for the core entities (`REQUIREMENTS.md` Appendix B): tables, keys, relationships, the desired/observed-state split on `Server`, cascade behavior, and the M1 persistence-technology decision behind the persistence Port. Metadata only — bulk artifacts live in `Storage`. |
-| [`app/RELAY.md`](app/RELAY.md) | The game ingress relay (epic #659 design): per-server hostnames under a wildcard domain, the public relay and Worker dial-back tunnel that let NAT'd Workers serve players without exposing their IP, hostname routing via the Minecraft handshake, status-ping caching, session recording for moderation, and the relay↔API gRPC contract. |
+| [`app/DATABASE.md`](app/DATABASE.md) | The persistence model for the core entities (`REQUIREMENTS.md` Appendix B): tables, keys, relationships, the desired/observed-state split on `Server`, cascade behavior, and the persistence-technology decision (PostgreSQL behind the persistence Port, schema applied by Alembic). Metadata only — bulk artifacts live in `Storage`. |
+| [`app/RELAY.md`](app/RELAY.md) | The game ingress relay: per-server hostnames under a wildcard domain, the public relay and Worker dial-back tunnel that let NAT'd Workers serve players without exposing their IP, hostname routing via the Minecraft handshake, status-ping caching, session recording for moderation, and the relay↔API gRPC contract. |
 | [`app/SECURITY.md`](app/SECURITY.md) | Authentication-hardening behaviour for `REQUIREMENTS.md` FR-AUTH-4: password-policy semantics, the brute-force/lockout algorithm, trusted-proxy client-IP resolution, and the decision on where the brute-force/lockout runtime state lives (DB-backed, behind a Port). Also the Minecraft-server-container trust model: the two-network split that keeps user-supplied plugins off the control plane, and what it deliberately leaves open. |
-| [`app/STORAGE.md`](app/STORAGE.md) | The API-side authoritative store: the `Storage` Port contract, the authoritative data layout, atomic snapshot publish, file version retention, path-traversal protection, and the fs / remote-fs / object adapter families. |
+| [`app/STORAGE.md`](app/STORAGE.md) | The API-side authoritative store: the `Storage` Port contract, the authoritative data layout, atomic snapshot publish, file version retention, path-traversal protection, the fs / remote-fs / object adapter families, and the HTTP data plane. |
 
 ## Development docs (`dev/`)
 
@@ -49,19 +49,19 @@ Docs are split by intent:
 | [`dev/CONTRIBUTING.md`](dev/CONTRIBUTING.md) | The change workflow: issues, branch naming, commits, pull requests, review hygiene, and squash-merge. |
 | [`dev/AGENTS.md`](dev/AGENTS.md) | Agent-facing operational manual complementing `CONTRIBUTING.md`: the primary-checkout / live-deploy ground rules, worktree lifecycle, the commands that fail silently (the shared scratchpad's generically named files, `--no-verify`, self-matching `pgrep -f`, the gate orphaned by a killed `git push`, `uv run --active`), gh/account quirks, and the pre-PR checklist. |
 | [`dev/TESTING.md`](dev/TESTING.md) | The test-driven development discipline (Kent Beck): the red/green/refactor cycle, working disciplines, Tidy First, and what a good test looks like. Concrete tooling is per-component (`make test`; see the module READMEs). |
-| [`dev/RELEASING.md`](dev/RELEASING.md) | Versioning policy (a single repository-wide SemVer version), tag naming, and generated release notes (no hand-maintained CHANGELOG). The tag-driven release workflow; the git tag is the version source of truth. |
-| [`dev/DEPENDENCIES.md`](dev/DEPENDENCIES.md) | Pinning style, the 7-day supply-chain cooldown, security-update handling, and the automated-update policy across the Python and Go ecosystems. |
+| [`dev/RELEASING.md`](dev/RELEASING.md) | Versioning policy (a single repository-wide SemVer version), tag naming, and generated release notes (no hand-maintained CHANGELOG). The tag-driven release workflow; the git tag is the version source of truth. A release does not build component artifacts — deployment builds them from the checked-out revision. |
+| [`dev/DEPENDENCIES.md`](dev/DEPENDENCIES.md) | Pinning style, the 7-day supply-chain cooldown, security-update handling, and the automated-update policy across the Python, Go, and Node ecosystems. |
 | [`dev/DEVELOPMENT.md`](dev/DEVELOPMENT.md) | Day-to-day developer workflow: prerequisites and first-time setup, the common command table (root unified commands + per-module READMEs), where code lives, the import-direction rules and how to run them, and the proto regeneration loop. |
-| [`dev/DEPLOYMENT.md`](dev/DEPLOYMENT.md) | Single-host Docker Compose deployment: the `db` / `api` / `worker` stack, `.env` setup, bring-up and first-run admin bootstrap, how Minecraft server ports reach clients, control-plane TLS guidance, and the upgrade and backup procedures. |
+| [`dev/DEPLOYMENT.md`](dev/DEPLOYMENT.md) | Single-host Docker Compose deployment: the `db` / `api` / `worker` stack (with the SeaweedFS object-storage backend and the optional `relay` profile), `.env` setup, bring-up and first-run admin bootstrap, how Minecraft server ports reach clients, TLS guidance for the browser and control planes, and the upgrade, backup, export/import, relay, and Bedrock procedures. |
 
 ---
 
 ## Conventions
 
 - **Language**: all documentation is English.
-- **Versioning terms**: *legacy* = the old `mc-server-dashboard-api`; *v2* =
-  this rebuild; *M1, M2, …* = milestones of v2. Never write "v1" for the new
-  system (see `REQUIREMENTS.md`).
+- **Naming**: *v2* is the product name (the repository is
+  `mc-server-dashboard-v2`), not a version number; release versions are SemVer
+  tags (`dev/RELEASING.md`). Never write "v1".
 - **Filenames**: `UPPERCASE_SNAKE_CASE.md`. The subdirectory names (`app/`,
   `dev/`) are lowercase.
 - **Section references**: write `Section 4.3` (or `section 4.3` mid-sentence).
