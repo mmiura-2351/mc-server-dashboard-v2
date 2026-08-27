@@ -142,6 +142,11 @@ func splitKeyValue(line []byte) (key, value string) {
 // whatever came after it, so a hand-mangled file is read rather than turning
 // every caller into an error path (the Minecraft server refuses such a file
 // outright, so no value we could return would match it anyway).
+//
+// A \uD800-\uDFFF escape spells half a surrogate pair, which a Go string cannot
+// hold, so it becomes U+FFFD here where Java keeps the lone surrogate. No key
+// the Worker reads can be spelled that way and the result is still stable, so
+// this is the one place the parse is not byte-identical to Java's.
 func loadConvert(raw []byte) string {
 	var b strings.Builder
 	b.Grow(len(raw))

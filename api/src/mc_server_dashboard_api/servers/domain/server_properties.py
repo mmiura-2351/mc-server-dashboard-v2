@@ -6,8 +6,11 @@ with the DB ``game_port`` (#311), and the RCON keys are enforced so the console 
 graceful-stop path works out of the box (#335). These are pure,
 standard-library-only helpers that do the line edits, preserving every other line
 and its order, or appending a key when the file has no such line. A wholly absent
-file (a legacy server with no seeded properties, #243) is handled by the caller,
-which passes an empty body so the helper produces a file with just its keys.
+file (a legacy server with no seeded properties, #243) is the caller's decision,
+not this module's: the restore, config-overrides and resource-pack assign paths
+pass an empty body to :func:`apply_platform_properties`, so the file they seed
+carries the whole platform half, while unassigning a pack skips the write
+altogether rather than publishing a file that holds nothing (#2621, #2810).
 
 Mojang's ``server.properties`` is a Java ``.properties`` file, so every helper here
 READS it through :func:`_parse`, a ``java.util.Properties.load``-compatible logical
