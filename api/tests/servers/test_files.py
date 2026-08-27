@@ -134,6 +134,13 @@ class FakeFileStore(FileStore):
         self.read_paths.append(rel_path)
         if self.bad_path:
             raise InvalidFilePathError(rel_path)
+        if rel_path in self.symlink_leaves or rel_path in self.symlink_through:
+            # A symlink at ANY component is refused by the real seam (#2432) on a
+            # read exactly as on a listing -- the leaf link included, since reading
+            # it would serve the target's bytes under the link's name. Modelled
+            # here so a guard that takes a baseline read cannot pass under the
+            # fake where the adapter would refuse it (issue #2809 review).
+            raise InvalidFilePathError(rel_path, reason="symlink_refused")
         if rel_path not in self.files:
             raise ServerFileNotFoundError(str(server_id.value))
         return self.files[rel_path]
@@ -3458,3 +3465,107 @@ async def test_rollback_root_properties_differing_only_in_user_keys_is_allowed()
         version_id="v1",
     )
     assert store.rollbacks == [("server.properties", "v1")]
+
+
+async def test_upload_oversized_root_properties_is_too_large() -> None:
+    # The comparison scans the whole body once per platform key, on the event
+    # loop, so an upload-sized (512 MiB) body must never reach it: the file the
+    # PUT caps at MAX_EDIT_BYTES is capped identically on every other door.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.files["server.properties"] = _CURRENT_PROPS
+    use_case = UploadFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(FileTooLargeError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            dir_path=".",
+            filename="server.properties",
+            content=b"x" * (MAX_EDIT_BYTES + 1),
+            extract=False,
+        )
+    assert store.writes == []
+
+
+async def test_upload_extract_oversized_properties_member_writes_nothing() -> None:
+    # Same cap for an archive member, and in the pre-write scan, so the refusal
+    # still leaves the whole archive unwritten (issue #269).
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.files["server.properties"] = _CURRENT_PROPS
+    use_case = UploadFile(uow=_stopped_uow(community, server_id), file_store=store)
+    archive = _zip_bytes(
+        {"ops.json": b"[]", "server.properties": b"x" * (MAX_EDIT_BYTES + 1)}
+    )
+
+    with pytest.raises(FileTooLargeError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            dir_path=".",
+            filename="bundle.zip",
+            content=archive,
+            extract=True,
+        )
+    assert store.writes == []
+
+
+async def test_upload_oversized_non_root_properties_is_written() -> None:
+    # The cap belongs to the guard, not to uploads: an ordinary file past the
+    # EDIT cap (bulk data is what uploads are for) is unaffected, including a
+    # same-named file outside the root.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = UploadFile(uow=_stopped_uow(community, server_id), file_store=store)
+    payload = b"x" * (MAX_EDIT_BYTES + 1)
+
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        dir_path="backups",
+        filename="server.properties",
+        content=payload,
+        extract=False,
+    )
+    assert store.files["backups/server.properties"] == payload
+
+
+async def test_delete_a_symlink_named_root_properties_is_refused() -> None:
+    # The narrowing of #2429 this guard deliberately accepts: a leaf link IS the
+    # file the server reads (it follows it), and its baseline cannot be read, so
+    # the removal cannot be shown to leave the platform keys alone. Refusing is
+    # the fail-closed answer; the link is still deletable under any other name.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    store.symlink_leaves.add("server.properties")
+    use_case = DeleteFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(InvalidFilePathError) as caught:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="server.properties",
+        )
+    assert caught.value.reason == "symlink_refused"
+    assert store.deleted_files == []
+    assert "server.properties" in store.symlink_leaves
+
+
+async def test_rollback_unknown_version_of_root_properties_is_not_found() -> None:
+    # The guard reads the version BEFORE comparing, so an unknown version stays
+    # the 404 the rollback itself would have raised rather than becoming a 422
+    # about a key nobody named.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.files["server.properties"] = _CURRENT_PROPS
+    use_case = RollbackFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(ServerFileNotFoundError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="server.properties",
+            version_id="v-nope",
+        )
+    assert store.rollbacks == []

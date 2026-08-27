@@ -2513,3 +2513,22 @@ def test_rollback_platform_managed_key_is_422_naming_the_key() -> None:
     body = resp.json()
     assert body["reason"] == "platform_managed_key"
     assert body["key"] == "server-port"
+
+
+def test_delete_symlink_refused_renders_invalid_path() -> None:
+    # The DELETE route deliberately does NOT forward exc.reason (unlike the PUT
+    # and rename routes): a refused path is one 422 invalid_path whatever refused
+    # it. So a symlink standing in for the root server.properties — which the
+    # platform-key guard now refuses rather than unlinks (issue #2809) — renders
+    # invalid_path, not symlink_refused. Pinned so the choice is deliberate.
+    app = _app(
+        member=True,
+        allow=True,
+        delete=_FakeUseCase(error=InvalidFilePathError("x", reason="symlink_refused")),
+    )
+    client = _client(app)
+    resp = client.delete(
+        _url(uuid.uuid4(), uuid.uuid4()), params={"path": "server.properties"}
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_path"
