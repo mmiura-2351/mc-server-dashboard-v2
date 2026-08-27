@@ -1,15 +1,15 @@
 package containerdriver
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
-	"strings"
 	"time"
+
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/javaproperties"
 )
 
 // errNameConflict is the error Create returns when the daemon answers 409
@@ -168,42 +168,24 @@ type ContainerInfo struct {
 	Running bool
 }
 
-// readProperties parses a Java .properties file into a map. Lines that are blank
-// or comments (# or !) are skipped.
+// readProperties reads and parses the server.properties at path with the shared
+// Java-compatible reader (internal/javaproperties), so the ports published here
+// are the ones the Minecraft server will bind even when the file spells them
+// "server-port:25599", "server-port 25599" or with an escaped key (issue #2811).
 //
 // An ABSENT file is not an error: it returns an empty map so the caller falls back
 // to the Minecraft defaults (a legacy server whose working set was never seeded).
-// Every other failure IS an error, including a scan that stopped early -- a line
-// longer than bufio.Scanner's token cap truncates the parse, and swallowing that
-// would silently drop server-port and publish the 25565 default, which is the
-// relay's port and collides on the host (issue #2621). The RCON adapter's copy of
-// this routine (adapters/rcon/serverproperties.go) has always checked; this one
-// now matches it.
+// Every other failure IS an error: swallowing it would silently drop server-port
+// and publish the 25565 default, which is the relay's port and collides on the
+// host (issue #2621). The whole file is read at once, so no line length can
+// truncate the parse and lose a key that way.
 func readProperties(path string) (map[string]string, error) {
-	out := map[string]string{}
-	f, err := os.Open(path) //nolint:gosec // path is the server's own working dir, not user-controlled.
+	data, err := os.ReadFile(path) //nolint:gosec // path is the server's own working dir, not user-controlled.
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return out, nil
+			return map[string]string{}, nil
 		}
 		return nil, fmt.Errorf("containerdriver: read %s: %w", path, err)
 	}
-	defer func() { _ = f.Close() }()
-
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "!") {
-			continue
-		}
-		key, value, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
-		}
-		out[strings.TrimSpace(key)] = strings.TrimSpace(value)
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("containerdriver: scan %s: %w", path, err)
-	}
-	return out, nil
+	return javaproperties.Parse(data), nil
 }
