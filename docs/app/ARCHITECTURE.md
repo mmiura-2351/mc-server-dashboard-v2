@@ -223,7 +223,7 @@ here.
 | Java-major selection (FR-EXE-5) | Pick the Java major a server's MC version needs | container `ImageSelector` resolves the major to a `driver.container.images` base image (version-to-Java table in Section 7.3) |
 | `WorkingDir` | Manage the local scratch working set per server; path-traversal-safe file access (FR-DATA-4, FR-FILE-4) | local-filesystem adapter |
 | `DataTransfer` | Pull (hydrate) / push (snapshot) the working set via the API HTTP data-plane (FR-DATA-3, FR-DATA-4) | HTTP client to the API |
-| `ServerControl` (RCON) | `save-all`, commands, graceful stop on the running process (FR-SRV-5, Section 6.9) | RCON client |
+| `ServerControl` (RCON) | `save-all`, commands, graceful stop on the running process (FR-SRV-5, REQUIREMENTS.md Section 6.9) | RCON client |
 | `APIClient` (control-plane) | Maintain the bidi stream; emit events; accept commands | gRPC stream client (`proto/`) |
 
 The Worker side deliberately has **no `Storage` Port**: it never sees the
@@ -287,7 +287,7 @@ and placement paths — before the mutability question (REQUIREMENTS.md Section
 Worker-side (FR-EXE-1, FR-EXE-4), so that cost falls on the API's data model
 alone.
 
-### 7.2 Worker-side file access rides the control plane (Section 6.9)
+### 7.2 Worker-side file access rides the control plane (REQUIREMENTS.md Section 6.9)
 
 **Decision.** Read-through reads and live edits of a **running** server's files
 (REQUIREMENTS.md Section 6.9) are performed by the API issuing **file-access
@@ -313,7 +313,7 @@ interactive and small; bulk movement stays on the data plane. Path-traversal
 protection is enforced on the Worker side as well as in the `Storage` adapter
 (FR-FILE-4), realized by the Worker's `WorkingDir` Port (Section 5.2).
 
-### 7.3 JAR source on the API, Java runtime on the Worker (Section 6.12, FR-EXE-5)
+### 7.3 JAR source on the API, Java runtime on the Worker (REQUIREMENTS.md Section 6.12, FR-EXE-5)
 
 **Decision.** Ownership splits along the API/Worker authority line:
 

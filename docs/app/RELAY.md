@@ -153,6 +153,9 @@ is unique per community, because the hostname namespace is global).
   no cooldown). Accepted risk: a stale hostname (old invite link) can resolve
   to a different owner's new server if the slug is re-claimed. Revisit if it
   bites; a cooldown table is a small additive change.
+- **Every row has one**: the column is `NOT NULL`, and the schema migration
+  that introduces it generates a unique slug for every server row that
+  predates it.
 
 ### Matching at the relay
 

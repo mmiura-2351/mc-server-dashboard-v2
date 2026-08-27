@@ -5,7 +5,7 @@ document fixes the *policy*: the version source of truth (Section 4.1),
 release-notes generation (Section 3), and the tag-driven release workflow
 (Section 4.3). A release does not build or publish component artifacts;
 components are built from the checked-out revision by the deployment procedure
-([`DEPLOYMENT.md`](DEPLOYMENT.md); Section 4.2 item 3).
+([`DEPLOYMENT.md`](DEPLOYMENT.md); Section 4.2 item 3 below).
 
 > **One version for the whole monorepo.** `api/`, `worker/`, `relay/`, `webui/`,
 > and `proto/` ship together and are kept in lock-step (see

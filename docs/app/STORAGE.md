@@ -109,7 +109,8 @@ Notes:
   Dereferencing `current/` reaches the authoritative working set. While a server
   is running that copy is temporarily stale (FR-DATA-4); `Storage` does not know
   server state — the application layer decides when to read `current/` vs.
-  read-through to the Worker per the Section 6.9 state-branching policy.
+  read-through to the Worker per the REQUIREMENTS.md Section 6.9 state-branching
+  policy.
 - `snapshots/<snapshot-id>/` holds published working-set states. Only the one
   targeted by the `current` symlink is authoritative; prior snapshots are
   reclaimed after a publish (Section 4.3). Single-file edits (Section 4.4) mutate
@@ -310,7 +311,7 @@ depend on a Worker.
 
 | Operation | Purpose | Notes |
 |---|---|---|
-| `create_backup_from_current(community_id, server_id) -> BackupKey` | Archive the authoritative `current/` into `backups/` | The **stopped-server** path (Section 6.9). For a **running** server the Worker quiesces the live world (save-off → save-all → settle-wait) and commits an on-demand snapshot (`commit_snapshot`) → then the application calls this; `Storage` only ever archives the authoritative copy. |
+| `create_backup_from_current(community_id, server_id) -> BackupKey` | Archive the authoritative `current/` into `backups/` | The **stopped-server** path (REQUIREMENTS.md Section 6.9). For a **running** server the Worker quiesces the live world (save-off → save-all → settle-wait) and commits an on-demand snapshot (`commit_snapshot`) → then the application calls this; `Storage` only ever archives the authoritative copy. |
 | `list_backups(community_id, server_id) -> [BackupKey]` | Enumerate a server's backups | Metadata (label, timestamp, size) lives in the DB (DATABASE.md); this returns the keys. |
 | `restore_backup(community_id, server_id, BackupKey, force=False)` | Atomically republish a backup into `current/` | Atomic publish (Section 4). Caller must ensure the server is **stopped** (FR-BAK-4); `Storage` enforces atomicity, the application enforces the stop precondition. A restore replaces `current/`, so it **bumps the working-set generation** like a `commit_snapshot` — otherwise a same-Worker scratch with `held == store` would skip the post-restore hydrate on the next start and boot the PRE-restore world. The publisher is stamped with the `api-restore` sentinel (no producing Worker), so the publish-time guard (Section 8) treats an in-flight stale snapshot from a real Worker as a different-publisher publish and refuses it, closing the restore-clobber window. The extracted backup is validated through the integrity gate: a corrupt backup is refused with `IntegrityCheckError` (carrying the `WorkingSetReport`); `current/` is left untouched. Quarantining the backup is an application-layer concern — the caller receives the report and decides what to do. `force=True` (the `?force=true` API override, operator-only) publishes despite corruption and returns the `WorkingSetReport` so the caller can quarantine and audit. A restore **bypasses the missing-region gate (Section 4.5) by design**: that gate diffs a staged set against the prior `current/` to catch a Worker accidentally dropping live regions, but a backup is a **complete, self-consistent set captured as a whole** — it is the authoritative replacement, not an incremental delta over `current/`, so a backup that legitimately holds fewer regions than the current world (an older/smaller world being restored) is exactly the intended operation and must not be refused. The structural `.mca` integrity gate applies regardless (a backup cannot be *internally* corrupt); only the prior-set partial-loss comparison is skipped. **Restore flip↔marker crash window:** like `commit_snapshot`, the generation/publisher marker is a separate write after the `current` flip (Section 2 generation marker), so a crash in that window leaves `current` = the restored world but the marker stale (old generation/publisher); the restore call itself then fails so the caller knows it did not complete, a retry republishes and bumps the marker into agreement (self-healing), and the per-server restore lock serializes the window so no concurrent publish can interleave. |
 | `delete_backup(community_id, server_id, BackupKey)` | Remove a backup archive | Idempotent. |
@@ -520,9 +521,10 @@ which edit "really" changed the world.
 
 A single-file `write_file` and a whole-working-set publish/restore are never
 issued concurrently for the same server: they are serialized at the application
-layer per the Section 6.9 state-branching policy and decision 9.2 (Storage file
-edits happen only on a stopped server, while publish happens for a running
-server's snapshot or during restore, which requires a stop). The Storage adapter
+layer per the state-branching policy (REQUIREMENTS.md Section 6.9, Section 9
+decision 3: Storage file edits happen only on a stopped server, while publish
+happens for a running server's snapshot or during restore, which requires a
+stop). The Storage adapter
 itself does not arbitrate concurrent publish and `write_file` on the same server;
 the application layer is responsible for not issuing them concurrently.
 
@@ -1072,9 +1074,10 @@ otherwise.
 **Backup readability probe.** `check_backup_health` on the object backend is
 *not* limited that way: it answers the question a `HEAD` never could — can the
 store still **produce** this archive? A store can serve an archive whose body ends
-deterministically short of the `Content-Length` its `HEAD` declares (the
-connection aborting after a stall at the same offset on every attempt). Such a
-backup is unrestorable, yet a probe that reads no bytes would list it as
+deterministically short of the `Content-Length` its `HEAD` declares. The
+signature of that failure: the connection stalls for ~12 s at the same offset on
+every attempt and then aborts, reproducibly across days. Such a backup is
+unrestorable, yet a probe that reads no bytes would list it as
 `health: healthy`.
 
 The probe therefore streams the stored object end to end — the same object the
@@ -1368,8 +1371,9 @@ ops).
 
 **Rationale.** `Storage` has no notion of server runtime state (that lives on the
 Worker / in the API records); injecting it would couple the Port to lifecycle
-concerns and the control plane. The Section 6.9 policy is a business rule and
-belongs in the use case. `Storage` stays a pure store: always-safe primitives,
+concerns and the control plane. The REQUIREMENTS.md Section 6.9 policy is a
+business rule and belongs in the use case. `Storage` stays a pure store:
+always-safe primitives,
 no policy.
 
 ### 9.3 The Port hides the data-plane transport

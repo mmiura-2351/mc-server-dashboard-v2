@@ -442,11 +442,12 @@ runs more often against smaller amounts of garbage.
 
 The lower threshold exists because compaction is not free space, it *needs*
 free space: it writes the compacted volume alongside the original before
-swapping, so once headroom is gone the auto-vacuum cannot complete. At the
-`0.3` default a volume can accumulate a large garbage fraction while the host
-disk fills, and by the time the threshold trips there is no room left to
-compact. Triggering it earlier (at 10%) keeps the garbage — and the peak disk
-needed to compact it — small enough that headroom is always available.
+swapping, so once headroom is gone the auto-vacuum cannot complete. The failure
+the value guards against looks like this: garbage at ~63% of a volume — well
+past the `0.3` default, so the threshold tripped long ago — on a host that has
+climbed to 97% disk, with no room left to write the compacted copy. Triggering
+compaction earlier (at 10%) keeps the garbage — and the peak disk needed to
+compact it — small enough that headroom is always available.
 
 If a deployment has run out of headroom and the auto-vacuum cannot keep up,
 reclaim space **on demand** from the SeaweedFS shell:

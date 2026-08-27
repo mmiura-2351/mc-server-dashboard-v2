@@ -5,8 +5,11 @@ How v2 takes on and updates third-party dependencies. This document fixes the
 (Section 2), cooldown enforcement (Section 3), and the automated updater
 (Section 6).
 
-> **Three ecosystems.** `api/` is Python; `worker/` and `relay/` are Go;
-> `webui/` is Node. The policy below applies to all of them; where a rule is
+> **Three language ecosystems, plus images and actions.** `api/` is Python;
+> `worker/` and `relay/` are Go; `webui/` is Node. Container base images
+> (`docker`), the compose service images (`docker-compose`) and the CI actions
+> (`github-actions`) are dependencies too, tracked by the same updater
+> (Section 6). The policy below applies to all of them; where a rule is
 > expressed per-tool, each ecosystem's section states its own form.
 
 ## 1. Pinning style

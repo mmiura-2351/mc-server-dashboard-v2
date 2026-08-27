@@ -374,9 +374,11 @@ here when it is added, so the blob does not accumulate undocumented keys.
 The operator-settable keys are validated on write (a bad value is `422`), and
 every edit — a name, port, or any config key — is gated by `server:update`. The
 system-written `resolved_jar_sha256` is not editable through the config-overrides
-surface. `backup_interval_hours` is **not** a config key: a create/update carrying
-it is rejected with `422` `retired_config_key` — the backup cadence is a first-class
-`backup` schedule (Section 8), the only cadence mechanism.
+surface. `backup_interval_hours` is **not** a config key but a *retired* one: the
+API keeps a list of retired keys — names it recognises and deliberately refuses
+rather than passing through to `server.properties` — and a create/update carrying
+one is rejected with `422` `retired_config_key`. The backup cadence is a
+first-class `backup` schedule (Section 8), the only cadence mechanism.
 
 **Desired / observed split (FR-SRV-3, FR-SRV-4).** The two state columns are the
 heart of the model. `desired_state` is the **source of truth for intent**, mutated

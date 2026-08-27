@@ -392,17 +392,19 @@ dials — so being adjacent to it grants no service to talk to.
 
 ### What an MC container can reach
 
-Established by TCP connect from inside a **booted** Minecraft server container
-on `mcsd-servers`, by service name and by raw control-plane IP, with a positive
-control from a container on `mcsd` confirming each target is live. Two entries
-report a bind or a flag rather than a probe result, marked (†) and (‡):
+Enumerated 2026-08-02 by TCP connect from inside a **booted** Minecraft server
+container on `mcsd-servers`, by service name and by raw control-plane IP, with a
+positive control from a container on `mcsd` confirming each target was live. Two
+entries, marked (†) and (‡), are closed by a bind or a flag rather than by the
+network split; their control column reports the post-deploy probe of 2026-08-25
+from the `api` container (an `mcsd` peer), not the 2026-08-02 enumeration:
 
 | Target | From `mcsd` (control) | From `mcsd-servers` |
 |---|---|---|
-| `seaweedfs` `8333` S3, `8888` filer, `9333` master, `8080` volume, `18333` S3 gRPC, `18080` volume gRPC, `18888` filer gRPC, `19333` master gRPC; `8181` Iceberg REST (‡) | all open; `8181` disabled by flag (‡) | all blocked |
+| `seaweedfs` `8333` S3, `8888` filer, `9333` master, `8080` volume, `18333` S3 gRPC, `18080` volume gRPC, `18888` filer gRPC, `19333` master gRPC; `8181` Iceberg REST (‡) | all open; `8181` refused — disabled by flag (‡) | all blocked |
 | `api` `8000`, `api` `50051` | open | blocked |
 | `db` `5432` | open | blocked |
-| `cloudflared` `20241` | bound to container loopback (†) | blocked |
+| `cloudflared` `20241` | refused — loopback bind (†) | blocked |
 | `grpcurl -plaintext seaweedfs:18333 list` | lists `SeaweedS3IamCache`, `SeaweedS3LifecycleInternal` | dial fails |
 
 Blocked, not refused: the packets are dropped between bridges, so this holds by
@@ -417,22 +419,26 @@ all unauthenticated, and with no `--metrics` argument cloudflared binds it on
 container's own loopback interface and no peer on either network has a path to
 it. That is a control independent of topology: segmentation removes the
 `mcsd-servers` path, the loopback bind removes the `mcsd` path as well, and
-neither depends on the other holding. Verify it from an `mcsd` peer after a
-deploy — `docker compose exec api python -c "import urllib.request;
-urllib.request.urlopen('http://cloudflared:20241/metrics', timeout=3)"` —
-expecting a connection refusal.
+neither depends on the other holding. Probed 2026-08-25 on the canonical host
+after a deploy, from the `api` container — `docker compose exec api python -c
+"import urllib.request;
+urllib.request.urlopen('http://cloudflared:20241/metrics', timeout=3)"` — and
+refused (`Errno 111`). The same command re-checks it after any change to the
+`cloudflared` command line.
 
 (‡) **`seaweedfs` `8181` — disabled by flag.** `compose.yaml`'s `weed server`
-command passes `-s3.port.iceberg=0`, which `weed server -h` on the pinned
-`chrislusf/seaweedfs:4.41` documents as `Iceberg REST Catalog server listen port
-(0 to disable)`. Verified against that image outside compose, on a throwaway
-internal docker network: with the flag, `8181` is absent from `netstat -lnt` in
-the container and a peer container's `GET http://<container>:8181/v1/config` is
-refused; without it, the same request answers 200. The other eight listeners
-are unaffected, and `8333` and `8888` answer from a peer. Verify it from an
-`mcsd` peer after a deploy — `docker compose exec api python -c "import
+command passes `-s3.port.iceberg=0`, which `weed server -h` on the
+`chrislusf/seaweedfs` image pinned in `compose.yaml` documents as `Iceberg REST
+Catalog server listen port (0 to disable)`. Verified 2026-08-21 against that
+image at `4.41`, outside compose, on a throwaway internal docker network: with
+the flag, `8181` is absent from `netstat -lnt` in the container and a peer
+container's `GET http://<container>:8181/v1/config` is refused; without it, the
+same request answers 200. The other eight listeners are unaffected, and `8333`
+and `8888` answer from a peer. Probed 2026-08-25 on the canonical host after a
+deploy, from the `api` container — `docker compose exec api python -c "import
 urllib.request; urllib.request.urlopen('http://seaweedfs:8181/', timeout=3)"` —
-expecting a connection refusal.
+and refused (`Errno 111`). The same command re-checks it after an image bump or
+a change to the `weed server` command line.
 
 **This covers docker-network paths only.** A port **published to the host** on a
 non-loopback interface is reachable from `mcsd-servers` through the bridge
@@ -486,10 +492,11 @@ ports. Two cases:
   the *same* service stays open. `RELAY_CONTROL_BIND_IP` defaults to
   `127.0.0.1`, which removes all three — Docker's DNAT rule then matches only
   packets destined to loopback, the same mechanism that makes the API refuse
-  from both networks in the case above. Verify it from inside a **booted** MC
-  server container after a deploy, by every host address — gateways from
-  `docker network inspect mcsd-servers` / `mcsd`, the rest from `ip -4 addr` on
-  the host:
+  from both networks in the case above. Probed 2026-08-25 on the canonical host
+  after a deploy, from inside a **booted** MC server container, by every host
+  address — gateways from `docker network inspect mcsd-servers` / `mcsd`, the
+  rest from `ip -4 addr` on the host — with `25665` refused at all four and
+  `25565` OPEN at all four. The probe, for re-checking after a compose change:
 
   ```sh
   docker exec <mc-container> sh -c '

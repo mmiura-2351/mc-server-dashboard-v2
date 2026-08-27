@@ -75,7 +75,8 @@ one change set, and keeps the UI in lock-step with the API surface it consumes.
 Every user use case is executable end-to-end through the API. The Web UI
 (`webui/` in this monorepo, see Section 1.2; design in docs/ui/WEBUI_SPEC.md)
 consumes this API surface; the requirements in this document cover the API +
-Worker.
+Worker. Everything listed here is implemented; Section 2.3 holds what is planned
+but not built.
 
 - Community management and membership (many-to-many users ↔ Communities).
 - Authentication, and authorization via custom roles + per-resource grants.
@@ -340,16 +341,8 @@ Requirements:
 - FR-EXE-5: The Worker selects the correct Java runtime for a server based on its
   Minecraft version (multiple Java versions may be installed; the right one is
   chosen per server). This selection is the driver's/Worker's concern, not the
-  API's (docs/app/ARCHITECTURE.md Section 7.3). The version-to-Java mapping:
-
-  | Minecraft version | Java major |
-  |---|---|
-  | ≤ 1.7.9 | 7 |
-  | ≤ 1.16.5 | 8 (11 as fallback) |
-  | ≤ 1.17.1 | 16 |
-  | ≤ 1.20.4 | 17 |
-  | ≤ 1.21.11 | 21 |
-  | newer | 25 (the newest configured runtime) |
+  API's; the version-to-Java mapping is the table in
+  docs/app/ARCHITECTURE.md Section 7.3.
 
 ### 6.7 Worker Management
 
@@ -459,8 +452,10 @@ branch on server state. This policy is shared by 6.10 (File Management) and
   the general scheduler: a per-server `schedule` row with `action = backup`
   firing on a cron expression or a fixed interval (DATABASE.md Section 8),
   driven by the one scheduler runner. Backup cadence lives only on the schedule:
-  `backup_interval_hours` is not a config key, and a server create/update
-  carrying it is rejected with `422` (`retired_config_key`). Execution history
+  `backup_interval_hours` is not a config key but a *retired* one — a name the
+  API recognises and deliberately refuses rather than passing through to
+  `server.properties` — so a server create/update carrying it is rejected with
+  `422` (`retired_config_key`). Execution history
   is the ordered set of `backup` rows with `source = scheduled`. A scheduled
   backup that fails does not retry on every scheduler tick: it gets the runner's
   bounded retry (one, ~30 minutes later) plus an operator notification, then

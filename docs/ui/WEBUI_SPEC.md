@@ -104,7 +104,7 @@ Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 | POST | `/communities/{cid}/servers/import` | ZIP import (multipart). |
 | GET / HEAD | `…/{sid}/export` | ZIP export (download). Accepts the Bearer access token, or a `?grant=` download grant so the browser can stream a multi-GB export straight to disk, or the `HttpOnly` download cookie a redemption sets so an interrupted transfer can be retried. The response declares `Cache-Control: no-store` under every credential. `HEAD` is the metadata probe: the same gate and the same headers with no body — including no `Content-Length`, since the zip is built incrementally and the `GET` declares none either — and it neither builds the zip nor records a `server:export` audit event. |
 | POST | `…/{sid}/export/download-grant` | Mint that grant: `{download_url, expires_at}`, `Cache-Control: no-store`. Same `file:read` gate as the export, and the same pre-flight — a running server is 409 `server_unsettled` and no grant is issued; `auth.token.download_grant_ttl_seconds`, 30 s by default (AUTH_API.md Section 3). |
-| GET / PATCH / DELETE | `…/{sid}` | Read / update (name, config, game_port) / delete. Every PATCH edit needs `server:update`. `backup_interval_hours` is not a config key; a PATCH carrying it is `422` (`retired_config_key`) — backup cadence is a `backup` schedule. A `game_port` change against a server whose `server.properties` is missing is a `409` (`server_properties_missing`): the rewrite preserves the file's other keys, so it refuses rather than republish one without `rcon.password`. |
+| GET / PATCH / DELETE | `…/{sid}` | Read / update (name, config, game_port) / delete. Every PATCH edit needs `server:update`. `backup_interval_hours` is not a config key; a PATCH carrying it is `422` (`retired_config_key`; DATABASE.md Section 7) — backup cadence is a `backup` schedule. A `game_port` change against a server whose `server.properties` is missing is a `409` (`server_properties_missing`): the rewrite preserves the file's other keys, so it refuses rather than republish one without `rcon.password`. |
 | POST | `…/{sid}/start` · `/stop?force=` · `/restart` | Lifecycle. Stop supports force. |
 | POST | `…/{sid}/command` | RCON line → `{output}`. |
 | GET | `…/{sid}/files?path=&list=` | Read file (base64) or list directory (entries + `truncated`). |
@@ -142,7 +142,8 @@ Server response fields: `id`, `community_id`, `name`, `mc_edition`,
 renameable via PATCH), `join_hostname` (`<slug>.<base_domain>` when relay
 enabled, else null), `bedrock_address` / `bedrock_port` (Bedrock join address:
 non-null only while the deployment's Bedrock gate is on AND the server carries
-at least one *enabled* Geyser plugin copy — see `BEDROCK.md`),
+at least one *enabled* Geyser plugin copy — see `BEDROCK.md`; the end-to-end
+Bedrock join is verified on Paper only, BEDROCK.md Section 1),
 `desired_state`, `observed_state`, `observed_at`,
 `assigned_worker_id`, `backup_retention` (the scheduled-backup retention
 policy; null while unconfigured).
@@ -478,7 +479,8 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 
 ### 6.13 Server detail — Schedules
 
-The `#schedules` tab: the UI for the general scheduler.
+The `#schedules` tab (numbered out of tab order so that 6.8–6.12 keep their
+numbers): the UI for the general scheduler.
 
 - Table: name, action, human-readable cadence ("Every N min/h" or the cron
   expression), timezone, enabled toggle, last-run and next-run timestamps
@@ -507,7 +509,8 @@ The `#schedules` tab: the UI for the general scheduler.
 
 ### 6.14 Server detail — Plugins
 
-The `#plugins` tab: plugin/mod content management for a server. The tab label
+The `#plugins` tab (numbered out of tab order so that 6.8–6.13 keep their
+numbers): plugin/mod content management for a server. The tab label
 and every content noun are loader-aware — **Plugins** for Paper, **Mods** for
 Fabric/Forge — and the whole tab is **hidden for `vanilla`** (no
 backend support; the tab body also self-guards with an "unsupported" notice).

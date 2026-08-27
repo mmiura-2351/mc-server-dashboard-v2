@@ -72,7 +72,8 @@ api/
 │   ├── core/                      # bounded context: health + infra
 │   │   ├── domain/ application/   # pure core + use cases (Ports only)
 │   │   └── adapters/ api/         # DB adapter + HTTP router
-│   └── identity/ community/ servers/ fleet/ versions/ audit/   # bounded contexts, same quadrants
+│   ├── identity/ community/ servers/ fleet/ versions/ audit/ storage/   # bounded contexts, same quadrants
+│   └── dataplane/api/             # the API-terminated HTTP data plane (transfers); api quadrant only
 ├── src/mcsd/                      # generated control-plane stubs (do not edit)
 ├── migrations/                    # Alembic env + versions
 └── tests/                         # pytest tests (unit) + tests/integration
