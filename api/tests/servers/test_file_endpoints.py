@@ -2422,3 +2422,131 @@ def test_file_head_without_credentials_is_401() -> None:
     resp = client.head(_url(community, server, "/download"), params={"path": "world"})
 
     assert resp.status_code == 401
+
+
+# --- platform-managed keys: the sibling write routes (issue #2809) ---------
+#
+# The PUT is not the only route that reaches the root server.properties, so the
+# 422 contract the Web UI reads (``platform_managed_key`` plus the offending
+# ``key``) is pinned on every route that can now refuse for that reason.
+
+
+def test_delete_platform_managed_key_is_422_naming_the_key() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        delete=_FakeUseCase(error=PlatformManagedKeyError("rcon.password")),
+    )
+    client = _client(app)
+    resp = client.delete(
+        _url(uuid.uuid4(), uuid.uuid4()), params={"path": "server.properties"}
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["reason"] == "platform_managed_key"
+    assert body["key"] == "rcon.password"
+
+
+def test_rename_platform_managed_key_is_422_naming_the_key() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        rename=_FakeUseCase(error=PlatformManagedKeyError("rcon.password")),
+    )
+    client = _client(app)
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/rename"),
+        json={"from": "server.properties", "to": "server.properties.bak"},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["reason"] == "platform_managed_key"
+    assert body["key"] == "rcon.password"
+
+
+def test_rename_oversized_properties_source_is_413() -> None:
+    # The rename-onto-server.properties guard caps the source it compares, so the
+    # route must answer 413 rather than let a FileTooLargeError escape as a 500.
+    app = _app(
+        member=True, allow=True, rename=_FakeUseCase(error=FileTooLargeError("x"))
+    )
+    client = _client(app)
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/rename"),
+        json={"from": "huge.bin", "to": "server.properties"},
+    )
+    assert resp.status_code == 413
+    assert resp.json()["reason"] == "file_too_large"
+
+
+def test_upload_platform_managed_key_is_422_naming_the_key() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        upload=_FakeUpload(error=PlatformManagedKeyError("server-port")),
+    )
+    client = _client(app)
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/upload"),
+        params={"path": "."},
+        files={"file": ("server.properties", b"x", "text/plain")},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["reason"] == "platform_managed_key"
+    assert body["key"] == "server-port"
+
+
+def test_rollback_platform_managed_key_is_422_naming_the_key() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        rollback=_FakeUseCase(error=PlatformManagedKeyError("server-port")),
+    )
+    client = _client(app)
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/rollback"),
+        params={"path": "server.properties"},
+        json={"version_id": "v1"},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["reason"] == "platform_managed_key"
+    assert body["key"] == "server-port"
+
+
+def test_delete_symlink_refused_renders_invalid_path() -> None:
+    # The DELETE route deliberately does NOT forward exc.reason (unlike the PUT
+    # and rename routes): a refused path is one 422 invalid_path whatever refused
+    # it. So a symlink standing in for the root server.properties — which the
+    # platform-key guard now refuses rather than unlinks (issue #2809) — renders
+    # invalid_path, not symlink_refused. Pinned so the choice is deliberate.
+    app = _app(
+        member=True,
+        allow=True,
+        delete=_FakeUseCase(error=InvalidFilePathError("x", reason="symlink_refused")),
+    )
+    client = _client(app)
+    resp = client.delete(
+        _url(uuid.uuid4(), uuid.uuid4()), params={"path": "server.properties"}
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_path"
+
+
+def test_rollback_oversized_version_is_413() -> None:
+    # Centralizing the cap inside the shared guard made FileTooLargeError
+    # reachable from rollback: it reads the retained version to compare it, and a
+    # legacy oversized version of the root server.properties predates the cap
+    # every write door now enforces. Without this mapping it escapes as a 500.
+    app = _app(
+        member=True, allow=True, rollback=_FakeUseCase(error=FileTooLargeError("x"))
+    )
+    client = _client(app)
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/rollback"),
+        params={"path": "server.properties"},
+        json={"version_id": "v1"},
+    )
+    assert resp.status_code == 413
+    assert resp.json()["reason"] == "file_too_large"

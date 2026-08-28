@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import pytest
+
 from mc_server_dashboard_api.servers.domain.server_properties import (
     PLATFORM_MANAGED_KEYS,
     RCON_PORT,
     ResourcePackProperties,
+    _parse,
+    _raw_values,
     apply_overrides,
     apply_platform_properties,
     changed_platform_managed_keys,
@@ -50,9 +54,11 @@ def test_ignores_commented_server_port_line() -> None:
     )
 
 
-def test_replaces_only_the_first_server_port_line() -> None:
+def test_rewrites_the_first_port_line_and_drops_the_rest() -> None:
+    # Java's Properties.load is last-occurrence-wins, so leaving a second line
+    # behind would hand the server a port the platform did not choose (#2811).
     content = b"server-port=1\nserver-port=2\n"
-    assert set_server_port(content, 9) == b"server-port=9\nserver-port=2\n"
+    assert set_server_port(content, 9) == b"server-port=9\n"
 
 
 def test_no_trailing_newline_input_appends_without_adding_blank_line() -> None:
@@ -323,11 +329,20 @@ def test_appended_duplicate_platform_key_is_reported() -> None:
     assert changed_platform_managed_keys(current, incoming) == ["rcon.password"]
 
 
-def test_whitespace_only_difference_is_not_a_change() -> None:
-    # A reformatting edit (or a CRLF round-trip) leaves the value itself alone.
+def test_whitespace_around_the_separator_is_not_a_change() -> None:
+    # Java skips whitespace around the separator and ends a line at a CR, so
+    # neither a reformatting edit nor a CRLF round-trip changes what it reads.
     current = b"server-port=25565\r\n"
-    incoming = b"server-port= 25565 \n"
+    incoming = b"server-port =  25565\n"
     assert changed_platform_managed_keys(current, incoming) == []
+
+
+def test_trailing_whitespace_on_a_platform_value_is_a_change() -> None:
+    # Java keeps trailing whitespace in the value, so "25565 " is NOT "25565".
+    # The guard reports what the server would really read, not a tidied version.
+    current = b"server-port=25565\n"
+    incoming = b"server-port=25565 \n"
+    assert changed_platform_managed_keys(current, incoming) == ["server-port"]
 
 
 def test_commented_out_platform_key_counts_as_removal() -> None:
@@ -469,3 +484,281 @@ def test_apply_platform_properties_preserves_a_non_utf8_line() -> None:
     )
     assert b"motd=caf\xe9\n" in result
     assert b"server-port=26590\n" in result
+
+
+# --- Java Properties.load parity (issue #2811) --------------------------------
+
+# The parse table mirrored one-for-one by the Worker's
+# worker/internal/javaproperties/javaproperties_test.go::parityCases. Same input,
+# same parse -- that mirroring is the evidence that the platform-key guard and
+# the Worker read a server.properties alike. Keep the two tables in sync: a case
+# added here but not there leaves the invariant unpinned.
+PARITY_CASES: list[tuple[str, bytes, dict[str, str]]] = [
+    ("equals separator", b"server-port=25599\n", {"server-port": "25599"}),
+    ("colon separator", b"server-port:25599\n", {"server-port": "25599"}),
+    ("whitespace separator", b"server-port 25599\n", {"server-port": "25599"}),
+    (
+        "separator with surrounding whitespace",
+        b"server-port = 25599\n",
+        {"server-port": "25599"},
+    ),
+    (
+        "whitespace then colon separator",
+        b"server-port : 25599\n",
+        {"server-port": "25599"},
+    ),
+    ("tab separator", b"server-port\t25599\n", {"server-port": "25599"}),
+    (
+        "leading whitespace before the key",
+        b"   server-port=25599\n",
+        {"server-port": "25599"},
+    ),
+    (
+        "a second separator belongs to the value",
+        b"server-port==25599\n",
+        {"server-port": "=25599"},
+    ),
+    (
+        "trailing whitespace is part of the value",
+        b"server-port=25599  \n",
+        {"server-port": "25599  "},
+    ),
+    (
+        "a key with no separator has an empty value",
+        b"server-port\n",
+        {"server-port": ""},
+    ),
+    (
+        "a hash comment is skipped",
+        b"#server-port=1\nserver-port=25599\n",
+        {"server-port": "25599"},
+    ),
+    (
+        "a bang comment is skipped",
+        b"!server-port=1\nserver-port=25599\n",
+        {"server-port": "25599"},
+    ),
+    (
+        "a comment does not continue on a trailing backslash",
+        b"#server-port=1\\\nserver-port=25599\n",
+        {"server-port": "25599"},
+    ),
+    (
+        "blank lines are skipped",
+        b"\n   \nserver-port=25599\n",
+        {"server-port": "25599"},
+    ),
+    (
+        "a backslash continues onto the next line",
+        b"rcon.password=one\\\n  two\n",
+        {"rcon.password": "onetwo"},
+    ),
+    (
+        "an even trailing backslash run does not continue",
+        b"rcon.password=one\\\\\nmotd=hi\n",
+        {"rcon.password": "one\\", "motd": "hi"},
+    ),
+    (
+        "a continuation line is never a comment",
+        b"rcon.password=one\\\n#two\n",
+        {"rcon.password": "one#two"},
+    ),
+    (
+        "a blank continuation line ends the value",
+        b"rcon.password=one\\\n\nmotd=hi\n",
+        {"rcon.password": "one", "motd": "hi"},
+    ),
+    (
+        "an escaped dot in the key",
+        rb"rcon\.password=tok" + b"\n",
+        {"rcon.password": "tok"},
+    ),
+    (
+        "an escaped separator in the key",
+        rb"rcon\=password=tok" + b"\n",
+        {"rcon=password": "tok"},
+    ),
+    (
+        "a unicode escape in the key",
+        rb"\u0072con.password=tok" + b"\n",
+        {"rcon.password": "tok"},
+    ),
+    ("a unicode escape in the value", rb"motd=caf\u00e9" + b"\n", {"motd": "café"}),
+    ("an escaped colon in the value", rb"motd=a\:b" + b"\n", {"motd": "a:b"}),
+    (
+        "control-character escapes in the value",
+        rb"motd=a\tb\nc" + b"\n",
+        {"motd": "a\tb\nc"},
+    ),
+    (
+        "the last occurrence wins",
+        b"server-port=1\nserver-port:2\n",
+        {"server-port": "2"},
+    ),
+    (
+        "CRLF terminates a line",
+        b"server-port=25599\r\nmotd=hi\r\n",
+        {"server-port": "25599", "motd": "hi"},
+    ),
+    (
+        "a lone CR terminates a line",
+        b"server-port=25599\rmotd=hi\r",
+        {"server-port": "25599", "motd": "hi"},
+    ),
+    (
+        "a final line without a terminator is parsed",
+        b"server-port=25599",
+        {"server-port": "25599"},
+    ),
+    ("a trailing lone backslash at EOF is dropped", b"motd=hi\\", {"motd": "hi"}),
+    ("latin-1 bytes decode byte-for-byte", b"motd=caf\xe9\n", {"motd": "café"}),
+    (
+        "a malformed unicode escape keeps the u literal",
+        rb"motd=a\uZZZZb" + b"\n",
+        {"motd": "auZZZZb"},
+    ),
+    ("an empty file has no properties", b"", {}),
+]
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        pytest.param(content, expected, id=name)
+        for name, content, expected in PARITY_CASES
+    ],
+)
+def test_parses_like_java_properties_load(
+    content: bytes, expected: dict[str, str]
+) -> None:
+    # Last occurrence wins, matching java.util.Properties.load.
+    assert {prop.key: prop.value for prop in _parse(content)} == expected
+
+
+# --- the guard sees every Java spelling (issue #2811) -------------------------
+
+
+def test_appended_colon_form_duplicate_is_reported() -> None:
+    # The bypass #2811 names: leave the original line intact and append the key
+    # again with a colon. Java reads "evil"; so must the guard.
+    current = b"rcon.password=tok\n"
+    incoming = b"rcon.password=tok\nrcon.password:evil\n"
+    assert changed_platform_managed_keys(current, incoming) == ["rcon.password"]
+
+
+def test_appended_whitespace_form_duplicate_is_reported() -> None:
+    current = b"server-port=25565\n"
+    incoming = b"server-port=25565\nserver-port 25999\n"
+    assert changed_platform_managed_keys(current, incoming) == ["server-port"]
+
+
+def test_appended_escaped_key_duplicate_is_reported() -> None:
+    current = b"rcon.password=tok\n"
+    incoming = b"rcon.password=tok\n" + rb"rcon\.password=evil" + b"\n"
+    assert changed_platform_managed_keys(current, incoming) == ["rcon.password"]
+
+
+def test_appended_unicode_escaped_key_duplicate_is_reported() -> None:
+    current = b"rcon.password=tok\n"
+    incoming = b"rcon.password=tok\n" + rb"\u0072con.password=evil" + b"\n"
+    assert changed_platform_managed_keys(current, incoming) == ["rcon.password"]
+
+
+def test_continuation_line_value_change_is_reported() -> None:
+    # The value spills onto a second line; changing that half changes the key.
+    current = b"rcon.password=to\\\nk\n"
+    incoming = b"rcon.password=to\\\nken\n"
+    assert changed_platform_managed_keys(current, incoming) == ["rcon.password"]
+
+
+def test_bang_commenting_out_a_platform_key_counts_as_removal() -> None:
+    # "!" is a comment marker for Properties.load just as "#" is.
+    current = b"rcon.password=tok\n"
+    incoming = b"!rcon.password=tok\n"
+    assert changed_platform_managed_keys(current, incoming) == ["rcon.password"]
+
+
+def test_respelling_a_platform_line_without_changing_its_value_is_allowed() -> None:
+    # Java reads the same value out of either spelling, so nothing changed for
+    # the server -- the guard must not refuse a write that changes nothing.
+    current = b"server-port=25565\n"
+    incoming = b"server-port:25565\n"
+    assert changed_platform_managed_keys(current, incoming) == []
+
+
+# --- clearing reaches every Java spelling (issue #2811) -----------------------
+
+
+def test_clear_resource_pack_removes_a_colon_form_line() -> None:
+    # An untrusted archive's respelled pack line must not survive the clear that
+    # import/restore runs, or the Java server still serves it (issue #2621).
+    content = b"motd=hi\nresource-pack:http://attacker/pack.zip\n"
+    assert clear_resource_pack_properties(content) == b"motd=hi\n"
+
+
+def test_clear_resource_pack_removes_a_whitespace_form_line() -> None:
+    content = b"motd=hi\nresource-pack http://attacker/pack.zip\n"
+    assert clear_resource_pack_properties(content) == b"motd=hi\n"
+
+
+def test_clear_resource_pack_removes_a_continued_line_whole() -> None:
+    # A backslash continuation is ONE property to Java; leaving its tail behind
+    # would both keep the pack and corrupt the following line.
+    content = b"motd=hi\nresource-pack=http://attacker/\\\npack.zip\nmax-players=20\n"
+    assert clear_resource_pack_properties(content) == b"motd=hi\nmax-players=20\n"
+
+
+def test_clear_resource_pack_removes_every_occurrence() -> None:
+    content = (
+        b"resource-pack=http://one/pack.zip\nmotd=hi\n"
+        b"resource-pack:http://two/pack.zip\n"
+    )
+    assert clear_resource_pack_properties(content) == b"motd=hi\n"
+
+
+def test_remove_keys_removes_a_colon_form_line() -> None:
+    assert remove_keys(b"motd:hi\npvp=true\n", {"motd"}) == b"pvp=true\n"
+
+
+def test_apply_platform_properties_clears_a_colon_form_pack_line() -> None:
+    # The import/restore path: no assignment means every pack line goes, in
+    # whatever spelling the archive used.
+    result = apply_platform_properties(
+        b"resource-pack:http://attacker/pack.zip\n",
+        game_port=26590,
+        rcon_password="fresh",
+        resource_pack=None,
+    )
+    assert b"resource-pack" not in result
+
+
+# --- writes leave no respelled duplicate behind (issue #2811) -----------------
+
+
+def test_set_server_port_drops_a_respelled_duplicate() -> None:
+    # Rewriting the canonical line while a colon-form one survived below it would
+    # hand the server the archive's port under Java's last-occurrence rule.
+    content = b"server-port=25565\nmotd=hi\nserver-port:25999\n"
+    assert set_server_port(content, 26590) == b"server-port=26590\nmotd=hi\n"
+
+
+def test_set_server_port_replaces_a_colon_form_line_in_place() -> None:
+    content = b"motd=hi\nserver-port:25999\n"
+    assert set_server_port(content, 26590) == b"motd=hi\nserver-port=26590\n"
+
+
+def test_set_resource_pack_drops_a_respelled_duplicate() -> None:
+    content = (
+        b"resource-pack=https://old/pack.zip\nresource-pack:http://attacker/pack.zip\n"
+    )
+    out = set_resource_pack_properties(content, url=_RP_URL, sha1=_RP_SHA1)
+    # Only the platform's own line survives: a colon-form one below it would be
+    # what Java reads.
+    assert _raw_values(out, "resource-pack") == [_RP_URL]
+
+
+def test_set_rcon_keeps_a_colon_form_password() -> None:
+    # rcon.password is read out of the file by the same Java rules the worker
+    # uses, so a colon-form credential is a live one and is preserved as it is.
+    out = set_rcon_properties(b"rcon.password:known\n", password="generated")
+    assert _raw_values(out, "rcon.password") == ["known"]

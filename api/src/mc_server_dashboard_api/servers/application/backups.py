@@ -60,14 +60,15 @@ from mc_server_dashboard_api.servers.application.files import (
     MAX_DECOMPRESSED_BYTES,
     MAX_UPLOAD_BYTES,
 )
+from mc_server_dashboard_api.servers.application.platform_properties import (
+    assigned_resource_pack,
+    read_properties,
+)
 from mc_server_dashboard_api.servers.application.plugin_cache import (
     ingest_into_cache,
 )
 from mc_server_dashboard_api.servers.application.plugin_manifest import (
     parse_manifest_at_ingest,
-)
-from mc_server_dashboard_api.servers.application.resource_packs import (
-    pack_download_url,
 )
 from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
     SnapshotServer,
@@ -96,7 +97,6 @@ from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
     InvalidBackupArchiveError,
     InvalidRetentionPolicyError,
-    ServerFileNotFoundError,
     ServerNotFoundError,
     ServerNotStoppedError,
     UnsupportedPluginServerTypeError,
@@ -117,7 +117,6 @@ from mc_server_dashboard_api.servers.domain.plugin import (
 )
 from mc_server_dashboard_api.servers.domain.plugin_cache_store import PluginCacheStore
 from mc_server_dashboard_api.servers.domain.server_properties import (
-    ResourcePackProperties,
     apply_platform_properties,
     new_rcon_password,
 )
@@ -475,13 +474,9 @@ class RestoreBackup:
         if self.file_store is None:
             return
         try:
-            current = await self.file_store.read_file(
-                community_id=community_id,
-                server_id=server_id,
-                rel_path=_PROPERTIES_REL_PATH,
+            current = await read_properties(
+                self.file_store, community_id=community_id, server_id=server_id
             )
-        except ServerFileNotFoundError:
-            current = b""
         except Exception as exc:
             raise WorkingSetSeedFailedError(str(server_id.value)) from exc
         try:
@@ -490,10 +485,14 @@ class RestoreBackup:
                 server_id=server_id,
                 rel_path=_PROPERTIES_REL_PATH,
                 content=apply_platform_properties(
-                    current,
+                    current if current is not None else b"",
                     game_port=server.game_port,
                     rcon_password=self.token_generator(),
-                    resource_pack=await self._assigned_resource_pack(server_id),
+                    resource_pack=await assigned_resource_pack(
+                        self.uow,
+                        server_id=server_id,
+                        public_base_url=self.public_base_url,
+                    ),
                 ),
             )
         except Exception as exc:
@@ -503,27 +502,6 @@ class RestoreBackup:
                 extra={"server_id": str(server_id.value)},
             )
             raise WorkingSetSeedFailedError(str(server_id.value)) from exc
-
-    async def _assigned_resource_pack(
-        self, server_id: ServerId
-    ) -> ResourcePackProperties | None:
-        """The server's currently assigned pack as properties values, or ``None``."""
-
-        async with self.uow:
-            assignment = await self.uow.resource_packs.get_assignment_by_server(
-                server_id
-            )
-            if assignment is None:
-                return None
-            pack = await self.uow.resource_packs.get_by_id(assignment.resource_pack_id)
-        if pack is None:
-            return None
-        return ResourcePackProperties(
-            url=pack_download_url(self.public_base_url, pack.id, pack.filename),
-            sha1=pack.sha1_hash,
-            require=assignment.require_resource_pack,
-            prompt=assignment.resource_pack_prompt,
-        )
 
 
 async def _reconcile_plugins(

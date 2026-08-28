@@ -389,14 +389,7 @@ async def write_file(
         # (name_too_long, issue #2433).
         raise _unprocessable(exc.reason) from exc
     except PlatformManagedKeyError as exc:
-        # The write would change a key the platform owns in server.properties
-        # (issue #2623). 422 with the key named in a ``key`` member, following the
-        # 403 ``permission`` precedent, so the UI can say which one is off limits.
-        raise problem(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            "platform_managed_key",
-            extensions={"key": exc.key},
-        ) from exc
+        raise _platform_managed_key(exc) from exc
     except FileTooLargeError as exc:
         # The edge cap (MAX_EDIT_BYTES) and the Worker's payload_too_large reason
         # (issue #548) both surface here as 413.
@@ -536,6 +529,13 @@ async def rollback_file(
     authoritative copy, so it is 409 while running. A successful rollback is
     audited (``file:rollback``); a rollback refused because the server is not
     stopped is recorded DENIED (issue #263).
+
+    **Platform-managed keys (issue #2809).** Republishing a retained version of
+    the root ``server.properties`` is a write of those bytes, so a version that
+    differs from the file's current content in a platform-owned key — a stale
+    ``server-port`` or ``rcon.password`` — is 422 ``platform_managed_key`` with
+    the offending key in the ``key`` member. A version differing only in the
+    user's own keys rolls back normally.
     """
 
     try:
@@ -553,6 +553,14 @@ async def rollback_file(
         raise _unprocessable("invalid_path") from exc
     except InvalidVersionIdError as exc:
         raise _unprocessable("invalid_version_id") from exc
+    except PlatformManagedKeyError as exc:
+        raise _platform_managed_key(exc) from exc
+    except FileTooLargeError as exc:
+        # The platform-key guard reads the retained version to compare it, and
+        # that comparison is capped (issue #2809): an oversized version of the
+        # root server.properties is a 413, matching the sibling routes, rather
+        # than an escaped 500.
+        raise _too_large() from exc
     except ServerNotStoppedError as exc:
         await _record_file_failure(
             recorder, ops.FILE_ROLLBACK, authorized, community_id, server_id
@@ -595,6 +603,13 @@ async def upload_file(
     reusing the unsettled posture other bulk at-rest ops take. With
     ``extract=true`` a zip / tar.gz is expanded under ``path`` with per-entry
     traversal validation (zip-slip defence) and a total-extracted-size cap.
+
+    **Platform-managed keys (issue #2809).** An upload landing on the root
+    ``server.properties`` — directly, or as an archive member — may not change
+    the keys the platform owns; such an upload is 422 ``platform_managed_key``
+    with the offending key in the ``key`` member. An offending archive member is
+    caught before any write, so the whole extract is refused with nothing
+    written.
     """
 
     filename = file.filename or ""
@@ -612,6 +627,8 @@ async def upload_file(
         raise _not_found() from exc
     except InvalidFilePathError as exc:
         raise _unprocessable("invalid_path") from exc
+    except PlatformManagedKeyError as exc:
+        raise _platform_managed_key(exc) from exc
     except FileTooLargeError as exc:
         raise _too_large() from exc
     except ContentDirProtectedError as exc:
@@ -889,6 +906,12 @@ async def rename_file(
     At rest only (Section 6.9): a running server is 409 ``server_unsettled``. Both
     paths are traversal-validated (422 on a bad path); a missing source is 404 and
     an existing destination is 409 ``destination_exists`` (rename never clobbers).
+
+    **Platform-managed keys (issue #2809).** Both ends are guarded: renaming the
+    root ``server.properties`` away removes the keys the platform owns, and
+    renaming another file onto that name publishes its bytes there — either is
+    422 ``platform_managed_key`` with the offending key in the ``key`` member. A
+    source larger than the edit cap is 413 rather than compared.
     """
 
     try:
@@ -907,6 +930,12 @@ async def rename_file(
         # name_too_long and a symlink-component path is symlink_refused (issues
         # #2433/#2432); a genuine traversal keeps the default invalid_path.
         raise _unprocessable(exc.reason) from exc
+    except PlatformManagedKeyError as exc:
+        raise _platform_managed_key(exc) from exc
+    except FileTooLargeError as exc:
+        # The only oversized case a rename has: the source the destination guard
+        # would have to compare against the root server.properties (issue #2809).
+        raise _too_large() from exc
     except FileAlreadyExistsError as exc:
         raise _conflict("destination_exists") from exc
     except ContentDirProtectedError as exc:
@@ -951,6 +980,12 @@ async def delete_file(
     path is resolved to a file or directory; a missing path is 404 and a
     traversal-unsafe one is 422. A file delete retains the prior content (rollback
     can resurrect it); a directory delete does not (backups cover whole subtrees).
+
+    **Platform-managed keys (issue #2809).** Deleting the root
+    ``server.properties`` removes every key in it, ``rcon.password`` — which
+    lives nowhere else — included, so a delete that would drop a platform-owned
+    key is 422 ``platform_managed_key`` with that key in the ``key`` member. A
+    root ``server.properties`` carrying none of those keys still deletes.
     """
 
     try:
@@ -965,6 +1000,8 @@ async def delete_file(
         raise _not_found() from exc
     except InvalidFilePathError as exc:
         raise _unprocessable("invalid_path") from exc
+    except PlatformManagedKeyError as exc:
+        raise _platform_managed_key(exc) from exc
     except ContentDirProtectedError as exc:
         raise _conflict("content_dir_protected") from exc
     except ServerFilesUnsettledError as exc:
@@ -1172,6 +1209,22 @@ def _decode(content_base64: str) -> bytes:
 
 def _unprocessable(reason: str) -> ProblemException:
     return problem(status.HTTP_422_UNPROCESSABLE_CONTENT, reason)
+
+
+def _platform_managed_key(exc: PlatformManagedKeyError) -> ProblemException:
+    """422 for a write that would change a platform-owned ``server.properties`` key.
+
+    The key is named in a ``key`` member (following the 403 ``permission``
+    precedent) so the UI can say which one is off limits. Every route that can
+    reach that file answers identically — the PUT (issue #2623) and the delete /
+    rename / upload / rollback siblings (issue #2809).
+    """
+
+    return problem(
+        status.HTTP_422_UNPROCESSABLE_CONTENT,
+        "platform_managed_key",
+        extensions={"key": exc.key},
+    )
 
 
 def _too_large() -> ProblemException:
