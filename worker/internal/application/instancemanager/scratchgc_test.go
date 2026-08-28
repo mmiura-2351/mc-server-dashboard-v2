@@ -271,12 +271,22 @@ func TestRestartRetainsScratch(t *testing.T) {
 func TestFailedStopRetainsScratch(t *testing.T) {
 	d := &orphanDriver{stopAfter: 1} // first Stop fails, leaving an orphan
 	m := newManager(t, d, nil)
-	_ = m.Handle(context.Background(), startCmd())
-	dir := seedScratch(t, m, "s1")
+	dir := seedScratch(t, m, "s1") // before the start: launchReserved refuses a marker-less dir
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
 
 	res := m.Handle(context.Background(), session.Command{CommandID: "stop", ServerID: "s1", Kind: "StopServer"})
 	if res.Success {
 		t.Fatalf("first stop = %+v, want failure (driver could not confirm termination)", res)
+	}
+	// The failure must be the ORPHAN one, not a short-circuit. A stop that never
+	// reached the driver refuses with SERVER_NOT_FOUND before attemptStop runs, and
+	// the retention assertion below then holds vacuously — which is exactly how this
+	// test passed for the wrong reason while the start was refused (issue #2828).
+	if res.ErrorCode != session.CommandErrorInternal {
+		t.Fatalf("first stop = %+v, want the unconfirmed-termination failure (INTERNAL); "+
+			"a SERVER_NOT_FOUND here means no instance was registered and the orphan path never ran", res)
 	}
 	if _, err := os.Stat(dir); err != nil {
 		t.Fatalf("scratch dir removed on a failed stop (the orphan may still be writing it): %v", err)
