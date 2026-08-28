@@ -8279,7 +8279,7 @@
     },
     "/api/communities/{community_id}/servers/{server_id}/files/directories": {
       "post": {
-        "description": "Create an (empty) directory at rest (file:edit, FR-FILE-*).\n\nAt rest only (Section 6.9): a running server is 409 ``server_unsettled``. The\npath is traversal-validated (422); the root path is rejected since the root\nalways exists (issue #1944). Both backends materialize the directory\n(fs: real empty directory; object storage: zero-byte ``.dir`` marker,\nissue #1125).",
+        "description": "Create an (empty) directory at rest (file:edit, FR-FILE-*).\n\nAt rest only (Section 6.9): a running server is 409 ``server_unsettled``. The\npath is traversal-validated (422); the root path is rejected since the root\nalways exists (issue #1944). The root ``server.properties`` path \u2014 and\nanything under it, whose missing parents make_dir creates \u2014 is 422\n``platform_managed_path``: the platform's writes need a file there, not a\ndirectory (issue #2812). Both backends materialize the directory\n(fs: real empty directory; object storage: zero-byte ``.dir`` marker,\nissue #1125).",
         "operationId": "make_directory_api_communities__community_id__servers__server_id__files_directories_post",
         "parameters": [
           {
@@ -8626,7 +8626,7 @@
     },
     "/api/communities/{community_id}/servers/{server_id}/files/rename": {
       "post": {
-        "description": "Rename/move a file at rest (file:edit, FR-FILE-*).\n\nAt rest only (Section 6.9): a running server is 409 ``server_unsettled``. Both\npaths are traversal-validated (422 on a bad path); a missing source is 404 and\nan existing destination is 409 ``destination_exists`` (rename never clobbers).\n\n**Platform-managed keys (issue #2809).** Both ends are guarded: renaming the\nroot ``server.properties`` away removes the keys the platform owns, and\nrenaming another file onto that name publishes its bytes there \u2014 either is\n422 ``platform_managed_key`` with the offending key in the ``key`` member. A\nsource larger than the edit cap is 413 rather than compared.",
+        "description": "Rename/move a file at rest (file:edit, FR-FILE-*).\n\nAt rest only (Section 6.9): a running server is 409 ``server_unsettled``. Both\npaths are traversal-validated (422 on a bad path); a missing source is 404 and\nan existing destination is 409 ``destination_exists`` (rename never clobbers).\n\n**Platform-managed keys (issue #2809).** Both ends are guarded: renaming the\nroot ``server.properties`` away removes the keys the platform owns, and\nrenaming another file onto that name publishes its bytes there \u2014 either is\n422 ``platform_managed_key`` with the offending key in the ``key`` member. A\nsource larger than the edit cap is 413 rather than compared.\n\n**A directory may not land on that path (issue #2812).** Renaming a DIRECTORY\nonto the root ``server.properties`` name \u2014 or to any path under it, whose\nmissing parents the rename creates \u2014 is 422 ``platform_managed_path``: the\nplatform's writes need a file there. Moving a directory already standing at\nthat name away is the cleanup path and still works.",
         "operationId": "rename_file_api_communities__community_id__servers__server_id__files_rename_post",
         "parameters": [
           {

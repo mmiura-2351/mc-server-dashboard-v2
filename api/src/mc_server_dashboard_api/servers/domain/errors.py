@@ -273,9 +273,12 @@ class InvalidFilePathError(ServerError):
     reason — and the same sentence — whether the server is at rest or running. A
     mutation whose DESTINATION name is past the backend's ``NAME_MAX`` carries
     ``"name_too_long"`` (issue #2433); an over-long SOURCE is a 404 miss instead, and
-    a non-directory blocking the path is :class:`FileAlreadyExistsError` (409). The
-    oversized case is not carried here — it is raised as
-    :class:`FileTooLargeError` (413) instead.
+    a non-directory blocking the path is :class:`FileAlreadyExistsError` (409). A
+    make-dir or directory rename that would leave a DIRECTORY at the root
+    ``server.properties`` path carries ``"platform_managed_path"`` (issue #2812):
+    the platform-managed-key guard compares bytes and a directory has none, so the
+    path itself is refused. The oversized case is not carried here — it is raised
+    as :class:`FileTooLargeError` (413) instead.
     """
 
     def __init__(self, message: str = "", *, reason: str = "invalid_path") -> None:

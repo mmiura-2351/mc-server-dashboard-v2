@@ -212,6 +212,30 @@ def _is_root_server_properties(rel_path: str) -> bool:
     return str(PurePosixPath(rel_path)) == _PROPERTIES_REL_PATH
 
 
+def _refuse_dir_at_root_properties(rel_path: str) -> None:
+    """Refuse a mutation putting a DIRECTORY at the root properties path (#2812).
+
+    ``rel_path`` is the path the operation materializes as a directory:
+    :class:`MakeDir`'s target, or a directory rename's destination. The
+    platform-managed-key guards cannot cover this case — a directory carries no
+    keys and a baseline read of one raises — yet a directory standing there is
+    exactly what the later platform-managed writes cannot survive: they publish a
+    file at that path.
+
+    Anything UNDER the name is refused too, because both doors create the
+    destination's missing parents (issue #2433): ``server.properties/logs`` puts a
+    directory at the guarded path just as directly as the name itself. A path is
+    refused by name alone, before any Storage call — the answer depends on
+    neither the file's presence nor its content.
+    """
+
+    normalized = str(PurePosixPath(rel_path))
+    if normalized == _PROPERTIES_REL_PATH or normalized.startswith(
+        f"{_PROPERTIES_REL_PATH}/"
+    ):
+        raise InvalidFilePathError(rel_path, reason="platform_managed_path")
+
+
 async def _current_properties(
     file_store: FileStore, community_id: CommunityId, server_id: ServerId
 ) -> bytes:
@@ -1289,7 +1313,9 @@ class MakeDir:
 
     At rest only (running -> 409). The path is traversal-validated; the root
     path (``.``/empty) is rejected with 422 since the root always exists
-    (issue #1944). Both backends materialize the directory (fs: real empty
+    (issue #1944), and the root ``server.properties`` path is rejected with 422
+    ``platform_managed_path`` since a directory there breaks the platform's own
+    writes (issue #2812). Both backends materialize the directory (fs: real empty
     directory; object storage: zero-byte ``.dir`` marker, issue #1125).
     """
 
@@ -1306,6 +1332,7 @@ class MakeDir:
         cleaned = [p for p in PurePosixPath(rel_path).parts if p not in ("", ".")]
         if not cleaned:
             raise InvalidFilePathError(rel_path)
+        _refuse_dir_at_root_properties(rel_path)
         # Hold the per-server lifecycle lock across the at-rest check and the
         # make-dir so a concurrent start cannot race the mutation (issue #827).
         async with self.lifecycle_lock.hold(server_id):
@@ -1333,7 +1360,10 @@ class RenameFile:
 
     **Directory rename** delegates to :meth:`FileStore.rename_dir` which moves the
     subtree atomically (fs ``os.rename``; object storage copy+delete). Like
-    :meth:`FileStore.delete_dir`, no per-file version capture.
+    :meth:`FileStore.delete_dir`, no per-file version capture. Its DESTINATION may
+    not be the root ``server.properties`` path (422 ``platform_managed_path``,
+    issue #2812); moving a directory already standing there AWAY is the cleanup
+    path and stays open.
     """
 
     uow: UnitOfWork
@@ -1374,6 +1404,7 @@ class RenameFile:
                 raise FileAlreadyExistsError(to_path)
 
             if is_dir:
+                _refuse_dir_at_root_properties(to_path)
                 await self.file_store.rename_dir(
                     community_id=community_id,
                     server_id=server_id,
