@@ -913,35 +913,54 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 	}
 
 	if !running {
-		// Refuse a stopped-id snapshot whose working dir does not exist (issue
-		// #1713): there is no working set to capture, so packing would upload an
-		// empty tar as a candidate new generation with the staleness guard disabled
-		// (readGeneration on an absent dir is 0, so the base-generation header is
+		// Refuse a stopped-id snapshot whose scratch holds no working set (issue
+		// #1713): there is nothing to capture, so packing would upload an empty tar
+		// as a candidate new generation with the staleness guard disabled
+		// (readGeneration on an unmarked dir is 0, so the base-generation header is
 		// omitted) — leaving the API-side empty-staging refusal as the only defense
-		// and burning a full pack+upload+refusal cycle. The usual cause is a benign
-		// duplicate: the final snapshot published, removeScratch GC'd the dir, but
-		// the CommandResult was lost on a dropped stream so the API re-dispatched.
-		// The worker keeps no tombstone that could tell that apart from a genuinely
-		// missing working set (e.g. never hydrated), so one distinct refusal covers
-		// both. SERVER_NOT_FOUND (not TRANSFER_FAILED): no working set is held for
-		// this id and no retry can succeed without a hydrate — a terminal
-		// condition, not a transient transfer failure. The check is race-free: the
-		// reservation above already holds off any hydrate/start that could create
-		// the dir concurrently. The running path needs no guard — a tracked
-		// instance's working dir was created by its start.
+		// and burning a full pack+upload+refusal cycle, again on every scheduler
+		// tick. The usual cause is a benign duplicate: the final snapshot published,
+		// removeScratch GC'd the dir, but the CommandResult was lost on a dropped
+		// stream so the API re-dispatched. The worker keeps no tombstone that could
+		// tell that apart from a genuinely missing working set (e.g. never
+		// hydrated), so one distinct refusal covers both. SERVER_NOT_FOUND (not
+		// TRANSFER_FAILED): no working set is held for this id and no retry can
+		// succeed without a hydrate — a terminal condition, not a transient transfer
+		// failure. The check is race-free: the reservation above already holds off
+		// any hydrate/start that could create the working set concurrently. The
+		// running path needs no guard — a tracked instance's working dir was created
+		// by its start.
+		//
+		// The PREDICATE is hasWorkingSet, not a directory stat (issue #2813): a
+		// scratch emptied in place, and one holding only the generation marker (or a
+		// crashed stamp's ".mcsd_generation-*" temp), passed the stat and reached the
+		// pack — which excludes exactly those files, so the upload staged zero files
+		// and the API refused it 400 empty_snapshot after the whole cycle, reporting
+		// the environment-dependent transfer_failed that points away from the cause.
+		// It is deliberately NOT the launch guard's marker predicate (issue #2802),
+		// which the sibling refusal below uses: what a launch needs is the held-claim
+		// token, so a marker-ONLY dir passes there (the 204 fresh-boot contract),
+		// while what a snapshot needs is something to capture, so the same dir is
+		// refused here. Content WITHOUT a marker packs, which is right — there is a
+		// world to publish.
 		//
 		// The "working dir absent" phrase in the message is load-bearing (issue
 		// #1790): the API's final-snapshot path keys on it (together with the
 		// SERVER_NOT_FOUND code) to downgrade this refusal from its data-loss
-		// ERROR to a benign-duplicate INFO — see _WORKING_SET_ABSENT_MARKER in
+		// ERROR to a benign-duplicate INFO, and the periodic scheduler reads the same
+		// pair as "nothing left to capture" (issue #2480) — see
+		// _WORKING_SET_ABSENT_MARKER in
 		// api/src/mc_server_dashboard_api/servers/application/lifecycle.py.
-		// Reword only together with that discriminator (and both sides' tests).
-		if _, err := os.Stat(workingDir); os.IsNotExist(err) {
+		// Reword only together with that discriminator (and both sides' tests). It is
+		// kept verbatim for the emptied and marker-only shapes too: the prose is a
+		// shade imprecise there, but the discriminator is exact — the same trade the
+		// launch guard made.
+		if !hasWorkingSet(workingDir) {
 			m.logger.Warn("snapshot refused: working dir absent for stopped id",
 				"server_id", cmd.ServerID, "reason", "working_set_absent")
 			return fail(cmd.CommandID, session.CommandErrorServerNotFound,
 				"instancemanager: snapshot refused: working dir absent (no working set held for this id: "+
-					"scratch already GC'd after a published final snapshot, or never hydrated)")
+					"scratch already GC'd after a published final snapshot, emptied out of band, or never hydrated)")
 		}
 	}
 

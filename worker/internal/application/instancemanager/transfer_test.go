@@ -3,6 +3,7 @@ package instancemanager
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -263,6 +264,92 @@ func TestSnapshotTriggerTransferFailureIsCoded(t *testing.T) {
 	res := m.Handle(context.Background(), snapshotCmd())
 	if res.Success || res.ErrorCode != session.CommandErrorTransferFailed {
 		t.Fatalf("SnapshotTrigger failure = %+v, want transfer-failed", res)
+	}
+}
+
+// A stopped-id snapshot over a scratch that holds NO WORKING SET is refused before
+// any pack or upload (issue #2813). The guard was a bare existence stat, so a
+// scratch emptied in place — or one holding only the generation marker — passed it:
+// the Worker packed nothing, the upload staged zero files, and the API's
+// 400 empty_snapshot staging gate refused the transfer only after the full cycle,
+// again on every scheduler tick, reporting a transfer failure that points away from
+// the cause. The predicate is hasWorkingSet (CONTENT), deliberately not the launch
+// guard's marker predicate (issue #2802): a marker-only dir boots a fresh world
+// there — the 204 contract — but has nothing to capture here.
+//
+// SERVER_NOT_FOUND carrying the "working dir absent" phrase, the same refusal an
+// absent dir earns (issue #1713): the API keys on the pair to read it as "nothing
+// left to capture" (_WORKING_SET_ABSENT_MARKER, lifecycle.py; issue #2480).
+func TestSnapshotTriggerRefusedWhenScratchHoldsNoWorkingSet(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		seed func(t *testing.T, dir string)
+	}{
+		{
+			name: "emptied in place",
+			seed: func(*testing.T, string) {},
+		},
+		{
+			name: "marker only",
+			seed: func(t *testing.T, dir string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(dir, generationFile), []byte("7"), 0o640); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "marker temp only",
+			seed: func(t *testing.T, dir string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(dir, generationFile+"-123"), []byte("7"), 0o640); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := &fakeTransfer{}
+			m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
+			dir := filepath.Join(m.scratchDir, "s1")
+			if err := os.MkdirAll(dir, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			tc.seed(t, dir)
+
+			res := m.Handle(context.Background(), snapshotCmd())
+
+			if res.Success {
+				t.Fatalf("SnapshotTrigger over a scratch holding no working set = %+v, want a refusal", res)
+			}
+			if res.ErrorCode != session.CommandErrorServerNotFound {
+				t.Fatalf("ErrorCode = %v, want %v", res.ErrorCode, session.CommandErrorServerNotFound)
+			}
+			if !strings.Contains(res.ErrorMessage, "working dir absent") {
+				t.Fatalf("refusal message = %q, want the API-pinned phrase %q", res.ErrorMessage, "working dir absent")
+			}
+			// The whole point of the guard: nothing packed and nothing uploaded. Both the
+			// combined and the split entry points are asserted so a regression cannot route
+			// around the check through either.
+			if len(tr.snapshots) != 0 || len(tr.packs) != 0 || len(tr.uploads) != 0 {
+				t.Fatalf("transfer calls = snapshots %v, packs %v, uploads %v; want none: the refusal must precede the pack",
+					tr.snapshots, tr.packs, tr.uploads)
+			}
+			// The refusal must not GC what it refused over: removeScratch runs only after a
+			// PUBLISHED snapshot, and eating a marker-only dir would destroy the held-claim
+			// token the launch guard reads (issue #2802).
+			if _, err := os.Stat(dir); err != nil {
+				t.Fatalf("working dir stat err = %v, want the refusal to leave the scratch in place", err)
+			}
+			// The stopped path's reservation is released, so the corrective hydrate is not
+			// refused BUSY behind this refusal (the leak shape of issue #1950).
+			m.mu.Lock()
+			leaked := m.reserved["s1"]
+			m.mu.Unlock()
+			if leaked {
+				t.Fatal("reserved[s1] leaked after the working-set refusal: the corrective hydrate would be refused BUSY")
+			}
+		})
 	}
 }
 
