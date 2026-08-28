@@ -25,24 +25,26 @@ detector against fixtures (not the real tree).
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
 # The banned call shape. ``_client`` is the endpoint-test client helper; wrapping
-# it in ``next(...)`` is the finalize-immediately bug this guards against.
-PATTERN = "next(_client("
+# it in ``next(...)`` is the finalize-immediately bug this guards against. The
+# whitespace tolerance matters: ``ruff format`` re-wraps a too-long call across
+# lines (``next(\n    _client(``), which a per-line substring match would miss.
+PATTERN = re.compile(r"next\(\s*_client\(")
 
 
 def find_violations(tests_root: Path) -> list[str]:
     """Return ``path:line`` messages for every ``PATTERN`` occurrence (sorted)."""
     violations: list[str] = []
     for path in sorted(tests_root.rglob("*.py")):
-        for lineno, line in enumerate(
-            path.read_text(encoding="utf-8").splitlines(), start=1
-        ):
-            if PATTERN in line:
-                rel = path.relative_to(tests_root.parent.parent)
-                violations.append(f"{rel}:{lineno}")
+        text = path.read_text(encoding="utf-8")
+        for match in PATTERN.finditer(text):
+            rel = path.relative_to(tests_root.parent.parent)
+            lineno = text.count("\n", 0, match.start()) + 1
+            violations.append(f"{rel}:{lineno}")
     return violations
 
 
@@ -95,15 +97,26 @@ def _self_test() -> int:
         (tests_root / "servers" / "test_bad.py").write_text(
             "client = next(_client(app))\n", encoding="utf-8"
         )
+        # The shape ``ruff format`` produces when the call is too long for one
+        # line -- it must be flagged just like the single-line form.
+        (tests_root / "servers" / "test_multiline.py").write_text(
+            "client = next(\n    _client(\n        _app(fake)\n    )\n)\n",
+            encoding="utf-8",
+        )
 
         got = find_violations(tests_root)
-        want = ["api/tests/identity/test_bad.py:2", "api/tests/servers/test_bad.py:1"]
+        want = [
+            "api/tests/identity/test_bad.py:2",
+            "api/tests/servers/test_bad.py:1",
+            "api/tests/servers/test_multiline.py:1",
+        ]
         if got != want:
             failures.append(f"detection: expected {want!r}, got {got!r}")
 
         # A clean tree reports nothing.
         (tests_root / "identity" / "test_bad.py").unlink()
         (tests_root / "servers" / "test_bad.py").unlink()
+        (tests_root / "servers" / "test_multiline.py").unlink()
         if find_violations(tests_root):
             failures.append("clean tree: expected no violations")
 
