@@ -233,7 +233,7 @@ async def _current_properties(
         return b""
 
 
-def _refuse_platform_key_change(current: bytes, incoming: bytes) -> None:
+async def _refuse_platform_key_change(current: bytes, incoming: bytes) -> None:
     """Raise when *incoming* changes a platform-managed key relative to *current*.
 
     The first offending key (sorted) names the refusal so the edge can say which
@@ -241,17 +241,20 @@ def _refuse_platform_key_change(current: bytes, incoming: bytes) -> None:
 
     *incoming* past :data:`MAX_EDIT_BYTES` is :class:`FileTooLargeError` (413)
     instead of a comparison. The comparison scans the whole body once per
-    platform-managed key, synchronously on the event loop, so letting an
-    upload-sized (:data:`MAX_UPLOAD_BYTES`, 512 MiB) body reach it is minutes of
-    blocked loop for one authenticated ``file:edit`` request. The cap costs
-    nothing honest: a real ``server.properties`` is kilobytes, and the PUT
-    already refuses a larger one for this very file. Capping every files-API
-    door also keeps the BASELINE bounded in practice: no oversized copy can be
-    planted through this API for a later guard to choke on reading back.
+    platform-managed key, so letting an upload-sized (:data:`MAX_UPLOAD_BYTES`,
+    512 MiB) body reach it is minutes of CPU for one authenticated ``file:edit``
+    request. The cap costs nothing honest: a real ``server.properties`` is
+    kilobytes, and the PUT already refuses a larger one for this very file.
+    Capping every files-API door also keeps the BASELINE bounded in practice: no
+    oversized copy can be planted through this API for a later guard to choke on
+    reading back.
 
     Only *incoming* is capped. An oversized *current* — which this API can no
-    longer produce — is still compared rather than refused, because refusing it
-    would leave exactly that pathological file undeletable.
+    longer produce, though a restore or an import still can — is still compared
+    rather than refused, because refusing it would leave exactly that
+    pathological file undeletable. That uncapped side is why the comparison runs
+    on a worker thread rather than on the event loop (issue #2821): minutes of
+    parsing for one such file would stall every other request for as long.
 
     Every route that can reach this must map :class:`FileTooLargeError` to 413.
     The PUT, upload, rename and rollback routes all do. The removal guards
@@ -261,7 +264,7 @@ def _refuse_platform_key_change(current: bytes, incoming: bytes) -> None:
 
     if len(incoming) > MAX_EDIT_BYTES:
         raise FileTooLargeError(str(len(incoming)))
-    changed = changed_platform_managed_keys(current, incoming)
+    changed = await asyncio.to_thread(changed_platform_managed_keys, current, incoming)
     if changed:
         raise PlatformManagedKeyError(changed[0])
 
@@ -290,7 +293,7 @@ async def _guard_at_rest_properties(
 
     if not _is_root_server_properties(rel_path):
         return
-    _refuse_platform_key_change(
+    await _refuse_platform_key_change(
         await _current_properties(file_store, community_id, server_id), incoming
     )
 
@@ -576,7 +579,7 @@ class WriteFile:
             # nothing is republished from this — it only makes every platform key
             # in the incoming text an addition, which is refused below.
             current = b""
-        _refuse_platform_key_change(current, content)
+        await _refuse_platform_key_change(current, content)
 
     async def _snapshot_authoritative(
         self, community_id: CommunityId, server_id: ServerId, rel_path: str
@@ -703,7 +706,7 @@ class RollbackFile:
                     rel_path=rel_path,
                     version_id=version_id,
                 )
-                _refuse_platform_key_change(
+                await _refuse_platform_key_change(
                     await _current_properties(self.file_store, community_id, server_id),
                     version_content,
                 )
@@ -958,7 +961,7 @@ class UploadFile:
                             properties_baseline = await _current_properties(
                                 self.file_store, community_id, server_id
                             )
-                        _refuse_platform_key_change(properties_baseline, data)
+                        await _refuse_platform_key_change(properties_baseline, data)
                 # Duplicate entry names (two members with the same path) are written
                 # in archive order, so the last occurrence wins — the same last-write
                 # semantics a sequence of plain writes would have. Left as-is (no
