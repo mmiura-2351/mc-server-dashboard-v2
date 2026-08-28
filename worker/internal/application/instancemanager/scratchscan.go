@@ -229,6 +229,17 @@ func hasWorkingSet(workingDir string) bool {
 	if err != nil {
 		return false
 	}
+	return holdsWorkingSet(children)
+}
+
+// holdsWorkingSet is hasWorkingSet's decision over entries the caller has already
+// read. Split out so a caller that must tell "holds no working set" from "cannot be
+// read" applies the SAME predicate without inheriting the swallow above
+// (handleSnapshot's stopped-id guard, PR #2840 review): there the false-on-error
+// answer would classify an EACCES/EMFILE/EIO as the benign refusal the API reads as
+// "nothing was lost". The swallow stays right for the scans above, which ADVERTISE
+// held sets — a set the Worker cannot prove it holds must not be advertised.
+func holdsWorkingSet(children []os.DirEntry) bool {
 	for _, child := range children {
 		if !strings.HasPrefix(child.Name(), generationFile) {
 			return true

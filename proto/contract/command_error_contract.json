@@ -119,10 +119,17 @@
       "name": "working_set_emptied",
       "description": [
         "no tracked instance, orphan or reservation; the id's dir EXISTS at the scratch",
-        "root but holds no generation marker -- the contents were destroyed in place, or",
-        "only a crashed 204 stamp's '.mcsd_generation-*' temp survives (issue #2802). The",
-        "#2499 guard was a directory stat, which this shape passed; the marker predicate",
-        "refuses it exactly as it refuses working_set_absent"
+        "root but is EMPTY of both -- no generation marker and no content -- because it",
+        "was destroyed in place, or because only a crashed 204 stamp's",
+        "'.mcsd_generation-*' temp survives (issues #2802, #2813). Both guards that",
+        "consult the scratch were directory stats this shape passed, and both now refuse",
+        "it exactly as they refuse working_set_absent -- but by DIFFERENT predicates,",
+        "because they ask different questions: a LAUNCH keys on the generation marker",
+        "(the held-claim token the skipped hydrate relied on), a stopped-id SNAPSHOT on",
+        "the working set's CONTENT (there has to be something to pack). This",
+        "precondition is where the two agree. They part company on a marker-ONLY dir,",
+        "which the launch accepts (the 204 fresh-boot contract) and the snapshot refuses",
+        "-- a shape no cell of this matrix keys on, filed as issue #2841"
       ]
     },
     {
@@ -296,7 +303,7 @@
     {"kind": "SnapshotTrigger", "precondition": "running_working_set_absent", "code": "ok", "why": "DRIVEN, and not what issue #2802 predicted (transfer_failed via the quiesce): the running path takes no working-set check by design -- it is reservation-free and the save-off/save-all bracket is its quiesce (issue #829 item 4) -- and both collaborators treat an absent root as empty rather than as an error, by explicit contract: scanRegionState yields an empty settled map, and packTar 'snapshots an empty/absent working dir to an empty tar'. So the Worker packs and offers nothing and answers ok. The production backstop is API-side: the upload stages zero files and is refused 400 empty_snapshot (dataplane/api/transfers.py) before any generation publishes, which reaches the Worker as the environment-dependent transfer_failed this table leaves unpinned -- a failed operation, not a precondition code. Recorded per the #202 discipline: the code is what driveRow shows, never the prediction"},
     {"kind": "SnapshotTrigger", "precondition": "instance_stopped", "code": "ok"},
     {"kind": "SnapshotTrigger", "precondition": "working_set_absent", "code": "server_not_found", "api": ["lifecycle.py:is_working_set_absent_refusal", "via lifecycle.py:StopServer._final_snapshot", "via snapshot_scheduler.py:RunSnapshotCadenceTick._dispatch"]},
-    {"kind": "SnapshotTrigger", "precondition": "working_set_emptied", "code": "ok", "why": "RECORDED, NOT FIXED (follow-up issue #2813): the stopped-id snapshot guard is still the bare directory stat this issue replaced on the launch path, so a dir emptied in place passes it and the pack proceeds over nothing. The production backstop is API-side, not here: the pack excludes the generation marker and its temps, so an emptied dir stages zero files and the transfer is refused 400 empty_snapshot (dataplane/api/transfers.py, storage/adapters/fs.py) before any generation is published. What it costs is a wasted pack+upload+refusal cycle, which is the same trade #1713 closed for the absent dir -- hence the follow-up rather than a silent 'ok'"},
+    {"kind": "SnapshotTrigger", "precondition": "working_set_emptied", "code": "server_not_found", "why": "the stopped-id guard's predicate is the working set's CONTENT -- at least one child that is not the generation marker or one of its '.mcsd_generation-*' temps -- not a directory stat (issue #2813). An emptied dir passed the stat, so the Worker packed nothing: the pack excludes the marker and its temps, the upload stages zero files, and the API refuses it 400 empty_snapshot (dataplane/api/transfers.py, storage/adapters/fs.py) only AFTER a full pack+upload -- the wasted cycle #1713 closed for the absent dir, repeated every scheduler tick, and reported as the environment-dependent transfer_failed, which points away from the cause. It is refused at the source instead, with the code and the pinned 'working dir absent' phrase the periodic scheduler already reads as 'nothing left to capture' (issue #2480). The predicate deliberately DIFFERS from the launch guard's on this same precondition: a marker-ONLY dir PASSES the launch guard (the 204 fresh-boot contract) but is refused here, because there is nothing for the pack to stage; content WITHOUT a marker packs, which is correct -- there is a world to capture. The directory is read at the guard rather than through hasWorkingSet, whose false-on-error answer would put an unreadable scratch (EACCES/EMFILE/EIO) on this row: only os.IsNotExist is the 'nothing held' statement, every other read error is a failed operation carrying the unpinned transfer_failed", "api": ["lifecycle.py:is_working_set_absent_refusal", "via lifecycle.py:StopServer._final_snapshot", "via snapshot_scheduler.py:RunSnapshotCadenceTick._dispatch"]},
     {"kind": "SnapshotTrigger", "precondition": "command_in_flight", "code": "busy", "api": ["command_dispatch.py:_SANITIZED_REASONS"]},
     {"kind": "SnapshotTrigger", "precondition": "orphan_pending", "code": "busy", "api": ["command_dispatch.py:_SANITIZED_REASONS"]},
     {"kind": "SnapshotTrigger", "precondition": "snapshot_reserve_race", "code": "invalid_state", "api": "command_failed", "why": "the code the API reads as 'already running' on a start, emitted here by a SNAPSHOT: sound only because no API site converges an observed state off a snapshot outcome (see the api column)"},

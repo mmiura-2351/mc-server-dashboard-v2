@@ -185,12 +185,17 @@ def is_working_set_absent_refusal(outcome: CommandOutcome) -> bool:
 
     True exactly for the two Worker sites that answer SERVER_NOT_FOUND with the
     pinned phrase, both meaning the id's working set is not held at the scratch root
-    (since issue #2802 the launch site's predicate is the generation marker, so a
-    scratch emptied in place says it as loudly as an absent directory):
+    — and neither of them a bare directory stat any more, so a scratch emptied in
+    place says it as loudly as an absent directory (the launch site keys on the
+    generation marker since issue #2802, the snapshot site on the working set's
+    content since issue #2813):
 
     * a stopped-id SnapshotTrigger whose scratch the Worker already GC'd after a
       PUBLISHED final snapshot (issue #1713) — a duplicate dispatch whose original
-      result was lost, not a data-loss event (issue #1790);
+      result was lost, not a data-loss event (issue #1790). Since issue #2813 it
+      also covers a scratch that exists but holds nothing to capture (emptied out of
+      band, or only the generation marker), refused before the pack instead of after
+      the ``400 empty_snapshot`` staging gate;
     * ``launchReserved``'s guard, which serves TWO kinds because every launch goes
       through it (issue #2802). On a StartServer the API sent WITHOUT a preceding
       hydrate it is the launch-time floor under the held-working-set inventory
