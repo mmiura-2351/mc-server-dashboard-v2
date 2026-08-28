@@ -685,8 +685,8 @@ world data is restored, the seed is not — retry the restore).
 
 - A `server.properties` edited outside the API — on the worker host, or inside the
   running container — is invisible to the platform until the next write path runs.
-  The DB keeps the tracked port and the file keeps the edit; the next port `PATCH`,
-  import, or restore overwrites it.
+  The DB keeps the tracked port and the file keeps the edit; the next port `PATCH`
+  that changes the port, or a restore, overwrites it.
 
 - The port `PATCH`'s file write and DB commit are not atomic. The file is
   rewritten *after* the commit, so the drift is one-way: a storage failure in
