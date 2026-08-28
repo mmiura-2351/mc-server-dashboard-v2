@@ -24,18 +24,17 @@ with the same rules (``worker/internal/javaproperties``), and the two test table
 (``PARITY_CASES`` / ``parityCases``) are mirrored to keep them from drifting.
 
 WRITES stay canonical: :func:`_set_property` always emits ``key=value``, never a
-respelling and never an escape. Two remnants follow from that and are NOT closed
-here:
+respelling -- but it does emit ``java.util.Properties.store``'s escapes, so what
+a caller submits is what ``Properties.load`` reads back. Unescaped, a newline in
+an override value ended the line and turned the rest of the value into further
+property lines, planted below the platform's own and therefore the ones Java
+reads (issue #2819). One remnant is NOT closed here:
 
-- A value containing a newline, or leading whitespace, or (for the first
-  character) an ``=``/``:``, round-trips as something else through Java. Nothing
-  the platform itself writes does that; :func:`apply_overrides` passes user text
-  through unescaped, which is the pre-existing gap.
 - Values are encoded UTF-8 (``surrogateescape``) while Java reads a
   ``server.properties`` as latin-1, so a non-latin-1 value the platform writes
-  (a ``resource-pack-prompt``, say) reaches the server mojibaked. Untouched
-  bytes are spliced through verbatim, so a file the platform did not write to is
-  preserved exactly.
+  (a ``resource-pack-prompt``, say) reaches the server mojibaked (issue #2820).
+  Untouched bytes are spliced through verbatim, so a file the platform did not
+  write to is preserved exactly.
 """
 
 from __future__ import annotations
@@ -119,6 +118,19 @@ class _Property:
 _BLANKS = b" \t\f"
 
 _HEX_DIGITS = "0123456789abcdefABCDEF"
+
+# The escapes ``java.util.Properties.store`` emits for a character that would
+# otherwise be read as structure rather than text. A newline is the dangerous one
+# (it ends the line, so the rest of a value becomes property lines of its own,
+# issue #2819) and a trailing backslash the subtle one (an odd run continues the
+# logical line onto the next, swallowing it).
+_ESCAPES = {"\\": "\\\\", "\n": "\\n", "\r": "\\r", "\t": "\\t", "\f": "\\f"}
+
+# The characters that carry meaning only in a LEADING position within a value: a
+# blank there is padding the reader skips, and ``=`` / ``:`` / ``#`` / ``!`` read
+# as the separator or as a comment marker. Inside a key each of them still ends
+# it, so a key escapes them everywhere -- as ``Properties.store`` does.
+_SPECIALS = frozenset("=:#! ")
 
 
 def _natural_line(content: bytes, offset: int) -> tuple[bytes, int]:
@@ -295,6 +307,31 @@ def _clear_property(content: bytes, key: str) -> bytes:
     return bytes(out)
 
 
+def _escape_key(key: str) -> str:
+    """Return *key* spelled so ``Properties.load`` reads it back verbatim.
+
+    Every :data:`_SPECIALS` character is escaped wherever it sits, because each
+    would otherwise end the key -- or, first on the line, start a comment.
+    """
+
+    return "".join(
+        "\\" + char if char in _SPECIALS else _ESCAPES.get(char, char) for char in key
+    )
+
+
+def _escape_value(value: str) -> str:
+    """Return *value* spelled so ``Properties.load`` reads it back verbatim.
+
+    :data:`_ESCAPES` applies wherever it matches, while a :data:`_SPECIALS`
+    character only needs escaping as the FIRST character -- past the separator
+    they are ordinary text, so a ``motd`` or a resource-pack URL keeps the
+    readable spelling an operator expects to find in the file.
+    """
+
+    escaped = "".join(_ESCAPES.get(char, char) for char in value)
+    return "\\" + escaped if value[:1] in _SPECIALS else escaped
+
+
 def _set_property(content: bytes, key: str, value: str) -> bytes:
     """Return *content* with *key* set to *value*, canonically and exactly once.
 
@@ -302,9 +339,17 @@ def _set_property(content: bytes, key: str, value: str) -> bytes:
     canonical spelling whatever spelling it had; every later line for the key is
     removed, because Java would read that one instead. When the file has no such
     line, ``key=value`` is appended. Other lines and their order are preserved.
+
+    Key and value are escaped on the way out (:func:`_escape_key`,
+    :func:`_escape_value`), so caller-supplied text is written as ONE property
+    line saying exactly what was submitted -- the write side of the same Java
+    rules :func:`_parse` reads with, and what keeps an override value from
+    injecting further lines (issue #2819).
     """
 
-    new_line = f"{key}={value}".encode(errors="surrogateescape")
+    new_line = f"{_escape_key(key)}={_escape_value(value)}".encode(
+        errors="surrogateescape"
+    )
     matches = [prop for prop in _parse(content) if prop.key == key]
     if not matches:
         if content and not content.endswith(b"\n"):
@@ -392,6 +437,12 @@ def apply_overrides(content: bytes, overrides: dict[str, str]) -> bytes:
     same key is dropped); if none exists, ``key=value`` is appended. Other lines
     and their order are preserved; the result ends with a single trailing newline
     (issue #1209).
+
+    These pairs are the one caller-supplied input this module writes, so the
+    escaping :func:`_set_property` applies is what makes each override exactly one
+    property line: a newline, a leading blank or a leading ``=``/``:`` in a value
+    is written escaped, and reads back as the text that was submitted rather than
+    as further lines the platform-managed-key guard never saw (issue #2819).
     """
 
     for key, value in overrides.items():
