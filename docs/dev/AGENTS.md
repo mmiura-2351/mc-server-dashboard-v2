@@ -208,6 +208,14 @@ Each one succeeds, or appears to; the damage surfaces later.
 - A new Alembic migration chains off `main`'s current head at the final
   rebase before merge; expect a renumber whenever another open PR also
   touches `api/migrations/` (CONTRIBUTING.md Section 5).
+- A precondition that test fixtures satisfy **by hand** changed (the launch
+  working-set guard's `.mcsd_generation` marker) → `worker-e2e-compile` only
+  compiles the `-tags e2e` fixtures, so a stale one fails only in CI. From the
+  repo root: `docker build -t mcsd-e2e-stub:latest worker/test/e2e/stub`, then
+  `cd worker && MCD_E2E_DOCKER=1 MCD_E2E_STUB_IMAGE=mcsd-e2e-stub:latest
+  go test -tags e2e -v -timeout 300s ./test/e2e/...` (keep the `-v`: an
+  all-skip run prints `ok` too). `relay/test/e2e/` is tagged the same way; run
+  it via `make relay-e2e` / `make bedrock-e2e`.
 - Exactly one category label; `Resolves #N` on its own line when a related
   issue exists (omit it when there is none); short imperative title; everything
   in English.
