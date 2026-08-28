@@ -75,6 +75,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     PluginAlreadyExistsError,
     PortAlreadyTakenError,
     ResourcePackInUseError,
+    ResourcePackNotFoundError,
     ScheduleNameAlreadyExistsError,
     ServerNameAlreadyExistsError,
     ServerNotFoundError,
@@ -93,7 +94,10 @@ from mc_server_dashboard_api.servers.domain.plugin import (
     PluginSource,
     ServerPlugin,
 )
-from mc_server_dashboard_api.servers.domain.resource_pack import ResourcePackId
+from mc_server_dashboard_api.servers.domain.resource_pack import (
+    ResourcePackAssignment,
+    ResourcePackId,
+)
 from mc_server_dashboard_api.servers.domain.schedule import (
     Cadence,
     Schedule,
@@ -529,6 +533,43 @@ async def test_resource_pack_delete_reraises_unknown_violation_untranslated() ->
     repo = SqlAlchemyResourcePackRepository(session)  # type: ignore[arg-type]
     with pytest.raises(IntegrityError):
         await repo.delete(ResourcePackId(uuid.uuid4()))
+
+
+# --- the assignment INSERT direction (issue #2784) ----------------------------
+# The same FK, read the other way: the INSERT names a resource_packs row that is
+# gone, which is not-found (404), not in-use (409). add_assignment flushes its own
+# staged row so the violation surfaces at a statement this repository owns --
+# left to the unit of work's commit it would hit the shared map, whose entry
+# carries the DELETE direction's meaning.
+
+
+def _assignment_entity() -> ResourcePackAssignment:
+    now = dt.datetime(2026, 8, 20, 12, 0, tzinfo=dt.timezone.utc)
+    return ResourcePackAssignment(
+        server_id=ServerId(uuid.uuid4()),
+        resource_pack_id=ResourcePackId(uuid.uuid4()),
+        require_resource_pack=False,
+        resource_pack_prompt=None,
+        assigned_by=uuid.uuid4(),
+        created_at=now,
+        updated_at=now,
+    )
+
+
+async def test_resource_pack_add_assignment_translates_fk_violation_at_flush() -> None:
+    session = _FakeFlushSession(
+        _integrity_error("fk_srv_rp_assignments_resource_pack_id_resource_packs")
+    )
+    repo = SqlAlchemyResourcePackRepository(session)  # type: ignore[arg-type]
+    with pytest.raises(ResourcePackNotFoundError):
+        await repo.add_assignment(_assignment_entity())
+
+
+async def test_resource_pack_add_assignment_reraises_unknown_violation() -> None:
+    session = _FakeFlushSession(_integrity_error("fk_some_other_constraint"))
+    repo = SqlAlchemyResourcePackRepository(session)  # type: ignore[arg-type]
+    with pytest.raises(IntegrityError):
+        await repo.add_assignment(_assignment_entity())
 
 
 def _attach_repo_with_execute_error(constraint: str) -> SqlAlchemyGroupRepository:

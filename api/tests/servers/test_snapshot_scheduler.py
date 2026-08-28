@@ -202,12 +202,14 @@ async def test_override_below_default_snapshots_sooner() -> None:
 
 
 # The Worker's working_set_absent refusal message, verbatim (issue #1713,
-# worker/internal/application/instancemanager/instancemanager.go handleSnapshot).
-# The API discriminator matches the "working dir absent" phrase inside it.
+# worker/internal/application/instancemanager/instancemanager.go handleSnapshot;
+# the guard's predicate is the working set's content since issue #2813, which is
+# what added the emptied-out-of-band cause). The API discriminator matches the
+# "working dir absent" phrase inside it.
 _WORKING_SET_ABSENT_MESSAGE = (
     "instancemanager: snapshot refused: working dir absent (no working set held "
-    "for this id: scratch already GC'd after a published final snapshot, or "
-    "never hydrated)"
+    "for this id: scratch already GC'd after a published final snapshot, emptied "
+    "out of band, or never hydrated)"
 )
 
 
