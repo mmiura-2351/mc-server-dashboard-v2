@@ -8,6 +8,7 @@ from mc_server_dashboard_api.servers.domain.server_properties import (
     PLATFORM_MANAGED_KEYS,
     RCON_PORT,
     ResourcePackProperties,
+    _get_property,
     _parse,
     _raw_values,
     apply_overrides,
@@ -235,6 +236,89 @@ def test_apply_overrides_preserves_other_lines() -> None:
 def test_apply_overrides_empty_dict_is_noop() -> None:
     content = b"motd=hi\n"
     assert apply_overrides(content, {}) == b"motd=hi\n"
+
+
+# --- write-side escaping (issue #2819) ----------------------------------------
+
+
+def test_apply_overrides_escapes_a_newline_in_a_value() -> None:
+    # The injection #2819 names: an unescaped newline in an override value ends
+    # the line, so the rest of the value becomes property lines of its own --
+    # below the platform's own rcon.password, which is the one Java then reads.
+    content = b"rcon.password=tok\nmotd=hi\n"
+    out = apply_overrides(content, {"motd": "hi\nrcon.password=evil"})
+    assert _get_property(out, "motd") == "hi\nrcon.password=evil"
+    assert _raw_values(out, "rcon.password") == ["tok"]
+
+
+def test_apply_overrides_writes_the_escaped_spelling() -> None:
+    # The written line, pinned: one logical line carrying the escape, not two.
+    assert apply_overrides(b"", {"motd": "a\nb"}) == rb"motd=a\nb" + b"\n"
+
+
+def test_apply_overrides_escapes_a_trailing_backslash_in_a_value() -> None:
+    # An odd trailing backslash run continues the logical line, so an unescaped
+    # one would swallow the next property line into the value.
+    content = b"motd=hi\nmax-players=20\n"
+    out = apply_overrides(content, {"motd": "C:\\path\\"})
+    assert _get_property(out, "motd") == "C:\\path\\"
+    assert _get_property(out, "max-players") == "20"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "=x",
+        ":x",
+        "#x",
+        "!x",
+        " x",
+        "  x",
+        "\tx",
+        "\fx",
+        "a\rb",
+        "a\tb",
+        "a\\b",
+        "",
+    ],
+)
+def test_apply_overrides_values_round_trip_through_a_java_parse(value: str) -> None:
+    out = apply_overrides(b"motd=old\nmax-players=20\n", {"motd": value})
+    assert _get_property(out, "motd") == value
+    assert _get_property(out, "max-players") == "20"
+
+
+@pytest.mark.parametrize("key", ["a=b", "a:b", "a b", "#a", "!a", "a\\b", "a\nb"])
+def test_apply_overrides_keys_round_trip_through_a_java_parse(key: str) -> None:
+    out = apply_overrides(b"motd=hi\n", {key: "v"})
+    assert _get_property(out, key) == "v"
+    assert _get_property(out, "motd") == "hi"
+
+
+@pytest.mark.parametrize("key", sorted(PLATFORM_MANAGED_KEYS))
+def test_no_override_value_can_add_a_platform_managed_key(key: str) -> None:
+    # The acceptance criterion of #2819: whatever the value carries, the guard's
+    # own reading of the platform's keys is untouched by the write.
+    current = apply_platform_properties(
+        b"",
+        game_port=25565,
+        rcon_password="tok",
+        resource_pack=ResourcePackProperties(
+            url="https://example.test/pack.zip",
+            sha1="a" * 40,
+            require=True,
+            prompt="Use it",
+        ),
+    )
+    out = apply_overrides(current, {"motd": f"hi\n{key}=evil"})
+    assert changed_platform_managed_keys(current, out) == []
+
+
+def test_apply_overrides_leaves_an_ordinary_value_readable() -> None:
+    # Only what Java would misread is escaped: a non-leading ``:`` is literal in
+    # a value, so a URL keeps the spelling an operator reading the file expects.
+    out = apply_overrides(b"", {"resource-pack": "https://example.test/pack.zip"})
+    assert out == b"resource-pack=https://example.test/pack.zip\n"
 
 
 # --- remove_keys (issue #1242) ------------------------------------------------
