@@ -382,8 +382,11 @@ def test_a_lone_surrogate_value_round_trips_without_raising() -> None:
 
 
 def test_ascii_platform_writes_are_byte_identical() -> None:
-    # #2820 changes the encoding, not the spelling: every platform-written value
-    # that is ASCII lands as exactly the bytes it did before.
+    # #2820 changes the encoding, not the spelling: a platform-written value in
+    # printable ASCII -- 0x20-0x7E, plus the characters _ESCAPES already spelled
+    # as escapes -- lands as exactly the bytes it did before. Outside that set
+    # the spelling does change, to the \uXXXX escape Properties.store emits, which
+    # Java reads identically.
     out = apply_platform_properties(
         b"",
         game_port=25565,
