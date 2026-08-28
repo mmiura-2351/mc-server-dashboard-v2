@@ -13,7 +13,12 @@ import (
 
 // seedScratch creates a non-empty scratch working dir for serverID so a test can
 // assert whether a stop/restart removed or retained it. It mirrors what a real
-// hydrate/run leaves behind (at least one file under scratchDir/<id>).
+// hydrate/run leaves behind (at least one file under scratchDir/<id>), which
+// since issue #2802 includes the GENERATION MARKER: a 200 hydrate embeds it in
+// the tree before the swap-in (issue #917) and a 204 stamps it as its only write,
+// so a marker-less dir is not a state any hydrate leaves — and it is the exact
+// state launchReserved's guard refuses. Content 0 keeps readGeneration's answer
+// what an unmarked dir gave before (an unknown/never-hydrated set).
 func seedScratch(t *testing.T, m *Manager, serverID string) string {
 	t.Helper()
 	dir := filepath.Join(m.scratchDir, serverID)
@@ -21,6 +26,9 @@ func seedScratch(t *testing.T, m *Manager, serverID string) string {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "level.dat"), []byte("world"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, generationFile), []byte("0"), 0o640); err != nil {
 		t.Fatal(err)
 	}
 	return dir

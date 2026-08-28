@@ -339,6 +339,153 @@ func TestStartRefusedWhenWorkingDirAbsent(t *testing.T) {
 	}
 }
 
+// A working dir holding ONLY the generation marker STARTS (issue #2802). That is
+// the 204 "nothing published yet" shape: writeGenerationGuarded MkdirAll's the dir
+// and stamps the marker as its only write, and booting a fresh world out of it is
+// the contract, not an accident. It is the case that decides the guard's predicate
+// — a content predicate ("level.dat present") would refuse this legitimate first
+// start, which is why the predicate is the marker and nothing else.
+func TestStartAcceptsMarkerOnlyWorkingDir(t *testing.T) {
+	d := &fakeDriver{}
+	m := newManager(t, d, nil)
+	dir := filepath.Join(m.scratchDir, "s1")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, generationFile), []byte("0"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	res := m.Handle(context.Background(), startCmd())
+
+	if !res.Success {
+		t.Fatalf("StartServer over a marker-only working dir = %+v, want success (the 204 contract)", res)
+	}
+	if d.startCount() != 1 {
+		t.Fatalf("driver started %d times, want 1", d.startCount())
+	}
+}
+
+// A scratch dir whose CONTENTS were destroyed while the directory itself survived
+// is refused exactly like an absent one (issue #2802). The #2499 guard was a bare
+// directory stat, so this shape passed it and booted the server into an empty
+// directory — the same #696 loss, one rmdir short of the case that was closed. The
+// predicate is the generation marker, so a dir holding only a CRASHED stamp's temp
+// sibling (".mcsd_generation-*", which no consumer treats as a marker) is refused
+// too: the claim the skipped hydrate relied on was never published.
+func TestStartRefusedWhenScratchEmptiedInPlace(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		seed func(t *testing.T, dir string)
+	}{
+		{
+			name: "empty dir",
+			seed: func(*testing.T, string) {},
+		},
+		{
+			name: "marker temp only",
+			seed: func(t *testing.T, dir string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(dir, generationFile+"-123"), []byte("7"), 0o640); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := &fakeDriver{}
+			m := newManager(t, d, nil)
+			dir := filepath.Join(m.scratchDir, "s1")
+			if err := os.MkdirAll(dir, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			tc.seed(t, dir)
+
+			res := m.Handle(context.Background(), startCmd())
+
+			if res.Success {
+				t.Fatalf("StartServer over an emptied working dir = %+v, want a refusal", res)
+			}
+			if res.ErrorCode != session.CommandErrorServerNotFound {
+				t.Fatalf("ErrorCode = %v, want %v", res.ErrorCode, session.CommandErrorServerNotFound)
+			}
+			if !strings.Contains(res.ErrorMessage, "working dir absent") {
+				t.Fatalf("refusal message = %q, want the API-pinned phrase %q", res.ErrorMessage, "working dir absent")
+			}
+			if d.startCount() != 0 {
+				t.Fatalf("driver started %d times, want 0: the refusal must precede driver.Start", d.startCount())
+			}
+			m.mu.Lock()
+			leaked := m.reserved["s1"]
+			m.mu.Unlock()
+			if leaked {
+				t.Fatal("reserved[s1] leaked after the working-set refusal: the corrective start would be refused BUSY")
+			}
+		})
+	}
+}
+
+// A RESTART of a RUNNING server whose working set was destroyed out of band is
+// refused on the RELAUNCH (issue #2802). Until the guard moved into launchReserved
+// it lived in handleStart only, so the restart's relaunch went straight to the
+// MkdirAll and booted the live server into an empty directory — #2499's hole
+// reached through a different verb. The stop is taken first (any recovery needs the
+// server stopped and the on-disk world is already forfeit), so the server is left
+// down and evicted, exactly as the port_conflict / image_missing relaunch rows; the
+// API's reconciler re-launches it WITH a hydrate.
+func TestRestartRefusedWhenWorkingSetDestroyed(t *testing.T) {
+	d := &fakeDriver{}
+	m := newManager(t, d, &fakeControl{reply: "ok"}).WithTransfer(&fakeTransfer{})
+	startRunning(t, m)
+	dir := filepath.Join(m.scratchDir, "s1")
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	res := m.Handle(context.Background(), session.Command{CommandID: "r", ServerID: "s1", Kind: "RestartServer"})
+
+	if res.Success {
+		t.Fatalf("RestartServer over a destroyed working set = %+v, want a refusal", res)
+	}
+	if res.ErrorCode != session.CommandErrorServerNotFound {
+		t.Fatalf("ErrorCode = %v, want %v", res.ErrorCode, session.CommandErrorServerNotFound)
+	}
+	if !strings.Contains(res.ErrorMessage, "working dir absent") {
+		t.Fatalf("refusal message = %q, want the API-pinned phrase %q", res.ErrorMessage, "working dir absent")
+	}
+	if res.CommandID != "r" {
+		t.Fatalf("CommandID = %q, want the RestartServer's own correlation id", res.CommandID)
+	}
+	if d.startCount() != 1 {
+		t.Fatalf("driver started %d times, want 1 (the original start only): the relaunch must be refused before driver.Start", d.startCount())
+	}
+	// The refusal must not manufacture the directory it refused over — that MkdirAll
+	// is precisely what made the empty boot look healthy.
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("working dir stat err = %v, want it to still be absent", err)
+	}
+	// The instance is evicted (the restart's stop confirmed) and the id is left
+	// unreserved, so the API's corrective re-launch is not refused BUSY behind it
+	// (the leak shape of issue #1950). Read both maps directly rather than inferring
+	// them from a follow-up command.
+	m.mu.Lock()
+	_, tracked := m.instances["s1"]
+	leaked := m.reserved["s1"]
+	m.mu.Unlock()
+	if tracked {
+		t.Fatal("instances[s1] still tracked after the refused relaunch: the server is down, not running")
+	}
+	if leaked {
+		t.Fatal("reserved[s1] leaked after the refused relaunch: the corrective start would be refused BUSY")
+	}
+	// And the corrective launch — the reconciler's redispatch_start after the API's
+	// own hydrate — succeeds once the working set is back.
+	seedScratch(t, m, "s1")
+	if start := m.Handle(context.Background(), startCmd()); !start.Success {
+		t.Fatalf("start after the refused relaunch = %+v, want success once the working set is present", start)
+	}
+}
+
 // The command's memory limit (bytes on the wire, #706) is converted to MiB on the
 // InstanceSpec ceiling; unset stays 0 (default heap).
 func TestStartConvertsMemoryLimitBytesToSpecMiB(t *testing.T) {

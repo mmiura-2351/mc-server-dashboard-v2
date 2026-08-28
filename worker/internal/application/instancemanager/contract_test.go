@@ -170,6 +170,28 @@ func driveRow(t *testing.T, row contractRow) session.CommandResult {
 		startRunning(t, m)
 		return m.Handle(ctx, contractCmd(t, row.Kind, serverID))
 
+	case "running_working_set_absent":
+		// A tracked RUNNING instance whose working-set claim is gone from the scratch
+		// root: start it, then destroy the id's dir out of band under the live process
+		// (issue #2802). The restart's RELAUNCH meets launchReserved's guard here.
+		m := newContractManager(t, &fakeDriver{})
+		startRunning(t, m)
+		if err := os.RemoveAll(filepath.Join(m.scratchDir, serverID)); err != nil {
+			t.Fatal(err)
+		}
+		return m.Handle(ctx, contractCmd(t, row.Kind, serverID))
+
+	case "working_set_emptied":
+		// No tracked instance, orphan or reservation, and the id's dir EXISTS at the
+		// scratch root but holds no generation marker: the contents were destroyed in
+		// place (issue #2802). It is the shape the #2499 directory stat passed and the
+		// marker predicate refuses.
+		m := newContractManager(t, &fakeDriver{})
+		if err := os.MkdirAll(filepath.Join(m.scratchDir, serverID), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		return m.Handle(ctx, contractCmd(t, row.Kind, serverID))
+
 	case "orphan_pending":
 		// A failed first Stop records the server as a failed-stop orphan; the row
 		// command then runs against that pending orphan (issue #251/#253).

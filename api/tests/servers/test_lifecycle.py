@@ -3164,6 +3164,67 @@ async def test_restart_of_not_running_server_is_not_running() -> None:
         )
 
 
+async def test_restart_over_a_destroyed_working_set_is_not_reported_as_not_running(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Issue #2802: the Worker's relaunch guard refuses a restart whose working set is
+    # not on its disk, with SERVER_NOT_FOUND and the pinned "working dir absent"
+    # phrase. The refusal is emitted AFTER the restart's own stop confirmed, so
+    # "server not running" -- what the generic SERVER_NOT_FOUND arm says -- would be a
+    # statement about a server this very restart just stopped, and would send the
+    # operator looking at lifecycle state instead of at a scratch disk being destroyed
+    # underneath a live Worker. Name it instead, and WARN: the recovery (the
+    # reconciler's redispatch_start, whose start meets the same guard and takes the
+    # #2499 replay) is automatic, and a self-healing recovery nobody can see is how
+    # the next occurrence gets harder to diagnose.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(
+            status=worker_status("RestartServer", "running_working_set_absent"),
+            message=(
+                "instancemanager: start refused: working dir absent "
+                "(/var/lib/mcsd/scratch/s): the hydrate was skipped for a working "
+                "set this Worker does not hold"
+            ),
+        )
+    )
+    use_case = RestartServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+
+    with (
+        caplog.at_level(logging.WARNING),
+        pytest.raises(CommandDispatchError) as excinfo,
+    ):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert not isinstance(excinfo.value, ServerNotRunningError)
+    assert excinfo.value.reason == "working_set_absent"
+    assert any(
+        "holds no working set" in r.getMessage()
+        and "destroyed out of band" in r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.WARNING
+    )
+    # Restart commits no desired-state change of its own beyond the compare-and-set
+    # that guarded the dispatch, and this refusal adds none: the row stays
+    # desired=running and assigned, which is what lets the reconciler heal it.
+    assert uow.commits == 1
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.desired_state is DesiredState.RUNNING
+    assert stored.assigned_worker_id == WorkerId(worker)
+
+
 async def test_restart_over_failed_stop_orphan_names_the_orphan() -> None:
     # Issue #2466: the Worker answers INVALID_STATE when it holds a failed-stop
     # orphan for the id -- a process it could not confirm dead, so probably still
