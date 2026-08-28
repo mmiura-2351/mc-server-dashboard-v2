@@ -28,11 +28,13 @@ respelling -- but it does emit ``java.util.Properties.store``'s escapes, so what
 a caller submits is what ``Properties.load`` reads back. Unescaped, a newline in
 an override value ended the line and turned the rest of the value into further
 property lines, planted below the platform's own and therefore the ones Java
-reads (issue #2819). The line is then encoded latin-1 -- the encoding Java reads
-the file in -- with whatever latin-1 cannot hold spelled as a Unicode escape, so
-a Japanese ``resource-pack-prompt`` reaches the server as itself rather than as
-the mojibake UTF-8 bytes made of it (issue #2820). Untouched bytes are spliced
-through verbatim, so a file the platform did not write to is preserved exactly.
+reads (issue #2819). Everything outside printable ASCII is spelled as the
+``\\uXXXX`` escape ``Properties.store`` emits, so a written line is pure ASCII
+however the file is later decoded: a Japanese ``resource-pack-prompt`` reaches
+the server as itself instead of as the mojibake UTF-8 bytes made of it, and the
+webui's UTF-8 file editor reads it back as itself too (issue #2820). Untouched
+bytes are spliced through verbatim, so a file the platform did not write to is
+preserved exactly.
 """
 
 from __future__ import annotations
@@ -308,17 +310,26 @@ def _clear_property(content: bytes, key: str) -> bytes:
 def _escape_char(char: str) -> str:
     """Return the spelling *char* is written as, inside a key or inside a value.
 
-    A structural character takes its :data:`_ESCAPES` spelling; a character
-    latin-1 cannot hold -- the file's encoding -- becomes the Unicode escape
-    ``Properties.store`` emits for it, one per UTF-16 unit, so a code point above
-    the BMP is written as the surrogate pair a Java string holds it as. The
-    backslashes emitted here are output, never input to another pass, so a
-    literal backslash in the text is still the one thing that doubles.
+    A structural character takes its :data:`_ESCAPES` spelling; anything outside
+    printable ASCII becomes the Unicode escape ``Properties.store`` emits for it,
+    one per UTF-16 unit, so a code point above the BMP is written as the
+    surrogate pair a Java string holds it as. The backslashes emitted here are
+    output, never input to another pass, so a literal backslash in the text is
+    still the one thing that doubles.
+
+    The threshold is ``Properties.store(OutputStream)``'s own -- escape
+    everything outside ``0x20``-``0x7E`` -- and NOT "whatever latin-1 cannot
+    hold", because Java is not the file's only reader. A raw ``0xE9`` byte is the
+    right ``e``-acute to a latin-1 reader alone: the webui reads the file through
+    a UTF-8 decoder, which turns that byte into U+FFFD, so saving the text back
+    would report the platform's own key as changed and refuse the write. The
+    escape is the right spelling to EVERY reader, and costs nothing -- printable
+    ASCII writes are unchanged and Java reads both spellings identically.
     """
 
     if char in _ESCAPES:
         return _ESCAPES[char]
-    if ord(char) <= 0xFF:
+    if 0x20 <= ord(char) <= 0x7E:
         return char
     units = char.encode("utf-16-be", "surrogatepass").hex().upper()
     return "".join("\\u" + units[i : i + 4] for i in range(0, len(units), 4))
@@ -363,10 +374,11 @@ def _set_property(content: bytes, key: str, value: str) -> bytes:
     rules :func:`_parse` reads with, and what keeps an override value from
     injecting further lines (issue #2819).
 
-    The escaped line is latin-1, the encoding ``Properties.load(InputStream)``
-    reads the file in, because :func:`_escape_char` has already spelled every
-    character latin-1 cannot hold as an escape -- so the encode is total and
-    what the server reads back is what was submitted (issue #2820).
+    The escaped line is pure ASCII, because :func:`_escape_char` has already
+    spelled everything outside ``0x20``-``0x7E`` as an escape -- so the latin-1
+    encode (the encoding ``Properties.load(InputStream)`` reads the file in) is
+    total, and every reader of the file agrees on what was submitted whichever
+    encoding it assumes (issue #2820).
     """
 
     new_line = f"{_escape_key(key)}={_escape_value(value)}".encode("latin-1")

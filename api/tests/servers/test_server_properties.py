@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import random
+import shutil
+import subprocess
+from pathlib import Path
+
 import pytest
 
 from mc_server_dashboard_api.servers.domain.server_properties import (
@@ -335,15 +340,28 @@ def test_resource_pack_prompt_round_trips_a_non_latin1_value() -> None:
 
 def test_a_non_latin1_value_is_written_as_unicode_escapes() -> None:
     # The spelling java.util.Properties.store emits, pinned: the file stays
-    # latin-1 and the escape is what carries the code point.
+    # line stays pure ASCII and the escape is what carries the code point.
     assert apply_overrides(b"", {"motd": "日本"}) == rb"motd=\u65E5\u672C" + b"\n"
 
 
-def test_a_latin1_value_is_written_as_latin1_bytes() -> None:
-    # Only what latin-1 cannot hold is escaped, so an accented motd is written as
-    # the very byte such a file already carries (a latin-1 motd is ordinary,
-    # #2623) rather than a gratuitous é.
-    assert apply_overrides(b"", {"motd": "café"}) == b"motd=caf\xe9\n"
+def test_a_latin1_value_is_written_as_a_unicode_escape() -> None:
+    # Properties.store's threshold, not "whatever latin-1 can hold": a raw 0xE9
+    # byte is the right e-acute to a latin-1 reader alone, while the escape is
+    # the right one to every reader of the file.
+    out = apply_overrides(b"", {"motd": "café"})
+    assert out == rb"motd=caf\u00E9" + b"\n"
+    assert _get_property(out, "motd") == "café"
+
+
+def test_a_written_line_carries_no_non_ascii_byte() -> None:
+    # What makes a platform write survivable end to end: the webui reads the file
+    # through a UTF-8 decoder, so a raw non-ASCII byte would come back as U+FFFD
+    # and saving the text again would report resource-pack-prompt -- a key the
+    # platform owns -- as changed, refusing the write with a 409.
+    out = set_resource_pack_properties(
+        b"", url=_RP_URL, sha1=_RP_SHA1, prompt="Télécharge パック"
+    )
+    assert out.isascii()
 
 
 def test_an_astral_value_is_written_as_a_surrogate_pair() -> None:
@@ -356,8 +374,8 @@ def test_an_astral_value_is_written_as_a_surrogate_pair() -> None:
 
 
 def test_a_lone_surrogate_value_round_trips_without_raising() -> None:
-    # An unpaired surrogate is above U+00FF too, so it is written as the escape
-    # Properties.store emits instead of reaching a strict encoder.
+    # An unpaired surrogate is outside printable ASCII too, so it is written as
+    # the escape Properties.store emits, instead of reaching a strict encoder.
     out = apply_overrides(b"", {"motd": "\ud800"})
     assert out == rb"motd=\uD800" + b"\n"
     assert _get_property(out, "motd") == "\ud800"
@@ -911,3 +929,188 @@ def test_set_rcon_keeps_a_colon_form_password() -> None:
     # uses, so a colon-form credential is a live one and is preserved as it is.
     out = set_rcon_properties(b"rcon.password:known\n", password="generated")
     assert _raw_values(out, "rcon.password") == ["known"]
+
+
+# --- checked against the reference java.util.Properties (issue #2820) ---------
+
+# The escapes written above are only right if the reference implementation reads
+# them back as what was submitted, and no Python reimplementation can settle
+# that -- _parse is the same author's reading of the same spec. So when a JDK is
+# on PATH the writer is checked against java.util.Properties itself; without one
+# this skips and the _parse pins stand on their own (this module's CI is
+# Python-only).
+#
+# The probe prints, per file, every UTF-16 unit of the key and of the value as
+# hex -- what a Java string is made of -- so an astral code point and a lone
+# surrogate survive the comparison instead of collapsing on the way out. Fields
+# are space-separated, which no hex dump or file name here contains, and that
+# keeps the Java source free of escapes of its own.
+_PROBE_JAVA = """\
+import java.io.FileInputStream;
+import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.List;
+import java.util.Map;
+import java.util.Properties;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+public class Probe {
+    static String hex(String s) {
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < s.length(); i++) {
+            out.append(String.format("%04x", (int) s.charAt(i)));
+        }
+        return out.toString();
+    }
+
+    public static void main(String[] args) throws Exception {
+        List<Path> files;
+        try (Stream<Path> paths = Files.list(Paths.get(args[0]))) {
+            files = paths.sorted().collect(Collectors.toList());
+        }
+        StringBuilder out = new StringBuilder();
+        for (Path file : files) {
+            Properties props = new Properties();
+            try (InputStream in = new FileInputStream(file.toFile())) {
+                props.load(in);
+            }
+            out.append(file.getFileName().toString());
+            if (props.size() == 1) {
+                Map.Entry<Object, Object> e = props.entrySet().iterator().next();
+                out.append(' ').append(hex((String) e.getKey()));
+                out.append(' ').append(hex((String) e.getValue()));
+            } else {
+                out.append(" properties:").append(props.size());
+            }
+            out.append(System.lineSeparator());
+        }
+        System.out.print(out);
+    }
+}
+"""
+
+
+def _java_runs_source_files() -> bool:
+    """True when a JDK able to execute a ``.java`` source file is on PATH.
+
+    A bare ``java`` is not enough: source-file mode compiles in memory, so a
+    runtime without ``jdk.compiler`` would fail the run rather than skip it.
+    """
+
+    if shutil.which("java") is None:
+        return False
+    modules = subprocess.run(
+        ["java", "--list-modules"], capture_output=True, text=True, timeout=60
+    )
+    return "jdk.compiler" in modules.stdout
+
+
+_JDK_ON_PATH = _java_runs_source_files()
+
+
+def _utf16_units(text: str) -> str:
+    """Return *text* as the hex of its UTF-16 units, which a Java string is."""
+
+    return text.encode("utf-16-be", "surrogatepass").hex()
+
+
+def _reference_cases() -> list[tuple[str, str]]:
+    """Return the (key, value) pairs the reference check writes and reads back.
+
+    The fixed pairs are the ones the escaping was written for (#2819's injection
+    and leading-character cases, #2820's encoding ones); the drawn pairs mix
+    those alphabets so the two rules meet in every combination.
+    """
+
+    keys = [
+        "motd",
+        "resource-pack-prompt",
+        "a=b",
+        "a:b",
+        "a b",
+        "#a",
+        "!a",
+        "a\\b",
+        "a\nb",
+        "\u65e5",
+        "\U0001f600",
+        "\ud800",
+    ]
+    values = [
+        "",
+        "hi",
+        "25565",
+        "https://example.test/pack.zip",
+        "hi\nrcon.password=evil",
+        "C:\\path\\",
+        " leading",
+        "=lead",
+        ":lead",
+        "#lead",
+        "!lead",
+        "trailing ",
+        "a\tb\fc\rd",
+        "\\",
+        "caf\u00e9",
+        "\u65e5\u672c\u8a9e",
+        "\U0001f600",
+        "\ud800",
+        "\udfff",
+    ]
+    pools = [
+        "abcXYZ019 -_./",
+        "=:#!\\ \t\f\n\r",
+        "".join(chr(code) for code in range(0x80, 0x100)),
+        "\u65e5\u672c\u8a9e\u00e9\u00df\u03a9\u0416\ud55c",
+        "".join(chr(code) for code in (0x1F600, 0x10000, 0x10FFFF, 0x2070E)),
+        "".join(chr(code) for code in (0xD800, 0xDBFF, 0xDC00, 0xDFFF)),
+    ]
+    cases = [(key, value) for key in keys for value in values]
+    rng = random.Random(2820)
+    for _ in range(1500):
+        pool = rng.choice(pools) + rng.choice(pools)
+        key = "".join(rng.choice(pool) for _ in range(rng.randint(1, 8)))
+        value = "".join(rng.choice(pool) for _ in range(rng.randint(0, 12)))
+        cases.append((key, value))
+    return cases
+
+
+@pytest.mark.skipif(not _JDK_ON_PATH, reason="no JDK on PATH")
+def test_writes_read_back_through_java_properties_load(tmp_path: Path) -> None:
+    # Every write, through the reader the Minecraft server itself uses: key and
+    # value must come back UTF-16 unit for UTF-16 unit.
+    cases = _reference_cases()
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+    expected: dict[str, str] = {}
+    for index, (key, value) in enumerate(cases):
+        name = f"{index:06d}.properties"
+        (cases_dir / name).write_bytes(apply_overrides(b"", {key: value}))
+        expected[name] = f"{_utf16_units(key)} {_utf16_units(value)}"
+    probe = tmp_path / "Probe.java"
+    probe.write_text(_PROBE_JAVA, encoding="ascii")
+
+    result = subprocess.run(
+        ["java", str(probe), str(cases_dir)],
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stderr
+
+    actual: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        name, _, dump = line.partition(" ")
+        actual[name] = dump
+    mismatches = [
+        (name, expected[name], actual.get(name))
+        for name in expected
+        if actual.get(name) != expected[name]
+    ]
+    assert not mismatches, (
+        f"{len(mismatches)} of {len(cases)} writes did not read back as written: "
+        f"{mismatches[:3]}"
+    )
