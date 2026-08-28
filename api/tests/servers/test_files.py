@@ -3676,7 +3676,7 @@ async def test_delete_root_properties_over_the_edit_cap_is_allowed(
 # a directory carries no keys and a baseline read of one raises. But a directory
 # standing at the root ``server.properties`` path is precisely what the later
 # platform-managed writes cannot survive -- the port rewrite finds a directory
-# where it must publish a file. The two doors that can materialize one there --
+# where it must publish a file. The two doors this change closes --
 # ``make_dir`` and a directory rename's destination -- refuse it by path, before
 # any Storage call. Both create the destination's missing parents, so a path
 # UNDER the guarded name puts a directory there just as surely.

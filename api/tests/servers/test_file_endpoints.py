@@ -2554,7 +2554,7 @@ def test_rollback_oversized_version_is_413() -> None:
 
 # --- no directory at the root server.properties path (issue #2812) ---------
 #
-# The two routes that can materialize one there answer 422 with the
+# The two routes this change closes answer 422 with the
 # ``platform_managed_path`` reason, pinned per route so the Web UI's switch on
 # ``reason`` sees the same contract from both.
 
