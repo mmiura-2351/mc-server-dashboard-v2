@@ -116,8 +116,8 @@ func TestContainerForgeInstallThenLaunch(t *testing.T) {
 	// install step. Free ephemeral ports avoid colliding with the default
 	// 25565/25575 (and anything else on the host).
 	game, rcon := freePort(t), freePort(t)
-	writeTree(t, scratchDir, map[string]string{
-		serverID + "/server.properties": "server-port=" + game + "\nrcon.port=" + rcon + "\n",
+	seedWorkingSet(t, scratchDir, serverID, map[string]string{
+		"server.properties": "server-port=" + game + "\nrcon.port=" + rcon + "\n",
 	})
 
 	// Always remove both the harness's launch and install containers, even on a
@@ -239,9 +239,9 @@ func TestContainerForgeInstalledSkipsInstall(t *testing.T) {
 	// Seed the working dir WITH the args file already present, so the launch plan
 	// skips the install step.
 	game, rcon := freePort(t), freePort(t)
-	writeTree(t, scratchDir, map[string]string{
-		serverID + "/server.properties":   "server-port=" + game + "\nrcon.port=" + rcon + "\n",
-		serverID + "/" + forgeArgsfileRel: "stub forge args file\n",
+	seedWorkingSet(t, scratchDir, serverID, map[string]string{
+		"server.properties": "server-port=" + game + "\nrcon.port=" + rcon + "\n",
+		forgeArgsfileRel:    "stub forge args file\n",
 	})
 
 	t.Cleanup(func() {

@@ -50,6 +50,32 @@ const (
 	stubMCVersion = "1.20.4"
 )
 
+// generationMarkerFile is the working-dir-relative generation marker every real
+// hydrate leaves behind (instancemanager/generation.go: a 200 hydrate embeds it in
+// the tree before the swap-in rename, a 204 stamps it as its only write). Since
+// issue #2802 it is the LAUNCH GUARD's predicate — launchReserved refuses a launch
+// over a working set carrying no marker, because that is precisely the claim a
+// skipped hydrate relied on — so a hand-seeded working set that omits it has its
+// StartServer refused before the driver is ever reached. The name is spelled out
+// here rather than imported because the const is unexported in each package that
+// owns it; those packages pin the literal in their own
+// generation_marker_name_test.go.
+const generationMarkerFile = ".mcsd_generation"
+
+// seedWorkingSet materialises a working set for serverID under scratchDir: the
+// caller's {working-dir-relative path: content}, plus the generation marker (above)
+// without which no launch in this harness gets past instancemanager's guard.
+// Content "0" matches what the unit fixtures seed — readGeneration then answers
+// what an unmarked dir answered before the guard existed (a never-hydrated set).
+func seedWorkingSet(t *testing.T, scratchDir, serverID string, files map[string]string) {
+	t.Helper()
+	tree := map[string]string{serverID + "/" + generationMarkerFile: "0"}
+	for rel, content := range files {
+		tree[serverID+"/"+rel] = content
+	}
+	writeTree(t, scratchDir, tree)
+}
+
 // errNoRCON is returned by the RCON openers so graceful stop falls back to
 // `docker stop`: the stub image runs no RCON listener.
 var errNoRCON = errors.New("e2e: rcon unavailable for stub")
@@ -128,8 +154,8 @@ func TestContainerRestartRecreatesContainer(t *testing.T) {
 	// the working dir's server.properties with free ephemeral ports so the harness
 	// container binds its own ports and never fights for the defaults.
 	game, rcon := freePort(t), freePort(t)
-	writeTree(t, scratchDir, map[string]string{
-		serverID + "/server.properties": "server-port=" + game + "\nrcon.port=" + rcon + "\n",
+	seedWorkingSet(t, scratchDir, serverID, map[string]string{
+		"server.properties": "server-port=" + game + "\nrcon.port=" + rcon + "\n",
 	})
 
 	// Always remove the harness's own container, even on a mid-test failure, so a
