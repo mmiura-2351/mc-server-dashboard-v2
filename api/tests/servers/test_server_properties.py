@@ -339,8 +339,8 @@ def test_resource_pack_prompt_round_trips_a_non_latin1_value() -> None:
 
 
 def test_a_non_latin1_value_is_written_as_unicode_escapes() -> None:
-    # The spelling java.util.Properties.store emits, pinned: the file stays
-    # line stays pure ASCII and the escape is what carries the code point.
+    # The spelling java.util.Properties.store emits, pinned: the written line
+    # stays pure ASCII and the escape is what carries the code point.
     assert apply_overrides(b"", {"motd": "日本"}) == rb"motd=\u65E5\u672C" + b"\n"
 
 
