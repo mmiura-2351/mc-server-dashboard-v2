@@ -2550,3 +2550,48 @@ def test_rollback_oversized_version_is_413() -> None:
     )
     assert resp.status_code == 413
     assert resp.json()["reason"] == "file_too_large"
+
+
+# --- no directory at the root server.properties path (issue #2812) ---------
+#
+# The two routes that can materialize one there answer 422 with the
+# ``platform_managed_path`` reason, pinned per route so the Web UI's switch on
+# ``reason`` sees the same contract from both.
+
+
+def test_mkdir_at_root_properties_path_is_422_platform_managed_path() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        mkdir=_FakeUseCase(
+            error=InvalidFilePathError(
+                "server.properties", reason="platform_managed_path"
+            )
+        ),
+    )
+    client = _client(app)
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/directories"),
+        params={"path": "server.properties"},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "platform_managed_path"
+
+
+def test_rename_dir_onto_root_properties_path_is_422_platform_managed_path() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        rename=_FakeUseCase(
+            error=InvalidFilePathError(
+                "server.properties", reason="platform_managed_path"
+            )
+        ),
+    )
+    client = _client(app)
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/rename"),
+        json={"from": "staged", "to": "server.properties"},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "platform_managed_path"

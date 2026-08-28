@@ -3668,3 +3668,115 @@ async def test_delete_root_properties_over_the_edit_cap_is_allowed(
 
     assert compared == [(oversized, b"")]
     assert store.deleted_files == ["server.properties"]
+
+
+# --- no directory at the root server.properties path (issue #2812) ---------
+#
+# The key guards above compare BYTES, which is why they let a directory through:
+# a directory carries no keys and a baseline read of one raises. But a directory
+# standing at the root ``server.properties`` path is precisely what the later
+# platform-managed writes cannot survive -- the port rewrite finds a directory
+# where it must publish a file. The two doors that can materialize one there --
+# ``make_dir`` and a directory rename's destination -- refuse it by path, before
+# any Storage call. Both create the destination's missing parents, so a path
+# UNDER the guarded name puts a directory there just as surely.
+
+
+async def test_mkdir_at_root_properties_path_is_refused() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    use_case = MakeDir(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(InvalidFilePathError) as caught:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="server.properties",
+        )
+    assert caught.value.reason == "platform_managed_path"
+    assert store.made_dirs == []
+
+
+async def test_mkdir_under_root_properties_path_is_refused() -> None:
+    # make_dir creates missing parents, so this materializes a directory at the
+    # guarded path itself.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    use_case = MakeDir(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(InvalidFilePathError) as caught:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="server.properties/logs",
+        )
+    assert caught.value.reason == "platform_managed_path"
+    assert store.made_dirs == []
+
+
+async def test_mkdir_of_a_non_root_properties_path_is_allowed() -> None:
+    # A same-named path elsewhere in the tree is ordinary user data, exactly as
+    # the key guards treat it.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    use_case = MakeDir(uow=_stopped_uow(community, server_id), file_store=store)
+
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="backups/server.properties",
+    )
+    assert store.made_dirs == ["backups/server.properties"]
+
+
+async def test_rename_dir_onto_root_properties_path_is_refused() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    store.dirs["staged"] = []
+    use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(InvalidFilePathError) as caught:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            from_path="staged",
+            to_path="server.properties",
+        )
+    assert caught.value.reason == "platform_managed_path"
+    assert store.renamed_dirs == []
+
+
+async def test_rename_dir_under_root_properties_path_is_refused() -> None:
+    # rename_dir creates the destination's missing parents (#2433), so this too
+    # leaves a directory at the guarded path.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    store.dirs["staged"] = []
+    use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(InvalidFilePathError) as caught:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            from_path="staged",
+            to_path="server.properties/staged",
+        )
+    assert caught.value.reason == "platform_managed_path"
+    assert store.renamed_dirs == []
+
+
+async def test_rename_root_properties_directory_away_is_allowed() -> None:
+    # The cleanup path stays open: a directory already standing at the name is
+    # movable away, the same posture the delete guard takes (#2809).
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    store.dirs["server.properties"] = []
+    use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        from_path="server.properties",
+        to_path="stale.properties",
+    )
+    assert store.renamed_dirs == [("server.properties", "stale.properties")]
