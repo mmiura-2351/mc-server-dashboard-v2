@@ -752,6 +752,21 @@ def test_set_side_unsettled_is_409() -> None:
     assert resp.status_code == 409
 
 
+def test_set_side_already_exists_is_409() -> None:
+    pid = uuid.uuid4()
+    app = _app(
+        member=True,
+        allow=True,
+        set_side=_FakeUseCase(error=PluginAlreadyExistsError("x")),
+    )
+    client = _client(app)
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), f"/{pid}/side"), json={"side": "client"}
+    )
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "plugin_already_exists"
+
+
 def test_set_side_non_member_is_404() -> None:
     pid = uuid.uuid4()
     app = _app(member=False, allow=True, set_side=_FakeUseCase(result=_plugin()))
