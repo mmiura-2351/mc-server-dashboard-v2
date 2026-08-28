@@ -3471,9 +3471,9 @@ async def test_rollback_root_properties_differing_only_in_user_keys_is_allowed()
 
 
 async def test_upload_oversized_root_properties_is_too_large() -> None:
-    # The comparison scans the whole body once per platform key, on the event
-    # loop, so an upload-sized (512 MiB) body must never reach it: the file the
-    # PUT caps at MAX_EDIT_BYTES is capped identically on every other door.
+    # The comparison scans the whole body once per platform key, so an
+    # upload-sized (512 MiB) body must never reach it: the file the PUT caps at
+    # MAX_EDIT_BYTES is capped identically on every other door.
     community, server_id = uuid.uuid4(), uuid.uuid4()
     store = FakeFileStore()
     store.files["server.properties"] = _CURRENT_PROPS
@@ -3626,9 +3626,14 @@ async def test_platform_key_comparison_does_not_block_the_event_loop(
             rel_path="server.properties",
         )
     )
-    assert await asyncio.to_thread(comparing.wait, 10), "the comparison never ran"
-    release.set()
-    await task
+    try:
+        assert await asyncio.to_thread(comparing.wait, 10), "the comparison never ran"
+    finally:
+        # Unblock the comparison and retrieve the task's outcome on every path, so
+        # a failed assertion above does not leave its exception for the GC to
+        # report as "Task exception was never retrieved".
+        release.set()
+        await task
 
     assert store.deleted_files == ["server.properties"]
 
