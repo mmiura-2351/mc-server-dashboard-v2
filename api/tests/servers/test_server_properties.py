@@ -288,7 +288,7 @@ def test_apply_overrides_values_round_trip_through_a_java_parse(value: str) -> N
     assert _get_property(out, "max-players") == "20"
 
 
-@pytest.mark.parametrize("key", ["a=b", "a:b", "a b", "#a", "!a", "a\\b", "a\nb"])
+@pytest.mark.parametrize("key", ["a=b", "a:b", "a b", "#a", "!a", "a\\b", "a\nb", "日"])
 def test_apply_overrides_keys_round_trip_through_a_java_parse(key: str) -> None:
     out = apply_overrides(b"motd=hi\n", {key: "v"})
     assert _get_property(out, key) == "v"
@@ -319,6 +319,71 @@ def test_apply_overrides_leaves_an_ordinary_value_readable() -> None:
     # a value, so a URL keeps the spelling an operator reading the file expects.
     out = apply_overrides(b"", {"resource-pack": "https://example.test/pack.zip"})
     assert out == b"resource-pack=https://example.test/pack.zip\n"
+
+
+# --- write-side encoding (issue #2820) ----------------------------------------
+
+
+def test_resource_pack_prompt_round_trips_a_non_latin1_value() -> None:
+    # The case #2820 names: a Japanese prompt encoded UTF-8 into a file the Java
+    # server reads as latin-1 reached it mojibaked.
+    out = set_resource_pack_properties(
+        b"", url=_RP_URL, sha1=_RP_SHA1, prompt="リソースパック"
+    )
+    assert _get_property(out, "resource-pack-prompt") == "リソースパック"
+
+
+def test_a_non_latin1_value_is_written_as_unicode_escapes() -> None:
+    # The spelling java.util.Properties.store emits, pinned: the file stays
+    # latin-1 and the escape is what carries the code point.
+    assert apply_overrides(b"", {"motd": "日本"}) == rb"motd=\u65E5\u672C" + b"\n"
+
+
+def test_a_latin1_value_is_written_as_latin1_bytes() -> None:
+    # Only what latin-1 cannot hold is escaped, so an accented motd is written as
+    # the very byte such a file already carries (a latin-1 motd is ordinary,
+    # #2623) rather than a gratuitous é.
+    assert apply_overrides(b"", {"motd": "café"}) == b"motd=caf\xe9\n"
+
+
+def test_an_astral_value_is_written_as_a_surrogate_pair() -> None:
+    # Above the BMP, Properties.store emits one escape per UTF-16 unit; a single
+    # five-digit escape would read back as four digits plus a stray literal.
+    # _parse resolves each half to a lone surrogate -- Java's own reader pairs
+    # them back into the character, which is what the server sees.
+    out = apply_overrides(b"", {"motd": "\U0001f600"})
+    assert out == rb"motd=\uD83D\uDE00" + b"\n"
+
+
+def test_a_lone_surrogate_value_round_trips_without_raising() -> None:
+    # An unpaired surrogate is above U+00FF too, so it is written as the escape
+    # Properties.store emits instead of reaching a strict encoder.
+    out = apply_overrides(b"", {"motd": "\ud800"})
+    assert out == rb"motd=\uD800" + b"\n"
+    assert _get_property(out, "motd") == "\ud800"
+
+
+def test_ascii_platform_writes_are_byte_identical() -> None:
+    # #2820 changes the encoding, not the spelling: every platform-written value
+    # that is ASCII lands as exactly the bytes it did before.
+    out = apply_platform_properties(
+        b"",
+        game_port=25565,
+        rcon_password="tok",
+        resource_pack=ResourcePackProperties(
+            url=_RP_URL, sha1=_RP_SHA1, require=True, prompt="Use this pack"
+        ),
+    )
+    assert out == (
+        f"server-port=25565\n"
+        f"enable-rcon=true\n"
+        f"rcon.port={RCON_PORT}\n"
+        f"rcon.password=tok\n"
+        f"resource-pack={_RP_URL}\n"
+        f"resource-pack-sha1={_RP_SHA1}\n"
+        f"require-resource-pack=true\n"
+        f"resource-pack-prompt=Use this pack\n"
+    ).encode("ascii")
 
 
 # --- remove_keys (issue #1242) ------------------------------------------------

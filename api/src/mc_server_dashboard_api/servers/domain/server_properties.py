@@ -28,13 +28,11 @@ respelling -- but it does emit ``java.util.Properties.store``'s escapes, so what
 a caller submits is what ``Properties.load`` reads back. Unescaped, a newline in
 an override value ended the line and turned the rest of the value into further
 property lines, planted below the platform's own and therefore the ones Java
-reads (issue #2819). One remnant is NOT closed here:
-
-- Values are encoded UTF-8 (``surrogateescape``) while Java reads a
-  ``server.properties`` as latin-1, so a non-latin-1 value the platform writes
-  (a ``resource-pack-prompt``, say) reaches the server mojibaked (issue #2820).
-  Untouched bytes are spliced through verbatim, so a file the platform did not
-  write to is preserved exactly.
+reads (issue #2819). The line is then encoded latin-1 -- the encoding Java reads
+the file in -- with whatever latin-1 cannot hold spelled as a Unicode escape, so
+a Japanese ``resource-pack-prompt`` reaches the server as itself rather than as
+the mojibake UTF-8 bytes made of it (issue #2820). Untouched bytes are spliced
+through verbatim, so a file the platform did not write to is preserved exactly.
 """
 
 from __future__ import annotations
@@ -307,6 +305,25 @@ def _clear_property(content: bytes, key: str) -> bytes:
     return bytes(out)
 
 
+def _escape_char(char: str) -> str:
+    """Return the spelling *char* is written as, inside a key or inside a value.
+
+    A structural character takes its :data:`_ESCAPES` spelling; a character
+    latin-1 cannot hold -- the file's encoding -- becomes the Unicode escape
+    ``Properties.store`` emits for it, one per UTF-16 unit, so a code point above
+    the BMP is written as the surrogate pair a Java string holds it as. The
+    backslashes emitted here are output, never input to another pass, so a
+    literal backslash in the text is still the one thing that doubles.
+    """
+
+    if char in _ESCAPES:
+        return _ESCAPES[char]
+    if ord(char) <= 0xFF:
+        return char
+    units = char.encode("utf-16-be", "surrogatepass").hex().upper()
+    return "".join("\\u" + units[i : i + 4] for i in range(0, len(units), 4))
+
+
 def _escape_key(key: str) -> str:
     """Return *key* spelled so ``Properties.load`` reads it back verbatim.
 
@@ -315,20 +332,20 @@ def _escape_key(key: str) -> str:
     """
 
     return "".join(
-        "\\" + char if char in _SPECIALS else _ESCAPES.get(char, char) for char in key
+        "\\" + char if char in _SPECIALS else _escape_char(char) for char in key
     )
 
 
 def _escape_value(value: str) -> str:
     """Return *value* spelled so ``Properties.load`` reads it back verbatim.
 
-    :data:`_ESCAPES` applies wherever it matches, while a :data:`_SPECIALS`
+    :func:`_escape_char` applies to every character, while a :data:`_SPECIALS`
     character only needs escaping as the FIRST character -- past the separator
     they are ordinary text, so a ``motd`` or a resource-pack URL keeps the
     readable spelling an operator expects to find in the file.
     """
 
-    escaped = "".join(_ESCAPES.get(char, char) for char in value)
+    escaped = "".join(_escape_char(char) for char in value)
     return "\\" + escaped if value[:1] in _SPECIALS else escaped
 
 
@@ -345,11 +362,14 @@ def _set_property(content: bytes, key: str, value: str) -> bytes:
     line saying exactly what was submitted -- the write side of the same Java
     rules :func:`_parse` reads with, and what keeps an override value from
     injecting further lines (issue #2819).
+
+    The escaped line is latin-1, the encoding ``Properties.load(InputStream)``
+    reads the file in, because :func:`_escape_char` has already spelled every
+    character latin-1 cannot hold as an escape -- so the encode is total and
+    what the server reads back is what was submitted (issue #2820).
     """
 
-    new_line = f"{_escape_key(key)}={_escape_value(value)}".encode(
-        errors="surrogateescape"
-    )
+    new_line = f"{_escape_key(key)}={_escape_value(value)}".encode("latin-1")
     matches = [prop for prop in _parse(content) if prop.key == key]
     if not matches:
         if content and not content.endswith(b"\n"):
