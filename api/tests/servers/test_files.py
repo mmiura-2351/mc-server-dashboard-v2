@@ -14,10 +14,12 @@ plus the edit-size cap, rollback's at-rest-only rule, and the Worker file-status
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import io
 import logging
 import tarfile
+import threading
 import uuid
 import zipfile
 from collections.abc import AsyncIterator
@@ -26,6 +28,7 @@ from pathlib import PurePosixPath
 
 import pytest
 
+from mc_server_dashboard_api.servers.application import files
 from mc_server_dashboard_api.servers.application.files import (
     MAX_EDIT_BYTES,
     MAX_SEARCH_RESULTS,
@@ -3468,9 +3471,9 @@ async def test_rollback_root_properties_differing_only_in_user_keys_is_allowed()
 
 
 async def test_upload_oversized_root_properties_is_too_large() -> None:
-    # The comparison scans the whole body once per platform key, on the event
-    # loop, so an upload-sized (512 MiB) body must never reach it: the file the
-    # PUT caps at MAX_EDIT_BYTES is capped identically on every other door.
+    # The comparison scans the whole body once per platform key, so an
+    # upload-sized (512 MiB) body must never reach it: the file the PUT caps at
+    # MAX_EDIT_BYTES is capped identically on every other door.
     community, server_id = uuid.uuid4(), uuid.uuid4()
     store = FakeFileStore()
     store.files["server.properties"] = _CURRENT_PROPS
@@ -3590,3 +3593,190 @@ async def test_rollback_to_an_oversized_version_is_too_large() -> None:
             version_id="v1",
         )
     assert store.rollbacks == []
+
+
+async def test_platform_key_comparison_does_not_block_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The baseline side of the comparison is uncapped by design (an oversized root
+    # server.properties must stay deletable, below), and the comparison scans the
+    # whole baseline once per platform-managed key -- 20.77 s for 64 MiB. Running
+    # that on the event loop stalls every other request for as long as the file is
+    # large (issue #2821), so it must run off it. Pinned by a comparison that
+    # blocks until loop-side code releases it: run inline, nothing could release
+    # it, and the wait below times out instead.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    store.files["server.properties"] = _KEYS_FREE_PROPS
+    comparing = threading.Event()
+    release = threading.Event()
+
+    def blocking_compare(current: bytes, incoming: bytes) -> list[str]:
+        comparing.set()
+        assert release.wait(timeout=10), "the event loop never ran while comparing"
+        return []
+
+    monkeypatch.setattr(files, "changed_platform_managed_keys", blocking_compare)
+    use_case = DeleteFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    task = asyncio.ensure_future(
+        use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="server.properties",
+        )
+    )
+    try:
+        assert await asyncio.to_thread(comparing.wait, 10), "the comparison never ran"
+    finally:
+        # Unblock the comparison and retrieve the task's outcome on every path, so
+        # a failed assertion above does not leave its exception for the GC to
+        # report as "Task exception was never retrieved".
+        release.set()
+        await task
+
+    assert store.deleted_files == ["server.properties"]
+
+
+async def test_delete_root_properties_over_the_edit_cap_is_allowed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Only the INCOMING side is capped. Capping the baseline too would leave a
+    # root server.properties larger than MAX_EDIT_BYTES -- which a restore or an
+    # import can still republish -- undeletable through the API (issue #2821), so
+    # an oversized baseline is compared, not refused. The comparison is stubbed
+    # because the real one over 4 MiB takes ~18 s; what this pins is that the
+    # oversized baseline reaches it at all.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    oversized = b"motd=hi\n" * (MAX_EDIT_BYTES // 8) + b"x"
+    store.files["server.properties"] = oversized
+    compared: list[tuple[bytes, bytes]] = []
+
+    def record_compare(current: bytes, incoming: bytes) -> list[str]:
+        compared.append((current, incoming))
+        return []
+
+    monkeypatch.setattr(files, "changed_platform_managed_keys", record_compare)
+    use_case = DeleteFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="server.properties",
+    )
+
+    assert compared == [(oversized, b"")]
+    assert store.deleted_files == ["server.properties"]
+
+
+# --- no directory at the root server.properties path (issue #2812) ---------
+#
+# The key guards above compare BYTES, which is why they let a directory through:
+# a directory carries no keys and a baseline read of one raises. But a directory
+# standing at the root ``server.properties`` path is precisely what the later
+# platform-managed writes cannot survive -- the port rewrite finds a directory
+# where it must publish a file. The two doors this change closes --
+# ``make_dir`` and a directory rename's destination -- refuse it by path, before
+# any Storage call. Both create the destination's missing parents, so a path
+# UNDER the guarded name puts a directory there just as surely.
+
+
+async def test_mkdir_at_root_properties_path_is_refused() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    use_case = MakeDir(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(InvalidFilePathError) as caught:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="server.properties",
+        )
+    assert caught.value.reason == "platform_managed_path"
+    assert store.made_dirs == []
+
+
+async def test_mkdir_under_root_properties_path_is_refused() -> None:
+    # make_dir creates missing parents, so this materializes a directory at the
+    # guarded path itself.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    use_case = MakeDir(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(InvalidFilePathError) as caught:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="server.properties/logs",
+        )
+    assert caught.value.reason == "platform_managed_path"
+    assert store.made_dirs == []
+
+
+async def test_mkdir_of_a_non_root_properties_path_is_allowed() -> None:
+    # A same-named path elsewhere in the tree is ordinary user data, exactly as
+    # the key guards treat it.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    use_case = MakeDir(uow=_stopped_uow(community, server_id), file_store=store)
+
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="backups/server.properties",
+    )
+    assert store.made_dirs == ["backups/server.properties"]
+
+
+async def test_rename_dir_onto_root_properties_path_is_refused() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    store.dirs["staged"] = []
+    use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(InvalidFilePathError) as caught:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            from_path="staged",
+            to_path="server.properties",
+        )
+    assert caught.value.reason == "platform_managed_path"
+    assert store.renamed_dirs == []
+
+
+async def test_rename_dir_under_root_properties_path_is_refused() -> None:
+    # rename_dir creates the destination's missing parents (#2433), so this too
+    # leaves a directory at the guarded path.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    store.dirs["staged"] = []
+    use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(InvalidFilePathError) as caught:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            from_path="staged",
+            to_path="server.properties/staged",
+        )
+    assert caught.value.reason == "platform_managed_path"
+    assert store.renamed_dirs == []
+
+
+async def test_rename_root_properties_directory_away_is_allowed() -> None:
+    # The cleanup path stays open: a directory already standing at the name is
+    # movable away, the same posture the delete guard takes (#2809).
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    store.dirs["server.properties"] = []
+    use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        from_path="server.properties",
+        to_path="stale.properties",
+    )
+    assert store.renamed_dirs == [("server.properties", "stale.properties")]

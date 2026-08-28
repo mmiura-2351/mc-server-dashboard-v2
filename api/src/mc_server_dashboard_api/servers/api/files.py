@@ -35,6 +35,11 @@ every denial into ``invalid_path``. The file-API problem-reason catalog is:
   SOURCE (delete, rename-from) is a 404 miss instead, matching a read of the same
   name. An fs realization: object-store keys have no ``NAME_MAX`` so it cannot arise
   there.
+- ``platform_managed_path`` (422) — a make-dir or a directory rename whose
+  destination would leave a DIRECTORY at the root ``server.properties`` path, at
+  or under the name (both create the destination's missing parents). The
+  platform's own writes need a file there (issue #2812); the sibling
+  ``platform_managed_key`` guards the file's contents.
 - ``destination_exists`` (409) — a non-directory occupies the target, or a
   component the mutation needs as a directory (make_dir / write / rename, issue
   #2433); the same never-clobber conflict a rename onto an existing destination
@@ -912,6 +917,12 @@ async def rename_file(
     renaming another file onto that name publishes its bytes there — either is
     422 ``platform_managed_key`` with the offending key in the ``key`` member. A
     source larger than the edit cap is 413 rather than compared.
+
+    **A directory may not land on that path (issue #2812).** Renaming a DIRECTORY
+    onto the root ``server.properties`` name — or to any path under it, whose
+    missing parents the rename creates — is 422 ``platform_managed_path``: the
+    platform's writes need a file there. Moving a directory already standing at
+    that name away is the cleanup path and still works.
     """
 
     try:
@@ -1042,7 +1053,10 @@ async def make_directory(
 
     At rest only (Section 6.9): a running server is 409 ``server_unsettled``. The
     path is traversal-validated (422); the root path is rejected since the root
-    always exists (issue #1944). Both backends materialize the directory
+    always exists (issue #1944). The root ``server.properties`` path — and
+    anything under it, whose missing parents make_dir creates — is 422
+    ``platform_managed_path``: the platform's writes need a file there, not a
+    directory (issue #2812). Both backends materialize the directory
     (fs: real empty directory; object storage: zero-byte ``.dir`` marker,
     issue #1125).
     """

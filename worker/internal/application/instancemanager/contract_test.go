@@ -183,9 +183,12 @@ func driveRow(t *testing.T, row contractRow) session.CommandResult {
 
 	case "working_set_emptied":
 		// No tracked instance, orphan or reservation, and the id's dir EXISTS at the
-		// scratch root but holds no generation marker: the contents were destroyed in
-		// place (issue #2802). It is the shape the #2499 directory stat passed and the
-		// marker predicate refuses.
+		// scratch root but is empty of BOTH marker and content: destroyed in place
+		// (issues #2802, #2813). It is the shape both directory stats passed, and the
+		// one both replacements refuse — though by different predicates, a launch
+		// keying on the generation marker and a stopped-id snapshot on the working
+		// set's content. This fixture is where the two agree; see the precondition's
+		// description in the contract table for where they part company.
 		m := newContractManager(t, &fakeDriver{})
 		if err := os.MkdirAll(filepath.Join(m.scratchDir, serverID), 0o750); err != nil {
 			t.Fatal(err)

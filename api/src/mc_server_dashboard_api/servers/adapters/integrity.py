@@ -11,7 +11,8 @@ the relay slug backstop; ``uq_schedule_server_id_name`` (migration 0029) is the
 per-server schedule name backstop; ``uq_player_group_community_kind_name``
 (migration 0012) is the per-community, per-kind group name backstop;
 ``fk_srv_rp_assignments_resource_pack_id_resource_packs`` (migration 0018) is
-the resource-pack-in-use FK backstop (issue #1962);
+the resource-pack-in-use FK backstop (issue #1962) -- the DELETE direction only,
+see below;
 ``fk_group_player_group_id_player_group`` (migration 0012) is the
 group-deleted-mid-edit backstop (issue #2583);
 ``uq_server_plugin_server_rel`` (migration 0019) is the per-server plugin path
@@ -63,6 +64,16 @@ PostgreSQL refuses ``SqlAlchemyResourcePackRepository.delete`` at *statement*
 end -- before the translating ``commit`` ever runs. Being in the map below is
 therefore not evidence that a constraint is handled; the wrap has to sit on the
 statement that raises.
+
+That one constraint also fires in the opposite direction, where it means the
+opposite thing (issue #2784): the *assignment INSERT* is refused because the
+``resource_packs`` row it names is gone -- the not-found (404) every other
+missing-parent FK above translates to, not "in use" (409). One name, two
+conditions, and only the statement site tells them apart, so
+``SqlAlchemyResourcePackRepository.add_assignment`` flushes its own staged row
+and translates it through :func:`translate_assignment_insert_error`. The map
+entry below therefore carries the DELETE direction's meaning, for ``delete``'s
+wrap to read.
 """
 
 from __future__ import annotations
@@ -76,6 +87,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     PluginAlreadyExistsError,
     PortAlreadyTakenError,
     ResourcePackInUseError,
+    ResourcePackNotFoundError,
     ScheduleNameAlreadyExistsError,
     ServerNameAlreadyExistsError,
     ServerNotFoundError,
@@ -125,6 +137,20 @@ def translate_integrity_error(exc: IntegrityError) -> None:
         raise PluginAlreadyExistsError(str(constraint)) from exc
     if constraint in _RESOURCE_PACK_FK_CONSTRAINTS:
         raise ResourcePackInUseError(str(constraint)) from exc
+
+
+def translate_assignment_insert_error(exc: IntegrityError) -> None:
+    """Translate a violation raised by the resource-pack *assignment* INSERT.
+
+    Same constraint as the map's, opposite direction: here the pack the row names
+    is gone, so it is not-found (404) rather than in use (409) (issue #2784).
+    Anything else falls through to the shared translation.
+    """
+
+    constraint = _constraint_name(exc)
+    if constraint in _RESOURCE_PACK_FK_CONSTRAINTS:
+        raise ResourcePackNotFoundError(str(constraint)) from exc
+    translate_integrity_error(exc)
 
 
 def _constraint_name(exc: IntegrityError) -> str | None:

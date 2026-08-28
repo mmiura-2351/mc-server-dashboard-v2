@@ -12,6 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mc_server_dashboard_api.servers.adapters.integrity import (
+    translate_assignment_insert_error,
     translate_integrity_error,
 )
 from mc_server_dashboard_api.servers.adapters.resource_pack_models import (
@@ -120,6 +121,17 @@ class SqlAlchemyResourcePackRepository(ResourcePackRepository):
                 updated_at=assignment.updated_at,
             )
         )
+        # Flushed here rather than left to the unit of work's commit (or to
+        # whichever autoflush a later query happens to trigger), so this method
+        # owns the INSERT that fk_srv_rp_assignments_resource_pack_id_resource_packs
+        # refuses when a racer deleted the pack: the shared map reads that name as
+        # the DELETE direction -- the pack is in use (409) -- while here it means
+        # the pack is gone (404) (issue #2784).
+        try:
+            await self._session.flush()
+        except IntegrityError as exc:
+            translate_assignment_insert_error(exc)
+            raise
 
     async def get_assignment_by_server(
         self, server_id: ServerId

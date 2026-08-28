@@ -11,6 +11,12 @@ non-``ON DELETE CASCADE`` foreign key, and not ``DEFERRABLE`` — refusing the
 in-memory fake carries no constraints, so it reports success where PostgreSQL
 raises (issues #2557, #2549), and the unit-of-work's commit-time translation
 never sees the violation at all.
+
+One constraint, two directions (issue #2784): the DELETE is refused *because* an
+assignment references the pack, so the pack is in use (409); the assignment
+INSERT is refused because the pack it names is gone, which is not-found (404).
+The constraint name is the same in both, so only the statement site tells them
+apart — and only the real FK raises either. Both directions are pinned here.
 """
 
 from __future__ import annotations
@@ -40,9 +46,14 @@ from mc_server_dashboard_api.servers.adapters.unit_of_work import (
 )
 from mc_server_dashboard_api.servers.application.manage_server import CreateServer
 from mc_server_dashboard_api.servers.application.resource_packs import (
+    AssignResourcePack,
     DeleteResourcePack,
 )
-from mc_server_dashboard_api.servers.domain.errors import ResourcePackInUseError
+from mc_server_dashboard_api.servers.domain.entities import Server
+from mc_server_dashboard_api.servers.domain.errors import (
+    ResourcePackInUseError,
+    ResourcePackNotFoundError,
+)
 from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.resource_pack import (
     ResourcePack,
@@ -81,7 +92,7 @@ async def engine() -> AsyncIterator[AsyncEngine]:
         await downgrade_base(_DB_URL)
 
 
-async def _seed_server(engine: AsyncEngine) -> ServerId:
+async def _seed_server(engine: AsyncEngine) -> Server:
     community_id = uuid.uuid4()
     community = Community(
         id=CommunityCommunityId(community_id),
@@ -93,7 +104,7 @@ async def _seed_server(engine: AsyncEngine) -> ServerId:
     async with CommunityUnitOfWork(factory) as uow:
         await uow.communities.add(community)
         await uow.commit()
-    server = await CreateServer(
+    return await CreateServer(
         uow=ServersUnitOfWork(factory),
         clock=FakeClock(_NOW),
         version_validator=FakeVersionValidator(),
@@ -107,7 +118,6 @@ async def _seed_server(engine: AsyncEngine) -> ServerId:
         server_type="vanilla",
         config={},
     )
-    return server.id
 
 
 def _pack() -> ResourcePack:
@@ -198,7 +208,7 @@ async def test_delete_of_a_concurrently_assigned_pack_reports_in_use(
     # PostgreSQL refuses the DELETE at statement end -- inside delete(), never at
     # the unit of work's commit. The translation therefore has to sit on the
     # execute itself; the map entry alone leaves this a raw IntegrityError (500).
-    server_id = await _seed_server(engine)
+    server = await _seed_server(engine)
     factory = create_session_factory(engine)
     pack = _pack()
     await _seed_pack(engine, pack)
@@ -207,7 +217,7 @@ async def test_delete_of_a_concurrently_assigned_pack_reports_in_use(
         assert await uow.resource_packs.list_assignments_for_pack(pack.id) == []
         # A racer assigns the pack to a server after the pre-check saw none.
         async with ServersUnitOfWork(factory) as racer:
-            await racer.resource_packs.add_assignment(_assignment(server_id, pack.id))
+            await racer.resource_packs.add_assignment(_assignment(server.id, pack.id))
             await racer.commit()
         with pytest.raises(ResourcePackInUseError):
             await uow.resource_packs.delete(pack.id)
@@ -219,12 +229,12 @@ async def test_delete_resource_pack_reports_a_concurrent_assign_as_in_use(
     # The reachable path: DeleteResourcePack's own in-use pre-check passes, the
     # racer assigns, and the DELETE lands on the live FK. Without the wrap the
     # request dies on a raw IntegrityError (500) despite the map entry.
-    server_id = await _seed_server(engine)
+    server = await _seed_server(engine)
     pack = _pack()
     await _seed_pack(engine, pack)
 
     use_case = DeleteResourcePack(
-        uow=_RacingUnitOfWork(engine, server_id), store=FakeResourcePackStore()
+        uow=_RacingUnitOfWork(engine, server.id), store=FakeResourcePackStore()
     )
     with pytest.raises(ResourcePackInUseError):
         await use_case(
@@ -236,3 +246,95 @@ async def test_delete_resource_pack_reports_a_concurrent_assign_as_in_use(
     # The pack row survives: nothing was deleted behind the typed error.
     async with ServersUnitOfWork(create_session_factory(engine)) as uow:
         assert await uow.resource_packs.get_by_id(pack.id) is not None
+
+
+# --- concurrent pack delete during an assign (issue #2784) --------------------
+
+
+class _DeletePackOnWriteFileStore(FakeFileStore):
+    """A file store that deletes the pack while the assign writes its properties.
+
+    Reproduces the production interleave deterministically, with no sleeps: the
+    use case's first unit of work read the pack and closed, another request's
+    ``DeleteResourcePack`` commits on its own connection, and only then does the
+    assignment INSERT name a ``resource_packs`` row that is gone.
+    """
+
+    def __init__(self, engine: AsyncEngine, pack_id: ResourcePackId) -> None:
+        super().__init__()
+        self._engine = engine
+        self._pack_id = pack_id
+
+    async def write_file(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        rel_path: str,
+        content: bytes,
+    ) -> None:
+        await super().write_file(
+            community_id=community_id,
+            server_id=server_id,
+            rel_path=rel_path,
+            content=content,
+        )
+        async with ServersUnitOfWork(create_session_factory(self._engine)) as racer:
+            await racer.resource_packs.delete(self._pack_id)
+            await racer.commit()
+
+
+async def test_assignment_insert_for_a_deleted_pack_reports_not_found(
+    engine: AsyncEngine,
+) -> None:
+    # The same FK, the other direction: the INSERT names a resource_packs row a
+    # racer deleted, so the pack is *gone* (404), not in use (409) (issue #2784).
+    # add_assignment owns the statement, so the violation surfaces there instead
+    # of at the unit of work's commit, whose shared map reads this constraint as
+    # the delete direction.
+    server = await _seed_server(engine)
+    factory = create_session_factory(engine)
+    pack = _pack()
+    await _seed_pack(engine, pack)
+
+    async with ServersUnitOfWork(factory) as uow:
+        assert await uow.resource_packs.get_by_id(pack.id) is not None
+        # A racer deletes the pack after the pre-read found it.
+        async with ServersUnitOfWork(factory) as racer:
+            await racer.resource_packs.delete(pack.id)
+            await racer.commit()
+        with pytest.raises(ResourcePackNotFoundError):
+            await uow.resource_packs.add_assignment(_assignment(server.id, pack.id))
+
+
+async def test_assign_resource_pack_reports_a_concurrent_delete_as_not_found(
+    engine: AsyncEngine,
+) -> None:
+    # The reachable path: AssignResourcePack's own pre-read finds the pack, the
+    # racer deletes it, and the assignment INSERT lands on the live FK. Mapped to
+    # 404 by the route -- the very answer the pre-read would have given had the
+    # delete landed a moment earlier.
+    server = await _seed_server(engine)
+    factory = create_session_factory(engine)
+    pack = _pack()
+    await _seed_pack(engine, pack)
+
+    use_case = AssignResourcePack(
+        uow=ServersUnitOfWork(factory),
+        file_store=_DeletePackOnWriteFileStore(engine, pack.id),
+        clock=FakeClock(_NOW),
+    )
+    with pytest.raises(ResourcePackNotFoundError):
+        await use_case(
+            community_id=server.community_id,
+            server_id=server.id,
+            resource_pack_id=pack.id,
+            require_resource_pack=False,
+            resource_pack_prompt=None,
+            assigned_by=_UPLOADER,
+            public_base_url="https://mcsd.example",
+        )
+
+    # No assignment row survives the typed error.
+    async with ServersUnitOfWork(factory) as uow:
+        assert await uow.resource_packs.get_assignment_by_server(server.id) is None
