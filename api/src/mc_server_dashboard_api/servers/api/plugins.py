@@ -1108,6 +1108,8 @@ async def set_plugin_side(
         raise _not_found() from exc
     except InvalidPluginSideError as exc:
         raise _unprocessable("invalid_side") from exc
+    except PluginAlreadyExistsError as exc:
+        raise _conflict("plugin_already_exists") from exc
     except ServerFilesUnsettledError as exc:
         await _record_plugin_failure(
             recorder, ops.PLUGIN_SET_SIDE, authorized, community_id, plugin_id
