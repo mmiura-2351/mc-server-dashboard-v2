@@ -353,6 +353,81 @@ func TestSnapshotTriggerRefusedWhenScratchHoldsNoWorkingSet(t *testing.T) {
 	}
 }
 
+// The ACCEPT side of the same boundary, driven rather than asserted in prose (PR
+// #2840 review): a scratch holding CONTENT but NO generation marker still packs.
+// It is the shape that separates this guard's predicate from the launch guard's
+// (issue #2802) in the other direction — a marker is the held-CLAIM token a launch
+// needs, not what makes a world worth capturing — and until this test existed a
+// predicate that also refused it left the whole worker package green, because every
+// other stopped-id snapshot test seeds through seedScratch, which writes both the
+// world file and the marker.
+func TestSnapshotTriggerPacksContentWithoutGenerationMarker(t *testing.T) {
+	tr := &fakeTransfer{}
+	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
+	dir := filepath.Join(m.scratchDir, "s1")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "level.dat"), []byte("world"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	res := m.Handle(context.Background(), snapshotCmd())
+
+	if !res.Success {
+		t.Fatalf("SnapshotTrigger over an unmarked world = %+v, want it packed: an unmarked set is still a world to publish", res)
+	}
+	if len(tr.snapshots) != 1 || tr.snapshots[0] != dir {
+		t.Fatalf("snapshots = %v, want [%q]", tr.snapshots, dir)
+	}
+	// What the pack SAW, not just that it was called: an unmarked set declares base
+	// generation 0, which leaves the publish-time staleness guard to compare against
+	// the store's own value (issue #847).
+	if len(tr.snapshotBaseGenerations) != 1 || tr.snapshotBaseGenerations[0] != 0 {
+		t.Fatalf("base generations = %v, want [0]", tr.snapshotBaseGenerations)
+	}
+}
+
+// An UNREADABLE stopped-id scratch must NOT take the benign working-set refusal (PR
+// #2840 review). hasWorkingSet answers false when it cannot read the directory,
+// which is the safe direction where it is used to ADVERTISE held sets — a set the
+// Worker cannot prove it holds must not be advertised — and the wrong one for a
+// DURABILITY decision: SERVER_NOT_FOUND plus the "working dir absent" phrase is
+// exactly what makes StopServer._final_snapshot downgrade its data-loss ERROR to a
+// benign-duplicate INFO (lifecycle.py), so an EACCES / EMFILE / EIO would report
+// "nothing was lost" about a world that was never captured — the #841
+// swallowed-failure shape. The one other site that had to make this call already
+// made it the same way: datatransfer.displacedSlotHoldsWorkingSet returns the read
+// error rather than reusing the swallow.
+func TestSnapshotTriggerUnreadableScratchIsNotTheWorkingSetRefusal(t *testing.T) {
+	tr := &fakeTransfer{}
+	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
+	dir := seedScratch(t, m, "s1")
+	if err := os.Chmod(dir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	// Restored before t.TempDir()'s own cleanup, which was registered first and
+	// therefore runs last (LIFO), so the scratch root can still be removed.
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o750) })
+
+	res := m.Handle(context.Background(), snapshotCmd())
+
+	if res.Success {
+		t.Fatalf("SnapshotTrigger over an unreadable scratch = %+v, want a failure", res)
+	}
+	if res.ErrorCode == session.CommandErrorServerNotFound || strings.Contains(res.ErrorMessage, "working dir absent") {
+		t.Fatalf("unreadable scratch answered the working-set refusal (%v, %q): the API reads that pair as "+
+			"'nothing was lost' and would downgrade a real data loss to a benign INFO", res.ErrorCode, res.ErrorMessage)
+	}
+	if res.ErrorCode != session.CommandErrorTransferFailed {
+		t.Fatalf("ErrorCode = %v, want %v: a scratch we cannot read is a failed operation, not a precondition",
+			res.ErrorCode, session.CommandErrorTransferFailed)
+	}
+	if len(tr.snapshots) != 0 {
+		t.Fatalf("snapshots = %v, want none: the read failure must precede the pack", tr.snapshots)
+	}
+}
+
 // A running-server snapshot brackets the working-dir copy with save-off →
 // save-all → settle-wait → save-on (#694/#907): save-off disables auto-save so a
 // region file cannot be captured torn mid-copy, a plain non-blocking save-all

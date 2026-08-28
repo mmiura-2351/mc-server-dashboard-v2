@@ -931,18 +931,32 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		// running path needs no guard — a tracked instance's working dir was created
 		// by its start.
 		//
-		// The PREDICATE is hasWorkingSet, not a directory stat (issue #2813): a
-		// scratch emptied in place, and one holding only the generation marker (or a
-		// crashed stamp's ".mcsd_generation-*" temp), passed the stat and reached the
-		// pack — which excludes exactly those files, so the upload staged zero files
-		// and the API refused it 400 empty_snapshot after the whole cycle, reporting
-		// the environment-dependent transfer_failed that points away from the cause.
-		// It is deliberately NOT the launch guard's marker predicate (issue #2802),
-		// which the sibling refusal below uses: what a launch needs is the held-claim
-		// token, so a marker-ONLY dir passes there (the 204 fresh-boot contract),
-		// while what a snapshot needs is something to capture, so the same dir is
-		// refused here. Content WITHOUT a marker packs, which is right — there is a
-		// world to publish.
+		// The PREDICATE is the working set's CONTENT, not a directory stat (issue
+		// #2813): a scratch emptied in place, and one holding only the generation
+		// marker (or a crashed stamp's ".mcsd_generation-*" temp), passed the stat and
+		// reached the pack — which excludes exactly those files, so the upload staged
+		// zero files and the API refused it 400 empty_snapshot after the whole cycle,
+		// reporting the environment-dependent transfer_failed that points away from
+		// the cause. It is deliberately NOT the launch guard's marker predicate (issue
+		// #2802), which the sibling refusal below uses: what a launch needs is the
+		// held-claim token, so a marker-ONLY dir passes there (the 204 fresh-boot
+		// contract), while what a snapshot needs is something to capture, so the same
+		// dir is refused here. Content WITHOUT a marker packs, which is right — there
+		// is a world to publish, and that direction is pinned by
+		// TestSnapshotTriggerPacksContentWithoutGenerationMarker.
+		//
+		// The directory is read HERE rather than through hasWorkingSet (PR #2840
+		// review): that helper answers false when it cannot read, which is the safe
+		// direction for the scans that ADVERTISE held sets but the wrong one for this
+		// decision. The refusal below is what makes StopServer._final_snapshot
+		// downgrade its data-loss ERROR to a benign-duplicate INFO, so reporting it on
+		// an EACCES/EMFILE/EIO would say "nothing was lost" about a world that was
+		// never captured — the #841 swallowed-failure shape, and a direct
+		// contradiction of is_working_set_absent_refusal's own contract. Only
+		// os.IsNotExist IS the statement (the dir is gone); every other read error is
+		// a failed operation and carries the unpinned transfer_failed, the same call
+		// datatransfer.displacedSlotHoldsWorkingSet already made for its own
+		// durability decision.
 		//
 		// The "working dir absent" phrase in the message is load-bearing (issue
 		// #1790): the API's final-snapshot path keys on it (together with the
@@ -955,7 +969,12 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		// kept verbatim for the emptied and marker-only shapes too: the prose is a
 		// shade imprecise there, but the discriminator is exact — the same trade the
 		// launch guard made.
-		if !hasWorkingSet(workingDir) {
+		entries, err := os.ReadDir(workingDir)
+		if err != nil && !os.IsNotExist(err) {
+			return fail(cmd.CommandID, session.CommandErrorTransferFailed,
+				fmt.Sprintf("instancemanager: snapshot: read working dir: %v", err))
+		}
+		if !holdsWorkingSet(entries) {
 			m.logger.Warn("snapshot refused: working dir absent for stopped id",
 				"server_id", cmd.ServerID, "reason", "working_set_absent")
 			return fail(cmd.CommandID, session.CommandErrorServerNotFound,
