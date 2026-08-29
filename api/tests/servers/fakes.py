@@ -1132,6 +1132,11 @@ class FakeResourcePackRepository(ResourcePackRepository):
         self.packs.pop(pack_id, None)
 
     async def add_assignment(self, assignment: ResourcePackAssignment) -> None:
+        # The same FK in the opposite direction: the adapter's INSERT is refused
+        # when the pack the row names is gone, translated to
+        # ResourcePackNotFoundError -- not-found (404), not in-use (409) (#2784).
+        if assignment.resource_pack_id not in self.packs:
+            raise ResourcePackNotFoundError(str(assignment.resource_pack_id.value))
         self.assignments[assignment.server_id] = self._copy_assignment(assignment)
 
     async def get_assignment_by_server(
