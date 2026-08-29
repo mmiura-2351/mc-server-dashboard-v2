@@ -950,10 +950,11 @@ def test_set_rcon_keeps_a_colon_form_password() -> None:
     ],
 )
 def test_a_degenerate_override_key_is_a_key_of_its_own(key: str) -> None:
-    # Each spelling ends the key early for Properties.load, so writing it
-    # verbatim would land the platform-managed key it is spelled after -- the
-    # hole #2822 names. _escape_key closes it: the key is written so Java reads
-    # it back as itself, which keeps all three of these true at once.
+    # Written verbatim, each spelling would collapse onto the platform-managed
+    # key it is spelled after -- Properties.load ends a key at a blank, ":", "="
+    # or the line's end, strips the blanks leading it, and resolves its escapes.
+    # That is the hole #2822 names. _escape_key closes it: the key is written so
+    # Java reads it back as itself, which keeps all three of these true at once.
     current = apply_platform_properties(
         b"", game_port=25565, rcon_password="tok", resource_pack=None
     )
