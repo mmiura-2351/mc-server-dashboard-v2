@@ -755,11 +755,15 @@ PARITY_CASES: list[tuple[str, bytes, dict[str, str]]] = [
     ),
     ("a unicode escape in the value", rb"motd=caf\u00e9" + b"\n", {"motd": "café"}),
     ("an escaped colon in the value", rb"motd=a\:b" + b"\n", {"motd": "a:b"}),
+    ("an escaped leading hash in the value", rb"motd=\#hi" + b"\n", {"motd": "#hi"}),
+    ("an escaped leading space in the value", rb"motd=\ hi" + b"\n", {"motd": " hi"}),
     (
         "control-character escapes in the value",
         rb"motd=a\tb\nc" + b"\n",
         {"motd": "a\tb\nc"},
     ),
+    ("a carriage-return escape in the value", rb"motd=a\rb" + b"\n", {"motd": "a\rb"}),
+    ("a form-feed escape in the value", rb"motd=a\fb" + b"\n", {"motd": "a\fb"}),
     (
         "the last occurrence wins",
         b"server-port=1\nserver-port:2\n",
