@@ -34,7 +34,8 @@ jobs:
       #
       # Every step below except the workflow YAML parse also runs locally: the
       # migration guard (self-test + real run) via `make migrations-check`, the
-      # docs checker (self-test + real run) via `make docs-check`,
+      # docs checker (self-test + real run) via `make docs-check`, the
+      # test-client guard (self-test + real run) via `make test-client-check`,
       # supply_chain_cooldown.py's self-test via `make scripts-test`, the two
       # hook suites via `make hooks-test`. The YAML parse is CI-only -- it
       # guards this directory, which has no local gate. The commands stay
@@ -57,6 +58,12 @@ jobs:
 
       - name: Docs conventions (links, section-mark glyph, v1 term)
         run: python3 scripts/check_docs.py
+
+      - name: Test-client guard self-test
+        run: python3 scripts/check_test_client_pattern.py --self-test
+
+      - name: Test-client pattern (api/tests)
+        run: python3 scripts/check_test_client_pattern.py
 
       # Unit-test the checked-in git hooks (post-checkout auto-restore,
       # hooks-check assertions). Pure bash + temp git repos; mirrors the
