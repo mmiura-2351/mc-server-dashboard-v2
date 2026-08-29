@@ -132,9 +132,29 @@ var parityCases = []struct {
 		want:  map[string]string{"motd": "a:b"},
 	},
 	{
+		name:  "an escaped leading hash in the value",
+		input: `motd=\#hi` + "\n",
+		want:  map[string]string{"motd": "#hi"},
+	},
+	{
+		name:  "an escaped leading space in the value",
+		input: `motd=\ hi` + "\n",
+		want:  map[string]string{"motd": " hi"},
+	},
+	{
 		name:  "control-character escapes in the value",
 		input: `motd=a\tb\nc` + "\n",
 		want:  map[string]string{"motd": "a\tb\nc"},
+	},
+	{
+		name:  "a carriage-return escape in the value",
+		input: `motd=a\rb` + "\n",
+		want:  map[string]string{"motd": "a\rb"},
+	},
+	{
+		name:  "a form-feed escape in the value",
+		input: `motd=a\fb` + "\n",
+		want:  map[string]string{"motd": "a\fb"},
 	},
 	{
 		name:  "the last occurrence wins",
