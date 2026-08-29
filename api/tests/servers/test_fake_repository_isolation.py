@@ -51,6 +51,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     GroupNotFoundError,
     PluginAlreadyExistsError,
     ResourcePackInUseError,
+    ResourcePackNotFoundError,
 )
 from mc_server_dashboard_api.servers.domain.groups import (
     GroupId,
@@ -483,14 +484,15 @@ async def test_resource_pack_add_and_readers_are_detached() -> None:
 
 async def test_resource_pack_assignment_add_and_readers_are_detached() -> None:
     repo = FakeResourcePackRepository()
-    pack_id = ResourcePackId.new()
-    assignment = _assignment(pack_id)
+    pack = _pack()
+    await repo.add(pack)
+    assignment = _assignment(pack.id)
 
     await repo.add_assignment(assignment)
 
     assignment.require_resource_pack = False
     loaded = await repo.get_assignment_by_server(_SERVER)
-    (listed,) = await repo.list_assignments_for_pack(pack_id)
+    (listed,) = await repo.list_assignments_for_pack(pack.id)
     assert loaded is not None
     loaded.require_resource_pack = False
     listed.resource_pack_prompt = "rewritten-by-list"
@@ -515,3 +517,18 @@ async def test_resource_pack_delete_while_assigned_reports_in_use() -> None:
         await repo.delete(pack.id)
 
     assert pack.id in repo.packs
+
+
+async def test_resource_pack_assignment_to_missing_pack_reports_not_found() -> None:
+    # The same FK in the opposite direction, where it means the opposite thing:
+    # the adapter's assignment INSERT is refused because the ``resource_packs``
+    # row it names is gone, which is not-found (404), not in-use (409) (#2784).
+    # Pinned against the live FK in
+    # ``tests/integration/test_resource_pack_repositories.py``; modelled here so
+    # a use-case test driving the fake sees the same refusal.
+    repo = FakeResourcePackRepository()
+
+    with pytest.raises(ResourcePackNotFoundError):
+        await repo.add_assignment(_assignment(ResourcePackId.new()))
+
+    assert repo.assignments == {}
