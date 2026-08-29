@@ -934,6 +934,41 @@ def test_set_rcon_keeps_a_colon_form_password() -> None:
     assert _raw_values(out, "rcon.password") == ["known"]
 
 
+# --- a degenerate override key stays its own key (issue #2822) ----------------
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "server-port ",
+        " server-port",
+        r"rcon\.password",
+        "server-port:",
+        "server-port=",
+        "server-port\t",
+        "server-port\n",
+    ],
+)
+def test_a_degenerate_override_key_is_a_key_of_its_own(key: str) -> None:
+    # Written verbatim, each spelling would collapse onto the platform-managed
+    # key it is spelled after -- Properties.load ends a key at a blank, ":", "="
+    # or the line's end, strips the blanks leading it, and resolves its escapes.
+    # That is the hole #2822 names. _escape_key closes it: the key is written so
+    # Java reads it back as itself, which keeps all three of these true at once.
+    current = apply_platform_properties(
+        b"", game_port=25565, rcon_password="tok", resource_pack=None
+    )
+    out = apply_overrides(current, {key: "one"})
+    # It does not alias the platform key.
+    assert changed_platform_managed_keys(current, out) == []
+    # It re-finds its own line on the next write instead of appending a
+    # duplicate no later write could reach (the #1242 half).
+    out = apply_overrides(out, {key: "two"})
+    assert _raw_values(out, key) == ["two"]
+    # And it can still be cleared.
+    assert _raw_values(remove_keys(out, {key}), key) == []
+
+
 # --- checked against the reference java.util.Properties (issue #2820) ---------
 
 # The escapes written above are only right if the reference implementation reads
