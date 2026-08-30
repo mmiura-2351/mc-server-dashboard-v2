@@ -8,8 +8,8 @@ Unauthenticated, and mounted **only** on the observability app
 (:mod:`mc_server_dashboard_api.observability`), which serves it from its own
 listener — never on the public HTTP port, which the bundled Cloudflare tunnel
 publishes wholesale (issue #2565). The content is aggregates only, but it is
-operational signal (server/worker counts, per-route request and auth-outcome
-counters, process start times) that an external party has no need to see.
+operational signal (server/worker counts, per-route request counters, process
+start times) that an external party has no need to see.
 
 "Aggregates only" is pinned by a test rather than by convention (issue #2569):
 ``tests/test_metrics_label_vocabulary.py::

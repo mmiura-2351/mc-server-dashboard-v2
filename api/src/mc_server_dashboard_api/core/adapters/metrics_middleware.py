@@ -9,6 +9,15 @@ read after ``call_next``; a request that matched no route (a 404) is labelled wi
 a single ``<unmatched>`` template rather than its raw path, again to bound
 cardinality.
 
+``method`` is bounded the same way, by :data:`_ALLOWED_METHODS`: it comes
+straight off the request, and uvicorn parses this deployment's requests with
+``h11``, whose grammar accepts any RFC token as a method — so an invented token
+on a templated path (the 405 partial match still sets ``scope["route"]``) would
+otherwise mint a fresh series per token, from an unauthenticated client. Anything
+off the allowlist is labelled ``<other>``. TRACE and CONNECT are deliberately not
+on it: no route here serves either, so both can only ever be probe traffic, which
+is what ``<other>`` is for.
+
 This is an adapter at the edge: it imports the metrics primitives module directly,
 which the wiring layer (app factory) installs as middleware.
 """
@@ -27,6 +36,10 @@ from mc_server_dashboard_api.core.adapters.metrics import (
 )
 
 _UNMATCHED = "<unmatched>"
+_OTHER_METHOD = "<other>"
+_ALLOWED_METHODS = frozenset(
+    {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}
+)
 
 
 async def metrics_middleware(
@@ -37,7 +50,7 @@ async def metrics_middleware(
     elapsed = time.perf_counter() - start
     route = request.scope.get("route")
     template = getattr(route, "path", None) or _UNMATCHED
-    method = request.method
+    method = request.method if request.method in _ALLOWED_METHODS else _OTHER_METHOD
     http_requests_total.labels(
         method=method, route=template, status=str(response.status_code)
     ).inc()
