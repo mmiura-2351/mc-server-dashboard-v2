@@ -44,7 +44,7 @@ func (m *Manager) recordOrphan(serverID string, inst execution.Instance, driverN
 	spawn := !m.converging[serverID] && !m.closed
 	if spawn {
 		m.converging[serverID] = true
-		m.convergers.Add(1)
+		m.background.Add(1)
 	}
 	m.mu.Unlock()
 	if spawn {
@@ -96,7 +96,7 @@ func (m *Manager) recordOrphan(serverID string, inst execution.Instance, driverN
 // reserve()'s orphan guard to close it would let a snapshot run over a world
 // that may still be live — the one thing this whole path exists to prevent.
 func (m *Manager) convergeOrphan(serverID string) {
-	defer m.convergers.Done()
+	defer m.background.Done()
 	delay := m.orphanProbeInterval
 	// probed is the orphan the two flags below describe; they reset if the id's
 	// record changes hands.

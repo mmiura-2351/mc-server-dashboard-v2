@@ -129,7 +129,9 @@ func TestScanHeldServersSkipsGenerationMarkerTempLeftover(t *testing.T) {
 	if got := ScanHeldServers(scratch, nil); len(got) != 1 || got[0] != want {
 		t.Errorf("ScanHeldServers = %v, want [%v]", got, want)
 	}
-	if got := New(nil, scratch, nil).HeldServers(); len(got) != 1 || got[0] != want {
+	m := New(nil, scratch, nil)
+	closeWithTest(t, m)
+	if got := m.HeldServers(); len(got) != 1 || got[0] != want {
 		t.Errorf("HeldServers = %v, want [%v]", got, want)
 	}
 }
@@ -345,6 +347,7 @@ func TestManagerHeldServersReadsCurrentGenerations(t *testing.T) {
 	}
 
 	m := New(nil, scratch, nil)
+	closeWithTest(t, m)
 
 	got := m.HeldServers()
 	if len(got) != 1 {

@@ -202,6 +202,7 @@ func TestManagerEmitsUpOnlyMetricsWithoutStatsSource(t *testing.T) {
 			return nil, fmt.Errorf("test: no rcon control configured")
 		}).
 		WithMetrics(clk, time.Hour)
+	closeWithTest(t, m)
 
 	seedScratch(t, m, "s1")
 	res := m.Handle(context.Background(), startCmd())
@@ -320,6 +321,7 @@ func TestMetricsSampleCancelledOnTeardown(t *testing.T) {
 			return nil, fmt.Errorf("test: no rcon control configured")
 		}).
 		WithMetrics(clk, time.Hour)
+	closeWithTest(t, m)
 
 	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
@@ -462,11 +464,13 @@ func (h *syncSlogHandler) snapshot() []slog.Record {
 // pump under test is driven directly, so no driver or metrics clock is wired.
 func newDropTestManager(t *testing.T, h *syncSlogHandler) *Manager {
 	t.Helper()
-	return New(map[string]execution.ExecutionDriver{}, t.TempDir(),
+	m := New(map[string]execution.ExecutionDriver{}, t.TempDir(),
 		func(context.Context, string, string) (execution.ServerControl, error) {
 			return nil, fmt.Errorf("test: no rcon control configured")
 		}).
 		WithLogger(slog.New(h))
+	closeWithTest(t, m)
+	return m
 }
 
 // assertOneDropWarn asserts h captured exactly one WARN carrying the server id

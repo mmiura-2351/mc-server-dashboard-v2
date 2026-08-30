@@ -306,6 +306,7 @@ func TestSnapshotTriggerRunningServerRconUnavailableRefusesQuiesceUnavailable(t 
 	m := New(map[string]execution.ExecutionDriver{"container": &fakeDriver{}}, scratch,
 		func(context.Context, string, string) (execution.ServerControl, error) { return nil, openErr }).
 		WithTransfer(tr)
+	closeWithTest(t, m)
 
 	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
