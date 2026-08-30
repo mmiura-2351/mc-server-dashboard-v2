@@ -139,9 +139,16 @@ class RunSnapshotCadenceTick:
             # snapshot is retried once it reconnects (FR-WRK-4, FR-DATA-5).
             return
         await self._dispatch(server)
-        # Reschedule one interval out (plus jitter) from now whatever the dispatch
-        # answered: a failure is retried on this server's own interval rather than
-        # on every tick (issue #2485).
+        # Reschedule whatever the dispatch answered: a failure is retried on this
+        # server's own interval rather than on every tick (issue #2485).
+        self._schedule_next(server, now)
+
+    def _schedule_next(self, server: Server, now: dt.datetime) -> None:
+        """Make ``server`` due one interval out (plus its jitter) from ``now``."""
+
+        interval = self._interval_for(server)
+        if interval is None:
+            return
         self._next_due[server.id] = now + dt.timedelta(
             seconds=interval + jitter_seconds(server.id, interval_seconds=interval)
         )
