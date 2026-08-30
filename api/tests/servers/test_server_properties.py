@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from mc_server_dashboard_api.servers.domain import server_properties
 from mc_server_dashboard_api.servers.domain.server_properties import (
     PLATFORM_MANAGED_KEYS,
     RCON_PORT,
@@ -550,6 +551,28 @@ def test_non_utf8_platform_value_change_is_still_detected() -> None:
     current = b"rcon.password=\xff\xfe\n"
     incoming = b"rcon.password=\xfe\xff\n"
     assert changed_platform_managed_keys(current, incoming) == ["rcon.password"]
+
+
+def test_the_guard_parses_each_side_exactly_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Asking _parse for one key at a time re-read both whole files once per
+    # platform-managed key -- sixteen passes over a file the guard needs to read
+    # twice. _parse walks the content byte by byte, so on an oversized root file
+    # (restore/import, or one predating the #2809 cap) that is seconds of a
+    # worker thread (issue #2831).
+    parsed: list[bytes] = []
+    real_parse = server_properties._parse
+
+    def counting_parse(content: bytes) -> list[server_properties._Property]:
+        parsed.append(content)
+        return real_parse(content)
+
+    monkeypatch.setattr(server_properties, "_parse", counting_parse)
+    current = b"server-port=25565\nrcon.password=tok\n"
+    incoming = b"server-port=25999\nrcon.password=tok\n"
+    assert changed_platform_managed_keys(current, incoming) == ["server-port"]
+    assert parsed == [current, incoming]
 
 
 # --- apply_platform_properties (issue #2621) --------------------------------

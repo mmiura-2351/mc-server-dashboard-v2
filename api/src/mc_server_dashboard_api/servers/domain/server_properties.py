@@ -495,6 +495,23 @@ def remove_keys(content: bytes, keys: AbstractSet[str]) -> bytes:
     return _normalize(content)
 
 
+def _platform_managed_values(content: bytes) -> dict[str, list[str]]:
+    """Return the values *content* gives each :data:`PLATFORM_MANAGED_KEYS` key.
+
+    Same lists :func:`_raw_values` returns per key, collected in ONE
+    :func:`_parse` pass instead of one pass per key -- sixteen walks over the two
+    files for a single comparison, each of them byte by byte (issue #2831). A key
+    the file never mentions is absent from the mapping rather than mapped to an
+    empty list, which is why the caller reads it with a default.
+    """
+
+    values: dict[str, list[str]] = {}
+    for prop in _parse(content):
+        if prop.key in PLATFORM_MANAGED_KEYS:
+            values.setdefault(prop.key, []).append(prop.value)
+    return values
+
+
 def changed_platform_managed_keys(current: bytes, incoming: bytes) -> list[str]:
     """Return the platform-managed keys *incoming* changes relative to *current*.
 
@@ -527,10 +544,12 @@ def changed_platform_managed_keys(current: bytes, incoming: bytes) -> list[str]:
     seeded file omits), so comparing against the wrong one refuses honest edits.
     """
 
+    current_values = _platform_managed_values(current)
+    incoming_values = _platform_managed_values(incoming)
     return sorted(
         key
         for key in PLATFORM_MANAGED_KEYS
-        if _raw_values(current, key) != _raw_values(incoming, key)
+        if current_values.get(key, []) != incoming_values.get(key, [])
     )
 
 
