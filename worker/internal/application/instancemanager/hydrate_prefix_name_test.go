@@ -46,9 +46,11 @@ func TestHeldScansSkipTheSharedHydrateTempPrefix(t *testing.T) {
 	seedHydrateShapedTree(t, filepath.Join(scratch, ".hydrate-s1-123456"), 7)
 	seedHydrateShapedTree(t, filepath.Join(scratch, ".hydrate-s1-superseded-654321"), 6)
 
+	m := New(nil, scratch, nil)
+	closeWithTest(t, m)
 	want := []session.HeldServer{{ServerID: "s1", Generation: 7}}
 	assertHeld(t, "ScanHeldServers", ScanHeldServers(scratch, nil), want)
-	assertHeld(t, "HeldServers", New(nil, scratch, nil).HeldServers(), want)
+	assertHeld(t, "HeldServers", m.HeldServers(), want)
 }
 
 // The leftover SWEEP side of the same contract (issue #2409). The held-set scans
@@ -75,7 +77,9 @@ func TestHydrateLeftoverSweepMatchesTheSharedHydratePrefix(t *testing.T) {
 		seedHydrateShapedTree(t, dir, 7)
 	}
 
-	New(nil, scratch, nil).sweepHydrateLeftovers("s1")
+	m := New(nil, scratch, nil)
+	closeWithTest(t, m)
+	m.sweepHydrateLeftovers("s1")
 
 	for _, dir := range leftovers {
 		if _, err := os.Stat(dir); !os.IsNotExist(err) {

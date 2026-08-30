@@ -247,14 +247,20 @@ func newManager(t *testing.T, d execution.ExecutionDriver, ctrl execution.Server
 	return m
 }
 
-// closeWithTest ends the manager with the test that built it (issue #2493). A
-// test whose stop fails records a failed-stop orphan, and an orphan nobody
-// resolves keeps its converger probing and re-stopping at the production cadence
-// — inside a test binary, against the fixtures of a test that finished minutes
-// ago. Close joins the convergers, so the goroutines are gone before the test is.
-// Every shared manager constructor in this package registers it: which driver a
-// caller passes decides whether an orphan is reachable, so the guarantee belongs
-// to the constructor, not to the tests that remember.
+// closeWithTest ends the manager with the test that built it (issues #2493,
+// #2777). A test whose stop fails records a failed-stop orphan, and an orphan
+// nobody resolves keeps its converger probing and re-stopping at the production
+// cadence — inside a test binary, against the fixtures of a test that finished
+// minutes ago. Every manager also owns a status dispatcher from the moment New
+// returns, and every started instance a status and a metrics pump; none of them
+// end on their own here, because no fake in this package ever closes an
+// instance's event channel. Close joins them all, so the goroutines are gone
+// before the test is.
+//
+// EVERY New in this package's tests registers it, not only the constructors and
+// not only the tests that can reach an orphan: New alone starts a goroutine, so
+// a manager built without a Close is a leak whatever the test does with it.
+// TestMain (shutdown_test.go) is what holds that line.
 func closeWithTest(t *testing.T, m *Manager) {
 	t.Helper()
 	t.Cleanup(m.Close)
@@ -833,6 +839,7 @@ func TestStopServerGracefulRedialsAfterPoisonedSaveOff(t *testing.T) {
 			}
 			return freshCtrl, nil
 		})
+	closeWithTest(t, m)
 	m.settlePollInterval = 0
 	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
@@ -882,6 +889,7 @@ func TestStopServerGracefulCompletesWhenBothRCONCommandsFail(t *testing.T) {
 			}
 			return freshCtrl, nil
 		})
+	closeWithTest(t, m)
 	m.settlePollInterval = 0
 	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
@@ -934,6 +942,7 @@ func TestOpenControlReceivesRunningServerDriver(t *testing.T) {
 		gotDriver = driver
 		return &fakeControl{reply: "ok"}, nil
 	})
+	closeWithTest(t, m)
 
 	// Start a container server on the mixed-driver worker.
 	seedScratch(t, m, "s1")

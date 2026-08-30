@@ -228,15 +228,18 @@ type Manager struct {
 	orphanProbeInterval    time.Duration
 	orphanProbeMaxInterval time.Duration
 
-	// shutdown is cancelled by Close and is the lifetime every converger runs
-	// under: they park on it between probe rounds and derive the probe context
-	// from it, so closing the manager ends them instead of leaving goroutines
-	// probing a manager nobody owns any more (issue #2493). convergers counts the
-	// ones still running so Close can join them — a converger caught mid-round is
-	// still driving driver calls, so "signalled" is not "gone".
+	// shutdown is cancelled by Close and is the lifetime EVERY background
+	// goroutine the manager owns runs under — the orphan convergers (issue #2493),
+	// the status dispatcher, and the per-instance status/log/metrics pumps (issue
+	// #2777). Each parks on it alongside whatever it normally waits for, so
+	// closing the manager ends everything it started instead of leaving goroutines
+	// running against a manager nobody owns any more. background counts the ones
+	// still running so Close can join them: "signalled" is not "gone" — a
+	// converger caught mid-round is still driving driver calls, and a pump past
+	// its WaitGroup Done still holds its frame.
 	shutdown       context.Context
-	stopConverging context.CancelFunc
-	convergers     sync.WaitGroup
+	stopBackground context.CancelFunc
+	background     sync.WaitGroup
 
 	// transferDeadlineNanos bounds a single data-plane transfer (snapshot upload /
 	// hydrate download) Worker-side (issue #874). The session pushes it from the
@@ -280,12 +283,14 @@ type Manager struct {
 	// in currentOrphan, in the same critical section that observes the record gone,
 	// so the flag can never outlive its goroutine or block its successor.
 	converging map[string]bool
-	// closed records that Close has run, so a command that records an orphan
-	// during shutdown does not spawn a converger nothing will ever join (issue
-	// #2493). It is set under the SAME mu that guards the converger spawn, which
-	// is what keeps the WaitGroup honest: a spawn either happens before Close
-	// takes the lock (and is counted, so Close waits for it) or observes the flag
-	// and does not happen at all — never an Add racing the Wait.
+	// closed records that Close has run, so a command still in flight during
+	// shutdown does not spawn a background goroutine nothing will ever join — a
+	// converger for an orphan it records (issue #2493), or the pumps for an
+	// instance it starts (issue #2777). It is set under the SAME mu that guards
+	// every spawn, which is what keeps the WaitGroup honest: a spawn either
+	// happens before Close takes the lock (and is counted, so Close waits for it)
+	// or observes the flag and does not happen at all — never an Add racing the
+	// Wait.
 	closed bool
 	// reserved marks a server id as having a mutating lifecycle command in flight so
 	// a duplicate re-issued after a stream reconnect cannot overlap the original
@@ -368,18 +373,45 @@ func New(drivers map[string]execution.ExecutionDriver, scratchDir string, openCo
 		orphanProbeMaxInterval: defaultOrphanProbeMaxInterval,
 		converging:             map[string]bool{},
 	}
-	m.shutdown, m.stopConverging = context.WithCancel(context.Background())
-	go m.statusDispatcher()
+	m.shutdown, m.stopBackground = context.WithCancel(context.Background())
+	m.goBackground(m.statusDispatcher)
 	return m
 }
 
-// Close ends the manager's failed-stop-orphan convergers and waits for them to
-// exit (issue #2493). Nothing else joined them before: a converger drives its
-// orphan until the record is retired, so an orphan that never resolves kept one
-// goroutine probing and re-stopping for the life of the process, outliving the
-// manager that spawned it. In the Worker that only ever showed up at shutdown; in
-// the test binary, where a manager's lifetime is one test, it meant a converger
-// still calling into the fixtures of a test that had already finished.
+// goBackground starts fn as a goroutine the manager owns and Close joins. It
+// reports whether the goroutine was started: a CLOSED manager starts nothing,
+// because Close has already run the Wait that a later Add would race — and,
+// with the counter back at zero, panic against. The Add happens under the SAME
+// mu that Close sets closed under, so a start either lands before Close takes
+// the lock and is therefore waited for, or does not happen at all.
+//
+// recordOrphan performs the same Add inline rather than calling this: its spawn
+// decision must also claim the per-id converging flag, and both have to be taken
+// in one critical section.
+func (m *Manager) goBackground(fn func()) bool {
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return false
+	}
+	m.background.Add(1)
+	m.mu.Unlock()
+	go func() {
+		defer m.background.Done()
+		fn()
+	}()
+	return true
+}
+
+// Close ends EVERY goroutine the manager started and waits for them to exit: the
+// failed-stop-orphan convergers (issue #2493), the status dispatcher New starts,
+// and the per-instance status/log/metrics pumps startPumps starts (issue #2777).
+// Nothing joined the latter group before, and none of them ended on their own: a
+// pump parks on an instance channel that a server still running never closes, and
+// the dispatcher parks on a notify channel nothing ever closes. In the Worker that
+// only ever showed up at process exit; in the test binary, where a manager's
+// lifetime is one test, one package run left ~91k of them parked against managers
+// their tests had finished with.
 //
 // The wait is the point: a converger caught mid-round is inside a driver call, so
 // returning on the signal alone would leave exactly the window this closes. The
@@ -389,16 +421,29 @@ func New(drivers map[string]execution.ExecutionDriver, scratchDir string, openCo
 // half-stopped container (issue #770) — so Close can take that stop's remaining
 // budget to return. Waiting out a stop the Worker is already driving is the right
 // end of that trade: the alternative is exiting while a SIGKILL escalation is
-// half-issued.
+// half-issued. The pumps and the dispatcher add nothing to that bound: each parks
+// on the shutdown alongside its own wait and leaves at once.
 //
-// Close is idempotent and terminal: a manager that has been closed still records
-// orphans (the record is what guards the id) but spawns no new convergers.
+// WHAT IS IN FLIGHT IS DROPPED, deliberately, and this changes nothing an operator
+// or the API can observe. Close runs after the session runner has returned
+// (main.go), so by then nothing drains the merged status/log/metrics streams —
+// which is also why the dispatcher must observe the shutdown ON ITS SEND and not
+// only between events, or a full sink would hold Close forever. The alternative,
+// draining first, would deliver into channels no session reads, and before this
+// the same events died with the process anyway. Each site states its own drop:
+// pump, logPump, metricsPump, statusDispatcher.
+//
+// Close is idempotent and terminal: it is safe to call on a manager that has
+// already been closed (the flag is monotonic, cancelling a cancelled context is a
+// no-op, and a settled WaitGroup returns from Wait immediately), and a closed
+// manager still records orphans (the record is what guards the id) and still
+// registers a started instance, but spawns no convergers and no pumps for them.
 func (m *Manager) Close() {
 	m.mu.Lock()
 	m.closed = true
 	m.mu.Unlock()
-	m.stopConverging()
-	m.convergers.Wait()
+	m.stopBackground()
+	m.background.Wait()
 }
 
 // WithLogger sets the manager's logger.
@@ -1603,13 +1648,24 @@ func (m *Manager) launchReserved(ctx context.Context, cmd session.Command, drive
 // pump owns a done channel it closes when the instance reaches a terminal state;
 // the log and metrics pumps watch it so all three tear down cleanly on
 // stop/crash/eviction without leaking goroutines (FR-MON-2, FR-MON-3).
+//
+// A terminal state is the only thing that used to end them, and a server the
+// Worker is shut down underneath never reaches one — so they are manager-owned
+// goroutines Close joins (issue #2777). A start that lands on an already-closed
+// manager therefore starts NONE of them: the instance is registered (the map is
+// what guards the id) but its events go nowhere, which is what they did anyway
+// with no session left to forward them to. The status pump is started first and
+// gates the other two, so the pumps that watch its done channel can never be
+// started without the pump that closes it.
 func (m *Manager) startPumps(serverID string, inst execution.Instance) {
 	done := make(chan struct{})
-	go m.pump(serverID, inst, done)
-	if src, ok := inst.(execution.LogSource); ok {
-		go m.logPump(serverID, src)
+	if !m.goBackground(func() { m.pump(serverID, inst, done) }) {
+		return
 	}
-	go m.metricsPump(serverID, inst, done)
+	if src, ok := inst.(execution.LogSource); ok {
+		m.goBackground(func() { m.logPump(serverID, src) })
+	}
+	m.goBackground(func() { m.metricsPump(serverID, inst, done) })
 }
 
 func (m *Manager) handleStop(ctx context.Context, cmd session.Command, graceful bool) session.CommandResult {
@@ -2655,19 +2711,38 @@ func (m *Manager) restoreRunning(serverID string, inst execution.Instance, start
 
 // pump forwards an instance's status events onto the merged stream, mapping the
 // domain state to its wire name. It also forgets a crashed instance so the server
-// id can be started again. It exits when the instance closes its event channel,
-// closing done to release the log/metrics pumps for the same instance.
+// id can be started again. It exits when the instance closes its event channel —
+// or when the manager is closed (issue #2777), because a server that is still
+// running when the Worker goes down never closes it — closing done either way to
+// release the log/metrics pumps for the same instance.
 func (m *Manager) pump(serverID string, inst execution.Instance, done chan struct{}) {
 	defer close(done)
-	// If this instance was recorded as a failed-stop orphan (issue #251) and then
-	// exits on its own, the channel closes here: forget the orphan so a later stop
-	// for the id is a genuinely unknown server, not a lingering retry target.
-	defer m.forgetOrphanIf(serverID, inst)
-	for ev := range inst.Events() {
-		if ev.State == execution.StateCrashed {
-			m.forgetIf(serverID, inst)
+	events := inst.Events()
+	for {
+		select {
+		case ev, ok := <-events:
+			if !ok {
+				// The instance closed its stream: it reached a terminal state on its
+				// own. If it was recorded as a failed-stop orphan (issue #251), forget
+				// the record so a later stop for the id is a genuinely unknown server,
+				// not a lingering retry target.
+				m.forgetOrphanIf(serverID, inst)
+				return
+			}
+			if ev.State == execution.StateCrashed {
+				m.forgetIf(serverID, inst)
+			}
+			m.sendStatus(session.StatusEvent{ServerID: ev.ServerID, State: ev.State.String(), Detail: ev.Detail})
+		case <-m.shutdown.Done():
+			// Close. A status the instance has already queued is DROPPED: nothing
+			// drains the merged stream by then (Close runs after the session runner
+			// returns, main.go), so forwarding it would only move it into a channel
+			// no one reads — which is what happened before, one process exit later.
+			// The orphan record is left alone on this path: the instance has NOT
+			// exited, and retiring its record would claim a fate the Worker never
+			// observed.
+			return
 		}
-		m.sendStatus(session.StatusEvent{ServerID: ev.ServerID, State: ev.State.String(), Detail: ev.Detail})
 	}
 }
 
@@ -2761,11 +2836,24 @@ func (m *Manager) sendStatus(ev session.StatusEvent) {
 
 // statusDispatcher drains coalesced status events onto the events sink, one
 // server at a time in arrival order, using blocking sends so backpressure is
-// absorbed (not dropped). It runs for the Manager's lifetime; events is never
-// closed, mirroring the existing stream posture, so the goroutine simply parks on
-// a quiet sink and exits with the process.
+// absorbed (not dropped). It runs for the Manager's lifetime and ends with Close
+// (issue #2777): statusNotify is never closed, so before that it simply parked
+// forever on a quiet sink, one leaked goroutine per manager ever built.
+//
+// It observes the shutdown on BOTH waits, and the send is the one that matters:
+// Close runs after the session runner has returned (main.go), so nothing drains
+// events any more, and a dispatcher watching the shutdown only between events
+// would hold Close forever on a full sink. Whatever is parked in pendingStatus
+// at that moment is DROPPED — the same fate it had when the process exited under
+// this goroutine, and the coalescing contract is about converging observed_state
+// for a session that is still there to read it.
 func (m *Manager) statusDispatcher() {
-	for range m.statusNotify {
+	for {
+		select {
+		case <-m.statusNotify:
+		case <-m.shutdown.Done():
+			return
+		}
 		for {
 			m.statusMu.Lock()
 			if len(m.dirtyStatus) == 0 {
@@ -2778,7 +2866,11 @@ func (m *Manager) statusDispatcher() {
 			delete(m.pendingStatus, serverID)
 			m.statusMu.Unlock()
 
-			m.events <- ev
+			select {
+			case m.events <- ev:
+			case <-m.shutdown.Done():
+				return
+			}
 
 			m.statusMu.Lock()
 			if _, ok := m.pendingStatus[serverID]; ok {
@@ -2804,17 +2896,32 @@ func (m *Manager) statusDispatcher() {
 // log for the whole length of a control-plane outage (issue #1716). The counter
 // is goroutine-local: one pump goroutine runs per server, so no locking is
 // needed.
+//
+// Like the status pump it also ends on the manager's shutdown (issue #2777): a
+// server still running when the Worker goes down never closes its log stream.
+// Lines still queued in it are DROPPED, which is the posture this pump already
+// has for a congested sink, and by then nothing drains the merged stream anyway.
 func (m *Manager) logPump(serverID string, src execution.LogSource) {
 	dropped := 0
-	for ev := range src.Logs() {
+	logs := src.Logs()
+loop:
+	for {
 		select {
-		case m.logs <- session.LogEvent{ServerID: ev.ServerID, Line: ev.Line, Stream: mapLogStream(ev.Stream)}:
-			if dropped > 0 {
-				m.reportDroppedLogs(serverID, dropped)
-				dropped = 0
+		case ev, ok := <-logs:
+			if !ok {
+				break loop
 			}
-		default:
-			dropped++
+			select {
+			case m.logs <- session.LogEvent{ServerID: ev.ServerID, Line: ev.Line, Stream: mapLogStream(ev.Stream)}:
+				if dropped > 0 {
+					m.reportDroppedLogs(serverID, dropped)
+					dropped = 0
+				}
+			default:
+				dropped++
+			}
+		case <-m.shutdown.Done():
+			break loop
 		}
 	}
 	if dropped > 0 {
@@ -2856,25 +2963,39 @@ func (m *Manager) metricsPump(serverID string, inst execution.Instance, done cha
 	stats, _ := inst.(execution.StatsSource)
 
 	// Bound every Sample by a context cancelled when the instance tears down (done
-	// closes), so a hung Engine stats call does not leak this goroutine past
-	// stop/crash. Each sample additionally carries a timeout proportionate to the
-	// interval so a single slow-but-not-stuck call cannot stall the cadence.
-	pumpCtx, cancel := context.WithCancel(context.Background())
+	// closes) or when the manager is closed, so a hung Engine stats call does not
+	// leak this goroutine past stop/crash and cannot hold Close (issue #2777).
+	// Each sample additionally carries a timeout proportionate to the interval so
+	// a single slow-but-not-stuck call cannot stall the cadence. The watcher is a
+	// manager-owned goroutine too: it parks on done, so Close has to join it to be
+	// able to say nothing of the manager's is still running.
+	pumpCtx, cancel := context.WithCancel(m.shutdown)
 	defer cancel()
-	go func() {
+	m.goBackground(func() {
 		<-done
 		cancel()
-	}()
+	})
 
 	dropped := 0
 	for {
+		// The tick is not taken at teardown, and an unfired one is not waited out:
+		// metrics are a periodic stream, not state, so a sample the shutdown lands
+		// on is simply never produced — a gap consumers already read as missing
+		// points. The shutdown is watched here as well as through done so the
+		// cadence (15s in production) can never sit between Close and the exit.
+		stop := false
 		select {
 		case <-done:
+			stop = true
+		case <-m.shutdown.Done():
+			stop = true
+		case <-m.clock.After(m.metricsInterval):
+		}
+		if stop {
 			if dropped > 0 {
 				m.reportDroppedMetrics(serverID, dropped)
 			}
 			return
-		case <-m.clock.After(m.metricsInterval):
 		}
 
 		sample := session.MetricsEvent{ServerID: serverID}
