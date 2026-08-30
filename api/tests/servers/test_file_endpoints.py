@@ -2595,3 +2595,69 @@ def test_rename_dir_onto_root_properties_path_is_422_platform_managed_path() -> 
     )
     assert resp.status_code == 422
     assert resp.json()["reason"] == "platform_managed_path"
+
+
+# --- the file-side doors to the same directory (issue #2846) ---------------
+#
+# The write / upload / file-rename family reaches that directory too, by
+# creating the destination's parents. Same 422 ``platform_managed_path``, so the
+# Web UI's switch on ``reason`` sees ONE contract across every door.
+
+
+def test_write_under_root_properties_path_is_422_platform_managed_path() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        write=_FakeUseCase(
+            error=InvalidFilePathError(
+                "server.properties", reason="platform_managed_path"
+            )
+        ),
+    )
+    client = _client(app)
+    resp = client.put(
+        _url(uuid.uuid4(), uuid.uuid4()),
+        params={"path": "server.properties/notes.txt"},
+        json={"content_base64": base64.b64encode(b"x").decode()},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "platform_managed_path"
+
+
+def test_rename_file_under_root_properties_path_is_422_platform_managed_path() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        rename=_FakeUseCase(
+            error=InvalidFilePathError(
+                "server.properties", reason="platform_managed_path"
+            )
+        ),
+    )
+    client = _client(app)
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/rename"),
+        json={"from": "ops.json", "to": "server.properties/ops.json"},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "platform_managed_path"
+
+
+def test_upload_under_root_properties_path_is_422_platform_managed_path() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        upload=_FakeUpload(
+            error=InvalidFilePathError(
+                "server.properties", reason="platform_managed_path"
+            )
+        ),
+    )
+    client = _client(app)
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/upload"),
+        params={"path": "server.properties"},
+        files={"file": ("notes.txt", b"x", "text/plain")},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "platform_managed_path"

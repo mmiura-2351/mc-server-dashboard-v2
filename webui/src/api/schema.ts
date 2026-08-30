@@ -1183,6 +1183,12 @@ export interface paths {
          *     current bytes, so leaving those keys untouched — the ordinary case for editing
          *     ``motd`` or ``max-players`` — passes; removing one, or appending a second line
          *     for one, counts as changing it.
+         *
+         *     **No directory may stand at that path (issue #2846).** A write to a path
+         *     UNDER the root ``server.properties`` name creates the name as a directory on
+         *     the way, which the key guard above cannot see (a directory carries no keys)
+         *     and the platform's own writes cannot survive; it is 422
+         *     ``platform_managed_path``. Writing the file itself is unaffected.
          */
         put: operations["write_file_api_communities__community_id__servers__server_id__files_put"];
         post?: never;
@@ -1385,11 +1391,12 @@ export interface paths {
          *     422 ``platform_managed_key`` with the offending key in the ``key`` member. A
          *     source larger than the edit cap is 413 rather than compared.
          *
-         *     **A directory may not land on that path (issue #2812).** Renaming a DIRECTORY
-         *     onto the root ``server.properties`` name — or to any path under it, whose
-         *     missing parents the rename creates — is 422 ``platform_managed_path``: the
-         *     platform's writes need a file there. Moving a directory already standing at
-         *     that name away is the cleanup path and still works.
+         *     **A directory may not land on that path (issues #2812, #2846).** Renaming a
+         *     DIRECTORY onto the root ``server.properties`` name — or renaming anything, a
+         *     FILE included, to a path under it, whose missing parents the rename creates —
+         *     is 422 ``platform_managed_path``: the platform's writes need a file there.
+         *     Moving a directory already standing at that name away is the cleanup path and
+         *     still works.
          */
         post: operations["rename_file_api_communities__community_id__servers__server_id__files_rename_post"];
         delete?: never;
@@ -1480,6 +1487,14 @@ export interface paths {
          *     with the offending key in the ``key`` member. An offending archive member is
          *     caught before any write, so the whole extract is refused with nothing
          *     written.
+         *
+         *     **No directory may stand at that path (issue #2846).** An upload landing
+         *     UNDER the root ``server.properties`` name — ``path`` naming it, or an archive
+         *     member named ``server.properties/…`` — creates the name as a directory, which
+         *     the platform's own writes cannot survive; it is 422
+         *     ``platform_managed_path``, refused in the same pre-write scan (nothing
+         *     written). The check is on the resulting path, so the same member extracted
+         *     into a subdirectory is ordinary user data.
          */
         post: operations["upload_file_api_communities__community_id__servers__server_id__files_upload_post"];
         delete?: never;
