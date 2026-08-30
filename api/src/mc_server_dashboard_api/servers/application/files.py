@@ -264,20 +264,19 @@ async def _refuse_platform_key_change(current: bytes, incoming: bytes) -> None:
     one is off limits.
 
     *incoming* past :data:`MAX_EDIT_BYTES` is :class:`FileTooLargeError` (413)
-    instead of a comparison. The comparison scans the whole body once per
-    platform-managed key, so letting an upload-sized (:data:`MAX_UPLOAD_BYTES`,
-    512 MiB) body reach it is minutes of CPU for one authenticated ``file:edit``
-    request. The cap costs nothing honest: a real ``server.properties`` is
-    kilobytes, and the PUT already refuses a larger one for this very file.
-    Capping every files-API door also keeps the BASELINE bounded in practice: no
-    oversized copy can be planted through this API for a later guard to choke on
-    reading back.
+    instead of a comparison. The comparison is a full parse of the whole body, so
+    letting an upload-sized (:data:`MAX_UPLOAD_BYTES`, 512 MiB) body reach it is
+    minutes of CPU for one authenticated ``file:edit`` request. The cap costs
+    nothing honest: a real ``server.properties`` is kilobytes, and the PUT already
+    refuses a larger one for this very file. Capping every files-API door also
+    keeps the BASELINE bounded in practice: no oversized copy can be planted
+    through this API for a later guard to choke on reading back.
 
     Only *incoming* is capped. An oversized *current* — which this API can no
     longer produce, though a restore or an import still can — is still compared
     rather than refused, because refusing it would leave exactly that
     pathological file undeletable. That uncapped side is why the comparison runs
-    on a worker thread rather than on the event loop (issue #2821): minutes of
+    on a worker thread rather than on the event loop (issue #2821): seconds of
     parsing for one such file would stall every other request for as long.
 
     Every route that can reach this must map :class:`FileTooLargeError` to 413.

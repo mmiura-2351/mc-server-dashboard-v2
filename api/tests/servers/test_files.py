@@ -3471,8 +3471,8 @@ async def test_rollback_root_properties_differing_only_in_user_keys_is_allowed()
 
 
 async def test_upload_oversized_root_properties_is_too_large() -> None:
-    # The comparison scans the whole body once per platform key, so an
-    # upload-sized (512 MiB) body must never reach it: the file the PUT caps at
+    # The comparison is a full parse of the whole body, so an upload-sized
+    # (512 MiB) body must never reach it: the file the PUT caps at
     # MAX_EDIT_BYTES is capped identically on every other door.
     community, server_id = uuid.uuid4(), uuid.uuid4()
     store = FakeFileStore()
@@ -3599,12 +3599,12 @@ async def test_platform_key_comparison_does_not_block_the_event_loop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # The baseline side of the comparison is uncapped by design (an oversized root
-    # server.properties must stay deletable, below), and the comparison scans the
-    # whole baseline once per platform-managed key -- 20.77 s for 64 MiB. Running
-    # that on the event loop stalls every other request for as long as the file is
-    # large (issue #2821), so it must run off it. Pinned by a comparison that
-    # blocks until loop-side code releases it: run inline, nothing could release
-    # it, and the wait below times out instead.
+    # server.properties must stay deletable, below), and comparing is a full parse
+    # of each side -- seconds of CPU once the baseline is large. Running that on
+    # the event loop stalls every other request for as long as the file is large
+    # (issue #2821), so it must run off it. Pinned by a comparison that blocks
+    # until loop-side code releases it: run inline, nothing could release it, and
+    # the wait below times out instead.
     community, server_id = uuid.uuid4(), uuid.uuid4()
     store = FakeFileStore(strict_dirs=True)
     store.files["server.properties"] = _KEYS_FREE_PROPS
@@ -3645,7 +3645,7 @@ async def test_delete_root_properties_over_the_edit_cap_is_allowed(
     # root server.properties larger than MAX_EDIT_BYTES -- which a restore or an
     # import can still republish -- undeletable through the API (issue #2821), so
     # an oversized baseline is compared, not refused. The comparison is stubbed
-    # because the real one over 4 MiB takes ~18 s; what this pins is that the
+    # because the real one over 4 MiB still takes ~2 s; what this pins is that the
     # oversized baseline reaches it at all.
     community, server_id = uuid.uuid4(), uuid.uuid4()
     store = FakeFileStore(strict_dirs=True)
