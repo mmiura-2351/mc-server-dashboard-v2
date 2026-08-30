@@ -274,9 +274,11 @@ class InvalidFilePathError(ServerError):
     mutation whose DESTINATION name is past the backend's ``NAME_MAX`` carries
     ``"name_too_long"`` (issue #2433); an over-long SOURCE is a 404 miss instead, and
     a non-directory blocking the path is :class:`FileAlreadyExistsError` (409). A
-    make-dir or directory rename that would leave a DIRECTORY at the root
-    ``server.properties`` path carries ``"platform_managed_path"`` (issue #2812):
-    the platform-managed-key guard compares bytes and a directory has none, so the
+    mutation that would leave a DIRECTORY at the root ``server.properties`` path
+    carries ``"platform_managed_path"``: a make-dir or directory rename naming it
+    (issue #2812), and a write / upload / file rename landing UNDER it, whose
+    missing parents every write door creates (issue #2846). The
+    platform-managed-key guard compares bytes and a directory has none, so the
     path itself is refused. The oversized case is not carried here — it is raised
     as :class:`FileTooLargeError` (413) instead.
     """

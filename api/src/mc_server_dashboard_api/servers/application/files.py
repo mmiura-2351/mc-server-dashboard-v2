@@ -227,6 +227,13 @@ def _refuse_dir_at_root_properties(rel_path: str) -> None:
     directory at the guarded path just as directly as the name itself. A path is
     refused by name alone, before any Storage call — the answer depends on
     neither the file's presence nor its content.
+
+    The **file-side** doors (a PUT, an upload, a file rename — issue #2846) reach
+    the same directory by the same route, since each creates its destination's
+    parents too. They pass the destination's PARENT, which is precisely the
+    directory their write materializes: writing ``server.properties`` ITSELF is
+    the legitimate case the key guards handle, and its parent is the root, which
+    matches nothing here.
     """
 
     normalized = str(PurePosixPath(rel_path))
@@ -462,7 +469,12 @@ class ListDir:
 
 @dataclass(frozen=True)
 class WriteFile:
-    """Edit a file, branching at-rest -> Storage / running -> Worker (file:edit)."""
+    """Edit a file, branching at-rest -> Storage / running -> Worker (file:edit).
+
+    The target may not be a path UNDER the root ``server.properties`` name (422
+    ``platform_managed_path``, issue #2846): the write creates its parents, so
+    such a path stands a directory where the platform publishes a file.
+    """
 
     uow: UnitOfWork
     control_plane: ControlPlane
@@ -479,6 +491,9 @@ class WriteFile:
     ) -> None:
         if len(content) > MAX_EDIT_BYTES:
             raise FileTooLargeError(str(len(content)))
+        # The write creates the target's missing parents, so a path UNDER the root
+        # server.properties name leaves a DIRECTORY at the name (issue #2846).
+        _refuse_dir_at_root_properties(str(PurePosixPath(rel_path).parent))
 
         # Hold the per-server lifecycle lock across the at-rest check and the
         # Storage write (issue #827): a start that flips desired=running must
@@ -897,7 +912,9 @@ class UploadFile:
     the unsettled posture other bulk at-rest ops take. The target directory and
     the filename are traversal-validated before any write; with ``extract``, each
     archive member is validated per entry (zip-slip defence) and the total
-    extracted size is capped.
+    extracted size is capped. No target may land UNDER the root
+    ``server.properties`` name (422 ``platform_managed_path``, issue #2846) —
+    the write would create the name as a directory.
 
     Versioning: each written file captures a version exactly as
     :class:`WriteFile` does (one published version per file). An archive extract
@@ -979,6 +996,13 @@ class UploadFile:
                 for entry_path, data in entries:
                     target = _join(dir_path, entry_path)
                     _guard_content_dir(server.server_type, target)
+                    # A member named ``server.properties/x`` (or any member under
+                    # a dir_path of that name) extracts through the same
+                    # parent-creating write, leaving a DIRECTORY at the guarded
+                    # path (issue #2846). Guarded on the JOINED target, not the
+                    # member name: the same member under a subdirectory is
+                    # ordinary user data.
+                    _refuse_dir_at_root_properties(str(PurePosixPath(target).parent))
                     if _is_root_server_properties(target):
                         if properties_baseline is None:
                             properties_baseline = await _current_properties(
@@ -998,6 +1022,9 @@ class UploadFile:
                         content=data,
                     )
                 return
+            _refuse_dir_at_root_properties(
+                str(PurePosixPath(_join(dir_path, filename)).parent)
+            )
             await _guard_at_rest_properties(
                 self.file_store,
                 community_id=community_id,
@@ -1359,7 +1386,9 @@ class RenameFile:
     :meth:`FileStore.delete_dir`, no per-file version capture. Its DESTINATION may
     not be the root ``server.properties`` path (422 ``platform_managed_path``,
     issue #2812); moving a directory already standing there AWAY is the cleanup
-    path and stays open.
+    path and stays open. A FILE rename shares the refusal for a destination UNDER
+    that name, which ``rename_file`` would create the name as a directory for
+    (issue #2846).
     """
 
     uow: UnitOfWork
@@ -1408,6 +1437,10 @@ class RenameFile:
                     to_path=to_path,
                 )
             else:
+                # A file rename creates its destination's parents too, so a
+                # destination UNDER the name leaves a directory there (issue
+                # #2846) — the same refusal the directory branch above makes.
+                _refuse_dir_at_root_properties(str(PurePosixPath(to_path).parent))
                 # Both ends of a file rename are writes to the root
                 # server.properties (issue #2809). Renaming it AWAY removes its
                 # keys, exactly like a delete. Renaming another file ONTO the name

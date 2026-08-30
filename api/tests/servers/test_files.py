@@ -3929,3 +3929,111 @@ async def test_rename_root_properties_directory_away_is_allowed() -> None:
         to_path="stale.properties",
     )
     assert store.renamed_dirs == [("server.properties", "stale.properties")]
+
+
+# --- the file-side doors to the same directory (issue #2846) ---------------
+#
+# Every write door creates its destination's missing parents, so a write UNDER
+# the root ``server.properties`` name leaves a DIRECTORY at the name just as
+# surely as a make-dir on it does -- and the key guards still cannot see it (a
+# directory carries no keys). Each door is refused by the destination's PARENT,
+# which is the directory the write would materialize, so writing the file
+# ITSELF stays open and only the nested shape is refused.
+
+
+async def test_write_under_root_properties_path_is_refused() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = WriteFile(
+        uow=_stopped_uow(community, server_id),
+        control_plane=FakeControlPlane(),
+        file_store=store,
+    )
+
+    with pytest.raises(InvalidFilePathError) as caught:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="server.properties/notes.txt",
+            content=b"x",
+        )
+    assert caught.value.reason == "platform_managed_path"
+    assert store.writes == []
+
+
+async def test_rename_file_onto_a_path_under_root_properties_is_refused() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    store.files["ops.json"] = b"[]"
+    use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(InvalidFilePathError) as caught:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            from_path="ops.json",
+            to_path="server.properties/ops.json",
+        )
+    assert caught.value.reason == "platform_managed_path"
+    assert store.files == {"ops.json": b"[]"}
+
+
+async def test_upload_extract_member_under_root_properties_is_refused() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = UploadFile(uow=_stopped_uow(community, server_id), file_store=store)
+    archive = _zip_bytes({"ops.json": b"[]", "server.properties/notes.txt": b"X"})
+
+    with pytest.raises(InvalidFilePathError) as caught:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            dir_path=".",
+            filename="bundle.zip",
+            content=archive,
+            extract=True,
+        )
+    assert caught.value.reason == "platform_managed_path"
+    # Scanned before the write pass, so the whole archive is refused with
+    # nothing written (the #269 atomicity posture).
+    assert store.writes == []
+
+
+async def test_upload_into_a_path_under_root_properties_is_refused() -> None:
+    # The same door without an archive: the upload target directory IS the
+    # guarded name, so the plain write creates a directory there.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = UploadFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(InvalidFilePathError) as caught:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            dir_path="server.properties",
+            filename="notes.txt",
+            content=b"X",
+            extract=False,
+        )
+    assert caught.value.reason == "platform_managed_path"
+    assert store.writes == []
+
+
+async def test_upload_extract_member_under_a_nested_properties_dir_is_allowed() -> None:
+    # Only the ROOT name is guarded, so the check is on the joined target, not on
+    # the member name: the same member extracted into a subdirectory is ordinary
+    # user data.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = UploadFile(uow=_stopped_uow(community, server_id), file_store=store)
+    archive = _zip_bytes({"server.properties/notes.txt": b"X"})
+
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        dir_path="backups",
+        filename="bundle.zip",
+        content=archive,
+        extract=True,
+    )
+    assert store.writes == [("backups/server.properties/notes.txt", b"X")]
