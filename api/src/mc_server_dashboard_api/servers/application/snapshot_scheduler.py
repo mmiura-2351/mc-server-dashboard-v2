@@ -33,6 +33,13 @@ nothing for this id, so nothing was lost and it is logged as such (issue #2480).
 The one skip that does not advance next-due is the pre-dispatch connectivity gate:
 nothing is dispatched and nothing is logged there, so retrying it every tick costs
 nothing and the snapshot is taken as soon as the Worker reconnects.
+
+Considering one server is isolated from considering the next (issue #2752): an
+exception that no branch below handles is logged with its traceback and advances
+that server's next-due like a failed dispatch, rather than aborting the tick and
+starving every server behind the offender in iteration order — every tick, since
+its next-due never advanced either. The loop-level catch in the adapter stays as
+the last resort (issue #1760).
 """
 
 from __future__ import annotations
@@ -115,7 +122,20 @@ class RunSnapshotCadenceTick:
         for stale in self._next_due.keys() - live_ids:
             del self._next_due[stale]
         for server in servers:
-            await self._consider(server, now)
+            try:
+                await self._consider(server, now)
+            except Exception:  # noqa: BLE001 - one server must not abort the tick
+                # An unexpected failure is isolated to its own server (issue
+                # #2752): log it with the traceback, advance next-due exactly as a
+                # failed dispatch does so the offender is not due again on every
+                # tick, and carry on with the servers behind it. CancelledError is
+                # not an Exception, so shutdown still ends the loop promptly.
+                _LOG.exception(
+                    "periodic snapshot failed unexpectedly for server %s; "
+                    "will retry on the server's next interval",
+                    server.id.value,
+                )
+                self._schedule_next(server, now)
 
     async def _consider(self, server: Server, now: dt.datetime) -> None:
         interval = self._interval_for(server)

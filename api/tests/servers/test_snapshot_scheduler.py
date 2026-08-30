@@ -324,6 +324,112 @@ async def test_only_running_assigned_servers_are_considered() -> None:
     assert {sid for _, _, sid in cp.dispatched} == {running.id}
 
 
+# --- per-server isolation inside one tick (issue #2752) --------------------
+
+
+class _ExplodingControlPlane(FakeControlPlane):
+    """Raises an *unexpected* error for one server's snapshot.
+
+    Stands in for the genuine bug the tick has to survive: anything that is not
+    ``WorkerUnavailableError`` / ``InvalidSnapshotIntervalError``, which the
+    scheduler already handles per server (an unmapped exception type, a
+    repository error mid-iteration).
+    """
+
+    def __init__(self, *, exploding: ServerId) -> None:
+        super().__init__()
+        self._exploding = exploding
+        # Every attempt, including the ones that raise — the base fake records
+        # only the dispatches that return, so a raised one leaves no trace there.
+        self.attempts: list[ServerId] = []
+
+    async def snapshot(
+        self,
+        *,
+        worker_id: WorkerId,
+        community_id: CommunityId,
+        server_id: ServerId,
+        final: bool = False,
+    ) -> CommandOutcome:
+        self.attempts.append(server_id)
+        if server_id == self._exploding:
+            raise RuntimeError("unexpected snapshot bug")
+        return await super().snapshot(
+            worker_id=worker_id,
+            community_id=community_id,
+            server_id=server_id,
+            final=final,
+        )
+
+
+async def test_unexpected_error_for_one_server_still_snapshots_the_rest() -> None:
+    # Issue #2752: an unexpected exception while considering one server must not
+    # abort the tick. Without per-server isolation the servers BEHIND the offender
+    # in iteration order were never considered, every tick, for as long as the
+    # cause lasted. Seed order is iteration order in the fake repository, so the
+    # exploding server is considered first.
+    uow = FakeUnitOfWork()
+    exploding = _running_server()
+    behind = _running_server()
+    uow.servers.seed(exploding)
+    uow.servers.seed(behind)
+    cp = _ExplodingControlPlane(exploding=exploding.id)
+    clock = FakeClock(_NOW)
+    scheduler = _scheduler(uow, cp, clock)
+    await scheduler.tick()
+    clock.set(_NOW + dt.timedelta(seconds=3600))
+
+    await scheduler.tick()  # the first server raises; the second is still due
+
+    assert [sid for _, _, sid in cp.dispatched] == [behind.id]
+
+
+async def test_unexpected_error_advances_next_due() -> None:
+    # Issue #2752: the failure must also advance the offender's next-due, exactly
+    # as a failed dispatch does (issue #2485). Skipping the advance left it due on
+    # every tick, so the ERROR traceback repeated at the tick period rather than
+    # at the server's own interval.
+    uow = FakeUnitOfWork()
+    server = _running_server()
+    uow.servers.seed(server)
+    cp = _ExplodingControlPlane(exploding=server.id)
+    clock = FakeClock(_NOW)
+    scheduler = _scheduler(uow, cp, clock)
+    await scheduler.tick()
+    clock.set(_NOW + dt.timedelta(seconds=3600))
+    await scheduler.tick()  # due, attempted, raises
+    assert cp.attempts == [server.id]
+    clock.set(_NOW + dt.timedelta(seconds=3700))  # < one interval after the failure
+    await scheduler.tick()  # not due again yet -> not re-attempted
+    assert cp.attempts == [server.id]
+    clock.set(_NOW + dt.timedelta(seconds=3600 + 4000))  # > interval after failure
+    await scheduler.tick()  # retried on its own interval
+    assert cp.attempts == [server.id, server.id]
+
+
+async def test_unexpected_error_is_logged_with_the_server_and_a_traceback(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Issue #2752: isolating the failure must not hide it. The record names the
+    # server and carries the traceback, so what the loop-level catch used to print
+    # is still diagnosable from the tick that survived.
+    uow = FakeUnitOfWork()
+    server = _running_server()
+    uow.servers.seed(server)
+    cp = _ExplodingControlPlane(exploding=server.id)
+    clock = FakeClock(_NOW)
+    scheduler = _scheduler(uow, cp, clock)
+    await scheduler.tick()
+    clock.set(_NOW + dt.timedelta(seconds=3600))
+
+    with caplog.at_level(logging.ERROR):
+        await scheduler.tick()
+
+    record = next(r for r in caplog.records if r.levelno == logging.ERROR)
+    assert str(server.id.value) in record.getMessage()
+    assert record.exc_info is not None
+
+
 # --- on-demand snapshot hook (SnapshotServer) ------------------------------
 
 
