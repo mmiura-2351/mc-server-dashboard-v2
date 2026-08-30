@@ -1108,39 +1108,7 @@ class DownloadFile:
         """
 
         await self._require_at_rest(community_id, server_id)
-        return await self._resolve_is_dir(community_id, server_id, rel_path)
-
-    async def _resolve_is_dir(
-        self, community_id: CommunityId, server_id: ServerId, rel_path: str
-    ) -> bool:
-        if rel_path in ("", "."):
-            return True
-        self.file_store.validate_rel_path(rel_path)
-        try:
-            await self.file_store.list_dir(
-                community_id=community_id, server_id=server_id, rel_path=rel_path
-            )
-            return True
-        except ServerFileNotFoundError:
-            # Not a directory; confirm it is a readable file (else re-raise). Probe
-            # the per-file stream rather than read_file so a huge file is not
-            # buffered whole just to confirm existence (issue #265): the stream
-            # resolves + locates the file on its first iteration, so consuming one
-            # chunk (or hitting a clean EOF for an empty file) is enough; missing
-            # surfaces ServerFileNotFoundError there.
-            stream = cast(
-                "AsyncGenerator[bytes, None]",
-                self.file_store.open_file_stream(
-                    community_id=community_id, server_id=server_id, rel_path=rel_path
-                ),
-            )
-            try:
-                await stream.__anext__()
-            except StopAsyncIteration:
-                pass
-            finally:
-                await stream.aclose()
-            return False
+        return await _path_is_dir(self.file_store, community_id, server_id, rel_path)
 
     async def _require_at_rest(
         self, community_id: CommunityId, server_id: ServerId
@@ -1162,24 +1130,30 @@ async def _path_is_dir(
     """Resolve whether ``rel_path`` is a directory (vs a file), at rest.
 
     The root is always a directory; otherwise a successful ``list_dir`` means a
-    directory, and a :class:`ServerFileNotFoundError` from it means the path is
-    not one — leaving only "is it there at all?", which is what ``path_exists``
-    answers (present and not a directory is a file; absent re-raises the miss).
-    Validates the path first.
+    directory, and a :class:`ServerFileNotFoundError` from it falls back to
+    confirming a file (re-raising if that is missing too). Validates the path
+    first. :meth:`DownloadFile.is_dir` resolves its file/zip branch through this
+    same function, so the download, the delete and the rename cannot disagree
+    about what a path IS.
 
-    That second question is deliberately NOT a read (issue #2817). Confirming the
-    file by reading it materialized the whole object to learn one bit, so a delete
-    or rename of a multi-GiB file pulled every byte of it into memory before doing
-    anything with it. The two answers agree on every path that reaches here: a
-    ``list_dir`` miss is a plain file, a path reached through one, an over-long
-    name or a gone path, and on each of those the existence probe answers exactly
-    what the read did.
+    The fallback confirms the file from the per-file STREAM, not from
+    :meth:`FileStore.read_file` (issue #2817). The stream resolves and locates the
+    file on its first iteration, so pulling one chunk — or hitting a clean EOF for
+    an empty file — settles it, while a read materialized the whole object to
+    learn one bit: a delete or rename of a multi-GiB file pulled every byte of it
+    into memory before doing anything with it. This is the probe
+    :meth:`DownloadFile` already used for the same reason (issue #265).
 
-    Only the MISS falls back: a path the listing REFUSES — one with a symlink at
-    any component (#2432), or one escaping the working set — is neither a directory
-    nor a file, so the refusal propagates rather than being re-asked. It has to
-    propagate from here rather than be handed to the probe, which describes a leaf
-    link as an occupied NAME (#2426) and would therefore call it a file.
+    The question stays "can this be read as a file", never "is this NAME taken".
+    :meth:`FileStore.path_exists` answers the latter and is the wrong probe here,
+    by a case that reaches this branch: a SELF-LOOPING symlink. Every other link
+    shape is refused by the listing below, but a loop is left literal by the
+    adapter's resolve, so no refusal fires and ELOOP lands in the "nothing
+    listable/readable here" errno sets — the miss runs, and ``path_exists``
+    reports the dirent as occupied (#2426) where every read reports the modelled
+    miss. Answering from the name would delete such a link on a 404 path and turn
+    a rename's 404 into a 422; the stream agrees with the read on ELOOP, so it
+    does neither.
 
     ``treat_symlink_as_file`` is the one caller-picked exception (the DELETE route,
     issue #2429): a symlink dirent is not a directory (its listing shows
@@ -1201,14 +1175,26 @@ async def _path_is_dir(
         )
         return True
     except ServerFileNotFoundError:
-        if not await file_store.path_exists(
-            community_id=community_id, server_id=server_id, rel_path=rel_path
-        ):
-            raise
+        # Not a directory; confirm it is a readable file (else re-raise). One chunk
+        # is enough — the stream locates the file on its first iteration — so a
+        # huge file is never buffered whole just to answer this (issues #265,
+        # #2817); missing surfaces ServerFileNotFoundError there.
+        stream = cast(
+            "AsyncGenerator[bytes, None]",
+            file_store.open_file_stream(
+                community_id=community_id, server_id=server_id, rel_path=rel_path
+            ),
+        )
+        try:
+            await stream.__anext__()
+        except StopAsyncIteration:
+            pass
+        finally:
+            await stream.aclose()
         return False
     except InvalidFilePathError:
         # A refused path (a symlink at some component, #2432) is neither the
-        # directory ``list_dir`` would confirm nor the file ``path_exists`` would —
+        # directory ``list_dir`` would confirm nor the file the stream would —
         # so by default the refusal propagates (rename source / download want that
         # 422). The DELETE route instead treats it as not-a-directory so the delete
         # dispatches to ``delete_file``, where the adapter unlinks a leaf link and

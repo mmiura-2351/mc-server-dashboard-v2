@@ -118,6 +118,17 @@ class FakeFileStore(FileStore):
         # delete dispatch cannot slip such a path past the adapter's enforcement.
         self.symlink_leaves: set[str] = set()
         self.symlink_through: set[str] = set()
+        # Self-looping symlink dirents (``loop -> loop``). Unlike every other link
+        # shape these are NOT refused: the adapter's resolve leaves a loop literal
+        # (a non-strict realpath cannot follow it), so no symlink refusal fires and
+        # ELOOP lands in the errno sets that mean "nothing listable/readable here"
+        # -- a plain MISS from list_dir, read_file and open_file_stream alike. The
+        # name is nonetheless occupied (``path_exists`` lstats the dirent), and the
+        # mutations split: delete_file unlinks the dirent, rename refuses it. An
+        # uploaded tar can plant one (``filter="data"`` permits an internal
+        # relative symlink), so this is reachable from the product, not only over
+        # SSH (issue #2817).
+        self.symlink_loops: set[str] = set()
         # When set, list_dir raises ServerFileNotFoundError for a path that is not
         # a seeded directory, so the file-vs-dir resolution (delete / rename /
         # search) can tell a file from a directory; off by default to preserve the
@@ -145,6 +156,8 @@ class FakeFileStore(FileStore):
             # fake where the adapter would refuse it (issue #2809 review).
             raise InvalidFilePathError(rel_path, reason="symlink_refused")
         if rel_path not in self.files:
+            # A loop is inside this miss rather than beside it: ELOOP is one of the
+            # errnos the adapter reads as "no readable file" (issue #2817).
             raise ServerFileNotFoundError(str(server_id.value))
         return self.files[rel_path]
 
@@ -158,6 +171,8 @@ class FakeFileStore(FileStore):
         async def _gen() -> AsyncIterator[bytes]:
             if self.bad_path:
                 raise InvalidFilePathError(rel_path)
+            if rel_path in self.symlink_leaves or rel_path in self.symlink_through:
+                raise InvalidFilePathError(rel_path, reason="symlink_refused")
             if rel_path not in self.files:
                 raise ServerFileNotFoundError(str(server_id.value))
             data = self.files[rel_path]
@@ -173,6 +188,10 @@ class FakeFileStore(FileStore):
             # A symlink at any component is refused by the real seam (#2432), the
             # same 422 whether the link is the leaf or an intermediate one.
             raise InvalidFilePathError(rel_path, reason="symlink_refused")
+        if rel_path in self.symlink_loops:
+            # ELOOP is in the listing's "nothing listable here" errno set, so a
+            # loop MISSES rather than being refused like every other link (#2817).
+            raise ServerFileNotFoundError(str(server_id.value))
         if self.missing:
             raise ServerFileNotFoundError(str(server_id.value))
         if self.strict_dirs and rel_path not in self.dirs:
@@ -188,7 +207,15 @@ class FakeFileStore(FileStore):
         # refuses a symlink the name is nonetheless occupied by.
         if self.bad_path:
             raise InvalidFilePathError(rel_path)
-        return rel_path in ("", ".") or rel_path in self.files or rel_path in self.dirs
+        return (
+            rel_path in ("", ".")
+            or rel_path in self.files
+            or rel_path in self.dirs
+            # A link occupies its name whatever it points at -- a loop included,
+            # which nothing can list or read (issue #2426, #2817).
+            or rel_path in self.symlink_leaves
+            or rel_path in self.symlink_loops
+        )
 
     async def write_file(
         self,
@@ -242,9 +269,11 @@ class FakeFileStore(FileStore):
             # The adapter refuses a mutation reached through an intermediate link
             # (#2432), so the route's delete dispatch does not defeat it (#2429).
             raise InvalidFilePathError(rel_path, reason="symlink_refused")
-        if rel_path in self.symlink_leaves:
-            # A leaf symlink is unlinked as the dirent it is (#2429).
+        if rel_path in self.symlink_leaves or rel_path in self.symlink_loops:
+            # A leaf symlink is unlinked as the dirent it is, a looping one
+            # included (#2429).
             self.symlink_leaves.discard(rel_path)
+            self.symlink_loops.discard(rel_path)
             self.deleted_files.append(rel_path)
             return
         if rel_path not in self.files:
@@ -267,6 +296,9 @@ class FakeFileStore(FileStore):
         from_path: str,
         to_path: str,
     ) -> None:
+        if from_path in self.symlink_leaves or from_path in self.symlink_loops:
+            # Rename is one of the mutations a leaf link refuses outright (#2429).
+            raise InvalidFilePathError(from_path, reason="symlink_refused")
         if from_path not in self.files:
             raise ServerFileNotFoundError(str(server_id.value))
         self.files[to_path] = self.files.pop(from_path)
@@ -2546,14 +2578,65 @@ async def test_delete_through_an_intermediate_symlink_still_refuses() -> None:
     assert store.deleted_files == []
 
 
-class _BodyReadTrapFileStore(FakeFileStore):
-    """Fails the moment anything reads a file's BYTES (issue #2817).
+async def test_delete_of_a_symlink_loop_is_still_not_found() -> None:
+    """A self-looping link stays a 404, and stays on disk (issue #2817).
 
-    The file-vs-directory probe confirmed a non-directory by reading the whole
-    object back, so a delete or rename of a multi-GiB file pulled all of it into
-    memory before doing anything with it. Both read seams are traps here, so the
-    probe is pinned to answering from a size-free question rather than from a
-    body it never looks at.
+    Every other link shape is REFUSED by the listing, so the file-vs-directory
+    probe never has to decide about it. A loop is the exception: the adapter's
+    resolve leaves it literal, so nothing raises the symlink refusal and ELOOP
+    lands in the "nothing listable/readable here" errno sets — the probe's miss
+    branch runs, and what it asks there decides the answer. Asking whether the
+    NAME is occupied says yes (a link occupies its name, #2426) and would delete
+    the dirent; asking for the file's first byte, as a read does, keeps the 404
+    this has always returned.
+    """
+
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    store.symlink_loops.add("loop")
+    use_case = DeleteFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(ServerFileNotFoundError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="loop",
+        )
+    assert store.deleted_files == []
+    assert "loop" in store.symlink_loops
+
+
+async def test_rename_of_a_symlink_loop_source_is_still_not_found() -> None:
+    """The rename side of the same path (issue #2817).
+
+    Resolving the loop as "a file" hands it to ``rename_file``, whose own resolve
+    refuses a leaf link — turning the 404 into a 422 ``symlink_refused``. The
+    probe answers 404 before the mutation is ever reached.
+    """
+
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    store.symlink_loops.add("loop")
+    use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(ServerFileNotFoundError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            from_path="loop",
+            to_path="moved",
+        )
+
+
+class _BodyReadTrapFileStore(FakeFileStore):
+    """Fails if a file's BODY is read to answer file-vs-directory (issue #2817).
+
+    The probe confirmed a non-directory by reading the whole object back, so a
+    delete or rename of a multi-GiB file pulled all of it into memory before
+    doing anything with it. Opening the stream is not the problem — locating the
+    file is what answers the question, and one chunk is what that costs — so the
+    trap allows exactly one chunk and fails on the second. Both the whole-bytes
+    seam and a stream drained past its first chunk redden.
     """
 
     async def read_file(
@@ -2564,7 +2647,21 @@ class _BodyReadTrapFileStore(FakeFileStore):
     def open_file_stream(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> AsyncIterator[bytes]:
-        raise AssertionError(f"streamed the body of {rel_path!r}")
+        inner = super().open_file_stream(
+            community_id=community_id, server_id=server_id, rel_path=rel_path
+        )
+
+        async def _gen() -> AsyncIterator[bytes]:
+            chunks = 0
+            async for chunk in inner:
+                chunks += 1
+                if chunks > 1:
+                    raise AssertionError(
+                        f"drained {chunks} chunks of {rel_path!r}; one locates it"
+                    )
+                yield chunk
+
+        return _gen()
 
 
 async def test_delete_file_resolves_its_kind_without_reading_the_body() -> None:
