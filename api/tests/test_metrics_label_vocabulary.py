@@ -55,6 +55,15 @@ neither — so a static-mount path, a plain Starlette route (``/api/openapi.json
 and a 404 all leave the key absent and collapse to the literal ``<unmatched>``.
 The test drives a mount path and a 404, both carrying a UUID, and pins that
 neither raw path reaches the exposition.
+
+**The** ``method`` **label is bounded by a literal allowlist, not by the
+request** (issue #2762). ``uvicorn`` runs on ``h11`` here, whose grammar accepts
+any RFC token as a method, and an invented token on a templated path takes the
+405 partial-match branch, which still sets ``scope["route"]`` — so before the
+middleware normalised it, every invented token was a fresh series, from an
+unauthenticated client. The test drives one such request and pins that it is
+labelled ``<other>``, which is what makes the literal vocabulary below a real
+pin rather than a description of the methods the test happens to send.
 """
 
 from __future__ import annotations
@@ -88,14 +97,18 @@ from tests.core.test_metrics_refresh import _CountSession, _Registry
 # The route label a request that matched no ``APIRoute`` collapses to.
 _UNMATCHED = "<unmatched>"
 
+# The method label a request outside the middleware's allowlist collapses to.
+_OTHER_METHOD = "<other>"
+
 # Every vocabulary below is written out as a literal rather than imported from
 # the code it describes: a vocabulary derived from the source widens silently
 # with it, and the whole point is that widening one must be a deliberate,
 # reviewable edit here.
 
-# HTTP request methods. Bounded by the HTTP method registry, not by this repo.
+# HTTP request methods. Bounded by the middleware's literal allowlist (anything
+# else is labelled ``<other>``), not by the request and not by this repo's routes.
 _HTTP_METHODS = frozenset(
-    {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE"}
+    {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", _OTHER_METHOD}
 )
 
 # HTTP status codes, as ``str(response.status_code)``.
@@ -258,6 +271,9 @@ def test_exposition_label_values_stay_bounded_and_non_identifying(
         # by the docs-assets ``StaticFiles`` mount. Both must collapse.
         api_client.get(f"/api/no-such-route/{server_id}")
         api_client.get(f"/api/docs-assets/{server_id}.css")
+        # An invented method token, which h11 accepts on the wire and the 405
+        # partial match still resolves to a route template. Must collapse too.
+        api_client.request("BREW", "/api/healthz")
 
     body = exposition_client.get("/metrics").text
     families = list(text_string_to_metric_families(body))
@@ -276,6 +292,7 @@ def test_exposition_label_values_stay_bounded_and_non_identifying(
     )
 
     routes: set[str] = set()
+    methods: set[str] = set()
     for family in families:
         declared = _declared_family(family.name)
         permitted = vocabulary[declared]
@@ -302,8 +319,9 @@ def test_exposition_label_values_stay_bounded_and_non_identifying(
                 )
         if declared == "http_requests":
             routes.update(sample.labels["route"] for sample in family.samples)
+            methods.update(sample.labels["method"] for sample in family.samples)
 
-    # The six driven requests, as the ``route`` label saw them: four templates,
+    # The seven driven requests, as the ``route`` label saw them: four templates,
     # and one ``<unmatched>`` covering both the 404 and the static-mount path.
     assert routes == {
         "/api/healthz",
@@ -312,3 +330,7 @@ def test_exposition_label_values_stay_bounded_and_non_identifying(
         "/api/communities/{community_id}/servers/{server_id}",
         _UNMATCHED,
     }
+    # And as the ``method`` label saw them. ``BREW`` reached a real route
+    # template (the 405 partial match) and still contributed no series of its
+    # own: the vocabulary above bounds the label, the request does not.
+    assert methods == {"GET", "POST", _OTHER_METHOD}
