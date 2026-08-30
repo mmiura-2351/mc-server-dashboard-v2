@@ -200,14 +200,15 @@ func TestStartAfterCloseSpawnsNoPumps(t *testing.T) {
 		t.Fatalf("start failed: %+v", res)
 	}
 
-	// An absence, so watch for a while rather than returning on the first clean
-	// sample: the pumps would appear a scheduling moment after Handle returns.
-	deadline := time.Now().Add(200 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		if live, dump := liveManagerGoroutines(); live != 0 {
-			t.Fatalf("a start on a closed manager spawned %d goroutine(s) nobody joins:\n%s",
-				live, managerStacks(dump))
-		}
-		time.Sleep(time.Millisecond)
+	// The guard itself, asserted directly: a spawn on a closed manager is REFUSED,
+	// not merely short-lived. Watching the goroutines alone cannot see this — one
+	// started here observes the already-cancelled shutdown and leaves within
+	// microseconds — but the danger is not its lifetime, it is the Add: landing
+	// beside a Wait still in progress, that is a panic in the Worker's shutdown
+	// path, not a leak.
+	if m.goBackground(func() {}) {
+		t.Fatal("goBackground started a goroutine on a closed manager; Close has already run the Wait that counts it")
 	}
+
+	awaitManagerGoroutines(t, 0)
 }
