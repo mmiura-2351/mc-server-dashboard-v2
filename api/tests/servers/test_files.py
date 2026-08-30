@@ -2546,6 +2546,42 @@ async def test_delete_through_an_intermediate_symlink_still_refuses() -> None:
     assert store.deleted_files == []
 
 
+class _BodyReadTrapFileStore(FakeFileStore):
+    """Fails the moment anything reads a file's BYTES (issue #2817).
+
+    The file-vs-directory probe confirmed a non-directory by reading the whole
+    object back, so a delete or rename of a multi-GiB file pulled all of it into
+    memory before doing anything with it. Both read seams are traps here, so the
+    probe is pinned to answering from a size-free question rather than from a
+    body it never looks at.
+    """
+
+    async def read_file(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> bytes:
+        raise AssertionError(f"read the whole body of {rel_path!r}")
+
+    def open_file_stream(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> AsyncIterator[bytes]:
+        raise AssertionError(f"streamed the body of {rel_path!r}")
+
+
+async def test_delete_file_resolves_its_kind_without_reading_the_body() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = _BodyReadTrapFileStore(strict_dirs=True)
+    store.files["world/region.mca"] = b"pretend these are gigabytes"
+    use_case = DeleteFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="world/region.mca",
+    )
+
+    assert store.deleted_files == ["world/region.mca"]
+
+
 # --- mkdir (issue #259) ----------------------------------------------------
 
 
@@ -2624,6 +2660,22 @@ async def test_rename_at_rest_moves_file() -> None:
     # Atomic rename via rename_file: dest present, source gone, no version capture.
     assert store.files.get("new.txt") == b"payload"
     assert "old.txt" not in store.files
+
+
+async def test_rename_file_resolves_its_kind_without_reading_the_body() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = _BodyReadTrapFileStore(strict_dirs=True)
+    store.files["world/region.mca"] = b"pretend these are gigabytes"
+    use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        from_path="world/region.mca",
+        to_path="world/region.mca.bak",
+    )
+
+    assert store.files.get("world/region.mca.bak") == b"pretend these are gigabytes"
 
 
 async def test_rename_missing_source_is_file_not_found() -> None:

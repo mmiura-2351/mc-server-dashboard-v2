@@ -1161,15 +1161,25 @@ async def _path_is_dir(
 ) -> bool:
     """Resolve whether ``rel_path`` is a directory (vs a file), at rest.
 
-    Mirrors :meth:`DownloadFile._resolve_is_dir`: the root is always a directory;
-    otherwise a successful ``list_dir`` means a directory, and a
-    :class:`ServerFileNotFoundError` from it falls back to a file read (re-raising
-    if that is missing too). Validates the path first.
+    The root is always a directory; otherwise a successful ``list_dir`` means a
+    directory, and a :class:`ServerFileNotFoundError` from it means the path is
+    not one — leaving only "is it there at all?", which is what ``path_exists``
+    answers (present and not a directory is a file; absent re-raises the miss).
+    Validates the path first.
+
+    That second question is deliberately NOT a read (issue #2817). Confirming the
+    file by reading it materialized the whole object to learn one bit, so a delete
+    or rename of a multi-GiB file pulled every byte of it into memory before doing
+    anything with it. The two answers agree on every path that reaches here: a
+    ``list_dir`` miss is a plain file, a path reached through one, an over-long
+    name or a gone path, and on each of those the existence probe answers exactly
+    what the read did.
 
     Only the MISS falls back: a path the listing REFUSES — one with a symlink at
     any component (#2432), or one escaping the working set — is neither a directory
-    nor a file, so the refusal propagates rather than being re-asked as a read that
-    would refuse it identically.
+    nor a file, so the refusal propagates rather than being re-asked. It has to
+    propagate from here rather than be handed to the probe, which describes a leaf
+    link as an occupied NAME (#2426) and would therefore call it a file.
 
     ``treat_symlink_as_file`` is the one caller-picked exception (the DELETE route,
     issue #2429): a symlink dirent is not a directory (its listing shows
@@ -1191,13 +1201,14 @@ async def _path_is_dir(
         )
         return True
     except ServerFileNotFoundError:
-        await file_store.read_file(
+        if not await file_store.path_exists(
             community_id=community_id, server_id=server_id, rel_path=rel_path
-        )
+        ):
+            raise
         return False
     except InvalidFilePathError:
         # A refused path (a symlink at some component, #2432) is neither the
-        # directory ``list_dir`` would confirm nor the file ``read_file`` would —
+        # directory ``list_dir`` would confirm nor the file ``path_exists`` would —
         # so by default the refusal propagates (rename source / download want that
         # 422). The DELETE route instead treats it as not-a-directory so the delete
         # dispatches to ``delete_file``, where the adapter unlinks a leaf link and
