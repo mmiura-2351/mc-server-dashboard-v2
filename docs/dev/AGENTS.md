@@ -96,10 +96,10 @@ Each one succeeds, or appears to; the damage surfaces later.
   `git checkout <path>` restores from the index, not `HEAD`, eating any
   unstaged edits with no confirmation, no reflog entry, nothing to recover
   from. Reordering the work removes that hazard instead of navigating it: with
-  everything else already committed, both `git checkout -- <path>` and the bare
-  form restore the committed content, and no file has to be copied aside, so
-  the scratchpad collision below cannot arise either. The branch is squashed at
-  merge (CONTRIBUTING.md Section 4), so the extra commit costs nothing — the
+  the tree clean before the mutation, both `git checkout -- <path>` and the
+  bare form restore the committed content, and no file has to be copied aside,
+  so the copy-aside collision below cannot arise either. The branch is squashed
+  at merge (CONTRIBUTING.md Section 4), so the extra commit costs nothing — the
   same reason a failed pre-push is fixed in a new commit rather than an amend.
   When a commit genuinely cannot come first, `git checkout -- <path>` on an
   otherwise-clean file is the fallback, still with no copy; but it is the
