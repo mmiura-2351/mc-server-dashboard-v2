@@ -407,15 +407,17 @@ async def test_upload_file_takes_lock_around_its_work() -> None:
 async def test_delete_file_takes_lock_around_its_work() -> None:
     server, repo, lock = _seeded()
     store = FakeFileStore()
+    # Seed a member under "d" so it IS a directory and the delete lands on
+    # delete_dir; the mutation is what must fall inside the hold, whichever branch
+    # dispatches it. (The fake's list_dir used to answer every path, so this
+    # landed on delete_dir for a path that was nothing at all; issue #2867.)
+    store.files["d/a.txt"] = b"x"
     store.events = lock.events
-    # The fake's list_dir never misses, so _path_is_dir resolves "a.txt" as a
-    # directory and the delete lands on delete_dir; either way the mutation is
-    # what must fall inside the hold.
     await DeleteFile(
         uow=FakeUnitOfWork(servers=repo),
         file_store=store,
         lifecycle_lock=lock,
-    )(community_id=_COMMUNITY, server_id=server.id, rel_path="a.txt")
+    )(community_id=_COMMUNITY, server_id=server.id, rel_path="d")
 
     _assert_around(lock.events, server.id, "delete-dir")
 
@@ -438,11 +440,11 @@ async def test_rename_file_takes_lock_around_its_work() -> None:
     store = FakeFileStore()
     store.files["a.txt"] = b"x"
     store.events = lock.events
-    # Rename onto itself: a no-op that only reads the source, so the at-rest path
-    # runs without the fake's always-succeeds list_dir making the destination look
-    # taken — the lock scope is what this asserts, not the move semantics. The
-    # work it reduces to is that at-rest resolve read (list_dir via _path_is_dir),
-    # which must fall inside the hold or a start could flip state under it.
+    # Rename onto itself: a no-op that only reads the source, so the lock scope is
+    # what this asserts, not the move semantics. The work it reduces to is that
+    # at-rest resolve read (list_dir via _path_is_dir, which misses on the seeded
+    # FILE and confirms it from the stream), which must fall inside the hold or a
+    # start could flip state under it.
     await RenameFile(
         uow=FakeUnitOfWork(servers=repo),
         file_store=store,
