@@ -32,6 +32,11 @@ per writer, against the adapter each one stands in for.
 ``FakeGameSessionRepository`` is absent on purpose: ``GameSession`` is
 ``frozen=True``, so no mutation can cross its boundary in either direction and
 there is nothing for a copy to protect.
+
+``FakeFileStore`` is not a repository, but it is a fake standing in for an
+adapter and the forgiving direction is the same hazard (#2867): where the real
+seam REFUSES, a fake that answers lets a use case that depends on the refusal
+pass here and fail in production. Its pins therefore live here too.
 """
 
 from __future__ import annotations
@@ -52,6 +57,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     PluginAlreadyExistsError,
     ResourcePackInUseError,
     ResourcePackNotFoundError,
+    ServerFileNotFoundError,
 )
 from mc_server_dashboard_api.servers.domain.groups import (
     GroupId,
@@ -86,6 +92,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 )
 from tests.servers.fakes import (
     FakeBackupRepository,
+    FakeFileStore,
     FakeGroupRepository,
     FakePluginRepository,
     FakeResourcePackRepository,
@@ -95,6 +102,7 @@ from tests.servers.fakes import (
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.UTC)
 _SERVER = ServerId(uuid.uuid4())
+_COMMUNITY = CommunityId(uuid.uuid4())
 
 
 # -- FakeBackupRepository --
@@ -532,3 +540,43 @@ async def test_resource_pack_assignment_to_missing_pack_reports_not_found() -> N
         await repo.add_assignment(_assignment(ResourcePackId.new()))
 
     assert repo.assignments == {}
+
+
+# -- FakeFileStore --
+
+
+async def test_file_store_list_dir_on_an_unknown_directory_reports_not_found() -> None:
+    # ``StorageFileStoreAdapter.list_dir`` translates Storage's ``NotFoundError``
+    # into ``ServerFileNotFoundError``, and both Storage backends raise it for a
+    # non-root path that lists nothing -- gone, a plain file, or reached through
+    # one (Port.list_dir, #2394). Answering ``[]`` there instead is the forgiving
+    # direction: ``_path_is_dir`` never reaches its not-found fallback, so every
+    # caller that branches file-vs-directory takes the directory branch whatever
+    # the test intended (#2867). Pinned against the live backends in
+    # ``tests/storage/test_port_contract.py``.
+    store = FakeFileStore()
+    store.files["world/level.dat"] = b"x"
+
+    with pytest.raises(ServerFileNotFoundError):
+        await store.list_dir(
+            community_id=_COMMUNITY, server_id=_SERVER, rel_path="nope"
+        )
+
+    # A seeded file is not a directory either, for the same reason.
+    with pytest.raises(ServerFileNotFoundError):
+        await store.list_dir(
+            community_id=_COMMUNITY, server_id=_SERVER, rel_path="world/level.dat"
+        )
+
+
+async def test_file_store_list_dir_on_the_root_is_empty_not_a_miss() -> None:
+    # The other half of the same contract: the ROOT always lists, empty included
+    # -- a never-snapshotted server has an empty working set, not a missing one
+    # (#205), and both backends special-case it. So the refusal above must not
+    # swallow ``"."``.
+    store = FakeFileStore()
+
+    assert (
+        await store.list_dir(community_id=_COMMUNITY, server_id=_SERVER, rel_path=".")
+        == []
+    )

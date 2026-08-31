@@ -274,12 +274,25 @@ class FakeFileStore(FileStore):
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> list[FileEntry]:
         self.events.append((server_id, "list-dir"))
-        prefix = "" if rel_path == "." else rel_path.rstrip("/") + "/"
+        prefix = "" if rel_path in ("", ".") else rel_path.rstrip("/") + "/"
+        members = {
+            path: content
+            for path, content in self.files.items()
+            if path.startswith(prefix)
+        }
+        # A non-root path nothing sits under is a MISS at the real seam, never an
+        # empty listing: gone, a plain file, or reached through one all raise
+        # NotFoundError, which StorageFileStoreAdapter surfaces as
+        # ServerFileNotFoundError (issues #2394, #2867). Answering ``[]`` kept
+        # ``_path_is_dir`` out of its not-found fallback, so every caller that
+        # branches file-vs-directory took the directory branch unconditionally.
+        # The ROOT still lists empty -- an unpublished working set is empty, not
+        # missing (issue #205), and both backends special-case it.
+        if prefix and not members:
+            raise ServerFileNotFoundError(str(server_id.value))
         seen: set[str] = set()
         entries: list[FileEntry] = []
-        for path, content in self.files.items():
-            if not path.startswith(prefix):
-                continue
+        for path, content in members.items():
             rest = path[len(prefix) :]
             # Direct child only (no nested slashes).
             if "/" in rest:
