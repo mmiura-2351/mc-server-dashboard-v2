@@ -144,6 +144,13 @@ func TestContainerRestartRecreatesContainer(t *testing.T) {
 			return nil, errNoRCON
 		},
 	)
+	// Close joins the status, log and metrics pumps and the status dispatcher
+	// (issue #2777). Without it they outlive the test, and here they run against a
+	// real daemon: the metrics pump keeps sampling Docker stats on a real clock for
+	// the rest of the binary's life. Deferred rather than t.Cleanup so it runs
+	// BEFORE the container removals registered below — the pumps stop sampling a
+	// container that still exists (issue #2875).
+	defer mgr.Close()
 
 	serverID := newServerID(t)
 	name := "mcsd-" + serverID

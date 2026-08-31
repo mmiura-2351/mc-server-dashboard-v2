@@ -441,9 +441,10 @@ hooks-test:
 # A self-test belongs here when the script has no local real run to sit next
 # to, so that a regression in it fails the pre-push `make check` instead of a CI
 # runner after the push (#2508). supply_chain_cooldown.py is such a script: its
-# real run is the Dependabot flow, not a gate. The other two self-tests live
+# real run is the Dependabot flow, not a gate. The other three self-tests live
 # next to the real run they guard -- check_docs.py's in docs-check,
-# check_migrations.py's in migrations-check (#2511).
+# check_migrations.py's in migrations-check (#2511), and
+# check_test_client_pattern.py's in test-client-check (#2698).
 scripts-test:
 	python3 scripts/supply_chain_cooldown.py --self-test
 	bash scripts/test_deploy_preflight.sh
