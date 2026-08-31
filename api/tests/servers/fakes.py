@@ -1115,11 +1115,14 @@ class FakePluginRepository(PluginRepository):
 
 
 class _DuplicateAssignment(Exception):
-    """asyncpg-shaped driver error for a duplicate assignment INSERT (#2858).
+    """``_FakeOrig``-shaped driver error for a duplicate assignment INSERT (#2858).
 
-    ``IntegrityError`` reports the violated constraint through its wrapped driver
-    error's ``constraint_name`` (servers/adapters/integrity.py), so the fake's
-    refusal carries the name production's would.
+    Named for the shim in ``tests/servers/test_unit_of_work_translation.py``,
+    which this matches: the constraint name sits directly on the wrapped error.
+    Production's is one indirection deeper -- ``exc.orig`` is the asyncpg
+    dialect's own wrapper, whose ``constraint_name`` is ``None``, and the name
+    lives on its ``__cause__``. ``integrity._constraint_name`` reads both, so a
+    caller translating this error resolves the same name either way.
     """
 
     def __init__(self) -> None:
