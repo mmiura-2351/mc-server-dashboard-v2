@@ -106,6 +106,12 @@ func TestContainerForgeInstallThenLaunch(t *testing.T) {
 			return nil, errNoRCON
 		},
 	)
+	// Close joins the status, log and metrics pumps and the status dispatcher
+	// (issue #2777); without it they outlive the test and the metrics pump keeps
+	// sampling this harness's Docker stats on a real clock. Deferred rather than
+	// t.Cleanup so it runs BEFORE the container removals registered below (issue
+	// #2875).
+	defer mgr.Close()
 
 	serverID := newServerID(t)
 	launchName := "mcsd-" + serverID
@@ -231,6 +237,8 @@ func TestContainerForgeInstalledSkipsInstall(t *testing.T) {
 			return nil, errNoRCON
 		},
 	)
+	// As above: join the manager's pumps before the containers go away (issue #2875).
+	defer mgr.Close()
 
 	serverID := newServerID(t)
 	launchName := "mcsd-" + serverID
