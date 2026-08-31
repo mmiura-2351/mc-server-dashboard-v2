@@ -286,8 +286,15 @@ class FakeFileStore(FileStore):
         # ServerFileNotFoundError (issues #2394, #2867). Answering ``[]`` kept
         # ``_path_is_dir`` out of its not-found fallback, so every caller that
         # branches file-vs-directory took the directory branch unconditionally.
-        # The ROOT still lists empty -- an unpublished working set is empty, not
-        # missing (issue #205), and both backends special-case it.
+        # The ROOT is the exemption and still lists, empty included. The
+        # root-exempt / everything-else-refused split this mirrors is the one
+        # stated in ``_FsWorkingSetView.list_dir`` and
+        # ``_ObjectWorkingSetView.list_dir`` (``if not rel_path.parts: return []``
+        # ahead of the miss); the top-level bodies answer the same once something
+        # is published. Their #205 posture is BROADER -- an UNPUBLISHED server
+        # lists ``[]`` for EVERY path, not just the root -- and is deliberately
+        # not modelled here: this fake has no unpublished state, its seeded files
+        # ARE the published working set.
         if prefix and not members:
             raise ServerFileNotFoundError(str(server_id.value))
         seen: set[str] = set()

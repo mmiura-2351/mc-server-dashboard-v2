@@ -569,14 +569,18 @@ async def test_file_store_list_dir_on_an_unknown_directory_reports_not_found() -
         )
 
 
-async def test_file_store_list_dir_on_the_root_is_empty_not_a_miss() -> None:
+@pytest.mark.parametrize("root", ["", "."])
+async def test_file_store_list_dir_on_the_root_is_empty_not_a_miss(root: str) -> None:
     # The other half of the same contract: the ROOT always lists, empty included
-    # -- a never-snapshotted server has an empty working set, not a missing one
-    # (#205), and both backends special-case it. So the refusal above must not
-    # swallow ``"."``.
+    # -- an empty working set is empty, not missing -- so the refusal above must
+    # not swallow it. BOTH spellings, because ``RelPath`` normalises ``""`` and
+    # ``"."`` to the same empty ``parts`` (storage.domain.value_objects), and the
+    # empty one is reachable rather than theoretical: ``?path=`` reaches ``ListDir``
+    # verbatim (``path: Annotated[str, Query()] = "."`` in servers/api/files.py),
+    # which hands it to this seam unmodified at rest.
     store = FakeFileStore()
 
     assert (
-        await store.list_dir(community_id=_COMMUNITY, server_id=_SERVER, rel_path=".")
+        await store.list_dir(community_id=_COMMUNITY, server_id=_SERVER, rel_path=root)
         == []
     )
