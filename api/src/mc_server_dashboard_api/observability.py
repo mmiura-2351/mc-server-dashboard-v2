@@ -4,8 +4,8 @@ The exposition used to be a route on the public API app (``GET /api/metrics``).
 The bundled Compose deployment fronts the API with ``cloudflared``, which
 forwards the whole public hostname to ``api:8000`` — so every path the API
 served was on the internet, and the exposition's server/worker counts, per-route
-request **and auth-outcome** counters, process start timestamps and control-plane
-liveness were world-readable (confirmed by probe on the live deployments).
+request counters, process start timestamps and control-plane liveness were
+world-readable (confirmed by probe on the live deployments).
 
 Serving it from a second listener makes it unreachable *under the documented
 tunnel configuration* rather than reachable-and-rejected: the public hostname is
