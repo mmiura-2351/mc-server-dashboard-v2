@@ -45,6 +45,7 @@ import datetime as dt
 import uuid
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from mc_server_dashboard_api.servers.domain.backup import (
     Backup,
@@ -540,6 +541,31 @@ async def test_resource_pack_assignment_to_missing_pack_reports_not_found() -> N
         await repo.add_assignment(_assignment(ResourcePackId.new()))
 
     assert repo.assignments == {}
+
+
+async def test_resource_pack_second_assignment_for_one_server_is_refused() -> None:
+    # ``server_id`` alone is ``pk_server_resource_pack_assignments`` (migration
+    # 0018), so a second assignment for a server that already has one is a
+    # duplicate INSERT, not an upsert: PostgreSQL refuses it. No map entry names
+    # the PK, so ``SqlAlchemyResourcePackRepository.add_assignment``'s own flush
+    # re-raises the ``IntegrityError`` untranslated -- a 500 (that fall-through is
+    # pinned in ``tests/servers/test_unit_of_work_translation.py::
+    # test_resource_pack_add_assignment_reraises_unknown_violation``). Keying the
+    # row in regardless made the fake an upsert, the forgiving direction: a caller
+    # that adds without deleting first passes here and 500s in production (#2858).
+    # ``AssignResourcePack`` deletes the existing row first, which is what keeps
+    # the hole latent rather than live.
+    repo = FakeResourcePackRepository()
+    pack = _pack()
+    await repo.add(pack)
+    first = _assignment(pack.id)
+    await repo.add_assignment(first)
+
+    with pytest.raises(IntegrityError):
+        await repo.add_assignment(_assignment(pack.id))
+
+    # The first row stands; the refused INSERT wrote nothing over it.
+    assert repo.assignments[_SERVER].assigned_by == first.assigned_by
 
 
 # -- FakeFileStore --
