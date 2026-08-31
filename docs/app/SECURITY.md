@@ -320,10 +320,12 @@ metrics endpoint (RELAY.md Section 13).
 The content is aggregates only — no names, ids, emails or IPs, and the label
 sets are structurally bounded (route *templates*, a fixed observed-state tuple,
 the `WorkerStatus` enum). But it is operational signal an external party has no
-need to see: server and worker counts, per-route request volume **including
-auth outcomes** (login success/failure rates, a live oracle for anyone probing
-the FR-AUTH-4 brute-force behaviour), scanning activity as `<unmatched>` 404s,
-process start timestamps, control-plane liveness, and latency histograms.
+need to see: server and worker counts, per-route request volume (whose `route`
+and `status` labels make login success/failure rates derivable:
+`http_requests_total{route="/api/auth/login"}` split by `status`, 200 against
+401 — a live oracle for anyone probing the FR-AUTH-4 brute-force behaviour),
+scanning activity as `<unmatched>` 404s, process start timestamps, control-plane
+liveness, and latency histograms.
 
 **The bind address is not the control, and which control applies depends on the
 topology.** The listener binds `0.0.0.0` by default, because the API's canonical
