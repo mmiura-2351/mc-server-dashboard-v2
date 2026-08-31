@@ -91,24 +91,31 @@ rebuild ships.
 
 Each one succeeds, or appears to; the damage surfaces later.
 
-- **The scratchpad is shared across concurrently running agents, not
-  session-private, so any generically named file a later command reads back
-  collides by construction.** Mutation-testing production code to prove a test
-  is a real pin has an edit-then-revert shape, and the obvious revert
+- **Commit before you mutate.** Mutation-testing production code to prove a
+  test is a real pin has an edit-then-revert shape, and the reflex revert
   `git checkout <path>` restores from the index, not `HEAD`, eating any
   unstaged edits with no confirmation, no reflog entry, nothing to recover
-  from — so the temptation is to copy the file aside and restore from the
-  copy. But two agents mutating the same file — normal, not exotic, when
-  several review or implement against one module — both write
-  `<scratchpad>/app.py.orig`; the restore then silently writes the *other*
-  agent's file into this worktree, with no error, no conflict marker, and a
-  plausible-looking `git diff`. Every consumer that reads a file back has this
-  shape: `gh pr create --body-file <scratchpad>/pr_body.md` opens a PR carrying
-  a concurrent agent's body and its `Resolves #N`, which closes the wrong issue
-  at merge. So name uniquely whatever a later command reads back — PR and issue
-  bodies, review comments, generated patches, backups: `mktemp`, or embed the
-  agent id or branch name. Better still, keep no file: `git checkout -- <path>`
-  reverts a mutation on an otherwise-clean file with no copy to collide.
+  from. Reordering the work removes that hazard instead of navigating it: with
+  the tree clean before the mutation, both `git checkout -- <path>` and the
+  bare form restore the committed content, and no file has to be copied aside,
+  so the copy-aside collision below cannot arise either. The branch is squashed
+  at merge (CONTRIBUTING.md Section 4), so the extra commit costs nothing — the
+  same reason a failed pre-push is fixed in a new commit rather than an amend.
+  When a commit genuinely cannot come first, `git checkout -- <path>` on an
+  otherwise-clean file is the fallback, still with no copy; but it is the
+  ordering, not the spelling of the revert, that protects unstaged work.
+- **The scratchpad is shared across concurrently running agents, not
+  session-private, so any generically named file a later command reads back
+  collides by construction.** Two agents that copy the same file aside —
+  normal, not exotic, when several review or implement against one module —
+  both write `<scratchpad>/app.py.orig`; the restore then silently writes the
+  *other* agent's file into this worktree, with no error, no conflict marker,
+  and a plausible-looking `git diff`. Every consumer that reads a file back has
+  this shape: `gh pr create --body-file <scratchpad>/pr_body.md` opens a PR
+  carrying a concurrent agent's body and its `Resolves #N`, which closes the
+  wrong issue at merge. So name uniquely whatever a later command reads back —
+  PR and issue bodies, review comments, generated patches, backups: `mktemp`,
+  or embed the agent id or branch name.
 - **`--no-verify` cannot establish what the gate establishes.** The rule is in
   [`CONTRIBUTING.md`](CONTRIBUTING.md) Section 4; it is unconditional because a
   bypass is only known to have been harmless *afterwards* — the very fact the
