@@ -126,7 +126,10 @@ class SqlAlchemyResourcePackRepository(ResourcePackRepository):
         # owns the INSERT that fk_srv_rp_assignments_resource_pack_id_resource_packs
         # refuses when a racer deleted the pack: the shared map reads that name as
         # the DELETE direction -- the pack is in use (409) -- while here it means
-        # the pack is gone (404) (issue #2784).
+        # the pack is gone (404) (issue #2784). The row's other parent rides along:
+        # fk_server_resource_pack_assignments_server_id_server is ON DELETE CASCADE
+        # and so only ever fires on this INSERT, where the fall-through to the
+        # shared map reports the vanished server as not-found (issue #2852).
         try:
             await self._session.flush()
         except IntegrityError as exc:

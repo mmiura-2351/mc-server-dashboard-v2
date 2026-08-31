@@ -13,6 +13,8 @@ per-server schedule name backstop; ``uq_player_group_community_kind_name``
 ``fk_srv_rp_assignments_resource_pack_id_resource_packs`` (migration 0018) is
 the resource-pack-in-use FK backstop (issue #1962) -- the DELETE direction only,
 see below;
+``fk_server_resource_pack_assignments_server_id_server`` (migration 0018) is the
+server-deleted-mid-assign backstop (issue #2852);
 ``fk_group_player_group_id_player_group`` (migration 0012) is the
 group-deleted-mid-edit backstop (issue #2583);
 ``uq_server_plugin_server_rel`` (migration 0019) is the per-server plugin path
@@ -74,6 +76,14 @@ conditions, and only the statement site tells them apart, so
 and translates it through :func:`translate_assignment_insert_error`. The map
 entry below therefore carries the DELETE direction's meaning, for ``delete``'s
 wrap to read.
+
+That row's *other* parent needs none of this (issue #2852):
+``fk_server_resource_pack_assignments_server_id_server`` is ``ON DELETE
+CASCADE``, so a server delete sweeps the assignment instead of being refused and
+the constraint only ever fires on the INSERT -- one name, one meaning, the server
+is gone (404). It is an ordinary map entry, which the same ``add_assignment``
+flush reaches through
+:func:`translate_assignment_insert_error`'s fall-through.
 """
 
 from __future__ import annotations
@@ -106,7 +116,12 @@ _GROUP_MISSING_CONSTRAINTS = frozenset(
         "fk_server_group_group_id_player_group",
     }
 )
-_SERVER_MISSING_CONSTRAINTS = frozenset({"fk_server_group_server_id_server"})
+_SERVER_MISSING_CONSTRAINTS = frozenset(
+    {
+        "fk_server_group_server_id_server",
+        "fk_server_resource_pack_assignments_server_id_server",
+    }
+)
 _PLUGIN_PATH_CONSTRAINTS = frozenset({"uq_server_plugin_server_rel"})
 _RESOURCE_PACK_FK_CONSTRAINTS = frozenset(
     {"fk_srv_rp_assignments_resource_pack_id_resource_packs"}

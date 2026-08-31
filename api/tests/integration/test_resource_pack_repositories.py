@@ -17,6 +17,12 @@ assignment references the pack, so the pack is in use (409); the assignment
 INSERT is refused because the pack it names is gone, which is not-found (404).
 The constraint name is the same in both, so only the statement site tells them
 apart — and only the real FK raises either. Both directions are pinned here.
+
+The assignment table's *other* FK,
+``fk_server_resource_pack_assignments_server_id_server`` (issue #2852), is
+``ON DELETE CASCADE``: a server delete sweeps the assignment rather than being
+refused, so this one only ever fires on the INSERT, where it means the server is
+gone (404). One name, one meaning — the shared map carries it whole.
 """
 
 from __future__ import annotations
@@ -53,6 +59,7 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     ResourcePackInUseError,
     ResourcePackNotFoundError,
+    ServerNotFoundError,
 )
 from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.resource_pack import (
@@ -338,3 +345,31 @@ async def test_assign_resource_pack_reports_a_concurrent_delete_as_not_found(
     # No assignment row survives the typed error.
     async with ServersUnitOfWork(factory) as uow:
         assert await uow.resource_packs.get_assignment_by_server(server.id) is None
+
+
+# --- concurrent server delete during an assign (issue #2852) ------------------
+
+
+async def test_assignment_insert_for_a_deleted_server_reports_not_found(
+    engine: AsyncEngine,
+) -> None:
+    # The assignment table's other parent: the INSERT names a `server` row a racer
+    # deleted, so the server is gone -- ServerNotFoundError (404), not a raw
+    # IntegrityError (500) (issue #2852). Only the real FK raises this; the
+    # in-memory fake carries no constraints. No lifecycle lock reaches this layer,
+    # so the repository is where the INSERT direction is reachable at all: the
+    # AssignResourcePack / DeleteServer pair above it serialize on one per-server
+    # lock, which is what keeps the hole latent rather than live.
+    server = await _seed_server(engine)
+    factory = create_session_factory(engine)
+    pack = _pack()
+    await _seed_pack(engine, pack)
+
+    async with ServersUnitOfWork(factory) as uow:
+        assert await uow.servers.get_by_id(server.id) is not None
+        # A racer deletes the server after the pre-read found it.
+        async with ServersUnitOfWork(factory) as racer:
+            await racer.servers.delete(server.id)
+            await racer.commit()
+        with pytest.raises(ServerNotFoundError):
+            await uow.resource_packs.add_assignment(_assignment(server.id, pack.id))

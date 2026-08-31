@@ -565,6 +565,18 @@ async def test_resource_pack_add_assignment_translates_fk_violation_at_flush() -
         await repo.add_assignment(_assignment_entity())
 
 
+async def test_resource_pack_add_assignment_translates_server_fk_at_flush() -> None:
+    # The assignment table's other parent (issue #2852): ON DELETE CASCADE means
+    # this FK only ever fires on the INSERT, so its one meaning -- the server is
+    # gone -- lives in the shared map, which add_assignment's wrap falls through to.
+    session = _FakeFlushSession(
+        _integrity_error("fk_server_resource_pack_assignments_server_id_server")
+    )
+    repo = SqlAlchemyResourcePackRepository(session)  # type: ignore[arg-type]
+    with pytest.raises(ServerNotFoundError):
+        await repo.add_assignment(_assignment_entity())
+
+
 async def test_resource_pack_add_assignment_reraises_unknown_violation() -> None:
     session = _FakeFlushSession(_integrity_error("fk_some_other_constraint"))
     repo = SqlAlchemyResourcePackRepository(session)  # type: ignore[arg-type]
