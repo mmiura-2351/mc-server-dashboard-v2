@@ -18,6 +18,8 @@ from copy import deepcopy
 from dataclasses import replace
 from typing import Any
 
+from sqlalchemy.exc import IntegrityError
+
 from mc_server_dashboard_api.servers.domain.backup import (
     Backup,
     BackupHealth,
@@ -1112,6 +1114,22 @@ class FakePluginRepository(PluginRepository):
         return None
 
 
+class _DuplicateAssignment(Exception):
+    """``_FakeOrig``-shaped driver error for a duplicate assignment INSERT (#2858).
+
+    Named for the shim in ``tests/servers/test_unit_of_work_translation.py``,
+    which this matches: the constraint name sits directly on the wrapped error.
+    Production's is one indirection deeper -- ``exc.orig`` is the asyncpg
+    dialect's own wrapper, whose ``constraint_name`` is ``None``, and the name
+    lives on its ``__cause__``. ``integrity._constraint_name`` reads both, so a
+    caller translating this error resolves the same name either way.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("duplicate key value violates unique constraint")
+        self.constraint_name = "pk_server_resource_pack_assignments"
+
+
 class FakeResourcePackRepository(ResourcePackRepository):
     def __init__(self) -> None:
         self.packs: dict[ResourcePackId, ResourcePack] = {}
@@ -1157,6 +1175,20 @@ class FakeResourcePackRepository(ResourcePackRepository):
         # ResourcePackNotFoundError -- not-found (404), not in-use (409) (#2784).
         if assignment.resource_pack_id not in self.packs:
             raise ResourcePackNotFoundError(str(assignment.resource_pack_id.value))
+        # ``server_id`` alone is pk_server_resource_pack_assignments (migration
+        # 0018), so this is an INSERT and never an upsert: a server that already
+        # has an assignment duplicates the key and PostgreSQL refuses the row.
+        # Nothing in the integrity map names the PK, so the adapter's own flush
+        # re-raises the IntegrityError untranslated -- a 500 (#2858). Keying it in
+        # regardless was the forgiving direction: a caller that adds without
+        # deleting first passed here and failed in production. AssignResourcePack
+        # deletes the existing row first, which is why no caller reaches this yet.
+        if assignment.server_id in self.assignments:
+            raise IntegrityError(
+                "INSERT INTO server_resource_pack_assignments",
+                {},
+                _DuplicateAssignment(),
+            )
         self.assignments[assignment.server_id] = self._copy_assignment(assignment)
 
     async def get_assignment_by_server(
