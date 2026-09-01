@@ -29,6 +29,15 @@ test that updates a deleted entity and then reads it back is asserting a state
 production can never reach. The ``_on_a_missing_row_is_a_no_op`` tests pin that
 per writer, against the adapter each one stands in for.
 
+Refusal is the third (#2612, #2784, #2858). A dict carries no constraints, so a
+fake that writes a row PostgreSQL would reject is forgiving in the same
+direction: a use case built on the refusal passes here and fails there. Where the
+adapter translates the violation the fake raises that typed domain error; where
+nothing in the integrity map names the constraint, it raises the untranslated
+``IntegrityError`` the adapter re-raises, because a 500 is still the refusal the
+caller meets, and modelling it as anything friendlier would invent a production
+behaviour that does not exist.
+
 ``FakeGameSessionRepository`` is absent on purpose: ``GameSession`` is
 ``frozen=True``, so no mutation can cross its boundary in either direction and
 there is nothing for a copy to protect.
@@ -45,7 +54,9 @@ import datetime as dt
 import uuid
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
+from mc_server_dashboard_api.servers.adapters.integrity import _constraint_name
 from mc_server_dashboard_api.servers.domain.backup import (
     Backup,
     BackupHealth,
@@ -341,9 +352,15 @@ async def test_group_save_on_a_missing_row_with_players_reports_not_found() -> N
     # stages ``group_player`` INSERTs whose FK to ``player_group.id`` has no
     # parent and raises the same ``GroupNotFoundError`` at its own flush (#2583,
     # measured against PostgreSQL 18). Previously that was recorded here as an
-    # unmodelled divergence, because a raw ``IntegrityError`` is a flush boundary
-    # a fake has not got; a typed domain error is not, so the fake now models it
-    # (#2557).
+    # unmodelled divergence, and the load-bearing half of that reasoning was the
+    # *moment*: the violation surfaced at whichever later flush the caller
+    # happened to trigger, and a fake has no such flush to surface at. A typed
+    # domain error raised at the call does land somewhere a fake can, so the fake
+    # now models it (#2557). The argument stops there and does not reach the
+    # exception type: an adapter that flushes inside its own call gives a fake the
+    # same moment for a raw ``IntegrityError``, which is what
+    # ``test_resource_pack_second_assignment_for_one_server_is_refused`` models
+    # (#2858).
     repo = FakeGroupRepository()
     group = _group()
 
@@ -540,6 +557,46 @@ async def test_resource_pack_assignment_to_missing_pack_reports_not_found() -> N
         await repo.add_assignment(_assignment(ResourcePackId.new()))
 
     assert repo.assignments == {}
+
+
+async def test_resource_pack_second_assignment_for_one_server_is_refused() -> None:
+    # ``server_id`` alone is ``pk_server_resource_pack_assignments`` (migration
+    # 0018), so a second assignment for a server that already has one is a
+    # duplicate INSERT, not an upsert: PostgreSQL refuses it. No map entry names
+    # the PK, so ``SqlAlchemyResourcePackRepository.add_assignment``'s own flush
+    # re-raises the ``IntegrityError`` untranslated -- a 500 (that fall-through is
+    # pinned in ``tests/servers/test_unit_of_work_translation.py::
+    # test_resource_pack_add_assignment_reraises_unknown_violation``). Keying the
+    # row in regardless made the fake an upsert, the forgiving direction: a caller
+    # that adds without deleting first passes here and 500s in production (#2858).
+    # ``AssignResourcePack`` deletes the existing row first, which is what keeps
+    # the hole latent rather than live.
+    #
+    # Unlike its two neighbours above, this refusal is taken from the migration's
+    # ``PrimaryKeyConstraint`` declaration rather than pinned against a live
+    # database, and the asymmetry is deliberate: those two turn on *when* the FK
+    # fires -- statement end rather than the unit of work's commit -- which only a
+    # real statement settles. A PK has no such question. Measured on PostgreSQL 18
+    # while reviewing PR #2888, all three duplicate shapes raise here -- a row
+    # another session committed, one this session already flushed, and one first
+    # SELECTed into this session's identity map -- and the ORM does not
+    # short-circuit any of them with a ``FlushError``.
+    repo = FakeResourcePackRepository()
+    pack = _pack()
+    await repo.add(pack)
+    first = _assignment(pack.id)
+    await repo.add_assignment(first)
+
+    with pytest.raises(IntegrityError) as raised:
+        await repo.add_assignment(_assignment(pack.id))
+
+    # Read back through the adapter's own accessor rather than off ``orig``: the
+    # constraint name is the whole payload of the shim the fake raises, and a
+    # caller that translates reaches it this way, so the pin reddens if the shim's
+    # shape drifts out from under it.
+    assert _constraint_name(raised.value) == "pk_server_resource_pack_assignments"
+    # The first row stands; the refused INSERT wrote nothing over it.
+    assert repo.assignments[_SERVER].assigned_by == first.assigned_by
 
 
 # -- FakeFileStore --
