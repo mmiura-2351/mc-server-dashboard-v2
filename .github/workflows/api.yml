@@ -123,8 +123,12 @@ jobs:
   #
   # A separate job, not part of `check`: only these two modules need the
   # container, so the rest of the api suite neither waits on it nor fails when
-  # the registry is unreachable. Deliberately not a required status check yet —
-  # see the PR that added it.
+  # the registry is unreachable.
+  #
+  # `live-s3` IS a required status check on `main` (#2349), which is why
+  # sanity.yml carries an unfiltered job of the same name: this workflow is
+  # path-filtered, so on a PR that touches no api path it never runs, and a
+  # required context that never reports blocks the merge forever (#303).
   live-s3:
     runs-on: ubuntu-latest
     steps:

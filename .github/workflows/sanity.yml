@@ -11,6 +11,9 @@ name: sanity
 # satisfiable. Its job is named `check` to match api/docs/proto/worker, letting a
 # single required context cover all of them. Keep it cheap (<30s, no services).
 # See issue #303.
+#
+# The `live-s3` job below is the same trick for the second path-filtered
+# required context; see its own comment.
 
 on:
   pull_request:
@@ -87,3 +90,21 @@ jobs:
                   yaml.safe_load(fh)
               print("ok:", f)
           '
+
+  # The unfiltered counterpart of api.yml's `live-s3` job, for exactly the
+  # reason the header gives for `check`: `live-s3` is a required status check on
+  # `main` (#2349) and api.yml is path-filtered, so a PR touching no api path
+  # would never report that context and could never merge.
+  #
+  # This does not weaken the gate. api.yml's job reports the same context
+  # whenever it runs, and branch protection is satisfied only when every check
+  # run carrying a required name is green -- so a red live-s3 in api.yml still
+  # blocks, and this job only answers for the PRs where the real one has nothing
+  # to test.
+  live-s3:
+    runs-on: ubuntu-latest
+    steps:
+      - name: No api change for the live-S3 contract modules to test
+        run: |
+          echo "api.yml's live-s3 job runs when a PR touches an api path;"
+          echo "this PR touches none, so there is nothing to run here."
