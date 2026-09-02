@@ -5,4 +5,4 @@
 // all. See main.go's doc comment.
 module github.com/mmiura-2351/mc-server-dashboard-v2/worker/test/e2e/stub-geyser
 
-go 1.26
+go 1.27
