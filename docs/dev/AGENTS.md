@@ -185,9 +185,10 @@ Each one succeeds, or appears to; the damage surfaces later.
   exactly `VERDICT: APPROVE` or `VERDICT: REQUEST-CHANGES`.
 - Checking out a PR branch that another worktree holds fails. Fallback:
   `git fetch origin pull/<N>/head && git checkout --detach FETCH_HEAD`.
-- `main` branch protection: required status `check` + strict up-to-date. The
-  merge sequence is update-branch → wait for checks (`gh pr checks <N>
-  --watch`) → squash-merge (CONTRIBUTING.md Section 7).
+- `main` branch protection: required statuses `check`, `supply-chain-cooldown`
+  and `live-s3`, + strict up-to-date. The merge sequence is update-branch → wait
+  for checks (`gh pr checks <N> --watch`) → squash-merge (CONTRIBUTING.md
+  Section 7).
 
 ## 5. Pre-PR checklist (monorepo tripwires)
 
