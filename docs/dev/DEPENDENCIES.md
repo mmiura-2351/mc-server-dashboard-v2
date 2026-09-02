@@ -152,3 +152,24 @@ triggers CI; this requires the repository secrets `CLIENT_ID` and `APP_PRIVATE_K
 to be configured for the App. Because Dependabot-triggered workflows cannot
 access regular repository secrets, these two secrets must also be added to the
 **Dependabot secrets** (Settings > Secrets and variables > Dependabot).
+
+**Pins no ecosystem watches:** the `docker` ecosystems read `Dockerfile`s and
+`docker-compose` reads `compose.yaml`, so an image pinned anywhere else is
+invisible to Dependabot and is bumped by hand:
+
+- **PostgreSQL** — `services.postgres.image` in `.github/workflows/api.yml`,
+  `e2e.yml` and `webui-e2e.yml`, plus `PG_IMAGE` in
+  `scripts/run_webui_e2e.sh`. Follows the `db` image in `compose.yaml`.
+- **SeaweedFS** — the `docker run` line in `api.yml`'s `live-s3` job. Follows
+  the `seaweedfs` image in `compose.yaml`.
+
+**PostgreSQL: CI runs the minor the deployment runs** (#2755). `compose.yaml`
+pins an explicit minor rather than the floating `postgres:18`, so a new minor
+arrives as a Dependabot `docker-compose` PR instead of silently on the next
+`docker compose pull`. That PR is where the four CI references above are
+re-pinned, by hand, to the same minor's Debian digest — CI and the deployment
+move together, in one reviewed change. Read the digest for the new minor from
+the registry (`docker buildx imagetools inspect postgres:<minor>`) and keep the
+`# postgres:<minor> (Debian; pushed <date>, outside the cooldown)` comment
+truthful: the 7-day cooldown (Section 3) applies to these hand-maintained pins
+exactly as it does to the automated ones.

@@ -1280,7 +1280,7 @@ container was replaced, so the existing stamp still describes what is running.
 > that worker can reach ([Section 8](#8-tls-guidance)).
 
 > **Caveat — PostgreSQL major upgrades; `db-data` mounts at
-> `/var/lib/postgresql`.** `compose.yaml` runs `postgres:18`, whose image keeps
+> `/var/lib/postgresql`.** `compose.yaml` runs PostgreSQL 18, whose image keeps
 > `PGDATA` at `/var/lib/postgresql/<major>/docker` and declares its volume at
 > that parent directory; the mount follows that layout. When a revision bumps
 > the PostgreSQL major, an existing deployment's `db-data` volume holds data in
