@@ -1,8 +1,8 @@
 module github.com/mmiura-2351/mc-server-dashboard-v2/relay
 
-go 1.26
+go 1.27
 
-toolchain go1.26.6
+toolchain go1.27.0
 
 // The relay's mcsd.relay.v1 Go stubs are generated into internal/genproto by a
 // dedicated buf template (proto/buf.gen.relay.yaml, run by `make proto-gen`):
