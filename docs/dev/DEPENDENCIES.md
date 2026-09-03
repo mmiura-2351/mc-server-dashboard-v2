@@ -159,7 +159,11 @@ invisible to Dependabot and is bumped by hand:
 
 - **PostgreSQL** — `services.postgres.image` in `.github/workflows/api.yml`,
   `e2e.yml` and `webui-e2e.yml`, plus `PG_IMAGE` in
-  `scripts/run_webui_e2e.sh`. Follows the `db` image in `compose.yaml`.
+  `scripts/run_webui_e2e.sh`. Follows the `db` image in `compose.yaml`. The
+  scratch-Postgres `docker run` example in `api/tests/integration/README.md`
+  carries the same `postgres:<minor>` tag as `compose.yaml` and is bumped in
+  the same PR — a developer-facing example, not a CI pin: no gate reads it, so
+  it drifts unnoticed (#2906).
 - **SeaweedFS** — the `docker run` line in `api.yml`'s `live-s3` job. Follows
   the `seaweedfs` image in `compose.yaml` (it currently lags: `4.41` in CI
   against `4.42` deployed — issue #2904).
