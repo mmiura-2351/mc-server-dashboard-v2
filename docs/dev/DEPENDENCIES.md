@@ -165,8 +165,7 @@ invisible to Dependabot and is bumped by hand:
   the same PR — a developer-facing example, not a CI pin: no gate reads it, so
   it drifts unnoticed (#2906).
 - **SeaweedFS** — the `docker run` line in `api.yml`'s `live-s3` job. Follows
-  the `seaweedfs` image in `compose.yaml` (it currently lags: `4.41` in CI
-  against `4.42` deployed — issue #2904).
+  the `seaweedfs` image in `compose.yaml`.
 
 **PostgreSQL: CI runs the minor the deployment runs** (#2755). `compose.yaml`
 pins an explicit minor rather than the floating `postgres:18`, so a new minor

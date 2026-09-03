@@ -429,18 +429,20 @@ refused (`Errno 111`). The same command re-checks it after any change to the
 `cloudflared` command line.
 
 (‡) **`seaweedfs` `8181` — disabled by flag.** `compose.yaml`'s `weed server`
-command passes `-s3.port.iceberg=0`, which `weed server -h` on the
-`chrislusf/seaweedfs` image pinned in `compose.yaml` documents as `Iceberg REST
-Catalog server listen port (0 to disable)`. Verified 2026-08-21 against that
-image at `4.41`, outside compose, on a throwaway internal docker network: with
-the flag, `8181` is absent from `netstat -lnt` in the container and a peer
-container's `GET http://<container>:8181/v1/config` is refused; without it, the
-same request answers 200. The other eight listeners are unaffected, and `8333`
-and `8888` answer from a peer. Probed 2026-08-25 on the canonical host after a
-deploy, from the `api` container — `docker compose exec api python -c "import
-urllib.request; urllib.request.urlopen('http://seaweedfs:8181/', timeout=3)"` —
-and refused (`Errno 111`). The same command re-checks it after an image bump or
-a change to the `weed server` command line.
+command passes `-s3.port.iceberg=0`, which `weed server -h` on
+`chrislusf/seaweedfs` `4.41` documents as `Iceberg REST Catalog server listen
+port (0 to disable)`. Verified 2026-08-21 against `chrislusf/seaweedfs:4.41`,
+outside compose, on a throwaway internal docker network: with the flag, `8181`
+is absent from `netstat -lnt` in the container and a peer container's
+`GET http://<container>:8181/v1/config` is refused; without it, the same
+request answers 200. The other eight listeners are unaffected, and `8333` and
+`8888` answer from a peer. That probe was not repeated when `compose.yaml`
+moved its pin to `4.42`, so it describes `4.41`, not the pinned version. Probed
+2026-08-25 on the canonical host after a deploy, from the `api` container —
+`docker compose exec api python -c "import urllib.request;
+urllib.request.urlopen('http://seaweedfs:8181/', timeout=3)"` — and refused
+(`Errno 111`). The same command re-checks it after an image bump or a change to
+the `weed server` command line.
 
 **This covers docker-network paths only.** A port **published to the host** on a
 non-loopback interface is reachable from `mcsd-servers` through the bridge
