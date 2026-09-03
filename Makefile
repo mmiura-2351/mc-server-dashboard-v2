@@ -157,7 +157,11 @@ test-client-check:
 # invalidates everything after it. On a fresh checkout (CI, the primary checkout)
 # there is no shadowing, so it is a silent no-op. Prerequisite of the api-*
 # targets so a directly-invoked `make api-test` is guarded too.
+#
+# Same shape as docs-check/migrations-check/test-client-check: the self-test
+# first (pure stdlib, plain python3 -- no venv), then the real run it guards.
 api-env-check:
+	python3 scripts/check_api_env.py --self-test
 	cd api && uv run python ../scripts/check_api_env.py
 
 api-lint: api-env-check
@@ -441,10 +445,11 @@ hooks-test:
 # A self-test belongs here when the script has no local real run to sit next
 # to, so that a regression in it fails the pre-push `make check` instead of a CI
 # runner after the push (#2508). supply_chain_cooldown.py is such a script: its
-# real run is the Dependabot flow, not a gate. The other three self-tests live
+# real run is the Dependabot flow, not a gate. The other four self-tests live
 # next to the real run they guard -- check_docs.py's in docs-check,
-# check_migrations.py's in migrations-check (#2511), and
-# check_test_client_pattern.py's in test-client-check (#2698).
+# check_migrations.py's in migrations-check (#2511),
+# check_test_client_pattern.py's in test-client-check (#2698), and
+# check_api_env.py's in api-env-check (#2880).
 scripts-test:
 	python3 scripts/supply_chain_cooldown.py --self-test
 	bash scripts/test_deploy_preflight.sh

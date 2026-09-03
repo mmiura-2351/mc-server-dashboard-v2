@@ -39,6 +39,8 @@ jobs:
       # migration guard (self-test + real run) via `make migrations-check`, the
       # docs checker (self-test + real run) via `make docs-check`, the
       # test-client guard (self-test + real run) via `make test-client-check`,
+      # the api-env preflight's self-test via `make api-env-check` (its real run
+      # needs the api venv, so only the self-test is here),
       # supply_chain_cooldown.py's self-test via `make scripts-test`, the two
       # hook suites via `make hooks-test`. The YAML parse is CI-only -- it
       # guards this directory, which has no local gate. The commands stay
@@ -67,6 +69,9 @@ jobs:
 
       - name: Test-client pattern (api/tests)
         run: python3 scripts/check_test_client_pattern.py
+
+      - name: API env guard self-test
+        run: python3 scripts/check_api_env.py --self-test
 
       # Unit-test the checked-in git hooks (post-checkout auto-restore,
       # hooks-check assertions). Pure bash + temp git repos; mirrors the
