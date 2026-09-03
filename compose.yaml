@@ -140,15 +140,16 @@ services:
     # #2590). Do not attach anything that runs untrusted code to `mcsd`.
     #
     # 8181 NO LONGER BINDS: the entrypoint below passes -s3.port.iceberg=0, which
-    # `weed server -h` on the pinned 4.41 documents as "Iceberg REST Catalog
-    # server listen port (0 to disable)". Verified 2026-08-21 against
-    # chrislusf/seaweedfs:4.41 outside compose, on a throwaway internal network:
-    # with the flag 8181 is absent from `netstat -lnt` and a peer container's GET
-    # /v1/config on 8181 is refused; without it that same GET answers 200. The
-    # other eight listeners are unchanged. The enumeration above still reports the
-    # 2026-08-02 probe because the deployment has not been rebuilt on the flag —
-    # re-probe from an `mcsd` peer after the next deploy (issue #2626 stays open
-    # until then).
+    # `weed server -h` on 4.41 documents as "Iceberg REST Catalog server listen
+    # port (0 to disable)". Verified 2026-08-21 against chrislusf/seaweedfs:4.41
+    # outside compose, on a throwaway internal network: with the flag 8181 is
+    # absent from `netstat -lnt` and a peer container's GET /v1/config on 8181 is
+    # refused; without it that same GET answers 200. The other eight listeners are
+    # unchanged. That probe ran on 4.41 and has not been repeated since the image
+    # above moved to 4.42 (#2804), so it does not cover the pinned version. The
+    # enumeration above still reports the 2026-08-02 probe because the
+    # deployment has not been rebuilt on the flag — re-probe from an `mcsd` peer
+    # after the next deploy (issue #2626 stays open until then).
     #
     # THE OTHER EIGHT ARE UNCHANGED, and that is an ACCEPTED RESIDUAL, not a
     # pending fix (decided on #2626, 2026-08-20). The peers left on `mcsd` are
