@@ -104,7 +104,9 @@ jobs:
   live-s3:
     runs-on: ubuntu-latest
     steps:
-      - name: No api change for the live-S3 contract modules to test
+      - name: Placeholder for the required live-s3 context
         run: |
-          echo "api.yml's live-s3 job runs when a PR touches an api path;"
-          echo "this PR touches none, so there is nothing to run here."
+          echo "This job exists only so the required live-s3 context is reported on"
+          echo "PRs that trigger no api.yml run; it tests nothing. If this PR touched"
+          echo "an api path, api.yml's live-s3 job is the one that tests anything,"
+          echo "against a live SeaweedFS container."
