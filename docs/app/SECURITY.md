@@ -441,8 +441,10 @@ moved its pin to `4.42`, so it describes `4.41`, not the pinned version. Probed
 2026-08-25 on the canonical host after a deploy, from the `api` container —
 `docker compose exec api python -c "import urllib.request;
 urllib.request.urlopen('http://seaweedfs:8181/', timeout=3)"` — and refused
-(`Errno 111`). The same command re-checks it after an image bump or a change to
-the `weed server` command line.
+(`Errno 111`); `compose.yaml` pinned `4.41` from 2026-08-20 (#2733) until
+2026-08-26 (#2804), so that deploy ran `4.41` too, not the pinned `4.42`. The
+same command re-checks it after an image bump or a change to the `weed server`
+command line.
 
 **This covers docker-network paths only.** A port **published to the host** on a
 non-loopback interface is reachable from `mcsd-servers` through the bridge
