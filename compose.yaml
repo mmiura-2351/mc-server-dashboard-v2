@@ -155,8 +155,8 @@ services:
     # form: docs/app/SECURITY.md, the (‡) footnote.
     #
     # THAT RE-PROBE DOES NOT SUPERSEDE THE 2026-08-02 ENUMERATION, which is why
-    # the enumeration above is still dated 2026-08-02: its seaweedfs part was a
-    # single connect to 8181 from one peer, and re-ran neither the `netstat`
+    # the enumeration above is still dated 2026-08-02: the 2026-08-25 probe was
+    # a single connect to 8181 from one peer, and re-ran neither the `netstat`
     # listing nor the uncredentialed calls behind the other eight rows. Those
     # still rest on the 2026-08-02 probe against 4.40, by the owner decision on
     # #2626 (2026-08-20): the rest of the surface is unchanged by design and
