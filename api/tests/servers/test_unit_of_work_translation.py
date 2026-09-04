@@ -19,7 +19,10 @@ own pre-read raises (``fk_group_player_group_id_player_group`` ->
 :class:`GroupNotFoundError`, 404, issue #2583;
 ``fk_server_group_group_id_player_group`` /
 ``fk_server_group_server_id_server`` -> :class:`GroupNotFoundError` /
-:class:`ServerNotFoundError` on an attach whose target vanished, issue #2612).
+:class:`ServerNotFoundError` on an attach whose target vanished, issue #2612;
+``fk_player_group_community_id_community`` -> :class:`CommunityNotFoundError`
+on a create whose *community* vanished, issue #2924 -- there the pre-read that
+answers 404 is the request's authorization gate, one layer above the use case).
 A write with nothing left to insert violates nothing, so ``save`` re-reads the
 group and raises the same not-found itself (issue #2613).
 
@@ -69,6 +72,7 @@ from mc_server_dashboard_api.servers.adapters.schedule_repository import (
 from mc_server_dashboard_api.servers.adapters.unit_of_work import SqlAlchemyUnitOfWork
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
+    CommunityNotFoundError,
     GroupNameAlreadyExistsError,
     GroupNotFoundError,
     GroupPlayerEditConflictError,
@@ -335,6 +339,20 @@ async def test_group_add_reraises_unknown_violation_untranslated() -> None:
     session = _FakeFlushSession(_integrity_error("uq_some_other_constraint"))
     repo = SqlAlchemyGroupRepository(session)  # type: ignore[arg-type]
     with pytest.raises(IntegrityError):
+        await repo.add(_group_entity())
+
+
+async def test_group_add_translates_community_fk_violation_at_flush() -> None:
+    # issue #2924: the same flush carries fk_player_group_community_id_community,
+    # violated when the community is deleted between the caller's pre-read and the
+    # INSERT. The parent that vanished is the community, so it surfaces as the
+    # not-found (404) the authorization pre-read raises for a community that is
+    # gone -- not the group-not-found the sibling FKs carry.
+    session = _FakeFlushSession(
+        _integrity_error("fk_player_group_community_id_community")
+    )
+    repo = SqlAlchemyGroupRepository(session)  # type: ignore[arg-type]
+    with pytest.raises(CommunityNotFoundError):
         await repo.add(_group_entity())
 
 

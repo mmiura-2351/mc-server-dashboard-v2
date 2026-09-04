@@ -13,6 +13,10 @@ the staged ``group_player`` INSERTs, and an in-memory fake repository has no
 constraints to violate, so it reports success where PostgreSQL raises
 (issues #2557, #2549).
 
+The issue #2924 pair is here for the first reason: the community FK it covers
+is live only against PostgreSQL, and the use-case half also shows that nothing
+in ``CreateGroup`` short-circuits the flush that raises it.
+
 The issue #2613 tests are here for the same reason and one more: the writes they
 cover are the ones with *nothing to insert*, so what has to be pinned is that
 ``save`` still refuses them, and that the interleaved player edit really does hit
@@ -55,10 +59,12 @@ from mc_server_dashboard_api.servers.adapters.unit_of_work import (
 from mc_server_dashboard_api.servers.application.groups import (
     AddPlayer,
     AttachGroup,
+    CreateGroup,
     RemovePlayer,
     RenameGroup,
 )
 from mc_server_dashboard_api.servers.domain.errors import (
+    CommunityNotFoundError,
     GroupNameAlreadyExistsError,
     GroupNotFoundError,
     GroupPlayerEditConflictError,
@@ -399,6 +405,50 @@ async def test_save_after_concurrent_name_take_reports_name_exists(
         loaded.name = GroupName("moderators")
         with pytest.raises(GroupNameAlreadyExistsError):
             await uow.groups.save(loaded)
+
+
+# --- the create path's other parent: the community (issue #2924) -------------
+
+
+async def test_add_after_concurrent_community_delete_reports_community_not_found(
+    engine: AsyncEngine,
+) -> None:
+    # add's flush carries fk_player_group_community_id_community as well as the
+    # name uniqueness: the community deleted since the caller's pre-read leaves
+    # the player_group INSERT with no parent. Live FK, so this pins the
+    # translation rather than a fake's opinion of it.
+    community_id = await _seed_community(engine)
+    factory = create_session_factory(engine)
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("DELETE FROM community WHERE id = :id"), {"id": community_id}
+        )
+
+    async with ServersUnitOfWork(factory) as uow:
+        with pytest.raises(CommunityNotFoundError):
+            await uow.groups.add(_group(community_id, []))
+
+
+async def test_create_group_reports_a_concurrent_community_delete_as_not_found(
+    engine: AsyncEngine,
+) -> None:
+    # The reachable path. CreateGroup's only pre-read is the group name lookup,
+    # which answers None whether or not the community is there, so nothing
+    # short-circuits the INSERT: the use case really does reach the flush and
+    # depends on the translation for its typed error. The community pre-read that
+    # would have caught this is the authorization gate, one layer up.
+    community_id = await _seed_community(engine)
+    factory = create_session_factory(engine)
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("DELETE FROM community WHERE id = :id"), {"id": community_id}
+        )
+
+    use_case = CreateGroup(uow=ServersUnitOfWork(factory))
+    with pytest.raises(CommunityNotFoundError):
+        await use_case(community_id=CommunityId(community_id), name="admins", kind="op")
 
 
 async def test_add_player_reports_a_concurrent_group_delete_as_not_found(

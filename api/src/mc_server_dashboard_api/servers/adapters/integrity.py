@@ -20,14 +20,23 @@ group-deleted-mid-edit backstop (issue #2583);
 ``uq_server_plugin_server_rel`` (migration 0019) is the per-server plugin path
 backstop; ``fk_server_group_group_id_player_group`` /
 ``fk_server_group_server_id_server`` (migration 0012) are the
-attach-target-vanished backstops (issue #2612); and
+attach-target-vanished backstops (issue #2612);
 ``uq_group_player_group_uuid`` (migration 0012) is the interleaved-player-edit
-backstop (issue #2613).
+backstop (issue #2613); and ``fk_player_group_community_id_community``
+(migration 0012) is the community-deleted-mid-create backstop (issue #2924).
 
 A *duplicate* racer conflicts (409); a *deleted* racer is gone, so the FK naming
 the vanished parent row translates to that context's not-found error (404) --
 the very error the use case's own pre-read would have raised had the delete
 landed a moment earlier.
+
+``fk_player_group_community_id_community`` is that shape with the pre-read one
+layer up (issue #2924): no group use case reads the community, so the read a
+concurrent community delete invalidates is the request's own authorization gate
+(Layer-1 membership, :func:`~mc_server_dashboard_api.dependencies`'s
+``authorize_two_layer``), which answers 404 with no existence signal.
+:class:`CommunityNotFoundError` is the servers context's name for that vanished
+parent, and the create route maps it to the identical 404.
 
 ``uq_group_player_group_uuid`` is a third shape: neither caller duplicated
 anything a pre-read could have caught, and neither is gone. Two player edits on
@@ -44,7 +53,10 @@ named UNIQUE and FOREIGN KEY constraint in ``api/migrations/`` against it and
 found further reachable-but-untranslated ones; each needed its own typed error
 and its own decision, tracked as issues #2611, #2612 and #2613 rather than
 guessed at here. A constraint's absence below is therefore not evidence that
-violating it is unreachable.
+violating it is unreachable -- nor that anyone weighed it and declined: that
+audit named ``fk_player_group_community_id_community`` in neither its
+reachable-but-unmapped list nor its verified-unreachable one, and the gap went
+unrecorded until #2924 asked which it was.
 
 Shared by two kinds of call site, because *when* a violation surfaces depends on
 the statement shape: an INSERT staged via ``session.add`` (create) flushes at
@@ -91,6 +103,7 @@ from __future__ import annotations
 from sqlalchemy.exc import IntegrityError
 
 from mc_server_dashboard_api.servers.domain.errors import (
+    CommunityNotFoundError,
     GroupNameAlreadyExistsError,
     GroupNotFoundError,
     GroupPlayerEditConflictError,
@@ -122,6 +135,7 @@ _SERVER_MISSING_CONSTRAINTS = frozenset(
         "fk_server_resource_pack_assignments_server_id_server",
     }
 )
+_COMMUNITY_MISSING_CONSTRAINTS = frozenset({"fk_player_group_community_id_community"})
 _PLUGIN_PATH_CONSTRAINTS = frozenset({"uq_server_plugin_server_rel"})
 _RESOURCE_PACK_FK_CONSTRAINTS = frozenset(
     {"fk_srv_rp_assignments_resource_pack_id_resource_packs"}
@@ -148,6 +162,8 @@ def translate_integrity_error(exc: IntegrityError) -> None:
         raise GroupNotFoundError(str(constraint)) from exc
     if constraint in _SERVER_MISSING_CONSTRAINTS:
         raise ServerNotFoundError(str(constraint)) from exc
+    if constraint in _COMMUNITY_MISSING_CONSTRAINTS:
+        raise CommunityNotFoundError(str(constraint)) from exc
     if constraint in _PLUGIN_PATH_CONSTRAINTS:
         raise PluginAlreadyExistsError(str(constraint)) from exc
     if constraint in _RESOURCE_PACK_FK_CONSTRAINTS:

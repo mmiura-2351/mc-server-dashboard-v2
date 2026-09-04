@@ -53,8 +53,11 @@ class SqlAlchemyGroupRepository(GroupRepository):
         # Flush the parent before the children: without an ORM relationship
         # SQLAlchemy does not order the INSERTs, so the group_player rows would
         # otherwise hit the FK to player_group before that row exists.
-        # The flush is also the site where uq_player_group_community_kind_name
-        # surfaces for a concurrent create racer (issue #2000), so translate it.
+        # The flush is also the site where the group row's own constraints
+        # surface, so translate them: uq_player_group_community_kind_name for a
+        # concurrent create racer (issue #2000), and
+        # fk_player_group_community_id_community for a community deleted since
+        # the request's authorization gate read the membership (issue #2924).
         try:
             await self._session.flush()
         except IntegrityError as exc:
