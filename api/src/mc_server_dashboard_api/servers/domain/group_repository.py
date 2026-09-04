@@ -25,7 +25,17 @@ class GroupRepository(abc.ABC):
 
     @abc.abstractmethod
     async def add(self, group: PlayerGroup) -> None:
-        """Stage a new group (with its players) within the current transaction."""
+        """Add the group and its players; the group row's INSERT runs in this call.
+
+        The player rows are staged: the adapter flushes only the ``player_group``
+        row here, so that row's constraints are enforced inside this call rather
+        than at the unit of work's commit. A concurrent create of the same
+        ``(community_id, kind, name)`` raises :class:`GroupNameAlreadyExistsError`
+        (``uq_player_group_community_kind_name``, issue #2000), while
+        ``fk_player_group_community_id_community`` is enforced at the same flush
+        but untranslated, so a community deleted mid-create surfaces as a raw
+        ``IntegrityError`` (issue #2924).
+        """
 
     @abc.abstractmethod
     async def get_by_id(self, group_id: GroupId) -> PlayerGroup | None:
@@ -59,7 +69,19 @@ class GroupRepository(abc.ABC):
 
     @abc.abstractmethod
     async def attach(self, group_id: GroupId, server_id: ServerId) -> None:
-        """Attach ``group_id`` to ``server_id`` (idempotent: a re-attach is a no-op)."""
+        """Attach ``group_id`` to ``server_id``; the INSERT runs inside this call.
+
+        Idempotent: an already-attached pair conflicts on ``pk_server_group``,
+        which the adapter's ``ON CONFLICT DO NOTHING`` turns into a silent no-op
+        (issue #2612).
+
+        Not a staged write: the row's two foreign keys are enforced here rather
+        than at the unit of work's commit, so a group or server deleted since the
+        caller's pre-read raises the very error that pre-read raises, instead of
+        surfacing at whatever the caller does next:
+        :class:`GroupNotFoundError` for ``fk_server_group_group_id_player_group``
+        and :class:`ServerNotFoundError` for ``fk_server_group_server_id_server``.
+        """
 
     @abc.abstractmethod
     async def detach(self, group_id: GroupId, server_id: ServerId) -> bool:
