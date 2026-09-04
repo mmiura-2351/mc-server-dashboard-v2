@@ -25,7 +25,7 @@ class GroupRepository(abc.ABC):
 
     @abc.abstractmethod
     async def add(self, group: PlayerGroup) -> None:
-        """Insert the group row; that INSERT runs inside this call.
+        """Add the group and its players; the group row's INSERT runs in this call.
 
         Only the players are staged: the adapter flushes the ``player_group`` row
         explicitly, because without an ORM relationship the ``group_player``
