@@ -152,15 +152,12 @@ func (h *blockingReclaimLogger) unpark() { h.once.Do(func() { close(h.release) }
 
 // newBlockingReclaimLogger parks on the record reclaimDeletedScratches emits after
 // removing a scratch dir and before sweeping the hydrate leftovers.
-func newBlockingReclaimLogger(t *testing.T) *blockingReclaimLogger {
-	t.Helper()
-	h := &blockingReclaimLogger{
+func newBlockingReclaimLogger() *blockingReclaimLogger {
+	return &blockingReclaimLogger{
 		msg:     "reclaimed orphaned scratch for deleted server",
 		entered: make(chan struct{}),
 		release: make(chan struct{}),
 	}
-	t.Cleanup(h.unpark)
-	return h
 }
 
 // Close JOINS a reclaim in flight (issue #2878). The reclaim was the one
@@ -170,8 +167,12 @@ func newBlockingReclaimLogger(t *testing.T) *blockingReclaimLogger {
 // returned in that window lets the process exit inside it.
 func TestCloseJoinsAnInFlightReclaim(t *testing.T) {
 	awaitManagerGoroutines(t, 0)
-	h := newBlockingReclaimLogger(t)
+	h := newBlockingReclaimLogger()
 	m := newManager(t, &fakeDriver{}, nil).WithLogger(slog.New(h))
+	// Registered AFTER newManager's Close, so cleanups run it FIRST: a t.Fatal
+	// below would otherwise leave Close joining a reclaim nothing ever releases,
+	// and the package would hang instead of failing.
+	t.Cleanup(h.unpark)
 	seedScratch(t, m, "s1")
 	leftover := filepath.Join(m.scratchDir, ".hydrate-s1-stale")
 	if err := os.MkdirAll(leftover, 0o750); err != nil {
