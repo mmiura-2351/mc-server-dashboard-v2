@@ -61,6 +61,24 @@ class GroupRepository(abc.ABC):
         Never an insert: a group a concurrent delete removed since the caller's
         pre-read raises :class:`GroupNotFoundError` rather than writing nothing
         and reporting success (issue #2613).
+
+        Nothing is left for the unit of work's commit: the adapter executes the
+        player-row DELETE and flushes the replacement rows itself, so the
+        violations surface inside this call. The DELETE autoflushes the pending
+        name UPDATE, so a racer that took the target
+        ``(community_id, kind, name)`` first raises
+        :class:`GroupNameAlreadyExistsError`
+        (``uq_player_group_community_kind_name``, issue #2000).
+
+        The flush of the replacement ``group_player`` rows carries two more. A
+        concurrent group delete too late for the not-found above to catch leaves
+        those INSERTs violating ``fk_group_player_group_id_player_group`` -- the
+        same :class:`GroupNotFoundError`, raised by a constraint rather than by
+        the missing row (issue #2583). An interleaved second edit of the same
+        group violates ``uq_group_player_group_uuid`` instead and raises
+        :class:`GroupPlayerEditConflictError`: under READ COMMITTED the wholesale
+        DELETE cannot see a player the winner committed after it ran, so the
+        loser re-inserts a pair that now exists (issue #2613).
         """
 
     @abc.abstractmethod
