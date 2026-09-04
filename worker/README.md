@@ -49,9 +49,9 @@ regenerate with `make proto-gen` from the repo root (see
 
 ## Toolchain
 
-- **Go**: 1.26 (pinned in `go.mod`; see
+- **Go**: 1.27 (pinned in `go.mod`; see
   [`docs/dev/DEPENDENCIES.md`](../docs/dev/DEPENDENCIES.md)).
-- **golangci-lint**: 2.12.2.
+- **golangci-lint**: 2.13.1.
 
 Run every command below from this `worker/` directory.
 
@@ -61,7 +61,7 @@ golangci-lint is not part of the Go distribution, so install the pinned version
 into the module-local `./.bin` (gitignored):
 
 ```sh
-GOBIN="$(pwd)/.bin" go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+GOBIN="$(pwd)/.bin" go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.1
 ```
 
 ## Commands

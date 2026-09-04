@@ -40,7 +40,7 @@
 
 # golangci-lint is not part of the Go distribution; it is installed into a
 # module-local, gitignored ./.bin (see worker/README.md).
-GOLANGCI_VERSION := v2.12.2
+GOLANGCI_VERSION := v2.13.1
 GOLANGCI := worker/.bin/golangci-lint
 
 # Per-worktree golangci-lint analysis cache. The default shared cache

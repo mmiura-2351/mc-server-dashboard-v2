@@ -9,7 +9,7 @@
 # worker/Dockerfile's builder pin), then ship it alone on the sibling
 # container-driver e2e stub's already-vetted digest-pinned Alpine base
 # (worker/test/e2e/stub/Dockerfile).
-FROM golang:1.26 AS builder
+FROM golang:1.27.0 AS builder
 
 WORKDIR /src
 COPY go.mod main.go ./
