@@ -147,9 +147,20 @@ services:
     # refused; without it that same GET answers 200. The other eight listeners are
     # unchanged. That probe ran on 4.41 and has not been repeated since the image
     # above moved to 4.42 (#2804), so it does not cover the pinned version. The
-    # enumeration above still reports the 2026-08-02 probe because the
-    # deployment has not been rebuilt on the flag — re-probe from an `mcsd` peer
-    # after the next deploy (issue #2626 stays open until then).
+    # re-probe from an `mcsd` peer has since been done, and #2626 was closed on
+    # its result: 2026-08-25, on the canonical host after a deploy, GET
+    # http://seaweedfs:8181/ from the `api` container was refused (Errno 111).
+    # That deploy ran 4.41 as well — the pin moved to 4.42 only on 2026-08-26
+    # (#2804) — so neither probe covers the pinned version. Re-check command and
+    # long form: docs/app/SECURITY.md, the (‡) footnote.
+    #
+    # THAT RE-PROBE DOES NOT SUPERSEDE THE 2026-08-02 ENUMERATION, which is why
+    # the enumeration above is still dated 2026-08-02: its seaweedfs part was a
+    # single connect to 8181 from one peer, and re-ran neither the `netstat`
+    # listing nor the uncredentialed calls behind the other eight rows. Those
+    # still rest on the 2026-08-02 probe against 4.40, by the owner decision on
+    # #2626 (2026-08-20): the rest of the surface is unchanged by design and
+    # needs no re-probe.
     #
     # THE OTHER EIGHT ARE UNCHANGED, and that is an ACCEPTED RESIDUAL, not a
     # pending fix (decided on #2626, 2026-08-20). The peers left on `mcsd` are
