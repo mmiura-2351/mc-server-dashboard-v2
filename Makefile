@@ -39,9 +39,19 @@
 	up down restart status logs ps build clean help
 
 # golangci-lint is not part of the Go distribution; it is installed into a
-# module-local, gitignored ./.bin (see worker/README.md).
+# module-local, gitignored ./.bin by `make bootstrap` (see worker/README.md).
 GOLANGCI_VERSION := v2.12.2
 GOLANGCI := worker/.bin/golangci-lint
+
+# Version stamp for the installed binary (#2903). $(GOLANGCI) is a fixed path,
+# so as a bare file target it only ever answered "does it exist?": a bump of
+# GOLANGCI_VERSION never reinstalled, and every checkout that already had the
+# binary kept linting with the old one -- silently, while CI (which keys its
+# lint cache on the resolved version) used the new one. The stamp carries the
+# version in its *name*, so a bump renames the prerequisite out of existence and
+# the install rule below runs. It lives inside the gitignored worker/.bin, so it
+# is swept with the binary it describes.
+GOLANGCI_STAMP := worker/.bin/.golangci-lint-$(GOLANGCI_VERSION).stamp
 
 # Per-worktree golangci-lint analysis cache. The default shared cache
 # (~/.cache/golangci-lint) outlives the agent worktrees under .claude/worktrees/
@@ -352,10 +362,23 @@ openapi-check: openapi-gen
 		exit 1; \
 	fi
 
-# Install the pinned golangci-lint into worker/.bin if it is missing.
-$(GOLANGCI):
+# Install the pinned golangci-lint into worker/.bin if it is missing or holds a
+# version other than the current pin (the stamp above).
+$(GOLANGCI): $(GOLANGCI_STAMP)
 	cd worker && GOBIN="$$(pwd)/.bin" go install \
 		github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_VERSION)
+	@# Guarantee the binary ends up no older than the stamp that triggered this
+	@# rule, whatever `go install` decides to do with the mtime of a file it
+	@# rewrites with identical content. Without that guarantee the target would
+	@# still look out of date and reinstall on every run.
+	@touch $@
+
+# The stamp is an empty marker; the version lives in its name. Older stamps are
+# removed so a bump leaves exactly one.
+$(GOLANGCI_STAMP):
+	@mkdir -p $(dir $@)
+	@rm -f $(dir $@).golangci-lint-*.stamp
+	@touch $@
 
 # Bootstrap local tooling. uv installs the Python toolchain on first `uv run`,
 # but syncing up front gives a clear, fast failure if the environment is wrong.
@@ -458,6 +481,7 @@ scripts-test:
 	bash scripts/test_shell_pipefail.sh
 	bash scripts/test_check_parallel_identity.sh
 	bash scripts/test_check_parallel_lock.sh
+	bash scripts/test_golangci_pin.sh
 
 # ---------------------------------------------------------------------------
 # proto/ (buf) -- the shared control-plane contract.
