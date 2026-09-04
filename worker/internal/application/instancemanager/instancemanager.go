@@ -405,8 +405,8 @@ func (m *Manager) goBackground(fn func()) bool {
 
 // Close ends EVERY goroutine the manager started and waits for them to exit: the
 // failed-stop-orphan convergers (issue #2493), the status dispatcher New starts,
-// the per-instance status/log/metrics pumps startPumps starts (issue #2777), and
-// the deleted-scratch reclaim ReclaimDeletedScratches starts (issue #2878).
+// the deleted-scratch reclaim ReclaimDeletedScratches starts (issue #2878), and
+// the per-instance status/log/metrics pumps startPumps starts (issue #2777).
 // Nothing joined the latter group before, and none of them ended on their own: a
 // pump parks on an instance channel that a server still running never closes, and
 // the dispatcher parks on a notify channel nothing ever closes. In the Worker that
