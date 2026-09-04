@@ -14,7 +14,8 @@ import (
 )
 
 // managerFrames names the background goroutines a Manager owns: the ones New and
-// startPumps launch, plus the metrics pump's teardown watcher. A goroutine dump
+// startPumps launch, the metrics pump's teardown watcher, and the deleted-scratch
+// reclaim ReclaimDeletedScratches launches (issue #2878). A goroutine dump
 // is the only evidence that says whether they are still there once the manager
 // that started them is gone, which is how issue #2777 was found — the package's
 // own test run left ~91k of them behind. The trailing "(" is load-bearing: it
@@ -28,6 +29,7 @@ var managerFrames = []string{
 	"instancemanager.(*Manager).metricsPump.func1(",
 	"instancemanager.(*Manager).logPump(",
 	"instancemanager.(*Manager).statusDispatcher(",
+	"instancemanager.(*Manager).reclaimDeletedScratches(",
 }
 
 // liveManagerGoroutines counts the manager-owned background goroutines currently

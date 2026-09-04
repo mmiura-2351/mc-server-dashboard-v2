@@ -2,8 +2,10 @@ package instancemanager
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -114,6 +116,121 @@ func TestReclaimDeletedScratchesSkipsReservedServer(t *testing.T) {
 		t.Fatalf("scratch dir removed for a reserved server: %v", err)
 	}
 	m.release("s1")
+}
+
+// blockingReclaimLogger parks the reclaim goroutine on one of the manager's own
+// log records and lets it go again on demand. The manager's logger is the only
+// seam INSIDE the reclaim body, and the record parked on sits between the scratch
+// removal and the reservation release — the exact window issue #2878 is about —
+// so this is what turns "a reclaim in flight" into a state a test can hold still.
+// Records it does not park on pass straight through.
+type blockingReclaimLogger struct {
+	msg     string
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (h *blockingReclaimLogger) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *blockingReclaimLogger) Handle(_ context.Context, r slog.Record) error {
+	if r.Message == h.msg {
+		close(h.entered)
+		<-h.release
+	}
+	return nil
+}
+
+func (h *blockingReclaimLogger) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *blockingReclaimLogger) WithGroup(string) slog.Handler      { return h }
+
+// unpark releases a parked reclaim. It is idempotent so the test can both release
+// it deliberately and register the release as a cleanup, which keeps a t.Fatal
+// before the deliberate one from leaving the goroutine parked for the rest of the
+// package run.
+func (h *blockingReclaimLogger) unpark() { h.once.Do(func() { close(h.release) }) }
+
+// newBlockingReclaimLogger parks on the record reclaimDeletedScratches emits after
+// removing a scratch dir and before sweeping the hydrate leftovers.
+func newBlockingReclaimLogger(t *testing.T) *blockingReclaimLogger {
+	t.Helper()
+	h := &blockingReclaimLogger{
+		msg:     "reclaimed orphaned scratch for deleted server",
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	t.Cleanup(h.unpark)
+	return h
+}
+
+// Close JOINS a reclaim in flight (issue #2878). The reclaim was the one
+// manager-owned goroutine spawned with a bare go, so Close neither waited for it
+// nor cancelled it: parked here it has removed the scratch tree but has not yet
+// swept the hydrate leftovers or released the reservation, and a Close that
+// returned in that window lets the process exit inside it.
+func TestCloseJoinsAnInFlightReclaim(t *testing.T) {
+	awaitManagerGoroutines(t, 0)
+	h := newBlockingReclaimLogger(t)
+	m := newManager(t, &fakeDriver{}, nil).WithLogger(slog.New(h))
+	seedScratch(t, m, "s1")
+	leftover := filepath.Join(m.scratchDir, ".hydrate-s1-stale")
+	if err := os.MkdirAll(leftover, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	m.ReclaimDeletedScratches([]string{"s1"})
+	select {
+	case <-h.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the reclaim never reached its removal; the log record this test parks on has changed")
+	}
+	// The status dispatcher and the reclaim. Counting the reclaim at all is what
+	// pins its frame into managerFrames, so the package's leak check can see it.
+	awaitManagerGoroutines(t, 2)
+
+	closed := make(chan struct{})
+	go func() { m.Close(); close(closed) }()
+	// The dispatcher is gone, so Close is past stopBackground and inside its Wait:
+	// the parked reclaim is the only thing that Wait can still be waiting on, and
+	// the window below therefore reads a decision rather than a scheduling delay.
+	awaitManagerGoroutines(t, 1)
+	select {
+	case <-closed:
+		t.Fatal("Close returned with a reclaim parked between its scratch removal and its reservation release; nothing joined it")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	h.unpark()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return after the reclaim it joined had finished")
+	}
+	if _, err := os.Stat(leftover); !os.IsNotExist(err) {
+		t.Fatalf("Close returned before the joined reclaim finished its sweep: stat err = %v", err)
+	}
+	awaitManagerGoroutines(t, 0)
+}
+
+// A reclaim requested AFTER Close is dropped whole: goBackground refuses on a
+// closed manager, so no goroutine starts and no id is touched (issue #2878).
+func TestReclaimDeletedScratchesAfterCloseIsDropped(t *testing.T) {
+	awaitManagerGoroutines(t, 0)
+	m := newManager(t, &fakeDriver{}, nil)
+	dir := seedScratch(t, m, "s1")
+	m.Close()
+
+	m.ReclaimDeletedScratches([]string{"s1"})
+
+	// Two assertions covering each other, because a spawn is asynchronous: one
+	// still running is seen here, and one that already finished has removed the
+	// scratch dir the next check demands.
+	if live, stacks := settleManagerGoroutines(1, 200*time.Millisecond); live != 0 {
+		t.Fatalf("a reclaim requested after Close started %d goroutine(s):\n%s", live, stacks)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("a reclaim requested after Close reclaimed the scratch dir anyway: %v", err)
+	}
 }
 
 // Manager implements the session.ScratchReclaimer interface (compile check).
