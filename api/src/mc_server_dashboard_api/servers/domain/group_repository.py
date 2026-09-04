@@ -27,15 +27,14 @@ class GroupRepository(abc.ABC):
     async def add(self, group: PlayerGroup) -> None:
         """Add the group and its players; the group row's INSERT runs in this call.
 
-        Only the players are staged: the adapter flushes the ``player_group`` row
-        explicitly, because without an ORM relationship the ``group_player``
-        INSERTs are not ordered after their parent, and the player rows it stages
-        after that flush reach the database at the next one. The group row's
-        constraints are therefore enforced here rather than at the unit of work's
-        commit, so a concurrent create of the same
-        ``(community_id, kind, name)`` violates
-        ``uq_player_group_community_kind_name`` and this call raises
-        :class:`GroupNameAlreadyExistsError` (issue #2000).
+        The player rows are staged: the adapter flushes only the ``player_group``
+        row here, so that row's constraints are enforced inside this call rather
+        than at the unit of work's commit. A concurrent create of the same
+        ``(community_id, kind, name)`` raises :class:`GroupNameAlreadyExistsError`
+        (``uq_player_group_community_kind_name``, issue #2000), while
+        ``fk_player_group_community_id_community`` is enforced at the same flush
+        but untranslated, so a community deleted mid-create surfaces as a raw
+        ``IntegrityError`` (issue #2924).
         """
 
     @abc.abstractmethod
