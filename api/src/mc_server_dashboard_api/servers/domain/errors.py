@@ -521,6 +521,18 @@ class GroupAttachmentNotFoundError(ServerError):
     """
 
 
+class CommunityNotFoundError(ServerError):
+    """A servers-context write named a community that is no longer there (#2924).
+
+    The community itself is owned by the community context; this is the servers
+    context's own name for "the parent community vanished mid-write", raised when
+    a row's foreign key to ``community`` is violated because a racer deleted it
+    after the request's authorization gate read the caller's membership. The edge
+    maps this to the same 404 that gate raises for a community that is gone, so
+    the racer gets the answer it would have got a moment earlier.
+    """
+
+
 class InvalidSlugError(ServerError):
     """A slug failed DNS-label format or reserved-word check (issue #955).
 

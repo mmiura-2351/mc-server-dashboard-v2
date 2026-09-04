@@ -40,6 +40,7 @@ from mc_server_dashboard_api.dependencies import (
     get_rename_group,
 )
 from mc_server_dashboard_api.servers.domain.errors import (
+    CommunityNotFoundError,
     GroupNameAlreadyExistsError,
     GroupNotFoundError,
     GroupPlayerEditConflictError,
@@ -229,6 +230,26 @@ def test_create_duplicate_name_is_409() -> None:
     )
     assert resp.status_code == 409
     assert resp.json()["reason"] == "group_name_exists"
+
+
+def test_create_in_a_concurrently_deleted_community_is_404() -> None:
+    # issue #2924: the community is deleted between the authorization gate's
+    # membership read and the group INSERT, so the row's FK to community is
+    # violated at ``add``'s flush. The route answers with the same 404 the gate
+    # itself raises a moment earlier for a community that is gone.
+    app = _app(
+        member=True,
+        allow=True,
+        create=_FakeUseCase(
+            error=CommunityNotFoundError("fk_player_group_community_id_community")
+        ),
+    )
+    client = _client(app)
+    resp = client.post(
+        f"/api/communities/{uuid.uuid4()}/groups", json={"name": "admins", "kind": "op"}
+    )
+    assert resp.status_code == 404
+    assert resp.json()["reason"] == "not_found"
 
 
 def _edit_conflict() -> GroupPlayerEditConflictError:

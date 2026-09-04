@@ -31,10 +31,11 @@ class GroupRepository(abc.ABC):
         row here, so that row's constraints are enforced inside this call rather
         than at the unit of work's commit. A concurrent create of the same
         ``(community_id, kind, name)`` raises :class:`GroupNameAlreadyExistsError`
-        (``uq_player_group_community_kind_name``, issue #2000), while
-        ``fk_player_group_community_id_community`` is enforced at the same flush
-        but untranslated, so a community deleted mid-create surfaces as a raw
-        ``IntegrityError`` (issue #2924).
+        (``uq_player_group_community_kind_name``, issue #2000). The same flush
+        enforces ``fk_player_group_community_id_community``: a community deleted
+        between the request's authorization gate and this INSERT raises
+        :class:`CommunityNotFoundError`, the same not-found that gate answers for
+        a community that is gone (issue #2924).
         """
 
     @abc.abstractmethod
