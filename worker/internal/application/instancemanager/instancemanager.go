@@ -233,14 +233,15 @@ type Manager struct {
 	// dispatcher, and the per-instance status/log/metrics pumps (issue #2777). Each
 	// parks on it alongside whatever it normally waits for, so closing the manager
 	// ends everything it started instead of leaving goroutines running against a
-	// manager nobody owns any more. The deleted-scratch reclaim is the one
-	// goroutine that does NOT read this context, deliberately: a cancel landing
-	// inside an id's work would abandon a half-removed tree, so it is joined rather
-	// than signalled (issue #2878). background counts every one of them — the
-	// reclaim included — so Close can join them: "signalled" is not "gone", and
-	// "not signalled" still has to be waited for. A converger caught mid-round is
-	// still driving driver calls, and a pump past its WaitGroup Done still holds
-	// its frame.
+	// manager nobody owns any more. Two manager-owned goroutines never read it, for
+	// different reasons: the metrics pump's teardown watcher parks on the instance's
+	// done channel, so the cancellation reaches it one hop away, through the status
+	// pump whose return closes that channel; and the deleted-scratch reclaim reads
+	// no cancellation at all, so Close reaches it only by waiting (issue #2878).
+	// background counts every one of them — both of those included — so Close can
+	// join them: "signalled" is not "gone", and "never signalled" still has to be
+	// waited for. A converger caught mid-round is still driving driver calls, and a
+	// pump past its WaitGroup Done still holds its frame.
 	shutdown       context.Context
 	stopBackground context.CancelFunc
 	background     sync.WaitGroup
