@@ -33,8 +33,8 @@ landed a moment earlier.
 ``fk_player_group_community_id_community`` is that shape with the pre-read one
 layer up (issue #2924): no group use case reads the community, so the read a
 concurrent community delete invalidates is the request's own authorization gate
-(Layer-1 membership, :func:`~mc_server_dashboard_api.dependencies`'s
-``authorize_two_layer``), which answers 404 with no existence signal.
+(Layer-1 membership, ``dependencies.authorize_two_layer``), which answers 404
+with no existence signal.
 :class:`CommunityNotFoundError` is the servers context's name for that vanished
 parent, and the create route maps it to the identical 404.
 
