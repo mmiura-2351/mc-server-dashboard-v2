@@ -26,10 +26,13 @@
 #
 # Hermetic by construction: every run is `make -n` (dry run -- nothing is
 # executed, nothing is installed, no network) against a temp path substituted
-# for $(GOLANGCI) via a command-line override, so the developer's real
-# worker/.bin is neither read nor written. Command-line overrides win over the
-# `:=` assignments in the Makefile, which is what lets the stamp name be
-# derived from an overridden GOLANGCI_VERSION.
+# for $(GOLANGCI) via a command-line override, so nothing in the developer's
+# real worker/.bin is written. It is read: assertions 1 and 2 leave
+# $(GOLANGCI_STAMP) at its default, which resolves inside the real worker/.bin,
+# and make stats that path to decide whether the install rule is out of date --
+# which is the point of assertion 1, since the stamp name is what carries the
+# version. Command-line overrides win over the `:=` assignments in the Makefile,
+# which is what lets that name be derived from an overridden GOLANGCI_VERSION.
 #
 # Exit code: 0 = all pass, non-zero = at least one failure.
 set -uo pipefail

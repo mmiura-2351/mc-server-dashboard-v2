@@ -53,7 +53,8 @@ regenerate with `make proto-gen` from the repo root (see
   [`docs/dev/DEPENDENCIES.md`](../docs/dev/DEPENDENCIES.md)).
 - **golangci-lint**: pinned by `GOLANGCI_VERSION` in the root `Makefile`.
 
-Run every command below from this `worker/` directory.
+Run every command below from this `worker/` directory, except the `make`
+targets, which run from the repo root.
 
 ### Install golangci-lint
 

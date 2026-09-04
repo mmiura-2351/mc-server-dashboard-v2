@@ -367,9 +367,10 @@ openapi-check: openapi-gen
 $(GOLANGCI): $(GOLANGCI_STAMP)
 	cd worker && GOBIN="$$(pwd)/.bin" go install \
 		github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_VERSION)
-	@# `go install` leaves the mtime alone when it re-installs byte-identical
-	@# content, which would leave the binary older than the stamp and reinstall
-	@# on every run. Stamping the result keeps the rule idempotent.
+	@# Guarantee the binary ends up no older than the stamp that triggered this
+	@# rule, whatever `go install` decides to do with the mtime of a file it
+	@# rewrites with identical content. Without that guarantee the target would
+	@# still look out of date and reinstall on every run.
 	@touch $@
 
 # The stamp is an empty marker; the version lives in its name. Older stamps are
