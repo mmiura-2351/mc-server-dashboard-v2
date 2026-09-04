@@ -150,9 +150,9 @@ services:
     # re-probe from an `mcsd` peer has since been done, and #2626 was closed on
     # its result: 2026-08-25, on the canonical host after a deploy, GET
     # http://seaweedfs:8181/ from the `api` container was refused (Errno 111).
-    # That deploy ran 4.41 as well — the pin moved to 4.42 only on 2026-08-26
-    # (#2804) — so neither probe covers the pinned version. Re-check command and
-    # long form: docs/app/SECURITY.md, the (‡) footnote.
+    # That deploy ran 4.41 too — the pin moved on 2026-08-26 — so it does not
+    # extend the record to the pinned version either. Re-check command and long
+    # form: docs/app/SECURITY.md, the (‡) footnote.
     #
     # THAT RE-PROBE DOES NOT SUPERSEDE THE 2026-08-02 ENUMERATION, which is why
     # the enumeration above is still dated 2026-08-02: its seaweedfs part was a
