@@ -51,17 +51,20 @@ regenerate with `make proto-gen` from the repo root (see
 
 - **Go**: 1.26 (pinned in `go.mod`; see
   [`docs/dev/DEPENDENCIES.md`](../docs/dev/DEPENDENCIES.md)).
-- **golangci-lint**: 2.12.2.
+- **golangci-lint**: pinned by `GOLANGCI_VERSION` in the root `Makefile`.
 
 Run every command below from this `worker/` directory.
 
-### Install golangci-lint (one-time)
+### Install golangci-lint
 
-golangci-lint is not part of the Go distribution, so install the pinned version
-into the module-local `./.bin` (gitignored):
+golangci-lint is not part of the Go distribution, so `make` installs the pinned
+version into the module-local `./.bin` (gitignored) and reinstalls it whenever
+the pin moves. Do not install it by hand: a hand-placed binary satisfies the
+same path and then lints at whatever version it happens to be (#2903). From the
+repo root:
 
 ```sh
-GOBIN="$(pwd)/.bin" go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+make bootstrap   # or any lint target -- `make worker-lint`, `make relay-lint`
 ```
 
 ## Commands
