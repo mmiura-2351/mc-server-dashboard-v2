@@ -125,17 +125,18 @@ func TestReclaimDeletedScratchesSkipsReservedServer(t *testing.T) {
 // so this is what turns "a reclaim in flight" into a state a test can hold still.
 // Records it does not park on pass straight through.
 type blockingReclaimLogger struct {
-	msg     string
-	entered chan struct{}
-	release chan struct{}
-	once    sync.Once
+	msg         string
+	entered     chan struct{}
+	release     chan struct{}
+	enterOnce   sync.Once
+	releaseOnce sync.Once
 }
 
 func (h *blockingReclaimLogger) Enabled(context.Context, slog.Level) bool { return true }
 
 func (h *blockingReclaimLogger) Handle(_ context.Context, r slog.Record) error {
 	if r.Message == h.msg {
-		close(h.entered)
+		h.enterOnce.Do(func() { close(h.entered) })
 		<-h.release
 	}
 	return nil
@@ -148,7 +149,7 @@ func (h *blockingReclaimLogger) WithGroup(string) slog.Handler      { return h }
 // it deliberately and register the release as a cleanup, which keeps a t.Fatal
 // before the deliberate one from leaving the goroutine parked for the rest of the
 // package run.
-func (h *blockingReclaimLogger) unpark() { h.once.Do(func() { close(h.release) }) }
+func (h *blockingReclaimLogger) unpark() { h.releaseOnce.Do(func() { close(h.release) }) }
 
 // newBlockingReclaimLogger parks on the record reclaimDeletedScratches emits after
 // removing a scratch dir and before sweeping the hydrate leftovers.

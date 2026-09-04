@@ -228,15 +228,19 @@ type Manager struct {
 	orphanProbeInterval    time.Duration
 	orphanProbeMaxInterval time.Duration
 
-	// shutdown is cancelled by Close and is the lifetime EVERY background
-	// goroutine the manager owns runs under — the orphan convergers (issue #2493),
-	// the status dispatcher, and the per-instance status/log/metrics pumps (issue
-	// #2777). Each parks on it alongside whatever it normally waits for, so
-	// closing the manager ends everything it started instead of leaving goroutines
-	// running against a manager nobody owns any more. background counts the ones
-	// still running so Close can join them: "signalled" is not "gone" — a
-	// converger caught mid-round is still driving driver calls, and a pump past
-	// its WaitGroup Done still holds its frame.
+	// shutdown is cancelled by Close and is the lifetime the background goroutines
+	// the manager owns run under — the orphan convergers (issue #2493), the status
+	// dispatcher, and the per-instance status/log/metrics pumps (issue #2777). Each
+	// parks on it alongside whatever it normally waits for, so closing the manager
+	// ends everything it started instead of leaving goroutines running against a
+	// manager nobody owns any more. The deleted-scratch reclaim is the one
+	// goroutine that does NOT read this context, deliberately: a cancel landing
+	// inside an id's work would abandon a half-removed tree, so it is joined rather
+	// than signalled (issue #2878). background counts every one of them — the
+	// reclaim included — so Close can join them: "signalled" is not "gone", and
+	// "not signalled" still has to be waited for. A converger caught mid-round is
+	// still driving driver calls, and a pump past its WaitGroup Done still holds
+	// its frame.
 	shutdown       context.Context
 	stopBackground context.CancelFunc
 	background     sync.WaitGroup
@@ -425,8 +429,10 @@ func (m *Manager) goBackground(fn func()) bool {
 // half-issued. The pumps and the dispatcher add nothing to that bound: each parks
 // on the shutdown alongside its own wait and leaves at once. A reclaim in flight
 // does add to it, for the same reason and by the same trade: it is uninterruptible
-// filesystem work, and the alternative is exiting between a scratch removal and
-// its reservation release (issue #2878).
+// filesystem work, and the alternative is exiting mid-RemoveAll and leaving a
+// half-removed working set behind (issue #2878). The reservation it holds across
+// that window is NOT part of the trade — reserved is in-memory and dies with the
+// process.
 //
 // WHAT IS IN FLIGHT IS DROPPED, deliberately, and this changes nothing an operator
 // or the API can observe. Close runs after the session runner has returned
@@ -1814,11 +1820,10 @@ func (m *Manager) sweepHydrateLeftovers(serverID string) {
 //     HeldServers() (issue #1711) refreshes the advertised set each register.
 //
 // The goroutine is manager-owned, so it goes through goBackground and Close JOINS
-// it (issue #2878). The body is deliberately NOT cancellation-aware: it runs
-// between the removal of a scratch tree and the release of that id's reservation,
-// which is exactly the window a Close returning early — or a cancel landing
-// mid-id — would let the process exit inside. What Close pays for that is the
-// remaining ids' filesystem work, which is bounded and local.
+// it (issue #2878) — joined, not signalled: the body reads no cancellation, so a
+// removal in flight finishes instead of leaving a half-removed working set behind
+// at process exit. What Close pays for that is the remaining ids' filesystem work,
+// which is bounded and local.
 //
 // A reclaim requested AFTER Close is dropped whole, and silently: goBackground
 // starts nothing on a closed manager, and ScratchReclaimer is void so there is

@@ -94,13 +94,15 @@ func run(ctx context.Context) error {
 	}
 	// The manager's background goroutines are its own, and nothing joined them:
 	// the failed-stop-orphan convergers (issue #2475) kept probing and re-stopping
-	// until the process died under one mid-round (issue #2493), and the status
+	// until the process died under one mid-round (issue #2493), the status
 	// dispatcher plus every running instance's status/log/metrics pumps waited on
-	// channels a live server never closes (issue #2777). Ending them with the
-	// session that owns the manager is the honest lifetime — none of them was ever
-	// meant to outlive it — and it makes shutdown ordered: a probe in flight is
-	// cancelled at once, and a retry stop in flight is allowed to finish rather
-	// than being abandoned half-escalated.
+	// channels a live server never closes (issue #2777), and the deleted-server
+	// scratch reclaim removed working-set trees the process could exit in the
+	// middle of (issue #2878). Ending them with the session that owns the manager
+	// is the honest lifetime — none of them was ever meant to outlive it — and it
+	// makes shutdown ordered: a probe in flight is cancelled at once, and a retry
+	// stop or a reclaim in flight is allowed to finish rather than being abandoned
+	// half-escalated or half-removed.
 	//
 	// This runs AFTER runner.Run returns, so the session that drains the manager's
 	// merged status/log/metrics streams is already gone. A status, log line or
