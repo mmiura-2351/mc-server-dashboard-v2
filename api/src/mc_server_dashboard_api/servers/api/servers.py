@@ -111,6 +111,7 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupStorageUnavailableError,
     CommandDispatchError,
+    CommunityNotFoundError,
     EulaNotAcceptedError,
     FileTooLargeError,
     InvalidCpuAllocationError,
@@ -481,6 +482,11 @@ async def create_server(
         # (extremely unlikely in practice); a transient capacity condition (issue
         # #955). Surface 503 so the caller can retry.
         raise _service_unavailable("slug_exhausted") from exc
+    except CommunityNotFoundError as exc:
+        # A racer deleted the community between the gate's membership read and the
+        # commit that emits the INSERT (issue #2940); answer what the gate itself
+        # would have.
+        raise _not_found() from exc
     except WorkingSetSeedFailedError as exc:
         # The row committed but seeding the working set failed (issue #243). The
         # server is left in a degraded-but-repairable state (the files API can
@@ -555,6 +561,10 @@ async def import_server(
         raise _service_unavailable("port_range_exhausted") from exc
     except ServerNameAlreadyExistsError as exc:
         raise _conflict("server_name_exists") from exc
+    except CommunityNotFoundError as exc:
+        # Import composes CreateServer, so it stages the same row and reaches the
+        # same commit-time FK to community (issue #2940); same racer, same answer.
+        raise _not_found() from exc
     except WorkingSetSeedFailedError as exc:
         # The row committed but publishing the working set failed mid-way: the
         # server is degraded-but-repairable via the files API (same posture as

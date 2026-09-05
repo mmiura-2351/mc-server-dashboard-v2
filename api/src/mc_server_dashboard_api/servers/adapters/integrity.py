@@ -23,20 +23,34 @@ backstop; ``fk_server_group_group_id_player_group`` /
 attach-target-vanished backstops (issue #2612);
 ``uq_group_player_group_uuid`` (migration 0012) is the interleaved-player-edit
 backstop (issue #2613); and ``fk_player_group_community_id_community``
-(migration 0012) is the community-deleted-mid-create backstop (issue #2924).
+(migration 0012) / ``fk_server_community_id_community`` (migration 0005) are the
+community-deleted-mid-create backstops (issues #2924, #2940).
 
 A *duplicate* racer conflicts (409); a *deleted* racer is gone, so the FK naming
 the vanished parent row translates to that context's not-found error (404) --
 the very error the use case's own pre-read would have raised had the delete
 landed a moment earlier.
 
-``fk_player_group_community_id_community`` is that shape with the pre-read one
-layer up (issue #2924): no group use case reads the community, so the read a
-concurrent community delete invalidates is the request's own authorization gate
-(Layer-1 membership, ``dependencies.authorize_two_layer``), which answers 404
-with no existence signal.
-:class:`CommunityNotFoundError` is the servers context's name for that vanished
-parent, and the create route maps it to the identical 404.
+The two community FKs are that shape with the pre-read one layer up (issues
+#2924, #2940): neither the group nor the server create use case reads the
+community, so the read a concurrent community delete invalidates is the
+request's own authorization gate (Layer-1 membership,
+``dependencies.authorize_two_layer``), which answers 404 with no existence
+signal. :class:`CommunityNotFoundError` is the servers context's name for that
+vanished parent, and the create routes map it to the identical 404 -- the server
+one on both ``create_server`` and ``import_server``, since import composes the
+same :class:`~mc_server_dashboard_api.servers.application.manage_server.CreateServer`
+and so stages the same row.
+
+``fk_server_community_id_community`` needs no site work beyond the entry, and the
+reason is the one below: the ``server`` row is staged with ``session.add`` and
+nothing in ``CreateServer`` flushes between the ``add`` and the commit (its two
+pre-reads -- the taken game ports and the taken slugs -- are deployment-wide and
+run *before* the ``add``), so the INSERT is emitted by ``commit``, which is
+already wrapped. ``uq_server_community_name`` is the same statement's other
+backstop and has been reached that way since it was mapped. That is the
+difference from ``fk_player_group_community_id_community``, whose row is emitted
+by ``add``'s own explicit flush.
 
 ``uq_group_player_group_uuid`` is a third shape: neither caller duplicated
 anything a pre-read could have caught, and neither is gone. Two player edits on
@@ -54,9 +68,23 @@ found further reachable-but-untranslated ones; each needed its own typed error
 and its own decision, tracked as issues #2611, #2612 and #2613 rather than
 guessed at here. A constraint's absence below is therefore not evidence that
 violating it is unreachable -- nor that anyone weighed it and declined: that
-audit named ``fk_player_group_community_id_community`` in neither its
-reachable-but-unmapped list nor its verified-unreachable one, and the gap went
-unrecorded until #2924 asked which it was.
+audit named neither ``fk_player_group_community_id_community`` nor
+``fk_server_community_id_community`` in its reachable-but-unmapped list or its
+verified-unreachable one, and each gap went unrecorded until #2924 and #2940
+asked which it was.
+
+The FK-to-``community`` family is now swept whole, so it does not come back a
+third time. The schema has exactly five foreign keys onto ``community.id``, all
+``ON DELETE CASCADE`` and all named ``*_community_id_community``:
+``fk_player_group_community_id_community`` (0012) and
+``fk_server_community_id_community`` (0005) are the two in this context, both
+mapped above; ``fk_membership_community_id_community``,
+``fk_role_community_id_community`` and ``fk_resource_grant_community_id_community``
+(all 0004) belong to the *community* context and stay unmapped, named with their
+reason in ``community/adapters/integrity.py``'s own partial-map note -- each
+would need a typed error and an HTTP status for "the community vanished
+mid-write" that none of those routes maps today, a decision per constraint rather
+than a map entry.
 
 Shared by two kinds of call site, because *when* a violation surfaces depends on
 the statement shape: an INSERT staged via ``session.add`` (create) flushes at
@@ -135,7 +163,12 @@ _SERVER_MISSING_CONSTRAINTS = frozenset(
         "fk_server_resource_pack_assignments_server_id_server",
     }
 )
-_COMMUNITY_MISSING_CONSTRAINTS = frozenset({"fk_player_group_community_id_community"})
+_COMMUNITY_MISSING_CONSTRAINTS = frozenset(
+    {
+        "fk_player_group_community_id_community",
+        "fk_server_community_id_community",
+    }
+)
 _PLUGIN_PATH_CONSTRAINTS = frozenset({"uq_server_plugin_server_rel"})
 _RESOURCE_PACK_FK_CONSTRAINTS = frozenset(
     {"fk_srv_rp_assignments_resource_pack_id_resource_packs"}

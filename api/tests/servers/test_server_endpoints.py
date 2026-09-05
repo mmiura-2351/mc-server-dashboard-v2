@@ -66,6 +66,7 @@ from mc_server_dashboard_api.servers.domain.cpu_allocation import (
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupStorageUnavailableError,
+    CommunityNotFoundError,
     InvalidCpuAllocationError,
     InvalidMemoryLimitError,
     InvalidSnapshotIntervalError,
@@ -635,6 +636,24 @@ def test_create_port_range_exhausted_is_503() -> None:
     resp = client.post(f"/api/communities/{uuid.uuid4()}/servers", json=_create_body())
     assert resp.status_code == 503
     assert resp.json()["reason"] == "port_range_exhausted"
+
+
+def test_create_in_a_concurrently_deleted_community_is_404() -> None:
+    # issue #2940: the community is deleted between the authorization gate's
+    # membership read and the commit that emits the server INSERT, so the row's FK
+    # to community is violated there. The route answers with the same 404 the gate
+    # itself raises a moment earlier for a community that is gone.
+    app = _app(
+        member=True,
+        allow=True,
+        create=_FakeUseCase(
+            error=CommunityNotFoundError("fk_server_community_id_community")
+        ),
+    )
+    client = _client(app)
+    resp = client.post(f"/api/communities/{uuid.uuid4()}/servers", json=_create_body())
+    assert resp.status_code == 404
+    assert resp.json()["reason"] == "not_found"
 
 
 def test_create_seed_failed_is_503() -> None:

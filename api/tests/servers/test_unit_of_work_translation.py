@@ -20,9 +20,11 @@ own pre-read raises (``fk_group_player_group_id_player_group`` ->
 ``fk_server_group_group_id_player_group`` /
 ``fk_server_group_server_id_server`` -> :class:`GroupNotFoundError` /
 :class:`ServerNotFoundError` on an attach whose target vanished, issue #2612;
-``fk_player_group_community_id_community`` -> :class:`CommunityNotFoundError`
-on a create whose *community* vanished, issue #2924 -- there the pre-read that
-answers 404 is the request's authorization gate, one layer above the use case).
+``fk_player_group_community_id_community`` /
+``fk_server_community_id_community`` -> :class:`CommunityNotFoundError` on a
+group or server create whose *community* vanished, issues #2924 and #2940 --
+there the pre-read that answers 404 is the request's authorization gate, one
+layer above the use case).
 A write with nothing left to insert violates nothing, so ``save`` re-reads the
 group and raises the same not-found itself (issue #2613).
 
@@ -196,6 +198,18 @@ async def test_commit_translates_schedule_name_violation() -> None:
     # issue #1837: a schedule-create racer flushing at commit surfaces typed.
     uow, session = _uow_with_commit_error("uq_schedule_server_id_name")
     with pytest.raises(ScheduleNameAlreadyExistsError):
+        await uow.commit()
+    assert session.rolled_back is True
+
+
+async def test_commit_translates_server_community_fk_violation() -> None:
+    # issue #2940: the server INSERT carries fk_server_community_id_community
+    # alongside the name uniqueness above, violated when a racer deletes the
+    # community between the request's read of it and the commit that emits the
+    # row. The parent that vanished is the community, so it surfaces as the
+    # not-found the authorization gate raises for a community that is gone.
+    uow, session = _uow_with_commit_error("fk_server_community_id_community")
+    with pytest.raises(CommunityNotFoundError):
         await uow.commit()
     assert session.rolled_back is True
 
