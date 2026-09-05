@@ -82,9 +82,10 @@ type FileDownloadGrant = components["schemas"]["FileDownloadGrantResponse"];
 /**
  * Map a file-operation error to its toast text.
  *
- * Names the RFC 9457 reason codes a user can act on; any other 4xx keeps the
- * per-status message. `content_dir_protected` is handled separately (inline
- * notice, not a toast).
+ * Names the RFC 9457 reason codes worth acting on; a reason with no arm falls
+ * back to the message for its status, so the mapping is deliberately not
+ * exhaustive. `content_dir_protected` is handled separately (inline notice, not
+ * a toast).
  *
  * Returns the rendered text rather than a `TranslationKey` because a reason may
  * carry an extension member the message interpolates.
@@ -111,6 +112,13 @@ function fileOperationErrorMessage(error: unknown): string {
       if (r === "not_a_directory") return t("files.error.notDirectory");
       if (r === "symlink_refused") return t("files.error.symlinkRefused");
       if (r === "name_too_long") return t("files.error.nameTooLong");
+      // The two platform-managed server.properties refusals (issues #2623,
+      // #2812, #2846). Both reach here from every write door — save, delete,
+      // rename, upload and rollback — not the editor's PUT alone.
+      if (r === "platform_managed_key" && error.key !== undefined)
+        return t("files.error.platformManagedKey", { key: error.key });
+      if (r === "platform_managed_path")
+        return t("files.error.platformManagedPath");
       return t("files.error.invalidInput");
     }
     case 503:
