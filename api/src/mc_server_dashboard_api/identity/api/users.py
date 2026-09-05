@@ -95,6 +95,7 @@ class UserResponse(BaseModel):
 @router.post("/users", status_code=status.HTTP_201_CREATED)
 async def register_user(
     body: RegisterUserRequest,
+    response: Response,
     use_case: Annotated[RegisterUser, Depends(get_register_user)],
     client_ip: Annotated[str | None, Depends(get_client_ip)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
@@ -147,6 +148,13 @@ async def register_user(
                 target_id=user.id.value,
             )
         )
+    # A per-user body, so no cache may keep it where a second user could be served
+    # it (issue #2587). The method does not settle that on its own, as it does on
+    # the PUT / DELETE routes below: POST is one of the three methods RFC 9110
+    # Section 9.2.3 defines caching semantics for, and Section 9.3.3 makes such a
+    # response storable as soon as it carries explicit freshness and a matching
+    # ``Content-Location`` — so this declaration guards something (issue #2763).
+    response.headers["Cache-Control"] = "no-store"
     return UserResponse.from_entity(user)
 
 
@@ -375,6 +383,13 @@ async def revoke_session(
             target_id=user.id.value,
         )
     )
+    # No caching policy is declared here, deliberately: DELETE is not a cacheable
+    # method (RFC 9110 Section 9.2.3; Section 9.3.5 states it outright), so a
+    # ``Cache-Control`` header would guard nothing. The DELETE siblings that do
+    # declare one state it to match the other methods on their own path; this path
+    # carries only this one method, so there is nothing to match. Follows #2519's
+    # reasoning for not stamping routes whose method already settles it, as on
+    # ``PUT /users/me/password`` above (issue #2763).
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -413,8 +428,9 @@ async def revoke_other_sessions(
             target_id=user.id.value,
         )
     )
-    # A 204 has no body to store; declared so every method on /users/me/sessions
-    # states the same policy (issue #2587), as on /users/me above.
+    # A 204 has no body to store; declared so both methods on this exact path state
+    # the same policy (issue #2587), as on /users/me above. The per-id sibling is a
+    # different path, and records at the route why it declares none (issue #2763).
     return Response(
         status_code=status.HTTP_204_NO_CONTENT,
         headers={"Cache-Control": "no-store"},
