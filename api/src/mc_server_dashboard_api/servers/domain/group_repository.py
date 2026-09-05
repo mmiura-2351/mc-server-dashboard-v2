@@ -80,6 +80,13 @@ class GroupRepository(abc.ABC):
         :class:`GroupPlayerEditConflictError`: under READ COMMITTED the wholesale
         DELETE cannot see a player the winner committed after it ran, so the
         loser re-inserts a pair that now exists (issue #2613).
+
+        A *rename* has a third site, earlier than both: the pending name UPDATE
+        the DELETE autoflushes matches zero rows when the racing delete commits
+        between the re-read and that statement, which the ORM reports as
+        ``StaleDataError`` rather than as a constraint violation. It is the same
+        vanished group, so it raises the same :class:`GroupNotFoundError`
+        (issue #2937). A player-only edit stages no UPDATE and so cannot reach it.
         """
 
     @abc.abstractmethod
