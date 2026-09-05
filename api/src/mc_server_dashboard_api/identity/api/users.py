@@ -151,9 +151,9 @@ async def register_user(
     # A per-user body, so no cache may keep it where a second user could be served
     # it (issue #2587). The method does not settle that on its own, as it does on
     # the PUT / DELETE routes below: POST is one of the three methods RFC 9110
-    # Section 9.2.3 defines caching semantics for, and Section 9.3.3 makes such a
-    # response storable as soon as it carries explicit freshness and a matching
-    # ``Content-Location`` — so this declaration guards something (issue #2763).
+    # Section 9.2.3 defines caching semantics for, and Section 9.3.3 leaves such a
+    # response eligible for storage once it carries explicit freshness and a
+    # matching ``Content-Location`` — so this declaration guards something (#2763).
     response.headers["Cache-Control"] = "no-store"
     return UserResponse.from_entity(user)
 
