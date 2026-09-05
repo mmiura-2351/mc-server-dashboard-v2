@@ -482,6 +482,7 @@ scripts-test:
 	bash scripts/test_check_parallel_identity.sh
 	bash scripts/test_check_parallel_lock.sh
 	bash scripts/test_golangci_pin.sh
+	bash scripts/test_protoc_plugin_pins.sh
 
 # ---------------------------------------------------------------------------
 # proto/ (buf) -- the shared control-plane contract.
