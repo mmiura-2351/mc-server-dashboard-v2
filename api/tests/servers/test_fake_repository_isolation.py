@@ -56,7 +56,12 @@ there is nothing for a copy to protect.
 ``FakeFileStore`` is not a repository, but it is a fake standing in for an
 adapter and the forgiving direction is the same hazard (#2867): where the real
 seam REFUSES, a fake that answers lets a use case that depends on the refusal
-pass here and fail in production. Its pins therefore live here too.
+pass here and fail in production. Its pins therefore live here too. What it
+CANNOT describe is forgiving the same way (#2886): a store with no notion of a
+directory answers every listing entry ``is_dir=False`` and forgets a created
+directory, so a caller that branches on the flag, enumerates subdirectories, or
+acts on what it just created is exercised against a world production never
+serves.
 """
 
 from __future__ import annotations
@@ -751,4 +756,76 @@ async def test_file_store_list_dir_on_the_root_is_empty_not_a_miss(root: str) ->
     assert (
         await store.list_dir(community_id=_COMMUNITY, server_id=_SERVER, rel_path=root)
         == []
+    )
+
+
+async def test_file_store_list_dir_surfaces_a_subdirectory() -> None:
+    # ``tests/storage/test_port_contract.py::test_list_dir_lists_entries`` pins this
+    # listing against BOTH live backends: the parent of a nested file is one entry
+    # with ``is_dir=True`` and size 0 -- fs lstats the real directory
+    # (``_list_entries``), the object backend collapses the shared key prefix
+    # (``_entries_at_level``) -- listed alongside the direct files. A fake that
+    # drops every nested path and hardcodes ``is_dir=False`` answers ``[]`` here
+    # and never produces a directory at all (#2886), which is the same forgiving
+    # direction #2885 closed: a caller that branches on ``is_dir``, or that
+    # enumerates subdirectories, passes here for a reason production cannot
+    # reproduce.
+    store = FakeFileStore()
+    store.files["world/level.dat"] = b"abc"
+    store.files["server.properties"] = b"k=v"
+
+    entries = await store.list_dir(
+        community_id=_COMMUNITY, server_id=_SERVER, rel_path="."
+    )
+
+    assert {(e.name, e.is_dir) for e in entries} == {
+        ("world", True),
+        ("server.properties", False),
+    }
+    world = next(e for e in entries if e.name == "world")
+    assert world.size == 0
+
+
+async def test_file_store_make_dir_creates_a_directory_later_calls_see() -> None:
+    # A ``make_dir`` that records nothing leaves the directory non-existent for
+    # every later call, and since #2885's refusal that is a hard
+    # ``ServerFileNotFoundError`` where production succeeds (#2886). Both backends
+    # make the new directory observable: fs materializes a real one
+    # (``FsStorage._make_dir``), and the object backend anchors the prefix with a
+    # zero-byte ``.dir`` marker that ``_entries_at_level`` hides again
+    # (``tests/storage/test_object_specifics.py``
+    # ``::test_make_dir_writes_marker_and_dir_is_visible``). So the parent lists
+    # it, listing it is EMPTY rather than the miss above, and the name is
+    # occupied.
+    store = FakeFileStore()
+    store.files["server.properties"] = b"k=v"
+
+    await store.make_dir(community_id=_COMMUNITY, server_id=_SERVER, rel_path="plugins")
+
+    root_entries = await store.list_dir(
+        community_id=_COMMUNITY, server_id=_SERVER, rel_path="."
+    )
+    assert ("plugins", True) in {(e.name, e.is_dir) for e in root_entries}
+    assert (
+        await store.list_dir(
+            community_id=_COMMUNITY, server_id=_SERVER, rel_path="plugins"
+        )
+        == []
+    )
+    assert (
+        await store.path_exists(
+            community_id=_COMMUNITY, server_id=_SERVER, rel_path="plugins"
+        )
+        is True
+    )
+
+    # The ROOT is the one path no directory is created UNDER: the object backend
+    # returns before writing a marker (#1944, whose ``//.dir`` key the worker's
+    # safeJoin rejects) and fs's ``exist_ok=True`` mkdir of the snapshot dir
+    # itself is equally a no-op. So the listing must not gain a nameless entry.
+    await store.make_dir(community_id=_COMMUNITY, server_id=_SERVER, rel_path=".")
+
+    assert (
+        await store.list_dir(community_id=_COMMUNITY, server_id=_SERVER, rel_path=".")
+        == root_entries
     )
