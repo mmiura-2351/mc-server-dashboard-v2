@@ -371,6 +371,13 @@ services:
       MCD_API_METRICS__ENABLED: "${MCD_API_METRICS__ENABLED:-false}"
       MCD_API_METRICS__HOST: "${MCD_API_METRICS__HOST:-0.0.0.0}"
       MCD_API_METRICS__PORT: "${MCD_API_METRICS__PORT:-9090}"
+      # Log verbosity and format (CONFIGURATION.md Section 5.10), forwarded with
+      # `:-` defaults so the .env knobs are not silently inert here (issue
+      # #2794). This is the pair an operator reaches for during an incident, and
+      # without these two lines raising verbosity meant editing this file. The
+      # worker and relay carry the same pair under their own prefixes.
+      MCD_API_LOG__LEVEL: "${MCD_API_LOG__LEVEL:-info}"
+      MCD_API_LOG__FORMAT: "${MCD_API_LOG__FORMAT:-json}"
     volumes:
       - api-storage:/data/storage
     ports:
@@ -447,6 +454,13 @@ services:
       # #2609). A second stack's worker then attaches its MC containers to that
       # stack's `servers` network, not to this one's.
       MCD_WORKER_DRIVER_CONTAINER_NETWORK: ${COMPOSE_PROJECT_NAME:-mcsd}-servers
+      # Log verbosity and format (CONFIGURATION.md Section 6.4) — the same
+      # forwarding gap the api had, fixed the same way (issue #2794). The Go
+      # services' keys are FLAT, so these read LOG_LEVEL where the api's nested
+      # keys read LOG__LEVEL, and they take `warn` where the api takes
+      # `warning`.
+      MCD_WORKER_LOG_LEVEL: "${MCD_WORKER_LOG_LEVEL:-info}"
+      MCD_WORKER_LOG_FORMAT: "${MCD_WORKER_LOG_FORMAT:-json}"
     # The Docker socket is how the container driver creates sibling MC containers.
     # The worker runs as root (worker/Dockerfile), so it reads the socket
     # regardless of group ownership.
@@ -520,6 +534,10 @@ services:
       # both services. Default false, so a Java-only relay neither binds nor
       # requires the Bedrock UDP ports below.
       MCD_RELAY_BEDROCK_ENABLED: "${MCD_API_RELAY__BEDROCK_ENABLED:-false}"
+      # Log verbosity and format (RELAY.md Section 13), forwarded like the api's
+      # and the worker's (issue #2794); same flat key spelling as the worker's.
+      MCD_RELAY_LOG_LEVEL: "${MCD_RELAY_LOG_LEVEL:-info}"
+      MCD_RELAY_LOG_FORMAT: "${MCD_RELAY_LOG_FORMAT:-json}"
     volumes:
       # Mount the tunnel TLS material (self-signed or CA-issued) from the host.
       # Generate once: see docs/dev/DEPLOYMENT.md "Relay — TLS material".

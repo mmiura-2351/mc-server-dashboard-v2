@@ -65,11 +65,25 @@ overriding the file:
   its default. A key with no default (marked *required*) must be supplied.
 - **Config file** — a single **TOML** file per service (e.g. `api.toml` /
   `worker.toml`). Holds the non-secret bulk of configuration and is the
-  recommended place for adapter-selection and tuning keys.
+  recommended place for adapter-selection and tuning keys. Its **path comes from
+  an environment variable**, and a service whose variable is unset reads no file
+  at all — there is no searched default location. The variable is
+  `MCD_API_CONFIG_FILE` for `api/`, `MCD_WORKER_CONFIG` for `worker/`, and
+  `MCD_RELAY_CONFIG` for `relay/`; each names the file itself, not a directory.
 - **Environment variables** — highest precedence; override any file value. The
   intended channel for **secrets** (Section 3) and for per-deployment overrides
   (container/orchestrator injection). Names are the UPPERCASE keys in the tables
   below.
+
+**The bundled Compose deployment sets none of those three variables and mounts
+no config file**, so on it the chain is defaults then environment. That makes
+`compose.yaml` part of the configuration surface rather than a transparent
+transport: a setting reaches a service only if that service's `environment:`
+block forwards it, so a documented key with no `${VAR:-default}` entry there is
+inert no matter what `.env` says (issues #2585, #2794). The file layer is for
+runs that supply a file themselves (bare metal, systemd, a hand-written
+`docker run`) — under Compose it also needs the file bind-mounted into the
+container and the variable pointed at the *in-container* path.
 
 A startup configuration error (a required key missing, an unknown adapter name,
 a malformed value) is **fatal**: the service fails fast at boot rather than
