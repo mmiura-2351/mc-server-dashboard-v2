@@ -293,8 +293,10 @@ listener, described below.
 Anything mounted on the API's HTTP port is on the internet in this repo's
 recommended topology. The `cloudflared` service (`compose.yaml`) forwards the
 whole public hostname to `api:8000`, path-scoped by nothing, so the loopback
-publish (`127.0.0.1:${API_HTTP_PORT}:8000`) constrains only *host*
-reachability — not the tunnel, which reaches the API over the `mcsd` network.
+publish
+(`${API_HTTP_BIND_IP:-127.0.0.1}:${API_HTTP_PORT}:${MCD_API_SERVER__HTTP_PORT:-8000}`)
+constrains only *host* reachability — not the tunnel, which reaches the API over
+the `mcsd` network.
 Any statement of the form "Compose publishes only the API port, so X is not
 exposed" is therefore false for X on that port: the tunnel returns whatever is
 mounted there to an unauthenticated request.
