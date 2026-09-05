@@ -63,6 +63,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from dataclasses import replace
 
 import pytest
 from sqlalchemy.exc import IntegrityError
@@ -424,6 +425,43 @@ async def test_group_add_of_a_duplicate_name_reports_already_exists() -> None:
         await repo.add(_group(community_id=first.community_id))
 
     assert list(repo.by_id) == [first.id]
+
+
+async def test_group_add_of_a_stored_id_is_refused() -> None:
+    # ``id`` alone is ``pk_player_group`` (migration 0012), so ``add`` is an
+    # INSERT and never an upsert: a second row under a stored id duplicates the
+    # key and PostgreSQL refuses it at the same explicit flush that carries the
+    # name UNIQUE above. No map entry names the PK, so
+    # ``SqlAlchemyGroupRepository.add`` re-raises the ``IntegrityError``
+    # untranslated -- a 500 (that fall-through is pinned in
+    # ``tests/servers/test_unit_of_work_translation.py::
+    # test_group_add_reraises_unknown_violation_untranslated``). Keying the row in
+    # regardless made the fake an upsert, the forgiving direction, and left a
+    # locally checkable divergence unstated while its two neighbours were
+    # modelled. ``CreateGroup`` mints ``GroupId.new()``, which is what keeps the
+    # hole latent rather than live.
+    #
+    # Same reasoning, same shim and same untranslated error as
+    # ``test_resource_pack_second_assignment_for_one_server_is_refused`` (#2858),
+    # including the measurement recorded there: on PostgreSQL 18 the ORM raises
+    # for every duplicate shape rather than short-circuiting with a
+    # ``FlushError``, and this adapter stages its row the same way -- a fresh
+    # model instance followed by a flush the method owns.
+    repo = FakeGroupRepository()
+    first = _group()
+    await repo.add(first)
+
+    # A different name, so the row is refused by its key rather than by the
+    # UNIQUE the test above pins.
+    with pytest.raises(IntegrityError) as raised:
+        await repo.add(replace(first, name=GroupName("second"), players=[]))
+
+    # Read the name back through the adapter's own accessor, as the pin for the
+    # assignment PK does: it is the whole payload of the shim, and a caller that
+    # translates reaches it this way.
+    assert _constraint_name(raised.value) == "pk_player_group"
+    # The stored row stands; the refused INSERT wrote nothing over it.
+    assert repo.by_id[first.id].name == GroupName("ops")
 
 
 async def test_group_save_onto_a_taken_name_reports_already_exists() -> None:

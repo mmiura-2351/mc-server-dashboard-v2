@@ -870,6 +870,20 @@ class FakeGameSessionRepository(GameSessionRepository):
         return len(stale)
 
 
+class _DuplicateGroup(Exception):
+    """Driver error for a duplicate ``player_group`` INSERT (#2923).
+
+    The same shim shape as :class:`_DuplicateAssignment` below, which carries the
+    reasoning: the constraint name sits directly on the wrapped error, and
+    ``integrity._constraint_name`` resolves it there as well as through
+    production's extra asyncpg indirection.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("duplicate key value violates unique constraint")
+        self.constraint_name = "pk_player_group"
+
+
 class FakeGroupRepository(GroupRepository):
     """In-memory player-group store + attachment join (issue #276).
 
@@ -905,6 +919,19 @@ class FakeGroupRepository(GroupRepository):
         return None
 
     async def add(self, group: PlayerGroup) -> None:
+        # ``id`` alone is pk_player_group (migration 0012), so this is an INSERT
+        # and never an upsert: re-adding a stored id duplicates the key and
+        # PostgreSQL refuses the row. Nothing in the integrity map names the PK,
+        # so the adapter's flush re-raises the IntegrityError untranslated -- a
+        # 500, which is still the refusal the caller meets (#2923, the shape
+        # #2858 established). Keying it in regardless made this an upsert, the
+        # forgiving direction; CreateGroup mints GroupId.new(), which is what
+        # keeps the hole latent rather than live. Checked before the UNIQUE
+        # below only because it is the row's own identity: both constraints sit
+        # on the one INSERT, and which of them PostgreSQL reports when a caller
+        # violates both is not modelled.
+        if group.id in self.by_id:
+            raise IntegrityError("INSERT INTO player_group", {}, _DuplicateGroup())
         # uq_player_group_community_kind_name refuses a second group holding one
         # community's (kind, name), and the adapter's ``add`` flushes the
         # player_group row itself, so the refusal lands inside this call as
