@@ -181,3 +181,25 @@ upstream build time and predates the push. Keep the
 `# postgres:<minor> (Debian; pushed <date>, outside the cooldown)` comment
 truthful: the 7-day cooldown (Section 3) applies to these hand-maintained pins
 exactly as it does to the automated ones.
+
+**SeaweedFS: the CI pin is the tag's image-index digest** (#2904). A new version
+arrives as a Dependabot `docker-compose` PR against `compose.yaml`, and the
+`live-s3` `docker run` is re-pinned by hand in that same PR. Resolve the new tag
+to its **top-level image-index digest**, never a per-platform one — the amd64
+entry pulls and passes CI on the runner while silently pinning that single
+architecture. A `HEAD` of
+`https://registry-1.docker.io/v2/chrislusf/seaweedfs/manifests/<tag>`, with an
+anonymous pull token from `auth.docker.io`, returns it as
+`docker-content-digest`, and the accompanying `content-type`
+(`application/vnd.oci.image.index.v1+json`) is the proof of kind. Cross-check
+against Docker Hub's tags API
+(`https://hub.docker.com/v2/repositories/chrislusf/seaweedfs/tags/<tag>`), whose
+`digest` is that same index digest while the per-platform digests it lists under
+`images` all differ from it; resolving the *outgoing* tag the same way must
+return the pin being replaced, byte for byte — that is what proves the method
+yields the same kind of digest. Take the cooldown date from that response's
+`tag_last_pushed` — the same field as above — and check it against the 7-day
+window (Section 3). Re-pin the digest and the
+`# chrislusf/seaweedfs:<tag> (pushed <date>, outside the cooldown)` comment
+above the `docker run` in one change: the version and date in that comment are
+what a later reader checks the pin against.
