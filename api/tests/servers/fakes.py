@@ -241,9 +241,9 @@ class FakeFileStore(FileStore):
     def __init__(self, *, fail_write: bool = False, seed_eula: bool = False) -> None:
         self.files: dict[str, bytes] = {}
         # Directories created through ``make_dir``. A directory a seeded file sits
-        # under needs no entry here -- the file path implies it, exactly as the
-        # object backend's key prefix does -- so this holds only the EMPTY ones,
-        # which have nothing else to make them visible (issue #2886).
+        # under needs no record -- the file path implies it, exactly as the object
+        # backend's key prefix does -- so what this set is FOR is the created
+        # directory nothing else would make visible (issue #2886).
         self.dirs: set[str] = set()
         if seed_eula:
             self.files["eula.txt"] = b"eula=true\n"
