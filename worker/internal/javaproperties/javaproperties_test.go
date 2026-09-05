@@ -117,6 +117,21 @@ var parityCases = []struct {
 		want:  map[string]string{"rcon=password": "tok"},
 	},
 	{
+		name:  "an escaped hash in the key",
+		input: `a\#b=tok` + "\n",
+		want:  map[string]string{"a#b": "tok"},
+	},
+	{
+		name:  "an escaped space in the key",
+		input: `a\ b=tok` + "\n",
+		want:  map[string]string{"a b": "tok"},
+	},
+	{
+		name:  "an escaped bang in the key",
+		input: `a\!b=tok` + "\n",
+		want:  map[string]string{"a!b": "tok"},
+	},
+	{
 		name:  "a unicode escape in the key",
 		input: `\u0072con.password=tok` + "\n",
 		want:  map[string]string{"rcon.password": "tok"},

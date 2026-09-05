@@ -771,6 +771,9 @@ PARITY_CASES: list[tuple[str, bytes, dict[str, str]]] = [
         rb"rcon\=password=tok" + b"\n",
         {"rcon=password": "tok"},
     ),
+    ("an escaped hash in the key", rb"a\#b=tok" + b"\n", {"a#b": "tok"}),
+    ("an escaped space in the key", rb"a\ b=tok" + b"\n", {"a b": "tok"}),
+    ("an escaped bang in the key", rb"a\!b=tok" + b"\n", {"a!b": "tok"}),
     (
         "a unicode escape in the key",
         rb"\u0072con.password=tok" + b"\n",
