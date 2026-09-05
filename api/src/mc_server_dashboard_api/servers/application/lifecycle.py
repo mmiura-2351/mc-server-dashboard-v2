@@ -165,9 +165,13 @@ _DEFAULT_JAR_RELPATH = "server.jar"
 # (issue #1790). The phrase is pinned on the Worker side
 # (worker/internal/application/instancemanager/instancemanager.go — handleSnapshot's
 # stopped-id refusal, issue #1713, and launchReserved's guard, issue #2499/#2802)
-# with a cross-reference to this constant — reword all of them together. It is kept
-# verbatim for the emptied-in-place scratch the marker predicate also refuses (issue
-# #2802): the prose is a shade imprecise there, but the discriminator is exact.
+# with a cross-reference to this constant — reword all of them together, which the
+# gate now holds rather than a reader's memory: both messages are declared in
+# proto/contract/command_error_contract.json ("messages"), the Worker test asserts
+# its emissions against them, and this constant is pinned equal to the phrase they
+# declare (issue #2843). It is kept verbatim for the emptied-in-place scratch the
+# marker predicate also refuses (issue #2802): the prose is a shade imprecise there,
+# but the discriminator is exact.
 _WORKING_SET_ABSENT_MARKER = "working dir absent"
 
 # The 409 body reason for a RESTART the Worker refused on its relaunch because the

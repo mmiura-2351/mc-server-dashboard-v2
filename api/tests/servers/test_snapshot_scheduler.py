@@ -38,7 +38,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerType,
     WorkerId,
 )
-from tests.servers.contract_table import worker_status
+from tests.servers.contract_table import worker_message, worker_status
 from tests.servers.fakes import FakeClock, FakeControlPlane, FakeUnitOfWork
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
@@ -202,16 +202,14 @@ async def test_override_below_default_snapshots_sooner() -> None:
     assert len(cp.dispatched) == 1
 
 
-# The Worker's working_set_absent refusal message, verbatim (issue #1713,
-# worker/internal/application/instancemanager/instancemanager.go handleSnapshot;
-# the guard's predicate is the working set's content since issue #2813, which is
-# what added the emptied-out-of-band cause). The API discriminator matches the
-# "working dir absent" phrase inside it.
-_WORKING_SET_ABSENT_MESSAGE = (
-    "instancemanager: snapshot refused: working dir absent (no working set held "
-    "for this id: scratch already GC'd after a published final snapshot, emptied "
-    "out of band, or never hydrated)"
-)
+# The Worker's working_set_absent refusal message (issue #1713,
+# worker/internal/application/instancemanager/instancemanager.go handleSnapshot),
+# read from the shared contract table rather than hand-copied: the Worker test
+# drives the real emission against that same declaration, so a Go-side reword
+# cannot leave this fixture asserting against a message nobody emits any more
+# (issue #2843). The API discriminator matches the "working dir absent" phrase
+# inside it.
+_WORKING_SET_ABSENT_MESSAGE = worker_message("working_set_absent.snapshot")
 
 
 async def test_crashed_server_is_still_snapshotted() -> None:

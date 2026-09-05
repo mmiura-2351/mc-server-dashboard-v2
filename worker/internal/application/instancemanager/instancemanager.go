@@ -1021,10 +1021,14 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		// pair as "nothing left to capture" (issue #2480) — see
 		// _WORKING_SET_ABSENT_MARKER in
 		// api/src/mc_server_dashboard_api/servers/application/lifecycle.py.
-		// Reword only together with that discriminator (and both sides' tests). It is
-		// kept verbatim for the emptied and marker-only shapes too: the prose is a
-		// shade imprecise there, but the discriminator is exact — the same trade the
-		// launch guard made.
+		// Reword only together with that discriminator (and both sides' tests): the
+		// message below is declared as "working_set_absent.snapshot" in
+		// proto/contract/command_error_contract.json, which TestCommandErrorContract
+		// asserts this emission against and the API's fixtures are built from, so a
+		// reword here is red until that declaration and the API's phrase follow (issue
+		// #2843). It is kept verbatim for the emptied and marker-only shapes too: the
+		// prose is a shade imprecise there, but the discriminator is exact — the same
+		// trade the launch guard made.
 		entries, err := os.ReadDir(workingDir)
 		if err != nil && !os.IsNotExist(err) {
 			return fail(cmd.CommandID, session.CommandErrorTransferFailed,
@@ -1608,7 +1612,11 @@ func (m *Manager) launchReserved(ctx context.Context, cmd session.Command, drive
 	// api/src/mc_server_dashboard_api/servers/application/lifecycle.py) to tell this
 	// refusal from a plain SERVER_NOT_FOUND. It is kept verbatim for the emptied case
 	// too: the prose is a shade imprecise there, but the discriminator is exact, and
-	// rewording it would mean touching every pinned site on both sides at once.
+	// rewording it would mean touching every pinned site on both sides at once — which
+	// is now enforced rather than remembered: the message below is declared as
+	// "working_set_absent.launch" in proto/contract/command_error_contract.json,
+	// TestCommandErrorContract asserts this emission against that declaration, and the
+	// API's phrase is pinned to the same entry (issue #2843).
 	workingDir := filepath.Join(m.scratchDir, cmd.ServerID)
 	if _, err := os.Stat(filepath.Join(workingDir, generationFile)); os.IsNotExist(err) {
 		m.release(cmd.ServerID)
