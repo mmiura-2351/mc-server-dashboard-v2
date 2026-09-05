@@ -530,6 +530,11 @@ class CommunityNotFoundError(ServerError):
     after the request's authorization gate read the caller's membership. The edge
     maps this to the same 404 that gate raises for a community that is gone, so
     the racer gets the answer it would have got a moment earlier.
+
+    Both of the context's rows that carry a community FK raise it: the group
+    create's ``player_group`` INSERT (#2924) and the server create's ``server``
+    INSERT (#2940, reached by import as well as create, which compose the same
+    use case).
     """
 
 

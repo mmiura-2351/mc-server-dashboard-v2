@@ -67,6 +67,7 @@ from mc_server_dashboard_api.servers.application.export_import import (
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
+    CommunityNotFoundError,
     FileTooLargeError,
     InvalidExportMetadataError,
     ServerFilesUnsettledError,
@@ -908,6 +909,29 @@ def test_import_name_conflict_is_409() -> None:
     )
     assert resp.status_code == 409
     assert resp.json()["reason"] == "server_name_exists"
+
+
+def test_import_into_a_concurrently_deleted_community_is_404() -> None:
+    # issue #2940: import composes CreateServer, so it stages the same server row
+    # and reaches the same commit-time fk_server_community_id_community. A racer
+    # deleting the community between the authorization gate's membership read and
+    # that commit gets the 404 the gate itself raises a moment earlier.
+    app = _app(
+        member=True,
+        allow=True,
+        import_=_FakeImport(
+            error=CommunityNotFoundError("fk_server_community_id_community")
+        ),
+    )
+    client = _client(app)
+    files, data = _zip_upload()
+    resp = client.post(
+        f"/api/communities/{uuid.uuid4()}/servers/import",
+        files=files,
+        data=data,
+    )
+    assert resp.status_code == 404
+    assert resp.json()["reason"] == "not_found"
 
 
 def test_import_oversized_is_413() -> None:
