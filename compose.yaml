@@ -456,8 +456,8 @@ services:
       MCD_WORKER_DRIVER_CONTAINER_NETWORK: ${COMPOSE_PROJECT_NAME:-mcsd}-servers
       # Log verbosity and format (CONFIGURATION.md Section 6.4) — the same
       # forwarding gap the api had, fixed the same way (issue #2794). The Go
-      # services spell these with a SINGLE underscore before LOG, unlike the
-      # api's nested MCD_API_LOG__LEVEL, and take `warn` where the api takes
+      # services' keys are FLAT, so these read LOG_LEVEL where the api's nested
+      # keys read LOG__LEVEL, and they take `warn` where the api takes
       # `warning`.
       MCD_WORKER_LOG_LEVEL: "${MCD_WORKER_LOG_LEVEL:-info}"
       MCD_WORKER_LOG_FORMAT: "${MCD_WORKER_LOG_FORMAT:-json}"
@@ -535,8 +535,7 @@ services:
       # requires the Bedrock UDP ports below.
       MCD_RELAY_BEDROCK_ENABLED: "${MCD_API_RELAY__BEDROCK_ENABLED:-false}"
       # Log verbosity and format (RELAY.md Section 13), forwarded like the api's
-      # and the worker's (issue #2794); same single-underscore spelling as the
-      # worker's.
+      # and the worker's (issue #2794); same flat key spelling as the worker's.
       MCD_RELAY_LOG_LEVEL: "${MCD_RELAY_LOG_LEVEL:-info}"
       MCD_RELAY_LOG_FORMAT: "${MCD_RELAY_LOG_FORMAT:-json}"
     volumes:

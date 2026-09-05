@@ -1,18 +1,18 @@
 """The bundled deployment forwards every service's log knobs (issue #2794).
 
-`log.level` / `log.format` are declared, typed and documented settings for all
-three runtime processes (CONFIGURATION.md Sections 5.10 and 6.4, RELAY.md
-Section 13), read at startup by `configure_logging` on the API and by
-`newLogger` on the Worker and the Relay. `compose.yaml` forwarded none of them,
-so on the only way this project is deployed setting `MCD_API_LOG__LEVEL=debug`
-in `.env` produced no error, no warning and no effect — the same defect class as
-issue #2585, on the setting an operator is most likely to reach for during an
-incident.
+``log.level`` / ``log.format`` are declared, typed and documented settings for
+all three runtime processes (CONFIGURATION.md Sections 5.10 and 6.4, RELAY.md
+Section 13), read at startup by ``configure_logging`` on the API and by
+``newLogger`` on the Worker and the Relay. ``compose.yaml`` forwarded none of
+them, so on the only way this project is deployed setting
+``MCD_API_LOG__LEVEL=debug`` in ``.env`` produced no error, no warning and no
+effect — the same defect class as issue #2585, on the setting an operator is
+most likely to reach for during an incident.
 
-These guards live here rather than in `worker/` or `relay/` because the artifact
-under test is `compose.yaml`, a repo-root deployment file owned by no module;
-the api suite is already where its forwarding is pinned (`test_serve_entrypoint`,
-`fleet/test_control_plane_config`).
+These guards live here rather than in ``worker/`` or ``relay/`` because the
+artifact under test is ``compose.yaml``, a repo-root deployment file owned by no
+module; the api suite is already where its forwarding is pinned
+(``test_serve_entrypoint``, ``fleet/test_control_plane_config``).
 """
 
 from __future__ import annotations
@@ -57,7 +57,7 @@ def test_compose_forwards_the_api_log_settings() -> None:
 
 
 def test_compose_forwards_the_worker_log_settings() -> None:
-    """Same gap, same fix. The Worker's names carry a single underscore."""
+    """Same gap, same fix. The Go services' keys are flat, not nested."""
 
     worker = _compose_service("worker")
 

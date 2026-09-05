@@ -76,9 +76,12 @@ overriding the file:
   below.
 
 **The bundled Compose deployment sets none of those three variables and mounts
-no config file**, so on it the chain is defaults then environment: every knob is
-set in `.env` and forwarded to the service by `compose.yaml`. The file layer is
-for runs that supply one themselves (bare metal, systemd, a hand-written
+no config file**, so on it the chain is defaults then environment. That makes
+`compose.yaml` part of the configuration surface rather than a transparent
+transport: a setting reaches a service only if that service's `environment:`
+block forwards it, so a documented key with no `${VAR:-default}` entry there is
+inert no matter what `.env` says (issues #2585, #2794). The file layer is for
+runs that supply a file themselves (bare metal, systemd, a hand-written
 `docker run`) — under Compose it also needs the file bind-mounted into the
 container and the variable pointed at the *in-container* path.
 
