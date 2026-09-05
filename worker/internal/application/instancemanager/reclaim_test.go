@@ -24,17 +24,12 @@ func TestReclaimDeletedScratchesRemovesScratchAndHydrateLeftovers(t *testing.T) 
 
 	m.ReclaimDeletedScratches([]string{"s1"})
 	// ReclaimDeletedScratches runs on a goroutine that removes the scratch dir
-	// first, then sweeps the hydrate leftover. Wait for BOTH to be gone before
-	// asserting, otherwise the leftover check races the goroutine (issue #1888).
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		_, dirErr := os.Stat(dir)
-		_, leftoverErr := os.Stat(leftover)
-		if os.IsNotExist(dirErr) && os.IsNotExist(leftoverErr) {
-			break
-		}
-		time.Sleep(time.Millisecond)
-	}
+	// first, then sweeps the hydrate leftover, so the leftover check would race
+	// that goroutine on its own (issue #1888). Close JOINS the reclaim (issue
+	// #2878), so it is the barrier: both removals have happened by the time it
+	// returns. Closing here and again from newManager's cleanup is fine — Close
+	// is idempotent.
+	m.Close()
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("scratch dir not reclaimed for deleted server: stat err = %v", err)
 	}
@@ -50,14 +45,9 @@ func TestReclaimDeletedScratchesRetainsDisplacedTree(t *testing.T) {
 	displaced := seedDisplaced(t, m, "s1")
 
 	m.ReclaimDeletedScratches([]string{"s1"})
-	// Wait for the goroutine to complete the scratch removal.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(filepath.Join(m.scratchDir, "s1")); os.IsNotExist(err) {
-			break
-		}
-		time.Sleep(time.Millisecond)
-	}
+	// Close joins the reclaim (issue #2878), so the scratch removal has run by the
+	// time it returns and a surviving .displaced tree is a decision, not a race.
+	m.Close()
 	if _, err := os.Stat(displaced); err != nil {
 		t.Fatalf(".displaced-s1 tree removed by ReclaimDeletedScratches (must be retained, issue #911): %v", err)
 	}
