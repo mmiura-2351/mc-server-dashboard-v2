@@ -234,6 +234,14 @@ def _refuse_dir_at_root_properties(rel_path: str) -> None:
     directory their write materializes: writing ``server.properties`` ITSELF is
     the legitimate case the key guards handle, and its parent is the root, which
     matches nothing here.
+
+    The **whole-working-set** doors (a server import, a backup upload — issue
+    #2869) publish an operator-supplied archive whose member names are already
+    server-root-relative, so each member is its own joined target and is guarded
+    the same way: a file member by its parent, a tar directory member by its own
+    name. Both refuse before anything is committed or stored — the import before
+    its server row exists (#277), the upload before the archive reaches Storage,
+    whose extraction is below the seam that could inspect it.
     """
 
     normalized = str(PurePosixPath(rel_path))

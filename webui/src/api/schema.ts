@@ -574,6 +574,14 @@ export interface paths {
          *     the initial working set through the hardened extraction (zip-slip / size / entry
          *     caps -> 413 / 422). A publish failure after the row commits is 503
          *     ``seed_failed`` (the row is repairable via the files API).
+         *
+         *     **No directory may stand at the root ``server.properties`` path (issue
+         *     #2869).** A member named ``server.properties/…`` would publish that name as a
+         *     directory, which the platform's own writes cannot survive; it is 422
+         *     ``platform_managed_path``, the same answer the files-API doors give. Like every
+         *     other archive rejection it fires before the row is created, so nothing is left
+         *     behind. Only the ROOT name is guarded: a nested
+         *     ``backups/server.properties/…`` member is ordinary user data.
          */
         post: operations["import_server_api_communities__community_id__servers_import_post"];
         delete?: never;
@@ -737,7 +745,15 @@ export interface paths {
          *     The multipart body is buffered with the chunked pre-buffer cap (over-cap -> 413
          *     before the whole body is materialized); the use case then validates the archive
          *     (opens + traversal-safe entries) before storing it. A non-archive / unsafe
-         *     member is 422; an over-cap archive is 413.
+         *     member is 422 ``invalid_archive``; an over-cap archive is 413.
+         *
+         *     **No directory may stand at the root ``server.properties`` path (issue
+         *     #2869).** A restore republishes the archive's members verbatim as the working
+         *     set, so a member named ``server.properties/…`` would stand that name as a
+         *     directory, which the platform's own writes cannot survive. It is refused here,
+         *     before the archive is stored, as 422 ``platform_managed_path`` — the same
+         *     answer the files-API doors give. Only the ROOT name is guarded: a nested
+         *     ``backups/server.properties/…`` member is ordinary user data.
          */
         post: operations["upload_backup_api_communities__community_id__servers__server_id__backups_upload_post"];
         delete?: never;

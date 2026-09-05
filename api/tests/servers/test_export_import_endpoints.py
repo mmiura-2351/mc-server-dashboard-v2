@@ -70,6 +70,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     CommunityNotFoundError,
     FileTooLargeError,
     InvalidExportMetadataError,
+    InvalidFilePathError,
     ServerFilesUnsettledError,
     ServerNameAlreadyExistsError,
     ServerNotFoundError,
@@ -965,3 +966,50 @@ def test_import_seed_failure_is_503() -> None:
     )
     assert resp.status_code == 503
     assert resp.json()["reason"] == "seed_failed"
+
+
+# --- the archive's path rejections reach the wire (issue #2869) -------------
+#
+# The route carries the reason the use case raised, so the Web UI's switch on
+# ``reason`` sees the SAME contract import gives as the five files-API doors.
+
+
+def test_import_member_under_root_properties_is_422_platform_managed_path() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        import_=_FakeImport(
+            error=InvalidFilePathError(
+                "server.properties/notes.txt", reason="platform_managed_path"
+            )
+        ),
+    )
+    client = _client(app)
+    files, data = _zip_upload()
+    resp = client.post(
+        f"/api/communities/{uuid.uuid4()}/servers/import",
+        files=files,
+        data=data,
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "platform_managed_path"
+
+
+def test_import_zip_slip_member_is_422_invalid_path() -> None:
+    # The same handler carries the default reason, so the zip-slip rejection the
+    # docstring has always promised finally answers 422 instead of an unmapped
+    # 500.
+    app = _app(
+        member=True,
+        allow=True,
+        import_=_FakeImport(error=InvalidFilePathError("../escape.txt")),
+    )
+    client = _client(app)
+    files, data = _zip_upload()
+    resp = client.post(
+        f"/api/communities/{uuid.uuid4()}/servers/import",
+        files=files,
+        data=data,
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_path"
