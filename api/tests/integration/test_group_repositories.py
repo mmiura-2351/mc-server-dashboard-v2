@@ -31,6 +31,7 @@ import datetime as dt
 import os
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from typing import Any
 
 import pytest
 from sqlalchemy import text
@@ -41,6 +42,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.orm.exc import StaleDataError
 
 from mc_server_dashboard_api.community.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork as CommunityUnitOfWork,
@@ -709,6 +711,76 @@ async def test_save_flush_after_a_racing_delete_reports_not_found(
     cause = raised.value.__cause__
     assert isinstance(cause, IntegrityError)
     assert "fk_group_player_group_id_player_group" in str(cause)
+
+
+# --- the rename UPDATE at save's autoflush, past the re-read (issue #2937) ----
+
+
+class _ExecuteRacingSession(_RacingSession):
+    """A racing session that fires before ``save``'s player-row DELETE.
+
+    ``save``'s re-read goes through ``Session.get``, so with the aggregate loaded
+    on another session the first ``execute`` this one sees is the player-row
+    DELETE -- the statement whose autoflush emits the pending name UPDATE.
+    Committing the racer's delete here is the one window that leaves that UPDATE
+    matching zero rows; fired from the base class's ``flush`` hook the UPDATE has
+    already succeeded. The inherited ``_raced`` flag keeps that hook from firing
+    the racer a second time.
+    """
+
+    async def execute(self, *args: Any, **kwargs: Any) -> Any:
+        if not self._raced:
+            self._raced = True
+            await self._racer()
+        return await super().execute(*args, **kwargs)
+
+
+async def test_save_rename_after_a_racing_delete_reports_not_found(
+    engine: AsyncEngine,
+) -> None:
+    # A rename is the one edit that stages an UPDATE on the group row itself, and
+    # PostgreSQL reports a sane rowcount, so the ORM raises StaleDataError when the
+    # racer's delete lands between save's re-read and the autoflush that carries
+    # that UPDATE. StaleDataError is not an IntegrityError, so it escaped save's
+    # translation as an unhandled 500 where every neighbouring racer on the same
+    # method answers a typed domain error.
+    #
+    # The group is empty and stays empty: with no group_player rows there is
+    # nothing for the flush to insert, so the FK that carries the not-found for a
+    # player-carrying edit (#2938) is never reached and the UPDATE is the only
+    # statement that can raise. The aggregate is loaded on a separate session
+    # because ``get_by_id`` hydrates its players through ``execute``, which would
+    # otherwise spend the racer before ``save`` ever runs.
+    community_id = await _seed_community(engine)
+    factory = create_session_factory(engine)
+    group = _group(community_id, [], name="admins")
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.groups.add(group)
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as reader:
+        loaded = await reader.groups.get_by_id(group.id)
+    assert loaded is not None
+
+    async def deleter() -> None:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM player_group WHERE id = :id"), {"id": group.id.value}
+            )
+
+    racing_factory = async_sessionmaker(
+        engine, expire_on_commit=False, class_=_ExecuteRacingSession, racer=deleter
+    )
+    loaded.name = GroupName("moderators")
+    async with ServersUnitOfWork(racing_factory) as loser:  # type: ignore[arg-type]
+        with pytest.raises(GroupNotFoundError) as raised:
+            await loser.groups.save(loaded)
+
+    # Which statement raised: the re-read's own not-found carries no cause, and
+    # the FK path's cause is an IntegrityError, so a StaleDataError is what
+    # identifies the zero-row UPDATE as the origin.
+    assert isinstance(raised.value.__cause__, StaleDataError)
 
 
 # --- concurrent racers on the attach write (issue #2612) ----------------------
