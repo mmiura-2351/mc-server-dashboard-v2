@@ -9,6 +9,7 @@ math honours the default / override / floor.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import logging
 import uuid
@@ -428,6 +429,62 @@ async def test_unexpected_error_is_logged_with_the_server_and_a_traceback(
     record = next(r for r in caplog.records if r.levelno == logging.ERROR)
     assert str(server.id.value) in record.getMessage()
     assert record.exc_info is not None
+
+
+class _BlockingControlPlane(FakeControlPlane):
+    """Suspends inside one server's snapshot until the task is cancelled.
+
+    ``entered`` is set from within the dispatch, which the tick reaches only
+    through ``_consider``, so a test that awaits it before cancelling knows
+    control was inside the try-block — not in the caller and not between two
+    servers — when the cancellation landed.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = asyncio.Event()
+        self._blocked = asyncio.Event()
+
+    async def snapshot(
+        self,
+        *,
+        worker_id: WorkerId,
+        community_id: CommunityId,
+        server_id: ServerId,
+        final: bool = False,
+    ) -> CommandOutcome:
+        self.entered.set()
+        await self._blocked.wait()  # never set; only a cancellation ends this
+        return await super().snapshot(
+            worker_id=worker_id,
+            community_id=community_id,
+            server_id=server_id,
+            final=final,
+        )
+
+
+async def test_cancellation_inside_consider_escapes_the_per_server_handler() -> None:
+    # Issue #2865: the per-server handler (issue #2752) catches Exception, not
+    # BaseException, and that is what keeps shutdown prompt — CancelledError is a
+    # BaseException, so a cancellation delivered while control is inside
+    # _consider ends the tick instead of being logged and swallowed like a bug.
+    # Widening the handler would make the scheduler task ignore shutdown for up
+    # to a full tick per server.
+    uow = FakeUnitOfWork()
+    server = _running_server()
+    uow.servers.seed(server)
+    cp = _BlockingControlPlane()
+    clock = FakeClock(_NOW)
+    scheduler = _scheduler(uow, cp, clock)
+    await scheduler.tick()  # schedules the first due instant
+    clock.set(_NOW + dt.timedelta(seconds=3600))
+
+    task = asyncio.create_task(scheduler.tick())
+    await cp.entered.wait()  # control is inside _consider, suspended mid-dispatch
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
 
 # --- on-demand snapshot hook (SnapshotServer) ------------------------------
