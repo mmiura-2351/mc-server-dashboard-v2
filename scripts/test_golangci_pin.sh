@@ -21,9 +21,10 @@
 #      that appears nowhere in the Makefile, so a name that hardcoded today's
 #      pin instead of deriving it from the variable fails here too.
 #   2. A version bump reinstalls -- with the binary present and the *previous*
-#      version's stamp beside it, asking for the binary at the current pin
-#      produces a `go install` of that pin. This is the half that regressed: it
-#      fails on the bare file target with "is up to date".
+#      version's stamp beside it, asking for the binary at a version that has
+#      never been installed here produces a `go install` of *that* version. This
+#      is the half that regressed: it fails on the bare file target with "is up
+#      to date".
 #   3. A first run installs -- with no binary at all, the install still runs
 #      (the `make bootstrap` path in a fresh worktree).
 #   4. Steady state does nothing -- binary present and its stamp current, no
@@ -103,10 +104,14 @@ echo "=== golangci-lint version-pin tests ==="
 	: > "$(stamp_in "$dir" v0.0.0-previous)"
 	: > "$bin"
 
+	# Both overrides are load-bearing: GOLANGCI_VERSION is what the install
+	# line must carry, GOLANGCI_STAMP relocates make's derived name into $dir
+	# beside the previous version's stamp.
 	recipe="$(cd "$ROOT" && make -n "$bin" GOLANGCI="$bin" \
-		GOLANGCI_STAMP="$(stamp_in "$dir" "$version")" 2>&1)"
+		GOLANGCI_VERSION=v0.0.0-bumped \
+		GOLANGCI_STAMP="$(stamp_in "$dir" v0.0.0-bumped)" 2>&1)"
 	case "$recipe" in
-		*"golangci-lint@$version"*)
+		*"golangci-lint@v0.0.0-bumped"*)
 			ok "a bumped GOLANGCI_VERSION reinstalls over an existing binary" ;;
 		*)
 			fail_test "a bumped GOLANGCI_VERSION did not reinstall (make said: $(echo "$recipe" | tr '\n' ' '))" ;;
