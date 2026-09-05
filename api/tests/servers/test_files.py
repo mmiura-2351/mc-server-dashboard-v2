@@ -81,9 +81,32 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerType,
     WorkerId,
 )
+from mc_server_dashboard_api.storage.domain.errors import PathTraversalError
+from mc_server_dashboard_api.storage.domain.value_objects import RelPath
 from tests.servers.fakes import FakeControlPlane, FakeUnitOfWork
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
+
+
+def _canonical(rel_path: str) -> str:
+    """``rel_path`` as production keys it, through the adapter's own value object.
+
+    ``StorageFileStoreAdapter`` builds a ``RelPath`` from the raw string before
+    every Storage call, and ``RelPath`` normalises away ``.`` components and
+    redundant separators -- so ``"./"`` is the root and ``"world/"``, ``"./world"``
+    and ``"world//"`` are all ``world``. Deciding a directory's existence on the
+    raw string instead refuses those aliases, which is #2887's divergence in the
+    opposite direction: a false red rather than a false green, but an infidelity
+    either way. Reused rather than re-derived, so the fake cannot drift from the
+    rule it is modelling. A traversal rejection is translated exactly as the
+    adapter's ``_rel_path`` translates it, so no storage error crosses back into
+    the servers layer.
+    """
+
+    try:
+        return RelPath(rel_path).value
+    except PathTraversalError as exc:
+        raise InvalidFilePathError(rel_path) from exc
 
 
 class FakeFileStore(FileStore):
@@ -189,7 +212,13 @@ class FakeFileStore(FileStore):
             raise ServerFileNotFoundError(str(server_id.value))
         if self.missing:
             raise ServerFileNotFoundError(str(server_id.value))
-        if rel_path not in ("", ".") and rel_path not in self.dirs:
+        path = _canonical(rel_path)
+        # BOTH sides canonical: ``dirs`` keys are typed by hand and carry the same
+        # aliases the lookup does (the root is seeded as ``""`` in one test here
+        # and as ``"."`` in the rest), so normalising only the lookup would leave
+        # an alias-seeded directory unanswerable under the name it resolves to.
+        seeded = {_canonical(key): entries for key, entries in self.dirs.items()}
+        if path != "." and path not in seeded:
             # A non-root path that is not a seeded directory is a MISS at the real
             # seam, never an empty listing: gone, a plain file, or reached through
             # one all raise NotFoundError, which StorageFileStoreAdapter surfaces
@@ -200,7 +229,7 @@ class FakeFileStore(FileStore):
             # posture (an UNPUBLISHED server lists [] for EVERY path) is broader
             # and deliberately not modelled: this fake has no unpublished state.
             raise ServerFileNotFoundError(str(server_id.value))
-        return self.dirs.get(rel_path, [])
+        return seeded.get(path, [])
 
     async def path_exists(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
@@ -462,16 +491,15 @@ async def test_file_store_list_dir_on_an_unknown_directory_reports_not_found() -
         )
 
 
-@pytest.mark.parametrize("root", ["", "."])
+@pytest.mark.parametrize("root", ["", ".", "./"])
 async def test_file_store_list_dir_on_the_root_is_empty_not_a_miss(root: str) -> None:
     # The other half of the same contract: the ROOT always lists, empty included
     # -- an empty working set is empty, not missing (``ObjectStorage.list_dir``
     # guards its miss with ``and sub``; the fs backend's listing of the snapshot
-    # root has nothing to miss) -- so the refusal above must not swallow it. BOTH
-    # spellings, because ``RelPath`` normalises ``""`` and ``"."`` to the same
-    # empty ``parts``, and the empty one is reachable rather than theoretical:
-    # ``?path=`` reaches ``ListDir`` verbatim (``path: Annotated[str, Query()] =
-    # "."`` in servers/api/files.py).
+    # root has nothing to miss) -- so the refusal above must not swallow it. EVERY
+    # spelling ``RelPath`` normalises to empty ``parts``, and the empty one is
+    # reachable rather than theoretical: ``?path=`` reaches ``ListDir`` verbatim
+    # (``path: Annotated[str, Query()] = "."`` in servers/api/files.py).
     community, server_id = uuid.uuid4(), uuid.uuid4()
     store = FakeFileStore()
 
@@ -483,6 +511,46 @@ async def test_file_store_list_dir_on_the_root_is_empty_not_a_miss(root: str) ->
         )
         == []
     )
+
+
+@pytest.mark.parametrize("alias", ["world", "world/", "./world", "world//"])
+async def test_file_store_list_dir_answers_every_spelling_of_a_directory(
+    alias: str,
+) -> None:
+    # The refusal above must not fire on a path production would have RESOLVED to
+    # a seeded directory. ``StorageFileStoreAdapter`` builds a ``RelPath`` before
+    # every call and ``RelPath`` normalises away ``.`` components and redundant
+    # separators, so all four spellings reach the backends as ``world``. Deciding
+    # on the raw string refuses three of them -- the divergence #2887 closed, in
+    # the opposite direction: a false red rather than a false green, but an
+    # infidelity either way.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    entry = FileEntry(name="level.dat", is_dir=False, size=1)
+    store.dirs["world"] = [entry]
+
+    assert await store.list_dir(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path=alias,
+    ) == [entry]
+
+
+async def test_file_store_list_dir_answers_a_directory_seeded_under_an_alias() -> None:
+    # Both sides are canonicalised, not just the lookup: a ``dirs`` key is typed by
+    # hand too, and this file already seeds the root as ``""`` in one test and as
+    # ``"."`` in the rest. Normalising only the lookup would leave an alias-seeded
+    # directory unanswerable under the name production resolves it to.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    entry = FileEntry(name="level.dat", is_dir=False, size=1)
+    store.dirs["./world/"] = [entry]
+
+    assert await store.list_dir(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="world",
+    ) == [entry]
 
 
 # --- read: state branching -------------------------------------------------
