@@ -31,19 +31,22 @@
 #      install. Without this, "always reinstall" would pass assertions 2 and 3
 #      while paying a `go install` on every lint.
 #
-# Hermetic by construction: every run is `make -n` (dry run -- nothing is
-# executed, nothing is installed, no network) against temp paths substituted for
-# $(GOLANGCI) and $(GOLANGCI_STAMP), so the developer's real worker/.bin is
-# neither written nor read, and no result depends on whether a lint has already
-# run in this checkout.
+# Hermetic by construction. Each of the four assertions is a `make -n` run (dry
+# run -- nothing is executed, nothing is installed, no network) against temp
+# paths substituted for $(GOLANGCI) and $(GOLANGCI_STAMP), so the developer's
+# real worker/.bin is neither written nor read, and no result depends on whether
+# a lint has already run in this checkout. The one recipe this suite does let
+# make execute is the `mk` probe's own `echo` of a variable, which likewise
+# reads and writes nothing.
 #
 # Relocating the stamp does not hide the derivation under test, because the
 # stamp's *name* is still make's own: `mk` asks make what $(GOLANGCI_STAMP)
 # expands to under a given GOLANGCI_VERSION, and only the directory of that
-# answer is replaced. So if the name stopped carrying the version, assertion 2's
-# "previous version" stamp would land on the same path as the current one, the
-# prerequisite would already be satisfied, and no reinstall would be dry-run --
-# red, whatever worker/.bin happens to hold.
+# answer is replaced. So if the name stopped carrying the version, the "previous
+# version" stamp assertion 2 puts on disk would land on the same path as the
+# bumped version it then asks for, the prerequisite would already be satisfied,
+# and no reinstall would be dry-run -- red, whatever worker/.bin happens to
+# hold.
 #
 # Exit code: 0 = all pass, non-zero = at least one failure.
 set -uo pipefail
@@ -57,11 +60,14 @@ ok()        { echo "  PASS: $1"; pass=$((pass + 1)); }
 fail_test() { echo "  FAIL: $1"; fail=$((fail + 1)); }
 
 # Ask make what a variable expands to, under the `VAR=value` overrides passed
-# after the variable name. `--eval` appends a throwaway target to the makefile
-# make has just read, so the answer is make's own expansion and this script
-# never reimplements the derivation it is pinning. --no-print-directory:
-# `make scripts-test` runs this script with MAKEFLAGS exported, which makes the
-# call below a sub-make and would otherwise put "Entering directory" on stdout.
+# after the variable name. `--eval` defines a throwaway target *before* the
+# makefile is read -- $(GOLANGCI_STAMP) is still empty at that point -- and what
+# makes the probe work is that a recipe body is expanded only when the recipe
+# runs, by which time the makefile has defined it. So the answer is make's own
+# expansion and this script never reimplements the derivation it is pinning.
+# --no-print-directory: `make scripts-test` runs this script with MAKELEVEL
+# exported, and a make that sees MAKELEVEL > 0 counts itself a sub-make and
+# turns on -w, which would put "Entering directory" on stdout.
 mk() {
 	local var="$1"
 	shift
