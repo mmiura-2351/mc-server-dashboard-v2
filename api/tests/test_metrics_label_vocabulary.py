@@ -91,9 +91,10 @@ import datetime as dt
 import re
 import uuid
 from collections.abc import Iterable, Iterator
+from pathlib import Path
 
 import pytest
-from fastapi import FastAPI
+from fastapi import APIRouter, FastAPI
 from fastapi.routing import APIRoute, APIWebSocketRoute
 from fastapi.testclient import TestClient
 from prometheus_client.parser import text_string_to_metric_families
@@ -406,6 +407,42 @@ def _declared_methods(routes: Iterable[BaseRoute]) -> frozenset[str]:
         methods |= set(declared or ())
         methods |= _declared_methods(nested or ())
     return frozenset(methods)
+
+
+def test_the_route_walk_exempts_static_file_mounts_and_no_other_mount(
+    tmp_path: Path,
+) -> None:
+    """The ``Mount`` exemption in :func:`_declared_methods` is by type (#2931).
+
+    Over a synthetic app on purpose: the real app declares exactly one mount, a
+    ``StaticFiles``, so the containment test below exercises the exemption alone
+    and would stay green if the walk went back to reading ``Mount.routes`` —
+    which is ``[]`` for every mounted app and so exempts them all.
+
+    One assertion per branch: the exempted type, the mount that is walked
+    through, and the bare ASGI app that is neither and must be reported rather
+    than skipped.
+    """
+
+    async def bare_asgi(*_: object) -> None:
+        """An ASGI callable with no ``routes`` of its own."""
+
+    router = APIRouter()
+
+    @router.delete("/thing")
+    async def thing() -> None:
+        return None
+
+    assert _declared_methods([Mount("/static", StaticFiles(directory=tmp_path))]) == (
+        frozenset()
+    )
+    assert _declared_methods([Mount("/sub", routes=router.routes)]) == frozenset(
+        {"DELETE"}
+    )
+    with pytest.raises(
+        AssertionError, match="declares neither HTTP methods nor sub-routes"
+    ):
+        _declared_methods([Mount("/bare", app=bare_asgi)])
 
 
 def test_every_route_method_is_inside_the_metrics_allowlist(
