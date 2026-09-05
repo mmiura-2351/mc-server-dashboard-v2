@@ -276,11 +276,12 @@ class InvalidFilePathError(ServerError):
     a non-directory blocking the path is :class:`FileAlreadyExistsError` (409). A
     mutation that would leave a DIRECTORY at the root ``server.properties`` path
     carries ``"platform_managed_path"``: a make-dir or directory rename naming it
-    (issue #2812), and a write / upload / file rename landing UNDER it, whose
-    missing parents every write door creates (issue #2846). The
-    platform-managed-key guard compares bytes and a directory has none, so the
-    path itself is refused. The oversized case is not carried here — it is raised
-    as :class:`FileTooLargeError` (413) instead.
+    (issue #2812), a write / upload / file rename landing UNDER it, whose missing
+    parents every write door creates (issue #2846), and an archive member that
+    would publish it as a whole working set — a server import or a backup upload
+    (issue #2869). The platform-managed-key guard compares bytes and a directory
+    has none, so the path itself is refused. The oversized case is not carried
+    here — it is raised as :class:`FileTooLargeError` (413) instead.
     """
 
     def __init__(self, message: str = "", *, reason: str = "invalid_path") -> None:

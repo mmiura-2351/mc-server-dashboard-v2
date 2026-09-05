@@ -116,6 +116,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
     InvalidCpuAllocationError,
     InvalidExportMetadataError,
+    InvalidFilePathError,
     InvalidLifecycleTransitionError,
     InvalidMemoryLimitError,
     InvalidServerNameError,
@@ -530,6 +531,14 @@ async def import_server(
     the initial working set through the hardened extraction (zip-slip / size / entry
     caps -> 413 / 422). A publish failure after the row commits is 503
     ``seed_failed`` (the row is repairable via the files API).
+
+    **No directory may stand at the root ``server.properties`` path (issue
+    #2869).** A member named ``server.properties/…`` would publish that name as a
+    directory, which the platform's own writes cannot survive; it is 422
+    ``platform_managed_path``, the same answer the files-API doors give. Like every
+    other archive rejection it fires before the row is created, so nothing is left
+    behind. Only the ROOT name is guarded: a nested
+    ``backups/server.properties/…`` member is ordinary user data.
     """
 
     content = await _read_capped_upload(file)
@@ -553,6 +562,13 @@ async def import_server(
         raise _service_unavailable("catalog_unavailable") from exc
     except InvalidServerNameError as exc:
         raise _unprocessable("invalid_server_name") from exc
+    except InvalidFilePathError as exc:
+        # An archive member the pre-commit validate pass refused by PATH: a
+        # zip-slip entry (``invalid_path``), or one that would stand a directory at
+        # the root server.properties name (``platform_managed_path``, issue #2869).
+        # exc.reason, not a hardcoded value, so import answers the Web UI's switch
+        # on ``reason`` exactly as the files-API doors do.
+        raise _unprocessable(exc.reason) from exc
     except FileTooLargeError as exc:
         # The uploaded archive (or its cumulative extracted size / entry count)
         # exceeded the caps reused from the upload path (issue #262).

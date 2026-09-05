@@ -93,6 +93,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     CommandDispatchError,
     FileTooLargeError,
     InvalidBackupArchiveError,
+    InvalidFilePathError,
     InvalidRetentionPolicyError,
     ServerNotFoundError,
     ServerNotStoppedError,
@@ -1940,6 +1941,22 @@ def test_upload_invalid_archive_is_422() -> None:
     client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "/upload"), files=_multipart())
     assert resp.status_code == 422
+
+
+def test_upload_member_under_root_properties_is_422_platform_managed_path() -> None:
+    # A member that would stand a DIRECTORY at the root ``server.properties``
+    # path on restore (issue #2869) gets the SAME reason the files-API doors
+    # give, not the generic ``invalid_archive`` a non-tar body gets.
+    use_case = _FakeUseCase(
+        error=InvalidFilePathError(
+            "server.properties/notes.txt", reason="platform_managed_path"
+        )
+    )
+    app = _app(member=True, allow=True, upload=use_case)
+    client = _client(app)
+    resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "/upload"), files=_multipart())
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "platform_managed_path"
 
 
 def test_upload_too_large_is_413() -> None:
