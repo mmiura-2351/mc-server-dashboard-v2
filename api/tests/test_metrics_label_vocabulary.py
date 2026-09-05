@@ -74,6 +74,15 @@ labelled ``<other>``.
 :func:`test_every_route_method_is_inside_the_metrics_allowlist` walks the app's
 routes and asserts the methods they declare are contained in the middleware's
 ``_ALLOWED_METHODS``, so the two can no longer drift in silence.
+
+That leaves the drift between ``_ALLOWED_METHODS`` and this file's own restating
+of it (issue #2931). ``_HTTP_METHODS`` is only ever checked against label values
+some test actually drives, so *widening* the allowlist reddened nothing and left
+the literal silently stale — including when a route was added to serve the new
+method, because the containment test reads the widened set.
+:func:`test_the_method_vocabulary_restates_the_middleware_allowlist` asserts the
+two are equal up to ``<other>``, which is what turns a change to the production
+allowlist into a required, deliberate edit here.
 """
 
 from __future__ import annotations
@@ -82,13 +91,15 @@ import datetime as dt
 import re
 import uuid
 from collections.abc import Iterable, Iterator
+from pathlib import Path
 
 import pytest
-from fastapi import FastAPI
+from fastapi import APIRouter, FastAPI
 from fastapi.routing import APIRoute, APIWebSocketRoute
 from fastapi.testclient import TestClient
 from prometheus_client.parser import text_string_to_metric_families
-from starlette.routing import BaseRoute, WebSocketRoute
+from starlette.routing import BaseRoute, Mount, WebSocketRoute
+from starlette.staticfiles import StaticFiles
 
 from mc_server_dashboard_api.core.adapters import metrics
 from mc_server_dashboard_api.core.adapters.metrics_middleware import _ALLOWED_METHODS
@@ -119,6 +130,9 @@ _OTHER_METHOD = "<other>"
 
 # HTTP request methods. Bounded by the middleware's literal allowlist (anything
 # else is labelled ``<other>``), not by the request and not by this repo's routes.
+# Still a literal, and reconciled against that allowlist by
+# ``test_the_method_vocabulary_restates_the_middleware_allowlist``: re-typed on
+# purpose when the allowlist moves, never imported and never left to go stale.
 _HTTP_METHODS = frozenset(
     {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", _OTHER_METHOD}
 )
@@ -361,18 +375,30 @@ def _declared_methods(routes: Iterable[BaseRoute]) -> frozenset[str]:
     sub-routes is reported by the assertion below instead of silently inheriting
     the WebSocket exemption.
 
-    A ``Mount`` whose app is a bare ASGI app rather than a router (the
-    ``docs-assets`` and SPA ``StaticFiles`` mounts) exposes an empty ``routes``,
-    so there is nothing to walk under it; ``StaticFiles`` answers GET and HEAD
-    and 405s every other method, and both are on the allowlist anyway.
+    A ``Mount`` is exempted by the type of the app it mounts, not by the shape of
+    its ``routes`` (issue #2931). ``Mount.routes`` is
+    ``getattr(self._base_app, "routes", [])`` — ``[]`` and never ``None`` — so
+    reading it off the ``Mount`` satisfies the assertion below for *any* mounted
+    app, and a bare ASGI one would be skipped in silence rather than reported.
+    The mounts this app declares are ``StaticFiles`` (``docs-assets``, and the
+    SPA when a dist dir is configured), which answers GET and HEAD and 405s every
+    other method — both on the allowlist, and nothing underneath to walk — so
+    those are skipped by type; every other mount is walked through the mounted
+    app itself, and reaches the assertion when that app has no ``routes`` of its
+    own. (``Mount.app``, not the private ``_base_app``: a mount wrapped in
+    ``middleware=`` exposes the wrapper, which has no ``routes``, so it too
+    reddens rather than passing silently.)
     """
 
     methods: set[str] = set()
     for route in routes:
         if isinstance(route, WebSocketRoute):
             continue
+        if isinstance(route, Mount) and isinstance(route.app, StaticFiles):
+            continue
         declared: set[str] | None = getattr(route, "methods", None)
-        nested: list[BaseRoute] | None = getattr(route, "routes", None)
+        walkable = route.app if isinstance(route, Mount) else route
+        nested: list[BaseRoute] | None = getattr(walkable, "routes", None)
         assert declared is not None or nested is not None, (
             f"{type(route).__name__} {getattr(route, 'path', route)!r} declares "
             "neither HTTP methods nor sub-routes: this walk would skip it, and "
@@ -381,6 +407,42 @@ def _declared_methods(routes: Iterable[BaseRoute]) -> frozenset[str]:
         methods |= set(declared or ())
         methods |= _declared_methods(nested or ())
     return frozenset(methods)
+
+
+def test_the_route_walk_exempts_static_file_mounts_and_no_other_mount(
+    tmp_path: Path,
+) -> None:
+    """The ``Mount`` exemption in :func:`_declared_methods` is by type (#2931).
+
+    Over a synthetic app on purpose: the real app declares exactly one mount, a
+    ``StaticFiles``, so the containment test below exercises the exemption alone
+    and would stay green if the walk went back to reading ``Mount.routes`` —
+    which is ``[]`` for every mounted app and so exempts them all.
+
+    One assertion per branch: the exempted type, the mount that is walked
+    through, and the bare ASGI app that is neither and must be reported rather
+    than skipped.
+    """
+
+    async def bare_asgi(*_: object) -> None:
+        """An ASGI callable with no ``routes`` of its own."""
+
+    router = APIRouter()
+
+    @router.delete("/thing")
+    async def thing() -> None:
+        return None
+
+    assert _declared_methods([Mount("/static", StaticFiles(directory=tmp_path))]) == (
+        frozenset()
+    )
+    assert _declared_methods([Mount("/sub", routes=router.routes)]) == frozenset(
+        {"DELETE"}
+    )
+    with pytest.raises(
+        AssertionError, match="declares neither HTTP methods nor sub-routes"
+    ):
+        _declared_methods([Mount("/bare", app=bare_asgi)])
 
 
 def test_every_route_method_is_inside_the_metrics_allowlist(
@@ -415,4 +477,26 @@ def test_every_route_method_is_inside_the_metrics_allowlist(
         "the metrics middleware labels <other>: either do not serve the method, "
         "or widen metrics_middleware._ALLOWED_METHODS and _HTTP_METHODS above "
         "as one deliberate edit"
+    )
+
+
+def test_the_method_vocabulary_restates_the_middleware_allowlist() -> None:
+    """``_HTTP_METHODS`` is a re-typed literal, never a stale copy (#2931).
+
+    The two spellings of the ``method`` vocabulary in this file do opposite jobs
+    and each leaves the other's drift undetected. The containment test above
+    reads ``_ALLOWED_METHODS`` so that a *narrowing* under a route still serving
+    the dropped method reddens; ``_HTTP_METHODS`` is written out so that the
+    exposition's vocabulary cannot widen silently along with the source. But a
+    vocabulary is only exercised by the label values some test actually drives,
+    so *widening* the allowlist reddened nothing on either side.
+
+    This closes that direction, and takes no fixture on purpose: it must hold
+    whatever routes the app happens to declare.
+    """
+
+    assert _HTTP_METHODS == _ALLOWED_METHODS | {_OTHER_METHOD}, (
+        "metrics_middleware._ALLOWED_METHODS and _HTTP_METHODS above have "
+        "drifted apart: re-type _HTTP_METHODS to the allowlist plus <other> as "
+        "one deliberate edit, and keep it a literal"
     )
