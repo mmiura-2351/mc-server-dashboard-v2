@@ -231,10 +231,20 @@ class FakeFileStore(FileStore):
     Backs the create-seeding tests: ``write_file`` records each seed write so a
     test can assert what landed in the initial working set, and ``read_file``
     serves it back (404 → :class:`ServerFileNotFoundError` for an unseeded path).
+
+    Directories exist here as they do at the real seam (issue #2886): a listing
+    describes the parent of a nested seed as ``is_dir=True``, and ``make_dir``
+    records an empty one in :attr:`dirs` so a later ``list_dir`` / ``path_exists``
+    observes it.
     """
 
     def __init__(self, *, fail_write: bool = False, seed_eula: bool = False) -> None:
         self.files: dict[str, bytes] = {}
+        # Directories created through ``make_dir``. A directory a seeded file sits
+        # under needs no record -- the file path implies it, exactly as the object
+        # backend's key prefix does -- so what this set is FOR is the created
+        # directory nothing else would make visible (issue #2886).
+        self.dirs: set[str] = set()
         if seed_eula:
             self.files["eula.txt"] = b"eula=true\n"
         self.writes: list[tuple[str, bytes]] = []
@@ -283,6 +293,13 @@ class FakeFileStore(FileStore):
             for path, content in self.files.items()
             if path.startswith(prefix)
         }
+        # A created directory is a member of a prefix exactly as a file is: the
+        # object backend anchors it with a real ``<dir>/.dir`` object (issue
+        # #1125), so appending the slash here puts ``make_dir``'s record on that
+        # same footing. It makes ``d`` a member of ``d/`` -- an empty created
+        # directory LISTS, empty, rather than missing below -- and a member of
+        # every prefix above it, which is where its parents come from.
+        dir_members = sorted(d + "/" for d in self.dirs if (d + "/").startswith(prefix))
         # A non-root path nothing sits under is a MISS at the real seam, never an
         # empty listing: gone, a plain file, or reached through one all raise
         # NotFoundError, which StorageFileStoreAdapter surfaces as
@@ -298,30 +315,51 @@ class FakeFileStore(FileStore):
         # lists ``[]`` for EVERY path, not just the root -- and is deliberately
         # not modelled here: this fake has no unpublished state, its seeded files
         # ARE the published working set.
-        if prefix and not members:
+        if prefix and not members and not dir_members:
             raise ServerFileNotFoundError(str(server_id.value))
         seen: set[str] = set()
         entries: list[FileEntry] = []
         for path, content in members.items():
             rest = path[len(prefix) :]
-            # Direct child only (no nested slashes).
-            if "/" in rest:
+            # A nested file is not a child of this level; the directory it sits
+            # under is, and both backends describe that one as ``is_dir=True``
+            # with size 0 (fs lstats it in ``_list_entries``, the object backend
+            # collapses the shared key prefix in ``_entries_at_level``).
+            entry = (
+                FileEntry(name=rest.split("/", 1)[0], is_dir=True, size=0)
+                if "/" in rest
+                else FileEntry(name=rest, is_dir=False, size=len(content))
+            )
+            if entry.name not in seen:
+                seen.add(entry.name)
+                entries.append(entry)
+        for path in dir_members:
+            rest = path[len(prefix) :]
+            # Empty for the directory being listed itself, which is not its own
+            # child -- the object backend drops the same member by filtering the
+            # ``.dir`` marker out of the level.
+            if not rest:
                 continue
-            if rest not in seen:
-                seen.add(rest)
-                entries.append(FileEntry(name=rest, is_dir=False, size=len(content)))
+            name = rest.split("/", 1)[0]
+            if name not in seen:
+                seen.add(name)
+                entries.append(FileEntry(name=name, is_dir=True, size=0))
         return entries
 
     async def path_exists(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> bool:
-        # A name is occupied by a seeded file or by a directory some seeded file
-        # sits under; the root is always there.
+        # A name is occupied by a seeded file, by a directory some seeded file
+        # sits under, or by a created directory -- itself or an ancestor of one,
+        # which is the same ``d + "/"`` membership the listing uses. The root is
+        # always there.
         if rel_path in ("", "."):
             return True
         prefix = rel_path.rstrip("/") + "/"
-        return rel_path in self.files or any(
-            path.startswith(prefix) for path in self.files
+        return (
+            rel_path in self.files
+            or any(path.startswith(prefix) for path in self.files)
+            or any((d + "/").startswith(prefix) for d in self.dirs)
         )
 
     async def write_file(
@@ -382,6 +420,16 @@ class FakeFileStore(FileStore):
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> None:
         self.events.append((server_id, "make-dir"))
+        if rel_path in ("", "."):
+            # The root is already there and neither backend creates anything for
+            # it: ObjectStorage returns before writing the ``//.dir`` key issue
+            # #1944 names, and fs's ``exist_ok=True`` mkdir of the snapshot
+            # directory itself is a no-op.
+            return None
+        # Idempotent (a set), and the parents are implied rather than stored:
+        # creating ``a/b`` makes ``a`` a directory the same way seeding a file at
+        # ``a/b/f`` does.
+        self.dirs.add(rel_path.rstrip("/"))
         return None
 
     def download_dir(
