@@ -565,7 +565,8 @@ $(PROTOC_GEN_GO_GRPC): $(PROTOC_GEN_GO_GRPC_STAMP)
 # version's leading `v` -- which every Go module version carries, so every value
 # these pins can take -- because `protoc-gen-go` is a prefix of
 # `protoc-gen-go-grpc`: the bare `<tool>-*` form used for golangci-lint would
-# here sweep away the sibling plugin's stamp and reinstall it on every run.
+# here sweep away the sibling plugin's stamp as well, so every bump of
+# protoc-gen-go would drag a reinstall of protoc-gen-go-grpc along with it.
 $(PROTOC_GEN_GO_STAMP):
 	@mkdir -p $(dir $@)
 	@rm -f $(dir $@).protoc-gen-go-v*.stamp

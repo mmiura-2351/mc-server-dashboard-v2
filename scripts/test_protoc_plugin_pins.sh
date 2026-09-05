@@ -43,9 +43,10 @@
 #   5. The stamp cleanup is per tool -- worker/.bin now holds stamps for three
 #      tools, and `protoc-gen-go` is a *prefix* of `protoc-gen-go-grpc`, so a
 #      cleanup glob copied over as a bare `<tool>-*.stamp` would sweep the
-#      sibling's stamp away and reinstall that sibling on the next run, every
-#      run. Installing a stamp into a directory holding all three tools' stamps
-#      must remove this tool's superseded stamp and nothing else.
+#      sibling's stamp away too, dragging a reinstall of that sibling along with
+#      every bump of this one. Installing a stamp into a directory holding all
+#      three tools' stamps must remove this tool's superseded stamp and nothing
+#      else.
 #
 # Hermetic by construction. Assertions 1-4 are `make -n` runs (dry run --
 # nothing executed, nothing installed, no network) against temp paths
