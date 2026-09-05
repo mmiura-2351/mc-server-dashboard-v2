@@ -14,25 +14,35 @@
 #
 # What is asserted:
 #
-#   1. A version bump reinstalls -- with the binary present, asking for it at a
-#      version that has never been installed here produces a `go install` of
-#      *that* version. This is the half that regressed: it fails on the bare
-#      file target with "is up to date".
-#   2. A first run installs -- with no binary at all, the install still runs
+#   1. The stamp name carries the pin -- $(GOLANGCI_STAMP) resolves to a name
+#      that embeds whatever GOLANGCI_VERSION says. That derivation *is* the fix
+#      (#2928): a stamp whose name stops varying with the version is a fixed
+#      name again, which is the #2903 defect restored. The probe uses a version
+#      that appears nowhere in the Makefile, so a name that hardcoded today's
+#      pin instead of deriving it from the variable fails here too.
+#   2. A version bump reinstalls -- with the binary present and the *previous*
+#      version's stamp beside it, asking for the binary at the current pin
+#      produces a `go install` of that pin. This is the half that regressed: it
+#      fails on the bare file target with "is up to date".
+#   3. A first run installs -- with no binary at all, the install still runs
 #      (the `make bootstrap` path in a fresh worktree).
-#   3. Steady state does nothing -- binary present and its stamp current, no
-#      install. Without this, "always reinstall" would pass assertions 1 and 2
+#   4. Steady state does nothing -- binary present and its stamp current, no
+#      install. Without this, "always reinstall" would pass assertions 2 and 3
 #      while paying a `go install` on every lint.
 #
 # Hermetic by construction: every run is `make -n` (dry run -- nothing is
-# executed, nothing is installed, no network) against a temp path substituted
-# for $(GOLANGCI) via a command-line override, so nothing in the developer's
-# real worker/.bin is written. It is read: assertions 1 and 2 leave
-# $(GOLANGCI_STAMP) at its default, which resolves inside the real worker/.bin,
-# and make stats that path to decide whether the install rule is out of date --
-# which is the point of assertion 1, since the stamp name is what carries the
-# version. Command-line overrides win over the `:=` assignments in the Makefile,
-# which is what lets that name be derived from an overridden GOLANGCI_VERSION.
+# executed, nothing is installed, no network) against temp paths substituted for
+# $(GOLANGCI) and $(GOLANGCI_STAMP), so the developer's real worker/.bin is
+# neither written nor read, and no result depends on whether a lint has already
+# run in this checkout.
+#
+# Relocating the stamp does not hide the derivation under test, because the
+# stamp's *name* is still make's own: `mk` asks make what $(GOLANGCI_STAMP)
+# expands to under a given GOLANGCI_VERSION, and only the directory of that
+# answer is replaced. So if the name stopped carrying the version, assertion 2's
+# "previous version" stamp would land on the same path as the current one, the
+# prerequisite would already be satisfied, and no reinstall would be dry-run --
+# red, whatever worker/.bin happens to hold.
 #
 # Exit code: 0 = all pass, non-zero = at least one failure.
 set -uo pipefail
@@ -45,21 +55,58 @@ fail=0
 ok()        { echo "  PASS: $1"; pass=$((pass + 1)); }
 fail_test() { echo "  FAIL: $1"; fail=$((fail + 1)); }
 
+# Ask make what a variable expands to, under the `VAR=value` overrides passed
+# after the variable name. `--eval` appends a throwaway target to the makefile
+# make has just read, so the answer is make's own expansion and this script
+# never reimplements the derivation it is pinning. --no-print-directory:
+# `make scripts-test` runs this script with MAKEFLAGS exported, which makes the
+# call below a sub-make and would otherwise put "Entering directory" on stdout.
+mk() {
+	local var="$1"
+	shift
+	(cd "$ROOT" && make --no-print-directory \
+		--eval="mcsd-probe:;@echo \$($var)" mcsd-probe "$@")
+}
+
+# $(GOLANGCI_STAMP) for a given GOLANGCI_VERSION, rebased into a temp directory:
+# make's name, our directory.
+stamp_in() {
+	echo "$1/$(basename "$(mk GOLANGCI_STAMP GOLANGCI_VERSION="$2")")"
+}
+
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
+
+version="$(mk GOLANGCI_VERSION)"
 
 echo "=== golangci-lint version-pin tests ==="
 
 # ---------------------------------------------------------------------------
-# 1. A version bump forces the reinstall.
+# 1. The stamp name carries the pinned version.
 {
-	bin="$tmp/bumped-golangci-lint"
+	stamp="$(mk GOLANGCI_STAMP GOLANGCI_VERSION=v0.0.0-test)"
+	case "$stamp" in
+		*v0.0.0-test*)
+			ok "the stamp name carries the pinned version" ;;
+		*)
+			fail_test "the stamp name does not carry the pinned version (GOLANGCI_STAMP resolved to: $stamp)" ;;
+	esac
+}
+
+# ---------------------------------------------------------------------------
+# 2. A version bump forces the reinstall: the previous version's stamp does not
+#    satisfy the current pin.
+{
+	dir="$tmp/bumped"
+	mkdir -p "$dir"
+	bin="$dir/golangci-lint"
+	: > "$(stamp_in "$dir" v0.0.0-previous)"
 	: > "$bin"
 
 	recipe="$(cd "$ROOT" && make -n "$bin" GOLANGCI="$bin" \
-		GOLANGCI_VERSION=v0.0.0-test 2>&1)"
+		GOLANGCI_STAMP="$(stamp_in "$dir" "$version")" 2>&1)"
 	case "$recipe" in
-		*"golangci-lint@v0.0.0-test"*)
+		*"golangci-lint@$version"*)
 			ok "a bumped GOLANGCI_VERSION reinstalls over an existing binary" ;;
 		*)
 			fail_test "a bumped GOLANGCI_VERSION did not reinstall (make said: $(echo "$recipe" | tr '\n' ' '))" ;;
@@ -67,11 +114,14 @@ echo "=== golangci-lint version-pin tests ==="
 }
 
 # ---------------------------------------------------------------------------
-# 2. A first run installs (fresh worktree / `make bootstrap`).
+# 3. A first run installs (fresh worktree / `make bootstrap`).
 {
-	bin="$tmp/absent-golangci-lint"
+	dir="$tmp/absent"
+	mkdir -p "$dir"
+	bin="$dir/golangci-lint"
 
-	recipe="$(cd "$ROOT" && make -n "$bin" GOLANGCI="$bin" 2>&1)"
+	recipe="$(cd "$ROOT" && make -n "$bin" GOLANGCI="$bin" \
+		GOLANGCI_STAMP="$(stamp_in "$dir" "$version")" 2>&1)"
 	case "$recipe" in
 		*"go install"*golangci-lint*)
 			ok "a missing binary is installed" ;;
@@ -81,10 +131,12 @@ echo "=== golangci-lint version-pin tests ==="
 }
 
 # ---------------------------------------------------------------------------
-# 3. Binary present at the pinned version: nothing to do.
+# 4. Binary present at the pinned version: nothing to do.
 {
-	bin="$tmp/current-golangci-lint"
-	stamp="$tmp/current-stamp"
+	dir="$tmp/current"
+	mkdir -p "$dir"
+	bin="$dir/golangci-lint"
+	stamp="$(stamp_in "$dir" "$version")"
 	: > "$stamp"
 	: > "$bin"
 
