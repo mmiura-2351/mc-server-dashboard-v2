@@ -374,19 +374,19 @@ def _declared_methods(routes: Iterable[BaseRoute]) -> frozenset[str]:
     sub-routes is reported by the assertion below instead of silently inheriting
     the WebSocket exemption.
 
-    A ``Mount`` is exempted by the type of the app it mounts, not by the shape
-    of its ``routes`` (issue #2931). ``Mount.routes`` is
+    A ``Mount`` is exempted by the type of the app it mounts, not by the shape of
+    its ``routes`` (issue #2931). ``Mount.routes`` is
     ``getattr(self._base_app, "routes", [])`` — ``[]`` and never ``None`` — so
-    read off the ``Mount`` it would satisfy the assertion below for *any* mounted
-    app, and a bare ASGI one would be skipped as silently as the WebSocket routes
-    are skipped deliberately. The two mounts this app declares are
-    ``StaticFiles`` (``docs-assets`` and, when configured, the SPA), which
-    answers GET and HEAD and 405s every other method — both on the allowlist,
-    and nothing underneath to walk — so those are skipped by type; every other
-    mount is walked through the mounted app itself and reaches the assertion when
-    that app has no ``routes`` of its own. (``Mount.app``, not the private
-    ``_base_app``: a mount wrapped in ``middleware=`` exposes the wrapper, which
-    has no ``routes``, so it too reddens rather than passing silently.)
+    reading it off the ``Mount`` satisfies the assertion below for *any* mounted
+    app, and a bare ASGI one would be skipped in silence rather than reported.
+    The mounts this app declares are ``StaticFiles`` (``docs-assets``, and the
+    SPA when a dist dir is configured), which answers GET and HEAD and 405s every
+    other method — both on the allowlist, and nothing underneath to walk — so
+    those are skipped by type; every other mount is walked through the mounted
+    app itself, and reaches the assertion when that app has no ``routes`` of its
+    own. (``Mount.app``, not the private ``_base_app``: a mount wrapped in
+    ``middleware=`` exposes the wrapper, which has no ``routes``, so it too
+    reddens rather than passing silently.)
     """
 
     methods: set[str] = set()
