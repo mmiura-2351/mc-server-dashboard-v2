@@ -185,9 +185,9 @@ exactly as it does to the automated ones.
 **SeaweedFS: the CI pin is the tag's image-index digest** (#2904). A new version
 arrives as a Dependabot `docker-compose` PR against `compose.yaml`, and the
 `live-s3` `docker run` is re-pinned by hand in that same PR. Resolve the new tag
-to its **top-level image-index digest**, never a per-platform one — a
-per-platform digest pulls and passes CI while silently pinning one architecture.
-A `HEAD` of
+to its **top-level image-index digest**, never a per-platform one — the amd64
+entry pulls and passes CI on the runner while silently pinning that single
+architecture. A `HEAD` of
 `https://registry-1.docker.io/v2/chrislusf/seaweedfs/manifests/<tag>`, with an
 anonymous pull token from `auth.docker.io`, returns it as
 `docker-content-digest`, and the accompanying `content-type`
