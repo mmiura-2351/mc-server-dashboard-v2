@@ -32,9 +32,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # Nothing below needs a setup action or a dependency install: the checkers
-      # are pure stdlib python3 (ubuntu-latest ships it), mirroring docs.yml,
-      # and the shell suites use only bash, git and make.
+      # Nothing below needs a setup action, a dependency install, a service or a
+      # network fetch: the checkers are pure stdlib python3 (ubuntu-latest ships
+      # it), mirroring docs.yml, and the shell suites use only tools the runner
+      # already has.
       #
       # Every step below except the workflow YAML parse also runs locally: the
       # migration guard (self-test + real run) via `make migrations-check`, the
