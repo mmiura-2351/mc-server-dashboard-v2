@@ -41,7 +41,10 @@ async def test_clear_logs_on_non_uuid_server_id(
 ) -> None:
     with caplog.at_level(logging.ERROR):
         await _sink().clear_held_assignment_on_late_snapshot(
-            server_id="server-1", worker_id=_UUID, succeeded=False
+            server_id="server-1",
+            worker_id=_UUID,
+            succeeded=False,
+            message="transfer_failed",
         )
     assert any(record.levelno == logging.ERROR for record in caplog.records)
 
@@ -51,6 +54,9 @@ async def test_clear_logs_on_non_uuid_worker_id(
 ) -> None:
     with caplog.at_level(logging.ERROR):
         await _sink().clear_held_assignment_on_late_snapshot(
-            server_id=_UUID, worker_id="worker-1", succeeded=True
+            server_id=_UUID,
+            worker_id="worker-1",
+            succeeded=True,
+            message=None,
         )
     assert any(record.levelno == logging.ERROR for record in caplog.records)

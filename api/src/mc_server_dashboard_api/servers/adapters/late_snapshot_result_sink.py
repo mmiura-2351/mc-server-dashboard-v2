@@ -75,7 +75,7 @@ class ServersLateSnapshotResultSink(LateSnapshotResultSink):
         self._clock = clock
 
     async def clear_held_assignment_on_late_snapshot(
-        self, *, server_id: str, worker_id: str, succeeded: bool
+        self, *, server_id: str, worker_id: str, succeeded: bool, message: str | None
     ) -> None:
         parsed = _parse_id(server_id, kind="server_id")
         parsed_worker = _parse_id(worker_id, kind="worker_id")
@@ -90,4 +90,5 @@ class ServersLateSnapshotResultSink(LateSnapshotResultSink):
             server_id=ServerId(parsed),
             worker_id=WorkerId(parsed_worker),
             succeeded=succeeded,
+            message=message,
         )

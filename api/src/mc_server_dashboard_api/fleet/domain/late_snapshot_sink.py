@@ -28,7 +28,7 @@ class LateSnapshotResultSink(abc.ABC):
 
     @abc.abstractmethod
     async def clear_held_assignment_on_late_snapshot(
-        self, *, server_id: str, worker_id: str, succeeded: bool
+        self, *, server_id: str, worker_id: str, succeeded: bool, message: str | None
     ) -> None:
         """Release ``server_id``'s held assignment on a late snapshot result (#891).
 
@@ -41,8 +41,18 @@ class LateSnapshotResultSink(abc.ABC):
         guard, enforced by the guarded UPDATE), and a row a racing start re-placed
         is left untouched.
 
-        ``succeeded`` is the result's outcome: ``False`` for ``TRANSFER_FAILED``
-        (the upload is dead — the held progression since the last periodic snapshot
-        is lost, logged loud), ``True`` for a late SUCCESS (the publish landed; the
-        clear is the same release the on-time success would have run).
+        ``succeeded`` is the result's outcome: ``False`` for any failure — the
+        canonical one is ``TRANSFER_FAILED``, the upload dead and the held
+        progression since the last periodic snapshot lost, logged loud — ``True``
+        for a late SUCCESS (the publish landed; the clear is the same release the
+        on-time success would have run).
+
+        ``message`` is the Worker's failure detail, the only text that names WHY the
+        snapshot failed (a misconfigured data-plane URL, an auth error, a storage
+        outage — issue #2766), falling back to the result's error code when the
+        Worker sent no text; ``None`` on a late SUCCESS, which has no failure to
+        explain. It is not optional to pass: dropping it left the consumer asserting
+        a cause it never observed. The caller resolves it, so a failed result always
+        carries something to log — mirroring the ``message or status.value`` every
+        other failed-command log in the API renders.
         """

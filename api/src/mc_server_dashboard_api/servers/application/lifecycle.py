@@ -1914,7 +1914,12 @@ class StopServer:
         return server
 
     async def clear_assignment_after_late_snapshot(
-        self, *, server_id: ServerId, worker_id: WorkerId, succeeded: bool
+        self,
+        *,
+        server_id: ServerId,
+        worker_id: WorkerId,
+        succeeded: bool,
+        message: str | None,
     ) -> None:
         """Release a held assignment on a late final-snapshot result (issue #891).
 
@@ -1946,10 +1951,16 @@ class StopServer:
         carries no community scope, and the server id is authoritative.
 
         On SUCCESS the publish landed, so this is the same release the on-time
-        success path runs; on TRANSFER_FAILED the snapshot was never published, so a
+        success path runs; on a FAILURE the snapshot was never published, so a
         later cross-worker re-placement loses progression since the last periodic
         snapshot — the documented #845/#847 exposure, logged loud (a same-worker
         start reuses the retained scratch, #767).
+
+        ``message`` is the Worker's own account of that failure, logged verbatim
+        beside the release. The cause is whatever it says — a data-plane URL the
+        Worker cannot reach (#2595), an auth error, a storage outage — and NOT the
+        transfer bound this line used to assert for every late failure, which sent
+        the operator after a cause nobody observed (issue #2766).
         """
 
         async with self.uow:
@@ -1982,14 +1993,15 @@ class StopServer:
             )
         else:
             _LOG.warning(
-                "released worker %s for server %s on a LATE failed final snapshot "
-                "(the worker's transfer bound aborted the upload, #874/#890): the "
-                "final snapshot was never published, so a cross-worker re-placement "
-                "loses progression since the last periodic snapshot (#845/#847); a "
-                "same-worker start reuses the retained scratch (#767). Cleared now "
-                "instead of waiting out the stale-stop arm (#891)",
+                "released worker %s for server %s on a LATE failed final snapshot: "
+                "%s; the final snapshot was never published, so a cross-worker "
+                "re-placement loses progression since the last periodic snapshot "
+                "(#845/#847); a same-worker start reuses the retained scratch "
+                "(#767). Cleared now instead of waiting out the stale-stop arm "
+                "(#891)",
                 worker_id.value,
                 server_id.value,
+                message,
             )
 
 
