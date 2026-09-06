@@ -120,6 +120,7 @@ configuration lives in `.github/dependabot.yml` and covers:
 | `gomod` | `/worker` | Go worker module |
 | `gomod` | `/relay` | Go relay module |
 | `npm` | `/webui` | React frontend |
+| `npm` | `/webui/tools/openapi` | OpenAPI codegen tool (own lockfile) |
 | `github-actions` | `/` | Actions used in CI workflows |
 | `docker` | `/api` | Base images |
 | `docker` | `/worker` | Base images |
