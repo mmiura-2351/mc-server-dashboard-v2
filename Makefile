@@ -34,7 +34,7 @@
 	bench bench-api bench-worker bench-webui \
 	openapi-gen openapi-check \
 	proto-lint proto-gen proto-check proto-breaking \
-	bootstrap hooks-install hooks-check hooks-test scripts-test \
+	bootstrap hooks-install hooks-check hooks-test scripts-test scripts-test-cheap \
 	update deploy \
 	up down restart status logs ps build clean help
 
@@ -470,11 +470,10 @@ hooks-test:
 	bash .githooks/test-post-checkout.sh
 	bash .githooks/test-hooks-check.sh
 
-# Unit-test everything under scripts/: the `--self-test` suite of
-# supply_chain_cooldown.py first, then the deploy shell helpers. Same shape as
-# hooks-test -- stdlib python3 and pure bash, temp dirs, and stubbed
-# `sg`/`docker`/HTTP transports: offline, and never touches a real daemon or
-# volume.
+# Unit-test everything under scripts/: the cheap suites below, then the deploy
+# shell helpers. Same shape as hooks-test throughout -- stdlib python3 and pure
+# bash, temp dirs, and stubbed `sg`/`docker`/HTTP transports: offline, and never
+# touches a real daemon or volume.
 #
 # A self-test belongs here when the script has no local real run to sit next
 # to, so that a regression in it fails the pre-push `make check` instead of a CI
@@ -485,19 +484,28 @@ hooks-test:
 # check_test_client_pattern.py's in test-client-check (#2698), and
 # check_api_env.py's in api-env-check (#2880).
 #
-# This target is not the only gate over the cheap suites, and it is the list an
-# author edits, so the pointer belongs here rather than only in the workflow:
-# the cooldown self-test and the two version-pin suites are enumerated a second
-# time by hand in .github/workflows/sanity.yml, which is what gives them a CI
-# run of their own. A suite added here that clears that workflow's bar (no
-# network, no dependency install, seconds rather than minutes) is wired into
-# both lists in one change; a suite in only this list is gated by whoever
-# happens to run `make check` and by nothing else (#2946).
-scripts-test:
-	python3 scripts/supply_chain_cooldown.py --self-test
+# The recipe lines here are the deploy helper suites and only those: they cost
+# ~14s to the cheap set's ~3s, and .github/workflows/sanity.yml is the one gate
+# that deliberately does not want them (see its header). Everything else under
+# scripts/ goes in scripts-test-cheap below.
+scripts-test: scripts-test-cheap
 	bash scripts/test_deploy_preflight.sh
 	bash scripts/test_pg_major_upgrade.sh
 	bash scripts/test_deploy_stamp.sh
+
+# The scripts/ suites the always-on CI gate can afford: no network, no
+# dependency install, ~3s for all six (0.06s-2.3s each; the slowest is the lock
+# suite, whose cost is deliberate waits, bounded by its own polling ceiling).
+#
+# sanity.yml runs this target rather than copying the list out, which is the
+# whole point of the split: the workflow used to enumerate its scripts/ steps by
+# hand under a comment asking authors to keep two lists in step, and five suites
+# reached main with no CI run of their own anyway (#2946). Membership is now a
+# single choice made here -- cheap suite or deploy suite -- and CI follows from
+# it. Adding a suite to the deploy lines above is the deliberate way to keep it
+# out of that gate; there is no third place to put one.
+scripts-test-cheap:
+	python3 scripts/supply_chain_cooldown.py --self-test
 	bash scripts/test_shell_pipefail.sh
 	bash scripts/test_check_parallel_identity.sh
 	bash scripts/test_check_parallel_lock.sh
