@@ -22,14 +22,14 @@ func TestReclaimDeletedScratchesRemovesScratchAndHydrateLeftovers(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	m.ReclaimDeletedScratches([]string{"s1"})
-	// ReclaimDeletedScratches runs on a goroutine that removes the scratch dir
-	// first, then sweeps the hydrate leftover, so the leftover check would race
-	// that goroutine on its own (issue #1888). Close JOINS the reclaim (issue
-	// #2878), so it is the barrier: both removals have happened by the time it
-	// returns. Closing here and again from newManager's cleanup is fine — Close
-	// is idempotent.
-	m.Close()
+	// The SYNCHRONOUS body, as the rest of this file's per-id tests use. The
+	// asynchronous entry point removes the scratch dir first and sweeps the hydrate
+	// leftover after, so the leftover check would race that goroutine on its own
+	// (issue #1888), and the only barrier available is Close — which since issue
+	// #2933 also STOPS the reclaim at its loop top, so a spawn that has not reached
+	// its first id yet reclaims nothing. TestCloseJoinsAnInFlightReclaim covers the
+	// goroutine and its join; this test is about what one id's reclaim removes.
+	m.reclaimDeletedScratches([]string{"s1"})
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("scratch dir not reclaimed for deleted server: stat err = %v", err)
 	}
@@ -44,10 +44,10 @@ func TestReclaimDeletedScratchesRetainsDisplacedTree(t *testing.T) {
 	seedScratch(t, m, "s1")
 	displaced := seedDisplaced(t, m, "s1")
 
-	m.ReclaimDeletedScratches([]string{"s1"})
-	// Close joins the reclaim (issue #2878), so the scratch removal has run by the
-	// time it returns and a surviving .displaced tree is a decision, not a race.
-	m.Close()
+	// The synchronous body, so the scratch removal has provably run by the time the
+	// .displaced tree is checked and its survival is a decision, not a race (see
+	// TestReclaimDeletedScratchesRemovesScratchAndHydrateLeftovers).
+	m.reclaimDeletedScratches([]string{"s1"})
 	if _, err := os.Stat(displaced); err != nil {
 		t.Fatalf(".displaced-s1 tree removed by ReclaimDeletedScratches (must be retained, issue #911): %v", err)
 	}
@@ -222,6 +222,112 @@ func TestReclaimDeletedScratchesAfterCloseIsDropped(t *testing.T) {
 	}
 	if _, err := os.Stat(dir); err != nil {
 		t.Fatalf("a reclaim requested after Close reclaimed the scratch dir anyway: %v", err)
+	}
+}
+
+// Close stops a reclaim at the next id boundary (issue #2933). The reclaim reads
+// the shutdown at the TOP of the per-id loop — after the previous id's release,
+// before the next id's reserve — where it holds no reservation and no half-done
+// removal, so stopping there is safe by the same reasoning that makes the join
+// safe. What it buys is the bound: Close pays the filesystem work of the id
+// already in flight, not of every id still on the list. The id in flight still
+// finishes; the window from reserve to release stays uninterruptible on purpose
+// (issue #2878), which is what leaves no id with a removed tree and a held
+// reservation.
+func TestCloseStopsTheReclaimAtTheNextIDBoundary(t *testing.T) {
+	awaitManagerGoroutines(t, 0)
+	h := newBlockingReclaimLogger()
+	m := newManager(t, &fakeDriver{}, nil).WithLogger(slog.New(h))
+	// Registered AFTER newManager's Close, so cleanups run it FIRST (see
+	// TestCloseJoinsAnInFlightReclaim).
+	t.Cleanup(h.unpark)
+
+	ids := []string{"s1", "s2", "s3", "s4", "s5"}
+	dirs := make(map[string]string, len(ids))
+	for _, id := range ids {
+		dirs[id] = seedScratch(t, m, id)
+	}
+	leftover := filepath.Join(m.scratchDir, ".hydrate-s1-stale")
+	if err := os.MkdirAll(leftover, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	m.ReclaimDeletedScratches(ids)
+	select {
+	case <-h.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the reclaim never reached its removal; the log record this test parks on has changed")
+	}
+	// The status dispatcher and the reclaim, parked inside s1.
+	awaitManagerGoroutines(t, 2)
+
+	closed := make(chan struct{})
+	go func() { m.Close(); close(closed) }()
+	// The dispatcher is gone, so Close is past stopBackground and the shutdown the
+	// loop top reads is already cancelled: unparking now resumes the reclaim into a
+	// manager that is shutting down, which is the state under test rather than a
+	// scheduling coincidence.
+	awaitManagerGoroutines(t, 1)
+	h.unpark()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return after the reclaim it joined had finished")
+	}
+
+	// s1 was past the loop top when the shutdown landed, so it completes whole.
+	if _, err := os.Stat(dirs["s1"]); !os.IsNotExist(err) {
+		t.Fatalf("the id in flight was left half-reclaimed: stat err = %v", err)
+	}
+	if _, err := os.Stat(leftover); !os.IsNotExist(err) {
+		t.Fatalf("the id in flight kept its hydrate leftovers: stat err = %v", err)
+	}
+	// Every id after it is untouched: Close did not pay their filesystem work.
+	for _, id := range ids[1:] {
+		if _, err := os.Stat(dirs[id]); err != nil {
+			t.Fatalf("Close paid %s's reclaim after the shutdown was signalled: %v", id, err)
+		}
+	}
+	// The loop top sits after a release, so the stopped reclaim holds nothing.
+	m.mu.Lock()
+	stillReserved := len(m.reserved)
+	m.mu.Unlock()
+	if stillReserved != 0 {
+		t.Fatalf("the stopped reclaim left %d reservation(s) held", stillReserved)
+	}
+	awaitManagerGoroutines(t, 0)
+}
+
+// The ids a stopped reclaim skips are re-offered, not lost (issue #2933). Their
+// scratch dirs are still on disk, so HeldServers() keeps advertising them and the
+// next registration re-derives the unknown subset from that advertisement — the
+// ack-vs-advertised intersection pinned in the session package
+// (TestRegisterAckUnknownHeldServerIDsPlumbedToReclaimer) over a held set the
+// runner re-reads per registration (TestReRegistrationRefreshesHeldServers, issue
+// #1711). This is the Worker-side half those two compose with: a skipped id is
+// still HELD.
+//
+// It also pins the low end of the bound. On a manager that is already shutting
+// down the loop top stops the reclaim at the FIRST id, so "at most one id's
+// filesystem work" includes none at all.
+func TestStoppedReclaimLeavesSkippedIDsHeld(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	ids := []string{"s1", "s2"}
+	for _, id := range ids {
+		seedScratch(t, m, id)
+	}
+	m.Close()
+
+	m.reclaimDeletedScratches(ids)
+
+	held := make(map[string]bool)
+	for _, hs := range m.HeldServers() {
+		held[hs.ServerID] = true
+	}
+	for _, id := range ids {
+		if !held[id] {
+			t.Fatalf("%s is no longer advertised as held after a stopped reclaim, so the next registration cannot re-offer it: held = %v", id, held)
+		}
 	}
 }
 
