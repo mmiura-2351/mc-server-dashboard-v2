@@ -469,7 +469,17 @@ def _rewrite(
 
 
 def _appending_would_diverge(content: bytes, props: list[_Property]) -> bool:
-    """True when appending to *content* makes a batched write differ from a chain.
+    """True when appending to *content* could make a batched write differ from a chain.
+
+    SUFFICIENT, not exact: it answers "could this diverge", and errs toward the
+    chain. Some files it gates are ones the batched path would in fact reproduce
+    byte for byte -- ``motd=hi`` ended by a lone ``\\r``, and ``enable-rcon=false``
+    ending in a trailing backslash, are two (PR #2993 review). The lone-``\\r``
+    clause is the broad one: EVERY CR-only file takes the chain, whether or not a
+    removal there could expose a CR at the append boundary at all. Narrowing
+    either clause means re-establishing the differential argument that the two
+    forms agree -- which is why the conservative shape is deliberate, and why a
+    reader should not read the two shapes below as the exact set that diverges.
 
     Two shapes of file do, and both are about the line an appended one lands
     against. Neither is a shape a ``server.properties`` normally has, and a file
@@ -758,9 +768,10 @@ def _apply_platform_properties_per_key(
     """Apply the platform's keys by chaining the public helpers, one parse each.
 
     What :func:`apply_platform_properties` was before it batched the writes, kept
-    for the files the batch cannot reproduce byte for byte -- a last line that
-    continues onto whatever is appended, or a lone ``\\r`` terminator
-    (:func:`_appending_would_diverge`, issue #2863). The chain's result on the
+    for the files :func:`_appending_would_diverge` sends back to it -- a last line
+    that continues onto whatever is appended, or a lone ``\\r`` terminator (issue
+    #2863). That gate is sufficient rather than exact, so some of those files the
+    batch would have reproduced byte for byte anyway. The chain's result on the
     first of those is not better, it drops a platform line it had just written;
     but replacing it is a behavioral change, and this one is not, so the chain
     still decides that file.
