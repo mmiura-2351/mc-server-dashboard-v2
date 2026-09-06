@@ -22,7 +22,7 @@ in :func:`_label_vocabulary`. That friction is the point — this is a
 development-time check, deliberately *not* a runtime filter that would strip or
 reject labels (a code path that only ever runs once something is already wrong).
 
-Four mechanics worth stating outright, because each one silently changes what is
+Mechanics worth stating outright, because each one silently changes what is
 being asserted:
 
 **The registry under test is the dedicated** ``metrics.REGISTRY``, not
