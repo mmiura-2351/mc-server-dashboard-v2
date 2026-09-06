@@ -1246,8 +1246,8 @@ def test_create_lone_surrogate_config_is_422_lone_surrogate() -> None:
     # The wire form of the offending body: ``json.dumps`` escapes the unpaired
     # surrogate as ``\ud800``, which is valid JSON and decodes back to the lone
     # surrogate server-side (issue #2838). ``content=`` rather than ``json=``
-    # because the test client encodes its own payload as UTF-8, which this value
-    # is precisely what cannot survive.
+    # because the test client encodes its own payload as UTF-8, which is
+    # precisely what this value cannot survive.
     app = _app(member=True, allow=True, create=_FakeUseCase())
     client = _client(app)
     body = _create_body()
