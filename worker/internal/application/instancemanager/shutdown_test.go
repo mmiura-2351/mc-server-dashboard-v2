@@ -1,122 +1,33 @@
 package instancemanager
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
-	"runtime"
-	"strings"
 	"testing"
 	"time"
 
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/application/instancemanager/goroutineleak"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
-
-// managerFrames names the background goroutines a Manager owns: the ones New and
-// startPumps launch, the metrics pump's teardown watcher, and the deleted-scratch
-// reclaim ReclaimDeletedScratches launches (issue #2878). A goroutine dump
-// is the only evidence that says whether they are still there once the manager
-// that started them is gone, which is how issue #2777 was found — the package's
-// own test run left ~91k of them behind. The trailing "(" is load-bearing: it
-// keeps ".metricsPump(" from also matching ".metricsPump.func1(".
-//
-// Convergers are not listed: PR #2775 already joins them, and orphan_test.go
-// pins that directly.
-var managerFrames = []string{
-	"instancemanager.(*Manager).pump(",
-	"instancemanager.(*Manager).metricsPump(",
-	"instancemanager.(*Manager).metricsPump.func1(",
-	"instancemanager.(*Manager).logPump(",
-	"instancemanager.(*Manager).statusDispatcher(",
-	"instancemanager.(*Manager).reclaimDeletedScratches(",
-}
-
-// liveManagerGoroutines counts the manager-owned background goroutines currently
-// in the runtime and returns the dump they were counted from. Each stack lists a
-// given frame at most once, so counting occurrences counts goroutines.
-func liveManagerGoroutines() (int, []byte) {
-	buf := make([]byte, 1<<20)
-	for {
-		n := runtime.Stack(buf, true)
-		if n < len(buf) {
-			buf = buf[:n]
-			break
-		}
-		buf = make([]byte, 2*len(buf))
-	}
-	live := 0
-	for _, f := range managerFrames {
-		live += bytes.Count(buf, []byte(f))
-	}
-	return live, buf
-}
-
-// settleManagerGoroutines polls until want manager-owned goroutines are live, or
-// the budget runs out, and reports the last count with the stacks behind it.
-//
-// It polls rather than sampling once because a goroutine Close has joined is
-// past its WaitGroup Done but has not necessarily left its frame yet — a residue
-// that clears in microseconds. A leak never clears, so the poll cannot turn one
-// green; it only keeps a busy host's scheduling from turning a clean shutdown
-// red.
-func settleManagerGoroutines(want int, budget time.Duration) (int, string) {
-	deadline := time.Now().Add(budget)
-	for {
-		live, dump := liveManagerGoroutines()
-		if live == want || time.Now().After(deadline) {
-			return live, managerStacks(dump)
-		}
-		time.Sleep(time.Millisecond)
-	}
-}
-
-// managerStacks reduces a full goroutine dump to the blocks that hold a manager
-// frame, so a failure names the leaked goroutines instead of every goroutine in
-// the binary.
-func managerStacks(dump []byte) string {
-	var kept []string
-	for _, block := range strings.Split(string(dump), "\n\n") {
-		for _, f := range managerFrames {
-			if strings.Contains(block, f) {
-				kept = append(kept, block)
-				break
-			}
-		}
-	}
-	return strings.Join(kept, "\n\n")
-}
 
 // awaitManagerGoroutines asserts that exactly want manager-owned goroutines are
 // live, allowing the same settling window the other waits in this package use.
 func awaitManagerGoroutines(t *testing.T, want int) {
 	t.Helper()
-	if live, stacks := settleManagerGoroutines(want, 5*time.Second); live != want {
+	if live, stacks := goroutineleak.Settle(want, 5*time.Second); live != want {
 		t.Fatalf("%d manager background goroutine(s) live, want %d:\n%s", live, want, stacks)
 	}
 }
 
-// TestMain runs the package and then asserts the acceptance criterion of issue
-// #2777 directly: once every test has finished — and with it every t.Cleanup
-// Close — no goroutine the Manager started may still be running. Before the fix
-// this dump held ~30k status pumps, ~30k metrics pumps and their watchers, and
-// one status dispatcher per manager ever built.
-//
-// It is a package-level check because the leak is: no single test leaks
-// visibly, and the cost (a `-race` run paying for tens of thousands of parked
-// goroutines) only shows in the aggregate. It runs only on a green suite, so a
-// failing test is never buried under a leak report caused by its own abort.
+// TestMain runs the package and then hands the result to the shared census,
+// which fails the run if any goroutine a Manager started is still there once
+// every test has finished (issue #2777). The census lives in goroutineleak
+// rather than here so worker/test/e2e — which builds Managers against a real
+// Docker daemon and cannot import this file — asserts the same invariant off the
+// same frame list (issue #2881).
 func TestMain(m *testing.M) {
-	code := m.Run()
-	if code == 0 {
-		if live, stacks := settleManagerGoroutines(0, 5*time.Second); live != 0 {
-			fmt.Fprintf(os.Stderr,
-				"%d manager background goroutine(s) outlived the package's tests (issue #2777):\n%s\n",
-				live, stacks)
-			code = 1
-		}
-	}
-	os.Exit(code)
+	os.Exit(goroutineleak.FailIfSurvivors(m.Run()))
 }
 
 // A running instance's status pump parks on the instance's event channel and the

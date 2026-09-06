@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/application/instancemanager/goroutineleak"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
 
@@ -177,7 +178,7 @@ func TestCloseJoinsAnInFlightReclaim(t *testing.T) {
 		t.Fatal("the reclaim never reached its removal; the log record this test parks on has changed")
 	}
 	// The status dispatcher and the reclaim. Counting the reclaim at all is what
-	// pins its frame into managerFrames, so the package's leak check can see it.
+	// pins its frame into goroutineleak's census, so the leak check can see it.
 	awaitManagerGoroutines(t, 2)
 
 	closed := make(chan struct{})
@@ -217,7 +218,7 @@ func TestReclaimDeletedScratchesAfterCloseIsDropped(t *testing.T) {
 	// Two assertions covering each other, because a spawn is asynchronous: one
 	// still running is seen here, and one that already finished has removed the
 	// scratch dir the next check demands.
-	if live, stacks := settleManagerGoroutines(1, 200*time.Millisecond); live != 0 {
+	if live, stacks := goroutineleak.Settle(1, 200*time.Millisecond); live != 0 {
 		t.Fatalf("a reclaim requested after Close started %d goroutine(s):\n%s", live, stacks)
 	}
 	if _, err := os.Stat(dir); err != nil {
