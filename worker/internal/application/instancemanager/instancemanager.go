@@ -233,15 +233,18 @@ type Manager struct {
 	// dispatcher, and the per-instance status/log/metrics pumps (issue #2777). Each
 	// parks on it alongside whatever it normally waits for, so closing the manager
 	// ends everything it started instead of leaving goroutines running against a
-	// manager nobody owns any more. Two manager-owned goroutines never read it, for
-	// different reasons: the metrics pump's teardown watcher parks on the instance's
-	// done channel, so the cancellation reaches it one hop away, through the status
-	// pump whose return closes that channel; and the deleted-scratch reclaim reads
-	// no cancellation at all, so Close reaches it only by waiting (issue #2878).
+	// manager nobody owns any more. Two manager-owned goroutines do not park on it
+	// that way, for different reasons: the metrics pump's teardown watcher parks on
+	// the instance's done channel, so the cancellation reaches it one hop away,
+	// through the status pump whose return closes that channel; and the
+	// deleted-scratch reclaim reads it only at the top of its per-id loop, after a
+	// release and before the next reserve (issue #2933), so the id already in
+	// flight runs to its release uninterruptibly and Close reaches that one by
+	// waiting (issue #2878).
 	// background counts every one of them — both of those included — so Close can
-	// join them: "signalled" is not "gone", and "never signalled" still has to be
-	// waited for. A converger caught mid-round is still driving driver calls, and a
-	// pump past its WaitGroup Done still holds its frame.
+	// join them: "signalled" is not "gone", and a signal a goroutine cannot act on
+	// yet still has to be waited out. A converger caught mid-round is still driving
+	// driver calls, and a pump past its WaitGroup Done still holds its frame.
 	shutdown       context.Context
 	stopBackground context.CancelFunc
 	background     sync.WaitGroup
