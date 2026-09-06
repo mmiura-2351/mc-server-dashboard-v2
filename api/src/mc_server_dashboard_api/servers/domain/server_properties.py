@@ -438,9 +438,10 @@ def _rewrite(
     the chain always set before it cleared. That is invisible -- the removed line
     leaves nothing behind either way -- with one exception: the newline an append
     needs when the content does not already end in one is decided HERE after the
-    removals and THERE before them. Callers that both clear and append keep such
-    a content away from this (:func:`_appending_would_diverge`, and the newline
-    :func:`apply_platform_properties` settles up front).
+    removals and THERE before them. They still agree, because a removal that
+    takes the content's last line takes that newline with it, and the line it
+    uncovers ends in one -- unless the file's terminators include a lone ``\\r``,
+    which is a shape callers keep away from this (:func:`_appending_would_diverge`).
     """
 
     lines = {
@@ -713,15 +714,8 @@ def apply_platform_properties(
     have callers of their own, and they are still what a file whose line
     structure the appends would disturb goes through
     (:func:`_appending_would_diverge`).
-
-    A file not already ending in a newline is given the one the chain's first
-    append would have added, before anything else looks at it. Deciding that
-    up front is what keeps the single pass from having to answer it later, from
-    a content the removals have already changed.
     """
 
-    if content:
-        content = _normalize(content)
     props = _parse(content)
     if _appending_would_diverge(content, props):
         return _apply_platform_properties_per_key(
