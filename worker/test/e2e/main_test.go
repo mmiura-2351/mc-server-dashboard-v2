@@ -19,8 +19,8 @@ import (
 // t.Cleanups perform (issue #2875) — but nothing checked that they do, so a
 // fourth construction added later could reintroduce the leak with no gate
 // reddening. The census it asserts against is the one instancemanager's TestMain
-// uses, so a pump added to the Manager is either covered in BOTH binaries or
-// compiles in neither.
+// uses, so an entry added to that single list reaches both binaries at once and
+// the two can never drift apart — a pump left out of it stays invisible to both.
 //
 // It runs after m.Run returns, i.e. after every test's cleanups, so it does not
 // race the suite's own container teardown. The per-run reaper is invoked by the
