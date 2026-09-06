@@ -53,7 +53,8 @@
 #      survives the `rm -rf worker/.bin` (or the fresh worktree) that drops the
 #      plugin, and then claims a version that is no longer installed -- the
 #      #2903 defect reached from the other side. Assertions 1-5 cannot see it:
-#      they relocate every path they touch into a temp directory.
+#      assertion 1 looks only at the stamp's name, and 2-5 relocate every path
+#      they touch into a temp directory.
 #
 # Hermetic by construction. Assertions 1 and 6 only expand Makefile variables
 # through the `mk` probe below and compare the answers as strings; assertions
@@ -237,11 +238,11 @@ assert_plugin() {
 
 	# -----------------------------------------------------------------------
 	# 6. The stamp lives beside the plugin it describes, so whatever sweeps
-	#    worker/.bin sweeps both. Probed with no overrides at all -- the
-	#    assertions above relocate every path they touch into $tmp, so this is
-	#    the only one that sees where the Makefile actually puts them -- and
-	#    compared as strings, so the real worker/.bin is still neither read nor
-	#    written.
+	#    worker/.bin sweeps both. Probed with no overrides at all -- assertion 1
+	#    looks only at the stamp's name and 2-5 relocate every path they touch
+	#    into $tmp, so this is the only one that sees where the Makefile
+	#    actually puts them -- and compared as strings, so the real worker/.bin
+	#    is still neither read nor written.
 	stamp_dir="$(dirname "$(mk "$stamp_var")")"
 	bin_dir="$(dirname "$(mk "$bin_var")")"
 	if [ "$stamp_dir" = "$bin_dir" ]; then

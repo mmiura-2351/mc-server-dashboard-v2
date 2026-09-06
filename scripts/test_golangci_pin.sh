@@ -35,8 +35,9 @@
 #      the binary it describes (#2947). A stamp anywhere else survives the
 #      `rm -rf worker/.bin` (or the fresh worktree) that drops the binary, and
 #      then claims a version that is no longer installed -- the #2903 defect
-#      reached from the other side. Assertions 1-4 cannot see it: they relocate
-#      both paths into a temp directory.
+#      reached from the other side. Assertions 1-4 cannot see it: assertion 1
+#      looks only at the stamp's name, and 2-4 relocate both paths into a temp
+#      directory.
 #
 # Hermetic by construction. Assertions 1 and 5 only expand Makefile variables
 # through the `mk` probe below and compare the answers as strings; assertions
@@ -172,10 +173,11 @@ echo "=== golangci-lint version-pin tests ==="
 
 # ---------------------------------------------------------------------------
 # 5. The stamp lives beside the binary it describes, so whatever sweeps
-#    worker/.bin sweeps both. Probed with no overrides at all -- the assertions
-#    above relocate both paths into $tmp, so this is the only one that sees
-#    where the Makefile actually puts them -- and compared as strings, so the
-#    real worker/.bin is still neither read nor written.
+#    worker/.bin sweeps both. Probed with no overrides at all -- assertion 1
+#    looks only at the stamp's name and 2-4 relocate both paths into $tmp, so
+#    this is the only one that sees where the Makefile actually puts them -- and
+#    compared as strings, so the real worker/.bin is still neither read nor
+#    written.
 {
 	stamp_dir="$(dirname "$(mk GOLANGCI_STAMP)")"
 	bin_dir="$(dirname "$(mk GOLANGCI)")"
