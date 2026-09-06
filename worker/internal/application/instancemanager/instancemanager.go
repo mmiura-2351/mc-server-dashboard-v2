@@ -429,11 +429,14 @@ func (m *Manager) goBackground(fn func()) bool {
 // end of that trade: the alternative is exiting while a SIGKILL escalation is
 // half-issued. The pumps and the dispatcher add nothing to that bound: each parks
 // on the shutdown alongside its own wait and leaves at once. A reclaim in flight
-// does add to it, for the same reason and by the same trade: it is uninterruptible
-// filesystem work, and the alternative is exiting mid-RemoveAll and leaving a
-// half-removed working set behind (issue #2878). The reservation it holds across
-// that window is NOT part of the trade — reserved is in-memory and dies with the
-// process.
+// does add to it, for the same reason and by the same trade, but only for the ONE
+// id it is on: that id's body is uninterruptible filesystem work, and the
+// alternative is exiting mid-RemoveAll and leaving a half-removed working set
+// behind (issue #2878). The ids after it cost nothing — the reclaim reads the
+// shutdown at the top of its per-id loop, where it holds neither a reservation nor
+// a half-done removal, and returns (issue #2933). The reservation it holds across
+// the in-flight id is NOT part of the trade — reserved is in-memory and dies with
+// the process.
 //
 // WHAT IS IN FLIGHT IS DROPPED, deliberately, and this changes nothing an operator
 // or the API can observe. Close runs after the session runner has returned
@@ -1829,10 +1832,12 @@ func (m *Manager) sweepHydrateLeftovers(serverID string) {
 //     HeldServers() (issue #1711) refreshes the advertised set each register.
 //
 // The goroutine is manager-owned, so it goes through goBackground and Close JOINS
-// it (issue #2878) — joined, not signalled: the body reads no cancellation, so a
-// removal in flight finishes instead of leaving a half-removed working set behind
-// at process exit. What Close pays for that is the remaining ids' filesystem work,
-// which is bounded and local.
+// it (issue #2878). The join is what lets the PER-ID body stay uninterruptible: from
+// reserve to release the id holds a reservation and, for part of that window, a
+// half-removed working set, so a cancellation landing there would let the process
+// exit inside exactly the window the join closes. Between ids nothing is held, so
+// the loop TOP does read the shutdown (issue #2933) and what Close pays is the one
+// id already in flight rather than every id still on the list.
 //
 // A reclaim requested AFTER Close is dropped whole, and silently: goBackground
 // starts nothing on a closed manager, and ScratchReclaimer is void so there is
@@ -1847,6 +1852,18 @@ func (m *Manager) ReclaimDeletedScratches(serverIDs []string) {
 // Tests call this directly to avoid timing dependencies on the goroutine.
 func (m *Manager) reclaimDeletedScratches(serverIDs []string) {
 	for _, id := range serverIDs {
+		// The body's one cancellation point, deliberately HERE and nowhere else
+		// (issue #2933). The loop top sits after the previous id's release and
+		// before this id's reserve, so a return holds no reservation and leaves no
+		// half-removed working set — safe by the same reasoning that makes Close's
+		// join safe, and it bounds Close to the id already in flight instead of
+		// every id still on the list. The ids left unreached are re-offered, not
+		// lost: they still hold their scratch dirs, so the next registration
+		// advertises them in held_servers again and the API re-derives the unknown
+		// subset from that advertisement.
+		if m.shutdown.Err() != nil {
+			return
+		}
 		if err := validateServerID(id); err != nil {
 			m.logger.Warn("refusing to reclaim scratch for unsafe server id",
 				"server_id", id, "error", err)
