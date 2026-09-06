@@ -2157,10 +2157,82 @@ async def test_late_failed_snapshot_clears_held_assignment() -> None:
     await StopServer(
         uow=uow, control_plane=FakeControlPlane(), clock=FakeClock(_NOW)
     ).clear_assignment_after_late_snapshot(
-        server_id=ServerId(server_id), worker_id=WorkerId(worker), succeeded=False
+        server_id=ServerId(server_id),
+        worker_id=WorkerId(worker),
+        succeeded=False,
+        message="transfer_failed",
     )
 
     assert uow.servers.by_id[ServerId(server_id)].assigned_worker_id is None
+
+
+async def test_late_failed_snapshot_logs_the_worker_message(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Issue #2766: the Worker's failure detail is the only text that names WHY the
+    # late snapshot failed — here the compose-internal data-plane URL a second-host
+    # worker was handed (#2595/#2765) — so the release WARN must carry it verbatim,
+    # exactly as the final-snapshot and periodic-snapshot failures log theirs.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.STOPPED,
+            worker_id=worker,
+        )
+    )
+    detail = (
+        "instancemanager: snapshot: datatransfer: snapshot request: Post "
+        '"http://api:8000/api/data-plane/communities/c/servers/s/working-set": '
+        "dial tcp: lookup api on 127.0.0.11:53: no such host"
+    )
+
+    with caplog.at_level(logging.WARNING):
+        await StopServer(
+            uow=uow, control_plane=FakeControlPlane(), clock=FakeClock(_NOW)
+        ).clear_assignment_after_late_snapshot(
+            server_id=ServerId(server_id),
+            worker_id=WorkerId(worker),
+            succeeded=False,
+            message=detail,
+        )
+
+    assert any(detail in record.getMessage() for record in caplog.records)
+
+
+async def test_late_failed_snapshot_does_not_assert_an_unobserved_cause(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Issue #2766: the WARN used to assert the worker's transfer bound aborted the
+    # upload for EVERY late failure. A storage outage, an auth error or a bad
+    # data-plane URL is none of those, and naming a cause nothing observed sends the
+    # operator after the wrong thing.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.STOPPED,
+            worker_id=worker,
+        )
+    )
+
+    with caplog.at_level(logging.WARNING):
+        await StopServer(
+            uow=uow, control_plane=FakeControlPlane(), clock=FakeClock(_NOW)
+        ).clear_assignment_after_late_snapshot(
+            server_id=ServerId(server_id),
+            worker_id=WorkerId(worker),
+            succeeded=False,
+            message="storage backend returned 503",
+        )
+
+    assert not any("transfer bound" in record.getMessage() for record in caplog.records)
 
 
 async def test_late_successful_snapshot_clears_held_assignment() -> None:
@@ -2182,7 +2254,10 @@ async def test_late_successful_snapshot_clears_held_assignment() -> None:
     await StopServer(
         uow=uow, control_plane=FakeControlPlane(), clock=FakeClock(_NOW)
     ).clear_assignment_after_late_snapshot(
-        server_id=ServerId(server_id), worker_id=WorkerId(worker), succeeded=True
+        server_id=ServerId(server_id),
+        worker_id=WorkerId(worker),
+        succeeded=True,
+        message=None,
     )
 
     assert uow.servers.by_id[ServerId(server_id)].assigned_worker_id is None
@@ -2210,7 +2285,10 @@ async def test_late_snapshot_clears_held_crashed_release() -> None:
     await StopServer(
         uow=uow, control_plane=FakeControlPlane(), clock=FakeClock(_NOW)
     ).clear_assignment_after_late_snapshot(
-        server_id=ServerId(server_id), worker_id=WorkerId(worker), succeeded=True
+        server_id=ServerId(server_id),
+        worker_id=WorkerId(worker),
+        succeeded=True,
+        message=None,
     )
 
     stored = uow.servers.by_id[ServerId(server_id)]
@@ -2243,6 +2321,7 @@ async def test_late_snapshot_from_non_owning_worker_does_not_clear() -> None:
         server_id=ServerId(server_id),
         worker_id=WorkerId(other_worker),
         succeeded=False,
+        message="transfer_failed",
     )
 
     assert uow.servers.by_id[ServerId(server_id)].assigned_worker_id == WorkerId(worker)
@@ -2267,7 +2346,10 @@ async def test_late_snapshot_on_replaced_row_does_not_clear() -> None:
     await StopServer(
         uow=uow, control_plane=FakeControlPlane(), clock=FakeClock(_NOW)
     ).clear_assignment_after_late_snapshot(
-        server_id=ServerId(server_id), worker_id=WorkerId(worker), succeeded=False
+        server_id=ServerId(server_id),
+        worker_id=WorkerId(worker),
+        succeeded=False,
+        message="transfer_failed",
     )
 
     assert uow.servers.by_id[ServerId(server_id)].assigned_worker_id == WorkerId(worker)
