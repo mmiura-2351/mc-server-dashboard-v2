@@ -47,17 +47,26 @@
 #      every bump of this one. Installing a stamp into a directory holding all
 #      three tools' stamps must remove this tool's superseded stamp and nothing
 #      else.
+#   6. The stamp sits beside the plugin -- the stamp variable and the plugin
+#      variable resolve to the same directory, which is what makes the stamp
+#      swept with the plugin it describes (#2947). A stamp anywhere else
+#      survives the `rm -rf worker/.bin` (or the fresh worktree) that drops the
+#      plugin, and then claims a version that is no longer installed -- the
+#      #2903 defect reached from the other side. Assertions 1-5 cannot see it:
+#      they relocate every path they touch into a temp directory.
 #
-# Hermetic by construction. Assertions 1-4 are `make -n` runs (dry run --
-# nothing executed, nothing installed, no network) against temp paths
-# substituted for both the plugin and its stamp, so the developer's real
-# worker/.bin is neither written nor read, and no result depends on whether a
-# `proto-gen` has already run in this checkout. Assertion 5 is the one place
-# this suite lets make execute a recipe, because deletion is the behavior it is
-# about: the stamp rule has no prerequisites, names no tool path, and derives
-# every path it writes from `$(dir $@)` -- which that run overrides into a temp
-# directory. The `mk` probe below executes only its own `echo` of a variable,
-# which likewise reads and writes nothing.
+# Hermetic by construction. Assertions 1 and 6 only expand Makefile variables
+# through the `mk` probe below and compare the answers as strings; assertions
+# 2-4 are `make -n` runs (dry run -- nothing executed, nothing installed, no
+# network) against temp paths substituted for both the plugin and its stamp, and
+# call `mk` themselves during setup. So the developer's real worker/.bin is
+# neither written nor read, and no result depends on whether a `proto-gen` has
+# already run in this checkout. Assertion 5 is the one place this suite lets
+# make execute a recipe of the Makefile's own, because deletion is the behavior
+# it is about: the stamp rule has no prerequisites, names no tool path, and
+# derives every path it writes from `$(dir $@)` -- which that run overrides into
+# a temp directory. Every other recipe this suite runs is the `mk` probe's own
+# throwaway `echo` of a variable, which likewise reads and writes nothing.
 #
 # Relocating the stamps does not hide the derivation under test, because a
 # stamp's *name* is still make's own: `mk` asks make what the stamp variable
@@ -127,6 +136,7 @@ trap 'rm -rf "$tmp"' EXIT
 assert_plugin() {
 	local label="$1" bin_var="$2" stamp_var="$3" version_var="$4" token="$5"
 	local version bin_name dir bin stamp recipe own_old new entry sibling missing
+	local stamp_dir bin_dir
 
 	version="$(mk "$version_var")"
 	bin_name="$(basename "$(mk "$bin_var")")"
@@ -223,6 +233,21 @@ assert_plugin() {
 		fail_test "$label: the cleanup deleted another tool's stamp:$missing"
 	else
 		ok "$label: the stamp cleanup removes only this tool's stamps"
+	fi
+
+	# -----------------------------------------------------------------------
+	# 6. The stamp lives beside the plugin it describes, so whatever sweeps
+	#    worker/.bin sweeps both. Probed with no overrides at all -- the
+	#    assertions above relocate every path they touch into $tmp, so this is
+	#    the only one that sees where the Makefile actually puts them -- and
+	#    compared as strings, so the real worker/.bin is still neither read nor
+	#    written.
+	stamp_dir="$(dirname "$(mk "$stamp_var")")"
+	bin_dir="$(dirname "$(mk "$bin_var")")"
+	if [ "$stamp_dir" = "$bin_dir" ]; then
+		ok "$label: the stamp sits in the plugin's directory"
+	else
+		fail_test "$label: the stamp is not swept with the plugin ($stamp_var is in $stamp_dir, $bin_var in $bin_dir)"
 	fi
 }
 
