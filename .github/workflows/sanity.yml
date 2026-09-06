@@ -32,8 +32,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # The checkers are pure stdlib python3 (ubuntu-latest ships it); no setup
-      # action or dependency install is needed, mirroring docs.yml.
+      # Nothing below needs a setup action or a dependency install: the checkers
+      # are pure stdlib python3 (ubuntu-latest ships it), mirroring docs.yml,
+      # and the shell suites are bash plus `make -n` dry runs against temp
+      # directories.
       #
       # Every step below except the workflow YAML parse also runs locally: the
       # migration guard (self-test + real run) via `make migrations-check`, the
@@ -41,14 +43,21 @@ jobs:
       # test-client guard (self-test + real run) via `make test-client-check`,
       # the api-env preflight's self-test via `make api-env-check` (its real run
       # needs the api venv, so only the self-test is here),
-      # supply_chain_cooldown.py's self-test via `make scripts-test`, the two
-      # hook suites via `make hooks-test`. The YAML parse is CI-only -- it
-      # guards this directory, which has no local gate. The commands stay
-      # spelled out here rather than invoking those Make targets, because
-      # scripts-test additionally runs the deploy shell suites that this
-      # deliberately cheap always-on gate does not want (see the header). So a
-      # new `--self-test` under scripts/ has to be wired into both lists
-      # (#2508, #2511).
+      # supply_chain_cooldown.py's self-test and the two version-pin suites via
+      # `make scripts-test`, the two hook suites via `make hooks-test`. The YAML
+      # parse is CI-only -- it guards this directory, which has no local gate.
+      #
+      # The commands stay spelled out here rather than invoking those Make
+      # targets, because scripts-test additionally runs the deploy shell suites
+      # that this deliberately cheap always-on gate does not want (see the
+      # header). So this list has to be kept in step with the Makefile by hand,
+      # and the rule for doing so is by COST, not by shape: any new gate under
+      # scripts/ that clears the header's bar -- no network, no dependency
+      # install, seconds rather than minutes -- belongs in both lists, whether
+      # it is a `--self-test` flag on a python checker or a standalone
+      # `bash scripts/test_*.sh` suite. Stating the rule for the `--self-test`
+      # shape alone is what let both version-pin suites reach main with no CI
+      # run of their own (#2508, #2511, #2946).
       - name: Migration guard self-test
         run: python3 scripts/check_migrations.py --self-test
 
@@ -81,6 +90,17 @@ jobs:
 
       - name: Hook tests (hooks-check)
         run: bash .githooks/test-hooks-check.sh
+
+      # A bumped tool pin must reinstall that tool (#2903, #2927). Each suite is
+      # bash plus `make -n` dry runs against temp paths substituted for the tool
+      # and its stamp -- nothing is installed, no toolchain is needed, and the
+      # runner's own worker/.bin is neither read nor written. Mirrors the same
+      # two lines in `make scripts-test`.
+      - name: golangci-lint version-pin suite
+        run: bash scripts/test_golangci_pin.sh
+
+      - name: protoc plugin version-pin suite
+        run: bash scripts/test_protoc_plugin_pins.sh
 
       # YAML-parse every workflow so a malformed workflow fails fast. PyYAML is
       # preinstalled with ubuntu-latest's system python3.
