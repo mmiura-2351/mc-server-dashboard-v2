@@ -1205,7 +1205,7 @@ def test_apply_platform_properties_parses_the_content_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Chaining set_server_port / set_rcon_properties / set_resource_pack_properties
-    # re-read the whole file once per key written -- eight to ten byte-by-byte
+    # re-read the whole file once per key written -- seven to nine byte-by-byte
     # passes for one call, and this one runs on the event loop (issue #2863).
     parsed = _count_parses(monkeypatch)
     content = b"motd=hi\n"
@@ -1280,6 +1280,7 @@ _DIFFERENTIAL_FRAGMENTS: list[bytes] = [
     b"rcon.port=1\n",
     b"rcon\\.port=degenerate\n",
     b"rcon.password=known\n",
+    b"rcon.password=known",
     b"rcon.password:known\n",
     b"rcon.password=\n",
     b"rcon.password= \n",
@@ -1287,7 +1288,6 @@ _DIFFERENTIAL_FRAGMENTS: list[bytes] = [
     b"\\u0072con.password=escaped\n",
     b"resource-pack=old\n",
     b"resource-pack=old",
-    b"rcon.password=known",
     b"resource-pack:old\n",
     b"resource-pack=a\nresource-pack=b\n",
     b"resource-pack=old\\\n  continued\n",
@@ -1411,10 +1411,11 @@ def _differential_files() -> list[bytes]:
 def _apply_cases() -> list[tuple[bytes, int | None, ResourcePackProperties | None]]:
     """Return the (file, port, assignment) triples the two apply forms are run over.
 
-    Each fragment and each drawn file meets every assignment shape. The 3025
-    ordered pairs meet the two that CLEAR -- an unassigned pack and one with no
-    prompt -- because a removal is what an append can interact with, and running
-    all four over them costs seconds for no further reach.
+    Each fragment and each drawn file meets every assignment shape. The ordered
+    pairs, which are the bulk of the corpus, meet the two that CLEAR -- an
+    unassigned pack and one with no prompt -- because a removal is what an append
+    can interact with, and running all four over them costs seconds for no
+    further reach.
     """
 
     ports: tuple[int | None, ...] = (None, 25565)
@@ -1468,10 +1469,12 @@ def test_apply_platform_properties_matches_the_per_key_chain() -> None:
 
 
 def test_apply_platform_properties_keeps_the_chain_on_a_continued_last_line() -> None:
-    # The one file shape the batch cannot reproduce, so the chain still writes it
-    # (issue #2863). Appending after a last line that ends in an odd backslash run
-    # merges the two: "require-\" + the appended "resource-pack=..." is read as
-    # ONE require-resource-pack line, which the chain's next write then replaces
+    # One of the two file shapes the batch cannot reproduce, so the chain still
+    # writes it (issue #2863; a lone CR terminator is the other, and the sweep
+    # above is what pins that one). Appending after a last line that ends in an
+    # odd backslash run merges the two: "require-\" + the appended
+    # "resource-pack=..." is read as ONE require-resource-pack line, which the
+    # chain's next write then replaces
     # in place -- taking the resource-pack line it had just written with it. The
     # result is a file missing a key the platform owns; preserving that is not an
     # endorsement of it, it is this change staying a speed change.

@@ -423,7 +423,7 @@ def _rewrite(
     walk of *props* -- the caller's own :func:`_parse` of *content*, so a caller
     that already holds one does not pay for a second -- instead of a fresh full
     parse per key. Chaining the single-key helpers cost one byte-by-byte pass
-    each, eight to ten of them for one :func:`apply_platform_properties` call
+    each, seven to nine of them for one :func:`apply_platform_properties` call
     (issue #2863).
 
     Per key the outcome is the single-key helpers' own: the first property line
