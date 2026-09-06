@@ -96,7 +96,20 @@ jobs:
       # and its stamp -- nothing is installed, no toolchain is needed, and the
       # runner's own worker/.bin is neither read nor written. Mirrors the same
       # two lines in `make scripts-test`.
+      # SCRATCH (#2946 proof obligation) -- REVERTED IN THE NEXT COMMIT.
+      # Regress both stamp derivations to the fixed names that are the #2903 /
+      # #2927 defect, in the runner's checkout only, so the two steps below have
+      # something they must catch. The local `make check` never executes a
+      # workflow `run:` block, so the pre-push gate sees an unmutated Makefile.
+      - name: SCRATCH regress the stamp derivations
+        run: |
+          sed -i 's/^GOLANGCI_STAMP := worker\/\.bin\/\.golangci-lint-$(GOLANGCI_VERSION)\.stamp$/GOLANGCI_STAMP := worker\/.bin\/.golangci-lint.stamp/' Makefile
+          sed -i 's/^PROTOC_GEN_GO_STAMP := worker\/\.bin\/\.protoc-gen-go-$(PROTOC_GEN_GO_VERSION)\.stamp$/PROTOC_GEN_GO_STAMP := worker\/.bin\/.protoc-gen-go.stamp/' Makefile
+          grep -n '^GOLANGCI_STAMP\|^PROTOC_GEN_GO_STAMP' Makefile
+
       - name: golangci-lint version-pin suite
+        # SCRATCH: let the job reach the protoc step so both reds are visible.
+        continue-on-error: true
         run: bash scripts/test_golangci_pin.sh
 
       - name: protoc plugin version-pin suite
