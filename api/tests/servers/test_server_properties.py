@@ -1182,3 +1182,310 @@ def test_writes_read_back_through_java_properties_load(tmp_path: Path) -> None:
         f"{len(mismatches)} of {len(cases)} writes did not read back as written: "
         f"{mismatches[:3]}"
     )
+
+
+# --- one parse per write (issue #2863) ----------------------------------------
+
+
+def _count_parses(monkeypatch: pytest.MonkeyPatch) -> list[bytes]:
+    """Record the content of every :func:`_parse` call and return the record."""
+
+    parsed: list[bytes] = []
+    real_parse = server_properties._parse
+
+    def counting_parse(content: bytes) -> list[server_properties._Property]:
+        parsed.append(content)
+        return real_parse(content)
+
+    monkeypatch.setattr(server_properties, "_parse", counting_parse)
+    return parsed
+
+
+def test_apply_platform_properties_parses_the_content_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Chaining set_server_port / set_rcon_properties / set_resource_pack_properties
+    # re-read the whole file once per key written -- eight to ten byte-by-byte
+    # passes for one call, and this one runs on the event loop (issue #2863).
+    parsed = _count_parses(monkeypatch)
+    content = b"motd=hi\n"
+    apply_platform_properties(
+        content,
+        game_port=25565,
+        rcon_password="tok",
+        resource_pack=ResourcePackProperties(
+            url=_RP_URL, sha1=_RP_SHA1, require=True, prompt="Use it"
+        ),
+    )
+    assert parsed == [content]
+
+
+def test_remove_keys_parses_the_content_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # One pass per key removed, so the cost grew with the size of the key set.
+    parsed = _count_parses(monkeypatch)
+    content = b"a=1\nb=2\nc=3\nd=4\ne=5\n"
+    assert remove_keys(content, {"a", "c", "e"}) == b"b=2\nd=4\n"
+    assert parsed == [content]
+
+
+def test_clear_resource_pack_properties_parses_the_content_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A fixed four passes for the four pack keys, on the import/restore path.
+    parsed = _count_parses(monkeypatch)
+    content = b"resource-pack=u\nresource-pack-sha1=s\nmotd=hi\n"
+    assert clear_resource_pack_properties(content) == b"motd=hi\n"
+    assert parsed == [content]
+
+
+# --- the batched writes against the per-key ones they replace (issue #2863) ----
+
+# The write paths were batched for speed alone, so the bar is byte identity with
+# the per-key chain, not "equivalent enough" -- and the chain is kept below, in
+# terms of the single-key helpers it was written in, so the two can be run
+# against each other over inputs picked to break them. The fragments are the
+# corners this file's format has: every Java separator, degenerate and escaped
+# spellings of the platform's own keys, duplicates, comments, continuations,
+# each line terminator including a lone CR, non-UTF-8 bytes, and files that end
+# mid-line. Concatenating them is itself adversarial -- a fragment with no
+# terminator splices into the next one's key.
+_DIFFERENTIAL_FRAGMENTS: list[bytes] = [
+    b"",
+    b"\n",
+    b"   \n",
+    b"#comment\n",
+    b"!bang comment\n",
+    b"#comment\\\n",
+    b"motd=hi\n",
+    b"motd=hi",
+    b"motd=trailing ",
+    b"nokeyandnonewline",
+    b"=empty key\n",
+    b"orphan\n",
+    b"server-port=25565\n",
+    b"server-port:25565\n",
+    b"server-port 25565\n",
+    b"server-port = 25565 \n",
+    b"server-port=1\nserver-port=2\n",
+    b"#server-port=11111\n",
+    b"server-port\n",
+    b"server-port \n",
+    b" server-port=leading\n",
+    b"server-port\\ =degenerate\n",
+    b"\\u0073erver-port=escaped\n",
+    b"enable-rcon=false\n",
+    b"enable-rcon=\n",
+    b"rcon.port=1\n",
+    b"rcon\\.port=degenerate\n",
+    b"rcon.password=known\n",
+    b"rcon.password:known\n",
+    b"rcon.password=\n",
+    b"rcon.password= \n",
+    b"rcon.password=a\nrcon.password=\n",
+    b"\\u0072con.password=escaped\n",
+    b"resource-pack=old\n",
+    b"resource-pack:old\n",
+    b"resource-pack=a\nresource-pack=b\n",
+    b"resource-pack=old\\\n  continued\n",
+    b"resource-pack-sha1=deadbeef\n",
+    b"require-resource-pack=true\n",
+    b"resource-pack-prompt=hi\n",
+    b"resource-pack-prompt=\\u65E5\\u672C\n",
+    b"require-\\\n",
+    b"require\n",
+    b"motd=\xff\xfe raw latin-1 \xe9\n",
+    b"\xff\xfe=\xe9\n",
+    b"crlf=1\r\n",
+    b"cronly=1\r",
+    b"even=1\\\\\n",
+    b"odd=1\\\n",
+    b"\\\n",
+    b"resource-pack=old\\\n",
+    b"rcon.password=\\\n",
+    b"tail\\",
+    b"tail\\\r\n",
+    b"tail\\\r",
+]
+
+# One assignment of each shape apply_platform_properties branches on, plus one
+# whose values are the injection and encoding corners #2819 / #2820 name.
+_DIFFERENTIAL_PACKS: list[ResourcePackProperties | None] = [
+    None,
+    ResourcePackProperties(url=_RP_URL, sha1=_RP_SHA1, require=True, prompt="Use it"),
+    ResourcePackProperties(url=_RP_URL, sha1=_RP_SHA1, require=False, prompt=None),
+    ResourcePackProperties(
+        url="=lead\nrcon.password=evil", sha1="", require=True, prompt="\u65e5\\"
+    ),
+]
+
+_DIFFERENTIAL_KEY_SETS: list[set[str]] = [
+    set(),
+    {"motd"},
+    {"server-port"},
+    {"resource-pack", "resource-pack-sha1"},
+    set(PLATFORM_MANAGED_KEYS),
+    {"motd", "server-port ", " server-port", "rcon.password", "", "orphan", "tail"},
+]
+
+
+def _chained_remove_keys(content: bytes, keys: set[str]) -> bytes:
+    """Remove *keys* the way ``remove_keys`` did: one full parse per key.
+
+    Sorted rather than in the set's own order, so agreeing with this also says
+    the batched removal does not depend on the order the keys arrive in.
+    """
+
+    for key in sorted(keys):
+        content = server_properties._clear_property(content, key)
+    return server_properties._normalize(content)
+
+
+def _chained_clear_resource_pack_properties(content: bytes) -> bytes:
+    """Clear the four pack keys the way ``clear_resource_pack_properties`` did."""
+
+    for key in (
+        "resource-pack",
+        "resource-pack-sha1",
+        "require-resource-pack",
+        "resource-pack-prompt",
+    ):
+        content = server_properties._clear_property(content, key)
+    return server_properties._normalize(content)
+
+
+def _chained_apply_platform_properties(
+    content: bytes,
+    *,
+    game_port: int | None,
+    rcon_password: str,
+    resource_pack: ResourcePackProperties | None,
+) -> bytes:
+    """Apply the platform's keys by chaining the public helpers, as #2621 did."""
+
+    if game_port is not None:
+        content = set_server_port(content, game_port)
+    content = set_rcon_properties(content, password=rcon_password)
+    if resource_pack is None:
+        return _chained_clear_resource_pack_properties(content)
+    content = set_resource_pack_properties(
+        content,
+        url=resource_pack.url,
+        sha1=resource_pack.sha1,
+        require=resource_pack.require,
+        prompt=resource_pack.prompt,
+    )
+    if resource_pack.prompt is None:
+        content = _chained_remove_keys(content, {"resource-pack-prompt"})
+    return content
+
+
+def _paired_files() -> list[bytes]:
+    """Return every ordered pair of fragments, each before and after every other."""
+
+    return [a + b for a in _DIFFERENTIAL_FRAGMENTS for b in _DIFFERENTIAL_FRAGMENTS]
+
+
+def _drawn_files() -> list[bytes]:
+    """Return files of up to six drawn fragments, so keys repeat across spellings.
+
+    Seeded, so a mismatch is reproducible from the test name alone.
+    """
+
+    rng = random.Random(2863)
+    return [
+        b"".join(rng.choice(_DIFFERENTIAL_FRAGMENTS) for _ in range(rng.randint(3, 6)))
+        for _ in range(500)
+    ]
+
+
+def _differential_files() -> list[bytes]:
+    """Return every file the two forms are run over."""
+
+    return _DIFFERENTIAL_FRAGMENTS + _paired_files() + _drawn_files()
+
+
+def _apply_cases() -> list[tuple[bytes, int | None, ResourcePackProperties | None]]:
+    """Return the (file, port, assignment) triples the two apply forms are run over.
+
+    Each fragment and each drawn file meets every assignment shape. The 3025
+    ordered pairs meet the two that CLEAR -- an unassigned pack and one with no
+    prompt -- because a removal is what an append can interact with, and running
+    all four over them costs seconds for no further reach.
+    """
+
+    ports: tuple[int | None, ...] = (None, 25565)
+    cases = [
+        (content, port, pack)
+        for content in _DIFFERENTIAL_FRAGMENTS + _drawn_files()
+        for port in ports
+        for pack in _DIFFERENTIAL_PACKS
+    ]
+    cases += [
+        (content, port, pack)
+        for content in _paired_files()
+        for port in ports
+        for pack in (_DIFFERENTIAL_PACKS[0], _DIFFERENTIAL_PACKS[2])
+    ]
+    return cases
+
+
+def test_remove_keys_matches_removing_one_key_at_a_time() -> None:
+    mismatches = [
+        (content, sorted(keys))
+        for content in _differential_files()
+        for keys in _DIFFERENTIAL_KEY_SETS
+        if remove_keys(content, keys) != _chained_remove_keys(content, keys)
+    ]
+    assert not mismatches, f"{len(mismatches)} differ, first: {mismatches[:3]}"
+
+
+def test_clear_resource_pack_properties_matches_clearing_one_key_at_a_time() -> None:
+    mismatches = [
+        content
+        for content in _differential_files()
+        if clear_resource_pack_properties(content)
+        != _chained_clear_resource_pack_properties(content)
+    ]
+    assert not mismatches, f"{len(mismatches)} differ, first: {mismatches[:3]}"
+
+
+def test_apply_platform_properties_matches_the_per_key_chain() -> None:
+    mismatches = [
+        (content, game_port, pack)
+        for content, game_port, pack in _apply_cases()
+        if apply_platform_properties(
+            content, game_port=game_port, rcon_password="tok", resource_pack=pack
+        )
+        != _chained_apply_platform_properties(
+            content, game_port=game_port, rcon_password="tok", resource_pack=pack
+        )
+    ]
+    assert not mismatches, f"{len(mismatches)} differ, first: {mismatches[:3]}"
+
+
+def test_apply_platform_properties_keeps_the_chain_on_a_continued_last_line() -> None:
+    # The one file shape the batch cannot reproduce, so the chain still writes it
+    # (issue #2863). Appending after a last line that ends in an odd backslash run
+    # merges the two: "require-\" + the appended "resource-pack=..." is read as
+    # ONE require-resource-pack line, which the chain's next write then replaces
+    # in place -- taking the resource-pack line it had just written with it. The
+    # result is a file missing a key the platform owns; preserving that is not an
+    # endorsement of it, it is this change staying a speed change.
+    content = b"enable-rcon=x\nrcon.port=y\nrcon.password=z\nrequire-\\\n"
+    out = apply_platform_properties(
+        content,
+        game_port=None,
+        rcon_password="tok",
+        resource_pack=ResourcePackProperties(
+            url=_RP_URL, sha1=_RP_SHA1, require=True, prompt=None
+        ),
+    )
+    assert out == (
+        b"enable-rcon=true\n"
+        b"rcon.port=25575\n"
+        b"rcon.password=z\n"
+        b"require-resource-pack=true\n" + f"resource-pack-sha1={_RP_SHA1}\n".encode()
+    )
+    assert _raw_values(out, "resource-pack") == []

@@ -40,6 +40,7 @@ preserved exactly.
 from __future__ import annotations
 
 import secrets
+from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 
@@ -88,6 +89,18 @@ PLATFORM_MANAGED_KEYS: frozenset[str] = frozenset(
         _ENABLE_RCON_KEY,
         _RCON_PORT_KEY,
         _RCON_PASSWORD_KEY,
+        _RESOURCE_PACK_KEY,
+        _RESOURCE_PACK_SHA1_KEY,
+        _REQUIRE_RESOURCE_PACK_KEY,
+        _RESOURCE_PACK_PROMPT_KEY,
+    }
+)
+
+# The four keys one resource-pack assignment owns: the set
+# :func:`clear_resource_pack_properties` removes when a server has no pack, named
+# once so the removal and the re-apply path cannot drift apart (#1177, #1253).
+_RESOURCE_PACK_KEYS: frozenset[str] = frozenset(
+    {
         _RESOURCE_PACK_KEY,
         _RESOURCE_PACK_SHA1_KEY,
         _REQUIRE_RESOURCE_PACK_KEY,
@@ -398,6 +411,96 @@ def _set_property(content: bytes, key: str, value: str) -> bytes:
     return _normalize(bytes(out))
 
 
+def _rewrite(
+    content: bytes,
+    props: list[_Property],
+    values: Mapping[str, str],
+    cleared: AbstractSet[str],
+) -> bytes:
+    """Return *content* with each *values* key set and each *cleared* key removed.
+
+    The batched form of :func:`_set_property` and :func:`_clear_property`: one
+    walk of *props* -- the caller's own :func:`_parse` of *content*, so a caller
+    that already holds one does not pay for a second -- instead of a fresh full
+    parse per key. Chaining the single-key helpers cost one byte-by-byte pass
+    each, eight to ten of them for one :func:`apply_platform_properties` call
+    (issue #2863).
+
+    Per key the outcome is the single-key helpers' own: the first property line
+    for a *values* key is replaced in place by the canonical ``key=value`` and
+    every later one is dropped, a key the file has no line for is appended, and a
+    *cleared* key loses every line it has. *values* is applied in ITERATION
+    ORDER, which is the order its appended lines land in -- the order the chained
+    helpers appended them in. The result is NOT normalized; callers do that, as
+    they did around the single-key helpers.
+
+    An append lands after a *cleared* line the chain had not removed yet, because
+    the chain always set before it cleared. That is invisible -- the removed line
+    leaves nothing behind either way -- with one exception: the newline an append
+    needs when the content does not already end in one is decided HERE after the
+    removals and THERE before them. Callers that both clear and append keep such
+    a content away from this (:func:`_appending_would_diverge`, and the newline
+    :func:`apply_platform_properties` settles up front).
+    """
+
+    lines = {
+        key: f"{_escape_key(key)}={_escape_value(value)}".encode("latin-1")
+        for key, value in values.items()
+    }
+    written: set[str] = set()
+    out = bytearray()
+    cursor = 0
+    for prop in props:
+        if prop.key not in lines and prop.key not in cleared:
+            continue
+        out += content[cursor : prop.start]
+        cursor = prop.end
+        if prop.key in lines and prop.key not in written:
+            out += lines[prop.key] + b"\n"
+            written.add(prop.key)
+    out += content[cursor:]
+    for key, line in lines.items():
+        if key not in written:
+            if out and not out.endswith(b"\n"):
+                out += b"\n"
+            out += line + b"\n"
+    return bytes(out)
+
+
+def _appending_would_diverge(content: bytes, props: list[_Property]) -> bool:
+    """True when appending to *content* makes a batched write differ from a chain.
+
+    Two shapes of file do, and both are about the line an appended one lands
+    against. Neither is a shape a ``server.properties`` normally has, and a file
+    with either goes back through the chain (issue #2863) rather than being
+    quietly rewritten some other way.
+
+    A last logical line ending in an odd backslash run CONTINUES onto whatever is
+    appended, merging the two into one property spelled as neither the file nor
+    the write said. Both forms produce that merge; they part company on what
+    comes after it. A chain re-parses, so its next write sees the merged key and
+    the span it now covers, and rewriting or clearing that key drops the appended
+    line along with it. A batched write decided everything from the parse it
+    started with and never sees the merge at all.
+
+    A lone ``\\r`` line terminator makes it possible for a removal to leave the
+    content NOT ending in a newline, and a chain sets before it clears while a
+    batch does both at once -- so the two disagree on whether the append needs a
+    newline in front of it, which is a byte in the result.
+    """
+
+    if props and props[-1].end == len(content):
+        tail = content
+        if tail.endswith(b"\r\n"):
+            tail = tail[:-2]
+        elif tail.endswith((b"\n", b"\r")):
+            tail = tail[:-1]
+        cut = max(tail.rfind(b"\n"), tail.rfind(b"\r"))
+        if _ends_with_odd_backslash(tail[cut + 1 :].lstrip(_BLANKS)):
+            return True
+    return b"\r" in content.replace(b"\r\n", b"")
+
+
 def set_server_port(content: bytes, port: int) -> bytes:
     """Return ``content`` with its ``server-port`` line set to ``port``.
 
@@ -488,11 +591,14 @@ def remove_keys(content: bytes, keys: AbstractSet[str]) -> bytes:
     Every property line for each key is deleted entirely, in whatever spelling it
     used and including the continuation lines it spans. Other lines and their
     order are preserved; the result ends with a single trailing newline (#1242).
+
+    One parse whatever the size of *keys* (issue #2863), where clearing a key at
+    a time re-read the whole file per key. Order never mattered here and still
+    does not: a removed property line is spliced out whole, so what is left
+    parses exactly as it did, and *keys* arrives as a set anyway.
     """
 
-    for key in keys:
-        content = _clear_property(content, key)
-    return _normalize(content)
+    return _normalize(_rewrite(content, _parse(content), {}, keys))
 
 
 def _platform_managed_values(content: bytes) -> dict[str, list[str]]:
@@ -597,6 +703,73 @@ def apply_platform_properties(
     - The resource-pack keys come from the assignment: ``None`` clears all four
       (the server has no pack), and a ``prompt`` of ``None`` removes just the
       prompt key, since "no prompt" is what the assignment row then says.
+
+    Those decisions are read off ONE :func:`_parse` and applied in ONE pass
+    (issue #2863). Chaining the public helpers cost a full byte-by-byte parse per
+    key written -- seven to nine of them per call -- and this call, unlike the
+    comparison guard, is not behind ``asyncio.to_thread`` at every call site, so
+    on an oversized root file (a restore or an import, or one predating the #2809
+    cap) it occupied the event loop. The helpers themselves are unchanged: they
+    have callers of their own, and they are still what a file whose line
+    structure the appends would disturb goes through
+    (:func:`_appending_would_diverge`).
+
+    A file not already ending in a newline is given the one the chain's first
+    append would have added, before anything else looks at it. Deciding that
+    up front is what keeps the single pass from having to answer it later, from
+    a content the removals have already changed.
+    """
+
+    if content:
+        content = _normalize(content)
+    props = _parse(content)
+    if _appending_would_diverge(content, props):
+        return _apply_platform_properties_per_key(
+            content,
+            game_port=game_port,
+            rcon_password=rcon_password,
+            resource_pack=resource_pack,
+        )
+    values: dict[str, str] = {}
+    if game_port is not None:
+        values[_PORT_KEY] = str(game_port)
+    values[_ENABLE_RCON_KEY] = "true"
+    values[_RCON_PORT_KEY] = str(RCON_PORT)
+    passwords = [prop.value for prop in props if prop.key == _RCON_PASSWORD_KEY]
+    if not (passwords and passwords[-1]):
+        values[_RCON_PASSWORD_KEY] = rcon_password
+    cleared: AbstractSet[str] = frozenset()
+    if resource_pack is None:
+        cleared = _RESOURCE_PACK_KEYS
+    else:
+        values[_RESOURCE_PACK_KEY] = resource_pack.url
+        values[_RESOURCE_PACK_SHA1_KEY] = resource_pack.sha1
+        values[_REQUIRE_RESOURCE_PACK_KEY] = (
+            "true" if resource_pack.require else "false"
+        )
+        if resource_pack.prompt is None:
+            cleared = frozenset({_RESOURCE_PACK_PROMPT_KEY})
+        else:
+            values[_RESOURCE_PACK_PROMPT_KEY] = resource_pack.prompt
+    return _normalize(_rewrite(content, props, values, cleared))
+
+
+def _apply_platform_properties_per_key(
+    content: bytes,
+    *,
+    game_port: int | None,
+    rcon_password: str,
+    resource_pack: ResourcePackProperties | None,
+) -> bytes:
+    """Apply the platform's keys by chaining the public helpers, one parse each.
+
+    What :func:`apply_platform_properties` was before it batched the writes, kept
+    for the files the batch cannot reproduce byte for byte -- a last line that
+    continues onto whatever is appended, or a lone ``\\r`` terminator
+    (:func:`_appending_would_diverge`, issue #2863). The chain's result on the
+    first of those is not better, it drops a platform line it had just written;
+    but replacing it is a behavioral change, and this one is not, so the chain
+    still decides that file.
     """
 
     if game_port is not None:
@@ -624,13 +797,9 @@ def clear_resource_pack_properties(content: bytes) -> bytes:
     spelling, so an untrusted archive's ``resource-pack:http://...`` cannot survive
     the clear that import and restore run (issues #2621, #2811). Other lines and
     their order are preserved; the result ends with a single trailing newline.
+
+    One parse, where clearing the four keys one at a time was a fixed four passes
+    over the whole file (issue #2863).
     """
 
-    for key in (
-        _RESOURCE_PACK_KEY,
-        _RESOURCE_PACK_SHA1_KEY,
-        _REQUIRE_RESOURCE_PACK_KEY,
-        _RESOURCE_PACK_PROMPT_KEY,
-    ):
-        content = _clear_property(content, key)
-    return _normalize(content)
+    return _normalize(_rewrite(content, _parse(content), {}, _RESOURCE_PACK_KEYS))
