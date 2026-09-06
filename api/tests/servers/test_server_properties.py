@@ -1286,6 +1286,8 @@ _DIFFERENTIAL_FRAGMENTS: list[bytes] = [
     b"rcon.password=a\nrcon.password=\n",
     b"\\u0072con.password=escaped\n",
     b"resource-pack=old\n",
+    b"resource-pack=old",
+    b"rcon.password=known",
     b"resource-pack:old\n",
     b"resource-pack=a\nresource-pack=b\n",
     b"resource-pack=old\\\n  continued\n",
