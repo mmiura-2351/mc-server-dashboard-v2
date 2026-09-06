@@ -570,6 +570,8 @@ export const ja: Record<TranslationKey, string> = {
     "サーバーが起動／停止の途中です。完全に停止または稼働してから再度お試しください。",
   "backups.error.invalidArchive":
     "そのファイルは有効なバックアップアーカイブではありません。",
+  "backups.error.platformManagedPath":
+    "このアーカイブには server.properties ディレクトリが含まれています。このパスはプラットフォームがファイルとして管理しています。",
   "backups.error.workerUnavailable":
     "現在、バックアップを取得できるサーバーホストがありません。",
   "backups.error.storageUnavailable":
@@ -774,6 +776,10 @@ export const ja: Record<TranslationKey, string> = {
     "指定されたパスはディレクトリではなくファイルです。",
   "files.error.symlinkRefused": "シンボリックリンクは許可されていません。",
   "files.error.nameTooLong": "名前が長すぎます。",
+  "files.error.platformManagedKey":
+    "server.properties の「{key}」はプラットフォームが管理しているため、この操作では変更できません。",
+  "files.error.platformManagedPath":
+    "server.properties はプラットフォームが管理しているため、そのパスにディレクトリを置くことはできません。",
   "files.error.invalidInput": "リクエストが無効です。",
   "files.error.workerUnavailable":
     "サーバーエージェントが切断されています。しばらくしてから再度お試しください。",

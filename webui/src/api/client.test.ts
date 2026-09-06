@@ -85,6 +85,35 @@ describe("ApiError", () => {
     expect(error.permission).toBeUndefined();
   });
 
+  it("exposes the key extension member on a 422 platform_managed_key refusal", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(422, {
+        type: "urn:mcsd:error:platform-managed-key",
+        title: "Unprocessable Content",
+        status: 422,
+        reason: "platform_managed_key",
+        key: "rcon.password",
+      }),
+    );
+
+    const error = await api.get("/api/communities").catch((e) => e);
+
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error.reason).toBe("platform_managed_key");
+    expect(error.key).toBe("rcon.password");
+  });
+
+  it("leaves key undefined when the body omits it", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(422, { reason: "platform_managed_path" }),
+    );
+
+    const error = await api.get("/api/communities").catch((e) => e);
+
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error.key).toBeUndefined();
+  });
+
   it("leaves reason undefined for a non-problem body", async () => {
     fetchMock.mockResolvedValue(jsonResponse(500, { message: "boom" }));
 
