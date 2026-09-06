@@ -3,11 +3,13 @@
 A final-snapshot dispatch that TIMED OUT abandons its pending future, leaving the
 stop wedged at (stopped, stopped, assigned) and held for the reconciler's
 stale-stop arm to clear once grace lapses (issue #847). When the Worker later
-reports the snapshot's outcome — a ``TRANSFER_FAILED`` once the worker's transfer
-bound aborts the upload (#874/#890), or a late SUCCESS when the publish landed but
-the response was slow — that ``CommandResult`` arrives unmatched (no pending
-future). Rather than drop it and wait out grace, the control-plane state hands it
-to this Port so the held assignment is released minutes earlier (issue #891).
+reports the snapshot's outcome — a failure, canonically a ``TRANSFER_FAILED`` once
+the worker's transfer bound aborts the upload (#874/#890) but any of them, or a
+late SUCCESS when the publish landed but the response was slow — that
+``CommandResult`` arrives unmatched (no pending future). Rather than drop it and
+wait out grace, the control-plane state hands it — the Worker's failure detail
+included (#2766) — to this Port so the held assignment is released minutes earlier
+(issue #891).
 
 The servicer is a fleet adapter and must not reach into the servers domain, so it
 depends on this fleet-domain Port (mirroring :class:`ServerStateSink`); the wiring
