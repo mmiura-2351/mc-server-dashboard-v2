@@ -34,8 +34,7 @@ jobs:
 
       # Nothing below needs a setup action or a dependency install: the checkers
       # are pure stdlib python3 (ubuntu-latest ships it), mirroring docs.yml,
-      # and the shell suites are bash plus `make -n` dry runs against temp
-      # directories.
+      # and the shell suites use only bash, git and make.
       #
       # Every step below except the workflow YAML parse also runs locally: the
       # migration guard (self-test + real run) via `make migrations-check`, the
