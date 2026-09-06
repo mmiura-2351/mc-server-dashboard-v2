@@ -4,10 +4,11 @@ The control-plane result path (the gRPC servicer, a fleet adapter) recognises a
 final-snapshot ``CommandResult`` that arrives after its dispatch timed out and
 abandoned the pending future (issue #891) — a failure, canonically a
 ``TRANSFER_FAILED`` once the worker's transfer bound aborts the upload
-(#874/#890) but any of them, or a late SUCCESS. Rather than drop it and wait out
-the reconciler grace, it hands the (server, worker, outcome, failure detail) to
-this Port so the held (stopped, stopped, assigned) row is released immediately
-and the Worker's own account of the failure reaches the release log (#2766).
+(#874/#890) but potentially any failure, or a late SUCCESS. Rather than drop it
+and wait out the reconciler grace, it hands the (server, worker, outcome, failure
+detail) to this Port so the held (stopped, stopped, assigned) row is released
+immediately and the Worker's own account of the failure reaches the release log
+(#2766).
 
 The servicer depends on the fleet-domain Port; this adapter fulfils it against the
 ``StopServer`` use case's guarded clear, building a fresh use case per call from

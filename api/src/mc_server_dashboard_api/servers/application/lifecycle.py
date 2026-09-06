@@ -1929,9 +1929,9 @@ class StopServer:
         clear once grace lapses, because the worker may still be uploading. When the
         worker instead reports the snapshot's outcome LATE — a failure, canonically
         a ``TRANSFER_FAILED`` once its transfer bound aborts the upload (#874/#890)
-        but any of them, or a SUCCESS whose response was slow — the upload is
-        settled and there is no reason to wait out grace: this releases the
-        assignment minutes earlier, exactly what #874's issue text anticipated.
+        but potentially any failure, or a SUCCESS whose response was slow — the
+        upload is settled and there is no reason to wait out grace: this releases
+        the assignment minutes earlier, exactly what #874's issue text anticipated.
 
         The held row reads ``(stopped, stopped, assigned)`` OR
         ``(stopped, crashed, assigned)``: since issue #2448 both release paths for a
