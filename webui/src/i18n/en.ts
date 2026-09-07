@@ -596,6 +596,8 @@ export const en = {
   "backups.error.unsettled":
     "The server is starting or stopping — try again once it is fully stopped or running.",
   "backups.error.invalidArchive": "That file is not a valid backup archive.",
+  "backups.error.platformManagedPath":
+    "That archive contains a server.properties directory, but the platform manages that path as a file.",
   "backups.error.workerUnavailable":
     "No server host is available to take the backup right now.",
   "backups.error.storageUnavailable":
@@ -797,6 +799,14 @@ export const en = {
   "files.error.notDirectory": "The path is a file, not a directory.",
   "files.error.symlinkRefused": "Symbolic links are not allowed.",
   "files.error.nameTooLong": "The name is too long.",
+  // Platform-managed server.properties refusals (issues #2623, #2812, #2846).
+  // `{key}` is the offending key from the 422's `key` extension member. Both
+  // messages are worded for every door that raises them — save, delete, rename,
+  // upload and rollback — not the editor alone.
+  "files.error.platformManagedKey":
+    "“{key}” in server.properties is managed by the platform; this operation would change it.",
+  "files.error.platformManagedPath":
+    "server.properties is managed by the platform; a directory cannot stand at that path.",
   "files.error.invalidInput": "The request was invalid.",
   "files.error.workerUnavailable":
     "The server agent is disconnected. Please try again later.",

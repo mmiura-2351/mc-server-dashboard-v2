@@ -32,8 +32,9 @@ jobs:
     # (pinning + 7-day cooldown).
     services:
       postgres:
-        # postgres:18.4 (Debian; pushed 2026-08-06, outside the cooldown).
-        image: postgres@sha256:a02db8cac496f15b094798a38254f14d6e00741f709360e5e00bb6668ea31636
+        # postgres:18.6 (Debian; pushed 2026-08-26, outside the cooldown) -- the tag
+        # compose.yaml pins.
+        image: postgres@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
         env:
           POSTGRES_USER: mcsd
           POSTGRES_PASSWORD: mcsd
@@ -122,8 +123,12 @@ jobs:
   #
   # A separate job, not part of `check`: only these two modules need the
   # container, so the rest of the api suite neither waits on it nor fails when
-  # the registry is unreachable. Deliberately not a required status check yet —
-  # see the PR that added it.
+  # the registry is unreachable.
+  #
+  # `live-s3` IS a required status check on `main` (#2349), which is why
+  # sanity.yml carries an unfiltered job of the same name: this workflow is
+  # path-filtered, so on a PR that touches no api path it never runs, and a
+  # required context that never reports blocks the merge forever (#303).
   live-s3:
     runs-on: ubuntu-latest
     steps:
@@ -156,7 +161,7 @@ jobs:
           printf '{"identities":[{"name":"ci","credentials":[{"accessKey":"%s","secretKey":"%s"}],"actions":["Admin","Read","Write","List","Tagging"]}]}' \
             mcsdaccess mcsdsecret > "$RUNNER_TEMP/seaweedfs/s3.json"
 
-          # chrislusf/seaweedfs:4.41 (pushed 2026-08-06, outside the cooldown) —
+          # chrislusf/seaweedfs:4.42 (pushed 2026-08-17, outside the cooldown) —
           # the version compose.yaml pins, so CI exercises the backend the
           # deployment actually runs. Digest-pinned per docs/dev/DEPENDENCIES.md
           # (pinning + 7-day cooldown). Dependabot cannot see a digest pinned
@@ -168,7 +173,7 @@ jobs:
           docker run -d --name seaweedfs -p 127.0.0.1:8333:8333 \
             -v "$RUNNER_TEMP/seaweedfs/s3.json:/etc/seaweedfs/s3.json:ro" \
             --entrypoint weed \
-            chrislusf/seaweedfs@sha256:43b768cd62b00d132439cda881b93fd1adebf1b315e996e794087743821d771d \
+            chrislusf/seaweedfs@sha256:f7cbc8bdbbf60a1aaba7d61784a3bdff3ec1e0657f6ad0b26d5b6ab2cd9d0dc6 \
             server -dir=/data -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json
 
           # /status returns 200 once the S3 gateway is serving (no auth needed) —

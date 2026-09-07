@@ -22,8 +22,9 @@ Both reuse the C1 machinery rather than re-implementing it:
   eula.txt).
 
 Failure posture (import): the archive is fully validated (metadata shape AND the
-hardened entry checks — zip-slip, size, entry-count) BEFORE the row commits, so a
-hostile archive is rejected (413/422) with NO server row created (issue #277).
+hardened entry checks — zip-slip, size, entry-count, and the root
+``server.properties`` path of issue #2869) BEFORE the row commits, so a hostile
+archive is rejected (413/422) with NO server row created (issue #277).
 Only a genuine storage failure during the post-commit write pass, or a Bedrock
 port-allocation failure (window exhaustion or the concurrent-racer backstop)
 while re-creating the plugin set (issue #1551), can leave a committed row
@@ -48,13 +49,14 @@ import uuid
 import zipfile
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
 
 from mc_server_dashboard_api.rfc3339 import serialize_utc
 from mc_server_dashboard_api.servers.application.files import (
     MAX_ARCHIVE_ENTRIES,
     MAX_UPLOAD_BYTES,
     _archive_entries,
-    _validate_archive,
+    _refuse_dir_at_root_properties,
 )
 from mc_server_dashboard_api.servers.application.manage_server import CreateServer
 from mc_server_dashboard_api.servers.application.plugins import (
@@ -115,6 +117,44 @@ _PROPERTIES_FILENAME = "server.properties"
 # member is read in chunks so the guard trips mid-decompression, not after.
 _MAX_METADATA_BYTES = 64 * 1024
 _METADATA_CHUNK_BYTES = 16 * 1024
+
+
+def _validate_import_archive(
+    content: bytes, *, max_bytes: int, max_entries: int
+) -> None:
+    """Dry-run the import archive, refusing every member before the row commits.
+
+    Drains the SAME hardened generator the write pass runs over
+    (``_archive_entries``: zip-slip, symlink / special member, cumulative size,
+    entry count) and discards the bytes, so a hostile archive is rejected while
+    there is still no server row to leave behind (issue #277) — what
+    ``files._validate_archive`` does for the upload path, plus the one check that
+    is specific to publishing an archive as a WHOLE working set.
+
+    That check is the root ``server.properties`` path (issue #2869): the import
+    write loop persists each member at ``rel_path=entry_path``, creating its
+    missing parents, so a member named ``server.properties/x`` stands a DIRECTORY
+    where the platform publishes a file — the shape #2812 describes, which the
+    platform-managed-KEY guard cannot see because a directory carries no keys.
+    Import is the sixth door to it and the only one that runs on a server with no
+    working set yet.
+
+    The archive root IS the new server's root, so a member's path is already the
+    joined target PR #2868 established the guard belongs on; only the ROOT name is
+    refused, and a member under a nested ``backups/server.properties/`` directory
+    stays ordinary user data.
+    """
+
+    for entry_path, _data in _archive_entries(
+        EXPORT_METADATA_FILENAME + ".zip",  # route to the zip branch
+        content,
+        max_bytes=max_bytes,
+        max_entries=max_entries,
+    ):
+        # The PARENT, because the write materializes exactly that as a directory:
+        # ``server.properties`` ITSELF is the legitimate member the platform-key
+        # re-apply handles, and its parent is the root, which matches nothing.
+        _refuse_dir_at_root_properties(str(PurePosixPath(entry_path).parent))
 
 
 async def _load(
@@ -234,10 +274,16 @@ class ImportServer:
     apply -- ``accept_eula`` is left false (the imported working set carries its
     own eula.txt if any).
 
-    The whole archive is then validated in a dry-run pass (the hardened
-    ``_archive_entries`` checks: zip-slip, size, and entry-count caps) BEFORE the
-    row is created, so a hostile archive 413/422s with no server row left behind
-    (issue #277). Only after both the metadata and the entries validate does the
+    The whole archive is then validated in a dry-run pass
+    (:func:`_validate_import_archive`: the hardened ``_archive_entries`` checks —
+    zip-slip, size, and entry-count caps — plus the root ``server.properties`` path
+    of issue #2869) BEFORE the row is created, so a hostile archive 413/422s with
+    no server row left behind (issue #277). A member named
+    ``server.properties/…`` is 422 ``platform_managed_path``, the same answer the
+    five files-API doors give: the publish creates the member's parents, so it
+    would stand a DIRECTORY where the platform publishes a file (#2812). Only the
+    ROOT name is guarded — a nested ``backups/server.properties/…`` member is
+    ordinary user data. Only after both the metadata and the entries validate does the
     row commit; the write pass then publishes the entries as the initial working
     set, with the metadata member itself excluded. The name comes from the caller,
     not the metadata.
@@ -287,15 +333,15 @@ class ImportServer:
             raise FileTooLargeError(str(len(content)))
 
         metadata = _parse_metadata(content)
-        # Validate the whole archive (zip-slip / size / entry-count) BEFORE the row
-        # is created, so a hostile archive 413/422s with no server row left behind
-        # (issue #277). The metadata member is included in this pass (it is a normal
-        # archive entry); only its write is skipped later. The body bytes are
-        # already in memory, so the dry-run pass is cheap.
+        # Validate the whole archive (zip-slip / size / entry-count, and the root
+        # server.properties path of #2869) BEFORE the row is created, so a hostile
+        # archive 413/422s with no server row left behind (issue #277). The metadata
+        # member is included in this pass (it is a normal archive entry); only its
+        # write is skipped later. The body bytes are already in memory, so the
+        # dry-run pass is cheap.
         # Offloaded to a thread: decompression is CPU-bound (issue #1620).
         await asyncio.to_thread(
-            _validate_archive,
-            EXPORT_METADATA_FILENAME + ".zip",  # route to the zip branch
+            _validate_import_archive,
             content,
             max_bytes=self.max_bytes,
             max_entries=self.max_entries,

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 
@@ -24,6 +25,10 @@ type contractRow struct {
 	Precondition string `json:"precondition"`
 	Code         string `json:"code"`
 	Why          string `json:"why"`
+	// Message names the entry in the table's `messages` section whose text this
+	// cell emits verbatim. Empty for every other cell: a message is pinned only
+	// where the API reads one (issue #2843).
+	Message string `json:"message"`
 }
 
 // contractPrecondition is one declared precondition: the name rows key on, plus
@@ -33,10 +38,63 @@ type contractPrecondition struct {
 	Description []string `json:"description"`
 }
 
+// contractMessage is one refusal message the API discriminates on by TEXT rather
+// than by code alone (issue #2843). The table already recorded that such a match
+// exists -- the api column of the rows below names is_working_set_absent_refusal --
+// without carrying the text being matched, so the API's marker and its fixtures
+// were unverified hand copies of a Go literal and a reword here drifted them
+// silently. The text lives in the shared file instead: this side asserts the real
+// emission equals it, the API side asserts its discriminator is Phrase and builds
+// its fixtures from Text, so a reword cannot be accepted on one side alone.
+//
+// Text is the Worker literal verbatim. A `%s` in it stands for a runtime value (the
+// working dir), so the comparison is prefix+suffix there and exact everywhere else;
+// either way every declared character is pinned.
+type contractMessage struct {
+	Name   string `json:"name"`
+	Site   string `json:"site"`
+	Phrase string `json:"phrase"`
+	Text   string `json:"text"`
+}
+
 type contractTable struct {
 	Kinds         []string               `json:"kinds"`
 	Preconditions []contractPrecondition `json:"preconditions"`
+	Messages      []contractMessage      `json:"messages"`
 	Rows          []contractRow          `json:"rows"`
+}
+
+// messagesByName indexes the declared messages, failing on a duplicate name so a
+// row that references one always resolves to a single text.
+func messagesByName(t *testing.T, table contractTable) map[string]contractMessage {
+	t.Helper()
+	byName := map[string]contractMessage{}
+	for _, msg := range table.Messages {
+		if _, dup := byName[msg.Name]; dup {
+			t.Fatalf("contract table: duplicate message %q; one name, one text", msg.Name)
+		}
+		byName[msg.Name] = msg
+	}
+	return byName
+}
+
+// assertMessage checks an emitted refusal against the declared text. `%s` stands
+// for a runtime value, so the text around it is checked as a prefix and a suffix;
+// a text without one is compared exactly.
+func assertMessage(t *testing.T, msg contractMessage, got string) {
+	t.Helper()
+	before, after, hasArg := strings.Cut(msg.Text, "%s")
+	switch {
+	case !hasArg:
+		if got != msg.Text {
+			t.Fatalf("ErrorMessage = %q, want the message %q declares (%s):\n  %q",
+				got, msg.Name, msg.Site, msg.Text)
+		}
+	case !strings.HasPrefix(got, before) || !strings.HasSuffix(got, after) ||
+		len(got) < len(before)+len(after):
+		t.Fatalf("ErrorMessage = %q, want the message %q declares (%s), with its %%s filled in:\n  %q",
+			got, msg.Name, msg.Site, msg.Text)
+	}
 }
 
 // unaffectedCode marks a cell whose precondition determines no emission for that
@@ -418,8 +476,13 @@ func TestContractTableIsExhaustive(t *testing.T) {
 // TestCommandErrorContract is the worker side of the #204 guard: every row in the
 // shared table is reproduced against the real instancemanager and the emitted
 // code must equal the table. Drift on either the code or the table fails here.
+//
+// Since issue #2843 a row may also name a declared message, and the emitted TEXT
+// must equal it: that is the half of the contract the API's
+// is_working_set_absent_refusal reads, and it was pinned nowhere.
 func TestCommandErrorContract(t *testing.T) {
 	table := loadContract(t)
+	messages := messagesByName(t, table)
 	for _, row := range table.Rows {
 		if row.Code == unaffectedCode {
 			continue
@@ -434,6 +497,47 @@ func TestCommandErrorContract(t *testing.T) {
 			if !wantSuccess && res.ErrorCode != wantErr {
 				t.Fatalf("%s: ErrorCode = %v, want %v (%q)", name, res.ErrorCode, wantErr, row.Code)
 			}
+			if row.Message == "" {
+				return
+			}
+			msg, declared := messages[row.Message]
+			if !declared {
+				t.Fatalf("%s: row names the message %q, which the table's 'messages' section "+
+					"does not declare", name, row.Message)
+			}
+			assertMessage(t, msg, res.ErrorMessage)
 		})
+	}
+}
+
+// TestContractMessagesAreDrivenByARow is the direction the assertion above cannot
+// cover: it checks the emissions against the messages, not the messages against the
+// emissions. A declared message no row names is never compared with anything, so it
+// would keep asserting the API's fixtures against a text the Worker stopped
+// emitting -- the drift issue #2843 closed, re-opened one indirection further out.
+func TestContractMessagesAreDrivenByARow(t *testing.T) {
+	table := loadContract(t)
+	named := map[string]bool{}
+	for _, row := range table.Rows {
+		if row.Message != "" {
+			named[row.Message] = true
+		}
+	}
+	for _, msg := range messagesByName(t, table) {
+		if msg.Name == "" || msg.Site == "" || msg.Phrase == "" || msg.Text == "" {
+			t.Errorf("contract table: message %+v needs a name, a site, a phrase and a text", msg)
+			continue
+		}
+		if !strings.Contains(msg.Text, msg.Phrase) {
+			t.Errorf("contract table: message %q declares the phrase %q, which its text does not "+
+				"contain:\n  %q\nThe API matches the phrase inside this text, so a text without it "+
+				"is a match that can never fire.", msg.Name, msg.Phrase, msg.Text)
+			continue
+		}
+		if !named[msg.Name] {
+			t.Errorf("contract table: no row names the message %q (%s), so nothing drives it and "+
+				"the API's fixtures are pinned to a text this suite never sees emitted. Add "+
+				"'message': %q to every row whose cell emits it.", msg.Name, msg.Site, msg.Name)
+		}
 	}
 }

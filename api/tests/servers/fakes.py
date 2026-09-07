@@ -56,6 +56,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     BackupNotFoundError,
     BackupStorageUnavailableError,
     BackupUnreadableError,
+    GroupNameAlreadyExistsError,
     GroupNotFoundError,
     PluginAlreadyExistsError,
     PluginCacheBlobNotFoundError,
@@ -230,10 +231,20 @@ class FakeFileStore(FileStore):
     Backs the create-seeding tests: ``write_file`` records each seed write so a
     test can assert what landed in the initial working set, and ``read_file``
     serves it back (404 → :class:`ServerFileNotFoundError` for an unseeded path).
+
+    Directories exist here as they do at the real seam (issue #2886): a listing
+    describes the parent of a nested seed as ``is_dir=True``, and ``make_dir``
+    records an empty one in :attr:`dirs` so a later ``list_dir`` / ``path_exists``
+    observes it.
     """
 
     def __init__(self, *, fail_write: bool = False, seed_eula: bool = False) -> None:
         self.files: dict[str, bytes] = {}
+        # Directories created through ``make_dir``. A directory a seeded file sits
+        # under needs no record -- the file path implies it, exactly as the object
+        # backend's key prefix does -- so what this set is FOR is the created
+        # directory nothing else would make visible (issue #2886).
+        self.dirs: set[str] = set()
         if seed_eula:
             self.files["eula.txt"] = b"eula=true\n"
         self.writes: list[tuple[str, bytes]] = []
@@ -282,6 +293,13 @@ class FakeFileStore(FileStore):
             for path, content in self.files.items()
             if path.startswith(prefix)
         }
+        # A created directory is a member of a prefix exactly as a file is: the
+        # object backend anchors it with a real ``<dir>/.dir`` object (issue
+        # #1125), so appending the slash here puts ``make_dir``'s record on that
+        # same footing. It makes ``d`` a member of ``d/`` -- an empty created
+        # directory LISTS, empty, rather than missing below -- and a member of
+        # every prefix above it, which is where its parents come from.
+        dir_members = sorted(d + "/" for d in self.dirs if (d + "/").startswith(prefix))
         # A non-root path nothing sits under is a MISS at the real seam, never an
         # empty listing: gone, a plain file, or reached through one all raise
         # NotFoundError, which StorageFileStoreAdapter surfaces as
@@ -297,30 +315,51 @@ class FakeFileStore(FileStore):
         # lists ``[]`` for EVERY path, not just the root -- and is deliberately
         # not modelled here: this fake has no unpublished state, its seeded files
         # ARE the published working set.
-        if prefix and not members:
+        if prefix and not members and not dir_members:
             raise ServerFileNotFoundError(str(server_id.value))
         seen: set[str] = set()
         entries: list[FileEntry] = []
         for path, content in members.items():
             rest = path[len(prefix) :]
-            # Direct child only (no nested slashes).
-            if "/" in rest:
+            # A nested file is not a child of this level; the directory it sits
+            # under is, and both backends describe that one as ``is_dir=True``
+            # with size 0 (fs lstats it in ``_list_entries``, the object backend
+            # collapses the shared key prefix in ``_entries_at_level``).
+            entry = (
+                FileEntry(name=rest.split("/", 1)[0], is_dir=True, size=0)
+                if "/" in rest
+                else FileEntry(name=rest, is_dir=False, size=len(content))
+            )
+            if entry.name not in seen:
+                seen.add(entry.name)
+                entries.append(entry)
+        for path in dir_members:
+            rest = path[len(prefix) :]
+            # Empty for the directory being listed itself, which is not its own
+            # child -- the object backend drops the same member by filtering the
+            # ``.dir`` marker out of the level.
+            if not rest:
                 continue
-            if rest not in seen:
-                seen.add(rest)
-                entries.append(FileEntry(name=rest, is_dir=False, size=len(content)))
+            name = rest.split("/", 1)[0]
+            if name not in seen:
+                seen.add(name)
+                entries.append(FileEntry(name=name, is_dir=True, size=0))
         return entries
 
     async def path_exists(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> bool:
-        # A name is occupied by a seeded file or by a directory some seeded file
-        # sits under; the root is always there.
+        # A name is occupied by a seeded file, by a directory some seeded file
+        # sits under, or by a created directory -- itself or an ancestor of one,
+        # which is the same ``d + "/"`` membership the listing uses. The root is
+        # always there.
         if rel_path in ("", "."):
             return True
         prefix = rel_path.rstrip("/") + "/"
-        return rel_path in self.files or any(
-            path.startswith(prefix) for path in self.files
+        return (
+            rel_path in self.files
+            or any(path.startswith(prefix) for path in self.files)
+            or any((d + "/").startswith(prefix) for d in self.dirs)
         )
 
     async def write_file(
@@ -381,6 +420,16 @@ class FakeFileStore(FileStore):
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> None:
         self.events.append((server_id, "make-dir"))
+        if rel_path in ("", "."):
+            # The root is already there and neither backend creates anything for
+            # it: ObjectStorage returns before writing the ``//.dir`` key issue
+            # #1944 names, and fs's ``exist_ok=True`` mkdir of the snapshot
+            # directory itself is a no-op.
+            return None
+        # Idempotent (a set), and the parents are implied rather than stored:
+        # creating ``a/b`` makes ``a`` a directory the same way seeding a file at
+        # ``a/b/f`` does.
+        self.dirs.add(rel_path.rstrip("/"))
         return None
 
     def download_dir(
@@ -869,6 +918,20 @@ class FakeGameSessionRepository(GameSessionRepository):
         return len(stale)
 
 
+class _DuplicateGroup(Exception):
+    """Driver error for a duplicate ``player_group`` INSERT (#2923).
+
+    The same shim shape as :class:`_DuplicateAssignment` below, which carries the
+    reasoning: the constraint name sits directly on the wrapped error, and
+    ``integrity._constraint_name`` resolves it there as well as through
+    production's extra asyncpg indirection.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("duplicate key value violates unique constraint")
+        self.constraint_name = "pk_player_group"
+
+
 class FakeGroupRepository(GroupRepository):
     """In-memory player-group store + attachment join (issue #276).
 
@@ -890,7 +953,47 @@ class FakeGroupRepository(GroupRepository):
         # ``Player`` values, so a new list is the full depth (#2516).
         return replace(group, players=list(group.players))
 
+    def _other_holder_of_name(self, group: PlayerGroup) -> PlayerGroup | None:
+        """Return the *other* group holding ``group``'s (community, kind, name)."""
+
+        for other in self.by_id.values():
+            if (
+                other.id != group.id
+                and other.community_id == group.community_id
+                and other.kind is group.kind
+                and other.name == group.name
+            ):
+                return other
+        return None
+
     async def add(self, group: PlayerGroup) -> None:
+        # ``id`` alone is pk_player_group (migration 0012), so this is an INSERT
+        # and never an upsert: re-adding a stored id duplicates the key and
+        # PostgreSQL refuses the row. Nothing in the integrity map names the PK,
+        # so the adapter's flush re-raises the IntegrityError untranslated -- a
+        # 500, which is still the refusal the caller meets (#2923, the shape
+        # #2858 established). Keying it in regardless made this an upsert, the
+        # forgiving direction; CreateGroup mints GroupId.new(), which is what
+        # keeps the hole latent rather than live. Checked before the UNIQUE
+        # below only because it is the row's own identity: both constraints sit
+        # on the one INSERT, and which of them PostgreSQL reports when a caller
+        # violates both is not modelled.
+        if group.id in self.by_id:
+            raise IntegrityError("INSERT INTO player_group", {}, _DuplicateGroup())
+        # uq_player_group_community_kind_name refuses a second group holding one
+        # community's (kind, name), and the adapter's ``add`` flushes the
+        # player_group row itself, so the refusal lands inside this call as
+        # GroupNameAlreadyExistsError (#2000). Keying on ``group.id`` alone was
+        # the forgiving direction: two groups sharing the triple coexisted here,
+        # a state production cannot hold (#2923).
+        if self._other_holder_of_name(group) is not None:
+            raise GroupNameAlreadyExistsError(group.name.value)
+        # That same flush carries fk_player_group_community_id_community
+        # (CommunityNotFoundError, #2924), which is NOT modelled: the parent row
+        # lives in the community context, not in this fake, so it cannot be
+        # checked here. Same reason and same answer as ``attach``'s server-side
+        # FK below -- the rule is stated once, in the module docstring of
+        # tests/servers/test_fake_repository_isolation.py.
         self.by_id[group.id] = self._copy(group)
 
     async def get_by_id(self, group_id: GroupId) -> PlayerGroup | None:
@@ -921,8 +1024,21 @@ class FakeGroupRepository(GroupRepository):
         # took the row, so it raises the not-found its re-read asserts, whether or
         # not there are players left to write (#2613; before that the emptied-set
         # branch stayed silent and reported the edit as a success).
+        # The port names three routes to that same not-found -- the re-read above,
+        # the StaleDataError a rename's zero-row UPDATE raises (#2937), and
+        # fk_group_player_group_id_player_group at the replacement rows' flush
+        # (#2583) -- and all three mean the one thing a dict can see: the group is
+        # gone.
         if group.id not in self.by_id:
             raise GroupNotFoundError(str(group.id.value))
+        # A rename has the same UNIQUE as ``add``: the player-row DELETE
+        # autoflushes the pending name UPDATE, so a racer that took the target
+        # (community_id, kind, name) since the caller's pre-check raises
+        # GroupNameAlreadyExistsError inside ``save`` too (#2000, #2923).
+        # uq_group_player_group_uuid (GroupPlayerEditConflictError, #2613) stays
+        # unmodelled: reaching it needs two interleaved transactions.
+        if self._other_holder_of_name(group) is not None:
+            raise GroupNameAlreadyExistsError(group.name.value)
         self.by_id[group.id] = self._copy(group)
 
     async def delete(self, group_id: GroupId) -> None:
@@ -930,6 +1046,18 @@ class FakeGroupRepository(GroupRepository):
         self.attachments = {pair for pair in self.attachments if pair[0] != group_id}
 
     async def attach(self, group_id: GroupId, server_id: ServerId) -> None:
+        # The adapter executes the INSERT here rather than staging it, so the
+        # row's two foreign keys are refusals of this call. The group side is
+        # checkable locally: no row in ``by_id`` means no parent for
+        # fk_server_group_group_id_player_group, which the adapter reports as
+        # GroupNotFoundError (#2612).
+        if group_id not in self.by_id:
+            raise GroupNotFoundError(str(group_id.value))
+        # fk_server_group_server_id_server (ServerNotFoundError) is NOT modelled,
+        # for the same reason and with the same answer as ``add``'s community FK:
+        # the server row lives in FakeServerRepository, so this fake cannot see
+        # whether it exists. In fake-driven tests the server side is asserted one
+        # layer up, by AttachGroup's own ``_require_server`` pre-read.
         self.attachments.add((group_id, server_id))
 
     async def detach(self, group_id: GroupId, server_id: ServerId) -> bool:

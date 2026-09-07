@@ -326,6 +326,10 @@ class ControlPlaneState:
         left untouched (defense-in-depth). On a SUCCESS the publish already landed,
         so the upload is done and there is no late publish for the #847 guard to
         fight; on a TRANSFER_FAILED the upload is dead — also no late publish.
+
+        The Worker's failure detail rides along with the outcome (issue #2766): it
+        is the only text that names why the snapshot failed, and this is the seam
+        where it would otherwise be dropped, leaving the consumer to guess a cause.
         """
 
         snapshot = self._late_snapshots.get(command_id)
@@ -349,6 +353,7 @@ class ControlPlaneState:
             server_id=server_id,
             worker_id=worker_id.value,
             succeeded=result.success,
+            message=_failure_detail(result),
         )
 
     def fail_worker_pending(
@@ -505,6 +510,21 @@ def _to_result(message: pb.CommandResult) -> CommandResult:
     return CommandResult(
         code=code, message=message.error.message, file_access_reason=reason
     )
+
+
+def _failure_detail(message: pb.CommandResult) -> str | None:
+    """The reason a command failed, in the Worker's words; ``None`` on a success.
+
+    The Worker's text when it sent any, else the error code — the same
+    ``message or status.value`` fallback every other failed-command log in the API
+    renders (``command_dispatch.py``, the final- and periodic-snapshot paths), so a
+    failure always names something even from a Worker that sent no text (#2766).
+    """
+
+    if message.success:
+        return None
+    result = _to_result(message)
+    return result.message or result.code.value
 
 
 def _to_listing(message: pb.FileListing) -> FileListing:

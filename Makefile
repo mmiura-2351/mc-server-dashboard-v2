@@ -34,14 +34,24 @@
 	bench bench-api bench-worker bench-webui \
 	openapi-gen openapi-check \
 	proto-lint proto-gen proto-check proto-breaking \
-	bootstrap hooks-install hooks-check hooks-test scripts-test \
+	bootstrap hooks-install hooks-check hooks-test scripts-test scripts-test-cheap \
 	update deploy \
 	up down restart status logs ps build clean help
 
 # golangci-lint is not part of the Go distribution; it is installed into a
-# module-local, gitignored ./.bin (see worker/README.md).
+# module-local, gitignored ./.bin by `make bootstrap` (see worker/README.md).
 GOLANGCI_VERSION := v2.12.2
 GOLANGCI := worker/.bin/golangci-lint
+
+# Version stamp for the installed binary (#2903). $(GOLANGCI) is a fixed path,
+# so as a bare file target it only ever answered "does it exist?": a bump of
+# GOLANGCI_VERSION never reinstalled, and every checkout that already had the
+# binary kept linting with the old one -- silently, while CI (which keys its
+# lint cache on the resolved version) used the new one. The stamp carries the
+# version in its *name*, so a bump renames the prerequisite out of existence and
+# the install rule below runs. It lives inside the gitignored worker/.bin, so it
+# is swept with the binary it describes.
+GOLANGCI_STAMP := worker/.bin/.golangci-lint-$(GOLANGCI_VERSION).stamp
 
 # Per-worktree golangci-lint analysis cache. The default shared cache
 # (~/.cache/golangci-lint) outlives the agent worktrees under .claude/worktrees/
@@ -83,6 +93,17 @@ PROTOC_GEN_GO_VERSION := v1.36.11
 PROTOC_GEN_GO_GRPC_VERSION := v1.6.2
 PROTOC_GEN_GO := worker/.bin/protoc-gen-go
 PROTOC_GEN_GO_GRPC := worker/.bin/protoc-gen-go-grpc
+
+# Version stamps for the installed plugins (#2927), the same mechanism as
+# $(GOLANGCI_STAMP) above: both plugin paths are fixed, so as bare file targets
+# they only ever answered "does it exist?" and a bump of either pin reinstalled
+# nothing on a checkout that already had the plugin. Here the staleness is not
+# silent -- the generated stubs carry the plugin version in their header, so it
+# surfaces as a proto-check drift failure -- but it surfaces as "the committed
+# stubs are stale", which points away from the plugin that is actually out of
+# date.
+PROTOC_GEN_GO_STAMP := worker/.bin/.protoc-gen-go-$(PROTOC_GEN_GO_VERSION).stamp
+PROTOC_GEN_GO_GRPC_STAMP := worker/.bin/.protoc-gen-go-grpc-$(PROTOC_GEN_GO_GRPC_VERSION).stamp
 
 # A bare `make` shows the target listing rather than running the heavy `check`
 # gate. `all: check` stays the first target so `make all` / CI keep working.
@@ -157,7 +178,11 @@ test-client-check:
 # invalidates everything after it. On a fresh checkout (CI, the primary checkout)
 # there is no shadowing, so it is a silent no-op. Prerequisite of the api-*
 # targets so a directly-invoked `make api-test` is guarded too.
+#
+# Same shape as docs-check/migrations-check/test-client-check: the self-test
+# first (pure stdlib, plain python3 -- no venv), then the real run it guards.
 api-env-check:
+	python3 scripts/check_api_env.py --self-test
 	cd api && uv run python ../scripts/check_api_env.py
 
 api-lint: api-env-check
@@ -348,10 +373,23 @@ openapi-check: openapi-gen
 		exit 1; \
 	fi
 
-# Install the pinned golangci-lint into worker/.bin if it is missing.
-$(GOLANGCI):
+# Install the pinned golangci-lint into worker/.bin if it is missing or holds a
+# version other than the current pin (the stamp above).
+$(GOLANGCI): $(GOLANGCI_STAMP)
 	cd worker && GOBIN="$$(pwd)/.bin" go install \
 		github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_VERSION)
+	@# Guarantee the binary ends up no older than the stamp that triggered this
+	@# rule, whatever `go install` decides to do with the mtime of a file it
+	@# rewrites with identical content. Without that guarantee the target would
+	@# still look out of date and reinstall on every run.
+	@touch $@
+
+# The stamp is an empty marker; the version lives in its name. Older stamps are
+# removed so a bump leaves exactly one.
+$(GOLANGCI_STAMP):
+	@mkdir -p $(dir $@)
+	@rm -f $(dir $@).golangci-lint-*.stamp
+	@touch $@
 
 # Bootstrap local tooling. uv installs the Python toolchain on first `uv run`,
 # but syncing up front gives a clear, fast failure if the environment is wrong.
@@ -432,27 +470,47 @@ hooks-test:
 	bash .githooks/test-post-checkout.sh
 	bash .githooks/test-hooks-check.sh
 
-# Unit-test everything under scripts/: the `--self-test` suite of
-# supply_chain_cooldown.py first, then the deploy shell helpers. Same shape as
-# hooks-test -- stdlib python3 and pure bash, temp dirs, and stubbed
-# `sg`/`docker`/HTTP transports: offline, and never touches a real daemon or
-# volume.
+# Unit-test everything under scripts/: the cheap suites below, then the deploy
+# shell helpers. Same shape as hooks-test throughout -- stdlib python3 and pure
+# bash, temp dirs, and stubbed `sg`/`docker`/HTTP transports: offline, and never
+# touches a real daemon or volume.
 #
 # A self-test belongs here when the script has no local real run to sit next
 # to, so that a regression in it fails the pre-push `make check` instead of a CI
 # runner after the push (#2508). supply_chain_cooldown.py is such a script: its
-# real run is the Dependabot flow, not a gate. The other three self-tests live
+# real run is the Dependabot flow, not a gate. The other four self-tests live
 # next to the real run they guard -- check_docs.py's in docs-check,
-# check_migrations.py's in migrations-check (#2511), and
-# check_test_client_pattern.py's in test-client-check (#2698).
-scripts-test:
-	python3 scripts/supply_chain_cooldown.py --self-test
+# check_migrations.py's in migrations-check (#2511),
+# check_test_client_pattern.py's in test-client-check (#2698), and
+# check_api_env.py's in api-env-check (#2880).
+#
+# The recipe lines here are the deploy helper suites and only those: they cost
+# ~14s to the cheap set's ~3s, and .github/workflows/sanity.yml is the one gate
+# that deliberately does not want them (see its header). Everything else under
+# scripts/ goes in scripts-test-cheap below.
+scripts-test: scripts-test-cheap
 	bash scripts/test_deploy_preflight.sh
 	bash scripts/test_pg_major_upgrade.sh
 	bash scripts/test_deploy_stamp.sh
+
+# The scripts/ suites the always-on CI gate can afford: no network, no
+# dependency install, ~3s for all six (0.06s-2.3s each; the slowest is the lock
+# suite, whose cost is deliberate waits, bounded by its own polling ceiling).
+#
+# sanity.yml runs this target rather than copying the list out, which is the
+# whole point of the split: the workflow used to enumerate its scripts/ steps by
+# hand under a comment asking authors to keep two lists in step, and five suites
+# reached main with no CI run of their own anyway (#2946). Membership is now a
+# single choice made here -- cheap suite or deploy suite -- and CI follows from
+# it. Adding a suite to the deploy lines above is the deliberate way to keep it
+# out of that gate; there is no third place to put one.
+scripts-test-cheap:
+	python3 scripts/supply_chain_cooldown.py --self-test
 	bash scripts/test_shell_pipefail.sh
 	bash scripts/test_check_parallel_identity.sh
 	bash scripts/test_check_parallel_lock.sh
+	bash scripts/test_golangci_pin.sh
+	bash scripts/test_protoc_plugin_pins.sh
 
 # ---------------------------------------------------------------------------
 # proto/ (buf) -- the shared control-plane contract.
@@ -505,14 +563,36 @@ proto-check: proto-gen
 		exit 1; \
 	fi
 
-# Install the pinned Go protoc plugins into worker/.bin if missing.
-$(PROTOC_GEN_GO):
+# Install the pinned Go protoc plugins into worker/.bin if missing or holding a
+# version other than the current pin (the stamps above). The trailing touch on
+# each keeps the rule idempotent: `go install` may leave the mtime alone when it
+# rewrites a byte-identical binary, which would leave the plugin older than the
+# stamp that triggered the rule and reinstall it on every run.
+$(PROTOC_GEN_GO): $(PROTOC_GEN_GO_STAMP)
 	cd worker && GOBIN="$$(pwd)/.bin" go install \
 		google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VERSION)
+	@touch $@
 
-$(PROTOC_GEN_GO_GRPC):
+$(PROTOC_GEN_GO_GRPC): $(PROTOC_GEN_GO_GRPC_STAMP)
 	cd worker && GOBIN="$$(pwd)/.bin" go install \
 		google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(PROTOC_GEN_GO_GRPC_VERSION)
+	@touch $@
+
+# Empty markers; the version lives in the name. Each glob is anchored on the
+# version's leading `v` -- which every Go module version carries, so every value
+# these pins can take -- because `protoc-gen-go` is a prefix of
+# `protoc-gen-go-grpc`: the bare `<tool>-*` form used for golangci-lint would
+# here sweep away the sibling plugin's stamp as well, so every bump of
+# protoc-gen-go would drag a reinstall of protoc-gen-go-grpc along with it.
+$(PROTOC_GEN_GO_STAMP):
+	@mkdir -p $(dir $@)
+	@rm -f $(dir $@).protoc-gen-go-v*.stamp
+	@touch $@
+
+$(PROTOC_GEN_GO_GRPC_STAMP):
+	@mkdir -p $(dir $@)
+	@rm -f $(dir $@).protoc-gen-go-grpc-v*.stamp
+	@touch $@
 
 # ---------------------------------------------------------------------------
 # Deployment

@@ -13,6 +13,10 @@ the staged ``group_player`` INSERTs, and an in-memory fake repository has no
 constraints to violate, so it reports success where PostgreSQL raises
 (issues #2557, #2549).
 
+The issue #2924 pair is here for the first reason: the community FK it covers
+is live only against PostgreSQL, and the use-case half also shows that nothing
+in ``CreateGroup`` short-circuits the flush that raises it.
+
 The issue #2613 tests are here for the same reason and one more: the writes they
 cover are the ones with *nothing to insert*, so what has to be pinned is that
 ``save`` still refuses them, and that the interleaved player edit really does hit
@@ -27,15 +31,18 @@ import datetime as dt
 import os
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from typing import Any
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.orm.exc import StaleDataError
 
 from mc_server_dashboard_api.community.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork as CommunityUnitOfWork,
@@ -55,10 +62,12 @@ from mc_server_dashboard_api.servers.adapters.unit_of_work import (
 from mc_server_dashboard_api.servers.application.groups import (
     AddPlayer,
     AttachGroup,
+    CreateGroup,
     RemovePlayer,
     RenameGroup,
 )
 from mc_server_dashboard_api.servers.domain.errors import (
+    CommunityNotFoundError,
     GroupNameAlreadyExistsError,
     GroupNotFoundError,
     GroupPlayerEditConflictError,
@@ -318,9 +327,13 @@ class _RacingUnitOfWork(ServersUnitOfWork):
 async def test_save_after_concurrent_group_delete_reports_not_found(
     engine: AsyncEngine,
 ) -> None:
-    # The staged group_player INSERTs hit fk_group_player_group_id_player_group
-    # once the parent row is gone. save flushes them itself, so the violation is
-    # translated to the same not-found the use case's own pre-read raises.
+    # Since #2613 this stops at ``save``'s own re-read: the delete lands before the
+    # save, so the row is already gone when the re-read looks and the not-found is
+    # raised before a single group_player row is staged -- the FK is never reached.
+    # What it pins is that a player-carrying edit of a deleted group is refused at
+    # all. The FK at the flush needs a racer that commits *after* the re-read, and
+    # is pinned by ``test_save_flush_after_a_racing_delete_reports_not_found``
+    # (issue #2938).
     community_id = await _seed_community(engine)
     factory = create_session_factory(engine)
     group = _group(community_id, [Player(uuid.uuid4(), "alice")])
@@ -399,6 +412,50 @@ async def test_save_after_concurrent_name_take_reports_name_exists(
         loaded.name = GroupName("moderators")
         with pytest.raises(GroupNameAlreadyExistsError):
             await uow.groups.save(loaded)
+
+
+# --- the create path's other parent: the community (issue #2924) -------------
+
+
+async def test_add_after_concurrent_community_delete_reports_community_not_found(
+    engine: AsyncEngine,
+) -> None:
+    # add's flush carries fk_player_group_community_id_community as well as the
+    # name uniqueness: the community deleted since the caller's pre-read leaves
+    # the player_group INSERT with no parent. Live FK, so this pins the
+    # translation rather than a fake's opinion of it.
+    community_id = await _seed_community(engine)
+    factory = create_session_factory(engine)
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("DELETE FROM community WHERE id = :id"), {"id": community_id}
+        )
+
+    async with ServersUnitOfWork(factory) as uow:
+        with pytest.raises(CommunityNotFoundError):
+            await uow.groups.add(_group(community_id, []))
+
+
+async def test_create_group_reports_a_concurrent_community_delete_as_not_found(
+    engine: AsyncEngine,
+) -> None:
+    # The reachable path. CreateGroup's only pre-read is the group name lookup,
+    # which answers None whether or not the community is there, so nothing
+    # short-circuits the INSERT: the use case really does reach the flush and
+    # depends on the translation for its typed error. The community pre-read that
+    # would have caught this is the authorization gate, one layer up.
+    community_id = await _seed_community(engine)
+    factory = create_session_factory(engine)
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("DELETE FROM community WHERE id = :id"), {"id": community_id}
+        )
+
+    use_case = CreateGroup(uow=ServersUnitOfWork(factory))
+    with pytest.raises(CommunityNotFoundError):
+        await use_case(community_id=CommunityId(community_id), name="admins", kind="op")
 
 
 async def test_add_player_reports_a_concurrent_group_delete_as_not_found(
@@ -606,6 +663,124 @@ async def test_interleaved_player_edits_report_an_edit_conflict(
             await conn.execute(text("SELECT count(*) FROM group_player"))
         ).scalar_one()
     assert players == 1
+
+
+# --- the FK at save's own flush, reached past the re-read (issue #2938) -------
+
+
+async def test_save_flush_after_a_racing_delete_reports_not_found(
+    engine: AsyncEngine,
+) -> None:
+    # ``save``'s flush of the replacement group_player rows is where
+    # fk_group_player_group_id_player_group becomes the not-found (#2583), and no
+    # live test reached it: #2613's re-read answers every racer that deletes before
+    # the save, so dropping the constraint from ``_GROUP_MISSING_CONSTRAINTS``
+    # reddened nothing. Firing the racer from ``_RacingSession.flush`` puts its
+    # DELETE after the re-read has already found the row.
+    #
+    # The group starts empty so the loser's wholesale DELETE matches nothing and
+    # takes no locks the racer's cascade would wait on; the one player added here
+    # is what gives the flush an INSERT to carry into the FK check.
+    community_id = await _seed_community(engine)
+    factory = create_session_factory(engine)
+    group = _group(community_id, [])
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.groups.add(group)
+        await uow.commit()
+
+    async def deleter() -> None:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM player_group WHERE id = :id"), {"id": group.id.value}
+            )
+
+    racing_factory = async_sessionmaker(
+        engine, expire_on_commit=False, class_=_RacingSession, racer=deleter
+    )
+    async with ServersUnitOfWork(racing_factory) as loser:  # type: ignore[arg-type]
+        loaded = await loser.groups.get_by_id(group.id)
+        assert loaded is not None
+        loaded.upsert_player(Player(uuid.uuid4(), "alice"))
+        with pytest.raises(GroupNotFoundError) as raised:
+            await loser.groups.save(loaded)
+
+    # Which statement raised, not merely that something did: the re-read's own
+    # not-found carries no cause, so a translated IntegrityError naming the FK is
+    # what distinguishes the flush from it.
+    cause = raised.value.__cause__
+    assert isinstance(cause, IntegrityError)
+    assert "fk_group_player_group_id_player_group" in str(cause)
+
+
+# --- the rename UPDATE at save's autoflush, past the re-read (issue #2937) ----
+
+
+class _ExecuteRacingSession(_RacingSession):
+    """A racing session that fires before ``save``'s player-row DELETE.
+
+    ``save``'s re-read goes through ``Session.get``, so with the aggregate loaded
+    on another session the first ``execute`` this one sees is the player-row
+    DELETE -- the statement whose autoflush emits the pending name UPDATE.
+    Committing the racer's delete here is the one window that leaves that UPDATE
+    matching zero rows; fired from the base class's ``flush`` hook the UPDATE has
+    already succeeded. The inherited ``_raced`` flag keeps that hook from firing
+    the racer a second time.
+    """
+
+    async def execute(self, *args: Any, **kwargs: Any) -> Any:
+        if not self._raced:
+            self._raced = True
+            await self._racer()
+        return await super().execute(*args, **kwargs)
+
+
+async def test_save_rename_after_a_racing_delete_reports_not_found(
+    engine: AsyncEngine,
+) -> None:
+    # A rename is the one edit that stages an UPDATE on the group row itself, and
+    # PostgreSQL reports a sane rowcount, so the ORM raises StaleDataError when the
+    # racer's delete lands between save's re-read and the autoflush that carries
+    # that UPDATE. StaleDataError is not an IntegrityError, so it escaped save's
+    # translation as an unhandled 500 where every neighbouring racer on the same
+    # method answers a typed domain error.
+    #
+    # The group is empty and stays empty: with no group_player rows there is
+    # nothing for the flush to insert, so the FK that carries the not-found for a
+    # player-carrying edit (#2938) is never reached and the UPDATE is the only
+    # statement that can raise. The aggregate is loaded on a separate session
+    # because ``get_by_id`` hydrates its players through ``execute``, which would
+    # otherwise spend the racer before ``save`` ever runs.
+    community_id = await _seed_community(engine)
+    factory = create_session_factory(engine)
+    group = _group(community_id, [], name="admins")
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.groups.add(group)
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as reader:
+        loaded = await reader.groups.get_by_id(group.id)
+    assert loaded is not None
+
+    async def deleter() -> None:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM player_group WHERE id = :id"), {"id": group.id.value}
+            )
+
+    racing_factory = async_sessionmaker(
+        engine, expire_on_commit=False, class_=_ExecuteRacingSession, racer=deleter
+    )
+    loaded.name = GroupName("moderators")
+    async with ServersUnitOfWork(racing_factory) as loser:  # type: ignore[arg-type]
+        with pytest.raises(GroupNotFoundError) as raised:
+            await loser.groups.save(loaded)
+
+    # Which statement raised: the re-read's own not-found carries no cause, and
+    # the FK path's cause is an IntegrityError, so a StaleDataError is what
+    # identifies the zero-row UPDATE as the origin.
+    assert isinstance(raised.value.__cause__, StaleDataError)
 
 
 # --- concurrent racers on the attach write (issue #2612) ----------------------

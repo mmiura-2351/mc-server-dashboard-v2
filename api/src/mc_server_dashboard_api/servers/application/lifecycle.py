@@ -165,9 +165,13 @@ _DEFAULT_JAR_RELPATH = "server.jar"
 # (issue #1790). The phrase is pinned on the Worker side
 # (worker/internal/application/instancemanager/instancemanager.go — handleSnapshot's
 # stopped-id refusal, issue #1713, and launchReserved's guard, issue #2499/#2802)
-# with a cross-reference to this constant — reword all of them together. It is kept
-# verbatim for the emptied-in-place scratch the marker predicate also refuses (issue
-# #2802): the prose is a shade imprecise there, but the discriminator is exact.
+# with a cross-reference to this constant — reword all of them together, which the
+# gate now holds rather than a reader's memory: both messages are declared in
+# proto/contract/command_error_contract.json ("messages"), the Worker test asserts
+# its emissions against them, and this constant is pinned equal to the phrase they
+# declare (issue #2843). It is kept verbatim for the emptied-in-place scratch the
+# marker predicate also refuses (issue #2802): the prose is a shade imprecise there,
+# but the discriminator is exact.
 _WORKING_SET_ABSENT_MARKER = "working dir absent"
 
 # The 409 body reason for a RESTART the Worker refused on its relaunch because the
@@ -1910,7 +1914,12 @@ class StopServer:
         return server
 
     async def clear_assignment_after_late_snapshot(
-        self, *, server_id: ServerId, worker_id: WorkerId, succeeded: bool
+        self,
+        *,
+        server_id: ServerId,
+        worker_id: WorkerId,
+        succeeded: bool,
+        message: str | None,
     ) -> None:
         """Release a held assignment on a late final-snapshot result (issue #891).
 
@@ -1918,11 +1927,11 @@ class StopServer:
         (``_record_stopped_then_final_snapshot``, #847/#901)
         HOLD the row at (stopped, stopped, assigned) for the stale-stop arm to
         clear once grace lapses, because the worker may still be uploading. When the
-        worker instead reports the snapshot's outcome LATE — a ``TRANSFER_FAILED``
-        once its transfer bound aborts the upload (#874/#890), or a SUCCESS whose
-        response was slow — the upload is settled and there is no reason to wait out
-        grace: this releases the assignment minutes earlier, exactly what #874's
-        issue text anticipated.
+        worker instead reports the snapshot's outcome LATE — a failure, canonically
+        a ``TRANSFER_FAILED`` once its transfer bound aborts the upload (#874/#890)
+        but potentially any failure, or a SUCCESS whose response was slow — the
+        upload is settled and there is no reason to wait out grace: this releases
+        the assignment minutes earlier, exactly what #874's issue text anticipated.
 
         The held row reads ``(stopped, stopped, assigned)`` OR
         ``(stopped, crashed, assigned)``: since issue #2448 both release paths for a
@@ -1942,10 +1951,16 @@ class StopServer:
         carries no community scope, and the server id is authoritative.
 
         On SUCCESS the publish landed, so this is the same release the on-time
-        success path runs; on TRANSFER_FAILED the snapshot was never published, so a
+        success path runs; on a FAILURE the snapshot was never published, so a
         later cross-worker re-placement loses progression since the last periodic
         snapshot — the documented #845/#847 exposure, logged loud (a same-worker
         start reuses the retained scratch, #767).
+
+        ``message`` is the Worker's own account of that failure, logged verbatim
+        beside the release. The cause is whatever it says — a data-plane URL the
+        Worker cannot reach (#2595), an auth error, a storage outage — and NOT the
+        transfer bound this line used to assert for every late failure, which sent
+        the operator after a cause nobody observed (issue #2766).
         """
 
         async with self.uow:
@@ -1978,14 +1993,15 @@ class StopServer:
             )
         else:
             _LOG.warning(
-                "released worker %s for server %s on a LATE failed final snapshot "
-                "(the worker's transfer bound aborted the upload, #874/#890): the "
-                "final snapshot was never published, so a cross-worker re-placement "
-                "loses progression since the last periodic snapshot (#845/#847); a "
-                "same-worker start reuses the retained scratch (#767). Cleared now "
-                "instead of waiting out the stale-stop arm (#891)",
+                "released worker %s for server %s on a LATE failed final snapshot: "
+                "%s; the final snapshot was never published, so a cross-worker "
+                "re-placement loses progression since the last periodic snapshot "
+                "(#845/#847); a same-worker start reuses the retained scratch "
+                "(#767). Cleared now instead of waiting out the stale-stop arm "
+                "(#891)",
                 worker_id.value,
                 server_id.value,
+                message,
             )
 
 

@@ -35,11 +35,29 @@ class ResourcePackRepository(abc.ABC):
 
     @abc.abstractmethod
     async def delete(self, pack_id: ResourcePackId) -> None:
-        """Delete the resource pack row."""
+        """Delete the resource pack row; the DELETE runs inside this call.
+
+        Not a staged write: the assignment foreign key is not ``DEFERRABLE``, so
+        a pack an assignment still references is refused at statement end rather
+        than at the unit of work's commit, and this call raises
+        :class:`ResourcePackInUseError` (issue #2612).
+        """
 
     @abc.abstractmethod
     async def add_assignment(self, assignment: ResourcePackAssignment) -> None:
-        """Stage a new assignment row for persistence."""
+        """Insert the assignment row; the INSERT runs inside this call.
+
+        Not a staged write: the row's foreign keys are enforced here rather than
+        at the unit of work's commit, so this call raises
+        :class:`ResourcePackNotFoundError` when the pack it names is gone (issue
+        #2784) and :class:`ServerNotFoundError` when the server is (issue #2852).
+
+        ``server_id`` is the primary key, so this is always an INSERT and never
+        an upsert: a server that already has an assignment duplicates the key,
+        which no translation covers and which therefore surfaces as a raw
+        ``IntegrityError`` (issue #2858); callers replacing an assignment delete
+        the existing row first.
+        """
 
     @abc.abstractmethod
     async def get_assignment_by_server(

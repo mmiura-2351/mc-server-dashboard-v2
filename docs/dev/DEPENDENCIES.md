@@ -120,6 +120,7 @@ configuration lives in `.github/dependabot.yml` and covers:
 | `gomod` | `/worker` | Go worker module |
 | `gomod` | `/relay` | Go relay module |
 | `npm` | `/webui` | React frontend |
+| `npm` | `/webui/tools/openapi` | OpenAPI codegen tool (own lockfile) |
 | `github-actions` | `/` | Actions used in CI workflows |
 | `docker` | `/api` | Base images |
 | `docker` | `/worker` | Base images |
@@ -152,3 +153,54 @@ triggers CI; this requires the repository secrets `CLIENT_ID` and `APP_PRIVATE_K
 to be configured for the App. Because Dependabot-triggered workflows cannot
 access regular repository secrets, these two secrets must also be added to the
 **Dependabot secrets** (Settings > Secrets and variables > Dependabot).
+
+**Pins no ecosystem watches:** the `docker` ecosystems read `Dockerfile`s and
+`docker-compose` reads `compose.yaml`, so an image pinned anywhere else is
+invisible to Dependabot and is bumped by hand:
+
+- **PostgreSQL** — `services.postgres.image` in `.github/workflows/api.yml`,
+  `e2e.yml` and `webui-e2e.yml`, plus `PG_IMAGE` in
+  `scripts/run_webui_e2e.sh`. Follows the `db` image in `compose.yaml`. The
+  scratch-Postgres `docker run` example in `api/tests/integration/README.md`
+  carries the same `postgres:<minor>` tag as `compose.yaml` and is bumped in
+  the same PR — a developer-facing example, not a CI pin: no gate reads it, so
+  it drifts unnoticed (#2906).
+- **SeaweedFS** — the `docker run` line in `api.yml`'s `live-s3` job. Follows
+  the `seaweedfs` image in `compose.yaml`.
+
+**PostgreSQL: CI runs the minor the deployment runs** (#2755). `compose.yaml`
+pins an explicit minor rather than the floating `postgres:18`, so a new minor
+arrives as a Dependabot `docker-compose` PR instead of silently on the next
+`docker compose pull`. That PR is where the four CI references above are
+re-pinned, by hand, to the same minor's Debian digest — CI and the deployment
+move together, in one reviewed change. Read the digest for the new minor from
+the registry (`docker buildx imagetools inspect postgres:<minor>`) and the date
+from Docker Hub's `tag_last_pushed` for that tag — the field
+`scripts/supply_chain_cooldown.py` reads, not the
+`org.opencontainers.image.created` annotation `imagetools` prints, which is the
+upstream build time and predates the push. Keep the
+`# postgres:<minor> (Debian; pushed <date>, outside the cooldown)` comment
+truthful: the 7-day cooldown (Section 3) applies to these hand-maintained pins
+exactly as it does to the automated ones.
+
+**SeaweedFS: the CI pin is the tag's image-index digest** (#2904). A new version
+arrives as a Dependabot `docker-compose` PR against `compose.yaml`, and the
+`live-s3` `docker run` is re-pinned by hand in that same PR. Resolve the new tag
+to its **top-level image-index digest**, never a per-platform one — the amd64
+entry pulls and passes CI on the runner while silently pinning that single
+architecture. A `HEAD` of
+`https://registry-1.docker.io/v2/chrislusf/seaweedfs/manifests/<tag>`, with an
+anonymous pull token from `auth.docker.io`, returns it as
+`docker-content-digest`, and the accompanying `content-type`
+(`application/vnd.oci.image.index.v1+json`) is the proof of kind. Cross-check
+against Docker Hub's tags API
+(`https://hub.docker.com/v2/repositories/chrislusf/seaweedfs/tags/<tag>`), whose
+`digest` is that same index digest while the per-platform digests it lists under
+`images` all differ from it; resolving the *outgoing* tag the same way must
+return the pin being replaced, byte for byte — that is what proves the method
+yields the same kind of digest. Take the cooldown date from that response's
+`tag_last_pushed` — the same field as above — and check it against the 7-day
+window (Section 3). Re-pin the digest and the
+`# chrislusf/seaweedfs:<tag> (pushed <date>, outside the cooldown)` comment
+above the `docker run` in one change: the version and date in that comment are
+what a later reader checks the pin against.

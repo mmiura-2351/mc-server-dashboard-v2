@@ -58,6 +58,7 @@ from mc_server_dashboard_api.servers.application.groups import (
     RenameGroup,
 )
 from mc_server_dashboard_api.servers.domain.errors import (
+    CommunityNotFoundError,
     GroupAttachmentNotFoundError,
     GroupNameAlreadyExistsError,
     GroupNotFoundError,
@@ -140,6 +141,10 @@ async def create_group(
         raise _unprocessable("invalid_group_name") from exc
     except GroupNameAlreadyExistsError as exc:
         raise _conflict("group_name_exists") from exc
+    except CommunityNotFoundError as exc:
+        # A racer deleted the community between the gate's membership read and
+        # the INSERT (issue #2924); answer what the gate itself would have.
+        raise _not_found() from exc
     await _record(recorder, ops.GROUP_CREATE, authorized, community_id, group.id.value)
     return GroupResponse.from_entity(group)
 

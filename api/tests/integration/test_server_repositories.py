@@ -49,13 +49,22 @@ from mc_server_dashboard_api.servers.application.manage_server import (
     ReadServer,
     UpdateServer,
 )
+from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
+    CommunityNotFoundError,
     PortAlreadyTakenError,
     ServerNameAlreadyExistsError,
     ServerNotFoundError,
 )
 from mc_server_dashboard_api.servers.domain.ports import PortRange
-from mc_server_dashboard_api.servers.domain.value_objects import CommunityId
+from mc_server_dashboard_api.servers.domain.value_objects import (
+    CommunityId,
+    DesiredState,
+    ObservedState,
+    ServerId,
+    ServerName,
+    ServerType,
+)
 from tests.integration.migrate import downgrade_base, upgrade_head
 from tests.servers.fakes import (
     FakeBackupArchiveStore,
@@ -584,3 +593,83 @@ async def test_backup_retention_round_trip_and_clear(engine: AsyncEngine) -> Non
         loaded = await uow.servers.get_by_id(created.id)
     assert loaded is not None
     assert loaded.backup_retention is None
+
+
+# --- the create INSERT's parent community, deleted mid-create (issue #2940) ---
+
+
+def _server_entity(community_id: uuid.UUID) -> Server:
+    return Server(
+        id=ServerId.new(),
+        community_id=CommunityId(community_id),
+        name=ServerName("survival"),
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type=ServerType.VANILLA,
+        config={},
+        desired_state=DesiredState.STOPPED,
+        observed_state=ObservedState.STOPPED,
+        observed_at=None,
+        assigned_worker_id=None,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+
+
+async def test_commit_after_concurrent_community_delete_reports_not_found(
+    engine: AsyncEngine,
+) -> None:
+    # fk_server_community_id_community is ON DELETE CASCADE, so it is violable
+    # only by a racer deleting the community between the request's read of it and
+    # this INSERT. The row is staged with ``session.add``, so -- unlike the group
+    # create's explicit flush (#2924) -- the statement that emits it is the unit
+    # of work's ``commit``, and that is the wrap the translation has to be reached
+    # through. Live FK, so this pins the real constraint name and the real site
+    # rather than a fake's opinion of either.
+    community_id = await _seed_community(engine)
+    factory = create_session_factory(engine)
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("DELETE FROM community WHERE id = :id"), {"id": community_id}
+        )
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.servers.add(_server_entity(community_id))
+        with pytest.raises(CommunityNotFoundError):
+            await uow.commit()
+
+
+async def test_create_server_reports_a_concurrent_community_delete_as_not_found(
+    engine: AsyncEngine,
+) -> None:
+    # The reachable path. CreateServer's pre-reads inside the transaction are the
+    # taken-port and taken-slug sets, both deployment-wide rather than
+    # community-scoped, so neither notices the missing community and nothing
+    # short-circuits the INSERT: the use case really does reach the commit and
+    # depends on the translation for its typed error. The community pre-read that
+    # would have caught this is the authorization gate, one layer up.
+    community_id = await _seed_community(engine)
+    factory = create_session_factory(engine)
+    create = CreateServer(
+        uow=ServersUnitOfWork(factory),
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+        file_store=FakeFileStore(),
+        port_range=PortRange(start=25565, end=25664),
+    )
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("DELETE FROM community WHERE id = :id"), {"id": community_id}
+        )
+
+    with pytest.raises(CommunityNotFoundError):
+        await create(
+            community_id=CommunityId(community_id),
+            name="survival",
+            mc_edition="java",
+            mc_version="1.21.1",
+            server_type="vanilla",
+            config={},
+        )

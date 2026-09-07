@@ -979,3 +979,63 @@ async def test_import_plugins_takes_lifecycle_lock() -> None:
     assert (
         ev.index((server.id, "acquire")) < insert_at < ev.index((server.id, "release"))
     )
+
+
+# --- no directory at the root server.properties path (issue #2869) ---------
+#
+# Import is the sixth door to the directory #2812 describes, and the only one
+# that runs on a server with no working set to compare against: the archive
+# publishes verbatim, so a member named ``server.properties/x`` would stand a
+# DIRECTORY where the platform publishes a file. Same refusal the other five
+# give -- 422 ``platform_managed_path`` -- raised in the pre-commit validate
+# pass, so a hostile archive leaves NO server row behind (the #277 posture).
+
+
+async def test_import_member_under_root_properties_creates_no_row() -> None:
+    community = uuid.uuid4()
+    dst_uow, dst_store = FakeUnitOfWork(), FakeFileStore()
+    imp = ImportServer(
+        create_server=_create_server(dst_uow, dst_store), file_store=dst_store
+    )
+    archive = _zip(
+        {
+            EXPORT_METADATA_FILENAME: _metadata(),
+            "server.properties/notes.txt": b"X",
+        }
+    )
+
+    with pytest.raises(InvalidFilePathError) as caught:
+        await imp(
+            community_id=CommunityId(community),
+            name="fresh",
+            content=archive,
+        )
+    assert caught.value.reason == "platform_managed_path"
+    # Refused BEFORE the row is created, like every other archive property
+    # (zip-slip / size / entry count): no row, nothing written (#277).
+    assert len(dst_uow.servers.by_id) == 0
+    assert dst_store.files == {}
+
+
+async def test_import_member_under_a_nested_properties_dir_is_published() -> None:
+    # Only the ROOT name is guarded. The archive root IS the server root, so the
+    # member path is already the joined target; a member under a NESTED
+    # ``server.properties`` directory is ordinary user data and still imports.
+    community = uuid.uuid4()
+    dst_uow, dst_store = FakeUnitOfWork(), FakeFileStore()
+    imp = ImportServer(
+        create_server=_create_server(dst_uow, dst_store), file_store=dst_store
+    )
+    archive = _zip(
+        {
+            EXPORT_METADATA_FILENAME: _metadata(),
+            "backups/server.properties/notes.txt": b"X",
+        }
+    )
+
+    await imp(
+        community_id=CommunityId(community),
+        name="fresh",
+        content=archive,
+    )
+    assert dst_store.files["backups/server.properties/notes.txt"] == b"X"

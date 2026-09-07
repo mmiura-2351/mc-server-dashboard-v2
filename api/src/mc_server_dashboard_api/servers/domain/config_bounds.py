@@ -13,7 +13,11 @@ standard-library-only checks before staging:
   approaches that, while a pathologically nested payload is rejected;
 - a no-null rule: a JSON ``null`` is never a meaningful ``server.properties``-style
   value, and a null value is the shape that enabled the key-presence smuggle fixed
-  in PR #148, so any ``null`` (at any depth) is rejected.
+  in PR #148, so any ``null`` (at any depth) is rejected;
+- a no-lone-surrogate rule: a JSON string may escape an unpaired surrogate
+  (``"\\ud800"``), which Python decodes into a code point that no UTF-8 encoder
+  accepts — so such a value can neither be sized here nor stored in the column, and
+  is rejected outright rather than blowing up mid-write (issue #2838).
 
 Pure (no I/O, no framework types) so the bound is deterministic and unit-testable
 in isolation (TESTING.md Section 4). The edge maps the errors to a typed 422.
@@ -47,14 +51,23 @@ class ConfigNullValueError(ServerError):
     """The ``config`` contains a JSON ``null`` value (at any depth)."""
 
 
+class ConfigLoneSurrogateError(ServerError):
+    """The ``config`` contains an unpaired surrogate code point (at any depth)."""
+
+
 def validate_config(config: Any) -> dict[str, Any]:
     """Validate a client-supplied config blob, returning it unchanged if sound.
 
     Raises :class:`ConfigInvalidShapeError` when the top level is not an object or
     the structure nests beyond :data:`MAX_CONFIG_DEPTH`,
-    :class:`ConfigNullValueError` when any value is ``null``, and
-    :class:`ConfigTooLargeError` when its JSON serialization exceeds
+    :class:`ConfigNullValueError` when any value is ``null``,
+    :class:`ConfigLoneSurrogateError` when any key or value carries an unpaired
+    surrogate, and :class:`ConfigTooLargeError` when its JSON serialization exceeds
     :data:`MAX_CONFIG_BYTES`.
+
+    The surrogate rule is checked before the size ceiling, so a blob that breaks
+    both is refused as a lone surrogate: text that no UTF-8 encoder accepts has no
+    serialized size to compare against the ceiling in the first place.
     """
 
     if not isinstance(config, dict):
@@ -63,6 +76,8 @@ def validate_config(config: Any) -> dict[str, Any]:
         raise ConfigInvalidShapeError("config nests too deeply")
     if _has_null(config):
         raise ConfigNullValueError("config may not contain a null value")
+    if _has_lone_surrogate(config):
+        raise ConfigLoneSurrogateError("config may not contain an unpaired surrogate")
     # ``ensure_ascii=False`` so multibyte values are sized by their real UTF-8
     # byte length rather than escaped ASCII, matching what the column stores.
     size = len(json.dumps(config, ensure_ascii=False).encode("utf-8"))
@@ -80,6 +95,29 @@ def _has_null(value: Any) -> bool:
         return any(_has_null(v) for v in value.values())
     if isinstance(value, list):
         return any(_has_null(v) for v in value)
+    return False
+
+
+def _has_lone_surrogate(value: Any) -> bool:
+    """True if any string in ``value`` carries a surrogate code point.
+
+    Tested by code point rather than by catching the encoder, so the refusal names
+    this condition and cannot absorb an unrelated failure. Keys are inspected as
+    well as values: a JSON object key can carry the escape just as a value can.
+
+    Every surrogate reaching here is unpaired — a well-formed escape pair is
+    already one astral character by the time ``json`` has decoded the request body,
+    and Python strings hold code points, not UTF-16 units.
+    """
+
+    if isinstance(value, str):
+        return any("\ud800" <= char <= "\udfff" for char in value)
+    if isinstance(value, dict):
+        return any(
+            _has_lone_surrogate(k) or _has_lone_surrogate(v) for k, v in value.items()
+        )
+    if isinstance(value, list):
+        return any(_has_lone_surrogate(v) for v in value)
     return False
 
 
