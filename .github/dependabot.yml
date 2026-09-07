@@ -103,6 +103,35 @@ updates:
           - minor
           - patch
 
+  # --- OpenAPI codegen tool (webui/tools/openapi/) ---
+  # A standalone npm project with its own package.json and lockfile,
+  # deliberately not a webui workspace (see its package.json description).
+  # Dependabot does not recurse into nested lockfiles, so the /webui entry
+  # above never reaches it and it needs its own entry (#2910).
+  - package-ecosystem: npm
+    directory: /webui/tools/openapi
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps):"
+    labels:
+      - dependencies
+    cooldown:
+      default-days: 7
+    groups:
+      production:
+        dependency-type: production
+        update-types:
+          - minor
+          - patch
+      dev:
+        dependency-type: development
+        update-types:
+          - minor
+          - patch
+
   # --- GitHub Actions ---
   - package-ecosystem: github-actions
     directory: /

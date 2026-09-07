@@ -78,7 +78,13 @@ class PluginRepository(abc.ABC):
 
     @abc.abstractmethod
     async def update(self, plugin: ServerPlugin) -> None:
-        """Full entity update of the plugin row."""
+        """Full entity update of the plugin row; the UPDATE runs inside this call.
+
+        Not a staged write: ``uq_server_plugin_server_rel`` is enforced here
+        rather than at the unit of work's commit, so a racer that took the
+        target ``rel_path`` between the caller's collision pre-check and this
+        write raises :class:`PluginAlreadyExistsError` (issue #2612).
+        """
 
     @abc.abstractmethod
     async def list_catalog_plugins(self, server_id: ServerId) -> list[ServerPlugin]:

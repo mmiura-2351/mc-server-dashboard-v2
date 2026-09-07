@@ -109,6 +109,23 @@ def test_register_returns_201_and_user_without_hash() -> None:
     assert "argon2-secret-hash" not in resp.text
 
 
+def test_register_declares_no_store() -> None:
+    # The 201 body is the new user — per-user data, so no cache may keep it where
+    # a second client could be served it (issues #2587, #2763).
+    fake = _FakeRegisterUser(result=_user())
+    client = _client(fake)
+    resp = client.post(
+        "/api/users",
+        json={
+            "username": "alice",
+            "email": "alice@example.com",
+            "password": _VALID_PASSWORD,
+        },
+    )
+    assert resp.status_code == 201
+    assert resp.headers["cache-control"] == "no-store"
+
+
 def test_register_duplicate_username_returns_409() -> None:
     fake = _FakeRegisterUser(error=UsernameAlreadyExistsError("alice"))
     client = _client(fake)

@@ -55,6 +55,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     BackupUnsettledError,
     FileTooLargeError,
     InvalidBackupArchiveError,
+    InvalidFilePathError,
     ServerNotFoundError,
     ServerNotStoppedError,
 )
@@ -1161,6 +1162,60 @@ def test_validate_accepts_safe_archive_within_caps() -> None:
     content = _targz({"server.properties": b"k=v", "world/level.dat": b"w"})
     # No raise: a benign archive within both the entry and decompressed caps.
     _validate_backup_archive(content, max_entries=10, max_decompressed_bytes=1024)
+
+
+# --- no directory at the root server.properties path (issue #2869) ---------
+#
+# An uploaded archive is restorable through the SAME restore flow as a created
+# one, and the restore republishes its members verbatim as ``current/`` (member
+# names are already server-root-relative: the packer uses ``arcname=child.name``).
+# So a member named ``server.properties/x`` plants the directory #2812 describes,
+# and the restore's own platform-key re-apply is what then fails on it. The
+# extraction lives in Storage, below this seam, so the archive is refused HERE --
+# before it is stored -- the way every other hostile shape is.
+
+
+def test_validate_rejects_member_under_root_properties() -> None:
+    content = _targz({"server.properties/notes.txt": b"X"})
+    with pytest.raises(InvalidFilePathError) as caught:
+        _validate_backup_archive(content, max_entries=10)
+    assert caught.value.reason == "platform_managed_path"
+
+
+def test_validate_rejects_a_directory_member_at_root_properties() -> None:
+    import tarfile
+
+    info = tarfile.TarInfo(name="server.properties/")
+    info.type = tarfile.DIRTYPE
+    content = _targz_with_member(info)
+    with pytest.raises(InvalidFilePathError) as caught:
+        _validate_backup_archive(content, max_entries=10)
+    assert caught.value.reason == "platform_managed_path"
+
+
+def test_validate_accepts_a_member_under_a_nested_properties_dir() -> None:
+    # Only the ROOT name is guarded: a ``server.properties`` directory deeper in
+    # the tree is ordinary user data and must still restore.
+    content = _targz({"backups/server.properties/notes.txt": b"X"})
+    # No raise.
+    _validate_backup_archive(content, max_entries=10)
+
+
+async def test_upload_rejects_member_under_root_properties_before_storing() -> None:
+    server = _at_rest()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    archive = FakeBackupArchiveStore()
+    uow = FakeUnitOfWork(servers=repo)
+    with pytest.raises(InvalidFilePathError) as caught:
+        await UploadBackup(uow=uow, backup_store=archive, clock=FakeClock(_NOW))(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            content=_targz({"server.properties/notes.txt": b"X"}),
+            created_by=uuid.uuid4(),
+        )
+    assert caught.value.reason == "platform_managed_path"
+    assert archive.stored == []
 
 
 async def test_upload_rejects_decompression_bomb_before_storing() -> None:

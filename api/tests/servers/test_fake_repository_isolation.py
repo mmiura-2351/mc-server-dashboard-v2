@@ -38,6 +38,17 @@ nothing in the integrity map names the constraint, it raises the untranslated
 caller meets, and modelling it as anything friendlier would invent a production
 behaviour that does not exist.
 
+A fake can only refuse what it can see, and where it cannot the omission is
+stated rather than left to read as an oversight (#2923). Its own rows carry the
+UNIQUEs and the foreign keys whose parent it holds, so those are modelled; a
+foreign key onto a row another fake owns is not — ``FakeGroupRepository`` holds
+neither the ``server`` its ``attach`` names nor the ``community`` its ``add``
+names, so ``fk_server_group_server_id_server`` and
+``fk_player_group_community_id_community`` stay forgiving there, both by the same
+decision. In a fake-driven test those two parents are asserted one layer up, by
+the use case's own pre-read (``AttachGroup``'s ``_require_server``, the route's
+authorization gate for the community), which is the only place that can see them.
+
 ``FakeGameSessionRepository`` is absent on purpose: ``GameSession`` is
 ``frozen=True``, so no mutation can cross its boundary in either direction and
 there is nothing for a copy to protect.
@@ -45,13 +56,19 @@ there is nothing for a copy to protect.
 ``FakeFileStore`` is not a repository, but it is a fake standing in for an
 adapter and the forgiving direction is the same hazard (#2867): where the real
 seam REFUSES, a fake that answers lets a use case that depends on the refusal
-pass here and fail in production. Its pins therefore live here too.
+pass here and fail in production. Its pins therefore live here too. What it
+CANNOT describe is forgiving the same way (#2886): a store with no notion of a
+directory answers every listing entry ``is_dir=False`` and forgets a created
+directory, so a caller that branches on the flag, enumerates subdirectories, or
+acts on what it just created is exercised against a world production never
+serves.
 """
 
 from __future__ import annotations
 
 import datetime as dt
 import uuid
+from dataclasses import replace
 
 import pytest
 from sqlalchemy.exc import IntegrityError
@@ -64,6 +81,7 @@ from mc_server_dashboard_api.servers.domain.backup import (
     BackupSource,
 )
 from mc_server_dashboard_api.servers.domain.errors import (
+    GroupNameAlreadyExistsError,
     GroupNotFoundError,
     PluginAlreadyExistsError,
     ResourcePackInUseError,
@@ -313,11 +331,13 @@ async def test_plugin_readers_hand_out_copies() -> None:
 # -- FakeGroupRepository --
 
 
-def _group() -> PlayerGroup:
+def _group(
+    *, community_id: CommunityId | None = None, name: str = "ops"
+) -> PlayerGroup:
     return PlayerGroup(
         id=GroupId(uuid.uuid4()),
-        community_id=CommunityId(uuid.uuid4()),
-        name=GroupName("ops"),
+        community_id=community_id or CommunityId(uuid.uuid4()),
+        name=GroupName(name),
         kind=GroupKind.OP,
         players=[Player(uuid.uuid4(), "steve")],
     )
@@ -391,6 +411,102 @@ async def test_group_save_on_a_missing_row_without_players_reports_not_found() -
         await repo.save(group)
 
     assert repo.by_id == {}
+
+
+async def test_group_add_of_a_duplicate_name_reports_already_exists() -> None:
+    # ``uq_player_group_community_kind_name`` refuses a second group holding one
+    # community's ``(kind, name)``, and ``SqlAlchemyGroupRepository.add`` flushes
+    # the ``player_group`` row itself, so the refusal lands inside the call as
+    # ``GroupNameAlreadyExistsError`` (#2000; that translation is pinned in
+    # ``tests/servers/test_unit_of_work_translation.py::
+    # test_group_add_translates_name_violation_at_flush``). Keying on ``group.id``
+    # alone was the forgiving direction: two groups sharing the triple coexisted
+    # here, a state production cannot hold (#2923).
+    repo = FakeGroupRepository()
+    first = _group()
+    await repo.add(first)
+
+    with pytest.raises(GroupNameAlreadyExistsError):
+        await repo.add(_group(community_id=first.community_id))
+
+    assert list(repo.by_id) == [first.id]
+
+
+async def test_group_add_of_a_stored_id_is_refused() -> None:
+    # ``id`` alone is ``pk_player_group`` (migration 0012), so ``add`` is an
+    # INSERT and never an upsert: a second row under a stored id duplicates the
+    # key and PostgreSQL refuses it at the same explicit flush that carries the
+    # name UNIQUE above. No map entry names the PK, so
+    # ``SqlAlchemyGroupRepository.add`` re-raises the ``IntegrityError``
+    # untranslated -- a 500 (that fall-through is pinned in
+    # ``tests/servers/test_unit_of_work_translation.py::
+    # test_group_add_reraises_unknown_violation_untranslated``). Keying the row in
+    # regardless made the fake an upsert, the forgiving direction, and left a
+    # locally checkable divergence unstated while its two neighbours were
+    # modelled. ``CreateGroup`` mints ``GroupId.new()``, which is what keeps the
+    # hole latent rather than live.
+    #
+    # Same reasoning, same shim and same untranslated error as
+    # ``test_resource_pack_second_assignment_for_one_server_is_refused`` (#2858),
+    # including the measurement recorded there: on PostgreSQL 18 the ORM raises
+    # for every duplicate shape rather than short-circuiting with a
+    # ``FlushError``, and this adapter stages its row the same way -- a fresh
+    # model instance followed by a flush the method owns.
+    repo = FakeGroupRepository()
+    first = _group()
+    await repo.add(first)
+
+    # A different name, so the row is refused by its key rather than by the
+    # UNIQUE the test above pins.
+    with pytest.raises(IntegrityError) as raised:
+        await repo.add(replace(first, name=GroupName("second"), players=[]))
+
+    # Read the name back through the adapter's own accessor, as the pin for the
+    # assignment PK does: it is the whole payload of the shim, and a caller that
+    # translates reaches it this way.
+    assert _constraint_name(raised.value) == "pk_player_group"
+    # The stored row stands; the refused INSERT wrote nothing over it.
+    assert repo.by_id[first.id].name == GroupName("ops")
+
+
+async def test_group_save_onto_a_taken_name_reports_already_exists() -> None:
+    # The same UNIQUE on the rename path: ``save``'s player-row DELETE autoflushes
+    # the pending name UPDATE, so a racer that took the target triple between the
+    # caller's pre-check and the write is refused inside ``save`` too (#2000).
+    # Pinned against the live UNIQUE in
+    # ``tests/integration/test_group_repositories.py::
+    # test_save_after_concurrent_name_take_reports_name_exists``; modelled here so
+    # a use-case test driving the fake sees the same refusal.
+    repo = FakeGroupRepository()
+    community = CommunityId(uuid.uuid4())
+    moving = _group(community_id=community)
+    repo.seed(moving)
+    repo.seed(_group(community_id=community, name="taken"))
+
+    moving.name = GroupName("taken")
+    with pytest.raises(GroupNameAlreadyExistsError):
+        await repo.save(moving)
+
+    assert repo.by_id[moving.id].name == GroupName("ops")
+
+
+async def test_group_attach_to_a_missing_group_reports_not_found() -> None:
+    # ``attach`` executes its INSERT rather than staging it, so
+    # ``fk_server_group_group_id_player_group`` is refused inside the call and
+    # translated to ``GroupNotFoundError`` -- the very error the use case's
+    # pre-read raises, for a group a racer deleted just after it (#2612). Pinned
+    # against the live FK in ``tests/integration/test_group_repositories.py::
+    # test_attach_after_a_concurrent_group_delete_reports_not_found``.
+    #
+    # The row's other FK, ``fk_server_group_server_id_server``, is the half this
+    # fake cannot see (see the module docstring) and is deliberately left
+    # forgiving, so this pin says nothing about it.
+    repo = FakeGroupRepository()
+
+    with pytest.raises(GroupNotFoundError):
+        await repo.attach(GroupId(uuid.uuid4()), _SERVER)
+
+    assert repo.attachments == set()
 
 
 # -- FakeScheduleRepository / FakeScheduleRunRepository --
@@ -640,4 +756,76 @@ async def test_file_store_list_dir_on_the_root_is_empty_not_a_miss(root: str) ->
     assert (
         await store.list_dir(community_id=_COMMUNITY, server_id=_SERVER, rel_path=root)
         == []
+    )
+
+
+async def test_file_store_list_dir_surfaces_a_subdirectory() -> None:
+    # ``tests/storage/test_port_contract.py::test_list_dir_lists_entries`` pins this
+    # listing against BOTH live backends: the parent of a nested file is one entry
+    # with ``is_dir=True`` and size 0 -- fs lstats the real directory
+    # (``_list_entries``), the object backend collapses the shared key prefix
+    # (``_entries_at_level``) -- listed alongside the direct files. A fake that
+    # drops every nested path and hardcodes ``is_dir=False`` answers ``[]`` here
+    # and never produces a directory at all (#2886), which is the same forgiving
+    # direction #2885 closed: a caller that branches on ``is_dir``, or that
+    # enumerates subdirectories, passes here for a reason production cannot
+    # reproduce.
+    store = FakeFileStore()
+    store.files["world/level.dat"] = b"abc"
+    store.files["server.properties"] = b"k=v"
+
+    entries = await store.list_dir(
+        community_id=_COMMUNITY, server_id=_SERVER, rel_path="."
+    )
+
+    assert {(e.name, e.is_dir) for e in entries} == {
+        ("world", True),
+        ("server.properties", False),
+    }
+    world = next(e for e in entries if e.name == "world")
+    assert world.size == 0
+
+
+async def test_file_store_make_dir_creates_a_directory_later_calls_see() -> None:
+    # A ``make_dir`` that records nothing leaves the directory non-existent for
+    # every later call, and since #2885's refusal that is a hard
+    # ``ServerFileNotFoundError`` where production succeeds (#2886). Both backends
+    # make the new directory observable: fs materializes a real one
+    # (``FsStorage._make_dir``), and the object backend anchors the prefix with a
+    # zero-byte ``.dir`` marker that ``_entries_at_level`` hides again
+    # (``tests/storage/test_object_specifics.py``
+    # ``::test_make_dir_writes_marker_and_dir_is_visible``). So the parent lists
+    # it, listing it is EMPTY rather than the miss above, and the name is
+    # occupied.
+    store = FakeFileStore()
+    store.files["server.properties"] = b"k=v"
+
+    await store.make_dir(community_id=_COMMUNITY, server_id=_SERVER, rel_path="plugins")
+
+    root_entries = await store.list_dir(
+        community_id=_COMMUNITY, server_id=_SERVER, rel_path="."
+    )
+    assert ("plugins", True) in {(e.name, e.is_dir) for e in root_entries}
+    assert (
+        await store.list_dir(
+            community_id=_COMMUNITY, server_id=_SERVER, rel_path="plugins"
+        )
+        == []
+    )
+    assert (
+        await store.path_exists(
+            community_id=_COMMUNITY, server_id=_SERVER, rel_path="plugins"
+        )
+        is True
+    )
+
+    # The ROOT is the one path no directory is created UNDER: the object backend
+    # returns before writing a marker (#1944, whose ``//.dir`` key the worker's
+    # safeJoin rejects) and fs's ``exist_ok=True`` mkdir of the snapshot dir
+    # itself is equally a no-op. So the listing must not gain a nameless entry.
+    await store.make_dir(community_id=_COMMUNITY, server_id=_SERVER, rel_path=".")
+
+    assert (
+        await store.list_dir(community_id=_COMMUNITY, server_id=_SERVER, rel_path=".")
+        == root_entries
     )

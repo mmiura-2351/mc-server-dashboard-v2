@@ -47,6 +47,7 @@ import tarfile
 import uuid
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
 from typing import IO
 
 from mc_server_dashboard_api.audit.domain.events import AuditEvent, Outcome
@@ -59,6 +60,7 @@ from mc_server_dashboard_api.servers.application.files import (
     MAX_ARCHIVE_ENTRIES,
     MAX_DECOMPRESSED_BYTES,
     MAX_UPLOAD_BYTES,
+    _refuse_dir_at_root_properties,
 )
 from mc_server_dashboard_api.servers.application.platform_properties import (
     assigned_resource_pack,
@@ -1088,6 +1090,14 @@ class UploadBackup:
     metadata row committed — so an uploaded backup is restorable through the exact
     same restore flow as a created one.
 
+    That last sentence is exactly why the validation also refuses a member named
+    ``server.properties/…`` (:class:`InvalidFilePathError` with
+    ``reason="platform_managed_path"`` -> 422, issue #2869): the restore
+    republishes the members verbatim as ``current/``, so such a member is the
+    operator-supplied route to the directory issue #2812 is about. See
+    :func:`_validate_backup_archive` for why the refusal belongs here rather than
+    at restore.
+
     The caps are fields so a test can inject a tiny cap and trip the guard with a
     small archive; production wiring uses the defaults.
     """
@@ -1296,6 +1306,19 @@ def _validate_backup_archive(
     read, not the (forgeable) member header, so a member that under-reports its size
     cannot slip past. Raises :class:`InvalidBackupArchiveError` (422) on any
     violation.
+
+    One member shape carries its own error instead (issue #2869): the archive's
+    member names ARE the restored working set's rel paths (the packer uses
+    ``arcname=child.name``, and :class:`RestoreBackup` republishes the extraction
+    as ``current/``), so a member named ``server.properties/…`` would stand a
+    DIRECTORY where the platform publishes a file — the #2812 shape, which
+    :meth:`RestoreBackup._reapply_platform_properties` is the first thing to fail
+    on. It is refused HERE, before the archive is stored, because the extraction
+    itself lives in Storage below this seam. The refusal is
+    :class:`InvalidFilePathError` with ``reason="platform_managed_path"`` (422) —
+    the same answer every files-API door gives, rather than an ``invalid_archive``
+    indistinguishable from "not a gzip tar". Only the ROOT name is guarded: a
+    nested ``backups/server.properties/…`` member is ordinary user data.
     """
 
     try:
@@ -1314,6 +1337,13 @@ def _validate_backup_archive(
                     raise InvalidBackupArchiveError(
                         f"unsafe member path: {member.name!r}"
                     )
+                # A directory member materializes AT its own name; a file member
+                # materializes its PARENT on the way (issue #2869).
+                _refuse_dir_at_root_properties(
+                    member.name
+                    if member.isdir()
+                    else str(PurePosixPath(member.name).parent)
+                )
                 if member.isfile():
                     handle = tar.extractfile(member)
                     if handle is not None:

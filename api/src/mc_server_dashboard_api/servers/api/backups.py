@@ -96,6 +96,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     CommandDispatchError,
     FileTooLargeError,
     InvalidBackupArchiveError,
+    InvalidFilePathError,
     InvalidRetentionPolicyError,
     ServerBusyError,
     ServerNotFoundError,
@@ -921,7 +922,15 @@ async def upload_backup(
     The multipart body is buffered with the chunked pre-buffer cap (over-cap -> 413
     before the whole body is materialized); the use case then validates the archive
     (opens + traversal-safe entries) before storing it. A non-archive / unsafe
-    member is 422; an over-cap archive is 413.
+    member is 422 ``invalid_archive``; an over-cap archive is 413.
+
+    **No directory may stand at the root ``server.properties`` path (issue
+    #2869).** A restore republishes the archive's members verbatim as the working
+    set, so a member named ``server.properties/…`` would stand that name as a
+    directory, which the platform's own writes cannot survive. It is refused here,
+    before the archive is stored, as 422 ``platform_managed_path`` — the same
+    answer the files-API doors give. Only the ROOT name is guarded: a nested
+    ``backups/server.properties/…`` member is ordinary user data.
     """
 
     content = await _read_capped_upload(file)
@@ -938,6 +947,12 @@ async def upload_backup(
         raise _too_large() from exc
     except InvalidBackupArchiveError as exc:
         raise _unprocessable("invalid_archive") from exc
+    except InvalidFilePathError as exc:
+        # A member refused by PATH rather than by archive structure: one that would
+        # stand a directory at the root server.properties name on restore (issue
+        # #2869). exc.reason carries platform_managed_path, so the Web UI's switch
+        # on ``reason`` sees the same contract here as on the files-API doors.
+        raise _unprocessable(exc.reason) from exc
     except BackupStorageUnavailableError as exc:
         # The archive validated but the store could not take the write (issue
         # #2378): a transient backend fault, so 503 tells the client the upload is

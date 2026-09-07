@@ -81,15 +81,38 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerType,
     WorkerId,
 )
+from mc_server_dashboard_api.storage.domain.errors import PathTraversalError
+from mc_server_dashboard_api.storage.domain.value_objects import RelPath
 from tests.servers.fakes import FakeControlPlane, FakeUnitOfWork
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 
 
+def _canonical(rel_path: str) -> str:
+    """``rel_path`` as production keys it, through the adapter's own value object.
+
+    ``StorageFileStoreAdapter`` builds a ``RelPath`` from the raw string before
+    every Storage call, and ``RelPath`` normalises away ``.`` components and
+    redundant separators -- so ``"./"`` is the root and ``"world/"``, ``"./world"``
+    and ``"world//"`` are all ``world``. Deciding a directory's existence on the
+    raw string instead refuses those aliases, which is #2887's divergence in the
+    opposite direction: a false red rather than a false green, but an infidelity
+    either way. Reused rather than re-derived, so the fake cannot drift from the
+    rule it is modelling. A traversal rejection is translated exactly as the
+    adapter's ``_rel_path`` translates it, so no storage error crosses back into
+    the servers layer.
+    """
+
+    try:
+        return RelPath(rel_path).value
+    except PathTraversalError as exc:
+        raise InvalidFilePathError(rel_path) from exc
+
+
 class FakeFileStore(FileStore):
     """In-memory authoritative-copy file store keyed by rel_path."""
 
-    def __init__(self, *, strict_dirs: bool = False) -> None:
+    def __init__(self) -> None:
         self.files: dict[str, bytes] = {}
         self.dirs: dict[str, list[FileEntry]] = {}
         self.versions: dict[str, list[str]] = {}
@@ -129,11 +152,6 @@ class FakeFileStore(FileStore):
         # relative symlink), so this is reachable from the product, not only over
         # SSH (issue #2817).
         self.symlink_loops: set[str] = set()
-        # When set, list_dir raises ServerFileNotFoundError for a path that is not
-        # a seeded directory, so the file-vs-dir resolution (delete / rename /
-        # search) can tell a file from a directory; off by default to preserve the
-        # existing browse tests' "unknown dir lists empty" behaviour.
-        self.strict_dirs = strict_dirs
 
     def validate_rel_path(self, rel_path: str) -> None:
         # Mirror the seam's string-level traversal rule (absolute / ".."
@@ -194,9 +212,24 @@ class FakeFileStore(FileStore):
             raise ServerFileNotFoundError(str(server_id.value))
         if self.missing:
             raise ServerFileNotFoundError(str(server_id.value))
-        if self.strict_dirs and rel_path not in self.dirs:
+        path = _canonical(rel_path)
+        # BOTH sides canonical: ``dirs`` keys are typed by hand and carry the same
+        # aliases the lookup does (the root is seeded as ``""`` in one test here
+        # and as ``"."`` in the rest), so normalising only the lookup would leave
+        # an alias-seeded directory unanswerable under the name it resolves to.
+        seeded = {_canonical(key): entries for key, entries in self.dirs.items()}
+        if path != "." and path not in seeded:
+            # A non-root path that is not a seeded directory is a MISS at the real
+            # seam, never an empty listing: gone, a plain file, or reached through
+            # one all raise NotFoundError, which StorageFileStoreAdapter surfaces
+            # as ServerFileNotFoundError (#2394, #2867). The refusal is
+            # unconditional -- a permissive-by-default opt-out is what let the
+            # divergence survive here after #2885 closed it in fakes.py (#2887).
+            # The ROOT is the exemption and still lists, empty included. The #205
+            # posture (an UNPUBLISHED server lists [] for EVERY path) is broader
+            # and deliberately not modelled: this fake has no unpublished state.
             raise ServerFileNotFoundError(str(server_id.value))
-        return self.dirs.get(rel_path, [])
+        return seeded.get(path, [])
 
     async def path_exists(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
@@ -423,6 +456,101 @@ def _server(
 
 def _seed(uow: FakeUnitOfWork, server: Server) -> None:
     uow.servers.seed(server)
+
+
+# --- the fake's own directory contract (issue #2887) -----------------------
+
+
+async def test_file_store_list_dir_on_an_unknown_directory_reports_not_found() -> None:
+    # ``StorageFileStoreAdapter.list_dir`` translates Storage's ``NotFoundError``
+    # into ``ServerFileNotFoundError``, and both backends raise it for a non-root
+    # path that lists nothing -- gone, a plain file, or reached through one
+    # (``FsStorage._list_dir`` via ``_list_entries``, ``ObjectStorage.list_dir``'s
+    # empty-prefix miss). Answering ``[]`` there instead is the forgiving
+    # direction: ``_path_is_dir`` never reaches its not-found fallback, so every
+    # caller that branches file-vs-directory takes the directory branch whatever
+    # the test intended (#2867). Pinned against the live backends in
+    # ``tests/storage/test_port_contract.py``.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.files["world/level.dat"] = b"x"
+
+    with pytest.raises(ServerFileNotFoundError):
+        await store.list_dir(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="nope",
+        )
+
+    # A seeded file is not a directory either, for the same reason.
+    with pytest.raises(ServerFileNotFoundError):
+        await store.list_dir(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="world/level.dat",
+        )
+
+
+@pytest.mark.parametrize("root", ["", ".", "./"])
+async def test_file_store_list_dir_on_the_root_is_empty_not_a_miss(root: str) -> None:
+    # The other half of the same contract: the ROOT always lists, empty included
+    # -- an empty working set is empty, not missing (``ObjectStorage.list_dir``
+    # guards its miss with ``and sub``; the fs backend's listing of the snapshot
+    # root has nothing to miss) -- so the refusal above must not swallow it. EVERY
+    # spelling ``RelPath`` normalises to empty ``parts``, and the empty one is
+    # reachable rather than theoretical: ``?path=`` reaches ``ListDir`` verbatim
+    # (``path: Annotated[str, Query()] = "."`` in servers/api/files.py).
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+
+    assert (
+        await store.list_dir(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path=root,
+        )
+        == []
+    )
+
+
+@pytest.mark.parametrize("alias", ["world", "world/", "./world", "world//"])
+async def test_file_store_list_dir_answers_every_spelling_of_a_directory(
+    alias: str,
+) -> None:
+    # The refusal above must not fire on a path production would have RESOLVED to
+    # a seeded directory. ``StorageFileStoreAdapter`` builds a ``RelPath`` before
+    # every call and ``RelPath`` normalises away ``.`` components and redundant
+    # separators, so all four spellings reach the backends as ``world``. Deciding
+    # on the raw string refuses three of them -- the divergence #2887 closed, in
+    # the opposite direction: a false red rather than a false green, but an
+    # infidelity either way.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    entry = FileEntry(name="level.dat", is_dir=False, size=1)
+    store.dirs["world"] = [entry]
+
+    assert await store.list_dir(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path=alias,
+    ) == [entry]
+
+
+async def test_file_store_list_dir_answers_a_directory_seeded_under_an_alias() -> None:
+    # Both sides are canonicalised, not just the lookup: a ``dirs`` key is typed by
+    # hand too, and this file already seeds the root as ``""`` in one test and as
+    # ``"."`` in the rest. Normalising only the lookup would leave an alias-seeded
+    # directory unanswerable under the name production resolves it to.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    entry = FileEntry(name="level.dat", is_dir=False, size=1)
+    store.dirs["./world/"] = [entry]
+
+    assert await store.list_dir(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="world",
+    ) == [entry]
 
 
 # --- read: state branching -------------------------------------------------
@@ -2460,7 +2588,7 @@ async def test_download_is_dir_false_for_file() -> None:
 
 async def test_delete_file_at_rest_removes_file() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = FakeFileStore(strict_dirs=True)
+    store = FakeFileStore()
     store.files["plugins/old.jar"] = b"x"
     use_case = DeleteFile(uow=_stopped_uow(community, server_id), file_store=store)
 
@@ -2475,7 +2603,7 @@ async def test_delete_file_at_rest_removes_file() -> None:
 
 async def test_delete_directory_at_rest_removes_subtree() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = FakeFileStore(strict_dirs=True)
+    store = FakeFileStore()
     store.dirs["world"] = [FileEntry(name="level.dat", is_dir=False, size=1)]
     use_case = DeleteFile(uow=_stopped_uow(community, server_id), file_store=store)
 
@@ -2490,7 +2618,7 @@ async def test_delete_directory_at_rest_removes_subtree() -> None:
 
 async def test_delete_missing_is_file_not_found() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = FakeFileStore(strict_dirs=True)  # neither a known dir nor a file
+    store = FakeFileStore()  # neither a known dir nor a file
     use_case = DeleteFile(uow=_stopped_uow(community, server_id), file_store=store)
 
     with pytest.raises(ServerFileNotFoundError):
@@ -2503,7 +2631,7 @@ async def test_delete_missing_is_file_not_found() -> None:
 
 async def test_delete_root_is_invalid_path() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = FakeFileStore(strict_dirs=True)
+    store = FakeFileStore()
     use_case = DeleteFile(uow=_stopped_uow(community, server_id), file_store=store)
 
     with pytest.raises(InvalidFilePathError):
@@ -2516,7 +2644,7 @@ async def test_delete_root_is_invalid_path() -> None:
 
 async def test_delete_running_is_unsettled() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = FakeFileStore(strict_dirs=True)
+    store = FakeFileStore()
     store.files["f"] = b"x"
     use_case = DeleteFile(uow=_running_uow(community, server_id), file_store=store)
 
@@ -2541,7 +2669,7 @@ async def test_delete_leaf_symlink_dispatches_to_delete_file() -> None:
     """
 
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = FakeFileStore(strict_dirs=True)
+    store = FakeFileStore()
     store.symlink_leaves.add("alias")
     use_case = DeleteFile(uow=_stopped_uow(community, server_id), file_store=store)
 
@@ -2564,7 +2692,7 @@ async def test_delete_through_an_intermediate_symlink_still_refuses() -> None:
     """
 
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = FakeFileStore(strict_dirs=True)
+    store = FakeFileStore()
     store.symlink_through.add("alias/inner")
     use_case = DeleteFile(uow=_stopped_uow(community, server_id), file_store=store)
 
@@ -2592,7 +2720,7 @@ async def test_delete_of_a_symlink_loop_is_still_not_found() -> None:
     """
 
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = FakeFileStore(strict_dirs=True)
+    store = FakeFileStore()
     store.symlink_loops.add("loop")
     use_case = DeleteFile(uow=_stopped_uow(community, server_id), file_store=store)
 
@@ -2615,7 +2743,7 @@ async def test_rename_of_a_symlink_loop_source_is_still_not_found() -> None:
     """
 
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = FakeFileStore(strict_dirs=True)
+    store = FakeFileStore()
     store.symlink_loops.add("loop")
     use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
 
@@ -2666,7 +2794,7 @@ class _BodyReadTrapFileStore(FakeFileStore):
 
 async def test_delete_file_resolves_its_kind_without_reading_the_body() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = _BodyReadTrapFileStore(strict_dirs=True)
+    store = _BodyReadTrapFileStore()
     store.files["world/region.mca"] = b"pretend these are gigabytes"
     use_case = DeleteFile(uow=_stopped_uow(community, server_id), file_store=store)
 
@@ -2744,7 +2872,7 @@ async def test_make_dir_root_path_is_invalid(path: str) -> None:
 
 async def test_rename_at_rest_moves_file() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = FakeFileStore(strict_dirs=True)
+    store = FakeFileStore()
     store.files["old.txt"] = b"payload"
     use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
 
@@ -2761,7 +2889,7 @@ async def test_rename_at_rest_moves_file() -> None:
 
 async def test_rename_file_resolves_its_kind_without_reading_the_body() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = _BodyReadTrapFileStore(strict_dirs=True)
+    store = _BodyReadTrapFileStore()
     store.files["world/region.mca"] = b"pretend these are gigabytes"
     use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
 
@@ -2777,7 +2905,7 @@ async def test_rename_file_resolves_its_kind_without_reading_the_body() -> None:
 
 async def test_rename_missing_source_is_file_not_found() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = FakeFileStore(strict_dirs=True)
+    store = FakeFileStore()
     use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
 
     with pytest.raises(ServerFileNotFoundError):
@@ -2791,7 +2919,7 @@ async def test_rename_missing_source_is_file_not_found() -> None:
 
 async def test_rename_existing_destination_is_conflict() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = FakeFileStore(strict_dirs=True)
+    store = FakeFileStore()
     store.files["old.txt"] = b"a"
     store.files["taken.txt"] = b"b"
     use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
@@ -2811,7 +2939,7 @@ async def test_rename_existing_destination_is_conflict() -> None:
 
 async def test_rename_traversal_path_is_invalid() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = FakeFileStore(strict_dirs=True)
+    store = FakeFileStore()
     use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
 
     with pytest.raises(InvalidFilePathError):
@@ -2825,7 +2953,7 @@ async def test_rename_traversal_path_is_invalid() -> None:
 
 async def test_rename_running_is_unsettled() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = FakeFileStore(strict_dirs=True)
+    store = FakeFileStore()
     store.files["old.txt"] = b"x"
     use_case = RenameFile(uow=_running_uow(community, server_id), file_store=store)
 
@@ -2850,7 +2978,7 @@ def test_rename_docstring_notes_atomic_rename() -> None:
 
 async def test_rename_dir_at_rest_moves_directory() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = FakeFileStore(strict_dirs=True)
+    store = FakeFileStore()
     store.dirs["old_world"] = [FileEntry(name="level.dat", is_dir=False, size=4)]
     store.files["old_world/level.dat"] = b"data"
     use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
@@ -2868,7 +2996,7 @@ async def test_rename_dir_at_rest_moves_directory() -> None:
 
 async def test_rename_dir_missing_source_is_not_found() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = FakeFileStore(strict_dirs=True)
+    store = FakeFileStore()
     use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
 
     with pytest.raises(ServerFileNotFoundError):
@@ -2882,7 +3010,7 @@ async def test_rename_dir_missing_source_is_not_found() -> None:
 
 async def test_rename_dir_existing_destination_is_conflict() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = FakeFileStore(strict_dirs=True)
+    store = FakeFileStore()
     store.dirs["old_world"] = [FileEntry(name="level.dat", is_dir=False, size=4)]
     store.dirs["taken"] = [FileEntry(name="x.dat", is_dir=False, size=1)]
     use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
@@ -2899,7 +3027,7 @@ async def test_rename_dir_existing_destination_is_conflict() -> None:
 
 async def test_rename_dir_self_is_noop() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = FakeFileStore(strict_dirs=True)
+    store = FakeFileStore()
     store.dirs["world"] = [FileEntry(name="level.dat", is_dir=False, size=4)]
     use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
 
@@ -2919,7 +3047,7 @@ async def test_rename_dir_self_is_noop() -> None:
 def _search_store() -> FakeFileStore:
     """A small two-level tree for the search walk."""
 
-    store = FakeFileStore(strict_dirs=True)
+    store = FakeFileStore()
     store.dirs["."] = [
         FileEntry(name="server.properties", is_dir=False, size=3),
         FileEntry(name="config", is_dir=True, size=0),
@@ -3056,7 +3184,7 @@ class _VanishingDirFileStore(FakeFileStore):
     """
 
     def __init__(self, victim: str) -> None:
-        super().__init__(strict_dirs=True)
+        super().__init__()
         self._victim = victim
 
     async def list_dir(
@@ -3122,7 +3250,7 @@ async def test_search_surfaces_a_subdirectory_it_cannot_list() -> None:
             )
 
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = _UnreadableDirFileStore(strict_dirs=True)
+    store = _UnreadableDirFileStore()
     store.dirs["."] = [FileEntry(name="config", is_dir=True, size=0)]
     use_case = SearchFiles(uow=_stopped_uow(community, server_id), file_store=store)
 
@@ -3155,7 +3283,7 @@ async def test_search_skips_a_subdirectory_whose_listing_is_refused() -> None:
             )
 
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = _EscapingDirFileStore(strict_dirs=True)
+    store = _EscapingDirFileStore()
     store.dirs["."] = [
         FileEntry(name="config", is_dir=True, size=0),
         FileEntry(name="plugins", is_dir=True, size=0),
@@ -3199,7 +3327,7 @@ async def test_search_by_name_returns_a_dirent_no_download_can_fetch() -> None:
             )
 
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = _RefusingLeafFileStore(strict_dirs=True)
+    store = _RefusingLeafFileStore()
     store.dirs["."] = [FileEntry(name="config", is_dir=True, size=0)]
     store.dirs["config"] = [
         # A link resolving outside the working set: listed, but its read is
@@ -3224,7 +3352,7 @@ async def test_search_by_name_returns_a_dirent_no_download_can_fetch() -> None:
 
 async def test_search_content_aggregate_scan_cap_sets_truncated() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = FakeFileStore(strict_dirs=True)
+    store = FakeFileStore()
     store.dirs["."] = [
         FileEntry(name=f"f{i}.txt", is_dir=False, size=1) for i in range(5)
     ]
@@ -3337,7 +3465,7 @@ _KEYS_FREE_PROPS = b"motd=hi\nmax-players=20\n"
 
 async def test_delete_root_properties_with_platform_keys_is_refused() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = FakeFileStore(strict_dirs=True)
+    store = FakeFileStore()
     store.files["server.properties"] = _CURRENT_PROPS
     use_case = DeleteFile(uow=_stopped_uow(community, server_id), file_store=store)
 
@@ -3356,7 +3484,7 @@ async def test_delete_keys_free_root_properties_is_allowed() -> None:
     # The invariant is "no write path changes a platform-managed key", not a ban
     # on the filename: a file carrying none of them is ordinary user data.
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = FakeFileStore(strict_dirs=True)
+    store = FakeFileStore()
     store.files["server.properties"] = _KEYS_FREE_PROPS
     use_case = DeleteFile(uow=_stopped_uow(community, server_id), file_store=store)
 
@@ -3371,7 +3499,7 @@ async def test_delete_keys_free_root_properties_is_allowed() -> None:
 async def test_delete_non_root_properties_is_unguarded() -> None:
     # A same-named file elsewhere in the tree is not the file the server reads.
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = FakeFileStore(strict_dirs=True)
+    store = FakeFileStore()
     store.files["backups/server.properties"] = _CURRENT_PROPS
     use_case = DeleteFile(uow=_stopped_uow(community, server_id), file_store=store)
 
@@ -3387,7 +3515,7 @@ async def test_delete_root_properties_directory_is_unguarded() -> None:
     # A DIRECTORY named server.properties carries no keys (and is only possible
     # when the real file is absent), so the directory branch passes untouched.
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = FakeFileStore(strict_dirs=True)
+    store = FakeFileStore()
     store.dirs["server.properties"] = []
     use_case = DeleteFile(uow=_stopped_uow(community, server_id), file_store=store)
 
@@ -3402,7 +3530,7 @@ async def test_delete_root_properties_directory_is_unguarded() -> None:
 async def test_rename_root_properties_away_is_refused() -> None:
     # Renaming the file away is a delete as far as the server is concerned.
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = FakeFileStore(strict_dirs=True)
+    store = FakeFileStore()
     store.files["server.properties"] = _CURRENT_PROPS
     use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
 
@@ -3420,7 +3548,7 @@ async def test_rename_root_properties_away_is_refused() -> None:
 
 async def test_rename_keys_free_root_properties_away_is_allowed() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = FakeFileStore(strict_dirs=True)
+    store = FakeFileStore()
     store.files["server.properties"] = _KEYS_FREE_PROPS
     use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
 
@@ -3440,7 +3568,7 @@ async def test_rename_onto_root_properties_publishing_keys_is_refused() -> None:
     # bytes are compared against an empty baseline and any platform key in them
     # is an addition.
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = FakeFileStore(strict_dirs=True)
+    store = FakeFileStore()
     store.files["staged.properties"] = _CURRENT_PROPS
     use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
 
@@ -3458,7 +3586,7 @@ async def test_rename_onto_root_properties_publishing_keys_is_refused() -> None:
 
 async def test_rename_onto_root_properties_with_keys_free_source_is_allowed() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = FakeFileStore(strict_dirs=True)
+    store = FakeFileStore()
     store.files["staged.properties"] = _KEYS_FREE_PROPS
     use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
 
@@ -3475,7 +3603,7 @@ async def test_rename_onto_root_properties_over_the_edit_cap_is_too_large() -> N
     # A legitimate server.properties cannot exceed the PUT cap, so an oversized
     # source is refused (413) rather than compared.
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = FakeFileStore(strict_dirs=True)
+    store = FakeFileStore()
     store.files["huge.bin"] = b"x" * (MAX_EDIT_BYTES + 1)
     use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
 
@@ -3689,7 +3817,7 @@ async def test_delete_a_symlink_named_root_properties_is_refused() -> None:
     # the removal cannot be shown to leave the platform keys alone. Refusing is
     # the fail-closed answer; the link is still deletable under any other name.
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = FakeFileStore(strict_dirs=True)
+    store = FakeFileStore()
     store.symlink_leaves.add("server.properties")
     use_case = DeleteFile(uow=_stopped_uow(community, server_id), file_store=store)
 
@@ -3755,7 +3883,7 @@ async def test_platform_key_comparison_does_not_block_the_event_loop(
     # until loop-side code releases it: run inline, nothing could release it, and
     # the wait below times out instead.
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = FakeFileStore(strict_dirs=True)
+    store = FakeFileStore()
     store.files["server.properties"] = _KEYS_FREE_PROPS
     comparing = threading.Event()
     release = threading.Event()
@@ -3797,7 +3925,7 @@ async def test_delete_root_properties_over_the_edit_cap_is_allowed(
     # because the real one over 4 MiB still takes ~2 s; what this pins is that the
     # oversized baseline reaches it at all.
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = FakeFileStore(strict_dirs=True)
+    store = FakeFileStore()
     oversized = b"motd=hi\n" * (MAX_EDIT_BYTES // 8) + b"x"
     store.files["server.properties"] = oversized
     compared: list[tuple[bytes, bytes]] = []
@@ -3833,7 +3961,7 @@ async def test_delete_root_properties_over_the_edit_cap_is_allowed(
 
 async def test_mkdir_at_root_properties_path_is_refused() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = FakeFileStore(strict_dirs=True)
+    store = FakeFileStore()
     use_case = MakeDir(uow=_stopped_uow(community, server_id), file_store=store)
 
     with pytest.raises(InvalidFilePathError) as caught:
@@ -3850,7 +3978,7 @@ async def test_mkdir_under_root_properties_path_is_refused() -> None:
     # make_dir creates missing parents, so this materializes a directory at the
     # guarded path itself.
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = FakeFileStore(strict_dirs=True)
+    store = FakeFileStore()
     use_case = MakeDir(uow=_stopped_uow(community, server_id), file_store=store)
 
     with pytest.raises(InvalidFilePathError) as caught:
@@ -3867,7 +3995,7 @@ async def test_mkdir_of_a_non_root_properties_path_is_allowed() -> None:
     # A same-named path elsewhere in the tree is ordinary user data, exactly as
     # the key guards treat it.
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = FakeFileStore(strict_dirs=True)
+    store = FakeFileStore()
     use_case = MakeDir(uow=_stopped_uow(community, server_id), file_store=store)
 
     await use_case(
@@ -3880,7 +4008,7 @@ async def test_mkdir_of_a_non_root_properties_path_is_allowed() -> None:
 
 async def test_rename_dir_onto_root_properties_path_is_refused() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = FakeFileStore(strict_dirs=True)
+    store = FakeFileStore()
     store.dirs["staged"] = []
     use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
 
@@ -3899,7 +4027,7 @@ async def test_rename_dir_under_root_properties_path_is_refused() -> None:
     # rename_dir creates the destination's missing parents (#2433), so this too
     # leaves a directory at the guarded path.
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = FakeFileStore(strict_dirs=True)
+    store = FakeFileStore()
     store.dirs["staged"] = []
     use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
 
@@ -3918,7 +4046,7 @@ async def test_rename_root_properties_directory_away_is_allowed() -> None:
     # The cleanup path stays open: a directory already standing at the name is
     # movable away, the same posture the delete guard takes (#2809).
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = FakeFileStore(strict_dirs=True)
+    store = FakeFileStore()
     store.dirs["server.properties"] = []
     use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
 
@@ -3963,7 +4091,7 @@ async def test_write_under_root_properties_path_is_refused() -> None:
 
 async def test_rename_file_onto_a_path_under_root_properties_is_refused() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
-    store = FakeFileStore(strict_dirs=True)
+    store = FakeFileStore()
     store.files["ops.json"] = b"[]"
     use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
 

@@ -14,6 +14,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.exc import StaleDataError
 
 from mc_server_dashboard_api.servers.adapters.group_models import (
     GroupPlayerModel,
@@ -53,8 +54,11 @@ class SqlAlchemyGroupRepository(GroupRepository):
         # Flush the parent before the children: without an ORM relationship
         # SQLAlchemy does not order the INSERTs, so the group_player rows would
         # otherwise hit the FK to player_group before that row exists.
-        # The flush is also the site where uq_player_group_community_kind_name
-        # surfaces for a concurrent create racer (issue #2000), so translate it.
+        # The flush is also the site where the group row's own constraints
+        # surface, so translate them: uq_player_group_community_kind_name for a
+        # concurrent create racer (issue #2000), and
+        # fk_player_group_community_id_community for a community deleted since
+        # the request's authorization gate read the membership (issue #2924).
         try:
             await self._session.flush()
         except IntegrityError as exc:
@@ -110,7 +114,9 @@ class SqlAlchemyGroupRepository(GroupRepository):
             # aggregate is the source of truth for the upsert/remove the caller made.
             # This execute autoflushes the name update above, so
             # uq_player_group_community_kind_name can surface here for a concurrent
-            # rename racer (issue #2000).
+            # rename racer (issue #2000), and so can StaleDataError: a delete racer
+            # that commits between the re-read and this statement leaves the UPDATE
+            # matching zero rows (issue #2937).
             await self._session.execute(
                 delete(GroupPlayerModel).where(
                     GroupPlayerModel.group_id == group.id.value
@@ -126,6 +132,15 @@ class SqlAlchemyGroupRepository(GroupRepository):
         except IntegrityError as exc:
             translate_integrity_error(exc)
             raise
+        except StaleDataError as exc:
+            # The name UPDATE is the only statement in this block the ORM
+            # rowcount-checks -- the player-row DELETE is a bulk statement and the
+            # replacement rows are INSERTs -- so a zero-row match here means one
+            # thing: the group is gone. Same cause and same answer as the FK above,
+            # translated here because StaleDataError carries no constraint name and
+            # is not an IntegrityError, so it would otherwise cross the port
+            # boundary raw and surface as a 500 (issue #2937).
+            raise GroupNotFoundError(str(group.id.value)) from exc
 
     async def delete(self, group_id: GroupId) -> None:
         # group_player and server_group rows cascade from the FK ON DELETE CASCADE.

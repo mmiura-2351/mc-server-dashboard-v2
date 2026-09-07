@@ -512,7 +512,16 @@ states how the API treats it: the sites that match it, the catch-all
 `command_failed`, or `fire_and_forget` for a kind whose result the API never
 awaits.
 
-Three table-driven tests hold both sides to it:
+A refusal the API tells apart by its **message text** rather than by its code
+alone carries that text in the table too, in a `messages` section: the emitting
+Worker function, the phrase the API matches, and the Worker literal verbatim,
+referenced from the `message` key of every row whose cell emits it. The
+`working dir absent` refusal is the only such match today, and until it was
+declared here the API's phrase and the fixtures feeding it were hand copies of
+a Go literal nothing checked — a Worker-side reword dropped the match with both
+suites green.
+
+Table-driven tests hold both sides to it:
 
 - the Worker test
   (`worker/internal/application/instancemanager/contract_test.go`) drives the
@@ -527,7 +536,13 @@ Three table-driven tests hold both sides to it:
   exactly the `CommandStatus` matches an `ast` scan finds under
   `api/src/mc_server_dashboard_api/servers/application/`, so an API match on a
   code the Worker never produces has no row to live on, and
-  a site added or removed in source fails the API suite.
+  a site added or removed in source fails the API suite;
+- for the declared messages, the Worker test also asserts the driven emission is
+  the text the row's `message` names (and that no declared message goes
+  undriven), while the API test pins the discriminator constant to the declared
+  `phrase` and the fixtures feeding it read the declared text. A reworded
+  refusal is therefore red on the Worker side until the table follows, and red
+  on the API side until the discriminator does.
 
 Add a new convergence match or change a Worker emission only together with the
 table; the asymmetry is intentional — drift on either side fails that side's CI.

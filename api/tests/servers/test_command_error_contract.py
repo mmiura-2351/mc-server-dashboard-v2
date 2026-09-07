@@ -30,6 +30,11 @@ fails here, and a match added in source without a row fails here too. The Worker
 direction -- that every row is what the instancemanager really emits, and that
 every (kind, precondition) cell HAS a row.
 
+Since issue #2843 the table also carries the refusal MESSAGES the API
+discriminates on by text, and :func:`test_the_declared_phrase_is_the_api_discriminator`
+pins the API's marker to the phrase they declare -- the half of the same contract
+that lived in two hand copies of a Go literal.
+
 Granularity note: a site is ``(module, enclosing qualname, status)``. Two
 references to the same status inside one function are one site; the qualname is
 class-qualified, so ``StartServer.__call__`` and ``StopServer.__call__`` are
@@ -45,6 +50,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from mc_server_dashboard_api.servers.application import lifecycle
 from mc_server_dashboard_api.servers.domain.control_plane import CommandStatus
 
 # Repo root: tests/servers/<file> -> api/ -> repo root.
@@ -77,6 +83,12 @@ def _rows() -> list[Row]:
     data: Any = json.loads(_CONTRACT_PATH.read_text())
     rows: list[Row] = data["rows"]
     return rows
+
+
+def _messages() -> list[Row]:
+    data: Any = json.loads(_CONTRACT_PATH.read_text())
+    messages: list[Row] = data["messages"]
+    return messages
 
 
 def _declared_triples() -> dict[Triple, set[str]]:
@@ -252,6 +264,40 @@ def test_declared_via_sites_exist_in_the_source() -> None:
         f"not define: {missing}. It was renamed, moved or removed -- update the "
         "'api' column in proto/contract/command_error_contract.json."
     )
+
+
+def test_the_declared_phrase_is_the_api_discriminator() -> None:
+    """The phrase the table declares IS what the API matches on (issue #2843).
+
+    ``is_working_set_absent_refusal`` tells the Worker's "I hold no working set for
+    this id" refusal from any other ``SERVER_NOT_FOUND`` by a phrase inside the
+    message, and until this test nothing tied that phrase to the Go literal: the
+    marker and the fixtures feeding it were hand copies, so a Worker-side reword
+    that dropped the phrase left the match dead with both suites green. It is not a
+    cosmetic drift -- ``StopServer._final_snapshot`` downgrades a data-loss ERROR to
+    a benign-duplicate INFO on exactly this (code, phrase) pair, and the periodic
+    scheduler reads it as "nothing left to capture" (issue #2480), so the silent
+    outcome is the wrong one in both.
+
+    The table now carries the messages; ``TestCommandErrorContract`` asserts the
+    Worker really emits them, and this asserts the API keys on a phrase they
+    contain. A reword therefore reddens the Worker test, and accepting it in the
+    table reddens this one until the API constant follows.
+
+    Every declared message names the same phrase today, so this compares them all
+    to the one marker rather than inventing a lookup for a second discriminator
+    that does not exist. A message with a different phrase fails here -- loudly,
+    which is the point: it needs its own API constant and its own line below.
+    """
+
+    for message in _messages():
+        assert message["phrase"] == lifecycle._WORKING_SET_ABSENT_MARKER, (
+            f"the table's message {message['name']!r} ({message['site']}) declares "
+            f"the phrase {message['phrase']!r}, but the API discriminates on "
+            f"{lifecycle._WORKING_SET_ABSENT_MARKER!r}. The Worker emission and the "
+            "API match are the two halves of one contract: reword them together, or "
+            "the refusal stops being told from a plain SERVER_NOT_FOUND."
+        )
 
 
 def test_every_error_row_declares_its_api_handling() -> None:
