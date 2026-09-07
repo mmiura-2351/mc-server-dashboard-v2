@@ -30,10 +30,20 @@
 #   4. Steady state does nothing -- binary present and its stamp current, no
 #      install. Without this, "always reinstall" would pass assertions 2 and 3
 #      while paying a `go install` on every lint.
+#   5. The stamp sits beside the binary -- $(GOLANGCI_STAMP) and $(GOLANGCI)
+#      resolve to the same directory, which is what makes the stamp swept with
+#      the binary it describes (#2947). A stamp anywhere else survives the
+#      `rm -rf worker/.bin` (or the fresh worktree) that drops the binary, and
+#      then claims a version that is no longer installed -- the #2903 defect
+#      reached from the other side. Assertions 1-4 cannot see it: assertion 1
+#      looks only at the stamp's name, and 2-4 relocate both paths into a temp
+#      directory.
 #
-# Hermetic by construction. Each of the four assertions is a `make -n` run (dry
-# run -- nothing is executed, nothing is installed, no network) against temp
-# paths substituted for $(GOLANGCI) and $(GOLANGCI_STAMP), so the developer's
+# Hermetic by construction. Assertions 1 and 5 only expand Makefile variables
+# through the `mk` probe below and compare the answers as strings; assertions
+# 2-4 are `make -n` runs (dry run -- nothing is executed, nothing is installed,
+# no network) against temp paths substituted for $(GOLANGCI) and
+# $(GOLANGCI_STAMP), and call `mk` themselves during setup. So the developer's
 # real worker/.bin is neither written nor read, and no result depends on whether
 # a lint has already run in this checkout. The one recipe this suite does let
 # make execute is the `mk` probe's own `echo` of a variable, which likewise
@@ -159,6 +169,23 @@ echo "=== golangci-lint version-pin tests ==="
 		*)
 			ok "an up-to-date binary is left alone" ;;
 	esac
+}
+
+# ---------------------------------------------------------------------------
+# 5. The stamp lives beside the binary it describes, so whatever sweeps
+#    worker/.bin sweeps both. Probed with no overrides at all -- assertion 1
+#    looks only at the stamp's name and 2-4 relocate both paths into $tmp, so
+#    this is the only one that sees where the Makefile actually puts them -- and
+#    compared as strings, so the real worker/.bin is still neither read nor
+#    written.
+{
+	stamp_dir="$(dirname "$(mk GOLANGCI_STAMP)")"
+	bin_dir="$(dirname "$(mk GOLANGCI)")"
+	if [ "$stamp_dir" = "$bin_dir" ]; then
+		ok "the stamp sits in the binary's directory"
+	else
+		fail_test "the stamp is not swept with the binary (GOLANGCI_STAMP is in $stamp_dir, GOLANGCI in $bin_dir)"
+	fi
 }
 
 # ---------------------------------------------------------------------------
