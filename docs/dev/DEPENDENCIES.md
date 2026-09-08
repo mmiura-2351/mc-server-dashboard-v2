@@ -168,11 +168,11 @@ invisible to Dependabot and is bumped by hand:
 - **SeaweedFS** — the `docker run` line in `api.yml`'s `live-s3` job. Follows
   the `seaweedfs` image in `compose.yaml`.
 
-**The digest source is interchangeable.** `docker buildx imagetools inspect
-<image>:<tag>`, a registry manifest `HEAD` and Docker Hub's tags API all return
-the same top-level image-index digest for a tag, so which one a procedure below
-names is not load-bearing; the checks each procedure prescribes around the
-lookup are.
+**The digest source is interchangeable.**
+`docker buildx imagetools inspect <image>:<tag>`, a registry manifest `HEAD` and
+Docker Hub's tags API all return the same top-level image-index digest for a
+tag, so which one a procedure below names is not load-bearing; the checks each
+procedure prescribes around the lookup are.
 
 **PostgreSQL: CI runs the minor the deployment runs** (#2755). `compose.yaml`
 pins an explicit minor rather than the floating `postgres:18`, so a new minor
