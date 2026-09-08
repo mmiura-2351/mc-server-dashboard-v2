@@ -168,6 +168,17 @@ invisible to Dependabot and is bumped by hand:
 - **SeaweedFS** — the `docker run` line in `api.yml`'s `live-s3` job. Follows
   the `seaweedfs` image in `compose.yaml`.
 
+**Two sources resolve the digest; the tags API is a cross-check.**
+`docker buildx imagetools inspect <image>:<tag>` and a registry manifest `HEAD`
+are interchangeable — both return the tag's top-level digest and its media
+type — so which one a procedure below names is not load-bearing. Docker Hub's
+tags API is not a third option: its `digest` is that same value when it carries
+one, but on some tags it is `null` and only the per-platform digests under
+`images` are exposed (`chrislusf/seaweedfs:3.00`). Use it as the SeaweedFS
+procedure below does — to confirm a digest, not to obtain one — and for
+`tag_last_pushed`, which is present either way and is the field the cooldown
+check reads.
+
 **PostgreSQL: CI runs the minor the deployment runs** (#2755). `compose.yaml`
 pins an explicit minor rather than the floating `postgres:18`, so a new minor
 arrives as a Dependabot `docker-compose` PR instead of silently on the next
@@ -189,9 +200,10 @@ arrives as a Dependabot `docker-compose` PR against `compose.yaml`, and the
 to its **top-level image-index digest**, never a per-platform one — the amd64
 entry pulls and passes CI on the runner while silently pinning that single
 architecture. A `HEAD` of
-`https://registry-1.docker.io/v2/chrislusf/seaweedfs/manifests/<tag>`, with an
-anonymous pull token from `auth.docker.io`, returns it as
-`docker-content-digest`, and the accompanying `content-type`
+`https://registry-1.docker.io/v2/chrislusf/seaweedfs/manifests/<tag>`, sent with
+an anonymous pull token as `Authorization: Bearer` (the `token` field of
+`https://auth.docker.io/token?service=registry.docker.io&scope=repository:chrislusf/seaweedfs:pull`),
+returns it as `docker-content-digest`, and the accompanying `content-type`
 (`application/vnd.oci.image.index.v1+json`) is the proof of kind. Cross-check
 against Docker Hub's tags API
 (`https://hub.docker.com/v2/repositories/chrislusf/seaweedfs/tags/<tag>`), whose
