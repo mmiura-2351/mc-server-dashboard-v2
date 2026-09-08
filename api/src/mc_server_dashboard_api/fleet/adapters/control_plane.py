@@ -248,11 +248,12 @@ class ControlPlaneState:
         """Stop tracking ``command_id`` (on timeout or cancellation).
 
         For a SNAPSHOT command (issue #891), retain a (worker, server) record so a
-        late ``CommandResult`` — the worker's transfer bound aborts a final-snapshot
-        upload and reports ``TRANSFER_FAILED`` after the API abandoned the future
-        (#874/#890), or a late SUCCESS — is recognised in :meth:`resolve` and used
-        to release the held assignment immediately. Non-snapshot commands carry no
-        such held state, so they are simply forgotten.
+        late ``CommandResult`` — a failure, canonically a ``TRANSFER_FAILED`` once
+        the worker's transfer bound aborts a final-snapshot upload after the API
+        abandoned the future (#874/#890) but potentially any failure, or a late
+        SUCCESS — is recognised in :meth:`resolve` and used to release the held
+        assignment immediately. Non-snapshot commands carry no such held state, so
+        they are simply forgotten.
         """
 
         self._pending.pop(command_id, None)
