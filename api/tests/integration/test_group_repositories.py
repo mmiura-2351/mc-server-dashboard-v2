@@ -8,10 +8,17 @@ attach/detach, and the cross-direction listings are exercised end to end, plus t
 ``ON DELETE CASCADE`` from server and group deletion.
 
 The concurrent-delete tests (issue #2583) live here rather than beside the other
-group unit tests because they need a **real** flush: the bug is a live FK refusing
-the staged ``group_player`` INSERTs, and an in-memory fake repository has no
-constraints to violate, so it reports success where PostgreSQL raises
-(issues #2557, #2549).
+group unit tests because they need a **real** database: the racer's delete is
+committed on a second connection, and only a live one makes it visible to the
+write that follows. Since #2613 that write stops at ``save``'s own existence
+re-read, which finds the row gone and raises before a single ``group_player``
+row is staged, so the live FK the bug named --
+``fk_group_player_group_id_player_group`` refusing the staged INSERTs -- is
+reached only by ``test_save_flush_after_a_racing_delete_reports_not_found``,
+whose racer commits *between* the re-read and the flush. ``FakeGroupRepository``
+raises that same not-found from ``save`` now, but on a dict of its own with no
+constraint to violate and no second connection to see, so asserting it
+establishes nothing about the adapter (issues #2557, #2549).
 
 The issue #2924 pair is here for the first reason: the community FK it covers
 is live only against PostgreSQL, and the use-case half also shows that nothing
@@ -290,9 +297,17 @@ class _DeleteOnLoadGroupRepository(SqlAlchemyGroupRepository):
     """A group repository that deletes the group right after handing it back.
 
     Reproduces the production interleave deterministically, with no sleeps: the
-    use case's ``_load_group`` read succeeds, another request's ``DeleteGroup``
-    commits on its own connection, and only then does ``save`` stage the
-    replacement ``group_player`` rows against a parent that is gone.
+    use case's ``_load_group`` read succeeds and another request's
+    ``DeleteGroup`` commits on its own connection before the use case writes
+    anything. Where that write is ``save`` (``AddPlayer``, ``RemovePlayer``,
+    ``RenameGroup``) the delete therefore lands ahead of ``save``'s own
+    existence re-read (issue #2613), which raises the not-found there -- no
+    ``group_player`` row is ever staged, so the FK at the flush is not what
+    answers; reaching that needs a racer committing *after* the re-read
+    (``test_save_flush_after_a_racing_delete_reports_not_found``). Where the
+    write is ``attach`` (``AttachGroup``) there is no re-read: the INSERT is
+    executed on the spot and ``fk_server_group_group_id_player_group`` is what
+    names the vanished parent.
     """
 
     def __init__(self, session: AsyncSession, engine: AsyncEngine) -> None:
