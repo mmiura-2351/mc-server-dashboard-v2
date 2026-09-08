@@ -190,10 +190,15 @@ class FileStore(abc.ABC):
     ) -> None:
         """Create an (empty) directory in ``current/`` (#259).
 
-        Backend-dependent: fs materializes a real empty directory; object storage
-        cannot represent one (no-op there). Raises :class:`InvalidFilePathError`
-        for a traversal-unsafe path and :class:`ServerFileNotFoundError` when no
-        working set has been published yet (fs has no snapshot to create it in).
+        Observably the same on every backend since issue #1125: the new directory
+        shows up in its parent's listing, lists as ``[]`` rather than a miss, and
+        occupies its name for :meth:`path_exists`. Only the realization differs —
+        fs materializes a real empty directory, while object storage (which has no
+        real directories, just shared key-prefixes) writes a zero-byte ``.dir``
+        marker to anchor the prefix, filtered back out of the listed level.
+        Idempotent. Raises :class:`InvalidFilePathError` for a traversal-unsafe
+        path and :class:`ServerFileNotFoundError` when no working set has been
+        published yet (neither backend has a live ``current/`` to create it in).
         """
 
     @abc.abstractmethod
