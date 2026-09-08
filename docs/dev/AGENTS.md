@@ -179,6 +179,14 @@ Each one succeeds, or appears to; the damage surfaces later.
   repos/{owner}/{repo}/issues/<N>/labels/<label>` for labels.
 - `gh pr update-branch` does not exist in the installed `gh`. Use:
   `gh api -X PUT repos/{owner}/{repo}/pulls/<N>/update-branch`.
+- `gh pr checks <N> --json <fields>` is rejected by the installed `gh`:
+  `unknown flag: --json`, then the usage text, exit 1, no JSON. `--watch`
+  works. For scriptable check state, `gh pr view <N> --json statusCheckRollup`
+  returns both `CheckRun` entries (`name`/`status`/`conclusion`) and
+  `StatusContext` entries (`context`/`state`) — a filter has to handle both
+  shapes. The REST `repos/{owner}/{repo}/commits/<sha>/check-runs` endpoint
+  carries the check runs only, so commit statuses — the required
+  `supply-chain-cooldown` among them — are missing from it.
 - All agents share one GitHub account, so a PR's author identity can never
   formally approve it (`--approve` fails). Reviews land as comments
   (`gh pr review <N> --comment`); state the verdict in the body, first line
