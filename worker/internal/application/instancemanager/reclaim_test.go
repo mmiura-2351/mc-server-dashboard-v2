@@ -42,13 +42,19 @@ func TestReclaimDeletedScratchesRemovesScratchAndHydrateLeftovers(t *testing.T) 
 // ReclaimDeletedScratches MUST NOT remove .displaced-<id> trees (issue #911).
 func TestReclaimDeletedScratchesRetainsDisplacedTree(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	seedScratch(t, m, "s1")
+	dir := seedScratch(t, m, "s1")
 	displaced := seedDisplaced(t, m, "s1")
 
 	// The synchronous body, so the scratch removal has provably run by the time the
 	// .displaced tree is checked and its survival is a decision, not a race (see
 	// TestReclaimDeletedScratchesRemovesScratchAndHydrateLeftovers).
 	m.reclaimDeletedScratches([]string{"s1"})
+	// The scratch removal is asserted FIRST because it is what makes the retention
+	// below a decision: a reclaim that does nothing at all leaves the .displaced tree
+	// standing too, and without this check that no-op passes as #911 (issue #2984).
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("scratch dir not reclaimed for deleted server: stat err = %v", err)
+	}
 	if _, err := os.Stat(displaced); err != nil {
 		t.Fatalf(".displaced-s1 tree removed by ReclaimDeletedScratches (must be retained, issue #911): %v", err)
 	}
