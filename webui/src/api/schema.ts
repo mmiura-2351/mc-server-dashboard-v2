@@ -618,7 +618,8 @@ export interface paths {
          *     (#1840).
          *
          *     **Error precedence (issue #115).** Validation runs first: config-bounds
-         *     (``config_too_large`` / ``config_invalid_shape``), a retired config key
+         *     (``config_too_large`` / ``config_invalid_shape`` / ``config_null_value`` /
+         *     ``config_lone_surrogate``), a retired config key
          *     (``retired_config_key``), the cadence-override floor/shape
          *     (``invalid_snapshot_interval``), and the game-port range
          *     (``port_out_of_range``) are 422 and are evaluated before any state gating.
