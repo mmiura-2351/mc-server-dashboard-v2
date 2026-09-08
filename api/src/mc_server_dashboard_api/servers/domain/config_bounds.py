@@ -2,7 +2,7 @@
 
 The config column stores ``server.properties``-style key/value settings (plus a
 few per-server overrides, DATABASE.md Section 7). Without a guard a client could
-write megabytes of arbitrary JSON into the row, so create/update apply two cheap,
+write megabytes of arbitrary JSON into the row, so create/update apply cheap,
 standard-library-only checks before staging:
 
 - a serialized-size ceiling (:data:`MAX_CONFIG_BYTES`), generous for any real
