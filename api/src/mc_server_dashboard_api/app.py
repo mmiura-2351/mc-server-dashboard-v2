@@ -798,10 +798,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             bedrock_tunnel_table=bedrock_tunnel_table,
             bedrock_tunnel_port=settings.relay.bedrock_tunnel_port,
         )
-        # A final-snapshot result that arrives after its dispatch timed out (a late
-        # TRANSFER_FAILED once the worker's transfer bound aborts the upload, or a
-        # late SUCCESS) releases the held assignment immediately instead of waiting
-        # out the reconciler grace (issue #891). The sink runs the same guarded
+        # A final-snapshot result that arrives after its dispatch timed out — a
+        # failure, canonically a TRANSFER_FAILED once the worker's transfer bound
+        # aborts the upload (#874/#890) but potentially any failure, or a late
+        # SUCCESS — releases the held assignment immediately instead of waiting out
+        # the reconciler grace (issue #891). The sink runs the same guarded
         # clear the final-snapshot path uses; its control-plane dependency is only
         # the StopServer constructor's (the clear dispatches no command). Injected
         # after construction because the state, the GrpcControlPlane adapter, and
