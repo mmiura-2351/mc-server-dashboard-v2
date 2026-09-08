@@ -204,8 +204,14 @@ the `transfer_deadline` that bounds one data-plane transfer Worker-side
 server the API has since deleted while the scratch was live. The Worker
 reclaims the scratch dir and `.hydrate-<id>-*` leftovers for
 each listed id but does **not** reclaim `.displaced-<id>` trees (retained for
-operator recovery, STORAGE.md Section 4.6). The list is fail-safe: a DB error on
-the API side yields an empty list rather than misclassifying a live server as deleted.
+operator recovery, STORAGE.md Section 4.6). That reclaim is **best-effort**: the
+Worker skips any id that is running, that has a failed-stop orphan pending, or that
+another mutating lifecycle command holds in flight, and once shutdown is signalled it
+stops after the id it is on, leaving the rest untouched. An id it does not reclaim
+keeps its scratch, so the next registration advertises it in `held_servers` again and
+the API re-derives `unknown_held_server_ids` from that advertisement. The list is
+fail-safe: a DB error on the API side yields an empty list rather than misclassifying
+a live server as deleted.
 A refusal never rides in the ack: `RegisterAck` carries no accept/reject flag —
 the API aborts the `Session` stream with a gRPC status instead — `UNAUTHENTICATED`
 for a missing or wrong credential, `FAILED_PRECONDITION` when the first message is
