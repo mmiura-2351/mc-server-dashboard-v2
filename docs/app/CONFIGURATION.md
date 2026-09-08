@@ -53,8 +53,8 @@
 
 ## 2. Sources and precedence
 
-Both services read configuration from two sources, with environment variables
-overriding the file:
+The three services (`api/`, `worker/`, and `relay/`) read configuration from
+two sources, with environment variables overriding the file:
 
 ```
    defaults (in code)  <  config file  <  environment variables
