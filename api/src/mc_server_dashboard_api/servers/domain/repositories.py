@@ -42,23 +42,24 @@ class ServerRepository(abc.ABC):
         and the create use case flushes nothing between this call and the commit
         (its two pre-reads -- the taken game ports and the taken slugs -- run
         *before* it), so the INSERT is emitted by the unit of work's ``commit``
-        and every constraint the row carries is enforced, and translated, there.
+        and every constraint the row carries is enforced there. The adapters
+        translate five of them into typed domain errors, and four of those five
+        are reachable from a create.
 
-        Four of them are reachable from a create. A duplicate name raises
-        :class:`ServerNameAlreadyExistsError` (``uq_server_community_name``) --
-        and on this path that constraint is the *only* enforcement of
-        per-community name uniqueness rather than a backstop behind a pre-read:
-        the create path never reads the name (only ``UpdateServer``'s rename
-        does), so every duplicate reaches it. A racer that took the game port or
-        the slug the caller read as free raises :class:`PortAlreadyTakenError`
-        (``uq_server_game_port``, issue #243) or :class:`SlugAlreadyTakenError`
-        (``uq_server_slug``, issue #955). A community deleted between the
-        request's authorization gate and this INSERT raises
-        :class:`CommunityNotFoundError` (``fk_server_community_id_community``,
-        issue #2940) -- the same not-found that gate answers for a community
-        that is gone.
+        A duplicate name raises :class:`ServerNameAlreadyExistsError`
+        (``uq_server_community_name``) -- and on this path that constraint is the
+        *only* enforcement of per-community name uniqueness rather than a
+        backstop behind a pre-read: the create path never reads the name (only
+        ``UpdateServer``'s rename does), so every duplicate reaches it. A racer
+        that took the game port or the slug the caller read as free raises
+        :class:`PortAlreadyTakenError` (``uq_server_game_port``, issue #243) or
+        :class:`SlugAlreadyTakenError` (``uq_server_slug``, issue #955). A
+        community deleted between the request's authorization gate and this
+        INSERT raises :class:`CommunityNotFoundError`
+        (``fk_server_community_id_community``, issue #2940) -- the same not-found
+        that gate answers for a community that is gone.
 
-        The row's fifth constraint, ``uq_server_bedrock_port``, shares
+        The fifth translated one, ``uq_server_bedrock_port``, shares
         :class:`PortAlreadyTakenError` (issue #1541) but is dormant on this
         path: a staged server carries no Bedrock port -- it is allocated by a
         later UPDATE, which the adapter translates at its own execute site --
