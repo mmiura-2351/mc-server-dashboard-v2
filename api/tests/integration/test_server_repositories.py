@@ -2,8 +2,8 @@
 
 Runs only when ``MCD_TEST_DATABASE_URL`` is set (the CI Postgres service);
 skipped otherwise (TESTING.md Section 5). The schema is created and torn down per
-test via the real 0001-0005 migrations so the adapters run against the documented
-shape (DATABASE.md Section 7, 10). A community (and, for the sweep test, a user +
+test via the real migrations so the adapters run against the documented shape
+(DATABASE.md Section 7, 10). A community (and, for the sweep test, a user +
 membership + resource grant) are seeded through the community adapters; the
 server-delete grant sweep is exercised end to end via :class:`DeleteServer`.
 """
