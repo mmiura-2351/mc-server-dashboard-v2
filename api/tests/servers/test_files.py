@@ -22,9 +22,8 @@ import tarfile
 import threading
 import uuid
 import zipfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from dataclasses import replace
-from pathlib import PurePosixPath
 
 import pytest
 
@@ -109,6 +108,19 @@ def _canonical(rel_path: str) -> str:
         raise InvalidFilePathError(rel_path) from exc
 
 
+def _canonical_names(names: Iterable[str]) -> set[str]:
+    """The seeded names as production keys them, for a membership test.
+
+    Every membership decision in this fake puts BOTH sides through
+    :func:`_canonical`, never just the lookup: the seeds are typed by hand and
+    carry the same aliases a caller does (this file seeds the root as ``""`` in
+    one test and as ``"."`` in the rest), so normalising one side alone would
+    leave an alias-seeded name unanswerable under the name it resolves to.
+    """
+
+    return {_canonical(name) for name in names}
+
+
 class FakeFileStore(FileStore):
     """In-memory authoritative-copy file store keyed by rel_path."""
 
@@ -154,11 +166,14 @@ class FakeFileStore(FileStore):
         self.symlink_loops: set[str] = set()
 
     def validate_rel_path(self, rel_path: str) -> None:
-        # Mirror the seam's string-level traversal rule (absolute / ".."
-        # rejection) so the running branch pre-rejects without a real adapter.
-        parts = PurePosixPath(rel_path)
-        if parts.is_absolute() or ".." in parts.parts:
-            raise InvalidFilePathError(rel_path)
+        # The seam's string-level rule IS the canonicaliser every decision below
+        # uses -- ``StorageFileStoreAdapter.validate_rel_path`` is the same
+        # ``RelPath`` construction its other methods make. A hand-rolled
+        # ``PurePosixPath`` check was a second rule that disagreed with it: it
+        # passed a C0/DEL control character through this first gate, leaving it to
+        # be refused later inside ``list_dir``, where production refuses it here
+        # (issue #2975).
+        _canonical(rel_path)
 
     async def read_file(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
@@ -240,14 +255,16 @@ class FakeFileStore(FileStore):
         # refuses a symlink the name is nonetheless occupied by.
         if self.bad_path:
             raise InvalidFilePathError(rel_path)
-        return (
-            rel_path in ("", ".")
-            or rel_path in self.files
-            or rel_path in self.dirs
-            # A link occupies its name whatever it points at -- a loop included,
-            # which nothing can list or read (issue #2426, #2817).
-            or rel_path in self.symlink_leaves
-            or rel_path in self.symlink_loops
+        path = _canonical(rel_path)
+        return path == "." or path in _canonical_names(
+            [
+                *self.files,
+                *self.dirs,
+                # A link occupies its name whatever it points at -- a loop
+                # included, which nothing can list or read (issue #2426, #2817).
+                *self.symlink_leaves,
+                *self.symlink_loops,
+            ]
         )
 
     async def write_file(
@@ -317,7 +334,10 @@ class FakeFileStore(FileStore):
     async def delete_dir(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> None:
-        if rel_path not in self.dirs:
+        # The same membership the listing decides on, canonical on both sides: the
+        # adapter builds one ``RelPath`` per call, so a directory that LISTS under
+        # a spelling deletes under it too (issue #2975).
+        if _canonical(rel_path) not in _canonical_names(self.dirs):
             raise ServerFileNotFoundError(str(server_id.value))
         self.deleted_dirs.append(rel_path)
 
@@ -344,7 +364,13 @@ class FakeFileStore(FileStore):
         from_path: str,
         to_path: str,
     ) -> None:
-        if from_path not in self.dirs:
+        source = _canonical(from_path)
+        # The adapter builds a ``RelPath`` for BOTH paths as the arguments of one
+        # Storage call, so an unusable destination is refused before Storage is
+        # reached -- ahead of the missing-source miss below, which is the order
+        # pinned here.
+        self.validate_rel_path(to_path)
+        if source not in _canonical_names(self.dirs):
             raise ServerFileNotFoundError(str(server_id.value))
         self.renamed_dirs.append((from_path, to_path))
 
@@ -551,6 +577,208 @@ async def test_file_store_list_dir_answers_a_directory_seeded_under_an_alias() -
         server_id=ServerId(server_id),
         rel_path="world",
     ) == [entry]
+
+
+@pytest.mark.parametrize("alias", ["world", "world/", "./world", "world//"])
+async def test_file_store_delete_dir_answers_every_spelling_of_a_directory(
+    alias: str,
+) -> None:
+    # The aliasing the listing already answers, on the mutation that follows it:
+    # ``StorageFileStoreAdapter.delete_dir`` builds its ``RelPath`` from the raw
+    # string exactly as ``list_dir`` does, so all four spellings reach the backends
+    # as ``world`` and delete it. Deciding on the raw string instead 404s three of
+    # them -- a directory that LISTS under a spelling and is then missing at the
+    # delete, which is a divergence the fake invents (issue #2975). The recorded
+    # path stays the argument as passed, like every other observation list here.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.dirs["world"] = [FileEntry(name="level.dat", is_dir=False, size=1)]
+
+    await store.delete_dir(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path=alias,
+    )
+
+    assert store.deleted_dirs == [alias]
+
+
+async def test_file_store_delete_dir_answers_a_directory_seeded_under_an_alias() -> (
+    None
+):
+    # BOTH sides canonical, the same half the listing pins: a ``dirs`` key is typed
+    # by hand, so normalising only the lookup would leave an alias-seeded directory
+    # undeletable under the name production resolves it to.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.dirs["./world/"] = [FileEntry(name="level.dat", is_dir=False, size=1)]
+
+    await store.delete_dir(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="world",
+    )
+
+    assert store.deleted_dirs == ["world"]
+
+
+@pytest.mark.parametrize("alias", ["world", "world/", "./world", "world//"])
+async def test_file_store_rename_dir_answers_every_spelling_of_a_directory(
+    alias: str,
+) -> None:
+    # Same rule again on the other directory mutation: the adapter canonicalises
+    # the source before Storage sees it, so every spelling of a seeded directory
+    # renames rather than 404ing (issue #2975).
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.dirs["world"] = [FileEntry(name="level.dat", is_dir=False, size=1)]
+
+    await store.rename_dir(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        from_path=alias,
+        to_path="new_world",
+    )
+
+    assert store.renamed_dirs == [(alias, "new_world")]
+
+
+async def test_file_store_rename_dir_answers_a_directory_seeded_under_an_alias() -> (
+    None
+):
+    # The seeded-key half of the same rule, as for the listing and the delete.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.dirs["./world/"] = [FileEntry(name="level.dat", is_dir=False, size=1)]
+
+    await store.rename_dir(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        from_path="world",
+        to_path="new_world",
+    )
+
+    assert store.renamed_dirs == [("world", "new_world")]
+
+
+async def test_file_store_rename_dir_refuses_a_bad_destination_before_a_miss() -> None:
+    # ``StorageFileStoreAdapter.rename_dir`` builds a ``RelPath`` for BOTH paths as
+    # the arguments of one Storage call, so a destination that cannot be a rel_path
+    # is refused before Storage is reached -- ahead of the missing-source miss it
+    # would otherwise report. A missing source therefore still surfaces the 422
+    # here, and that ordering is what pins the destination's gate.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+
+    with pytest.raises(InvalidFilePathError):
+        await store.rename_dir(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            from_path="ghost",
+            to_path="../escape",
+        )
+
+
+@pytest.mark.parametrize(
+    "alias",
+    [
+        "world",
+        "world/",
+        "./world",
+        "world//",
+        "world/level.dat",
+        "./world/level.dat",
+        "world//level.dat",
+    ],
+)
+async def test_file_store_path_exists_answers_every_spelling_of_a_seeded_name(
+    alias: str,
+) -> None:
+    # ``path_exists`` is the never-clobber probe a rename consults, so answering
+    # ``False`` for a name that IS taken under another spelling is the forgiving
+    # direction: production canonicalises through the same ``RelPath`` and reports
+    # the name occupied (issue #2975).
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.dirs["world"] = [FileEntry(name="level.dat", is_dir=False, size=1)]
+    store.files["world/level.dat"] = b"x"
+
+    assert (
+        await store.path_exists(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path=alias,
+        )
+        is True
+    )
+
+
+@pytest.mark.parametrize("root", ["", ".", "./"])
+async def test_file_store_path_exists_answers_the_root_under_every_spelling(
+    root: str,
+) -> None:
+    # The root is always occupied, and EVERY spelling ``RelPath`` normalises to
+    # empty ``parts`` is the root -- ``"./"`` included, which the raw membership
+    # test missed even though the listing already answers it.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+
+    assert (
+        await store.path_exists(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path=root,
+        )
+        is True
+    )
+
+
+async def test_file_store_path_exists_answers_a_name_seeded_under_an_alias() -> None:
+    # BOTH sides canonical for every source the probe consults -- the seeded files
+    # and directories, and the symlink dirents that occupy their name whatever they
+    # point at (issues #2426, #2817).
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.files["./notes.txt"] = b"x"
+    store.dirs["./world/"] = []
+    store.symlink_leaves.add("./alias")
+    store.symlink_loops.add("./loop")
+
+    for name in ("notes.txt", "world", "alias", "loop"):
+        assert (
+            await store.path_exists(
+                community_id=CommunityId(community),
+                server_id=ServerId(server_id),
+                rel_path=name,
+            )
+            is True
+        )
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "../escape",
+        "/etc/passwd",
+        "a/../../escape",
+        "wor\x00ld",
+        "world/lev\x7fel.dat",
+        "log\rinject",
+    ],
+)
+def test_file_store_validate_rel_path_refuses_what_production_refuses(bad: str) -> None:
+    # One path rule, not two (issue #2975). The seam's pre-rejection is the same
+    # ``RelPath`` construction ``StorageFileStoreAdapter.validate_rel_path`` makes,
+    # so it refuses a C0/DEL control character as well as an absolute path and a
+    # ``..`` component. A hand-rolled ``PurePosixPath`` check let the control
+    # characters through this first gate and left them to be refused later, inside
+    # ``list_dir``'s canonicaliser -- production refuses them here. The traversal
+    # inputs are the adapter's own, from
+    # ``test_file_store_adapter.py::test_validate_rel_path_rejects_traversal``.
+    store = FakeFileStore()
+
+    with pytest.raises(InvalidFilePathError):
+        store.validate_rel_path(bad)
 
 
 # --- read: state branching -------------------------------------------------
