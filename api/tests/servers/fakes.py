@@ -235,7 +235,9 @@ class FakeFileStore(FileStore):
     Directories exist here as they do at the real seam (issue #2886): a listing
     describes the parent of a nested seed as ``is_dir=True``, and ``make_dir``
     records an empty one in :attr:`dirs` so a later ``list_dir`` / ``path_exists``
-    observes it.
+    observes it. ``delete_dir`` and ``rename_dir`` carry that record along with the
+    files in the subtree they act on, so a created directory stops being observable
+    once it is deleted and moves with its parent when it is renamed (issue #2972).
     """
 
     def __init__(self, *, fail_write: bool = False, seed_eula: bool = False) -> None:
@@ -387,11 +389,44 @@ class FakeFileStore(FileStore):
         self.events.append((server_id, "delete-file"))
         self.files.pop(rel_path, None)
 
+    def _existing_subtree(
+        self, rel_path: str, server_id: ServerId
+    ) -> tuple[str, list[str], set[str]]:
+        """The prefix ``rel_path`` names, plus every file and directory inside it.
+
+        The whole-subtree half of ``delete_dir`` / ``rename_dir`` (issue #2972).
+        Both backends act on the PREFIX rather than on one entry -- fs through
+        ``shutil.rmtree`` / ``os.rename`` of the resolved directory, the object
+        backend by looping over ``list_objects(<prefix>)`` -- so the seeded files
+        under it and the ``make_dir`` records inside it travel together. On the
+        object side those records ARE keys under the same prefix (the nested
+        ``.dir`` markers of issue #1125), which is why one prefix scan is the
+        faithful shape for both halves.
+
+        A path nothing sits under is a MISS, never an empty subtree: fs's
+        ``_existing_dir`` gate and the object backend's empty prefix listing both
+        raise ``NotFoundError``, which ``StorageFileStoreAdapter`` surfaces as
+        ``ServerFileNotFoundError`` -- the error both port docstrings name. This is
+        the same membership ``list_dir`` refuses on, root exemption included, so a
+        plain FILE at the name misses here too (nothing sits under ``<name>/``) and
+        the ROOT never misses.
+        """
+
+        prefix = "" if rel_path in ("", ".") else rel_path.rstrip("/") + "/"
+        files = [path for path in self.files if path.startswith(prefix)]
+        dirs = {d for d in self.dirs if (d + "/").startswith(prefix)}
+        if prefix and not files and not dirs:
+            raise ServerFileNotFoundError(str(server_id.value))
+        return prefix, files, dirs
+
     async def delete_dir(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> None:
         self.events.append((server_id, "delete-dir"))
-        return None
+        _, files, dirs = self._existing_subtree(rel_path, server_id)
+        for path in files:
+            del self.files[path]
+        self.dirs -= dirs
 
     async def rename_file(
         self,
@@ -414,7 +449,28 @@ class FakeFileStore(FileStore):
         from_path: str,
         to_path: str,
     ) -> None:
-        return None
+        self.events.append((server_id, "rename-dir"))
+        prefix, files, dirs = self._existing_subtree(from_path, server_id)
+        to_prefix = "" if to_path in ("", ".") else to_path.rstrip("/") + "/"
+        # Re-key rather than copy: neither backend leaves anything behind at the
+        # source (fs renames the dirent, the object backend deletes every key it
+        # copied), so the old path is a miss afterwards exactly as ``list_dir``
+        # already reports one.
+        #
+        # A destination that ALREADY EXISTS is deliberately not modelled, because
+        # there is no single production behaviour to be faithful to (#2923's rule):
+        # fs's ``os.rename`` silently replaces an empty directory, 409s on a file
+        # (ENOTDIR through ``_dest_mutation_errnos``) and lets ENOTEMPTY escape
+        # untranslated, while the object backend's copy loop merges into the
+        # destination prefix without checking it at all. It also never reaches this
+        # seam: ``RenameFile`` 409s an occupied destination from its own
+        # ``path_exists`` never-clobber probe before dispatching here, and
+        # ``FileStore.rename_dir`` names only the missing-source error.
+        for path in files:
+            self.files[to_prefix + path[len(prefix) :]] = self.files.pop(path)
+        for recorded in dirs:
+            self.dirs.discard(recorded)
+            self.dirs.add((to_prefix + (recorded + "/")[len(prefix) :]).rstrip("/"))
 
     async def make_dir(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str

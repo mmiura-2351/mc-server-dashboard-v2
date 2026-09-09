@@ -829,3 +829,187 @@ async def test_file_store_make_dir_creates_a_directory_later_calls_see() -> None
         await store.list_dir(community_id=_COMMUNITY, server_id=_SERVER, rel_path=".")
         == root_entries
     )
+
+
+async def test_file_store_delete_dir_removes_the_subtree_later_calls_see() -> None:
+    # A ``delete_dir`` that records nothing leaves the directory and every member
+    # observable for the rest of the test, so create-then-delete-then-list passes
+    # here while production reports the directory gone (#2972) -- the forgiving
+    # direction again. Both backends take the whole subtree: fs ``shutil.rmtree``s
+    # the resolved directory (``FsStorage._delete_dir``), and the object backend
+    # deletes every key under the ``<dir>/`` prefix (``ObjectStorage.delete_dir``).
+    # Pinned against the live backends in
+    # ``tests/storage/test_port_contract.py::test_delete_dir_removes_subtree``.
+    store = FakeFileStore()
+    store.files["world/level.dat"] = b"a"
+    store.files["world/region/r.dat"] = b"b"
+    store.files["server.properties"] = b"keep"
+    # A created EMPTY directory inside the subtree. No contract test states this
+    # one: ``test_delete_dir_removes_subtree`` seeds files only. It follows from
+    # the two implementations -- ``rmtree`` unlinks a nested empty directory like
+    # any other member, and the object backend's prefix listing includes the
+    # nested ``.dir`` marker #1125 anchors it with -- and it is the half of the
+    # delete that the ``dirs`` bookkeeping is what models.
+    await store.make_dir(
+        community_id=_COMMUNITY, server_id=_SERVER, rel_path="world/plugins"
+    )
+
+    await store.delete_dir(community_id=_COMMUNITY, server_id=_SERVER, rel_path="world")
+
+    root_entries = await store.list_dir(
+        community_id=_COMMUNITY, server_id=_SERVER, rel_path="."
+    )
+    assert {(e.name, e.is_dir) for e in root_entries} == {("server.properties", False)}
+    with pytest.raises(ServerFileNotFoundError):
+        await store.list_dir(
+            community_id=_COMMUNITY, server_id=_SERVER, rel_path="world"
+        )
+    for gone in ("world", "world/plugins", "world/region/r.dat"):
+        assert (
+            await store.path_exists(
+                community_id=_COMMUNITY, server_id=_SERVER, rel_path=gone
+            )
+            is False
+        )
+    # A sibling outside the deleted subtree survives.
+    assert (
+        await store.read_file(
+            community_id=_COMMUNITY, server_id=_SERVER, rel_path="server.properties"
+        )
+        == b"keep"
+    )
+
+
+async def test_file_store_delete_dir_on_a_missing_directory_reports_not_found() -> None:
+    # Both backends refuse rather than succeed silently: fs's ``_existing_dir``
+    # gate raises ``NotFoundError`` and the object backend raises it on an empty
+    # prefix listing, which ``StorageFileStoreAdapter.delete_dir`` surfaces as
+    # ``ServerFileNotFoundError``. Pinned against the live backends in
+    # ``tests/storage/test_port_contract.py::test_delete_missing_dir_is_not_found``.
+    # A plain FILE at the name misses for the same reason it is not a listable
+    # directory (#2885): ``_existing_dir`` answers False on it, and nothing sits
+    # under ``server.properties/`` for the object backend to delete.
+    store = FakeFileStore()
+    store.files["server.properties"] = b"keep"
+
+    with pytest.raises(ServerFileNotFoundError):
+        await store.delete_dir(
+            community_id=_COMMUNITY, server_id=_SERVER, rel_path="nope"
+        )
+    with pytest.raises(ServerFileNotFoundError):
+        await store.delete_dir(
+            community_id=_COMMUNITY, server_id=_SERVER, rel_path="server.properties"
+        )
+
+    assert (
+        await store.read_file(
+            community_id=_COMMUNITY, server_id=_SERVER, rel_path="server.properties"
+        )
+        == b"keep"
+    )
+
+
+async def test_file_store_rename_dir_moves_the_subtree_later_calls_see() -> None:
+    # A ``rename_dir`` that records nothing leaves BOTH paths in whatever state
+    # they were, so the move is invisible to every later call (#2972). Both
+    # backends move the whole subtree: fs ``os.rename``s the directory
+    # (``FsStorage._rename_dir``) and the object backend copies every key under
+    # the ``<from>/`` prefix to ``<to>/`` before deleting the originals
+    # (``ObjectStorage.rename_dir``). Pinned against the live backends in
+    # ``tests/storage/test_port_contract.py::test_rename_dir_moves_subtree``,
+    # which -- like the delete's -- seeds files only, so the created EMPTY
+    # directory below is again derived rather than contract-pinned: ``os.rename``
+    # carries it as part of the tree, and the object backend copies the nested
+    # ``.dir`` marker like any other key.
+    store = FakeFileStore()
+    store.files["world/level.dat"] = b"a"
+    store.files["world/region/r.dat"] = b"b"
+    store.files["server.properties"] = b"keep"
+    await store.make_dir(
+        community_id=_COMMUNITY, server_id=_SERVER, rel_path="world/plugins"
+    )
+
+    await store.rename_dir(
+        community_id=_COMMUNITY,
+        server_id=_SERVER,
+        from_path="world",
+        to_path="new_world",
+    )
+
+    entries = await store.list_dir(
+        community_id=_COMMUNITY, server_id=_SERVER, rel_path="new_world"
+    )
+    assert {(e.name, e.is_dir) for e in entries} == {
+        ("level.dat", False),
+        ("region", True),
+        ("plugins", True),
+    }
+    assert (
+        await store.read_file(
+            community_id=_COMMUNITY,
+            server_id=_SERVER,
+            rel_path="new_world/region/r.dat",
+        )
+        == b"b"
+    )
+    assert (
+        await store.list_dir(
+            community_id=_COMMUNITY, server_id=_SERVER, rel_path="new_world/plugins"
+        )
+        == []
+    )
+    # The old directory is gone, subtree and all.
+    with pytest.raises(ServerFileNotFoundError):
+        await store.list_dir(
+            community_id=_COMMUNITY, server_id=_SERVER, rel_path="world"
+        )
+    for gone in ("world", "world/plugins", "world/region/r.dat"):
+        assert (
+            await store.path_exists(
+                community_id=_COMMUNITY, server_id=_SERVER, rel_path=gone
+            )
+            is False
+        )
+    # A sibling outside the renamed subtree survives.
+    assert (
+        await store.read_file(
+            community_id=_COMMUNITY, server_id=_SERVER, rel_path="server.properties"
+        )
+        == b"keep"
+    )
+
+
+async def test_file_store_rename_dir_on_a_missing_source_reports_not_found() -> None:
+    # The same refusal the delete makes, from the same two gates: fs's
+    # ``_existing_dir`` on the SOURCE and the object backend's empty prefix
+    # listing, surfaced by ``StorageFileStoreAdapter.rename_dir`` as
+    # ``ServerFileNotFoundError`` -- the one error the ``FileStore.rename_dir``
+    # docstring names. Pinned against the live backends in
+    # ``tests/storage/test_port_contract.py::test_rename_missing_dir_is_not_found``.
+    # ``rename_file`` in this fake already refuses its missing source; a
+    # ``rename_dir`` that returns instead conjures a successful move of nothing.
+    store = FakeFileStore()
+    store.files["server.properties"] = b"keep"
+
+    with pytest.raises(ServerFileNotFoundError):
+        await store.rename_dir(
+            community_id=_COMMUNITY,
+            server_id=_SERVER,
+            from_path="nope",
+            to_path="dest",
+        )
+    # A plain FILE is not a directory source either.
+    with pytest.raises(ServerFileNotFoundError):
+        await store.rename_dir(
+            community_id=_COMMUNITY,
+            server_id=_SERVER,
+            from_path="server.properties",
+            to_path="dest",
+        )
+
+    assert (
+        await store.path_exists(
+            community_id=_COMMUNITY, server_id=_SERVER, rel_path="dest"
+        )
+        is False
+    )
