@@ -333,14 +333,20 @@ class FakeFileStore(FileStore):
         key = _seeded_key(self.files, path)
         if key is None:
             return
-        history = self._version_key(path)
-        existing = self.versions.get(history)
+        existing = self._history(path)
         if existing:
             newest = existing[0]
-            if self.version_bytes.get((history, newest)) == self.files[key]:
+            # The newest id and its bytes are joined on the canonical path, not on
+            # the spelling each happens to be seeded under: production compares the
+            # authoritative copy against the newest member of the one ring the path
+            # names (``FsStorage._matches_newest_version``), so a history at ``f``
+            # whose bytes sit at ``./f`` is one version, not a miss that churns a
+            # spurious second copy into the ring.
+            if self._retained(path, newest) == self.files[key]:
                 return
         self._version_seq += 1
         version_id = f"v{self._version_seq}"
+        history = self._version_key(path)
         self.version_bytes[(history, version_id)] = self.files[key]
         self.versions.setdefault(history, []).insert(0, version_id)
         self.retained.append((rel_path, self.files[key]))
@@ -466,31 +472,61 @@ class FakeFileStore(FileStore):
         return _gen()
 
     def _version_key(self, path: str) -> str:
-        """The key the retained-version history uses for ``path`` (canonical).
+        """The key a NEW retention appends to for ``path`` (canonical).
 
         The seeded spelling when a test typed one, the canonical form otherwise,
         so a retention lands on the history that already exists rather than
-        starting a second one beside it under another spelling.
+        starting a second one beside it. Only the write side needs this: the reads
+        below span every spelling of the path, so which one is appended to does not
+        change what they answer.
         """
 
         return _seeded_key(self.versions, path) or path
 
-    def _retained(self, path: str, version_id: str) -> bytes | None:
-        """The bytes retained for ``(path, version_id)``, ``path`` canonical.
+    def _history(self, path: str) -> list[str]:
+        """Every version id recorded for ``path`` (canonical), newest-first.
 
-        Resolved over the ``version_bytes`` keys rather than over ``versions``:
-        a test can seed retained bytes without a history list (and does), so the
+        ONE history per canonical path, because that is the identity the real
+        version store has: both backends address the ring by ``rel_path.parts`` --
+        a directory under ``versions/`` for fs (``FsStorage._versions_dir``) and the
+        matching key prefix for the object backend
+        (``ObjectStorage._versions_prefix``) -- so two spellings of one path name
+        the same ring and cannot carry separate histories. Hand-seeded spellings are
+        therefore merged rather than one of them chosen; each list stays newest-first
+        as the writers keep it.
+        """
+
+        return [
+            recorded
+            for stored, ids in self.versions.items()
+            if _canonical(stored) == path
+            for recorded in ids
+        ]
+
+    def _retained(self, path: str, version_id: str) -> bytes | None:
+        """The bytes retained for ``path`` (canonical) at ``version_id``.
+
+        Matched on the COMPOUND key, both halves at once. The id is a member of the
+        ring the canonical path names (``versions/<parts>/<id>`` in both backends),
+        so resolving the path half to ONE spelling first and then looking the id up
+        inside it reports a version missing that is really there -- and, resolved out
+        of a set, could do it differently from run to run, which reads as a flake
+        rather than as the divergence it is.
+
+        Resolved over the ``version_bytes`` keys rather than over ``versions``: a
+        test can seed retained bytes without a history list (and does), so the
         version read has to answer from what is actually there.
         """
 
-        key = _seeded_key({stored for stored, _ in self.version_bytes}, path)
-        return None if key is None else self.version_bytes.get((key, version_id))
+        for (stored, stored_id), data in self.version_bytes.items():
+            if stored_id == version_id and _canonical(stored) == path:
+                return data
+        return None
 
     async def list_versions(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> list[str]:
-        key = _seeded_key(self.versions, _canonical(rel_path))
-        return [] if key is None else self.versions[key]
+        return self._history(_canonical(rel_path))
 
     async def read_version(
         self,
@@ -1081,6 +1117,69 @@ async def test_file_store_version_reads_answer_every_spelling() -> None:
         )
         == b"old-content"
     )
+
+
+async def test_file_store_retain_if_changed_dedups_across_spellings() -> None:
+    # The history and its bytes are joined on the canonical path, not on the
+    # spelling each is seeded under. Production keys the ring by ``rel_path.parts``
+    # (``FsStorage._versions_dir``, ``ObjectStorage._versions_prefix``) and compares
+    # the authoritative copy against the newest member of THAT ring
+    # (``_matches_newest_version``), so unchanged bytes retain nothing. Joining the
+    # raw spellings instead reads the newest version as absent and churns a
+    # spurious second copy of identical bytes into the ring -- the exact churn the
+    # dedup of #351 exists to prevent.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.files["f"] = b"same"
+    store.versions["f"] = ["v1"]
+    store.version_bytes[("./f", "v1")] = b"same"
+
+    await store.retain_if_changed(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="f",
+    )
+
+    assert store.retained == []
+    assert await store.list_versions(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="f",
+    ) == ["v1"]
+
+
+async def test_file_store_version_reads_span_the_spellings_of_one_history() -> None:
+    # Two spellings of one path cannot carry separate histories: both backends
+    # address the ring by ``rel_path.parts``, so ``f`` and ``./f`` name the same
+    # directory / key prefix and every id in it is readable under either spelling.
+    # Choosing one spelling first and then looking the id up inside it reports the
+    # other version missing -- out of a set, and so differently from run to run.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.versions["f"] = ["v1"]
+    store.versions["./f"] = ["v2"]
+    store.version_bytes[("f", "v1")] = b"one"
+    store.version_bytes[("./f", "v2")] = b"two"
+
+    async def _read(rel_path: str, version_id: str) -> bytes:
+        return await store.read_version(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path=rel_path,
+            version_id=version_id,
+        )
+
+    # Either spelling reaches either version, the cross-spelled pairs included.
+    assert await _read("f", "v1") == b"one"
+    assert await _read("./f", "v2") == b"two"
+    assert await _read("f", "v2") == b"two"
+    assert await _read("./f", "v1") == b"one"
+    # And the listing is the whole ring, not the half one spelling was seeded with.
+    assert await store.list_versions(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="f//",
+    ) == ["v1", "v2"]
 
 
 async def test_file_store_rollback_restores_what_a_spelling_names() -> None:
