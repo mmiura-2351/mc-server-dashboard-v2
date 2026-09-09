@@ -471,37 +471,59 @@ class FakeFileStore(FileStore):
 
         return _gen()
 
-    def _version_key(self, path: str) -> str:
-        """The key a NEW retention appends to for ``path`` (canonical).
-
-        The seeded spelling when a test typed one, the canonical form otherwise,
-        so a retention lands on the history that already exists rather than
-        starting a second one beside it. Only the write side needs this: the reads
-        below span every spelling of the path, so which one is appended to does not
-        change what they answer.
-        """
-
-        return _seeded_key(self.versions, path) or path
-
-    def _history(self, path: str) -> list[str]:
-        """Every version id recorded for ``path`` (canonical), newest-first.
+    def _history_key(self, path: str) -> str | None:
+        """The one ``versions`` key for ``path`` (canonical), or ``None``.
 
         ONE history per canonical path, because that is the identity the real
         version store has: both backends address the ring by ``rel_path.parts`` --
         a directory under ``versions/`` for fs (``FsStorage._versions_dir``) and the
         matching key prefix for the object backend
         (``ObjectStorage._versions_prefix``) -- so two spellings of one path name
-        the same ring and cannot carry separate histories. Hand-seeded spellings are
-        therefore merged rather than one of them chosen; each list stays newest-first
-        as the writers keep it.
+        the same ring.
+
+        Two canonical-equivalent keys are therefore a SEEDING MISTAKE, not a state
+        to model, and this refuses them loudly rather than choosing between them.
+        Merging them instead would have to invent an order the model does not
+        define: ``{"f": ["v1"], "./f": ["v2"]}`` reads as ``["v1", "v2"]`` or
+        ``["v2", "v1"]`` purely by which spelling was typed first, and a pin on
+        either is a pin on nothing. A fake that manufactures a state production
+        cannot hold and then picks an answer for it is exactly the kind of quiet
+        divergence this file exists to close.
+
+        ``version_bytes`` is a different question and is deliberately untouched:
+        ``("f", "v1")`` and ``("./f", "v2")`` are two ids in ONE ring, which
+        production holds happily, so :meth:`_retained` matches them on the compound
+        key rather than refusing them.
         """
 
-        return [
-            recorded
-            for stored, ids in self.versions.items()
-            if _canonical(stored) == path
-            for recorded in ids
-        ]
+        keys = [stored for stored in self.versions if _canonical(stored) == path]
+        if len(keys) > 1:
+            raise AssertionError(
+                f"versions seeded under {len(keys)} spellings of one path: "
+                f"{sorted(keys)!r} all name {path!r}, which has ONE history at the "
+                "real seam -- seed the ring under a single spelling"
+            )
+        return keys[0] if keys else None
+
+    def _version_key(self, path: str) -> str:
+        """The key a NEW retention appends to for ``path`` (canonical).
+
+        The seeded spelling when a test typed one, the canonical form otherwise,
+        so a retention lands on the history that already exists rather than
+        starting a second one beside it.
+        """
+
+        return self._history_key(path) or path
+
+    def _history(self, path: str) -> list[str]:
+        """The version ids recorded for ``path`` (canonical), newest-first.
+
+        The ring the canonical path names, under whatever spelling it was seeded
+        with; the writers keep each list newest-first.
+        """
+
+        key = self._history_key(path)
+        return [] if key is None else self.versions[key]
 
     def _retained(self, path: str, version_id: str) -> bytes | None:
         """The bytes retained for ``path`` (canonical) at ``version_id``.
@@ -1149,15 +1171,18 @@ async def test_file_store_retain_if_changed_dedups_across_spellings() -> None:
 
 
 async def test_file_store_version_reads_span_the_spellings_of_one_history() -> None:
-    # Two spellings of one path cannot carry separate histories: both backends
-    # address the ring by ``rel_path.parts``, so ``f`` and ``./f`` name the same
-    # directory / key prefix and every id in it is readable under either spelling.
-    # Choosing one spelling first and then looking the id up inside it reports the
-    # other version missing -- out of a set, and so differently from run to run.
+    # Both backends address the ring by ``rel_path.parts``, so ``f`` and ``./f``
+    # name the same directory / key prefix: every id in that ring is readable under
+    # either spelling. Choosing one spelling first and then looking the id up inside
+    # it reports the other version missing -- out of a set, and so differently from
+    # run to run.
+    #
+    # The RING is seeded under one spelling, because that is all production can
+    # hold (two ``versions`` keys for one path is refused, below). The retained
+    # BYTES are cross-spelled, which production can hold: two ids, one ring.
     community, server_id = uuid.uuid4(), uuid.uuid4()
     store = FakeFileStore()
-    store.versions["f"] = ["v1"]
-    store.versions["./f"] = ["v2"]
+    store.versions["f"] = ["v1", "v2"]
     store.version_bytes[("f", "v1")] = b"one"
     store.version_bytes[("./f", "v2")] = b"two"
 
@@ -1174,12 +1199,38 @@ async def test_file_store_version_reads_span_the_spellings_of_one_history() -> N
     assert await _read("./f", "v2") == b"two"
     assert await _read("f", "v2") == b"two"
     assert await _read("./f", "v1") == b"one"
-    # And the listing is the whole ring, not the half one spelling was seeded with.
+    # And the listing answers an alias spelling with that ring. The order asserted
+    # is the seeded list's own, not a merge of two seeds, so it holds however the
+    # seeds are written.
     assert await store.list_versions(
         community_id=CommunityId(community),
         server_id=ServerId(server_id),
         rel_path="f//",
     ) == ["v1", "v2"]
+
+
+@pytest.mark.parametrize("spellings", [("f", "./f"), ("./f", "f")])
+async def test_file_store_refuses_a_history_seeded_under_two_spellings(
+    spellings: tuple[str, str],
+) -> None:
+    # A canonical path has ONE ring at the real seam, so two ``versions`` keys that
+    # resolve to the same path are a state production cannot hold. Merging them
+    # would have to invent an order -- ``["v1", "v2"]`` or ``["v2", "v1"]`` purely
+    # by which spelling was typed first -- and a pin on either would be a pin on
+    # nothing, so the fake reports the seeding mistake instead. Parametrized over
+    # BOTH orders because the whole point is that neither is privileged.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    first, second = spellings
+    store.versions[first] = ["v1"]
+    store.versions[second] = ["v2"]
+
+    with pytest.raises(AssertionError, match="ONE history"):
+        await store.list_versions(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="f",
+        )
 
 
 async def test_file_store_rollback_restores_what_a_spelling_names() -> None:
