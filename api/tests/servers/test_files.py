@@ -111,11 +111,16 @@ def _canonical(rel_path: str) -> str:
 def _canonical_names(names: Iterable[str]) -> set[str]:
     """The seeded names as production keys them, for a membership test.
 
-    Every membership decision in this fake puts BOTH sides through
-    :func:`_canonical`, never just the lookup: the seeds are typed by hand and
-    carry the same aliases a caller does (this file seeds the root as ``""`` in
-    one test and as ``"."`` in the rest), so normalising one side alone would
-    leave an alias-seeded name unanswerable under the name it resolves to.
+    Both sides of the test go through :func:`_canonical`, never just the lookup:
+    the seeds are typed by hand and carry the same aliases a caller does (this
+    file seeds the root as ``""`` in one test and as ``"."`` in the rest), so
+    normalising one side alone would leave an alias-seeded name unanswerable under
+    the name production resolves it to. That covers the directory membership
+    ``list_dir`` decides on -- inline there, since it needs the entries -- and
+    ``delete_dir`` / ``rename_dir`` share, plus every name ``path_exists``
+    consults. The per-FILE methods still compare raw strings: not a second rule,
+    just this one not yet applied to them (issue #2975 scoped to the directory
+    decisions and the name probe; ``download_dir`` / ``export_dir`` are #2976).
     """
 
     return {_canonical(name) for name in names}
