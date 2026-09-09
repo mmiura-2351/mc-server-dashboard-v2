@@ -115,15 +115,26 @@ def _canonical_names(names: Iterable[str]) -> set[str]:
     the seeds are typed by hand and carry the same aliases a caller does (this
     file seeds the root as ``""`` in one test and as ``"."`` in the rest), so
     normalising one side alone would leave an alias-seeded name unanswerable under
-    the name production resolves it to. That covers the directory membership
-    ``list_dir`` decides on -- inline there, since it needs the entries -- and
-    ``delete_dir`` / ``rename_dir`` share, plus every name ``path_exists``
-    consults. The per-FILE methods still compare raw strings: not a second rule,
-    just this one not yet applied to them (issue #2975 scoped to the directory
-    decisions and the name probe; ``download_dir`` / ``export_dir`` are #2976).
+    the name production resolves it to. Every decision in this fake is made this
+    way -- ``download_dir`` / ``export_dir`` are the one exception, and they decide
+    nothing about a path today (issue #2976).
     """
 
     return {_canonical(name) for name in names}
+
+
+def _seeded_key(names: Iterable[str], path: str) -> str | None:
+    """The seeded spelling that ``path`` -- already canonical -- names.
+
+    The membership question and the entry to act on are not the same thing: a
+    seed is typed by hand and may be an alias of the name a caller uses, so a
+    mutation has to reach the entry that EXISTS (``files["./notes.txt"]`` is the
+    file a delete removes and a write overwrites) the way production acts on the
+    one dirent every spelling resolves to. ``None`` when nothing is seeded there,
+    which each caller reports as its own kind of miss.
+    """
+
+    return next((name for name in names if _canonical(name) == path), None)
 
 
 class FakeFileStore(FileStore):
@@ -186,18 +197,20 @@ class FakeFileStore(FileStore):
         self.read_paths.append(rel_path)
         if self.bad_path:
             raise InvalidFilePathError(rel_path)
-        if rel_path in self.symlink_leaves or rel_path in self.symlink_through:
+        path = _canonical(rel_path)
+        if path in _canonical_names([*self.symlink_leaves, *self.symlink_through]):
             # A symlink at ANY component is refused by the real seam (#2432) on a
             # read exactly as on a listing -- the leaf link included, since reading
             # it would serve the target's bytes under the link's name. Modelled
             # here so a guard that takes a baseline read cannot pass under the
             # fake where the adapter would refuse it (issue #2809 review).
             raise InvalidFilePathError(rel_path, reason="symlink_refused")
-        if rel_path not in self.files:
+        key = _seeded_key(self.files, path)
+        if key is None:
             # A loop is inside this miss rather than beside it: ELOOP is one of the
             # errnos the adapter reads as "no readable file" (issue #2817).
             raise ServerFileNotFoundError(str(server_id.value))
-        return self.files[rel_path]
+        return self.files[key]
 
     def open_file_stream(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
@@ -209,11 +222,13 @@ class FakeFileStore(FileStore):
         async def _gen() -> AsyncIterator[bytes]:
             if self.bad_path:
                 raise InvalidFilePathError(rel_path)
-            if rel_path in self.symlink_leaves or rel_path in self.symlink_through:
+            path = _canonical(rel_path)
+            if path in _canonical_names([*self.symlink_leaves, *self.symlink_through]):
                 raise InvalidFilePathError(rel_path, reason="symlink_refused")
-            if rel_path not in self.files:
+            key = _seeded_key(self.files, path)
+            if key is None:
                 raise ServerFileNotFoundError(str(server_id.value))
-            data = self.files[rel_path]
+            data = self.files[key]
             for i in range(0, len(data), chunk):
                 yield data[i : i + chunk]
 
@@ -282,15 +297,21 @@ class FakeFileStore(FileStore):
     ) -> None:
         if self.bad_path:
             raise InvalidFilePathError(rel_path)
+        path = _canonical(rel_path)
+        # The file a spelling names, or the canonical form when it names nothing
+        # yet: a write lands ON the seeded entry rather than beside it under the
+        # caller's spelling, since production has one file there either way.
+        key = _seeded_key(self.files, path) or path
         # Mirror Storage.write_file: retain the prior content as a version
         # (newest-first) before overwriting, so the running-edit snapshot and the
         # at-rest edit both produce a recoverable version (FR-FILE-3).
-        if rel_path in self.files:
+        if key in self.files:
             self._version_seq += 1
             version_id = f"v{self._version_seq}"
-            self.version_bytes[(rel_path, version_id)] = self.files[rel_path]
-            self.versions.setdefault(rel_path, []).insert(0, version_id)
-        self.files[rel_path] = content
+            history = self._version_key(path)
+            self.version_bytes[(history, version_id)] = self.files[key]
+            self.versions.setdefault(history, []).insert(0, version_id)
+        self.files[key] = content
         self.writes.append((rel_path, content))
 
     async def retain_if_changed(
@@ -298,42 +319,49 @@ class FakeFileStore(FileStore):
     ) -> None:
         if self.bad_path:
             raise InvalidFilePathError(rel_path)
+        path = _canonical(rel_path)
         # Mirror Storage.retain_file_version: retain the current authoritative
         # bytes as a version unless they equal the newest retained version, and
         # treat a missing authoritative copy as a no-op (#351). Never mutates
         # ``current/``.
-        if rel_path not in self.files:
+        key = _seeded_key(self.files, path)
+        if key is None:
             return
-        existing = self.versions.get(rel_path)
+        history = self._version_key(path)
+        existing = self.versions.get(history)
         if existing:
             newest = existing[0]
-            if self.version_bytes.get((rel_path, newest)) == self.files[rel_path]:
+            if self.version_bytes.get((history, newest)) == self.files[key]:
                 return
         self._version_seq += 1
         version_id = f"v{self._version_seq}"
-        self.version_bytes[(rel_path, version_id)] = self.files[rel_path]
-        self.versions.setdefault(rel_path, []).insert(0, version_id)
-        self.retained.append((rel_path, self.files[rel_path]))
+        self.version_bytes[(history, version_id)] = self.files[key]
+        self.versions.setdefault(history, []).insert(0, version_id)
+        self.retained.append((rel_path, self.files[key]))
 
     async def delete_file(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> None:
         if self.bad_path:
             raise InvalidFilePathError(rel_path)
-        if rel_path in self.symlink_through:
+        path = _canonical(rel_path)
+        if path in _canonical_names(self.symlink_through):
             # The adapter refuses a mutation reached through an intermediate link
             # (#2432), so the route's delete dispatch does not defeat it (#2429).
             raise InvalidFilePathError(rel_path, reason="symlink_refused")
-        if rel_path in self.symlink_leaves or rel_path in self.symlink_loops:
+        dirent = _seeded_key([*self.symlink_leaves, *self.symlink_loops], path)
+        if dirent is not None:
             # A leaf symlink is unlinked as the dirent it is, a looping one
-            # included (#2429).
-            self.symlink_leaves.discard(rel_path)
-            self.symlink_loops.discard(rel_path)
+            # included (#2429) -- the dirent that EXISTS, whatever spelling the
+            # caller reached it by.
+            self.symlink_leaves.discard(dirent)
+            self.symlink_loops.discard(dirent)
             self.deleted_files.append(rel_path)
             return
-        if rel_path not in self.files:
+        key = _seeded_key(self.files, path)
+        if key is None:
             raise ServerFileNotFoundError(str(server_id.value))
-        del self.files[rel_path]
+        del self.files[key]
         self.deleted_files.append(rel_path)
 
     async def delete_dir(
@@ -354,12 +382,18 @@ class FakeFileStore(FileStore):
         from_path: str,
         to_path: str,
     ) -> None:
-        if from_path in self.symlink_leaves or from_path in self.symlink_loops:
+        source = _canonical(from_path)
+        # Both paths are ``RelPath``-built as the arguments of one Storage call, so
+        # an unusable destination is refused before Storage is reached -- the same
+        # gate order ``rename_dir`` pins.
+        destination = _canonical(to_path)
+        if source in _canonical_names([*self.symlink_leaves, *self.symlink_loops]):
             # Rename is one of the mutations a leaf link refuses outright (#2429).
             raise InvalidFilePathError(from_path, reason="symlink_refused")
-        if from_path not in self.files:
+        key = _seeded_key(self.files, source)
+        if key is None:
             raise ServerFileNotFoundError(str(server_id.value))
-        self.files[to_path] = self.files.pop(from_path)
+        self.files[destination] = self.files.pop(key)
 
     async def rename_dir(
         self,
@@ -384,6 +418,10 @@ class FakeFileStore(FileStore):
     ) -> None:
         if self.bad_path:
             raise InvalidFilePathError(rel_path)
+        # The adapter builds a ``RelPath`` here as everywhere else, so an unusable
+        # path is refused rather than recorded. This fake records the call instead
+        # of creating the directory, so the gate is the whole of what it models.
+        _canonical(rel_path)
         self.made_dirs.append(rel_path)
 
     def download_dir(
@@ -421,10 +459,32 @@ class FakeFileStore(FileStore):
 
         return _gen()
 
+    def _version_key(self, path: str) -> str:
+        """The key the retained-version history uses for ``path`` (canonical).
+
+        The seeded spelling when a test typed one, the canonical form otherwise,
+        so a retention lands on the history that already exists rather than
+        starting a second one beside it under another spelling.
+        """
+
+        return _seeded_key(self.versions, path) or path
+
+    def _retained(self, path: str, version_id: str) -> bytes | None:
+        """The bytes retained for ``(path, version_id)``, ``path`` canonical.
+
+        Resolved over the ``version_bytes`` keys rather than over ``versions``:
+        a test can seed retained bytes without a history list (and does), so the
+        version read has to answer from what is actually there.
+        """
+
+        key = _seeded_key({stored for stored, _ in self.version_bytes}, path)
+        return None if key is None else self.version_bytes.get((key, version_id))
+
     async def list_versions(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> list[str]:
-        return self.versions.get(rel_path, [])
+        key = _seeded_key(self.versions, _canonical(rel_path))
+        return [] if key is None else self.versions[key]
 
     async def read_version(
         self,
@@ -436,9 +496,10 @@ class FakeFileStore(FileStore):
     ) -> bytes:
         # Mirror Storage.read_file_version: serve the retained bytes; an unknown
         # (rel_path, version_id) is a missing version (404).
-        if (rel_path, version_id) not in self.version_bytes:
+        data = self._retained(_canonical(rel_path), version_id)
+        if data is None:
             raise ServerFileNotFoundError(str(server_id.value))
-        return self.version_bytes[(rel_path, version_id)]
+        return data
 
     async def rollback(
         self,
@@ -451,12 +512,13 @@ class FakeFileStore(FileStore):
         self.rollbacks.append((rel_path, version_id))
         # Restore the retained bytes through write_file so rollback is itself
         # reversible (Storage.rollback_file semantics), matching the adapter.
-        if (rel_path, version_id) in self.version_bytes:
+        data = self._retained(_canonical(rel_path), version_id)
+        if data is not None:
             await self.write_file(
                 community_id=community_id,
                 server_id=server_id,
                 rel_path=rel_path,
-                content=self.version_bytes[(rel_path, version_id)],
+                content=data,
             )
 
 
@@ -784,6 +846,244 @@ def test_file_store_validate_rel_path_refuses_what_production_refuses(bad: str) 
 
     with pytest.raises(InvalidFilePathError):
         store.validate_rel_path(bad)
+
+
+async def test_file_store_read_file_answers_every_spelling_of_a_seeded_file() -> None:
+    # The reviewer's case for PR #3031: production reads ``./world/level.dat`` and
+    # ``world/level.dat`` as one file, because the adapter builds a ``RelPath``
+    # before every Storage call. Both sides go through it -- the lookup (the clean
+    # seed, read under an alias) and the seeded key (the alias seed, read under the
+    # name production resolves it to).
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.files["world/level.dat"] = b"clean"
+    store.files["./notes.txt"] = b"alias"
+
+    assert (
+        await store.read_file(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="./world/level.dat",
+        )
+        == b"clean"
+    )
+    assert (
+        await store.read_file(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="notes.txt",
+        )
+        == b"alias"
+    )
+
+
+async def test_file_store_open_file_stream_answers_every_spelling() -> None:
+    # The per-file STREAM is the probe ``_path_is_dir`` settles a file on, so it
+    # has to agree with ``read_file`` about what a spelling names (issue #2817).
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.files["world/level.dat"] = b"clean"
+    store.files["./notes.txt"] = b"alias"
+
+    async def _drain(rel_path: str) -> bytes:
+        return b"".join(
+            [
+                chunk
+                async for chunk in store.open_file_stream(
+                    community_id=CommunityId(community),
+                    server_id=ServerId(server_id),
+                    rel_path=rel_path,
+                )
+            ]
+        )
+
+    assert await _drain("./world/level.dat") == b"clean"
+    assert await _drain("notes.txt") == b"alias"
+
+
+async def test_file_store_read_seams_refuse_a_symlink_under_every_spelling() -> None:
+    # The symlink dirents are named paths too, so the refusal has to survive an
+    # alias: production resolves the spelling first and then refuses the link it
+    # finds (#2432), rather than missing because the string differed.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.symlink_leaves.add("alias")
+
+    with pytest.raises(InvalidFilePathError):
+        await store.read_file(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="./alias",
+        )
+    with pytest.raises(InvalidFilePathError):
+        async for _ in store.open_file_stream(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="./alias",
+        ):
+            pass
+
+
+async def test_file_store_write_file_lands_on_the_file_a_spelling_names() -> None:
+    # A write reaches the seeded entry rather than starting a second one beside it
+    # under the caller's spelling -- production has one file there whichever
+    # spelling arrives -- and the overwritten bytes are retained as a version, so
+    # the retain-before-overwrite contract (FR-FILE-3) survives the aliasing too.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.files["./notes.txt"] = b"old"
+
+    await store.write_file(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="notes.txt",
+        content=b"new",
+    )
+
+    assert store.files == {"./notes.txt": b"new"}
+    assert await store.list_versions(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="./notes.txt",
+    ) == ["v1"]
+    # The observation list records the argument as passed, unchanged by any of it.
+    assert store.writes == [("notes.txt", b"new")]
+
+
+async def test_file_store_retain_if_changed_answers_every_spelling() -> None:
+    # The running-edit snapshot (#351) reads the authoritative copy through the
+    # same rule, so an alias retains the seeded file instead of no-oping as a
+    # missing one.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.files["./notes.txt"] = b"seeded"
+
+    await store.retain_if_changed(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="notes.txt",
+    )
+
+    assert store.retained == [("notes.txt", b"seeded")]
+
+
+async def test_file_store_delete_file_removes_what_a_spelling_names() -> None:
+    # Both the seeded file and the seeded symlink dirent: production unlinks the
+    # one entry every spelling resolves to (#2429), so neither can survive a
+    # delete that reached it by an alias.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.files["./notes.txt"] = b"x"
+    store.symlink_leaves.add("alias")
+
+    await store.delete_file(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="notes.txt",
+    )
+    await store.delete_file(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="./alias",
+    )
+
+    assert store.files == {}
+    assert store.symlink_leaves == set()
+    assert store.deleted_files == ["notes.txt", "./alias"]
+
+
+async def test_file_store_rename_file_moves_what_a_spelling_names() -> None:
+    # The source resolves to the seeded entry and the destination is keyed as
+    # production keys it, so a later read finds the file under the name it was
+    # moved to rather than under the caller's spelling of it.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.files["./old.txt"] = b"payload"
+
+    await store.rename_file(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        from_path="old.txt",
+        to_path="./new.txt",
+    )
+
+    assert store.files == {"new.txt": b"payload"}
+
+
+async def test_file_store_rename_file_refuses_a_bad_destination_before_a_miss() -> None:
+    # The same gate order ``rename_dir`` pins, on the file seam: both ``RelPath``
+    # constructions are arguments of one Storage call, so the destination is
+    # refused ahead of the missing-source miss.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+
+    with pytest.raises(InvalidFilePathError):
+        await store.rename_file(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            from_path="ghost.txt",
+            to_path="../escape",
+        )
+
+
+async def test_file_store_version_reads_answer_every_spelling() -> None:
+    # The history and the retained bytes are keyed by path as well, and a test can
+    # seed retained bytes with no history list, so both reads resolve the spelling
+    # over what is actually seeded.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.versions["f"] = ["v1"]
+    store.version_bytes[("f", "v1")] = b"old-content"
+
+    assert await store.list_versions(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="./f",
+    ) == ["v1"]
+    assert (
+        await store.read_version(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="./f",
+            version_id="v1",
+        )
+        == b"old-content"
+    )
+
+
+async def test_file_store_rollback_restores_what_a_spelling_names() -> None:
+    # Rollback restores through ``write_file``, so it has to find the retained
+    # bytes under an alias and land them on the seeded file (#351 reversibility).
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.files["f"] = b"current"
+    store.version_bytes[("f", "v1")] = b"old-content"
+
+    await store.rollback(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="./f",
+        version_id="v1",
+    )
+
+    assert store.files["f"] == b"old-content"
+    assert store.rollbacks == [("./f", "v1")]
+
+
+async def test_file_store_make_dir_refuses_what_production_refuses() -> None:
+    # ``make_dir`` records the call rather than creating anything, so the
+    # ``RelPath`` the adapter builds is the whole of what there is to model here --
+    # and without it an unusable path is recorded as a directory creation.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+
+    with pytest.raises(InvalidFilePathError):
+        await store.make_dir(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="../escape",
+        )
+    assert store.made_dirs == []
 
 
 # --- read: state branching -------------------------------------------------
