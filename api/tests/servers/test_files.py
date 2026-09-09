@@ -237,17 +237,23 @@ class FakeFileStore(FileStore):
     async def list_dir(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> list[FileEntry]:
-        if rel_path in self.symlink_leaves or rel_path in self.symlink_through:
+        # The adapter builds its ``RelPath`` before Storage resolves anything, so
+        # the refusal is the FIRST gate here too -- ahead of the symlink refusal and
+        # the ``missing`` miss, which is the order production gates in
+        # (``StorageFileStoreAdapter.list_dir``). The canonical form has to be in
+        # hand this early anyway: the dirents below are named paths, and deciding
+        # them on the raw string missed an aliased link where production refuses it.
+        path = _canonical(rel_path)
+        if path in _canonical_names([*self.symlink_leaves, *self.symlink_through]):
             # A symlink at any component is refused by the real seam (#2432), the
             # same 422 whether the link is the leaf or an intermediate one.
             raise InvalidFilePathError(rel_path, reason="symlink_refused")
-        if rel_path in self.symlink_loops:
+        if path in _canonical_names(self.symlink_loops):
             # ELOOP is in the listing's "nothing listable here" errno set, so a
             # loop MISSES rather than being refused like every other link (#2817).
             raise ServerFileNotFoundError(str(server_id.value))
         if self.missing:
             raise ServerFileNotFoundError(str(server_id.value))
-        path = _canonical(rel_path)
         # BOTH sides canonical: ``dirs`` keys are typed by hand and carry the same
         # aliases the lookup does (the root is seeded as ``""`` in one test here
         # and as ``"."`` in the rest), so normalising only the lookup would leave
@@ -644,6 +650,32 @@ async def test_file_store_list_dir_answers_a_directory_seeded_under_an_alias() -
         server_id=ServerId(server_id),
         rel_path="world",
     ) == [entry]
+
+
+async def test_file_store_list_dir_refuses_a_symlink_under_every_spelling() -> None:
+    # The last raw comparison in the fake (issue #2975): the listing decided its
+    # symlink refusal on the raw string, so an aliased link MISSED here where
+    # production resolves the spelling first and then refuses the link it finds
+    # (#2432). The leaf and the intermediate link are both pinned; the LOOP is not,
+    # because it misses either way -- raw or canonical, ``list_dir`` answers the
+    # same ``ServerFileNotFoundError``, so a pin there would redden for nothing.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.symlink_leaves.add("alias")
+    store.symlink_through.add("alias/inner")
+
+    with pytest.raises(InvalidFilePathError):
+        await store.list_dir(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="./alias",
+        )
+    with pytest.raises(InvalidFilePathError):
+        await store.list_dir(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="alias//inner",
+        )
 
 
 @pytest.mark.parametrize("alias", ["world", "world/", "./world", "world//"])
