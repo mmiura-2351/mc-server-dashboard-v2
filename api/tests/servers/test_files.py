@@ -22,7 +22,7 @@ import tarfile
 import threading
 import uuid
 import zipfile
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncIterator, Callable, Iterable
 from dataclasses import replace
 
 import pytest
@@ -116,8 +116,8 @@ def _canonical_names(names: Iterable[str]) -> set[str]:
     file seeds the root as ``""`` in one test and as ``"."`` in the rest), so
     normalising one side alone would leave an alias-seeded name unanswerable under
     the name production resolves it to. Every decision in this fake is made this
-    way -- ``download_dir`` / ``export_dir`` are the one exception, and they decide
-    nothing about a path today (issue #2976).
+    way, the two dir-zip streams included since issue #2976 -- they reach it
+    through ``list_dir``, which is the gate production opens them with.
     """
 
     return {_canonical(name) for name in names}
@@ -436,12 +436,36 @@ class FakeFileStore(FileStore):
         _canonical(rel_path)
         self.made_dirs.append(rel_path)
 
+    async def _require_dir_to_zip(
+        self, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> None:
+        """The gate both dir-zip streams open with, as production opens them.
+
+        ``StorageFileStoreAdapter``'s two dir-zip methods share one body, and that
+        body's first act is a LISTING: it pins the working set and calls
+        ``view.list_dir(_rel_path(rel_path))``, translating a ``NotFoundError`` into
+        ``ServerFileNotFoundError`` and a refused path into ``InvalidFilePathError``
+        before a byte of zip exists. The Port states the view's miss set and refusal
+        set are exactly ``FileStore.list_dir``'s, so the faithful gate here is this
+        fake's own ``list_dir`` -- reused rather than restated, so the zip cannot
+        answer a path the listing would have refused, and so no third path rule
+        joins the one #2975 left (issue #2976). The entries are discarded: the fake
+        streams stub bytes rather than walking the tree, so the listing is only ever
+        the gate.
+        """
+
+        await self.list_dir(
+            community_id=community_id, server_id=server_id, rel_path=rel_path
+        )
+
     def download_dir(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> AsyncIterator[bytes]:
         async def _gen() -> AsyncIterator[bytes]:
-            if self.missing:
-                raise ServerFileNotFoundError(str(server_id.value))
+            # Inside the generator, because the adapter's gate is too: its
+            # ``download_dir`` only builds the generator, so nothing is decided
+            # until the caller pulls the first chunk.
+            await self._require_dir_to_zip(community_id, server_id, rel_path)
             yield b"zip-bytes"
 
         return _gen()
@@ -459,8 +483,7 @@ class FakeFileStore(FileStore):
         files = dict(self.files)
 
         async def _gen() -> AsyncIterator[bytes]:
-            if self.missing:
-                raise ServerFileNotFoundError(str(server_id.value))
+            await self._require_dir_to_zip(community_id, server_id, rel_path)
             buf = io.BytesIO()
             with zipfile.ZipFile(buf, mode="w") as zf:
                 for path, content in files.items():
@@ -1266,6 +1289,103 @@ async def test_file_store_make_dir_refuses_what_production_refuses() -> None:
             rel_path="../escape",
         )
     assert store.made_dirs == []
+
+
+def _download_dir(
+    store: FakeFileStore, community: uuid.UUID, server_id: uuid.UUID, rel_path: str
+) -> AsyncIterator[bytes]:
+    return store.download_dir(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path=rel_path,
+    )
+
+
+def _export_dir(
+    store: FakeFileStore, community: uuid.UUID, server_id: uuid.UUID, rel_path: str
+) -> AsyncIterator[bytes]:
+    return store.export_dir(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path=rel_path,
+        extra=[],
+    )
+
+
+# Both dir-zip streams are pinned by every case below because production builds
+# them from ONE body: ``StorageFileStoreAdapter.download_dir`` and ``.export_dir``
+# both return ``_download_dir_gen``, which differs only in the ``extra`` in-memory
+# entries appended after the subtree. A rule that held for one and not the other
+# would be a divergence the fake invented (issue #2976).
+_DirZip = Callable[[FakeFileStore, uuid.UUID, uuid.UUID, str], AsyncIterator[bytes]]
+
+
+@pytest.mark.parametrize("open_zip", [_download_dir, _export_dir])
+async def test_file_store_dir_zip_on_an_unknown_directory_reports_not_found(
+    open_zip: _DirZip,
+) -> None:
+    # The listing contract above, on the two methods that were left deciding
+    # nothing about the path they were handed (issue #2976). The real gate IS a
+    # listing: ``_download_dir_gen`` opens the pinned working-set view and calls
+    # ``view.list_dir(_rel_path(rel_path))`` before the zip starts, translating
+    # ``NotFoundError`` into ``ServerFileNotFoundError``. Both backends miss there
+    # for a non-root path that lists nothing -- gone, or a plain file
+    # (``_NOT_A_LISTABLE_DIR`` carries ENOTDIR for the fs view;
+    # ``_ObjectWorkingSetView.list_dir`` guards its miss with ``and sub``) -- and
+    # the Port states the view's miss set is exactly ``FileStore.list_dir``'s. So
+    # a directory nothing seeded streamed ``b"zip-bytes"`` here where production
+    # 404s: the forgiving direction, the same class as #2867, #2886 and #2887.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.files["world/level.dat"] = b"x"
+
+    stream = open_zip(store, community, server_id, "nope")
+    with pytest.raises(ServerFileNotFoundError):
+        async for _ in stream:
+            pass
+
+    # A seeded file is not a directory to zip either, for the same reason.
+    stream = open_zip(store, community, server_id, "world/level.dat")
+    with pytest.raises(ServerFileNotFoundError):
+        async for _ in stream:
+            pass
+
+
+@pytest.mark.parametrize("root", ["", ".", "./"])
+@pytest.mark.parametrize("open_zip", [_download_dir, _export_dir])
+async def test_file_store_dir_zip_on_the_root_streams_rather_than_missing(
+    open_zip: _DirZip, root: str
+) -> None:
+    # The other half of the contract, and load-bearing rather than theoretical:
+    # ``ExportServer`` always passes ``rel_path="."``, so a refusal that swallowed
+    # the root would make every export a 404. Both views answer the root without a
+    # miss -- ``_FsWorkingSetView.list_dir`` and ``_ObjectWorkingSetView.list_dir``
+    # each guard the unpinned miss with ``if not rel_path.parts``, and the object
+    # backend's pinned miss with ``and sub`` -- for EVERY spelling ``RelPath``
+    # normalises to empty ``parts``.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+
+    stream = open_zip(store, community, server_id, root)
+    assert [chunk async for chunk in stream] != []
+
+
+@pytest.mark.parametrize("alias", ["world", "world/", "./world", "world//"])
+@pytest.mark.parametrize("open_zip", [_download_dir, _export_dir])
+async def test_file_store_dir_zip_answers_every_spelling_of_a_directory(
+    open_zip: _DirZip, alias: str
+) -> None:
+    # One path rule, not a third one (issue #2975): the adapter builds a
+    # ``RelPath`` here exactly as it does for the listing, so all four spellings
+    # reach the backends as ``world`` and zip it. Deciding on the raw string
+    # instead 404s three of them -- a directory that LISTS and DELETES under a
+    # spelling but cannot be downloaded under it.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.dirs["world"] = [FileEntry(name="level.dat", is_dir=False, size=1)]
+
+    stream = open_zip(store, community, server_id, alias)
+    assert [chunk async for chunk in stream] != []
 
 
 # --- read: state branching -------------------------------------------------
@@ -3261,6 +3381,14 @@ async def test_download_running_is_unsettled() -> None:
 async def test_download_dir_zip_at_rest() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
     store = FakeFileStore()
+    # The directory this asks for, seeded (issue #2976). It never was: the zip
+    # streamed because the fake gated on nothing, so what the test showed was that
+    # the at-rest branch reaches the Storage seam AND that the seam was forgiving
+    # -- against production this exact call is a 404. Empty rather than populated
+    # because that is what the subject needs and an empty directory is a real one:
+    # a created directory lists as ``[]`` on both backends
+    # (``test_make_dir_creates_an_observable_empty_directory``, #1125).
+    store.dirs["world"] = []
     use_case = DownloadFile(uow=_stopped_uow(community, server_id), file_store=store)
 
     stream = await use_case.dir_zip(
