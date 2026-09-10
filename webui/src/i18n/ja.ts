@@ -1015,6 +1015,8 @@ export const ja: Record<TranslationKey, string> = {
   "serverCreate.import.noFile": "インポートするZIPファイルを選択してください。",
   "serverCreate.import.error.invalid_export_metadata":
     "そのアーカイブは有効なサーバーエクスポートではありません。",
+  "serverCreate.import.error.platform_managed_path":
+    "そのアーカイブには server.properties/ 配下のファイルが含まれています。server.properties はファイルとして管理されるため、該当のエントリを削除するか移動してからインポートしてください。",
   "serverCreate.import.tooLarge":
     "そのアーカイブはインポートするには大きすぎます。",
 

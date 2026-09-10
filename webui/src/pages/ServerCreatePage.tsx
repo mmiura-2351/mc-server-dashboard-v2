@@ -956,5 +956,16 @@ function handleImportError(
     showToast(t("serverCreate.import.error.invalid_export_metadata"), "error");
     return true;
   }
+  if (err.reason === "platform_managed_path") {
+    // An archive member stored under the root server.properties path, refused
+    // before the row is created (issue #2869): publishing it would stand a
+    // directory where the platform keeps a file. Import gets its own string
+    // rather than the Backups upload's because the two archives can be tripped
+    // by different things — a tar can carry a real server.properties directory
+    // member, a zip cannot (`_zip_entries` skips directory entries), so here the
+    // offending entry is always a file the operator can find and delete.
+    showToast(t("serverCreate.import.error.platform_managed_path"), "error");
+    return true;
+  }
   return handleCreateError(err, showToast, setNameError, () => {});
 }
