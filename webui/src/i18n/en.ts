@@ -484,11 +484,11 @@ export const en = {
   // the rule and its limit rather than the reason code, which is what the user
   // needs in order to fix the row.
   "serverDetail.error.configTooLarge":
-    "The config overrides are too large. Keep the whole blob under 64 KiB — shorten or remove some values.",
+    "The config overrides are too large. Keep them under 64 KiB in total — shorten or remove some values.",
   "serverDetail.error.configNullValue":
     "A config override is set to null. Give it a real value, or remove that row.",
   "serverDetail.error.configInvalidShape":
-    "The config overrides must be a JSON object, and may not nest deeper than 8 levels including the overrides object itself. Flatten the value that nests deeper.",
+    "The config overrides must be a JSON object, and may not nest more than 8 levels deep in total. Flatten the value that nests deeper.",
   "serverDetail.error.configLoneSurrogate":
     "A config override key or value contains a broken character — often half of an emoji left behind by a copy-paste. Retype or remove that text.",
   // Relay join address name errors (issue #961).
@@ -1056,7 +1056,7 @@ export const en = {
   // need a JSON-typed value, which only the Settings tab's editor parses. Size
   // and lone surrogates ride through verbatim from what was typed or pasted.
   "serverCreate.error.config_too_large":
-    "The server.properties overrides are too large. Keep the whole blob under 64 KiB — shorten or remove some values.",
+    "The server.properties overrides are too large. Keep them under 64 KiB in total — shorten or remove some values.",
   "serverCreate.error.config_lone_surrogate":
     "An override key or value contains a broken character — often half of an emoji left behind by a copy-paste. Retype or remove that text.",
   "serverCreate.genericError": "Could not create the server. Please try again.",
