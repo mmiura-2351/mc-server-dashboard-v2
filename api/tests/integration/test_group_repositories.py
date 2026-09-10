@@ -429,6 +429,43 @@ async def test_save_after_concurrent_name_take_reports_name_exists(
             await uow.groups.save(loaded)
 
 
+# --- the same UNIQUE at add's own flush (issue #2970) -------------------------
+
+
+async def test_add_after_concurrent_name_take_reports_name_exists(
+    engine: AsyncEngine,
+) -> None:
+    # The create half of the pair above. ``add`` stages the player_group row and
+    # flushes it itself, so uq_player_group_community_kind_name is refused inside
+    # the call when a racer took the (community, kind, name) between the use
+    # case's pre-read and the INSERT (issue #2000). Only the rename site had a
+    # live pin; this one was covered by a translation unit test alone, which
+    # drives a fake session and so cannot show that the constraint is reachable
+    # -- and really violated -- at this statement (issue #2970).
+    #
+    # No racing session is needed, unlike the flush sites reached past ``save``'s
+    # re-read (#2938, #2937): ``add`` reads nothing before its flush, so a racer
+    # that has already committed is still ahead of the only statement in the call.
+    community_id = await _seed_community(engine)
+    factory = create_session_factory(engine)
+
+    async with ServersUnitOfWork(factory) as racer:
+        await racer.groups.add(_group(community_id, [], name="admins"))
+        await racer.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        with pytest.raises(GroupNameAlreadyExistsError) as raised:
+            await uow.groups.add(_group(community_id, [], name="admins"))
+
+    # Which statement raised, not merely that something did: the group ids differ,
+    # so pk_player_group is not what PostgreSQL refuses, and a translated
+    # IntegrityError naming the UNIQUE is what identifies ``add``'s own flush as
+    # the origin rather than a pre-check above it.
+    cause = raised.value.__cause__
+    assert isinstance(cause, IntegrityError)
+    assert "uq_player_group_community_kind_name" in str(cause)
+
+
 # --- the create path's other parent: the community (issue #2924) -------------
 
 
