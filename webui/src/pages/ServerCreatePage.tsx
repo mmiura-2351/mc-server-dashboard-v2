@@ -957,11 +957,12 @@ function handleImportError(
     return true;
   }
   if (err.reason === "platform_managed_path") {
-    // An archive member under the root server.properties path, refused before
-    // the row is created (issue #2869). The verdict is about the archive's
-    // contents, exactly as it is for a backup upload (issue #2790), so this
-    // reuses that surface's string rather than adding a third near-duplicate.
-    showToast(t("backups.error.platformManagedPath"), "error");
+    // An archive member stored under the root server.properties path, refused
+    // before the row is created (issue #2869): publishing it would stand a
+    // directory where the platform keeps a file. The message is import-specific
+    // rather than the Backups upload's, which names a directory ENTRY that a zip
+    // import can never carry — `_zip_entries` skips those before the guard runs.
+    showToast(t("serverCreate.import.error.platform_managed_path"), "error");
     return true;
   }
   return handleCreateError(err, showToast, setNameError, () => {});
