@@ -1242,10 +1242,13 @@ def test_clear_resource_pack_properties_parses_the_content_once(
 
 # --- the batched writes against the per-key ones they replace (issue #2863) ----
 
-# The write paths were batched for speed alone, so the bar is byte identity with
-# the per-key chain, not "equivalent enough" -- and the chain is kept below, in
-# terms of the single-key helpers it was written in, so the two can be run
-# against each other over inputs picked to break them. The fragments are the
+# The write paths were batched for speed alone (issue #2863), so the bar is byte
+# identity with the per-key chain, not "equivalent enough" -- and the chain is
+# kept below, in terms of the single-key helpers it was written in, so the two
+# can be run against each other over inputs picked to break them. On one shape
+# the chain stopped being the bar: it drops a key the caller asked for when the
+# file's last logical line continues onto an appended one, which is the
+# corruption issue #2994 removed. The fragments are the
 # corners this file's format has: every Java separator, degenerate and escaped
 # spellings of the platform's own keys, duplicates, comments, continuations,
 # each line terminator including a lone CR, non-UTF-8 bytes, and files that end
@@ -1434,6 +1437,26 @@ def _apply_cases() -> list[tuple[bytes, int | None, ResourcePackProperties | Non
     return cases
 
 
+def _requested_keys(
+    game_port: int | None, pack: ResourcePackProperties | None
+) -> set[str]:
+    """Return the keys an ``apply_platform_properties`` call asks the file to carry.
+
+    ``rcon.password`` counts whether the call writes one or keeps the file's own:
+    either way the file must end up with the key. The keys a call CLEARS are not
+    requested, so they are absent from the set rather than negated in it.
+    """
+
+    keys = {"enable-rcon", "rcon.port", "rcon.password"}
+    if game_port is not None:
+        keys.add("server-port")
+    if pack is not None:
+        keys |= {"resource-pack", "resource-pack-sha1", "require-resource-pack"}
+        if pack.prompt is not None:
+            keys.add("resource-pack-prompt")
+    return keys
+
+
 def test_remove_keys_matches_removing_one_key_at_a_time() -> None:
     mismatches = [
         (content, sorted(keys))
@@ -1454,30 +1477,58 @@ def test_clear_resource_pack_properties_matches_clearing_one_key_at_a_time() -> 
     assert not mismatches, f"{len(mismatches)} differ, first: {mismatches[:3]}"
 
 
+def _as_the_server_reads_it(content: bytes) -> list[tuple[str, str]]:
+    """Return the key/value pairs ``Properties.load`` takes from *content*."""
+
+    return [(prop.key, prop.value) for prop in _parse(content)]
+
+
 def test_apply_platform_properties_matches_the_per_key_chain() -> None:
-    mismatches = [
-        (content, game_port, pack)
-        for content, game_port, pack in _apply_cases()
-        if apply_platform_properties(
+    """Byte identity with the chain, on every file the chain still gets right.
+
+    Two shapes are excused, and they are the two the #2863 carve-out used to
+    route back to the chain (issue #2994):
+
+    - A last logical line that continues onto whatever is appended. The chain
+      re-parses between writes, so its next write sees the merged key and
+      rewrites the span it now covers, dropping the line it had just written.
+      The chain is not the reference on those files;
+      ``test_apply_platform_properties_writes_every_requested_key`` and the two
+      pins below are.
+    - A lone ``\\r`` terminator, where the chain decides the newline an append
+      needs BEFORE its removals and the batched write decides it after. That is
+      one terminator byte and nothing else, so those files are compared as the
+      server reads them rather than byte for byte.
+    """
+
+    mismatches = []
+    for content, game_port, pack in _apply_cases():
+        if server_properties._ends_in_dangling_continuation(content, _parse(content)):
+            continue
+        out = apply_platform_properties(
             content, game_port=game_port, rcon_password="tok", resource_pack=pack
         )
-        != _chained_apply_platform_properties(
+        chained = _chained_apply_platform_properties(
             content, game_port=game_port, rcon_password="tok", resource_pack=pack
         )
-    ]
+        if out == chained:
+            continue
+        if b"\r" in content.replace(b"\r\n", b"") and _as_the_server_reads_it(
+            out
+        ) == _as_the_server_reads_it(chained):
+            continue
+        mismatches.append((content, game_port, pack))
     assert not mismatches, f"{len(mismatches)} differ, first: {mismatches[:3]}"
 
 
-def test_apply_platform_properties_keeps_the_chain_on_a_continued_last_line() -> None:
-    # One of the two file shapes the batch cannot reproduce, so the chain still
-    # writes it (issue #2863; a lone CR terminator is the other, and the sweep
-    # above is what pins that one). Appending after a last line that ends in an
-    # odd backslash run merges the two: "require-\" + the appended
-    # "resource-pack=..." is read as ONE require-resource-pack line, which the
-    # chain's next write then replaces
-    # in place -- taking the resource-pack line it had just written with it. The
-    # result is a file missing a key the platform owns; preserving that is not an
-    # endorsement of it, it is this change staying a speed change.
+def test_apply_platform_properties_closes_a_continued_last_line() -> None:
+    # The file's last logical line ends in an odd backslash run, so it continues
+    # onto whatever is appended: "require-\" + an appended "resource-pack=..."
+    # used to be read as ONE require-resource-pack line, and the resource-pack
+    # the caller asked for was gone from the file (issue #2994). The append now
+    # ends that continuation with an empty line first, which leaves the file's
+    # own "require-" line saying exactly what it said before -- its value ran to
+    # EOF, and an empty continuation is the same empty value.
     content = b"enable-rcon=x\nrcon.port=y\nrcon.password=z\nrequire-\\\n"
     out = apply_platform_properties(
         content,
@@ -1491,6 +1542,39 @@ def test_apply_platform_properties_keeps_the_chain_on_a_continued_last_line() ->
         b"enable-rcon=true\n"
         b"rcon.port=25575\n"
         b"rcon.password=z\n"
-        b"require-resource-pack=true\n" + f"resource-pack-sha1={_RP_SHA1}\n".encode()
+        b"require-\\\n"
+        b"\n"
+        + f"resource-pack={_RP_URL}\n".encode()
+        + f"resource-pack-sha1={_RP_SHA1}\n".encode()
+        + b"require-resource-pack=true\n"
     )
-    assert _raw_values(out, "resource-pack") == []
+    assert _raw_values(out, "resource-pack") == [_RP_URL]
+    assert _raw_values(out, "require-") == [""]
+
+
+def test_apply_platform_properties_enables_rcon_past_a_continued_pack_line() -> None:
+    # The other shape from issue #2994: the continued last line is a pack line,
+    # so clearing it takes the continuation with it and the RCON triple lands on
+    # an empty file. enable-rcon used to be swallowed by that continuation and
+    # then rewritten away, leaving RCON configured but not enabled.
+    out = apply_platform_properties(
+        b"resource-pack=old\\\n",
+        game_port=None,
+        rcon_password="tok",
+        resource_pack=None,
+    )
+    assert out == b"enable-rcon=true\nrcon.port=25575\nrcon.password=tok\n"
+
+
+def test_apply_platform_properties_writes_every_requested_key() -> None:
+    # The property the carve-out cost: whatever the file's shape, the result
+    # carries every key the call asked it to carry (issue #2994).
+    missing = []
+    for content, game_port, pack in _apply_cases():
+        out = apply_platform_properties(
+            content, game_port=game_port, rcon_password="tok", resource_pack=pack
+        )
+        absent = _requested_keys(game_port, pack) - {prop.key for prop in _parse(out)}
+        if absent:
+            missing.append((content, game_port, pack, sorted(absent)))
+    assert not missing, f"{len(missing)} incomplete, first: {missing[:3]}"

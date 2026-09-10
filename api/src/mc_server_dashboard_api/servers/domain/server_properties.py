@@ -411,6 +411,38 @@ def _set_property(content: bytes, key: str, value: str) -> bytes:
     return _normalize(bytes(out))
 
 
+def _ends_in_dangling_continuation(content: bytes, props: list[_Property]) -> bool:
+    """True when *content*'s last logical line continues onto whatever follows it.
+
+    A line ending in an odd backslash run CONTINUES onto the next one. At EOF
+    there is no next line, so the value simply ends -- until something is
+    appended, which that continuation then swallows, merging the two into one
+    property spelled as neither the file nor the write said. The appended key is
+    then absent from the file the server reads, which is a setting the caller
+    explicitly asked for silently dropped (issue #2994), so :func:`_rewrite` ends
+    the continuation before it appends.
+
+    Only the LAST logical line can dangle -- an earlier one would have consumed
+    the line below it -- and it dangles only when its last natural line carries
+    the odd run. That line belongs to a property only when the last property's
+    span reaches EOF: a comment does not continue, so a file ending in ``#c\\``
+    swallows nothing (:func:`_parse`).
+
+    Neither this shape nor the file that has one is normal for a
+    ``server.properties``; a hand-edited or truncated file is where it turns up.
+    """
+
+    if not props or props[-1].end != len(content):
+        return False
+    tail = content
+    if tail.endswith(b"\r\n"):
+        tail = tail[:-2]
+    elif tail.endswith((b"\n", b"\r")):
+        tail = tail[:-1]
+    cut = max(tail.rfind(b"\n"), tail.rfind(b"\r"))
+    return _ends_with_odd_backslash(tail[cut + 1 :].lstrip(_BLANKS))
+
+
 def _rewrite(
     content: bytes,
     props: list[_Property],
@@ -434,14 +466,19 @@ def _rewrite(
     helpers appended them in. The result is NOT normalized; callers do that, as
     they did around the single-key helpers.
 
-    An append lands after a *cleared* line the chain had not removed yet, because
-    the chain always set before it cleared. That is invisible -- the removed line
-    leaves nothing behind either way -- with one exception: the newline an append
-    needs when the content does not already end in one is decided HERE after the
-    removals and THERE before them. They still agree, because a removal that
-    takes the content's last line takes that newline with it, and the line it
-    uncovers ends in one -- unless the file's terminators include a lone ``\\r``,
-    which is a shape callers keep away from this (:func:`_appending_would_diverge`).
+    An append is preceded by whatever it takes to make it its own logical line:
+    the newline the content does not already end in, and -- when what is left
+    after the removals still ends in a dangling continuation
+    (:func:`_ends_in_dangling_continuation`) -- an empty line to end that
+    continuation, so the appended key is not swallowed into the line above
+    (issue #2994). The empty line leaves that line saying what it said: its value
+    ran to EOF, and an empty continuation is the same empty tail.
+
+    The removals are what decide whether the tail still dangles. Only a tail
+    spliced through verbatim can -- once *cursor* reaches the end of *content*,
+    the last property was either replaced by a canonical ``key=value`` line or
+    removed along with the whole dangling line, and what an earlier property
+    leaves behind ends its own logical line by construction.
     """
 
     lines = {
@@ -460,56 +497,15 @@ def _rewrite(
             out += lines[prop.key] + b"\n"
             written.add(prop.key)
     out += content[cursor:]
-    for key, line in lines.items():
-        if key not in written:
-            if out and not out.endswith(b"\n"):
-                out += b"\n"
+    appended = [line for key, line in lines.items() if key not in written]
+    if appended:
+        if out and not out.endswith(b"\n"):
+            out += b"\n"
+        if cursor < len(content) and _ends_in_dangling_continuation(content, props):
+            out += b"\n"
+        for line in appended:
             out += line + b"\n"
     return bytes(out)
-
-
-def _appending_would_diverge(content: bytes, props: list[_Property]) -> bool:
-    """True when appending to *content* could make a batched write differ from a chain.
-
-    SUFFICIENT, not exact: it answers "could this diverge", and errs toward the
-    chain. Some files it gates are ones the batched path would in fact reproduce
-    byte for byte -- ``motd=hi`` ended by a lone ``\\r``, and ``enable-rcon=false``
-    ending in a trailing backslash, are two (PR #2993 review). The lone-``\\r``
-    clause is the broad one: EVERY CR-only file takes the chain, whether or not a
-    removal there could expose a CR at the append boundary at all. Narrowing
-    either clause means re-establishing the differential argument that the two
-    forms agree -- which is why the conservative shape is deliberate, and why a
-    reader should not read the two shapes below as the exact set that diverges.
-
-    Two shapes of file do, and both are about the line an appended one lands
-    against. Neither is a shape a ``server.properties`` normally has, and a file
-    with either goes back through the chain (issue #2863) rather than being
-    quietly rewritten some other way.
-
-    A last logical line ending in an odd backslash run CONTINUES onto whatever is
-    appended, merging the two into one property spelled as neither the file nor
-    the write said. Both forms produce that merge; they part company on what
-    comes after it. A chain re-parses, so its next write sees the merged key and
-    the span it now covers, and rewriting or clearing that key drops the appended
-    line along with it. A batched write decided everything from the parse it
-    started with and never sees the merge at all.
-
-    A lone ``\\r`` line terminator makes it possible for a removal to leave the
-    content NOT ending in a newline, and a chain sets before it clears while a
-    batch does both at once -- so the two disagree on whether the append needs a
-    newline in front of it, which is a byte in the result.
-    """
-
-    if props and props[-1].end == len(content):
-        tail = content
-        if tail.endswith(b"\r\n"):
-            tail = tail[:-2]
-        elif tail.endswith((b"\n", b"\r")):
-            tail = tail[:-1]
-        cut = max(tail.rfind(b"\n"), tail.rfind(b"\r"))
-        if _ends_with_odd_backslash(tail[cut + 1 :].lstrip(_BLANKS)):
-            return True
-    return b"\r" in content.replace(b"\r\n", b"")
 
 
 def set_server_port(content: bytes, port: int) -> bytes:
@@ -720,20 +716,19 @@ def apply_platform_properties(
     key written -- seven to nine of them per call -- and this call, unlike the
     comparison guard, is not behind ``asyncio.to_thread`` at every call site, so
     on an oversized root file (a restore or an import, or one predating the #2809
-    cap) it occupied the event loop. The helpers themselves are unchanged: they
-    have callers of their own, and they are still what a file whose line
-    structure the appends would disturb goes through
-    (:func:`_appending_would_diverge`).
+    cap) it occupied the event loop. The helpers themselves are unchanged and
+    have callers of their own.
+
+    The one pass is also what keeps every key: chaining them re-parsed between
+    writes, so when the file's last logical line continued onto an appended one,
+    the next helper saw the merged key and rewrote or cleared the span it now
+    covered -- taking the line it had just written with it, and leaving the file
+    without a setting the caller had asked for (issue #2994). Nothing here reads
+    back what it wrote, and the append ends such a continuation before it writes
+    (:func:`_rewrite`).
     """
 
     props = _parse(content)
-    if _appending_would_diverge(content, props):
-        return _apply_platform_properties_per_key(
-            content,
-            game_port=game_port,
-            rcon_password=rcon_password,
-            resource_pack=resource_pack,
-        )
     values: dict[str, str] = {}
     if game_port is not None:
         values[_PORT_KEY] = str(game_port)
@@ -756,42 +751,6 @@ def apply_platform_properties(
         else:
             values[_RESOURCE_PACK_PROMPT_KEY] = resource_pack.prompt
     return _normalize(_rewrite(content, props, values, cleared))
-
-
-def _apply_platform_properties_per_key(
-    content: bytes,
-    *,
-    game_port: int | None,
-    rcon_password: str,
-    resource_pack: ResourcePackProperties | None,
-) -> bytes:
-    """Apply the platform's keys by chaining the public helpers, one parse each.
-
-    What :func:`apply_platform_properties` was before it batched the writes, kept
-    for the files :func:`_appending_would_diverge` sends back to it -- a last line
-    that continues onto whatever is appended, or a lone ``\\r`` terminator (issue
-    #2863). That gate is sufficient rather than exact, so some of those files the
-    batch would have reproduced byte for byte anyway. The chain's result on the
-    first of those is not better, it drops a platform line it had just written;
-    but replacing it is a behavioral change, and this one is not, so the chain
-    still decides that file.
-    """
-
-    if game_port is not None:
-        content = set_server_port(content, game_port)
-    content = set_rcon_properties(content, password=rcon_password)
-    if resource_pack is None:
-        return clear_resource_pack_properties(content)
-    content = set_resource_pack_properties(
-        content,
-        url=resource_pack.url,
-        sha1=resource_pack.sha1,
-        require=resource_pack.require,
-        prompt=resource_pack.prompt,
-    )
-    if resource_pack.prompt is None:
-        content = remove_keys(content, {_RESOURCE_PACK_PROMPT_KEY})
-    return content
 
 
 def clear_resource_pack_properties(content: bytes) -> bytes:
