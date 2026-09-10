@@ -1049,8 +1049,10 @@ export const en = {
   // The import guard refuses any member stored UNDER the root server.properties
   // path (issue #2869); publishing it would stand a directory where the platform
   // keeps a file. A zip's own directory entries are skipped before the guard, so
-  // the offending member is always a plain file — which is why this cannot reuse
-  // the Backups string, worded for a tar's directory member.
+  // the offending member is always a plain file. The Backups string states the
+  // same rule truthfully but names the directory the extraction WOULD create,
+  // which is not what an operator finds when they open the archive; this one
+  // names the file they can actually see and delete.
   "serverCreate.import.error.platform_managed_path":
     "That archive stores a file under server.properties/, but the platform keeps a plain file at that path. Remove or move that entry and import again.",
   "serverCreate.import.tooLarge": "That archive is too large to import.",
