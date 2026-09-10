@@ -102,6 +102,14 @@ const CREATE_ERROR_KEY: Record<string, TranslationKey> = {
   invalid_cpu_allocation: "serverCreate.error.invalid_cpu_allocation",
   invalid_slug: "serverCreate.error.invalid_slug",
   slug_taken: "serverCreate.error.slug_taken",
+  // The config-blob guard (issue #94) as far as this wizard can trip it. The
+  // POST carries a flat object of raw override strings plus the two
+  // range-checked numbers, so only the size ceiling and the lone-surrogate rule
+  // are reachable from here; `config_null_value` and `config_invalid_shape`
+  // need a JSON-typed value, which only the Settings tab's editor produces, so
+  // arms for those two would be dead.
+  config_too_large: "serverCreate.error.config_too_large",
+  config_lone_surrogate: "serverCreate.error.config_lone_surrogate",
 };
 
 export function ServerCreatePage() {
