@@ -417,11 +417,14 @@ async def test_group_add_of_a_duplicate_name_reports_already_exists() -> None:
     # ``uq_player_group_community_kind_name`` refuses a second group holding one
     # community's ``(kind, name)``, and ``SqlAlchemyGroupRepository.add`` flushes
     # the ``player_group`` row itself, so the refusal lands inside the call as
-    # ``GroupNameAlreadyExistsError`` (#2000; that translation is pinned in
-    # ``tests/servers/test_unit_of_work_translation.py::
-    # test_group_add_translates_name_violation_at_flush``). Keying on ``group.id``
-    # alone was the forgiving direction: two groups sharing the triple coexisted
-    # here, a state production cannot hold (#2923).
+    # ``GroupNameAlreadyExistsError`` (#2000). Pinned against the live UNIQUE in
+    # ``tests/integration/test_group_repositories.py::
+    # test_add_after_concurrent_name_take_reports_name_exists``, as its rename
+    # counterpart below is; until #2970 only the translation unit test stood
+    # behind this site, and a fake session cannot show that the constraint is
+    # reached at all. Keying on ``group.id`` alone was the forgiving direction:
+    # two groups sharing the triple coexisted here, a state production cannot
+    # hold (#2923).
     repo = FakeGroupRepository()
     first = _group()
     await repo.add(first)
