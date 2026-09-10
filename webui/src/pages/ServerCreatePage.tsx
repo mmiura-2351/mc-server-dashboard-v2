@@ -956,5 +956,13 @@ function handleImportError(
     showToast(t("serverCreate.import.error.invalid_export_metadata"), "error");
     return true;
   }
+  if (err.reason === "platform_managed_path") {
+    // An archive member under the root server.properties path, refused before
+    // the row is created (issue #2869). The verdict is about the archive's
+    // contents, exactly as it is for a backup upload (issue #2790), so this
+    // reuses that surface's string rather than adding a third near-duplicate.
+    showToast(t("backups.error.platformManagedPath"), "error");
+    return true;
+  }
   return handleCreateError(err, showToast, setNameError, () => {});
 }

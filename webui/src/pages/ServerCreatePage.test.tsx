@@ -923,6 +923,38 @@ describe("import tab", () => {
     ).toBeInTheDocument();
     expect(lastPath).toBe(`/communities/${CID}/servers/new`);
   });
+
+  it("names the platform-managed path a refused import would occupy (#2979)", async () => {
+    // An archive member under the root server.properties path is refused before
+    // the server row is created (issue #2869). Without an arm for the reason the
+    // handler fell through to the generic create toast, which says nothing about
+    // the member the user has to remove.
+    mockPostFormWithProgress.mockRejectedValue(
+      new ApiError(422, { reason: "platform_managed_path" }),
+    );
+    renderPage();
+    fireEvent.click(await screen.findByText(t("serverCreate.tab.import")));
+    fireEvent.change(
+      await screen.findByLabelText(t("serverCreate.nameLabel")),
+      { target: { value: "restored" } },
+    );
+    const file = new File(["zip"], "export.zip");
+    fireEvent.change(
+      screen.getByLabelText(t("serverCreate.import.fileLabel")),
+      {
+        target: { files: [file] },
+      },
+    );
+    fireEvent.click(screen.getByText(t("serverCreate.import.submit")));
+
+    expect(
+      await screen.findByText(t("backups.error.platformManagedPath")),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("serverCreate.genericError")),
+    ).not.toBeInTheDocument();
+    expect(lastPath).toBe(`/communities/${CID}/servers/new`);
+  });
 });
 
 describe("create-vs-import tab in the URL (#540)", () => {
