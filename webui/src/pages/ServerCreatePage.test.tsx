@@ -667,6 +667,49 @@ describe("create error surfacing", () => {
     expect(lastPath).toBe(`/communities/${CID}/servers/new`);
   });
 
+  // The two config-blob reasons (issue #94) this wizard can actually provoke.
+  // It posts a flat object of raw override strings plus the two range-checked
+  // numbers, so `config_null_value` and `config_invalid_shape` cannot arise
+  // here — only the Settings tab's editor parses a value as JSON — and an arm
+  // for either would be dead code.
+  it("surfaces a 422 config_too_large specifically", async () => {
+    // Override values are free text with no length cap, so one paste can push
+    // the blob past the API's 64 KiB ceiling. The generic toast never named the
+    // limit, which is the one thing that makes the error fixable.
+    mockApi.post.mockRejectedValue(
+      new ApiError(422, { reason: "config_too_large" }),
+    );
+    renderPage();
+    await reachConfigStep();
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverCreate.create") }),
+    );
+    expect(
+      await screen.findByText(t("serverCreate.error.config_too_large")),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(t("serverCreate.genericError"))).toBeNull();
+    expect(lastPath).toBe(`/communities/${CID}/servers/new`);
+  });
+
+  it("surfaces a 422 config_lone_surrogate specifically", async () => {
+    // A half-emoji pasted into an override survives the round trip verbatim:
+    // `JSON.stringify` emits it as a `\ud800` escape, which the API decodes
+    // back into the lone surrogate its guard refuses (issue #2838).
+    mockApi.post.mockRejectedValue(
+      new ApiError(422, { reason: "config_lone_surrogate" }),
+    );
+    renderPage();
+    await reachConfigStep();
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverCreate.create") }),
+    );
+    expect(
+      await screen.findByText(t("serverCreate.error.config_lone_surrogate")),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(t("serverCreate.genericError"))).toBeNull();
+    expect(lastPath).toBe(`/communities/${CID}/servers/new`);
+  });
+
   it("maps a structural validation_error on name to the field", async () => {
     mockApi.post.mockRejectedValue(
       new ApiError(422, {

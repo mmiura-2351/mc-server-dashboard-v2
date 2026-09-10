@@ -451,6 +451,15 @@ export const ja: Record<TranslationKey, string> = {
     "メモリ上限は 512〜1048576 MiB の整数である必要があります。",
   "serverDetail.error.invalidCpuAllocation":
     "CPU割り当ては 100〜128000 ミリコアの整数である必要があります。",
+  // The config-blob guard (issue #94); all four reasons are reachable here.
+  "serverDetail.error.configTooLarge":
+    "設定の上書きが大きすぎます。全体で64KiB以内に収まるよう、値を短くするか削除してください。",
+  "serverDetail.error.configNullValue":
+    "値が null になっている上書きがあります。実際の値を入力するか、その行を削除してください。",
+  "serverDetail.error.configInvalidShape":
+    "設定の上書きはJSONオブジェクトである必要があります。入れ子は上書き全体で8階層までなので、それより深い値は階層を浅くしてください。",
+  "serverDetail.error.configLoneSurrogate":
+    "上書きのキーまたは値に壊れた文字（途中で欠けた絵文字など）が含まれています。該当の文字を入力し直すか削除してください。",
   // Relay join address name errors (issue #961).
   "serverDetail.error.invalidSlug":
     "参加アドレス名は有効なDNSラベルである必要があります: 小文字・数字・ハイフンのみ、先頭と末尾にハイフン不可。",
@@ -1003,6 +1012,12 @@ export const ja: Record<TranslationKey, string> = {
     "その参加アドレス名は無効です。小文字・数字・ハイフンのみ使用できます。",
   "serverCreate.error.slug_taken":
     "その参加アドレス名はすでに使用されています。別の名前を選択してください。",
+  // The config-blob guard (issue #94); only these two reasons are reachable
+  // from the wizard (see en.ts for why).
+  "serverCreate.error.config_too_large":
+    "server.properties の上書きが大きすぎます。全体で64KiB以内に収まるよう、値を短くするか削除してください。",
+  "serverCreate.error.config_lone_surrogate":
+    "上書きのキーまたは値に壊れた文字（途中で欠けた絵文字など）が含まれています。該当の文字を入力し直すか削除してください。",
   "serverCreate.genericError":
     "サーバーを作成できませんでした。もう一度お試しください。",
   // Import tab.

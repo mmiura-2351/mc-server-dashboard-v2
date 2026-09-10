@@ -477,6 +477,20 @@ export const en = {
     "The memory limit must be a whole number between 512 and 1048576 MiB.",
   "serverDetail.error.invalidCpuAllocation":
     "The CPU allocation must be a whole number between 100 and 128000 millicores.",
+  // The config-blob guard (issue #94). All four of its reasons are reachable
+  // from this editor because it reads every value as JSON (`settings.configHint`):
+  // a typed `null`, a deeply nested literal, an oversized paste and an unpaired
+  // surrogate escape each survive the round trip to the API. Each string names
+  // the rule and its limit rather than the reason code, which is what the user
+  // needs in order to fix the row.
+  "serverDetail.error.configTooLarge":
+    "The config overrides are too large. Keep them under 64 KiB in total — shorten or remove some values.",
+  "serverDetail.error.configNullValue":
+    "A config override is set to null. Give it a real value, or remove that row.",
+  "serverDetail.error.configInvalidShape":
+    "The config overrides must be a JSON object, and may not nest more than 8 levels deep in total. Flatten the value that nests deeper.",
+  "serverDetail.error.configLoneSurrogate":
+    "A config override key or value contains a broken character — often half of an emoji left behind by a copy-paste. Retype or remove that text.",
   // Relay join address name errors (issue #961).
   "serverDetail.error.invalidSlug":
     "The join address name must be a valid DNS label: lowercase letters, digits, hyphens; cannot start or end with a hyphen.",
@@ -1035,6 +1049,16 @@ export const en = {
     "That join address name is not valid. Use lowercase letters, digits and hyphens only.",
   "serverCreate.error.slug_taken":
     "That join address name is already in use. Choose another.",
+  // The config-blob guard (issue #94). Only two of its four reasons are
+  // reachable from this wizard: it posts a flat object whose values are the raw
+  // override strings plus the two range-checked numbers, so no value can be
+  // `null` and nothing nests — `config_null_value` and `config_invalid_shape`
+  // need a JSON-typed value, which only the Settings tab's editor parses. Size
+  // and lone surrogates ride through verbatim from what was typed or pasted.
+  "serverCreate.error.config_too_large":
+    "The server.properties overrides are too large. Keep them under 64 KiB in total — shorten or remove some values.",
+  "serverCreate.error.config_lone_surrogate":
+    "An override key or value contains a broken character — often half of an emoji left behind by a copy-paste. Retype or remove that text.",
   "serverCreate.genericError": "Could not create the server. Please try again.",
   // Import tab.
   "serverCreate.import.heading": "Import from a ZIP export",
