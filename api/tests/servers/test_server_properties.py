@@ -1566,6 +1566,19 @@ def test_apply_platform_properties_enables_rcon_past_a_continued_pack_line() -> 
     assert out == b"enable-rcon=true\nrcon.port=25575\nrcon.password=tok\n"
 
 
+def test_apply_platform_properties_appends_straight_after_a_trailing_comment() -> None:
+    # A comment does NOT continue on a trailing backslash, so a file ending in
+    # one swallows nothing and the append needs no empty line in front of it
+    # (issue #2994).
+    out = apply_platform_properties(
+        b"rcon.password=z\n#c\\\n",
+        game_port=None,
+        rcon_password="tok",
+        resource_pack=None,
+    )
+    assert out == b"rcon.password=z\n#c\\\nenable-rcon=true\nrcon.port=25575\n"
+
+
 def test_apply_platform_properties_writes_every_requested_key() -> None:
     # The property the carve-out cost: whatever the file's shape, the result
     # carries every key the call asked it to carry (issue #2994).
