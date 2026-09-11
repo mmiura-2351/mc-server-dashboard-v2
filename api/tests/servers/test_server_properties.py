@@ -1581,8 +1581,12 @@ def test_apply_platform_properties_appends_straight_after_a_trailing_comment() -
 # The continued last lines an append has to end, each with the line that ends it
 # (issue #2994): an empty line, unless the logical line is EMPTY once its
 # continuation is accumulated and the file does not end in CRLF, where it takes
-# "=". These pins hold each choice where no JDK is on PATH; the JDK test below is
-# what shows each choice leaves Java reading the file's own lines as it did.
+# "=". While that line is still empty, Java reads a "#" / "!" line as a comment
+# rather than as its continuation, and the next line starts a logical line of
+# its own; _parse joins them, so the "after-a-comment" rows are where the two
+# disagree on which line is the last. These pins hold each choice where no JDK
+# is on PATH; the JDK test below is what shows each choice leaves Java reading
+# the file's own lines as it did.
 _CONTINUED_LAST_LINES: list[tuple[str, bytes, bytes]] = [
     ("empty-lf", b"\\\n", b"=\n"),
     ("empty-unterminated", b"\\", b"=\n"),
@@ -1600,6 +1604,15 @@ _CONTINUED_LAST_LINES: list[tuple[str, bytes, bytes]] = [
     ("value-then-a-lone-backslash", b"motd=a\\\n\\\n", b"\n"),
     ("value-crlf", b"k=v\\\r\n", b"\n"),
     ("value-lone-cr", b"k=v\\\r", b"\n"),
+    ("empty-after-a-comment", b"\\\n#c\\\n\\\n", b"=\n"),
+    ("empty-after-a-bang-comment", b"\\\n!c\\\n\\\n", b"=\n"),
+    ("empty-after-two-comments", b"\\\n#a\\\n#b\\\n\\\n", b"=\n"),
+    ("empty-after-a-blank-led-comment", b"\\\n  #c\\\n\\\n", b"=\n"),
+    ("empty-after-a-blank-and-a-comment", b"\\\n\n#c\\\n\\\n", b"=\n"),
+    ("empty-crlf-after-a-comment", b"\\\n#c\\\n\\\r\n", b"\n"),
+    ("value-after-a-comment", b"\\\n#c\\\nk=v\\\n", b"\n"),
+    ("value-continued-onto-a-hash", b"k=\\\n#c\\\n\\\n", b"\n"),
+    ("comment-after-an-empty-line", b"\\\n#comment\\\n", b"\n"),
 ]
 
 
@@ -1641,7 +1654,6 @@ def test_apply_platform_properties_keeps_what_java_reads_from_the_files_own_line
         b"enable-rcon=false\\\n",
         b"rcon.password=z\n#c\\\n",
         b"\\\n\n",
-        b"\\\n#comment\\\n",
         b"\\\n!bang\n",
     ]
     packs = [
