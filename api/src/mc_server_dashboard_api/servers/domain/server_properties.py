@@ -443,6 +443,37 @@ def _ends_in_dangling_continuation(content: bytes, props: list[_Property]) -> bo
     return _ends_with_odd_backslash(tail[cut + 1 :].lstrip(_BLANKS))
 
 
+def _continuation_end(content: bytes, start: int) -> bytes:
+    """Return the line that ends *content*'s dangling last property, at *start*.
+
+    The line has to end the continuation without changing what
+    ``Properties.load`` reads from the property it ends (issue #2994). An empty
+    line does that whenever the logical line has something in it: its value ran
+    to EOF, and an empty continuation is the same empty tail.
+
+    Not when the logical line is EMPTY once its continuation is accumulated --
+    every natural line from *start* on is a lone backslash, blanks aside. Java
+    reads ``"" = ""`` from that line only because EOF ends it; followed by an
+    empty line, it reads the line as blank and the property is gone. ``=`` ends
+    it as ``"" = ""`` instead. Unless the file ends in ``\\r\\n``: Java already
+    reads no property at all from an empty continued line that ends the file
+    that way, so ``=`` would invent one, and the empty line is right after all.
+    Both are what the JDK reads (checked in the tests); :func:`_parse` reads a
+    ``""`` property from the CRLF file as well, which is its divergence from
+    Java rather than a property to preserve.
+
+    The ``=`` is for the empty line only: after ``k=v`` it would make the value
+    ``v=``.
+    """
+
+    offset = start
+    while offset < len(content):
+        line, offset = _natural_line(content, offset)
+        if line.lstrip(_BLANKS) != b"\\":
+            return b"\n"
+    return b"\n" if content.endswith(b"\r\n") else b"=\n"
+
+
 def _rewrite(
     content: bytes,
     props: list[_Property],
@@ -469,10 +500,9 @@ def _rewrite(
     An append is preceded by whatever it takes to make it its own logical line:
     the newline the content does not already end in, and -- when what is left
     after the removals still ends in a dangling continuation
-    (:func:`_ends_in_dangling_continuation`) -- an empty line to end that
-    continuation, so the appended key is not swallowed into the line above
-    (issue #2994). The empty line leaves that line saying what it said: its value
-    ran to EOF, and an empty continuation is the same empty tail.
+    (:func:`_ends_in_dangling_continuation`) -- a line that ends that
+    continuation and leaves it reading as it did (:func:`_continuation_end`), so
+    the appended key is not swallowed into the line above (issue #2994).
 
     The removals are what decide whether the tail still dangles. Only a tail
     spliced through verbatim can -- once *cursor* reaches the end of *content*,
@@ -502,7 +532,7 @@ def _rewrite(
         if out and not out.endswith(b"\n"):
             out += b"\n"
         if cursor < len(content) and _ends_in_dangling_continuation(content, props):
-            out += b"\n"
+            out += _continuation_end(content, props[-1].start)
         for line in appended:
             out += line + b"\n"
     return bytes(out)
