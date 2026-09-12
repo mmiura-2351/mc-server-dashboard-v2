@@ -86,10 +86,24 @@ if [ -z "${MCSD_CHECK_LOCK_HELD:-}" ]; then
         echo "FAIL: cannot open the gate lock file $lock_file" >&2
         exit 1
     }
+    # The recorded pid is the orchestrator's own, but the lock outlives it: fd 9
+    # is inherited by everything the run spawns, so an orchestrator killed while
+    # its sub-makes are still running leaves the lock held by processes that
+    # carry a bare argv. A waiter told only that pid runs the `pgrep` recipe in
+    # docs/dev/AGENTS.md Section 3, finds nothing, and reads the whole message as
+    # a stale lock file -- so when the pid is gone, name the one command that
+    # does find the holders (#2776).
     lock_holder() {
         local line
         line=$(head -n 1 "$lock_file" 2>/dev/null) || line=""
-        printf '%s' "${line:-<unknown>}"
+        if [ -z "$line" ]; then
+            printf '<unknown>'
+            return
+        fi
+        printf '%s' "$line"
+        if [[ $line =~ \(pid\ ([0-9]+),\ since ]] && ! kill -0 "${BASH_REMATCH[1]}" 2>/dev/null; then
+            printf ' -- that pid is gone; its descendants still hold the lock: fuser -v %s' "$lock_file"
+        fi
     }
     if ! flock -n 9; then
         echo "=== check: another gate holds $lock_file; waiting ==="

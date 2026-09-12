@@ -32,6 +32,12 @@
 #   4. A nested invocation does not block. scripts-test runs check_parallel.sh
 #      itself (test_check_parallel_identity.sh, and this file), so the gate
 #      would otherwise wait for its own lock forever.
+#   5. A waiter whose recorded holder pid is dead is pointed at `fuser`. The
+#      lock outlives the pid the holder recorded -- fd 9 is inherited by every
+#      process the run spawns -- so an orchestrator killed while its sub-makes
+#      are still running holds the lock from processes that
+#      `pgrep -f <worktree>` cannot see (they carry a bare argv), and a message
+#      naming only the dead pid reads as a stale lock file (#2776).
 #
 # The runs use a stub `make` on PATH: the stub is reached at the pre-flight
 # golangci-lint install -- the first thing the script runs after the lock -- so
@@ -72,6 +78,18 @@ await_file() {
 	local path=$1 limit=${2:-100} i=0
 	while [ "$i" -lt "$limit" ]; do
 		[ -e "$path" ] && return 0
+		sleep 0.1
+		i=$((i + 1))
+	done
+	return 1
+}
+
+# The same, for a line that has to appear in a run's output rather than a file
+# that has to appear on disk.
+await_grep() {
+	local needle=$1 path=$2 limit=${3:-100} i=0
+	while [ "$i" -lt "$limit" ]; do
+		grep -qF "$needle" "$path" 2> /dev/null && return 0
 		sleep 0.1
 		i=$((i + 1))
 	done
@@ -194,6 +212,53 @@ if grep -qF "$holder_wt" "$work/waiter.out"; then
 else
 	fail_test "the waiting run does not name the holder's worktree (output: $(cat "$work/waiter.out"))"
 fi
+
+# The holder recorded a pid that is alive, so the dead-pid hint must be absent
+# here. Without this half, assertion 5 below is equally satisfied by a script
+# that appends the hint unconditionally, which would send every ordinary waiter
+# hunting for holders that the recorded pid already accounts for.
+if grep -qF 'fuser -v' "$work/waiter.out"; then
+	fail_test "the waiting run points at fuser while the recorded holder pid is alive"
+else
+	ok "a waiter whose recorded holder pid is alive gets no fuser hint"
+fi
+
+# ---------------------------------------------------------------------------
+# 5. A waiter whose recorded holder pid is dead is pointed at `fuser` (#2776).
+#    The holder above still holds the lock; only the line it recorded is
+#    doctored to name a pid that is gone, which is the state a killed
+#    orchestrator leaves behind -- its sub-makes inherited fd 9 and hold the
+#    lock without it. Rewriting the file does not disturb the flock, which
+#    lives on the inode, so this stages the message without staging a kill.
+dead_pid_waiter=""
+{
+	( exit 0 ) &
+	dead_pid=$!
+	wait "$dead_pid" 2> /dev/null
+
+	if kill -0 "$dead_pid" 2> /dev/null; then
+		fail_test "no dead pid to record with: pid $dead_pid was reused"
+	else
+		printf '%s (pid %d, since %s)\n' \
+			"$holder_wt" "$dead_pid" "$(date '+%Y-%m-%dT%H:%M:%S%z')" > "$lock_file"
+
+		dead_pid_entered="$work/dead-pid-entered"
+		(
+			cd "$waiter_wt" &&
+				PATH="$waiter_bin:$PATH" \
+					MCSD_CHECK_LOCK_FILE="$lock_file" \
+					ENTERED="$dead_pid_entered" \
+					bash "$ROOT/scripts/check_parallel.sh" "$waiter_wt"
+		) > "$work/dead-pid-waiter.out" 2>&1 &
+		dead_pid_waiter=$!
+
+		if await_grep "fuser -v $lock_file" "$work/dead-pid-waiter.out"; then
+			ok "a waiter whose recorded holder pid is dead is pointed at fuser"
+		else
+			fail_test "a waiter whose recorded holder pid is dead prints no fuser hint (output: $(cat "$work/dead-pid-waiter.out"))"
+		fi
+	fi
+}
 
 # ---------------------------------------------------------------------------
 # 3. Releasing the lock lets the waiter through.
