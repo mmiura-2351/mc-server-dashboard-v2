@@ -56,6 +56,13 @@
 #     the host lock -- neither taking it (which would deadlock against the gate
 #     running this test) nor waiting on it.
 #
+# The failure paths are bounded on purpose (#2776). This suite runs inside
+# `make check`, so a `wait` on a run still blocked on the lock would hang the
+# whole gate instead of failing it, and the holder stub -- which idles until a
+# release file appears -- would outlive a killed suite still holding the lock,
+# because the EXIT trap has by then removed the directory that file would have
+# appeared in.
+#
 # Exit code: 0 = all pass, non-zero = at least one failure.
 set -uo pipefail
 
@@ -96,6 +103,22 @@ await_grep() {
 	return 1
 }
 
+# Stop a backgrounded run and reap it. Only the failure paths use this: a `wait`
+# on a run still blocked on the lock never returns, which would hang the scripts
+# chain rather than report the failure it is standing in for. The run is exec'd
+# into its subshell, so the recorded pid is check_parallel.sh itself, and the
+# script installs its TERM trap only after the lock section -- a run still
+# waiting there dies on the signal. Its `flock` child is swept first because
+# signalling only the parent would leave it reparented and running.
+stop_run() {
+	local pid=$1
+	[ -n "$pid" ] || return 0
+	pkill -TERM -P "$pid" 2> /dev/null
+	kill -TERM "$pid" 2> /dev/null
+	wait "$pid" 2> /dev/null
+	return 0
+}
+
 echo "=== check_parallel.sh host-lock tests ==="
 
 work="$(mktemp -d)"
@@ -117,11 +140,18 @@ stub_dir="$work/stubs"
 mkdir -p "$stub_dir"
 
 # Holder stub: announce that the run is past the lock, then hold there until
-# released, so the lock is demonstrably held while the other runs are made.
+# released, so the lock is demonstrably held while the other runs are made. It
+# gives up as well when its work dir disappears: if this suite is killed, the
+# EXIT trap removes $work, the release file can then never appear, and a stub
+# watching only for that file would sit on the lock forever with nothing left
+# alive to release it (#2776).
 cat > "$stub_dir/make-holder" << 'STUB'
 #!/usr/bin/env bash
 touch "$LOCK_ACQUIRED"
-while [ ! -e "$LOCK_RELEASE" ]; do sleep 0.05; done
+while [ ! -e "$LOCK_RELEASE" ]; do
+	[ -d "$WORK_DIR" ] || exit 1
+	sleep 0.05
+done
 exit 1
 STUB
 
@@ -151,6 +181,7 @@ release="$work/holder-release"
 			MCSD_CHECK_LOCK_FILE="$lock_file" \
 			LOCK_ACQUIRED="$acquired" \
 			LOCK_RELEASE="$release" \
+			WORK_DIR="$work" \
 			bash "$ROOT/scripts/check_parallel.sh" "$holder_wt"
 ) > "$work/holder.out" 2>&1 &
 holder_pid=$!
@@ -158,7 +189,7 @@ holder_pid=$!
 if ! await_file "$acquired"; then
 	fail_test "the holder run never took the lock (nothing to test against)"
 	touch "$release"
-	wait "$holder_pid" 2> /dev/null
+	stop_run "$holder_pid"
 	echo
 	echo "Results: $pass passed, $fail failed"
 	exit 1
@@ -267,11 +298,17 @@ wait "$holder_pid" 2> /dev/null
 
 if await_file "$waiter_entered"; then
 	ok "the waiting run proceeds once the holder releases the lock"
+	# Both waiters are through the lock now, and the stub behind it exits at
+	# once, so these two reap rather than wait.
+	wait "$waiter_pid" 2> /dev/null
+	[ -n "$dead_pid_waiter" ] && wait "$dead_pid_waiter" 2> /dev/null
 else
 	fail_test "the waiting run never proceeded after the holder released the lock"
+	# Whatever went wrong, the waiters are still blocked on a lock they are now
+	# never going to get: reporting this failure must not cost the gate a hang.
+	stop_run "$waiter_pid"
+	stop_run "$dead_pid_waiter"
 fi
-
-wait "$waiter_pid" 2> /dev/null
 
 # ---------------------------------------------------------------------------
 echo
