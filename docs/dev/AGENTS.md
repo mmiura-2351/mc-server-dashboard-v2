@@ -144,15 +144,17 @@ Each one succeeds, or appears to; the damage surfaces later.
   mid-suite in the same fs-heavy modules with a red indistinguishable from a
   timeout flake, and one that a re-run does not clear). The wait prints
   `held by: <worktree> (pid N, since ...)` — when the worktree it names is your
-  own, the holder *is* the survivor. That pid is the orchestrator's, and it is
-  the first thing to die: the sub-makes under it inherited the descriptor and
-  keep the lock without it, so the message can name a pid that no longer exists.
-  The gate tests it and appends `fuser -v /tmp/mcsd-check.lock` when it is gone.
-  The two diagnostics answer different questions — `fuser` says who holds the
-  lock right now, the `pgrep` below says what is still running in this worktree
-  — and an orphaned gate usually needs both. Before attributing a stalled or red
-  gate in a worktree whose push was interrupted to a flake or a contended host,
-  look for the survivor.
+  own, the holder *is* the survivor. That pid is the orchestrator's, which is
+  the right one here but not always: when the orchestrator is itself what died
+  (a `kill -9`, or a foreground Ctrl-C whose TERM trap reaches its chain
+  subshells but not their sub-makes), those sub-makes keep the lock without it
+  and the message names a pid that no longer exists. The gate tests it and
+  appends `fuser -v /tmp/mcsd-check.lock` when it is gone. The two diagnostics
+  answer different questions — `fuser` says who holds the lock right now, the
+  `pgrep` below says what is still running in this worktree — and an orphaned
+  gate can need both. Before attributing a stalled or red gate in a worktree
+  whose push was interrupted to a flake or a contended host, look for the
+  survivor.
   `pgrep -af "<worktree-pat[h]>"` names `scripts/check_parallel.sh` and its
   chain subshells (forks share its argv): `make check` passes `$(CURDIR)` to it
   for exactly this purpose. Bracket one character of the path every time, even
