@@ -77,7 +77,10 @@ echo "=== check: $worktree ==="
 # MCSD_CHECK_LOCK_HELD makes the lock re-entrant. `make scripts-test` runs this
 # script (test_check_parallel_lock.sh, test_check_parallel_identity.sh) from
 # inside a running gate, which would otherwise wait for the lock its own parent
-# holds, forever.
+# holds, forever. It is internal -- the script exports it for the processes it
+# spawns -- and setting it by hand is a silent opt-out of the serialisation
+# above, which puts the #2513 timeout reds back on a host where nothing in the
+# output says why.
 lock_file=${MCSD_CHECK_LOCK_FILE:-/tmp/mcsd-check.lock}
 if [ -z "${MCSD_CHECK_LOCK_HELD:-}" ]; then
     # Append rather than truncate: opening the file must not erase the holder

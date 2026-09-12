@@ -121,6 +121,10 @@ Each one succeeds, or appears to; the damage surfaces later.
   bypass is only known to have been harmless *afterwards* — the very fact the
   gate exists to establish beforehand. "Only the known flake" is a prediction,
   not a result. Escalate a flaky gate as an issue and re-run instead.
+  `MCSD_CHECK_LOCK_HELD` is the quiet form of the same move: the gate exports it
+  so its own nested runs (`make scripts-test` runs the orchestrator) do not wait
+  for the lock they already hold; setting it by hand instead drops the host-wide
+  serialisation below — never set it yourself.
 - **`pgrep -f <pattern>` matches the waiting shell itself.** `pgrep` omits only
   its own process, not the shell that invoked it — whose command line contains
   the pattern. So `until ! pgrep -f "make check"; do sleep 30; done` never
@@ -140,9 +144,15 @@ Each one succeeds, or appears to; the damage surfaces later.
   mid-suite in the same fs-heavy modules with a red indistinguishable from a
   timeout flake, and one that a re-run does not clear). The wait prints
   `held by: <worktree> (pid N, since ...)` — when the worktree it names is your
-  own, the holder *is* the survivor, and the `pgrep` below turns the message
-  into a pid. Before attributing a stalled or red gate in a worktree whose push
-  was interrupted to a flake or a contended host, look for the survivor.
+  own, the holder *is* the survivor. That pid is the orchestrator's, and it is
+  the first thing to die: the sub-makes under it inherited the descriptor and
+  keep the lock without it, so the message can name a pid that no longer exists.
+  The gate tests it and appends `fuser -v /tmp/mcsd-check.lock` when it is gone.
+  The two diagnostics answer different questions — `fuser` says who holds the
+  lock right now, the `pgrep` below says what is still running in this worktree
+  — and an orphaned gate usually needs both. Before attributing a stalled or red
+  gate in a worktree whose push was interrupted to a flake or a contended host,
+  look for the survivor.
   `pgrep -af "<worktree-pat[h]>"` names `scripts/check_parallel.sh` and its
   chain subshells (forks share its argv): `make check` passes `$(CURDIR)` to it
   for exactly this purpose. Bracket one character of the path every time, even
