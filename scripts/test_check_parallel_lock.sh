@@ -39,11 +39,13 @@
 #      `pgrep -f <worktree>` cannot see (they carry a bare argv), and a message
 #      naming only the dead pid reads as a stale lock file (#2776).
 #   6. A worktree path that mimics the recorded suffix does not fake a dead
-#      pid. The line is "<worktree> (pid N, since <timestamp>)" and the
-#      worktree half is arbitrary text, so a parse that is not anchored to the
-#      end reads a decoy "(pid ..., since ...)" inside the path instead and
-#      reports a live holder as gone -- sending the reader after holders that
-#      do not exist (#2776).
+#      pid, in either shape. The line is "<worktree> (pid N, since <stamp>)"
+#      and the worktree half is arbitrary text: a parse taking the first
+#      "(pid ..., since ...)" reads a terminated decoy, and one anchored only
+#      at the end of the line is beaten by an unterminated decoy, which has no
+#      paren to stop a "not a paren" class before the real suffix. Either way
+#      a live holder is reported as gone, sending the reader after holders
+#      that do not exist (#2776).
 #
 # The runs use a stub `make` on PATH: the stub is reached at the pre-flight
 # golangci-lint install -- the first thing the script runs after the lock -- so
@@ -291,33 +293,33 @@ fi
 #    orchestrator leaves behind -- its sub-makes inherited fd 9 and hold the
 #    lock without it. Rewriting the file does not disturb the flock, which
 #    lives on the inode, so this stages the message without staging a kill.
+#
+#    The pid used here is above this host's pid_max, so it cannot be alive. A
+#    reaped pid would do the same job only for as long as it stayed unissued:
+#    the kernel could hand it to an unrelated process between the check here
+#    and the waiter parsing the line, and the assertion would then pass for the
+#    wrong reason.
+dead_pid=$(( $(cat /proc/sys/kernel/pid_max) + 1 ))
+
 dead_pid_waiter=""
 {
-	( exit 0 ) &
-	dead_pid=$!
-	wait "$dead_pid" 2> /dev/null
+	printf '%s (pid %d, since %s)\n' \
+		"$holder_wt" "$dead_pid" "$(date '+%Y-%m-%dT%H:%M:%S%z')" > "$lock_file"
 
-	if kill -0 "$dead_pid" 2> /dev/null; then
-		fail_test "no dead pid to record with: pid $dead_pid was reused"
+	dead_pid_entered="$work/dead-pid-entered"
+	(
+		cd "$waiter_wt" &&
+			PATH="$waiter_bin:$PATH" \
+				MCSD_CHECK_LOCK_FILE="$lock_file" \
+				ENTERED="$dead_pid_entered" \
+				bash "$ROOT/scripts/check_parallel.sh" "$waiter_wt"
+	) > "$work/dead-pid-waiter.out" 2>&1 &
+	dead_pid_waiter=$!
+
+	if await_grep "fuser -v $lock_file" "$work/dead-pid-waiter.out"; then
+		ok "a waiter whose recorded holder pid is dead is pointed at fuser"
 	else
-		printf '%s (pid %d, since %s)\n' \
-			"$holder_wt" "$dead_pid" "$(date '+%Y-%m-%dT%H:%M:%S%z')" > "$lock_file"
-
-		dead_pid_entered="$work/dead-pid-entered"
-		(
-			cd "$waiter_wt" &&
-				PATH="$waiter_bin:$PATH" \
-					MCSD_CHECK_LOCK_FILE="$lock_file" \
-					ENTERED="$dead_pid_entered" \
-					bash "$ROOT/scripts/check_parallel.sh" "$waiter_wt"
-		) > "$work/dead-pid-waiter.out" 2>&1 &
-		dead_pid_waiter=$!
-
-		if await_grep "fuser -v $lock_file" "$work/dead-pid-waiter.out"; then
-			ok "a waiter whose recorded holder pid is dead is pointed at fuser"
-		else
-			fail_test "a waiter whose recorded holder pid is dead prints no fuser hint (output: $(cat "$work/dead-pid-waiter.out"))"
-		fi
+		fail_test "a waiter whose recorded holder pid is dead prints no fuser hint (output: $(cat "$work/dead-pid-waiter.out"))"
 	fi
 }
 
@@ -325,42 +327,43 @@ dead_pid_waiter=""
 # 6. A worktree path that mimics the recorded suffix does not fake a dead pid
 #    (#2776). Staged like assertion 5 -- the holder still holds the lock, only
 #    the line it recorded is doctored -- except that here the decoy sits in the
-#    worktree half and the real suffix names this suite, which is alive. A
-#    parse that takes the first "(pid ..., since ...)" it sees reads the decoy
-#    and calls a live holder gone.
-decoy_waiter=""
+#    worktree half and the real suffix names this suite, which is alive.
+#
+#    Both shapes are asserted because they defeat different parses. A parse
+#    that takes the first "(pid ..., since ...)" it sees reads the TERMINATED
+#    decoy; a parse anchored only at the end of the line is beaten by the
+#    UNTERMINATED one, whose missing paren lets a "not a paren" class run from
+#    the decoy straight through the real suffix to the closing paren at the
+#    end. Either way a live holder is reported as gone.
+decoy_waiters=()
 {
-	( exit 0 ) &
-	decoy_pid=$!
-	wait "$decoy_pid" 2> /dev/null
-
-	if kill -0 "$decoy_pid" 2> /dev/null; then
-		fail_test "no dead pid to build the decoy with: pid $decoy_pid was reused"
-	else
-		decoy_wt="$holder_wt (pid $decoy_pid, since decoy): 42"
+	decoy_n=0
+	for decoy_tail in "since decoy): 42" "since decoy: 42"; do
+		decoy_n=$((decoy_n + 1))
+		decoy_wt="$holder_wt (pid $dead_pid, $decoy_tail"
 		printf '%s (pid %d, since %s)\n' \
 			"$decoy_wt" "$$" "$(date '+%Y-%m-%dT%H:%M:%S%z')" > "$lock_file"
 
-		decoy_entered="$work/decoy-entered"
+		decoy_out="$work/decoy-waiter-$decoy_n.out"
 		(
 			cd "$waiter_wt" &&
 				PATH="$waiter_bin:$PATH" \
 					MCSD_CHECK_LOCK_FILE="$lock_file" \
-					ENTERED="$decoy_entered" \
+					ENTERED="$work/decoy-entered-$decoy_n" \
 					bash "$ROOT/scripts/check_parallel.sh" "$waiter_wt"
-		) > "$work/decoy-waiter.out" 2>&1 &
-		decoy_waiter=$!
+		) > "$decoy_out" 2>&1 &
+		decoy_waiters+=($!)
 
-		if await_grep "held by: $decoy_wt" "$work/decoy-waiter.out"; then
-			if grep -qF 'fuser -v' "$work/decoy-waiter.out"; then
-				fail_test "a decoy pid inside the worktree path faked a dead holder"
+		if await_grep "held by: $decoy_wt" "$decoy_out"; then
+			if grep -qF 'fuser -v' "$decoy_out"; then
+				fail_test "a decoy pid in the worktree path faked a dead holder [$decoy_tail]"
 			else
-				ok "a decoy pid inside the worktree path does not fake a dead holder"
+				ok "a decoy pid in the worktree path does not fake a dead holder [$decoy_tail]"
 			fi
 		else
-			fail_test "the decoy waiter never named the holder (output: $(cat "$work/decoy-waiter.out"))"
+			fail_test "the decoy waiter never named the holder [$decoy_tail] (output: $(cat "$decoy_out"))"
 		fi
-	fi
+	done
 }
 
 # ---------------------------------------------------------------------------
@@ -374,14 +377,18 @@ if await_file "$waiter_entered"; then
 	# runs can only finish by getting past the lock.
 	reap_run "$waiter_pid"
 	reap_run "$dead_pid_waiter"
-	reap_run "$decoy_waiter"
+	for decoy_waiter in "${decoy_waiters[@]}"; do
+		reap_run "$decoy_waiter"
+	done
 else
 	fail_test "the waiting run never proceeded after the holder released the lock"
 	# Whatever went wrong, the waiters are still blocked on a lock they are now
 	# never going to get: reporting this failure must not cost the gate a hang.
 	stop_run "$waiter_pid"
 	stop_run "$dead_pid_waiter"
-	stop_run "$decoy_waiter"
+	for decoy_waiter in "${decoy_waiters[@]}"; do
+		stop_run "$decoy_waiter"
+	done
 fi
 
 # ---------------------------------------------------------------------------

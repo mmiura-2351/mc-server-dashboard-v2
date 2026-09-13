@@ -97,17 +97,24 @@ if [ -z "${MCSD_CHECK_LOCK_HELD:-}" ]; then
     # a stale lock file -- so when the pid is gone, name the one command that
     # does find the holders (#2776).
     lock_holder() {
-        local line
+        local line rest
         line=$(head -n 1 "$lock_file" 2>/dev/null) || line=""
         if [ -z "$line" ]; then
             printf '<unknown>'
             return
         fi
         printf '%s' "$line"
-        # Anchored at the end of the line: the worktree path in front of the
-        # suffix is arbitrary text and may contain a decoy "(pid N, since ...)"
-        # of its own, which an unanchored match would read instead.
-        if [[ $line =~ \(pid\ ([0-9]+),\ since\ [^\)]*\)$ ]] && ! kill -0 "${BASH_REMATCH[1]}" 2>/dev/null; then
+        # Parse from the right, and accept only the exact shape written above.
+        # The worktree half in front of the suffix is arbitrary text and may
+        # carry a decoy "(pid N, since ..." of its own; an unterminated one has
+        # no closing paren to stop a "not a paren" class, so a match anchored
+        # only at the end of the line runs through the real suffix and reports
+        # a live holder as gone. The last " (pid " is the generated delimiter,
+        # and what follows it must be the pid and the timestamp `date` produced.
+        rest=${line##*" (pid "}
+        if [ "$rest" != "$line" ] &&
+            [[ $rest =~ ^([0-9]+),\ since\ [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{4}\)$ ]] &&
+            ! kill -0 "${BASH_REMATCH[1]}" 2>/dev/null; then
             printf ' -- that pid is gone; its descendants still hold the lock: fuser -v %s' "$lock_file"
         fi
     }
