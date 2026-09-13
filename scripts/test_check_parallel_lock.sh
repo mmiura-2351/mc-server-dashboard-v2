@@ -38,6 +38,12 @@
 #      are still running holds the lock from processes that
 #      `pgrep -f <worktree>` cannot see (they carry a bare argv), and a message
 #      naming only the dead pid reads as a stale lock file (#2776).
+#   6. A worktree path that mimics the recorded suffix does not fake a dead
+#      pid. The line is "<worktree> (pid N, since <timestamp>)" and the
+#      worktree half is arbitrary text, so a parse that is not anchored to the
+#      end reads a decoy "(pid ..., since ...)" inside the path instead and
+#      reports a live holder as gone -- sending the reader after holders that
+#      do not exist (#2776).
 #
 # The runs use a stub `make` on PATH: the stub is reached at the pre-flight
 # golangci-lint install -- the first thing the script runs after the lock -- so
@@ -316,6 +322,48 @@ dead_pid_waiter=""
 }
 
 # ---------------------------------------------------------------------------
+# 6. A worktree path that mimics the recorded suffix does not fake a dead pid
+#    (#2776). Staged like assertion 5 -- the holder still holds the lock, only
+#    the line it recorded is doctored -- except that here the decoy sits in the
+#    worktree half and the real suffix names this suite, which is alive. A
+#    parse that takes the first "(pid ..., since ...)" it sees reads the decoy
+#    and calls a live holder gone.
+decoy_waiter=""
+{
+	( exit 0 ) &
+	decoy_pid=$!
+	wait "$decoy_pid" 2> /dev/null
+
+	if kill -0 "$decoy_pid" 2> /dev/null; then
+		fail_test "no dead pid to build the decoy with: pid $decoy_pid was reused"
+	else
+		decoy_wt="$holder_wt (pid $decoy_pid, since decoy): 42"
+		printf '%s (pid %d, since %s)\n' \
+			"$decoy_wt" "$$" "$(date '+%Y-%m-%dT%H:%M:%S%z')" > "$lock_file"
+
+		decoy_entered="$work/decoy-entered"
+		(
+			cd "$waiter_wt" &&
+				PATH="$waiter_bin:$PATH" \
+					MCSD_CHECK_LOCK_FILE="$lock_file" \
+					ENTERED="$decoy_entered" \
+					bash "$ROOT/scripts/check_parallel.sh" "$waiter_wt"
+		) > "$work/decoy-waiter.out" 2>&1 &
+		decoy_waiter=$!
+
+		if await_grep "held by: $decoy_wt" "$work/decoy-waiter.out"; then
+			if grep -qF 'fuser -v' "$work/decoy-waiter.out"; then
+				fail_test "a decoy pid inside the worktree path faked a dead holder"
+			else
+				ok "a decoy pid inside the worktree path does not fake a dead holder"
+			fi
+		else
+			fail_test "the decoy waiter never named the holder (output: $(cat "$work/decoy-waiter.out"))"
+		fi
+	fi
+}
+
+# ---------------------------------------------------------------------------
 # 3. Releasing the lock lets the waiter through.
 touch "$release"
 reap_run "$holder_pid"
@@ -326,12 +374,14 @@ if await_file "$waiter_entered"; then
 	# runs can only finish by getting past the lock.
 	reap_run "$waiter_pid"
 	reap_run "$dead_pid_waiter"
+	reap_run "$decoy_waiter"
 else
 	fail_test "the waiting run never proceeded after the holder released the lock"
 	# Whatever went wrong, the waiters are still blocked on a lock they are now
 	# never going to get: reporting this failure must not cost the gate a hang.
 	stop_run "$waiter_pid"
 	stop_run "$dead_pid_waiter"
+	stop_run "$decoy_waiter"
 fi
 
 # ---------------------------------------------------------------------------

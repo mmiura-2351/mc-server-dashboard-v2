@@ -104,7 +104,10 @@ if [ -z "${MCSD_CHECK_LOCK_HELD:-}" ]; then
             return
         fi
         printf '%s' "$line"
-        if [[ $line =~ \(pid\ ([0-9]+),\ since ]] && ! kill -0 "${BASH_REMATCH[1]}" 2>/dev/null; then
+        # Anchored at the end of the line: the worktree path in front of the
+        # suffix is arbitrary text and may contain a decoy "(pid N, since ...)"
+        # of its own, which an unanchored match would read instead.
+        if [[ $line =~ \(pid\ ([0-9]+),\ since\ [^\)]*\)$ ]] && ! kill -0 "${BASH_REMATCH[1]}" 2>/dev/null; then
             printf ' -- that pid is gone; its descendants still hold the lock: fuser -v %s' "$lock_file"
         fi
     }
