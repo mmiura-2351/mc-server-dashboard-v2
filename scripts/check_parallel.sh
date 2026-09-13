@@ -77,7 +77,10 @@ echo "=== check: $worktree ==="
 # MCSD_CHECK_LOCK_HELD makes the lock re-entrant. `make scripts-test` runs this
 # script (test_check_parallel_lock.sh, test_check_parallel_identity.sh) from
 # inside a running gate, which would otherwise wait for the lock its own parent
-# holds, forever.
+# holds, forever. It is internal -- the script exports it for the processes it
+# spawns -- and setting it by hand is a silent opt-out of the serialisation
+# above, which puts the #2513 timeout reds back on a host where nothing in the
+# output says why.
 lock_file=${MCSD_CHECK_LOCK_FILE:-/tmp/mcsd-check.lock}
 if [ -z "${MCSD_CHECK_LOCK_HELD:-}" ]; then
     # Append rather than truncate: opening the file must not erase the holder
@@ -86,10 +89,34 @@ if [ -z "${MCSD_CHECK_LOCK_HELD:-}" ]; then
         echo "FAIL: cannot open the gate lock file $lock_file" >&2
         exit 1
     }
+    # The recorded pid is the orchestrator's own, but the lock outlives it: fd 9
+    # is inherited by everything the run spawns, so an orchestrator killed while
+    # its sub-makes are still running leaves the lock held by processes that
+    # carry a bare argv. A waiter told only that pid runs the `pgrep` recipe in
+    # docs/dev/AGENTS.md Section 3, finds nothing, and reads the whole message as
+    # a stale lock file -- so when the pid is gone, name the one command that
+    # does find the holders (#2776).
     lock_holder() {
-        local line
+        local line rest
         line=$(head -n 1 "$lock_file" 2>/dev/null) || line=""
-        printf '%s' "${line:-<unknown>}"
+        if [ -z "$line" ]; then
+            printf '<unknown>'
+            return
+        fi
+        printf '%s' "$line"
+        # Parse from the right, and accept only the exact shape written above.
+        # The worktree half in front of the suffix is arbitrary text and may
+        # carry a decoy "(pid N, since ..." of its own; an unterminated one has
+        # no closing paren to stop a "not a paren" class, so a match anchored
+        # only at the end of the line runs through the real suffix and reports
+        # a live holder as gone. The last " (pid " is the generated delimiter,
+        # and what follows it must be the pid and the timestamp `date` produced.
+        rest=${line##*" (pid "}
+        if [ "$rest" != "$line" ] &&
+            [[ $rest =~ ^([0-9]+),\ since\ [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{4}\)$ ]] &&
+            ! kill -0 "${BASH_REMATCH[1]}" 2>/dev/null; then
+            printf ' -- that pid is gone; its descendants still hold the lock: fuser -v %s' "$lock_file"
+        fi
     }
     if ! flock -n 9; then
         echo "=== check: another gate holds $lock_file; waiting ==="
