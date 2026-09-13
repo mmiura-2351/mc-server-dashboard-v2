@@ -46,6 +46,11 @@
 #      paren to stop a "not a paren" class before the real suffix. Either way
 #      a live holder is reported as gone, sending the reader after holders
 #      that do not exist (#2776).
+#   7. A run that had to be stopped is reported rather than reaped in silence.
+#      The reaps are bounded so a wedged run cannot hang the gate, but a stop
+#      that passed quietly would be worse than the hang: stopping the holder
+#      releases the lock, so the suite would go on to "pass" assertions about
+#      scaffolding it had cut short itself (#2776).
 #
 # The runs use a stub `make` on PATH: the stub is reached at the pre-flight
 # golangci-lint install -- the first thing the script runs after the lock -- so
@@ -118,12 +123,17 @@ await_grep() {
 # script installs its TERM trap only after the lock section -- a run still
 # waiting there dies on the signal. Its `flock` child is swept first because
 # signalling only the parent would leave it reparented and running.
+#
+# Each step is allowed to fail: the run may have no `flock` child left, it may
+# have exited between the two signals, and `wait` reports the status of a run
+# that exits non-zero by design (its stub fails on purpose). None of that is an
+# error here, and leaving the statuses bare aborts the suite under `set -e`.
 stop_run() {
 	local pid=$1
 	[ -n "$pid" ] || return 0
-	pkill -TERM -P "$pid" 2> /dev/null
-	kill -TERM "$pid" 2> /dev/null
-	wait "$pid" 2> /dev/null
+	pkill -TERM -P "$pid" 2> /dev/null || true
+	kill -TERM "$pid" 2> /dev/null || true
+	wait "$pid" 2> /dev/null || true
 	return 0
 }
 
@@ -133,11 +143,17 @@ stop_run() {
 # suite runs inside `make check`. Bash reaps its own background children as
 # they exit, so `kill -0` failing is the signal that the run is done and the
 # `wait` returns at once; a run still there at the ceiling is stopped instead.
+#
+# Returns non-zero when it had to stop the run instead of reaping one that
+# finished. Callers must check that: a run stopped part-way has not done what
+# the assertion around it claims, and stopping a holder releases the lock as a
+# side effect, which would let the assertions after it pass on scaffolding the
+# suite itself cut short.
 reap_run() {
 	local pid=$1 limit=${2:-100} i=0
 	[ -n "$pid" ] || return 0
 	while [ "$i" -lt "$limit" ]; do
-		kill -0 "$pid" 2> /dev/null || { wait "$pid" 2> /dev/null; return 0; }
+		kill -0 "$pid" 2> /dev/null || { wait "$pid" 2> /dev/null || true; return 0; }
 		sleep 0.1
 		i=$((i + 1))
 	done
@@ -241,7 +257,8 @@ fi
 
 	if await_file "$nested_entered"; then
 		ok "a nested run (MCSD_CHECK_LOCK_HELD) does not wait for the lock it already holds"
-		reap_run "$nested_pid"
+		reap_run "$nested_pid" ||
+			fail_test "the nested run had to be stopped instead of exiting on its own"
 	else
 		fail_test "a nested run blocked on the held lock -- scripts-test would deadlock the gate"
 		stop_run "$nested_pid"
@@ -369,16 +386,20 @@ decoy_waiters=()
 # ---------------------------------------------------------------------------
 # 3. Releasing the lock lets the waiter through.
 touch "$release"
-reap_run "$holder_pid"
+reap_run "$holder_pid" ||
+	fail_test "the holder run had to be stopped: it did not exit after the lock was released, so the lock below was freed by this suite rather than by the holder"
 
 if await_file "$waiter_entered"; then
 	ok "the waiting run proceeds once the holder releases the lock"
 	# Bounded for the same reason as the failure branch below: each of these
 	# runs can only finish by getting past the lock.
-	reap_run "$waiter_pid"
-	reap_run "$dead_pid_waiter"
+	reap_run "$waiter_pid" ||
+		fail_test "the waiting run had to be stopped instead of exiting on its own"
+	reap_run "$dead_pid_waiter" ||
+		fail_test "the dead-pid waiter had to be stopped instead of exiting on its own"
 	for decoy_waiter in "${decoy_waiters[@]}"; do
-		reap_run "$decoy_waiter"
+		reap_run "$decoy_waiter" ||
+			fail_test "a decoy waiter had to be stopped instead of exiting on its own"
 	done
 else
 	fail_test "the waiting run never proceeded after the holder released the lock"
@@ -390,6 +411,23 @@ else
 		stop_run "$decoy_waiter"
 	done
 fi
+
+# ---------------------------------------------------------------------------
+# 7. A run that had to be stopped is reported, not reaped in silence (#2776).
+#    This is the contract every reap above relies on. A silent stop would let
+#    the suite cut its own scaffolding short and still report green -- and
+#    because stopping the holder releases the lock as a side effect, every
+#    assertion after it would pass on a lock this suite freed itself.
+{
+	sleep 30 &
+	stuck_pid=$!
+
+	if reap_run "$stuck_pid" 3; then
+		fail_test "reap_run reported success for a run it had to stop"
+	else
+		ok "a run that had to be stopped is reported rather than reaped in silence"
+	fi
+}
 
 # ---------------------------------------------------------------------------
 echo
