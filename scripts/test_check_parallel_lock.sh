@@ -119,6 +119,24 @@ stop_run() {
 	return 0
 }
 
+# Reap a run that should be finishing on its own, without waiting forever for
+# it. Every run started below can only finish by getting past the lock, so a
+# plain `wait` on one that never does turns a red into a hung gate -- this
+# suite runs inside `make check`. Bash reaps its own background children as
+# they exit, so `kill -0` failing is the signal that the run is done and the
+# `wait` returns at once; a run still there at the ceiling is stopped instead.
+reap_run() {
+	local pid=$1 limit=${2:-100} i=0
+	[ -n "$pid" ] || return 0
+	while [ "$i" -lt "$limit" ]; do
+		kill -0 "$pid" 2> /dev/null || { wait "$pid" 2> /dev/null; return 0; }
+		sleep 0.1
+		i=$((i + 1))
+	done
+	stop_run "$pid"
+	return 1
+}
+
 echo "=== check_parallel.sh host-lock tests ==="
 
 work="$(mktemp -d)"
@@ -198,6 +216,9 @@ fi
 # ---------------------------------------------------------------------------
 # 4. A nested invocation must not block. Asserted first, while the lock is
 #    demonstrably held: with the guard set, the run walks straight past it.
+#    Backgrounded like every other run here, because the failure this asserts
+#    IS a run that blocks on the lock: in the foreground it would hang the gate
+#    on the way to its own failure message rather than print it (#2776).
 {
 	nested_entered="$work/nested-entered"
 	(
@@ -207,12 +228,15 @@ fi
 				MCSD_CHECK_LOCK_HELD=1 \
 				ENTERED="$nested_entered" \
 				bash "$ROOT/scripts/check_parallel.sh" "$waiter_wt"
-	) > /dev/null 2>&1
+	) > /dev/null 2>&1 &
+	nested_pid=$!
 
-	if [ -e "$nested_entered" ]; then
+	if await_file "$nested_entered"; then
 		ok "a nested run (MCSD_CHECK_LOCK_HELD) does not wait for the lock it already holds"
+		reap_run "$nested_pid"
 	else
 		fail_test "a nested run blocked on the held lock -- scripts-test would deadlock the gate"
+		stop_run "$nested_pid"
 	fi
 }
 
@@ -294,14 +318,14 @@ dead_pid_waiter=""
 # ---------------------------------------------------------------------------
 # 3. Releasing the lock lets the waiter through.
 touch "$release"
-wait "$holder_pid" 2> /dev/null
+reap_run "$holder_pid"
 
 if await_file "$waiter_entered"; then
 	ok "the waiting run proceeds once the holder releases the lock"
-	# Both waiters are through the lock now, and the stub behind it exits at
-	# once, so these two reap rather than wait.
-	wait "$waiter_pid" 2> /dev/null
-	[ -n "$dead_pid_waiter" ] && wait "$dead_pid_waiter" 2> /dev/null
+	# Bounded for the same reason as the failure branch below: each of these
+	# runs can only finish by getting past the lock.
+	reap_run "$waiter_pid"
+	reap_run "$dead_pid_waiter"
 else
 	fail_test "the waiting run never proceeded after the holder released the lock"
 	# Whatever went wrong, the waiters are still blocked on a lock they are now
