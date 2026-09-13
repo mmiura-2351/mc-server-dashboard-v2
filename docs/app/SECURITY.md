@@ -439,12 +439,12 @@ is absent from `netstat -lnt` in the container and a peer container's
 `GET http://<container>:8181/v1/config` is refused; without it, the same
 request answers 200. The other eight listeners are unaffected, and `8333` and
 `8888` answer from a peer. That probe was not repeated when `compose.yaml`
-moved its pin to `4.42`, so it describes `4.41`, not the pinned version. Probed
+moved its pin off `4.41`, so it describes `4.41`, not the pinned version. Probed
 2026-08-25 on the canonical host after a deploy, from the `api` container —
 `docker compose exec api python -c "import urllib.request;
 urllib.request.urlopen('http://seaweedfs:8181/', timeout=3)"` — and refused
 (`Errno 111`); `compose.yaml` pinned `4.41` from 2026-08-20 (#2733) until
-2026-08-26 (#2804), so that deploy ran `4.41` too, not the pinned `4.42`. The
+2026-08-26 (#2804), so that deploy ran `4.41` too, not the pinned version. The
 same command re-checks it after an image bump or a change to the `weed server`
 command line.
 

@@ -146,7 +146,7 @@ services:
     # absent from `netstat -lnt` and a peer container's GET /v1/config on 8181 is
     # refused; without it that same GET answers 200. The other eight listeners are
     # unchanged. That probe ran on 4.41 and has not been repeated since the image
-    # above moved to 4.42 (#2804), so it does not cover the pinned version. The
+    # above moved off 4.41 (#2804), so it does not cover the pinned version. The
     # re-probe from an `mcsd` peer has since been done, and #2626 was closed on
     # its result: 2026-08-25, on the canonical host after a deploy, GET
     # http://seaweedfs:8181/ from the `api` container was refused (Errno 111).
