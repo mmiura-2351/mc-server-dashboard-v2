@@ -372,16 +372,18 @@ async def test_save_after_concurrent_group_delete_reports_not_found(
 async def test_save_after_concurrent_group_delete_without_players_reports_not_found(
     engine: AsyncEngine,
 ) -> None:
-    # The other half of the branch above, pinned against a real flush for the same
-    # reason: a fake asserting its own no-op establishes nothing about the
-    # adapter, so both branches modelled by ``FakeGroupRepository.save``
-    # (tests/servers/test_fake_repository_isolation.py) get one here.
+    # The other half of the branch above, pinned against a real database for the
+    # same reason: ``FakeGroupRepository.save`` raises this not-found from a dict
+    # of its own, with no second connection to see the racer's delete, so
+    # asserting it establishes nothing about the adapter -- both branches it
+    # models (tests/servers/test_fake_repository_isolation.py) get one here.
     #
     # With the player set emptied there is no INSERT, so nothing violates the FK
     # that carries the not-found for the player-carrying branch (#2583) -- save
     # used to write nothing and pass silently, which told the caller the edit
-    # succeeded (#2613). The load now re-asserts the row, so both branches report
-    # the same not-found regardless of whether the group happened to have players.
+    # succeeded (#2613). The re-read now asserts the row and raises here, before
+    # anything is staged, so both branches report the same not-found regardless
+    # of whether the group happened to have players.
     community_id = await _seed_community(engine)
     factory = create_session_factory(engine)
     only_player = uuid.uuid4()
@@ -538,9 +540,14 @@ async def test_add_player_reports_a_concurrent_group_delete_as_not_found(
 async def test_remove_player_reports_a_concurrent_group_delete_as_not_found(
     engine: AsyncEngine,
 ) -> None:
-    # Same race on the removal side. The group keeps a second player so save
-    # still stages an INSERT for the surviving one -- the emptied-set shape,
-    # where there is nothing left to violate the FK, is the test below.
+    # Same race on the removal side, and it stops at ``save``'s re-read (#2613):
+    # the racer's delete lands before the save, so the re-read raises before a
+    # single group_player row is staged -- for the surviving player or any other.
+    # The second player was put here so ``save`` would stage that INSERT, which
+    # it no longer does; dropping it leaves the test green. What it still marks
+    # is which half of the pair this is: the emptied-set shape is
+    # ``test_remove_last_player_reports_a_concurrent_group_delete_as_not_found``,
+    # and both halves now reach the same not-found by the same route.
     community_id = await _seed_community(engine)
     factory = create_session_factory(engine)
     doomed = uuid.uuid4()
