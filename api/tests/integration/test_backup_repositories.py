@@ -2,8 +2,8 @@
 
 Runs only when ``MCD_TEST_DATABASE_URL`` is set (the CI Postgres service);
 skipped otherwise (TESTING.md Section 5). The schema is created and torn down per
-test via the real 0001-0006 migrations so the adapter runs against the documented
-shape (DATABASE.md Section 8). A community + server are seeded through the existing
+test via the real migrations so the adapter runs against the documented shape
+(DATABASE.md Section 8). A community + server are seeded through the existing
 adapters; backups are added/listed/deleted, and the server-delete cascade is
 verified (a server's backups go with it).
 """
