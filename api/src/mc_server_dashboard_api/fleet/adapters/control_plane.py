@@ -326,7 +326,9 @@ class ControlPlaneState:
         ``assigned_worker_id == worker_id``, so a row a racing start re-placed is
         left untouched (defense-in-depth). On a SUCCESS the publish already landed,
         so the upload is done and there is no late publish for the #847 guard to
-        fight; on a TRANSFER_FAILED the upload is dead — also no late publish.
+        fight; on a failure, canonically a ``TRANSFER_FAILED`` once the worker's
+        transfer bound aborts the upload (#874/#890) but potentially any failure,
+        the upload is dead — also no late publish.
 
         The Worker's failure detail rides along with the outcome (issue #2766): it
         is the only text that names why the snapshot failed, and this is the seam
@@ -569,8 +571,10 @@ class GrpcControlPlane(ControlPlane):
             raise WorkerNotConnectedError(worker_id.value)
         command_id = str(uuid.uuid4())
         # A FINAL snapshot's server is recorded with the pending future so a timeout
-        # or cancellation that discards the future still lets a late TRANSFER_FAILED
-        # / SUCCESS result be matched to the held assignment (#891/#901). Only the
+        # or cancellation that discards the future still lets a late result — a
+        # failure, canonically a TRANSFER_FAILED once the worker's transfer bound
+        # aborts the upload (#874/#890) but potentially any failure, or a SUCCESS —
+        # be matched to the held assignment (#891/#901). Only the
         # stop-flow final snapshot is tracked: it is the sole command whose stop
         # wedges the row at (stopped, stopped, assigned) for the held-snapshot
         # window. Periodic and on-demand snapshots share the command type but take
