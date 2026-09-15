@@ -1032,6 +1032,9 @@ export const ja: Record<TranslationKey, string> = {
     "そのアーカイブは有効なサーバーエクスポートではありません。",
   "serverCreate.import.error.platform_managed_path":
     "そのアーカイブには server.properties/ 配下のファイルが含まれています。server.properties はファイルとして管理されるため、該当のエントリを削除するか移動してからインポートしてください。",
+  // The import assigns the join address itself (issue #3022); see en.ts.
+  "serverCreate.import.error.slug_taken":
+    "インポート中に、割り当てようとした参加アドレス名を他のサーバーが取得しました。サーバーは作成されていません。もう一度インポートすると別の名前が割り当てられます。",
   "serverCreate.import.tooLarge":
     "そのアーカイブはインポートするには大きすぎます。",
 
