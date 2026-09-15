@@ -1,7 +1,7 @@
 # Configuration
 
-> Status: **Implemented** · Audience: contributors and operators of `api/` and
-> `worker/`
+> Status: **Implemented** · Audience: contributors and operators of `api/`,
+> `worker/`, and `relay/`
 >
 > This document defines the **runtime configuration surface** of v2 and the
 > **config-driven adapter selection** mechanism. It refines, but does not
@@ -24,6 +24,10 @@
 7. [Authentication hardening](#7-authentication-hardening)
 8. [Snapshot cadence](#8-snapshot-cadence)
 9. [Related documents](#9-related-documents)
+
+Relay configuration has no section of its own: the relay binary's keys are
+tabled in [`RELAY.md`](RELAY.md) Section 13, beside the design they configure.
+Section 5.13 below covers the API-side `relay.*` keys that gate the feature.
 
 ---
 
@@ -94,8 +98,12 @@ may legitimately carry unrelated prefixed names.
 
 The tables below give the **logical key name**. The environment-variable form
 is the key prefixed per service (`MCD_API_` for `api/`, `MCD_WORKER_` for
-`worker/`) to avoid collisions; the file form nests the same key under its
-group.
+`worker/`, `MCD_RELAY_` for `relay/`) to avoid collisions; the file form nests
+the same key under its group. Under the prefix the API spells a nested key
+with a double underscore (`auth.password.policy` →
+`MCD_API_AUTH__PASSWORD__POLICY`), the Worker and the relay with a single one
+(`api.grpc_endpoint` → `MCD_RELAY_API_GRPC_ENDPOINT`). The relay binary's keys
+are not tabled below — they are in [`RELAY.md`](RELAY.md) Section 13.
 
 ---
 
