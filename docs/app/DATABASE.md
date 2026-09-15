@@ -380,6 +380,22 @@ rather than passing through to `server.properties` — and a create/update carry
 one is rejected with `422` `retired_config_key`. The backup cadence is a
 first-class `backup` schedule (Section 8), the only cadence mechanism.
 
+**`config` bounds.** Beyond the individual keys, the blob as a whole is bounded
+before it is staged: a create or an update carrying a `config` that breaks one of
+these rules is rejected with `422` and the reason naming the rule, so the surface
+can tell the operator what to change. Both limits are constants in the servers
+domain (`MAX_CONFIG_BYTES`, `MAX_CONFIG_DEPTH`) and are stated here only — the
+two routes' rows in [`../ui/WEBUI_SPEC.md`](../ui/WEBUI_SPEC.md) Section 2.3 name
+the reasons and point back here rather than restating the numbers, which the Web
+UI's own messages already quote.
+
+| Reason | Rule | To satisfy it |
+|---|---|---|
+| `config_invalid_shape` | The top level must be a JSON object, and the blob may not nest deeper than **8** (`MAX_CONFIG_DEPTH`). Depth counts the innermost value: a scalar is depth 1 and every enclosing object or array adds one, so a flat blob of scalar overrides is depth 2, and a blob at exactly the cap is still accepted | Send an object rather than an array or a scalar; flatten the value that nests deeper |
+| `config_null_value` | No value anywhere in the blob may be JSON `null` — a `null` is never a meaningful `server.properties`-style value, and it is the shape a key-presence smuggle exploited | Give the key a real value, or remove the key |
+| `config_lone_surrogate` | No key or value anywhere in the blob may carry an unpaired surrogate code point (a `"\ud800"` escape), which no UTF-8 encoder accepts and the column therefore cannot store. Checked before the size ceiling, so a blob breaking both is refused as a lone surrogate | Retype or remove the broken text — typically half of an emoji left behind by a copy-paste |
+| `config_too_large` | The blob's JSON serialization, measured in UTF-8 bytes (not the request body), may not exceed **64 KiB** (`MAX_CONFIG_BYTES`); exactly 64 KiB is accepted | Shorten or remove values until the blob fits |
+
 **Desired / observed split (FR-SRV-3, FR-SRV-4).** The two state columns are the
 heart of the model. `desired_state` is the **source of truth for intent**, mutated
 only by API operations (start/stop). `observed_state` + `observed_at` are written
