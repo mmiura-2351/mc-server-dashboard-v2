@@ -771,6 +771,9 @@ PARITY_CASES: list[tuple[str, bytes, dict[str, str]]] = [
         rb"rcon\=password=tok" + b"\n",
         {"rcon=password": "tok"},
     ),
+    ("an escaped hash in the key", rb"a\#b=tok" + b"\n", {"a#b": "tok"}),
+    ("an escaped space in the key", rb"a\ b=tok" + b"\n", {"a b": "tok"}),
+    ("an escaped bang in the key", rb"a\!b=tok" + b"\n", {"a!b": "tok"}),
     (
         "a unicode escape in the key",
         rb"\u0072con.password=tok" + b"\n",
@@ -1005,11 +1008,13 @@ def test_a_degenerate_override_key_is_a_key_of_its_own(key: str) -> None:
 # this skips and the _parse pins stand on their own (this module's CI is
 # Python-only).
 #
-# The probe prints, per file, every UTF-16 unit of the key and of the value as
-# hex -- what a Java string is made of -- so an astral code point and a lone
-# surrogate survive the comparison instead of collapsing on the way out. Fields
-# are space-separated, which no hex dump or file name here contains, and that
-# keeps the Java source free of escapes of its own.
+# The probe prints, per file, every property it reads, sorted by key: every
+# UTF-16 unit of the key and of the value as hex -- what a Java string is made
+# of -- so an astral code point and a lone surrogate survive the comparison
+# instead of collapsing on the way out. Fields are space-separated, which no hex
+# dump or file name here contains, and that keeps the Java source free of
+# escapes of its own. An empty key or value is an empty field, so the output is
+# split on the single space, never on runs of whitespace.
 _PROBE_JAVA = """\
 import java.io.FileInputStream;
 import java.io.InputStream;
@@ -1017,8 +1022,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.List;
-import java.util.Map;
 import java.util.Properties;
+import java.util.TreeSet;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -1043,12 +1048,9 @@ public class Probe {
                 props.load(in);
             }
             out.append(file.getFileName().toString());
-            if (props.size() == 1) {
-                Map.Entry<Object, Object> e = props.entrySet().iterator().next();
-                out.append(' ').append(hex((String) e.getKey()));
-                out.append(' ').append(hex((String) e.getValue()));
-            } else {
-                out.append(" properties:").append(props.size());
+            for (String key : new TreeSet<>(props.stringPropertyNames())) {
+                out.append(' ').append(hex(key));
+                out.append(' ').append(hex(props.getProperty(key)));
             }
             out.append(System.lineSeparator());
         }
@@ -1179,3 +1181,543 @@ def test_writes_read_back_through_java_properties_load(tmp_path: Path) -> None:
         f"{len(mismatches)} of {len(cases)} writes did not read back as written: "
         f"{mismatches[:3]}"
     )
+
+
+# --- one parse per write (issue #2863) ----------------------------------------
+
+
+def _count_parses(monkeypatch: pytest.MonkeyPatch) -> list[bytes]:
+    """Record the content of every :func:`_parse` call and return the record."""
+
+    parsed: list[bytes] = []
+    real_parse = server_properties._parse
+
+    def counting_parse(content: bytes) -> list[server_properties._Property]:
+        parsed.append(content)
+        return real_parse(content)
+
+    monkeypatch.setattr(server_properties, "_parse", counting_parse)
+    return parsed
+
+
+def test_apply_platform_properties_parses_the_content_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Chaining set_server_port / set_rcon_properties / set_resource_pack_properties
+    # re-read the whole file once per key written -- seven to nine byte-by-byte
+    # passes for one call, and this one runs on the event loop (issue #2863).
+    parsed = _count_parses(monkeypatch)
+    content = b"motd=hi\n"
+    apply_platform_properties(
+        content,
+        game_port=25565,
+        rcon_password="tok",
+        resource_pack=ResourcePackProperties(
+            url=_RP_URL, sha1=_RP_SHA1, require=True, prompt="Use it"
+        ),
+    )
+    assert parsed == [content]
+
+
+def test_remove_keys_parses_the_content_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # One pass per key removed, so the cost grew with the size of the key set.
+    parsed = _count_parses(monkeypatch)
+    content = b"a=1\nb=2\nc=3\nd=4\ne=5\n"
+    assert remove_keys(content, {"a", "c", "e"}) == b"b=2\nd=4\n"
+    assert parsed == [content]
+
+
+def test_clear_resource_pack_properties_parses_the_content_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A fixed four passes for the four pack keys, on the import/restore path.
+    parsed = _count_parses(monkeypatch)
+    content = b"resource-pack=u\nresource-pack-sha1=s\nmotd=hi\n"
+    assert clear_resource_pack_properties(content) == b"motd=hi\n"
+    assert parsed == [content]
+
+
+# --- the batched writes against the per-key ones they replace (issue #2863) ----
+
+# The write paths were batched for speed alone (issue #2863), so the bar is byte
+# identity with the per-key chain, not "equivalent enough" -- and the chain is
+# kept below, in terms of the single-key helpers it was written in, so the two
+# can be run against each other over inputs picked to break them. On one shape
+# the chain stopped being the bar: it drops a key the caller asked for when the
+# file's last logical line continues onto an appended one, which is the
+# corruption issue #2994 removed. The fragments are the
+# corners this file's format has: every Java separator, degenerate and escaped
+# spellings of the platform's own keys, duplicates, comments, continuations,
+# each line terminator including a lone CR, non-UTF-8 bytes, and files that end
+# mid-line. Concatenating them is itself adversarial -- a fragment with no
+# terminator splices into the next one's key.
+_DIFFERENTIAL_FRAGMENTS: list[bytes] = [
+    b"",
+    b"\n",
+    b"   \n",
+    b"#comment\n",
+    b"!bang comment\n",
+    b"#comment\\\n",
+    b"motd=hi\n",
+    b"motd=hi",
+    b"motd=trailing ",
+    b"nokeyandnonewline",
+    b"=empty key\n",
+    b"orphan\n",
+    b"server-port=25565\n",
+    b"server-port:25565\n",
+    b"server-port 25565\n",
+    b"server-port = 25565 \n",
+    b"server-port=1\nserver-port=2\n",
+    b"#server-port=11111\n",
+    b"server-port\n",
+    b"server-port \n",
+    b" server-port=leading\n",
+    b"server-port\\ =degenerate\n",
+    b"\\u0073erver-port=escaped\n",
+    b"enable-rcon=false\n",
+    b"enable-rcon=\n",
+    b"rcon.port=1\n",
+    b"rcon\\.port=degenerate\n",
+    b"rcon.password=known\n",
+    b"rcon.password=known",
+    b"rcon.password:known\n",
+    b"rcon.password=\n",
+    b"rcon.password= \n",
+    b"rcon.password=a\nrcon.password=\n",
+    b"\\u0072con.password=escaped\n",
+    b"resource-pack=old\n",
+    b"resource-pack=old",
+    b"resource-pack:old\n",
+    b"resource-pack=a\nresource-pack=b\n",
+    b"resource-pack=old\\\n  continued\n",
+    b"resource-pack-sha1=deadbeef\n",
+    b"require-resource-pack=true\n",
+    b"resource-pack-prompt=hi\n",
+    b"resource-pack-prompt=\\u65E5\\u672C\n",
+    b"require-\\\n",
+    b"require\n",
+    b"motd=\xff\xfe raw latin-1 \xe9\n",
+    b"\xff\xfe=\xe9\n",
+    b"crlf=1\r\n",
+    b"cronly=1\r",
+    b"even=1\\\\\n",
+    b"odd=1\\\n",
+    b"\\\n",
+    b"resource-pack=old\\\n",
+    b"rcon.password=\\\n",
+    b"tail\\",
+    b"tail\\\r\n",
+    b"tail\\\r",
+]
+
+# One assignment of each shape apply_platform_properties branches on, plus one
+# whose values are the injection and encoding corners #2819 / #2820 name.
+_DIFFERENTIAL_PACKS: list[ResourcePackProperties | None] = [
+    None,
+    ResourcePackProperties(url=_RP_URL, sha1=_RP_SHA1, require=True, prompt="Use it"),
+    ResourcePackProperties(url=_RP_URL, sha1=_RP_SHA1, require=False, prompt=None),
+    ResourcePackProperties(
+        url="=lead\nrcon.password=evil", sha1="", require=True, prompt="\u65e5\\"
+    ),
+]
+
+_DIFFERENTIAL_KEY_SETS: list[set[str]] = [
+    set(),
+    {"motd"},
+    {"server-port"},
+    {"resource-pack", "resource-pack-sha1"},
+    set(PLATFORM_MANAGED_KEYS),
+    {"motd", "server-port ", " server-port", "rcon.password", "", "orphan", "tail"},
+]
+
+
+def _chained_remove_keys(content: bytes, keys: set[str]) -> bytes:
+    """Remove *keys* the way ``remove_keys`` did: one full parse per key.
+
+    Sorted rather than in the set's own order, so agreeing with this also says
+    the batched removal does not depend on the order the keys arrive in.
+    """
+
+    for key in sorted(keys):
+        content = server_properties._clear_property(content, key)
+    return server_properties._normalize(content)
+
+
+def _chained_clear_resource_pack_properties(content: bytes) -> bytes:
+    """Clear the four pack keys the way ``clear_resource_pack_properties`` did."""
+
+    for key in (
+        "resource-pack",
+        "resource-pack-sha1",
+        "require-resource-pack",
+        "resource-pack-prompt",
+    ):
+        content = server_properties._clear_property(content, key)
+    return server_properties._normalize(content)
+
+
+def _chained_apply_platform_properties(
+    content: bytes,
+    *,
+    game_port: int | None,
+    rcon_password: str,
+    resource_pack: ResourcePackProperties | None,
+) -> bytes:
+    """Apply the platform's keys by chaining the public helpers, as #2621 did."""
+
+    if game_port is not None:
+        content = set_server_port(content, game_port)
+    content = set_rcon_properties(content, password=rcon_password)
+    if resource_pack is None:
+        return _chained_clear_resource_pack_properties(content)
+    content = set_resource_pack_properties(
+        content,
+        url=resource_pack.url,
+        sha1=resource_pack.sha1,
+        require=resource_pack.require,
+        prompt=resource_pack.prompt,
+    )
+    if resource_pack.prompt is None:
+        content = _chained_remove_keys(content, {"resource-pack-prompt"})
+    return content
+
+
+def _paired_files() -> list[bytes]:
+    """Return every ordered pair of fragments, each before and after every other."""
+
+    return [a + b for a in _DIFFERENTIAL_FRAGMENTS for b in _DIFFERENTIAL_FRAGMENTS]
+
+
+def _drawn_files() -> list[bytes]:
+    """Return files of up to six drawn fragments, so keys repeat across spellings.
+
+    Seeded, so a mismatch is reproducible from the test name alone.
+    """
+
+    rng = random.Random(2863)
+    return [
+        b"".join(rng.choice(_DIFFERENTIAL_FRAGMENTS) for _ in range(rng.randint(3, 6)))
+        for _ in range(500)
+    ]
+
+
+def _differential_files() -> list[bytes]:
+    """Return every file the two forms are run over."""
+
+    return _DIFFERENTIAL_FRAGMENTS + _paired_files() + _drawn_files()
+
+
+def _apply_cases() -> list[tuple[bytes, int | None, ResourcePackProperties | None]]:
+    """Return the (file, port, assignment) triples the two apply forms are run over.
+
+    Each fragment and each drawn file meets every assignment shape. The ordered
+    pairs, which are the bulk of the corpus, meet the two that CLEAR -- an
+    unassigned pack and one with no prompt -- because a removal is what an append
+    can interact with, and running all four over them costs seconds for no
+    further reach.
+    """
+
+    ports: tuple[int | None, ...] = (None, 25565)
+    cases = [
+        (content, port, pack)
+        for content in _DIFFERENTIAL_FRAGMENTS + _drawn_files()
+        for port in ports
+        for pack in _DIFFERENTIAL_PACKS
+    ]
+    cases += [
+        (content, port, pack)
+        for content in _paired_files()
+        for port in ports
+        for pack in (_DIFFERENTIAL_PACKS[0], _DIFFERENTIAL_PACKS[2])
+    ]
+    return cases
+
+
+def _requested_keys(
+    game_port: int | None, pack: ResourcePackProperties | None
+) -> set[str]:
+    """Return the keys an ``apply_platform_properties`` call asks the file to carry.
+
+    ``rcon.password`` counts whether the call writes one or keeps the file's own:
+    either way the file must end up with the key. The keys a call CLEARS are not
+    requested, so they are absent from the set rather than negated in it.
+    """
+
+    keys = {"enable-rcon", "rcon.port", "rcon.password"}
+    if game_port is not None:
+        keys.add("server-port")
+    if pack is not None:
+        keys |= {"resource-pack", "resource-pack-sha1", "require-resource-pack"}
+        if pack.prompt is not None:
+            keys.add("resource-pack-prompt")
+    return keys
+
+
+def test_remove_keys_matches_removing_one_key_at_a_time() -> None:
+    mismatches = [
+        (content, sorted(keys))
+        for content in _differential_files()
+        for keys in _DIFFERENTIAL_KEY_SETS
+        if remove_keys(content, keys) != _chained_remove_keys(content, keys)
+    ]
+    assert not mismatches, f"{len(mismatches)} differ, first: {mismatches[:3]}"
+
+
+def test_clear_resource_pack_properties_matches_clearing_one_key_at_a_time() -> None:
+    mismatches = [
+        content
+        for content in _differential_files()
+        if clear_resource_pack_properties(content)
+        != _chained_clear_resource_pack_properties(content)
+    ]
+    assert not mismatches, f"{len(mismatches)} differ, first: {mismatches[:3]}"
+
+
+def _as_the_server_reads_it(content: bytes) -> list[tuple[str, str]]:
+    """Return the key/value pairs ``Properties.load`` takes from *content*."""
+
+    return [(prop.key, prop.value) for prop in _parse(content)]
+
+
+def test_apply_platform_properties_matches_the_per_key_chain() -> None:
+    """Byte identity with the chain, on every file the chain still gets right.
+
+    Two shapes are excused, and they are the two the #2863 carve-out used to
+    route back to the chain (issue #2994):
+
+    - A last logical line that continues onto whatever is appended. The chain
+      re-parses between writes, so its next write sees the merged key and
+      rewrites the span it now covers, dropping the line it had just written.
+      The chain is not the reference on those files;
+      ``test_apply_platform_properties_writes_every_requested_key`` and the two
+      pins below are.
+    - A lone ``\\r`` terminator, where the chain decides the newline an append
+      needs BEFORE its removals and the batched write decides it after. That is
+      one terminator byte and nothing else, so those files are compared as the
+      server reads them rather than byte for byte.
+    """
+
+    mismatches = []
+    for content, game_port, pack in _apply_cases():
+        if server_properties._ends_in_dangling_continuation(content, _parse(content)):
+            continue
+        out = apply_platform_properties(
+            content, game_port=game_port, rcon_password="tok", resource_pack=pack
+        )
+        chained = _chained_apply_platform_properties(
+            content, game_port=game_port, rcon_password="tok", resource_pack=pack
+        )
+        if out == chained:
+            continue
+        if b"\r" in content.replace(b"\r\n", b"") and _as_the_server_reads_it(
+            out
+        ) == _as_the_server_reads_it(chained):
+            continue
+        mismatches.append((content, game_port, pack))
+    assert not mismatches, f"{len(mismatches)} differ, first: {mismatches[:3]}"
+
+
+def test_apply_platform_properties_closes_a_continued_last_line() -> None:
+    # The file's last logical line ends in an odd backslash run, so it continues
+    # onto whatever is appended: "require-\" + an appended "resource-pack=..."
+    # used to be read as ONE require-resource-pack line, and the resource-pack
+    # the caller asked for was gone from the file (issue #2994). The append now
+    # ends that continuation with an empty line first, which leaves the file's
+    # own "require-" line saying exactly what it said before -- its value ran to
+    # EOF, and an empty continuation is the same empty value.
+    content = b"enable-rcon=x\nrcon.port=y\nrcon.password=z\nrequire-\\\n"
+    out = apply_platform_properties(
+        content,
+        game_port=None,
+        rcon_password="tok",
+        resource_pack=ResourcePackProperties(
+            url=_RP_URL, sha1=_RP_SHA1, require=True, prompt=None
+        ),
+    )
+    assert out == (
+        b"enable-rcon=true\n"
+        b"rcon.port=25575\n"
+        b"rcon.password=z\n"
+        b"require-\\\n"
+        b"\n"
+        + f"resource-pack={_RP_URL}\n".encode()
+        + f"resource-pack-sha1={_RP_SHA1}\n".encode()
+        + b"require-resource-pack=true\n"
+    )
+    assert _raw_values(out, "resource-pack") == [_RP_URL]
+    assert _raw_values(out, "require-") == [""]
+
+
+def test_apply_platform_properties_enables_rcon_past_a_continued_pack_line() -> None:
+    # The other shape from issue #2994: the continued last line is a pack line,
+    # so clearing it takes the continuation with it and the RCON triple lands on
+    # an empty file. enable-rcon used to be swallowed by that continuation and
+    # then rewritten away, leaving RCON configured but not enabled.
+    out = apply_platform_properties(
+        b"resource-pack=old\\\n",
+        game_port=None,
+        rcon_password="tok",
+        resource_pack=None,
+    )
+    assert out == b"enable-rcon=true\nrcon.port=25575\nrcon.password=tok\n"
+
+
+def test_apply_platform_properties_appends_straight_after_a_trailing_comment() -> None:
+    # A comment does NOT continue on a trailing backslash, so a file ending in
+    # one swallows nothing and the append needs no empty line in front of it
+    # (issue #2994).
+    out = apply_platform_properties(
+        b"rcon.password=z\n#c\\\n",
+        game_port=None,
+        rcon_password="tok",
+        resource_pack=None,
+    )
+    assert out == b"rcon.password=z\n#c\\\nenable-rcon=true\nrcon.port=25575\n"
+
+
+# The continued last lines an append has to end, each with the line that ends it
+# (issue #2994): an empty line, unless the logical line is EMPTY once its
+# continuation is accumulated and the file does not end in CRLF, where it takes
+# "=". While that line is still empty, Java reads a "#" / "!" line as a comment
+# rather than as its continuation, and the next line starts a logical line of
+# its own; _parse joins them, so the "after-a-comment" rows are where the two
+# disagree on which line is the last. These pins hold each choice where no JDK
+# is on PATH; the JDK test below is what shows each choice leaves Java reading
+# the file's own lines as it did.
+_CONTINUED_LAST_LINES: list[tuple[str, bytes, bytes]] = [
+    ("empty-lf", b"\\\n", b"=\n"),
+    ("empty-unterminated", b"\\", b"=\n"),
+    ("empty-lone-cr", b"\\\r", b"=\n"),
+    ("empty-crlf", b"\\\r\n", b"\n"),
+    ("empty-blank-led-line", b"   \\\n", b"=\n"),
+    ("empty-blank-led-continuation", b"\\\n  \\\n", b"=\n"),
+    ("empty-tab-led-unterminated", b"\\\n\t\\", b"=\n"),
+    ("empty-crlf-then-lf", b"\\\r\n\\\n", b"=\n"),
+    ("empty-lf-then-crlf", b"\\\n\\\r\n", b"\n"),
+    ("empty-crlf-then-lone-cr", b"\\\r\n\\\r", b"=\n"),
+    ("three-backslashes-keep-two", b"\\\\\\\n", b"\n"),
+    ("key-only", b"require-\\\n", b"\n"),
+    ("separator-only", b"=\\\n", b"\n"),
+    ("value-then-a-lone-backslash", b"motd=a\\\n\\\n", b"\n"),
+    ("value-crlf", b"k=v\\\r\n", b"\n"),
+    ("value-lone-cr", b"k=v\\\r", b"\n"),
+    ("empty-after-a-comment", b"\\\n#c\\\n\\\n", b"=\n"),
+    ("empty-after-a-bang-comment", b"\\\n!c\\\n\\\n", b"=\n"),
+    ("empty-after-two-comments", b"\\\n#a\\\n#b\\\n\\\n", b"=\n"),
+    ("empty-after-a-blank-led-comment", b"\\\n  #c\\\n\\\n", b"=\n"),
+    ("empty-after-a-blank-and-a-comment", b"\\\n\n#c\\\n\\\n", b"=\n"),
+    ("empty-crlf-after-a-comment", b"\\\n#c\\\n\\\r\n", b"\n"),
+    ("value-after-a-comment", b"\\\n#c\\\nk=v\\\n", b"\n"),
+    ("value-continued-onto-a-hash", b"k=\\\n#c\\\n\\\n", b"\n"),
+    ("comment-after-an-empty-line", b"\\\n#comment\\\n", b"\n"),
+]
+
+
+@pytest.mark.parametrize(
+    ("content", "closer"),
+    [
+        pytest.param(content, closer, id=name)
+        for name, content, closer in _CONTINUED_LAST_LINES
+    ],
+)
+def test_apply_platform_properties_ends_a_continued_last_line_as_java_reads_it(
+    content: bytes, closer: bytes
+) -> None:
+    out = apply_platform_properties(
+        content, game_port=None, rcon_password="tok", resource_pack=None
+    )
+    terminated = content if content.endswith(b"\n") else content + b"\n"
+    assert out == (
+        terminated + closer + b"enable-rcon=true\nrcon.port=25575\nrcon.password=tok\n"
+    )
+
+
+@pytest.mark.skipif(not _JDK_ON_PATH, reason="no JDK on PATH")
+def test_apply_platform_properties_keeps_what_java_reads_from_the_files_own_lines(
+    tmp_path: Path,
+) -> None:
+    # _parse is this module's own reading of the format, so it cannot settle
+    # whether ending a continuation changed what the SERVER reads from the file's
+    # own lines -- and on an empty continued line it did, where _parse saw no
+    # change (issue #2994). So the shapes above, both reproductions and the
+    # zero-length continuations _parse reads differently from Java go through the
+    # JDK in one run: what Java reads from the file's own keys must survive the
+    # write, nothing lost and nothing invented, and every key the call asked for
+    # must be there.
+    contents = [content for _, content, _ in _CONTINUED_LAST_LINES] + [
+        b"enable-rcon=x\nrcon.port=y\nrcon.password=z\nrequire-\\\n",
+        b"resource-pack=old\\\n",
+        b"motd=hi\nresource-pack=old\\\n",
+        b"enable-rcon=false\\\n",
+        b"rcon.password=z\n#c\\\n",
+        b"\\\n\n",
+        b"\\\n!bang\n",
+    ]
+    packs = [
+        None,
+        ResourcePackProperties(url=_RP_URL, sha1=_RP_SHA1, require=True, prompt=None),
+    ]
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+    for index, content in enumerate(contents):
+        (cases_dir / f"{index:03d}-in").write_bytes(content)
+        for which, pack in enumerate(packs):
+            out = apply_platform_properties(
+                content, game_port=25565, rcon_password="tok", resource_pack=pack
+            )
+            (cases_dir / f"{index:03d}-out{which}").write_bytes(out)
+    probe = tmp_path / "Probe.java"
+    probe.write_text(_PROBE_JAVA, encoding="ascii")
+
+    result = subprocess.run(
+        ["java", str(probe), str(cases_dir)],
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stderr
+
+    read: dict[str, dict[str, str]] = {}
+    for line in result.stdout.splitlines():
+        name, *fields = line.split(" ")
+        read[name] = {
+            bytes.fromhex(key).decode("utf-16-be"): bytes.fromhex(value).decode(
+                "utf-16-be"
+            )
+            for key, value in zip(fields[::2], fields[1::2], strict=True)
+        }
+    changed = []
+    for index, content in enumerate(contents):
+        own = {
+            key: value
+            for key, value in read[f"{index:03d}-in"].items()
+            if key not in PLATFORM_MANAGED_KEYS
+        }
+        for which, pack in enumerate(packs):
+            after = read[f"{index:03d}-out{which}"]
+            kept = {
+                key: value
+                for key, value in after.items()
+                if key not in PLATFORM_MANAGED_KEYS
+            }
+            absent = _requested_keys(25565, pack) - after.keys()
+            if kept != own or absent:
+                changed.append((content, pack, own, kept, sorted(absent)))
+    assert not changed, f"{len(changed)} changed, first: {changed[:3]}"
+
+
+def test_apply_platform_properties_writes_every_requested_key() -> None:
+    # The property the carve-out cost: whatever the file's shape, the result
+    # carries every key the call asked it to carry (issue #2994).
+    missing = []
+    for content, game_port, pack in _apply_cases():
+        out = apply_platform_properties(
+            content, game_port=game_port, rcon_password="tok", resource_pack=pack
+        )
+        absent = _requested_keys(game_port, pack) - {prop.key for prop in _parse(out)}
+        if absent:
+            missing.append((content, game_port, pack, sorted(absent)))
+    assert not missing, f"{len(missing)} incomplete, first: {missing[:3]}"

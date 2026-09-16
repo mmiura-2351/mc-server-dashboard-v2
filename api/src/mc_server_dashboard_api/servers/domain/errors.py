@@ -276,11 +276,12 @@ class InvalidFilePathError(ServerError):
     a non-directory blocking the path is :class:`FileAlreadyExistsError` (409). A
     mutation that would leave a DIRECTORY at the root ``server.properties`` path
     carries ``"platform_managed_path"``: a make-dir or directory rename naming it
-    (issue #2812), and a write / upload / file rename landing UNDER it, whose
-    missing parents every write door creates (issue #2846). The
-    platform-managed-key guard compares bytes and a directory has none, so the
-    path itself is refused. The oversized case is not carried here — it is raised
-    as :class:`FileTooLargeError` (413) instead.
+    (issue #2812), a write / upload / file rename landing UNDER it, whose missing
+    parents every write door creates (issue #2846), and an archive member that
+    would publish it as a whole working set — a server import or a backup upload
+    (issue #2869). The platform-managed-key guard compares bytes and a directory
+    has none, so the path itself is refused. The oversized case is not carried
+    here — it is raised as :class:`FileTooLargeError` (413) instead.
     """
 
     def __init__(self, message: str = "", *, reason: str = "invalid_path") -> None:
@@ -518,6 +519,23 @@ class GroupAttachmentNotFoundError(ServerError):
     """A detach targeted a group/server pair that is not attached (issue #276).
 
     The edge maps this to 404.
+    """
+
+
+class CommunityNotFoundError(ServerError):
+    """A servers-context write named a community that is no longer there (#2924).
+
+    The community itself is owned by the community context; this is the servers
+    context's own name for "the parent community vanished mid-write", raised when
+    a row's foreign key to ``community`` is violated because a racer deleted it
+    after the request's authorization gate read the caller's membership. The edge
+    maps this to the same 404 that gate raises for a community that is gone, so
+    the racer gets the answer it would have got a moment earlier.
+
+    Both of the context's rows that carry a community FK raise it: the group
+    create's ``player_group`` INSERT (#2924) and the server create's ``server``
+    INSERT (#2940, reached by import as well as create, which compose the same
+    use case).
     """
 
 

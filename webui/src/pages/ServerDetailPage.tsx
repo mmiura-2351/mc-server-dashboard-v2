@@ -1445,6 +1445,18 @@ function settingsErrorMessage(error: unknown): TranslationKey {
         return "serverDetail.error.invalidMemoryLimit";
       case "invalid_cpu_allocation":
         return "serverDetail.error.invalidCpuAllocation";
+      // The config-blob guard (issue #94). This editor reads every value as
+      // JSON, so all four of its rules describe something a row can carry: a
+      // typed `null`, a literal nested past the depth cap, an oversized paste,
+      // and an unpaired surrogate escape.
+      case "config_too_large":
+        return "serverDetail.error.configTooLarge";
+      case "config_null_value":
+        return "serverDetail.error.configNullValue";
+      case "config_invalid_shape":
+        return "serverDetail.error.configInvalidShape";
+      case "config_lone_surrogate":
+        return "serverDetail.error.configLoneSurrogate";
       case "invalid_slug":
         return "serverDetail.error.invalidSlug";
       case "slug_taken":

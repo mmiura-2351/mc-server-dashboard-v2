@@ -1595,6 +1595,31 @@ describe("ServerDetailPage settings", () => {
     ).toBeInTheDocument();
   });
 
+  // All four config-blob reasons (issue #94). This editor reads every value as
+  // JSON (`settings.configHint`), so each rule is something a user can type into
+  // a row: `null`, a literal nested past the depth cap, an oversized paste, and
+  // a `"\ud800"` escape. Each must name its own rule — falling through to the
+  // generic toast tells the user nothing about which row to fix.
+  it.each([
+    ["config_too_large", "serverDetail.error.configTooLarge"],
+    ["config_null_value", "serverDetail.error.configNullValue"],
+    ["config_invalid_shape", "serverDetail.error.configInvalidShape"],
+    ["config_lone_surrogate", "serverDetail.error.configLoneSurrogate"],
+  ] as const)("surfaces a 422 %s specifically on save", async (reason, key) => {
+    routeGet({ srv: { observed_state: "stopped" } });
+    mockApi.patch.mockRejectedValue(new ApiError(422, { reason }));
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.settings.save") }),
+    );
+
+    expect(await screen.findByText(t(key))).toBeInTheDocument();
+    expect(screen.queryByText(t("serverDetail.error.generic"))).toBeNull();
+  });
+
   it("surfaces a 409 server_not_stopped specifically on save", async () => {
     routeGet({ srv: { observed_state: "running" } });
     mockApi.patch.mockRejectedValue(

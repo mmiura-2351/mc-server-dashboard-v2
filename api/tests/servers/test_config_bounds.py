@@ -8,6 +8,7 @@ from mc_server_dashboard_api.servers.domain.config_bounds import (
     MAX_CONFIG_BYTES,
     MAX_CONFIG_DEPTH,
     ConfigInvalidShapeError,
+    ConfigLoneSurrogateError,
     ConfigNullValueError,
     ConfigTooLargeError,
     validate_config,
@@ -71,3 +72,35 @@ def test_nested_null_value_is_rejected() -> None:
 def test_null_inside_list_is_rejected() -> None:
     with pytest.raises(ConfigNullValueError):
         validate_config({"items": [1, None]})
+
+
+def test_lone_surrogate_value_is_rejected() -> None:
+    # ``json.loads`` merges a well-formed escape pair into one astral character,
+    # so a surrogate that survives decoding is always an unpaired one (issue
+    # #2838) — and it cannot be encoded into the UTF-8 the column stores.
+    with pytest.raises(ConfigLoneSurrogateError):
+        validate_config({"motd": "hi \ud800"})
+
+
+def test_lone_surrogate_in_key_is_rejected() -> None:
+    with pytest.raises(ConfigLoneSurrogateError):
+        validate_config({"mot\udfffd": "hi"})
+
+
+def test_lone_surrogate_inside_list_is_rejected() -> None:
+    with pytest.raises(ConfigLoneSurrogateError):
+        validate_config({"items": ["ok", "\udcff"]})
+
+
+def test_astral_character_passes() -> None:
+    # The rule rejects surrogate code points, not non-BMP text: an emoji encodes
+    # to UTF-8 fine and stays acceptable.
+    config = {"motd": "\U0001f600"}
+    assert validate_config(config) is config
+
+
+def test_lone_surrogate_wins_over_size_bound() -> None:
+    # Both bounds apply to this blob; the surrogate refusal is the answer, because
+    # the serialized size of text that cannot be encoded is not defined.
+    with pytest.raises(ConfigLoneSurrogateError):
+        validate_config({"k": "a" * (MAX_CONFIG_BYTES + 1) + "\ud800"})

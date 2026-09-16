@@ -204,9 +204,10 @@ def test_revoke_others_passes_presented_token_and_audits() -> None:
 
 
 def test_revoke_others_declares_no_store() -> None:
-    # A 204 has no body to store, so this is defence in depth — kept because the
-    # retired middleware set stamped every method on /users/me/sessions and the
-    # swap to per-route declarations covers each of them (issue #2587).
+    # A 204 has no body to store; declared so both methods on the exact path
+    # /users/me/sessions state the same policy (issue #2587). The per-id sibling
+    # is a different path, and records at the route why it declares none
+    # (issue #2763).
     user = make_user()
     fake = _Fake(result=None)
     client = _client(user, revoke_other_sessions=fake)

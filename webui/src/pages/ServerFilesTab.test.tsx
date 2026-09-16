@@ -1461,6 +1461,74 @@ describe("ServerFilesTab 409 reason toasts", () => {
     ).toBeInTheDocument();
   });
 
+  it("names the platform-managed key a refused save would change (#2790)", async () => {
+    // The 422 carries the offending key in a `key` extension member; without an
+    // arm for the reason it collapsed into the generic invalid-input toast and
+    // the user was never told which line to revert.
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "server.properties", is_dir: false }]),
+      content: {
+        path: "server.properties",
+        content_base64: encodeUtf8Base64("motd=hello\n"),
+      },
+    });
+    mockApi.put.mockRejectedValue(
+      new ApiError(422, {
+        reason: "platform_managed_key",
+        key: "rcon.password",
+      }),
+    );
+    renderPage();
+    await openFiles();
+
+    fireEvent.click(await screen.findByText(/server\.properties/));
+    const editor = await screen.findByLabelText(t("files.editorLabel"));
+    fireEvent.change(editor, { target: { value: "rcon.password=hunter2\n" } });
+    fireEvent.click(screen.getByRole("button", { name: t("files.save") }));
+
+    expect(
+      await screen.findByText(
+        t("files.error.platformManagedKey", { key: "rcon.password" }),
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("files.error.invalidInput")),
+    ).not.toBeInTheDocument();
+  });
+
+  it("names the platform-managed path a refused mkdir would occupy (#2790)", async () => {
+    // make_dir is one of the five doors that answer platform_managed_path; the
+    // reason has no extension member, so the message names server.properties.
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "a.txt", is_dir: false }]),
+    });
+    mockApi.post.mockRejectedValue(
+      new ApiError(422, { reason: "platform_managed_path" }),
+    );
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    const row = screen.getByText(/a\.txt/).closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.newFolder") }),
+    );
+    fireEvent.change(screen.getByLabelText(t("files.folderName")), {
+      target: { value: "server.properties" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: t("files.create") }));
+
+    expect(
+      await screen.findByText(t("files.error.platformManagedPath")),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("files.error.invalidInput")),
+    ).not.toBeInTheDocument();
+  });
+
   it("maps a 503 to the worker-unavailable message", async () => {
     routeGet({
       detail: server(),

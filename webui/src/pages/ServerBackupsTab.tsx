@@ -82,6 +82,11 @@ function createErrorMessage(
       return "backups.error.serverBusy";
     case "invalid_archive":
       return "backups.error.invalidArchive";
+    case "platform_managed_path":
+      // An uploaded archive whose member lands under the root server.properties
+      // path (issue #2869): a verdict about the archive's contents, so the
+      // generic toast would hide the one member the user has to remove.
+      return "backups.error.platformManagedPath";
     case "worker_unavailable":
       return "backups.error.workerUnavailable";
     case "storage_unavailable":

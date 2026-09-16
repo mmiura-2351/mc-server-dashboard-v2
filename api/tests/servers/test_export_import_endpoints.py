@@ -9,8 +9,9 @@ cases and authorization Ports faked (NFR-TEST-1, no database). Verifies:
 - the export download grant (issue #2352): the mint's gate and pre-flight,
   redemption without an ``Authorization`` header, and the grant's binding;
 - import is gated by ``server:create`` (multipart) and maps the domain errors:
-  invalid metadata -> 422, name conflict -> 409, oversized -> 413,
-  seed failure -> 503;
+  invalid metadata -> 422, name conflict -> 409, a racer taking the
+  auto-assigned game port or slug -> 409, slug exhaustion -> 503,
+  oversized -> 413, seed failure -> 503;
 - the success audit codes (``server:export`` / ``server:import``).
 """
 
@@ -67,11 +68,16 @@ from mc_server_dashboard_api.servers.application.export_import import (
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
+    CommunityNotFoundError,
     FileTooLargeError,
     InvalidExportMetadataError,
+    InvalidFilePathError,
+    PortAlreadyTakenError,
     ServerFilesUnsettledError,
     ServerNameAlreadyExistsError,
     ServerNotFoundError,
+    SlugAlreadyTakenError,
+    SlugExhaustedError,
     WorkingSetSeedFailedError,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
@@ -910,6 +916,97 @@ def test_import_name_conflict_is_409() -> None:
     assert resp.json()["reason"] == "server_name_exists"
 
 
+def test_import_into_a_concurrently_deleted_community_is_404() -> None:
+    # issue #2940: import composes CreateServer, so it stages the same server row
+    # and reaches the same commit-time fk_server_community_id_community. A racer
+    # deleting the community between the authorization gate's membership read and
+    # that commit gets the 404 the gate itself raises a moment earlier.
+    app = _app(
+        member=True,
+        allow=True,
+        import_=_FakeImport(
+            error=CommunityNotFoundError("fk_server_community_id_community")
+        ),
+    )
+    client = _client(app)
+    files, data = _zip_upload()
+    resp = client.post(
+        f"/api/communities/{uuid.uuid4()}/servers/import",
+        files=files,
+        data=data,
+    )
+    assert resp.status_code == 404
+    assert resp.json()["reason"] == "not_found"
+
+
+def test_import_racing_a_taken_game_port_is_409() -> None:
+    # issue #3022: import composes CreateServer with an AUTO-assigned game port,
+    # chosen from a taken-set read inside the transaction and committed later, so
+    # a racer taking that port in between violates uq_server_game_port and the
+    # seam hands the route PortAlreadyTakenError. The client picked no port, but
+    # the answer is still create's 409: create's own auto-assign path reaches this
+    # identical commit-time race and answers 409 there, and a retry lands on a
+    # different free port. 503 would claim the deployment is out of ports, which
+    # is what port_range_exhausted already means.
+    app = _app(
+        member=True,
+        allow=True,
+        import_=_FakeImport(error=PortAlreadyTakenError("uq_server_game_port")),
+    )
+    client = _client(app)
+    files, data = _zip_upload()
+    resp = client.post(
+        f"/api/communities/{uuid.uuid4()}/servers/import",
+        files=files,
+        data=data,
+    )
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "port_taken"
+
+
+def test_import_racing_a_taken_slug_is_409() -> None:
+    # issue #3022: the same window one constraint over. The slug is auto-generated
+    # against a taken-set read and committed later, so a racer taking it violates
+    # uq_server_slug -> SlugAlreadyTakenError, and the same reasoning gives the
+    # same 409 the create route answers.
+    app = _app(
+        member=True,
+        allow=True,
+        import_=_FakeImport(error=SlugAlreadyTakenError("uq_server_slug")),
+    )
+    client = _client(app)
+    files, data = _zip_upload()
+    resp = client.post(
+        f"/api/communities/{uuid.uuid4()}/servers/import",
+        files=files,
+        data=data,
+    )
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "slug_taken"
+
+
+def test_import_slug_exhausted_is_503() -> None:
+    # issue #3022, from the audit of every typed error CreateServer can raise on
+    # this path rather than from the issue title: import ALWAYS auto-generates its
+    # slug, so generate_slug's retry budget is reachable here exactly as it is on
+    # create. A degenerate uniqueness state is transient capacity the caller
+    # retries, not a client-state conflict -- 503, create's mapping.
+    app = _app(
+        member=True,
+        allow=True,
+        import_=_FakeImport(error=SlugExhaustedError()),
+    )
+    client = _client(app)
+    files, data = _zip_upload()
+    resp = client.post(
+        f"/api/communities/{uuid.uuid4()}/servers/import",
+        files=files,
+        data=data,
+    )
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "slug_exhausted"
+
+
 def test_import_oversized_is_413() -> None:
     app = _app(
         member=True,
@@ -941,3 +1038,50 @@ def test_import_seed_failure_is_503() -> None:
     )
     assert resp.status_code == 503
     assert resp.json()["reason"] == "seed_failed"
+
+
+# --- the archive's path rejections reach the wire (issue #2869) -------------
+#
+# The route carries the reason the use case raised, so the Web UI's switch on
+# ``reason`` sees the SAME contract import gives as the five files-API doors.
+
+
+def test_import_member_under_root_properties_is_422_platform_managed_path() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        import_=_FakeImport(
+            error=InvalidFilePathError(
+                "server.properties/notes.txt", reason="platform_managed_path"
+            )
+        ),
+    )
+    client = _client(app)
+    files, data = _zip_upload()
+    resp = client.post(
+        f"/api/communities/{uuid.uuid4()}/servers/import",
+        files=files,
+        data=data,
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "platform_managed_path"
+
+
+def test_import_zip_slip_member_is_422_invalid_path() -> None:
+    # The same handler carries the default reason, so the zip-slip rejection the
+    # docstring has always promised finally answers 422 instead of an unmapped
+    # 500.
+    app = _app(
+        member=True,
+        allow=True,
+        import_=_FakeImport(error=InvalidFilePathError("../escape.txt")),
+    )
+    client = _client(app)
+    files, data = _zip_upload()
+    resp = client.post(
+        f"/api/communities/{uuid.uuid4()}/servers/import",
+        files=files,
+        data=data,
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_path"

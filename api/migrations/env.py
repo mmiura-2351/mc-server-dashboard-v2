@@ -18,12 +18,18 @@ from alembic import context
 from model_registry import target_metadata
 from sqlalchemy.engine import Connection
 
+from mc_server_dashboard_api.app import _resolve_config_file
 from mc_server_dashboard_api.config import load_settings
 from mc_server_dashboard_api.core.adapters.database import create_engine
 
 
 def _database_url() -> str:
-    return load_settings(config_file=None).database.url
+    # ``_resolve_config_file`` is the app's own ``MCD_API_CONFIG_FILE`` lookup
+    # (the entry points in ``serve`` and ``integrity_sweep_cli`` reuse it the
+    # same way). Reading the variable here instead would let the two readers
+    # drift, which is the #2953 defect: with the file channel ignored, Alembic
+    # ran against a different database than the API -- or against none at all.
+    return load_settings(_resolve_config_file()).database.url
 
 
 def run_migrations_offline() -> None:

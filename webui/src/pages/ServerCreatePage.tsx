@@ -102,6 +102,14 @@ const CREATE_ERROR_KEY: Record<string, TranslationKey> = {
   invalid_cpu_allocation: "serverCreate.error.invalid_cpu_allocation",
   invalid_slug: "serverCreate.error.invalid_slug",
   slug_taken: "serverCreate.error.slug_taken",
+  // The config-blob guard (issue #94) as far as this wizard can trip it. The
+  // POST carries a flat object of raw override strings plus the two
+  // range-checked numbers, so only the size ceiling and the lone-surrogate rule
+  // are reachable from here; `config_null_value` and `config_invalid_shape`
+  // need a JSON-typed value, which only the Settings tab's editor produces, so
+  // arms for those two would be dead.
+  config_too_large: "serverCreate.error.config_too_large",
+  config_lone_surrogate: "serverCreate.error.config_lone_surrogate",
 };
 
 export function ServerCreatePage() {
@@ -938,8 +946,21 @@ function handleCreateError(
 }
 
 // Import-specific surfacing: a bad archive / oversize upload, plus the create
-// reasons it shares (name conflict, …). Import has no slug field, so
-// slug errors (not reachable from import) fall back to the generic toast path.
+// reasons it shares (name conflict, …).
+//
+// The import tab has no slug field, so a reason the create path reports *inline
+// against that field* has nowhere to land here. `slug_taken` is reachable from
+// import (issue #3022: the join address is auto-assigned, and a racer can take
+// it between the assignment and the commit that inserts the row), and it used to
+// be swallowed — the create handler set its slug error and returned "handled",
+// so the caller showed no toast and the operator saw nothing at all, which is
+// worse than the 500 it replaced. It is answered here instead, asking for a
+// retry rather than pointing at a field the operator never filled in: the next
+// attempt draws a fresh address. The delegated call now routes any *other*
+// slug-field reason to a toast rather than a discarding setter, so a "handled"
+// return always means something was actually displayed. Only `invalid_slug`
+// takes that route today, and import cannot trigger it (it sends no explicit
+// slug).
 function handleImportError(
   err: unknown,
   showToast: (m: string, k: "error") => void,
@@ -956,5 +977,22 @@ function handleImportError(
     showToast(t("serverCreate.import.error.invalid_export_metadata"), "error");
     return true;
   }
-  return handleCreateError(err, showToast, setNameError, () => {});
+  if (err.reason === "platform_managed_path") {
+    // An archive member stored under the root server.properties path, refused
+    // before the row is created (issue #2869): publishing it would stand a
+    // directory where the platform keeps a file. Import gets its own string
+    // rather than the Backups upload's because the two archives can be tripped
+    // by different things — a tar can carry a real server.properties directory
+    // member, a zip cannot (`_zip_entries` skips directory entries), so here the
+    // offending entry is always a file the operator can find and delete.
+    showToast(t("serverCreate.import.error.platform_managed_path"), "error");
+    return true;
+  }
+  if (err.reason === "slug_taken") {
+    showToast(t("serverCreate.import.error.slug_taken"), "error");
+    return true;
+  }
+  return handleCreateError(err, showToast, setNameError, (m) =>
+    showToast(m, "error"),
+  );
 }

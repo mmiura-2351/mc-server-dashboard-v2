@@ -788,6 +788,30 @@ describe("ServerBackupsTab permission gating", () => {
     ).toBeInTheDocument();
   });
 
+  it("names the platform-managed path on a 422 platform_managed_path upload (#2790)", async () => {
+    // A member under the root server.properties path is refused before the
+    // archive is stored (issue #2869). Without an arm for the reason the switch
+    // fell through to the generic toast, which says nothing about the member.
+    routeGet();
+    mockPostFormWithProgress.mockRejectedValue(
+      new ApiError(422, { reason: "platform_managed_path" }),
+    );
+    await openBackups();
+
+    const input = (await screen.findByLabelText(
+      t("backups.upload"),
+    )) as HTMLInputElement;
+    const file = new File(["x"], "b.tar.gz", { type: "application/gzip" });
+    fireEvent.change(input, { target: { files: [file] } });
+
+    expect(
+      await screen.findByText(t("backups.error.platformManagedPath")),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("backups.error.generic")),
+    ).not.toBeInTheDocument();
+  });
+
   it("routes a create 403 through the permission glue", async () => {
     routeGet();
     mockApi.post.mockRejectedValue(

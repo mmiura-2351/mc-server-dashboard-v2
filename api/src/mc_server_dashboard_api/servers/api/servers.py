@@ -97,6 +97,7 @@ from mc_server_dashboard_api.servers.application.manage_server import (
 )
 from mc_server_dashboard_api.servers.domain.config_bounds import (
     ConfigInvalidShapeError,
+    ConfigLoneSurrogateError,
     ConfigNullValueError,
     ConfigTooLargeError,
     validate_config,
@@ -111,10 +112,12 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupStorageUnavailableError,
     CommandDispatchError,
+    CommunityNotFoundError,
     EulaNotAcceptedError,
     FileTooLargeError,
     InvalidCpuAllocationError,
     InvalidExportMetadataError,
+    InvalidFilePathError,
     InvalidLifecycleTransitionError,
     InvalidMemoryLimitError,
     InvalidServerNameError,
@@ -481,6 +484,11 @@ async def create_server(
         # (extremely unlikely in practice); a transient capacity condition (issue
         # #955). Surface 503 so the caller can retry.
         raise _service_unavailable("slug_exhausted") from exc
+    except CommunityNotFoundError as exc:
+        # A racer deleted the community between the gate's membership read and the
+        # commit that emits the INSERT (issue #2940); answer what the gate itself
+        # would have.
+        raise _not_found() from exc
     except WorkingSetSeedFailedError as exc:
         # The row committed but seeding the working set failed (issue #243). The
         # server is left in a degraded-but-repairable state (the files API can
@@ -524,6 +532,19 @@ async def import_server(
     the initial working set through the hardened extraction (zip-slip / size / entry
     caps -> 413 / 422). A publish failure after the row commits is 503
     ``seed_failed`` (the row is repairable via the files API).
+
+    **No directory may stand at the root ``server.properties`` path (issue
+    #2869).** A member named ``server.properties/…`` would publish that name as a
+    directory, which the platform's own writes cannot survive; it is 422
+    ``platform_managed_path``, the same answer the files-API doors give. Like every
+    other archive rejection it fires before the row is created, so nothing is left
+    behind. Only the ROOT name is guarded: a nested
+    ``backups/server.properties/…`` member is ordinary user data.
+
+    A racer taking the auto-assigned game port or slug between the assignment and
+    the commit that inserts the row is 409 ``port_taken`` / ``slug_taken``, and an
+    exhausted slug retry budget is 503 ``slug_exhausted`` (issue #3022) — the same
+    answers create gives for the same conditions.
     """
 
     content = await _read_capped_upload(file)
@@ -547,14 +568,53 @@ async def import_server(
         raise _service_unavailable("catalog_unavailable") from exc
     except InvalidServerNameError as exc:
         raise _unprocessable("invalid_server_name") from exc
+    except InvalidFilePathError as exc:
+        # An archive member the pre-commit validate pass refused by PATH: a
+        # zip-slip entry (``invalid_path``), or one that would stand a directory at
+        # the root server.properties name (``platform_managed_path``, issue #2869).
+        # exc.reason, not a hardcoded value, so import answers the Web UI's switch
+        # on ``reason`` exactly as the files-API doors do.
+        raise _unprocessable(exc.reason) from exc
     except FileTooLargeError as exc:
         # The uploaded archive (or its cumulative extracted size / entry count)
         # exceeded the caps reused from the upload path (issue #262).
         raise _too_large() from exc
+    except PortAlreadyTakenError as exc:
+        # Import assigns the game port itself (#243), but the assignment is a
+        # taken-set read inside the create transaction while the INSERT lands at
+        # the commit, so a racer taking that port in between violates
+        # uq_server_game_port (issue #3022). It is the same race create's own
+        # auto-assign path runs, hence the same 409: a retry picks another free
+        # port, where 503 would claim the deployment has none left.
+        raise _conflict("port_taken") from exc
     except PortRangeExhaustedError as exc:
         raise _service_unavailable("port_range_exhausted") from exc
     except ServerNameAlreadyExistsError as exc:
         raise _conflict("server_name_exists") from exc
+    except SlugAlreadyTakenError as exc:
+        # The auto-generated slug (#955) has the identical window one constraint
+        # over: uq_server_slug fires at the same commit (issue #3022).
+        raise _conflict("slug_taken") from exc
+    except SlugExhaustedError as exc:
+        # Auto-generation found no unique slug within the retry budget. Import
+        # always auto-generates, so this is as reachable here as on create; a
+        # transient capacity condition the caller retries (issue #3022).
+        #
+        # With this arm the route maps every typed error the composed CreateServer
+        # can raise; the remainder are unreachable from here rather than unmapped,
+        # which is the audit #3022 asked for after #2940 and #2924 each found the
+        # same gap one error over. Import supplies ``config={}``, so there is no
+        # retired key, memory limit or CPU allocation to reject -- the
+        # operator-configured memory default is bounded at startup by
+        # MemoryLimitSettings to the very range memory_limit_from_config re-checks,
+        # so it cannot fail that re-check -- and it supplies neither an explicit
+        # port nor an explicit slug, so PortOutOfRange and InvalidSlug cannot fire.
+        # A new CreateServer error needs an arm here as well as on create.
+        raise _service_unavailable("slug_exhausted") from exc
+    except CommunityNotFoundError as exc:
+        # Import composes CreateServer, so it stages the same row and reaches the
+        # same commit-time FK to community (issue #2940); same racer, same answer.
+        raise _not_found() from exc
     except WorkingSetSeedFailedError as exc:
         # The row committed but publishing the working set failed mid-way: the
         # server is degraded-but-repairable via the files API (same posture as
@@ -902,7 +962,8 @@ async def update_server(
     (#1840).
 
     **Error precedence (issue #115).** Validation runs first: config-bounds
-    (``config_too_large`` / ``config_invalid_shape``), a retired config key
+    (``config_too_large`` / ``config_invalid_shape`` / ``config_null_value`` /
+    ``config_lone_surrogate``), a retired config key
     (``retired_config_key``), the cadence-override floor/shape
     (``invalid_snapshot_interval``), and the game-port range
     (``port_out_of_range``) are 422 and are evaluated before any state gating.
@@ -1359,6 +1420,8 @@ def _validated_config(config: Any) -> dict[str, Any]:
         raise _unprocessable("config_null_value") from exc
     except ConfigInvalidShapeError as exc:
         raise _unprocessable("config_invalid_shape") from exc
+    except ConfigLoneSurrogateError as exc:
+        raise _unprocessable("config_lone_surrogate") from exc
 
 
 def _merge_memory_limit_alias(

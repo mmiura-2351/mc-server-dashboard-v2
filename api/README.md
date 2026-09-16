@@ -55,8 +55,10 @@ database is unreachable rather than crashing.
 ## Migrations (Alembic)
 
 The Alembic chain starts from an empty baseline revision and builds the full
-schema from there (schema reference: DATABASE.md). The DB URL is read from
-`MCD_API_DATABASE__URL`, not from `alembic.ini`.
+schema from there (schema reference: DATABASE.md). The DB URL is read from the
+same configuration the app uses, at the same precedence — the optional TOML file
+named by `MCD_API_CONFIG_FILE`, overridden by `MCD_API_DATABASE__URL` — not from
+`alembic.ini`.
 
 ```sh
 uv run alembic upgrade head        # apply migrations

@@ -25,7 +25,18 @@ class GroupRepository(abc.ABC):
 
     @abc.abstractmethod
     async def add(self, group: PlayerGroup) -> None:
-        """Stage a new group (with its players) within the current transaction."""
+        """Add the group and its players; the group row's INSERT runs in this call.
+
+        The player rows are staged: the adapter flushes only the ``player_group``
+        row here, so that row's constraints are enforced inside this call rather
+        than at the unit of work's commit. A concurrent create of the same
+        ``(community_id, kind, name)`` raises :class:`GroupNameAlreadyExistsError`
+        (``uq_player_group_community_kind_name``, issue #2000). The same flush
+        enforces ``fk_player_group_community_id_community``: a community deleted
+        between the request's authorization gate and this INSERT raises
+        :class:`CommunityNotFoundError`, the same not-found that gate answers for
+        a community that is gone (issue #2924).
+        """
 
     @abc.abstractmethod
     async def get_by_id(self, group_id: GroupId) -> PlayerGroup | None:
@@ -51,6 +62,31 @@ class GroupRepository(abc.ABC):
         Never an insert: a group a concurrent delete removed since the caller's
         pre-read raises :class:`GroupNotFoundError` rather than writing nothing
         and reporting success (issue #2613).
+
+        Nothing is left for the unit of work's commit: the adapter executes the
+        player-row DELETE and flushes the replacement rows itself, so the
+        violations surface inside this call. The DELETE autoflushes the pending
+        name UPDATE, so a racer that took the target
+        ``(community_id, kind, name)`` first raises
+        :class:`GroupNameAlreadyExistsError`
+        (``uq_player_group_community_kind_name``, issue #2000).
+
+        The flush of the replacement ``group_player`` rows carries two more. A
+        concurrent group delete too late for the not-found above to catch leaves
+        those INSERTs violating ``fk_group_player_group_id_player_group`` -- the
+        same :class:`GroupNotFoundError`, raised by a constraint rather than by
+        the missing row (issue #2583). An interleaved second edit of the same
+        group violates ``uq_group_player_group_uuid`` instead and raises
+        :class:`GroupPlayerEditConflictError`: under READ COMMITTED the wholesale
+        DELETE cannot see a player the winner committed after it ran, so the
+        loser re-inserts a pair that now exists (issue #2613).
+
+        A *rename* has a third site, earlier than both: the pending name UPDATE
+        the DELETE autoflushes matches zero rows when the racing delete commits
+        between the re-read and that statement, which the ORM reports as
+        ``StaleDataError`` rather than as a constraint violation. It is the same
+        vanished group, so it raises the same :class:`GroupNotFoundError`
+        (issue #2937). A player-only edit stages no UPDATE and so cannot reach it.
         """
 
     @abc.abstractmethod
@@ -59,7 +95,19 @@ class GroupRepository(abc.ABC):
 
     @abc.abstractmethod
     async def attach(self, group_id: GroupId, server_id: ServerId) -> None:
-        """Attach ``group_id`` to ``server_id`` (idempotent: a re-attach is a no-op)."""
+        """Attach ``group_id`` to ``server_id``; the INSERT runs inside this call.
+
+        Idempotent: an already-attached pair conflicts on ``pk_server_group``,
+        which the adapter's ``ON CONFLICT DO NOTHING`` turns into a silent no-op
+        (issue #2612).
+
+        Not a staged write: the row's two foreign keys are enforced here rather
+        than at the unit of work's commit, so a group or server deleted since the
+        caller's pre-read raises the very error that pre-read raises, instead of
+        surfacing at whatever the caller does next:
+        :class:`GroupNotFoundError` for ``fk_server_group_group_id_player_group``
+        and :class:`ServerNotFoundError` for ``fk_server_group_server_id_server``.
+        """
 
     @abc.abstractmethod
     async def detach(self, group_id: GroupId, server_id: ServerId) -> bool:

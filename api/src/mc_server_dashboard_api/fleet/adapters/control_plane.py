@@ -248,11 +248,12 @@ class ControlPlaneState:
         """Stop tracking ``command_id`` (on timeout or cancellation).
 
         For a SNAPSHOT command (issue #891), retain a (worker, server) record so a
-        late ``CommandResult`` — the worker's transfer bound aborts a final-snapshot
-        upload and reports ``TRANSFER_FAILED`` after the API abandoned the future
-        (#874/#890), or a late SUCCESS — is recognised in :meth:`resolve` and used
-        to release the held assignment immediately. Non-snapshot commands carry no
-        such held state, so they are simply forgotten.
+        late ``CommandResult`` — a failure, canonically a ``TRANSFER_FAILED`` once
+        the worker's transfer bound aborts a final-snapshot upload after the API
+        abandoned the future (#874/#890) but potentially any failure, or a late
+        SUCCESS — is recognised in :meth:`resolve` and used to release the held
+        assignment immediately. Non-snapshot commands carry no such held state, so
+        they are simply forgotten.
         """
 
         self._pending.pop(command_id, None)
@@ -325,7 +326,13 @@ class ControlPlaneState:
         ``assigned_worker_id == worker_id``, so a row a racing start re-placed is
         left untouched (defense-in-depth). On a SUCCESS the publish already landed,
         so the upload is done and there is no late publish for the #847 guard to
-        fight; on a TRANSFER_FAILED the upload is dead — also no late publish.
+        fight; on a failure, canonically a ``TRANSFER_FAILED`` once the worker's
+        transfer bound aborts the upload (#874/#890) but potentially any failure,
+        the upload is dead — also no late publish.
+
+        The Worker's failure detail rides along with the outcome (issue #2766): it
+        is the only text that names why the snapshot failed, and this is the seam
+        where it would otherwise be dropped, leaving the consumer to guess a cause.
         """
 
         snapshot = self._late_snapshots.get(command_id)
@@ -349,6 +356,7 @@ class ControlPlaneState:
             server_id=server_id,
             worker_id=worker_id.value,
             succeeded=result.success,
+            message=_failure_detail(result),
         )
 
     def fail_worker_pending(
@@ -507,6 +515,21 @@ def _to_result(message: pb.CommandResult) -> CommandResult:
     )
 
 
+def _failure_detail(message: pb.CommandResult) -> str | None:
+    """The reason a command failed, in the Worker's words; ``None`` on a success.
+
+    The Worker's text when it sent any, else the error code — the same
+    ``message or status.value`` fallback every other failed-command log in the API
+    renders (``command_dispatch.py``, the final- and periodic-snapshot paths), so a
+    failure always names something even from a Worker that sent no text (#2766).
+    """
+
+    if message.success:
+        return None
+    result = _to_result(message)
+    return result.message or result.code.value
+
+
 def _to_listing(message: pb.FileListing) -> FileListing:
     return FileListing(
         entries=tuple(
@@ -548,8 +571,10 @@ class GrpcControlPlane(ControlPlane):
             raise WorkerNotConnectedError(worker_id.value)
         command_id = str(uuid.uuid4())
         # A FINAL snapshot's server is recorded with the pending future so a timeout
-        # or cancellation that discards the future still lets a late TRANSFER_FAILED
-        # / SUCCESS result be matched to the held assignment (#891/#901). Only the
+        # or cancellation that discards the future still lets a late result — a
+        # failure, canonically a TRANSFER_FAILED once the worker's transfer bound
+        # aborts the upload (#874/#890) but potentially any failure, or a SUCCESS —
+        # be matched to the held assignment (#891/#901). Only the
         # stop-flow final snapshot is tracked: it is the sole command whose stop
         # wedges the row at (stopped, stopped, assigned) for the held-snapshot
         # window. Periodic and on-demand snapshots share the command type but take

@@ -1,7 +1,7 @@
 # Configuration
 
-> Status: **Implemented** · Audience: contributors and operators of `api/` and
-> `worker/`
+> Status: **Implemented** · Audience: contributors and operators of `api/`,
+> `worker/`, and `relay/`
 >
 > This document defines the **runtime configuration surface** of v2 and the
 > **config-driven adapter selection** mechanism. It refines, but does not
@@ -24,6 +24,10 @@
 7. [Authentication hardening](#7-authentication-hardening)
 8. [Snapshot cadence](#8-snapshot-cadence)
 9. [Related documents](#9-related-documents)
+
+Relay configuration has no section of its own: the relay binary's keys are
+tabled in [`RELAY.md`](RELAY.md) Section 13, beside the design they configure.
+Section 5.13 below covers the API-side `relay.*` keys that gate the feature.
 
 ---
 
@@ -53,8 +57,8 @@
 
 ## 2. Sources and precedence
 
-Both services read configuration from two sources, with environment variables
-overriding the file:
+The three services (`api/`, `worker/`, and `relay/`) read configuration from
+two sources, with environment variables overriding the file:
 
 ```
    defaults (in code)  <  config file  <  environment variables
@@ -65,11 +69,25 @@ overriding the file:
   its default. A key with no default (marked *required*) must be supplied.
 - **Config file** — a single **TOML** file per service (e.g. `api.toml` /
   `worker.toml`). Holds the non-secret bulk of configuration and is the
-  recommended place for adapter-selection and tuning keys.
+  recommended place for adapter-selection and tuning keys. Its **path comes from
+  an environment variable**, and a service whose variable is unset reads no file
+  at all — there is no searched default location. The variable is
+  `MCD_API_CONFIG_FILE` for `api/`, `MCD_WORKER_CONFIG` for `worker/`, and
+  `MCD_RELAY_CONFIG` for `relay/`; each names the file itself, not a directory.
 - **Environment variables** — highest precedence; override any file value. The
   intended channel for **secrets** (Section 3) and for per-deployment overrides
   (container/orchestrator injection). Names are the UPPERCASE keys in the tables
   below.
+
+**The bundled Compose deployment sets none of those three variables and mounts
+no config file**, so on it the chain is defaults then environment. That makes
+`compose.yaml` part of the configuration surface rather than a transparent
+transport: a setting reaches a service only if that service's `environment:`
+block forwards it, so a documented key with no `${VAR:-default}` entry there is
+inert no matter what `.env` says (issues #2585, #2794). The file layer is for
+runs that supply a file themselves (bare metal, systemd, a hand-written
+`docker run`) — under Compose it also needs the file bind-mounted into the
+container and the variable pointed at the *in-container* path.
 
 A startup configuration error (a required key missing, an unknown adapter name,
 a malformed value) is **fatal**: the service fails fast at boot rather than
@@ -80,8 +98,12 @@ may legitimately carry unrelated prefixed names.
 
 The tables below give the **logical key name**. The environment-variable form
 is the key prefixed per service (`MCD_API_` for `api/`, `MCD_WORKER_` for
-`worker/`) to avoid collisions; the file form nests the same key under its
-group.
+`worker/`, `MCD_RELAY_` for `relay/`) to avoid collisions; the file form nests
+the same key under its group. Under the prefix the API spells a nested key
+with a double underscore (`auth.password.policy` →
+`MCD_API_AUTH__PASSWORD__POLICY`), the Worker and the relay with a single one
+(`api.grpc_endpoint` → `MCD_RELAY_API_GRPC_ENDPOINT`). The relay binary's keys
+are not tabled below — they are in [`RELAY.md`](RELAY.md) Section 13.
 
 ---
 

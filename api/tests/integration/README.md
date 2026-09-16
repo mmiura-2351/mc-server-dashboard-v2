@@ -47,7 +47,7 @@ Point at a *scratch* Postgres — never the live deployment database. For exampl
 ```sh
 docker run --rm -d --name mcd-test-pg -p 5544:5432 \
   -e POSTGRES_USER=mcsd -e POSTGRES_PASSWORD=mcsd -e POSTGRES_DB=mcsd_test \
-  postgres:18
+  postgres:18.6
 
 cd api
 MCD_TEST_DATABASE_URL="postgresql+asyncpg://mcsd:mcsd@localhost:5544/mcsd_test" \

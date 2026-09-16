@@ -30,10 +30,12 @@ in [`../../CLAUDE.md`](../../CLAUDE.md); documentation conventions are in
 
 ## 3. Branches
 
-- `fix/issue-{N}-{slug}` for bugs, `feature/issue-{N}-{slug}` for everything
-  else. One issue per branch.
-- If no issue exists, omit the `issue-{N}-` segment: `fix/{slug}` or
-  `feature/{slug}`.
+- `fix/issue-{N}-{slug}` for bugs, `chore/issue-{N}-{slug}` for
+  release/CI/build maintenance with no user-facing effect (the `chore` label
+  of Section 5), and `feature/issue-{N}-{slug}` for everything else. One issue
+  per branch.
+- If no issue exists, omit the `issue-{N}-` segment: `fix/{slug}`,
+  `chore/{slug}` or `feature/{slug}`.
 
 Development is **worktree-based**: the root checkout stays on `main`, and each
 branch lives in its own worktree

@@ -52,7 +52,7 @@ import { useToast } from "../components/Toast.tsx";
 import { UploadProgress } from "../components/UploadProgress.tsx";
 import { useUploadProgress } from "../components/useUploadProgress.ts";
 import { humanizeBytes } from "../format.ts";
-import { type TranslationKey, t } from "../i18n/index.ts";
+import { t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
 import {
@@ -80,39 +80,51 @@ type FileVersions = components["schemas"]["FileVersionsResponse"];
 type FileDownloadGrant = components["schemas"]["FileDownloadGrantResponse"];
 
 /**
- * Map a file-operation error to its toast message.
+ * Map a file-operation error to its toast text.
  *
- * Handles all RFC 9457 reason codes the file API can return.
- * `content_dir_protected` is handled separately (inline notice, not a toast).
+ * Names the RFC 9457 reason codes worth acting on; a reason with no arm falls
+ * back to the message for its status, so the mapping is deliberately not
+ * exhaustive. `content_dir_protected` is handled separately (inline notice, not
+ * a toast).
+ *
+ * Returns the rendered text rather than a `TranslationKey` because a reason may
+ * carry an extension member the message interpolates.
  */
-function fileOperationErrorMessage(error: unknown): TranslationKey {
-  if (!(error instanceof ApiError)) return "files.error.generic";
+function fileOperationErrorMessage(error: unknown): string {
+  if (!(error instanceof ApiError)) return t("files.error.generic");
 
   switch (error.status) {
     case 404:
-      return "files.error.notFound";
+      return t("files.error.notFound");
     case 409: {
       const r = error.reason;
       if (r === "server_unsettled" || r === "server_not_stopped")
-        return "files.error.serverMustBeStopped";
-      if (r === "server_busy") return "files.error.serverBusy";
-      return "files.error.conflict";
+        return t("files.error.serverMustBeStopped");
+      if (r === "server_busy") return t("files.error.serverBusy");
+      return t("files.error.conflict");
     }
     case 413:
-      return "files.error.fileTooLarge";
+      return t("files.error.fileTooLarge");
     case 422: {
       const r = error.reason;
-      if (r === "invalid_path") return "files.error.invalidPath";
-      if (r === "is_a_directory") return "files.error.isDirectory";
-      if (r === "not_a_directory") return "files.error.notDirectory";
-      if (r === "symlink_refused") return "files.error.symlinkRefused";
-      if (r === "name_too_long") return "files.error.nameTooLong";
-      return "files.error.invalidInput";
+      if (r === "invalid_path") return t("files.error.invalidPath");
+      if (r === "is_a_directory") return t("files.error.isDirectory");
+      if (r === "not_a_directory") return t("files.error.notDirectory");
+      if (r === "symlink_refused") return t("files.error.symlinkRefused");
+      if (r === "name_too_long") return t("files.error.nameTooLong");
+      // The two platform-managed server.properties refusals (issues #2623,
+      // #2812, #2846). Both reach here from every write door — save, delete,
+      // rename, upload and rollback — not the editor's PUT alone.
+      if (r === "platform_managed_key" && error.key !== undefined)
+        return t("files.error.platformManagedKey", { key: error.key });
+      if (r === "platform_managed_path")
+        return t("files.error.platformManagedPath");
+      return t("files.error.invalidInput");
     }
     case 503:
-      return "files.error.workerUnavailable";
+      return t("files.error.workerUnavailable");
     default:
-      return "files.error.generic";
+      return t("files.error.generic");
   }
 }
 
@@ -556,7 +568,7 @@ export function ServerFilesTab({
       setContentDirNotice(true);
       return;
     }
-    showToast(t(fileOperationErrorMessage(error)), "error");
+    showToast(fileOperationErrorMessage(error), "error");
   };
 
   const listKey = ["files", "list", communityId, server.id, dir];

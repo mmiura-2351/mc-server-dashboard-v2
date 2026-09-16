@@ -48,12 +48,14 @@ type Op<P extends keyof paths, M extends string> = M extends keyof paths[P]
 interface ProblemDetails {
   reason?: string;
   permission?: string;
+  key?: string;
 }
 
 /**
  * Pull a string-valued member out of a problem+json body. The UI branches on
- * `reason` and (for 403 denials) `permission` (AUTH_API.md 2); anything that is
- * not a problem+json object yields `undefined`.
+ * `reason` and renders the members some reasons carry — `permission` on a 403
+ * denial, `key` on a 422 `platform_managed_key` refusal (AUTH_API.md 2);
+ * anything that is not a problem+json object yields `undefined`.
  */
 function readProblemString(
   body: unknown,
@@ -76,6 +78,12 @@ export class ApiError extends Error {
    * 403 denial (AUTH_API.md 2, issue #425); undefined on other responses.
    */
   readonly permission: string | undefined;
+  /**
+   * The `key` extension member naming the platform-managed `server.properties`
+   * key a 422 `platform_managed_key` refusal was raised for (issue #2623);
+   * undefined on other responses.
+   */
+  readonly key: string | undefined;
 
   constructor(
     readonly status: number,
@@ -85,6 +93,7 @@ export class ApiError extends Error {
     this.name = "ApiError";
     this.reason = readProblemString(body, "reason");
     this.permission = readProblemString(body, "permission");
+    this.key = readProblemString(body, "key");
   }
 }
 

@@ -667,6 +667,49 @@ describe("create error surfacing", () => {
     expect(lastPath).toBe(`/communities/${CID}/servers/new`);
   });
 
+  // The two config-blob reasons (issue #94) this wizard can actually provoke.
+  // It posts a flat object of raw override strings plus the two range-checked
+  // numbers, so `config_null_value` and `config_invalid_shape` cannot arise
+  // here — only the Settings tab's editor parses a value as JSON — and an arm
+  // for either would be dead code.
+  it("surfaces a 422 config_too_large specifically", async () => {
+    // Override values are free text with no length cap, so one paste can push
+    // the blob past the API's 64 KiB ceiling. The generic toast never named the
+    // limit, which is the one thing that makes the error fixable.
+    mockApi.post.mockRejectedValue(
+      new ApiError(422, { reason: "config_too_large" }),
+    );
+    renderPage();
+    await reachConfigStep();
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverCreate.create") }),
+    );
+    expect(
+      await screen.findByText(t("serverCreate.error.config_too_large")),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(t("serverCreate.genericError"))).toBeNull();
+    expect(lastPath).toBe(`/communities/${CID}/servers/new`);
+  });
+
+  it("surfaces a 422 config_lone_surrogate specifically", async () => {
+    // A half-emoji pasted into an override survives the round trip verbatim:
+    // `JSON.stringify` emits it as a `\ud800` escape, which the API decodes
+    // back into the lone surrogate its guard refuses (issue #2838).
+    mockApi.post.mockRejectedValue(
+      new ApiError(422, { reason: "config_lone_surrogate" }),
+    );
+    renderPage();
+    await reachConfigStep();
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverCreate.create") }),
+    );
+    expect(
+      await screen.findByText(t("serverCreate.error.config_lone_surrogate")),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(t("serverCreate.genericError"))).toBeNull();
+    expect(lastPath).toBe(`/communities/${CID}/servers/new`);
+  });
+
   it("maps a structural validation_error on name to the field", async () => {
     mockApi.post.mockRejectedValue(
       new ApiError(422, {
@@ -920,6 +963,121 @@ describe("import tab", () => {
       await screen.findByText(
         t("serverCreate.import.error.invalid_export_metadata"),
       ),
+    ).toBeInTheDocument();
+    expect(lastPath).toBe(`/communities/${CID}/servers/new`);
+  });
+
+  it("names the platform-managed path a refused import would occupy (#2979)", async () => {
+    // An archive member stored UNDER the root server.properties path is refused
+    // before the server row is created (issue #2869). Without an arm for the
+    // reason the handler fell through to the generic create toast, which says
+    // nothing about the entry the user has to remove. The message is
+    // import-specific: a zip's directory entries never reach the guard, so the
+    // offending member is always a plain file.
+    mockPostFormWithProgress.mockRejectedValue(
+      new ApiError(422, { reason: "platform_managed_path" }),
+    );
+    renderPage();
+    fireEvent.click(await screen.findByText(t("serverCreate.tab.import")));
+    fireEvent.change(
+      await screen.findByLabelText(t("serverCreate.nameLabel")),
+      { target: { value: "restored" } },
+    );
+    const file = new File(["zip"], "export.zip");
+    fireEvent.change(
+      screen.getByLabelText(t("serverCreate.import.fileLabel")),
+      {
+        target: { files: [file] },
+      },
+    );
+    fireEvent.click(screen.getByText(t("serverCreate.import.submit")));
+
+    expect(
+      await screen.findByText(
+        t("serverCreate.import.error.platform_managed_path"),
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("serverCreate.genericError")),
+    ).not.toBeInTheDocument();
+    // Not the Backups upload's string: that one names a server.properties
+    // DIRECTORY entry, which the zip path never yields (files.py `_zip_entries`).
+    expect(
+      screen.queryByText(t("backups.error.platformManagedPath")),
+    ).not.toBeInTheDocument();
+    expect(lastPath).toBe(`/communities/${CID}/servers/new`);
+  });
+
+  // --- the auto-assigned join address / port, taken mid-import (issue #3022) ---
+
+  async function submitImport() {
+    renderPage();
+    fireEvent.click(await screen.findByText(t("serverCreate.tab.import")));
+    fireEvent.change(
+      await screen.findByLabelText(t("serverCreate.nameLabel")),
+      { target: { value: "restored" } },
+    );
+    const file = new File(["zip"], "export.zip");
+    fireEvent.change(
+      screen.getByLabelText(t("serverCreate.import.fileLabel")),
+      {
+        target: { files: [file] },
+      },
+    );
+    fireEvent.click(screen.getByText(t("serverCreate.import.submit")));
+  }
+
+  it("surfaces a 409 slug_taken on import instead of failing silently (#3022)", async () => {
+    // The import route now answers 409 `slug_taken` where it used to 500. The
+    // create path routes that reason to its slug FIELD and reports it handled,
+    // but the import tab has no slug field — so delegating there swallowed the
+    // error and the operator saw NOTHING, which is worse than the generic toast
+    // the 500 used to produce. Import assigns the address itself, so the message
+    // is a plain retry rather than a field complaint.
+    mockPostFormWithProgress.mockRejectedValue(
+      new ApiError(409, { reason: "slug_taken" }),
+    );
+    await submitImport();
+
+    expect(
+      await screen.findByText(t("serverCreate.import.error.slug_taken")),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("serverCreate.genericError")),
+    ).not.toBeInTheDocument();
+    // Not the create tab's inline slug-field string: that one tells the operator
+    // to choose another address, which they never supplied here.
+    expect(
+      screen.queryByText(t("serverCreate.error.slug_taken")),
+    ).not.toBeInTheDocument();
+    expect(lastPath).toBe(`/communities/${CID}/servers/new`);
+  });
+
+  it("surfaces a 409 port_taken on import (#3022)", async () => {
+    // Shares the create path's toast: `port_taken` is in CREATE_ERROR_KEY, so it
+    // renders rather than vanishing. Pinned because #3022 made it reachable here.
+    mockPostFormWithProgress.mockRejectedValue(
+      new ApiError(409, { reason: "port_taken" }),
+    );
+    await submitImport();
+
+    expect(
+      await screen.findByText(t("serverCreate.error.port_taken")),
+    ).toBeInTheDocument();
+    expect(lastPath).toBe(`/communities/${CID}/servers/new`);
+  });
+
+  it("surfaces a 503 slug_exhausted on import via the generic toast (#3022)", async () => {
+    // Not in CREATE_ERROR_KEY, so the handler reports it unhandled and the caller
+    // shows the generic toast. That is a real message, which is all this pins —
+    // the failure mode #3022 fixes is showing nothing at all.
+    mockPostFormWithProgress.mockRejectedValue(
+      new ApiError(503, { reason: "slug_exhausted" }),
+    );
+    await submitImport();
+
+    expect(
+      await screen.findByText(t("serverCreate.genericError")),
     ).toBeInTheDocument();
     expect(lastPath).toBe(`/communities/${CID}/servers/new`);
   });

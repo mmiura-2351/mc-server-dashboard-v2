@@ -11,6 +11,9 @@ name: sanity
 # satisfiable. Its job is named `check` to match api/docs/proto/worker, letting a
 # single required context cover all of them. Keep it cheap (<30s, no services).
 # See issue #303.
+#
+# The `live-s3` job below is the same trick for the second path-filtered
+# required context; see its own comment.
 
 on:
   pull_request:
@@ -29,29 +32,32 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # The checkers are pure stdlib python3 (ubuntu-latest ships it); no setup
-      # action or dependency install is needed, mirroring docs.yml.
+      # Nothing below needs a setup action, a dependency install, a service or a
+      # network fetch: the checkers are pure stdlib python3 (ubuntu-latest ships
+      # it), mirroring docs.yml, and the shell suites use only tools the runner
+      # already has.
       #
       # Every step below except the workflow YAML parse also runs locally: the
       # migration guard (self-test + real run) via `make migrations-check`, the
       # docs checker (self-test + real run) via `make docs-check`, the
       # test-client guard (self-test + real run) via `make test-client-check`,
-      # supply_chain_cooldown.py's self-test via `make scripts-test`, the two
-      # hook suites via `make hooks-test`. The YAML parse is CI-only -- it
-      # guards this directory, which has no local gate. The commands stay
-      # spelled out here rather than invoking those Make targets, because
-      # scripts-test additionally runs the deploy shell suites that this
-      # deliberately cheap always-on gate does not want (see the header). So a
-      # new `--self-test` under scripts/ has to be wired into both lists
-      # (#2508, #2511).
+      # the api-env preflight's self-test via `make api-env-check` (its real run
+      # needs the api venv, so only the self-test is here), the two hook suites
+      # via `make hooks-test`, and the scripts/ suites via the Make target the
+      # last step names. The YAML parse is CI-only -- it guards this directory,
+      # which has no local gate.
+      #
+      # The python checkers stay spelled out because each is a gate worth naming
+      # in the job's step list. The scripts/ suites do not, because there the
+      # membership is the thing that has to stay in step with the Makefile, and
+      # a hand-copied list did not: it was governed by a comment asking authors
+      # to update two places, and five suites reached main with no CI run of
+      # their own anyway (#2508, #2511, #2946).
       - name: Migration guard self-test
         run: python3 scripts/check_migrations.py --self-test
 
       - name: Migration guard (single head, no number collisions)
         run: (cd api && python3 ../scripts/check_migrations.py)
-
-      - name: Supply-chain cooldown self-test
-        run: python3 scripts/supply_chain_cooldown.py --self-test
 
       - name: Docs checker self-test
         run: python3 scripts/check_docs.py --self-test
@@ -65,6 +71,9 @@ jobs:
       - name: Test-client pattern (api/tests)
         run: python3 scripts/check_test_client_pattern.py
 
+      - name: API env guard self-test
+        run: python3 scripts/check_api_env.py --self-test
+
       # Unit-test the checked-in git hooks (post-checkout auto-restore,
       # hooks-check assertions). Pure bash + temp git repos; mirrors the
       # `make hooks-test` target so CI covers the same gate as local.
@@ -73,6 +82,15 @@ jobs:
 
       - name: Hook tests (hooks-check)
         run: bash .githooks/test-hooks-check.sh
+
+      # Every scripts/ suite this gate can afford, as the Make target that
+      # defines that set: the cooldown self-test, the pipefail source guard, the
+      # two check_parallel.sh suites and the two tool-pin suites. ~3s, bash and
+      # python3 over temp dirs, nothing installed and nothing fetched. The
+      # target deliberately excludes the deploy helper suites, which `make
+      # scripts-test` adds on top; the Makefile carries that rationale.
+      - name: Script suites (scripts-test-cheap)
+        run: make scripts-test-cheap
 
       # YAML-parse every workflow so a malformed workflow fails fast. PyYAML is
       # preinstalled with ubuntu-latest's system python3.
@@ -87,3 +105,23 @@ jobs:
                   yaml.safe_load(fh)
               print("ok:", f)
           '
+
+  # The unfiltered counterpart of api.yml's `live-s3` job, for exactly the
+  # reason the header gives for `check`: `live-s3` is a required status check on
+  # `main` (#2349) and api.yml is path-filtered, so a PR touching no api path
+  # would never report that context and could never merge.
+  #
+  # This does not weaken the gate. api.yml's job reports the same context
+  # whenever it runs, and branch protection is satisfied only when every check
+  # run carrying a required name is green -- so a red live-s3 in api.yml still
+  # blocks, and this job only answers for the PRs where the real one has nothing
+  # to test.
+  live-s3:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Placeholder for the required live-s3 context
+        run: |
+          echo "This job exists only so the required live-s3 context is reported on"
+          echo "PRs that trigger no api.yml run; it tests nothing. If this PR touched"
+          echo "an api path, api.yml's live-s3 job is the one that tests anything,"
+          echo "against a live SeaweedFS container."

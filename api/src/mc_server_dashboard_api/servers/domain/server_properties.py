@@ -40,6 +40,7 @@ preserved exactly.
 from __future__ import annotations
 
 import secrets
+from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 
@@ -88,6 +89,18 @@ PLATFORM_MANAGED_KEYS: frozenset[str] = frozenset(
         _ENABLE_RCON_KEY,
         _RCON_PORT_KEY,
         _RCON_PASSWORD_KEY,
+        _RESOURCE_PACK_KEY,
+        _RESOURCE_PACK_SHA1_KEY,
+        _REQUIRE_RESOURCE_PACK_KEY,
+        _RESOURCE_PACK_PROMPT_KEY,
+    }
+)
+
+# The four keys one resource-pack assignment owns: the set
+# :func:`clear_resource_pack_properties` removes when a server has no pack, named
+# once so the removal and the re-apply path cannot drift apart (#1177, #1253).
+_RESOURCE_PACK_KEYS: frozenset[str] = frozenset(
+    {
         _RESOURCE_PACK_KEY,
         _RESOURCE_PACK_SHA1_KEY,
         _REQUIRE_RESOURCE_PACK_KEY,
@@ -398,6 +411,160 @@ def _set_property(content: bytes, key: str, value: str) -> bytes:
     return _normalize(bytes(out))
 
 
+def _ends_in_dangling_continuation(content: bytes, props: list[_Property]) -> bool:
+    """True when *content*'s last logical line continues onto whatever follows it.
+
+    A line ending in an odd backslash run CONTINUES onto the next one. At EOF
+    there is no next line, so the value simply ends -- until something is
+    appended, which that continuation then swallows, merging the two into one
+    property spelled as neither the file nor the write said. The appended key is
+    then absent from the file the server reads, which is a setting the caller
+    explicitly asked for silently dropped (issue #2994), so :func:`_rewrite` ends
+    the continuation before it appends.
+
+    Only the LAST logical line can dangle -- an earlier one would have consumed
+    the line below it -- and it dangles only when its last natural line carries
+    the odd run. That line belongs to a property only when the last property's
+    span reaches EOF: a comment does not continue, so a file ending in ``#c\\``
+    swallows nothing (:func:`_parse`).
+
+    That is :func:`_parse`'s reading, the one this module's own reads of the file
+    go through. Java's can end sooner: while a continued line is still empty,
+    Java reads a ``#`` / ``!`` line after it as a comment rather than as its
+    continuation, so to Java a file ending ``\\``, ``#c\\`` ends in a comment.
+    The append needs a line in front of it all the same -- without one,
+    :func:`_parse` joins the appended key onto ``#c`` -- and
+    :func:`_continuation_end` picks one that leaves Java's reading alone too.
+
+    Neither this shape nor the file that has one is normal for a
+    ``server.properties``; a hand-edited or truncated file is where it turns up.
+    """
+
+    if not props or props[-1].end != len(content):
+        return False
+    tail = content
+    if tail.endswith(b"\r\n"):
+        tail = tail[:-2]
+    elif tail.endswith((b"\n", b"\r")):
+        tail = tail[:-1]
+    cut = max(tail.rfind(b"\n"), tail.rfind(b"\r"))
+    return _ends_with_odd_backslash(tail[cut + 1 :].lstrip(_BLANKS))
+
+
+def _continuation_end(content: bytes, start: int) -> bytes:
+    """Return the line that ends *content*'s dangling last property, at *start*.
+
+    The line has to end the continuation without changing what
+    ``Properties.load`` reads from the property it ends (issue #2994). An empty
+    line does that whenever the logical line has something in it: its value ran
+    to EOF, and an empty continuation is the same empty tail.
+
+    Not when the logical line is EMPTY once its continuation is accumulated --
+    every natural line of it is a lone backslash, blanks aside. Java reads
+    ``"" = ""`` from that line only because EOF ends it; followed by an empty
+    line, it reads the line as blank and the property is gone. ``=`` ends it as
+    ``"" = ""`` instead. Unless *content* ends in ``\\r\\n``: Java already reads
+    no property at all from an empty continued line that ends the file that way,
+    so ``=`` would invent one, and the empty line is right after all. Both are
+    what the JDK reads (checked in the tests); :func:`_parse` reads a ``""``
+    property from the CRLF file as well, which is its divergence from Java
+    rather than a property to preserve.
+
+    That logical line need not begin at *start*. While a continued line is still
+    empty, Java reads a ``#`` / ``!`` line after it as a comment, which never
+    continues, and starts a new logical line below it; :func:`_parse` joins the
+    comment on instead (:func:`_ends_in_dangling_continuation`). So the walk
+    skips such a comment as Java does and goes on with a new, empty line.
+    *start* itself is a line Java starts too: :func:`_parse` only ever joins
+    lines Java keeps apart, never the reverse. A blank line needs no rule of its
+    own -- it ends the line either way, and :func:`_parse` never joins past one.
+
+    The ``=`` is for the empty line only: after ``k=v`` it would make the value
+    ``v=``. When the comment is the last line, nothing dangles for Java at all,
+    and the empty line is only what keeps :func:`_parse` from joining the append
+    onto it.
+    """
+
+    continued = False
+    offset = start
+    while offset < len(content):
+        line, offset = _natural_line(content, offset)
+        line = line.lstrip(_BLANKS)
+        if line[:1] in (b"#", b"!"):
+            continued = False
+        elif line == b"\\":
+            continued = True
+        else:
+            return b"\n"
+    if continued and not content.endswith(b"\r\n"):
+        return b"=\n"
+    return b"\n"
+
+
+def _rewrite(
+    content: bytes,
+    props: list[_Property],
+    values: Mapping[str, str],
+    cleared: AbstractSet[str],
+) -> bytes:
+    """Return *content* with each *values* key set and each *cleared* key removed.
+
+    The batched form of :func:`_set_property` and :func:`_clear_property`: one
+    walk of *props* -- the caller's own :func:`_parse` of *content*, so a caller
+    that already holds one does not pay for a second -- instead of a fresh full
+    parse per key. Chaining the single-key helpers cost one byte-by-byte pass
+    each, seven to nine of them for one :func:`apply_platform_properties` call
+    (issue #2863).
+
+    Per key the outcome is the single-key helpers' own: the first property line
+    for a *values* key is replaced in place by the canonical ``key=value`` and
+    every later one is dropped, a key the file has no line for is appended, and a
+    *cleared* key loses every line it has. *values* is applied in ITERATION
+    ORDER, which is the order its appended lines land in -- the order the chained
+    helpers appended them in. The result is NOT normalized; callers do that, as
+    they did around the single-key helpers.
+
+    An append is preceded by whatever it takes to make it its own logical line:
+    the newline the content does not already end in, and -- when what is left
+    after the removals still ends in a dangling continuation
+    (:func:`_ends_in_dangling_continuation`) -- a line that ends that
+    continuation and leaves it reading as it did (:func:`_continuation_end`), so
+    the appended key is not swallowed into the line above (issue #2994).
+
+    The removals are what decide whether the tail still dangles. Only a tail
+    spliced through verbatim can -- once *cursor* reaches the end of *content*,
+    the last property was either replaced by a canonical ``key=value`` line or
+    removed along with the whole dangling line, and what an earlier property
+    leaves behind ends its own logical line by construction.
+    """
+
+    lines = {
+        key: f"{_escape_key(key)}={_escape_value(value)}".encode("latin-1")
+        for key, value in values.items()
+    }
+    written: set[str] = set()
+    out = bytearray()
+    cursor = 0
+    for prop in props:
+        if prop.key not in lines and prop.key not in cleared:
+            continue
+        out += content[cursor : prop.start]
+        cursor = prop.end
+        if prop.key in lines and prop.key not in written:
+            out += lines[prop.key] + b"\n"
+            written.add(prop.key)
+    out += content[cursor:]
+    appended = [line for key, line in lines.items() if key not in written]
+    if appended:
+        if out and not out.endswith(b"\n"):
+            out += b"\n"
+        if cursor < len(content) and _ends_in_dangling_continuation(content, props):
+            out += _continuation_end(content, props[-1].start)
+        for line in appended:
+            out += line + b"\n"
+    return bytes(out)
+
+
 def set_server_port(content: bytes, port: int) -> bytes:
     """Return ``content`` with its ``server-port`` line set to ``port``.
 
@@ -488,11 +655,14 @@ def remove_keys(content: bytes, keys: AbstractSet[str]) -> bytes:
     Every property line for each key is deleted entirely, in whatever spelling it
     used and including the continuation lines it spans. Other lines and their
     order are preserved; the result ends with a single trailing newline (#1242).
+
+    One parse whatever the size of *keys* (issue #2863), where clearing a key at
+    a time re-read the whole file per key. Order never mattered here and still
+    does not: a removed property line is spliced out whole, so what is left
+    parses exactly as it did, and *keys* arrives as a set anyway.
     """
 
-    for key in keys:
-        content = _clear_property(content, key)
-    return _normalize(content)
+    return _normalize(_rewrite(content, _parse(content), {}, keys))
 
 
 def _platform_managed_values(content: bytes) -> dict[str, list[str]]:
@@ -597,23 +767,47 @@ def apply_platform_properties(
     - The resource-pack keys come from the assignment: ``None`` clears all four
       (the server has no pack), and a ``prompt`` of ``None`` removes just the
       prompt key, since "no prompt" is what the assignment row then says.
+
+    Those decisions are read off ONE :func:`_parse` and applied in ONE pass
+    (issue #2863). Chaining the public helpers cost a full byte-by-byte parse per
+    key written -- seven to nine of them per call -- and this call, unlike the
+    comparison guard, is not behind ``asyncio.to_thread`` at every call site, so
+    on an oversized root file (a restore or an import, or one predating the #2809
+    cap) it occupied the event loop. The helpers themselves are unchanged and
+    have callers of their own.
+
+    The one pass is also what keeps every key: chaining them re-parsed between
+    writes, so when the file's last logical line continued onto an appended one,
+    the next helper saw the merged key and rewrote or cleared the span it now
+    covered -- taking the line it had just written with it, and leaving the file
+    without a setting the caller had asked for (issue #2994). Nothing here reads
+    back what it wrote, and the append ends such a continuation before it writes
+    (:func:`_rewrite`).
     """
 
+    props = _parse(content)
+    values: dict[str, str] = {}
     if game_port is not None:
-        content = set_server_port(content, game_port)
-    content = set_rcon_properties(content, password=rcon_password)
+        values[_PORT_KEY] = str(game_port)
+    values[_ENABLE_RCON_KEY] = "true"
+    values[_RCON_PORT_KEY] = str(RCON_PORT)
+    passwords = [prop.value for prop in props if prop.key == _RCON_PASSWORD_KEY]
+    if not (passwords and passwords[-1]):
+        values[_RCON_PASSWORD_KEY] = rcon_password
+    cleared: AbstractSet[str] = frozenset()
     if resource_pack is None:
-        return clear_resource_pack_properties(content)
-    content = set_resource_pack_properties(
-        content,
-        url=resource_pack.url,
-        sha1=resource_pack.sha1,
-        require=resource_pack.require,
-        prompt=resource_pack.prompt,
-    )
-    if resource_pack.prompt is None:
-        content = remove_keys(content, {_RESOURCE_PACK_PROMPT_KEY})
-    return content
+        cleared = _RESOURCE_PACK_KEYS
+    else:
+        values[_RESOURCE_PACK_KEY] = resource_pack.url
+        values[_RESOURCE_PACK_SHA1_KEY] = resource_pack.sha1
+        values[_REQUIRE_RESOURCE_PACK_KEY] = (
+            "true" if resource_pack.require else "false"
+        )
+        if resource_pack.prompt is None:
+            cleared = frozenset({_RESOURCE_PACK_PROMPT_KEY})
+        else:
+            values[_RESOURCE_PACK_PROMPT_KEY] = resource_pack.prompt
+    return _normalize(_rewrite(content, props, values, cleared))
 
 
 def clear_resource_pack_properties(content: bytes) -> bytes:
@@ -624,13 +818,9 @@ def clear_resource_pack_properties(content: bytes) -> bytes:
     spelling, so an untrusted archive's ``resource-pack:http://...`` cannot survive
     the clear that import and restore run (issues #2621, #2811). Other lines and
     their order are preserved; the result ends with a single trailing newline.
+
+    One parse, where clearing the four keys one at a time was a fixed four passes
+    over the whole file (issue #2863).
     """
 
-    for key in (
-        _RESOURCE_PACK_KEY,
-        _RESOURCE_PACK_SHA1_KEY,
-        _REQUIRE_RESOURCE_PACK_KEY,
-        _RESOURCE_PACK_PROMPT_KEY,
-    ):
-        content = _clear_property(content, key)
-    return _normalize(content)
+    return _normalize(_rewrite(content, _parse(content), {}, _RESOURCE_PACK_KEYS))

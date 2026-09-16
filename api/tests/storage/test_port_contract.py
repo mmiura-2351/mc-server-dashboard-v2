@@ -1915,12 +1915,38 @@ async def test_delete_missing_dir_is_not_found(harness: StorageHarness) -> None:
         await harness.storage.delete_dir(community, server, RelPath("nope"))
 
 
-async def test_make_dir_then_write_file_under_it(harness: StorageHarness) -> None:
-    """make_dir followed by a write under it makes the directory observable.
+async def test_make_dir_creates_an_observable_empty_directory(
+    harness: StorageHarness,
+) -> None:
+    """A created directory is observable on both backends while still empty (#1125).
 
-    The empty-directory itself is backend-dependent (fs materializes it; object
-    storage cannot represent an empty dir), so the portable contract is: after a
-    file is written under the new directory, the directory lists that file.
+    Only the realization differs — fs materializes a real directory, object storage
+    writes a zero-byte ``.dir`` marker to anchor the prefix and filters it back out
+    of the listed level — so all three observations belong to the portable contract:
+    the directory appears in its parent's listing, lists as ``[]`` rather than
+    raising, and occupies its name.
+    """
+
+    community, server = new_scope()
+    await harness.publish(community, server, {"server.properties": b"x"})
+
+    await harness.storage.make_dir(community, server, RelPath("plugins"))
+
+    root = await harness.storage.list_dir(community, server, RelPath("."))
+    assert {(e.name, e.is_dir) for e in root} == {
+        ("plugins", True),
+        ("server.properties", False),
+    }
+    assert await harness.storage.list_dir(community, server, RelPath("plugins")) == []
+    assert await harness.storage.path_exists(community, server, RelPath("plugins"))
+
+
+async def test_make_dir_then_write_file_under_it(harness: StorageHarness) -> None:
+    """A file written under a created directory is listed there.
+
+    The directory is already observable while empty (the test above); this pins the
+    next step — the write lands under the directory that ``make_dir`` created rather
+    than beside it.
     """
 
     community, server = new_scope()

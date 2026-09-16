@@ -38,6 +38,17 @@ nothing in the integrity map names the constraint, it raises the untranslated
 caller meets, and modelling it as anything friendlier would invent a production
 behaviour that does not exist.
 
+A fake can only refuse what it can see, and where it cannot the omission is
+stated rather than left to read as an oversight (#2923). Its own rows carry the
+UNIQUEs and the foreign keys whose parent it holds, so those are modelled; a
+foreign key onto a row another fake owns is not — ``FakeGroupRepository`` holds
+neither the ``server`` its ``attach`` names nor the ``community`` its ``add``
+names, so ``fk_server_group_server_id_server`` and
+``fk_player_group_community_id_community`` stay forgiving there, both by the same
+decision. In a fake-driven test those two parents are asserted one layer up, by
+the use case's own pre-read (``AttachGroup``'s ``_require_server``, the route's
+authorization gate for the community), which is the only place that can see them.
+
 ``FakeGameSessionRepository`` is absent on purpose: ``GameSession`` is
 ``frozen=True``, so no mutation can cross its boundary in either direction and
 there is nothing for a copy to protect.
@@ -45,13 +56,22 @@ there is nothing for a copy to protect.
 ``FakeFileStore`` is not a repository, but it is a fake standing in for an
 adapter and the forgiving direction is the same hazard (#2867): where the real
 seam REFUSES, a fake that answers lets a use case that depends on the refusal
-pass here and fail in production. Its pins therefore live here too.
+pass here and fail in production. Its pins therefore live here too. What it
+CANNOT describe is forgiving the same way (#2886): a store with no notion of a
+directory answers every listing entry ``is_dir=False`` and forgets a created
+directory, so a caller that branches on the flag, enumerates subdirectories, or
+acts on what it just created is exercised against a world production never
+serves.
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import io
 import uuid
+import zipfile
+from collections.abc import AsyncIterator, Callable
+from dataclasses import replace
 
 import pytest
 from sqlalchemy.exc import IntegrityError
@@ -64,6 +84,7 @@ from mc_server_dashboard_api.servers.domain.backup import (
     BackupSource,
 )
 from mc_server_dashboard_api.servers.domain.errors import (
+    GroupNameAlreadyExistsError,
     GroupNotFoundError,
     PluginAlreadyExistsError,
     ResourcePackInUseError,
@@ -313,11 +334,13 @@ async def test_plugin_readers_hand_out_copies() -> None:
 # -- FakeGroupRepository --
 
 
-def _group() -> PlayerGroup:
+def _group(
+    *, community_id: CommunityId | None = None, name: str = "ops"
+) -> PlayerGroup:
     return PlayerGroup(
         id=GroupId(uuid.uuid4()),
-        community_id=CommunityId(uuid.uuid4()),
-        name=GroupName("ops"),
+        community_id=community_id or CommunityId(uuid.uuid4()),
+        name=GroupName(name),
         kind=GroupKind.OP,
         players=[Player(uuid.uuid4(), "steve")],
     )
@@ -391,6 +414,105 @@ async def test_group_save_on_a_missing_row_without_players_reports_not_found() -
         await repo.save(group)
 
     assert repo.by_id == {}
+
+
+async def test_group_add_of_a_duplicate_name_reports_already_exists() -> None:
+    # ``uq_player_group_community_kind_name`` refuses a second group holding one
+    # community's ``(kind, name)``, and ``SqlAlchemyGroupRepository.add`` flushes
+    # the ``player_group`` row itself, so the refusal lands inside the call as
+    # ``GroupNameAlreadyExistsError`` (#2000). Pinned against the live UNIQUE in
+    # ``tests/integration/test_group_repositories.py::
+    # test_add_after_concurrent_name_take_reports_name_exists``, as its rename
+    # counterpart below is; until #2970 only the translation unit test stood
+    # behind this site, and a fake session cannot show that the constraint is
+    # reached at all. Keying on ``group.id`` alone was the forgiving direction:
+    # two groups sharing the triple coexisted here, a state production cannot
+    # hold (#2923).
+    repo = FakeGroupRepository()
+    first = _group()
+    await repo.add(first)
+
+    with pytest.raises(GroupNameAlreadyExistsError):
+        await repo.add(_group(community_id=first.community_id))
+
+    assert list(repo.by_id) == [first.id]
+
+
+async def test_group_add_of_a_stored_id_is_refused() -> None:
+    # ``id`` alone is ``pk_player_group`` (migration 0012), so ``add`` is an
+    # INSERT and never an upsert: a second row under a stored id duplicates the
+    # key and PostgreSQL refuses it at the same explicit flush that carries the
+    # name UNIQUE above. No map entry names the PK, so
+    # ``SqlAlchemyGroupRepository.add`` re-raises the ``IntegrityError``
+    # untranslated -- a 500 (that fall-through is pinned in
+    # ``tests/servers/test_unit_of_work_translation.py::
+    # test_group_add_reraises_unknown_violation_untranslated``). Keying the row in
+    # regardless made the fake an upsert, the forgiving direction, and left a
+    # locally checkable divergence unstated while its two neighbours were
+    # modelled. ``CreateGroup`` mints ``GroupId.new()``, which is what keeps the
+    # hole latent rather than live.
+    #
+    # Same reasoning, same shim and same untranslated error as
+    # ``test_resource_pack_second_assignment_for_one_server_is_refused`` (#2858),
+    # including the measurement recorded there: on PostgreSQL 18 the ORM raises
+    # for every duplicate shape rather than short-circuiting with a
+    # ``FlushError``, and this adapter stages its row the same way -- a fresh
+    # model instance followed by a flush the method owns.
+    repo = FakeGroupRepository()
+    first = _group()
+    await repo.add(first)
+
+    # A different name, so the row is refused by its key rather than by the
+    # UNIQUE the test above pins.
+    with pytest.raises(IntegrityError) as raised:
+        await repo.add(replace(first, name=GroupName("second"), players=[]))
+
+    # Read the name back through the adapter's own accessor, as the pin for the
+    # assignment PK does: it is the whole payload of the shim, and a caller that
+    # translates reaches it this way.
+    assert _constraint_name(raised.value) == "pk_player_group"
+    # The stored row stands; the refused INSERT wrote nothing over it.
+    assert repo.by_id[first.id].name == GroupName("ops")
+
+
+async def test_group_save_onto_a_taken_name_reports_already_exists() -> None:
+    # The same UNIQUE on the rename path: ``save``'s player-row DELETE autoflushes
+    # the pending name UPDATE, so a racer that took the target triple between the
+    # caller's pre-check and the write is refused inside ``save`` too (#2000).
+    # Pinned against the live UNIQUE in
+    # ``tests/integration/test_group_repositories.py::
+    # test_save_after_concurrent_name_take_reports_name_exists``; modelled here so
+    # a use-case test driving the fake sees the same refusal.
+    repo = FakeGroupRepository()
+    community = CommunityId(uuid.uuid4())
+    moving = _group(community_id=community)
+    repo.seed(moving)
+    repo.seed(_group(community_id=community, name="taken"))
+
+    moving.name = GroupName("taken")
+    with pytest.raises(GroupNameAlreadyExistsError):
+        await repo.save(moving)
+
+    assert repo.by_id[moving.id].name == GroupName("ops")
+
+
+async def test_group_attach_to_a_missing_group_reports_not_found() -> None:
+    # ``attach`` executes its INSERT rather than staging it, so
+    # ``fk_server_group_group_id_player_group`` is refused inside the call and
+    # translated to ``GroupNotFoundError`` -- the very error the use case's
+    # pre-read raises, for a group a racer deleted just after it (#2612). Pinned
+    # against the live FK in ``tests/integration/test_group_repositories.py::
+    # test_attach_after_a_concurrent_group_delete_reports_not_found``.
+    #
+    # The row's other FK, ``fk_server_group_server_id_server``, is the half this
+    # fake cannot see (see the module docstring) and is deliberately left
+    # forgiving, so this pin says nothing about it.
+    repo = FakeGroupRepository()
+
+    with pytest.raises(GroupNotFoundError):
+        await repo.attach(GroupId(uuid.uuid4()), _SERVER)
+
+    assert repo.attachments == set()
 
 
 # -- FakeScheduleRepository / FakeScheduleRunRepository --
@@ -641,3 +763,459 @@ async def test_file_store_list_dir_on_the_root_is_empty_not_a_miss(root: str) ->
         await store.list_dir(community_id=_COMMUNITY, server_id=_SERVER, rel_path=root)
         == []
     )
+
+
+async def test_file_store_list_dir_surfaces_a_subdirectory() -> None:
+    # ``tests/storage/test_port_contract.py::test_list_dir_lists_entries`` pins this
+    # listing against BOTH live backends: the parent of a nested file is one entry
+    # with ``is_dir=True`` and size 0 -- fs lstats the real directory
+    # (``_list_entries``), the object backend collapses the shared key prefix
+    # (``_entries_at_level``) -- listed alongside the direct files. A fake that
+    # drops every nested path and hardcodes ``is_dir=False`` answers ``[]`` here
+    # and never produces a directory at all (#2886), which is the same forgiving
+    # direction #2885 closed: a caller that branches on ``is_dir``, or that
+    # enumerates subdirectories, passes here for a reason production cannot
+    # reproduce.
+    store = FakeFileStore()
+    store.files["world/level.dat"] = b"abc"
+    store.files["server.properties"] = b"k=v"
+
+    entries = await store.list_dir(
+        community_id=_COMMUNITY, server_id=_SERVER, rel_path="."
+    )
+
+    assert {(e.name, e.is_dir) for e in entries} == {
+        ("world", True),
+        ("server.properties", False),
+    }
+    world = next(e for e in entries if e.name == "world")
+    assert world.size == 0
+
+
+async def test_file_store_make_dir_creates_a_directory_later_calls_see() -> None:
+    # A ``make_dir`` that records nothing leaves the directory non-existent for
+    # every later call, and since #2885's refusal that is a hard
+    # ``ServerFileNotFoundError`` where production succeeds (#2886). Both backends
+    # make the new directory observable: fs materializes a real one
+    # (``FsStorage._make_dir``), and the object backend anchors the prefix with a
+    # zero-byte ``.dir`` marker that ``_entries_at_level`` hides again
+    # (``tests/storage/test_object_specifics.py``
+    # ``::test_make_dir_writes_marker_and_dir_is_visible``). So the parent lists
+    # it, listing it is EMPTY rather than the miss above, and the name is
+    # occupied.
+    store = FakeFileStore()
+    store.files["server.properties"] = b"k=v"
+
+    await store.make_dir(community_id=_COMMUNITY, server_id=_SERVER, rel_path="plugins")
+
+    root_entries = await store.list_dir(
+        community_id=_COMMUNITY, server_id=_SERVER, rel_path="."
+    )
+    assert ("plugins", True) in {(e.name, e.is_dir) for e in root_entries}
+    assert (
+        await store.list_dir(
+            community_id=_COMMUNITY, server_id=_SERVER, rel_path="plugins"
+        )
+        == []
+    )
+    assert (
+        await store.path_exists(
+            community_id=_COMMUNITY, server_id=_SERVER, rel_path="plugins"
+        )
+        is True
+    )
+
+    # The ROOT is the one path no directory is created UNDER: the object backend
+    # returns before writing a marker (#1944, whose ``//.dir`` key the worker's
+    # safeJoin rejects) and fs's ``exist_ok=True`` mkdir of the snapshot dir
+    # itself is equally a no-op. So the listing must not gain a nameless entry.
+    await store.make_dir(community_id=_COMMUNITY, server_id=_SERVER, rel_path=".")
+
+    assert (
+        await store.list_dir(community_id=_COMMUNITY, server_id=_SERVER, rel_path=".")
+        == root_entries
+    )
+
+
+async def test_file_store_delete_dir_removes_the_subtree_later_calls_see() -> None:
+    # A ``delete_dir`` that records nothing leaves the directory and every member
+    # observable for the rest of the test, so create-then-delete-then-list passes
+    # here while production reports the directory gone (#2972) -- the forgiving
+    # direction again. Both backends take the whole subtree: fs ``shutil.rmtree``s
+    # the resolved directory (``FsStorage._delete_dir``), and the object backend
+    # deletes every key under the ``<dir>/`` prefix (``ObjectStorage.delete_dir``).
+    # Pinned against the live backends in
+    # ``tests/storage/test_port_contract.py::test_delete_dir_removes_subtree``.
+    store = FakeFileStore()
+    store.files["world/level.dat"] = b"a"
+    store.files["world/region/r.dat"] = b"b"
+    store.files["server.properties"] = b"keep"
+    # A created EMPTY directory inside the subtree. No contract test states this
+    # one: ``test_delete_dir_removes_subtree`` seeds files only. It follows from
+    # the two implementations -- ``rmtree`` unlinks a nested empty directory like
+    # any other member, and the object backend's prefix listing includes the
+    # nested ``.dir`` marker #1125 anchors it with -- and it is the half of the
+    # delete that the ``dirs`` bookkeeping is what models.
+    await store.make_dir(
+        community_id=_COMMUNITY, server_id=_SERVER, rel_path="world/plugins"
+    )
+
+    await store.delete_dir(community_id=_COMMUNITY, server_id=_SERVER, rel_path="world")
+
+    root_entries = await store.list_dir(
+        community_id=_COMMUNITY, server_id=_SERVER, rel_path="."
+    )
+    assert {(e.name, e.is_dir) for e in root_entries} == {("server.properties", False)}
+    with pytest.raises(ServerFileNotFoundError):
+        await store.list_dir(
+            community_id=_COMMUNITY, server_id=_SERVER, rel_path="world"
+        )
+    for gone in ("world", "world/plugins", "world/region/r.dat"):
+        assert (
+            await store.path_exists(
+                community_id=_COMMUNITY, server_id=_SERVER, rel_path=gone
+            )
+            is False
+        )
+    # A sibling outside the deleted subtree survives.
+    assert (
+        await store.read_file(
+            community_id=_COMMUNITY, server_id=_SERVER, rel_path="server.properties"
+        )
+        == b"keep"
+    )
+
+
+async def test_file_store_delete_dir_on_a_missing_directory_reports_not_found() -> None:
+    # Both backends refuse rather than succeed silently: fs's ``_existing_dir``
+    # gate raises ``NotFoundError`` and the object backend raises it on an empty
+    # prefix listing, which ``StorageFileStoreAdapter.delete_dir`` surfaces as
+    # ``ServerFileNotFoundError``. Pinned against the live backends in
+    # ``tests/storage/test_port_contract.py::test_delete_missing_dir_is_not_found``.
+    # A plain FILE at the name misses for the same reason it is not a listable
+    # directory (#2885): ``_existing_dir`` answers False on it, and nothing sits
+    # under ``server.properties/`` for the object backend to delete.
+    store = FakeFileStore()
+    store.files["server.properties"] = b"keep"
+
+    with pytest.raises(ServerFileNotFoundError):
+        await store.delete_dir(
+            community_id=_COMMUNITY, server_id=_SERVER, rel_path="nope"
+        )
+    with pytest.raises(ServerFileNotFoundError):
+        await store.delete_dir(
+            community_id=_COMMUNITY, server_id=_SERVER, rel_path="server.properties"
+        )
+
+    assert (
+        await store.read_file(
+            community_id=_COMMUNITY, server_id=_SERVER, rel_path="server.properties"
+        )
+        == b"keep"
+    )
+
+
+async def test_file_store_rename_dir_moves_the_subtree_later_calls_see() -> None:
+    # A ``rename_dir`` that records nothing leaves BOTH paths in whatever state
+    # they were, so the move is invisible to every later call (#2972). Both
+    # backends move the whole subtree: fs ``os.rename``s the directory
+    # (``FsStorage._rename_dir``) and the object backend copies every key under
+    # the ``<from>/`` prefix to ``<to>/`` before deleting the originals
+    # (``ObjectStorage.rename_dir``). Pinned against the live backends in
+    # ``tests/storage/test_port_contract.py::test_rename_dir_moves_subtree``,
+    # which -- like the delete's -- seeds files only, so the created EMPTY
+    # directory below is again derived rather than contract-pinned: ``os.rename``
+    # carries it as part of the tree, and the object backend copies the nested
+    # ``.dir`` marker like any other key.
+    store = FakeFileStore()
+    store.files["world/level.dat"] = b"a"
+    store.files["world/region/r.dat"] = b"b"
+    store.files["server.properties"] = b"keep"
+    await store.make_dir(
+        community_id=_COMMUNITY, server_id=_SERVER, rel_path="world/plugins"
+    )
+
+    await store.rename_dir(
+        community_id=_COMMUNITY,
+        server_id=_SERVER,
+        from_path="world",
+        to_path="new_world",
+    )
+
+    entries = await store.list_dir(
+        community_id=_COMMUNITY, server_id=_SERVER, rel_path="new_world"
+    )
+    assert {(e.name, e.is_dir) for e in entries} == {
+        ("level.dat", False),
+        ("region", True),
+        ("plugins", True),
+    }
+    assert (
+        await store.read_file(
+            community_id=_COMMUNITY,
+            server_id=_SERVER,
+            rel_path="new_world/region/r.dat",
+        )
+        == b"b"
+    )
+    assert (
+        await store.list_dir(
+            community_id=_COMMUNITY, server_id=_SERVER, rel_path="new_world/plugins"
+        )
+        == []
+    )
+    # The old directory is gone, subtree and all.
+    with pytest.raises(ServerFileNotFoundError):
+        await store.list_dir(
+            community_id=_COMMUNITY, server_id=_SERVER, rel_path="world"
+        )
+    for gone in ("world", "world/plugins", "world/region/r.dat"):
+        assert (
+            await store.path_exists(
+                community_id=_COMMUNITY, server_id=_SERVER, rel_path=gone
+            )
+            is False
+        )
+    # A sibling outside the renamed subtree survives.
+    assert (
+        await store.read_file(
+            community_id=_COMMUNITY, server_id=_SERVER, rel_path="server.properties"
+        )
+        == b"keep"
+    )
+
+
+async def test_file_store_rename_dir_on_a_missing_source_reports_not_found() -> None:
+    # The same refusal the delete makes, from the same two gates: fs's
+    # ``_existing_dir`` on the SOURCE and the object backend's empty prefix
+    # listing, surfaced by ``StorageFileStoreAdapter.rename_dir`` as
+    # ``ServerFileNotFoundError`` -- the one error the ``FileStore.rename_dir``
+    # docstring names. Pinned against the live backends in
+    # ``tests/storage/test_port_contract.py::test_rename_missing_dir_is_not_found``.
+    # ``rename_file`` in this fake already refuses its missing source; a
+    # ``rename_dir`` that returns instead conjures a successful move of nothing.
+    store = FakeFileStore()
+    store.files["server.properties"] = b"keep"
+
+    with pytest.raises(ServerFileNotFoundError):
+        await store.rename_dir(
+            community_id=_COMMUNITY,
+            server_id=_SERVER,
+            from_path="nope",
+            to_path="dest",
+        )
+    # A plain FILE is not a directory source either.
+    with pytest.raises(ServerFileNotFoundError):
+        await store.rename_dir(
+            community_id=_COMMUNITY,
+            server_id=_SERVER,
+            from_path="server.properties",
+            to_path="dest",
+        )
+
+    assert (
+        await store.path_exists(
+            community_id=_COMMUNITY, server_id=_SERVER, rel_path="dest"
+        )
+        is False
+    )
+
+
+async def test_file_store_delete_file_on_a_missing_path_reports_not_found() -> None:
+    # ``self.files.pop(rel_path, None)`` made a delete of a path the fake does not
+    # hold a silent SUCCESS -- the file-side sibling of the directory ops #2972
+    # closed, and the same forgiving direction: a use case that deletes a path it
+    # never created passes here and 404s in production. Both backends refuse. fs
+    # gates on ``_existing_file`` (``FsStorage._delete_file``) and the object
+    # backend on ``head_object(key) is None`` (``ObjectStorage.delete_file``) --
+    # the object delete is NOT idempotent at the SDK level, it heads the key
+    # first -- and each raises ``NotFoundError``, which
+    # ``StorageFileStoreAdapter.delete_file`` surfaces as
+    # ``ServerFileNotFoundError``. That is the error ``FileStore.delete_file``
+    # names, and the one ``Storage.delete_file`` demands in as many words: raise
+    # "for a missing path so a no-op delete is not silently reported as a
+    # success". Pinned against the live backends in
+    # ``tests/storage/test_port_contract.py::test_delete_missing_file_is_not_found``.
+    store = FakeFileStore()
+    store.files["world/level.dat"] = b"a"
+    store.files["server.properties"] = b"keep"
+
+    with pytest.raises(ServerFileNotFoundError):
+        await store.delete_file(
+            community_id=_COMMUNITY, server_id=_SERVER, rel_path="nope"
+        )
+    # A DIRECTORY at the name misses too -- the mirror of the "a plain FILE is not
+    # a directory source" half of #2972. Derived from the two implementations
+    # rather than contract-pinned (no contract test deletes a directory through
+    # ``delete_file``): ``_existing_file`` is an ``is_file`` check, so fs answers
+    # False on a directory, and the object backend heads the key ``world``
+    # itself, which the nested member does not write.
+    with pytest.raises(ServerFileNotFoundError):
+        await store.delete_file(
+            community_id=_COMMUNITY, server_id=_SERVER, rel_path="world"
+        )
+
+    # The refused deletes removed nothing.
+    assert store.files == {"world/level.dat": b"a", "server.properties": b"keep"}
+
+
+def _download_dir(store: FakeFileStore, rel_path: str) -> AsyncIterator[bytes]:
+    return store.download_dir(
+        community_id=_COMMUNITY, server_id=_SERVER, rel_path=rel_path
+    )
+
+
+def _export_dir(store: FakeFileStore, rel_path: str) -> AsyncIterator[bytes]:
+    return store.export_dir(
+        community_id=_COMMUNITY, server_id=_SERVER, rel_path=rel_path, extra=[]
+    )
+
+
+# Every gate case below is pinned on BOTH streams because production builds them
+# from ONE body: ``StorageFileStoreAdapter.download_dir`` and ``.export_dir`` both
+# return ``_download_dir_gen``, which differs only in the ``extra`` in-memory
+# entries appended after the subtree. A rule that held for one and not the other
+# would be a divergence this fake invented (issue #3034).
+_DirZip = Callable[[FakeFileStore, str], AsyncIterator[bytes]]
+
+
+async def _drain(stream: AsyncIterator[bytes]) -> bytes:
+    return b"".join([chunk async for chunk in stream])
+
+
+@pytest.mark.parametrize("open_zip", [_download_dir, _export_dir])
+async def test_file_store_dir_zip_on_an_unknown_directory_reports_not_found(
+    open_zip: _DirZip,
+) -> None:
+    # Both dir-zip streams decided NOTHING about the path they were handed:
+    # ``download_dir`` returned an empty generator for any ``rel_path`` and
+    # ``export_dir`` zipped the whole tree for any ``rel_path``, so a use case that
+    # downloads or exports a directory that does not exist passed here and 404s in
+    # production -- the forgiving direction this module's docstring names, and the
+    # same class as #2867, #2886 and #2887 (issue #3034).
+    #
+    # The real gate IS a listing: ``_download_dir_gen`` opens the pinned
+    # working-set view and calls ``view.list_dir(_rel_path(rel_path))`` before the
+    # zip starts, translating ``NotFoundError`` into ``ServerFileNotFoundError``.
+    # Both backends miss there for a non-root path that lists nothing -- gone
+    # (fs's ``iterdir`` ENOENT via ``_NOT_A_LISTABLE_DIR``; the object view's
+    # ``if not objs and sub: raise NotFoundError``) -- or a plain file, which fs
+    # reports as ENOTDIR through the same set and the object view sees as the key
+    # prefix ``server.properties/`` listing nothing. Pinned against the live
+    # backends in ``tests/storage/test_port_contract.py``.
+    store = FakeFileStore()
+    store.files["world/level.dat"] = b"x"
+    store.files["server.properties"] = b"k=v"
+
+    with pytest.raises(ServerFileNotFoundError):
+        await _drain(open_zip(store, "nope"))
+
+    # A seeded file is not a directory to zip either, for the same reason.
+    with pytest.raises(ServerFileNotFoundError):
+        await _drain(open_zip(store, "server.properties"))
+
+
+@pytest.mark.parametrize("root", ["", "."])
+@pytest.mark.parametrize("open_zip", [_download_dir, _export_dir])
+async def test_file_store_dir_zip_on_the_root_streams_rather_than_missing(
+    open_zip: _DirZip, root: str
+) -> None:
+    # The other half of the contract, and load-bearing rather than theoretical:
+    # ``ExportServer`` always passes ``rel_path="."``
+    # (servers/application/export_import.py), so a refusal that swallowed the root
+    # would make every export a 404. Both views answer the root without a miss --
+    # each guards its unpinned miss with ``if not rel_path.parts`` and the object
+    # backend its pinned miss with ``and sub``. BOTH spellings, as the sibling
+    # ``list_dir`` root pin above takes them: ``RelPath`` normalises ``""`` and
+    # ``"."`` to the same empty ``parts``.
+    #
+    # Draining without ``ServerFileNotFoundError`` IS the assertion here, not a
+    # missing one: ``download_dir`` yields no bytes in this fake by construction,
+    # so there is nothing to compare. What a zip CONTAINS is pinned separately:
+    # ``test_file_store_export_dir_zips_the_named_subtree`` below pins a SUBTREE,
+    # and the ``ExportServer`` suite pins the ROOT, reading the archive back.
+    store = FakeFileStore()
+    store.files["server.properties"] = b"k=v"
+
+    await _drain(open_zip(store, root))
+
+
+@pytest.mark.parametrize("alias", ["world", "world/", "world//"])
+@pytest.mark.parametrize("open_zip", [_download_dir, _export_dir])
+async def test_file_store_dir_zip_answers_every_spelling_of_a_directory(
+    open_zip: _DirZip, alias: str
+) -> None:
+    # A directory that LISTS must not be a miss for the zip, under each spelling
+    # the rest of this fake already answers it by: the gate is the same
+    # ``rstrip("/")``-prefixed membership ``list_dir``, ``delete_dir`` and
+    # ``rename_dir`` decide on, so a path they resolve and the zip refuses would be
+    # a rule this fake invented.
+    #
+    # ``"./world"`` is deliberately absent, in BOTH directions. Production
+    # canonicalises with ``RelPath`` and answers it as ``world``; this fake decides
+    # on the raw key, so it misses -- a divergence that belongs to the fake as a
+    # whole and is tracked as issue #3067. Pinning the miss would cement it and
+    # pinning the stream would require the canonicalisation #3067 covers, so
+    # neither is asserted here (issue #3034).
+    store = FakeFileStore()
+    store.files["world/level.dat"] = b"x"
+
+    await _drain(open_zip(store, alias))
+
+
+async def test_file_store_export_dir_zips_the_named_subtree() -> None:
+    # ``export_dir`` ignored ``rel_path`` and zipped EVERY seeded file under the
+    # arcname it was seeded with -- a content-fidelity divergence rather than a
+    # refusal one (issue #3034). It is benign for ``ExportServer``, which only ever
+    # passes ``"."``, but a subtree export would silently pass here against a fake
+    # that zipped the whole tree.
+    #
+    # Production zips the subtree with arcnames relative to ``rel_path``:
+    # ``_walk_files`` states it -- "the zip contains the subtree itself, not the
+    # path leading to it" -- and ``test_file_store_adapter.py``'s
+    # ``test_download_dir_streams_zip_of_subtree`` pins it against the live fs
+    # backend. ``extra`` is appended after the subtree
+    # (``test_export_dir_appends_extra_entries``).
+    store = FakeFileStore()
+    store.files["world/level.dat"] = b"level"
+    store.files["world/region/r.dat"] = b"region"
+    store.files["server.properties"] = b"k=v"
+
+    blob = await store.export_dir(
+        community_id=_COMMUNITY,
+        server_id=_SERVER,
+        rel_path="world",
+        extra=[("export_metadata.json", b'{"format": 1}')],
+    ).__anext__()
+
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        contents = {name: zf.read(name) for name in zf.namelist()}
+    # The sibling outside the subtree is absent, and the members carry arcnames
+    # relative to ``world`` rather than the paths they were seeded under.
+    assert contents == {
+        "level.dat": b"level",
+        "region/r.dat": b"region",
+        "export_metadata.json": b'{"format": 1}',
+    }
+
+
+async def test_file_store_export_dir_zips_a_created_empty_directory() -> None:
+    # An EMPTY directory is a real one, not an unknown one: both backends list a
+    # created directory as ``[]`` rather than missing
+    # (``test_make_dir_creates_an_observable_empty_directory``, #1125), so the gate
+    # must consult the ``make_dir`` records as well as the seeded files -- the same
+    # pairing ``list_dir`` and ``_existing_subtree`` already make. The archive
+    # carries only the ``extra`` entries, because production zips files and an
+    # empty directory contributes none.
+    store = FakeFileStore()
+    await store.make_dir(community_id=_COMMUNITY, server_id=_SERVER, rel_path="backups")
+
+    blob = await store.export_dir(
+        community_id=_COMMUNITY,
+        server_id=_SERVER,
+        rel_path="backups",
+        extra=[("export_metadata.json", b'{"format": 1}')],
+    ).__anext__()
+
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        assert zf.namelist() == ["export_metadata.json"]

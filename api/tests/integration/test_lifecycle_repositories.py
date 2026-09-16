@@ -1,7 +1,7 @@
 """Integration tests for the lifecycle repository writes + the state sink (PostgreSQL).
 
 Runs only when ``MCD_TEST_DATABASE_URL`` is set (the CI Postgres service); skipped
-otherwise (TESTING.md Section 5). Exercises against the real 0001-0005 schema the
+otherwise (TESTING.md Section 5). Exercises against the real schema the
 DB-backed paths the control-plane lifecycle relies on: persisting desired state +
 assignment, caching observed state, marking a worker's servers unknown on
 disconnect, and the running-server tally that rebuilds a reconnected worker's

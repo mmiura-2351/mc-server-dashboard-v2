@@ -15,6 +15,7 @@ cases and authorization Ports faked (NFR-TEST-1, no database). Verifies:
 from __future__ import annotations
 
 import datetime as dt
+import json
 import uuid
 
 import pytest
@@ -66,6 +67,7 @@ from mc_server_dashboard_api.servers.domain.cpu_allocation import (
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupStorageUnavailableError,
+    CommunityNotFoundError,
     InvalidCpuAllocationError,
     InvalidMemoryLimitError,
     InvalidSnapshotIntervalError,
@@ -635,6 +637,24 @@ def test_create_port_range_exhausted_is_503() -> None:
     resp = client.post(f"/api/communities/{uuid.uuid4()}/servers", json=_create_body())
     assert resp.status_code == 503
     assert resp.json()["reason"] == "port_range_exhausted"
+
+
+def test_create_in_a_concurrently_deleted_community_is_404() -> None:
+    # issue #2940: the community is deleted between the authorization gate's
+    # membership read and the commit that emits the server INSERT, so the row's FK
+    # to community is violated there. The route answers with the same 404 the gate
+    # itself raises a moment earlier for a community that is gone.
+    app = _app(
+        member=True,
+        allow=True,
+        create=_FakeUseCase(
+            error=CommunityNotFoundError("fk_server_community_id_community")
+        ),
+    )
+    client = _client(app)
+    resp = client.post(f"/api/communities/{uuid.uuid4()}/servers", json=_create_body())
+    assert resp.status_code == 404
+    assert resp.json()["reason"] == "not_found"
 
 
 def test_create_seed_failed_is_503() -> None:
@@ -1220,6 +1240,37 @@ def test_update_null_config_value_is_422_null_value() -> None:
     )
     assert resp.status_code == 422
     assert resp.json()["reason"] == "config_null_value"
+
+
+def test_create_lone_surrogate_config_is_422_lone_surrogate() -> None:
+    # The wire form of the offending body: ``json.dumps`` escapes the unpaired
+    # surrogate as ``\ud800``, which is valid JSON and decodes back to the lone
+    # surrogate server-side (issue #2838). ``content=`` rather than ``json=``
+    # because the test client encodes its own payload as UTF-8, which is
+    # precisely what this value cannot survive.
+    app = _app(member=True, allow=True, create=_FakeUseCase())
+    client = _client(app)
+    body = _create_body()
+    body["config"] = {"motd": "hi \ud800"}
+    resp = client.post(
+        f"/api/communities/{uuid.uuid4()}/servers",
+        content=json.dumps(body).encode(),
+        headers={"content-type": "application/json"},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "config_lone_surrogate"
+
+
+def test_update_lone_surrogate_config_is_422_lone_surrogate() -> None:
+    app = _app(member=True, allow=True, update=_FakeUseCase())
+    client = _client(app)
+    resp = client.patch(
+        f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
+        content=json.dumps({"config": {"motd": "hi \ud800"}}).encode(),
+        headers={"content-type": "application/json"},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "config_lone_surrogate"
 
 
 def test_update_at_size_bound_is_accepted() -> None:

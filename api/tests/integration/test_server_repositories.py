@@ -2,8 +2,8 @@
 
 Runs only when ``MCD_TEST_DATABASE_URL`` is set (the CI Postgres service);
 skipped otherwise (TESTING.md Section 5). The schema is created and torn down per
-test via the real 0001-0005 migrations so the adapters run against the documented
-shape (DATABASE.md Section 7, 10). A community (and, for the sweep test, a user +
+test via the real migrations so the adapters run against the documented shape
+(DATABASE.md Section 7, 10). A community (and, for the sweep test, a user +
 membership + resource grant) are seeded through the community adapters; the
 server-delete grant sweep is exercised end to end via :class:`DeleteServer`.
 """
@@ -11,8 +11,11 @@ server-delete grant sweep is exercised end to end via :class:`DeleteServer`.
 from __future__ import annotations
 
 import datetime as dt
+import io
+import json
 import os
 import uuid
+import zipfile
 from collections.abc import AsyncIterator
 
 import pytest
@@ -40,8 +43,16 @@ from mc_server_dashboard_api.community.domain.value_objects import (
     UserId as CommunityUserId,
 )
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
+from mc_server_dashboard_api.servers.adapters.repositories import (
+    SqlAlchemyServerRepository,
+)
 from mc_server_dashboard_api.servers.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork as ServersUnitOfWork,
+)
+from mc_server_dashboard_api.servers.application.export_import import (
+    EXPORT_FORMAT_VERSION,
+    EXPORT_METADATA_FILENAME,
+    ImportServer,
 )
 from mc_server_dashboard_api.servers.application.manage_server import (
     CreateServer,
@@ -49,13 +60,23 @@ from mc_server_dashboard_api.servers.application.manage_server import (
     ReadServer,
     UpdateServer,
 )
+from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
+    CommunityNotFoundError,
     PortAlreadyTakenError,
     ServerNameAlreadyExistsError,
     ServerNotFoundError,
+    SlugAlreadyTakenError,
 )
 from mc_server_dashboard_api.servers.domain.ports import PortRange
-from mc_server_dashboard_api.servers.domain.value_objects import CommunityId
+from mc_server_dashboard_api.servers.domain.value_objects import (
+    CommunityId,
+    DesiredState,
+    ObservedState,
+    ServerId,
+    ServerName,
+    ServerType,
+)
 from tests.integration.migrate import downgrade_base, upgrade_head
 from tests.servers.fakes import (
     FakeBackupArchiveStore,
@@ -584,3 +605,200 @@ async def test_backup_retention_round_trip_and_clear(engine: AsyncEngine) -> Non
         loaded = await uow.servers.get_by_id(created.id)
     assert loaded is not None
     assert loaded.backup_retention is None
+
+
+# --- the create INSERT's parent community, deleted mid-create (issue #2940) ---
+
+
+def _server_entity(community_id: uuid.UUID) -> Server:
+    return Server(
+        id=ServerId.new(),
+        community_id=CommunityId(community_id),
+        name=ServerName("survival"),
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type=ServerType.VANILLA,
+        config={},
+        desired_state=DesiredState.STOPPED,
+        observed_state=ObservedState.STOPPED,
+        observed_at=None,
+        assigned_worker_id=None,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+
+
+async def test_commit_after_concurrent_community_delete_reports_not_found(
+    engine: AsyncEngine,
+) -> None:
+    # fk_server_community_id_community is ON DELETE CASCADE, so it is violable
+    # only by a racer deleting the community between the request's read of it and
+    # this INSERT. The row is staged with ``session.add``, so -- unlike the group
+    # create's explicit flush (#2924) -- the statement that emits it is the unit
+    # of work's ``commit``, and that is the wrap the translation has to be reached
+    # through. Live FK, so this pins the real constraint name and the real site
+    # rather than a fake's opinion of either.
+    community_id = await _seed_community(engine)
+    factory = create_session_factory(engine)
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("DELETE FROM community WHERE id = :id"), {"id": community_id}
+        )
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.servers.add(_server_entity(community_id))
+        with pytest.raises(CommunityNotFoundError):
+            await uow.commit()
+
+
+async def test_create_server_reports_a_concurrent_community_delete_as_not_found(
+    engine: AsyncEngine,
+) -> None:
+    # The reachable path. CreateServer's pre-reads inside the transaction are the
+    # taken-port and taken-slug sets, both deployment-wide rather than
+    # community-scoped, so neither notices the missing community and nothing
+    # short-circuits the INSERT: the use case really does reach the commit and
+    # depends on the translation for its typed error. The community pre-read that
+    # would have caught this is the authorization gate, one layer up.
+    community_id = await _seed_community(engine)
+    factory = create_session_factory(engine)
+    create = CreateServer(
+        uow=ServersUnitOfWork(factory),
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+        file_store=FakeFileStore(),
+        port_range=PortRange(start=25565, end=25664),
+    )
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("DELETE FROM community WHERE id = :id"), {"id": community_id}
+        )
+
+    with pytest.raises(CommunityNotFoundError):
+        await create(
+            community_id=CommunityId(community_id),
+            name="survival",
+            mc_edition="java",
+            mc_version="1.21.1",
+            server_type="vanilla",
+            config={},
+        )
+
+
+# --- the import's auto-assigned port / slug, taken mid-create (issue #3022) ---
+#
+# ImportServer composes CreateServer with NEITHER an explicit game port nor an
+# explicit slug, so both are auto-assigned: chosen from a deployment-wide
+# taken-set read inside the transaction and committed later. A racer that commits
+# the same value in that window slips past the pre-read, so uq_server_game_port /
+# uq_server_slug fire at the unit of work's commit -- the same site the community
+# FK of #2940 fires at, for the same reason (nothing between the ``add`` and the
+# commit flushes). Auto-assignment is what makes the window exist, not what closes
+# it. These pin that the race is real *through import* and that the seam hands the
+# route a typed error rather than a raw IntegrityError; the route arms that turn
+# each into its status are pinned in tests/servers/test_export_import_endpoints.py.
+
+
+async def _insert_racer(
+    engine: AsyncEngine, community_id: uuid.UUID, *, game_port: int, slug: str
+) -> None:
+    """Commit a rival server row holding *game_port* / *slug* on its own connection."""
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO server "
+                "(id, community_id, name, mc_edition, mc_version, server_type, "
+                "config, game_port, slug, desired_state, "
+                "observed_state, created_at, updated_at) VALUES "
+                "(:id, :community_id, 'racer', 'java', '1.21.1', 'vanilla', "
+                "'{}', :game_port, :slug, "
+                "'stopped', 'stopped', now(), now())"
+            ),
+            {
+                "id": uuid.uuid4(),
+                "community_id": community_id,
+                "game_port": game_port,
+                "slug": slug,
+            },
+        )
+
+
+def _export_archive() -> bytes:
+    """A minimal valid export zip: the metadata descriptor and nothing else."""
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, mode="w") as zf:
+        zf.writestr(
+            EXPORT_METADATA_FILENAME,
+            json.dumps(
+                {
+                    "format": EXPORT_FORMAT_VERSION,
+                    "name": "exported",
+                    "mc_edition": "java",
+                    "mc_version": "1.21.1",
+                    "server_type": "vanilla",
+                }
+            ),
+        )
+    return buf.getvalue()
+
+
+def _importer(factory: object) -> ImportServer:
+    return ImportServer(create_server=_creator(factory), file_store=FakeFileStore())
+
+
+async def test_import_racing_a_taken_game_port_reports_port_taken(
+    engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The racer commits between CreateServer's ``list_game_ports()`` pre-read and
+    # the commit that emits our INSERT, which is exactly the window the constraint
+    # exists for; hooking the repository's ``add`` is how a single-threaded test
+    # lands inside it, and it also gives the racer the very port this create just
+    # picked. The racer's slug carries a hyphen, which generate_slug's
+    # ``[a-z0-9]{6}`` alphabet cannot produce, so only the port can collide.
+    community_id = await _seed_community(engine)
+    factory = create_session_factory(engine)
+    original_add = SqlAlchemyServerRepository.add
+
+    async def racing_add(self: SqlAlchemyServerRepository, server: Server) -> None:
+        assert server.game_port is not None
+        await _insert_racer(
+            engine, community_id, game_port=server.game_port, slug="racer-slug"
+        )
+        await original_add(self, server)
+
+    monkeypatch.setattr(SqlAlchemyServerRepository, "add", racing_add)
+
+    with pytest.raises(PortAlreadyTakenError):
+        await _importer(factory)(
+            community_id=CommunityId(community_id),
+            name="imported",
+            content=_export_archive(),
+        )
+
+
+async def test_import_racing_a_taken_slug_reports_slug_taken(
+    engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The same window one constraint over, with the racer taking the slug this
+    # create just generated. Its port is outside the creator's 25565-25664 range,
+    # so only the slug can collide.
+    community_id = await _seed_community(engine)
+    factory = create_session_factory(engine)
+    original_add = SqlAlchemyServerRepository.add
+
+    async def racing_add(self: SqlAlchemyServerRepository, server: Server) -> None:
+        await _insert_racer(engine, community_id, game_port=30000, slug=server.slug)
+        await original_add(self, server)
+
+    monkeypatch.setattr(SqlAlchemyServerRepository, "add", racing_add)
+
+    with pytest.raises(SlugAlreadyTakenError):
+        await _importer(factory)(
+            community_id=CommunityId(community_id),
+            name="imported",
+            content=_export_archive(),
+        )

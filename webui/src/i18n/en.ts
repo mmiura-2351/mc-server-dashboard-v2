@@ -477,6 +477,20 @@ export const en = {
     "The memory limit must be a whole number between 512 and 1048576 MiB.",
   "serverDetail.error.invalidCpuAllocation":
     "The CPU allocation must be a whole number between 100 and 128000 millicores.",
+  // The config-blob guard (issue #94). All four of its reasons are reachable
+  // from this editor because it reads every value as JSON (`settings.configHint`):
+  // a typed `null`, a deeply nested literal, an oversized paste and an unpaired
+  // surrogate escape each survive the round trip to the API. Each string names
+  // the rule and its limit rather than the reason code, which is what the user
+  // needs in order to fix the row.
+  "serverDetail.error.configTooLarge":
+    "The config overrides are too large. Keep them under 64 KiB in total — shorten or remove some values.",
+  "serverDetail.error.configNullValue":
+    "A config override is set to null. Give it a real value, or remove that row.",
+  "serverDetail.error.configInvalidShape":
+    "The config overrides must be a JSON object, and may not nest more than 8 levels deep in total. Flatten the value that nests deeper.",
+  "serverDetail.error.configLoneSurrogate":
+    "A config override key or value contains a broken character — often half of an emoji left behind by a copy-paste. Retype or remove that text.",
   // Relay join address name errors (issue #961).
   "serverDetail.error.invalidSlug":
     "The join address name must be a valid DNS label: lowercase letters, digits, hyphens; cannot start or end with a hyphen.",
@@ -596,6 +610,8 @@ export const en = {
   "backups.error.unsettled":
     "The server is starting or stopping — try again once it is fully stopped or running.",
   "backups.error.invalidArchive": "That file is not a valid backup archive.",
+  "backups.error.platformManagedPath":
+    "That archive contains a server.properties directory, but the platform manages that path as a file.",
   "backups.error.workerUnavailable":
     "No server host is available to take the backup right now.",
   "backups.error.storageUnavailable":
@@ -797,6 +813,14 @@ export const en = {
   "files.error.notDirectory": "The path is a file, not a directory.",
   "files.error.symlinkRefused": "Symbolic links are not allowed.",
   "files.error.nameTooLong": "The name is too long.",
+  // Platform-managed server.properties refusals (issues #2623, #2812, #2846).
+  // `{key}` is the offending key from the 422's `key` extension member. Both
+  // messages are worded for every door that raises them — save, delete, rename,
+  // upload and rollback — not the editor alone.
+  "files.error.platformManagedKey":
+    "“{key}” in server.properties is managed by the platform; this operation would change it.",
+  "files.error.platformManagedPath":
+    "server.properties is managed by the platform; a directory cannot stand at that path.",
   "files.error.invalidInput": "The request was invalid.",
   "files.error.workerUnavailable":
     "The server agent is disconnected. Please try again later.",
@@ -1025,6 +1049,16 @@ export const en = {
     "That join address name is not valid. Use lowercase letters, digits and hyphens only.",
   "serverCreate.error.slug_taken":
     "That join address name is already in use. Choose another.",
+  // The config-blob guard (issue #94). Only two of its four reasons are
+  // reachable from this wizard: it posts a flat object whose values are the raw
+  // override strings plus the two range-checked numbers, so no value can be
+  // `null` and nothing nests — `config_null_value` and `config_invalid_shape`
+  // need a JSON-typed value, which only the Settings tab's editor parses. Size
+  // and lone surrogates ride through verbatim from what was typed or pasted.
+  "serverCreate.error.config_too_large":
+    "The server.properties overrides are too large. Keep them under 64 KiB in total — shorten or remove some values.",
+  "serverCreate.error.config_lone_surrogate":
+    "An override key or value contains a broken character — often half of an emoji left behind by a copy-paste. Retype or remove that text.",
   "serverCreate.genericError": "Could not create the server. Please try again.",
   // Import tab.
   "serverCreate.import.heading": "Import from a ZIP export",
@@ -1036,6 +1070,22 @@ export const en = {
   "serverCreate.import.noFile": "Choose a ZIP file to import.",
   "serverCreate.import.error.invalid_export_metadata":
     "That archive is not a valid server export.",
+  // The import guard refuses any member stored UNDER the root server.properties
+  // path (issue #2869); publishing it would stand a directory where the platform
+  // keeps a file. A zip's own directory entries are skipped before the guard, so
+  // the offending member is always a plain file. The Backups string states the
+  // same rule truthfully but names the directory the extraction WOULD create,
+  // which is not what an operator finds when they open the archive; this one
+  // names the file they can actually see and delete.
+  "serverCreate.import.error.platform_managed_path":
+    "That archive stores a file under server.properties/, but the platform keeps a plain file at that path. Remove or move that entry and import again.",
+  // The import assigns the join address itself, so a 409 here is never the
+  // operator's input: another server claimed that address between the import
+  // picking it and the row committing (issue #3022). Nothing was created, and a
+  // fresh address is drawn on the next attempt — so the message asks for a plain
+  // retry rather than pointing at a field the import tab does not have.
+  "serverCreate.import.error.slug_taken":
+    "Another server took this server's join address while the import was running. Nothing was created — import again to get a new one.",
   "serverCreate.import.tooLarge": "That archive is too large to import.",
 
   // Community settings (WEBUI_SPEC.md 6.10) — one contiguous block to minimise

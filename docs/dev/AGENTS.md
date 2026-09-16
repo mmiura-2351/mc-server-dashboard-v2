@@ -121,6 +121,10 @@ Each one succeeds, or appears to; the damage surfaces later.
   bypass is only known to have been harmless *afterwards* — the very fact the
   gate exists to establish beforehand. "Only the known flake" is a prediction,
   not a result. Escalate a flaky gate as an issue and re-run instead.
+  `MCSD_CHECK_LOCK_HELD` is the quiet form of the same move: the gate exports it
+  so its own nested runs (`make scripts-test` runs the orchestrator) do not wait
+  for the lock they already hold; setting it by hand instead drops the host-wide
+  serialisation below — never set it yourself.
 - **`pgrep -f <pattern>` matches the waiting shell itself.** `pgrep` omits only
   its own process, not the shell that invoked it — whose command line contains
   the pattern. So `until ! pgrep -f "make check"; do sleep 30; done` never
@@ -140,9 +144,24 @@ Each one succeeds, or appears to; the damage surfaces later.
   mid-suite in the same fs-heavy modules with a red indistinguishable from a
   timeout flake, and one that a re-run does not clear). The wait prints
   `held by: <worktree> (pid N, since ...)` — when the worktree it names is your
-  own, the holder *is* the survivor, and the `pgrep` below turns the message
-  into a pid. Before attributing a stalled or red gate in a worktree whose push
-  was interrupted to a flake or a contended host, look for the survivor.
+  own, the holder *is* the survivor. That pid is the orchestrator's, which is
+  the right one here but not always: when the orchestrator is itself what died
+  (a `kill -9`, or a foreground Ctrl-C whose TERM trap reaches its chain
+  subshells but not their sub-makes), those sub-makes keep the lock without it
+  and the message names a pid that no longer exists. The gate tests it and
+  appends `fuser -v /tmp/mcsd-check.lock` when it is gone. Read that list for
+  what it is: every process with the lock file open — the holder, the
+  descendants that inherited its descriptor, and any gate queued behind it,
+  which has the file open too (one holder and one waiter listed six processes
+  here). Nothing in it marks the holder, and `/proc/locks` separates granted
+  from blocked but names the `flock` helper rather than the gate, so attribute
+  the pids yourself with `readlink /proc/<pid>/cwd`; the `held by:` line
+  already names the worktree to match them against. The two diagnostics answer
+  different questions — `fuser` says which processes have the lock file open
+  at all, the `pgrep` below says which ones belong to a given worktree — and a
+  survivor is identified by the pair. Before attributing a stalled or red gate
+  in a worktree whose push was interrupted to a flake or a contended host,
+  look for the survivor.
   `pgrep -af "<worktree-pat[h]>"` names `scripts/check_parallel.sh` and its
   chain subshells (forks share its argv): `make check` passes `$(CURDIR)` to it
   for exactly this purpose. Bracket one character of the path every time, even
@@ -179,15 +198,24 @@ Each one succeeds, or appears to; the damage surfaces later.
   repos/{owner}/{repo}/issues/<N>/labels/<label>` for labels.
 - `gh pr update-branch` does not exist in the installed `gh`. Use:
   `gh api -X PUT repos/{owner}/{repo}/pulls/<N>/update-branch`.
+- `gh pr checks <N> --json <fields>` is rejected by the installed `gh`:
+  `unknown flag: --json`, then the usage text, exit 1, no JSON. `--watch`
+  works. For scriptable check state, `gh pr view <N> --json statusCheckRollup`
+  returns both `CheckRun` entries (`name`/`status`/`conclusion`) and
+  `StatusContext` entries (`context`/`state`) — a filter has to handle both
+  shapes. The REST `repos/{owner}/{repo}/commits/<sha>/check-runs` endpoint
+  carries the check runs only, so commit statuses — the required
+  `supply-chain-cooldown` among them — are missing from it.
 - All agents share one GitHub account, so a PR's author identity can never
   formally approve it (`--approve` fails). Reviews land as comments
   (`gh pr review <N> --comment`); state the verdict in the body, first line
   exactly `VERDICT: APPROVE` or `VERDICT: REQUEST-CHANGES`.
 - Checking out a PR branch that another worktree holds fails. Fallback:
   `git fetch origin pull/<N>/head && git checkout --detach FETCH_HEAD`.
-- `main` branch protection: required status `check` + strict up-to-date. The
-  merge sequence is update-branch → wait for checks (`gh pr checks <N>
-  --watch`) → squash-merge (CONTRIBUTING.md Section 7).
+- `main` branch protection: required statuses `check`, `supply-chain-cooldown`
+  and `live-s3`, + strict up-to-date. The merge sequence is update-branch → wait
+  for checks (`gh pr checks <N> --watch`) → squash-merge (CONTRIBUTING.md
+  Section 7).
 
 ## 5. Pre-PR checklist (monorepo tripwires)
 
