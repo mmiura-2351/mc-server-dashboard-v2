@@ -1016,3 +1016,41 @@ async def test_file_store_rename_dir_on_a_missing_source_reports_not_found() -> 
         )
         is False
     )
+
+
+async def test_file_store_delete_file_on_a_missing_path_reports_not_found() -> None:
+    # ``self.files.pop(rel_path, None)`` made a delete of a path the fake does not
+    # hold a silent SUCCESS -- the file-side sibling of the directory ops #2972
+    # closed, and the same forgiving direction: a use case that deletes a path it
+    # never created passes here and 404s in production. Both backends refuse. fs
+    # gates on ``_existing_file`` (``FsStorage._delete_file``) and the object
+    # backend on ``head_object(key) is None`` (``ObjectStorage.delete_file``) --
+    # the object delete is NOT idempotent at the SDK level, it heads the key
+    # first -- and each raises ``NotFoundError``, which
+    # ``StorageFileStoreAdapter.delete_file`` surfaces as
+    # ``ServerFileNotFoundError``. That is the error ``FileStore.delete_file``
+    # names, and the one ``Storage.delete_file`` demands in as many words: raise
+    # "for a missing path so a no-op delete is not silently reported as a
+    # success". Pinned against the live backends in
+    # ``tests/storage/test_port_contract.py::test_delete_missing_file_is_not_found``.
+    store = FakeFileStore()
+    store.files["world/level.dat"] = b"a"
+    store.files["server.properties"] = b"keep"
+
+    with pytest.raises(ServerFileNotFoundError):
+        await store.delete_file(
+            community_id=_COMMUNITY, server_id=_SERVER, rel_path="nope"
+        )
+    # A DIRECTORY at the name misses too -- the mirror of the "a plain FILE is not
+    # a directory source" half of #2972. Derived from the two implementations
+    # rather than contract-pinned (no contract test deletes a directory through
+    # ``delete_file``): ``_existing_file`` is an ``is_file`` check, so fs answers
+    # False on a directory, and the object backend heads the key ``world``
+    # itself, which the nested member does not write.
+    with pytest.raises(ServerFileNotFoundError):
+        await store.delete_file(
+            community_id=_COMMUNITY, server_id=_SERVER, rel_path="world"
+        )
+
+    # The refused deletes removed nothing.
+    assert store.files == {"world/level.dat": b"a", "server.properties": b"keep"}

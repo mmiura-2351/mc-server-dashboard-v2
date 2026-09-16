@@ -230,7 +230,8 @@ class FakeFileStore(FileStore):
 
     Backs the create-seeding tests: ``write_file`` records each seed write so a
     test can assert what landed in the initial working set, and ``read_file``
-    serves it back (404 → :class:`ServerFileNotFoundError` for an unseeded path).
+    serves it back (404 → :class:`ServerFileNotFoundError` for an unseeded path),
+    which is also what ``delete_file`` refuses such a path with (issue #3029).
 
     Directories exist here as they do at the real seam (issue #2886): a listing
     describes the parent of a nested seed as ``is_dir=True``, and ``make_dir``
@@ -387,7 +388,16 @@ class FakeFileStore(FileStore):
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> None:
         self.events.append((server_id, "delete-file"))
-        self.files.pop(rel_path, None)
+        # A path the fake does not hold is a MISS, never a silent no-op (issue
+        # #3029): fs's ``_existing_file`` gate and the object backend's
+        # ``head_object`` probe each raise ``NotFoundError``, which
+        # ``StorageFileStoreAdapter`` surfaces as ``ServerFileNotFoundError`` --
+        # the error this Port names, and the one ``Storage.delete_file`` requires
+        # so a no-op delete is not reported as a success. Exact membership, as
+        # ``read_file`` uses: a DIRECTORY at the name holds no file either.
+        if rel_path not in self.files:
+            raise ServerFileNotFoundError(str(server_id.value))
+        del self.files[rel_path]
 
     def _existing_subtree(
         self, rel_path: str, server_id: ServerId
