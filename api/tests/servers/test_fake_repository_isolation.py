@@ -1131,9 +1131,9 @@ async def test_file_store_dir_zip_on_the_root_streams_rather_than_missing(
     #
     # Draining without ``ServerFileNotFoundError`` IS the assertion here, not a
     # missing one: ``download_dir`` yields no bytes in this fake by construction,
-    # so there is nothing to compare. What the root zip CONTAINS is pinned by
-    # ``test_file_store_export_dir_zips_the_named_subtree`` below and by the
-    # ``ExportServer`` suite, which reads the archive back.
+    # so there is nothing to compare. What a zip CONTAINS is pinned separately:
+    # ``test_file_store_export_dir_zips_the_named_subtree`` below pins a SUBTREE,
+    # and the ``ExportServer`` suite pins the ROOT, reading the archive back.
     store = FakeFileStore()
     store.files["server.properties"] = b"k=v"
 

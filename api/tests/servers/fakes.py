@@ -522,7 +522,8 @@ class FakeFileStore(FileStore):
             # same membership (same prefix rule, same root exemption -- its
             # docstring says so), so no third path rule is introduced, and it is
             # the bare scan rather than the seam method, which would append a
-            # ``list-dir`` event the real seam never records for a zip.
+            # ``list-dir`` event to ``self.events`` -- a seam record these two
+            # methods have never made.
             self._existing_subtree(rel_path, server_id)
             return
             yield b""  # pragma: no cover - empty async generator
