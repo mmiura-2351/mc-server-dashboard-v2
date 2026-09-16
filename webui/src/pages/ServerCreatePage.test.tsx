@@ -1007,6 +1007,80 @@ describe("import tab", () => {
     ).not.toBeInTheDocument();
     expect(lastPath).toBe(`/communities/${CID}/servers/new`);
   });
+
+  // --- the auto-assigned join address / port, taken mid-import (issue #3022) ---
+
+  async function submitImport() {
+    renderPage();
+    fireEvent.click(await screen.findByText(t("serverCreate.tab.import")));
+    fireEvent.change(
+      await screen.findByLabelText(t("serverCreate.nameLabel")),
+      { target: { value: "restored" } },
+    );
+    const file = new File(["zip"], "export.zip");
+    fireEvent.change(
+      screen.getByLabelText(t("serverCreate.import.fileLabel")),
+      {
+        target: { files: [file] },
+      },
+    );
+    fireEvent.click(screen.getByText(t("serverCreate.import.submit")));
+  }
+
+  it("surfaces a 409 slug_taken on import instead of failing silently (#3022)", async () => {
+    // The import route now answers 409 `slug_taken` where it used to 500. The
+    // create path routes that reason to its slug FIELD and reports it handled,
+    // but the import tab has no slug field — so delegating there swallowed the
+    // error and the operator saw NOTHING, which is worse than the generic toast
+    // the 500 used to produce. Import assigns the address itself, so the message
+    // is a plain retry rather than a field complaint.
+    mockPostFormWithProgress.mockRejectedValue(
+      new ApiError(409, { reason: "slug_taken" }),
+    );
+    await submitImport();
+
+    expect(
+      await screen.findByText(t("serverCreate.import.error.slug_taken")),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("serverCreate.genericError")),
+    ).not.toBeInTheDocument();
+    // Not the create tab's inline slug-field string: that one tells the operator
+    // to choose another address, which they never supplied here.
+    expect(
+      screen.queryByText(t("serverCreate.error.slug_taken")),
+    ).not.toBeInTheDocument();
+    expect(lastPath).toBe(`/communities/${CID}/servers/new`);
+  });
+
+  it("surfaces a 409 port_taken on import (#3022)", async () => {
+    // Shares the create path's toast: `port_taken` is in CREATE_ERROR_KEY, so it
+    // renders rather than vanishing. Pinned because #3022 made it reachable here.
+    mockPostFormWithProgress.mockRejectedValue(
+      new ApiError(409, { reason: "port_taken" }),
+    );
+    await submitImport();
+
+    expect(
+      await screen.findByText(t("serverCreate.error.port_taken")),
+    ).toBeInTheDocument();
+    expect(lastPath).toBe(`/communities/${CID}/servers/new`);
+  });
+
+  it("surfaces a 503 slug_exhausted on import via the generic toast (#3022)", async () => {
+    // Not in CREATE_ERROR_KEY, so the handler reports it unhandled and the caller
+    // shows the generic toast. That is a real message, which is all this pins —
+    // the failure mode #3022 fixes is showing nothing at all.
+    mockPostFormWithProgress.mockRejectedValue(
+      new ApiError(503, { reason: "slug_exhausted" }),
+    );
+    await submitImport();
+
+    expect(
+      await screen.findByText(t("serverCreate.genericError")),
+    ).toBeInTheDocument();
+    expect(lastPath).toBe(`/communities/${CID}/servers/new`);
+  });
 });
 
 describe("create-vs-import tab in the URL (#540)", () => {

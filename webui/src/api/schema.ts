@@ -582,6 +582,11 @@ export interface paths {
          *     other archive rejection it fires before the row is created, so nothing is left
          *     behind. Only the ROOT name is guarded: a nested
          *     ``backups/server.properties/…`` member is ordinary user data.
+         *
+         *     A racer taking the auto-assigned game port or slug between the assignment and
+         *     the commit that inserts the row is 409 ``port_taken`` / ``slug_taken``, and an
+         *     exhausted slug retry budget is 503 ``slug_exhausted`` (issue #3022) — the same
+         *     answers create gives for the same conditions.
          */
         post: operations["import_server_api_communities__community_id__servers_import_post"];
         delete?: never;
