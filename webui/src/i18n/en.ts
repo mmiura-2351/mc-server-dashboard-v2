@@ -1079,6 +1079,13 @@ export const en = {
   // names the file they can actually see and delete.
   "serverCreate.import.error.platform_managed_path":
     "That archive stores a file under server.properties/, but the platform keeps a plain file at that path. Remove or move that entry and import again.",
+  // The import assigns the join address itself, so a 409 here is never the
+  // operator's input: another server claimed that address between the import
+  // picking it and the row committing (issue #3022). Nothing was created, and a
+  // fresh address is drawn on the next attempt — so the message asks for a plain
+  // retry rather than pointing at a field the import tab does not have.
+  "serverCreate.import.error.slug_taken":
+    "Another server took this server's join address while the import was running. Nothing was created — import again to get a new one.",
   "serverCreate.import.tooLarge": "That archive is too large to import.",
 
   // Community settings (WEBUI_SPEC.md 6.10) — one contiguous block to minimise
