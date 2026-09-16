@@ -123,7 +123,9 @@ def _canonical_names(names: Iterable[str]) -> set[str]:
     return {_canonical(name) for name in names}
 
 
-def _seeded_key(names: Iterable[str], path: str) -> str | None:
+def _seeded_key(
+    names: Iterable[str], path: str, *, container: str, holds: str
+) -> str | None:
     """The seeded spelling that ``path`` -- already canonical -- names.
 
     The membership question and the entry to act on are not the same thing: a
@@ -132,9 +134,26 @@ def _seeded_key(names: Iterable[str], path: str) -> str | None:
     file a delete removes and a write overwrites) the way production acts on the
     one dirent every spelling resolves to. ``None`` when nothing is seeded there,
     which each caller reports as its own kind of miss.
+
+    Two canonical-equivalent spellings in one container are a SEEDING MISTAKE,
+    not a state to model, and this refuses them loudly rather than choosing
+    between them -- ``container`` and ``holds`` name what the refusal is about.
+    Production holds ONE thing at a canonical path, so there is no second entry
+    for a pick to be right about, and picking would answer out of a dict's
+    insertion order or a set's hash order: the same seed resolving differently
+    from run to run, which is the worst failure to debug because it reads as a
+    flake and gets re-run rather than investigated (issue #3032, generalising the
+    refusal PR #3031 gave the version ring).
     """
 
-    return next((name for name in names if _canonical(name) == path), None)
+    keys = [name for name in names if _canonical(name) == path]
+    if len(keys) > 1:
+        raise AssertionError(
+            f"{container} seeded under {len(keys)} spellings of one path: "
+            f"{sorted(keys)!r} all name {path!r}, which has ONE {holds} at the "
+            "real seam -- seed it under a single spelling"
+        )
+    return keys[0] if keys else None
 
 
 class FakeFileStore(FileStore):
@@ -205,7 +224,7 @@ class FakeFileStore(FileStore):
             # here so a guard that takes a baseline read cannot pass under the
             # fake where the adapter would refuse it (issue #2809 review).
             raise InvalidFilePathError(rel_path, reason="symlink_refused")
-        key = _seeded_key(self.files, path)
+        key = _seeded_key(self.files, path, container="files", holds="file")
         if key is None:
             # A loop is inside this miss rather than beside it: ELOOP is one of the
             # errnos the adapter reads as "no readable file" (issue #2817).
@@ -225,7 +244,7 @@ class FakeFileStore(FileStore):
             path = _canonical(rel_path)
             if path in _canonical_names([*self.symlink_leaves, *self.symlink_through]):
                 raise InvalidFilePathError(rel_path, reason="symlink_refused")
-            key = _seeded_key(self.files, path)
+            key = _seeded_key(self.files, path, container="files", holds="file")
             if key is None:
                 raise ServerFileNotFoundError(str(server_id.value))
             data = self.files[key]
@@ -258,8 +277,13 @@ class FakeFileStore(FileStore):
         # aliases the lookup does (the root is seeded as ``""`` in one test here
         # and as ``"."`` in the rest), so normalising only the lookup would leave
         # an alias-seeded directory unanswerable under the name it resolves to.
-        seeded = {_canonical(key): entries for key, entries in self.dirs.items()}
-        if path != "." and path not in seeded:
+        # Resolved to the ONE seeded key rather than through a canonical-keyed
+        # VIEW of the whole container: a view built by comprehension drops one of
+        # two equivalent keys by insertion order, which is the same arbitrary pick
+        # in a quieter shape -- the dropped seed never surfaces at all, so it reads
+        # as a product bug rather than a seeding one (issue #3032).
+        key = _seeded_key(self.dirs, path, container="dirs", holds="directory")
+        if path != "." and key is None:
             # A non-root path that is not a seeded directory is a MISS at the real
             # seam, never an empty listing: gone, a plain file, or reached through
             # one all raise NotFoundError, which StorageFileStoreAdapter surfaces
@@ -270,7 +294,7 @@ class FakeFileStore(FileStore):
             # posture (an UNPUBLISHED server lists [] for EVERY path) is broader
             # and deliberately not modelled: this fake has no unpublished state.
             raise ServerFileNotFoundError(str(server_id.value))
-        return seeded.get(path, [])
+        return [] if key is None else self.dirs[key]
 
     async def path_exists(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
@@ -307,7 +331,7 @@ class FakeFileStore(FileStore):
         # The file a spelling names, or the canonical form when it names nothing
         # yet: a write lands ON the seeded entry rather than beside it under the
         # caller's spelling, since production has one file there either way.
-        key = _seeded_key(self.files, path) or path
+        key = _seeded_key(self.files, path, container="files", holds="file") or path
         # Mirror Storage.write_file: retain the prior content as a version
         # (newest-first) before overwriting, so the running-edit snapshot and the
         # at-rest edit both produce a recoverable version (FR-FILE-3).
@@ -330,7 +354,7 @@ class FakeFileStore(FileStore):
         # bytes as a version unless they equal the newest retained version, and
         # treat a missing authoritative copy as a no-op (#351). Never mutates
         # ``current/``.
-        key = _seeded_key(self.files, path)
+        key = _seeded_key(self.files, path, container="files", holds="file")
         if key is None:
             return
         existing = self._history(path)
@@ -361,7 +385,18 @@ class FakeFileStore(FileStore):
             # The adapter refuses a mutation reached through an intermediate link
             # (#2432), so the route's delete dispatch does not defeat it (#2429).
             raise InvalidFilePathError(rel_path, reason="symlink_refused")
-        dirent = _seeded_key([*self.symlink_leaves, *self.symlink_loops], path)
+        # Resolved over the UNION because that is where the pick lived: the two
+        # sets are searched as one dirent table, so a duplicate ACROSS them is
+        # refused here too -- a name carries one dirent, and a link is either a
+        # loop or it is not. The stakes are higher than a wrong read: the discard
+        # below removes the spelling that was resolved, so a surviving twin would
+        # leave a deleted name still answering ``path_exists`` (issue #3032).
+        dirent = _seeded_key(
+            [*self.symlink_leaves, *self.symlink_loops],
+            path,
+            container="symlink_leaves/symlink_loops",
+            holds="dirent",
+        )
         if dirent is not None:
             # A leaf symlink is unlinked as the dirent it is, a looping one
             # included (#2429) -- the dirent that EXISTS, whatever spelling the
@@ -370,7 +405,7 @@ class FakeFileStore(FileStore):
             self.symlink_loops.discard(dirent)
             self.deleted_files.append(rel_path)
             return
-        key = _seeded_key(self.files, path)
+        key = _seeded_key(self.files, path, container="files", holds="file")
         if key is None:
             raise ServerFileNotFoundError(str(server_id.value))
         del self.files[key]
@@ -402,7 +437,7 @@ class FakeFileStore(FileStore):
         if source in _canonical_names([*self.symlink_leaves, *self.symlink_loops]):
             # Rename is one of the mutations a leaf link refuses outright (#2429).
             raise InvalidFilePathError(from_path, reason="symlink_refused")
-        key = _seeded_key(self.files, source)
+        key = _seeded_key(self.files, source, container="files", holds="file")
         if key is None:
             raise ServerFileNotFoundError(str(server_id.value))
         self.files[destination] = self.files.pop(key)
@@ -505,28 +540,19 @@ class FakeFileStore(FileStore):
         the same ring.
 
         Two canonical-equivalent keys are therefore a SEEDING MISTAKE, not a state
-        to model, and this refuses them loudly rather than choosing between them.
-        Merging them instead would have to invent an order the model does not
-        define: ``{"f": ["v1"], "./f": ["v2"]}`` reads as ``["v1", "v2"]`` or
-        ``["v2", "v1"]`` purely by which spelling was typed first, and a pin on
-        either is a pin on nothing. A fake that manufactures a state production
-        cannot hold and then picks an answer for it is exactly the kind of quiet
-        divergence this file exists to close.
+        to model, and :func:`_seeded_key` refuses them loudly rather than choosing
+        between them. Merging them instead would have to invent an order the model
+        does not define: ``{"f": ["v1"], "./f": ["v2"]}`` reads as ``["v1", "v2"]``
+        or ``["v2", "v1"]`` purely by which spelling was typed first, and a pin on
+        either is a pin on nothing.
 
-        ``version_bytes`` is a different question and is deliberately untouched:
+        ``version_bytes`` answers the neighbouring question on its COMPOUND key:
         ``("f", "v1")`` and ``("./f", "v2")`` are two ids in ONE ring, which
-        production holds happily, so :meth:`_retained` matches them on the compound
-        key rather than refusing them.
+        production holds happily, so :meth:`_retained` keeps them. Only ONE id
+        under two spellings is the same seeding mistake, and is refused there.
         """
 
-        keys = [stored for stored in self.versions if _canonical(stored) == path]
-        if len(keys) > 1:
-            raise AssertionError(
-                f"versions seeded under {len(keys)} spellings of one path: "
-                f"{sorted(keys)!r} all name {path!r}, which has ONE history at the "
-                "real seam -- seed the ring under a single spelling"
-            )
-        return keys[0] if keys else None
+        return _seeded_key(self.versions, path, container="versions", holds="history")
 
     def _version_key(self, path: str) -> str:
         """The key a NEW retention appends to for ``path`` (canonical).
@@ -561,12 +587,26 @@ class FakeFileStore(FileStore):
         Resolved over the ``version_bytes`` keys rather than over ``versions``: a
         test can seed retained bytes without a history list (and does), so the
         version read has to answer from what is actually there.
+
+        The refusal :func:`_seeded_key` carries applies PER ID, which is what the
+        compound key makes it mean here: two ids under two spellings are two
+        members of one ring and stay legal, while one id under two spellings is a
+        single version holding two different sets of bytes -- which
+        ``versions/<parts>/<id>`` cannot be in either backend (issue #3032).
         """
 
-        for (stored, stored_id), data in self.version_bytes.items():
-            if stored_id == version_id and _canonical(stored) == path:
-                return data
-        return None
+        names = [
+            stored
+            for stored, stored_id in self.version_bytes
+            if stored_id == version_id
+        ]
+        key = _seeded_key(
+            names,
+            path,
+            container=f"version_bytes at {version_id!r}",
+            holds="retained version",
+        )
+        return None if key is None else self.version_bytes[(key, version_id)]
 
     async def list_versions(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
@@ -1253,6 +1293,102 @@ async def test_file_store_refuses_a_history_seeded_under_two_spellings(
             community_id=CommunityId(community),
             server_id=ServerId(server_id),
             rel_path="f",
+        )
+
+
+@pytest.mark.parametrize("spellings", [("f", "./f"), ("./f", "f")])
+async def test_file_store_refuses_a_file_seeded_under_two_spellings(
+    spellings: tuple[str, str],
+) -> None:
+    # The same refusal the history ring gets, for the same reason: a canonical
+    # path names ONE file at the real seam, so two ``files`` keys that resolve to
+    # it are a state production cannot hold. Resolving it by picking would answer
+    # out of the dict's insertion order, and a read, a write, a delete and a
+    # rename would each act on whichever spelling was typed first (issue #3032).
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    first, second = spellings
+    store.files[first] = b"one"
+    store.files[second] = b"two"
+
+    with pytest.raises(AssertionError, match="ONE file"):
+        await store.read_file(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="f",
+        )
+
+
+@pytest.mark.parametrize("spellings", [("world", "./world"), ("./world", "world")])
+async def test_file_store_refuses_a_directory_seeded_under_two_spellings(
+    spellings: tuple[str, str],
+) -> None:
+    # ``list_dir`` used to answer from a canonical-keyed VIEW of ``dirs``, which
+    # drops one of two equivalent keys by insertion order rather than reporting
+    # them -- the same pick in a different shape, and a listing is exactly where a
+    # silently dropped seed reads as a product bug rather than a seeding one.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    first, second = spellings
+    store.dirs[first] = [FileEntry(name="level.dat", is_dir=False, size=1)]
+    store.dirs[second] = [FileEntry(name="session.lock", is_dir=False, size=1)]
+
+    with pytest.raises(AssertionError, match="ONE directory"):
+        await store.list_dir(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="world",
+        )
+
+
+@pytest.mark.parametrize("container", ["symlink_leaves", "symlink_loops"])
+@pytest.mark.parametrize("spellings", [("alias", "./alias"), ("./alias", "alias")])
+async def test_file_store_refuses_a_symlink_dirent_seeded_under_two_spellings(
+    container: str, spellings: tuple[str, str]
+) -> None:
+    # One name carries ONE dirent, so two spellings of it in the link sets are the
+    # same seeding mistake. The stakes are higher here than a wrong read: the
+    # delete discards the spelling it resolved and the other survives, so a name
+    # the caller deleted still answers ``path_exists``. These two containers are
+    # SET-backed, so the surviving spelling was chosen by hash order -- the same
+    # seed resolving differently from run to run, which is the flake-shaped
+    # failure this refusal exists to make legible. The seed order is parametrized
+    # alongside the dict-backed containers even though a set cannot record it,
+    # because the point is that neither spelling is privileged anywhere.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    dirents: set[str] = getattr(store, container)
+    for spelling in spellings:
+        dirents.add(spelling)
+
+    with pytest.raises(AssertionError, match="ONE dirent"):
+        await store.delete_file(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="alias",
+        )
+
+
+@pytest.mark.parametrize("spellings", [("f", "./f"), ("./f", "f")])
+async def test_file_store_refuses_one_version_id_seeded_under_two_spellings(
+    spellings: tuple[str, str],
+) -> None:
+    # ``version_bytes`` is keyed by the COMPOUND id, so the refusal is too: two
+    # ids under two spellings are two members of one ring and stay legal (pinned
+    # above), while ONE id under two spellings is one version with two sets of
+    # bytes -- which ``versions/<parts>/<id>`` cannot hold in either backend.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    first, second = spellings
+    store.version_bytes[(first, "v1")] = b"one"
+    store.version_bytes[(second, "v1")] = b"two"
+
+    with pytest.raises(AssertionError, match="ONE retained version"):
+        await store.read_version(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="f",
+            version_id="v1",
         )
 
 
