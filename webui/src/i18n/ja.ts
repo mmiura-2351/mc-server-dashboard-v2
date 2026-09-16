@@ -580,7 +580,7 @@ export const ja: Record<TranslationKey, string> = {
   "backups.error.invalidArchive":
     "そのファイルは有効なバックアップアーカイブではありません。",
   "backups.error.platformManagedPath":
-    "このアーカイブには server.properties ディレクトリが含まれています。このパスはプラットフォームがファイルとして管理しています。",
+    "そのアーカイブには server.properties ディレクトリ、または server.properties/ 配下のファイルが含まれています。server.properties はファイルとして管理されるため、該当のエントリを削除するか移動してからアップロードしてください。",
   "backups.error.workerUnavailable":
     "現在、バックアップを取得できるサーバーホストがありません。",
   "backups.error.storageUnavailable":

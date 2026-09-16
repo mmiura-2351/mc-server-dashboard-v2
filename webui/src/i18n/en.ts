@@ -610,8 +610,15 @@ export const en = {
   "backups.error.unsettled":
     "The server is starting or stopping — try again once it is fully stopped or running.",
   "backups.error.invalidArchive": "That file is not a valid backup archive.",
+  // `_validate_backup_archive` (api backups.py) guards a tar's DIRECTORY member
+  // by its own name and a FILE member by its PARENT, so both shapes reach this
+  // one message: a `server.properties/` directory entry, and a plain
+  // `server.properties/x` file whose parent is the guarded name. The file shape
+  // is what an operator actually sees in `tar -tzf`, so the message names it
+  // alongside the directory rather than only the directory a restore would
+  // stand up (issue #3037).
   "backups.error.platformManagedPath":
-    "That archive contains a server.properties directory, but the platform manages that path as a file.",
+    "That archive contains a server.properties directory, or a file under server.properties/, but the platform keeps a plain file at that path. Remove or move that entry and upload again.",
   "backups.error.workerUnavailable":
     "No server host is available to take the backup right now.",
   "backups.error.storageUnavailable":
@@ -1073,10 +1080,10 @@ export const en = {
   // The import guard refuses any member stored UNDER the root server.properties
   // path (issue #2869); publishing it would stand a directory where the platform
   // keeps a file. A zip's own directory entries are skipped before the guard, so
-  // the offending member is always a plain file. The Backups string states the
-  // same rule truthfully but names the directory the extraction WOULD create,
-  // which is not what an operator finds when they open the archive; this one
-  // names the file they can actually see and delete.
+  // the offending member is always a plain file. The Backups string has to name
+  // both shapes a tar can carry — a directory member and a file under it — so
+  // this one stays separate and names the single entry a zip can carry, which
+  // is the one the operator can see and delete.
   "serverCreate.import.error.platform_managed_path":
     "That archive stores a file under server.properties/, but the platform keeps a plain file at that path. Remove or move that entry and import again.",
   // The import assigns the join address itself, so a 409 here is never the
