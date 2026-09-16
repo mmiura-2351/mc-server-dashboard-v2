@@ -67,7 +67,10 @@ serves.
 from __future__ import annotations
 
 import datetime as dt
+import io
 import uuid
+import zipfile
+from collections.abc import AsyncIterator, Callable
 from dataclasses import replace
 
 import pytest
@@ -1054,3 +1057,165 @@ async def test_file_store_delete_file_on_a_missing_path_reports_not_found() -> N
 
     # The refused deletes removed nothing.
     assert store.files == {"world/level.dat": b"a", "server.properties": b"keep"}
+
+
+def _download_dir(store: FakeFileStore, rel_path: str) -> AsyncIterator[bytes]:
+    return store.download_dir(
+        community_id=_COMMUNITY, server_id=_SERVER, rel_path=rel_path
+    )
+
+
+def _export_dir(store: FakeFileStore, rel_path: str) -> AsyncIterator[bytes]:
+    return store.export_dir(
+        community_id=_COMMUNITY, server_id=_SERVER, rel_path=rel_path, extra=[]
+    )
+
+
+# Every gate case below is pinned on BOTH streams because production builds them
+# from ONE body: ``StorageFileStoreAdapter.download_dir`` and ``.export_dir`` both
+# return ``_download_dir_gen``, which differs only in the ``extra`` in-memory
+# entries appended after the subtree. A rule that held for one and not the other
+# would be a divergence this fake invented (issue #3034).
+_DirZip = Callable[[FakeFileStore, str], AsyncIterator[bytes]]
+
+
+async def _drain(stream: AsyncIterator[bytes]) -> bytes:
+    return b"".join([chunk async for chunk in stream])
+
+
+@pytest.mark.parametrize("open_zip", [_download_dir, _export_dir])
+async def test_file_store_dir_zip_on_an_unknown_directory_reports_not_found(
+    open_zip: _DirZip,
+) -> None:
+    # Both dir-zip streams decided NOTHING about the path they were handed:
+    # ``download_dir`` returned an empty generator for any ``rel_path`` and
+    # ``export_dir`` zipped the whole tree for any ``rel_path``, so a use case that
+    # downloads or exports a directory that does not exist passed here and 404s in
+    # production -- the forgiving direction this module's docstring names, and the
+    # same class as #2867, #2886 and #2887 (issue #3034).
+    #
+    # The real gate IS a listing: ``_download_dir_gen`` opens the pinned
+    # working-set view and calls ``view.list_dir(_rel_path(rel_path))`` before the
+    # zip starts, translating ``NotFoundError`` into ``ServerFileNotFoundError``.
+    # Both backends miss there for a non-root path that lists nothing -- gone
+    # (fs's ``iterdir`` ENOENT via ``_NOT_A_LISTABLE_DIR``; the object view's
+    # ``if not objs and sub: raise NotFoundError``) -- or a plain file, which fs
+    # reports as ENOTDIR through the same set and the object view sees as the key
+    # prefix ``server.properties/`` listing nothing. Pinned against the live
+    # backends in ``tests/storage/test_port_contract.py``.
+    store = FakeFileStore()
+    store.files["world/level.dat"] = b"x"
+    store.files["server.properties"] = b"k=v"
+
+    with pytest.raises(ServerFileNotFoundError):
+        await _drain(open_zip(store, "nope"))
+
+    # A seeded file is not a directory to zip either, for the same reason.
+    with pytest.raises(ServerFileNotFoundError):
+        await _drain(open_zip(store, "server.properties"))
+
+
+@pytest.mark.parametrize("root", ["", "."])
+@pytest.mark.parametrize("open_zip", [_download_dir, _export_dir])
+async def test_file_store_dir_zip_on_the_root_streams_rather_than_missing(
+    open_zip: _DirZip, root: str
+) -> None:
+    # The other half of the contract, and load-bearing rather than theoretical:
+    # ``ExportServer`` always passes ``rel_path="."``
+    # (servers/application/export_import.py), so a refusal that swallowed the root
+    # would make every export a 404. Both views answer the root without a miss --
+    # each guards its unpinned miss with ``if not rel_path.parts`` and the object
+    # backend its pinned miss with ``and sub``. BOTH spellings, as the sibling
+    # ``list_dir`` root pin above takes them: ``RelPath`` normalises ``""`` and
+    # ``"."`` to the same empty ``parts``.
+    #
+    # Draining without ``ServerFileNotFoundError`` IS the assertion here, not a
+    # missing one: ``download_dir`` yields no bytes in this fake by construction,
+    # so there is nothing to compare. What the root zip CONTAINS is pinned by
+    # ``test_file_store_export_dir_zips_the_named_subtree`` below and by the
+    # ``ExportServer`` suite, which reads the archive back.
+    store = FakeFileStore()
+    store.files["server.properties"] = b"k=v"
+
+    await _drain(open_zip(store, root))
+
+
+@pytest.mark.parametrize("alias", ["world", "world/", "world//"])
+@pytest.mark.parametrize("open_zip", [_download_dir, _export_dir])
+async def test_file_store_dir_zip_answers_every_spelling_of_a_directory(
+    open_zip: _DirZip, alias: str
+) -> None:
+    # A directory that LISTS must not be a miss for the zip, under each spelling
+    # the rest of this fake already answers it by: the gate is the same
+    # ``rstrip("/")``-prefixed membership ``list_dir``, ``delete_dir`` and
+    # ``rename_dir`` decide on, so a path they resolve and the zip refuses would be
+    # a rule this fake invented.
+    #
+    # ``"./world"`` is deliberately absent, in BOTH directions. Production
+    # canonicalises with ``RelPath`` and answers it as ``world``; this fake decides
+    # on the raw key, so it misses -- a divergence that belongs to the fake as a
+    # whole and is tracked as issue #3067. Pinning the miss would cement it and
+    # pinning the stream would require the canonicalisation #3067 covers, so
+    # neither is asserted here (issue #3034).
+    store = FakeFileStore()
+    store.files["world/level.dat"] = b"x"
+
+    await _drain(open_zip(store, alias))
+
+
+async def test_file_store_export_dir_zips_the_named_subtree() -> None:
+    # ``export_dir`` ignored ``rel_path`` and zipped EVERY seeded file under the
+    # arcname it was seeded with -- a content-fidelity divergence rather than a
+    # refusal one (issue #3034). It is benign for ``ExportServer``, which only ever
+    # passes ``"."``, but a subtree export would silently pass here against a fake
+    # that zipped the whole tree.
+    #
+    # Production zips the subtree with arcnames relative to ``rel_path``:
+    # ``_walk_files`` states it -- "the zip contains the subtree itself, not the
+    # path leading to it" -- and ``test_file_store_adapter.py``'s
+    # ``test_download_dir_streams_zip_of_subtree`` pins it against the live fs
+    # backend. ``extra`` is appended after the subtree
+    # (``test_export_dir_appends_extra_entries``).
+    store = FakeFileStore()
+    store.files["world/level.dat"] = b"level"
+    store.files["world/region/r.dat"] = b"region"
+    store.files["server.properties"] = b"k=v"
+
+    blob = await store.export_dir(
+        community_id=_COMMUNITY,
+        server_id=_SERVER,
+        rel_path="world",
+        extra=[("export_metadata.json", b'{"format": 1}')],
+    ).__anext__()
+
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        contents = {name: zf.read(name) for name in zf.namelist()}
+    # The sibling outside the subtree is absent, and the members carry arcnames
+    # relative to ``world`` rather than the paths they were seeded under.
+    assert contents == {
+        "level.dat": b"level",
+        "region/r.dat": b"region",
+        "export_metadata.json": b'{"format": 1}',
+    }
+
+
+async def test_file_store_export_dir_zips_a_created_empty_directory() -> None:
+    # An EMPTY directory is a real one, not an unknown one: both backends list a
+    # created directory as ``[]`` rather than missing
+    # (``test_make_dir_creates_an_observable_empty_directory``, #1125), so the gate
+    # must consult the ``make_dir`` records as well as the seeded files -- the same
+    # pairing ``list_dir`` and ``_existing_subtree`` already make. The archive
+    # carries only the ``extra`` entries, because production zips files and an
+    # empty directory contributes none.
+    store = FakeFileStore()
+    await store.make_dir(community_id=_COMMUNITY, server_id=_SERVER, rel_path="backups")
+
+    blob = await store.export_dir(
+        community_id=_COMMUNITY,
+        server_id=_SERVER,
+        rel_path="backups",
+        extra=[("export_metadata.json", b'{"format": 1}')],
+    ).__anext__()
+
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        assert zf.namelist() == ["export_metadata.json"]
