@@ -1,13 +1,13 @@
 # Architecture
 
-> Status: **Design** · Audience: contributors to `api/`, `worker/`, `proto/`
+> Status: **Design** · Audience: contributors across the monorepo
 >
 > This document defines the v2 architecture: the Hexagonal (Ports & Adapters)
-> layering, the `api/` / `worker/` / `proto/` module boundaries, the catalog of
-> domain Ports, and the design decisions for the architecture-level items
-> [`REQUIREMENTS.md`](../REQUIREMENTS.md) Section 9.1 delegates to design. It
-> refines, but does not contradict, the requirements; where the two disagree,
-> the requirements win and this document is wrong.
+> layering, the monorepo module boundaries, the catalog of domain Ports, the
+> design decisions for the architecture-level items
+> [`REQUIREMENTS.md`](../REQUIREMENTS.md) Section 9.1 delegates here, and the API
+> framework stack. It refines, but does not contradict, the requirements; where
+> the two disagree, the requirements win and this document is wrong.
 
 ## Table of Contents
 
@@ -17,7 +17,7 @@
 4. [Two planes between API and Worker](#4-two-planes-between-api-and-worker)
 5. [Domain Ports catalog](#5-domain-ports-catalog)
 6. [Naming conventions](#6-naming-conventions)
-7. [Architecture decisions (Section 9.1)](#7-architecture-decisions-section-91)
+7. [Architecture decisions](#7-architecture-decisions)
 8. [Related documents](#8-related-documents)
 
 ---
@@ -254,11 +254,13 @@ dependencies file) is detailed in
 
 ---
 
-## 7. Architecture decisions (Section 9.1)
+## 7. Architecture decisions
 
-These settle the architecture-level items REQUIREMENTS.md Section 9.1 delegates
-to design. Each records the decision, the alternatives considered, and the
-rationale. They are design decisions and do not change the requirements.
+Sections 7.1–7.3 settle the architecture-level items REQUIREMENTS.md Section
+9.1 delegates to this document. Section 7.4 records the API framework stack,
+an edge/adapter choice that the requirements do not delegate. Each records the
+decision, the alternatives considered, and the rationale; none changes the
+requirements.
 
 ### 7.1 Execution backend is fixed for a server's lifetime (FR-EXE-3)
 
