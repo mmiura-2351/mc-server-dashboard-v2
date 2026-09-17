@@ -371,17 +371,21 @@ async def test_group_save_on_a_missing_row_with_players_reports_not_found() -> N
     # ``GroupNotFoundError`` on an absent id.
     #
     # The absent-row branch is reachable anyway, by a concurrent delete landing
-    # between that pre-read and the write. With players to write, the adapter
-    # stages ``group_player`` INSERTs whose FK to ``player_group.id`` has no
-    # parent and raises the same ``GroupNotFoundError`` at its own flush (#2583,
-    # measured against PostgreSQL 18). Previously that was recorded here as an
-    # unmodelled divergence, and the load-bearing half of that reasoning was the
-    # *moment*: the violation surfaced at whichever later flush the caller
-    # happened to trigger, and a fake has no such flush to surface at. A typed
-    # domain error raised at the call does land somewhere a fake can, so the fake
-    # now models it (#2557). The argument stops there and does not reach the
-    # exception type: an adapter that flushes inside its own call gives a fake the
-    # same moment for a raw ``IntegrityError``, which is what
+    # between that pre-read and the write. The adapter's own existence re-read now
+    # sees the missing row and raises ``GroupNotFoundError`` before anything is
+    # staged (#2613).
+    #
+    # Before #2613, with players to write, the adapter staged ``group_player``
+    # INSERTs whose FK to ``player_group.id`` had no parent and raised the same
+    # error at its own flush (#2583, measured against PostgreSQL 18). Before #2583
+    # moved that violation inside ``save``, it was recorded here as an unmodelled
+    # divergence, and the load-bearing half of that reasoning was the *moment*:
+    # the violation surfaced at whichever later flush the caller happened to
+    # trigger, and a fake has no such flush to surface at. A typed domain error
+    # raised at the call does land somewhere a fake can, so the fake now models it
+    # (#2557). The argument stops there and does not reach the exception type: an
+    # adapter that flushes inside its own call gives a fake the same moment for a
+    # raw ``IntegrityError``, which is what
     # ``test_resource_pack_second_assignment_for_one_server_is_refused`` models
     # (#2858).
     repo = FakeGroupRepository()
@@ -402,8 +406,11 @@ async def test_group_save_on_a_missing_row_without_players_reports_not_found() -
     # caller cannot see (whether the group happened to have players) no longer
     # changes the answer.
     #
-    # Like the branch above, this is what the *adapter* does, so it is pinned
-    # against a real flush rather than against the fake alone --
+    # Like the branch above, the corresponding adapter path is pinned against a
+    # real database rather than against the fake alone. ``FakeGroupRepository``
+    # raises from a dict of its own, with no second connection to see the racer's
+    # delete, so this assertion alone establishes nothing about the adapter; the
+    # integration test makes its re-read observe the committed delete:
     # ``tests/integration/test_group_repositories.py::
     # test_save_after_concurrent_group_delete_without_players_reports_not_found``.
     repo = FakeGroupRepository()
