@@ -324,11 +324,12 @@ class ControlPlaneState:
         leaves the record in place and is ignored, so a forged late result cannot
         clear the assignment. The guarded clear at the servers seam re-checks
         ``assigned_worker_id == worker_id``, so a row a racing start re-placed is
-        left untouched (defense-in-depth). On a SUCCESS the publish already landed,
-        so the upload is done and there is no late publish for the #847 guard to
-        fight; on a failure, canonically a ``TRANSFER_FAILED`` once the worker's
-        transfer bound aborts the upload (#874/#890) but potentially any failure,
-        the upload is dead — also no late publish.
+        left untouched (defense-in-depth). On a SUCCESS publication is confirmed, so
+        the upload is done and there is no late publish for the #847 guard to fight.
+        On a failure, canonically a ``TRANSFER_FAILED`` once the worker's transfer
+        bound aborts the upload (#874/#890) but potentially any failure, the worker
+        command is terminal, but whether the API already published the snapshot is
+        unconfirmed.
 
         The Worker's failure detail rides along with the outcome (issue #2766): it
         is the only text that names why the snapshot failed, and this is the seam

@@ -1950,11 +1950,13 @@ class StopServer:
         is likewise left untouched. The load is by id only: the control-plane seam
         carries no community scope, and the server id is authoritative.
 
-        On SUCCESS the publish landed, so this is the same release the on-time
-        success path runs; on a FAILURE the snapshot was never published, so a
-        later cross-worker re-placement loses progression since the last periodic
-        snapshot — the documented #845/#847 exposure, logged loud (a same-worker
-        start reuses the retained scratch, #767).
+        On SUCCESS publication is confirmed, so this is the same release the on-time
+        success path runs; on a FAILURE publication of the final snapshot is
+        unconfirmed, so a later cross-worker re-placement may lose progression since
+        the last periodic snapshot — the documented #845/#847 exposure, logged loud
+        (a same-worker start reuses the retained scratch, #767). The result contains
+        no publication receipt; an operator can inspect authoritative Storage's
+        current snapshot to establish what progression it contains before recovery.
 
         ``message`` is the Worker's own account of that failure, logged verbatim
         beside the release. The cause is whatever it says — a data-plane URL the
@@ -1994,11 +1996,14 @@ class StopServer:
         else:
             _LOG.warning(
                 "released worker %s for server %s on a LATE failed final snapshot: "
-                "%s; the final snapshot was never published, so a cross-worker "
-                "re-placement loses progression since the last periodic snapshot "
-                "(#845/#847); a same-worker start reuses the retained scratch "
-                "(#767). Cleared now instead of waiting out the stale-stop arm "
-                "(#891)",
+                "%s; publication of the final snapshot is unconfirmed, so a "
+                "cross-worker re-placement may lose progression since the last "
+                "periodic snapshot "
+                "(#845/#847). Check authoritative Storage's current snapshot before "
+                "recovery: this result cannot distinguish a failed publish from a "
+                "lost publish response. A same-worker start reuses the retained "
+                "scratch (#767). Cleared now instead of waiting out the stale-stop "
+                "arm (#891)",
                 worker_id.value,
                 server_id.value,
                 message,
