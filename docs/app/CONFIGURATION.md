@@ -820,9 +820,13 @@ is rejected with 422 `retired_config_key`.
 |---|---|
 | [`../REQUIREMENTS.md`](../REQUIREMENTS.md) | What v2 must do; the source of truth for scope. |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Hexagonal layering, module boundaries, the Ports catalog these keys select adapters for, and wiring at the edge. |
+| [`AUTH_API.md`](AUTH_API.md) | Authentication endpoint token and cookie transports configured by `auth.token.*`. |
 | [`DATABASE.md`](DATABASE.md) | Persistence model behind `database.url`. |
 | [`STORAGE.md`](STORAGE.md) | `Storage` adapter contracts and the per-backend keys behind `storage.backend`. |
 | [`CONTROL_PLANE.md`](CONTROL_PLANE.md) | The control-plane messages, including Worker capability advertisement. |
 | [`RELAY.md`](RELAY.md) | Game-ingress relay design and the relay binary's configuration keys. |
 | [`BEDROCK_TUNNEL.md`](BEDROCK_TUNNEL.md) | Bedrock relay tunnel design and configuration. |
+| [`SECURITY.md`](SECURITY.md) | Password policy, brute-force protection, trusted proxies, and network exposure posture. |
+| [`../ui/WEBUI_SPEC.md`](../ui/WEBUI_SPEC.md) | Web UI serving and same-origin routing behind `webui.dist_dir`. |
+| [`../dev/DEPLOYMENT.md`](../dev/DEPLOYMENT.md) | Compose topology and operator-facing deployment wiring for these settings. |
 | [`../dev/CONTRIBUTING.md`](../dev/CONTRIBUTING.md) | The change workflow for editing these docs. |
