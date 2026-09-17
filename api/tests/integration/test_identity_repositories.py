@@ -2,7 +2,7 @@
 
 Runs only when ``MCD_TEST_DATABASE_URL`` is set (the CI Postgres service);
 skipped otherwise (TESTING.md Section 5). The schema is created and torn down per
-test via the real 0002 migration so the adapters run against the documented
+test via the real migrations so the adapters run against the documented
 shape.
 """
 

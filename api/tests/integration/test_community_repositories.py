@@ -2,7 +2,7 @@
 
 Runs only when ``MCD_TEST_DATABASE_URL`` is set (the CI Postgres service);
 skipped otherwise (TESTING.md Section 5). The schema is created and torn down per
-test via the real 0004 migration so the adapters run against the documented
+test via the real migrations so the adapters run against the documented
 shape (DATABASE.md Sections 5-6, 10). Users are inserted with raw SQL because the
 community context does not own user creation; the FK to ``user.id`` is exercised
 through them.
