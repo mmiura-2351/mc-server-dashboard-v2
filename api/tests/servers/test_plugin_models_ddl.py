@@ -1,4 +1,4 @@
-"""Model-rendered DDL for the ``server_plugin`` table (migration 0018).
+"""Model-rendered DDL for the ``server_plugin`` table (migration 0019).
 
 Verifies the table carries the documented columns, the ``loader_type`` and
 ``source`` CHECK enums, the ``(server_id, rel_path)`` unique constraint, the

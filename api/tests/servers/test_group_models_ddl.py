@@ -2,7 +2,7 @@
 
 Verifies the three tables carry the documented constraints (the per-community/kind
 name uniqueness, the kind CHECK enum, the upsert-key uniqueness, the cascade FKs)
-so the model metadata matches the hand-written 0011 migration (the metadata-sync
+so the model metadata matches the hand-written 0012 migration (the metadata-sync
 integration test pins them to the migrated database).
 """
 
