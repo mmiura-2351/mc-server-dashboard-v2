@@ -1421,8 +1421,8 @@ class StopServer:
         assignment (``upload_may_be_live``), released early by the worker's late
         ``CommandResult`` (``clear_assignment_after_late_snapshot``, #891) or by the
         stale-stop arm once grace lapses. A snapshot FAILURE still releases: the
-        server is down and the operator's stop succeeded; the loss is logged loud by
-        ``_final_snapshot``.
+        server is down and the operator's stop succeeded; ``_final_snapshot`` logs
+        publication as unconfirmed and names the cross-worker exposure.
 
         The release is additionally gated on this call having established the row is
         at rest — see ``at_rest_under_us`` below. That is the one place this path
@@ -1738,8 +1738,9 @@ class StopServer:
         snapshot (the worker is gone; same exposure as today, logged loud). A
         snapshot TIMEOUT raises ``WorkerUnavailableError`` so the reconciler backs
         off. A snapshot failure (TRANSFER_FAILED, etc.) or a benign duplicate
-        (working_set_absent) proceeds to clear — the loud log from
-        ``_final_snapshot`` records the loss or non-loss.
+        (working_set_absent) proceeds to clear — ``_final_snapshot`` logs an ordinary
+        failure as unconfirmed publication with the cross-worker exposure, or records
+        the pinned no-working-set refusal at INFO.
 
         observed=crashed (issue #2439) takes that SAME snapshot-then-clear leg,
         and for the same reason: no final snapshot ever ran for this server, and
