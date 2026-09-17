@@ -1,8 +1,9 @@
 # Contributing Workflow
 
-How a change moves from an idea to a merged PR: issues, branches, commits, pull
-requests, review, and merge. Behavioral guidance for *how to write the code* is
-in [`../../CLAUDE.md`](../../CLAUDE.md); documentation conventions are in
+How a change moves from issue discovery and implementation planning through
+branches, commits, pull requests, review, merge, and issue closure. Behavioral
+guidance for *how to write the code* is in
+[`../../CLAUDE.md`](../../CLAUDE.md); documentation conventions are in
 [`../README.md`](../README.md).
 
 > The commands below are enforced by the git hooks (Section 4; the pre-push
