@@ -2207,9 +2207,10 @@ async def test_late_failed_snapshot_logs_publication_as_unconfirmed(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     # Issue #3048: a failed CommandResult confirms only that the Worker reported a
-    # failure. The publish may already have landed before a later failure or a lost
-    # response, so the WARN must state the cross-worker exposure without asserting
-    # that publication or progression loss is certain.
+    # failure. The API may already have committed before its response was lost, so
+    # the WARN must state the cross-worker exposure without asserting that
+    # publication or progression loss is certain, and point the operator at the
+    # authoritative snapshot rather than inviting speculative recovery.
     community, server_id, worker = _ids()
     uow = FakeUnitOfWork()
     uow.servers.seed(
@@ -2235,7 +2236,9 @@ async def test_late_failed_snapshot_logs_publication_as_unconfirmed(
     assert any(
         "publication of the final snapshot is unconfirmed, so a cross-worker "
         "re-placement may lose progression since the last periodic snapshot "
-        "(#845/#847)" in record.getMessage()
+        "(#845/#847). Check authoritative Storage's current snapshot before "
+        "recovery: this result cannot distinguish a failed publish from a lost "
+        "publish response" in record.getMessage()
         for record in caplog.records
     )
 
