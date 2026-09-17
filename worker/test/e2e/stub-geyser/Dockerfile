@@ -5,10 +5,10 @@
 # Modrinth/GeyserMC download -- real Geyser+Floodgate behavior was already
 # validated live (epic #1540 issue #1542).
 #
-# Multi-stage: build the static binary with the pinned Go toolchain (matching
-# worker/Dockerfile's builder pin), then ship it alone on the sibling
-# container-driver e2e stub's already-vetted digest-pinned Alpine base
-# (worker/test/e2e/stub/Dockerfile).
+# Multi-stage: build the static binary with the fixture's Go toolchain. Its
+# patch intentionally does not track worker/Dockerfile's builder pin. Ship it
+# alone on the sibling container-driver e2e stub's already-vetted
+# digest-pinned Alpine base (worker/test/e2e/stub/Dockerfile).
 FROM golang:1.27.0 AS builder
 
 WORKDIR /src

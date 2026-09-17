@@ -3,9 +3,10 @@
 > Status: **Design** · Audience: contributors to `api/`, `worker/`, `proto/`
 >
 > This document is the reference for the API↔Worker **control-plane**
-> contract: the gRPC bidirectional stream, its lifecycle, the command and event
-> messages, and how each maps to [`../REQUIREMENTS.md`](../REQUIREMENTS.md). The
-> binding contract is the buf module under [`../../proto/`](../../proto/)
+> contract: the gRPC bidirectional stream, its message envelopes and
+> correlation IDs, its lifecycle, the command and event messages, and how each
+> maps to [`../REQUIREMENTS.md`](../REQUIREMENTS.md). The binding contract is the
+> buf module under [`../../proto/`](../../proto/)
 > (`mcsd.controlplane.v1`); this document explains it. Where the two disagree,
 > the `.proto` files and the requirements win and this document is wrong.
 
