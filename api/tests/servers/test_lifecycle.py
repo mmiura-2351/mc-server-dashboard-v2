@@ -2637,8 +2637,8 @@ async def test_stop_final_snapshot_failure_logs_error(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     # The final-stop snapshot is the ONLY final-snapshot path and the server is now
-    # stopped+unassigned, so a failure here is unrecoverable data loss — it must be
-    # logged LOUD (error level), not swallowed as a warning (issue #841). A silent
+    # stopped+unassigned with no automatic retry, so an unconfirmed publication must
+    # be logged LOUD (error level), not swallowed as a warning (issue #841). A silent
     # warning is what hid the regression where the worker packed an empty snapshot.
     community, server_id, worker = _ids()
     uow = FakeUnitOfWork()
@@ -2681,6 +2681,57 @@ async def test_stop_final_snapshot_failure_logs_error(
         if r.levelno == logging.ERROR and "final snapshot" in r.getMessage()
     )
     assert str(server_id) in record.getMessage()
+
+
+async def test_stop_final_snapshot_failure_logs_publication_as_unconfirmed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Issue #3080: a failed CommandResult confirms only that the Worker reported a
+    # failure. The API may already have committed before its response was lost, so
+    # the ERROR must state the cross-worker exposure without asserting that
+    # publication or progression loss is certain, and point the operator at the
+    # authoritative snapshot rather than inviting speculative recovery.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+
+    class _SnapshotFails(FakeControlPlane):
+        async def snapshot(
+            self,
+            *,
+            worker_id: WorkerId,
+            community_id: CommunityId,
+            server_id: ServerId,
+            final: bool = False,
+        ) -> CommandOutcome:
+            self.dispatched.append(("snapshot", worker_id, server_id))
+            return CommandOutcome(
+                status=CommandStatus.TRANSFER_FAILED,
+                message="storage backend returned 503",
+            )
+
+    with caplog.at_level(logging.ERROR):
+        await StopServer(
+            uow=uow, control_plane=_SnapshotFails(), clock=FakeClock(_NOW)
+        )(community_id=CommunityId(community), server_id=ServerId(server_id))
+
+    assert any(
+        "publication of the final snapshot is unconfirmed, so a cross-worker "
+        "re-placement may lose progression since the last periodic snapshot "
+        "(#845/#847). Check authoritative Storage's current snapshot before "
+        "recovery: this result carries no publication receipt and cannot "
+        "distinguish a failed publish from a lost publish response"
+        in record.getMessage()
+        for record in caplog.records
+    )
 
 
 # The Worker's working_set_absent refusal message (issue #1713,
@@ -2767,8 +2818,8 @@ async def test_stop_final_snapshot_genuine_server_not_found_still_logs_error(
 ) -> None:
     # Guard for issue #1790: ONLY the Worker's working_set_absent refusal is
     # benign. A SERVER_NOT_FOUND that does not carry that pinned message (e.g. a
-    # future Worker path where the server was genuinely never held) must keep
-    # the loud data-loss ERROR (issue #841).
+    # future Worker path where the server was genuinely never held) must keep the
+    # loud final-snapshot ERROR (issue #841), with publication unconfirmed (#3080).
     community, server_id, worker = _ids()
     uow = FakeUnitOfWork()
     uow.servers.seed(
