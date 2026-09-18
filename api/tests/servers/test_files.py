@@ -1592,6 +1592,28 @@ async def test_file_store_dir_zip_on_an_unknown_directory_reports_not_found(
             pass
 
 
+@pytest.mark.parametrize("open_zip", [_download_dir, _export_dir])
+async def test_file_store_dir_zip_refuses_a_requested_symlink(
+    open_zip: _DirZip,
+) -> None:
+    # The refusal half of the same gate: the adapter's pre-walk listing translates
+    # a refused REQUESTED path into ``InvalidFilePathError`` before a byte of zip
+    # exists, and the walk's skip of a refused child must not soften it
+    # (``test_download_dir_refuses_a_requested_root_that_escapes``, #2427). A
+    # symlink at any component is refused by the real seam (#2432), the leaf and
+    # the intermediate link alike (issue #3091).
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.symlink_leaves.add("alias")
+    store.symlink_through.add("alias/inner")
+
+    for requested in ("alias", "alias/inner"):
+        stream = open_zip(store, community, server_id, requested)
+        with pytest.raises(InvalidFilePathError):
+            async for _ in stream:
+                pass
+
+
 @pytest.mark.parametrize("root", ["", ".", "./"])
 @pytest.mark.parametrize("open_zip", [_download_dir, _export_dir])
 async def test_file_store_dir_zip_on_the_root_streams_rather_than_missing(
