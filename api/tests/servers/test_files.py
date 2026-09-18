@@ -440,7 +440,14 @@ class FakeFileStore(FileStore):
         key = _seeded_key(self.files, source, container="files", holds="file")
         if key is None:
             raise ServerFileNotFoundError(str(server_id.value))
-        self.files[destination] = self.files.pop(key)
+        # An occupied destination is OVERWRITTEN, as the real seam does it (fs
+        # ``os.rename``, the object backend's copy): the never-clobber 409 is
+        # ``RenameFile``'s pre-check, and refusing here as well would keep that
+        # pin green with the pre-check gone. Landing on the seeded spelling, as
+        # ``write_file`` does, is what keeps two spellings of one path out of
+        # ``files`` (issue #3071).
+        taken = _seeded_key(self.files, destination, container="files", holds="file")
+        self.files[taken or destination] = self.files.pop(key)
 
     async def rename_dir(
         self,
