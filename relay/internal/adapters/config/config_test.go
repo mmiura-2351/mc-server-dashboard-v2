@@ -178,8 +178,9 @@ func TestValidateMissingRequired(t *testing.T) {
 // TestValidateBlankRequired pins the whitespace-only half of the secret-blank
 // rule (CONFIGURATION.md Section 3, issue #3085): a blank required key reads as
 // missing, not as a value, whichever layer supplied it. The env case also pins
-// that a blank env value overrides the file and then reads as missing, as a
-// blank MCD_API_* value does on the API.
+// that a whitespace-only env value overrides the file and then reads as
+// missing, as a blank MCD_API_* value does on the API. (An empty env value is
+// still ignored by setEnvString and falls through to the file.)
 func TestValidateBlankRequired(t *testing.T) {
 	requiredKeys := []string{
 		"api.grpc_endpoint", "api.credential", "tunnel.public_endpoint",
