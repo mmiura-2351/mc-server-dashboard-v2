@@ -353,13 +353,21 @@ func TestValidateBadLogFormat(t *testing.T) {
 }
 
 func TestValidateMetricsListenRequiredWhenEnabled(t *testing.T) {
-	body := minimalTOML + `
+	// The whitespace-only case pins the secret-blank rule (issue #3085).
+	for _, listen := range []string{"", "   "} {
+		body := minimalTOML + `
 [metrics]
 enabled = true
-listen = ""
+listen = "` + listen + `"
 `
-	if _, err := Load(writeTOML(t, body), noEnv); err == nil {
-		t.Error("metrics.enabled=true with empty metrics.listen should fail")
+		_, err := Load(writeTOML(t, body), noEnv)
+		if err == nil {
+			t.Errorf("metrics.enabled=true with metrics.listen %q should fail", listen)
+			continue
+		}
+		if !strings.Contains(err.Error(), "metrics.listen") {
+			t.Errorf("error %q does not mention metrics.listen", err.Error())
+		}
 	}
 }
 

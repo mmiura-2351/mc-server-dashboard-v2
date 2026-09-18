@@ -269,6 +269,7 @@ func Load(path string, getenv func(string) string) (Config, error) {
 		&cfg.Tunnel.PublicEndpoint,
 		&cfg.Tunnel.TLS.CertFile,
 		&cfg.Tunnel.TLS.KeyFile,
+		&cfg.Metrics.Listen,
 	)
 
 	if err := cfg.validate(); err != nil {
