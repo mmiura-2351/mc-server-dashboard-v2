@@ -440,7 +440,14 @@ class FakeFileStore(FileStore):
         key = _seeded_key(self.files, source, container="files", holds="file")
         if key is None:
             raise ServerFileNotFoundError(str(server_id.value))
-        self.files[destination] = self.files.pop(key)
+        # An occupied destination is OVERWRITTEN, as the real seam does it (fs
+        # ``os.rename``, the object backend's copy): the never-clobber 409 is
+        # ``RenameFile``'s pre-check, and a refusal here as well would keep
+        # ``test_rename_existing_destination_is_conflict`` green with that
+        # pre-check deleted. Landing on the seeded spelling, as ``write_file``
+        # does, is what keeps two spellings of one path out of ``files`` (#3071).
+        taken = _seeded_key(self.files, destination, container="files", holds="file")
+        self.files[taken or destination] = self.files.pop(key)
 
     async def rename_dir(
         self,
@@ -1179,6 +1186,29 @@ async def test_file_store_rename_file_refuses_a_bad_destination_before_a_miss() 
         )
 
 
+async def test_file_store_rename_file_lands_on_the_file_a_destination_names() -> None:
+    # The real seam OVERWRITES an occupied file destination -- fs ``os.rename``
+    # replaces the dirent and the object backend's copy replaces the key; the 409
+    # is ``RenameFile``'s own never-clobber pre-check, not the seam's. So the move
+    # lands on the one file the destination already names, the way ``write_file``
+    # does, rather than beside it under the canonical spelling: that left two
+    # spellings of one path in ``files``, and the next read blamed the seed for a
+    # state the fake had made itself (issue #3071).
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.files["old.txt"] = b"a"
+    store.files["./taken.txt"] = b"b"
+
+    await store.rename_file(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        from_path="old.txt",
+        to_path="taken.txt",
+    )
+
+    assert store.files == {"./taken.txt": b"a"}
+
+
 async def test_file_store_version_reads_answer_every_spelling() -> None:
     # The history and the retained bytes are keyed by path as well, and a test can
     # seed retained bytes with no history list, so both reads resolve the spelling
@@ -1360,6 +1390,30 @@ async def test_file_store_refuses_a_symlink_dirent_seeded_under_two_spellings(
     dirents: set[str] = getattr(store, container)
     for spelling in spellings:
         dirents.add(spelling)
+
+    with pytest.raises(AssertionError, match="ONE dirent"):
+        await store.delete_file(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="alias",
+        )
+
+
+@pytest.mark.parametrize(("leaf", "loop"), [("alias", "./alias"), ("./alias", "alias")])
+async def test_file_store_refuses_a_symlink_dirent_seeded_across_both_link_sets(
+    leaf: str, loop: str
+) -> None:
+    # ``delete_file`` resolves a dirent over the leaves/loops UNION, so one name
+    # seeded as a leaf under one spelling and as a loop under another is the same
+    # mistake as a duplicate inside either set: a name carries one dirent, and a
+    # link is a loop or it is not. A guard per set misses it -- the delete then
+    # discards one spelling and the other survives to answer ``path_exists``, with
+    # every other test still green (issue #3071). This settles the union
+    # ``delete_file`` searches, not a rule across every container (PR #3031).
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.symlink_leaves.add(leaf)
+    store.symlink_loops.add(loop)
 
     with pytest.raises(AssertionError, match="ONE dirent"):
         await store.delete_file(
