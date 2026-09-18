@@ -66,6 +66,54 @@ func TestLoadFailsFastOnMissingRequired(t *testing.T) {
 	}
 }
 
+// TestLoadFailsFastOnBlankRequired pins the whitespace-only half of the
+// secret-blank rule (CONFIGURATION.md Section 3, issue #3085): a blank required
+// key reads as missing, not as a value, whichever layer supplied it.
+func TestLoadFailsFastOnBlankRequired(t *testing.T) {
+	requiredKeys := []string{"api.grpc_endpoint", "api.credential", "worker.scratch_dir"}
+
+	t.Run("env", func(t *testing.T) {
+		env := mapEnv(map[string]string{
+			"MCD_WORKER_API_GRPC_ENDPOINT":  "   ",
+			"MCD_WORKER_API_CREDENTIAL":     "   ",
+			"MCD_WORKER_WORKER_SCRATCH_DIR": "   ",
+		})
+		_, err := Load("", env)
+		if err == nil {
+			t.Fatal("Load() with whitespace-only required keys: want error, got nil")
+		}
+		for _, key := range requiredKeys {
+			if !contains(err.Error(), key) {
+				t.Errorf("error %q does not mention blank key %q", err.Error(), key)
+			}
+		}
+	})
+
+	t.Run("file", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "worker.toml")
+		body := `
+[api]
+grpc_endpoint = "   "
+credential = "   "
+
+[worker]
+scratch_dir = "   "
+`
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := Load(path, emptyEnv)
+		if err == nil {
+			t.Fatal("Load() with whitespace-only required keys in the file: want error, got nil")
+		}
+		for _, key := range requiredKeys {
+			if !contains(err.Error(), key) {
+				t.Errorf("error %q does not mention blank key %q", err.Error(), key)
+			}
+		}
+	})
+}
+
 func TestLoadPrecedenceFileThenEnv(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "worker.toml")
@@ -128,6 +176,29 @@ level = "debug"
 	}
 	if !cfg.API.TLS.Insecure {
 		t.Errorf("TLS.Insecure = false, want true from file")
+	}
+}
+
+// TestLoadKeepsNonBlankCredentialVerbatim pins the other side of the blank rule
+// (issue #3085): only a whitespace-only value is collapsed. A non-blank
+// credential is not trimmed, because the API's end of this shared secret
+// (control.worker_credential, _blank_to_none) keeps it verbatim too.
+func TestLoadKeepsNonBlankCredentialVerbatim(t *testing.T) {
+	env := mapEnv(map[string]string{
+		"MCD_WORKER_API_GRPC_ENDPOINT":       "api:50051",
+		"MCD_WORKER_API_CREDENTIAL":          " secret ",
+		"MCD_WORKER_API_TLS_INSECURE":        "true",
+		"MCD_WORKER_WORKER_SCRATCH_DIR":      t.TempDir(),
+		"MCD_WORKER_WORKER_DRIVERS":          "container",
+		"MCD_WORKER_DRIVER_CONTAINER_IMAGES": "21=eclipse-temurin:21-jre",
+	})
+
+	cfg, err := Load("", env)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.API.Credential != " secret " {
+		t.Errorf("Credential = %q, want %q verbatim", cfg.API.Credential, " secret ")
 	}
 }
 
@@ -220,6 +291,50 @@ func TestLoadFailsFastWhenTLSNeitherCAFileNorInsecure(t *testing.T) {
 	}
 }
 
+// TestLoadFailsFastWhenTLSCAFileBlankWithoutInsecure pins that a whitespace-only
+// api.tls.ca_file counts as unset (issue #3085), so it cannot stand in for the
+// required CA bundle.
+func TestLoadFailsFastWhenTLSCAFileBlankWithoutInsecure(t *testing.T) {
+	env := mapEnv(map[string]string{
+		"MCD_WORKER_API_GRPC_ENDPOINT":  "api:50051",
+		"MCD_WORKER_API_CREDENTIAL":     "secret",
+		"MCD_WORKER_API_TLS_CA_FILE":    "   ",
+		"MCD_WORKER_WORKER_SCRATCH_DIR": "/scratch",
+	})
+
+	_, err := Load("", env)
+	if err == nil {
+		t.Fatal("Load() with a whitespace-only ca_file and no insecure: want error, got nil")
+	}
+	if !contains(err.Error(), "api.tls.ca_file") {
+		t.Errorf("error %q does not mention the required api.tls.ca_file", err.Error())
+	}
+}
+
+// TestLoadCollapsesBlankCAFileWithInsecure pins that the value the rest of the
+// Worker reads agrees with what validation judged (issue #3085): a
+// whitespace-only api.tls.ca_file with api.tls.insecure=true is unset, so the
+// dial wiring takes the plaintext branch rather than opening a file named "   ".
+func TestLoadCollapsesBlankCAFileWithInsecure(t *testing.T) {
+	env := mapEnv(map[string]string{
+		"MCD_WORKER_API_GRPC_ENDPOINT":       "api:50051",
+		"MCD_WORKER_API_CREDENTIAL":          "secret",
+		"MCD_WORKER_API_TLS_CA_FILE":         "   ",
+		"MCD_WORKER_API_TLS_INSECURE":        "true",
+		"MCD_WORKER_WORKER_SCRATCH_DIR":      t.TempDir(),
+		"MCD_WORKER_WORKER_DRIVERS":          "container",
+		"MCD_WORKER_DRIVER_CONTAINER_IMAGES": "21=eclipse-temurin:21-jre",
+	})
+
+	cfg, err := Load("", env)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.API.TLS.CAFile != "" {
+		t.Errorf("TLS.CAFile = %q, want a blank value collapsed to empty", cfg.API.TLS.CAFile)
+	}
+}
+
 func TestLoadAcceptsCAFileWithoutInsecure(t *testing.T) {
 	env := mapEnv(map[string]string{
 		"MCD_WORKER_API_GRPC_ENDPOINT":       "api:50051",
@@ -267,15 +382,22 @@ func TestLoadRejectsHalfMTLSClientPair(t *testing.T) {
 	tests := []struct {
 		name      string
 		setKey    string // env key to set (the present half)
+		blankKey  string // env key to set whitespace-only (the missing half), if any
 		wantNamed string // the missing half the error must name
 	}{
 		{name: "cert without key", setKey: "MCD_WORKER_API_TLS_CLIENT_CERT_FILE", wantNamed: "api.tls.client_key_file"},
 		{name: "key without cert", setKey: "MCD_WORKER_API_TLS_CLIENT_KEY_FILE", wantNamed: "api.tls.client_cert_file"},
+		// A whitespace-only half counts as unset (issue #3085).
+		{name: "cert with blank key", setKey: "MCD_WORKER_API_TLS_CLIENT_CERT_FILE", blankKey: "MCD_WORKER_API_TLS_CLIENT_KEY_FILE", wantNamed: "api.tls.client_key_file"},
+		{name: "key with blank cert", setKey: "MCD_WORKER_API_TLS_CLIENT_KEY_FILE", blankKey: "MCD_WORKER_API_TLS_CLIENT_CERT_FILE", wantNamed: "api.tls.client_cert_file"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			env := mtlsBaseEnv(t)
 			env[tc.setKey] = "/etc/ssl/half.pem"
+			if tc.blankKey != "" {
+				env[tc.blankKey] = "   "
+			}
 
 			_, err := Load("", mapEnv(env))
 			if err == nil {
@@ -303,6 +425,23 @@ func TestLoadAcceptsWholeOrNoMTLSClientPair(t *testing.T) {
 	t.Run("neither half set", func(t *testing.T) {
 		if _, err := Load("", mapEnv(mtlsBaseEnv(t))); err != nil {
 			t.Fatalf("Load() with no mTLS client pair: %v", err)
+		}
+	})
+
+	// Both halves whitespace-only is "neither set" (issue #3085), and the loaded
+	// values must say so too: the dial wiring loads the pair whenever both are
+	// non-empty, so a surviving "   " would open files named "   ".
+	t.Run("both halves blank", func(t *testing.T) {
+		env := mtlsBaseEnv(t)
+		env["MCD_WORKER_API_TLS_CLIENT_CERT_FILE"] = "   "
+		env["MCD_WORKER_API_TLS_CLIENT_KEY_FILE"] = "   "
+		cfg, err := Load("", mapEnv(env))
+		if err != nil {
+			t.Fatalf("Load() with a blank mTLS client pair: %v", err)
+		}
+		if cfg.API.TLS.ClientCertFile != "" || cfg.API.TLS.ClientKeyFile != "" {
+			t.Errorf("client pair = (%q, %q), want blank values collapsed to empty",
+				cfg.API.TLS.ClientCertFile, cfg.API.TLS.ClientKeyFile)
 		}
 	})
 }

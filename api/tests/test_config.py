@@ -1033,6 +1033,18 @@ def test_relay_blank_credential_is_missing(
     assert settings.relay.credential is None
 
 
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_relay_blank_base_domain_is_missing(
+    blank: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A blank ``${MCD_API_RELAY__BASE_DOMAIN}`` interpolation collapses to None so
+    # the app factory's required-when-enabled guard treats it as missing (#3085).
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    monkeypatch.setenv("MCD_API_RELAY__BASE_DOMAIN", blank)
+    settings = load_settings(config_file=None)
+    assert settings.relay.base_domain is None
+
+
 def test_relay_session_retention_days_must_be_positive(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

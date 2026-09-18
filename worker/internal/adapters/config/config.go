@@ -200,6 +200,18 @@ func Load(path string, getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 
+	// A blank required or secret key reads as unset (CONFIGURATION.md Section 3,
+	// issue #3085). Collapse it on the resolved value, before validate, so the
+	// value the rest of the Worker reads is the one validate judged.
+	collapseBlank(
+		&cfg.API.GRPCEndpoint,
+		&cfg.API.Credential,
+		&cfg.API.TLS.CAFile,
+		&cfg.API.TLS.ClientCertFile,
+		&cfg.API.TLS.ClientKeyFile,
+		&cfg.Worker.ScratchDir,
+	)
+
 	if err := cfg.validate(); err != nil {
 		return Config{}, err
 	}
@@ -426,6 +438,17 @@ func setString(dst *string, src *string) {
 func setEnvString(dst *string, getenv func(string) string, key string) {
 	if v := getenv(EnvPrefix + key); v != "" {
 		*dst = v
+	}
+}
+
+// collapseBlank resets each whitespace-only value to "" — the blank a
+// `${VAR}` compose interpolation can produce. A non-blank value is kept
+// verbatim (not trimmed), matching the API's _blank_to_none.
+func collapseBlank(values ...*string) {
+	for _, v := range values {
+		if strings.TrimSpace(*v) == "" {
+			*v = ""
+		}
 	}
 }
 

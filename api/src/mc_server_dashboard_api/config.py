@@ -628,10 +628,11 @@ class RelaySettings(_Section):
     # or none); require a positive number of days.
     session_retention_days: int = Field(default=90, gt=0)
 
-    # A blank ``${MCD_API_RELAY__CREDENTIAL}`` arrives as "" rather than unset;
-    # collapse it to None so the app factory's fail-fast (relay enabled without a
-    # credential) treats a blank as missing (#943).
-    _blank_credential = field_validator("credential")(_blank_to_none)
+    # A blank ``${MCD_API_RELAY__CREDENTIAL}`` / ``BASE_DOMAIN`` arrives as ""
+    # rather than unset; collapse it to None so the app factory's fail-fast (relay
+    # enabled without a credential or base domain) treats a blank as missing
+    # (#943, #3085).
+    _blank_values = field_validator("credential", "base_domain")(_blank_to_none)
 
 
 class WebuiSettings(_Section):
