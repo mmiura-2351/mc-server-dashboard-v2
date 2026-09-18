@@ -328,6 +328,12 @@ class FakeFileStore(FileStore):
         if self.bad_path:
             raise InvalidFilePathError(rel_path)
         path = _canonical(rel_path)
+        if path == ".":
+            # The root names a directory, not a file: both backends refuse it with
+            # ``PathTraversalError`` ahead of any write (issue #542), which the
+            # adapter surfaces as ``InvalidFilePathError``. Storing it would hold a
+            # file named ``.`` (issue #3091).
+            raise InvalidFilePathError(rel_path)
         # The file a spelling names, or the canonical form when it names nothing
         # yet: a write lands ON the seeded entry rather than beside it under the
         # caller's spelling, since production has one file there either way.
@@ -478,39 +484,10 @@ class FakeFileStore(FileStore):
         _canonical(rel_path)
         self.made_dirs.append(rel_path)
 
-    async def _require_dir_to_zip(
-        self, community_id: CommunityId, server_id: ServerId, rel_path: str
-    ) -> None:
-        """The gate both dir-zip streams open with, as production opens them.
-
-        ``StorageFileStoreAdapter``'s two dir-zip methods share one body, and that
-        body's first act is a LISTING: it pins the working set and calls
-        ``view.list_dir(_rel_path(rel_path))``, translating a ``NotFoundError`` into
-        ``ServerFileNotFoundError`` and a refused path into ``InvalidFilePathError``
-        before a byte of zip exists. The Port states the view's miss set and refusal
-        set are exactly ``FileStore.list_dir``'s, so the faithful gate here is this
-        fake's own ``list_dir`` -- reused rather than restated, so the zip cannot
-        answer a path the listing would have refused, and so no third path rule
-        joins the one #2975 left (issue #2976). The entries are discarded: the fake
-        streams stub bytes rather than walking the tree, so the listing is only ever
-        the gate.
-        """
-
-        await self.list_dir(
-            community_id=community_id, server_id=server_id, rel_path=rel_path
-        )
-
     def download_dir(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> AsyncIterator[bytes]:
-        async def _gen() -> AsyncIterator[bytes]:
-            # Inside the generator, because the adapter's gate is too: its
-            # ``download_dir`` only builds the generator, so nothing is decided
-            # until the caller pulls the first chunk.
-            await self._require_dir_to_zip(community_id, server_id, rel_path)
-            yield b"zip-bytes"
-
-        return _gen()
+        return self._download_dir_gen(community_id, server_id, rel_path, extra=[])
 
     def export_dir(
         self,
@@ -520,21 +497,71 @@ class FakeFileStore(FileStore):
         rel_path: str,
         extra: list[tuple[str, bytes]],
     ) -> AsyncIterator[bytes]:
-        # Build a real zip of every seeded file plus the ``extra`` entries so a
-        # round-trip test can re-open and compare the bytes (issue #274).
-        files = dict(self.files)
+        return self._download_dir_gen(community_id, server_id, rel_path, extra=extra)
 
-        async def _gen() -> AsyncIterator[bytes]:
-            await self._require_dir_to_zip(community_id, server_id, rel_path)
-            buf = io.BytesIO()
-            with zipfile.ZipFile(buf, mode="w") as zf:
-                for path, content in files.items():
-                    zf.writestr(path, content)
-                for arcname, content in extra:
-                    zf.writestr(arcname, content)
-            yield buf.getvalue()
-
-        return _gen()
+    async def _download_dir_gen(
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        rel_path: str,
+        *,
+        extra: list[tuple[str, bytes]],
+    ) -> AsyncIterator[bytes]:
+        # ONE body for both dir-zip streams because production builds them from
+        # one: ``StorageFileStoreAdapter.download_dir`` and ``.export_dir`` both
+        # return its ``_download_dir_gen``, differing only in the ``extra``
+        # entries appended after the subtree. Two bodies here let ``download_dir``
+        # stream placeholder bytes and ``export_dir`` zip every seeded file
+        # whatever ``rel_path`` named (issue #3091). A generator, as the adapter's
+        # is, so nothing is decided until the caller pulls the first chunk.
+        #
+        # The gate is the walk's first listing, of ``rel_path`` itself. The
+        # adapter's body opens with a LISTING -- ``view.list_dir(_rel_path(
+        # rel_path))`` on the pinned working set -- whose miss is
+        # ``ServerFileNotFoundError`` and whose refusal is ``InvalidFilePathError``
+        # before a byte of zip exists, and the Port states the view's miss and
+        # refusal sets are exactly ``FileStore.list_dir``'s. So the faithful gate
+        # is this fake's own ``list_dir``: reused rather than restated, no third
+        # path rule beside the one #2975 left (issue #2976). Production lists the
+        # root once more AHEAD of the walk only because ``_walk_files`` skips a
+        # directory that misses or is refused on descent (#2394, #2427); this walk
+        # does not model that skip, so its first listing refuses on its own.
+        path = _canonical(rel_path)
+        base = "" if path == "." else path
+        buf = io.BytesIO()
+        # Deflated, as the adapter opens its ``ZipFile``.
+        with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+            # ``_walk_files``' walk over this fake's listings: each level's files
+            # zipped as met, its subdirectories pushed onto a stack and so descended
+            # after the files in reverse listing order. Arcnames are relative to
+            # ``rel_path`` -- "the zip contains the subtree itself, not the path
+            # leading to it".
+            stack = [base]
+            while stack:
+                current = stack.pop()
+                entries = await self.list_dir(
+                    community_id=community_id,
+                    server_id=server_id,
+                    rel_path=current or ".",
+                )
+                for entry in entries:
+                    child = f"{current}/{entry.name}" if current else entry.name
+                    if entry.is_dir:
+                        stack.append(child)
+                        continue
+                    key = _seeded_key(
+                        self.files, child, container="files", holds="file"
+                    )
+                    if key is None:
+                        # A listed member no read serves is skipped, not fatal:
+                        # the adapter ``continue``s on the member's miss or refusal.
+                        continue
+                    zf.writestr(
+                        child[len(base) + 1 :] if base else child, self.files[key]
+                    )
+            for arcname, content in extra:
+                zf.writestr(arcname, content)
+        yield buf.getvalue()
 
     def _history_key(self, path: str) -> str | None:
         """The one ``versions`` key for ``path`` (canonical), or ``None``.
@@ -1110,6 +1137,30 @@ async def test_file_store_write_file_lands_on_the_file_a_spelling_names() -> Non
     assert store.writes == [("notes.txt", b"new")]
 
 
+@pytest.mark.parametrize("root", ["", ".", "./"])
+async def test_file_store_write_file_refuses_the_root(root: str) -> None:
+    # The root names a directory, not a file, and both backends refuse to write it
+    # with ``PathTraversalError("rel_path must name a file, not the root")``
+    # (``FsStorage._write_file``, ``ObjectStorage.write_file``, issue #542), which
+    # ``StorageFileStoreAdapter.write_file`` surfaces as ``InvalidFilePathError``.
+    # Every spelling here canonicalises to ``.``, so a fake that stored it held a
+    # FILE named ``.`` -- the forgiving direction the sibling fake in ``fakes.py``
+    # closed in #3093 (issue #3091).
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+
+    with pytest.raises(InvalidFilePathError):
+        await store.write_file(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path=root,
+            content=b"x",
+        )
+
+    assert store.files == {}
+    assert store.writes == []
+
+
 async def test_file_store_retain_if_changed_answers_every_spelling() -> None:
     # The running-edit snapshot (#351) reads the authoritative copy through the
     # same rule, so an alias retains the seeded file instead of no-oping as a
@@ -1541,6 +1592,28 @@ async def test_file_store_dir_zip_on_an_unknown_directory_reports_not_found(
             pass
 
 
+@pytest.mark.parametrize("open_zip", [_download_dir, _export_dir])
+async def test_file_store_dir_zip_refuses_a_requested_symlink(
+    open_zip: _DirZip,
+) -> None:
+    # The refusal half of the same gate: the adapter's pre-walk listing translates
+    # a refused REQUESTED path into ``InvalidFilePathError`` before a byte of zip
+    # exists, and the walk's skip of a refused child must not soften it
+    # (``test_download_dir_refuses_a_requested_root_that_escapes``, #2427). A
+    # symlink at any component is refused by the real seam (#2432), the leaf and
+    # the intermediate link alike (issue #3091).
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.symlink_leaves.add("alias")
+    store.symlink_through.add("alias/inner")
+
+    for requested in ("alias", "alias/inner"):
+        stream = open_zip(store, community, server_id, requested)
+        with pytest.raises(InvalidFilePathError):
+            async for _ in stream:
+                pass
+
+
 @pytest.mark.parametrize("root", ["", ".", "./"])
 @pytest.mark.parametrize("open_zip", [_download_dir, _export_dir])
 async def test_file_store_dir_zip_on_the_root_streams_rather_than_missing(
@@ -1576,6 +1649,117 @@ async def test_file_store_dir_zip_answers_every_spelling_of_a_directory(
 
     stream = open_zip(store, community, server_id, alias)
     assert [chunk async for chunk in stream] != []
+
+
+def _zip_infos(blob: bytes) -> list[tuple[str, bytes, int]]:
+    # Members rather than bytes: each entry carries its write time, so two archives
+    # of one subtree differ byte-for-byte across a clock second.
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        return [
+            (info.filename, zf.read(info), info.compress_type) for info in zf.infolist()
+        ]
+
+
+@pytest.mark.parametrize("open_zip", [_download_dir, _export_dir])
+async def test_file_store_dir_zip_streams_the_subtree_as_production_walks_it(
+    open_zip: _DirZip,
+) -> None:
+    # ``download_dir`` streamed the placeholder ``b"zip-bytes"`` for any directory
+    # that exists and ``export_dir`` zipped EVERY seeded file whatever ``rel_path``
+    # named, so a use case that downloads or exports a subdirectory and asserts on
+    # the archive passed here against an archive production never writes -- the
+    # class #3034 / #3069 closed in ``fakes.py`` (issue #3091). Production builds
+    # both streams from ``_download_dir_gen``, so the archive is pinned on both,
+    # member for member, as ``StorageFileStoreAdapter`` writes it:
+    #
+    # - arcnames relative to ``rel_path``, and only what sits under it
+    #   (``test_download_dir_streams_zip_of_subtree`` pins it against live fs);
+    # - in ``_walk_files``' order over the listings: each level's files are zipped
+    #   as met and its subdirectories pushed onto a stack, so they are descended
+    #   after the files and in REVERSE listing order. Each level is seeded
+    #   name-sorted, as both backends list it, with files and directories
+    #   interleaved, so neither a path sort nor an in-order recursion reproduces it;
+    # - files only: a directory contributes no entry, an empty one nothing at all;
+    # - deflated (``compression=zipfile.ZIP_DEFLATED``).
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.dirs["."] = [
+        FileEntry(name="a", is_dir=True, size=0),
+        FileEntry(name="z.txt", is_dir=False, size=7),
+    ]
+    store.dirs["a"] = [
+        FileEntry(name="b.txt", is_dir=False, size=1),
+        FileEntry(name="empty", is_dir=True, size=0),
+        FileEntry(name="sub", is_dir=True, size=0),
+        FileEntry(name="sub2", is_dir=True, size=0),
+        FileEntry(name="y.txt", is_dir=False, size=1),
+    ]
+    store.dirs["a/empty"] = []
+    store.dirs["a/sub"] = [FileEntry(name="w.txt", is_dir=False, size=1)]
+    store.dirs["a/sub2"] = [FileEntry(name="v.txt", is_dir=False, size=1)]
+    store.files["a/b.txt"] = b"b"
+    store.files["a/y.txt"] = b"y"
+    store.files["a/sub/w.txt"] = b"w"
+    store.files["a/sub2/v.txt"] = b"v"
+    store.files["z.txt"] = b"outside"
+
+    stream = open_zip(store, community, server_id, "a")
+    blob = b"".join([chunk async for chunk in stream])
+
+    assert _zip_infos(blob) == [
+        ("b.txt", b"b", zipfile.ZIP_DEFLATED),
+        ("y.txt", b"y", zipfile.ZIP_DEFLATED),
+        ("sub2/v.txt", b"v", zipfile.ZIP_DEFLATED),
+        ("sub/w.txt", b"w", zipfile.ZIP_DEFLATED),
+    ]
+
+
+@pytest.mark.parametrize("open_zip", [_download_dir, _export_dir])
+async def test_file_store_dir_zip_skips_a_listed_file_nothing_holds(
+    open_zip: _DirZip,
+) -> None:
+    # A listing describes every dirent, including ones no read will serve -- a
+    # dangling symlink is listed but its read refused, a member deleted after the
+    # listing is a miss -- and ``_download_dir_gen`` SKIPS such a member rather
+    # than aborting the zip (``test_download_dir_skips_a_member_it_cannot_read``).
+    # This fake seeds a listing apart from the bytes (a listing alone is what a
+    # size lookup needs), so a listed name nothing in ``files`` holds is that
+    # unreadable member.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.dirs["world"] = [
+        FileEntry(name="level.dat", is_dir=False, size=5),
+        FileEntry(name="session.lock", is_dir=False, size=1),
+    ]
+    store.files["world/level.dat"] = b"level"
+
+    stream = open_zip(store, community, server_id, "world")
+    blob = b"".join([chunk async for chunk in stream])
+
+    assert _zip_infos(blob) == [("level.dat", b"level", zipfile.ZIP_DEFLATED)]
+
+
+async def test_file_store_export_dir_appends_extra_after_the_subtree() -> None:
+    # ``extra`` is the one thing ``export_dir`` adds to ``download_dir``: the
+    # adapter writes the in-memory entries AFTER the subtree's files
+    # (``test_export_dir_appends_extra_entries``), under their own arcnames.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.dirs["world"] = [FileEntry(name="level.dat", is_dir=False, size=5)]
+    store.files["world/level.dat"] = b"level"
+
+    stream = store.export_dir(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="world",
+        extra=[("export_metadata.json", b'{"format": 1}')],
+    )
+    blob = b"".join([chunk async for chunk in stream])
+
+    assert _zip_infos(blob) == [
+        ("level.dat", b"level", zipfile.ZIP_DEFLATED),
+        ("export_metadata.json", b'{"format": 1}', zipfile.ZIP_DEFLATED),
+    ]
 
 
 # --- read: state branching -------------------------------------------------
@@ -3571,14 +3755,14 @@ async def test_download_running_is_unsettled() -> None:
 async def test_download_dir_zip_at_rest() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
     store = FakeFileStore()
-    # The directory this asks for, seeded (issue #2976). It never was: the zip
-    # streamed because the fake gated on nothing, so what the test showed was that
-    # the at-rest branch reaches the Storage seam AND that the seam was forgiving
-    # -- against production this exact call is a 404. Empty rather than populated
-    # because that is what the subject needs and an empty directory is a real one:
-    # a created directory lists as ``[]`` on both backends
-    # (``test_make_dir_creates_an_observable_empty_directory``, #1125).
-    store.dirs["world"] = []
+    # The directory this asks for, seeded (issue #2976) -- against production an
+    # unseeded one is a 404 -- and populated, with a sibling outside it, so what
+    # the test reads back is the archive of THAT subtree. It used to assert the
+    # fake's placeholder ``b"zip-bytes"``, which pinned the fake rather than a
+    # download (issue #3091).
+    store.dirs["world"] = [FileEntry(name="level.dat", is_dir=False, size=5)]
+    store.files["world/level.dat"] = b"level"
+    store.files["server.properties"] = b"motd=hi"
     use_case = DownloadFile(uow=_stopped_uow(community, server_id), file_store=store)
 
     stream = await use_case.dir_zip(
@@ -3587,7 +3771,10 @@ async def test_download_dir_zip_at_rest() -> None:
         rel_path="world",
     )
     blob = b"".join([chunk async for chunk in stream])
-    assert blob == b"zip-bytes"
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        assert {name: zf.read(name) for name in zf.namelist()} == {
+            "level.dat": b"level"
+        }
 
 
 async def test_download_is_dir_true_for_root() -> None:
