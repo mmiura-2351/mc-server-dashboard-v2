@@ -484,27 +484,6 @@ class FakeFileStore(FileStore):
         _canonical(rel_path)
         self.made_dirs.append(rel_path)
 
-    async def _require_dir_to_zip(
-        self, community_id: CommunityId, server_id: ServerId, rel_path: str
-    ) -> None:
-        """The gate both dir-zip streams open with, as production opens them.
-
-        ``StorageFileStoreAdapter``'s two dir-zip methods share one body, and that
-        body's first act is a LISTING: it pins the working set and calls
-        ``view.list_dir(_rel_path(rel_path))``, translating a ``NotFoundError`` into
-        ``ServerFileNotFoundError`` and a refused path into ``InvalidFilePathError``
-        before a byte of zip exists. The Port states the view's miss set and refusal
-        set are exactly ``FileStore.list_dir``'s, so the faithful gate here is this
-        fake's own ``list_dir`` -- reused rather than restated, so the zip cannot
-        answer a path the listing would have refused, and so no third path rule
-        joins the one #2975 left (issue #2976). The same listing then drives the
-        walk, as the view's does in production (issue #3091).
-        """
-
-        await self.list_dir(
-            community_id=community_id, server_id=server_id, rel_path=rel_path
-        )
-
     def download_dir(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> AsyncIterator[bytes]:
@@ -535,7 +514,18 @@ class FakeFileStore(FileStore):
         # stream placeholder bytes and ``export_dir`` zip every seeded file
         # whatever ``rel_path`` named (issue #3091). A generator, as the adapter's
         # is, so nothing is decided until the caller pulls the first chunk.
-        await self._require_dir_to_zip(community_id, server_id, rel_path)
+        #
+        # The gate is the walk's first listing, of ``rel_path`` itself. The
+        # adapter's body opens with a LISTING -- ``view.list_dir(_rel_path(
+        # rel_path))`` on the pinned working set -- whose miss is
+        # ``ServerFileNotFoundError`` and whose refusal is ``InvalidFilePathError``
+        # before a byte of zip exists, and the Port states the view's miss and
+        # refusal sets are exactly ``FileStore.list_dir``'s. So the faithful gate
+        # is this fake's own ``list_dir``: reused rather than restated, no third
+        # path rule beside the one #2975 left (issue #2976). Production lists the
+        # root once more AHEAD of the walk only because ``_walk_files`` skips a
+        # directory that misses or is refused on descent (#2394, #2427); this walk
+        # does not model that skip, so its first listing refuses on its own.
         path = _canonical(rel_path)
         base = "" if path == "." else path
         buf = io.BytesIO()
