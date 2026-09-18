@@ -43,11 +43,11 @@ class LateSnapshotResultSink(abc.ABC):
         guard, enforced by the guarded UPDATE), and a row a racing start re-placed
         is left untouched.
 
-        ``succeeded`` is the result's outcome: ``False`` for any failure — the
-        canonical one is ``TRANSFER_FAILED``, the upload dead and the held
-        progression since the last periodic snapshot lost, logged loud — ``True``
-        for a late SUCCESS (the publish landed; the clear is the same release the
-        on-time success would have run).
+        ``succeeded`` is the result's outcome: ``False`` for any failure, which
+        leaves publication unconfirmed and means a later cross-worker re-placement
+        may lose progression since the last periodic snapshot (#845/#847), logged
+        loud. ``True`` is a late SUCCESS (the publish landed; the clear is the same
+        release the on-time success would have run).
 
         ``message`` is the Worker's failure detail, the only text that names WHY the
         snapshot failed (a misconfigured data-plane URL, an auth error, a storage

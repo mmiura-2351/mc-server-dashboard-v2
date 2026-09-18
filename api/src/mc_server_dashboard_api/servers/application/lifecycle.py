@@ -161,8 +161,8 @@ _DEFAULT_JAR_RELPATH = "server.jar"
 # The phrase identifying a Worker refusal whose reason is "I hold no working set
 # for this id" inside its SERVER_NOT_FOUND message. The wire result carries only a
 # code and a human-readable message, and the code alone must not discriminate: a
-# hypothetical OTHER SnapshotTrigger SERVER_NOT_FOUND must keep the data-loss ERROR
-# (issue #1790). The phrase is pinned on the Worker side
+# hypothetical OTHER SnapshotTrigger SERVER_NOT_FOUND must keep the loud final-
+# snapshot ERROR (issue #1790). The phrase is pinned on the Worker side
 # (worker/internal/application/instancemanager/instancemanager.go — handleSnapshot's
 # stopped-id refusal, issue #1713, and launchReserved's guard, issue #2499/#2802)
 # with a cross-reference to this constant — reword all of them together, which the
@@ -1421,8 +1421,8 @@ class StopServer:
         assignment (``upload_may_be_live``), released early by the worker's late
         ``CommandResult`` (``clear_assignment_after_late_snapshot``, #891) or by the
         stale-stop arm once grace lapses. A snapshot FAILURE still releases: the
-        server is down and the operator's stop succeeded; the loss is logged loud by
-        ``_final_snapshot``.
+        server is down and the operator's stop succeeded; ``_final_snapshot`` logs
+        publication as unconfirmed and names the cross-worker exposure.
 
         The release is additionally gated on this call having established the row is
         at rest — see ``at_rest_under_us`` below. That is the one place this path
@@ -1538,15 +1538,17 @@ class StopServer:
         and the server is down. But the failure is logged at ERROR, not warning
         (issue #841): this is the ONLY final-snapshot path for a graceful stop, and
         the server is now stopped (and about to be unassigned), so there is no
-        periodic-snapshot or reconciler retry to recover it — a failure here means
-        the world progressed since the last periodic snapshot is permanently lost.
-        A silent warning is exactly what hid the #841 regression (a worker-side
-        empty_snapshot 400 swallowed here), so it must be loud. The ONE exception
-        is the Worker's working_set_absent refusal (issue #1713): it means the Worker
-        holds no working set for the id at all, which is never data this dispatch
-        could have saved — it logs at INFO instead (issue #1790). (The
-        Worker self-addresses no Storage; the API drives the snapshot because only
-        it knows the (community, server) scope.)
+        periodic-snapshot or reconciler retry. A failed result carries no publication
+        receipt, so publication is unconfirmed; a later cross-worker re-placement may
+        lose progression since the last periodic snapshot (#845/#847). An operator
+        can inspect authoritative Storage's current snapshot before recovery (see
+        CONTROL_PLANE.md Section 5.1). A silent warning is exactly what hid the #841
+        regression (a worker-side empty_snapshot 400 swallowed here), so it must be
+        loud. The ONE exception is the Worker's working_set_absent refusal (issue
+        #1713): it means the Worker holds no working set for the id at all, which is
+        never data this dispatch could have saved — it logs at INFO instead (issue
+        #1790). (The Worker self-addresses no Storage; the API drives the snapshot
+        because only it knows the (community, server) scope.)
 
         Returns ``upload_may_be_live`` (issue #847): ``True`` only when the snapshot
         dispatch TIMED OUT — the worker session is healthy and the transfer is still
@@ -1566,7 +1568,7 @@ class StopServer:
                 if is_working_set_absent_refusal(snapshot):
                     # The Worker's working_set_absent refusal (issue #1713): it holds
                     # no working dir for this id, so there is nothing this dispatch
-                    # could have captured and the data-loss ERROR would be a false
+                    # could have captured and the final-snapshot ERROR would be a false
                     # alarm that trains operators to ignore the line that matters
                     # (issue #1790). The Worker keeps no tombstone, so it cannot say
                     # WHICH of the benign causes applies, and neither can this line —
@@ -1585,10 +1587,13 @@ class StopServer:
                     )
                 else:
                     _LOG.error(
-                        "final snapshot FAILED for server %s: %s; the working set "
-                        "was NOT captured and progression since the "
-                        "last periodic snapshot is lost (no retry exists for a "
-                        "stopped server)",
+                        "final snapshot FAILED for server %s: %s; publication of "
+                        "the final snapshot is unconfirmed, so a cross-worker "
+                        "re-placement may lose progression since the last periodic "
+                        "snapshot (#845/#847). Check authoritative Storage's current "
+                        "snapshot before recovery: this result carries no publication "
+                        "receipt and cannot distinguish a failed publish from a lost "
+                        "publish response (no retry exists for a stopped server)",
                         server_id.value,
                         snapshot.message or snapshot.status.value,
                     )
@@ -1733,8 +1738,9 @@ class StopServer:
         snapshot (the worker is gone; same exposure as today, logged loud). A
         snapshot TIMEOUT raises ``WorkerUnavailableError`` so the reconciler backs
         off. A snapshot failure (TRANSFER_FAILED, etc.) or a benign duplicate
-        (working_set_absent) proceeds to clear — the loud log from
-        ``_final_snapshot`` records the loss or non-loss.
+        (working_set_absent) proceeds to clear — ``_final_snapshot`` logs an ordinary
+        failure as unconfirmed publication with the cross-worker exposure, or records
+        the pinned no-working-set refusal at INFO.
 
         observed=crashed (issue #2439) takes that SAME snapshot-then-clear leg,
         and for the same reason: no final snapshot ever ran for this server, and
@@ -1950,11 +1956,13 @@ class StopServer:
         is likewise left untouched. The load is by id only: the control-plane seam
         carries no community scope, and the server id is authoritative.
 
-        On SUCCESS the publish landed, so this is the same release the on-time
-        success path runs; on a FAILURE the snapshot was never published, so a
-        later cross-worker re-placement loses progression since the last periodic
-        snapshot — the documented #845/#847 exposure, logged loud (a same-worker
-        start reuses the retained scratch, #767).
+        On SUCCESS publication is confirmed, so this is the same release the on-time
+        success path runs; on a FAILURE publication of the final snapshot is
+        unconfirmed, so a later cross-worker re-placement may lose progression since
+        the last periodic snapshot — the documented #845/#847 exposure, logged loud
+        (a same-worker start reuses the retained scratch, #767). The result contains
+        no publication receipt; an operator can inspect authoritative Storage's
+        current snapshot to establish what progression it contains before recovery.
 
         ``message`` is the Worker's own account of that failure, logged verbatim
         beside the release. The cause is whatever it says — a data-plane URL the
@@ -1994,11 +2002,14 @@ class StopServer:
         else:
             _LOG.warning(
                 "released worker %s for server %s on a LATE failed final snapshot: "
-                "%s; the final snapshot was never published, so a cross-worker "
-                "re-placement loses progression since the last periodic snapshot "
-                "(#845/#847); a same-worker start reuses the retained scratch "
-                "(#767). Cleared now instead of waiting out the stale-stop arm "
-                "(#891)",
+                "%s; publication of the final snapshot is unconfirmed, so a "
+                "cross-worker re-placement may lose progression since the last "
+                "periodic snapshot "
+                "(#845/#847). Check authoritative Storage's current snapshot before "
+                "recovery: this result cannot distinguish a failed publish from a "
+                "lost publish response. A same-worker start reuses the retained "
+                "scratch (#767). Cleared now instead of waiting out the stale-stop "
+                "arm (#891)",
                 worker_id.value,
                 server_id.value,
                 message,

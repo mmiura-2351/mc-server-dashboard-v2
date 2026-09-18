@@ -1306,12 +1306,16 @@ release:
 - **Success, or the Worker disconnected** — the assignment is cleared (the
   `SERVER_NOT_FOUND` path additionally requires that the same call established
   the row is at rest under this Worker; a convergence write beaten by a fresher
-  report holds instead). A failure is logged loud — everything since the last
-  periodic snapshot is lost, and no retry exists for a stopped server — but the
-  stop already succeeded and the server is down, so the release still proceeds.
-  The deliberate exception is the Worker's `working_set_absent` refusal: it
-  holds no working set for the id, so there was nothing to capture and the line
-  is INFO, not loss.
+  report holds instead). A failed result is logged loud because no retry exists
+  for a stopped server, but publication is unconfirmed: a later cross-worker
+  re-placement may lose progression since the last periodic snapshot
+  (#845/#847). Before recovery, inspect authoritative Storage's current snapshot;
+  the result carries no publication receipt and cannot distinguish a failed
+  publish from a lost publish response ([CONTROL_PLANE.md](CONTROL_PLANE.md)
+  Section 5.1). The stop already succeeded and the server is down, so the release
+  still proceeds. The deliberate exception is the Worker's
+  `working_set_absent` refusal: it holds no working set for the id, so there was
+  nothing to capture and the line is INFO, not loss.
 - **The snapshot dispatch timed out, or the HTTP request was cancelled** — the
   assignment is HELD. The Worker session is healthy and the transfer is still
   uploading (the control plane has no command-cancel, so abandoning the pending
