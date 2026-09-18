@@ -245,10 +245,17 @@ func TestReclaimDeletedScratchesAfterCloseIsDropped(t *testing.T) {
 	// than a reclaim that does nothing. It waits on the removal itself, not on Close,
 	// which since issue #2933 stops a reclaim that has not reached its first id.
 	m.ReclaimDeletedScratches([]string{"s0"})
-	waitFor(t, func() bool {
+	deadline := time.Now().Add(5 * time.Second)
+	for {
 		_, err := os.Stat(control)
-		return os.IsNotExist(err)
-	})
+		if os.IsNotExist(err) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the reclaim requested before Close never removed the control's scratch dir: stat err = %v", err)
+		}
+		time.Sleep(time.Millisecond)
+	}
 	m.Close()
 
 	m.ReclaimDeletedScratches([]string{"s1"})
