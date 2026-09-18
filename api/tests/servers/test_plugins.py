@@ -22,7 +22,6 @@ from mc_server_dashboard_api.servers.domain.errors import (
     PluginAlreadyExistsError,
     PluginNotFoundError,
     PortRangeExhaustedError,
-    ServerFileNotFoundError,
     ServerFilesUnsettledError,
     ServerNotFoundError,
     UnsupportedPluginServerTypeError,
@@ -659,18 +658,14 @@ async def test_enable_collision_raises_already_exists() -> None:
 async def test_remove_plugin_succeeds_when_jar_already_gone() -> None:
     """Removing a plugin whose jar was already gone still cleans up the DB record."""
 
-    class _RaisingFileStore(FakeFileStore):
-        async def delete_file(
-            self, *, community_id: object, server_id: object, rel_path: str
-        ) -> None:
-            raise ServerFileNotFoundError(str(rel_path))
-
     uow = FakeUnitOfWork()
     server = _server()
     uow.servers.seed(server)
     p = _plugin(server_id=server.id)
     uow.plugins.seed(p)
-    uc = RemovePlugin(uow=uow, file_store=_RaisingFileStore(), clock=FakeClock(_NOW))
+    # Nothing is seeded at the plugin's rel_path, so the fake's delete_file
+    # misses with ServerFileNotFoundError, as the real seam does (issue #3029).
+    uc = RemovePlugin(uow=uow, file_store=FakeFileStore(), clock=FakeClock(_NOW))
     await uc(community_id=_COMMUNITY, server_id=server.id, plugin_id=p.id)
     assert p.id not in uow.plugins.by_id
 
