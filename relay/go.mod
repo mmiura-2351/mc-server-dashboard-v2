@@ -1,8 +1,8 @@
 module github.com/mmiura-2351/mc-server-dashboard-v2/relay
 
-go 1.26.0
+go 1.27
 
-toolchain go1.26.6
+toolchain go1.27.0
 
 // The relay's mcsd.relay.v1 Go stubs are generated into internal/genproto by a
 // dedicated buf template (proto/buf.gen.relay.yaml, run by `make proto-gen`):
@@ -11,14 +11,11 @@ toolchain go1.26.6
 require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/google/uuid v1.6.0
-	google.golang.org/grpc v1.83.2
-	google.golang.org/protobuf v1.36.12
-)
-
-require (
 	github.com/prometheus/client_golang v1.24.1
 	github.com/prometheus/client_model v0.6.3
 	github.com/quic-go/quic-go v0.62.0
+	google.golang.org/grpc v1.83.2
+	google.golang.org/protobuf v1.36.12
 )
 
 require (

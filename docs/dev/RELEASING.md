@@ -1,9 +1,11 @@
 # Release Policy
 
 Versioning and release conventions for Minecraft Server Dashboard v2. This
-document fixes the *policy*: the version source of truth (Section 4.1),
-release-notes generation (Section 3), and the tag-driven release workflow
-(Section 4.3). A release does not build or publish component artifacts;
+document fixes the *policy*: repository-wide SemVer versioning, tag names and
+the version source of truth (Section 4.1), release-notes generation (Section
+3), and the tag-driven release and hotfix workflows (Sections 4.3 and 5). It
+also records the open artifact-publishing and automated-version-bumping
+decisions (Section 6). A release does not build or publish component artifacts;
 components are built from the checked-out revision by the deployment procedure
 ([`DEPLOYMENT.md`](DEPLOYMENT.md); Section 4.2 item 3 below).
 

@@ -540,6 +540,11 @@ async def import_server(
     other archive rejection it fires before the row is created, so nothing is left
     behind. Only the ROOT name is guarded: a nested
     ``backups/server.properties/…`` member is ordinary user data.
+
+    A racer taking the auto-assigned game port or slug between the assignment and
+    the commit that inserts the row is 409 ``port_taken`` / ``slug_taken``, and an
+    exhausted slug retry budget is 503 ``slug_exhausted`` (issue #3022) — the same
+    answers create gives for the same conditions.
     """
 
     content = await _read_capped_upload(file)
@@ -574,10 +579,38 @@ async def import_server(
         # The uploaded archive (or its cumulative extracted size / entry count)
         # exceeded the caps reused from the upload path (issue #262).
         raise _too_large() from exc
+    except PortAlreadyTakenError as exc:
+        # Import assigns the game port itself (#243), but the assignment is a
+        # taken-set read inside the create transaction while the INSERT lands at
+        # the commit, so a racer taking that port in between violates
+        # uq_server_game_port (issue #3022). It is the same race create's own
+        # auto-assign path runs, hence the same 409: a retry picks another free
+        # port, where 503 would claim the deployment has none left.
+        raise _conflict("port_taken") from exc
     except PortRangeExhaustedError as exc:
         raise _service_unavailable("port_range_exhausted") from exc
     except ServerNameAlreadyExistsError as exc:
         raise _conflict("server_name_exists") from exc
+    except SlugAlreadyTakenError as exc:
+        # The auto-generated slug (#955) has the identical window one constraint
+        # over: uq_server_slug fires at the same commit (issue #3022).
+        raise _conflict("slug_taken") from exc
+    except SlugExhaustedError as exc:
+        # Auto-generation found no unique slug within the retry budget. Import
+        # always auto-generates, so this is as reachable here as on create; a
+        # transient capacity condition the caller retries (issue #3022).
+        #
+        # With this arm the route maps every typed error the composed CreateServer
+        # can raise; the remainder are unreachable from here rather than unmapped,
+        # which is the audit #3022 asked for after #2940 and #2924 each found the
+        # same gap one error over. Import supplies ``config={}``, so there is no
+        # retired key, memory limit or CPU allocation to reject -- the
+        # operator-configured memory default is bounded at startup by
+        # MemoryLimitSettings to the very range memory_limit_from_config re-checks,
+        # so it cannot fail that re-check -- and it supplies neither an explicit
+        # port nor an explicit slug, so PortOutOfRange and InvalidSlug cannot fire.
+        # A new CreateServer error needs an arm here as well as on create.
+        raise _service_unavailable("slug_exhausted") from exc
     except CommunityNotFoundError as exc:
         # Import composes CreateServer, so it stages the same row and reaches the
         # same commit-time FK to community (issue #2940); same racer, same answer.

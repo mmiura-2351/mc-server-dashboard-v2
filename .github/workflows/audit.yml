@@ -69,7 +69,7 @@ jobs:
       # govulncheck is pinned like the other Go tools (cf. GOLANGCI_VERSION in
       # the Makefile): an exact tag, never @latest, kept outside the cooldown.
       - name: Install govulncheck (pinned)
-        run: go install golang.org/x/vuln/cmd/govulncheck@v1.3.0
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
 
       # Call-graph aware, so it only fails on vulnerabilities the module's code
       # actually reaches.

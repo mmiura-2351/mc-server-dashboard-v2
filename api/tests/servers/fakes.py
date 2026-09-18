@@ -230,7 +230,8 @@ class FakeFileStore(FileStore):
 
     Backs the create-seeding tests: ``write_file`` records each seed write so a
     test can assert what landed in the initial working set, and ``read_file``
-    serves it back (404 → :class:`ServerFileNotFoundError` for an unseeded path).
+    serves it back (404 → :class:`ServerFileNotFoundError` for an unseeded path),
+    which is also what ``delete_file`` refuses such a path with (issue #3029).
 
     Directories exist here as they do at the real seam (issue #2886): a listing
     describes the parent of a nested seed as ``is_dir=True``, and ``make_dir``
@@ -238,6 +239,8 @@ class FakeFileStore(FileStore):
     observes it. ``delete_dir`` and ``rename_dir`` carry that record along with the
     files in the subtree they act on, so a created directory stops being observable
     once it is deleted and moves with its parent when it is renamed (issue #2972).
+    ``download_dir`` and ``export_dir`` refuse a directory that same membership does
+    not describe, and ``export_dir`` zips the subtree it names (issue #3034).
     """
 
     def __init__(self, *, fail_write: bool = False, seed_eula: bool = False) -> None:
@@ -387,14 +390,24 @@ class FakeFileStore(FileStore):
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> None:
         self.events.append((server_id, "delete-file"))
-        self.files.pop(rel_path, None)
+        # A path the fake does not hold is a MISS, never a silent no-op (issue
+        # #3029): fs's ``_existing_file`` gate and the object backend's
+        # ``head_object`` probe each raise ``NotFoundError``, which
+        # ``StorageFileStoreAdapter`` surfaces as ``ServerFileNotFoundError`` --
+        # the error this Port names, and the one ``Storage.delete_file`` requires
+        # so a no-op delete is not reported as a success. Exact membership, as
+        # ``read_file`` uses: a DIRECTORY at the name holds no file either.
+        if rel_path not in self.files:
+            raise ServerFileNotFoundError(str(server_id.value))
+        del self.files[rel_path]
 
     def _existing_subtree(
         self, rel_path: str, server_id: ServerId
     ) -> tuple[str, list[str], set[str]]:
         """The prefix ``rel_path`` names, plus every file and directory inside it.
 
-        The whole-subtree half of ``delete_dir`` / ``rename_dir`` (issue #2972).
+        The whole-subtree half of ``delete_dir`` / ``rename_dir`` (issue #2972), and
+        the gate both dir-zip streams open with (issue #3034).
         Both backends act on the PREFIX rather than on one entry -- fs through
         ``shutil.rmtree`` / ``os.rename`` of the resolved directory, the object
         backend by looping over ``list_objects(<prefix>)`` -- so the seeded files
@@ -492,6 +505,26 @@ class FakeFileStore(FileStore):
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> AsyncIterator[bytes]:
         async def _gen() -> AsyncIterator[bytes]:
+            # Both dir-zip streams open with the same gate because production
+            # builds them from ONE body: ``StorageFileStoreAdapter.download_dir``
+            # and ``.export_dir`` both return ``_download_dir_gen``, whose first
+            # act is a LISTING of the pinned working-set view -- a ``NotFoundError``
+            # there becomes ``ServerFileNotFoundError`` before a byte of zip exists
+            # (issue #3034). Deciding nothing about ``rel_path`` was the forgiving
+            # direction: a download of a directory that does not exist passed here
+            # and 404s in production.
+            #
+            # Inside the generator, because the adapter's gate is too: its
+            # ``download_dir`` only builds the generator, so nothing is decided
+            # until the caller pulls the first chunk.
+            #
+            # ``_existing_subtree`` rather than this fake's ``list_dir``: it is the
+            # same membership (same prefix rule, same root exemption -- its
+            # docstring says so), so no third path rule is introduced, and it is
+            # the bare scan rather than the seam method, which would append a
+            # ``list-dir`` event to ``self.events`` -- a seam record these two
+            # methods have never made.
+            self._existing_subtree(rel_path, server_id)
             return
             yield b""  # pragma: no cover - empty async generator
 
@@ -505,15 +538,25 @@ class FakeFileStore(FileStore):
         rel_path: str,
         extra: list[tuple[str, bytes]],
     ) -> AsyncIterator[bytes]:
-        # Build a real zip of every seeded file plus the ``extra`` entries so a
-        # round-trip test can re-open and compare the bytes (issue #274).
-        files = dict(self.files)
-
+        # Build a real zip of every seeded file UNDER ``rel_path`` plus the
+        # ``extra`` entries so a round-trip test can re-open and compare the bytes
+        # (issue #274).
         async def _gen() -> AsyncIterator[bytes]:
+            # The gate ``download_dir`` documents, and the same scan supplies the
+            # members: zipping the whole tree whatever ``rel_path`` said was a
+            # content-fidelity divergence, benign only because ``ExportServer``
+            # always passes ``"."`` (issue #3034). Arcnames are relative to
+            # ``rel_path`` -- ``_walk_files`` states it ("the zip contains the
+            # subtree itself, not the path leading to it") and
+            # ``test_download_dir_streams_zip_of_subtree`` pins it against the live
+            # fs backend -- and ``extra`` lands after the subtree, as the adapter
+            # appends it. Read at first pull rather than at call time, which is
+            # where the adapter pins its snapshot (the view opens inside the body).
+            prefix, members, _ = self._existing_subtree(rel_path, server_id)
             buf = io.BytesIO()
             with zipfile.ZipFile(buf, mode="w") as zf:
-                for path, content in files.items():
-                    zf.writestr(path, content)
+                for path in members:
+                    zf.writestr(path[len(prefix) :], self.files[path])
                 for arcname, content in extra:
                     zf.writestr(arcname, content)
             yield buf.getvalue()

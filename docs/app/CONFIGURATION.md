@@ -1,7 +1,7 @@
 # Configuration
 
-> Status: **Implemented** · Audience: contributors and operators of `api/` and
-> `worker/`
+> Status: **Implemented** · Audience: contributors and operators of `api/`,
+> `worker/`, and `relay/`
 >
 > This document defines the **runtime configuration surface** of v2 and the
 > **config-driven adapter selection** mechanism. It refines, but does not
@@ -24,6 +24,10 @@
 7. [Authentication hardening](#7-authentication-hardening)
 8. [Snapshot cadence](#8-snapshot-cadence)
 9. [Related documents](#9-related-documents)
+
+Relay configuration has no section of its own: the relay binary's keys are
+tabled in [`RELAY.md`](RELAY.md) Section 13, beside the design they configure.
+Section 5.13 below covers the API-side `relay.*` keys that gate the feature.
 
 ---
 
@@ -63,8 +67,8 @@ two sources, with environment variables overriding the file:
 
 - **Defaults** are the values in this document; a key omitted everywhere takes
   its default. A key with no default (marked *required*) must be supplied.
-- **Config file** — a single **TOML** file per service (e.g. `api.toml` /
-  `worker.toml`). Holds the non-secret bulk of configuration and is the
+- **Config file** — a single **TOML** file per service (for example, the relay
+  binary's `relay.toml`). Holds the non-secret bulk of configuration and is the
   recommended place for adapter-selection and tuning keys. Its **path comes from
   an environment variable**, and a service whose variable is unset reads no file
   at all — there is no searched default location. The variable is
@@ -94,8 +98,12 @@ may legitimately carry unrelated prefixed names.
 
 The tables below give the **logical key name**. The environment-variable form
 is the key prefixed per service (`MCD_API_` for `api/`, `MCD_WORKER_` for
-`worker/`) to avoid collisions; the file form nests the same key under its
-group.
+`worker/`, `MCD_RELAY_` for `relay/`) to avoid collisions; the file form nests
+the same key under its group. Under the prefix the API spells a nested key
+with a double underscore (`auth.password.policy` →
+`MCD_API_AUTH__PASSWORD__POLICY`), the Worker and the relay with a single one
+(`api.grpc_endpoint` → `MCD_RELAY_API_GRPC_ENDPOINT`). The relay binary's keys
+are not tabled below — they are in [`RELAY.md`](RELAY.md) Section 13.
 
 ---
 
@@ -116,9 +124,18 @@ or token is marked **secret** in the tables below.
   interpolation) is treated as missing, so it fails fast the same way rather than
   booting with an empty key/credential.
 
-The secrets are: the API token-signing key (Section 5), the Worker's
-credential for authenticating to the API, and the TLS material for the
-control channel (Sections 5 and 6).
+The secret-bearing settings are:
+
+- **API:** `control.worker_credential`, `control.tls.key_file`, `database.url`,
+  `storage.object.access_key`, `storage.object.secret_key`,
+  `auth.token.signing_key`, and `relay.credential`.
+- **Worker:** `api.credential` and the reserved `api.tls.client_key_file`.
+- **Relay:** `api.credential` and `tunnel.tls.key_file` (see
+  [`RELAY.md`](RELAY.md) Section 13).
+
+The API's `control.worker_credential` and the Worker's `api.credential` are the
+two ends of one shared secret; the API's `relay.credential` and the relay's
+`api.credential` are another shared pair.
 
 ---
 
@@ -413,9 +430,9 @@ The Prometheus exposition is served on a **separate HTTP listener**, never on
 `server.http_port`: the bundled `cloudflared` service forwards the
 whole public hostname to `api:8000` and path-scopes nothing, so a route on the
 API's HTTP port is a route on the internet. Off by default, like the relay's
-metrics endpoint (RELAY.md Section 13) — a deployment that does not scrape binds
-no second port at all. When enabled, the listener serves `GET /metrics` and
-nothing else.
+metrics endpoint ([`RELAY.md`](RELAY.md) Section 13) — a deployment that does
+not scrape binds no second port at all. When enabled, the listener serves
+`GET /metrics` and nothing else.
 
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
@@ -481,9 +498,9 @@ like the JAR-pool GC (Section 5.7).
 
 ### 5.13 Game-ingress relay
 
-The game-ingress relay (RELAY.md) lets players join at
+The game-ingress relay ([`RELAY.md`](RELAY.md)) lets players join at
 `<slug>.<base_domain>` with no port. It is **config-selectable and default off**
-(RELAY.md Section 9): with `relay.enabled=false` (the default) single-host
+([`RELAY.md`](RELAY.md) Section 9): with `relay.enabled=false` (the default) single-host
 operators use the direct path with no additional setup. When enabled, the API
 serves `RelayService` on the gRPC listener (`server.grpc_port`) alongside
 `WorkerService`, exposes `join_hostname` on server responses, and runs the
@@ -493,14 +510,14 @@ missing, per the secret-blank rule above).
 
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
-| `relay.enabled` | `false` | | Master switch: serve `RelayService`, expose `join_hostname`, and run the prune loop (RELAY.md Section 9). |
-| `relay.credential` | *required when enabled* | secret | Shared credential the relay must present (`authorization: Bearer <credential>` metadata) to authenticate its gRPC calls (REQUIREMENTS.md NFR-SEC-1). A **separate** credential from `control.worker_credential` so relay and Worker credentials rotate independently (RELAY.md Section 6). |
-| `relay.base_domain` | *required when enabled* | | Routing domain (e.g. `mc.example.com`); used to build `join_hostname` (`<slug>.<base_domain>`) and returned to the relay on `Register` (RELAY.md Sections 3, 6). |
-| `relay.game_port` | `25565` | | The relay container's published game-listener host port (RELAY.md Section 13): the port players join on (fixed at 25565 to keep joins port-less). When the relay is enabled the allocator excludes any of these relay ports that fall inside the assignable game-port range so a server is never assigned a port the relay already holds on the host. Must be 1..65535. |
-| `relay.tunnel_port` | `25665` | | The relay container's published tunnel-listener host port (RELAY.md Section 13): the Worker dial-back tunnel endpoint. When the relay is enabled the allocator excludes it like `relay.game_port`. Must be 1..65535. |
+| `relay.enabled` | `false` | | Master switch: serve `RelayService`, expose `join_hostname`, and run the prune loop ([`RELAY.md`](RELAY.md) Section 9). |
+| `relay.credential` | *required when enabled* | secret | Shared credential the relay must present (`authorization: Bearer <credential>` metadata) to authenticate its gRPC calls (REQUIREMENTS.md NFR-SEC-1). A **separate** credential from `control.worker_credential` so relay and Worker credentials rotate independently ([`RELAY.md`](RELAY.md) Section 6). |
+| `relay.base_domain` | *required when enabled* | | Routing domain (e.g. `mc.example.com`); used to build `join_hostname` (`<slug>.<base_domain>`) and returned to the relay on `Register` ([`RELAY.md`](RELAY.md) Sections 3, 6). |
+| `relay.game_port` | `25565` | | The relay container's published game-listener host port ([`RELAY.md`](RELAY.md) Section 13): the port players join on (fixed at 25565 to keep joins port-less). When the relay is enabled the allocator excludes any of these relay ports that fall inside the assignable game-port range so a server is never assigned a port the relay already holds on the host. Must be 1..65535. |
+| `relay.tunnel_port` | `25665` | | The relay container's published tunnel-listener host port ([`RELAY.md`](RELAY.md) Section 13): the Worker dial-back tunnel endpoint. When the relay is enabled the allocator excludes it like `relay.game_port`. Must be 1..65535. |
 | `relay.bedrock_enabled` | `false` | | Bedrock ingress capability. With `relay.enabled`, a server whose plugin set carries Geyser -- via install, catalog install, or a ZIP import -- allocates its `bedrock_port` from the dedicated UDP window (Section 5.8); server responses surface `bedrock_address` / `bedrock_port` only while at least one installed Geyser copy is *enabled* -- the port stays allocated but the fields go null if every copy is disabled. `GET /api/meta` reports the combined gate as `bedrock_enabled`. Off: Geyser detection allocates nothing and the fields stay null. |
 | `relay.bedrock_tunnel_port` | `25675` | | The relay container's published Bedrock tunnel (QUIC) **UDP** listener host port. When the Bedrock gate is on, the allocator excludes it from the assignable Bedrock window like `relay.game_port` / `relay.tunnel_port`. Must be 1..65535. |
-| `relay.session_retention_days` | `90` | | `game_session` prune window in days (RELAY.md Section 8). Must be positive. |
+| `relay.session_retention_days` | `90` | | `game_session` prune window in days ([`RELAY.md`](RELAY.md) Section 8). Must be positive. |
 
 ### 5.14 General scheduler
 
@@ -803,7 +820,13 @@ is rejected with 422 `retired_config_key`.
 |---|---|
 | [`../REQUIREMENTS.md`](../REQUIREMENTS.md) | What v2 must do; the source of truth for scope. |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Hexagonal layering, module boundaries, the Ports catalog these keys select adapters for, and wiring at the edge. |
+| [`AUTH_API.md`](AUTH_API.md) | Authentication endpoint token and cookie transports configured by `auth.token.*`. |
 | [`DATABASE.md`](DATABASE.md) | Persistence model behind `database.url`. |
 | [`STORAGE.md`](STORAGE.md) | `Storage` adapter contracts and the per-backend keys behind `storage.backend`. |
 | [`CONTROL_PLANE.md`](CONTROL_PLANE.md) | The control-plane messages, including Worker capability advertisement. |
+| [`RELAY.md`](RELAY.md) | Game-ingress relay design and the relay binary's configuration keys. |
+| [`BEDROCK_TUNNEL.md`](BEDROCK_TUNNEL.md) | Bedrock relay tunnel design and configuration. |
+| [`SECURITY.md`](SECURITY.md) | Password policy, brute-force protection, trusted proxies, and network exposure posture. |
+| [`../ui/WEBUI_SPEC.md`](../ui/WEBUI_SPEC.md) | Web UI serving and same-origin routing behind `webui.dist_dir`. |
+| [`../dev/DEPLOYMENT.md`](../dev/DEPLOYMENT.md) | Compose topology and operator-facing deployment wiring for these settings. |
 | [`../dev/CONTRIBUTING.md`](../dev/CONTRIBUTING.md) | The change workflow for editing these docs. |

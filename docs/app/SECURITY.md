@@ -11,7 +11,9 @@
 > [`DATABASE.md`](DATABASE.md), and [`CONFIGURATION.md`](CONFIGURATION.md); where
 > they disagree, the requirements win and this document is wrong.
 >
-> **Scope.** Authentication-hardening behaviour, plus
+> **Scope.** Authentication-hardening behaviour, the observability endpoints in
+> [Section 5](#5-observability-endpoints) (`/api/healthz`, `/api/readyz`, and the
+> separate Prometheus listener), plus
 > [Section 6](#6-minecraft-server-container-trust-model), which records what a
 > Minecraft server container is trusted to do, which of the two docker networks
 > each service is attached to, and what is reachable from where. This document

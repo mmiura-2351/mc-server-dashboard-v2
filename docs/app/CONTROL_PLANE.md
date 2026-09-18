@@ -3,9 +3,10 @@
 > Status: **Design** · Audience: contributors to `api/`, `worker/`, `proto/`
 >
 > This document is the reference for the API↔Worker **control-plane**
-> contract: the gRPC bidirectional stream, its lifecycle, the command and event
-> messages, and how each maps to [`../REQUIREMENTS.md`](../REQUIREMENTS.md). The
-> binding contract is the buf module under [`../../proto/`](../../proto/)
+> contract: the gRPC bidirectional stream, its message envelopes and
+> correlation IDs, its lifecycle, the command and event messages, and how each
+> maps to [`../REQUIREMENTS.md`](../REQUIREMENTS.md). The binding contract is the
+> buf module under [`../../proto/`](../../proto/)
 > (`mcsd.controlplane.v1`); this document explains it. Where the two disagree,
 > the `.proto` files and the requirements win and this document is wrong.
 
@@ -353,6 +354,22 @@ the bytes have moved (STORAGE.md Section 8):
   `204`, which the API sends after its proven-complete gate commits the staged
   transfer (STORAGE.md Section 8); a partial upload is aborted and surfaces as a
   failed result, never a success.
+
+A failed snapshot result does not prove the converse: it confirms only that the
+Worker reported a failure. The Worker reports upload success only after its HTTP
+client receives the API's successful response, so the API may already have committed
+the publish when that response is lost. Publication is therefore unconfirmed when a
+late final-snapshot failure releases its held assignment. A later cross-worker
+re-placement may lose progression since the last periodic snapshot (#845/#847), while
+a same-worker start can reuse the retained scratch (#767).
+
+Before attempting recovery, an operator can inspect authoritative Storage's current
+snapshot to establish what progression it contains. The combined generation/publisher
+marker can corroborate a publish when its prior value is known, but it is not a receipt
+for this command: it carries no command id, and an earlier periodic snapshot from the
+same Worker can have the same publisher. No operator-facing API exposes a per-command
+publication receipt, so the failed result and marker alone cannot distinguish a
+failed publish from a lost publish response.
 
 API-side orchestrations rely on this ordering. Hydrate-then-start (the API issues
 `HydrateTrigger`, awaits its result, then `StartServer`) relies on the working
