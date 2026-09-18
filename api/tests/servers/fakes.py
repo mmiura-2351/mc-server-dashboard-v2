@@ -20,6 +20,7 @@ from typing import Any
 
 from sqlalchemy.exc import IntegrityError
 
+from mc_server_dashboard_api.servers.adapters.file_store import _rel_path
 from mc_server_dashboard_api.servers.domain.backup import (
     Backup,
     BackupHealth,
@@ -58,6 +59,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     BackupUnreadableError,
     GroupNameAlreadyExistsError,
     GroupNotFoundError,
+    InvalidFilePathError,
     PluginAlreadyExistsError,
     PluginCacheBlobNotFoundError,
     ResourcePackInUseError,
@@ -225,6 +227,53 @@ class FakeVersionValidator(VersionValidator):
             raise UnknownVersionError(f"{server_type} {version}")
 
 
+def _canonical(rel_path: str) -> str:
+    """``rel_path`` as production keys it, through the adapter's own gate.
+
+    ``StorageFileStoreAdapter`` builds a ``RelPath`` from the raw string before
+    every Storage call, through its ``_rel_path``: ``.`` components and redundant
+    separators are normalised away (``""``, ``"."`` and ``"./"`` are all the root,
+    ``"./world"``, ``"world/"`` and ``"world//"`` all ``world``) and a traversal
+    is refused as :class:`InvalidFilePathError` before Storage is reached. Calling
+    that function rather than restating it is what keeps this fake from drifting
+    from the rule it models -- the reason ``test_files.py``'s sibling fake reuses
+    ``RelPath`` too (#2887, issue #3067).
+    """
+
+    return _rel_path(rel_path).value
+
+
+def _by_canonical(
+    names: Iterable[str], *, container: str, holds: str
+) -> dict[str, str]:
+    """Each seeded name, keyed by the canonical path it names.
+
+    The membership question and the entry to act on are not the same thing: a
+    seed is typed by hand and may be an alias of the name a caller uses, so a
+    lookup decides on the canonical path while a mutation reaches the entry that
+    EXISTS (``files["./notes.txt"]`` is the file a delete removes) -- the way
+    production acts on the one dirent every spelling resolves to.
+
+    Two spellings of one path in a container are a SEEDING MISTAKE, not a state to
+    model, and are refused loudly rather than letting one win: production holds
+    ONE entry at a canonical path, and a pick would answer out of a dict's
+    insertion order or a set's hash order, which reads as a flake rather than as a
+    seeding bug (the guard issue #3032 gave the sibling fake in ``test_files.py``).
+    """
+
+    index: dict[str, str] = {}
+    for name in names:
+        path = _canonical(name)
+        if path in index:
+            raise AssertionError(
+                f"{container} seeded under two spellings of one path: "
+                f"{sorted([index[path], name])!r} both name {path!r}, which has ONE "
+                f"{holds} at the real seam -- seed it under a single spelling"
+            )
+        index[path] = name
+    return index
+
+
 class FakeFileStore(FileStore):
     """In-memory authoritative-copy file store keyed by rel_path.
 
@@ -232,6 +281,12 @@ class FakeFileStore(FileStore):
     test can assert what landed in the initial working set, and ``read_file``
     serves it back (404 → :class:`ServerFileNotFoundError` for an unseeded path),
     which is also what ``delete_file`` refuses such a path with (issue #3029).
+
+    Every path decision is made on the canonical path production decides it on,
+    both the caller's and the seeded keys' (issue #3067): an alias answers what
+    its canonical path answers, a traversal is :class:`InvalidFilePathError`, and
+    anything this fake writes lands under the canonical key -- or on the entry
+    already seeded there. See :func:`_canonical` and :func:`_by_canonical`.
 
     Directories exist here as they do at the real seam (issue #2886): a listing
     describes the parent of a nested seed as ``is_dir=True``, and ``make_dir``
@@ -267,25 +322,39 @@ class FakeFileStore(FileStore):
         # (issue #243): the committed row stays, surfaced as a mapped 503.
         self._fail_write = fail_write
 
+    def _files(self) -> dict[str, str]:
+        """The seeded files, keyed by canonical path (see :func:`_by_canonical`)."""
+
+        return _by_canonical(self.files, container="files", holds="file")
+
+    def _dirs(self) -> dict[str, str]:
+        """The created directories, keyed by canonical path."""
+
+        return _by_canonical(self.dirs, container="dirs", holds="directory")
+
     def validate_rel_path(self, rel_path: str) -> None:
-        return None
+        # The adapter's pre-rejection IS the ``RelPath`` construction every other
+        # method makes, so it refuses exactly what they refuse.
+        _canonical(rel_path)
 
     async def read_file(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> bytes:
-        if rel_path not in self.files:
+        key = self._files().get(_canonical(rel_path))
+        if key is None:
             raise ServerFileNotFoundError(str(server_id.value))
-        return self.files[rel_path]
+        return self.files[key]
 
     def open_file_stream(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> AsyncIterator[bytes]:
-        files = self.files
-
         async def _gen() -> AsyncIterator[bytes]:
-            if rel_path not in files:
+            # Inside the generator, as the adapter builds its ``RelPath``: nothing is
+            # decided until the caller pulls the first chunk.
+            key = self._files().get(_canonical(rel_path))
+            if key is None:
                 raise ServerFileNotFoundError(str(server_id.value))
-            yield files[rel_path]
+            yield self.files[key]
 
         return _gen()
 
@@ -293,11 +362,12 @@ class FakeFileStore(FileStore):
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> list[FileEntry]:
         self.events.append((server_id, "list-dir"))
-        prefix = "" if rel_path in ("", ".") else rel_path.rstrip("/") + "/"
+        path = _canonical(rel_path)
+        prefix = "" if path == "." else path + "/"
         members = {
-            path: content
-            for path, content in self.files.items()
-            if path.startswith(prefix)
+            member: self.files[key]
+            for member, key in self._files().items()
+            if member.startswith(prefix)
         }
         # A created directory is a member of a prefix exactly as a file is: the
         # object backend anchors it with a real ``<dir>/.dir`` object (issue
@@ -305,7 +375,9 @@ class FakeFileStore(FileStore):
         # same footing. It makes ``d`` a member of ``d/`` -- an empty created
         # directory LISTS, empty, rather than missing below -- and a member of
         # every prefix above it, which is where its parents come from.
-        dir_members = sorted(d + "/" for d in self.dirs if (d + "/").startswith(prefix))
+        dir_members = sorted(
+            d + "/" for d in self._dirs() if (d + "/").startswith(prefix)
+        )
         # A non-root path nothing sits under is a MISS at the real seam, never an
         # empty listing: gone, a plain file, or reached through one all raise
         # NotFoundError, which StorageFileStoreAdapter surfaces as
@@ -359,13 +431,15 @@ class FakeFileStore(FileStore):
         # sits under, or by a created directory -- itself or an ancestor of one,
         # which is the same ``d + "/"`` membership the listing uses. The root is
         # always there.
-        if rel_path in ("", "."):
+        path = _canonical(rel_path)
+        if path == ".":
             return True
-        prefix = rel_path.rstrip("/") + "/"
+        prefix = path + "/"
+        files = self._files()
         return (
-            rel_path in self.files
-            or any(path.startswith(prefix) for path in self.files)
-            or any((d + "/").startswith(prefix) for d in self.dirs)
+            path in files
+            or any(member.startswith(prefix) for member in files)
+            or any((d + "/").startswith(prefix) for d in self._dirs())
         )
 
     async def write_file(
@@ -377,14 +451,24 @@ class FakeFileStore(FileStore):
         content: bytes,
     ) -> None:
         self.events.append((server_id, "write-file"))
+        path = _canonical(rel_path)
+        if path == ".":
+            # The root names a directory, not a file: both backends refuse it with
+            # ``PathTraversalError`` ahead of any write (issue #542), which the
+            # adapter surfaces as ``InvalidFilePathError``. Storing it would hold a
+            # file named ``.``.
+            raise InvalidFilePathError(rel_path)
         if self._fail_write:
             raise RuntimeError("forced storage write failure")
-        self.files[rel_path] = content
+        # Onto the seeded entry when one exists, under the canonical path when
+        # none does -- never beside it under the caller's spelling.
+        self.files[self._files().get(path, path)] = content
         self.writes.append((rel_path, content))
 
     async def retain_if_changed(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> None:
+        _canonical(rel_path)
         return None
 
     async def delete_file(
@@ -398,14 +482,15 @@ class FakeFileStore(FileStore):
         # the error this Port names, and the one ``Storage.delete_file`` requires
         # so a no-op delete is not reported as a success. Exact membership, as
         # ``read_file`` uses: a DIRECTORY at the name holds no file either.
-        if rel_path not in self.files:
+        key = self._files().get(_canonical(rel_path))
+        if key is None:
             raise ServerFileNotFoundError(str(server_id.value))
-        del self.files[rel_path]
+        del self.files[key]
 
     def _existing_subtree(
-        self, rel_path: str, server_id: ServerId
-    ) -> tuple[str, list[str], set[str]]:
-        """The prefix ``rel_path`` names, plus every file and directory inside it.
+        self, path: str, server_id: ServerId
+    ) -> tuple[str, dict[str, str], dict[str, str]]:
+        """The prefix ``path`` names, plus every file and directory inside it.
 
         The whole-subtree half of ``delete_dir`` / ``rename_dir`` (issue #2972), and
         the gate both dir-zip streams open with (issue #3034).
@@ -424,11 +509,23 @@ class FakeFileStore(FileStore):
         the same membership ``list_dir`` refuses on, root exemption included, so a
         plain FILE at the name misses here too (nothing sits under ``<name>/``) and
         the ROOT never misses.
+
+        ``path`` is already canonical: each caller builds it where the adapter
+        builds its ``RelPath``, which for ``rename_dir`` is ahead of the
+        destination's. The members come back keyed by canonical path, each mapped
+        to the key it is seeded under (:func:`_by_canonical`), so a caller walks the
+        tree production holds and acts on the entries that exist.
         """
 
-        prefix = "" if rel_path in ("", ".") else rel_path.rstrip("/") + "/"
-        files = [path for path in self.files if path.startswith(prefix)]
-        dirs = {d for d in self.dirs if (d + "/").startswith(prefix)}
+        prefix = "" if path == "." else path + "/"
+        files = {
+            member: key
+            for member, key in self._files().items()
+            if member.startswith(prefix)
+        }
+        dirs = {
+            d: key for d, key in self._dirs().items() if (d + "/").startswith(prefix)
+        }
         if prefix and not files and not dirs:
             raise ServerFileNotFoundError(str(server_id.value))
         return prefix, files, dirs
@@ -437,10 +534,10 @@ class FakeFileStore(FileStore):
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> None:
         self.events.append((server_id, "delete-dir"))
-        _, files, dirs = self._existing_subtree(rel_path, server_id)
-        for path in files:
-            del self.files[path]
-        self.dirs -= dirs
+        _, files, dirs = self._existing_subtree(_canonical(rel_path), server_id)
+        for key in files.values():
+            del self.files[key]
+        self.dirs -= set(dirs.values())
 
     async def rename_file(
         self,
@@ -451,9 +548,18 @@ class FakeFileStore(FileStore):
         to_path: str,
     ) -> None:
         self.events.append((server_id, "rename-file"))
-        if from_path not in self.files:
+        # The adapter builds a ``RelPath`` for BOTH paths as the arguments of one
+        # Storage call, so an unusable destination is refused ahead of the
+        # missing-source miss.
+        source = _canonical(from_path)
+        destination = _canonical(to_path)
+        files = self._files()
+        key = files.get(source)
+        if key is None:
             raise ServerFileNotFoundError(str(server_id.value))
-        self.files[to_path] = self.files.pop(from_path)
+        # Landing on the seeded spelling of the destination, as ``write_file``
+        # does, keeps two spellings of one path out of ``files``.
+        self.files[files.get(destination, destination)] = self.files.pop(key)
 
     async def rename_dir(
         self,
@@ -464,8 +570,12 @@ class FakeFileStore(FileStore):
         to_path: str,
     ) -> None:
         self.events.append((server_id, "rename-dir"))
-        prefix, files, dirs = self._existing_subtree(from_path, server_id)
-        to_prefix = "" if to_path in ("", ".") else to_path.rstrip("/") + "/"
+        # Both paths canonical before the source is looked for, in the order the
+        # adapter builds them, as ``rename_file`` does.
+        source = _canonical(from_path)
+        destination = _canonical(to_path)
+        prefix, files, dirs = self._existing_subtree(source, server_id)
+        to_prefix = "" if destination == "." else destination + "/"
         # Re-key rather than copy: neither backend leaves anything behind at the
         # source (fs renames the dirent, the object backend deletes every key it
         # copied), so the old path is a miss afterwards exactly as ``list_dir``
@@ -480,26 +590,29 @@ class FakeFileStore(FileStore):
         # seam: ``RenameFile`` 409s an occupied destination from its own
         # ``path_exists`` never-clobber probe before dispatching here, and
         # ``FileStore.rename_dir`` names only the missing-source error.
-        for path in files:
-            self.files[to_prefix + path[len(prefix) :]] = self.files.pop(path)
-        for recorded in dirs:
-            self.dirs.discard(recorded)
+        for path, key in files.items():
+            self.files[to_prefix + path[len(prefix) :]] = self.files.pop(key)
+        for recorded, key in dirs.items():
+            self.dirs.discard(key)
             self.dirs.add((to_prefix + (recorded + "/")[len(prefix) :]).rstrip("/"))
 
     async def make_dir(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> None:
         self.events.append((server_id, "make-dir"))
-        if rel_path in ("", "."):
+        path = _canonical(rel_path)
+        if path == ".":
             # The root is already there and neither backend creates anything for
             # it: ObjectStorage returns before writing the ``//.dir`` key issue
             # #1944 names, and fs's ``exist_ok=True`` mkdir of the snapshot
             # directory itself is a no-op.
             return None
-        # Idempotent (a set), and the parents are implied rather than stored:
+        # Idempotent -- a directory already recorded under any spelling of the path
+        # is the one created -- and the parents are implied rather than stored:
         # creating ``a/b`` makes ``a`` a directory the same way seeding a file at
         # ``a/b/f`` does.
-        self.dirs.add(rel_path.rstrip("/"))
+        if path not in self._dirs():
+            self.dirs.add(path)
         return None
 
     def download_dir(
@@ -549,7 +662,7 @@ class FakeFileStore(FileStore):
         # ``self.events`` -- a seam record these two methods have never made. The
         # same scan supplies the members: zipping the whole tree whatever
         # ``rel_path`` said was a content-fidelity divergence (issue #3034).
-        prefix, members, _ = self._existing_subtree(rel_path, server_id)
+        prefix, members, _ = self._existing_subtree(_canonical(rel_path), server_id)
         buf = io.BytesIO()
         # Deflated, as the adapter opens its ``ZipFile``.
         with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -574,8 +687,8 @@ class FakeFileStore(FileStore):
                 }
                 for name in sorted(level):
                     child = current + name
-                    if child in self.files:
-                        zf.writestr(child[len(prefix) :], self.files[child])
+                    if child in members:
+                        zf.writestr(child[len(prefix) :], self.files[members[child]])
                     else:
                         stack.append(child + "/")
             for arcname, content in extra:
@@ -585,6 +698,7 @@ class FakeFileStore(FileStore):
     async def list_versions(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> list[str]:
+        _canonical(rel_path)
         return []
 
     async def read_version(
@@ -595,6 +709,7 @@ class FakeFileStore(FileStore):
         rel_path: str,
         version_id: str,
     ) -> bytes:
+        _canonical(rel_path)
         raise ServerFileNotFoundError(str(server_id.value))
 
     async def rollback(
@@ -606,6 +721,7 @@ class FakeFileStore(FileStore):
         version_id: str,
     ) -> None:
         self.events.append((server_id, "rollback"))
+        _canonical(rel_path)
         return None
 
 

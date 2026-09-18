@@ -70,7 +70,7 @@ import datetime as dt
 import io
 import uuid
 import zipfile
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import replace
 
 import pytest
@@ -86,6 +86,7 @@ from mc_server_dashboard_api.servers.domain.backup import (
 from mc_server_dashboard_api.servers.domain.errors import (
     GroupNameAlreadyExistsError,
     GroupNotFoundError,
+    InvalidFilePathError,
     PluginAlreadyExistsError,
     ResourcePackInUseError,
     ResourcePackNotFoundError,
@@ -122,6 +123,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     ServerId,
 )
+from mc_server_dashboard_api.storage.domain.value_objects import RelPath
 from tests.servers.fakes import (
     FakeBackupRepository,
     FakeFileStore,
@@ -755,15 +757,16 @@ async def test_file_store_list_dir_on_an_unknown_directory_reports_not_found() -
         )
 
 
-@pytest.mark.parametrize("root", ["", "."])
+@pytest.mark.parametrize("root", ["", ".", "./"])
 async def test_file_store_list_dir_on_the_root_is_empty_not_a_miss(root: str) -> None:
     # The other half of the same contract: the ROOT always lists, empty included
     # -- an empty working set is empty, not missing -- so the refusal above must
-    # not swallow it. BOTH spellings, because ``RelPath`` normalises ``""`` and
-    # ``"."`` to the same empty ``parts`` (storage.domain.value_objects), and the
-    # empty one is reachable rather than theoretical: ``?path=`` reaches ``ListDir``
-    # verbatim (``path: Annotated[str, Query()] = "."`` in servers/api/files.py),
-    # which hands it to this seam unmodified at rest.
+    # not swallow it. EVERY spelling ``RelPath`` normalises to the same empty
+    # ``parts`` (storage.domain.value_objects) -- ``"./"`` included, which the raw
+    # key missed (issue #3067) -- and the empty one is reachable rather than
+    # theoretical: ``?path=`` reaches ``ListDir`` verbatim (``path:
+    # Annotated[str, Query()] = "."`` in servers/api/files.py), which hands it to
+    # this seam unmodified at rest.
     store = FakeFileStore()
 
     assert (
@@ -1182,7 +1185,7 @@ async def test_file_store_dir_zip_on_an_unknown_directory_reports_not_found(
         await _drain(open_zip(store, "server.properties"))
 
 
-@pytest.mark.parametrize("root", ["", "."])
+@pytest.mark.parametrize("root", ["", ".", "./"])
 @pytest.mark.parametrize("open_zip", [_download_dir, _export_dir])
 async def test_file_store_dir_zip_on_the_root_streams_rather_than_missing(
     open_zip: _DirZip, root: str
@@ -1192,9 +1195,9 @@ async def test_file_store_dir_zip_on_the_root_streams_rather_than_missing(
     # (servers/application/export_import.py), so a refusal that swallowed the root
     # would make every export a 404. Both views answer the root without a miss --
     # each guards its unpinned miss with ``if not rel_path.parts`` and the object
-    # backend its pinned miss with ``and sub``. BOTH spellings, as the sibling
-    # ``list_dir`` root pin above takes them: ``RelPath`` normalises ``""`` and
-    # ``"."`` to the same empty ``parts``.
+    # backend its pinned miss with ``and sub``. EVERY spelling, as the sibling
+    # ``list_dir`` root pin above takes them: ``RelPath`` normalises ``""``,
+    # ``"."`` and ``"./"`` to the same empty ``parts``.
     #
     # Draining without ``ServerFileNotFoundError`` IS the assertion here, not a
     # missing one. What a zip CONTAINS is pinned separately:
@@ -1207,23 +1210,18 @@ async def test_file_store_dir_zip_on_the_root_streams_rather_than_missing(
     await _drain(open_zip(store, root))
 
 
-@pytest.mark.parametrize("alias", ["world", "world/", "world//"])
+@pytest.mark.parametrize("alias", ["world", "world/", "./world", "world//"])
 @pytest.mark.parametrize("open_zip", [_download_dir, _export_dir])
 async def test_file_store_dir_zip_answers_every_spelling_of_a_directory(
     open_zip: _DirZip, alias: str
 ) -> None:
-    # A directory that LISTS must not be a miss for the zip, under each spelling
-    # the rest of this fake already answers it by: the gate is the same
-    # ``rstrip("/")``-prefixed membership ``list_dir``, ``delete_dir`` and
-    # ``rename_dir`` decide on, so a path they resolve and the zip refuses would be
-    # a rule this fake invented.
-    #
-    # ``"./world"`` is deliberately absent, in BOTH directions. Production
-    # canonicalises with ``RelPath`` and answers it as ``world``; this fake decides
-    # on the raw key, so it misses -- a divergence that belongs to the fake as a
-    # whole and is tracked as issue #3067. Pinning the miss would cement it and
-    # pinning the stream would require the canonicalisation #3067 covers, so
-    # neither is asserted here (issue #3034).
+    # A directory that LISTS must not be a miss for the zip, under any spelling
+    # production resolves to it: the gate is the same membership ``list_dir``,
+    # ``delete_dir`` and ``rename_dir`` decide on, so a path they resolve and the
+    # zip refuses would be a rule this fake invented (issue #3034). That membership
+    # is decided on the ``RelPath``-canonical path, as ``StorageFileStoreAdapter``
+    # decides it, so ``"./world"`` streams too (issue #3067). What each spelling's
+    # archive CONTAINS is pinned with the rest of the per-method alias table below.
     store = FakeFileStore()
     store.files["world/level.dat"] = b"x"
 
@@ -1347,3 +1345,397 @@ async def test_file_store_download_dir_zips_a_created_empty_directory() -> None:
 
     with zipfile.ZipFile(io.BytesIO(blob)) as zf:
         assert zf.namelist() == []
+
+
+# -- FakeFileStore: production's path rule, on every method (issue #3067) --
+#
+# ``StorageFileStoreAdapter`` builds a ``RelPath`` from every path it is handed
+# (``_rel_path``) before Storage sees it. ``RelPath`` normalises away ``.``
+# components and redundant separators, so each spelling below reaches both
+# backends as the canonical path it names, and it refuses traversal, which the
+# adapter surfaces as ``InvalidFilePathError`` before Storage is reached at all.
+# A fake that decides on the raw key instead refuses the aliases -- a false red
+# rather than a false green, but the infidelity that makes a correct use case look
+# broken -- and reports traversal as a miss. The sibling fake in ``test_files.py``
+# was brought onto the rule by #2887 / #2975; these pin it here, one row per
+# method, because a method left on the raw key is a second path rule.
+
+_SPELLINGS = [
+    pytest.param(lambda path: "./" + path, id="dot-prefix"),
+    pytest.param(lambda path: path + "/", id="trailing-slash"),
+    pytest.param(lambda path: path.replace("/", "//", 1), id="doubled-separator"),
+]
+
+
+def _world(spell: Callable[[str], str] = lambda path: path) -> FakeFileStore:
+    """A small working set, every seed typed through ``spell``."""
+
+    store = FakeFileStore()
+    store.files[spell("world/level.dat")] = b"level"
+    store.files[spell("world/region/r.dat")] = b"region"
+    store.files[spell("server.properties")] = b"k=v"
+    store.dirs.add(spell("world/plugins"))
+    return store
+
+
+def _held(store: FakeFileStore) -> tuple[list[tuple[str, bytes]], list[str]]:
+    """What the store holds, under the canonical path each entry names.
+
+    A sorted LIST rather than a dict or set, so a second spelling of one path
+    shows up as a second entry instead of collapsing into the first.
+    """
+
+    return (
+        sorted((RelPath(path).value, data) for path, data in store.files.items()),
+        sorted(RelPath(path).value for path in store.dirs),
+    )
+
+
+_PathCall = Callable[[FakeFileStore, str], Awaitable[object]]
+
+
+async def _read_file(store: FakeFileStore, path: str) -> object:
+    return await store.read_file(
+        community_id=_COMMUNITY, server_id=_SERVER, rel_path=path
+    )
+
+
+async def _open_file_stream(store: FakeFileStore, path: str) -> object:
+    return await _drain(
+        store.open_file_stream(
+            community_id=_COMMUNITY, server_id=_SERVER, rel_path=path
+        )
+    )
+
+
+async def _path_exists(store: FakeFileStore, path: str) -> object:
+    return await store.path_exists(
+        community_id=_COMMUNITY, server_id=_SERVER, rel_path=path
+    )
+
+
+async def _write_file(store: FakeFileStore, path: str) -> object:
+    await store.write_file(
+        community_id=_COMMUNITY, server_id=_SERVER, rel_path=path, content=b"new"
+    )
+    return None
+
+
+async def _delete_file(store: FakeFileStore, path: str) -> object:
+    await store.delete_file(community_id=_COMMUNITY, server_id=_SERVER, rel_path=path)
+    return None
+
+
+async def _rename_file_from(store: FakeFileStore, path: str) -> object:
+    await store.rename_file(
+        community_id=_COMMUNITY,
+        server_id=_SERVER,
+        from_path=path,
+        to_path="moved.dat",
+    )
+    return None
+
+
+async def _rename_file_to(store: FakeFileStore, path: str) -> object:
+    await store.rename_file(
+        community_id=_COMMUNITY,
+        server_id=_SERVER,
+        from_path="server.properties",
+        to_path=path,
+    )
+    return None
+
+
+async def _rename_file_from_nothing_to(store: FakeFileStore, path: str) -> object:
+    await store.rename_file(
+        community_id=_COMMUNITY, server_id=_SERVER, from_path="ghost", to_path=path
+    )
+    return None
+
+
+async def _list_dir(store: FakeFileStore, path: str) -> object:
+    return await store.list_dir(
+        community_id=_COMMUNITY, server_id=_SERVER, rel_path=path
+    )
+
+
+async def _delete_dir(store: FakeFileStore, path: str) -> object:
+    await store.delete_dir(community_id=_COMMUNITY, server_id=_SERVER, rel_path=path)
+    return None
+
+
+async def _rename_dir_from(store: FakeFileStore, path: str) -> object:
+    await store.rename_dir(
+        community_id=_COMMUNITY, server_id=_SERVER, from_path=path, to_path="moved"
+    )
+    return None
+
+
+async def _rename_dir_to(store: FakeFileStore, path: str) -> object:
+    await store.rename_dir(
+        community_id=_COMMUNITY,
+        server_id=_SERVER,
+        from_path="world/region",
+        to_path=path,
+    )
+    return None
+
+
+async def _rename_dir_from_nothing_to(store: FakeFileStore, path: str) -> object:
+    await store.rename_dir(
+        community_id=_COMMUNITY, server_id=_SERVER, from_path="ghost", to_path=path
+    )
+    return None
+
+
+async def _make_dir(store: FakeFileStore, path: str) -> object:
+    await store.make_dir(community_id=_COMMUNITY, server_id=_SERVER, rel_path=path)
+    return None
+
+
+async def _zip_members(stream: AsyncIterator[bytes]) -> list[tuple[str, bytes]]:
+    # Members rather than bytes: each entry carries its write time, so two archives
+    # of one subtree differ byte-for-byte across a clock second.
+    with zipfile.ZipFile(io.BytesIO(await _drain(stream))) as zf:
+        return [(info.filename, zf.read(info)) for info in zf.infolist()]
+
+
+async def _download_dir_members(store: FakeFileStore, path: str) -> object:
+    return await _zip_members(_download_dir(store, path))
+
+
+async def _export_dir_members(store: FakeFileStore, path: str) -> object:
+    return await _zip_members(_export_dir(store, path))
+
+
+async def _validate_rel_path(store: FakeFileStore, path: str) -> object:
+    store.validate_rel_path(path)
+    return None
+
+
+async def _retain_if_changed(store: FakeFileStore, path: str) -> object:
+    await store.retain_if_changed(
+        community_id=_COMMUNITY, server_id=_SERVER, rel_path=path
+    )
+    return None
+
+
+async def _list_versions(store: FakeFileStore, path: str) -> object:
+    return await store.list_versions(
+        community_id=_COMMUNITY, server_id=_SERVER, rel_path=path
+    )
+
+
+async def _read_version(store: FakeFileStore, path: str) -> object:
+    return await store.read_version(
+        community_id=_COMMUNITY, server_id=_SERVER, rel_path=path, version_id="v1"
+    )
+
+
+async def _rollback(store: FakeFileStore, path: str) -> object:
+    await store.rollback(
+        community_id=_COMMUNITY, server_id=_SERVER, rel_path=path, version_id="v1"
+    )
+    return None
+
+
+# Every method that decides something about a path, each against a path that
+# EXISTS in ``_world()`` (or, for a destination, a free one), so the canonical
+# spelling is a hit and an alias that misses is a failure rather than a match. The
+# one occupied destination is a file rename onto a file, which both backends
+# overwrite (fs ``os.rename``, the object backend's copy) -- the never-clobber 409
+# is ``RenameFile``'s own pre-check. Each path has a ``/`` in it, so every
+# spelling in ``_SPELLINGS`` differs from it.
+_ANSWERING_CALLS = [
+    pytest.param(_read_file, "world/level.dat", id="read_file"),
+    pytest.param(_open_file_stream, "world/level.dat", id="open_file_stream"),
+    pytest.param(_path_exists, "world/level.dat", id="path_exists-file"),
+    pytest.param(_path_exists, "world/region", id="path_exists-dir"),
+    pytest.param(_path_exists, "world/plugins", id="path_exists-created-dir"),
+    pytest.param(_write_file, "world/level.dat", id="write_file-overwrite"),
+    pytest.param(_write_file, "world/new.txt", id="write_file-new"),
+    pytest.param(_delete_file, "world/level.dat", id="delete_file"),
+    pytest.param(_rename_file_from, "world/level.dat", id="rename_file-source"),
+    pytest.param(_rename_file_to, "world/moved.dat", id="rename_file-destination"),
+    pytest.param(_rename_file_to, "world/level.dat", id="rename_file-onto-a-file"),
+    pytest.param(_list_dir, "world/region", id="list_dir"),
+    pytest.param(_list_dir, "world/plugins", id="list_dir-created-dir"),
+    pytest.param(_delete_dir, "world/region", id="delete_dir"),
+    pytest.param(_delete_dir, "world/plugins", id="delete_dir-created-dir"),
+    pytest.param(_rename_dir_from, "world/region", id="rename_dir-source"),
+    pytest.param(_rename_dir_from, "world/plugins", id="rename_dir-created-source"),
+    pytest.param(_rename_dir_to, "archive/region", id="rename_dir-destination"),
+    pytest.param(_make_dir, "world/new", id="make_dir"),
+    pytest.param(_make_dir, "world/plugins", id="make_dir-existing"),
+    pytest.param(_download_dir_members, "world/region", id="download_dir"),
+    pytest.param(_export_dir_members, "world/region", id="export_dir"),
+]
+
+
+@pytest.mark.parametrize("spell", _SPELLINGS)
+@pytest.mark.parametrize(("call", "path"), _ANSWERING_CALLS)
+async def test_file_store_answers_every_spelling_of_a_path(
+    call: _PathCall, path: str, spell: Callable[[str], str]
+) -> None:
+    # An alias answers exactly what its canonical path answers, and leaves the
+    # store exactly as the canonical path does. The comparison is on the RAW
+    # containers: a write, rename or ``make_dir`` through an alias lands under the
+    # canonical key -- or on the entry already there -- never under the caller's
+    # spelling, because production holds one entry per canonical path and a test
+    # that reads ``store.files[...]`` back reads it by that name.
+    canonical, aliased = _world(), _world()
+
+    expected = await call(canonical, path)
+
+    assert await call(aliased, spell(path)) == expected
+    assert (aliased.files, aliased.dirs) == (canonical.files, canonical.dirs)
+
+
+@pytest.mark.parametrize("spell", _SPELLINGS)
+@pytest.mark.parametrize(("call", "path"), _ANSWERING_CALLS)
+async def test_file_store_answers_a_path_seeded_under_an_alias(
+    call: _PathCall, path: str, spell: Callable[[str], str]
+) -> None:
+    # The stored-key half of the same rule. ``files`` and ``dirs`` are typed by
+    # hand, so a seed carries the same aliases a caller does; canonicalising only
+    # the lookup would leave an alias-seeded entry unreachable under the name
+    # production resolves it to. A mutation acts on the entry that EXISTS, under
+    # whatever spelling it was seeded, so the store never holds two spellings of one
+    # path -- ``_held`` keeps a second one visible rather than collapsing it.
+    canonical, aliased = _world(), _world(spell)
+
+    expected = await call(canonical, path)
+
+    assert await call(aliased, path) == expected
+    assert _held(aliased) == _held(canonical)
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        pytest.param(_validate_rel_path, id="validate_rel_path"),
+        pytest.param(_read_file, id="read_file"),
+        pytest.param(_open_file_stream, id="open_file_stream"),
+        pytest.param(_path_exists, id="path_exists"),
+        pytest.param(_write_file, id="write_file"),
+        pytest.param(_retain_if_changed, id="retain_if_changed"),
+        pytest.param(_delete_file, id="delete_file"),
+        pytest.param(_rename_file_from, id="rename_file-source"),
+        pytest.param(_rename_file_to, id="rename_file-destination"),
+        pytest.param(_rename_file_from_nothing_to, id="rename_file-before-a-miss"),
+        pytest.param(_list_dir, id="list_dir"),
+        pytest.param(_delete_dir, id="delete_dir"),
+        pytest.param(_rename_dir_from, id="rename_dir-source"),
+        pytest.param(_rename_dir_to, id="rename_dir-destination"),
+        pytest.param(_rename_dir_from_nothing_to, id="rename_dir-before-a-miss"),
+        pytest.param(_make_dir, id="make_dir"),
+        pytest.param(_download_dir_members, id="download_dir"),
+        pytest.param(_export_dir_members, id="export_dir"),
+        pytest.param(_list_versions, id="list_versions"),
+        pytest.param(_read_version, id="read_version"),
+        pytest.param(_rollback, id="rollback"),
+    ],
+)
+async def test_file_store_refuses_traversal_as_production_does(
+    call: _PathCall,
+) -> None:
+    # ``RelPath`` refuses a ``..`` component and ``_rel_path`` surfaces it as
+    # ``InvalidFilePathError`` on EVERY adapter method, before Storage is reached,
+    # so nothing is looked up and nothing is changed. The raw key reported a miss,
+    # or wrote the traversal in as a key. The ``-before-a-miss`` rows pin the
+    # ORDER for a destination: the adapter builds both paths as the arguments of
+    # one Storage call, so an unusable destination is refused even when the source
+    # would have missed. The stream rows are drained, since the adapter builds the
+    # ``RelPath`` inside the generator body.
+    store = _world()
+    files, dirs = dict(store.files), set(store.dirs)
+
+    with pytest.raises(InvalidFilePathError):
+        await call(store, "../escape")
+
+    assert (store.files, store.dirs) == (files, dirs)
+
+
+@pytest.mark.parametrize("root", ["", ".", "./"])
+async def test_file_store_path_exists_answers_the_root_under_every_spelling(
+    root: str,
+) -> None:
+    # The root is always occupied, and every spelling ``RelPath`` normalises to
+    # empty ``parts`` is the root. The listing and both dir-zip streams take the
+    # same three spellings in their root pins above.
+    #
+    # The file methods get no root row here: a READ, a delete or a rename source
+    # at the root misses whether the key is raw or canonical, so a pin would redden
+    # for nothing. ``delete_dir`` and ``rename_dir`` get none either -- the
+    # backends disagree at the root (fs ``rmtree``s or renames the snapshot
+    # directory itself, the object backend loops over every key), so there is no
+    # single production behaviour to pin (#2923's rule).
+    store = FakeFileStore()
+
+    assert await _path_exists(store, root) is True
+
+
+@pytest.mark.parametrize("root", ["", ".", "./"])
+async def test_file_store_make_dir_at_the_root_records_nothing(root: str) -> None:
+    # ``make_dir`` of the root is a no-op in both backends (the object backend
+    # returns before writing the ``//.dir`` marker #1944 names, fs's
+    # ``exist_ok=True`` mkdir of the snapshot directory changes nothing), under
+    # every spelling of it. A record for ``"./"`` would list as a nameless ``.``
+    # directory at the root.
+    store = FakeFileStore()
+
+    await _make_dir(store, root)
+
+    assert store.dirs == set()
+    assert await _list_dir(store, ".") == []
+
+
+@pytest.mark.parametrize("root", ["", ".", "./"])
+async def test_file_store_write_file_refuses_the_root(root: str) -> None:
+    # The root names a directory, not a file, and both backends refuse to write it
+    # with ``PathTraversalError("rel_path must name a file, not the root")``
+    # (``FsStorage._write_file``, ``ObjectStorage.write_file``, issue #542), which
+    # ``StorageFileStoreAdapter.write_file`` surfaces as ``InvalidFilePathError``.
+    # Once every spelling of the root is one canonical path, a fake that stored it
+    # would hold a FILE named ``.`` -- the forgiving direction.
+    store = FakeFileStore()
+
+    with pytest.raises(InvalidFilePathError):
+        await _write_file(store, root)
+
+    assert store.files == {}
+    assert store.writes == []
+
+
+@pytest.mark.parametrize(
+    ("seed", "call", "path"),
+    [
+        pytest.param(
+            lambda store: store.files.update(
+                {"world/level.dat": b"a", "./world/level.dat": b"b"}
+            ),
+            _read_file,
+            "world/level.dat",
+            id="files",
+        ),
+        pytest.param(
+            lambda store: store.dirs.update({"world/plugins", "./world/plugins/"}),
+            _list_dir,
+            "world/plugins",
+            id="dirs",
+        ),
+    ],
+)
+async def test_file_store_refuses_one_path_seeded_under_two_spellings(
+    seed: Callable[[FakeFileStore], None], call: _PathCall, path: str
+) -> None:
+    # Canonicalising the stored keys can make two seeds name one path. That is a
+    # SEEDING MISTAKE, not a state to model -- production holds ONE entry at a
+    # canonical path -- so it is refused loudly rather than letting one seed win by
+    # insertion or hash order, which would read as a flake (the guard #3032 gave
+    # the sibling fake in ``test_files.py``).
+    store = FakeFileStore()
+    seed(store)
+
+    with pytest.raises(AssertionError, match="two spellings"):
+        await call(store, path)
