@@ -1541,8 +1541,11 @@ async def _rollback(store: FakeFileStore, path: str) -> object:
 
 # Every method that decides something about a path, each against a path that
 # EXISTS in ``_world()`` (or, for a destination, a free one), so the canonical
-# spelling is a hit and an alias that misses is a failure rather than a match. Each
-# path has a ``/`` in it, so every spelling in ``_SPELLINGS`` differs from it.
+# spelling is a hit and an alias that misses is a failure rather than a match. The
+# one occupied destination is a file rename onto a file, which both backends
+# overwrite (fs ``os.rename``, the object backend's copy) -- the never-clobber 409
+# is ``RenameFile``'s own pre-check. Each path has a ``/`` in it, so every
+# spelling in ``_SPELLINGS`` differs from it.
 _ANSWERING_CALLS = [
     pytest.param(_read_file, "world/level.dat", id="read_file"),
     pytest.param(_open_file_stream, "world/level.dat", id="open_file_stream"),
@@ -1554,6 +1557,7 @@ _ANSWERING_CALLS = [
     pytest.param(_delete_file, "world/level.dat", id="delete_file"),
     pytest.param(_rename_file_from, "world/level.dat", id="rename_file-source"),
     pytest.param(_rename_file_to, "world/moved.dat", id="rename_file-destination"),
+    pytest.param(_rename_file_to, "world/level.dat", id="rename_file-onto-a-file"),
     pytest.param(_list_dir, "world/region", id="list_dir"),
     pytest.param(_list_dir, "world/plugins", id="list_dir-created-dir"),
     pytest.param(_delete_dir, "world/region", id="delete_dir"),

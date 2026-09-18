@@ -488,9 +488,9 @@ class FakeFileStore(FileStore):
         del self.files[key]
 
     def _existing_subtree(
-        self, rel_path: str, server_id: ServerId
+        self, path: str, server_id: ServerId
     ) -> tuple[str, dict[str, str], dict[str, str]]:
-        """The prefix ``rel_path`` names, plus every file and directory inside it.
+        """The prefix ``path`` names, plus every file and directory inside it.
 
         The whole-subtree half of ``delete_dir`` / ``rename_dir`` (issue #2972), and
         the gate both dir-zip streams open with (issue #3034).
@@ -510,12 +510,13 @@ class FakeFileStore(FileStore):
         plain FILE at the name misses here too (nothing sits under ``<name>/``) and
         the ROOT never misses.
 
-        The members come back keyed by canonical path, each mapped to the key it
-        is seeded under (:func:`_by_canonical`), so a caller walks the tree
-        production holds and acts on the entries that exist.
+        ``path`` is already canonical: each caller builds it where the adapter
+        builds its ``RelPath``, which for ``rename_dir`` is ahead of the
+        destination's. The members come back keyed by canonical path, each mapped
+        to the key it is seeded under (:func:`_by_canonical`), so a caller walks the
+        tree production holds and acts on the entries that exist.
         """
 
-        path = _canonical(rel_path)
         prefix = "" if path == "." else path + "/"
         files = {
             member: key
@@ -533,7 +534,7 @@ class FakeFileStore(FileStore):
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> None:
         self.events.append((server_id, "delete-dir"))
-        _, files, dirs = self._existing_subtree(rel_path, server_id)
+        _, files, dirs = self._existing_subtree(_canonical(rel_path), server_id)
         for key in files.values():
             del self.files[key]
         self.dirs -= set(dirs.values())
@@ -661,7 +662,7 @@ class FakeFileStore(FileStore):
         # ``self.events`` -- a seam record these two methods have never made. The
         # same scan supplies the members: zipping the whole tree whatever
         # ``rel_path`` said was a content-fidelity divergence (issue #3034).
-        prefix, members, _ = self._existing_subtree(rel_path, server_id)
+        prefix, members, _ = self._existing_subtree(_canonical(rel_path), server_id)
         buf = io.BytesIO()
         # Deflated, as the adapter opens its ``ZipFile``.
         with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
