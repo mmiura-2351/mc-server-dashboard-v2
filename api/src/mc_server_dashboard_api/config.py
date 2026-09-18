@@ -918,6 +918,10 @@ class Settings(BaseSettings):
         # it whenever present. ``None`` (control plane disabled) is not a secret.
         if control["worker_credential"] is not None:
             control["worker_credential"] = _MASK
+        # The TLS private-key path is a secret (CONFIGURATION.md Section 5.1);
+        # mask it whenever present. ``None`` (TLS not configured) is not a secret.
+        if control["tls"]["key_file"] is not None:
+            control["tls"]["key_file"] = _MASK
         storage = self.storage.model_dump()
         # The object-store access/secret keys are secrets (CONFIGURATION.md
         # Section 5.2); mask each whenever present. ``None`` (object backend
