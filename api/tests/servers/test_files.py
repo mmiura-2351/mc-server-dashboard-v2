@@ -328,6 +328,12 @@ class FakeFileStore(FileStore):
         if self.bad_path:
             raise InvalidFilePathError(rel_path)
         path = _canonical(rel_path)
+        if path == ".":
+            # The root names a directory, not a file: both backends refuse it with
+            # ``PathTraversalError`` ahead of any write (issue #542), which the
+            # adapter surfaces as ``InvalidFilePathError``. Storing it would hold a
+            # file named ``.`` (issue #3091).
+            raise InvalidFilePathError(rel_path)
         # The file a spelling names, or the canonical form when it names nothing
         # yet: a write lands ON the seeded entry rather than beside it under the
         # caller's spelling, since production has one file there either way.
@@ -1108,6 +1114,30 @@ async def test_file_store_write_file_lands_on_the_file_a_spelling_names() -> Non
     ) == ["v1"]
     # The observation list records the argument as passed, unchanged by any of it.
     assert store.writes == [("notes.txt", b"new")]
+
+
+@pytest.mark.parametrize("root", ["", ".", "./"])
+async def test_file_store_write_file_refuses_the_root(root: str) -> None:
+    # The root names a directory, not a file, and both backends refuse to write it
+    # with ``PathTraversalError("rel_path must name a file, not the root")``
+    # (``FsStorage._write_file``, ``ObjectStorage.write_file``, issue #542), which
+    # ``StorageFileStoreAdapter.write_file`` surfaces as ``InvalidFilePathError``.
+    # Every spelling here canonicalises to ``.``, so a fake that stored it held a
+    # FILE named ``.`` -- the forgiving direction the sibling fake in ``fakes.py``
+    # closed in #3093 (issue #3091).
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+
+    with pytest.raises(InvalidFilePathError):
+        await store.write_file(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path=root,
+            content=b"x",
+        )
+
+    assert store.files == {}
+    assert store.writes == []
 
 
 async def test_file_store_retain_if_changed_answers_every_spelling() -> None:
