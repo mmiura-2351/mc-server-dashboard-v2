@@ -893,6 +893,34 @@ async def test_file_store_delete_dir_removes_the_subtree_later_calls_see() -> No
     )
 
 
+async def test_file_store_delete_dir_removes_a_created_empty_directory() -> None:
+    # The subtree the test above deletes holds FILES, so its gate is met by the
+    # seeded-file half of ``_existing_subtree`` alone, and the ``make_dir`` half
+    # was exercised only through ``export_dir`` (issue #3069): a regression that
+    # stopped the gate consulting the records would make this exact call a 404
+    # here while production deletes the directory. Measured against both live
+    # backends through ``StorageFileStoreAdapter`` while implementing #3069 -- fs
+    # ``rmtree``s the empty directory, the object backend's prefix listing finds
+    # the ``.dir`` marker #1125 anchors it with -- and afterwards the name is free
+    # and a listing misses, as for a populated directory.
+    store = FakeFileStore()
+    store.files["server.properties"] = b"keep"
+    await store.make_dir(community_id=_COMMUNITY, server_id=_SERVER, rel_path="empty")
+
+    await store.delete_dir(community_id=_COMMUNITY, server_id=_SERVER, rel_path="empty")
+
+    with pytest.raises(ServerFileNotFoundError):
+        await store.list_dir(
+            community_id=_COMMUNITY, server_id=_SERVER, rel_path="empty"
+        )
+    assert (
+        await store.path_exists(
+            community_id=_COMMUNITY, server_id=_SERVER, rel_path="empty"
+        )
+        is False
+    )
+
+
 async def test_file_store_delete_dir_on_a_missing_directory_reports_not_found() -> None:
     # Both backends refuse rather than succeed silently: fs's ``_existing_dir``
     # gate raises ``NotFoundError`` and the object backend raises it on an empty
@@ -989,6 +1017,38 @@ async def test_file_store_rename_dir_moves_the_subtree_later_calls_see() -> None
             community_id=_COMMUNITY, server_id=_SERVER, rel_path="server.properties"
         )
         == b"keep"
+    )
+
+
+async def test_file_store_rename_dir_moves_a_created_empty_directory() -> None:
+    # The rename sibling of the delete pin above, for the same reason: the subtree
+    # renamed above holds files, so nothing pinned a source that exists only
+    # through ``make_dir`` (issue #3069). Measured against both live backends
+    # through ``StorageFileStoreAdapter`` while implementing #3069 -- fs
+    # ``os.rename``s the empty directory, the object backend copies its ``.dir``
+    # marker -- and afterwards the destination lists empty and the source's name
+    # is free.
+    store = FakeFileStore()
+    await store.make_dir(community_id=_COMMUNITY, server_id=_SERVER, rel_path="empty")
+
+    await store.rename_dir(
+        community_id=_COMMUNITY,
+        server_id=_SERVER,
+        from_path="empty",
+        to_path="moved",
+    )
+
+    assert (
+        await store.list_dir(
+            community_id=_COMMUNITY, server_id=_SERVER, rel_path="moved"
+        )
+        == []
+    )
+    assert (
+        await store.path_exists(
+            community_id=_COMMUNITY, server_id=_SERVER, rel_path="empty"
+        )
+        is False
     )
 
 
@@ -1137,10 +1197,10 @@ async def test_file_store_dir_zip_on_the_root_streams_rather_than_missing(
     # ``"."`` to the same empty ``parts``.
     #
     # Draining without ``ServerFileNotFoundError`` IS the assertion here, not a
-    # missing one: ``download_dir`` yields no bytes in this fake by construction,
-    # so there is nothing to compare. What a zip CONTAINS is pinned separately:
-    # ``test_file_store_export_dir_zips_the_named_subtree`` below pins a SUBTREE,
-    # and the ``ExportServer`` suite pins the ROOT, reading the archive back.
+    # missing one. What a zip CONTAINS is pinned separately:
+    # ``test_file_store_dir_zip_streams_the_subtree_as_production_walks_it`` below
+    # pins a SUBTREE on both streams, and the ``ExportServer`` suite pins the ROOT,
+    # reading the archive back.
     store = FakeFileStore()
     store.files["server.properties"] = b"k=v"
 
@@ -1226,3 +1286,64 @@ async def test_file_store_export_dir_zips_a_created_empty_directory() -> None:
 
     with zipfile.ZipFile(io.BytesIO(blob)) as zf:
         assert zf.namelist() == ["export_metadata.json"]
+
+
+@pytest.mark.parametrize("open_zip", [_download_dir, _export_dir])
+async def test_file_store_dir_zip_streams_the_subtree_as_production_walks_it(
+    open_zip: _DirZip,
+) -> None:
+    # ``download_dir`` streamed NO bytes for a directory that exists, so a use case
+    # that downloads one and asserts on the archive passed here after merely
+    # draining it -- the forgiving direction again (issue #3069). Production builds
+    # both streams from ``_download_dir_gen``, so the archive is pinned on both,
+    # member for member, as ``StorageFileStoreAdapter`` writes it:
+    #
+    # - arcnames relative to ``rel_path``, and only what sits under it;
+    # - in ``_walk_files``' order: each level is listed name-sorted (fs's
+    #   ``_list_children``, the object backend's ``_entries_at_level``), its files
+    #   are yielded as met and its subdirectories pushed onto a stack, so they are
+    #   descended after the files and in REVERSE name order. Seeded here in an
+    #   order that is neither that nor sorted-by-path, so neither the insertion
+    #   order nor a plain sort reproduces it;
+    # - files only: the walk skips ``is_dir`` entries, so a created empty directory
+    #   contributes no member;
+    # - deflated (``compression=zipfile.ZIP_DEFLATED``).
+    #
+    # Measured against BOTH live backends through ``StorageFileStoreAdapter`` while
+    # implementing #3069 -- the committed adapter tests compare member SETS, so
+    # none of them pins the order.
+    store = FakeFileStore()
+    store.files["a/y.txt"] = b"y"
+    store.files["a/sub/w.txt"] = b"w"
+    store.files["a/b.txt"] = b"b"
+    store.files["a/sub2/v.txt"] = b"v"
+    store.files["z.txt"] = b"outside"
+    await store.make_dir(community_id=_COMMUNITY, server_id=_SERVER, rel_path="a/empty")
+
+    blob = await _drain(open_zip(store, "a"))
+
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        members = [(info.filename, zf.read(info)) for info in zf.infolist()]
+        compression = {info.compress_type for info in zf.infolist()}
+    assert members == [
+        ("b.txt", b"b"),
+        ("y.txt", b"y"),
+        ("sub2/v.txt", b"v"),
+        ("sub/w.txt", b"w"),
+    ]
+    assert compression == {zipfile.ZIP_DEFLATED}
+
+
+async def test_file_store_download_dir_zips_a_created_empty_directory() -> None:
+    # The download sibling of the export pin on a created empty directory: an
+    # empty directory is a real one, so what streams is a valid archive with no
+    # members -- not the zero bytes this fake used to answer every directory with
+    # (issue #3069). Measured against both live backends: a ``make_dir``-only
+    # directory downloads as an empty zip.
+    store = FakeFileStore()
+    await store.make_dir(community_id=_COMMUNITY, server_id=_SERVER, rel_path="backups")
+
+    blob = await _drain(_download_dir(store, "backups"))
+
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        assert zf.namelist() == []

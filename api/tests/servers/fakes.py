@@ -240,7 +240,8 @@ class FakeFileStore(FileStore):
     files in the subtree they act on, so a created directory stops being observable
     once it is deleted and moves with its parent when it is renamed (issue #2972).
     ``download_dir`` and ``export_dir`` refuse a directory that same membership does
-    not describe, and ``export_dir`` zips the subtree it names (issue #3034).
+    not describe (issue #3034), and both zip the subtree it names, member for member
+    as production writes it (issue #3069).
     """
 
     def __init__(self, *, fail_write: bool = False, seed_eula: bool = False) -> None:
@@ -504,31 +505,7 @@ class FakeFileStore(FileStore):
     def download_dir(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> AsyncIterator[bytes]:
-        async def _gen() -> AsyncIterator[bytes]:
-            # Both dir-zip streams open with the same gate because production
-            # builds them from ONE body: ``StorageFileStoreAdapter.download_dir``
-            # and ``.export_dir`` both return ``_download_dir_gen``, whose first
-            # act is a LISTING of the pinned working-set view -- a ``NotFoundError``
-            # there becomes ``ServerFileNotFoundError`` before a byte of zip exists
-            # (issue #3034). Deciding nothing about ``rel_path`` was the forgiving
-            # direction: a download of a directory that does not exist passed here
-            # and 404s in production.
-            #
-            # Inside the generator, because the adapter's gate is too: its
-            # ``download_dir`` only builds the generator, so nothing is decided
-            # until the caller pulls the first chunk.
-            #
-            # ``_existing_subtree`` rather than this fake's ``list_dir``: it is the
-            # same membership (same prefix rule, same root exemption -- its
-            # docstring says so), so no third path rule is introduced, and it is
-            # the bare scan rather than the seam method, which would append a
-            # ``list-dir`` event to ``self.events`` -- a seam record these two
-            # methods have never made.
-            self._existing_subtree(rel_path, server_id)
-            return
-            yield b""  # pragma: no cover - empty async generator
-
-        return _gen()
+        return self._download_dir_gen(server_id, rel_path, extra=[])
 
     def export_dir(
         self,
@@ -541,27 +518,69 @@ class FakeFileStore(FileStore):
         # Build a real zip of every seeded file UNDER ``rel_path`` plus the
         # ``extra`` entries so a round-trip test can re-open and compare the bytes
         # (issue #274).
-        async def _gen() -> AsyncIterator[bytes]:
-            # The gate ``download_dir`` documents, and the same scan supplies the
-            # members: zipping the whole tree whatever ``rel_path`` said was a
-            # content-fidelity divergence, benign only because ``ExportServer``
-            # always passes ``"."`` (issue #3034). Arcnames are relative to
+        return self._download_dir_gen(server_id, rel_path, extra=extra)
+
+    async def _download_dir_gen(
+        self, server_id: ServerId, rel_path: str, *, extra: list[tuple[str, bytes]]
+    ) -> AsyncIterator[bytes]:
+        # ONE body for both dir-zip streams because production builds them from
+        # one: ``StorageFileStoreAdapter.download_dir`` and ``.export_dir`` both
+        # return its ``_download_dir_gen``, differing only in the ``extra``
+        # in-memory entries appended after the subtree. Two bodies here let
+        # ``download_dir`` answer a directory that exists with no bytes at all, so
+        # a use case asserting on the archive passed after merely draining it
+        # (issue #3069).
+        #
+        # Its first act is a LISTING of the pinned working-set view -- a
+        # ``NotFoundError`` there becomes ``ServerFileNotFoundError`` before a byte
+        # of zip exists (issue #3034). Deciding nothing about ``rel_path`` was the
+        # forgiving direction: a download of a directory that does not exist
+        # passed here and 404s in production.
+        #
+        # A generator, because the adapter's body is one too: its two methods only
+        # build it, so nothing is decided until the caller pulls the first chunk.
+        # Read at first pull rather than at call time, which is where the adapter
+        # pins its snapshot (the view opens inside the body).
+        #
+        # ``_existing_subtree`` rather than this fake's ``list_dir``: it is the
+        # same membership (same prefix rule, same root exemption -- its docstring
+        # says so), so no third path rule is introduced, and it is the bare scan
+        # rather than the seam method, which would append a ``list-dir`` event to
+        # ``self.events`` -- a seam record these two methods have never made. The
+        # same scan supplies the members: zipping the whole tree whatever
+        # ``rel_path`` said was a content-fidelity divergence (issue #3034).
+        prefix, members, _ = self._existing_subtree(rel_path, server_id)
+        buf = io.BytesIO()
+        # Deflated, as the adapter opens its ``ZipFile``.
+        with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+            # ``_walk_files``' walk, over this fake's membership: each level
+            # name-sorted, as both backends list it (fs's ``_list_children``, the
+            # object backend's ``_entries_at_level``), its files zipped as met and
+            # its subdirectories pushed onto a stack -- so they are descended after
+            # the files, in REVERSE name order. Files only: a created directory
+            # holds none, so it contributes no member. Arcnames are relative to
             # ``rel_path`` -- ``_walk_files`` states it ("the zip contains the
             # subtree itself, not the path leading to it") and
             # ``test_download_dir_streams_zip_of_subtree`` pins it against the live
             # fs backend -- and ``extra`` lands after the subtree, as the adapter
-            # appends it. Read at first pull rather than at call time, which is
-            # where the adapter pins its snapshot (the view opens inside the body).
-            prefix, members, _ = self._existing_subtree(rel_path, server_id)
-            buf = io.BytesIO()
-            with zipfile.ZipFile(buf, mode="w") as zf:
-                for path in members:
-                    zf.writestr(path[len(prefix) :], self.files[path])
-                for arcname, content in extra:
-                    zf.writestr(arcname, content)
-            yield buf.getvalue()
-
-        return _gen()
+            # appends it.
+            stack = [prefix]
+            while stack:
+                current = stack.pop()
+                level = {
+                    path[len(current) :].split("/", 1)[0]
+                    for path in members
+                    if path.startswith(current)
+                }
+                for name in sorted(level):
+                    child = current + name
+                    if child in self.files:
+                        zf.writestr(child[len(prefix) :], self.files[child])
+                    else:
+                        stack.append(child + "/")
+            for arcname, content in extra:
+                zf.writestr(arcname, content)
+        yield buf.getvalue()
 
     async def list_versions(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
