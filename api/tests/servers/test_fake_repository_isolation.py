@@ -861,11 +861,13 @@ async def test_file_store_delete_dir_removes_the_subtree_later_calls_see() -> No
     store.files["world/region/r.dat"] = b"b"
     store.files["server.properties"] = b"keep"
     # A created EMPTY directory inside the subtree. No contract test states this
-    # one: ``test_delete_dir_removes_subtree`` seeds files only. It follows from
-    # the two implementations -- ``rmtree`` unlinks a nested empty directory like
-    # any other member, and the object backend's prefix listing includes the
-    # nested ``.dir`` marker #1125 anchors it with -- and it is the half of the
-    # delete that the ``dirs`` bookkeeping is what models.
+    # one: ``test_delete_dir_removes_subtree`` seeds files only, and
+    # ``test_delete_dir_removes_a_make_dir_only_directory`` deletes the created
+    # directory itself, not a populated one around it. It follows from the two
+    # implementations -- ``rmtree`` unlinks a nested empty directory like any
+    # other member, and the object backend's prefix listing includes the nested
+    # ``.dir`` marker #1125 anchors it with -- and it is the half of the delete
+    # that the ``dirs`` bookkeeping is what models.
     await store.make_dir(
         community_id=_COMMUNITY, server_id=_SERVER, rel_path="world/plugins"
     )
@@ -901,11 +903,12 @@ async def test_file_store_delete_dir_removes_a_created_empty_directory() -> None
     # seeded-file half of ``_existing_subtree`` alone, and the ``make_dir`` half
     # was exercised only through ``export_dir`` (issue #3069): a regression that
     # stopped the gate consulting the records would make this exact call a 404
-    # here while production deletes the directory. Measured against both live
-    # backends through ``StorageFileStoreAdapter`` while implementing #3069 -- fs
-    # ``rmtree``s the empty directory, the object backend's prefix listing finds
-    # the ``.dir`` marker #1125 anchors it with -- and afterwards the name is free
-    # and a listing misses, as for a populated directory.
+    # here while production deletes the directory. Pinned against the live
+    # backends in ``tests/storage/test_port_contract.py::
+    # test_delete_dir_removes_a_make_dir_only_directory`` -- fs ``rmtree``s the
+    # empty directory, the object backend's prefix listing finds the ``.dir``
+    # marker #1125 anchors it with -- and afterwards the name is free and a
+    # listing misses, as for a populated directory.
     store = FakeFileStore()
     store.files["server.properties"] = b"keep"
     await store.make_dir(community_id=_COMMUNITY, server_id=_SERVER, rel_path="empty")
@@ -962,9 +965,11 @@ async def test_file_store_rename_dir_moves_the_subtree_later_calls_see() -> None
     # (``ObjectStorage.rename_dir``). Pinned against the live backends in
     # ``tests/storage/test_port_contract.py::test_rename_dir_moves_subtree``,
     # which -- like the delete's -- seeds files only, so the created EMPTY
-    # directory below is again derived rather than contract-pinned: ``os.rename``
-    # carries it as part of the tree, and the object backend copies the nested
-    # ``.dir`` marker like any other key.
+    # directory below is again derived rather than contract-pinned (the
+    # contract's ``test_rename_dir_moves_a_make_dir_only_directory`` renames a
+    # created directory itself, not one nested in the moved subtree):
+    # ``os.rename`` carries it as part of the tree, and the object backend copies
+    # the nested ``.dir`` marker like any other key.
     store = FakeFileStore()
     store.files["world/level.dat"] = b"a"
     store.files["world/region/r.dat"] = b"b"
@@ -1026,11 +1031,11 @@ async def test_file_store_rename_dir_moves_the_subtree_later_calls_see() -> None
 async def test_file_store_rename_dir_moves_a_created_empty_directory() -> None:
     # The rename sibling of the delete pin above, for the same reason: the subtree
     # renamed above holds files, so nothing pinned a source that exists only
-    # through ``make_dir`` (issue #3069). Measured against both live backends
-    # through ``StorageFileStoreAdapter`` while implementing #3069 -- fs
-    # ``os.rename``s the empty directory, the object backend copies its ``.dir``
-    # marker -- and afterwards the destination lists empty and the source's name
-    # is free.
+    # through ``make_dir`` (issue #3069). Pinned against the live backends in
+    # ``tests/storage/test_port_contract.py::
+    # test_rename_dir_moves_a_make_dir_only_directory`` -- fs ``os.rename``s the
+    # empty directory, the object backend copies its ``.dir`` marker -- and
+    # afterwards the destination lists empty and the source's name is free.
     store = FakeFileStore()
     await store.make_dir(community_id=_COMMUNITY, server_id=_SERVER, rel_path="empty")
 

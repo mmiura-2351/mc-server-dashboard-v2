@@ -1908,6 +1908,32 @@ async def test_delete_dir_removes_subtree(harness: StorageHarness) -> None:
     )
 
 
+async def test_delete_dir_removes_a_make_dir_only_directory(
+    harness: StorageHarness,
+) -> None:
+    """A directory that exists only through ``make_dir`` deletes like any other (#3092).
+
+    ``test_delete_dir_removes_subtree`` deletes a directory that holds files. Here
+    nothing sits under the name but what ``make_dir`` left: a real empty directory
+    on fs, and on the object backend -- which has no directories -- only the
+    ``.dir`` marker that anchors it (#1125). That is where the two backends could
+    diverge, so the outcome is pinned on both: the name is free afterwards, a
+    listing misses, and the sibling is untouched.
+    """
+
+    community, server = new_scope()
+    await harness.publish(community, server, {"server.properties": b"keep"})
+    await harness.storage.make_dir(community, server, RelPath("empty"))
+
+    await harness.storage.delete_dir(community, server, RelPath("empty"))
+
+    with pytest.raises(NotFoundError):
+        await harness.storage.list_dir(community, server, RelPath("empty"))
+    assert not await harness.storage.path_exists(community, server, RelPath("empty"))
+    root = await harness.storage.list_dir(community, server, RelPath("."))
+    assert {(e.name, e.is_dir) for e in root} == {("server.properties", False)}
+
+
 async def test_delete_missing_dir_is_not_found(harness: StorageHarness) -> None:
     community, server = new_scope()
     await harness.publish(community, server, {"f": b"x"})
@@ -2051,6 +2077,38 @@ async def test_rename_dir_moves_subtree(harness: StorageHarness) -> None:
         await harness.storage.read_file(community, server, RelPath("server.properties"))
         == b"keep"
     )
+
+
+async def test_rename_dir_moves_a_make_dir_only_directory(
+    harness: StorageHarness,
+) -> None:
+    """A directory that exists only through ``make_dir`` renames like any other (#3092).
+
+    The rename sibling of ``test_delete_dir_removes_a_make_dir_only_directory``:
+    ``test_rename_dir_moves_subtree`` moves files, so nothing pinned a source whose
+    only object-backend key is its ``.dir`` marker (#1125). Afterwards the
+    destination lists empty -- still a directory, not a miss -- and the source's
+    name is free. The destination is fresh: renaming onto one that already exists
+    has no single rule yet (#3030).
+    """
+
+    community, server = new_scope()
+    await harness.publish(community, server, {"server.properties": b"keep"})
+    await harness.storage.make_dir(community, server, RelPath("empty"))
+
+    await harness.storage.rename_dir(
+        community, server, RelPath("empty"), RelPath("moved")
+    )
+
+    assert await harness.storage.list_dir(community, server, RelPath("moved")) == []
+    with pytest.raises(NotFoundError):
+        await harness.storage.list_dir(community, server, RelPath("empty"))
+    assert not await harness.storage.path_exists(community, server, RelPath("empty"))
+    root = await harness.storage.list_dir(community, server, RelPath("."))
+    assert {(e.name, e.is_dir) for e in root} == {
+        ("moved", True),
+        ("server.properties", False),
+    }
 
 
 async def test_rename_missing_dir_is_not_found(harness: StorageHarness) -> None:
