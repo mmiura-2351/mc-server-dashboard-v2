@@ -47,7 +47,7 @@ stubs by hand; regenerate with `make proto-gen` from the repo root.
 
 ## Toolchain
 
-- **Go**: 1.26 (pinned in `go.mod`).
+- **Go**: 1.27 (pinned in `go.mod`).
 - **golangci-lint**: pinned by `GOLANGCI_VERSION` in the root `Makefile` —
   reuses the binary installed into `worker/.bin` (one install for both Go
   modules). Run `make bootstrap` (or any `make *-lint`) to install it.

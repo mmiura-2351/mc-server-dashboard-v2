@@ -40,7 +40,7 @@
 
 # golangci-lint is not part of the Go distribution; it is installed into a
 # module-local, gitignored ./.bin by `make bootstrap` (see worker/README.md).
-GOLANGCI_VERSION := v2.12.2
+GOLANGCI_VERSION := v2.13.1
 GOLANGCI := worker/.bin/golangci-lint
 
 # Version stamp for the installed binary (#2903). $(GOLANGCI) is a fixed path,

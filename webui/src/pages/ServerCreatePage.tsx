@@ -946,8 +946,21 @@ function handleCreateError(
 }
 
 // Import-specific surfacing: a bad archive / oversize upload, plus the create
-// reasons it shares (name conflict, …). Import has no slug field, so
-// slug errors (not reachable from import) fall back to the generic toast path.
+// reasons it shares (name conflict, …).
+//
+// The import tab has no slug field, so a reason the create path reports *inline
+// against that field* has nowhere to land here. `slug_taken` is reachable from
+// import (issue #3022: the join address is auto-assigned, and a racer can take
+// it between the assignment and the commit that inserts the row), and it used to
+// be swallowed — the create handler set its slug error and returned "handled",
+// so the caller showed no toast and the operator saw nothing at all, which is
+// worse than the 500 it replaced. It is answered here instead, asking for a
+// retry rather than pointing at a field the operator never filled in: the next
+// attempt draws a fresh address. The delegated call now routes any *other*
+// slug-field reason to a toast rather than a discarding setter, so a "handled"
+// return always means something was actually displayed. Only `invalid_slug`
+// takes that route today, and import cannot trigger it (it sends no explicit
+// slug).
 function handleImportError(
   err: unknown,
   showToast: (m: string, k: "error") => void,
@@ -975,5 +988,11 @@ function handleImportError(
     showToast(t("serverCreate.import.error.platform_managed_path"), "error");
     return true;
   }
-  return handleCreateError(err, showToast, setNameError, () => {});
+  if (err.reason === "slug_taken") {
+    showToast(t("serverCreate.import.error.slug_taken"), "error");
+    return true;
+  }
+  return handleCreateError(err, showToast, setNameError, (m) =>
+    showToast(m, "error"),
+  );
 }

@@ -49,7 +49,7 @@ regenerate with `make proto-gen` from the repo root (see
 
 ## Toolchain
 
-- **Go**: 1.26 (pinned in `go.mod`; see
+- **Go**: 1.27 (pinned in `go.mod`; see
   [`docs/dev/DEPENDENCIES.md`](../docs/dev/DEPENDENCIES.md)).
 - **golangci-lint**: pinned by `GOLANGCI_VERSION` in the root `Makefile`.
 
