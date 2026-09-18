@@ -65,9 +65,16 @@ func TestReclaimDeletedScratchesSkipsRunningServer(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
 	dir := seedScratch(t, m, "s1")
+	control := seedScratch(t, m, "s2")
 	_ = m.Handle(context.Background(), startCmd())
 
-	m.reclaimDeletedScratches([]string{"s1"})
+	// s2 is the positive control, listed AFTER the running id and asserted FIRST: a
+	// reclaim that does nothing at all leaves s1 standing too, and one that aborts
+	// the call at s1 instead of skipping it never reaches s2 (issue #3025).
+	m.reclaimDeletedScratches([]string{"s1", "s2"})
+	if _, err := os.Stat(control); !os.IsNotExist(err) {
+		t.Fatalf("scratch dir not reclaimed for the deleted server listed after the running one: stat err = %v", err)
+	}
 	if _, err := os.Stat(dir); err != nil {
 		t.Fatalf("scratch dir removed for a running server: %v", err)
 	}
@@ -82,8 +89,15 @@ func TestReclaimDeletedScratchesRefusesUnsafeID(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = os.RemoveAll(sibling) }()
+	control := seedScratch(t, m, "s1")
 
-	m.reclaimDeletedScratches([]string{"../escaped", "", "."})
+	// s1 is the positive control, listed AFTER the unsafe ids and asserted FIRST, so
+	// the sibling's survival is a refusal rather than a reclaim that did nothing, and
+	// a refusal that skips the id rather than aborting the call (issue #3025).
+	m.reclaimDeletedScratches([]string{"../escaped", "", ".", "s1"})
+	if _, err := os.Stat(control); !os.IsNotExist(err) {
+		t.Fatalf("scratch dir not reclaimed for the safe id listed after the unsafe ones: stat err = %v", err)
+	}
 	if _, err := os.Stat(sibling); err != nil {
 		t.Fatalf("traversal-unsafe id escaped the scratch root: %v", err)
 	}
@@ -101,6 +115,7 @@ func TestReclaimDeletedScratchesIdempotentOnMissingDir(t *testing.T) {
 func TestReclaimDeletedScratchesSkipsReservedServer(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	dir := seedScratch(t, m, "s1")
+	control := seedScratch(t, m, "s2")
 
 	// Simulate s1 having an in-flight hydrate by reserving it.
 	ok, _, _ := m.reserve("s1")
@@ -108,7 +123,12 @@ func TestReclaimDeletedScratchesSkipsReservedServer(t *testing.T) {
 		t.Fatal("could not reserve s1 for test setup")
 	}
 
-	m.reclaimDeletedScratches([]string{"s1"})
+	// s2 is the positive control, listed AFTER the reserved id and asserted FIRST
+	// (see TestReclaimDeletedScratchesSkipsRunningServer, issue #3025).
+	m.reclaimDeletedScratches([]string{"s1", "s2"})
+	if _, err := os.Stat(control); !os.IsNotExist(err) {
+		t.Fatalf("scratch dir not reclaimed for the deleted server listed after the reserved one: stat err = %v", err)
+	}
 	if _, err := os.Stat(dir); err != nil {
 		t.Fatalf("scratch dir removed for a reserved server: %v", err)
 	}
@@ -216,7 +236,19 @@ func TestCloseJoinsAnInFlightReclaim(t *testing.T) {
 func TestReclaimDeletedScratchesAfterCloseIsDropped(t *testing.T) {
 	awaitManagerGoroutines(t, 0)
 	m := newManager(t, &fakeDriver{}, nil)
+	control := seedScratch(t, m, "s0")
 	dir := seedScratch(t, m, "s1")
+
+	// The positive control (issue #3025): no request after Close can reclaim anything,
+	// so it cannot share the dropped call. Instead the SAME entry point on the same
+	// manager reclaims s0 before Close, which makes the drop below Close's doing rather
+	// than a reclaim that does nothing. It waits on the removal itself, not on Close,
+	// which since issue #2933 stops a reclaim that has not reached its first id.
+	m.ReclaimDeletedScratches([]string{"s0"})
+	waitFor(t, func() bool {
+		_, err := os.Stat(control)
+		return os.IsNotExist(err)
+	})
 	m.Close()
 
 	m.ReclaimDeletedScratches([]string{"s1"})
@@ -323,6 +355,13 @@ func TestStoppedReclaimLeavesSkippedIDsHeld(t *testing.T) {
 	for _, id := range ids {
 		seedScratch(t, m, id)
 	}
+	seedScratch(t, m, "s0")
+
+	// The positive control (issue #3025): on a closed manager the loop top stops at
+	// the first id, so no id in the stopped call can be one it reclaims. Instead the
+	// same body on the same manager reclaims s0 before Close, which makes s1 and s2
+	// staying held below the stop rather than a reclaim that does nothing.
+	m.reclaimDeletedScratches([]string{"s0"})
 	m.Close()
 
 	m.reclaimDeletedScratches(ids)
@@ -330,6 +369,9 @@ func TestStoppedReclaimLeavesSkippedIDsHeld(t *testing.T) {
 	held := make(map[string]bool)
 	for _, hs := range m.HeldServers() {
 		held[hs.ServerID] = true
+	}
+	if held["s0"] {
+		t.Fatalf("s0 is still advertised as held after the reclaim before Close, so the ids below staying held proves nothing about the stop: held = %v", held)
 	}
 	for _, id := range ids {
 		if !held[id] {
