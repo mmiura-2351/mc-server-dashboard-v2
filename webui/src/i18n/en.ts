@@ -612,13 +612,13 @@ export const en = {
   "backups.error.invalidArchive": "That file is not a valid backup archive.",
   // `_validate_backup_archive` (api backups.py) guards a tar's DIRECTORY member
   // by its own name and a FILE member by its PARENT, so both shapes reach this
-  // one message: a `server.properties/` directory entry, and a plain
-  // `server.properties/x` file whose parent is the guarded name. The file shape
-  // is what an operator actually sees in `tar -tzf`, so the message names it
-  // alongside the directory rather than only the directory a restore would
-  // stand up (issue #3037).
+  // one message: a `server.properties/` directory entry, and any entry stored
+  // under that path — including a plain `server.properties/x` file in an
+  // archive with no directory entry at all. Naming only the directory would
+  // send that operator looking for something their archive does not list
+  // (issue #3037).
   "backups.error.platformManagedPath":
-    "That archive contains a server.properties directory, or a file under server.properties/, but the platform keeps a plain file at that path. Remove or move that entry and upload again.",
+    "That archive contains a server.properties directory or an entry under server.properties/, but the platform keeps a plain file at that path. Remove or move that entry and upload again.",
   "backups.error.workerUnavailable":
     "No server host is available to take the backup right now.",
   "backups.error.storageUnavailable":

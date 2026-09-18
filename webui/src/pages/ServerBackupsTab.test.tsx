@@ -804,9 +804,16 @@ describe("ServerBackupsTab permission gating", () => {
     const file = new File(["x"], "b.tar.gz", { type: "application/gzip" });
     fireEvent.change(input, { target: { files: [file] } });
 
-    expect(
-      await screen.findByText(t("backups.error.platformManagedPath")),
-    ).toBeInTheDocument();
+    const toast = await screen.findByText(
+      t("backups.error.platformManagedPath"),
+    );
+    // The route refuses two member shapes (backups.py `_validate_backup_archive`,
+    // issue #3037): a directory member by its own name, and any file member by
+    // its parent. An archive carrying only `server.properties/foo.txt` has no
+    // directory entry to find, so the message names both and the action.
+    expect(toast.textContent).toMatch(/server\.properties directory/);
+    expect(toast.textContent).toMatch(/entry under server\.properties\//);
+    expect(toast.textContent).toMatch(/upload again/);
     expect(
       screen.queryByText(t("backups.error.generic")),
     ).not.toBeInTheDocument();
