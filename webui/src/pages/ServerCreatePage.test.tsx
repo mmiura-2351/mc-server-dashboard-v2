@@ -1000,7 +1000,7 @@ describe("import tab", () => {
     expect(
       screen.queryByText(t("serverCreate.genericError")),
     ).not.toBeInTheDocument();
-    // Not the Backups upload's string: that one names a server.properties
+    // Not the Backups upload's string: that one also names a server.properties
     // DIRECTORY entry, which the zip path never yields (files.py `_zip_entries`).
     expect(
       screen.queryByText(t("backups.error.platformManagedPath")),
