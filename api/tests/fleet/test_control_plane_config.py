@@ -3,7 +3,8 @@
 The Worker credential is a required secret whenever the control plane is enabled
 (CONFIGURATION.md Section 5.1); ``create_app`` raises at boot rather than
 starting a server that would admit any Worker (NFR-SEC-1). When present, the
-credential is masked in the logged config dump (NFR-OBS-1).
+credential and the TLS private-key path are masked in the logged config dump
+(NFR-OBS-1).
 """
 
 from __future__ import annotations
@@ -54,6 +55,19 @@ def test_worker_credential_is_masked_in_dump(
     settings = load_settings(None)
     dump = settings.masked_dump()
     assert dump["control"]["worker_credential"] == "***"
+
+
+def test_tls_key_file_is_masked_in_dump(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The TLS private-key path is a secret (CONFIGURATION.md Section 5.1); the
+    # certificate path beside it is not, so it passes through unmasked.
+    monkeypatch.setenv("MCD_API_CONTROL__TLS__CERT_FILE", "/etc/mcsd/server.crt")
+    monkeypatch.setenv("MCD_API_CONTROL__TLS__KEY_FILE", "/etc/mcsd/sentinel-pk.key")
+    dump = load_settings(None).masked_dump()
+    assert "sentinel-pk" not in repr(dump)
+    assert dump["control"]["tls"]["key_file"] == "***"
+    assert dump["control"]["tls"]["cert_file"] == "/etc/mcsd/server.crt"
 
 
 def test_grpc_port_default(monkeypatch: pytest.MonkeyPatch) -> None:
