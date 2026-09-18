@@ -104,6 +104,36 @@ def test_create_app_fails_when_only_one_of_cert_or_key_set(
         create_app()
 
 
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_create_app_fails_when_tls_pair_blank_without_insecure(
+    monkeypatch: pytest.MonkeyPatch, blank: str
+) -> None:
+    # A blank ``${VAR}`` interpolation arrives as "" rather than unset; a blank
+    # cert/key pair is no TLS material, so the required-unless-insecure fail-fast
+    # fires at boot rather than the listener failing on ``open("")`` (#3083).
+    monkeypatch.setenv("MCD_API_CONTROL__ENABLED", "true")
+    monkeypatch.setenv("MCD_API_CONTROL__WORKER_CREDENTIAL", "shared-secret")
+    monkeypatch.delenv("MCD_API_CONTROL__TLS__INSECURE", raising=False)
+    monkeypatch.setenv("MCD_API_CONTROL__TLS__CERT_FILE", blank)
+    monkeypatch.setenv("MCD_API_CONTROL__TLS__KEY_FILE", blank)
+    with pytest.raises(ValueError, match="control.tls.key_file are required"):
+        create_app()
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_create_app_fails_when_tls_key_blank_with_cert_set(
+    monkeypatch: pytest.MonkeyPatch, blank: str
+) -> None:
+    # A blank key beside a real cert is only one half of the pair (#3083).
+    monkeypatch.setenv("MCD_API_CONTROL__ENABLED", "true")
+    monkeypatch.setenv("MCD_API_CONTROL__WORKER_CREDENTIAL", "shared-secret")
+    monkeypatch.delenv("MCD_API_CONTROL__TLS__INSECURE", raising=False)
+    monkeypatch.setenv("MCD_API_CONTROL__TLS__CERT_FILE", "/path/to/cert.pem")
+    monkeypatch.setenv("MCD_API_CONTROL__TLS__KEY_FILE", blank)
+    with pytest.raises(ValueError, match="set together"):
+        create_app()
+
+
 def test_create_app_succeeds_with_control_tls_insecure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

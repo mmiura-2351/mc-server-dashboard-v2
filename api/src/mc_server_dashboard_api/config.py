@@ -157,6 +157,12 @@ class ControlTlsSettings(_Section):
     # Documented-deferred (M1): client-cert (mTLS) verification. Unused today.
     client_ca_file: str | None = None
 
+    # A blank ``${MCD_API_CONTROL__TLS__CERT_FILE}`` / ``KEY_FILE`` arrives as ""
+    # rather than unset; collapse it to None so the app factory's control-TLS
+    # fail-fast treats a blank as missing instead of the gRPC listener failing on
+    # ``open("")`` at startup (#3083).
+    _blank_files = field_validator("cert_file", "key_file")(_blank_to_none)
+
 
 class ControlSettings(_Section):
     """Control-plane (Worker channel) settings (CONFIGURATION.md Section 5.1).

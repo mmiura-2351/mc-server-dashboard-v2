@@ -228,7 +228,8 @@ Under the bundled compose deployment these are the **container** side, and
   the real network boundary; scope it there.
 
 ² `control.tls.cert_file` and `control.tls.key_file` are required **together,
-unless** `control.tls.insecure=true`. With neither the cert/key pair nor
+unless** `control.tls.insecure=true`; a blank value counts as unset for both
+(the secret-blank rule of Section 3). With neither the cert/key pair nor
 `insecure=true` set — or with only one of cert/key set — `create_app` fails fast
 at startup; with `control.tls.insecure=true` the listener binds plaintext
 (local/dev only) and logs a `WARN`. Production must set the cert/key pair (or

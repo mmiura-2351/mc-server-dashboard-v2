@@ -94,3 +94,32 @@ async def test_lifespan_starts_and_stops_grpc_server(
         with pytest.raises(aio.AioRpcError) as exc:
             await call.read()
         assert exc.value.code() == grpc.StatusCode.UNAVAILABLE
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+async def test_lifespan_binds_plaintext_when_insecure_with_blank_tls_pair(
+    monkeypatch: pytest.MonkeyPatch, blank: str
+) -> None:
+    # A blank ``${VAR}`` interpolation arrives as "" rather than unset. Under
+    # control.tls.insecure=true a blank cert/key pair is no TLS material, so the
+    # listener binds plaintext instead of failing on ``open("")`` (#3083).
+    monkeypatch.setenv("MCD_API_CONTROL__ENABLED", "true")
+    monkeypatch.setenv("MCD_API_CONTROL__WORKER_CREDENTIAL", _CREDENTIAL)
+    monkeypatch.setenv("MCD_API_CONTROL__TLS__INSECURE", "true")
+    monkeypatch.setenv("MCD_API_CONTROL__TLS__CERT_FILE", blank)
+    monkeypatch.setenv("MCD_API_CONTROL__TLS__KEY_FILE", blank)
+    monkeypatch.setenv("MCD_API_SERVER__GRPC_PORT", "0")
+    monkeypatch.setenv("MCD_API_SERVER__HOST", "127.0.0.1")
+
+    insecure_binds: list[str] = []
+    real_add = ConcreteAioServer.add_insecure_port
+
+    def _spy_add_insecure_port(self: aio.Server, address: str) -> int:
+        insecure_binds.append(address)
+        return int(real_add(self, address))
+
+    monkeypatch.setattr(ConcreteAioServer, "add_insecure_port", _spy_add_insecure_port)
+
+    app = create_app()
+    async with app.router.lifespan_context(app):
+        assert insecure_binds == ["127.0.0.1:0"]
