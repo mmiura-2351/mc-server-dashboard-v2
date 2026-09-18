@@ -175,6 +175,77 @@ func TestValidateMissingRequired(t *testing.T) {
 	}
 }
 
+// TestValidateBlankRequired pins the whitespace-only half of the secret-blank
+// rule (CONFIGURATION.md Section 3, issue #3085): a blank required key reads as
+// missing, not as a value, whichever layer supplied it. The env case also pins
+// that a whitespace-only env value overrides the file and then reads as
+// missing, as a blank MCD_API_* value does on the API. (An empty env value is
+// still ignored by setEnvString and falls through to the file.)
+func TestValidateBlankRequired(t *testing.T) {
+	requiredKeys := []string{
+		"api.grpc_endpoint", "api.credential", "tunnel.public_endpoint",
+		"tunnel.tls.cert_file", "tunnel.tls.key_file",
+	}
+
+	t.Run("file", func(t *testing.T) {
+		body := `
+[api]
+grpc_endpoint = "   "
+credential = "   "
+[api.tls]
+insecure = true
+[tunnel]
+public_endpoint = "   "
+[tunnel.tls]
+cert_file = "   "
+key_file = "   "
+`
+		_, err := Load(writeTOML(t, body), noEnv)
+		if err == nil {
+			t.Fatal("whitespace-only required keys in the file should fail validation")
+		}
+		for _, key := range requiredKeys {
+			if !strings.Contains(err.Error(), key) {
+				t.Errorf("error %q does not mention blank key %q", err.Error(), key)
+			}
+		}
+	})
+
+	t.Run("env", func(t *testing.T) {
+		env := envMap(map[string]string{
+			"MCD_RELAY_API_GRPC_ENDPOINT":      "   ",
+			"MCD_RELAY_API_CREDENTIAL":         "   ",
+			"MCD_RELAY_TUNNEL_PUBLIC_ENDPOINT": "   ",
+			"MCD_RELAY_TUNNEL_TLS_CERT_FILE":   "   ",
+			"MCD_RELAY_TUNNEL_TLS_KEY_FILE":    "   ",
+		})
+		_, err := Load(writeTOML(t, minimalTOML), env)
+		if err == nil {
+			t.Fatal("whitespace-only required keys in the env should fail validation")
+		}
+		for _, key := range requiredKeys {
+			if !strings.Contains(err.Error(), key) {
+				t.Errorf("error %q does not mention blank key %q", err.Error(), key)
+			}
+		}
+	})
+}
+
+// TestLoadKeepsNonBlankCredentialVerbatim pins the other side of the blank rule
+// (issue #3085): only a whitespace-only value is collapsed. A non-blank
+// credential is not trimmed, because the API's end of this shared secret
+// (relay.credential, _blank_to_none) keeps it verbatim too.
+func TestLoadKeepsNonBlankCredentialVerbatim(t *testing.T) {
+	env := envMap(map[string]string{"MCD_RELAY_API_CREDENTIAL": " secret "})
+	cfg, err := Load(writeTOML(t, minimalTOML), env)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.API.Credential != " secret " {
+		t.Errorf("credential = %q, want %q verbatim", cfg.API.Credential, " secret ")
+	}
+}
+
 func TestValidateTLSRequired(t *testing.T) {
 	body := `
 [api]
@@ -188,6 +259,45 @@ key_file = "/k"
 `
 	if _, err := Load(writeTOML(t, body), noEnv); err == nil {
 		t.Error("missing api.tls.ca_file without insecure should fail")
+	}
+}
+
+// TestValidateTLSCAFileBlank pins that a whitespace-only api.tls.ca_file counts
+// as unset (issue #3085), so it cannot stand in for the required CA bundle.
+func TestValidateTLSCAFileBlank(t *testing.T) {
+	body := `
+[api]
+grpc_endpoint = "api:50051"
+credential = "secret"
+[api.tls]
+ca_file = "   "
+[tunnel]
+public_endpoint = "relay:25665"
+[tunnel.tls]
+cert_file = "/c"
+key_file = "/k"
+`
+	_, err := Load(writeTOML(t, body), noEnv)
+	if err == nil {
+		t.Fatal("whitespace-only api.tls.ca_file without insecure should fail")
+	}
+	if !strings.Contains(err.Error(), "api.tls.ca_file") {
+		t.Errorf("error %q does not mention api.tls.ca_file", err.Error())
+	}
+}
+
+// TestLoadCollapsesBlankCAFileWithInsecure pins that the value the rest of the
+// relay reads agrees with what validation judged (issue #3085): a
+// whitespace-only api.tls.ca_file with api.tls.insecure=true is unset, so the
+// dial wiring takes the plaintext branch rather than reading a file named "   ".
+func TestLoadCollapsesBlankCAFileWithInsecure(t *testing.T) {
+	env := envMap(map[string]string{"MCD_RELAY_API_TLS_CA_FILE": "   "})
+	cfg, err := Load(writeTOML(t, minimalTOML), env)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.API.TLS.CAFile != "" {
+		t.Errorf("api.tls.ca_file = %q, want a blank value collapsed to empty", cfg.API.TLS.CAFile)
 	}
 }
 
@@ -243,13 +353,21 @@ func TestValidateBadLogFormat(t *testing.T) {
 }
 
 func TestValidateMetricsListenRequiredWhenEnabled(t *testing.T) {
-	body := minimalTOML + `
+	// The whitespace-only case pins the secret-blank rule (issue #3085).
+	for _, listen := range []string{"", "   "} {
+		body := minimalTOML + `
 [metrics]
 enabled = true
-listen = ""
+listen = "` + listen + `"
 `
-	if _, err := Load(writeTOML(t, body), noEnv); err == nil {
-		t.Error("metrics.enabled=true with empty metrics.listen should fail")
+		_, err := Load(writeTOML(t, body), noEnv)
+		if err == nil {
+			t.Errorf("metrics.enabled=true with metrics.listen %q should fail", listen)
+			continue
+		}
+		if !strings.Contains(err.Error(), "metrics.listen") {
+			t.Errorf("error %q does not mention metrics.listen", err.Error())
+		}
 	}
 }
 

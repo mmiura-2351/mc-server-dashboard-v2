@@ -566,7 +566,9 @@ can run**, and **where its scratch space is**.
 | `api.tls.client_key_file` | — | secret | **Reserved; not implemented.** Path to the Worker's client private key (mTLS). Reserved, unused (see `api.tls.client_cert_file`). |
 | `worker.id` | *(auto)* | | Stable identifier the Worker registers under. **Must be a UUID**: the API persists a server's assigned worker as a UUID column, so registration rejects a non-UUID id with `INVALID_ARGUMENT` (and the Worker fails config load if an explicit `worker.id` is not a UUID). When unset, the Worker generates a UUIDv4 on first boot, persists it at `<worker.scratch_dir>/worker-id` (mode `0600`), and reuses it on later restarts so identity stays stable. A Worker that loses its persisted id (a wiped scratch dir) registers as a brand-new Worker; rows still assigned to the old id are orphaned and recovered via the disconnect/mark-unknown path (servers restart cleanly on hydrate). |
 
-¹ `api.tls.ca_file` is required **unless** `api.tls.insecure=true`. With neither
+¹ `api.tls.ca_file` is required **unless** `api.tls.insecure=true`; a blank value
+counts as unset (the secret-blank rule of Section 3, which the Worker applies to
+every required key and to the `api.tls.client_*` pair as well). With neither
 set, configuration validation fails fast at startup; with `api.tls.insecure=true`
 the Worker dials plaintext (local/dev only). Production must set `api.tls.ca_file`.
 

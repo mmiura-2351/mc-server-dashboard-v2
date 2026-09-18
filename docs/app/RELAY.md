@@ -568,6 +568,10 @@ config, wiring at the edge.
 | `metrics.listen` | `127.0.0.1:9090` | Metrics/health listener address. Loopback by default so the endpoint is never exposed on the public interface without an explicit choice. Via `MCD_RELAY_METRICS_LISTEN`. |
 | `log.level` / `log.format` | as Worker | Standard logging keys. |
 
+A blank (empty or whitespace-only) value of a required key or of
+`api.tls.ca_file` counts as unset, per the secret-blank rule of
+[`CONFIGURATION.md`](CONFIGURATION.md) Section 3.
+
 **Worker: no relay configuration.** Everything a `TunnelDial` needs arrives in
 the command.
 

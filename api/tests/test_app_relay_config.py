@@ -45,6 +45,17 @@ def test_create_app_fails_when_relay_enabled_without_base_domain(
         create_app()
 
 
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_create_app_fails_on_blank_relay_base_domain(
+    monkeypatch: pytest.MonkeyPatch, blank: str
+) -> None:
+    monkeypatch.setenv("MCD_API_RELAY__ENABLED", "true")
+    monkeypatch.setenv("MCD_API_RELAY__CREDENTIAL", "relay-secret")
+    monkeypatch.setenv("MCD_API_RELAY__BASE_DOMAIN", blank)
+    with pytest.raises(ValueError, match="relay.base_domain is required"):
+        create_app()
+
+
 def test_create_app_fails_when_relay_enabled_but_control_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
