@@ -624,6 +624,21 @@ def test_blank_signing_key_is_treated_as_missing(
     assert settings.auth.token.signing_key is None
 
 
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_blank_control_tls_files_are_treated_as_missing(
+    monkeypatch: pytest.MonkeyPatch, blank: str
+) -> None:
+    # A blank ``${MCD_API_CONTROL__TLS__CERT_FILE}`` / ``KEY_FILE`` interpolation
+    # arrives as "" (or whitespace); collapse it to None so the app factory's
+    # control-TLS guard sees it as unset instead of the gRPC listener failing on
+    # ``open("")`` at startup (#3083).
+    monkeypatch.setenv("MCD_API_CONTROL__TLS__CERT_FILE", blank)
+    monkeypatch.setenv("MCD_API_CONTROL__TLS__KEY_FILE", blank)
+    tls = load_settings(config_file=None).control.tls
+    assert tls.cert_file is None
+    assert tls.key_file is None
+
+
 # --- Cross-field consistency (issue #163) -----------------------------------
 # Pairs that pass their individual field bounds but are semantically
 # inconsistent (e.g. a min above its max). Each validator names both fields and
