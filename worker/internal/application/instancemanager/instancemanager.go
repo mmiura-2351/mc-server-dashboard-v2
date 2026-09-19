@@ -1795,8 +1795,14 @@ func (m *Manager) removeScratch(serverID string) {
 // a LEAK, never a loss: a declined sweep keeps one world-sized tree until the next
 // successful snapshot for the id reclaims it, which is the #906 contract itself.
 func (m *Manager) sweepDisplaced(serverID string) {
-	_ = os.RemoveAll(filepath.Join(m.scratchDir, ".displaced-"+serverID))
+	_ = removeDisplacedTree(filepath.Join(m.scratchDir, ".displaced-"+serverID))
 }
+
+// removeDisplacedTree is the os.RemoveAll sweepDisplaced removes a displaced tree with,
+// indirected through a package var (mirroring statWorkingDirRef) so a test can land a
+// racing hydrate INSIDE the removal — a traversal that takes seconds for a world-sized
+// tree — rather than race for it. Production always uses os.RemoveAll.
+var removeDisplacedTree = os.RemoveAll
 
 // sweepHydrateLeftovers removes the .hydrate-<id>-* temp/trash siblings a crashed
 // hydrate for serverID left in the scratch root. The next start's leftover sweep
