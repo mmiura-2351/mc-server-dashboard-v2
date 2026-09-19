@@ -167,9 +167,11 @@ jobs:
           # (pinning + 7-day cooldown). Dependabot cannot see a digest pinned
           # inside a workflow `run:` block — neither its docker-compose ecosystem
           # (compose.yaml only) nor its github-actions one (`uses:` only) — so
-          # this pin is bumped by hand whenever the compose pin moves. It sat on
-          # 4.39 for two compose bumps because nothing does that automatically
-          # (issue #2614).
+          # this pin is bumped by hand whenever the compose pin moves
+          # (docs/dev/DEPENDENCIES.md Section 6). It sat on 4.39 for two compose
+          # bumps with nothing to notice (issue #2614); `make image-pins-check`
+          # now fails a compose bump that leaves it behind (#2905), but the
+          # re-pin itself stays manual.
           docker run -d --name seaweedfs -p 127.0.0.1:8333:8333 \
             -v "$RUNNER_TEMP/seaweedfs/s3.json:/etc/seaweedfs/s3.json:ro" \
             --entrypoint weed \

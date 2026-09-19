@@ -113,12 +113,11 @@ PROTOC_GEN_GO_GRPC_STAMP := worker/.bin/.protoc-gen-go-grpc-$(PROTOC_GEN_GO_GRPC
 all: check
 
 # Full verification gate. Matches the pre-push hook and CI.
-# Parallelized via scripts/check_parallel.sh: independent module chains
-# (api, webui, worker, relay, proto, hooks, docs, scripts, migrations) run
-# concurrently in Phase 1,
-# then the drift checks (proto-check, openapi-check) that run generators
-# follow in Phase 2 after all readers have finished. See the script header
-# for the phasing rationale and bounded-parallelism notes.
+# Parallelized via scripts/check_parallel.sh: the independent lint, test and
+# guard chains run concurrently in Phase 1 (the script header lists them; a copy
+# kept here drifted, #3101), then the drift checks (proto-check, openapi-check)
+# that run generators follow in Phase 2 after all readers have finished. See the
+# script header for the phasing rationale and bounded-parallelism notes.
 #
 # The script also serialises gates host-wide (a flock on /tmp/mcsd-check.lock,
 # issue #2513): concurrent runs in sibling worktrees each fanned out over all
