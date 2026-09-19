@@ -573,7 +573,7 @@ func newManagerWithControls(t *testing.T, d execution.ExecutionDriver, ctrls ...
 	scratch := t.TempDir()
 	var i int
 	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch,
-		func(context.Context, string, string) (execution.ServerControl, error) {
+		func(context.Context, string, string, string) (execution.ServerControl, error) {
 			c := ctrls[i]
 			if i < len(ctrls)-1 {
 				i++

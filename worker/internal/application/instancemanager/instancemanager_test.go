@@ -229,7 +229,7 @@ func newManager(t *testing.T, d execution.ExecutionDriver, ctrl execution.Server
 	t.Helper()
 	scratch := t.TempDir()
 	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch,
-		func(context.Context, string, string) (execution.ServerControl, error) {
+		func(context.Context, string, string, string) (execution.ServerControl, error) {
 			// The real openControl never yields a nil control without an error (main.go).
 			// Tests that don't wire one exercise RCON-free paths; surface that as a dial
 			// failure so the #1007 stop-flush (and the snapshot quiesce) degrade gracefully
@@ -832,7 +832,7 @@ func TestStopServerGracefulRedialsAfterPoisonedSaveOff(t *testing.T) {
 	var dialCount int
 	scratch := t.TempDir()
 	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch,
-		func(context.Context, string, string) (execution.ServerControl, error) {
+		func(context.Context, string, string, string) (execution.ServerControl, error) {
 			dialCount++
 			if dialCount == 1 {
 				return poisonCtrl, nil
@@ -882,7 +882,7 @@ func TestStopServerGracefulCompletesWhenBothRCONCommandsFail(t *testing.T) {
 	var dialCount int
 	scratch := t.TempDir()
 	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch,
-		func(context.Context, string, string) (execution.ServerControl, error) {
+		func(context.Context, string, string, string) (execution.ServerControl, error) {
 			dialCount++
 			if dialCount == 1 {
 				return poisonCtrl, nil
@@ -938,7 +938,7 @@ func TestOpenControlReceivesRunningServerDriver(t *testing.T) {
 		"container": &fakeDriver{},
 		"docker":    &fakeDriver{},
 	}
-	m := New(drivers, scratch, func(_ context.Context, _ string, driver string) (execution.ServerControl, error) {
+	m := New(drivers, scratch, func(_ context.Context, _, driver, _ string) (execution.ServerControl, error) {
 		gotDriver = driver
 		return &fakeControl{reply: "ok"}, nil
 	})
@@ -956,6 +956,77 @@ func TestOpenControlReceivesRunningServerDriver(t *testing.T) {
 	}
 	if gotDriver != "container" {
 		t.Fatalf("openControl driver = %q, want container (the driver that started the server)", gotDriver)
+	}
+}
+
+// versionRecorder is an openControl double that records the Minecraft version
+// every RCON dial carries, handing out a control that answers every line.
+type versionRecorder struct {
+	mu       sync.Mutex
+	versions []string
+}
+
+func (r *versionRecorder) open(_ context.Context, _, _, mcVersion string) (execution.ServerControl, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.versions = append(r.versions, mcVersion)
+	return &fakeControl{reply: "ok"}, nil
+}
+
+func (r *versionRecorder) dials() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.versions...)
+}
+
+// newVersionRecordingManager builds a Manager over d whose RCON dials land in
+// the returned recorder.
+func newVersionRecordingManager(t *testing.T, d execution.ExecutionDriver) (*Manager, *versionRecorder) {
+	t.Helper()
+	rec := &versionRecorder{}
+	m := New(map[string]execution.ExecutionDriver{"container": d}, t.TempDir(), rec.open).WithTransfer(&fakeTransfer{})
+	m.settlePollInterval = 0
+	closeWithTest(t, m)
+	return m, rec
+}
+
+// assertDialsCarry fails unless at least one RCON dial happened and every one
+// carried want.
+func assertDialsCarry(t *testing.T, got []string, want string) {
+	t.Helper()
+	if len(got) == 0 {
+		t.Fatal("no RCON dial happened")
+	}
+	for i, v := range got {
+		if v != want {
+			t.Fatalf("RCON dial %d carried Minecraft version %q, want %q", i, v, want)
+		}
+	}
+}
+
+// TestOpenControlReceivesTheServerMinecraftVersion pins that every RCON dial for
+// a server carries that server's Minecraft version, which decides the charset
+// its RCON password is read in (issue #3116). The running-server paths take it
+// from the StartServer command; the stop paths, which evict that command before
+// they dial, carry it alongside the driver name.
+func TestOpenControlReceivesTheServerMinecraftVersion(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cmd  session.Command
+	}{
+		{"console command", session.Command{CommandID: "c", ServerID: "s1", Kind: "ServerCommand", Line: "list"}},
+		{"snapshot quiesce", snapshotCmd()},
+		{"graceful stop flush", session.Command{CommandID: "c", ServerID: "s1", Kind: "StopServer"}},
+		{"restart flush", session.Command{CommandID: "c", ServerID: "s1", Kind: "RestartServer"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := newVersionRecordingManager(t, &rconFailDriver{})
+			startRunning(t, m)
+
+			_ = m.Handle(context.Background(), tc.cmd)
+
+			assertDialsCarry(t, rec.dials(), startCmd().MinecraftVersion)
+		})
 	}
 }
 

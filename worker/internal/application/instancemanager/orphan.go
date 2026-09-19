@@ -38,9 +38,9 @@ const orphanUnknownState = "unknown"
 // already joined the convergers, so a fresh one would be a goroutine outliving
 // the manager again. The counter is incremented under the same lock that reads
 // the flag, so a spawn is always visible to the Wait that Close performs.
-func (m *Manager) recordOrphan(serverID string, inst execution.Instance, driverName string) {
+func (m *Manager) recordOrphan(serverID string, inst execution.Instance, driverName, mcVersion string) {
 	m.mu.Lock()
-	m.orphans[serverID] = orphanEntry{inst: inst, driver: driverName}
+	m.orphans[serverID] = orphanEntry{inst: inst, driver: driverName, mcVersion: mcVersion}
 	spawn := !m.converging[serverID] && !m.closed
 	if spawn {
 		m.converging[serverID] = true
@@ -219,12 +219,12 @@ func (m *Manager) currentOrphan(serverID string) (orphanEntry, bool) {
 // recordOrphan is idempotent on the flag), so a retry that still cannot confirm
 // termination simply leaves the loop running.
 func (m *Manager) retryOrphanStop(serverID string, inst execution.Instance) {
-	driver, outcome := m.takeOrphanReserve(serverID, inst)
+	driver, mcVersion, outcome := m.takeOrphanReserve(serverID, inst)
 	if outcome != takeFound {
 		return
 	}
 	defer m.release(serverID)
-	if err := m.attemptStop(context.Background(), serverID, inst, true, driver); err != nil {
+	if err := m.attemptStop(context.Background(), serverID, inst, true, driver, mcVersion); err != nil {
 		m.logger.Warn("failed-stop orphan: retry stop did not confirm termination; will probe again",
 			"server_id", serverID, "driver", driver, "error", err)
 	}
@@ -238,17 +238,18 @@ func (m *Manager) retryOrphanStop(serverID string, inst execution.Instance) {
 // on its own and a re-placed StartServer can register a fresh instance under the
 // same id — which an unguarded take would evict and stop. It reports takeInFlight
 // when a lifecycle command already holds the id and takeNotFound when the record
-// is gone or now names a different instance.
-func (m *Manager) takeOrphanReserve(serverID string, inst execution.Instance) (string, takeOutcome) {
+// is gone or now names a different instance. On a take it returns the orphan's
+// driver name and Minecraft version, as takeStoppableReserve does.
+func (m *Manager) takeOrphanReserve(serverID string, inst execution.Instance) (string, string, takeOutcome) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.reserved[serverID] {
-		return "", takeInFlight
+		return "", "", takeInFlight
 	}
 	entry, ok := m.orphans[serverID]
 	if !ok || entry.inst != inst {
-		return "", takeNotFound
+		return "", "", takeNotFound
 	}
 	m.reserved[serverID] = true
-	return entry.driver, takeFound
+	return entry.driver, entry.mcVersion, takeFound
 }

@@ -128,8 +128,10 @@ class _Property:
     end: int
 
 
-# The characters ``Properties.load`` counts as blanks: no CR/LF (those terminate a
-# line) and no Unicode whitespace (it reads latin-1 bytes, not text).
+# The characters ``Properties.load`` counts as blanks: space, tab and form feed.
+# No CR/LF (those terminate a line) and no other Unicode whitespace: its grammar
+# names exactly these three, whether it reads an ``InputStream`` (a pre-1.20
+# server) or a ``Reader`` (1.20+), so the file's charset does not enter into it.
 _BLANKS = b" \t\f"
 
 _HEX_DIGITS = "0123456789abcdefABCDEF"
@@ -302,7 +304,12 @@ def _raw_values(content: bytes, key: str) -> list[str]:
 
 
 def _get_property(content: bytes, key: str) -> str | None:
-    """Return the value the Java server reads for *key*, or ``None`` if absent."""
+    """Return *key*'s value in the occurrence Java keeps (the last), or ``None``.
+
+    ``None`` means *key* is absent. The value is :func:`_load_convert`'s latin-1
+    decode, which is how a pre-1.20 server reads it; a 1.20+ server reads a
+    non-ASCII UTF-8 value differently.
+    """
 
     values = _raw_values(content, key)
     return values[-1] if values else None

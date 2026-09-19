@@ -102,7 +102,7 @@ func TestContainerForgeInstallThenLaunch(t *testing.T) {
 	mgr := instancemanager.New(
 		map[string]execution.ExecutionDriver{"container": driver},
 		scratchDir,
-		func(context.Context, string, string) (execution.ServerControl, error) {
+		func(context.Context, string, string, string) (execution.ServerControl, error) {
 			return nil, errNoRCON
 		},
 	)
@@ -233,7 +233,7 @@ func TestContainerForgeInstalledSkipsInstall(t *testing.T) {
 	mgr := instancemanager.New(
 		map[string]execution.ExecutionDriver{"container": driver},
 		scratchDir,
-		func(context.Context, string, string) (execution.ServerControl, error) {
+		func(context.Context, string, string, string) (execution.ServerControl, error) {
 			return nil, errNoRCON
 		},
 	)
