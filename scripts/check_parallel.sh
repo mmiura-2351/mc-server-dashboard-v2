@@ -11,7 +11,7 @@
 #   worker-lint, relay-lint
 #
 # Phase 1b — reader chains (parallel, disjoint module dirs):
-#   A: api-lint → api-test              (api/)
+#   A: api-lint → api-test              (api/; each runs api-env-check first)
 #   B: webui-lint → webui-test → webui-build  (webui/)
 #   C: worker-test → worker-e2e-compile (worker/)
 #   D: relay-test → relay-e2e-compile   (relay/)
