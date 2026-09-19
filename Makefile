@@ -485,9 +485,9 @@ hooks-test:
 # check_api_env.py's in api-env-check (#2880).
 #
 # The recipe lines here are the deploy helper suites and only those: they cost
-# ~14s to the cheap set's ~3s, and .github/workflows/sanity.yml is the one gate
-# that deliberately does not want them (see its header). Everything else under
-# scripts/ goes in scripts-test-cheap below.
+# more than twice the whole cheap set, and .github/workflows/sanity.yml is the
+# one gate that deliberately does not want them (see its header). Everything
+# else under scripts/ goes in scripts-test-cheap below.
 scripts-test: scripts-test-cheap
 	bash scripts/test_deploy_preflight.sh
 	bash scripts/test_pg_major_upgrade.sh

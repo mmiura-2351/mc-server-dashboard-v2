@@ -85,9 +85,9 @@ jobs:
 
       # Every scripts/ suite this gate can afford, as the Make target that
       # defines that set: the cooldown self-test, the pipefail source guard, the
-      # two check_parallel.sh suites and the two tool-pin suites. ~3s, bash and
-      # python3 over temp dirs, nothing installed and nothing fetched. The
-      # target deliberately excludes the deploy helper suites, which `make
+      # two check_parallel.sh suites and the two tool-pin suites. A few seconds,
+      # bash and python3 over temp dirs, nothing installed and nothing fetched.
+      # The target deliberately excludes the deploy helper suites, which `make
       # scripts-test` adds on top; the Makefile carries that rationale.
       - name: Script suites (scripts-test-cheap)
         run: make scripts-test-cheap
