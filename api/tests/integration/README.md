@@ -65,5 +65,6 @@ top CPU consumers while DB-gated tests timed out (issue #2796). On the host
 network Postgres listens on the host loopback directly, so no proxy is involved.
 `PGPORT` moves it off the default 5432 so it cannot collide with a Postgres
 already on the host. `listen_addresses` keeps the fixed-password server off the
-host's external interfaces. Docker Desktop's host network is its VM's rather
-than your machine's, so there the `-p 5544:5432` form is the one that works.
+host's external interfaces. Where Docker's host network is not your machine's
+own (Docker Desktop without host networking enabled), fall back to
+`-p 5544:5432`.
