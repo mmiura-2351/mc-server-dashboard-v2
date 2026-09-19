@@ -1247,8 +1247,8 @@ func (m *Manager) checkWorkingSet(ctx context.Context, serverID, workingDir stri
 // requirement). A final failure is logged loudly: auto-save stuck off is
 // operator-actionable.
 func (m *Manager) quiesceRunning(ctx context.Context, serverID, workingDir string) (bool, func()) {
-	driverName := m.driverFor(serverID)
-	raw, err := m.openControl(ctx, serverID, driverName, "")
+	driverName, mcVersion := m.controlTargetFor(serverID)
+	raw, err := m.openControl(ctx, serverID, driverName, mcVersion)
 	if err != nil {
 		m.logger.Warn("snapshot quiesce: open rcon failed", "server_id", serverID, "error", err)
 		return false, func() {}
@@ -1260,7 +1260,7 @@ func (m *Manager) quiesceRunning(ctx context.Context, serverID, workingDir strin
 	ctrl := &resilientControl{
 		inner: raw,
 		dial: func(dialCtx context.Context) (execution.ServerControl, error) {
-			return m.openControl(dialCtx, serverID, driverName, "")
+			return m.openControl(dialCtx, serverID, driverName, mcVersion)
 		},
 		logger:   m.logger,
 		serverID: serverID,
@@ -1302,9 +1302,9 @@ func (m *Manager) quiesceRunning(ctx context.Context, serverID, workingDir strin
 // the asynchronous save to settle (settleWorkingSet: the region files' (mtime,
 // size) stop changing) so the chunks have landed on disk before the terminate.
 //
-// driverName is the driver that runs this server, captured before the instance
-// was evicted from the manager's map (driverFor would return empty after
-// eviction).
+// driverName is the driver that runs this server and mcVersion its Minecraft
+// version, both captured before the instance was evicted from the manager's map
+// (controlTargetFor would return empty after eviction).
 //
 // It is best-effort and bounded: any failure — RCON cannot be opened, save-off or
 // save-all errors, or the save never settles within the budget — is logged and the
@@ -1318,8 +1318,8 @@ func (m *Manager) quiesceRunning(ctx context.Context, serverID, workingDir strin
 // settleWorkingSet never converges within the budget. save-on is NOT sent — the
 // server is about to be stopped, so there is nothing to restore, and re-enabling
 // writes during the settle window would reintroduce the convergence problem.
-func (m *Manager) flushBeforeStopWithDriver(ctx context.Context, serverID, driverName string) bool {
-	raw, err := m.openControl(ctx, serverID, driverName, "")
+func (m *Manager) flushBeforeStopWithDriver(ctx context.Context, serverID, driverName, mcVersion string) bool {
+	raw, err := m.openControl(ctx, serverID, driverName, mcVersion)
 	if err != nil {
 		m.logger.Warn("stop flush: open rcon failed; stopping without a final save",
 			"server_id", serverID, "error", err)
@@ -1332,7 +1332,7 @@ func (m *Manager) flushBeforeStopWithDriver(ctx context.Context, serverID, drive
 	ctrl := &resilientControl{
 		inner: raw,
 		dial: func(dialCtx context.Context) (execution.ServerControl, error) {
-			return m.openControl(dialCtx, serverID, driverName, "")
+			return m.openControl(dialCtx, serverID, driverName, mcVersion)
 		},
 		logger:   m.logger,
 		serverID: serverID,
@@ -1391,7 +1391,8 @@ func (m *Manager) restoreSaveOn(ctx context.Context, serverID string, ctrl execu
 	case <-time.After(m.fsckRetryDelay):
 	}
 
-	fresh, err := m.openControl(restoreCtx, serverID, m.driverFor(serverID), "")
+	driverName, mcVersion := m.controlTargetFor(serverID)
+	fresh, err := m.openControl(restoreCtx, serverID, driverName, mcVersion)
 	if err != nil {
 		m.logger.Error("snapshot save-on NOT restored; redial failed, server left with auto-save disabled",
 			"server_id", serverID, "error", err)
@@ -1413,13 +1414,14 @@ func (m *Manager) restoreSaveOn(ctx context.Context, serverID string, ctrl execu
 //
 // Unlike restoreSaveOn (the snapshot path), the caller's RCON connection is
 // already closed and the instance was evicted from startCmds by
-// takeStoppableReserve, so driverFor would return empty. The helper accepts
-// driverName explicitly (captured before eviction) and dials a fresh RCON
-// connection on a context detached from the (possibly cancelled) request.
-func (m *Manager) restoreSaveOnAfterFailedStop(ctx context.Context, serverID, driverName string) {
+// takeStoppableReserve, so controlTargetFor would return empty. The helper
+// accepts driverName and mcVersion explicitly (captured before eviction) and
+// dials a fresh RCON connection on a context detached from the (possibly
+// cancelled) request.
+func (m *Manager) restoreSaveOnAfterFailedStop(ctx context.Context, serverID, driverName, mcVersion string) {
 	restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restoreSaveTimeout)
 	defer cancel()
-	ctrl, err := m.openControl(restoreCtx, serverID, driverName, "")
+	ctrl, err := m.openControl(restoreCtx, serverID, driverName, mcVersion)
 	if err != nil {
 		m.logger.Error("failed stop: auto-save NOT restored (rcon open failed); surviving server is running with auto-save disabled",
 			"server_id", serverID, "driver", driverName, "error", err)
@@ -1697,7 +1699,7 @@ func (m *Manager) startPumps(serverID string, inst execution.Instance) {
 }
 
 func (m *Manager) handleStop(ctx context.Context, cmd session.Command, graceful bool) session.CommandResult {
-	inst, driver, outcome := m.takeStoppableReserve(cmd.ServerID)
+	inst, driver, mcVersion, outcome := m.takeStoppableReserve(cmd.ServerID)
 	switch outcome {
 	case takeNotFound:
 		return fail(cmd.CommandID, session.CommandErrorServerNotFound,
@@ -1719,7 +1721,7 @@ func (m *Manager) handleStop(ctx context.Context, cmd session.Command, graceful 
 	// The id is now reserved across the eviction -> stop-confirmed window so the
 	// detached stop is the sole writer; released on every return below (issue #780).
 	defer m.release(cmd.ServerID)
-	if err := m.attemptStop(ctx, cmd.ServerID, inst, graceful, driver); err != nil {
+	if err := m.attemptStop(ctx, cmd.ServerID, inst, graceful, driver, mcVersion); err != nil {
 		return fail(cmd.CommandID, session.CommandErrorInternal,
 			fmt.Sprintf("instancemanager: stop: %v", err))
 	}
@@ -1946,11 +1948,13 @@ func (m *Manager) reclaimDeletedScratches(serverIDs []string) {
 }
 
 // orphanEntry pairs a failed-stop orphan instance with the execution driver name
-// it was started under, so the retry stop can resolve the RCON dial host exactly
-// as stop #1 did (issue #1712).
+// and Minecraft version it was started under, so the retry stop can resolve the
+// RCON dial host exactly as stop #1 did (issue #1712) and read the RCON password
+// in the same charset (issue #3116).
 type orphanEntry struct {
-	inst   execution.Instance
-	driver string
+	inst      execution.Instance
+	driver    string
+	mcVersion string
 }
 
 // takeOutcome is the result of takeStoppableReserve / takeRunningReserve: an
@@ -1994,20 +1998,20 @@ const orphanPendingMsg = "instancemanager: server has a failed-stop orphan pendi
 // takeNotFound only for genuinely unknown ids. The caller must release on every
 // return path.
 //
-// The returned driver is the execution driver name for the instance: read from
-// startCmds for a running instance (before deletion), or from the orphan entry
-// for a failed-stop orphan (issue #1712). This makes the driver capture atomic
-// with the take, eliminating the TOCTOU between a separate driverFor call and
-// the eviction.
-func (m *Manager) takeStoppableReserve(serverID string) (execution.Instance, string, takeOutcome) {
+// The returned driver is the execution driver name for the instance and
+// mcVersion its Minecraft version: read from startCmds for a running instance
+// (before deletion), or from the orphan entry for a failed-stop orphan (issues
+// #1712, #3116). This makes the capture atomic with the take, eliminating the
+// TOCTOU between a separate controlTargetFor call and the eviction.
+func (m *Manager) takeStoppableReserve(serverID string) (execution.Instance, string, string, takeOutcome) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if inst, ok := m.instances[serverID]; ok {
-		driver := m.startCmds[serverID].Driver
+		start := m.startCmds[serverID]
 		delete(m.instances, serverID)
 		delete(m.startCmds, serverID)
 		m.reserved[serverID] = true
-		return inst, driver, takeFound
+		return inst, start.Driver, start.MinecraftVersion, takeFound
 	}
 	// Check the reservation BEFORE the orphan branch. A failed-stop orphan retains
 	// its instance record while a stop for the id is in flight (attemptStop deletes
@@ -2020,13 +2024,13 @@ func (m *Manager) takeStoppableReserve(serverID string) (execution.Instance, str
 	// first rejects stop2 with takeInFlight (-> BUSY) instead, exactly as it
 	// already does for a detached running-instance stop (issue #780).
 	if m.reserved[serverID] {
-		return nil, "", takeInFlight
+		return nil, "", "", takeInFlight
 	}
 	if entry, ok := m.orphans[serverID]; ok {
 		m.reserved[serverID] = true
-		return entry.inst, entry.driver, takeFound
+		return entry.inst, entry.driver, entry.mcVersion, takeFound
 	}
-	return nil, "", takeNotFound
+	return nil, "", "", takeNotFound
 }
 
 // attemptStop runs the driver Stop for serverID's instance. On failure it
@@ -2042,18 +2046,18 @@ func (m *Manager) takeStoppableReserve(serverID string) (execution.Instance, str
 // the tunnel — matching the API's own "any transition away from running closes
 // it" semantics (PR #1558).
 //
-// driverName is the driver that runs this server (returned atomically by
-// takeStoppableReserve / takeRunningReserve alongside the instance). On a
-// graceful stop, attemptStop passes a pre-fallback flush closure so the driver
-// can flush the live world (save-all + settle) before stop — the driver calls it
-// always before tryRCONStop on the graceful path (#1007). On failure the driver
-// name is preserved on the orphan entry so a retry resolves RCON identically
-// (issue #1712).
-func (m *Manager) attemptStop(ctx context.Context, serverID string, inst execution.Instance, graceful bool, driverName string) error {
+// driverName is the driver that runs this server and mcVersion its Minecraft
+// version (returned atomically by takeStoppableReserve / takeRunningReserve
+// alongside the instance). On a graceful stop, attemptStop passes a pre-fallback
+// flush closure so the driver can flush the live world (save-all + settle) before
+// stop — the driver calls it always before tryRCONStop on the graceful path
+// (#1007). On failure both are preserved on the orphan entry so a retry resolves
+// RCON identically (issues #1712, #3116).
+func (m *Manager) attemptStop(ctx context.Context, serverID string, inst execution.Instance, graceful bool, driverName, mcVersion string) error {
 	var preFallback func(context.Context) bool
 	if graceful {
 		preFallback = func(flushCtx context.Context) bool {
-			return m.flushBeforeStopWithDriver(flushCtx, serverID, driverName)
+			return m.flushBeforeStopWithDriver(flushCtx, serverID, driverName, mcVersion)
 		}
 	}
 	if err := inst.Stop(ctx, graceful, preFallback); err != nil {
@@ -2062,7 +2066,7 @@ func (m *Manager) attemptStop(ctx context.Context, serverID string, inst executi
 		// #2475). recordOrphan is idempotent on the converger: the retries the
 		// converger itself issues land back here and re-record without spawning a
 		// second one.
-		m.recordOrphan(serverID, inst, driverName)
+		m.recordOrphan(serverID, inst, driverName, mcVersion)
 		// The orphan record is otherwise invisible: nothing enumerates m.orphans, so
 		// "why is every command for this server refused?" was a code-reading exercise
 		// (issue #2466). Say it once, at the moment the state is entered — the id is
@@ -2083,7 +2087,7 @@ func (m *Manager) attemptStop(ctx context.Context, serverID string, inst executi
 		// failed, the server may still be alive with auto-save disabled. Re-enable
 		// it so player progress is not silently lost (issue #2021).
 		if graceful {
-			m.restoreSaveOnAfterFailedStop(ctx, serverID, driverName)
+			m.restoreSaveOnAfterFailedStop(ctx, serverID, driverName, mcVersion)
 		}
 		return err
 	}
@@ -2179,7 +2183,7 @@ func (m *Manager) handleRestart(ctx context.Context, cmd session.Command) sessio
 	// orphan as a plain StopServer would, so the reconciler's retry path can still
 	// terminate it rather than double-instancing over it (issue #251). The reservation
 	// is dropped on this failure path; the orphan record then guards the id instead.
-	if err := m.attemptStop(ctx, cmd.ServerID, inst, true, start.Driver); err != nil {
+	if err := m.attemptStop(ctx, cmd.ServerID, inst, true, start.Driver, start.MinecraftVersion); err != nil {
 		m.release(cmd.ServerID)
 		return fail(cmd.CommandID, session.CommandErrorInternal,
 			fmt.Sprintf("instancemanager: restart stop: %v", err))
@@ -2227,7 +2231,8 @@ func (m *Manager) handleServerCommand(ctx context.Context, cmd session.Command) 
 		return fail(cmd.CommandID, code, msg)
 	}
 
-	ctrl, err := m.openControl(ctx, cmd.ServerID, m.driverFor(cmd.ServerID), "")
+	driverName, mcVersion := m.controlTargetFor(cmd.ServerID)
+	ctrl, err := m.openControl(ctx, cmd.ServerID, driverName, mcVersion)
 	if err != nil {
 		return fail(cmd.CommandID, session.CommandErrorInternal,
 			fmt.Sprintf("instancemanager: open rcon: %v", err))
@@ -2732,15 +2737,18 @@ func refuseExistingLeaf(parentFd int, leaf string) error {
 	return nil
 }
 
-// driverFor returns the execution driver recorded for serverID's running
-// instance (its StartServer command's Driver), so the RCON dial host can be
-// resolved per driver. It is empty for a server that is not running, in which
-// case the caller resolves the loopback host — but both RCON call sites first
-// confirm the server is running, so the recorded driver is present.
-func (m *Manager) driverFor(serverID string) string {
+// controlTargetFor returns the execution driver and Minecraft version recorded
+// for serverID's running instance (its StartServer command's Driver and
+// MinecraftVersion), so the RCON dial host can be resolved per driver and the
+// RCON password read in the charset of that version (issue #3116). Both are
+// empty for a server that is not running, in which case the caller resolves the
+// loopback host — but both RCON call sites first confirm the server is running,
+// so the recorded command is present.
+func (m *Manager) controlTargetFor(serverID string) (driver, mcVersion string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.startCmds[serverID].Driver
+	start := m.startCmds[serverID]
+	return start.Driver, start.MinecraftVersion
 }
 
 // reserve claims serverID for an in-flight mutating lifecycle command (issue
