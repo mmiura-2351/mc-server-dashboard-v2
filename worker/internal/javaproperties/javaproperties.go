@@ -44,19 +44,21 @@ import (
 
 // Parse parses the contents of a Java .properties file into its key/value pairs,
 // last occurrence winning, decoding it as latin-1 -- how a Minecraft server
-// before 1.20 reads server.properties. It never fails: a .properties file has no syntax a
-// reader can reject, and the one construct the reference implementation throws
-// on -- a malformed \uXXXX escape -- is decoded here as the literal characters
-// instead (see loadConvert). Callers own the I/O and its error policy; whole
-// contents are parsed at once, so no line length truncates the parse.
+// before 1.20 reads server.properties. It never fails: a .properties file has no
+// syntax a reader can reject, and the one construct the reference implementation
+// throws on -- a malformed \uXXXX escape -- is decoded here as the literal
+// characters instead (see loadConvert). Callers own the I/O and its error
+// policy; whole contents are parsed at once, so no line length truncates the
+// parse.
 func Parse(data []byte) map[string]string {
 	return parse(latin1ToUTF8(data))
 }
 
 // ParseUTF8 is Parse with the charset a Minecraft 1.20+ server reads its
 // server.properties in: UTF-8, or latin-1 for the WHOLE file when data is not
-// valid UTF-8. Its decoder reports the first malformed byte, and the server then
-// reloads the file from the start as ISO-8859-1 (Settings.loadFromFile).
+// valid UTF-8. The server's decoder reports the first malformed byte, and the
+// server then reloads the file from the start as ISO-8859-1
+// (Settings.loadFromFile).
 func ParseUTF8(data []byte) map[string]string {
 	if !utf8.Valid(data) {
 		return Parse(data)
