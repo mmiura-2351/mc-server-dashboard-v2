@@ -258,13 +258,18 @@ async def test_delete_resource_pack_reports_a_concurrent_assign_as_in_use(
 # --- concurrent pack delete during an assign (issue #2784) --------------------
 
 
-class _DeletePackOnWriteFileStore(FakeFileStore):
-    """A file store that deletes the pack while the assign writes its properties.
+class _DeletePackOnReadFileStore(FakeFileStore):
+    """A file store that deletes the pack while the assign reads its properties.
 
     Reproduces the production interleave deterministically, with no sleeps: the
     use case's first unit of work read the pack and closed, another request's
     ``DeleteResourcePack`` commits on its own connection, and only then does the
     assignment INSERT name a ``resource_packs`` row that is gone.
+
+    The racer lands on the *read*, never the write (issue #2853): the write now
+    follows the INSERT's flush, whose FK check holds a key-share lock on the pack
+    row, so a racer awaited from inside the write would block on that lock for
+    good.
     """
 
     def __init__(self, engine: AsyncEngine, pack_id: ResourcePackId) -> None:
@@ -272,23 +277,15 @@ class _DeletePackOnWriteFileStore(FakeFileStore):
         self._engine = engine
         self._pack_id = pack_id
 
-    async def write_file(
-        self,
-        *,
-        community_id: CommunityId,
-        server_id: ServerId,
-        rel_path: str,
-        content: bytes,
-    ) -> None:
-        await super().write_file(
-            community_id=community_id,
-            server_id=server_id,
-            rel_path=rel_path,
-            content=content,
-        )
+    async def read_file(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> bytes:
         async with ServersUnitOfWork(create_session_factory(self._engine)) as racer:
             await racer.resource_packs.delete(self._pack_id)
             await racer.commit()
+        return await super().read_file(
+            community_id=community_id, server_id=server_id, rel_path=rel_path
+        )
 
 
 async def test_assignment_insert_for_a_deleted_pack_reports_not_found(
@@ -326,9 +323,11 @@ async def test_assign_resource_pack_reports_a_concurrent_delete_as_not_found(
     pack = _pack()
     await _seed_pack(engine, pack)
 
+    file_store = _DeletePackOnReadFileStore(engine, pack.id)
+    file_store.files["server.properties"] = b"motd=hi\n"
     use_case = AssignResourcePack(
         uow=ServersUnitOfWork(factory),
-        file_store=_DeletePackOnWriteFileStore(engine, pack.id),
+        file_store=file_store,
         clock=FakeClock(_NOW),
     )
     with pytest.raises(ResourcePackNotFoundError):
@@ -343,6 +342,42 @@ async def test_assign_resource_pack_reports_a_concurrent_delete_as_not_found(
         )
 
     # No assignment row survives the typed error.
+    async with ServersUnitOfWork(factory) as uow:
+        assert await uow.resource_packs.get_assignment_by_server(server.id) is None
+    # Nor does the file advertise the deleted pack: the refused INSERT comes
+    # before the write, so server.properties is exactly as it was (issue #2853).
+    assert file_store.files["server.properties"] == b"motd=hi\n"
+
+
+async def test_assign_whose_properties_write_fails_leaves_no_assignment(
+    engine: AsyncEngine,
+) -> None:
+    # The write runs between the INSERT's flush and the commit, so a storage
+    # failure rolls the flushed row back: no committed assignment is left naming
+    # a pack the file does not advertise (issue #2853).
+    server = await _seed_server(engine)
+    factory = create_session_factory(engine)
+    pack = _pack()
+    await _seed_pack(engine, pack)
+
+    file_store = FakeFileStore(fail_write=True)
+    file_store.files["server.properties"] = b"motd=hi\n"
+    use_case = AssignResourcePack(
+        uow=ServersUnitOfWork(factory),
+        file_store=file_store,
+        clock=FakeClock(_NOW),
+    )
+    with pytest.raises(RuntimeError):
+        await use_case(
+            community_id=server.community_id,
+            server_id=server.id,
+            resource_pack_id=pack.id,
+            require_resource_pack=False,
+            resource_pack_prompt=None,
+            assigned_by=_UPLOADER,
+            public_base_url="https://mcsd.example",
+        )
+
     async with ServersUnitOfWork(factory) as uow:
         assert await uow.resource_packs.get_assignment_by_server(server.id) is None
 

@@ -257,6 +257,13 @@ class AssignResourcePack:
     Validates server at-rest state, holds the lifecycle lock, reads/writes
     ``server.properties``, and upserts the assignment row.
 
+    The file is written after the assignment INSERT is flushed and before it
+    commits (issue #2853). The flush is where a pack deleted since the pre-read is
+    refused, so losing that race leaves the file untouched; and a failed write
+    rolls the uncommitted row back, so neither failure leaves the row and the file
+    disagreeing. From the flush on, the INSERT's foreign-key check holds the pack
+    row, so a concurrent delete waits for the commit and then finds the pack in use.
+
     An assignment with no prompt removes any ``resource-pack-prompt`` line the
     previous assignment left behind (issue #2792): the row now says "no prompt", and
     :func:`set_resource_pack_properties` alone would leave the stale line to drift
@@ -330,13 +337,6 @@ class AssignResourcePack:
                     # previous assignment's prompt line (issue #2792).
                     new_props = remove_keys(new_props, {_RESOURCE_PACK_PROMPT_KEY})
 
-            await self.file_store.write_file(
-                community_id=community_id,
-                server_id=server_id,
-                rel_path="server.properties",
-                content=new_props,
-            )
-
             now = self.clock.now()
             assignment = ResourcePackAssignment(
                 server_id=server_id,
@@ -351,7 +351,17 @@ class AssignResourcePack:
             async with self.uow:
                 # Upsert: delete existing, then add new.
                 await self.uow.resource_packs.delete_assignment(server_id)
+                # Flushes the INSERT, so a pack deleted since the pre-read is
+                # refused here -- before the file names it (issue #2853).
                 await self.uow.resource_packs.add_assignment(assignment)
+                # Between the flush and the commit: a failed write rolls the row
+                # back rather than committing one the file does not carry.
+                await self.file_store.write_file(
+                    community_id=community_id,
+                    server_id=server_id,
+                    rel_path="server.properties",
+                    content=new_props,
+                )
                 await self.uow.commit()
 
         return assignment, pack
