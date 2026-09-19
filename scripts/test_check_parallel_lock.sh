@@ -55,6 +55,9 @@
 #      failing assertion from hanging the gate, and a stop that signalled a
 #      run's children and then the run left a `flock` forked between the two
 #      waiting out its own 60 s ceiling as an orphan (#3045).
+#   9. A suite killed with SIGKILL leaves none of its runs behind. No trap runs
+#      then, and the holder stub used to idle forever on its lock, with every
+#      waiter queued behind it waiting forever too (#3045).
 #
 # The runs use a stub `make` on PATH: the stub is reached at the pre-flight
 # golangci-lint install -- the first thing the script runs after the lock -- so
@@ -73,12 +76,11 @@
 #     the host lock -- neither taking it (which would deadlock against the gate
 #     running this test) nor waiting on it.
 #
-# The failure paths are bounded on purpose (#2776). This suite runs inside
-# `make check`, so a `wait` on a run still blocked on the lock would hang the
-# whole gate instead of failing it, and the holder stub -- which idles until a
-# release file appears -- would outlive a killed suite still holding the lock,
-# because the EXIT trap has by then removed the directory that file would have
-# appeared in.
+# The failure paths are bounded on purpose (#2776, #3045). This suite runs
+# inside `make check`, so a `wait` on a run still blocked on the lock would hang
+# the whole gate instead of failing it, and the holder stub -- which idles until
+# a release file appears -- would outlive a killed suite still holding the lock,
+# because a suite killed before it writes that file never writes it.
 #
 # Exit code: 0 = all pass, non-zero = at least one failure.
 set -uo pipefail
@@ -249,15 +251,19 @@ mkdir -p "$stub_dir"
 
 # Holder stub: announce that the run is past the lock, then hold there until
 # released, so the lock is demonstrably held while the other runs are made. It
-# gives up as well when its work dir disappears: if this suite is killed, the
-# EXIT trap removes $work, the release file can then never appear, and a stub
-# watching only for that file would sit on the lock forever with nothing left
-# alive to release it (#2776).
+# gives up as well when this suite is gone, because the release file can then
+# never appear and a stub watching only for that file would sit on the lock
+# forever with nothing left alive to release it. Two checks, because a suite
+# can go two ways: killed with a trap, its EXIT trap removes the work dir
+# (#2776); killed with SIGKILL, nothing runs and only its pid is gone (#3045).
+# The pid check alone would cover both, but the work-dir check cannot be fooled
+# by a reused pid.
 cat > "$stub_dir/make-holder" << 'STUB'
 #!/usr/bin/env bash
 touch "$LOCK_ACQUIRED"
 while [ ! -e "$LOCK_RELEASE" ]; do
 	[ -d "$WORK_DIR" ] || exit 1
+	kill -0 "$SUITE_PID" 2> /dev/null || exit 1
 	sleep 0.05
 done
 exit 1
@@ -289,6 +295,7 @@ start_run "$holder_wt" "$work/holder.out" env \
 	LOCK_ACQUIRED="$acquired" \
 	LOCK_RELEASE="$release" \
 	WORK_DIR="$work" \
+	SUITE_PID="$$" \
 	bash "$ROOT/scripts/check_parallel.sh" "$holder_wt"
 holder_pid=$run_pid
 
@@ -517,6 +524,49 @@ fi
 	fi
 	sweep_procs "$stop_dir"
 }
+
+# ---------------------------------------------------------------------------
+# 9. A suite killed with SIGKILL leaves none of its runs behind (#3045). No
+#    trap runs, so the work dir survives and the holder stub's check on it
+#    never fires: the stub idled forever, holding its run's lock, and every
+#    waiter queued behind that lock waited forever with it. A suite cannot
+#    watch its own SIGKILL, so this kills a second copy of it, once the copy's
+#    holder holds the lock and a waiter is queued behind it. The copy's TMPDIR
+#    points into $work so that its work dir can be found, and LOCK_SUITE_COPY
+#    stops it from starting a copy of its own.
+#
+#    Whatever the copy itself was running at the kill -- a sleep of at most
+#    2 s -- is orphaned as any killed shell's child is, and ends on its own; it
+#    works outside the copy's work dir, so it is not counted here, and the
+#    cleanup below takes it with the copy's process group.
+if [ -z "${LOCK_SUITE_COPY:-}" ]; then
+	copy_tmp="$work/copy-tmp"
+	mkdir -p "$copy_tmp"
+	start_run "$ROOT" "$work/copy.out" env TMPDIR="$copy_tmp" LOCK_SUITE_COPY=1 \
+		bash "$ROOT/scripts/test_check_parallel_lock.sh"
+	copy_pid=$run_pid
+
+	# Assertion 4 reports, pass or fail, after the copy's work dir exists and
+	# just before the copy queues its waiter.
+	copy_work=""
+	if await_grep "a nested run" "$work/copy.out"; then
+		copy_work=$(echo "$copy_tmp"/*)
+	fi
+	if [ -n "$copy_work" ] && await_grep "held by:" "$copy_work/waiter.out"; then
+		kill -KILL "$copy_pid" 2> /dev/null || true
+		wait "$copy_pid" 2> /dev/null || true
+		if await_no_procs "$copy_tmp"; then
+			ok "a suite killed with SIGKILL leaves none of its runs behind"
+		else
+			fail_test "a suite killed with SIGKILL left its runs behind: $(procs_under "$copy_tmp" | tr '\n' ' ')"
+		fi
+	else
+		fail_test "the copy of this suite never queued a waiter behind its holder (output: $(cat "$work/copy.out"))"
+	fi
+	kill -KILL -- -"$copy_pid" 2> /dev/null || true
+	wait "$copy_pid" 2> /dev/null || true
+	sweep_procs "$copy_tmp"
+fi
 
 # ---------------------------------------------------------------------------
 echo
