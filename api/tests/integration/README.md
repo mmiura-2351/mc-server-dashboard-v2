@@ -45,11 +45,39 @@ own Postgres service.
 Point at a *scratch* Postgres — never the live deployment database. For example:
 
 ```sh
-docker run --rm -d --name mcd-test-pg -p 5544:5432 \
+docker run --rm -d --name mcd-test-pg --network host -e PGPORT=5544 \
   -e POSTGRES_USER=mcsd -e POSTGRES_PASSWORD=mcsd -e POSTGRES_DB=mcsd_test \
-  postgres:18.6
+  postgres:18.6 -c listen_addresses=127.0.0.1
 
 cd api
-MCD_TEST_DATABASE_URL="postgresql+asyncpg://mcsd:mcsd@localhost:5544/mcsd_test" \
+MCD_TEST_DATABASE_URL="postgresql+asyncpg://mcsd:mcsd@127.0.0.1:5544/mcsd_test" \
   uv run pytest tests/integration
 ```
+
+The same variable, exported, enables these tests in `make api-test` and the
+pre-push `make check`; without it the gate skips them.
+
+The container shares the host's network instead of publishing a port, because a
+published port (`-p 5544:5432`, including `-p 127.0.0.1:5544:5432`) carries
+every byte between pytest and Postgres through Docker's userland `docker-proxy`
+process. Under the gate's `-n auto` load on a busy host, that proxy was among the
+top CPU consumers while DB-gated tests timed out (issue #2796). On the host
+network Postgres listens on the host loopback directly, so no proxy is involved.
+`PGPORT` moves it off the default 5432 so it cannot collide with a Postgres
+already on the host. `listen_addresses` keeps the fixed-password server off the
+host's external interfaces.
+
+Where Docker's host network is not your machine's own (Docker Desktop without
+host networking enabled), publish the port instead and accept the proxy:
+
+```sh
+docker run --rm -d --name mcd-test-pg -p 127.0.0.1:5544:5432 \
+  -e POSTGRES_USER=mcsd -e POSTGRES_PASSWORD=mcsd -e POSTGRES_DB=mcsd_test \
+  postgres:18.6
+```
+
+The `MCD_TEST_DATABASE_URL` is the same. Leave `PGPORT` and `listen_addresses`
+at the image defaults here: the published port forwards to container port 5432
+over the container's bridge interface, which a loopback-only listener rejects.
+Binding the published port to `127.0.0.1` is what keeps it off the external
+interfaces.

@@ -233,6 +233,11 @@ Each one succeeds, or appears to; the damage surfaces later.
   the commit intact and only the push undone, so the remedy is a follow-up
   commit, squashed away at merge (CONTRIBUTING.md Section 4). The gate itself
   is unchanged — never `--no-verify` (Section 3).
+- The gate runs the DB-gated api integration tests only when
+  `MCD_TEST_DATABASE_URL` is exported (skipped otherwise). Start the scratch
+  Postgres with the host-network recipe in
+  [`api/tests/integration/README.md`](../../api/tests/integration/README.md):
+  a `-p` published port puts all the gate's DB traffic through `docker-proxy`.
 - `proto/` changed → one atomic change set: `make proto-gen`, update `api/`
   **and** `worker/` together; an intentional contract break carries the
   `breaking` label (CONTRIBUTING.md Section 5).
