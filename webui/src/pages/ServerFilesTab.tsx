@@ -1407,6 +1407,7 @@ export function ServerFilesTab({
               path={openFile}
               communityId={communityId}
               serverId={server.id}
+              mcVersion={server.mc_version}
               canEdit={canEdit}
               can={can}
               running={notAtRest}
@@ -2242,6 +2243,7 @@ function Viewer({
   path,
   communityId,
   serverId,
+  mcVersion,
   canEdit,
   can,
   running,
@@ -2253,6 +2255,7 @@ function Viewer({
   path: string;
   communityId: string;
   serverId: string;
+  mcVersion: string;
   canEdit: boolean;
   can: Can;
   running: boolean;
@@ -2314,7 +2317,7 @@ function Viewer({
   }
 
   const decoded = isProbablyText(content.data.content_base64)
-    ? decodeBase64Text(content.data.content_base64)
+    ? decodeBase64Text(content.data.content_base64, { path, mcVersion })
     : null;
   const isText = decoded !== null;
   const downloadName = path.split("/").at(-1) ?? path;
@@ -2391,6 +2394,7 @@ function Viewer({
           path={path}
           communityId={communityId}
           serverId={serverId}
+          mcVersion={mcVersion}
           canRollback={can("file:rollback", { serverId })}
           onClose={() => setHistoryOpen(false)}
           onRolledBack={() => {
@@ -2434,6 +2438,7 @@ function HistoryDrawer({
   path,
   communityId,
   serverId,
+  mcVersion,
   canRollback,
   onClose,
   onRolledBack,
@@ -2442,6 +2447,7 @@ function HistoryDrawer({
   path: string;
   communityId: string;
   serverId: string;
+  mcVersion: string;
   canRollback: boolean;
   onClose: () => void;
   onRolledBack: () => void;
@@ -2602,7 +2608,12 @@ function HistoryDrawer({
               spellCheck={false}
               readOnly
               aria-label={t("files.editorLabel")}
-              value={decodeBase64Text(preview.data.content_base64).text}
+              value={
+                decodeBase64Text(preview.data.content_base64, {
+                  path,
+                  mcVersion,
+                }).text
+              }
             />
           ) : (
             <p className="sub">{t("files.history.preview.binary")}</p>

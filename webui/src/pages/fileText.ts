@@ -10,10 +10,14 @@
  *
  * Charset rule (issue #2851): a file is read as UTF-8 when its bytes are valid
  * UTF-8, and as latin-1 (ISO-8859-1) otherwise, and written back in the charset
- * it was read in. That is how Minecraft (1.20+) reads `server.properties` — the
+ * it was read in. That is how Minecraft 1.20+ reads `server.properties` — the
  * file whose non-UTF-8 bytes are ordinary, #2623 — and it keeps the round trip
  * lossless for every file: latin-1 maps each byte to one character and back,
  * where a UTF-8-only decode turned each invalid byte into U+FFFD for good.
+ * The one exception mirrors the older reader: a pre-1.20 server reads its root
+ * `server.properties` with `Properties.load(InputStream)`, latin-1 only, so
+ * that file on that server is read and written as latin-1 whatever its bytes
+ * are — written as UTF-8, a non-ASCII character reaches the server mangled.
  *
  * Text-vs-binary rule: sniff the decoded byte prefix for a NUL (0x00). Real
  * text files (server.properties, JSON, YAML, logs) never contain a NUL byte,
@@ -23,6 +27,8 @@
  * sniff rather than an extension allowlist so an unknown-extension text file
  * still edits and a `.txt`-named blob still does not.
  */
+
+import { readsServerPropertiesAsUtf8 } from "../mcVersion.ts";
 
 /** Bytes of the decoded prefix inspected for the NUL-byte binary signal. */
 const SNIFF_BYTES = 8192;
@@ -63,17 +69,31 @@ export class UnencodableTextError extends Error {
   }
 }
 
-/** Decode a base64 payload as UTF-8 text, or as latin-1 when it is not UTF-8. */
-export function decodeBase64Text(base64: string): DecodedText {
-  const bytes = base64ToBytes(base64);
-  try {
-    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-    return { text, charset: "utf-8" };
-  } catch {
-    // `atob`'s binary string IS latin-1: one character per byte, same value.
-    // Not `new TextDecoder("latin1")`, which WHATWG maps to windows-1252.
-    return { text: atob(base64), charset: "latin-1" };
+/**
+ * Decode a base64 payload as text in the charset the charset rule above picks
+ * for `file`: its working-set path and its server's Minecraft version.
+ */
+export function decodeBase64Text(
+  base64: string,
+  file: { path: string; mcVersion: string | null | undefined },
+): DecodedText {
+  // Only the root server.properties is the file the server itself reads.
+  const latin1Only =
+    file.path === "server.properties" &&
+    !readsServerPropertiesAsUtf8(file.mcVersion);
+  if (!latin1Only) {
+    try {
+      const text = new TextDecoder("utf-8", { fatal: true }).decode(
+        base64ToBytes(base64),
+      );
+      return { text, charset: "utf-8" };
+    } catch {
+      // Not UTF-8: read it as latin-1 below.
+    }
   }
+  // `atob`'s binary string IS latin-1: one character per byte, same value.
+  // Not `new TextDecoder("latin1")`, which WHATWG maps to windows-1252.
+  return { text: atob(base64), charset: "latin-1" };
 }
 
 /** Encode UTF-8 text to a base64 payload. */
