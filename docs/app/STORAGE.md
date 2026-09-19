@@ -1141,19 +1141,19 @@ backoff so a momentary fault has a chance to clear, and the two reads decide:
 - **The re-read completes** — the archive is healthy (subject to the same gzip
   check as any full read): the store just produced every declared byte, which a
   damaged object cannot do.
-- **Both reads delivered bytes and both ended short** — the archive is unreadable,
-  reported as ending at the **further** of the two points. The two need not agree:
-  a connection torn down with an RST rather than a graceful close discards whatever
-  was still in flight — a timing-dependent few MB — so two reads of one damaged
-  body stop at different offsets (issue #2381). An RST only ever loses bytes, never
-  invents them, so neither read got past the cut and the further one is the better
-  estimate of it.
-- **Either read delivered no byte at all** — the store refusing outright. Such a
-  read never reached the body and says nothing about where this object's bytes
-  end, so it stays `ObjectStoreUnavailableError` → `BackupStorageUnavailableError`
-  whatever the other read did. The sweep does not catch that: the pass stops,
-  logging which backup it died on, and the CLI exits non-zero with an
-  operator-facing message rather than a traceback.
+- **Both reads ended short, each after delivering bytes** — the archive is
+  unreadable, reported as ending at the **further** of the two points. The two
+  need not agree: a connection torn down with an RST rather than a graceful close
+  discards whatever was still in flight — a timing-dependent few MB — so two reads
+  of one damaged body stop at different offsets (issue #2381). An RST only ever
+  loses bytes, never invents them, so neither read got past the cut and the
+  further one is the better estimate of it.
+- **Both reads ended short, and either delivered no byte at all** — the store
+  refusing outright. Such a read never reached the body and says nothing about
+  where this object's bytes end, so it stays `ObjectStoreUnavailableError` →
+  `BackupStorageUnavailableError` however far the other read got. The sweep does
+  not catch that: the pass stops, logging which backup it died on, and the CLI
+  exits non-zero with an operator-facing message rather than a traceback.
 
 Accepting disagreeing stop points trades away some outage protection: a store that
 tears down both reads mid-body, at different points, now quarantines the backup

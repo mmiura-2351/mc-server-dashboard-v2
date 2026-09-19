@@ -240,8 +240,10 @@ async def test_reproducible_mid_stream_teardown_is_unreadable() -> None:
     cut = len(archive) // 2
     store.read_aborts[object_key] = [cut, cut]
 
-    with pytest.raises(ArchiveUnreadableError):
+    with pytest.raises(ArchiveUnreadableError) as excinfo:
         await storage.check_backup_health(community, server, key)
+
+    assert f"past {cut} of the {len(archive)} declared" in str(excinfo.value)
 
 
 @pytest.mark.parametrize("shorter_first", [True, False], ids=["first", "second"])

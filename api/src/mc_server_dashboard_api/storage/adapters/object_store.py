@@ -1424,20 +1424,21 @@ class ObjectStorage(Storage):
           content verdict the full read reached). The store just produced every
           declared byte, which a damaged object cannot do; the first stop was a
           blip.
-        * **Both reads delivered bytes and both ended short** — the archive is
+        * **Both reads ended short, each after delivering bytes** — the archive is
           unreadable, and the reported end is the MAXIMUM of the two stop points.
           They need not agree: a connection torn down with an RST rather than a
           graceful close discards whatever was still in flight, a timing-dependent
           few MB, so two reads of one damaged body stop at different offsets. An
           RST only ever loses bytes, never invents them, so neither read got past
           the cut and the further one is the better estimate of it.
-        * **Either read delivered no byte at all** — an availability failure. A
-          read that got nothing is the store refusing outright: it never reached
-          the body and says nothing about where this object's bytes end, so paired
-          with a short read it leaves one observation of the body — exactly the
-          ambiguity the re-read exists to resolve — and paired with another empty
-          read it is the outage signature. Quarantining on it would condemn a
-          backup because the store went down mid-read.
+        * **Both reads ended short, and either delivered no byte at all** — an
+          availability failure. A read that got nothing is the store refusing
+          outright: it never reached the body and says nothing about where this
+          object's bytes end, so paired with a short read it leaves one
+          observation of the body — exactly the ambiguity the re-read exists to
+          resolve — and paired with another empty read it is the outage signature.
+          Quarantining on it would condemn a backup because the store went down
+          mid-read.
 
         The offsets are byte-exact in practice, not rounded to 8 MiB chunks:
         ``_iter_body``'s ``read(_PART)`` returns whatever the connection has
