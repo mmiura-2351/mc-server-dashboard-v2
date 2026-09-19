@@ -147,9 +147,9 @@ start_run() {
 # did not: a run blocked on the lock forks a new `flock` the moment its old one
 # dies, so one forked between the two signals was left reparented, waiting out
 # its own 60 s ceiling. The run is signalled by pid as well, so that a run which
-# does not lead a group -- one start_run did not start, or a start_run that lost
-# its setsid -- still dies and the `wait` below cannot hang on it; whatever such
-# a run leaves behind is then reported by assertion 8 instead.
+# does not lead a group -- as under a start_run that lost its setsid -- still
+# dies and the `wait` below cannot hang on it; whatever such a run leaves behind
+# is then reported by assertion 8 instead.
 #
 # Each step is allowed to fail: the run may have exited before the signal, a
 # run that leads no group has no group to signal, and `wait` reports the status
