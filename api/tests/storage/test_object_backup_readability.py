@@ -11,10 +11,11 @@ decompressed output is discarded as it is produced — nothing is staged or buff
 
 The delicate case is telling *damage* from an *outage*: the reported defect
 surfaces as a connection teardown mid-body, exactly like a store having a bad
-minute. The probe re-reads after a teardown and only calls the archive unreadable
-when the body reproducibly ends at the same non-zero offset; anything else stays
-an availability failure, so a sweep run during an outage cannot quarantine every
-backup in the deployment.
+minute. The probe re-reads after a teardown: a complete re-read is healthy, and
+the archive is called unreadable only when both reads delivered bytes and both
+ended short — at the further of the two offsets, since an RST-torn read loses a
+timing-dependent tail (#2381). A read that delivered nothing stays an
+availability failure, so a store refusing reads cannot quarantine backups.
 """
 
 from __future__ import annotations
@@ -243,17 +244,50 @@ async def test_reproducible_mid_stream_teardown_is_unreadable() -> None:
         await storage.check_backup_health(community, server, key)
 
 
-async def test_teardown_at_a_shifting_offset_reports_the_store_unavailable() -> None:
-    """A store having a bad minute tears the body down wherever it happens to be.
-    That must stay an availability failure — quarantining on it would condemn every
-    backup in the deployment on one outage."""
+@pytest.mark.parametrize("shorter_first", [True, False], ids=["first", "second"])
+async def test_reads_ending_short_at_different_offsets_are_unreadable(
+    shorter_first: bool,
+) -> None:
+    """Issue #2381: a connection torn down with an RST discards whatever was still in
+    flight, and how much is timing-dependent — so two reads of the same damaged body
+    stop at different offsets. An RST only ever loses bytes, never invents them:
+    neither read got past the cut, and the further one is the better estimate of it.
+    Disagreement between two short reads is therefore not an outage."""
 
     store, storage = _store_and_storage()
     community, server = new_scope()
     archive = _sound_archive()
     key = await _put_backup(storage, community, server, archive)
     object_key = storage._backup_key(community, server, key)
-    store.read_aborts[object_key] = [len(archive) // 2, len(archive) // 3]
+    further, shorter = len(archive) // 2, len(archive) // 3
+    store.read_aborts[object_key] = (
+        [shorter, further] if shorter_first else [further, shorter]
+    )
+
+    with pytest.raises(ArchiveUnreadableError) as excinfo:
+        await storage.check_backup_health(community, server, key)
+
+    # The reported end is the maximum of the two, whichever read reached it.
+    assert f"past {further} of the {len(archive)} declared" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("empty_first", [True, False], ids=["first", "second"])
+async def test_a_read_that_delivers_nothing_cannot_corroborate_a_short_one(
+    empty_first: bool,
+) -> None:
+    """A read that delivered no byte never reached the body — it is the store
+    refusing, which says nothing about where THIS object's bytes end. Paired with a
+    short read it leaves one observation of the body, which is exactly the ambiguity
+    the re-read exists to resolve, so it stays an availability failure: taking the
+    maximum here would quarantine a backup because the store went down mid-read."""
+
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+    archive = _sound_archive()
+    key = await _put_backup(storage, community, server, archive)
+    object_key = storage._backup_key(community, server, key)
+    cut = len(archive) // 2
+    store.read_aborts[object_key] = [0, cut] if empty_first else [cut, 0]
 
     with pytest.raises(ObjectStoreUnavailableError) as excinfo:
         await storage.check_backup_health(community, server, key)

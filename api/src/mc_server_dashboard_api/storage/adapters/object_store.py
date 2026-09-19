@@ -141,10 +141,10 @@ _DIR_MARKER = ".dir"
 # itself. Mirrors the fs adapter's spool-sweep age guard.
 _MULTIPART_SWEEP_MIN_AGE_S = 3600
 # Pause before the backup readability probe re-reads a body that ended early
-# (issue #2371), so a momentary fault has a chance to clear: a blip then returns
-# healthy or stops somewhere else, and only genuinely persistent damage still looks
-# reproducible. Short enough to be irrelevant next to the full read it precedes, and
-# only ever paid on the failure path.
+# (issue #2371), so a momentary fault has a chance to clear: a blip then reads back
+# complete, and only genuinely persistent damage stops short again (#2381). Short
+# enough to be irrelevant next to the full read it precedes, and only ever paid on
+# the failure path.
 _REPROBE_BACKOFF_S = 1.0
 
 _LOG = logging.getLogger(__name__)
@@ -272,7 +272,8 @@ class _ArchiveProbe:
     opinion can change (a gzip stream that does not decompress, a body longer than
     declared); ``ended_at`` is the byte count the body stopped at — whether by a
     transport teardown or a clean early EOF — which on its own says nothing,
-    because only whether it reproduces distinguishes damage from an outage.
+    because only whether a re-read also ends short distinguishes damage from an
+    outage.
 
     ``cause`` carries the transport error the read failed with, so the eventual
     ``ObjectStoreUnavailableError`` can chain to it: without it the operator sees
@@ -1411,51 +1412,62 @@ class ObjectStorage(Storage):
     async def _reprobe_short_body(
         self, client: S3Client, backup_key: str, declared: int, first_end: int
     ) -> _ArchiveProbe:
-        """Classify a body that ended short of its declared length (issue #2371).
+        """Classify a body that ended short of its declared length (#2371, #2381).
 
         This is the delicate distinction. A single short read cannot tell "this
         object's bytes are damaged" from "the store is having a bad minute" — both
-        end the body early. The reported defect is *deterministic*: the transfer
-        runs at full speed to one fixed point and stops there on every attempt, days
-        apart. An outage is not.
+        end the body early. The reported defect is *persistent*: the transfer runs
+        at full speed to one fixed point and never gets past it, on every attempt,
+        days apart. So the read is repeated once, and the two reads decide:
 
-        So the read is repeated, and only a body that reproducibly ends at the SAME
-        non-zero point is called damage. Anything else — a different point, no byte
-        ever delivered (the store refusing outright), or a complete read the second
-        time — stays an availability failure, because quarantining on it would
-        condemn every backup in the deployment over one bad minute. The extra read
-        is paid only on the failure path.
+        * **The re-read completes** — the archive is healthy (or carries whatever
+          content verdict the full read reached). The store just produced every
+          declared byte, which a damaged object cannot do; the first stop was a
+          blip.
+        * **Both reads delivered bytes and both ended short** — the archive is
+          unreadable, and the reported end is the MAXIMUM of the two stop points.
+          They need not agree: a connection torn down with an RST rather than a
+          graceful close discards whatever was still in flight, a timing-dependent
+          few MB, so two reads of one damaged body stop at different offsets. An
+          RST only ever loses bytes, never invents them, so neither read got past
+          the cut and the further one is the better estimate of it.
+        * **Either read delivered no byte at all** — an availability failure. A
+          read that got nothing is the store refusing outright: it never reached
+          the body and says nothing about where this object's bytes end, so paired
+          with a short read it leaves one observation of the body — exactly the
+          ambiguity the re-read exists to resolve — and paired with another empty
+          read it is the outage signature. Quarantining on it would condemn a
+          backup because the store went down mid-read.
 
-        **Granularity.** ``_iter_body`` reads in 8 MiB chunks and a failed ``read()``
-        discards the partial chunk, so the byte count compared here moves in chunk
-        steps: this reproduces "the same 8 MiB boundary", not "the same byte". That
-        is ample to separate a fixed cut point from an outage's scattered ones,
-        which is all the comparison is asked to do — but it is not the byte-exact
-        guarantee the raw numbers suggest.
+        The offsets are byte-exact in practice, not rounded to 8 MiB chunks:
+        ``_iter_body``'s ``read(_PART)`` returns whatever the connection has
+        buffered rather than waiting for a full part, and a gracefully closed body
+        cut off an 8 MiB boundary was measured at its exact byte on every read. The
+        extra read is paid only on the failure path.
         """
 
-        # Let a momentary fault clear before re-reading, so a blip is more likely to
-        # come back healthy (or at a different point) than to look reproducible. This
-        # biases the ambiguous case toward "unavailable", which is the safe verdict.
+        # Let a momentary fault clear before re-reading, so a blip has the chance to
+        # come back as a complete read rather than a second short one.
         await asyncio.sleep(_REPROBE_BACKOFF_S)
         second = await self._probe_archive(client, backup_key, declared)
-        if second.ended_at == first_end and first_end > 0:
+        if second.ended_at is None:
+            return second
+        if first_end > 0 and second.ended_at > 0:
             return _ArchiveProbe(
                 defect=(
-                    f"the store reproducibly ends the body at {first_end} of the "
-                    f"{declared} declared bytes"
+                    f"the store cannot deliver the body past "
+                    f"{max(first_end, second.ended_at)} of the {declared} declared "
+                    f"bytes (the reads ended at {first_end} and {second.ended_at})"
                 )
             )
-        if second.ended_at is not None:
-            # Chain to the transport error the re-read failed with, so the traceback
-            # the sweep logs reaches the actual cause instead of stopping at this
-            # summary. ``None`` when the body ended on a clean EOF (no error to
-            # chain), which is the one case where there is nothing further to show.
-            raise ObjectStoreUnavailableError(
-                f"object store could not serve the body of {backup_key}: it ended at "
-                f"{first_end} then {second.ended_at} of {declared} declared bytes"
-            ) from second.cause
-        return second
+        # Chain to the transport error the re-read failed with, so the traceback the
+        # sweep logs reaches the actual cause instead of stopping at this summary.
+        # ``None`` when the body ended on a clean EOF (no error to chain), which is
+        # the one case where there is nothing further to show.
+        raise ObjectStoreUnavailableError(
+            f"object store could not serve the body of {backup_key}: it ended at "
+            f"{first_end} then {second.ended_at} of {declared} declared bytes"
+        ) from second.cause
 
     async def delete_backup(
         self, community_id: CommunityId, server_id: ServerId, key: BackupKey

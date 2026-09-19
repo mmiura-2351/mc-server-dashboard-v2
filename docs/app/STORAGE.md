@@ -1134,20 +1134,37 @@ config knob.
 **Damage vs. outage.** A body that ends early looks identical whether the object's
 bytes are damaged or the store is merely having a bad minute — and quarantining on
 the latter would condemn every backup in the deployment over one outage. The
-damage class the probe exists to catch presents *deterministically* — the transfer
-stops at one fixed point on every attempt — while an outage's cut points scatter.
-So the probe re-reads (after a short backoff, so a momentary fault has a
-chance to clear) and calls the archive unreadable only when the body reproducibly
-ends at the **same non-zero point**. A different point, no byte delivered at all
-(the store refusing outright), or a complete read the second time all stay
-`ObjectStoreUnavailableError` → `BackupStorageUnavailableError`, which the sweep
-does not catch: the pass stops, logging which backup it died on, and the CLI exits
-non-zero with an operator-facing message rather than a traceback. The extra read is
-paid only on the failure path. A clean early EOF takes the same re-read path as a
-transport teardown — it is the same observation and equally unable to tell damage
-from an outage on one attempt. The comparison is at the 8 MiB read-chunk
-granularity, not byte-exact, which is ample to separate a fixed cut point from an
-outage's scattered ones.
+damage class the probe exists to catch is *persistent*: the transfer never gets
+past one fixed point, on every attempt. So the probe re-reads once, after a short
+backoff so a momentary fault has a chance to clear, and the two reads decide:
+
+- **The re-read completes** — the archive is healthy (subject to the same gzip
+  check as any full read): the store just produced every declared byte, which a
+  damaged object cannot do.
+- **Both reads delivered bytes and both ended short** — the archive is unreadable,
+  reported as ending at the **further** of the two points. The two need not agree:
+  a connection torn down with an RST rather than a graceful close discards whatever
+  was still in flight — a timing-dependent few MB — so two reads of one damaged
+  body stop at different offsets (issue #2381). An RST only ever loses bytes, never
+  invents them, so neither read got past the cut and the further one is the better
+  estimate of it.
+- **Either read delivered no byte at all** — the store refusing outright. Such a
+  read never reached the body and says nothing about where this object's bytes
+  end, so it stays `ObjectStoreUnavailableError` → `BackupStorageUnavailableError`
+  whatever the other read did. The sweep does not catch that: the pass stops,
+  logging which backup it died on, and the CLI exits non-zero with an
+  operator-facing message rather than a traceback.
+
+Accepting disagreeing stop points trades away some outage protection: a store that
+tears down both reads mid-body, at different points, now quarantines the backup
+rather than stopping the pass. The alternative was worse in practice — requiring
+the two points to be equal misread an RST-torn damaged body as an outage on about
+one probe in five, aborting the whole pass. The extra read is paid only on the
+failure path. A clean early EOF takes the same re-read path as a transport
+teardown — it is the same observation and equally unable to tell damage from an
+outage on one attempt. The stop points are byte-exact in practice, not rounded to
+the 8 MiB read chunk: a read returns whatever the connection has buffered rather
+than waiting for a full chunk.
 
 Supporting this, `_iter_body` translates **any** exception raised while reading a
 response body to `ObjectStoreUnavailableError`, so a teardown is a typed storage
