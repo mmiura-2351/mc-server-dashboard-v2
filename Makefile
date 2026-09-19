@@ -494,8 +494,8 @@ scripts-test: scripts-test-cheap
 	bash scripts/test_deploy_stamp.sh
 
 # The scripts/ suites the always-on CI gate can afford: no network, no
-# dependency install, ~3s for all six (0.06s-2.3s each; the slowest is the lock
-# suite, whose cost is deliberate waits, bounded by its own polling ceiling).
+# dependency install, and a few seconds in all -- most of it the lock suite's,
+# whose cost is deliberate waits, bounded by its own polling ceilings.
 #
 # sanity.yml runs this target rather than copying the list out, which is the
 # whole point of the split: the workflow used to enumerate its scripts/ steps by
