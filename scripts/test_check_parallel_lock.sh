@@ -51,6 +51,10 @@
 #      that passed quietly would be worse than the hang: stopping the holder
 #      releases the lock, so the suite would go on to "pass" assertions about
 #      scaffolding it had cut short itself (#2776).
+#   8. Stopping a run leaves nothing of it behind. The stops are what keep a
+#      failing assertion from hanging the gate, and a stop that signalled a
+#      run's children and then the run left a `flock` forked between the two
+#      waiting out its own 60 s ceiling as an orphan (#3045).
 #
 # The runs use a stub `make` on PATH: the stub is reached at the pre-flight
 # golangci-lint install -- the first thing the script runs after the lock -- so
@@ -117,31 +121,43 @@ await_grep() {
 }
 
 # Start a run in the background and set run_pid: "$@" runs in directory $1,
-# with its output in file $2.
+# with its output in file $2. The run leads a session of its own, and so a
+# process group of its own whose id is run_pid, which is what lets stop_run
+# take down everything the run spawns with one signal (#3045). Each step execs
+# the next -- the subshell into setsid, setsid into the command -- so run_pid is
+# the command itself, and setsid has no need to fork: a job started by a shell
+# without job control does not already lead a group.
 start_run() {
 	local dir=$1 out=$2
 	shift 2
-	(cd "$dir" && exec "$@") > "$out" 2>&1 &
+	(cd "$dir" && exec setsid "$@") > "$out" 2>&1 &
 	run_pid=$!
 }
 
 # Stop a backgrounded run and reap it. Only the failure paths use this: a `wait`
 # on a run still blocked on the lock never returns, which would hang the scripts
-# chain rather than report the failure it is standing in for. The run is exec'd
-# into its subshell, so the recorded pid is check_parallel.sh itself, and the
-# script installs its TERM trap only after the lock section -- a run still
-# waiting there dies on the signal. Its `flock` child is swept first because
-# signalling only the parent would leave it reparented and running.
+# chain rather than report the failure it is standing in for. check_parallel.sh
+# installs its TERM trap only after the lock section, so a run still waiting
+# there dies on the signal.
 #
-# Each step is allowed to fail: the run may have no `flock` child left, it may
-# have exited between the two signals, and `wait` reports the status of a run
-# that exits non-zero by design (its stub fails on purpose). None of that is an
-# error here, and leaving the statuses bare aborts the suite under `set -e`.
+# The signal goes to the run's process group, which reaches the run and all it
+# has spawned at once (#3045). Signalling the run's children and then the run
+# did not: a run blocked on the lock forks a new `flock` the moment its old one
+# dies, so one forked between the two signals was left reparented, waiting out
+# its own 60 s ceiling. The run is signalled by pid as well, so that a run which
+# does not lead a group -- one start_run did not start, or a start_run that lost
+# its setsid -- still dies and the `wait` below cannot hang on it; whatever such
+# a run leaves behind is then reported by assertion 8 instead.
+#
+# Each step is allowed to fail: the run may have exited before the signal, a
+# run that leads no group has no group to signal, and `wait` reports the status
+# of a run that exits non-zero by design (its stub fails on purpose). None of
+# that is an error here, and leaving the statuses bare aborts the suite under
+# `set -e`.
 stop_run() {
 	local pid=$1
 	[ -n "$pid" ] || return 0
-	pkill -TERM -P "$pid" 2> /dev/null || true
-	kill -TERM "$pid" 2> /dev/null || true
+	kill -TERM -- -"$pid" "$pid" 2> /dev/null || true
 	wait "$pid" 2> /dev/null || true
 	return 0
 }
@@ -168,6 +184,47 @@ reap_run() {
 	done
 	stop_run "$pid"
 	return 1
+}
+
+# The pids of the processes working in directory $1 or below it. A run starts
+# in a directory of its own and everything it spawns inherits it, so this still
+# finds a run's processes once they have been reparented -- the attribution
+# docs/dev/AGENTS.md Section 3 gives for a gate (`readlink /proc/<pid>/cwd`).
+# find exits non-zero on the entries it may not read (other users' processes)
+# and on processes that exit mid-scan; neither is an error here.
+procs_under() {
+	find /proc/[0-9]*/cwd -maxdepth 0 \( -lname "$1" -o -lname "$1/*" \) \
+		2> /dev/null | cut -d/ -f3 || true
+}
+
+# Poll until nothing works under $1, up to a ceiling: a signalled process takes
+# a moment to die, and then to be reaped by whoever inherited it.
+await_no_procs() {
+	local dir=$1 limit=${2:-100} i=0
+	while [ "$i" -lt "$limit" ]; do
+		[ -z "$(procs_under "$dir")" ] && return 0
+		sleep 0.1
+		i=$((i + 1))
+	done
+	return 1
+}
+
+# Kill whatever still works under $1. The assertions that spawn processes end
+# with this, so that a red does not leave behind the very processes it reports.
+# It repeats because a waiter whose `flock` dies first can fork another before
+# its own signal lands.
+sweep_procs() {
+	local i=0 pids pid
+	while [ "$i" -lt 10 ]; do
+		pids=$(procs_under "$1")
+		[ -n "$pids" ] || return 0
+		for pid in $pids; do
+			kill -KILL "$pid" 2> /dev/null || true
+		done
+		sleep 0.1
+		i=$((i + 1))
+	done
+	return 0
 }
 
 echo "=== check_parallel.sh host-lock tests ==="
@@ -426,6 +483,39 @@ fi
 	else
 		ok "a run that had to be stopped is reported rather than reaped in silence"
 	fi
+}
+
+# ---------------------------------------------------------------------------
+# 8. Stopping a run leaves nothing of it behind (#3045). What escaped the old
+#    stop -- signal the run's children, then the run -- was a `flock` forked
+#    between the two: a run blocked on the lock forks a new one the moment its
+#    old one dies, and the new one was left reparented, waiting out its own
+#    60 s ceiling. That race cannot be staged on demand (the old stop orphaned
+#    no `flock` in 20 stops of a blocked waiter on the host this was written
+#    on), but what it slips through is the gap every such sweep has: a process
+#    that is not a child of the run at the instant of the sweep. A grandchild
+#    is in that gap every time, so the stand-in run below has one. A sweep of
+#    the run's children leaves it running; one signal to the run's process
+#    group does not.
+{
+	stop_dir="$work/stop-run"
+	mkdir -p "$stop_dir"
+	start_run "$stop_dir" /dev/null \
+		bash -c 'bash -c "sleep 30 & touch spawned; wait"; :'
+	stop_pid=$run_pid
+
+	if await_file "$stop_dir/spawned"; then
+		stop_run "$stop_pid"
+		if await_no_procs "$stop_dir" 20; then
+			ok "a stopped run leaves nothing behind, however deep its process tree"
+		else
+			fail_test "a stopped run left processes behind: $(procs_under "$stop_dir" | tr '\n' ' ')"
+		fi
+	else
+		fail_test "the stand-in run never spawned its grandchild"
+		stop_run "$stop_pid"
+	fi
+	sweep_procs "$stop_dir"
 }
 
 # ---------------------------------------------------------------------------
