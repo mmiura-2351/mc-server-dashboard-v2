@@ -502,8 +502,9 @@ func unpackAndSwap(r io.Reader, destDir string, gen uint64, log *slog.Logger) er
 	// passes until destDir was parked aside. Dropping regardless would leave no local
 	// tree. An emptied slot receives the parked set instead, the outcome this hydrate
 	// reaches when the sweep lands before its check. A slot that is neither provably
-	// occupied nor provably empty, or a failed re-park, leaves the set where it is: a leak,
-	// not a guess.
+	// occupied nor provably empty, or a failed re-park, leaves the set under its superseded
+	// name, which the next leftover sweep removes: no worse than the unconditional drop
+	// this replaces, and never a delete on a guess.
 	if dropAside {
 		if _, err := os.Lstat(displaced); err == nil {
 			_ = os.RemoveAll(asideAt)

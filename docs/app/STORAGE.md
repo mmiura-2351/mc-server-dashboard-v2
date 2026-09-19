@@ -746,6 +746,8 @@ WARN  displaced recovery tree for unknown/unassigned server found at boot; manua
    hydrates may have displaced and discarded newer working sets while this tree sat in the
    slot. Each such discard logged the `WARN` above, so grep the Worker log for
    `discarding the working set` on this server id to see whether newer branches existed.
+   If a `swept by a concurrent snapshot` `INFO` follows that `WARN` (see "when it
+   declines", below), the slot holds the set that hydrate displaced, not an older tree.
 3. **Recover the world.** Two options:
 
    - **Repack as a new backup (recommended).** Tar the displaced tree, upload it
