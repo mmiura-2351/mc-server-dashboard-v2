@@ -493,8 +493,23 @@ func unpackAndSwap(r io.Reader, destDir string, gen uint64, log *slog.Logger) er
 	// Swap succeeded. When an older displaced tree was retained instead, the set parked
 	// aside is the one the policy elected to drop. Best-effort: a failure here leaks a
 	// .hydrate-<id>-* tree that every sweeper reclaims later.
+	//
+	// The slot is re-checked first (issue #3112): the drop is justified only by the
+	// retained tree still being there, and a running-id sweep, which takes no per-id
+	// reservation, can have renamed it away since the check above — its identity pin
+	// passes until destDir was parked aside. Dropping regardless would leave no local
+	// tree. An emptied slot receives the parked set instead, the outcome this hydrate
+	// reaches when the sweep lands before its check. Anything short of a slot that is
+	// provably occupied or provably empty leaves the set where it is, a leak rather than a
+	// guess.
 	if dropAside {
-		_ = os.RemoveAll(asideAt)
+		if _, err := os.Lstat(displaced); err == nil {
+			_ = os.RemoveAll(asideAt)
+		} else if os.IsNotExist(err) && os.Rename(asideAt, displaced) == nil {
+			log.Info("hydrate: the retained displaced tree was swept by a concurrent snapshot before the discard; keeping the replaced working set in its slot instead (issue #3112)",
+				"server_id", filepath.Base(destDir),
+				"retained", displaced)
+		}
 	}
 	// fsync the scratch root so BOTH swap renames (the displace-aside and the swap-in)
 	// are durable: a power loss must not roll the displace rename back, and the marker
