@@ -396,6 +396,17 @@ each MC container's name for its RCON and relay game dials on `mcsd-servers`. It
 binds no listening socket on either network — both of its sessions are outbound
 dials — so being adjacent to it grants no service to talk to.
 
+The `mcsd-servers` row is checked mechanically, not just stated:
+`scripts/check_compose_topology.py`, a step of the required `check` job in the
+`sanity` workflow, renders `compose.yaml` with every profile enabled and fails
+unless the network the worker attaches MC containers to has exactly one compose
+service on it, `worker`. It also fails if any service sets `network_mode` or if
+either network name stops deriving from the project name. It checks the
+compose file, not a running host: a container attached by hand, or a server
+started before a network change (see
+[`../dev/DEPLOYMENT.md`](../dev/DEPLOYMENT.md) Section 9), is outside what it
+sees.
+
 ### What an MC container can reach
 
 Enumerated 2026-08-02 by TCP connect from inside a **booted** Minecraft server
