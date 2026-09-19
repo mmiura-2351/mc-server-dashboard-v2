@@ -1025,11 +1025,17 @@ def test_snapshot_partial_region_loss_is_refused_with_machine_readable_reason(
 
 
 def test_snapshot_partial_region_loss_report_is_bounded_and_truncated(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import asyncio
 
     from mc_server_dashboard_api.dataplane.api import transfers
+
+    # Shrink both report caps so the fixture's file count (every staged file is
+    # fsync'd) does not scale with the production values; the builder reads them
+    # at call time. Distinct values keep a dir/name cap mix-up visible.
+    monkeypatch.setattr(transfers, "_MISSING_REGION_DIR_CAP", 3)
+    monkeypatch.setattr(transfers, "_MISSING_REGION_NAME_CAP", 2)
 
     client, storage = _setup(tmp_path)
     community, server = _scope()
@@ -1073,11 +1079,17 @@ def test_snapshot_partial_region_loss_report_is_bounded_and_truncated(
 
 
 def test_snapshot_partial_region_loss_report_exactly_at_cap_not_truncated(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import asyncio
 
     from mc_server_dashboard_api.dataplane.api import transfers
+
+    # Shrink both report caps so the fixture's file count (every staged file is
+    # fsync'd) does not scale with the production values; the builder reads them
+    # at call time. Distinct values keep a dir/name cap mix-up visible.
+    monkeypatch.setattr(transfers, "_MISSING_REGION_DIR_CAP", 3)
+    monkeypatch.setattr(transfers, "_MISSING_REGION_NAME_CAP", 2)
 
     client, storage = _setup(tmp_path)
     community, server = _scope()
@@ -1085,9 +1097,9 @@ def test_snapshot_partial_region_loss_report_exactly_at_cap_not_truncated(
 
     # Exactly the directory cap of partial-loss dirs so the dir cap does not fire
     # (strict > in the builder). Each dir needs only two region files (keep one,
-    # drop one) to be a partial loss well under the name cap — the publish fsyncs
+    # drop one) to be a partial loss under the name cap — the publish fsyncs
     # every staged file, so no dir carries more region files than the boundary needs.
-    dir_count = transfers._MISSING_REGION_DIR_CAP  # 20
+    dir_count = transfers._MISSING_REGION_DIR_CAP
     prior: dict[str, bytes] = {}
     for d in range(dir_count):
         for n in range(2):
@@ -1111,11 +1123,17 @@ def test_snapshot_partial_region_loss_report_exactly_at_cap_not_truncated(
 
 
 def test_snapshot_partial_region_loss_report_name_list_exactly_at_cap_not_truncated(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import asyncio
 
     from mc_server_dashboard_api.dataplane.api import transfers
+
+    # Shrink both report caps so the fixture's file count (every staged file is
+    # fsync'd) does not scale with the production values; the builder reads them
+    # at call time. Distinct values keep a dir/name cap mix-up visible.
+    monkeypatch.setattr(transfers, "_MISSING_REGION_DIR_CAP", 3)
+    monkeypatch.setattr(transfers, "_MISSING_REGION_NAME_CAP", 2)
 
     client, storage = _setup(tmp_path)
     community, server = _scope()
@@ -1125,16 +1143,16 @@ def test_snapshot_partial_region_loss_report_name_list_exactly_at_cap_not_trunca
     # exactly _MISSING_REGION_NAME_CAP lost names in one directory must be reported
     # in full and NOT truncated (the builder slices on a strict > against the name
     # cap). dim000 sorts first and carries exactly the cap in lost names; a second
-    # dir keeps the report multi-directory while staying far under the dir cap, so
+    # dir keeps the report multi-directory while staying under the dir cap, so
     # only the name boundary is under test. Minimal fsync footprint (issue #2228):
     # only dim000 stages more than two region files.
-    name_cap = transfers._MISSING_REGION_NAME_CAP  # 50
+    name_cap = transfers._MISSING_REGION_NAME_CAP
     prior: dict[str, bytes] = {}
     # dim000: one kept + exactly name_cap dropped == name_cap lost names (at the cap).
     for n in range(name_cap + 1):
         prior[f"world/dim000/region/r.{n}.0.mca"] = healthy_mca
     # dim001: a second partial-loss dir (two files, drop one) so the report spans more
-    # than one directory yet stays far below the dir cap.
+    # than one directory yet stays below the dir cap.
     for n in range(2):
         prior[f"world/dim001/region/r.{n}.0.mca"] = healthy_mca
     asyncio.run(_publish(storage, community, server, prior))
@@ -1153,7 +1171,7 @@ def test_snapshot_partial_region_loss_report_name_list_exactly_at_cap_not_trunca
     assert resp.status_code == 422
     payload = resp.json()
     assert payload["reason"] == "working_set_incomplete"
-    # Two partial-loss dirs, far under the dir cap, so the dir cap does not fire.
+    # Two partial-loss dirs, under the dir cap, so the dir cap does not fire.
     assert len(payload["directories"]) == 2
     dim000 = next(
         entry
@@ -1163,8 +1181,8 @@ def test_snapshot_partial_region_loss_report_name_list_exactly_at_cap_not_trunca
     # Exactly at the name cap: all name_cap lost names are surfaced in full.
     assert len(dim000["missing"]) == name_cap
     # Exactly at cap -> not over -> the report is NOT flagged truncated. An off-by-one
-    # at the name-cap slice (>= instead of >) would slice dim000's list at 50 and set
-    # this flag; the exact-50 pin catches it.
+    # at the name-cap slice (>= instead of >) would slice dim000's list at the cap and
+    # set this flag; the exact-cap pin catches it.
     assert payload["truncated"] is False
 
 

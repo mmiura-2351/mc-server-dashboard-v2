@@ -828,6 +828,10 @@ export const en = {
     "“{key}” in server.properties is managed by the platform; this operation would change it.",
   "files.error.platformManagedPath":
     "server.properties is managed by the platform; a directory cannot stand at that path.",
+  // A save into a file read as latin-1: it is not UTF-8, or it is a pre-1.20
+  // server's server.properties (issue #2851).
+  "files.error.unencodableText":
+    "This file is saved as Latin-1 (ISO-8859-1), because it is not UTF-8 or because this Minecraft version reads it only as Latin-1, and Latin-1 cannot hold some of the characters you entered. Remove them and save again.",
   "files.error.invalidInput": "The request was invalid.",
   "files.error.workerUnavailable":
     "The server agent is disconnected. Please try again later.",
