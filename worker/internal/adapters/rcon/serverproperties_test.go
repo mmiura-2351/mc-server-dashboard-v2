@@ -42,7 +42,7 @@ func TestOpenFromWorkingDirDefaultsToLoopback(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	client, err := OpenFromWorkingDir(ctx, dir, "")
+	client, err := OpenFromWorkingDir(ctx, dir, "", "")
 	if err != nil {
 		t.Fatalf("OpenFromWorkingDir(host=\"\") error = %v", err)
 	}
@@ -80,7 +80,7 @@ func TestOpenFromWorkingDirReadsJavaSpellings(t *testing.T) {
 
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
-			client, err := OpenFromWorkingDir(ctx, dir, "")
+			client, err := OpenFromWorkingDir(ctx, dir, "", "")
 			if err != nil {
 				t.Fatalf("OpenFromWorkingDir = %v, want nil", err)
 			}
@@ -103,11 +103,51 @@ func TestOpenFromWorkingDirUsesTheLastOccurrence(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	client, err := OpenFromWorkingDir(ctx, dir, "")
+	client, err := OpenFromWorkingDir(ctx, dir, "", "")
 	if err != nil {
 		t.Fatalf("OpenFromWorkingDir = %v, want nil (the appended password must win)", err)
 	}
 	_ = client.Close()
+}
+
+// TestOpenFromWorkingDirReadsThePasswordAsTheServerVersionDoes pins that a
+// non-ASCII rcon.password authenticates (issue #3116). The fake server compares
+// the password's wire bytes with its own UTF-8 bytes -- vanilla's RconClient
+// decodes the AUTH payload as UTF-8 and String.equals it with the password it
+// loaded -- so the Worker has to decode server.properties in the charset the
+// server's version loaded it in: latin-1 before 1.20, UTF-8 first with a
+// whole-file latin-1 fallback from 1.20. A 1.20+ server rewrites the file in
+// UTF-8 at every start, so "caf\xc3\xa9" is the spelling a running one leaves.
+func TestOpenFromWorkingDirReadsThePasswordAsTheServerVersionDoes(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		mcVersion string
+		// fileValue is rcon.password as the file's raw bytes.
+		fileValue string
+		// serverHolds is the password the server loaded from those bytes.
+		serverHolds string
+	}{
+		{"1.20 reads UTF-8", "1.20.1", "caf\xc3\xa9", "café"},
+		{"year-numbered versions read UTF-8", "26.3", "caf\xc3\xa9", "café"},
+		{"1.20 falls back to latin-1 for a file that is not UTF-8", "1.20.1", "caf\xe9", "café"},
+		{"before 1.20 reads latin-1", "1.19.4", "caf\xc3\xa9", "cafÃ©"},
+		{"an unknown version reads latin-1", "", "caf\xc3\xa9", "cafÃ©"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// A fakeServer accepts exactly one connection, so each case needs its own.
+			fs := newFakeServer(t, tc.serverHolds)
+			dir := t.TempDir()
+			writeRCONProps(t, dir, listenPort(t, fs.addr()), tc.fileValue)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			client, err := OpenFromWorkingDir(ctx, dir, "", tc.mcVersion)
+			if err != nil {
+				t.Fatalf("OpenFromWorkingDir(mcVersion=%q) = %v, want nil", tc.mcVersion, err)
+			}
+			_ = client.Close()
+		})
+	}
 }
 
 // TestOpenFromWorkingDirUsesHostOverride verifies a non-empty host is used as the
@@ -121,7 +161,7 @@ func TestOpenFromWorkingDirUsesHostOverride(t *testing.T) {
 	defer cancel()
 	// "localhost" resolves to the loopback listener; it differs from the literal
 	// 127.0.0.1 default, proving the override host is the one dialed.
-	client, err := OpenFromWorkingDir(ctx, dir, "localhost")
+	client, err := OpenFromWorkingDir(ctx, dir, "localhost", "")
 	if err != nil {
 		t.Fatalf("OpenFromWorkingDir(host=\"localhost\") error = %v", err)
 	}
