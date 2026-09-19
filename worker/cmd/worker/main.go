@@ -110,6 +110,11 @@ func run(ctx context.Context) error {
 	// it was when the process simply exited underneath these goroutines; the
 	// individual drops are stated at each pump in instancemanager.go.
 	defer manager.Close()
+	// Reclaim any .sweeping-<id>-* tree a displaced-tree sweep renamed out of its slot
+	// but did not finish removing (issue #2799): nothing else ever reclaims one, and
+	// each is a world-sized leak. Nothing sweeps at boot, so every such tree is garbage.
+	// Run after the orphan sweep above, so no container can still be writing into it.
+	instancemanager.ReclaimInterruptedDisplacedSweeps(cfg.Worker.ScratchDir)
 	// Advertise the working sets already on the persistent scratch, each tagged
 	// with its generation, so the API skips the destructive hydrate on a same-worker
 	// restart only when the held generation is fresh enough (issue #763): a hydrate

@@ -625,8 +625,8 @@ while a `.displaced-<id>` is already present must choose between two trees, and
 **neither is guaranteed to be in the store**: a surviving `.displaced-<id>` almost always
 means that tree was never published *from this Worker* (any snapshot succeeding here calls
 `sweepDisplaced`, unless it declined the sweep because the working dir it packed had been
-replaced meanwhile — "when it declines", below — in which case the survivor does carry a published
-prefix, which only makes retaining it easier to justify), and the live set may itself be
+replaced meanwhile — "when it declines", below — in which case the survivor holds a published
+prefix plus the delta since that pack), and the live set may itself be
 torn or simply un-snapshotted. The Worker retains the **first-displaced** tree and drops
 the newer one.
 
@@ -670,7 +670,15 @@ reclaimed only when a subsequent snapshot **succeeds** for the same server id
 snapshot-success branches — the running-id branch reclaims only while the working
 directory is still the tree it packed, "when it declines" below): that success proves
 the store holds a state newer than the displaced world, making the local copy
-redundant. A server deleted after
+redundant. The sweep first **renames** the tree out of the slot, to
+`<scratch>/.sweeping-<id>-<nonce>`, and only then removes it. Removing it in place would
+take seconds for a world-sized tree, and a hydrate landing inside that traversal would
+read the half-deleted tree as an occupied slot, keep it under oldest-wins and drop the live
+set it displaced. The rename empties the slot atomically, so a hydrate finds either the whole
+tree or nothing. A `.sweeping-<id>-*` directory is therefore always garbage — the sweep had
+already decided to delete it. If the Worker crashed or the removal failed, the tree stays
+under that name until the next Worker boot, which removes every `.sweeping-*` tree before
+it scans the held servers. A server deleted after
 a failed final
 snapshot never snapshots again and its displaced tree therefore **persists on the
 Worker indefinitely** — bounded to one working-set worth of disk per deleted
@@ -758,9 +766,9 @@ WARN  displaced recovery tree for unknown/unassigned server found at boot; manua
    safely in the store (or the world is genuinely not needed), delete the
    displaced tree: `rm -rf <scratch>/.displaced-<id>`. The directory name is
    dot-prefixed so it is never touched by any Worker-internal sweep (the
-   `sweepHydrateLeftovers` and snapshot-spool sweeps only target their own
-   prefixes); only `sweepDisplaced` removes it, and only on a successful snapshot
-   for the matching id.
+   `sweepHydrateLeftovers`, snapshot-spool and boot-time `.sweeping-*` sweeps only
+   target their own prefixes); only `sweepDisplaced` removes it, and only on a
+   successful snapshot for the matching id.
 
 #### When is manual cleanup safe?
 
@@ -811,17 +819,31 @@ naming the reason:
 INFO  skipped sweeping the displaced recovery tree: the working dir is no longer the directory this snapshot packed  server_id=<id>  reason=working_dir_replaced
 ```
 
+`reason` is one of three values, and each one sends you to a different place:
+
+- `working_dir_replaced`: a different directory now sits at `<scratch>/<id>`. This is
+  the concurrent re-placement hydrate described above.
+- `working_dir_absent`: nothing is at `<scratch>/<id>` any more, or it was already gone
+  when the snapshot pinned it.
+- `identity_unavailable`: the Worker could not establish the directory's identity (a
+  descriptor or permission failure while pinning or re-checking it), so it cannot prove
+  the tree is unchanged and declines the sweep.
+
 **The tradeoff.** The GC occasionally declines to reclaim disk: a `.displaced-<id>` tree
 can survive a snapshot that succeeded, and it is then reclaimed only by the next successful
 snapshot for that id — the ordinary GC-on-success contract, so a server that keeps
 snapshotting reclaims it on the following tick. A server that stops snapshotting right
-after such a skip keeps the tree until one of the other reclamation paths applies, so
-treat it as one more world-sized copy under "Scratch capacity" above. What the decline
+after such a skip keeps the tree until an operator removes it by hand (step 4 of the
+recovery procedure above). No other automatic path reclaims it, because the deleted-server
+reclaim deliberately excludes `.displaced-<id>` (Lifecycle, above). Treat it
+as one more world-sized copy under "Scratch capacity" above. What the decline
 buys is the reverse guarantee: a `.displaced-<id>` tree never disappears on a snapshot
 success that published some *other* tree, so a displaced tree you care about is not on a
 clock — recover it (the procedure above) at your convenience rather than promptly. A
-microseconds-wide residual remains, since the working directory can still be replaced
-between the identity check and the removal; closing that too would require a per-server
+microseconds-wide residual remains. The working directory can still be replaced between
+the identity check and the sweep's rename. On the other side, a hydrate whose slot check
+lands just before that rename still sees the whole tree, keeps it and drops the live set it
+displaced, and then the sweep removes the kept tree. Closing either would require a per-server
 reservation on running-id snapshots, which is deliberately not taken (CONTROL_PLANE.md
 Section 4.1).
 
