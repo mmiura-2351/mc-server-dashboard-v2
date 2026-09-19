@@ -1024,7 +1024,7 @@ def test_snapshot_partial_region_loss_is_refused_with_machine_readable_reason(
     }
 
 
-def test_snapshot_partial_region_loss_report_is_bounded_and_truncated(
+def test_snapshot_partial_region_loss_report_dir_list_over_cap_is_truncated(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import asyncio
@@ -1041,25 +1041,17 @@ def test_snapshot_partial_region_loss_report_is_bounded_and_truncated(
     community, server = _scope()
     healthy_mca = bytes(2 * 4096)  # a structurally valid empty region.
 
-    # Cross BOTH truncation caps with the smallest durable-write footprint: the
-    # publish fsyncs every staged region file, so only the files that actually push
-    # a count past a cap need to exist. One extra directory past the dir cap fires
-    # the dir cap; a single directory whose lost-name list runs past the name cap
-    # fires the name cap. Every other directory needs just two region files (keep
-    # one, drop one) to count as a partial loss.
-    dir_count = transfers._MISSING_REGION_DIR_CAP + 1  # one directory past the dir cap
-    # dim000 sorts first, so it lands inside the surfaced prefix; give it enough
-    # region files that dropping all-but-one leaves more lost names than the cap.
-    overflow_names = transfers._MISSING_REGION_NAME_CAP + 2
+    # Overflow the DIR cap ALONE: one partial-loss directory past it, while every
+    # directory loses a single name (under the name cap), so only the dir cap can
+    # set the truncation flag. Two region files per dir (keep one, drop one) is the
+    # smallest partial loss; the publish fsyncs every staged file.
+    dir_count = transfers._MISSING_REGION_DIR_CAP + 1
     prior: dict[str, bytes] = {}
     for d in range(dir_count):
-        names_per_dir = overflow_names if d == 0 else 2
-        for n in range(names_per_dir):
+        for n in range(2):
             prior[f"world/dim{d:03d}/region/r.{n}.0.mca"] = healthy_mca
     asyncio.run(_publish(storage, community, server, prior))
 
-    # Re-publish keeping only the FIRST region file of each dir: every dir is a
-    # partial loss (some-but-not-all gone).
     kept = {f"world/dim{d:03d}/region/r.0.0.mca": healthy_mca for d in range(dir_count)}
     body = _tar_bytes(kept)
     with client:
@@ -1070,11 +1062,64 @@ def test_snapshot_partial_region_loss_report_is_bounded_and_truncated(
     payload = resp.json()
     assert payload["reason"] == "working_set_incomplete"
     assert payload["affected_count"] == dir_count
-    # The body must be BOUNDED: at most the dir cap, each at most the name cap.
-    assert len(payload["directories"]) == transfers._MISSING_REGION_DIR_CAP
-    for entry in payload["directories"]:
-        assert len(entry["missing"]) <= transfers._MISSING_REGION_NAME_CAP
-    # Both caps fired, so the list is flagged partial.
+    # Exactly the first dir-cap directories in the report's (directory-sorted) order.
+    assert payload["directories"] == [
+        {"directory": f"world/dim{d:03d}/region", "missing": ["r.1.0.mca"]}
+        for d in range(transfers._MISSING_REGION_DIR_CAP)
+    ]
+    assert payload["truncated"] is True
+
+
+def test_snapshot_partial_region_loss_report_name_list_over_cap_is_truncated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+
+    from mc_server_dashboard_api.dataplane.api import transfers
+
+    # Shrink both report caps so the fixture's file count (every staged file is
+    # fsync'd) does not scale with the production values; the builder reads them
+    # at call time. Distinct values keep a dir/name cap mix-up visible.
+    monkeypatch.setattr(transfers, "_MISSING_REGION_DIR_CAP", 3)
+    monkeypatch.setattr(transfers, "_MISSING_REGION_NAME_CAP", 2)
+
+    client, storage = _setup(tmp_path)
+    community, server = _scope()
+    healthy_mca = bytes(2 * 4096)
+
+    # Overflow the NAME cap ALONE: dim000 loses one name past the cap, and the
+    # report stays under the dir cap, so only the name cap can set the truncation
+    # flag. dim001 is an in-cap partial loss that sorts AFTER the overflowing dir,
+    # so the flag must survive a later directory that does not overflow.
+    name_cap = transfers._MISSING_REGION_NAME_CAP
+    prior: dict[str, bytes] = {}
+    # dim000: one kept + name_cap + 1 dropped == one lost name past the cap.
+    for n in range(name_cap + 2):
+        prior[f"world/dim000/region/r.{n}.0.mca"] = healthy_mca
+    for n in range(2):
+        prior[f"world/dim001/region/r.{n}.0.mca"] = healthy_mca
+    asyncio.run(_publish(storage, community, server, prior))
+
+    kept = {
+        "world/dim000/region/r.0.0.mca": healthy_mca,
+        "world/dim001/region/r.0.0.mca": healthy_mca,
+    }
+    body = _tar_bytes(kept)
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"), content=body, headers=_auth()
+        )
+    assert resp.status_code == 422
+    payload = resp.json()
+    assert payload["reason"] == "working_set_incomplete"
+    # dim000 surfaces exactly the first name_cap lost names (sorted), not fewer.
+    assert payload["directories"] == [
+        {
+            "directory": "world/dim000/region",
+            "missing": [f"r.{n}.0.mca" for n in range(1, name_cap + 1)],
+        },
+        {"directory": "world/dim001/region", "missing": ["r.1.0.mca"]},
+    ]
     assert payload["truncated"] is True
 
 
