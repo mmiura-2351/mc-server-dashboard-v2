@@ -485,17 +485,17 @@ hooks-test:
 # check_api_env.py's in api-env-check (#2880).
 #
 # The recipe lines here are the deploy helper suites and only those: they cost
-# ~14s to the cheap set's ~3s, and .github/workflows/sanity.yml is the one gate
-# that deliberately does not want them (see its header). Everything else under
-# scripts/ goes in scripts-test-cheap below.
+# more than twice the whole cheap set, and .github/workflows/sanity.yml is the
+# one gate that deliberately does not want them (see its header). Everything
+# else under scripts/ goes in scripts-test-cheap below.
 scripts-test: scripts-test-cheap
 	bash scripts/test_deploy_preflight.sh
 	bash scripts/test_pg_major_upgrade.sh
 	bash scripts/test_deploy_stamp.sh
 
 # The scripts/ suites the always-on CI gate can afford: no network, no
-# dependency install, ~3s for all six (0.06s-2.3s each; the slowest is the lock
-# suite, whose cost is deliberate waits, bounded by its own polling ceiling).
+# dependency install, and a few seconds in all -- most of it the lock suite's,
+# whose cost is deliberate waits, bounded by its own polling ceilings.
 #
 # sanity.yml runs this target rather than copying the list out, which is the
 # whole point of the split: the workflow used to enumerate its scripts/ steps by

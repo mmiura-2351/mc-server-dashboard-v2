@@ -51,6 +51,13 @@
 #      that passed quietly would be worse than the hang: stopping the holder
 #      releases the lock, so the suite would go on to "pass" assertions about
 #      scaffolding it had cut short itself (#2776).
+#   8. Stopping a run leaves nothing of it behind. The stops are what keep a
+#      failing assertion from hanging the gate, and a stop that signalled a
+#      run's children and then the run left a `flock` forked between the two
+#      waiting out its own 60 s ceiling as an orphan (#3045).
+#   9. A suite killed with SIGKILL leaves none of its runs behind. No trap runs
+#      then, and the holder stub used to idle forever on its lock, with every
+#      waiter queued behind it waiting forever too (#3045).
 #
 # The runs use a stub `make` on PATH: the stub is reached at the pre-flight
 # golangci-lint install -- the first thing the script runs after the lock -- so
@@ -69,12 +76,11 @@
 #     the host lock -- neither taking it (which would deadlock against the gate
 #     running this test) nor waiting on it.
 #
-# The failure paths are bounded on purpose (#2776). This suite runs inside
-# `make check`, so a `wait` on a run still blocked on the lock would hang the
-# whole gate instead of failing it, and the holder stub -- which idles until a
-# release file appears -- would outlive a killed suite still holding the lock,
-# because the EXIT trap has by then removed the directory that file would have
-# appeared in.
+# The failure paths are bounded on purpose (#2776, #3045). This suite runs
+# inside `make check`, so a `wait` on a run still blocked on the lock would hang
+# the whole gate instead of failing it, and the holder stub -- which idles until
+# a release file appears -- would outlive a killed suite still holding the lock,
+# because a suite killed before it writes that file never writes it.
 #
 # Exit code: 0 = all pass, non-zero = at least one failure.
 set -uo pipefail
@@ -116,23 +122,44 @@ await_grep() {
 	return 1
 }
 
+# Start a run in the background and set run_pid: "$@" runs in directory $1,
+# with its output in file $2. The run leads a session of its own, and so a
+# process group of its own whose id is run_pid, which is what lets stop_run
+# take down everything the run spawns with one signal (#3045). Each step execs
+# the next -- the subshell into setsid, setsid into the command -- so run_pid is
+# the command itself, and setsid has no need to fork: a job started by a shell
+# without job control does not already lead a group.
+start_run() {
+	local dir=$1 out=$2
+	shift 2
+	(cd "$dir" && exec setsid "$@") > "$out" 2>&1 &
+	run_pid=$!
+}
+
 # Stop a backgrounded run and reap it. Only the failure paths use this: a `wait`
 # on a run still blocked on the lock never returns, which would hang the scripts
-# chain rather than report the failure it is standing in for. The run is exec'd
-# into its subshell, so the recorded pid is check_parallel.sh itself, and the
-# script installs its TERM trap only after the lock section -- a run still
-# waiting there dies on the signal. Its `flock` child is swept first because
-# signalling only the parent would leave it reparented and running.
+# chain rather than report the failure it is standing in for. check_parallel.sh
+# installs its TERM trap only after the lock section, so a run still waiting
+# there dies on the signal.
 #
-# Each step is allowed to fail: the run may have no `flock` child left, it may
-# have exited between the two signals, and `wait` reports the status of a run
-# that exits non-zero by design (its stub fails on purpose). None of that is an
-# error here, and leaving the statuses bare aborts the suite under `set -e`.
+# The signal goes to the run's process group, which reaches the run and all it
+# has spawned at once (#3045). Signalling the run's children and then the run
+# did not: a run blocked on the lock forks a new `flock` the moment its old one
+# dies, so one forked between the two signals was left reparented, waiting out
+# its own 60 s ceiling. The run is signalled by pid as well, so that a run which
+# does not lead a group -- as under a start_run that lost its setsid -- still
+# dies and the `wait` below cannot hang on it; whatever such a run leaves behind
+# is then reported by assertion 8 instead.
+#
+# Each step is allowed to fail: the run may have exited before the signal, a
+# run that leads no group has no group to signal, and `wait` reports the status
+# of a run that exits non-zero by design (its stub fails on purpose). None of
+# that is an error here, and leaving the statuses bare aborts the suite under
+# `set -e`.
 stop_run() {
 	local pid=$1
 	[ -n "$pid" ] || return 0
-	pkill -TERM -P "$pid" 2> /dev/null || true
-	kill -TERM "$pid" 2> /dev/null || true
+	kill -TERM -- -"$pid" "$pid" 2> /dev/null || true
 	wait "$pid" 2> /dev/null || true
 	return 0
 }
@@ -161,6 +188,47 @@ reap_run() {
 	return 1
 }
 
+# The pids of the processes working in directory $1 or below it. A run starts
+# in a directory of its own and everything it spawns inherits it, so this still
+# finds a run's processes once they have been reparented -- the attribution
+# docs/dev/AGENTS.md Section 3 gives for a gate (`readlink /proc/<pid>/cwd`).
+# find exits non-zero on the entries it may not read (other users' processes)
+# and on processes that exit mid-scan; neither is an error here.
+procs_under() {
+	find /proc/[0-9]*/cwd -maxdepth 0 \( -lname "$1" -o -lname "$1/*" \) \
+		2> /dev/null | cut -d/ -f3 || true
+}
+
+# Poll until nothing works under $1, up to a ceiling: a signalled process takes
+# a moment to die, and then to be reaped by whoever inherited it.
+await_no_procs() {
+	local dir=$1 limit=${2:-100} i=0
+	while [ "$i" -lt "$limit" ]; do
+		[ -z "$(procs_under "$dir")" ] && return 0
+		sleep 0.1
+		i=$((i + 1))
+	done
+	return 1
+}
+
+# Kill whatever still works under $1. The assertions that spawn processes end
+# with this, so that a red does not leave behind the very processes it reports.
+# It repeats because a waiter whose `flock` dies first can fork another before
+# its own signal lands.
+sweep_procs() {
+	local i=0 pids pid
+	while [ "$i" -lt 10 ]; do
+		pids=$(procs_under "$1")
+		[ -n "$pids" ] || return 0
+		for pid in $pids; do
+			kill -KILL "$pid" 2> /dev/null || true
+		done
+		sleep 0.1
+		i=$((i + 1))
+	done
+	return 0
+}
+
 echo "=== check_parallel.sh host-lock tests ==="
 
 work="$(mktemp -d)"
@@ -183,15 +251,19 @@ mkdir -p "$stub_dir"
 
 # Holder stub: announce that the run is past the lock, then hold there until
 # released, so the lock is demonstrably held while the other runs are made. It
-# gives up as well when its work dir disappears: if this suite is killed, the
-# EXIT trap removes $work, the release file can then never appear, and a stub
-# watching only for that file would sit on the lock forever with nothing left
-# alive to release it (#2776).
+# gives up as well when this suite is gone, because the release file can then
+# never appear and a stub watching only for that file would sit on the lock
+# forever with nothing left alive to release it. Two checks, because a suite
+# can go two ways: killed with a trap, its EXIT trap removes the work dir
+# (#2776); killed with SIGKILL, nothing runs and only its pid is gone (#3045).
+# The pid check alone would cover both, but the work-dir check cannot be fooled
+# by a reused pid.
 cat > "$stub_dir/make-holder" << 'STUB'
 #!/usr/bin/env bash
 touch "$LOCK_ACQUIRED"
 while [ ! -e "$LOCK_RELEASE" ]; do
 	[ -d "$WORK_DIR" ] || exit 1
+	kill -0 "$SUITE_PID" 2> /dev/null || exit 1
 	sleep 0.05
 done
 exit 1
@@ -217,16 +289,15 @@ cp "$stub_dir/make-waiter" "$waiter_bin/make"
 acquired="$work/holder-acquired"
 release="$work/holder-release"
 
-(
-	cd "$holder_wt" &&
-		PATH="$holder_bin:$PATH" \
-			MCSD_CHECK_LOCK_FILE="$lock_file" \
-			LOCK_ACQUIRED="$acquired" \
-			LOCK_RELEASE="$release" \
-			WORK_DIR="$work" \
-			bash "$ROOT/scripts/check_parallel.sh" "$holder_wt"
-) > "$work/holder.out" 2>&1 &
-holder_pid=$!
+start_run "$holder_wt" "$work/holder.out" env \
+	PATH="$holder_bin:$PATH" \
+	MCSD_CHECK_LOCK_FILE="$lock_file" \
+	LOCK_ACQUIRED="$acquired" \
+	LOCK_RELEASE="$release" \
+	WORK_DIR="$work" \
+	SUITE_PID="$$" \
+	bash "$ROOT/scripts/check_parallel.sh" "$holder_wt"
+holder_pid=$run_pid
 
 if ! await_file "$acquired"; then
 	fail_test "the holder run never took the lock (nothing to test against)"
@@ -245,15 +316,13 @@ fi
 #    on the way to its own failure message rather than print it (#2776).
 {
 	nested_entered="$work/nested-entered"
-	(
-		cd "$waiter_wt" &&
-			PATH="$waiter_bin:$PATH" \
-				MCSD_CHECK_LOCK_FILE="$lock_file" \
-				MCSD_CHECK_LOCK_HELD=1 \
-				ENTERED="$nested_entered" \
-				bash "$ROOT/scripts/check_parallel.sh" "$waiter_wt"
-	) > /dev/null 2>&1 &
-	nested_pid=$!
+	start_run "$waiter_wt" /dev/null env \
+		PATH="$waiter_bin:$PATH" \
+		MCSD_CHECK_LOCK_FILE="$lock_file" \
+		MCSD_CHECK_LOCK_HELD=1 \
+		ENTERED="$nested_entered" \
+		bash "$ROOT/scripts/check_parallel.sh" "$waiter_wt"
+	nested_pid=$run_pid
 
 	if await_file "$nested_entered"; then
 		ok "a nested run (MCSD_CHECK_LOCK_HELD) does not wait for the lock it already holds"
@@ -268,14 +337,12 @@ fi
 # ---------------------------------------------------------------------------
 # 1 + 2. A second run blocks, and says whose worktree is holding the lock.
 waiter_entered="$work/waiter-entered"
-(
-	cd "$waiter_wt" &&
-		PATH="$waiter_bin:$PATH" \
-			MCSD_CHECK_LOCK_FILE="$lock_file" \
-			ENTERED="$waiter_entered" \
-			bash "$ROOT/scripts/check_parallel.sh" "$waiter_wt"
-) > "$work/waiter.out" 2>&1 &
-waiter_pid=$!
+start_run "$waiter_wt" "$work/waiter.out" env \
+	PATH="$waiter_bin:$PATH" \
+	MCSD_CHECK_LOCK_FILE="$lock_file" \
+	ENTERED="$waiter_entered" \
+	bash "$ROOT/scripts/check_parallel.sh" "$waiter_wt"
+waiter_pid=$run_pid
 
 # The one place a fixed wait is unavoidable: "has not proceeded" is only
 # observable by looking after enough time that it would have.
@@ -324,14 +391,12 @@ dead_pid_waiter=""
 		"$holder_wt" "$dead_pid" "$(date '+%Y-%m-%dT%H:%M:%S%z')" > "$lock_file"
 
 	dead_pid_entered="$work/dead-pid-entered"
-	(
-		cd "$waiter_wt" &&
-			PATH="$waiter_bin:$PATH" \
-				MCSD_CHECK_LOCK_FILE="$lock_file" \
-				ENTERED="$dead_pid_entered" \
-				bash "$ROOT/scripts/check_parallel.sh" "$waiter_wt"
-	) > "$work/dead-pid-waiter.out" 2>&1 &
-	dead_pid_waiter=$!
+	start_run "$waiter_wt" "$work/dead-pid-waiter.out" env \
+		PATH="$waiter_bin:$PATH" \
+		MCSD_CHECK_LOCK_FILE="$lock_file" \
+		ENTERED="$dead_pid_entered" \
+		bash "$ROOT/scripts/check_parallel.sh" "$waiter_wt"
+	dead_pid_waiter=$run_pid
 
 	if await_grep "fuser -v $lock_file" "$work/dead-pid-waiter.out"; then
 		ok "a waiter whose recorded holder pid is dead is pointed at fuser"
@@ -362,14 +427,12 @@ decoy_waiters=()
 			"$decoy_wt" "$$" "$(date '+%Y-%m-%dT%H:%M:%S%z')" > "$lock_file"
 
 		decoy_out="$work/decoy-waiter-$decoy_n.out"
-		(
-			cd "$waiter_wt" &&
-				PATH="$waiter_bin:$PATH" \
-					MCSD_CHECK_LOCK_FILE="$lock_file" \
-					ENTERED="$work/decoy-entered-$decoy_n" \
-					bash "$ROOT/scripts/check_parallel.sh" "$waiter_wt"
-		) > "$decoy_out" 2>&1 &
-		decoy_waiters+=($!)
+		start_run "$waiter_wt" "$decoy_out" env \
+			PATH="$waiter_bin:$PATH" \
+			MCSD_CHECK_LOCK_FILE="$lock_file" \
+			ENTERED="$work/decoy-entered-$decoy_n" \
+			bash "$ROOT/scripts/check_parallel.sh" "$waiter_wt"
+		decoy_waiters+=("$run_pid")
 
 		if await_grep "held by: $decoy_wt" "$decoy_out"; then
 			if grep -qF 'fuser -v' "$decoy_out"; then
@@ -419,8 +482,11 @@ fi
 #    because stopping the holder releases the lock as a side effect, every
 #    assertion after it would pass on a lock this suite freed itself.
 {
-	sleep 30 &
-	stuck_pid=$!
+	# A run that never exits on its own -- only with this suite, so that a
+	# suite killed while it runs does not leave it behind (#3045).
+	start_run "$work" /dev/null env SUITE_PID="$$" \
+		bash -c 'while kill -0 "$SUITE_PID" 2> /dev/null; do sleep 0.1; done'
+	stuck_pid=$run_pid
 
 	if reap_run "$stuck_pid" 3; then
 		fail_test "reap_run reported success for a run it had to stop"
@@ -428,6 +494,86 @@ fi
 		ok "a run that had to be stopped is reported rather than reaped in silence"
 	fi
 }
+
+# ---------------------------------------------------------------------------
+# 8. Stopping a run leaves nothing of it behind (#3045). What escaped the old
+#    stop -- signal the run's children, then the run -- was a `flock` forked
+#    between the two: a run blocked on the lock forks a new one the moment its
+#    old one dies, and the new one was left reparented, waiting out its own
+#    60 s ceiling. That race cannot be staged on demand (the old stop orphaned
+#    no `flock` in 20 stops of a blocked waiter on the host this was written
+#    on), but what it slips through is the gap every such sweep has: a process
+#    that is not a child of the run at the instant of the sweep. A grandchild
+#    is in that gap every time, so the stand-in run below has one. A sweep of
+#    the run's children leaves it running; one signal to the run's process
+#    group does not. The grandchild idles for as long as this suite lives and
+#    no longer, so a suite killed while it runs does not leave it behind.
+{
+	stop_dir="$work/stop-run"
+	mkdir -p "$stop_dir"
+	cat > "$stop_dir/run" << 'STUB'
+#!/usr/bin/env bash
+bash -c 'while kill -0 "$SUITE_PID" 2> /dev/null; do sleep 0.1; done & touch spawned; wait'
+STUB
+	start_run "$stop_dir" /dev/null env SUITE_PID="$$" bash "$stop_dir/run"
+	stop_pid=$run_pid
+
+	if await_file "$stop_dir/spawned"; then
+		stop_run "$stop_pid"
+		if await_no_procs "$stop_dir" 20; then
+			ok "a stopped run leaves nothing behind, however deep its process tree"
+		else
+			fail_test "a stopped run left processes behind: $(procs_under "$stop_dir" | tr '\n' ' ')"
+		fi
+	else
+		fail_test "the stand-in run never spawned its grandchild"
+		stop_run "$stop_pid"
+	fi
+	sweep_procs "$stop_dir"
+}
+
+# ---------------------------------------------------------------------------
+# 9. A suite killed with SIGKILL leaves none of its runs behind (#3045). No
+#    trap runs, so the work dir survives and the holder stub's check on it
+#    never fires: the stub idled forever, holding its run's lock, and every
+#    waiter queued behind that lock waited forever with it. A suite cannot
+#    watch its own SIGKILL, so this kills a second copy of it, once the copy's
+#    holder holds the lock and a waiter is queued behind it. The copy's TMPDIR
+#    points into $work so that its work dir can be found, and LOCK_SUITE_COPY
+#    stops it from starting a copy of its own.
+#
+#    Whatever the copy itself was running at the kill -- a sleep of at most
+#    2 s -- is orphaned as any killed shell's child is, and ends on its own; it
+#    works outside the copy's work dir, so it is not counted here, and the
+#    cleanup below takes it with the copy's process group.
+if [ -z "${LOCK_SUITE_COPY:-}" ]; then
+	copy_tmp="$work/copy-tmp"
+	mkdir -p "$copy_tmp"
+	start_run "$ROOT" "$work/copy.out" env TMPDIR="$copy_tmp" LOCK_SUITE_COPY=1 \
+		bash "$ROOT/scripts/test_check_parallel_lock.sh"
+	copy_pid=$run_pid
+
+	# Assertion 4 reports, pass or fail, after the copy's work dir exists and
+	# just before the copy queues its waiter.
+	copy_work=""
+	if await_grep "a nested run" "$work/copy.out"; then
+		copy_work=$(echo "$copy_tmp"/*)
+	fi
+	if [ -n "$copy_work" ] && await_grep "held by:" "$copy_work/waiter.out"; then
+		kill -KILL "$copy_pid" 2> /dev/null || true
+		wait "$copy_pid" 2> /dev/null || true
+		if await_no_procs "$copy_tmp"; then
+			ok "a suite killed with SIGKILL leaves none of its runs behind"
+		else
+			fail_test "a suite killed with SIGKILL left its runs behind: $(procs_under "$copy_tmp" | tr '\n' ' ')"
+		fi
+	else
+		fail_test "the copy of this suite never queued a waiter behind its holder (output: $(cat "$work/copy.out"))"
+	fi
+	kill -KILL -- -"$copy_pid" 2> /dev/null || true
+	wait "$copy_pid" 2> /dev/null || true
+	sweep_procs "$copy_tmp"
+fi
 
 # ---------------------------------------------------------------------------
 echo
