@@ -131,12 +131,12 @@ function routeGet(handlers: {
   });
 }
 
-function renderPage() {
+function renderPage(entry = `/communities/${CID}/servers/${SID}`) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   const result = render(
-    <MemoryRouter initialEntries={[`/communities/${CID}/servers/${SID}`]}>
+    <MemoryRouter initialEntries={[entry]}>
       <QueryClientProvider client={queryClient}>
         <ToastProvider>
           <Routes>
@@ -321,6 +321,234 @@ describe("ServerFilesTab viewer / editor", () => {
     const body = JSON.parse((putInit as { body: string }).body);
     // The PUT carries the edited text as UTF-8-safe base64.
     expect(body.content_base64).toBe(encodeUtf8Base64(edited));
+  });
+
+  it("keeps a raw latin-1 byte in server.properties through an unrelated edit (#2851)", async () => {
+    // 0xE9 is "é" in latin-1 and not valid UTF-8; a UTF-8-only editor showed
+    // U+FFFD and saved EF BF BD in its place.
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "server.properties", is_dir: false }]),
+      content: {
+        path: "server.properties",
+        content_base64: btoa("motd=Caf\xe9\nmax-players=20\n"),
+      },
+    });
+    mockApi.put.mockResolvedValue(undefined);
+    renderPage();
+    await openFiles();
+
+    fireEvent.click(await screen.findByText(/server\.properties/));
+    const editor = (await screen.findByLabelText(
+      t("files.editorLabel"),
+    )) as HTMLTextAreaElement;
+    expect(editor.value).toBe("motd=Café\nmax-players=20\n");
+
+    fireEvent.change(editor, {
+      target: { value: "motd=Café\nmax-players=30\n" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: t("files.save") }));
+
+    await waitFor(() => expect(mockApi.put).toHaveBeenCalled());
+    const body = JSON.parse(
+      (mockApi.put.mock.calls[0][1] as { body: string }).body,
+    );
+    expect(body.content_base64).toBe(btoa("motd=Caf\xe9\nmax-players=30\n"));
+  });
+
+  it("refuses to save a character a latin-1 file cannot hold (#2851)", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "server.properties", is_dir: false }]),
+      content: {
+        path: "server.properties",
+        content_base64: btoa("motd=Caf\xe9\n"),
+      },
+    });
+    mockApi.put.mockResolvedValue(undefined);
+    renderPage();
+    await openFiles();
+
+    fireEvent.click(await screen.findByText(/server\.properties/));
+    const editor = await screen.findByLabelText(t("files.editorLabel"));
+    fireEvent.change(editor, { target: { value: "motd=Café 🐉\n" } });
+    fireEvent.click(screen.getByRole("button", { name: t("files.save") }));
+
+    expect(
+      await screen.findByText(t("files.error.unencodableText")),
+    ).toBeInTheDocument();
+    expect(mockApi.put).not.toHaveBeenCalled();
+  });
+
+  it("writes a UTF-8 file's non-ASCII text back as UTF-8 (#2851)", async () => {
+    // "é" is where the two charsets differ on the wire: C3 A9 vs E9.
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "config.yml", is_dir: false }]),
+      content: {
+        path: "config.yml",
+        content_base64: encodeUtf8Base64("name: Café\n"),
+      },
+    });
+    mockApi.put.mockResolvedValue(undefined);
+    renderPage();
+    await openFiles();
+
+    fireEvent.click(await screen.findByText(/config\.yml/));
+    const editor = (await screen.findByLabelText(
+      t("files.editorLabel"),
+    )) as HTMLTextAreaElement;
+    expect(editor.value).toBe("name: Café\n");
+
+    fireEvent.change(editor, { target: { value: "name: Café ☕\n" } });
+    fireEvent.click(screen.getByRole("button", { name: t("files.save") }));
+
+    await waitFor(() => expect(mockApi.put).toHaveBeenCalled());
+    const body = JSON.parse(
+      (mockApi.put.mock.calls[0][1] as { body: string }).body,
+    );
+    expect(body.content_base64).toBe(encodeUtf8Base64("name: Café ☕\n"));
+  });
+
+  // Before 1.20 Minecraft reads server.properties as latin-1 only, so the
+  // editor reads and writes that one file as latin-1 whatever its bytes are.
+  it("saves server.properties as latin-1 on a pre-1.20 server even when it was ASCII (#2851)", async () => {
+    routeGet({
+      detail: server({ mc_version: "1.19.4" }),
+      list: listing([{ name: "server.properties", is_dir: false }]),
+      content: {
+        path: "server.properties",
+        content_base64: btoa("motd=Cafe\n"),
+      },
+    });
+    mockApi.put.mockResolvedValue(undefined);
+    renderPage();
+    await openFiles();
+
+    fireEvent.click(await screen.findByText(/server\.properties/));
+    const editor = await screen.findByLabelText(t("files.editorLabel"));
+    fireEvent.change(editor, { target: { value: "motd=Café\n" } });
+    fireEvent.click(screen.getByRole("button", { name: t("files.save") }));
+
+    await waitFor(() => expect(mockApi.put).toHaveBeenCalled());
+    const body = JSON.parse(
+      (mockApi.put.mock.calls[0][1] as { body: string }).body,
+    );
+    // E9, not the UTF-8 C3 A9 the server would read back as "Ã©".
+    expect(body.content_base64).toBe(btoa("motd=Caf\xe9\n"));
+  });
+
+  it("reads a pre-1.20 server's server.properties as latin-1 even when it is valid UTF-8 (#2851)", async () => {
+    routeGet({
+      detail: server({ mc_version: "1.19.4" }),
+      list: listing([{ name: "server.properties", is_dir: false }]),
+      content: {
+        path: "server.properties",
+        content_base64: btoa("motd=Caf\xc3\xa9\nmax-players=20\n"),
+      },
+    });
+    mockApi.put.mockResolvedValue(undefined);
+    renderPage();
+    await openFiles();
+
+    fireEvent.click(await screen.findByText(/server\.properties/));
+    const editor = (await screen.findByLabelText(
+      t("files.editorLabel"),
+    )) as HTMLTextAreaElement;
+    expect(editor.value).toBe("motd=CafÃ©\nmax-players=20\n");
+
+    fireEvent.change(editor, {
+      target: { value: "motd=CafÃ©\nmax-players=30\n" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: t("files.save") }));
+
+    await waitFor(() => expect(mockApi.put).toHaveBeenCalled());
+    const body = JSON.parse(
+      (mockApi.put.mock.calls[0][1] as { body: string }).body,
+    );
+    expect(body.content_base64).toBe(
+      btoa("motd=Caf\xc3\xa9\nmax-players=30\n"),
+    );
+  });
+
+  it("saves a deep-linked root server.properties alias as latin-1 on a pre-1.20 server (#2851)", async () => {
+    // `?file=` is kept verbatim, and the API resolves "./server.properties" to
+    // the root file.
+    routeGet({
+      detail: server({ mc_version: "1.19.4" }),
+      list: listing([{ name: "server.properties", is_dir: false }]),
+      content: {
+        path: "server.properties",
+        content_base64: btoa("motd=Cafe\n"),
+      },
+    });
+    mockApi.put.mockResolvedValue(undefined);
+    renderPage(
+      `/communities/${CID}/servers/${SID}?file=.%2Fserver.properties#files`,
+    );
+
+    const editor = await screen.findByLabelText(t("files.editorLabel"));
+    fireEvent.change(editor, { target: { value: "motd=Café\n" } });
+    fireEvent.click(screen.getByRole("button", { name: t("files.save") }));
+
+    await waitFor(() => expect(mockApi.put).toHaveBeenCalled());
+    const [putUrl, putInit] = mockApi.put.mock.calls[0];
+    expect(putUrl).toBe(`${FILES_BASE}?path=.%2Fserver.properties`);
+    const body = JSON.parse((putInit as { body: string }).body);
+    expect(body.content_base64).toBe(btoa("motd=Caf\xe9\n"));
+  });
+
+  it("refuses a non-latin-1 character in a pre-1.20 server's server.properties (#2851)", async () => {
+    routeGet({
+      detail: server({ mc_version: "1.19.4" }),
+      list: listing([{ name: "server.properties", is_dir: false }]),
+      content: {
+        path: "server.properties",
+        content_base64: btoa("motd=Cafe\n"),
+      },
+    });
+    mockApi.put.mockResolvedValue(undefined);
+    renderPage();
+    await openFiles();
+
+    fireEvent.click(await screen.findByText(/server\.properties/));
+    const editor = await screen.findByLabelText(t("files.editorLabel"));
+    fireEvent.change(editor, { target: { value: "motd=Cafe 🐉\n" } });
+    fireEvent.click(screen.getByRole("button", { name: t("files.save") }));
+
+    expect(
+      await screen.findByText(t("files.error.unencodableText")),
+    ).toBeInTheDocument();
+    expect(mockApi.put).not.toHaveBeenCalled();
+  });
+
+  it("reads any other file on a pre-1.20 server by its content (#2851)", async () => {
+    routeGet({
+      detail: server({ mc_version: "1.19.4" }),
+      list: listing([{ name: "config.yml", is_dir: false }]),
+      content: {
+        path: "config.yml",
+        content_base64: encodeUtf8Base64("name: Café\n"),
+      },
+    });
+    mockApi.put.mockResolvedValue(undefined);
+    renderPage();
+    await openFiles();
+
+    fireEvent.click(await screen.findByText(/config\.yml/));
+    const editor = (await screen.findByLabelText(
+      t("files.editorLabel"),
+    )) as HTMLTextAreaElement;
+    expect(editor.value).toBe("name: Café\n");
+
+    fireEvent.change(editor, { target: { value: "name: Café ☕\n" } });
+    fireEvent.click(screen.getByRole("button", { name: t("files.save") }));
+
+    await waitFor(() => expect(mockApi.put).toHaveBeenCalled());
+    const body = JSON.parse(
+      (mockApi.put.mock.calls[0][1] as { body: string }).body,
+    );
+    expect(body.content_base64).toBe(encodeUtf8Base64("name: Café ☕\n"));
   });
 
   it("offers download only for a binary file (no editor) and shows metadata", async () => {
@@ -1011,6 +1239,83 @@ describe("ServerFilesTab history + rollback", () => {
         `${FILES_BASE}/version?path=a%20b.txt&version_id=${VID1}`,
         { signal: expect.any(AbortSignal) },
       ),
+    );
+  });
+
+  it("previews a latin-1 version with its intended characters (#2851)", async () => {
+    mockApi.get.mockImplementation((path: string) => {
+      if (path.includes("/files/version")) {
+        return Promise.resolve({
+          path: "a b.txt",
+          content_base64: btoa("motd=Caf\xe9"),
+        });
+      }
+      if (path.includes("/files/history")) {
+        return Promise.resolve({ path: "a b.txt", versions: [VID1] });
+      }
+      if (path.includes("/files?path=") && !path.includes("list=")) {
+        return Promise.resolve({
+          path: "a b.txt",
+          content_base64: encodeUtf8Base64("current"),
+        });
+      }
+      if (path.includes("/files?path=")) {
+        return Promise.resolve(listing([{ name: "a b.txt", is_dir: false }]));
+      }
+      return Promise.resolve(server());
+    });
+    renderPage();
+    await openFiles();
+
+    fireEvent.click(await screen.findByText(/a b\.txt/));
+    await screen.findByLabelText(t("files.editorLabel"));
+    fireEvent.click(screen.getByRole("button", { name: t("files.history") }));
+    fireEvent.click(
+      await screen.findByText(versionDate(VID1).toLocaleString()),
+    );
+
+    expect(await screen.findByDisplayValue("motd=Café")).toHaveAttribute(
+      "readonly",
+    );
+  });
+
+  it("previews a pre-1.20 server's server.properties version as latin-1 (#2851)", async () => {
+    mockApi.get.mockImplementation((path: string) => {
+      if (path.includes("/files/version")) {
+        return Promise.resolve({
+          path: "server.properties",
+          content_base64: btoa("motd=Caf\xc3\xa9"),
+        });
+      }
+      if (path.includes("/files/history")) {
+        return Promise.resolve({ path: "server.properties", versions: [VID1] });
+      }
+      if (path.includes("/files?path=") && !path.includes("list=")) {
+        return Promise.resolve({
+          path: "server.properties",
+          content_base64: btoa("motd=current"),
+        });
+      }
+      if (path.includes("/files?path=")) {
+        return Promise.resolve(
+          listing([{ name: "server.properties", is_dir: false }]),
+        );
+      }
+      return Promise.resolve(server({ mc_version: "1.19.4" }));
+    });
+    renderPage();
+    await openFiles();
+
+    fireEvent.click(await screen.findByText(/server\.properties/));
+    await screen.findByLabelText(t("files.editorLabel"));
+    fireEvent.click(screen.getByRole("button", { name: t("files.history") }));
+    fireEvent.click(
+      await screen.findByText(versionDate(VID1).toLocaleString()),
+    );
+
+    // The same latin-1 reading the editor gives the file on this server.
+    expect(await screen.findByDisplayValue("motd=CafÃ©")).toHaveAttribute(
+      "readonly",
     );
   });
 
