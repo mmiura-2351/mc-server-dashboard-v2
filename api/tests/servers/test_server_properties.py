@@ -331,7 +331,7 @@ def test_apply_overrides_leaves_an_ordinary_value_readable() -> None:
 
 
 def test_resource_pack_prompt_round_trips_a_non_latin1_value() -> None:
-    # The case #2820 names: a Japanese prompt encoded UTF-8 into a file the Java
+    # The case #2820 names: a Japanese prompt encoded UTF-8 into a file a pre-1.20
     # server reads as latin-1 reached it mojibaked.
     out = set_resource_pack_properties(
         b"", url=_RP_URL, sha1=_RP_SHA1, prompt="リソースパック"
@@ -355,10 +355,11 @@ def test_a_latin1_value_is_written_as_a_unicode_escape() -> None:
 
 
 def test_a_written_line_carries_no_non_ascii_byte() -> None:
-    # What makes a platform write survivable end to end: the webui reads the file
-    # through a UTF-8 decoder, so a raw non-ASCII byte would come back as U+FFFD
-    # and saving the text again would report resource-pack-prompt -- a key the
-    # platform owns -- as changed, refusing the write with a 409.
+    # What makes a platform write right for every reader: raw UTF-8 bytes reach a
+    # pre-1.20 server as mojibake (#2820), and a raw latin-1 byte in an otherwise
+    # UTF-8 file tips a 1.20+ server -- and the webui editor, by the same rule --
+    # into reading the whole file as latin-1 (#2851). Pure ASCII reads the same
+    # in either charset.
     out = set_resource_pack_properties(
         b"", url=_RP_URL, sha1=_RP_SHA1, prompt="Télécharge パック"
     )
