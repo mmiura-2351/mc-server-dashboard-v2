@@ -30,11 +30,13 @@ an override value ended the line and turned the rest of the value into further
 property lines, planted below the platform's own and therefore the ones Java
 reads (issue #2819). Everything outside printable ASCII is spelled as the
 ``\\uXXXX`` escape ``Properties.store`` emits, so a written line is pure ASCII
-however the file is later decoded: a Japanese ``resource-pack-prompt`` reaches
-the server as itself instead of as the mojibake UTF-8 bytes made of it, and the
-webui's UTF-8 file editor reads it back as itself too (issue #2820). Untouched
-bytes are spliced through verbatim, so a file the platform did not write to is
-preserved exactly.
+and reads the same whichever charset the file is later decoded in: by the
+server, as latin-1 before Minecraft 1.20 and as UTF-8 first from 1.20, or by
+the webui's charset-aware file editor (issue #2851). A Japanese
+``resource-pack-prompt`` therefore reaches every server version as itself --
+its raw UTF-8 bytes reached a pre-1.20 server as mojibake (issue #2820) -- and
+the editor saves back the very line it read. Untouched bytes are spliced
+through verbatim, so a file the platform did not write to is preserved exactly.
 """
 
 from __future__ import annotations
@@ -177,11 +179,17 @@ def _ends_with_odd_backslash(line: bytes) -> bool:
 def _load_convert(raw: bytes) -> str:
     """Decode *raw* as latin-1 and resolve the ``.properties`` escapes.
 
-    latin-1 is what ``Properties.load(InputStream)`` uses, and it is a
-    byte-preserving bijection: a ``server.properties`` that is not valid UTF-8 (a
-    latin-1 ``motd`` is ordinary, #2623) decodes without raising, and two DIFFERENT
-    byte sequences never collapse onto one value the way a lossy decode would --
-    which is what keeps the comparison guard honest.
+    latin-1 is the decode ``Properties.load(InputStream)`` applies, but it is
+    NOT chosen to mirror the server, whose decode depends on its version:
+    latin-1 before Minecraft 1.20, UTF-8 first with a latin-1 fallback from
+    1.20. It is chosen because it is a byte-preserving bijection: a
+    ``server.properties`` that is not valid UTF-8 (a latin-1 ``motd`` is
+    ordinary, #2623) decodes without raising, and two DIFFERENT byte sequences
+    never collapse onto one value the way a lossy decode would -- which is what
+    keeps the comparison guard honest. The two charsets disagree only on
+    non-ASCII bytes, never on the ASCII structure this parse walks (a UTF-8
+    multi-byte sequence holds no ASCII byte), so where a 1.20+ server reads the
+    file differently, it is only in the text of a non-ASCII key or value.
 
     A malformed ``\\uXXXX`` -- which the reference implementation rejects with an
     exception -- yields the literal ``u`` and whatever followed it, so the guard
@@ -332,12 +340,17 @@ def _escape_char(char: str) -> str:
 
     The threshold is ``Properties.store(OutputStream)``'s own -- escape
     everything outside ``0x20``-``0x7E`` -- and NOT "whatever latin-1 cannot
-    hold", because Java is not the file's only reader. A raw ``0xE9`` byte is the
-    right ``e``-acute to a latin-1 reader alone: the webui reads the file through
-    a UTF-8 decoder, which turns that byte into U+FFFD, so saving the text back
-    would report the platform's own key as changed and refuse the write. The
-    escape is the right spelling to EVERY reader, and costs nothing -- printable
-    ASCII writes are unchanged and Java reads both spellings identically.
+    hold", because not every reader decodes the file as latin-1. A raw ``0xE9``
+    byte is the right ``e``-acute to a latin-1 reader alone: from 1.20 the
+    server reads the file as UTF-8 first and falls back to latin-1 for the WHOLE
+    file when it is not valid UTF-8, so that one byte in an otherwise-UTF-8 file
+    turns every other UTF-8 value in it (a Japanese ``motd``) into mojibake --
+    and the webui's file editor, which picks the charset by the same rule
+    (issue #2851), shows them mangled too. A pure-ASCII escape reads the same in
+    either charset, so it is the right spelling to EVERY reader without knowing
+    the server's version or the file's current charset, and costs nothing --
+    printable ASCII writes are unchanged, and ``Properties.load`` reads the
+    escape as the very character it spells.
     """
 
     if char in _ESCAPES:
