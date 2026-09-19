@@ -26,6 +26,7 @@
 #   make update         # selective rebuild with change detection
 
 .PHONY: all check lint format test docs-check migrations-check test-client-check \
+	image-pins-check \
 	api-env-check api-lint api-format api-test \
 	worker-lint worker-format worker-test worker-test-race worker-e2e-compile \
 	relay-lint relay-format relay-test relay-test-race relay-e2e relay-e2e-compile \
@@ -162,6 +163,17 @@ migrations-check:
 test-client-check:
 	python3 scripts/check_test_client_pattern.py --self-test
 	python3 scripts/check_test_client_pattern.py
+
+# CI image pins follow compose.yaml (#2905): the PostgreSQL and SeaweedFS digests
+# the workflows (and run_webui_e2e.sh) pin by hand must carry a comment naming
+# the tag compose.yaml deploys. No Dependabot ecosystem sees those pins, so this
+# is what fails a compose bump that forgot to re-pin them. Pure file parsing, no
+# network: it compares the comment, never resolves the digest.
+# Same shape as docs-check/migrations-check: self-test then the real run it
+# guards.
+image-pins-check:
+	python3 scripts/check_image_pins.py --self-test
+	python3 scripts/check_image_pins.py
 
 # ---------------------------------------------------------------------------
 # api/ (Python via uv)
@@ -478,11 +490,12 @@ hooks-test:
 # A self-test belongs here when the script has no local real run to sit next
 # to, so that a regression in it fails the pre-push `make check` instead of a CI
 # runner after the push (#2508). supply_chain_cooldown.py is such a script: its
-# real run is the Dependabot flow, not a gate. The other four self-tests live
+# real run is the Dependabot flow, not a gate. The other five self-tests live
 # next to the real run they guard -- check_docs.py's in docs-check,
 # check_migrations.py's in migrations-check (#2511),
-# check_test_client_pattern.py's in test-client-check (#2698), and
-# check_api_env.py's in api-env-check (#2880).
+# check_test_client_pattern.py's in test-client-check (#2698),
+# check_api_env.py's in api-env-check (#2880), and
+# check_image_pins.py's in image-pins-check (#2905).
 #
 # The recipe lines here are the deploy helper suites and only those: they cost
 # more than twice the whole cheap set, and .github/workflows/sanity.yml is the

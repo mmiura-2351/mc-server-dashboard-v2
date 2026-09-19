@@ -21,6 +21,7 @@
 #   H: scripts-test                     (scripts/)
 #   I: migrations-check                 (api/migrations/)
 #   J: test-client-check                (api/tests/, issue #1980)
+#   K: image-pins-check                 (compose.yaml vs CI pins, issue #2905)
 #
 # Phase 2 — drift checks (serial; generators write files read by Phase 1):
 #   proto-check  (proto-gen + git diff; writes api/worker/relay stubs)
@@ -28,8 +29,8 @@
 #   Skipped entirely if Phase 1 already failed (no point running generators
 #   on a known-broken tree).
 #
-# Bounded parallelism: 10 background jobs on a 4-core host. The heavy chains
-# (A, B) are CPU-bound; the lighter ones (C-J) finish quickly and free cores.
+# Bounded parallelism: 11 background jobs on a 4-core host. The heavy chains
+# (A, B) are CPU-bound; the lighter ones (C-K) finish quickly and free cores.
 # golangci-lint is capped at --concurrency=2 by the Makefile, and pytest-xdist
 # uses -n auto (4 workers). Oversubscription is transient and tolerable.
 #
@@ -221,6 +222,9 @@ pids[8]=$!; names[8]=migrations
 
 run_chain test-client test-client-check &
 pids[9]=$!; names[9]=test-client
+
+run_chain image-pins image-pins-check &
+pids[10]=$!; names[10]=image-pins
 
 # Wait for all Phase 1 chains; collect failures.
 for i in "${!pids[@]}"; do

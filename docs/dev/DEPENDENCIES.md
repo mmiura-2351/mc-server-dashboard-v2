@@ -168,6 +168,18 @@ invisible to Dependabot and is bumped by hand:
 - **SeaweedFS** — the `docker run` line in `api.yml`'s `live-s3` job. Follows
   the `seaweedfs` image in `compose.yaml`.
 
+**A guard enforces the follow-compose rule** (#2905). The re-pin stays manual,
+but a PR that moves either `compose.yaml` image without it no longer passes:
+`make image-pins-check` (`scripts/check_image_pins.py`) runs in `make check`
+and in the unfiltered `sanity` workflow's required `check` job, so it reaches
+the Dependabot PR, which runs no pre-push hook. It fails when the
+`<image>:<tag>` comment above any of the CI digests listed above names a
+different tag than `compose.yaml` deploys, or when one image's digests differ
+from each other, and names every stale file and line. It is offline, so it
+reads the comment and never resolves the digest: a comment updated without its
+digest passes it, which is why the procedures below re-pin both in one change.
+A new CI pin site joins the guard's `SITES` table together with the list above.
+
 **Two sources resolve the digest; the tags API is a cross-check.**
 `docker buildx imagetools inspect <image>:<tag>` and a registry manifest `HEAD`
 are interchangeable — both return the tag's top-level digest and its media
