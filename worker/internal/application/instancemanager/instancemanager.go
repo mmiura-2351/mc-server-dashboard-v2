@@ -2742,8 +2742,8 @@ func refuseExistingLeaf(parentFd int, leaf string) error {
 // MinecraftVersion), so the RCON dial host can be resolved per driver and the
 // RCON password read in the charset of that version (issue #3116). Both are
 // empty for a server that is not running, in which case the caller resolves the
-// loopback host — but both RCON call sites first confirm the server is running,
-// so the recorded command is present.
+// loopback host — but every caller first confirms the server is running, so the
+// recorded command is present.
 func (m *Manager) controlTargetFor(serverID string) (driver, mcVersion string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
