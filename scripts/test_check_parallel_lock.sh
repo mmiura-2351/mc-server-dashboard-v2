@@ -482,8 +482,11 @@ fi
 #    because stopping the holder releases the lock as a side effect, every
 #    assertion after it would pass on a lock this suite freed itself.
 {
-	sleep 30 &
-	stuck_pid=$!
+	# A run that never exits on its own -- only with this suite, so that a
+	# suite killed while it runs does not leave it behind (#3045).
+	start_run "$work" /dev/null env SUITE_PID="$$" \
+		bash -c 'while kill -0 "$SUITE_PID" 2> /dev/null; do sleep 0.1; done'
+	stuck_pid=$run_pid
 
 	if reap_run "$stuck_pid" 3; then
 		fail_test "reap_run reported success for a run it had to stop"
