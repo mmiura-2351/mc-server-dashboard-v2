@@ -40,11 +40,12 @@ const hydratePrefix = ".hydrate-"
 const sweepingPrefix = ".sweeping-"
 
 // isReservedScratchName reports whether a scratch-root entry name is one of the
-// dot-prefixed siblings datatransfer keeps next to the server-id scratch dirs rather
-// than a working set the Worker holds for an assigned server. Both held-set scans
+// dot-prefixed siblings the Worker keeps next to the server-id scratch dirs rather
+// than a working set it holds for an assigned server. Both held-set scans
 // share it so they can never drift apart on what they enumerate.
 func isReservedScratchName(name string) bool {
-	return strings.HasPrefix(name, displacedPrefix) || strings.HasPrefix(name, hydratePrefix)
+	return strings.HasPrefix(name, displacedPrefix) || strings.HasPrefix(name, hydratePrefix) ||
+		strings.HasPrefix(name, sweepingPrefix)
 }
 
 // ScanHeldServers returns the working sets this Worker already holds in its
@@ -98,8 +99,9 @@ func ScanHeldServers(scratchDir string, log *slog.Logger) []session.HeldServer {
 			continue
 		}
 		// A .displaced-<id> sibling is a recovery copy a hydrate kept aside (issue
-		// #906/#910) and a .hydrate-<id>-* one is a crashed hydrate's leftover (issue
-		// #2290), not held servers: skip them so they are never reported (and never
+		// #906/#910), a .hydrate-<id>-* one is a crashed hydrate's leftover (issue
+		// #2290) and a .sweeping-<id>-* one an interrupted displaced sweep's (issue
+		// #2799), not held servers: skip them so they are never reported (and never
 		// header-fsck'd per boot under a server_id=.displaced-<id> warning).
 		if isReservedScratchName(entry.Name()) {
 			continue
@@ -217,6 +219,26 @@ func WarnOrphanDisplacedTrees(scratchDir string, held []session.HeldServer, log 
 		log.Warn("displaced recovery tree for unknown/unassigned server found at boot; "+
 			"manual cleanup or recovery may be needed (see STORAGE.md Section 4.6)",
 			"path", filepath.Join(scratchDir, name), "server_id", serverID)
+	}
+}
+
+// ReclaimInterruptedDisplacedSweeps removes every .sweeping-<id>-* tree in scratchDir
+// (issue #2799): a displaced tree sweepDisplaced renamed out of its slot but did not
+// finish removing, because the Worker crashed mid-traversal or the removal failed. It
+// runs once at boot, where it is unconditional: no sweep is in flight yet, and the sweep
+// had already decided each such tree was garbage. Nothing else reclaims one — a crash
+// inside the stopped-id GC leaves it after the scratch dir is gone, so the id is never
+// advertised as held again and ReclaimDeletedScratches is never offered it. Best-effort:
+// an unreadable scratch root or a failed removal is ignored and retried at the next boot.
+func ReclaimInterruptedDisplacedSweeps(scratchDir string) {
+	entries, err := os.ReadDir(scratchDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), sweepingPrefix) {
+			_ = os.RemoveAll(filepath.Join(scratchDir, e.Name()))
+		}
 	}
 }
 

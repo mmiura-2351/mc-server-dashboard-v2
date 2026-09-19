@@ -459,6 +459,98 @@ func TestHydrateDuringDisplacedSweepFindsTheSlotEmpty(t *testing.T) {
 	}
 }
 
+// interruptDisplacedSweep runs sweepDisplaced for serverID over a seeded displaced tree
+// holding a full working set, with the removal stopped before it starts — the state a
+// crash between the sweep's rename and its traversal leaves — and returns the path the
+// tree was left under. The path is found by what appeared in the scratch root rather
+// than built from the prefix, so the tests below follow what the sweep really leaves.
+func interruptDisplacedSweep(t *testing.T, m *Manager, serverID string) string {
+	t.Helper()
+	seedHydrateShapedTree(t, filepath.Join(m.scratchDir, ".displaced-"+serverID), 7)
+	before := map[string]bool{}
+	entries, err := os.ReadDir(m.scratchDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		before[e.Name()] = true
+	}
+
+	restore := removeDisplacedTree
+	removeDisplacedTree = func(string) error { return nil }
+	m.sweepDisplaced(serverID)
+	removeDisplacedTree = restore
+
+	entries, err = os.ReadDir(m.scratchDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var left []string
+	for _, e := range entries {
+		if !before[e.Name()] {
+			left = append(left, e.Name())
+		}
+	}
+	if len(left) != 1 {
+		t.Fatalf("an interrupted displaced sweep left %v in the scratch root, want exactly one renamed tree", left)
+	}
+	return filepath.Join(m.scratchDir, left[0])
+}
+
+// The tree an interrupted sweep leaves is a full working set with a generation marker,
+// under a name that is not a server id: the held-set scans must skip it exactly as they
+// skip the .displaced- and .hydrate- siblings (issue #2799), or the Worker advertises a
+// server id the API never assigned and region-fscks a world-sized tree at every boot
+// until it is reclaimed.
+func TestInterruptedDisplacedSweepIsNotAdvertisedAsHeld(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	seedHydrateShapedTree(t, filepath.Join(m.scratchDir, "s1"), 7)
+	leftover := interruptDisplacedSweep(t, m, "s1")
+
+	for _, scan := range []struct {
+		name string
+		got  []session.HeldServer
+	}{
+		{"ScanHeldServers", ScanHeldServers(m.scratchDir, nil)},
+		{"HeldServers", m.HeldServers()},
+	} {
+		if len(scan.got) != 1 || scan.got[0].ServerID != "s1" {
+			t.Fatalf("%s = %v, want only s1: the tree an interrupted displaced sweep left at %s "+
+				"must never be enumerated as a held server (issue #2799)",
+				scan.name, scan.got, filepath.Base(leftover))
+		}
+	}
+}
+
+// The tree an interrupted sweep leaves is reclaimed at the next Worker boot (issue
+// #2799), and by nothing else: a crash inside the stopped-id GC (removeScratch) leaves it
+// with the scratch dir already gone, so the id is never advertised as held again and the
+// deleted-server reclaim is never offered it. Deleting it at boot is unconditional
+// because nothing sweeps at boot and the sweep had already decided the tree was garbage.
+// Everything else in the scratch root — a live scratch, another server's recovery tree,
+// a crashed hydrate's leftover — is not this reclaim's to touch.
+func TestBootReclaimsInterruptedDisplacedSweeps(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	leftover := interruptDisplacedSweep(t, m, "s1")
+	hydrateLeftover := filepath.Join(m.scratchDir, ".hydrate-s1-123456")
+	if err := os.MkdirAll(hydrateLeftover, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	keep := []string{seedScratch(t, m, "s1"), seedDisplaced(t, m, "s2"), hydrateLeftover}
+
+	ReclaimInterruptedDisplacedSweeps(m.scratchDir)
+
+	if _, err := os.Stat(leftover); !os.IsNotExist(err) {
+		t.Fatalf("interrupted displaced sweep %s survived the boot reclaim (stat err = %v): "+
+			"nothing else ever reclaims it (issue #2799)", filepath.Base(leftover), err)
+	}
+	for _, p := range keep {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("boot reclaim removed %s, which is not an interrupted displaced sweep: %v", filepath.Base(p), err)
+		}
+	}
+}
+
 // A FAILED snapshot must RETAIN the displaced recovery tree: the store did not
 // capture the world, so the .displaced-<id> copy is still the only one — GC-ing it
 // would defeat the recovery insurance entirely (issue #906).
