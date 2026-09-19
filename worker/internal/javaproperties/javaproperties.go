@@ -31,7 +31,10 @@
 //   - A key repeated in the file takes its LAST occurrence's value.
 package javaproperties
 
-import "strings"
+import (
+	"strings"
+	"unicode/utf8"
+)
 
 // Parse parses the contents of a Java .properties file into its key/value pairs,
 // last occurrence winning. It never fails: a .properties file has no syntax a
@@ -40,6 +43,13 @@ import "strings"
 // instead (see loadConvert). Callers own the I/O and its error policy; whole
 // contents are parsed at once, so no line length truncates the parse.
 func Parse(data []byte) map[string]string {
+	return parse(latin1ToUTF8(data))
+}
+
+// parse runs the grammar over text, which is UTF-8. Every byte the grammar acts
+// on is ASCII and no byte of a UTF-8 multi-byte sequence is, so this byte-wise
+// walk splits text exactly where Java's char-wise one splits the decoded file.
+func parse(data []byte) map[string]string {
 	out := map[string]string{}
 	for i := 0; i < len(data); {
 		line, next := naturalLine(data, i)
@@ -61,6 +71,16 @@ func Parse(data []byte) map[string]string {
 		}
 		key, value := splitKeyValue(logical)
 		out[key] = value
+	}
+	return out
+}
+
+// latin1ToUTF8 decodes data as latin-1 (ISO-8859-1) into UTF-8 text: every byte
+// becomes the code point of the same value.
+func latin1ToUTF8(data []byte) []byte {
+	out := make([]byte, 0, len(data))
+	for _, c := range data {
+		out = utf8.AppendRune(out, rune(c))
 	}
 	return out
 }
@@ -136,7 +156,7 @@ func splitKeyValue(line []byte) (key, value string) {
 	return loadConvert(line[:keyEnd]), loadConvert(line[valueStart:])
 }
 
-// loadConvert decodes raw as latin-1 and resolves the .properties escapes,
+// loadConvert resolves the .properties escapes in raw, which is UTF-8 text,
 // mirroring Properties.loadConvert. A malformed \uXXXX -- which the reference
 // implementation rejects with an exception -- yields the literal 'u' followed by
 // whatever came after it, so a hand-mangled file is read rather than turning
@@ -153,7 +173,7 @@ func loadConvert(raw []byte) string {
 	for i := 0; i < len(raw); i++ {
 		c := raw[i]
 		if c != '\\' || i+1 >= len(raw) {
-			b.WriteRune(rune(c))
+			b.WriteByte(c)
 			continue
 		}
 		i++
@@ -174,7 +194,9 @@ func loadConvert(raw []byte) string {
 		case 'f':
 			b.WriteByte('\f')
 		default:
-			b.WriteRune(rune(esc))
+			// Only the escape's first byte is consumed here; an escaped
+			// multi-byte character's remaining bytes follow as ordinary text.
+			b.WriteByte(esc)
 		}
 	}
 	return b.String()
