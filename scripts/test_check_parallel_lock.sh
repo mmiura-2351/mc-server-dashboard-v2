@@ -116,6 +116,15 @@ await_grep() {
 	return 1
 }
 
+# Start a run in the background and set run_pid: "$@" runs in directory $1,
+# with its output in file $2.
+start_run() {
+	local dir=$1 out=$2
+	shift 2
+	(cd "$dir" && exec "$@") > "$out" 2>&1 &
+	run_pid=$!
+}
+
 # Stop a backgrounded run and reap it. Only the failure paths use this: a `wait`
 # on a run still blocked on the lock never returns, which would hang the scripts
 # chain rather than report the failure it is standing in for. The run is exec'd
@@ -217,16 +226,14 @@ cp "$stub_dir/make-waiter" "$waiter_bin/make"
 acquired="$work/holder-acquired"
 release="$work/holder-release"
 
-(
-	cd "$holder_wt" &&
-		PATH="$holder_bin:$PATH" \
-			MCSD_CHECK_LOCK_FILE="$lock_file" \
-			LOCK_ACQUIRED="$acquired" \
-			LOCK_RELEASE="$release" \
-			WORK_DIR="$work" \
-			bash "$ROOT/scripts/check_parallel.sh" "$holder_wt"
-) > "$work/holder.out" 2>&1 &
-holder_pid=$!
+start_run "$holder_wt" "$work/holder.out" env \
+	PATH="$holder_bin:$PATH" \
+	MCSD_CHECK_LOCK_FILE="$lock_file" \
+	LOCK_ACQUIRED="$acquired" \
+	LOCK_RELEASE="$release" \
+	WORK_DIR="$work" \
+	bash "$ROOT/scripts/check_parallel.sh" "$holder_wt"
+holder_pid=$run_pid
 
 if ! await_file "$acquired"; then
 	fail_test "the holder run never took the lock (nothing to test against)"
@@ -245,15 +252,13 @@ fi
 #    on the way to its own failure message rather than print it (#2776).
 {
 	nested_entered="$work/nested-entered"
-	(
-		cd "$waiter_wt" &&
-			PATH="$waiter_bin:$PATH" \
-				MCSD_CHECK_LOCK_FILE="$lock_file" \
-				MCSD_CHECK_LOCK_HELD=1 \
-				ENTERED="$nested_entered" \
-				bash "$ROOT/scripts/check_parallel.sh" "$waiter_wt"
-	) > /dev/null 2>&1 &
-	nested_pid=$!
+	start_run "$waiter_wt" /dev/null env \
+		PATH="$waiter_bin:$PATH" \
+		MCSD_CHECK_LOCK_FILE="$lock_file" \
+		MCSD_CHECK_LOCK_HELD=1 \
+		ENTERED="$nested_entered" \
+		bash "$ROOT/scripts/check_parallel.sh" "$waiter_wt"
+	nested_pid=$run_pid
 
 	if await_file "$nested_entered"; then
 		ok "a nested run (MCSD_CHECK_LOCK_HELD) does not wait for the lock it already holds"
@@ -268,14 +273,12 @@ fi
 # ---------------------------------------------------------------------------
 # 1 + 2. A second run blocks, and says whose worktree is holding the lock.
 waiter_entered="$work/waiter-entered"
-(
-	cd "$waiter_wt" &&
-		PATH="$waiter_bin:$PATH" \
-			MCSD_CHECK_LOCK_FILE="$lock_file" \
-			ENTERED="$waiter_entered" \
-			bash "$ROOT/scripts/check_parallel.sh" "$waiter_wt"
-) > "$work/waiter.out" 2>&1 &
-waiter_pid=$!
+start_run "$waiter_wt" "$work/waiter.out" env \
+	PATH="$waiter_bin:$PATH" \
+	MCSD_CHECK_LOCK_FILE="$lock_file" \
+	ENTERED="$waiter_entered" \
+	bash "$ROOT/scripts/check_parallel.sh" "$waiter_wt"
+waiter_pid=$run_pid
 
 # The one place a fixed wait is unavoidable: "has not proceeded" is only
 # observable by looking after enough time that it would have.
@@ -324,14 +327,12 @@ dead_pid_waiter=""
 		"$holder_wt" "$dead_pid" "$(date '+%Y-%m-%dT%H:%M:%S%z')" > "$lock_file"
 
 	dead_pid_entered="$work/dead-pid-entered"
-	(
-		cd "$waiter_wt" &&
-			PATH="$waiter_bin:$PATH" \
-				MCSD_CHECK_LOCK_FILE="$lock_file" \
-				ENTERED="$dead_pid_entered" \
-				bash "$ROOT/scripts/check_parallel.sh" "$waiter_wt"
-	) > "$work/dead-pid-waiter.out" 2>&1 &
-	dead_pid_waiter=$!
+	start_run "$waiter_wt" "$work/dead-pid-waiter.out" env \
+		PATH="$waiter_bin:$PATH" \
+		MCSD_CHECK_LOCK_FILE="$lock_file" \
+		ENTERED="$dead_pid_entered" \
+		bash "$ROOT/scripts/check_parallel.sh" "$waiter_wt"
+	dead_pid_waiter=$run_pid
 
 	if await_grep "fuser -v $lock_file" "$work/dead-pid-waiter.out"; then
 		ok "a waiter whose recorded holder pid is dead is pointed at fuser"
@@ -362,14 +363,12 @@ decoy_waiters=()
 			"$decoy_wt" "$$" "$(date '+%Y-%m-%dT%H:%M:%S%z')" > "$lock_file"
 
 		decoy_out="$work/decoy-waiter-$decoy_n.out"
-		(
-			cd "$waiter_wt" &&
-				PATH="$waiter_bin:$PATH" \
-					MCSD_CHECK_LOCK_FILE="$lock_file" \
-					ENTERED="$work/decoy-entered-$decoy_n" \
-					bash "$ROOT/scripts/check_parallel.sh" "$waiter_wt"
-		) > "$decoy_out" 2>&1 &
-		decoy_waiters+=($!)
+		start_run "$waiter_wt" "$decoy_out" env \
+			PATH="$waiter_bin:$PATH" \
+			MCSD_CHECK_LOCK_FILE="$lock_file" \
+			ENTERED="$work/decoy-entered-$decoy_n" \
+			bash "$ROOT/scripts/check_parallel.sh" "$waiter_wt"
+		decoy_waiters+=("$run_pid")
 
 		if await_grep "held by: $decoy_wt" "$decoy_out"; then
 			if grep -qF 'fuser -v' "$decoy_out"; then
