@@ -1788,12 +1788,13 @@ func (m *Manager) removeScratch(serverID string) {
 // world-sized tree: a check landing inside it read the half-deleted tree as an occupied
 // slot, retained it — while the traversal went on deleting it — and dropped the live set
 // the hydrate displaced. The rename empties the slot atomically before any traversal
-// starts, so a hydrate finds either the whole tree or nothing. A failed rename therefore
-// returns WITHOUT removing anything: falling back to an in-place removal would reopen
-// that window, and declining costs only a leak, retried by the next successful
-// snapshot. A traversal that does not finish (a crash, or a removal error) leaves the
-// tree under its .sweeping- name, which ReclaimInterruptedDisplacedSweeps removes at the
-// next Worker boot.
+// starts, so a hydrate finds either the whole tree or nothing; the scratch root is
+// fsynced before the traversal, so not even a power loss can put a half-deleted tree
+// back in the slot. A failed rename therefore returns WITHOUT removing anything: falling
+// back to an in-place removal would reopen that window, and declining costs only a leak,
+// retried by the next successful snapshot. A traversal that does not finish (a crash,
+// or a removal error) leaves the tree under its .sweeping- name, which
+// ReclaimInterruptedDisplacedSweeps removes at the next Worker boot.
 //
 // The function itself is unconditional; the CALLERS establish that the success really
 // does supersede the tree being removed, and they do it differently. The stopped-id
@@ -1821,6 +1822,11 @@ func (m *Manager) sweepDisplaced(serverID string) {
 	// MkdirTemp creates the dir; remove it so Rename can use the name.
 	_ = os.Remove(trash)
 	if err := os.Rename(displaced, trash); err != nil {
+		return
+	}
+	// Make the rename durable before the traversal unlinks anything, so a power loss
+	// cannot roll it back over a half-deleted tree and put that tree back in the slot.
+	if err := fsyncDir(m.scratchDir); err != nil {
 		return
 	}
 	_ = removeDisplacedTree(trash)
