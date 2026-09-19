@@ -219,9 +219,9 @@ func buildInstanceManager(ctx context.Context, cfg config.Config, logger *slog.L
 	// Only a container-driven server with a configured network is dialed over the
 	// network (its container name); any other server keeps the host loopback
 	// (issue #218).
-	openControl := func(ctx context.Context, serverID, driver string) (execution.ServerControl, error) {
+	openControl := func(ctx context.Context, serverID, driver, mcVersion string) (execution.ServerControl, error) {
 		host := resolveRconHost(driver, containerRconHost, serverID)
-		return rcon.OpenFromWorkingDir(ctx, filepath.Join(wc.ScratchDir, serverID), host, "")
+		return rcon.OpenFromWorkingDir(ctx, filepath.Join(wc.ScratchDir, serverID), host, mcVersion)
 	}
 	// The relay dial-back dialer (RELAY.md Section 5) splices a player session to
 	// the server's game port. ctx here is the signal-cancelled context (run()

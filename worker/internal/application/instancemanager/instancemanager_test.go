@@ -229,7 +229,7 @@ func newManager(t *testing.T, d execution.ExecutionDriver, ctrl execution.Server
 	t.Helper()
 	scratch := t.TempDir()
 	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch,
-		func(context.Context, string, string) (execution.ServerControl, error) {
+		func(context.Context, string, string, string) (execution.ServerControl, error) {
 			// The real openControl never yields a nil control without an error (main.go).
 			// Tests that don't wire one exercise RCON-free paths; surface that as a dial
 			// failure so the #1007 stop-flush (and the snapshot quiesce) degrade gracefully
@@ -832,7 +832,7 @@ func TestStopServerGracefulRedialsAfterPoisonedSaveOff(t *testing.T) {
 	var dialCount int
 	scratch := t.TempDir()
 	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch,
-		func(context.Context, string, string) (execution.ServerControl, error) {
+		func(context.Context, string, string, string) (execution.ServerControl, error) {
 			dialCount++
 			if dialCount == 1 {
 				return poisonCtrl, nil
@@ -882,7 +882,7 @@ func TestStopServerGracefulCompletesWhenBothRCONCommandsFail(t *testing.T) {
 	var dialCount int
 	scratch := t.TempDir()
 	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch,
-		func(context.Context, string, string) (execution.ServerControl, error) {
+		func(context.Context, string, string, string) (execution.ServerControl, error) {
 			dialCount++
 			if dialCount == 1 {
 				return poisonCtrl, nil
@@ -938,7 +938,7 @@ func TestOpenControlReceivesRunningServerDriver(t *testing.T) {
 		"container": &fakeDriver{},
 		"docker":    &fakeDriver{},
 	}
-	m := New(drivers, scratch, func(_ context.Context, _ string, driver string) (execution.ServerControl, error) {
+	m := New(drivers, scratch, func(_ context.Context, _, driver, _ string) (execution.ServerControl, error) {
 		gotDriver = driver
 		return &fakeControl{reply: "ok"}, nil
 	})

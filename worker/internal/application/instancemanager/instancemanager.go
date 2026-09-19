@@ -39,8 +39,10 @@ import (
 // server (the one recorded on its StartServer command), so the dial host can be
 // resolved per the driver's topology — a container driver with a configured
 // network reaches RCON over the network, every other driver over the host
-// loopback (issue #218).
-type controlFunc func(ctx context.Context, serverID, driver string) (execution.ServerControl, error)
+// loopback (issue #218). mcVersion is the server's Minecraft version (the one on
+// the same StartServer command), which decides the charset its server.properties
+// -- and so the RCON password -- is read in (issue #3116).
+type controlFunc func(ctx context.Context, serverID, driver, mcVersion string) (execution.ServerControl, error)
 
 // resilientControl wraps a ServerControl and auto-redials on ErrConnBroken
 // (#919). The rcon client poisons the connection on any Execute error, so a
@@ -1246,7 +1248,7 @@ func (m *Manager) checkWorkingSet(ctx context.Context, serverID, workingDir stri
 // operator-actionable.
 func (m *Manager) quiesceRunning(ctx context.Context, serverID, workingDir string) (bool, func()) {
 	driverName := m.driverFor(serverID)
-	raw, err := m.openControl(ctx, serverID, driverName)
+	raw, err := m.openControl(ctx, serverID, driverName, "")
 	if err != nil {
 		m.logger.Warn("snapshot quiesce: open rcon failed", "server_id", serverID, "error", err)
 		return false, func() {}
@@ -1258,7 +1260,7 @@ func (m *Manager) quiesceRunning(ctx context.Context, serverID, workingDir strin
 	ctrl := &resilientControl{
 		inner: raw,
 		dial: func(dialCtx context.Context) (execution.ServerControl, error) {
-			return m.openControl(dialCtx, serverID, driverName)
+			return m.openControl(dialCtx, serverID, driverName, "")
 		},
 		logger:   m.logger,
 		serverID: serverID,
@@ -1317,7 +1319,7 @@ func (m *Manager) quiesceRunning(ctx context.Context, serverID, workingDir strin
 // server is about to be stopped, so there is nothing to restore, and re-enabling
 // writes during the settle window would reintroduce the convergence problem.
 func (m *Manager) flushBeforeStopWithDriver(ctx context.Context, serverID, driverName string) bool {
-	raw, err := m.openControl(ctx, serverID, driverName)
+	raw, err := m.openControl(ctx, serverID, driverName, "")
 	if err != nil {
 		m.logger.Warn("stop flush: open rcon failed; stopping without a final save",
 			"server_id", serverID, "error", err)
@@ -1330,7 +1332,7 @@ func (m *Manager) flushBeforeStopWithDriver(ctx context.Context, serverID, drive
 	ctrl := &resilientControl{
 		inner: raw,
 		dial: func(dialCtx context.Context) (execution.ServerControl, error) {
-			return m.openControl(dialCtx, serverID, driverName)
+			return m.openControl(dialCtx, serverID, driverName, "")
 		},
 		logger:   m.logger,
 		serverID: serverID,
@@ -1389,7 +1391,7 @@ func (m *Manager) restoreSaveOn(ctx context.Context, serverID string, ctrl execu
 	case <-time.After(m.fsckRetryDelay):
 	}
 
-	fresh, err := m.openControl(restoreCtx, serverID, m.driverFor(serverID))
+	fresh, err := m.openControl(restoreCtx, serverID, m.driverFor(serverID), "")
 	if err != nil {
 		m.logger.Error("snapshot save-on NOT restored; redial failed, server left with auto-save disabled",
 			"server_id", serverID, "error", err)
@@ -1417,7 +1419,7 @@ func (m *Manager) restoreSaveOn(ctx context.Context, serverID string, ctrl execu
 func (m *Manager) restoreSaveOnAfterFailedStop(ctx context.Context, serverID, driverName string) {
 	restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restoreSaveTimeout)
 	defer cancel()
-	ctrl, err := m.openControl(restoreCtx, serverID, driverName)
+	ctrl, err := m.openControl(restoreCtx, serverID, driverName, "")
 	if err != nil {
 		m.logger.Error("failed stop: auto-save NOT restored (rcon open failed); surviving server is running with auto-save disabled",
 			"server_id", serverID, "driver", driverName, "error", err)
@@ -2225,7 +2227,7 @@ func (m *Manager) handleServerCommand(ctx context.Context, cmd session.Command) 
 		return fail(cmd.CommandID, code, msg)
 	}
 
-	ctrl, err := m.openControl(ctx, cmd.ServerID, m.driverFor(cmd.ServerID))
+	ctrl, err := m.openControl(ctx, cmd.ServerID, m.driverFor(cmd.ServerID), "")
 	if err != nil {
 		return fail(cmd.CommandID, session.CommandErrorInternal,
 			fmt.Sprintf("instancemanager: open rcon: %v", err))

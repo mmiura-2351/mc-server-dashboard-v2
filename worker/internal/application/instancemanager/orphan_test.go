@@ -338,7 +338,7 @@ func TestConvergerSkipsRoundWhileOperatorStopInFlight(t *testing.T) {
 	clk := &fakeClock{}
 	d := &gatedOrphanDriver{}
 	m := New(map[string]execution.ExecutionDriver{"container": d}, t.TempDir(),
-		func(context.Context, string, string) (execution.ServerControl, error) {
+		func(context.Context, string, string, string) (execution.ServerControl, error) {
 			return nil, errors.New("test: no rcon control configured")
 		}).WithMetrics(clk, time.Hour)
 	closeWithTest(t, m)
@@ -731,7 +731,7 @@ func TestOrphanRetryStopPassesDriverToFlush(t *testing.T) {
 	var drivers []string
 	scratch := t.TempDir()
 	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch,
-		func(_ context.Context, _ string, driver string) (execution.ServerControl, error) {
+		func(_ context.Context, _, driver, _ string) (execution.ServerControl, error) {
 			drivers = append(drivers, driver)
 			return &fakeControl{reply: "ok"}, nil
 		})
@@ -798,7 +798,7 @@ func TestFailedStopRestoresSaveOn(t *testing.T) {
 	var drivers []string
 	scratch := t.TempDir()
 	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch,
-		func(_ context.Context, _ string, driver string) (execution.ServerControl, error) {
+		func(_ context.Context, _, driver, _ string) (execution.ServerControl, error) {
 			drivers = append(drivers, driver)
 			return &fakeControl{reply: "ok", seq: &seq}, nil
 		})
@@ -839,7 +839,7 @@ func TestFailedStopSaveOnDialFailureStillReturnsStopFailure(t *testing.T) {
 	var dialCount int
 	scratch := t.TempDir()
 	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch,
-		func(_ context.Context, _ string, _ string) (execution.ServerControl, error) {
+		func(_ context.Context, _, _, _ string) (execution.ServerControl, error) {
 			dialCount++
 			// The flush dial succeeds (save-off + save-all); the restore dial fails.
 			if dialCount <= 1 {
@@ -874,7 +874,7 @@ func TestForcedFailedStopSkipsSaveOn(t *testing.T) {
 	var seq []string
 	scratch := t.TempDir()
 	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch,
-		func(_ context.Context, _ string, _ string) (execution.ServerControl, error) {
+		func(_ context.Context, _, _, _ string) (execution.ServerControl, error) {
 			return &fakeControl{reply: "ok", seq: &seq}, nil
 		})
 	m.settlePollInterval = 0
@@ -901,7 +901,7 @@ func TestRestartStopFailureRestoresSaveOn(t *testing.T) {
 	var seq []string
 	scratch := t.TempDir()
 	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch,
-		func(_ context.Context, _ string, _ string) (execution.ServerControl, error) {
+		func(_ context.Context, _, _, _ string) (execution.ServerControl, error) {
 			return &fakeControl{reply: "ok", seq: &seq}, nil
 		})
 	m.settlePollInterval = 0
