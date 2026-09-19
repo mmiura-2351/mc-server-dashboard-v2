@@ -89,8 +89,9 @@ def check(config: dict[str, Any], project: str) -> list[str]:
     if on != MEMBERS:
         errors.append(
             f"services on the MC containers' network {target!r} are {sorted(on)}, "
-            f"expected exactly {sorted(MEMBERS)} -- MC containers run untrusted "
-            "code; keep every other service off their network (#2590)"
+            f"expected exactly {sorted(MEMBERS)} -- the worker reaches the MC "
+            "containers there, and they run untrusted code, so nothing else may "
+            "share it (#2590)"
         )
     for name, svc in services.items():
         if svc.get("network_mode"):

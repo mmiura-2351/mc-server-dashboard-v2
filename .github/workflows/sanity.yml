@@ -35,18 +35,21 @@ jobs:
       # Nothing below needs a setup action, a dependency install, a service or a
       # network fetch: the checkers are pure stdlib python3 (ubuntu-latest ships
       # it), mirroring docs.yml, and the shell suites use only tools the runner
-      # already has.
+      # already has -- the compose topology guard's real run included: it calls
+      # the preinstalled docker CLI's `docker compose config`, which parses and
+      # needs no daemon.
       #
-      # Every step below except the workflow YAML parse also runs locally: the
-      # migration guard (self-test + real run) via `make migrations-check`, the
-      # docs checker (self-test + real run) via `make docs-check`, the
+      # Every step below except the workflow YAML parse and that topology run
+      # also runs locally: the migration guard (self-test + real run) via
+      # `make migrations-check`, the docs checker (self-test + real run) via `make docs-check`, the
       # test-client guard (self-test + real run) via `make test-client-check`,
       # the image-pin guard (self-test + real run) via `make image-pins-check`,
       # the api-env preflight's self-test via `make api-env-check` (its real run
       # needs the api venv, so only the self-test is here), the two hook suites
       # via `make hooks-test`, and the scripts/ suites via the Make target the
       # last step names. The YAML parse is CI-only -- it guards this directory,
-      # which has no local gate.
+      # which has no local gate. The topology run is CI-only because the local
+      # gate does not assume docker; its self-test is in scripts-test-cheap.
       #
       # The python checkers stay spelled out because each is a gate worth naming
       # in the job's step list. The scripts/ suites do not, because there the
@@ -81,6 +84,12 @@ jobs:
       - name: CI image pins follow compose.yaml (postgres, seaweedfs)
         run: python3 scripts/check_image_pins.py
 
+      # The MC server containers' network holds the worker and nothing else, and
+      # its name derives from the project (#2619). Here for the same reason as
+      # the image pins: the PR that has to fail it touches only compose.yaml.
+      - name: Compose topology (only the worker shares the MC servers' network)
+        run: python3 scripts/check_compose_topology.py
+
       - name: API env guard self-test
         run: python3 scripts/check_api_env.py --self-test
 
@@ -94,8 +103,9 @@ jobs:
         run: bash .githooks/test-hooks-check.sh
 
       # Every scripts/ suite this gate can afford, as the Make target that
-      # defines that set: the cooldown self-test, the pipefail source guard, the
-      # two check_parallel.sh suites and the two tool-pin suites. A few seconds,
+      # defines that set: the cooldown and compose topology self-tests, the
+      # pipefail source guard, the two check_parallel.sh suites and the two
+      # tool-pin suites. A few seconds,
       # bash and python3 over temp dirs, nothing installed and nothing fetched.
       # The target deliberately excludes the deploy helper suites, which `make
       # scripts-test` adds on top; the Makefile carries that rationale.

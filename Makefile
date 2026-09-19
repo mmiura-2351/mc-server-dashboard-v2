@@ -490,8 +490,11 @@ hooks-test:
 # A self-test belongs here when the script has no local real run to sit next
 # to, so that a regression in it fails the pre-push `make check` instead of a CI
 # runner after the push (#2508). supply_chain_cooldown.py is such a script: its
-# real run is the Dependabot flow, not a gate. The other five self-tests live
-# next to the real run they guard -- check_docs.py's in docs-check,
+# real run is the Dependabot flow, not a gate. check_compose_topology.py is
+# another: its real run shells out to `docker compose config`, and this gate
+# does not assume the docker CLI, so that run is a sanity.yml step (#2619).
+# The other five self-tests live next to the real run they guard --
+# check_docs.py's in docs-check,
 # check_migrations.py's in migrations-check (#2511),
 # check_test_client_pattern.py's in test-client-check (#2698),
 # check_api_env.py's in api-env-check (#2880), and
@@ -519,6 +522,7 @@ scripts-test: scripts-test-cheap
 # out of that gate; there is no third place to put one.
 scripts-test-cheap:
 	python3 scripts/supply_chain_cooldown.py --self-test
+	python3 scripts/check_compose_topology.py --self-test
 	bash scripts/test_shell_pipefail.sh
 	bash scripts/test_check_parallel_identity.sh
 	bash scripts/test_check_parallel_lock.sh
