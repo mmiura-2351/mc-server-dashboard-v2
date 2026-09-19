@@ -2743,6 +2743,13 @@ async def test_stop_final_snapshot_failure_logs_publication_as_unconfirmed(
 # inside it.
 _WORKING_SET_ABSENT_MESSAGE = worker_message("working_set_absent.snapshot")
 
+# The launch-time counterpart (issue #2499, instancemanager.go launchReserved),
+# read from the table for the same reason. Its ``%s`` is the working dir the
+# Worker fills in; the discriminator keys on the phrase, never on the path.
+_WORKING_SET_ABSENT_LAUNCH_MESSAGE = (
+    worker_message("working_set_absent.launch") % "/var/lib/mcsd/scratch/s"
+)
+
 
 class _SnapshotServerNotFound(FakeControlPlane):
     def __init__(self, message: str) -> None:
@@ -3364,11 +3371,7 @@ async def test_restart_over_a_destroyed_working_set_is_not_reported_as_not_runni
     cp = FakeControlPlane(
         outcome=CommandOutcome(
             status=worker_status("RestartServer", "running_working_set_absent"),
-            message=(
-                "instancemanager: start refused: working dir absent "
-                "(/var/lib/mcsd/scratch/s): the hydrate was skipped for a working "
-                "set this Worker does not hold"
-            ),
+            message=_WORKING_SET_ABSENT_LAUNCH_MESSAGE,
         )
     )
     use_case = RestartServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
@@ -3957,11 +3960,7 @@ class _RefusesFirstStartControlPlane(FakeControlPlane):
             return outcome
         return CommandOutcome(
             status=worker_status("StartServer", "working_set_absent"),
-            message=(
-                "instancemanager: start refused: working dir absent "
-                "(/var/lib/mcsd/scratch/s): the hydrate was skipped for a working "
-                "set this Worker does not hold"
-            ),
+            message=_WORKING_SET_ABSENT_LAUNCH_MESSAGE,
         )
 
 
@@ -4016,7 +4015,7 @@ async def test_start_relaunch_after_the_refusal_is_taken_at_most_once() -> None:
         outcomes={
             "start": CommandOutcome(
                 status=worker_status("StartServer", "working_set_absent"),
-                message="instancemanager: start refused: working dir absent (/s)",
+                message=_WORKING_SET_ABSENT_LAUNCH_MESSAGE,
             )
         },
     )
