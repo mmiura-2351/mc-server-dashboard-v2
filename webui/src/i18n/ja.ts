@@ -789,6 +789,8 @@ export const ja: Record<TranslationKey, string> = {
     "server.properties の「{key}」はプラットフォームが管理しているため、この操作では変更できません。",
   "files.error.platformManagedPath":
     "server.properties はプラットフォームが管理しているため、そのパスにディレクトリを置くことはできません。",
+  "files.error.unencodableText":
+    "このファイルは UTF-8 ではないため Latin-1（ISO-8859-1）で保存しますが、入力された文字の一部は Latin-1 で表せません。該当する文字を削除してから保存し直してください。",
   "files.error.invalidInput": "リクエストが無効です。",
   "files.error.workerUnavailable":
     "サーバーエージェントが切断されています。しばらくしてから再度お試しください。",

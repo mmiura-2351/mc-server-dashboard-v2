@@ -828,6 +828,9 @@ export const en = {
     "“{key}” in server.properties is managed by the platform; this operation would change it.",
   "files.error.platformManagedPath":
     "server.properties is managed by the platform; a directory cannot stand at that path.",
+  // A save into a file read as latin-1 because it is not UTF-8 (issue #2851).
+  "files.error.unencodableText":
+    "This file is not UTF-8, so it is saved as Latin-1 (ISO-8859-1), which cannot hold some of the characters you entered. Remove them and save again.",
   "files.error.invalidInput": "The request was invalid.",
   "files.error.workerUnavailable":
     "The server agent is disconnected. Please try again later.",

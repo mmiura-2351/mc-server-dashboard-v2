@@ -1,5 +1,5 @@
 /**
- * Base64 ⇄ UTF-8 text helpers and text-vs-binary detection for the Files tab.
+ * Base64 ⇄ text helpers and text-vs-binary detection for the Files tab.
  *
  * The file routes carry content base64-encoded (bytes-faithful, no encoding
  * mangling on the wire — servers/api/files.py). The browser's `btoa`/`atob`
@@ -7,6 +7,13 @@
  * bare `atob` mangles multi-byte UTF-8. We bridge through `TextEncoder`/
  * `TextDecoder` so the editor round-trips UTF-8 (e.g. an MOTD with emoji) byte
  * for byte.
+ *
+ * Charset rule (issue #2851): a file is read as UTF-8 when its bytes are valid
+ * UTF-8, and as latin-1 (ISO-8859-1) otherwise, and written back in the charset
+ * it was read in. That is how Minecraft (1.20+) reads `server.properties` — the
+ * file whose non-UTF-8 bytes are ordinary, #2623 — and it keeps the round trip
+ * lossless for every file: latin-1 maps each byte to one character and back,
+ * where a UTF-8-only decode turned each invalid byte into U+FFFD for good.
  *
  * Text-vs-binary rule: sniff the decoded byte prefix for a NUL (0x00). Real
  * text files (server.properties, JSON, YAML, logs) never contain a NUL byte,
@@ -39,14 +46,57 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-/** Decode a base64 payload as UTF-8 text. */
-export function decodeBase64Utf8(base64: string): string {
-  return new TextDecoder().decode(base64ToBytes(base64));
+/** The charset a file's bytes were read in, and are written back in. */
+export type TextCharset = "utf-8" | "latin-1";
+
+/** A file's content as text, with the charset it was read in. */
+export interface DecodedText {
+  text: string;
+  charset: TextCharset;
+}
+
+/** Text holds a character its file's charset cannot encode. */
+export class UnencodableTextError extends Error {
+  constructor() {
+    super("text holds a character outside latin-1");
+    this.name = "UnencodableTextError";
+  }
+}
+
+/** Decode a base64 payload as UTF-8 text, or as latin-1 when it is not UTF-8. */
+export function decodeBase64Text(base64: string): DecodedText {
+  const bytes = base64ToBytes(base64);
+  try {
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return { text, charset: "utf-8" };
+  } catch {
+    // `atob`'s binary string IS latin-1: one character per byte, same value.
+    // Not `new TextDecoder("latin1")`, which WHATWG maps to windows-1252.
+    return { text: atob(base64), charset: "latin-1" };
+  }
 }
 
 /** Encode UTF-8 text to a base64 payload. */
 export function encodeUtf8Base64(text: string): string {
   return bytesToBase64(new TextEncoder().encode(text));
+}
+
+/**
+ * Encode text to a base64 payload in `charset`.
+ *
+ * @throws UnencodableTextError when `charset` is latin-1 and the text holds a
+ *   character above U+00FF.
+ */
+export function encodeTextBase64(text: string, charset: TextCharset): string {
+  if (charset === "utf-8") {
+    return encodeUtf8Base64(text);
+  }
+  for (let i = 0; i < text.length; i++) {
+    if (text.charCodeAt(i) > 0xff) {
+      throw new UnencodableTextError();
+    }
+  }
+  return btoa(text);
 }
 
 /**

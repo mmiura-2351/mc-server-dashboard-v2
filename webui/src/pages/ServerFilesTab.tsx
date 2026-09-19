@@ -56,9 +56,11 @@ import { t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
 import {
-  decodeBase64Utf8,
-  encodeUtf8Base64,
+  type DecodedText,
+  decodeBase64Text,
+  encodeTextBase64,
   isProbablyText,
+  UnencodableTextError,
 } from "./fileText.ts";
 import { atRest, normalizeState } from "./serverState.ts";
 import { useFileBrowserParams } from "./urlState.ts";
@@ -91,6 +93,8 @@ type FileDownloadGrant = components["schemas"]["FileDownloadGrantResponse"];
  * carry an extension member the message interpolates.
  */
 function fileOperationErrorMessage(error: unknown): string {
+  if (error instanceof UnencodableTextError)
+    return t("files.error.unencodableText");
   if (!(error instanceof ApiError)) return t("files.error.generic");
 
   switch (error.status) {
@@ -2281,10 +2285,15 @@ function Viewer({
   });
 
   const save = useMutation({
-    mutationFn: (text: string) =>
+    // Written back in the charset the file was read in (issue #2851).
+    mutationFn: ({ text, charset }: DecodedText) =>
       api.put(
         `${filesBase(communityId, serverId)}?path=${encodeURIComponent(path)}` as never,
-        { body: JSON.stringify({ content_base64: encodeUtf8Base64(text) }) },
+        {
+          body: JSON.stringify({
+            content_base64: encodeTextBase64(text, charset),
+          }),
+        },
       ),
     onSuccess: () => {
       showToast(t("files.saved"), "success");
@@ -2304,7 +2313,10 @@ function Viewer({
     return <p className="field-error">{t("files.openError")}</p>;
   }
 
-  const isText = isProbablyText(content.data.content_base64);
+  const decoded = isProbablyText(content.data.content_base64)
+    ? decodeBase64Text(content.data.content_base64)
+    : null;
+  const isText = decoded !== null;
   const downloadName = path.split("/").at(-1) ?? path;
 
   return (
@@ -2356,7 +2368,10 @@ function Viewer({
               type="button"
               className="btn sm primary"
               disabled={draft === null || save.isPending}
-              onClick={() => draft !== null && save.mutate(draft)}
+              onClick={() =>
+                draft !== null &&
+                save.mutate({ text: draft, charset: decoded.charset })
+              }
             >
               {t("files.save")}
             </button>
@@ -2395,7 +2410,7 @@ function Viewer({
             spellCheck={false}
             readOnly={!canEdit}
             aria-label={t("files.editorLabel")}
-            value={draft ?? decodeBase64Utf8(content.data.content_base64)}
+            value={draft ?? decoded.text}
             onChange={(e) => setDraft(e.target.value)}
           />
         </>
@@ -2587,7 +2602,7 @@ function HistoryDrawer({
               spellCheck={false}
               readOnly
               aria-label={t("files.editorLabel")}
-              value={decodeBase64Utf8(preview.data.content_base64)}
+              value={decodeBase64Text(preview.data.content_base64).text}
             />
           ) : (
             <p className="sub">{t("files.history.preview.binary")}</p>
