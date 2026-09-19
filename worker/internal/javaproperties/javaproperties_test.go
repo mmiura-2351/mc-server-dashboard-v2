@@ -283,7 +283,7 @@ func TestParseUTF8DecodesAsMinecraft120Does(t *testing.T) {
 		},
 		{
 			name:  "a unicode escape decodes as before",
-			input: `rcon.password=café` + "\n",
+			input: `rcon.password=caf\u00e9` + "\n",
 			want:  map[string]string{"rcon.password": "café"},
 		},
 	} {
