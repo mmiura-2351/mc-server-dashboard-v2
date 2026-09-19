@@ -604,6 +604,27 @@ def _seed_pack(uow: FakeUnitOfWork) -> ResourcePack:
     return pack
 
 
+class _DeletePackOnReadFileStore(FakeFileStore):
+    """A file store that deletes the pack while the assign reads its properties.
+
+    Lands a concurrent ``DeleteResourcePack`` in the window between the assign's
+    pre-read of the pack and its assignment INSERT (issue #2853).
+    """
+
+    def __init__(self, uow: FakeUnitOfWork, pack_id: ResourcePackId) -> None:
+        super().__init__()
+        self._uow = uow
+        self._pack_id = pack_id
+
+    async def read_file(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> bytes:
+        await self._uow.resource_packs.delete(self._pack_id)
+        return await super().read_file(
+            community_id=community_id, server_id=server_id, rel_path=rel_path
+        )
+
+
 class TestAssignResourcePack:
     async def test_assign_happy_path(self) -> None:
         server = _at_rest_server()
@@ -877,6 +898,62 @@ class TestAssignResourcePack:
                 assigned_by=uuid.uuid4(),
                 public_base_url=_BASE_URL,
             )
+
+    async def test_assign_losing_the_insert_race_leaves_properties_untouched(
+        self,
+    ) -> None:
+        # The pack is deleted after the pre-read found it, so the INSERT is refused
+        # (404). The file must not be left advertising the deleted pack's URL with
+        # no row behind it (issue #2853).
+        server = _at_rest_server()
+        servers = FakeServerRepository()
+        servers.seed(server)
+        uow = FakeUnitOfWork(servers=servers)
+        pack = _seed_pack(uow)
+        file_store = _DeletePackOnReadFileStore(uow, pack.id)
+        file_store.files["server.properties"] = b"motd=hi\n"
+
+        uc = AssignResourcePack(uow=uow, file_store=file_store, clock=FakeClock(_NOW))
+        with pytest.raises(ResourcePackNotFoundError):
+            await uc(
+                community_id=_COMMUNITY_ID,
+                server_id=server.id,
+                resource_pack_id=pack.id,
+                require_resource_pack=False,
+                resource_pack_prompt=None,
+                assigned_by=uuid.uuid4(),
+                public_base_url=_BASE_URL,
+            )
+
+        assert file_store.files["server.properties"] == b"motd=hi\n"
+
+    async def test_assign_whose_properties_write_fails_commits_nothing(
+        self,
+    ) -> None:
+        # The file write runs before the commit, so a storage failure leaves the
+        # staged row to roll back rather than committing an assignment the file
+        # does not carry (issue #2853).
+        server = _at_rest_server()
+        servers = FakeServerRepository()
+        servers.seed(server)
+        uow = FakeUnitOfWork(servers=servers)
+        pack = _seed_pack(uow)
+        file_store = FakeFileStore(fail_write=True)
+        file_store.files["server.properties"] = b"motd=hi\n"
+
+        uc = AssignResourcePack(uow=uow, file_store=file_store, clock=FakeClock(_NOW))
+        with pytest.raises(RuntimeError):
+            await uc(
+                community_id=_COMMUNITY_ID,
+                server_id=server.id,
+                resource_pack_id=pack.id,
+                require_resource_pack=False,
+                resource_pack_prompt=None,
+                assigned_by=uuid.uuid4(),
+                public_base_url=_BASE_URL,
+            )
+
+        assert uow.commits == 0
 
 
 class TestUnassignResourcePack:
