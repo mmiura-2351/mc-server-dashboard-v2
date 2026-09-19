@@ -1842,6 +1842,134 @@ func TestSupersededSetDroppedOnSuccessfulSwap(t *testing.T) {
 	}
 }
 
+// A running-id snapshot's displaced sweep takes no per-id reservation (#829 item 4), and
+// its identity pin still passes until the hydrate parks destDir aside, so its rename can
+// empty the .displaced-<id> slot after the oldest-wins check read it as held and before
+// the hydrate drops the set it superseded (issue #3112). Dropping it then leaves no local
+// tree at all: the sweep removed the tree oldest-wins kept, and the drop removes the one
+// given up for it. The hydrate must find the slot empty at the drop and park the
+// superseded set there instead, the outcome it reaches when the sweep lands before its
+// check. The sweep is landed at both ends of that window: right after the slot check, and
+// right after the swap-in, the last step before the drop.
+func TestSupersededSetKeptWhenSweepEmptiesSlotBeforeDrop(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// land installs a seam that runs sweep at this point of the hydrate and returns
+		// the function restoring it.
+		land func(displaced string, sweep func()) func()
+	}{
+		{
+			name: "right after the slot check",
+			land: func(displaced string, sweep func()) func() {
+				orig := readDir
+				readDir = func(dir string) ([]os.DirEntry, error) {
+					entries, err := os.ReadDir(dir)
+					if dir == displaced {
+						sweep()
+					}
+					return entries, err
+				}
+				return func() { readDir = orig }
+			},
+		},
+		{
+			name: "right after the swap-in",
+			land: func(_ string, sweep func()) func() {
+				orig := swapRename
+				swapRename = func(src, dst string) error {
+					err := os.Rename(src, dst)
+					sweep()
+					return err
+				}
+				return func() { swapRename = orig }
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scratch := t.TempDir()
+			dest := filepath.Join(scratch, "server")
+			if err := os.MkdirAll(dest, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dest, "gen"), []byte("current"), 0o640); err != nil {
+				t.Fatal(err)
+			}
+			displaced := filepath.Join(scratch, ".displaced-server")
+			if err := os.MkdirAll(displaced, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(displaced, "gen"), []byte("prior"), 0o640); err != nil {
+				t.Fatal(err)
+			}
+
+			swept := false
+			restore := tc.land(displaced, func() {
+				// sweepDisplaced's shape: rename the tree out of the slot, then remove it.
+				trash := filepath.Join(scratch, ".sweeping-server-race")
+				if err := os.Rename(displaced, trash); err != nil {
+					t.Errorf("model the sweep's rename: %v", err)
+					return
+				}
+				if err := os.RemoveAll(trash); err != nil {
+					t.Errorf("model the sweep's removal: %v", err)
+					return
+				}
+				swept = true
+			})
+			defer restore()
+
+			h := &capturingHandler{}
+			body := tarOf(map[string]string{"server.properties": "new"})
+			if err := unpackAndSwap(bytes.NewReader(body), dest, 99, slog.New(h)); err != nil {
+				t.Fatalf("unpackAndSwap: %v", err)
+			}
+			if !swept {
+				t.Fatal("the sweep never landed inside the hydrate, so this test proves nothing")
+			}
+
+			got, err := os.ReadFile(filepath.Join(displaced, "gen"))
+			if err != nil || string(got) != "current" {
+				t.Fatalf("slot gen = %q (err %v), want %q: the hydrate dropped the set it superseded "+
+					"although the sweep had emptied the slot, leaving no local tree (issue #3112)",
+					got, err, "current")
+			}
+			if got, err = os.ReadFile(filepath.Join(dest, "server.properties")); err != nil || string(got) != "new" {
+				t.Fatalf("destDir server.properties = %q, %v (want %q)", got, err, "new")
+			}
+			entries, err := os.ReadDir(scratch)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var names []string
+			for _, e := range entries {
+				names = append(names, e.Name())
+			}
+			if len(names) != 2 || names[0] != ".displaced-server" || names[1] != "server" {
+				t.Fatalf("scratch root = %v, want [.displaced-server server]", names)
+			}
+
+			// The discard WARN has already named the swept tree as retained; the correction
+			// must be visible too, naming where the superseded set now is.
+			var kept bool
+			for _, r := range h.records {
+				if r.Level != slog.LevelInfo || !strings.Contains(r.Message, "swept") {
+					continue
+				}
+				r.Attrs(func(a slog.Attr) bool {
+					if a.Key == "retained" && a.Value.String() == displaced {
+						kept = true
+					}
+					return true
+				})
+			}
+			if !kept {
+				t.Fatalf("no INFO names the slot as now holding the superseded set; the discard WARN "+
+					"would stand uncorrected. records: %v", h.records)
+			}
+		})
+	}
+}
+
 // A failed swap-in must put the superseded set back at destDir and leave the retained
 // tree untouched (issue #2278): oldest-wins drops the superseded set only AFTER the
 // swap-in succeeds, so a failure loses nothing and leaves no scratch leftovers.

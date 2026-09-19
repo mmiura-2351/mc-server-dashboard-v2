@@ -325,7 +325,8 @@ func (c *Client) Snapshot(ctx context.Context, url, token, srcDir string, baseGe
 // what is already there and this set is the one elected to be dropped — and (2) rename
 // temp -> destDir. On a (2) failure the parked set is renamed straight back, so the
 // failure loses nothing. On success the parked set is deleted only in the
-// slot-was-occupied case (best-effort).
+// slot-was-occupied case, and only while the slot is still occupied; a slot a concurrent
+// sweep emptied receives the set instead (issue #3112) (best-effort).
 //
 // A crash between (1) and (2) leaves destDir absent but every copy on disk: the parked
 // set, any retained .displaced-<id>, and the new tree at the temp name. Nothing is lost —
@@ -420,7 +421,8 @@ func unpackAndSwap(r io.Reader, destDir string, gen uint64, log *slog.Logger) er
 		// OLDEST-WINS (issue #2278). When .displaced-<id> is already occupied, the
 		// existing tree is KEPT — never renamed, never removed by this path — and the
 		// set this hydrate displaces is parked under a sweepable name and dropped once
-		// the swap-in succeeds.
+		// the swap-in succeeds, provided the kept tree is still there (issue #3112, at the
+		// drop below).
 		//
 		// What that choice rests on, precisely: every snapshot that succeeds ON THIS
 		// WORKER for this id calls sweepDisplaced, so a .displaced-<id> still present at
@@ -493,13 +495,29 @@ func unpackAndSwap(r io.Reader, destDir string, gen uint64, log *slog.Logger) er
 	// Swap succeeded. When an older displaced tree was retained instead, the set parked
 	// aside is the one the policy elected to drop. Best-effort: a failure here leaks a
 	// .hydrate-<id>-* tree that every sweeper reclaims later.
+	//
+	// The slot is re-checked first (issue #3112): the drop is justified only by the
+	// retained tree still being there, and a running-id sweep, which takes no per-id
+	// reservation, can have renamed it away since the check above — its identity pin
+	// passes until destDir was parked aside. Dropping regardless would leave no local
+	// tree. An emptied slot receives the parked set instead, the outcome this hydrate
+	// reaches when the sweep lands before its check. A slot that is neither provably
+	// occupied nor provably empty, or a failed re-park, leaves the set under its superseded
+	// name, which the next leftover sweep removes: no worse than the unconditional drop
+	// this replaces, and never a delete on a guess.
 	if dropAside {
-		_ = os.RemoveAll(asideAt)
+		if _, err := os.Lstat(displaced); err == nil {
+			_ = os.RemoveAll(asideAt)
+		} else if os.IsNotExist(err) && os.Rename(asideAt, displaced) == nil {
+			log.Info("hydrate: the retained displaced tree was swept by a concurrent snapshot before the discard; keeping the replaced working set in its slot instead (issue #3112)",
+				"server_id", filepath.Base(destDir),
+				"retained", displaced)
+		}
 	}
-	// fsync the scratch root so BOTH swap renames (the displace-aside and the swap-in)
-	// are durable: a power loss must not roll the displace rename back, and the marker
-	// the caller writes next (writeGeneration, also fsynced) can then never become
-	// durable before the destDir tree it describes (issue #787).
+	// fsync the scratch root so BOTH swap renames (the displace-aside and the swap-in),
+	// and a re-park above, are durable: a power loss must not roll the displace rename
+	// back, and the marker the caller writes next (writeGeneration, also fsynced) can
+	// then never become durable before the destDir tree it describes (issue #787).
 	if err := fsyncDir(parent); err != nil {
 		return err
 	}
@@ -534,7 +552,10 @@ func unpackAndSwap(r io.Reader, destDir string, gen uint64, log *slog.Logger) er
 // instancemanager.sweepDisplaced renames the tree out of the slot before traversing it
 // (issue #2799), so this check finds the whole tree or nothing. Were the tree removed in
 // place, a check landing mid-traversal would read the half-deleted tree as occupied and
-// retain it over the live set.
+// retain it over the live set. The junk clear below is the one remaining in-place
+// removal of the slot, and it is safe: it only ever removes a non-directory, an empty
+// directory or a marker-only one, so any part-way state reads as junk too, and the
+// hydrate runs under its per-id reservation, so no other hydrate reads the slot meanwhile.
 //
 // Clearing junk loses nothing and is required anyway: renaming a directory onto an
 // existing FILE fails with ENOTDIR, so the ordinary displace path could not proceed

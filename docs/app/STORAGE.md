@@ -652,7 +652,9 @@ WARN  hydrate: an older displaced recovery tree already exists; keeping it and d
 ```
 
 Treat that line as an operator signal: the retained tree is the one to recover from, and
-the discarded one is gone once the hydrate's swap-in succeeds. "Occupied" means the slot
+the discarded one is gone once the hydrate's swap-in succeeds — unless a concurrent sweep
+emptied the slot first, in which case the hydrate keeps the set in the slot and says so in
+an `INFO` line ("when it declines", below). "Occupied" means the slot
 holds an actual working set — at least one entry that is not Worker-private generation
 state. A regular file, a symlink, an empty directory, or a directory holding only
 `.mcsd_generation` (or a crashed write's `.mcsd_generation-XXXX` temp sibling) is cleared
@@ -744,6 +746,8 @@ WARN  displaced recovery tree for unknown/unassigned server found at boot; manua
    hydrates may have displaced and discarded newer working sets while this tree sat in the
    slot. Each such discard logged the `WARN` above, so grep the Worker log for
    `discarding the working set` on this server id to see whether newer branches existed.
+   If a `swept by a concurrent snapshot` `INFO` follows that `WARN` (see "when it
+   declines", below), the slot holds the set that hydrate displaced, not an older tree.
 3. **Recover the world.** Two options:
 
    - **Repack as a new backup (recommended).** Tar the displaced tree, upload it
@@ -840,12 +844,33 @@ as one more world-sized copy under "Scratch capacity" above. What the decline
 buys is the reverse guarantee: a `.displaced-<id>` tree never disappears on a snapshot
 success that published some *other* tree, so a displaced tree you care about is not on a
 clock — recover it (the procedure above) at your convenience rather than promptly. A
-microseconds-wide residual remains. The working directory can still be replaced between
-the identity check and the sweep's rename. On the other side, a hydrate whose slot check
-lands just before that rename still sees the whole tree, keeps it and drops the live set it
-displaced, and then the sweep removes the kept tree. Closing either would require a per-server
+microseconds-wide residual remains: the working directory can still be replaced between
+the identity check and the sweep's rename. Closing it would require a per-server
 reservation on running-id snapshots, which is deliberately not taken (CONTROL_PLANE.md
 Section 4.1).
+
+**A hydrate re-checks the slot before it discards.** The identity check still passes
+while a concurrent hydrate is working, right up to the moment that hydrate parks the
+working directory aside. So the sweep's rename can empty the slot after the hydrate's
+oldest-wins check found it occupied, and before the hydrate discards the set it displaced.
+Discarding then would leave no local tree at all. The sweep has removed the tree
+oldest-wins kept, and the discard removes the one given up for it. Run one after the
+other, the two operations keep one tree between them in either order. If the sweep runs
+first, the hydrate finds the slot empty and parks the displaced set there. If the hydrate
+runs first, the sweep declines and the kept tree stays. The discard is justified only by
+the kept tree still being there, so the hydrate checks the slot again after its swap-in.
+If the slot is empty, it moves the displaced set into the slot instead of deleting it.
+That set holds the snapshot's published pack plus whatever the world wrote since:
+
+```
+INFO  hydrate: the retained displaced tree was swept by a concurrent snapshot before the discard; keeping the replaced working set in its slot instead (issue #3112)  server_id=<id>  retained=<scratch>/.displaced-<id>
+```
+
+The re-check narrows the window but does not close it. A sweep can make its identity
+check before the hydrate parks the working directory and its rename after the re-check.
+Both trees then still go. For that, the sweep's few syscalls between its check and its
+rename have to span the hydrate's park, swap-in and re-check, which is the same
+microseconds class as the residual above.
 
 ---
 
