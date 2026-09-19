@@ -1,7 +1,11 @@
-// Package javaproperties parses a Java ".properties" file the way
-// java.util.Properties.load(InputStream) does, so the Worker reads a
-// server.properties exactly as the Minecraft server it supervises will (issue
-// #2811).
+// Package javaproperties parses a Java ".properties" file with the grammar of
+// java.util.Properties.load, so the Worker reads a server.properties as the
+// Minecraft server it supervises does (issue #2811). Which charset the server
+// decodes the file in depends on its version: latin-1 before Minecraft 1.20
+// (Parse), UTF-8 first with a latin-1 fallback from 1.20 (ParseUTF8, issue
+// #3116). The two readings differ only in how a non-ASCII byte decodes, never in
+// the ASCII structure the grammar walks (a UTF-8 multi-byte sequence holds no
+// ASCII byte), so they agree on every pure-ASCII key and value.
 //
 // The three adapters that need values out of a server.properties -- the RCON
 // credentials, the container driver's published ports, and the tunnel's game
@@ -13,8 +17,10 @@
 //
 // The grammar, following the reference implementation:
 //
-//   - Bytes decode as latin-1 (ISO-8859-1), which is what Properties.load does
-//     with an InputStream; every byte maps to the code point of the same value.
+//   - Parse decodes bytes as latin-1 (ISO-8859-1), which is what
+//     Properties.load does with an InputStream: every byte maps to the code
+//     point of the same value. ParseUTF8 decodes them as UTF-8, or as latin-1
+//     when the file is not valid UTF-8. Every rule below holds for both.
 //   - A line ends at "\n", "\r\n" or a lone "\r". Leading whitespace (space, tab,
 //     form feed) is skipped, and a line that is then empty is ignored.
 //   - A line whose first non-whitespace character is '#' or '!' is a comment and
@@ -37,13 +43,25 @@ import (
 )
 
 // Parse parses the contents of a Java .properties file into its key/value pairs,
-// last occurrence winning. It never fails: a .properties file has no syntax a
+// last occurrence winning, decoding it as latin-1 -- how a Minecraft server
+// before 1.20 reads server.properties. It never fails: a .properties file has no syntax a
 // reader can reject, and the one construct the reference implementation throws
 // on -- a malformed \uXXXX escape -- is decoded here as the literal characters
 // instead (see loadConvert). Callers own the I/O and its error policy; whole
 // contents are parsed at once, so no line length truncates the parse.
 func Parse(data []byte) map[string]string {
 	return parse(latin1ToUTF8(data))
+}
+
+// ParseUTF8 is Parse with the charset a Minecraft 1.20+ server reads its
+// server.properties in: UTF-8, or latin-1 for the WHOLE file when data is not
+// valid UTF-8. Its decoder reports the first malformed byte, and the server then
+// reloads the file from the start as ISO-8859-1 (Settings.loadFromFile).
+func ParseUTF8(data []byte) map[string]string {
+	if !utf8.Valid(data) {
+		return Parse(data)
+	}
+	return parse(data)
 }
 
 // parse runs the grammar over text, which is UTF-8. Every byte the grammar acts

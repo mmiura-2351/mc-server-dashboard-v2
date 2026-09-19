@@ -10,7 +10,10 @@ import (
 // tests/servers/test_server_properties.py::PARITY_CASES. Same input, same
 // parse -- that mirroring is the evidence that the platform-key guard and the
 // worker read a server.properties alike (issue #2811). Keep the two tables in
-// sync: a case added here but not there leaves the invariant unpinned.
+// sync: a case added here but not there leaves the invariant unpinned. The table
+// runs through Parse, whose latin-1 decode is the API's too; ParseUTF8 reads a
+// valid-UTF-8 non-ASCII byte differently from both (issue #3116), so such an
+// input is pinned in TestParseUTF8DecodesAsMinecraft120Does, not here.
 var parityCases = []struct {
 	name  string
 	input string
@@ -223,6 +226,75 @@ func TestParseParity(t *testing.T) {
 			for k, want := range tc.want {
 				if got[k] != want {
 					t.Errorf("Parse(%q)[%q] = %q, want %q", tc.input, k, got[k], want)
+				}
+			}
+		})
+	}
+}
+
+// TestParseUTF8KeepsTheGrammar runs the parity table through the 1.20+ reader:
+// the charset changes how a non-ASCII byte decodes, never the grammar, and the
+// table's one non-ASCII input is not valid UTF-8, so it falls back to latin-1.
+func TestParseUTF8KeepsTheGrammar(t *testing.T) {
+	for _, tc := range parityCases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ParseUTF8([]byte(tc.input))
+			if len(got) != len(tc.want) {
+				t.Fatalf("ParseUTF8(%q) = %#v, want %#v", tc.input, got, tc.want)
+			}
+			for k, want := range tc.want {
+				if got[k] != want {
+					t.Errorf("ParseUTF8(%q)[%q] = %q, want %q", tc.input, k, got[k], want)
+				}
+			}
+		})
+	}
+}
+
+// TestParseUTF8DecodesAsMinecraft120Does pins the reader a Minecraft 1.20+
+// server loads server.properties with (Settings.loadFromFile): UTF-8, and
+// latin-1 for the WHOLE file when any byte of it is not valid UTF-8 (issue
+// #3116).
+func TestParseUTF8DecodesAsMinecraft120Does(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		input string
+		want  map[string]string
+	}{
+		{
+			name:  "a UTF-8 value decodes as UTF-8",
+			input: "rcon.password=caf\xc3\xa9\n",
+			want:  map[string]string{"rcon.password": "café"},
+		},
+		{
+			name:  "a file that is not valid UTF-8 decodes as latin-1",
+			input: "rcon.password=caf\xe9\n",
+			want:  map[string]string{"rcon.password": "café"},
+		},
+		{
+			name:  "one invalid byte turns the whole file latin-1",
+			input: "motd=caf\xc3\xa9\nrcon.password=caf\xe9\n",
+			want:  map[string]string{"motd": "cafÃ©", "rcon.password": "café"},
+		},
+		{
+			name:  "an escaped UTF-8 character stands for itself",
+			input: "rcon.password=caf\\\xc3\xa9\n",
+			want:  map[string]string{"rcon.password": "café"},
+		},
+		{
+			name:  "a unicode escape decodes as before",
+			input: `rcon.password=café` + "\n",
+			want:  map[string]string{"rcon.password": "café"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ParseUTF8([]byte(tc.input))
+			if len(got) != len(tc.want) {
+				t.Fatalf("ParseUTF8(%q) = %#v, want %#v", tc.input, got, tc.want)
+			}
+			for k, want := range tc.want {
+				if got[k] != want {
+					t.Errorf("ParseUTF8(%q)[%q] = %q, want %q", tc.input, k, got[k], want)
 				}
 			}
 		})
