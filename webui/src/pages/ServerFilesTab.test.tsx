@@ -131,12 +131,12 @@ function routeGet(handlers: {
   });
 }
 
-function renderPage() {
+function renderPage(entry = `/communities/${CID}/servers/${SID}`) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   const result = render(
-    <MemoryRouter initialEntries={[`/communities/${CID}/servers/${SID}`]}>
+    <MemoryRouter initialEntries={[entry]}>
       <QueryClientProvider client={queryClient}>
         <ToastProvider>
           <Routes>
@@ -469,6 +469,33 @@ describe("ServerFilesTab viewer / editor", () => {
     expect(body.content_base64).toBe(
       btoa("motd=Caf\xc3\xa9\nmax-players=30\n"),
     );
+  });
+
+  it("saves a deep-linked root server.properties alias as latin-1 on a pre-1.20 server (#2851)", async () => {
+    // `?file=` is kept verbatim, and the API resolves "./server.properties" to
+    // the root file.
+    routeGet({
+      detail: server({ mc_version: "1.19.4" }),
+      list: listing([{ name: "server.properties", is_dir: false }]),
+      content: {
+        path: "server.properties",
+        content_base64: btoa("motd=Cafe\n"),
+      },
+    });
+    mockApi.put.mockResolvedValue(undefined);
+    renderPage(
+      `/communities/${CID}/servers/${SID}?file=.%2Fserver.properties#files`,
+    );
+
+    const editor = await screen.findByLabelText(t("files.editorLabel"));
+    fireEvent.change(editor, { target: { value: "motd=Café\n" } });
+    fireEvent.click(screen.getByRole("button", { name: t("files.save") }));
+
+    await waitFor(() => expect(mockApi.put).toHaveBeenCalled());
+    const [putUrl, putInit] = mockApi.put.mock.calls[0];
+    expect(putUrl).toBe(`${FILES_BASE}?path=.%2Fserver.properties`);
+    const body = JSON.parse((putInit as { body: string }).body);
+    expect(body.content_base64).toBe(btoa("motd=Caf\xe9\n"));
   });
 
   it("refuses a non-latin-1 character in a pre-1.20 server's server.properties (#2851)", async () => {

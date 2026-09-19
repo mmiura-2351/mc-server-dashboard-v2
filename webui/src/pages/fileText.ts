@@ -77,9 +77,13 @@ export function decodeBase64Text(
   base64: string,
   file: { path: string; mcVersion: string | null | undefined },
 ): DecodedText {
-  // Only the root server.properties is the file the server itself reads.
+  // Only the root server.properties is the file the server itself reads. The
+  // path may be a `?file=` deep link kept verbatim, so compare its components
+  // as the API's RelPath resolves them: empty and "." components dropped.
+  const parts = file.path.split("/").filter((p) => p !== "" && p !== ".");
   const latin1Only =
-    file.path === "server.properties" &&
+    parts.length === 1 &&
+    parts[0] === "server.properties" &&
     !readsServerPropertiesAsUtf8(file.mcVersion);
   if (!latin1Only) {
     try {

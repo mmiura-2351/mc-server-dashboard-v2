@@ -99,6 +99,21 @@ describe("fileText root server.properties before Minecraft 1.20 (#2851)", () => 
     ).toEqual({ text: "é", charset: "utf-8" });
   });
 
+  it("reads a root alias the API resolves to server.properties as latin-1", () => {
+    // The API's RelPath drops "." components and empty ones (redundant or
+    // trailing separators), so each of these opens the root file.
+    for (const path of [
+      "./server.properties",
+      "server.properties/",
+      ".//server.properties",
+    ]) {
+      expect(decodeBase64Text("w6k=", { path, mcVersion: "1.19.4" })).toEqual({
+        text: "Ã©",
+        charset: "latin-1",
+      });
+    }
+  });
+
   it("reads a nested server.properties by content", () => {
     expect(
       decodeBase64Text("w6k=", {
