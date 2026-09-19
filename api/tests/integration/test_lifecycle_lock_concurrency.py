@@ -189,7 +189,15 @@ async def _load(engine: AsyncEngine, server_id: ServerId) -> Server | None:
 
 async def test_start_blocks_until_restore_releases_the_lock(
     engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # No wall-clock ceiling on the handoff (issue #2796): under host load a real
+    # advisory-lock round trip can take seconds, so the awaits below are unbounded
+    # and the suite-wide pytest-timeout is the hang guard. The start's bounded
+    # acquire is the other hidden ceiling -- a waiter whose budget runs out before
+    # the restore's tail commits raises ServerBusyError -- so lift it well past that
+    # guard. This test pins the ordering; the budget has its own test below.
+    monkeypatch.setattr(lifecycle_lock_mod, "_ACQUIRE_BUDGET_SECONDS", 600.0)
     server = await _create_at_rest_server(engine)
     backup_id = await _seed_backup(engine, server.id)
     lock = PgLifecycleLock(engine=engine)
@@ -218,13 +226,15 @@ async def test_start_blocks_until_restore_releases_the_lock(
         )
     )
     # Wait until the restore is inside its body holding the lock.
-    await asyncio.wait_for(blocking_store.entered.wait(), timeout=5)
+    await blocking_store.entered.wait()
 
     start_task = asyncio.create_task(
         start(community_id=server.community_id, server_id=server.id)
     )
     # Give the start a chance to run: it must block on the advisory lock, so it does
     # NOT complete and the row stays at rest (desired=stopped) while restore holds.
+    # Load only lengthens how long a blocked start stays blocked, so this window
+    # cannot turn red on a slow host.
     await asyncio.sleep(0.5)
     assert not start_task.done()
     blocked = await _load(engine, server.id)
@@ -233,8 +243,8 @@ async def test_start_blocks_until_restore_releases_the_lock(
 
     # Release the restore: it commits and drops the lock, then the start proceeds.
     blocking_store.release.set()
-    await asyncio.wait_for(restore_task, timeout=5)
-    started = await asyncio.wait_for(start_task, timeout=5)
+    await restore_task
+    started = await start_task
     assert started.desired_state is DesiredState.RUNNING
 
     persisted = await _load(engine, server.id)
