@@ -503,12 +503,16 @@ fi
 #    that is not a child of the run at the instant of the sweep. A grandchild
 #    is in that gap every time, so the stand-in run below has one. A sweep of
 #    the run's children leaves it running; one signal to the run's process
-#    group does not.
+#    group does not. The grandchild idles for as long as this suite lives and
+#    no longer, so a suite killed while it runs does not leave it behind.
 {
 	stop_dir="$work/stop-run"
 	mkdir -p "$stop_dir"
-	start_run "$stop_dir" /dev/null \
-		bash -c 'bash -c "sleep 30 & touch spawned; wait"; :'
+	cat > "$stop_dir/run" << 'STUB'
+#!/usr/bin/env bash
+bash -c 'while kill -0 "$SUITE_PID" 2> /dev/null; do sleep 0.1; done & touch spawned; wait'
+STUB
+	start_run "$stop_dir" /dev/null env SUITE_PID="$$" bash "$stop_dir/run"
 	stop_pid=$run_pid
 
 	if await_file "$stop_dir/spawned"; then
