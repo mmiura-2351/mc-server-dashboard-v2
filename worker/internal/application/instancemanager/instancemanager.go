@@ -935,7 +935,8 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		// one world-sized tree until the next successful snapshot for the id reclaims it,
 		// which is the #906 GC-on-success contract itself, where the ungated sweep's
 		// failure was an unrecoverable delete. What remains is the microseconds between
-		// the check and the RemoveAll; closing that too would mean taking a per-id
+		// the check and the sweep's rename (issue #2799: the removal itself runs on the
+		// renamed tree, off the slot); closing that too would mean taking a per-id
 		// reservation on running-id snapshots, reversing the item-4 decision above, for a
 		// window that much smaller.
 		var quiesced bool

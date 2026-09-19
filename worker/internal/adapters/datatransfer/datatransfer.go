@@ -310,11 +310,11 @@ func (c *Client) Snapshot(ctx context.Context, url, token, srcDir string, baseGe
 // The rule rests on one near-provable fact — every successful snapshot for this id calls
 // sweepDisplaced, so a surviving .displaced-<id> means ZERO successful snapshots since it
 // was created. The one exception since issue #2291 is a snapshot that DECLINED its sweep
-// because a concurrent hydrate had replaced the tree it packed; the survivor then holds a
-// published prefix rather than being wholly unpublished, which only strengthens the case
-// for retaining it. Otherwise both trees are unpublished branches, and the discarded one
-// can be strictly NEWER; the swap emits a WARN naming both paths because of that. The rationale
-// and the rejected alternatives are in the swap block below and in issue #2278.
+// because a concurrent hydrate had replaced the tree it packed, which leaves a survivor
+// holding a published prefix plus the delta since that pack. Otherwise both trees are
+// unpublished branches, and the discarded one can be strictly NEWER; the swap emits a
+// WARN naming both paths because of that. The rationale and the rejected alternatives
+// are in the swap block below and in issue #2278.
 //
 // Crash safety (park-aside-first swap): the temp tree is built fully (including the
 // generation marker, issue #917) before any rename. When a live destDir is present, the
@@ -529,6 +529,12 @@ func unpackAndSwap(r io.Reader, destDir string, gen uint64, log *slog.Logger) er
 //
 // This is NOT a health check on the retained world (option C in #2278, rejected): it
 // applies the existing "holds a working set" test, and inspects nothing inside the world.
+//
+// Reading the slot by name is sound only because it never holds a tree mid-removal:
+// instancemanager.sweepDisplaced renames the tree out of the slot before traversing it
+// (issue #2799), so this check finds the whole tree or nothing. Were the tree removed in
+// place, a check landing mid-traversal would read the half-deleted tree as occupied and
+// retain it over the live set.
 //
 // Clearing junk loses nothing and is required anyway: renaming a directory onto an
 // existing FILE fails with ENOTDIR, so the ordinary displace path could not proceed
