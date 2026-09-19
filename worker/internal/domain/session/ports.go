@@ -87,7 +87,8 @@ type Command struct {
 	// JarRelpath is the server JAR path for StartServer (relative to the working
 	// set).
 	JarRelpath string
-	// MinecraftVersion drives Java runtime selection for StartServer.
+	// MinecraftVersion drives Java runtime selection for StartServer, and the
+	// charset server.properties is read in for RCON (issue #3116).
 	MinecraftVersion string
 	// MemoryLimitBytes is the per-server memory ceiling for StartServer (the
 	// operator-declared limit, issue #706). 0 means unset — the driver picks a

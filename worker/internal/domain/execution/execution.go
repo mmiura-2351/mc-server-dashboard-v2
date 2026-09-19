@@ -80,7 +80,8 @@ type InstanceSpec struct {
 	// WorkingDir is the absolute path to the server's working set, the process
 	// working directory (CONFIGURATION.md worker.scratch_dir root).
 	WorkingDir string
-	// MinecraftVersion drives Java runtime selection (FR-EXE-5).
+	// MinecraftVersion drives Java runtime selection (FR-EXE-5) and the charset
+	// server.properties is read in for RCON (issue #3116).
 	MinecraftVersion string
 	// JarRelpath is the server JAR path relative to WorkingDir (StartServer
 	// carries it; the API ships the JAR via hydrate, ARCHITECTURE.md Section 7.3).
