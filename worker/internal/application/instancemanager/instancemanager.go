@@ -1826,11 +1826,18 @@ func (m *Manager) sweepDisplaced(serverID string) {
 	}
 	// Make the rename durable before the traversal unlinks anything, so a power loss
 	// cannot roll it back over a half-deleted tree and put that tree back in the slot.
-	if err := fsyncDir(m.scratchDir); err != nil {
+	if err := syncSweepScratchRoot(m.scratchDir); err != nil {
 		return
 	}
 	_ = removeDisplacedTree(trash)
 }
+
+// syncSweepScratchRoot is the fsyncDir sweepDisplaced makes its rename durable with,
+// indirected through a package var (mirroring removeDisplacedTree) so a test can pin
+// that the sync lands between the rename and the removal, and that a failed sync stops
+// the sweep before the traversal unlinks anything — an ordering no power loss can be
+// staged to observe. Production always uses fsyncDir.
+var syncSweepScratchRoot = fsyncDir
 
 // removeDisplacedTree is the os.RemoveAll sweepDisplaced removes a swept tree with,
 // indirected through a package var (mirroring statWorkingDirRef) so a test can land a

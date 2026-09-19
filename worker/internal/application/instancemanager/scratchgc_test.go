@@ -551,6 +551,80 @@ func TestBootReclaimsInterruptedDisplacedSweeps(t *testing.T) {
 	}
 }
 
+// The sweep fsyncs the scratch root AFTER its rename and BEFORE its traversal (issue
+// #2799). Without that barrier a power loss can persist the traversal's unlinks yet roll
+// back the un-fsynced rename, putting a half-deleted tree back in the .displaced-<id>
+// slot, where a later hydrate's oldest-wins check retains it over the live set. No test
+// can stage the power loss, so the sync and removal seams record the order instead.
+func TestDisplacedSweepSyncsTheRenameBeforeRemoving(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	slot := filepath.Join(m.scratchDir, ".displaced-s1")
+	seedHydrateShapedTree(t, slot, 7)
+
+	var calls []string
+	restoreSync, restoreRemove := syncSweepScratchRoot, removeDisplacedTree
+	syncSweepScratchRoot = func(dir string) error {
+		calls = append(calls, "sync "+dir)
+		if _, err := os.Lstat(slot); !os.IsNotExist(err) {
+			t.Errorf("the scratch root was synced while the tree was still in the slot (lstat err = %v): "+
+				"a sync before the rename makes nothing durable", err)
+		}
+		return nil
+	}
+	removeDisplacedTree = func(path string) error {
+		calls = append(calls, "remove "+path)
+		return nil
+	}
+	t.Cleanup(func() { syncSweepScratchRoot, removeDisplacedTree = restoreSync, restoreRemove })
+
+	m.sweepDisplaced("s1")
+
+	if len(calls) != 2 || calls[0] != "sync "+m.scratchDir ||
+		!strings.HasPrefix(calls[1], "remove "+filepath.Join(m.scratchDir, sweepingPrefix+"s1-")) {
+		t.Fatalf("sweep calls = %q, want the scratch root synced and then the renamed tree removed: "+
+			"a traversal the rename is not yet durable under can leave a half-deleted tree in the "+
+			"slot after a power loss (issue #2799)", calls)
+	}
+}
+
+// A failed sync stops the sweep before its traversal (issue #2799): removing a tree whose
+// rename is not durable is exactly what a power loss can turn into a half-deleted tree
+// back in the slot. The tree stays whole under its .sweeping-<id>-* name, off the slot,
+// for the next boot's ReclaimInterruptedDisplacedSweeps to take.
+func TestDisplacedSweepSyncFailureLeavesTheTreeWhole(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	slot := filepath.Join(m.scratchDir, ".displaced-s1")
+	seedHydrateShapedTree(t, slot, 7)
+
+	removed := false
+	restoreSync, restoreRemove := syncSweepScratchRoot, removeDisplacedTree
+	syncSweepScratchRoot = func(string) error { return errors.New("injected fsync failure") }
+	removeDisplacedTree = func(path string) error {
+		removed = true
+		return restoreRemove(path)
+	}
+	t.Cleanup(func() { syncSweepScratchRoot, removeDisplacedTree = restoreSync, restoreRemove })
+
+	m.sweepDisplaced("s1")
+
+	if removed {
+		t.Fatal("the sweep removed the tree although the scratch root sync failed: its rename " +
+			"may not be durable, so a power loss can put the half-deleted tree back in the slot (issue #2799)")
+	}
+	if _, err := os.Lstat(slot); !os.IsNotExist(err) {
+		t.Fatalf("the .displaced-s1 slot survived the sweep's rename (lstat err = %v), want it empty", err)
+	}
+	left, err := filepath.Glob(filepath.Join(m.scratchDir, sweepingPrefix+"s1-*"))
+	if err != nil || len(left) != 1 {
+		t.Fatalf("renamed trees = %v (err %v), want exactly one for the boot reclaim to take", left, err)
+	}
+	got, err := os.ReadFile(filepath.Join(left[0], "world", "level.dat"))
+	if err != nil || string(got) != "x" || readGeneration(left[0]) != 7 {
+		t.Fatalf("%s holds level.dat %q (err %v) at generation %d, want the whole tree: %q at 7",
+			filepath.Base(left[0]), got, err, readGeneration(left[0]), "x")
+	}
+}
+
 // A FAILED snapshot must RETAIN the displaced recovery tree: the store did not
 // capture the world, so the .displaced-<id> copy is still the only one — GC-ing it
 // would defeat the recovery insurance entirely (issue #906).
