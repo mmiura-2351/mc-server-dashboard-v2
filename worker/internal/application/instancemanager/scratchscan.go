@@ -31,6 +31,14 @@ const displacedPrefix = ".displaced-"
 // and pinned to its creation site by the twin tests in hydrate_prefix_name_test.go.
 const hydratePrefix = ".hydrate-"
 
+// sweepingPrefix is the dot-prefixed name prefix sweepDisplaced renames a
+// .displaced-<id> tree to (".sweeping-<id>-*") before removing it, so the slot is
+// emptied atomically instead of being traversed in place (issue #2799). A tree still
+// under this name is one whose removal did not finish; it is garbage by construction,
+// since the sweep had already decided to delete it. Creation, the held-set skip and the
+// boot reclaim all live in this package and share this one constant.
+const sweepingPrefix = ".sweeping-"
+
 // isReservedScratchName reports whether a scratch-root entry name is one of the
 // dot-prefixed siblings datatransfer keeps next to the server-id scratch dirs rather
 // than a working set the Worker holds for an assigned server. Both held-set scans

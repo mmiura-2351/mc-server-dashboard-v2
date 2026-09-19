@@ -1777,8 +1777,22 @@ func (m *Manager) removeScratch(serverID string) {
 // moment the store provably supersedes the displaced world — mirroring the #845
 // GC-on-success reclamation. The name matches datatransfer.displacedDir exactly
 // (".displaced-<id>"), so only this id's displaced tree is touched. Best-effort: a
-// removal failure is ignored (the leftover is wasted disk, never a correctness
-// problem). A missing tree is a no-op (os.RemoveAll returns nil).
+// failure is ignored (the leftover is wasted disk, never a correctness problem). A
+// missing tree is a no-op.
+//
+// RENAME, THEN REMOVE (issue #2799). The tree is first renamed out of the slot to a
+// unique .sweeping-<id>-* sibling, and only that name is traversed. The slot is what a
+// hydrate's oldest-wins check (datatransfer.displacedSlotHoldsWorkingSet) reads, by
+// name, and removing the tree in place is a traversal that takes seconds for a
+// world-sized tree: a check landing inside it read the half-deleted tree as an occupied
+// slot, retained it — while the traversal went on deleting it — and dropped the live set
+// the hydrate displaced. The rename empties the slot atomically before any traversal
+// starts, so a hydrate finds either the whole tree or nothing. A failed rename therefore
+// returns WITHOUT removing anything: falling back to an in-place removal would reopen
+// that window, and declining costs only a leak, retried by the next successful
+// snapshot. A traversal that does not finish (a crash, or a removal error) leaves the
+// tree under its .sweeping- name, which ReclaimInterruptedDisplacedSweeps removes at the
+// next Worker boot.
 //
 // The function itself is unconditional; the CALLERS establish that the success really
 // does supersede the tree being removed, and they do it differently. The stopped-id
@@ -1790,18 +1804,32 @@ func (m *Manager) removeScratch(serverID string) {
 // recovery copy — a tree this snapshot never published, holding the published state
 // plus whatever the world progressed since its PACK — rather than a world the success
 // supersedes. That is the window issue #917 item 3 named and left open; the gate closes
-// it down to the microseconds between the caller's check and this RemoveAll, which
+// it down to the microseconds between the caller's check and this rename, which
 // nothing short of the reservation item 4 declined can close. The residual direction is
 // a LEAK, never a loss: a declined sweep keeps one world-sized tree until the next
 // successful snapshot for the id reclaims it, which is the #906 contract itself.
 func (m *Manager) sweepDisplaced(serverID string) {
-	_ = removeDisplacedTree(filepath.Join(m.scratchDir, ".displaced-"+serverID))
+	displaced := filepath.Join(m.scratchDir, displacedPrefix+serverID)
+	if _, err := os.Lstat(displaced); err != nil {
+		return
+	}
+	trash, err := os.MkdirTemp(m.scratchDir, sweepingPrefix+serverID+"-*")
+	if err != nil {
+		return
+	}
+	// MkdirTemp creates the dir; remove it so Rename can use the name.
+	_ = os.Remove(trash)
+	if err := os.Rename(displaced, trash); err != nil {
+		return
+	}
+	_ = removeDisplacedTree(trash)
 }
 
-// removeDisplacedTree is the os.RemoveAll sweepDisplaced removes a displaced tree with,
+// removeDisplacedTree is the os.RemoveAll sweepDisplaced removes a swept tree with,
 // indirected through a package var (mirroring statWorkingDirRef) so a test can land a
 // racing hydrate INSIDE the removal — a traversal that takes seconds for a world-sized
-// tree — rather than race for it. Production always uses os.RemoveAll.
+// tree — rather than race for it, and can stop it short the way a crash does.
+// Production always uses os.RemoveAll.
 var removeDisplacedTree = os.RemoveAll
 
 // sweepHydrateLeftovers removes the .hydrate-<id>-* temp/trash siblings a crashed

@@ -381,6 +381,84 @@ func TestRunningSnapshotSkipsDisplacedSweepWhenWorkingDirReplaced(t *testing.T) 
 	}
 }
 
+// A hydrate that lands WHILE a successful snapshot's sweep is still removing the
+// displaced tree must find the slot empty, never the half-deleted tree (issue #2799).
+// The removal is a traversal that takes seconds for a world-sized tree, and the
+// hydrate's oldest-wins check (datatransfer.displacedSlotHoldsWorkingSet, the same
+// "holds a working set" test as hasWorkingSet) reads the slot BY NAME: a tree still
+// being traversed there reads as an occupied slot, so the hydrate retains it — while
+// the traversal finishes deleting it — and drops the live set it displaces. The
+// identity pin on the sweep (issue #2291) does not cover this: the working dir is still
+// the packed tree when the sweep starts, and it is the HYDRATE that misreads the slot.
+//
+// The removal seam lands a racing hydrate part-way through the traversal, the one
+// interleaving the fix has to hold for, rather than racing for it.
+func TestHydrateDuringDisplacedSweepFindsTheSlotEmpty(t *testing.T) {
+	tr := &fakeTransfer{}
+	ctrl := &fakeControl{reply: "ok"}
+	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
+	live := seedScratch(t, m, "s1")
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("start = %+v, want success", res)
+	}
+	slot := seedDisplaced(t, m, "s1")
+	// A second entry, so removing one of them models a traversal already under way
+	// with the rest of the world still on disk.
+	if err := os.MkdirAll(filepath.Join(slot, "world", "region"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	var interleaved, droppedLive bool
+	restore := removeDisplacedTree
+	removeDisplacedTree = func(path string) error {
+		interleaved = true
+		if err := os.Remove(filepath.Join(path, "level.dat")); err != nil {
+			t.Fatalf("model the traversal's first unlink: %v", err)
+		}
+		// The racing hydrate's slot decision lands here, mid-traversal.
+		if hasWorkingSet(slot) {
+			droppedLive = true // oldest-wins: retain the slot, discard the live set
+		} else {
+			replaceWorkingDirLikeHydrate(t, live, 7) // ordinary displace: park the live set in the slot
+		}
+		return restore(path)
+	}
+	t.Cleanup(func() { removeDisplacedTree = restore })
+
+	if res := m.Handle(context.Background(), snapshotCmd()); !res.Success {
+		t.Fatalf("running-id snapshot = %+v, want success", res)
+	}
+
+	if !interleaved {
+		t.Fatal("the sweep never reached its removal, so no hydrate interleaved and this test proves nothing")
+	}
+	if droppedLive {
+		t.Fatal("a hydrate landing mid-sweep found a half-deleted tree in the .displaced-s1 slot: " +
+			"oldest-wins retains it (and the sweep then finishes deleting it) while the live set " +
+			"it displaces is dropped (issue #2799)")
+	}
+	// seedScratch wrote "world" into the live set, so reading it back from the slot
+	// proves the hydrate's recovery copy survived the rest of the sweep's traversal.
+	got, err := os.ReadFile(filepath.Join(slot, "level.dat"))
+	if err != nil || string(got) != "world" {
+		t.Fatalf("slot level.dat = %q (err %v), want %q: the sweep removed the racing "+
+			"hydrate's recovery copy along with the tree it was sweeping", got, err, "world")
+	}
+	// Only the hydrated working dir and the hydrate's recovery copy remain: the swept
+	// tree is gone, under whatever name it was removed from.
+	entries, err := os.ReadDir(m.scratchDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if len(names) != 2 || names[0] != ".displaced-s1" || names[1] != "s1" {
+		t.Fatalf("scratch root = %v, want [.displaced-s1 s1]: the swept tree must be removed in full", names)
+	}
+}
+
 // A FAILED snapshot must RETAIN the displaced recovery tree: the store did not
 // capture the world, so the .displaced-<id> copy is still the only one — GC-ing it
 // would defeat the recovery insurance entirely (issue #906).
