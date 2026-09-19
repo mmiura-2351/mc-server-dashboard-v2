@@ -235,6 +235,9 @@ func TestParseParity(t *testing.T) {
 // TestParseUTF8KeepsTheGrammar runs the parity table through the 1.20+ reader:
 // the charset changes how a non-ASCII byte decodes, never the grammar, and the
 // table's one non-ASCII input is not valid UTF-8, so it falls back to latin-1.
+// The other 38 inputs are pure ASCII and are asserted against the same wants
+// TestParseParity asserts for Parse, which is what pins that the two readers
+// agree on every ASCII key and value.
 func TestParseUTF8KeepsTheGrammar(t *testing.T) {
 	for _, tc := range parityCases {
 		t.Run(tc.name, func(t *testing.T) {

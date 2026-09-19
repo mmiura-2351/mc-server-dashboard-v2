@@ -127,6 +127,7 @@ func TestOpenFromWorkingDirReadsThePasswordAsTheServerVersionDoes(t *testing.T) 
 		// serverHolds is the password the server loaded from those bytes.
 		serverHolds string
 	}{
+		{"1.20 leaves an ASCII password alone", "1.20.1", "pw", "pw"},
 		{"1.20 reads UTF-8", "1.20.1", "caf\xc3\xa9", "café"},
 		{"year-numbered versions read UTF-8", "26.3", "caf\xc3\xa9", "café"},
 		{"1.20 falls back to latin-1 for a file that is not UTF-8", "1.20.1", "caf\xe9", "café"},
