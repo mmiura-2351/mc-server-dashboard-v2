@@ -65,6 +65,19 @@ top CPU consumers while DB-gated tests timed out (issue #2796). On the host
 network Postgres listens on the host loopback directly, so no proxy is involved.
 `PGPORT` moves it off the default 5432 so it cannot collide with a Postgres
 already on the host. `listen_addresses` keeps the fixed-password server off the
-host's external interfaces. Where Docker's host network is not your machine's
-own (Docker Desktop without host networking enabled), fall back to
-`-p 5544:5432`.
+host's external interfaces.
+
+Where Docker's host network is not your machine's own (Docker Desktop without
+host networking enabled), publish the port instead and accept the proxy:
+
+```sh
+docker run --rm -d --name mcd-test-pg -p 127.0.0.1:5544:5432 \
+  -e POSTGRES_USER=mcsd -e POSTGRES_PASSWORD=mcsd -e POSTGRES_DB=mcsd_test \
+  postgres:18.6
+```
+
+The `MCD_TEST_DATABASE_URL` is the same. Leave `PGPORT` and `listen_addresses`
+at the image defaults here: the published port forwards to container port 5432
+over the container's bridge interface, which a loopback-only listener rejects.
+Binding the published port to `127.0.0.1` is what keeps it off the external
+interfaces.
