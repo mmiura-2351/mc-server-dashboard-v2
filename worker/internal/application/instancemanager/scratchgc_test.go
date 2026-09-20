@@ -3,6 +3,7 @@ package instancemanager
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -475,7 +476,8 @@ func TestHydrateDuringDisplacedSweepFindsTheSlotEmpty(t *testing.T) {
 func TestDisplacedSweepKeepsARecoveryCopyParkedAfterThePinCheck(t *testing.T) {
 	tr := &fakeTransfer{}
 	ctrl := &fakeControl{reply: "ok"}
-	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
+	h := &capturingSlogHandler{}
+	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr).WithLogger(slog.New(h))
 	live := seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("start = %+v, want success", res)
@@ -521,6 +523,30 @@ func TestDisplacedSweepKeepsARecoveryCopyParkedAfterThePinCheck(t *testing.T) {
 	// The hydrated tree is in place and nothing is left under a .sweeping-<id>-* name:
 	// the sweep put back what it took rather than stranding it for the boot reclaim.
 	assertScratchRoot(t, m, ".displaced-s1", "s1")
+	assertSweepInfo(t, h, "put back the displaced tree", "retained", slot)
+}
+
+// assertSweepInfo fails unless the records hold an INFO whose message starts with prefix
+// and names path under key: the two outcomes of the sweep's re-check decide what the next
+// boot deletes, so STORAGE.md Section 4.6 documents both lines for the operator.
+func assertSweepInfo(t *testing.T, h *capturingSlogHandler, prefix, key, path string) {
+	t.Helper()
+	for _, rec := range h.records {
+		if rec.Level != slog.LevelInfo || !strings.HasPrefix(rec.Message, prefix) {
+			continue
+		}
+		named := false
+		rec.Attrs(func(a slog.Attr) bool {
+			if a.Key == key && a.Value.String() == path {
+				named = true
+			}
+			return true
+		})
+		if named {
+			return
+		}
+	}
+	t.Fatalf("no INFO %q naming %s=%s; records = %v", prefix, key, path, h.records)
 }
 
 // assertScratchRoot fails unless the scratch root holds exactly want, in order. os.ReadDir
@@ -552,7 +578,8 @@ func assertScratchRoot(t *testing.T, m *Manager, want ...string) {
 // delete on a guess. The drop is deferred to ReclaimInterruptedDisplacedSweeps instead,
 // which is no worse than the unconditional removal this replaced.
 func TestDisplacedSweepLeavesATreeItCannotPutBack(t *testing.T) {
-	m := newManager(t, &fakeDriver{}, nil)
+	h := &capturingSlogHandler{}
+	m := newManager(t, &fakeDriver{}, nil).WithLogger(slog.New(h))
 	slot := filepath.Join(m.scratchDir, ".displaced-s1")
 	seedHydrateShapedTree(t, slot, 7)
 
@@ -587,6 +614,9 @@ func TestDisplacedSweepLeavesATreeItCannotPutBack(t *testing.T) {
 		t.Fatalf("%s holds level.dat %q (err %v), want the whole tree: %q",
 			filepath.Base(left[0]), got, err, "x")
 	}
+	// Without this line the tree under .sweeping- reads as an ordinary interrupted
+	// sweep, which is exactly what it is not.
+	assertSweepInfo(t, h, "left a swept displaced tree", "swept_to", left[0])
 }
 
 // The put-back is fsynced too (issue #3118): it undoes a rename the sweep was about to

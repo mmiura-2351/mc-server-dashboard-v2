@@ -34,9 +34,11 @@ const hydratePrefix = ".hydrate-"
 // sweepingPrefix is the dot-prefixed name prefix sweepDisplaced renames a
 // .displaced-<id> tree to (".sweeping-<id>-*") before removing it, so the slot is
 // emptied atomically instead of being traversed in place (issue #2799). A tree still
-// under this name is one whose removal did not finish; it is garbage by construction,
-// since the sweep had already decided to delete it. Creation, the held-set skip and the
-// boot reclaim all live in this package and share this one constant.
+// under this name is one whose removal did not finish — or, since issue #3118, one whose
+// removal the sweep withdrew and could not put back because the slot had filled again,
+// which means another copy is in the slot. Either way it is garbage by the time the next
+// boot reads it. Creation, the held-set skip and the boot reclaim all live in this
+// package and share this one constant.
 const sweepingPrefix = ".sweeping-"
 
 // isReservedScratchName reports whether a scratch-root entry name is one of the
@@ -226,7 +228,12 @@ func WarnOrphanDisplacedTrees(scratchDir string, held []session.HeldServer, log 
 // (issue #2799): a displaced tree sweepDisplaced renamed out of its slot but did not
 // finish removing, because the Worker crashed mid-traversal or the removal failed. It
 // runs once at boot, where it is unconditional: no sweep is in flight yet, and the sweep
-// had already decided each such tree was garbage. Nothing else reclaims one — a crash
+// had already decided each such tree was garbage. It stays unconditional now that a sweep
+// can also leave one behind by withdrawing its removal and finding the slot occupied
+// again (issue #3118) — the copy in the slot is the one that matters — and it is
+// deliberately not taught to put trees back: it cannot tell that case from the crash, and
+// a power loss inside the sweep's own put-back window leaves the same state on disk.
+// Nothing else reclaims one — a crash
 // inside the stopped-id GC leaves it after the scratch dir is gone, so the id is never
 // advertised as held again and ReclaimDeletedScratches is never offered it. Best-effort:
 // an unreadable scratch root or a failed removal is ignored and retried at the next boot.

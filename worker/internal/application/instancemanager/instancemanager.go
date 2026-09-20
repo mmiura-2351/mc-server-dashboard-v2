@@ -936,11 +936,15 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		// would have reclaimed before. That is the safe direction — a declined sweep leaks
 		// one world-sized tree until the next successful snapshot for the id reclaims it,
 		// which is the #906 GC-on-success contract itself, where the ungated sweep's
-		// failure was an unrecoverable delete. What remains is the microseconds between
-		// the check and the sweep's rename (issue #2799: the removal itself runs on the
-		// renamed tree, off the slot); closing that too would mean taking a per-id
-		// reservation on running-id snapshots, reversing the item-4 decision above, for a
-		// window that much smaller.
+		// failure was an unrecoverable delete. The microseconds between the check and the
+		// sweep's rename (issue #2799: the removal itself runs on the renamed tree, off
+		// the slot) were left open on the reading that they could only leak. They could
+		// not: the check passes until the racing hydrate renames the working dir aside, so
+		// the hydrate can clear world-less junk from the slot and park its own live set
+		// there in between, and the rename takes THAT (issue #3118). The pin therefore
+		// goes into sweepDisplaced as well and is checked again after the rename, while
+		// putting the tree back is still possible — closing the window without the per-id
+		// reservation item 4 declined, so that decision still stands.
 		var quiesced bool
 		var rawRestore func()
 		quiesced, rawRestore = m.quiesceRunning(ctx, cmd.ServerID, workingDir)
@@ -1878,6 +1882,10 @@ func (m *Manager) sweepDisplaced(serverID string, stillPinned func() (bool, stri
 // copy this sweep must not rename over. A tree that cannot go back stays under its
 // .sweeping- name for ReclaimInterruptedDisplacedSweeps. Both outcomes are logged: they
 // decide what the next boot deletes, and a .sweeping- tree is garbage everywhere else.
+//
+// The put-back can also lose a race to a LATER hydrate's own park into the same empty
+// slot: that park then fails with ENOTEMPTY and fails the hydrate, which deletes nothing
+// before its park (datatransfer.unpackAndSwap) and is simply retried.
 func (m *Manager) putBackSweptTree(serverID, displaced, trash, why string) {
 	back := false
 	if _, err := os.Lstat(displaced); os.IsNotExist(err) {
