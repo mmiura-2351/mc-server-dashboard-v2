@@ -459,6 +459,92 @@ func TestHydrateDuringDisplacedSweepFindsTheSlotEmpty(t *testing.T) {
 	}
 }
 
+// A running-id sweep must not take a recovery copy a hydrate parked in the slot AFTER
+// the caller's identity pin passed (issue #3118). The pin gates the sweep (issue #2291),
+// but it keeps passing right up to the moment the racing hydrate renames the working dir
+// aside — and what the sweep's rename takes out of the slot is whatever sits there at
+// THAT instant, not what its Lstat saw. The shape is routine, not exotic: the slot held
+// marker-only junk (a 204 hydrate leaves a world-less <scratch>/<id> that the next
+// hydrate parks here by the ordinary displace path), the hydrate clears that junk and
+// parks its live set directly in the slot as its recovery copy, and the sweep then
+// renames that live set out and removes it — a tree this snapshot never published,
+// holding the published state plus everything written since its pack.
+//
+// The rename seam lands the hydrate's park in that gap, the one interleaving the
+// post-rename re-check has to hold for, rather than racing for it.
+func TestDisplacedSweepKeepsARecoveryCopyParkedAfterThePinCheck(t *testing.T) {
+	tr := &fakeTransfer{}
+	ctrl := &fakeControl{reply: "ok"}
+	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
+	live := seedScratch(t, m, "s1")
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("start = %+v, want success", res)
+	}
+	slot := filepath.Join(m.scratchDir, ".displaced-s1")
+	if err := os.MkdirAll(slot, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeGeneration(slot, 3); err != nil {
+		t.Fatal(err)
+	}
+
+	var interleaved bool
+	restore := renameSweptTree
+	renameSweptTree = func(from, to string) error {
+		interleaved = true
+		// The racing hydrate lands here: it clears the world-less junk
+		// (datatransfer.displacedSlotHoldsWorkingSet) and takes the ordinary displace
+		// path, which parks the live set DIRECTLY in the slot as its recovery copy.
+		if err := os.RemoveAll(slot); err != nil {
+			t.Fatalf("model the hydrate's junk clear: %v", err)
+		}
+		replaceWorkingDirLikeHydrate(t, live, 7)
+		return restore(from, to)
+	}
+	t.Cleanup(func() { renameSweptTree = restore })
+
+	if res := m.Handle(context.Background(), snapshotCmd()); !res.Success {
+		t.Fatalf("running-id snapshot = %+v, want success (the publish succeeded; only the GC is at stake)", res)
+	}
+
+	if !interleaved {
+		t.Fatal("the sweep never reached its rename, so no hydrate interleaved and this test proves nothing")
+	}
+	// seedScratch wrote "world" into the live set and replaceWorkingDirLikeHydrate
+	// renamed that very directory into the slot, so reading it back proves the surviving
+	// tree is the hydrate's recovery copy — not the junk the sweep set out to remove.
+	got, err := os.ReadFile(filepath.Join(slot, "level.dat"))
+	if err != nil || string(got) != "world" {
+		t.Fatalf("slot level.dat = %q (err %v), want %q: the sweep took a recovery copy the "+
+			"hydrate parked after the identity pin passed (issue #3118)", got, err, "world")
+	}
+	// The hydrated tree is in place and nothing is left under a .sweeping-<id>-* name:
+	// the sweep put back what it took rather than stranding it for the boot reclaim.
+	assertScratchRoot(t, m, ".displaced-s1", "s1")
+}
+
+// assertScratchRoot fails unless the scratch root holds exactly want, in order. os.ReadDir
+// sorts by name, so the wanted names are listed sorted.
+func assertScratchRoot(t *testing.T, m *Manager, want ...string) {
+	t.Helper()
+	entries, err := os.ReadDir(m.scratchDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if len(names) != len(want) {
+		t.Fatalf("scratch root = %v, want %v", names, want)
+	}
+	for i := range want {
+		if names[i] != want[i] {
+			t.Fatalf("scratch root = %v, want %v", names, want)
+		}
+	}
+}
+
 // interruptDisplacedSweep runs sweepDisplaced for serverID over a seeded displaced tree
 // holding a full working set, with the removal stopped before it starts — the state a
 // crash between the sweep's rename and its traversal leaves — and returns the path the
