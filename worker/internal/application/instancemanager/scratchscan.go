@@ -35,11 +35,11 @@ const hydratePrefix = ".hydrate-"
 // .displaced-<id> tree to (".sweeping-<id>-*") before removing it, so the slot is
 // emptied atomically instead of being traversed in place (issue #2799). A tree still
 // under this name is one whose removal did not finish — or, since issue #3118, one whose
-// removal the sweep withdrew and could not put back because the slot had filled again,
-// which means another copy is in the slot. Either way it is garbage by the time the next
-// boot reads it, bar a power loss inside the sweep's put-back window (see
-// ReclaimInterruptedDisplacedSweeps). Creation, the held-set skip and the boot reclaim
-// all live in this package and share this one constant.
+// removal the sweep withdrew and left here, because the tree held no working set or the
+// slot was not empty to put it back into. The boot reclaim takes it either way; the cases
+// where such a tree was still worth something, and why none of them can be told apart
+// here, are in putBackSweptTree and ReclaimInterruptedDisplacedSweeps. Creation, the
+// held-set skip and the boot reclaim all live in this package and share this one constant.
 const sweepingPrefix = ".sweeping-"
 
 // isReservedScratchName reports whether a scratch-root entry name is one of the
@@ -230,10 +230,12 @@ func WarnOrphanDisplacedTrees(scratchDir string, held []session.HeldServer, log 
 // finish removing, because the Worker crashed mid-traversal or the removal failed. It
 // runs once at boot, where it is unconditional: no sweep is in flight yet, and the sweep
 // had already decided each such tree was garbage. It stays unconditional now that a sweep
-// can also leave one behind by withdrawing its removal and finding the slot occupied
-// again (issue #3118) — the copy in the slot is the one that matters — and it is
-// deliberately not taught to put trees back: it cannot tell that case from the crash, and
-// a power loss inside the sweep's own put-back window leaves the same state on disk.
+// can also leave one behind by withdrawing its removal and having nowhere to put the tree
+// back (issue #3118), and it is deliberately not taught to put trees back itself: the
+// withdrawn case, the crash mid-traversal and a power loss inside the sweep's own
+// put-back window leave the same state on disk, and only the last of the three is a tree
+// the slot is missing. Restoring on that guess would resurrect trees a sweep was entitled
+// to delete, which is the unbounded leak this reclaim exists to stop.
 // Nothing else reclaims one — a crash
 // inside the stopped-id GC leaves it after the scratch dir is gone, so the id is never
 // advertised as held again and ReclaimDeletedScratches is never offered it. Best-effort:

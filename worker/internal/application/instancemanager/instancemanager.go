@@ -1832,10 +1832,9 @@ func (m *Manager) removeScratch(serverID string) {
 // leak-only direction — it could take the fresh recovery copy. The identity is therefore
 // checked again once the tree is out of the slot and before anything is unlinked. A
 // removal then happens only while the working dir is still the tree this snapshot
-// packed; a tree taken from a slot whose working dir was replaced meanwhile goes back
-// where it came from, and only when the slot is empty — a slot that filled again holds
-// another copy, so leaving the tree under .sweeping- for the boot reclaim is a deferred
-// drop rather than a delete on a guess. Every uncertainty resolves to "not current"
+// packed; a tree that holds a working set and was taken from a slot whose working dir was
+// replaced meanwhile goes back where it came from, and only when the slot is empty —
+// putBackSweptTree has the full rule and what it costs. Every uncertainty resolves to "not current"
 // (workingDirRef.current), so an unreadable identity puts the tree back too: the leak
 // direction, at worst one more tree until the next successful snapshot.
 //
@@ -1878,28 +1877,29 @@ func (m *Manager) sweepDisplaced(serverID string, stillPinned func() (bool, stri
 
 // putBackSweptTree renames a tree the sweep had taken out of the .displaced-<id> slot
 // back into it, for the re-check above (issue #3118). It runs before any unlink, so the
-// tree is still whole. BOTH ends are judged by CONTENT, not by existence, and by the one
-// predicate the rest of this package already applies to the slot (hasWorkingSet, the same
-// rule datatransfer.displacedSlotHoldsWorkingSet reads it with — no second definition of
-// junk):
+// tree is still whole.
 //
-//   - The tree must hold a working set. Running-id sweeps take NO cross-stream
-//     reservation, so two can be in this window at once, and world-less junk put back by
-//     one of them occupies the slot against the other, which may be holding the hydrate's
-//     live set. That set then goes under .sweeping- and the next boot deletes it, which is
-//     the loss this function exists to prevent (PR #3121 review, round 1).
-//   - The slot must hold no working set. Existence alone is the wrong test for the same
-//     reason: marker-only or empty junk in the slot is routine, and it proves nothing
-//     about another copy surviving.
+// THE TREE must hold a working set — hasWorkingSet, the predicate this package already
+// applies to the slot and the one datatransfer.displacedSlotHoldsWorkingSet reads it
+// with, so there is no second definition of junk. Running-id sweeps take NO cross-stream
+// reservation, so TWO can be in this window at once, and world-less junk put back by one
+// of them occupies the slot against the other, which may be holding the hydrate's live
+// set. That set would then go under .sweeping- for the next boot to delete, which is the
+// loss this function exists to prevent (PR #3121 review, round 1). Junk is left under
+// .sweeping- instead: it is the garbage the boot reclaim expects, and what this sweep was
+// going to do with it anyway.
 //
-// The slot is NOT cleared when it holds junk, so marker-only junk there still blocks the
-// put-back. That is deliberate: the sweep holds no reservation, and RemoveAll on the slot
-// is exactly the in-place removal issue #2799 forbids — a hydrate can clear that junk and
-// park its live set between this read and the removal, and the removal would then delete
-// the live set. Renaming onto it is safe for the mirror-image reason: rename refuses to
-// replace a non-empty directory, so a slot that gained a real tree since the check makes
-// the put-back fail rather than clobber it. Only an empty directory is replaced, which
-// holds nothing.
+// THE SLOT must be empty, and empty is the whole rule, not a proxy for "holds nothing
+// worth keeping": os.Rename REFUSES any existing directory as its target (an EEXIST it
+// raises itself, before the syscall — unlike rename(2), which would replace an empty
+// one), so a slot holding marker-only junk blocks the put-back whatever this function
+// decides about it. Emptying it first is not an option: the sweep holds no reservation,
+// so RemoveAll on the slot is exactly the in-place removal issue #2799 forbids — a
+// hydrate can clear that junk and park its live set between the read and the removal, and
+// the removal would then delete a live world. Only the hydrate, under its per-id
+// reservation, can clear the slot. The Lstat is therefore an early-out and a log
+// distinction; what makes the put-back safe is the rename refusing to clobber whatever a
+// concurrent hydrate parked since.
 //
 // A tree that cannot go back stays under its .sweeping- name for
 // ReclaimInterruptedDisplacedSweeps, and that is logged: it decides what the next boot
@@ -1918,7 +1918,7 @@ func (m *Manager) putBackSweptTree(serverID, displaced, trash, why string) {
 		return
 	}
 	back := false
-	if !hasWorkingSet(displaced) {
+	if _, err := os.Lstat(displaced); os.IsNotExist(err) {
 		back = os.Rename(trash, displaced) == nil
 	}
 	if !back {

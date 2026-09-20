@@ -679,9 +679,9 @@ read the half-deleted tree as an occupied slot, keep it under oldest-wins and dr
 set it displaced. The rename empties the slot atomically, so a hydrate finds either the whole
 tree or nothing. A `.sweeping-<id>-*` directory is garbage by the time the next boot reads
 it — either the sweep had decided to delete it and did not finish, or it withdrew that
-decision and could not put the tree back because the slot had filled again, which means
-another copy is in the slot. The one exception is a power loss inside the sweep's
-put-back window, and both are under "when it declines", below. If the Worker crashed or the
+decision and had nowhere to put the tree back. The cases where such a tree was still worth
+something, and why none of them can be told apart at boot, are under "when it declines",
+below. If the Worker crashed or the
 removal failed, the tree stays under that name until the next Worker boot, which removes
 every `.sweeping-*` tree before
 it scans the held servers. A server deleted after
@@ -861,21 +861,38 @@ instant, not what the check saw. A hydrate can clear world-less junk from the sl
 park its own live set there in between, and the rename then carries off that fresh
 recovery copy. The sweep therefore checks the identity a **second** time, after the rename
 and before anything is unlinked. It removes the tree only while the working directory is
-still the one the snapshot packed; otherwise it renames the tree back into the slot, or —
-when the slot has filled again — leaves it under its `.sweeping-<id>-*` name for the next
-boot to reclaim, because the copy now in the slot is the one that matters. Both outcomes
-are logged, since they decide what the next boot deletes:
+still the one the snapshot packed; otherwise it renames the tree back into the slot, and
+leaves it under its `.sweeping-<id>-*` name for the next boot to reclaim when it cannot.
+Two things have to hold for the tree to go back, and both are content, not names:
+
+- **The tree must hold a working set** — the same "at least one entry that is not
+  Worker-private generation state" test used everywhere else. Running-id snapshots take no
+  per-server reservation, so *two* sweeps for one id can be in this window at once, and
+  world-less junk put back by one of them would occupy the slot against the other, which
+  may be holding the hydrate's live set. Junk is left under `.sweeping-` instead, which is
+  what the sweep was going to do with it anyway.
+- **The slot must be empty.** Not "must hold nothing worth keeping": a directory rename
+  cannot replace an existing directory here, so marker-only junk in the slot blocks the
+  put-back whatever the sweep thinks of it, and emptying the slot first is not available to
+  a sweep — it holds no reservation, and removing the slot in place is the very thing the
+  rename-then-remove discipline above exists to avoid (a hydrate can clear that junk and
+  park its live set in between, and the removal would take the live set). Only a hydrate,
+  under its per-id reservation, clears the slot.
+
+Both outcomes are logged, since they decide what the next boot deletes:
 
 ```
 INFO  put back the displaced tree this snapshot was sweeping: the working dir was replaced mid-sweep, so the tree may be the replacing hydrate's recovery copy  server_id=<id>  retained=<scratch>/.displaced-<id>  reason=working_dir_replaced
 INFO  left a swept displaced tree for the next boot to reclaim: the working dir was replaced while this snapshot swept it, and it could not go back into the slot  server_id=<id>  swept_to=<scratch>/.sweeping-<id>-<nonce>  reason=working_dir_replaced
 ```
 
-What is left is crash-conditional: a power loss after the rename out of the slot and
-before the put-back is durable leaves the tree under its `.sweeping-` name, which the next
-boot reclaims. That is strictly narrower than the unconditional removal it replaced, and
-the boot reclaim is deliberately not taught to put trees back — it cannot tell that case
-from an ordinary interrupted sweep. Neither check needs the per-server reservation on
+What is left goes to the next boot rather than being deleted on the spot. A power loss
+after the rename out of the slot and before the put-back is durable, and a slot a hydrate
+refilled with a world-less directory, both leave a tree under `.sweeping-` that the boot
+reclaim removes. Both are strictly narrower than the unconditional removal they replaced,
+and the boot reclaim is deliberately not taught to put trees back: it cannot tell those
+cases from an ordinary interrupted sweep, and guessing would resurrect trees a sweep was
+entitled to delete. Neither check needs the per-server reservation on
 running-id snapshots, which remains deliberately not taken (CONTROL_PLANE.md Section 4.1).
 
 **A hydrate re-checks the slot before it discards.** The identity check still passes
