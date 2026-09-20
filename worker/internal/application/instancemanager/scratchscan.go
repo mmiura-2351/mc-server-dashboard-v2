@@ -37,8 +37,9 @@ const hydratePrefix = ".hydrate-"
 // under this name is one whose removal did not finish — or, since issue #3118, one whose
 // removal the sweep withdrew and could not put back because the slot had filled again,
 // which means another copy is in the slot. Either way it is garbage by the time the next
-// boot reads it. Creation, the held-set skip and the boot reclaim all live in this
-// package and share this one constant.
+// boot reads it, bar a power loss inside the sweep's put-back window (see
+// ReclaimInterruptedDisplacedSweeps). Creation, the held-set skip and the boot reclaim
+// all live in this package and share this one constant.
 const sweepingPrefix = ".sweeping-"
 
 // isReservedScratchName reports whether a scratch-root entry name is one of the

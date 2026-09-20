@@ -680,7 +680,8 @@ set it displaced. The rename empties the slot atomically, so a hydrate finds eit
 tree or nothing. A `.sweeping-<id>-*` directory is garbage by the time the next boot reads
 it — either the sweep had decided to delete it and did not finish, or it withdrew that
 decision and could not put the tree back because the slot had filled again, which means
-another copy is in the slot ("when it declines", below). If the Worker crashed or the
+another copy is in the slot. The one exception is a power loss inside the sweep's
+put-back window, and both are under "when it declines", below. If the Worker crashed or the
 removal failed, the tree stays under that name until the next Worker boot, which removes
 every `.sweeping-*` tree before
 it scans the held servers. A server deleted after
