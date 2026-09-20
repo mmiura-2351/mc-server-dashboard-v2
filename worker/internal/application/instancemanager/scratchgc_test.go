@@ -564,7 +564,7 @@ func interruptDisplacedSweep(t *testing.T, m *Manager, serverID string) string {
 
 	restore := removeDisplacedTree
 	removeDisplacedTree = func(string) error { return nil }
-	m.sweepDisplaced(serverID)
+	m.sweepDisplaced(serverID, nil)
 	removeDisplacedTree = restore
 
 	entries, err = os.ReadDir(m.scratchDir)
@@ -663,7 +663,7 @@ func TestDisplacedSweepSyncsTheRenameBeforeRemoving(t *testing.T) {
 	}
 	t.Cleanup(func() { syncSweepScratchRoot, removeDisplacedTree = restoreSync, restoreRemove })
 
-	m.sweepDisplaced("s1")
+	m.sweepDisplaced("s1", nil)
 
 	if len(calls) != 2 || calls[0] != "sync "+m.scratchDir ||
 		!strings.HasPrefix(calls[1], "remove "+filepath.Join(m.scratchDir, sweepingPrefix+"s1-")) {
@@ -691,7 +691,7 @@ func TestDisplacedSweepSyncFailureLeavesTheTreeWhole(t *testing.T) {
 	}
 	t.Cleanup(func() { syncSweepScratchRoot, removeDisplacedTree = restoreSync, restoreRemove })
 
-	m.sweepDisplaced("s1")
+	m.sweepDisplaced("s1", nil)
 
 	if removed {
 		t.Fatal("the sweep removed the tree although the scratch root sync failed: its rename " +
@@ -751,7 +751,7 @@ func TestDisplacedTreeNotTreatedAsLiveScratch(t *testing.T) {
 	if _, err := os.Stat(displaced); err != nil {
 		t.Fatalf("displaced tree removed by the s1 hydrate-leftover sweep: %v", err)
 	}
-	m.sweepDisplaced("s2")
+	m.sweepDisplaced("s2", nil)
 	if _, err := os.Stat(displaced); err != nil {
 		t.Fatalf("displaced tree for s1 removed by an s2 displaced sweep (wrong id): %v", err)
 	}
