@@ -545,6 +545,87 @@ func assertScratchRoot(t *testing.T, m *Manager, want ...string) {
 	}
 }
 
+// A tree the sweep cannot put back stays WHOLE under its .sweeping-<id>-* name for the
+// boot reclaim (issue #3118). With the working dir replaced mid-sweep the tree may be a
+// recovery copy the snapshot never published, and a slot that has filled again holds
+// another one: renaming over that would spend a copy, and removing the tree would be a
+// delete on a guess. The drop is deferred to ReclaimInterruptedDisplacedSweeps instead,
+// which is no worse than the unconditional removal this replaced.
+func TestDisplacedSweepLeavesATreeItCannotPutBack(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	slot := filepath.Join(m.scratchDir, ".displaced-s1")
+	seedHydrateShapedTree(t, slot, 7)
+
+	removed := false
+	restoreRename, restoreRemove := renameSweptTree, removeDisplacedTree
+	renameSweptTree = func(from, to string) error {
+		if err := restoreRename(from, to); err != nil {
+			return err
+		}
+		// A hydrate parks the working set it displaces in the now-empty slot.
+		seedHydrateShapedTree(t, slot, 9)
+		return nil
+	}
+	removeDisplacedTree = func(string) error { removed = true; return nil }
+	t.Cleanup(func() { renameSweptTree, removeDisplacedTree = restoreRename, restoreRemove })
+
+	m.sweepDisplaced("s1", func() (bool, string) { return false, "working_dir_replaced" })
+
+	if removed {
+		t.Fatal("the sweep removed the tree it had taken from the slot although the working dir " +
+			"was replaced meanwhile: the success no longer proves the store supersedes it (issue #3118)")
+	}
+	if got := readGeneration(slot); got != 9 {
+		t.Fatalf(".displaced-s1 generation = %d, want 9: the put-back renamed over the copy that "+
+			"filled the slot instead of leaving the swept tree aside (issue #3118)", got)
+	}
+	left, err := filepath.Glob(filepath.Join(m.scratchDir, sweepingPrefix+"s1-*"))
+	if err != nil || len(left) != 1 {
+		t.Fatalf("renamed trees = %v (err %v), want exactly one for the boot reclaim to take", left, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(left[0], "world", "level.dat")); err != nil || string(got) != "x" {
+		t.Fatalf("%s holds level.dat %q (err %v), want the whole tree: %q",
+			filepath.Base(left[0]), got, err, "x")
+	}
+}
+
+// The put-back is fsynced too (issue #3118): it undoes a rename the sweep was about to
+// make durable (issue #2799), and a power loss that rolled the put-back back would strand
+// the tree under a .sweeping-<id>-* name the next boot reclaims — turning a recovery copy
+// into garbage. No test can stage the power loss, so the sync and removal seams record
+// the order instead: one sync, with the tree already back in the slot, and no traversal.
+func TestDisplacedSweepSyncsTheTreeItPutsBack(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	slot := filepath.Join(m.scratchDir, ".displaced-s1")
+	seedHydrateShapedTree(t, slot, 7)
+
+	var syncedWithSlotBack []bool
+	removed := false
+	restoreSync, restoreRemove := syncSweepScratchRoot, removeDisplacedTree
+	syncSweepScratchRoot = func(dir string) error {
+		if dir != m.scratchDir {
+			t.Errorf("synced %q, want the scratch root %q", dir, m.scratchDir)
+		}
+		_, err := os.Lstat(slot)
+		syncedWithSlotBack = append(syncedWithSlotBack, err == nil)
+		return nil
+	}
+	removeDisplacedTree = func(string) error { removed = true; return nil }
+	t.Cleanup(func() { syncSweepScratchRoot, removeDisplacedTree = restoreSync, restoreRemove })
+
+	m.sweepDisplaced("s1", func() (bool, string) { return false, "working_dir_absent" })
+
+	if removed {
+		t.Fatal("the sweep traversed a tree it had decided to put back (issue #3118)")
+	}
+	if len(syncedWithSlotBack) != 1 || !syncedWithSlotBack[0] {
+		t.Fatalf("scratch-root syncs (slot back in place at each) = %v, want exactly one with the "+
+			"tree already restored: an un-fsynced put-back can roll back into a .sweeping- name "+
+			"the next boot reclaims (issue #3118)", syncedWithSlotBack)
+	}
+	assertScratchRoot(t, m, ".displaced-s1")
+}
+
 // interruptDisplacedSweep runs sweepDisplaced for serverID over a seeded displaced tree
 // holding a full working set, with the removal stopped before it starts — the state a
 // crash between the sweep's rename and its traversal leaves — and returns the path the
