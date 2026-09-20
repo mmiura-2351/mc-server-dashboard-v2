@@ -1878,17 +1878,47 @@ func (m *Manager) sweepDisplaced(serverID string, stillPinned func() (bool, stri
 
 // putBackSweptTree renames a tree the sweep had taken out of the .displaced-<id> slot
 // back into it, for the re-check above (issue #3118). It runs before any unlink, so the
-// tree is still whole; the slot must be EMPTY, because a slot that filled again holds a
-// copy this sweep must not rename over. A tree that cannot go back stays under its
-// .sweeping- name for ReclaimInterruptedDisplacedSweeps. Both outcomes are logged: they
-// decide what the next boot deletes, and a .sweeping- tree is garbage everywhere else.
+// tree is still whole. BOTH ends are judged by CONTENT, not by existence, and by the one
+// predicate the rest of this package already applies to the slot (hasWorkingSet, the same
+// rule datatransfer.displacedSlotHoldsWorkingSet reads it with — no second definition of
+// junk):
+//
+//   - The tree must hold a working set. Running-id sweeps take NO cross-stream
+//     reservation, so two can be in this window at once, and world-less junk put back by
+//     one of them occupies the slot against the other, which may be holding the hydrate's
+//     live set. That set then goes under .sweeping- and the next boot deletes it, which is
+//     the loss this function exists to prevent (PR #3121 review, round 1).
+//   - The slot must hold no working set. Existence alone is the wrong test for the same
+//     reason: marker-only or empty junk in the slot is routine, and it proves nothing
+//     about another copy surviving.
+//
+// The slot is NOT cleared when it holds junk, so marker-only junk there still blocks the
+// put-back. That is deliberate: the sweep holds no reservation, and RemoveAll on the slot
+// is exactly the in-place removal issue #2799 forbids — a hydrate can clear that junk and
+// park its live set between this read and the removal, and the removal would then delete
+// the live set. Renaming onto it is safe for the mirror-image reason: rename refuses to
+// replace a non-empty directory, so a slot that gained a real tree since the check makes
+// the put-back fail rather than clobber it. Only an empty directory is replaced, which
+// holds nothing.
+//
+// A tree that cannot go back stays under its .sweeping- name for
+// ReclaimInterruptedDisplacedSweeps, and that is logged: it decides what the next boot
+// deletes, and a .sweeping- tree is garbage everywhere else. Junk left behind is not
+// logged — it IS ordinary garbage, indistinguishable from an interrupted sweep's.
 //
 // The put-back can also lose a race to a LATER hydrate's own park into the same empty
 // slot: that park then fails with ENOTEMPTY and fails the hydrate, which deletes nothing
 // before its park (datatransfer.unpackAndSwap) and is simply retried.
 func (m *Manager) putBackSweptTree(serverID, displaced, trash, why string) {
+	if !hasWorkingSet(trash) {
+		// World-less junk is not worth putting back, and putting it back is actively
+		// harmful: it occupies the slot against a CONCURRENT sweep that is holding the
+		// real thing. Left under .sweeping-, where it is the garbage the boot reclaim
+		// expects — which is also what this sweep would have done with it.
+		return
+	}
 	back := false
-	if _, err := os.Lstat(displaced); os.IsNotExist(err) {
+	if !hasWorkingSet(displaced) {
 		back = os.Rename(trash, displaced) == nil
 	}
 	if !back {
