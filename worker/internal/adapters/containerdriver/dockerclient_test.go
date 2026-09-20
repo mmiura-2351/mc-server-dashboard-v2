@@ -259,7 +259,12 @@ func TestEngineClientWaitDecodesStatusCode(t *testing.T) {
 func TestEngineClientListFiltersByLabel(t *testing.T) {
 	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode([]map[string]any{
-			{"Id": "a", "Names": []string{"/mcsd-s1"}, "State": "running"},
+			{
+				"Id":     "a",
+				"Names":  []string{"/mcsd-s1"},
+				"State":  "running",
+				"Labels": map[string]string{labelWorkerID: "w1", labelMCVersion: "1.20.1"},
+			},
 		})
 	})
 	c := d.client(t)
@@ -270,6 +275,11 @@ func TestEngineClientListFiltersByLabel(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].ID != "a" || got[0].Name != "/mcsd-s1" || got[0].State != "running" {
 		t.Fatalf("List = %v", got)
+	}
+	// The sweep reads a swept container's Minecraft version off its labels
+	// (issue #3116), so List must carry them.
+	if got[0].Labels[labelMCVersion] != "1.20.1" {
+		t.Fatalf("Labels = %v, want the container's labels", got[0].Labels)
 	}
 	req := d.requests[0]
 	if req.method != http.MethodGet || req.path != "/v1.43/containers/json" {
