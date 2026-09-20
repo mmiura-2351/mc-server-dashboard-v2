@@ -1825,7 +1825,7 @@ func (m *Manager) sweepDisplaced(serverID string) {
 	}
 	// MkdirTemp creates the dir; remove it so Rename can use the name.
 	_ = os.Remove(trash)
-	if err := os.Rename(displaced, trash); err != nil {
+	if err := renameSweptTree(displaced, trash); err != nil {
 		return
 	}
 	// Make the rename durable before the traversal unlinks anything, so a power loss
@@ -1835,6 +1835,15 @@ func (m *Manager) sweepDisplaced(serverID string) {
 	}
 	_ = removeDisplacedTree(trash)
 }
+
+// renameSweptTree is the os.Rename sweepDisplaced empties the slot with, indirected
+// through a package var (mirroring removeDisplacedTree) so a test can land a racing
+// hydrate's park in the one gap that decides what this rename takes — between the Lstat
+// that found the slot occupied and the rename itself — rather than race for it. Only the
+// rename OUT of the slot goes through it; the re-park below renames back with os.Rename
+// directly, so a test's seam cannot also intercept the recovery. Production always uses
+// os.Rename.
+var renameSweptTree = os.Rename
 
 // syncSweepScratchRoot is the fsyncDir sweepDisplaced makes its rename durable with,
 // indirected through a package var (mirroring removeDisplacedTree) so a test can pin
