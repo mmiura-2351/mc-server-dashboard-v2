@@ -625,8 +625,10 @@ The environment-variable form is a comma-separated `major=image` list:
 with `MCD_WORKER_DRIVER_CONTAINER_DOCKER_HOST` for the daemon endpoint.
 
 The `container` driver names each container deterministically (`mcsd-<server_id>`)
-and labels it with this Worker's id (`mcsd.worker.id`) and the server id
-(`mcsd.server.id`). At startup it sweeps and force-removes every container
+and labels it with this Worker's id (`mcsd.worker.id`), the server id
+(`mcsd.server.id`) and the server's Minecraft version (`mcsd.mc.version`, which
+the sweep below reads to decode the container's `server.properties` the way that
+version's server does). At startup it sweeps and force-removes every container
 carrying its own worker-id label before launching any server, then removes a
 container after the server exits. The sweep recovers from a crash that left a
 server's container behind, but because it force-removes *running* containers too,
