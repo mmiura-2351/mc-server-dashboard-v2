@@ -1162,6 +1162,11 @@ func TestStartCreateSpec(t *testing.T) {
 	if got.Labels[labelWorkerID] != "w1" || got.Labels[labelServerID] != "s1" {
 		t.Fatalf("Labels = %v, want worker/server labels", got.Labels)
 	}
+	// The Minecraft version rides on the container so the startup sweep can read
+	// it back after a crash took the StartServer command with it (issue #3116).
+	if got.Labels[labelMCVersion] != spec().MinecraftVersion {
+		t.Fatalf("Labels = %v, want the Minecraft version %q", got.Labels, spec().MinecraftVersion)
+	}
 }
 
 // The launch container carries the per-server memory ceiling as the Docker
@@ -2521,6 +2526,46 @@ func TestSweepIssuesSaveOnToRunningOrphanBeforeStop(t *testing.T) {
 	}
 	if len(docker.removed) != 1 || docker.removed[0] != "a" {
 		t.Fatalf("removed = %v, want [a]", docker.removed)
+	}
+}
+
+// The sweep's save-on dial must carry the swept server's Minecraft version: it
+// decides the charset that server's server.properties -- and so its RCON
+// password -- is read in (issue #3116). The Worker crash this sweep cleans up
+// after took the StartServer command the version came from, so the version is
+// recovered from the container's own label. Dialing without it reads a 1.20+
+// server's non-ASCII password as latin-1, auth fails, and the sweep stops the
+// container with auto-save still off -- the very loss #1710 exists to prevent.
+func TestSweepSaveOnDialsWithTheContainersMinecraftVersion(t *testing.T) {
+	docker := newFakeDocker()
+	docker.listResult = []Container{{
+		ID:     "a",
+		Name:   "/mcsd-s1",
+		State:  "running",
+		Labels: map[string]string{labelWorkerID: "w1", labelServerID: "s1", labelMCVersion: "1.20.1"},
+	}}
+	var dialed []execution.InstanceSpec
+	var rconLines []string
+	d := New(docker, images(), func(_ context.Context, spec execution.InstanceSpec, _ string) (execution.ServerControl, error) {
+		dialed = append(dialed, spec)
+		return &fakeRconControl{reply: "ok", lines: &rconLines}, nil
+	}, Options{
+		WorkerID:        "w1",
+		StopTimeout:     50 * time.Millisecond,
+		ScratchDir:      t.TempDir(),
+		SweepCallMargin: 50 * time.Millisecond,
+	})
+
+	if err := d.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+
+	if len(dialed) != 1 {
+		t.Fatalf("rcon dials = %d, want 1", len(dialed))
+	}
+	if dialed[0].MinecraftVersion != "1.20.1" {
+		t.Fatalf("save-on dial Minecraft version = %q, want %q (the container's label)",
+			dialed[0].MinecraftVersion, "1.20.1")
 	}
 }
 
