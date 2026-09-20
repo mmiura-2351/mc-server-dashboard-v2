@@ -597,29 +597,33 @@ func TestOverlappingDisplacedSweepsKeepTheRecoveryCopy(t *testing.T) {
 	}
 	replaced := func() (bool, string) { return false, "working_dir_replaced" }
 
+	// Both handoffs hang off the RENAMES, not off the re-checks, so a sweep that stops
+	// re-checking (or stops reaching its rename) makes this test fail on its assertions
+	// rather than deadlock on a signal that never comes.
 	lTaken, jBack, aDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
-	renames := 0
+	renames, aStarted := 0, false
 	restore := renameSweptTree
 	renameSweptTree = func(from, to string) error {
-		// Ordered by the channel handoffs below: B renames first and then blocks until A,
-		// started here, has renamed too.
 		renames++
 		if err := restore(from, to); err != nil {
 			return err
 		}
-		if renames == 1 {
+		switch renames {
+		case 1:
 			// B has emptied the slot. The hydrate finds it empty and parks its live set
-			// there by the ordinary displace path.
+			// there by the ordinary displace path, and sweep A starts on it.
 			replaceWorkingDirLikeHydrate(t, live, 7)
+			aStarted = true
 			go func() {
 				m.sweepDisplaced("s1", func() (bool, string) {
-					close(lTaken) // A has taken L out of the slot
-					<-jBack       // ...and answers only once B has had its put-back
+					<-jBack // A answers only once B has had its put-back
 					return replaced()
 				})
 				close(aDone)
 			}()
-			<-lTaken
+			<-lTaken // ...and B answers only once A has taken L out of the slot
+		case 2:
+			close(lTaken)
 		}
 		return nil
 	}
@@ -627,7 +631,9 @@ func TestOverlappingDisplacedSweepsKeepTheRecoveryCopy(t *testing.T) {
 
 	m.sweepDisplaced("s1", replaced) // sweep B, holding the junk
 	close(jBack)
-	<-aDone
+	if aStarted {
+		<-aDone
+	}
 
 	if renames != 2 {
 		t.Fatalf("sweep renames = %d, want 2: the two sweeps did not overlap and this test proves nothing", renames)
