@@ -686,7 +686,10 @@ def test_apply_platform_properties_preserves_a_non_utf8_line() -> None:
 # worker/internal/javaproperties/javaproperties_test.go::parityCases. Same input,
 # same parse -- that mirroring is the evidence that the platform-key guard and
 # the Worker read a server.properties alike. Keep the two tables in sync: a case
-# added here but not there leaves the invariant unpinned.
+# added here but not there leaves the invariant unpinned. The Worker's table runs
+# through its latin-1 ``Parse``, the decode ``_load_convert`` uses; its reader for
+# a 1.20+ server (``ParseUTF8``, issue #3116) decodes a valid-UTF-8 non-ASCII
+# byte differently, so such an input has no row here.
 PARITY_CASES: list[tuple[str, bytes, dict[str, str]]] = [
     ("equals separator", b"server-port=25599\n", {"server-port": "25599"}),
     ("colon separator", b"server-port:25599\n", {"server-port": "25599"}),

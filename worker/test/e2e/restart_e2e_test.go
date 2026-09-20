@@ -140,7 +140,7 @@ func TestContainerRestartRecreatesContainer(t *testing.T) {
 		map[string]execution.ExecutionDriver{"container": driver},
 		scratchDir,
 		// The manager's ServerCommand RCON opener is unused in this scenario.
-		func(context.Context, string, string) (execution.ServerControl, error) {
+		func(context.Context, string, string, string) (execution.ServerControl, error) {
 			return nil, errNoRCON
 		},
 	)

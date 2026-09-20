@@ -40,6 +40,12 @@ var errRemovalInProgress = errors.New("containerdriver: container removal alread
 const (
 	labelWorkerID = "mcsd.worker.id"
 	labelServerID = "mcsd.server.id"
+	// labelMCVersion records the Minecraft version a container runs, so the
+	// startup sweep can read it back off a container left behind by a crashed
+	// Worker: the version decides the charset that container's server.properties
+	// -- and so its RCON password -- is read in (issue #3116), and the crash took
+	// the StartServer command that carried it (issue #1710).
+	labelMCVersion = "mcsd.mc.version"
 )
 
 // containerNamePrefix prefixes every container name so the deterministic name is
@@ -157,6 +163,9 @@ type Container struct {
 	ID    string
 	Name  string
 	State string
+	// Labels are the container's labels, the ones labels() attached at create.
+	// The sweep reads the Minecraft version from them (issue #3116).
+	Labels map[string]string
 }
 
 // ContainerInfo is the subset of a container inspection the driver needs to

@@ -175,7 +175,7 @@ func TestTakeOrphanReserveRefusesAnInstanceThatIsNoLongerTheOrphan(t *testing.T)
 	m.orphans["s1"] = orphanEntry{inst: recorded, driver: "container"}
 	m.instances["s1"] = replaced
 
-	driver, outcome := m.takeOrphanReserve("s1", newFakeInstance("s1"))
+	driver, _, outcome := m.takeOrphanReserve("s1", newFakeInstance("s1"))
 
 	if outcome != takeNotFound {
 		t.Fatalf("takeOrphanReserve with a stale instance = %v (driver %q), want takeNotFound", outcome, driver)
@@ -288,7 +288,7 @@ func TestStrandedOrphanRecordIsRetired(t *testing.T) {
 	close(inst.events)
 	inst.setAlive(false, nil)
 
-	m.recordOrphan("s1", inst, "container")
+	m.recordOrphan("s1", inst, "container", "1.21")
 
 	awaitStatus(t, m, "s1", "stopped")
 	waitFor(t, func() bool {
@@ -338,7 +338,7 @@ func TestConvergerSkipsRoundWhileOperatorStopInFlight(t *testing.T) {
 	clk := &fakeClock{}
 	d := &gatedOrphanDriver{}
 	m := New(map[string]execution.ExecutionDriver{"container": d}, t.TempDir(),
-		func(context.Context, string, string) (execution.ServerControl, error) {
+		func(context.Context, string, string, string) (execution.ServerControl, error) {
 			return nil, errors.New("test: no rcon control configured")
 		}).WithMetrics(clk, time.Hour)
 	closeWithTest(t, m)
@@ -731,7 +731,7 @@ func TestOrphanRetryStopPassesDriverToFlush(t *testing.T) {
 	var drivers []string
 	scratch := t.TempDir()
 	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch,
-		func(_ context.Context, _ string, driver string) (execution.ServerControl, error) {
+		func(_ context.Context, _, driver, _ string) (execution.ServerControl, error) {
 			drivers = append(drivers, driver)
 			return &fakeControl{reply: "ok"}, nil
 		})
@@ -766,6 +766,46 @@ func TestOrphanRetryStopPassesDriverToFlush(t *testing.T) {
 	}
 }
 
+// A failed graceful stop, and every retry of the orphan it leaves -- the
+// operator's and the converger's -- dials RCON with the server's Minecraft
+// version, although the stop evicted the StartServer command the version came
+// from: it rides on the orphan record beside the driver name (issues #1712,
+// #3116).
+func TestFailedStopAndOrphanRetriesCarryTheMinecraftVersion(t *testing.T) {
+	stop := func(id string) session.Command {
+		return session.Command{CommandID: id, ServerID: "s1", Kind: "StopServer"}
+	}
+
+	t.Run("failed stop and operator retry", func(t *testing.T) {
+		m, rec := newVersionRecordingManager(t, &flushOrphanDriver{stopAfter: 1})
+		startRunning(t, m)
+
+		if res := m.Handle(context.Background(), stop("stop1")); res.Success {
+			t.Fatalf("first stop = %+v, want failure (driver could not confirm termination)", res)
+		}
+		if res := m.Handle(context.Background(), stop("stop2")); !res.Success {
+			t.Fatalf("retry stop = %+v, want success", res)
+		}
+
+		assertDialsCarry(t, rec.dials(), startCmd().MinecraftVersion)
+	})
+
+	t.Run("converger retry", func(t *testing.T) {
+		m, rec := newVersionRecordingManager(t, &flushOrphanDriver{stopAfter: 1})
+		shrinkOrphanConverger(m)
+		startRunning(t, m)
+
+		if res := m.Handle(context.Background(), stop("stop1")); res.Success {
+			t.Fatalf("first stop = %+v, want failure (driver could not confirm termination)", res)
+		}
+		// The converger's retry stop confirmed termination, and its flush dialed
+		// first: every graceful Stop of this driver runs the flush.
+		awaitStatus(t, m, "s1", "stopped")
+
+		assertDialsCarry(t, rec.dials(), startCmd().MinecraftVersion)
+	})
+}
+
 // A restart whose internal stop fails leaves the same orphan record: it does not
 // relaunch, and a retry stop can still terminate the orphan (issue #251).
 func TestRestartStopFailureLeavesOrphan(t *testing.T) {
@@ -798,7 +838,7 @@ func TestFailedStopRestoresSaveOn(t *testing.T) {
 	var drivers []string
 	scratch := t.TempDir()
 	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch,
-		func(_ context.Context, _ string, driver string) (execution.ServerControl, error) {
+		func(_ context.Context, _, driver, _ string) (execution.ServerControl, error) {
 			drivers = append(drivers, driver)
 			return &fakeControl{reply: "ok", seq: &seq}, nil
 		})
@@ -839,7 +879,7 @@ func TestFailedStopSaveOnDialFailureStillReturnsStopFailure(t *testing.T) {
 	var dialCount int
 	scratch := t.TempDir()
 	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch,
-		func(_ context.Context, _ string, _ string) (execution.ServerControl, error) {
+		func(_ context.Context, _, _, _ string) (execution.ServerControl, error) {
 			dialCount++
 			// The flush dial succeeds (save-off + save-all); the restore dial fails.
 			if dialCount <= 1 {
@@ -874,7 +914,7 @@ func TestForcedFailedStopSkipsSaveOn(t *testing.T) {
 	var seq []string
 	scratch := t.TempDir()
 	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch,
-		func(_ context.Context, _ string, _ string) (execution.ServerControl, error) {
+		func(_ context.Context, _, _, _ string) (execution.ServerControl, error) {
 			return &fakeControl{reply: "ok", seq: &seq}, nil
 		})
 	m.settlePollInterval = 0
@@ -901,7 +941,7 @@ func TestRestartStopFailureRestoresSaveOn(t *testing.T) {
 	var seq []string
 	scratch := t.TempDir()
 	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch,
-		func(_ context.Context, _ string, _ string) (execution.ServerControl, error) {
+		func(_ context.Context, _, _, _ string) (execution.ServerControl, error) {
 			return &fakeControl{reply: "ok", seq: &seq}, nil
 		})
 	m.settlePollInterval = 0
@@ -964,7 +1004,7 @@ func (i *gatedProbeInstance) ProbeAlive(ctx context.Context) (bool, error) {
 // Close that only stopped it between rounds could not pass.
 func TestCloseStopsAConvergerParkedOnItsProbeInterval(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	m.recordOrphan("s1", newFakeInstance("s1"), "container")
+	m.recordOrphan("s1", newFakeInstance("s1"), "container", "1.21")
 
 	closed := make(chan struct{})
 	go func() { m.Close(); close(closed) }()
@@ -985,7 +1025,7 @@ func TestCloseWaitsForAConvergerMidRound(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	shrinkOrphanConverger(m)
 	inst := newGatedProbeInstance("s1")
-	m.recordOrphan("s1", inst, "container")
+	m.recordOrphan("s1", inst, "container", "1.21")
 	awaitEnter(t, inst.probeEntered)
 
 	closed := make(chan struct{})
@@ -1012,7 +1052,7 @@ func TestRecordOrphanAfterCloseSpawnsNoConverger(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	m.Close()
 
-	m.recordOrphan("s1", newFakeInstance("s1"), "container")
+	m.recordOrphan("s1", newFakeInstance("s1"), "container", "1.21")
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1077,7 +1117,7 @@ func TestConvergerLeavesQuietlyWhenTheShutdownCancelsItsProbe(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	shrinkOrphanConverger(m)
 	inst := newCancelledProbeInstance("s1")
-	m.recordOrphan("s1", inst, "container")
+	m.recordOrphan("s1", inst, "container", "1.21")
 	awaitEnter(t, inst.probeEntered)
 
 	closed := make(chan struct{})

@@ -319,7 +319,7 @@ func (d *Driver) Start(ctx context.Context, spec execution.InstanceSpec) (execut
 		image:            image,
 		network:          d.network,
 		gameBindIP:       d.gameBindIP,
-		labels:           d.labels(spec.ServerID),
+		labels:           d.labels(spec.ServerID, spec.MinecraftVersion),
 		createFn:         d.createContainer,
 		openControl:      d.openControl,
 		rconHost:         d.RconHost(spec.ServerID),
@@ -406,7 +406,7 @@ func (d *Driver) launchContainer(ctx context.Context, spec execution.InstanceSpe
 		Binds:            []string{spec.WorkingDir + ":" + containerWorkDir},
 		Ports:            portMappings,
 		Network:          d.network,
-		Labels:           d.labels(spec.ServerID),
+		Labels:           d.labels(spec.ServerID, spec.MinecraftVersion),
 		MemoryLimitBytes: memoryLimitBytes(spec.MemoryLimitMB),
 		CPUShares:        cpuShares(spec.CPUMillis),
 	}
@@ -456,7 +456,7 @@ func (d *Driver) runInstallContainer(ctx context.Context, spec execution.Instanc
 		Cmd:              containerCmd(plan.InstallArgs),
 		WorkingDir:       containerWorkDir,
 		Binds:            []string{spec.WorkingDir + ":" + containerWorkDir},
-		Labels:           d.labels(spec.ServerID),
+		Labels:           d.labels(spec.ServerID, spec.MinecraftVersion),
 		MemoryLimitBytes: memoryLimitBytes(spec.MemoryLimitMB),
 		CPUShares:        cpuShares(spec.CPUMillis),
 	}
@@ -687,7 +687,7 @@ func (d *Driver) Sweep(ctx context.Context) error {
 			// before stop ensures the MC server's shutdown hook (triggered by the SIGTERM
 			// from docker stop) can auto-save the world. Failure is logged and does not
 			// block the stop — the pre-fix behavior was no save-on at all.
-			d.sweepSaveOn(ctx, c.Name)
+			d.sweepSaveOn(ctx, c.Name, c.Labels[labelMCVersion])
 
 			// This bare docker.Stop is the orphan-sweep stop leg observed in the #927
 			// incident (a redeploy sweep stopped a running 26.x server, then the stop-leg
@@ -718,7 +718,16 @@ func (d *Driver) Sweep(ctx context.Context) error {
 // server with auto-save disabled; restoring it before the SIGTERM ensures the
 // shutdown save captures the world. Install containers (suffix "-install") are
 // skipped — they are not MC servers. Failure is logged and never blocks the stop.
-func (d *Driver) sweepSaveOn(ctx context.Context, containerName string) {
+//
+// mcVersion comes from the container's own mc-version label, which is the only
+// place left to read it: the Worker this sweep cleans up after crashed, taking
+// the StartServer command with it. It decides the charset the server.properties
+// this dial reads its RCON password from is decoded in (issue #3116) — without
+// it a 1.20+ server's non-ASCII password reads as latin-1, auth fails, and the
+// stop below runs with auto-save still off. A container labelled by an older
+// Worker carries no version and falls back to latin-1, the reader that Worker
+// itself used.
+func (d *Driver) sweepSaveOn(ctx context.Context, containerName, mcVersion string) {
 	if d.openControl == nil || d.scratchDir == "" {
 		return
 	}
@@ -732,8 +741,9 @@ func (d *Driver) sweepSaveOn(ctx context.Context, containerName string) {
 	}
 	rconHost := d.networkHost(serverID)
 	spec := execution.InstanceSpec{
-		ServerID:   serverID,
-		WorkingDir: filepath.Join(d.scratchDir, serverID),
+		ServerID:         serverID,
+		WorkingDir:       filepath.Join(d.scratchDir, serverID),
+		MinecraftVersion: mcVersion,
 	}
 	saveOnCtx, cancel := context.WithTimeout(ctx, d.sweepCallMargin)
 	defer cancel()
@@ -763,11 +773,14 @@ func (d *Driver) serverIDFromName(name string) string {
 }
 
 // labels are attached to every container: a worker-id label scopes the orphan
-// sweep, a server-id label identifies the server.
-func (d *Driver) labels(serverID string) map[string]string {
+// sweep, a server-id label identifies the server, and an mc-version label
+// records the Minecraft version, which the sweep needs after a crash took the
+// StartServer command that carried it (issue #3116).
+func (d *Driver) labels(serverID, mcVersion string) map[string]string {
 	return map[string]string{
-		labelWorkerID: d.workerID,
-		labelServerID: serverID,
+		labelWorkerID:  d.workerID,
+		labelServerID:  serverID,
+		labelMCVersion: mcVersion,
 	}
 }
 
