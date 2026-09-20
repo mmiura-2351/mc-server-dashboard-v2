@@ -681,8 +681,8 @@ tree or nothing. A `.sweeping-<id>-*` directory is garbage by the time the next 
 it — either the sweep had decided to delete it and did not finish, or it withdrew that
 decision and could not put the tree back because the slot had filled again, which means
 another copy is in the slot ("when it declines", below). If the Worker crashed or the
-removal failed, the tree stays
-under that name until the next Worker boot, which removes every `.sweeping-*` tree before
+removal failed, the tree stays under that name until the next Worker boot, which removes
+every `.sweeping-*` tree before
 it scans the held servers. A server deleted after
 a failed final
 snapshot never snapshots again and its displaced tree therefore **persists on the
@@ -827,7 +827,7 @@ INFO  skipped sweeping the displaced recovery tree: the working dir is no longer
 ```
 
 `reason` is one of three values, and each one sends you to a different place (the same
-three name the second check below):
+three reasons appear on the second check below):
 
 - `working_dir_replaced`: a different directory now sits at `<scratch>/<id>`. This is
   the concurrent re-placement hydrate described above.
@@ -875,7 +875,7 @@ before the put-back is durable leaves the tree under its `.sweeping-` name, whic
 boot reclaims. That is strictly narrower than the unconditional removal it replaced, and
 the boot reclaim is deliberately not taught to put trees back — it cannot tell that case
 from an ordinary interrupted sweep. Neither check needs the per-server reservation on
-running-id snapshots that remains deliberately not taken (CONTROL_PLANE.md Section 4.1).
+running-id snapshots, which remains deliberately not taken (CONTROL_PLANE.md Section 4.1).
 
 **A hydrate re-checks the slot before it discards.** The identity check still passes
 while a concurrent hydrate is working, right up to the moment that hydrate parks the

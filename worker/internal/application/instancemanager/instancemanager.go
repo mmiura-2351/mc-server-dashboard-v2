@@ -1908,7 +1908,7 @@ func (m *Manager) putBackSweptTree(serverID, displaced, trash, why string) {
 // through a package var (mirroring removeDisplacedTree) so a test can land a racing
 // hydrate's park in the one gap that decides what this rename takes — between the Lstat
 // that found the slot occupied and the rename itself — rather than race for it. Only the
-// rename OUT of the slot goes through it; the re-park below renames back with os.Rename
+// rename OUT of the slot goes through it; putBackSweptTree renames back with os.Rename
 // directly, so a test's seam cannot also intercept the recovery. Production always uses
 // os.Rename.
 var renameSweptTree = os.Rename
