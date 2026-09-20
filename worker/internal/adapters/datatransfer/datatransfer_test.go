@@ -2114,6 +2114,24 @@ func TestJunkDisplacedSlotDoesNotShadowLiveSet(t *testing.T) {
 				t.Fatal(err)
 			}
 		}},
+		// A symlink is junk however populated its target is: the rule Lstats the slot and
+		// requires a DIRECTORY, so it never reads through the link. This row is the
+		// counterpart of TestSweptTreeClassifierMatchesTheHydrateSlotRule in
+		// worker/internal/application/instancemanager, where the running-id sweep applies
+		// the same rule to a tree it is about to put back; a rule that read through the
+		// link there would put it into the slot ahead of a real recovery tree.
+		{"symlink to a populated dir", func(t *testing.T, path string) {
+			target := filepath.Join(t.TempDir(), "elsewhere")
+			if err := os.MkdirAll(filepath.Join(target, "world"), 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(target, "world", "level.dat"), []byte("x"), 0o640); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, path); err != nil {
+				t.Fatal(err)
+			}
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

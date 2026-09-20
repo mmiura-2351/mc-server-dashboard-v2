@@ -272,6 +272,47 @@ func hasWorkingSet(workingDir string) bool {
 	return holdsWorkingSet(children)
 }
 
+// readSweptTree is the os.ReadDir sweptTreeHoldsWorkingSet lists a swept tree with,
+// indirected through a package var (mirroring datatransfer.readDir, which the hydrate's
+// slot rule reads through for the same reason) so a test can inject a read failure
+// without a chmod fixture — a mode-000 directory is readable by root, so a chmod-based
+// test silently stops asserting anything whenever the suite runs as root. Production
+// always uses os.ReadDir.
+var readSweptTree = os.ReadDir
+
+// sweptTreeHoldsWorkingSet reports whether a tree the running-id sweep took out of the
+// .displaced-<id> slot holds a world worth putting back (issue #3118).
+//
+// It is NOT hasWorkingSet, and the difference is the point. This is a durability
+// decision about one specific tree, so it applies the rule the HYDRATE applies to that
+// same slot (datatransfer.displacedSlotHoldsWorkingSet) — the two must agree, and
+// TestSweptTreeClassifierMatchesTheHydrateSlotRule pins them to each other in the issue
+// #2280 twin-test style, since the adapter deliberately imports nothing from here:
+//
+//   - TYPE-AWARE: Lstat plus IsDir, never a symlink-following read. hasWorkingSet lists
+//     through a symlink, so it calls a link to a populated directory a working set while
+//     the hydrate calls it junk. A sweep acting on that puts the link back into the slot,
+//     where it occupies the slot against a concurrent sweep holding the real recovery
+//     tree (PR #3121 review, round 2).
+//   - ERROR-RETURNING: a read failure is returned, not folded into "no working set" the
+//     way hasWorkingSet folds it. That fold is right for the held-set scans, which must
+//     not ADVERTISE a set they cannot prove; it is wrong here, where the same answer
+//     means "delete this at the next boot". The caller keeps the tree on uncertainty.
+func sweptTreeHoldsWorkingSet(path string) (bool, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return false, err
+	}
+	if !info.IsDir() {
+		return false, nil
+	}
+	entries, err := readSweptTree(path)
+	if err != nil {
+		return false, err
+	}
+	return holdsWorkingSet(entries), nil
+}
+
 // holdsWorkingSet is hasWorkingSet's decision over entries the caller has already
 // read. Split out so a caller that must tell "holds no working set" from "cannot be
 // read" applies the SAME predicate without inheriting the swallow above

@@ -657,6 +657,136 @@ func TestOverlappingDisplacedSweepsKeepTheRecoveryCopy(t *testing.T) {
 	}
 }
 
+// The sweep's "is this worth putting back" rule must answer exactly as the hydrate's slot
+// rule does (datatransfer.displacedSlotHoldsWorkingSet), and this is its twin test in the
+// issue #2280 style: each side asserts the SAME fixtures from its own package, so a rule
+// that drifts fails CI here instead of degrading a durability decision silently. The
+// counterpart is TestJunkDisplacedSlotDoesNotShadowLiveSet in
+// worker/internal/adapters/datatransfer.
+//
+// The SYMLINK row is why the rule cannot be hasWorkingSet: that one reads through a
+// symlink and would call a link to a populated directory a working set, while the hydrate
+// calls it junk. A sweep believing it holds a working set puts the link back into the
+// slot, and the slot is then occupied against a concurrent sweep holding the real
+// recovery tree (PR #3121 review, round 2).
+func TestSweptTreeClassifierMatchesTheHydrateSlotRule(t *testing.T) {
+	populated := filepath.Join(t.TempDir(), "elsewhere")
+	seedHydrateShapedTree(t, populated, 7)
+
+	cases := []struct {
+		name  string
+		build func(t *testing.T, path string)
+		want  bool
+	}{
+		{"working set", func(t *testing.T, path string) { seedHydrateShapedTree(t, path, 7) }, true},
+		{"empty dir", func(t *testing.T, path string) {
+			if err := os.MkdirAll(path, 0o750); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+		{"regular file", func(t *testing.T, path string) {
+			if err := os.WriteFile(path, []byte("leftover"), 0o640); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+		{"marker only", func(t *testing.T, path string) {
+			if err := os.MkdirAll(path, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeGeneration(path, 7); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+		{"marker temp sibling only", func(t *testing.T, path string) {
+			if err := os.MkdirAll(path, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(path, generationFile+"-abc123"), []byte("7"), 0o640); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+		{"symlink to a populated dir", func(t *testing.T, path string) {
+			if err := os.Symlink(populated, path); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), ".sweeping-s1-123")
+			tc.build(t, path)
+
+			holds, err := sweptTreeHoldsWorkingSet(path)
+			if err != nil {
+				t.Fatalf("classifying %s = error %v, want a decision", tc.name, err)
+			}
+			if holds != tc.want {
+				t.Fatalf("%s holds a working set = %v, want %v: the sweep's rule has drifted from "+
+					"the hydrate's slot rule (datatransfer.displacedSlotHoldsWorkingSet)", tc.name, holds, tc.want)
+			}
+		})
+	}
+}
+
+// A symlink in the slot is junk by that shared rule, so the sweep must not put one back:
+// it would occupy the slot against a concurrent sweep holding the real recovery tree,
+// which then has nowhere to restore it and leaves it for the boot reclaim to delete.
+func TestDisplacedSweepDoesNotPutBackASymlinkSlot(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	populated := filepath.Join(t.TempDir(), "elsewhere")
+	seedHydrateShapedTree(t, populated, 7)
+	slot := filepath.Join(m.scratchDir, ".displaced-s1")
+	if err := os.Symlink(populated, slot); err != nil {
+		t.Fatal(err)
+	}
+
+	m.sweepDisplaced("s1", func() (bool, string) { return false, "working_dir_replaced" })
+
+	if _, err := os.Lstat(slot); !os.IsNotExist(err) {
+		t.Fatalf(".displaced-s1 exists after the sweep (lstat err = %v), want the slot left empty: "+
+			"the sweep read THROUGH the symlink, called it a working set and put it back (issue #3118)", err)
+	}
+	left, err := filepath.Glob(filepath.Join(m.scratchDir, sweepingPrefix+"s1-*"))
+	if err != nil || len(left) != 1 {
+		t.Fatalf("renamed entries = %v (err %v), want exactly one (the symlink)", left, err)
+	}
+	// The link went to .sweeping- as itself, and its target was never touched: the sweep
+	// must not follow it, neither to classify it nor to remove it.
+	if info, lerr := os.Lstat(left[0]); lerr != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("%s mode = %v (err %v), want a symlink", filepath.Base(left[0]), info, lerr)
+	}
+	if got, rerr := os.ReadFile(filepath.Join(populated, "world", "level.dat")); rerr != nil || string(got) != "x" {
+		t.Fatalf("symlink target level.dat = %q (err %v), want %q untouched", got, rerr, "x")
+	}
+}
+
+// A tree the sweep cannot READ is kept, not dropped (PR #3121 review, round 2). The
+// classification answers "is this copy worth keeping", so a transient EACCES/EMFILE/EIO
+// must not silently become "world-less junk, leave it for the boot reclaim to delete" —
+// the same direction datatransfer takes on its side (TestUnreadableDisplacedSlotFails-
+// HydrateWithoutDiscarding). Putting an unclassifiable tree back costs at worst an
+// occupied slot; leaving it costs the only copy of the unpublished delta.
+//
+// The failure is injected through a seam rather than a chmod fixture: a mode-000 dir is
+// readable by root, so a chmod-based test silently stops asserting anything as root.
+func TestDisplacedSweepKeepsATreeItCannotClassify(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	slot := filepath.Join(m.scratchDir, ".displaced-s1")
+	seedHydrateShapedTree(t, slot, 7)
+
+	restore := readSweptTree
+	readSweptTree = func(string) ([]os.DirEntry, error) { return nil, errors.New("injected read failure") }
+	t.Cleanup(func() { readSweptTree = restore })
+
+	m.sweepDisplaced("s1", func() (bool, string) { return false, "working_dir_replaced" })
+
+	if got, err := os.ReadFile(filepath.Join(slot, "world", "level.dat")); err != nil || string(got) != "x" {
+		t.Fatalf("slot world/level.dat = %q (err %v), want %q: a tree the sweep could not read was "+
+			"classified as junk and left under .sweeping- for the next boot to delete (issue #3118)", got, err, "x")
+	}
+	assertScratchRoot(t, m, ".displaced-s1")
+}
+
 // A tree the sweep cannot put back stays WHOLE under its .sweeping-<id>-* name for the
 // boot reclaim (issue #3118). With the working dir replaced mid-sweep the tree may be a
 // recovery copy the snapshot never published, and a slot that has filled again holds

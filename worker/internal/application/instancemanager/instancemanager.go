@@ -1879,9 +1879,12 @@ func (m *Manager) sweepDisplaced(serverID string, stillPinned func() (bool, stri
 // back into it, for the re-check above (issue #3118). It runs before any unlink, so the
 // tree is still whole.
 //
-// THE TREE must hold a working set — hasWorkingSet, the predicate this package already
-// applies to the slot and the one datatransfer.displacedSlotHoldsWorkingSet reads it
-// with, so there is no second definition of junk. Running-id sweeps take NO cross-stream
+// THE TREE must hold a working set, by sweptTreeHoldsWorkingSet — the rule the HYDRATE
+// applies to this same slot, type-aware and error-returning, pinned to the adapter's copy
+// by a twin test rather than shared through an import the layering does not allow. It is
+// deliberately not hasWorkingSet: that one reads through a symlink and folds every read
+// failure into "no working set", and both answers are "delete this at the next boot" here
+// (PR #3121 review, round 2). Running-id sweeps take NO cross-stream
 // reservation, so TWO can be in this window at once, and world-less junk put back by one
 // of them occupies the slot against the other, which may be holding the hydrate's live
 // set. That set would then go under .sweeping- for the next boot to delete, which is the
@@ -1901,6 +1904,13 @@ func (m *Manager) sweepDisplaced(serverID string, stillPinned func() (bool, stri
 // distinction; what makes the put-back safe is the rename refusing to clobber whatever a
 // concurrent hydrate parked since.
 //
+// ON READ UNCERTAINTY the tree is KEPT, not dropped: an unclassifiable tree falls through
+// to the put-back. The asymmetry is the point — putting back a tree that turns out to be
+// junk costs at worst an occupied slot, while leaving one that turns out to be real costs
+// the only copy of the unpublished delta at the next boot. It is the direction the
+// hydrate takes on the same read (an unreadable slot fails the hydrate rather than being
+// reclassified into a discard).
+//
 // A tree that cannot go back stays under its .sweeping- name for
 // ReclaimInterruptedDisplacedSweeps, and that is logged: it decides what the next boot
 // deletes, and a .sweeping- tree is garbage everywhere else. Junk left behind is not
@@ -1910,11 +1920,12 @@ func (m *Manager) sweepDisplaced(serverID string, stillPinned func() (bool, stri
 // slot: that park then fails with ENOTEMPTY and fails the hydrate, which deletes nothing
 // before its park (datatransfer.unpackAndSwap) and is simply retried.
 func (m *Manager) putBackSweptTree(serverID, displaced, trash, why string) {
-	if !hasWorkingSet(trash) {
-		// World-less junk is not worth putting back, and putting it back is actively
-		// harmful: it occupies the slot against a CONCURRENT sweep that is holding the
-		// real thing. Left under .sweeping-, where it is the garbage the boot reclaim
-		// expects — which is also what this sweep would have done with it.
+	if holds, err := sweptTreeHoldsWorkingSet(trash); err == nil && !holds {
+		// PROVABLY world-less junk is not worth putting back, and putting it back is
+		// actively harmful: it occupies the slot against a CONCURRENT sweep that is
+		// holding the real thing. Left under .sweeping-, where it is the garbage the boot
+		// reclaim expects — which is also what this sweep would have done with it.
+		// A tree that could not be classified falls through and is kept.
 		return
 	}
 	back := false

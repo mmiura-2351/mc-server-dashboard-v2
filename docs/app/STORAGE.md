@@ -865,12 +865,16 @@ still the one the snapshot packed; otherwise it renames the tree back into the s
 leaves it under its `.sweeping-<id>-*` name for the next boot to reclaim when it cannot.
 Two things have to hold for the tree to go back, and both are content, not names:
 
-- **The tree must hold a working set** — the same "at least one entry that is not
-  Worker-private generation state" test used everywhere else. Running-id snapshots take no
-  per-server reservation, so *two* sweeps for one id can be in this window at once, and
-  world-less junk put back by one of them would occupy the slot against the other, which
-  may be holding the hydrate's live set. Junk is left under `.sweeping-` instead, which is
-  what the sweep was going to do with it anyway.
+- **The tree must hold a working set** — by the *same rule the hydrate applies to the
+  slot*: it must be a directory (checked without following a symlink, so a link to a
+  populated directory is junk on both sides) holding at least one entry that is not
+  Worker-private generation state. Running-id snapshots take no per-server reservation, so
+  *two* sweeps for one id can be in this window at once, and world-less junk put back by
+  one of them would occupy the slot against the other, which may be holding the hydrate's
+  live set. Junk is left under `.sweeping-` instead, which is what the sweep was going to
+  do with it anyway. A tree the Worker cannot *read* is **kept**, not dropped: a transient
+  `EACCES`/`EMFILE`/`EIO` must never become "delete this at the next boot", the same
+  direction an unreadable slot takes on the hydrate side.
 - **The slot must be empty.** Not "must hold nothing worth keeping": a directory rename
   cannot replace an existing directory here, so marker-only junk in the slot blocks the
   put-back whatever the sweep thinks of it, and emptying the slot first is not available to
