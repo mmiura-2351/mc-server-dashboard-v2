@@ -571,6 +571,86 @@ func assertScratchRoot(t *testing.T, m *Manager, want ...string) {
 	}
 }
 
+// TWO running-id sweeps for one id can overlap — they take no cross-stream reservation
+// (#829 item 4) — and a sweep that is holding world-less junk must not put that junk back
+// into the slot, because the slot is then occupied against the sweep that is holding the
+// real recovery copy (issue #3118, Codex round 1).
+//
+// The interleaving, with marker-only junk J routinely in the slot, L the hydrate's live
+// set and both sweeps pinned on the working dir:
+//
+//	B Lstat J -> B renames J out (slot empty) -> the hydrate parks L in the slot ->
+//	A renames L out -> B's re-check fails, B puts J back -> A's re-check fails, A finds
+//	the slot occupied and leaves L under .sweeping-, which the next boot deletes.
+//
+// The slot then holds junk and L is gone, although no snapshot published it. A put-back
+// therefore carries a tree only when that tree holds a working set.
+func TestOverlappingDisplacedSweepsKeepTheRecoveryCopy(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	live := seedScratch(t, m, "s1")
+	slot := filepath.Join(m.scratchDir, ".displaced-s1")
+	if err := os.MkdirAll(slot, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeGeneration(slot, 3); err != nil {
+		t.Fatal(err)
+	}
+	replaced := func() (bool, string) { return false, "working_dir_replaced" }
+
+	lTaken, jBack, aDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	renames := 0
+	restore := renameSweptTree
+	renameSweptTree = func(from, to string) error {
+		// Ordered by the channel handoffs below: B renames first and then blocks until A,
+		// started here, has renamed too.
+		renames++
+		if err := restore(from, to); err != nil {
+			return err
+		}
+		if renames == 1 {
+			// B has emptied the slot. The hydrate finds it empty and parks its live set
+			// there by the ordinary displace path.
+			replaceWorkingDirLikeHydrate(t, live, 7)
+			go func() {
+				m.sweepDisplaced("s1", func() (bool, string) {
+					close(lTaken) // A has taken L out of the slot
+					<-jBack       // ...and answers only once B has had its put-back
+					return replaced()
+				})
+				close(aDone)
+			}()
+			<-lTaken
+		}
+		return nil
+	}
+	t.Cleanup(func() { renameSweptTree = restore })
+
+	m.sweepDisplaced("s1", replaced) // sweep B, holding the junk
+	close(jBack)
+	<-aDone
+
+	if renames != 2 {
+		t.Fatalf("sweep renames = %d, want 2: the two sweeps did not overlap and this test proves nothing", renames)
+	}
+	// seedScratch wrote "world" into the live set and replaceWorkingDirLikeHydrate renamed
+	// that very directory into the slot, so reading it back proves L is what survived.
+	got, err := os.ReadFile(filepath.Join(slot, "level.dat"))
+	if err != nil || string(got) != "world" {
+		t.Fatalf("slot level.dat = %q (err %v), want %q: a sweep put world-less junk back "+
+			"into the slot, so the sweep holding the hydrate's recovery copy had to leave it "+
+			"under .sweeping- for the next boot to delete (issue #3118)", got, err, "world")
+	}
+	// The junk is where the boot reclaim expects it, and it is the only thing left there.
+	left, err := filepath.Glob(filepath.Join(m.scratchDir, sweepingPrefix+"s1-*"))
+	if err != nil || len(left) != 1 {
+		t.Fatalf("renamed trees = %v (err %v), want exactly one (the junk)", left, err)
+	}
+	if hasWorkingSet(left[0]) {
+		t.Fatalf("%s holds a working set, want the world-less junk: the sweeps swapped which "+
+			"tree was left for the boot reclaim", filepath.Base(left[0]))
+	}
+}
+
 // A tree the sweep cannot put back stays WHOLE under its .sweeping-<id>-* name for the
 // boot reclaim (issue #3118). With the working dir replaced mid-sweep the tree may be a
 // recovery copy the snapshot never published, and a slot that has filled again holds
