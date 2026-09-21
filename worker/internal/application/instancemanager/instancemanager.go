@@ -330,6 +330,31 @@ type Manager struct {
 	// files and take no reservation.
 	reserved map[string]bool
 
+	// sweepingSlot marks a server id whose .displaced-<id> slot a displaced sweep is
+	// currently deciding about — from the Lstat that finds the tree through the rename
+	// out of the slot to the put-back or the commit to remove (issue #3118, PR #3121
+	// review round 3). Only that window is claimed, not the world-sized traversal that
+	// follows it.
+	//
+	// It exists because the slot holds ONE tree and two sweeps for one id can reach it
+	// at once: running-id snapshots take no reservation (#829 item 4), so an old dropped
+	// stream's sweep can overlap a newer one's. While both are past their rename,
+	// whatever one of them puts back occupies the slot against the other — and the other
+	// may be holding the hydrate's live recovery copy, which then goes under .sweeping-
+	// for the next boot to delete. No rule about the individual trees closes that: a tree
+	// whose classification FAILED is retained on purpose (putBackSweptTree), and that
+	// retention is what costs the other tree.
+	//
+	// The claim is NON-BLOCKING: a sweep that finds the id claimed declines, renaming
+	// nothing and leaving the tree where it is. Declining is the established posture for
+	// this GC — a declined sweep leaks one tree until the next successful snapshot
+	// reclaims it (#906/#2291) — and it keeps a sweep from waiting on another sweep's
+	// filesystem work. It is NOT the per-id reservation #829 item 4 declined: that one
+	// would span a whole running-id snapshot and reject concurrent commands with BUSY,
+	// while this is in-process, covers a handful of syscalls in the GC tail, and refuses
+	// no command.
+	sweepingSlot map[string]bool
+
 	// events/logs/metrics are the merged streams the session forwards. Per-instance
 	// pumps fan their events into them (FR-MON-2, FR-MON-3).
 	events  chan session.StatusEvent
@@ -372,6 +397,7 @@ func New(drivers map[string]execution.ExecutionDriver, scratchDir string, openCo
 		startCmds:          map[string]session.Command{},
 		orphans:            map[string]orphanEntry{},
 		reserved:           map[string]bool{},
+		sweepingSlot:       map[string]bool{},
 		events:             make(chan session.StatusEvent, 32),
 		logs:               make(chan session.LogEvent, 256),
 		metrics:            make(chan session.MetricsEvent, 32),
@@ -1846,18 +1872,48 @@ func (m *Manager) removeScratch(serverID string) {
 // and the boot reclaim is deliberately not taught to put trees back — a .sweeping- tree
 // is garbage in every other case.
 func (m *Manager) sweepDisplaced(serverID string, stillPinned func() (bool, string)) {
+	trash, remove := m.detachDisplacedTree(serverID, stillPinned)
+	if !remove {
+		return
+	}
+	// Make the rename durable before the traversal unlinks anything, so a power loss
+	// cannot roll it back over a half-deleted tree and put that tree back in the slot.
+	// Both still happen after the rename and before the first unlink (#2799); they run
+	// OUTSIDE the slot claim because they no longer touch the slot, and a world-sized
+	// traversal is not something another sweep for this id should have to wait behind.
+	if err := syncSweepScratchRoot(m.scratchDir); err != nil {
+		return
+	}
+	_ = removeDisplacedTree(trash)
+}
+
+// detachDisplacedTree performs the slot-visible half of a sweep under this id's slot
+// claim (sweepingSlot): find the tree, rename it out of the slot, re-check the caller's
+// identity pin and either hand the tree over for removal or put it back. It reports the
+// name the tree now sits under and whether removing it is justified.
+//
+// Everything that reads or writes .displaced-<id> is inside the claim, and nothing else
+// is. A sweep that cannot take the claim returns having touched nothing: the tree it
+// would have swept stays in the slot, and the next successful snapshot for the id sweeps
+// it instead. That decline is what keeps two sweeps from deciding about one slot at once,
+// which is the precondition for a put-back of one tree costing the other (issue #3118).
+func (m *Manager) detachDisplacedTree(serverID string, stillPinned func() (bool, string)) (string, bool) {
+	if !m.claimDisplacedSlot(serverID) {
+		return "", false
+	}
+	defer m.releaseDisplacedSlot(serverID)
 	displaced := filepath.Join(m.scratchDir, displacedPrefix+serverID)
 	if _, err := os.Lstat(displaced); err != nil {
-		return
+		return "", false
 	}
 	trash, err := os.MkdirTemp(m.scratchDir, sweepingPrefix+serverID+"-*")
 	if err != nil {
-		return
+		return "", false
 	}
 	// MkdirTemp creates the dir; remove it so Rename can use the name.
 	_ = os.Remove(trash)
 	if err := renameSweptTree(displaced, trash); err != nil {
-		return
+		return "", false
 	}
 	pinned, why := true, ""
 	if stillPinned != nil {
@@ -1865,14 +1921,29 @@ func (m *Manager) sweepDisplaced(serverID string, stillPinned func() (bool, stri
 	}
 	if !pinned {
 		m.putBackSweptTree(serverID, displaced, trash, why)
-		return
+		return "", false
 	}
-	// Make the rename durable before the traversal unlinks anything, so a power loss
-	// cannot roll it back over a half-deleted tree and put that tree back in the slot.
-	if err := syncSweepScratchRoot(m.scratchDir); err != nil {
-		return
+	return trash, true
+}
+
+// claimDisplacedSlot takes this id's displaced-slot claim for the window above, reporting
+// whether it was free. Mirrors reserve/release, and like them it must be paired with
+// releaseDisplacedSlot on every exit path. It never waits: see the sweepingSlot field.
+func (m *Manager) claimDisplacedSlot(serverID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.sweepingSlot[serverID] {
+		return false
 	}
-	_ = removeDisplacedTree(trash)
+	m.sweepingSlot[serverID] = true
+	return true
+}
+
+// releaseDisplacedSlot drops the claim so the next sweep for the id can take it.
+func (m *Manager) releaseDisplacedSlot(serverID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.sweepingSlot, serverID)
 }
 
 // putBackSweptTree renames a tree the sweep had taken out of the .displaced-<id> slot
@@ -1910,6 +1981,12 @@ func (m *Manager) sweepDisplaced(serverID string, stillPinned func() (bool, stri
 // the only copy of the unpublished delta at the next boot. It is the direction the
 // hydrate takes on the same read (an unreadable slot fails the hydrate rather than being
 // reclassified into a discard).
+//
+// That retention is only safe because THIS id's slot claim (sweepingSlot) makes this
+// function the only sweep deciding about the slot: the tree put back here can no longer
+// occupy the slot against a concurrent sweep holding a proven recovery tree. The
+// invariant the pair upholds: a tree that holds a working set is never deleted because
+// some OTHER tree's classification was junk or uncertain.
 //
 // A tree that cannot go back stays under its .sweeping- name for
 // ReclaimInterruptedDisplacedSweeps, and that is logged: it decides what the next boot

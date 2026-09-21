@@ -883,6 +883,20 @@ Two things have to hold for the tree to go back, and both are content, not names
   park its live set in between, and the removal would take the live set). Only a hydrate,
   under its per-id reservation, clears the slot.
 
+**One sweep decides about the slot at a time.** Keeping an unclassifiable tree is only safe
+because no *other* sweep can be deciding about the same slot meanwhile. Running-id snapshots
+take no per-server reservation, so two sweeps for one id can reach it at once — and while
+both sit between their rename and their decision, whatever one of them puts back occupies
+the slot against the other, which may be holding the hydrate's live recovery copy. The
+Worker therefore claims the id's slot for that window, in memory, and a sweep that finds it
+claimed **declines**: it renames nothing and the tree stays where it is, to be swept by the
+next successful snapshot for the id. The claim covers only the few syscalls from finding the
+tree to putting it back or committing to remove it — never the world-sized traversal — and
+it refuses no command, so it is not the per-server reservation CONTROL_PLANE.md Section 4.1
+records as deliberately not taken. The invariant it buys, together with the two content
+rules above: **a tree that holds a working set is never deleted because some other tree's
+classification came out junk or uncertain.**
+
 Both outcomes are logged, since they decide what the next boot deletes:
 
 ```
