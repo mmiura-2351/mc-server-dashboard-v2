@@ -369,10 +369,11 @@ def test_a_written_line_carries_no_non_ascii_byte() -> None:
 def test_an_astral_value_is_written_as_a_surrogate_pair() -> None:
     # Above the BMP, Properties.store emits one escape per UTF-16 unit; a single
     # five-digit escape would read back as four digits plus a stray literal.
-    # _parse resolves each half to a lone surrogate -- Java's own reader pairs
-    # them back into the character, which is what the server sees.
+    # _load_convert pairs the two halves back into the character, as
+    # Properties.load does, so the write round-trips (issue #3120).
     out = apply_overrides(b"", {"motd": "\U0001f600"})
     assert out == rb"motd=\uD83D\uDE00" + b"\n"
+    assert _get_property(out, "motd") == "\U0001f600"
 
 
 def test_a_lone_surrogate_value_round_trips_without_raising() -> None:
@@ -689,7 +690,9 @@ def test_apply_platform_properties_preserves_a_non_utf8_line() -> None:
 # added here but not there leaves the invariant unpinned. The Worker's table runs
 # through its latin-1 ``Parse``, the decode ``_load_convert`` uses; its reader for
 # a 1.20+ server (``ParseUTF8``, issue #3116) decodes a valid-UTF-8 non-ASCII
-# byte differently, so such an input has no row here.
+# byte differently, so such an input has no row here. An UNPAIRED surrogate
+# escape has no row either: a Python string holds the lone surrogate Java keeps,
+# while a Go string cannot, so the Worker reads U+FFFD there (issue #3120).
 PARITY_CASES: list[tuple[str, bytes, dict[str, str]]] = [
     ("equals separator", b"server-port=25599\n", {"server-port": "25599"}),
     ("colon separator", b"server-port:25599\n", {"server-port": "25599"}),
@@ -820,6 +823,11 @@ PARITY_CASES: list[tuple[str, bytes, dict[str, str]]] = [
         "a malformed unicode escape keeps the u literal",
         rb"motd=a\uZZZZb" + b"\n",
         {"motd": "auZZZZb"},
+    ),
+    (
+        "a surrogate pair escape is one character",
+        rb"motd=\uD83D\uDE00" + b"\n",
+        {"motd": "\U0001f600"},
     ),
     ("an empty file has no properties", b"", {}),
 ]

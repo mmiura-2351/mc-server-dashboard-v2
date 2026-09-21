@@ -1310,7 +1310,11 @@ type StartServer struct {
 	// (ARCHITECTURE.md Section 7.3).
 	JarRelpath string `protobuf:"bytes,2,opt,name=jar_relpath,json=jarRelpath,proto3" json:"jar_relpath,omitempty"`
 	// minecraft_version lets the Worker pick the Java runtime (FR-EXE-5); the API
-	// does not choose the java binary.
+	// does not choose the java binary. It also selects the charset the Worker
+	// reads the server's server.properties in for RCON -- latin-1 before
+	// Minecraft 1.20, UTF-8 first from 1.20 -- because that is the charset the
+	// server itself loads the file in, and the two disagree on a non-ASCII
+	// rcon.password (issue #3116).
 	MinecraftVersion string `protobuf:"bytes,3,opt,name=minecraft_version,json=minecraftVersion,proto3" json:"minecraft_version,omitempty"`
 	// launch_mode selects how the Worker launches the server (a vanilla/Paper JAR
 	// launch vs a Forge args-file launch with a supervised installer step). It is
