@@ -13,7 +13,10 @@ import (
 // sync: a case added here but not there leaves the invariant unpinned. The table
 // runs through Parse, whose latin-1 decode is the API's too; ParseUTF8 reads a
 // valid-UTF-8 non-ASCII byte differently from both (issue #3116), so such an
-// input is pinned in TestParseUTF8DecodesAsMinecraft120Does, not here.
+// input is pinned in TestParseUTF8DecodesAsMinecraft120Does, not here. An
+// UNPAIRED surrogate escape has no row either: a Go string cannot hold the lone
+// UTF-16 unit Java keeps, so it is U+FFFD here while the API's Python string
+// holds the surrogate itself (issue #3120); TestParseSurrogateEscapes pins it.
 var parityCases = []struct {
 	name  string
 	input string
@@ -210,6 +213,11 @@ var parityCases = []struct {
 		want:  map[string]string{"motd": "auZZZZb"},
 	},
 	{
+		name:  "a surrogate pair escape is one character",
+		input: `motd=\uD83D\uDE00` + "\n",
+		want:  map[string]string{"motd": "\U0001F600"},
+	},
+	{
 		name:  "an empty file has no properties",
 		input: "",
 		want:  map[string]string{},
@@ -235,7 +243,7 @@ func TestParseParity(t *testing.T) {
 // TestParseUTF8KeepsTheGrammar runs the parity table through the 1.20+ reader:
 // the charset changes how a non-ASCII byte decodes, never the grammar, and the
 // table's one non-ASCII input is not valid UTF-8, so it falls back to latin-1.
-// The other 38 inputs are pure ASCII and are asserted against the same wants
+// The other 39 inputs are pure ASCII and are asserted against the same wants
 // TestParseParity asserts for Parse, which is what pins that the two readers
 // agree on every ASCII key and value.
 func TestParseUTF8KeepsTheGrammar(t *testing.T) {
@@ -299,6 +307,40 @@ func TestParseUTF8DecodesAsMinecraft120Does(t *testing.T) {
 				if got[k] != want {
 					t.Errorf("ParseUTF8(%q)[%q] = %q, want %q", tc.input, k, got[k], want)
 				}
+			}
+		})
+	}
+}
+
+// TestParseSurrogateEscapes pins how a \uD800-\uDFFF escape decodes. A PAIR --
+// a high half immediately followed by a low half, which is how
+// Properties.store spells a supplementary character and therefore how a
+// pre-1.20 server's own rewrite spells one -- is the single character its two
+// UTF-16 units make, as Properties.load reads it (issue #3120). An UNPAIRED
+// half is U+FFFD: Java holds the lone unit, which has no UTF-8 spelling for the
+// Worker to send. That last row is the one place the two readers part, so these
+// cases live here and not in parityCases.
+func TestParseSurrogateEscapes(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"a pair is one character", `motd=\uD83D\uDE00`, "\U0001F600"},
+		{"text after a pair is kept", `motd=\uD83D\uDE00x`, "\U0001F600x"},
+		{"text before a pair is kept", `motd=x\uD83D\uDE00`, "x\U0001F600"},
+		{"two pairs in a row", `motd=\uD83D\uDE00\uD83D\uDE01`, "\U0001F600\U0001F601"},
+		{"a high half followed by a BMP escape is not a pair", `motd=\uD83D\u0041`, "\uFFFDA"},
+		{"a high half followed by another high half is not a pair", `motd=\uD83D\uD83D\uDE00`, "\uFFFD\U0001F600"},
+		{"a high half followed by literal text is not a pair", `motd=\uD83Dx`, "\uFFFDx"},
+		{"a high half at the end of the value is not a pair", `motd=\uD83D`, "\uFFFD"},
+		{"a lone low half is not a pair", `motd=\uDE00`, "\uFFFD"},
+		{"a low half followed by a high half is not a pair", `motd=\uDE00\uD83D`, "\uFFFD\uFFFD"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Parse([]byte(tc.input + "\n"))
+			if got["motd"] != tc.want {
+				t.Errorf("Parse(%q)[\"motd\"] = %q, want %q", tc.input, got["motd"], tc.want)
 			}
 		})
 	}

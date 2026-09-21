@@ -761,7 +761,11 @@ class StartServer(_message.Message):
     """
     minecraft_version: _builtins.str
     """minecraft_version lets the Worker pick the Java runtime (FR-EXE-5); the API
-    does not choose the java binary.
+    does not choose the java binary. It also selects the charset the Worker
+    reads the server's server.properties in for RCON -- latin-1 before
+    Minecraft 1.20, UTF-8 first from 1.20 -- because that is the charset the
+    server itself loads the file in, and the two disagree on a non-ASCII
+    rcon.password (issue #3116).
     """
     launch_mode: Global___LaunchMode.ValueType
     """launch_mode selects how the Worker launches the server (a vanilla/Paper JAR

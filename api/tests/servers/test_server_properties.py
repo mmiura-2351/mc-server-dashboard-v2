@@ -369,10 +369,63 @@ def test_a_written_line_carries_no_non_ascii_byte() -> None:
 def test_an_astral_value_is_written_as_a_surrogate_pair() -> None:
     # Above the BMP, Properties.store emits one escape per UTF-16 unit; a single
     # five-digit escape would read back as four digits plus a stray literal.
-    # _parse resolves each half to a lone surrogate -- Java's own reader pairs
-    # them back into the character, which is what the server sees.
+    # _load_convert pairs the two halves back into the character, as
+    # Properties.load does, so the write round-trips (issue #3120).
     out = apply_overrides(b"", {"motd": "\U0001f600"})
     assert out == rb"motd=\uD83D\uDE00" + b"\n"
+    assert _get_property(out, "motd") == "\U0001f600"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        pytest.param(rb"\uD83D\uDE00", "\U0001f600", id="a pair is one character"),
+        pytest.param(rb"\uD83D\uDE00x", "\U0001f600x", id="text after a pair is kept"),
+        pytest.param(rb"x\uD83D\uDE00", "x\U0001f600", id="text before a pair is kept"),
+        pytest.param(
+            rb"\uD83D\uDE00\uD83D\uDE01",
+            "\U0001f600\U0001f601",
+            id="two pairs in a row",
+        ),
+        pytest.param(
+            rb"\uD83D\u0041",
+            "\ud83dA",
+            id="a high half followed by a BMP escape is not a pair",
+        ),
+        pytest.param(
+            rb"\uD83D\uD83D\uDE00",
+            "\ud83d\U0001f600",
+            id="a high half followed by another high half is not a pair",
+        ),
+        pytest.param(
+            rb"\uD83Dx",
+            "\ud83dx",
+            id="a high half followed by literal text is not a pair",
+        ),
+        pytest.param(
+            rb"\uD83D",
+            "\ud83d",
+            id="a high half at the end of the value is not a pair",
+        ),
+        pytest.param(rb"\uDE00", "\ude00", id="a lone low half is not a pair"),
+        pytest.param(
+            rb"\uDE00\uD83D",
+            "\ude00\ud83d",
+            id="a low half followed by a high half is not a pair",
+        ),
+    ],
+)
+def test_surrogate_escapes_are_paired_only_when_adjacent(
+    value: bytes, expected: str
+) -> None:
+    # A high-surrogate escape IMMEDIATELY followed by a low-surrogate one is the
+    # pair Properties.store writes a supplementary character as, so it reads back
+    # as that character (issue #3120). Anything else keeps the lone surrogate a
+    # Java string holds -- a Python string carries one too, so nothing collapses
+    # and the decode stays injective. The Worker's reader gives U+FFFD there
+    # instead (a Go string cannot hold a lone UTF-16 unit), which is why these
+    # cases live here rather than in PARITY_CASES.
+    assert _get_property(b"motd=" + value + b"\n", "motd") == expected
 
 
 def test_a_lone_surrogate_value_round_trips_without_raising() -> None:
@@ -689,7 +742,9 @@ def test_apply_platform_properties_preserves_a_non_utf8_line() -> None:
 # added here but not there leaves the invariant unpinned. The Worker's table runs
 # through its latin-1 ``Parse``, the decode ``_load_convert`` uses; its reader for
 # a 1.20+ server (``ParseUTF8``, issue #3116) decodes a valid-UTF-8 non-ASCII
-# byte differently, so such an input has no row here.
+# byte differently, so such an input has no row here. An UNPAIRED surrogate
+# escape has no row either: a Python string holds the lone surrogate Java keeps,
+# while a Go string cannot, so the Worker reads U+FFFD there (issue #3120).
 PARITY_CASES: list[tuple[str, bytes, dict[str, str]]] = [
     ("equals separator", b"server-port=25599\n", {"server-port": "25599"}),
     ("colon separator", b"server-port:25599\n", {"server-port": "25599"}),
@@ -820,6 +875,11 @@ PARITY_CASES: list[tuple[str, bytes, dict[str, str]]] = [
         "a malformed unicode escape keeps the u literal",
         rb"motd=a\uZZZZb" + b"\n",
         {"motd": "auZZZZb"},
+    ),
+    (
+        "a surrogate pair escape is one character",
+        rb"motd=\uD83D\uDE00" + b"\n",
+        {"motd": "\U0001f600"},
     ),
     ("an empty file has no properties", b"", {}),
 ]

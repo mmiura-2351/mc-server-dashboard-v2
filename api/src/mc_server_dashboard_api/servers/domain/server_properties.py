@@ -178,6 +178,33 @@ def _ends_with_odd_backslash(line: bytes) -> bool:
     return (len(line) - len(line.rstrip(b"\\"))) % 2 == 1
 
 
+def _unicode_escape(text: str, offset: int) -> tuple[str, int] | None:
+    """Decode the ``\\uXXXX`` escape whose four hex digits start at *offset*.
+
+    Returns the character it spells and how many characters from *offset* were
+    consumed, or ``None`` when those four are not hex digits. A high-surrogate
+    escape IMMEDIATELY followed by a low-surrogate one spells ONE supplementary
+    character -- the pair of UTF-16 units ``Properties.store`` writes it as --
+    so both escapes are consumed and combined into it, which is what
+    ``Properties.load`` reads and what makes a :func:`_escape_char` write of an
+    astral character round-trip (issue #3120). An unpaired half stays the lone
+    surrogate a Java string holds; a Python string carries one, so the decode
+    loses nothing and stays injective.
+    """
+
+    digits = text[offset : offset + 4]
+    if len(digits) != 4 or not all(d in _HEX_DIGITS for d in digits):
+        return None
+    unit = int(digits, 16)
+    if 0xD800 <= unit <= 0xDBFF and text[offset + 4 : offset + 6] == "\\u":
+        low_digits = text[offset + 6 : offset + 10]
+        if len(low_digits) == 4 and all(d in _HEX_DIGITS for d in low_digits):
+            low = int(low_digits, 16)
+            if 0xDC00 <= low <= 0xDFFF:
+                return chr(0x10000 + ((unit - 0xD800) << 10) + (low - 0xDC00)), 10
+    return chr(unit), 4
+
+
 def _load_convert(raw: bytes) -> str:
     """Decode *raw* as latin-1 and resolve the ``.properties`` escapes.
 
@@ -214,12 +241,13 @@ def _load_convert(raw: bytes) -> str:
         char = text[i]
         i += 1
         if char == "u":
-            digits = text[i : i + 4]
-            if len(digits) == 4 and all(d in _HEX_DIGITS for d in digits):
-                out.append(chr(int(digits, 16)))
-                i += 4
-            else:
+            escape = _unicode_escape(text, i)
+            if escape is None:
                 out.append("u")
+            else:
+                decoded, consumed = escape
+                out.append(decoded)
+                i += consumed
         else:
             out.append({"t": "\t", "r": "\r", "n": "\n", "f": "\f"}.get(char, char))
     return "".join(out)

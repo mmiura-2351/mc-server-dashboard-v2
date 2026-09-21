@@ -39,6 +39,7 @@ package javaproperties
 
 import (
 	"strings"
+	"unicode/utf16"
 	"unicode/utf8"
 )
 
@@ -183,10 +184,14 @@ func splitKeyValue(line []byte) (key, value string) {
 // every caller into an error path (the Minecraft server refuses such a file
 // outright, so no value we could return would match it anyway).
 //
-// A \uD800-\uDFFF escape spells half a surrogate pair, which a Go string cannot
-// hold, so it becomes U+FFFD here where Java keeps the lone surrogate. No key
-// the Worker reads can be spelled that way and the result is still stable, so
-// this is the one place the parse is not byte-identical to Java's.
+// A \uD800-\uDFFF escape spells one UTF-16 unit of a surrogate pair. Two such
+// escapes side by side -- a high half then a low half -- spell one supplementary
+// character, which is how Properties.store writes anything above the BMP and so
+// how a pre-1.20 server's own boot rewrite spells it; they are combined here
+// into that character, as Properties.load does (issue #3120). An UNPAIRED half
+// becomes U+FFFD, since a Go string cannot hold the lone unit Java keeps; that
+// is the one place the parse is not byte-identical to Java's, and the result is
+// still stable.
 func loadConvert(raw []byte) string {
 	var b strings.Builder
 	b.Grow(len(raw))
@@ -199,9 +204,9 @@ func loadConvert(raw []byte) string {
 		i++
 		switch esc := raw[i]; esc {
 		case 'u':
-			if v, ok := hex4(raw, i+1); ok {
+			if v, n, ok := unicodeEscape(raw, i+1); ok {
 				b.WriteRune(v)
-				i += 4
+				i += n
 			} else {
 				b.WriteByte('u')
 			}
@@ -220,6 +225,29 @@ func loadConvert(raw []byte) string {
 		}
 	}
 	return b.String()
+}
+
+// unicodeEscape decodes the \uXXXX escape whose four hex digits start at off,
+// returning the rune it spells and how many bytes from off it consumed. A
+// high-surrogate escape IMMEDIATELY followed by a low-surrogate one spells a
+// single supplementary character, so both escapes are consumed and the pair is
+// decoded into it (issue #3120); utf16.DecodeRune settles which ordering counts
+// as a pair, returning utf8.RuneError for anything else. An unpaired half is
+// returned as the surrogate it is, which strings.Builder.WriteRune writes as
+// U+FFFD.
+func unicodeEscape(raw []byte, off int) (r rune, consumed int, ok bool) {
+	v, ok := hex4(raw, off)
+	if !ok {
+		return 0, 0, false
+	}
+	if utf16.IsSurrogate(v) && off+6 <= len(raw) && raw[off+4] == '\\' && raw[off+5] == 'u' {
+		if lo, ok := hex4(raw, off+6); ok {
+			if paired := utf16.DecodeRune(v, lo); paired != utf8.RuneError {
+				return paired, 10, true
+			}
+		}
+	}
+	return v, 4, true
 }
 
 // hex4 decodes the four hex digits at off into the code point they spell.

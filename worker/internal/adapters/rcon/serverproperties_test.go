@@ -133,6 +133,14 @@ func TestOpenFromWorkingDirReadsThePasswordAsTheServerVersionDoes(t *testing.T) 
 		{"1.20 falls back to latin-1 for a file that is not UTF-8", "1.20.1", "caf\xe9", "café"},
 		{"before 1.20 reads latin-1", "1.19.4", "caf\xc3\xa9", "cafÃ©"},
 		{"an unknown version reads latin-1", "", "caf\xc3\xa9", "cafÃ©"},
+		// A pre-1.20 server rewrites the file with Properties.store(OutputStream)
+		// at every start, which re-escapes every non-ASCII character as \uXXXX --
+		// one escape per UTF-16 unit, so a supplementary character is spelled as
+		// the surrogate PAIR its two units make. That spelling is therefore what
+		// such a server always runs with once the password holds one, and
+		// Properties.load pairs the two escapes back into the character (issue
+		// #3120).
+		{"before 1.20 pairs a surrogate-pair escape", "1.19.4", `pw\uD83D\uDE00`, "pw\U0001F600"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// A fakeServer accepts exactly one connection, so each case needs its own.
