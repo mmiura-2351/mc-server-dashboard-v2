@@ -245,8 +245,9 @@ def _load_convert(raw: bytes) -> str:
             if escape is None:
                 out.append("u")
             else:
-                out.append(escape[0])
-                i += escape[1]
+                decoded, consumed = escape
+                out.append(decoded)
+                i += consumed
         else:
             out.append({"t": "\t", "r": "\r", "n": "\n", "f": "\f"}.get(char, char))
     return "".join(out)
