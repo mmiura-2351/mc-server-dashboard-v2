@@ -376,6 +376,58 @@ def test_an_astral_value_is_written_as_a_surrogate_pair() -> None:
     assert _get_property(out, "motd") == "\U0001f600"
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        pytest.param(rb"\uD83D\uDE00", "\U0001f600", id="a pair is one character"),
+        pytest.param(rb"\uD83D\uDE00x", "\U0001f600x", id="text after a pair is kept"),
+        pytest.param(rb"x\uD83D\uDE00", "x\U0001f600", id="text before a pair is kept"),
+        pytest.param(
+            rb"\uD83D\uDE00\uD83D\uDE01",
+            "\U0001f600\U0001f601",
+            id="two pairs in a row",
+        ),
+        pytest.param(
+            rb"\uD83D\u0041",
+            "\ud83dA",
+            id="a high half followed by a BMP escape is not a pair",
+        ),
+        pytest.param(
+            rb"\uD83D\uD83D\uDE00",
+            "\ud83d\U0001f600",
+            id="a high half followed by another high half is not a pair",
+        ),
+        pytest.param(
+            rb"\uD83Dx",
+            "\ud83dx",
+            id="a high half followed by literal text is not a pair",
+        ),
+        pytest.param(
+            rb"\uD83D",
+            "\ud83d",
+            id="a high half at the end of the value is not a pair",
+        ),
+        pytest.param(rb"\uDE00", "\ude00", id="a lone low half is not a pair"),
+        pytest.param(
+            rb"\uDE00\uD83D",
+            "\ude00\ud83d",
+            id="a low half followed by a high half is not a pair",
+        ),
+    ],
+)
+def test_surrogate_escapes_are_paired_only_when_adjacent(
+    value: bytes, expected: str
+) -> None:
+    # A high-surrogate escape IMMEDIATELY followed by a low-surrogate one is the
+    # pair Properties.store writes a supplementary character as, so it reads back
+    # as that character (issue #3120). Anything else keeps the lone surrogate a
+    # Java string holds -- a Python string carries one too, so nothing collapses
+    # and the decode stays injective. The Worker's reader gives U+FFFD there
+    # instead (a Go string cannot hold a lone UTF-16 unit), which is why these
+    # cases live here rather than in PARITY_CASES.
+    assert _get_property(b"motd=" + value + b"\n", "motd") == expected
+
+
 def test_a_lone_surrogate_value_round_trips_without_raising() -> None:
     # An unpaired surrogate is outside printable ASCII too, so it is written as
     # the escape Properties.store emits, instead of reaching a strict encoder.
