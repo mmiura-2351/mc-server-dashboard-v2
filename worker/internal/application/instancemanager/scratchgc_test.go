@@ -617,6 +617,7 @@ func TestOverlappingDisplacedSweepsKeepTheRecoveryCopy(t *testing.T) {
 			aRenamed, aDone, bDecided := make(chan struct{}), make(chan struct{}), make(chan struct{})
 			var mu sync.Mutex
 			renames := 0
+			aStarted := false
 			bTrash := ""
 			restoreRename, restoreRead := renameSweptTree, readSweptTree
 			renameSweptTree = func(from, to string) error {
@@ -635,6 +636,7 @@ func TestOverlappingDisplacedSweepsKeepTheRecoveryCopy(t *testing.T) {
 				// B has emptied the slot. The hydrate finds it empty and parks its live set
 				// there by the ordinary displace path, and sweep A starts on it.
 				replaceWorkingDirLikeHydrate(t, live, 7)
+				aStarted = true
 				go func() {
 					m.sweepDisplaced("s1", replaced)
 					close(aDone)
@@ -661,7 +663,11 @@ func TestOverlappingDisplacedSweepsKeepTheRecoveryCopy(t *testing.T) {
 
 			m.sweepDisplaced("s1", replaced) // sweep B, holding what was in the slot
 			close(bDecided)
-			<-aDone
+			if aStarted {
+				// Skipped when the first sweep never reached its rename, so a sweep that
+				// stops renaming fails the assertions below instead of parking here.
+				<-aDone
+			}
 
 			// seedScratch wrote "world" into the live set and replaceWorkingDirLikeHydrate
 			// renamed that very directory into the slot, so reading it back proves the
