@@ -309,7 +309,7 @@ func (c *Client) Snapshot(ctx context.Context, url, token, srcDir string, baseGe
 // .displaced-<id> already there KEEPS it and discards the working set it just displaced.
 // The rule rests on one near-provable fact — every successful snapshot for this id calls
 // sweepDisplaced, so a surviving .displaced-<id> means ZERO successful snapshots since it
-// was created. What survives a success is a CLASS, not a single case: a snapshot whose
+// was created. The exception to that is a CLASS, not a single case: a snapshot whose
 // SWEEP did not remove the tree. Three deliberate routes reach it — the running-id caller
 // declines before the sweep starts, because the working dir is no longer provably the tree
 // it packed (issue #2291); the sweep renames the tree out of the slot, re-checks that same
