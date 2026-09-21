@@ -309,9 +309,15 @@ func (c *Client) Snapshot(ctx context.Context, url, token, srcDir string, baseGe
 // .displaced-<id> already there KEEPS it and discards the working set it just displaced.
 // The rule rests on one near-provable fact — every successful snapshot for this id calls
 // sweepDisplaced, so a surviving .displaced-<id> means ZERO successful snapshots since it
-// was created. The one exception since issue #2291 is a snapshot that DECLINED its sweep
-// because a concurrent hydrate had replaced the tree it packed, which leaves a survivor
-// holding a published prefix plus the delta since that pack. Otherwise both trees are
+// was created. What survives a success is a CLASS, not a single case: a snapshot whose
+// SWEEP did not remove the tree. Three deliberate routes reach it — the running-id caller
+// declines before the sweep starts, because the working dir is no longer provably the tree
+// it packed (issue #2291); the sweep renames the tree out of the slot, re-checks that same
+// pin, finds the working dir replaced and puts the tree BACK (issue #3118); or another
+// sweep for this id already holds the id's slot claim, so this one declines without
+// renaming (issue #3118, PR #3121). A survivor from any of them MAY hold a published
+// prefix plus the delta since that pack, which is why oldest-wins keeps it — a successful
+// snapshot is not proof the tree is redundant. Otherwise both trees are
 // unpublished branches, and the discarded one can be strictly NEWER; the swap emits a
 // WARN naming both paths because of that. The rationale and the rejected alternatives
 // are in the swap block below and in issue #2278.
@@ -426,10 +432,14 @@ func unpackAndSwap(r io.Reader, destDir string, gen uint64, log *slog.Logger) er
 		//
 		// What that choice rests on, precisely: every snapshot that succeeds ON THIS
 		// WORKER for this id calls sweepDisplaced, so a .displaced-<id> still present at
-		// hydrate time means the retained tree was not published from here — bar the one
-		// case where a running-id snapshot declined its sweep because the tree it packed
-		// had been replaced meanwhile (issue #2291), which leaves a survivor holding a
-		// published prefix plus the delta since that pack. The scope
+		// hydrate time means the retained tree was not published from here — bar the class
+		// where a snapshot's SWEEP did not remove the tree, which three deliberate routes
+		// reach: a running-id snapshot declines before the sweep starts, because the working
+		// dir is no longer provably the tree it packed (issue #2291); the sweep re-checks
+		// that pin after renaming the tree out of the slot, finds the working dir replaced
+		// and puts the tree back (issue #3118); or another sweep for this id holds the id's
+		// slot claim, so this one declines without renaming (issue #3118). A survivor from
+		// any of them may hold a published prefix plus the delta since that pack. The scope
 		// matters — sweepDisplaced only ever walks this Worker's scratch, so a snapshot
 		// that succeeded for this id on ANOTHER Worker (an A->B->A re-placement) leaves
 		// this tree in place. The tree can therefore be arbitrarily old even while the id

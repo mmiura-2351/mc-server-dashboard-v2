@@ -624,11 +624,23 @@ below).
 while a `.displaced-<id>` is already present must choose between two trees, and
 **neither is guaranteed to be in the store**: a surviving `.displaced-<id>` almost always
 means that tree was never published *from this Worker* (any snapshot succeeding here calls
-`sweepDisplaced`, unless it declined the sweep because the working dir it packed had been
-replaced meanwhile — "when it declines", below — in which case the survivor holds a published
-prefix plus the delta since that pack), and the live set may itself be
-torn or simply un-snapshotted. The Worker retains the **first-displaced** tree and drops
-the newer one.
+`sweepDisplaced`), and the live set may itself be torn or simply un-snapshotted. The
+Worker retains the **first-displaced** tree and drops the newer one.
+
+The "almost" covers a class, not a single case: a snapshot whose **sweep did not remove
+the tree**. Three deliberate routes reach it, each described in full under "when it
+declines", below:
+
+- the running-id branch declines before the sweep starts, because the working directory is
+  no longer provably the one that snapshot packed (issue #2291);
+- the sweep renames the tree out of the slot, re-checks that same identity, finds the
+  working directory replaced and **puts the tree back** (issue #3118);
+- another sweep for the same id already holds that id's slot claim, so this one declines
+  **without renaming** (issue #3118).
+
+A survivor from any of the three may hold a published prefix plus the delta since that
+pack — which is why oldest-wins keeps it rather than reading a successful snapshot as
+proof the tree is redundant.
 
 Note the scope: `sweepDisplaced` only walks *this* Worker's scratch dir, so a snapshot
 that succeeded for the same server on **another** Worker (an A→B→A re-placement) does not
@@ -670,7 +682,8 @@ path and makes the rule unpredictable under partial failures.
 reclaimed only when a subsequent snapshot **succeeds** for the same server id
 (`sweepDisplaced`, called from both the running-id and stopped-id
 snapshot-success branches — the running-id branch reclaims only while the working
-directory is still the tree it packed, "when it declines" below): that success proves
+directory is still the tree it packed, and either branch declines while another sweep for
+the id holds that id's slot claim, "when it declines" below): that success proves
 the store holds a state newer than the displaced world, making the local copy
 redundant. The sweep first **renames** the tree out of the slot, to
 `<scratch>/.sweeping-<id>-<nonce>`, and only then removes it. Removing it in place would
