@@ -34,9 +34,12 @@ const hydratePrefix = ".hydrate-"
 // sweepingPrefix is the dot-prefixed name prefix sweepDisplaced renames a
 // .displaced-<id> tree to (".sweeping-<id>-*") before removing it, so the slot is
 // emptied atomically instead of being traversed in place (issue #2799). A tree still
-// under this name is one whose removal did not finish; it is garbage by construction,
-// since the sweep had already decided to delete it. Creation, the held-set skip and the
-// boot reclaim all live in this package and share this one constant.
+// under this name is one whose removal did not finish — or, since issue #3118, one whose
+// removal the sweep withdrew and left here, because the tree held no working set or the
+// slot was not empty to put it back into. The boot reclaim takes it either way; the cases
+// where such a tree was still worth something, and why none of them can be told apart
+// here, are in putBackSweptTree and ReclaimInterruptedDisplacedSweeps. Creation, the
+// held-set skip and the boot reclaim all live in this package and share this one constant.
 const sweepingPrefix = ".sweeping-"
 
 // isReservedScratchName reports whether a scratch-root entry name is one of the
@@ -226,7 +229,14 @@ func WarnOrphanDisplacedTrees(scratchDir string, held []session.HeldServer, log 
 // (issue #2799): a displaced tree sweepDisplaced renamed out of its slot but did not
 // finish removing, because the Worker crashed mid-traversal or the removal failed. It
 // runs once at boot, where it is unconditional: no sweep is in flight yet, and the sweep
-// had already decided each such tree was garbage. Nothing else reclaims one — a crash
+// had already decided each such tree was garbage. It stays unconditional now that a sweep
+// can also leave one behind by withdrawing its removal and having nowhere to put the tree
+// back (issue #3118), and it is deliberately not taught to put trees back itself: the
+// withdrawn case, the crash mid-traversal and a power loss inside the sweep's own
+// put-back window leave the same state on disk, and only the last of the three is a tree
+// the slot is missing. Restoring on that guess would resurrect trees a sweep was entitled
+// to delete, which is the unbounded leak this reclaim exists to stop.
+// Nothing else reclaims one — a crash
 // inside the stopped-id GC leaves it after the scratch dir is gone, so the id is never
 // advertised as held again and ReclaimDeletedScratches is never offered it. Best-effort:
 // an unreadable scratch root or a failed removal is ignored and retried at the next boot.
@@ -260,6 +270,47 @@ func hasWorkingSet(workingDir string) bool {
 		return false
 	}
 	return holdsWorkingSet(children)
+}
+
+// readSweptTree is the os.ReadDir sweptTreeHoldsWorkingSet lists a swept tree with,
+// indirected through a package var (mirroring datatransfer.readDir, which the hydrate's
+// slot rule reads through for the same reason) so a test can inject a read failure
+// without a chmod fixture — a mode-000 directory is readable by root, so a chmod-based
+// test silently stops asserting anything whenever the suite runs as root. Production
+// always uses os.ReadDir.
+var readSweptTree = os.ReadDir
+
+// sweptTreeHoldsWorkingSet reports whether a tree the running-id sweep took out of the
+// .displaced-<id> slot holds a world worth putting back (issue #3118).
+//
+// It is NOT hasWorkingSet, and the difference is the point. This is a durability
+// decision about one specific tree, so it applies the rule the HYDRATE applies to that
+// same slot (datatransfer.displacedSlotHoldsWorkingSet) — the two must agree, and
+// TestSweptTreeClassifierMatchesTheHydrateSlotRule pins them to each other in the issue
+// #2280 twin-test style, since the adapter deliberately imports nothing from here:
+//
+//   - TYPE-AWARE: Lstat plus IsDir, never a symlink-following read. hasWorkingSet lists
+//     through a symlink, so it calls a link to a populated directory a working set while
+//     the hydrate calls it junk. A sweep acting on that puts the link back into the slot,
+//     where it occupies the slot against a concurrent sweep holding the real recovery
+//     tree (PR #3121 review, round 2).
+//   - ERROR-RETURNING: a read failure is returned, not folded into "no working set" the
+//     way hasWorkingSet folds it. That fold is right for the held-set scans, which must
+//     not ADVERTISE a set they cannot prove; it is wrong here, where the same answer
+//     means "delete this at the next boot". The caller keeps the tree on uncertainty.
+func sweptTreeHoldsWorkingSet(path string) (bool, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return false, err
+	}
+	if !info.IsDir() {
+		return false, nil
+	}
+	entries, err := readSweptTree(path)
+	if err != nil {
+		return false, err
+	}
+	return holdsWorkingSet(entries), nil
 }
 
 // holdsWorkingSet is hasWorkingSet's decision over entries the caller has already

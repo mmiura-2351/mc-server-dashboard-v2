@@ -677,9 +677,13 @@ redundant. The sweep first **renames** the tree out of the slot, to
 take seconds for a world-sized tree, and a hydrate landing inside that traversal would
 read the half-deleted tree as an occupied slot, keep it under oldest-wins and drop the live
 set it displaced. The rename empties the slot atomically, so a hydrate finds either the whole
-tree or nothing. A `.sweeping-<id>-*` directory is therefore always garbage — the sweep had
-already decided to delete it. If the Worker crashed or the removal failed, the tree stays
-under that name until the next Worker boot, which removes every `.sweeping-*` tree before
+tree or nothing. A `.sweeping-<id>-*` directory is garbage by the time the next boot reads
+it — either the sweep had decided to delete it and did not finish, or it withdrew that
+decision and had nowhere to put the tree back. The cases where such a tree was still worth
+something, and why none of them can be told apart at boot, are under "when it declines",
+below. If the Worker crashed or the
+removal failed, the tree stays under that name until the next Worker boot, which removes
+every `.sweeping-*` tree before
 it scans the held servers. A server deleted after
 a failed final
 snapshot never snapshots again and its displaced tree therefore **persists on the
@@ -823,7 +827,8 @@ naming the reason:
 INFO  skipped sweeping the displaced recovery tree: the working dir is no longer the directory this snapshot packed  server_id=<id>  reason=working_dir_replaced
 ```
 
-`reason` is one of three values, and each one sends you to a different place:
+`reason` is one of three values, and each one sends you to a different place (the same
+three reasons appear on the second check below):
 
 - `working_dir_replaced`: a different directory now sits at `<scratch>/<id>`. This is
   the concurrent re-placement hydrate described above.
@@ -842,12 +847,71 @@ recovery procedure above). No other automatic path reclaims it, because the dele
 reclaim deliberately excludes `.displaced-<id>` (Lifecycle, above). Treat it
 as one more world-sized copy under "Scratch capacity" above. What the decline
 buys is the reverse guarantee: a `.displaced-<id>` tree never disappears on a snapshot
-success that published some *other* tree, so a displaced tree you care about is not on a
-clock — recover it (the procedure above) at your convenience rather than promptly. A
-microseconds-wide residual remains: the working directory can still be replaced between
-the identity check and the sweep's rename. Closing it would require a per-server
-reservation on running-id snapshots, which is deliberately not taken (CONTROL_PLANE.md
-Section 4.1).
+success that published some *other* tree. That is not a promise the tree is kept —
+the ordinary clock keeps running, and the next snapshot that succeeds for this id while
+the working directory is still the one it packed reclaims it (Lifecycle, above). What a
+decline adds is **no deadline of its own**: recovery (the procedure above) races nothing
+but that ordinary reclaim, so it does not have to be done inside the window this skip
+opened.
+
+**The sweep re-checks after its rename.** The identity check above runs *before* the
+sweep starts, and it keeps passing until the racing hydrate renames the working directory
+aside — so what the sweep's rename lifts out of the slot is whatever is there at that
+instant, not what the check saw. A hydrate can clear world-less junk from the slot and
+park its own live set there in between, and the rename then carries off that fresh
+recovery copy. The sweep therefore checks the identity a **second** time, after the rename
+and before anything is unlinked. It removes the tree only while the working directory is
+still the one the snapshot packed; otherwise it renames the tree back into the slot, and
+leaves it under its `.sweeping-<id>-*` name for the next boot to reclaim when it cannot.
+Two things have to hold for the tree to go back, and both are content, not names:
+
+- **The tree must hold a working set** — by the *same rule the hydrate applies to the
+  slot*: it must be a directory (checked without following a symlink, so a link to a
+  populated directory is junk on both sides) holding at least one entry that is not
+  Worker-private generation state. Running-id snapshots take no per-server reservation, so
+  *two* sweeps for one id can be in this window at once, and world-less junk put back by
+  one of them would occupy the slot against the other, which may be holding the hydrate's
+  live set. Junk is left under `.sweeping-` instead, which is what the sweep was going to
+  do with it anyway. A tree the Worker cannot *read* is **kept**, not dropped: a transient
+  `EACCES`/`EMFILE`/`EIO` must never become "delete this at the next boot", the same
+  direction an unreadable slot takes on the hydrate side.
+- **The slot must be empty.** Not "must hold nothing worth keeping": a directory rename
+  cannot replace an existing directory here, so marker-only junk in the slot blocks the
+  put-back whatever the sweep thinks of it, and emptying the slot first is not available to
+  a sweep — it holds no reservation, and removing the slot in place is the very thing the
+  rename-then-remove discipline above exists to avoid (a hydrate can clear that junk and
+  park its live set in between, and the removal would take the live set). Only a hydrate,
+  under its per-id reservation, clears the slot.
+
+**One sweep decides about the slot at a time.** Keeping an unclassifiable tree is only safe
+because no *other* sweep can be deciding about the same slot meanwhile. Running-id snapshots
+take no per-server reservation, so two sweeps for one id can reach it at once — and while
+both sit between their rename and their decision, whatever one of them puts back occupies
+the slot against the other, which may be holding the hydrate's live recovery copy. The
+Worker therefore claims the id's slot for that window, in memory, and a sweep that finds it
+claimed **declines**: it renames nothing and the tree stays where it is, to be swept by the
+next successful snapshot for the id. The claim covers only the few syscalls from finding the
+tree to putting it back or committing to remove it — never the world-sized traversal — and
+it refuses no command, so it is not the per-server reservation CONTROL_PLANE.md Section 4.1
+records as deliberately not taken. The invariant it buys, together with the two content
+rules above: **a tree that holds a working set is never deleted because some other tree's
+classification came out junk or uncertain.**
+
+Both outcomes are logged, since they decide what the next boot deletes:
+
+```
+INFO  put back the displaced tree this snapshot was sweeping: the working dir was replaced mid-sweep, so the tree may be the replacing hydrate's recovery copy  server_id=<id>  retained=<scratch>/.displaced-<id>  reason=working_dir_replaced
+INFO  left a swept displaced tree for the next boot to reclaim: the working dir was replaced while this snapshot swept it, and it could not go back into the slot  server_id=<id>  swept_to=<scratch>/.sweeping-<id>-<nonce>  reason=working_dir_replaced
+```
+
+What is left goes to the next boot rather than being deleted on the spot. A power loss
+after the rename out of the slot and before the put-back is durable, and a slot a hydrate
+refilled with a world-less directory, both leave a tree under `.sweeping-` that the boot
+reclaim removes. Both are strictly narrower than the unconditional removal they replaced,
+and the boot reclaim is deliberately not taught to put trees back: it cannot tell those
+cases from an ordinary interrupted sweep, and guessing would resurrect trees a sweep was
+entitled to delete. Neither check needs the per-server reservation on
+running-id snapshots, which remains deliberately not taken (CONTROL_PLANE.md Section 4.1).
 
 **A hydrate re-checks the slot before it discards.** The identity check still passes
 while a concurrent hydrate is working, right up to the moment that hydrate parks the
@@ -866,11 +930,15 @@ That set holds the snapshot's published pack plus whatever the world wrote since
 INFO  hydrate: the retained displaced tree was swept by a concurrent snapshot before the discard; keeping the replaced working set in its slot instead (issue #3112)  server_id=<id>  retained=<scratch>/.displaced-<id>
 ```
 
-The re-check narrows the window but does not close it. A sweep can make its identity
-check before the hydrate parks the working directory and its rename after the re-check.
-Both trees then still go. For that, the sweep's few syscalls between its check and its
-rename have to span the hydrate's park, swap-in and re-check, which is the same
-microseconds class as the residual above.
+Together with the sweep's own second check, that closes the no-local-tree outcome. The
+sweep empties the slot *before* it re-checks, so a sweep that goes on to remove has
+already left the slot empty for the hydrate's re-check to find. And it removes only while
+the working directory is still the one it packed — which stops being true the moment the
+hydrate parks that directory aside, before the hydrate can discard anything. Whichever
+order the two run in, one tree survives beside the newly hydrated one: the kept tree if
+the hydrate got there first, the displaced set (put into the slot by whichever of the two
+finds it empty) if the sweep did. When both try to fill the same empty slot, one rename
+wins and the loser leaves its tree under its own aside name for the reclaim that owns it.
 
 ---
 

@@ -3,9 +3,11 @@ package instancemanager
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
@@ -459,6 +461,460 @@ func TestHydrateDuringDisplacedSweepFindsTheSlotEmpty(t *testing.T) {
 	}
 }
 
+// A running-id sweep must not take a recovery copy a hydrate parked in the slot AFTER
+// the caller's identity pin passed (issue #3118). The pin gates the sweep (issue #2291),
+// but it keeps passing right up to the moment the racing hydrate renames the working dir
+// aside — and what the sweep's rename takes out of the slot is whatever sits there at
+// THAT instant, not what its Lstat saw. The shape is routine, not exotic: the slot held
+// marker-only junk (a 204 hydrate leaves a world-less <scratch>/<id> that the next
+// hydrate parks here by the ordinary displace path), the hydrate clears that junk and
+// parks its live set directly in the slot as its recovery copy, and the sweep then
+// renames that live set out and removes it — a tree this snapshot never published,
+// holding the published state plus everything written since its pack.
+//
+// The rename seam lands the hydrate's park in that gap, the one interleaving the
+// post-rename re-check has to hold for, rather than racing for it.
+func TestDisplacedSweepKeepsARecoveryCopyParkedAfterThePinCheck(t *testing.T) {
+	tr := &fakeTransfer{}
+	ctrl := &fakeControl{reply: "ok"}
+	h := &capturingSlogHandler{}
+	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr).WithLogger(slog.New(h))
+	live := seedScratch(t, m, "s1")
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("start = %+v, want success", res)
+	}
+	slot := filepath.Join(m.scratchDir, ".displaced-s1")
+	if err := os.MkdirAll(slot, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeGeneration(slot, 3); err != nil {
+		t.Fatal(err)
+	}
+
+	var interleaved bool
+	restore := renameSweptTree
+	renameSweptTree = func(from, to string) error {
+		interleaved = true
+		// The racing hydrate lands here: it clears the world-less junk
+		// (datatransfer.displacedSlotHoldsWorkingSet) and takes the ordinary displace
+		// path, which parks the live set DIRECTLY in the slot as its recovery copy.
+		if err := os.RemoveAll(slot); err != nil {
+			t.Fatalf("model the hydrate's junk clear: %v", err)
+		}
+		replaceWorkingDirLikeHydrate(t, live, 7)
+		return restore(from, to)
+	}
+	t.Cleanup(func() { renameSweptTree = restore })
+
+	if res := m.Handle(context.Background(), snapshotCmd()); !res.Success {
+		t.Fatalf("running-id snapshot = %+v, want success (the publish succeeded; only the GC is at stake)", res)
+	}
+
+	if !interleaved {
+		t.Fatal("the sweep never reached its rename, so no hydrate interleaved and this test proves nothing")
+	}
+	// seedScratch wrote "world" into the live set and replaceWorkingDirLikeHydrate
+	// renamed that very directory into the slot, so reading it back proves the surviving
+	// tree is the hydrate's recovery copy — not the junk the sweep set out to remove.
+	got, err := os.ReadFile(filepath.Join(slot, "level.dat"))
+	if err != nil || string(got) != "world" {
+		t.Fatalf("slot level.dat = %q (err %v), want %q: the sweep took a recovery copy the "+
+			"hydrate parked after the identity pin passed (issue #3118)", got, err, "world")
+	}
+	// The hydrated tree is in place and nothing is left under a .sweeping-<id>-* name:
+	// the sweep put back what it took rather than stranding it for the boot reclaim.
+	assertScratchRoot(t, m, ".displaced-s1", "s1")
+	assertSweepInfo(t, h, "put back the displaced tree", "retained", slot)
+}
+
+// assertSweepInfo fails unless the records hold an INFO whose message starts with prefix
+// and names path under key: the two outcomes of the sweep's re-check decide what the next
+// boot deletes, so STORAGE.md Section 4.6 documents both lines for the operator.
+func assertSweepInfo(t *testing.T, h *capturingSlogHandler, prefix, key, path string) {
+	t.Helper()
+	for _, rec := range h.records {
+		if rec.Level != slog.LevelInfo || !strings.HasPrefix(rec.Message, prefix) {
+			continue
+		}
+		named := false
+		rec.Attrs(func(a slog.Attr) bool {
+			if a.Key == key && a.Value.String() == path {
+				named = true
+			}
+			return true
+		})
+		if named {
+			return
+		}
+	}
+	t.Fatalf("no INFO %q naming %s=%s; records = %v", prefix, key, path, h.records)
+}
+
+// assertScratchRoot fails unless the scratch root holds exactly want, in order. os.ReadDir
+// sorts by name, so the wanted names are listed sorted.
+func assertScratchRoot(t *testing.T, m *Manager, want ...string) {
+	t.Helper()
+	entries, err := os.ReadDir(m.scratchDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if len(names) != len(want) {
+		t.Fatalf("scratch root = %v, want %v", names, want)
+	}
+	for i := range want {
+		if names[i] != want[i] {
+			t.Fatalf("scratch root = %v, want %v", names, want)
+		}
+	}
+}
+
+// TWO running-id sweeps for one id can reach the .displaced-<id> slot at once — they take
+// no cross-stream reservation (#829 item 4) — and while both sit between their rename and
+// their decision, whatever one of them puts back occupies the slot against the other.
+// Round 1 of the PR #3121 review found that through world-less junk; round 3 found it
+// again through a tree whose classification merely FAILED, which is retained on purpose:
+//
+//	B Lstat J -> B renames J out (slot empty) -> the hydrate parks its live set L in the
+//	slot -> A renames L out -> B cannot classify J and puts it back -> A finds the slot
+//	occupied and leaves L under .sweeping-, which the next boot deletes.
+//
+// No rule about J alone closes that: keeping an unclassifiable tree is the safe direction
+// for J, and it is exactly what costs L. The sweeps have to stop competing for the slot,
+// so a sweep that finds another one already holding this id's slot DECLINES — it renames
+// nothing, and the tree it would have swept stays where it is. A decline costs a leak the
+// next successful snapshot reclaims, which is the #906 contract.
+//
+// The invariant each row proves: a tree that holds a working set is never deleted because
+// some OTHER tree's classification came out junk (row 1) or uncertain (row 2, the
+// reviewer's combined case).
+func TestOverlappingDisplacedSweepsKeepTheRecoveryCopy(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		unreadable bool
+	}{
+		{"the other sweep holds junk it can classify", false},
+		{"the other sweep holds a tree it cannot read", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newManager(t, &fakeDriver{}, nil)
+			live := seedScratch(t, m, "s1")
+			slot := filepath.Join(m.scratchDir, ".displaced-s1")
+			if err := os.MkdirAll(slot, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeGeneration(slot, 3); err != nil {
+				t.Fatal(err)
+			}
+			replaced := func() (bool, string) { return false, "working_dir_replaced" }
+
+			// aRenamed fires only if the second sweep gets into its own window; aDone fires
+			// either way, so the first sweep waits on both and this never deadlocks on the
+			// sweep that is supposed to decline.
+			aRenamed, aDone, bDecided := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			var mu sync.Mutex
+			renames := 0
+			aStarted := false
+			bTrash := ""
+			restoreRename, restoreRead := renameSweptTree, readSweptTree
+			renameSweptTree = func(from, to string) error {
+				mu.Lock()
+				renames++
+				n := renames
+				mu.Unlock()
+				if err := restoreRename(from, to); err != nil {
+					return err
+				}
+				if n > 1 {
+					close(aRenamed)
+					return nil
+				}
+				bTrash = to
+				// B has emptied the slot. The hydrate finds it empty and parks its live set
+				// there by the ordinary displace path, and sweep A starts on it.
+				replaceWorkingDirLikeHydrate(t, live, 7)
+				aStarted = true
+				go func() {
+					m.sweepDisplaced("s1", replaced)
+					close(aDone)
+				}()
+				select {
+				case <-aRenamed: // A reached its own window: the overlap this test is about
+				case <-aDone: // A declined: there is no overlap to wait for
+				}
+				return nil
+			}
+			readSweptTree = func(path string) ([]os.DirEntry, error) {
+				if path == bTrash {
+					if tc.unreadable {
+						return nil, errors.New("injected read failure")
+					}
+					return restoreRead(path)
+				}
+				// A's own classification lands after B has decided, so B's put-back is the one
+				// that gets the empty slot — the ordering the loss needs.
+				<-bDecided
+				return restoreRead(path)
+			}
+			t.Cleanup(func() { renameSweptTree, readSweptTree = restoreRename, restoreRead })
+
+			m.sweepDisplaced("s1", replaced) // sweep B, holding what was in the slot
+			close(bDecided)
+			if aStarted {
+				// Skipped when the first sweep never reached its rename, so a sweep that
+				// stops renaming fails the assertions below instead of parking here.
+				<-aDone
+			}
+
+			// seedScratch wrote "world" into the live set and replaceWorkingDirLikeHydrate
+			// renamed that very directory into the slot, so reading it back proves the
+			// hydrate's recovery copy is what survived.
+			got, err := os.ReadFile(filepath.Join(slot, "level.dat"))
+			if err != nil || string(got) != "world" {
+				t.Fatalf("slot level.dat = %q (err %v), want %q: the other sweep put the tree it was "+
+					"holding back into the slot, so the sweep holding the hydrate's recovery copy had "+
+					"to leave it under .sweeping- for the next boot to delete (issue #3118)",
+					got, err, "world")
+			}
+			mu.Lock()
+			n := renames
+			mu.Unlock()
+			if n != 1 {
+				t.Fatalf("sweep renames = %d, want 1: the second sweep took this id's slot while "+
+					"another sweep was still deciding what to do with it", n)
+			}
+			// The first sweep's tree is where the boot reclaim expects it, and it is the only
+			// thing left there.
+			left, err := filepath.Glob(filepath.Join(m.scratchDir, sweepingPrefix+"s1-*"))
+			if err != nil || len(left) != 1 {
+				t.Fatalf("renamed trees = %v (err %v), want exactly one", left, err)
+			}
+			if hasWorkingSet(left[0]) {
+				t.Fatalf("%s holds a working set, want the world-less junk: the sweeps swapped which "+
+					"tree was left for the boot reclaim", filepath.Base(left[0]))
+			}
+		})
+	}
+}
+
+// The sweep's "is this worth putting back" rule must answer exactly as the hydrate's slot
+// rule does (datatransfer.displacedSlotHoldsWorkingSet), and this is its twin test in the
+// issue #2280 style: each side asserts the SAME fixtures from its own package, so a rule
+// that drifts fails CI here instead of degrading a durability decision silently. The
+// counterpart is TestJunkDisplacedSlotDoesNotShadowLiveSet in
+// worker/internal/adapters/datatransfer.
+//
+// The SYMLINK row is why the rule cannot be hasWorkingSet: that one reads through a
+// symlink and would call a link to a populated directory a working set, while the hydrate
+// calls it junk. A sweep believing it holds a working set puts the link back into the
+// slot, and the slot is then occupied against a concurrent sweep holding the real
+// recovery tree (PR #3121 review, round 2).
+func TestSweptTreeClassifierMatchesTheHydrateSlotRule(t *testing.T) {
+	populated := filepath.Join(t.TempDir(), "elsewhere")
+	seedHydrateShapedTree(t, populated, 7)
+
+	cases := []struct {
+		name  string
+		build func(t *testing.T, path string)
+		want  bool
+	}{
+		{"working set", func(t *testing.T, path string) { seedHydrateShapedTree(t, path, 7) }, true},
+		{"empty dir", func(t *testing.T, path string) {
+			if err := os.MkdirAll(path, 0o750); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+		{"regular file", func(t *testing.T, path string) {
+			if err := os.WriteFile(path, []byte("leftover"), 0o640); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+		{"marker only", func(t *testing.T, path string) {
+			if err := os.MkdirAll(path, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeGeneration(path, 7); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+		{"marker temp sibling only", func(t *testing.T, path string) {
+			if err := os.MkdirAll(path, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(path, generationFile+"-abc123"), []byte("7"), 0o640); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+		{"symlink to a populated dir", func(t *testing.T, path string) {
+			if err := os.Symlink(populated, path); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), ".sweeping-s1-123")
+			tc.build(t, path)
+
+			holds, err := sweptTreeHoldsWorkingSet(path)
+			if err != nil {
+				t.Fatalf("classifying %s = error %v, want a decision", tc.name, err)
+			}
+			if holds != tc.want {
+				t.Fatalf("%s holds a working set = %v, want %v: the sweep's rule has drifted from "+
+					"the hydrate's slot rule (datatransfer.displacedSlotHoldsWorkingSet)", tc.name, holds, tc.want)
+			}
+		})
+	}
+}
+
+// A symlink in the slot is junk by that shared rule, so the sweep must not put one back:
+// it would occupy the slot against a concurrent sweep holding the real recovery tree,
+// which then has nowhere to restore it and leaves it for the boot reclaim to delete.
+func TestDisplacedSweepDoesNotPutBackASymlinkSlot(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	populated := filepath.Join(t.TempDir(), "elsewhere")
+	seedHydrateShapedTree(t, populated, 7)
+	slot := filepath.Join(m.scratchDir, ".displaced-s1")
+	if err := os.Symlink(populated, slot); err != nil {
+		t.Fatal(err)
+	}
+
+	m.sweepDisplaced("s1", func() (bool, string) { return false, "working_dir_replaced" })
+
+	if _, err := os.Lstat(slot); !os.IsNotExist(err) {
+		t.Fatalf(".displaced-s1 exists after the sweep (lstat err = %v), want the slot left empty: "+
+			"the sweep read THROUGH the symlink, called it a working set and put it back (issue #3118)", err)
+	}
+	left, err := filepath.Glob(filepath.Join(m.scratchDir, sweepingPrefix+"s1-*"))
+	if err != nil || len(left) != 1 {
+		t.Fatalf("renamed entries = %v (err %v), want exactly one (the symlink)", left, err)
+	}
+	// The link went to .sweeping- as itself, and its target was never touched: the sweep
+	// must not follow it, neither to classify it nor to remove it.
+	if info, lerr := os.Lstat(left[0]); lerr != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("%s mode = %v (err %v), want a symlink", filepath.Base(left[0]), info, lerr)
+	}
+	if got, rerr := os.ReadFile(filepath.Join(populated, "world", "level.dat")); rerr != nil || string(got) != "x" {
+		t.Fatalf("symlink target level.dat = %q (err %v), want %q untouched", got, rerr, "x")
+	}
+}
+
+// A tree the sweep cannot READ is kept, not dropped (PR #3121 review, round 2). The
+// classification answers "is this copy worth keeping", so a transient EACCES/EMFILE/EIO
+// must not silently become "world-less junk, leave it for the boot reclaim to delete" —
+// the same direction datatransfer takes on its side (TestUnreadableDisplacedSlotFails-
+// HydrateWithoutDiscarding). Putting an unclassifiable tree back costs at worst an
+// occupied slot; leaving it costs the only copy of the unpublished delta.
+//
+// The failure is injected through a seam rather than a chmod fixture: a mode-000 dir is
+// readable by root, so a chmod-based test silently stops asserting anything as root.
+func TestDisplacedSweepKeepsATreeItCannotClassify(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	slot := filepath.Join(m.scratchDir, ".displaced-s1")
+	seedHydrateShapedTree(t, slot, 7)
+
+	restore := readSweptTree
+	readSweptTree = func(string) ([]os.DirEntry, error) { return nil, errors.New("injected read failure") }
+	t.Cleanup(func() { readSweptTree = restore })
+
+	m.sweepDisplaced("s1", func() (bool, string) { return false, "working_dir_replaced" })
+
+	if got, err := os.ReadFile(filepath.Join(slot, "world", "level.dat")); err != nil || string(got) != "x" {
+		t.Fatalf("slot world/level.dat = %q (err %v), want %q: a tree the sweep could not read was "+
+			"classified as junk and left under .sweeping- for the next boot to delete (issue #3118)", got, err, "x")
+	}
+	assertScratchRoot(t, m, ".displaced-s1")
+}
+
+// A tree the sweep cannot put back stays WHOLE under its .sweeping-<id>-* name for the
+// boot reclaim (issue #3118). With the working dir replaced mid-sweep the tree may be a
+// recovery copy the snapshot never published, and a slot that has filled again holds
+// another one: renaming over that would spend a copy, and removing the tree would be a
+// delete on a guess. The drop is deferred to ReclaimInterruptedDisplacedSweeps instead,
+// which is no worse than the unconditional removal this replaced.
+func TestDisplacedSweepLeavesATreeItCannotPutBack(t *testing.T) {
+	h := &capturingSlogHandler{}
+	m := newManager(t, &fakeDriver{}, nil).WithLogger(slog.New(h))
+	slot := filepath.Join(m.scratchDir, ".displaced-s1")
+	seedHydrateShapedTree(t, slot, 7)
+
+	removed := false
+	restoreRename, restoreRemove := renameSweptTree, removeDisplacedTree
+	renameSweptTree = func(from, to string) error {
+		if err := restoreRename(from, to); err != nil {
+			return err
+		}
+		// A hydrate parks the working set it displaces in the now-empty slot.
+		seedHydrateShapedTree(t, slot, 9)
+		return nil
+	}
+	removeDisplacedTree = func(string) error { removed = true; return nil }
+	t.Cleanup(func() { renameSweptTree, removeDisplacedTree = restoreRename, restoreRemove })
+
+	m.sweepDisplaced("s1", func() (bool, string) { return false, "working_dir_replaced" })
+
+	if removed {
+		t.Fatal("the sweep removed the tree it had taken from the slot although the working dir " +
+			"was replaced meanwhile: the success no longer proves the store supersedes it (issue #3118)")
+	}
+	if got := readGeneration(slot); got != 9 {
+		t.Fatalf(".displaced-s1 generation = %d, want 9: the put-back renamed over the copy that "+
+			"filled the slot instead of leaving the swept tree aside (issue #3118)", got)
+	}
+	left, err := filepath.Glob(filepath.Join(m.scratchDir, sweepingPrefix+"s1-*"))
+	if err != nil || len(left) != 1 {
+		t.Fatalf("renamed trees = %v (err %v), want exactly one for the boot reclaim to take", left, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(left[0], "world", "level.dat")); err != nil || string(got) != "x" {
+		t.Fatalf("%s holds level.dat %q (err %v), want the whole tree: %q",
+			filepath.Base(left[0]), got, err, "x")
+	}
+	// Without this line the tree under .sweeping- reads as an ordinary interrupted
+	// sweep, which is exactly what it is not.
+	assertSweepInfo(t, h, "left a swept displaced tree", "swept_to", left[0])
+}
+
+// The put-back is fsynced too (issue #3118): it undoes a rename the sweep was about to
+// make durable (issue #2799), and a power loss that rolled the put-back back would strand
+// the tree under a .sweeping-<id>-* name the next boot reclaims — turning a recovery copy
+// into garbage. No test can stage the power loss, so the sync and removal seams record
+// the order instead: one sync, with the tree already back in the slot, and no traversal.
+func TestDisplacedSweepSyncsTheTreeItPutsBack(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	slot := filepath.Join(m.scratchDir, ".displaced-s1")
+	seedHydrateShapedTree(t, slot, 7)
+
+	var syncedWithSlotBack []bool
+	removed := false
+	restoreSync, restoreRemove := syncSweepScratchRoot, removeDisplacedTree
+	syncSweepScratchRoot = func(dir string) error {
+		if dir != m.scratchDir {
+			t.Errorf("synced %q, want the scratch root %q", dir, m.scratchDir)
+		}
+		_, err := os.Lstat(slot)
+		syncedWithSlotBack = append(syncedWithSlotBack, err == nil)
+		return nil
+	}
+	removeDisplacedTree = func(string) error { removed = true; return nil }
+	t.Cleanup(func() { syncSweepScratchRoot, removeDisplacedTree = restoreSync, restoreRemove })
+
+	m.sweepDisplaced("s1", func() (bool, string) { return false, "working_dir_absent" })
+
+	if removed {
+		t.Fatal("the sweep traversed a tree it had decided to put back (issue #3118)")
+	}
+	if len(syncedWithSlotBack) != 1 || !syncedWithSlotBack[0] {
+		t.Fatalf("scratch-root syncs (slot back in place at each) = %v, want exactly one with the "+
+			"tree already restored: an un-fsynced put-back can roll back into a .sweeping- name "+
+			"the next boot reclaims (issue #3118)", syncedWithSlotBack)
+	}
+	assertScratchRoot(t, m, ".displaced-s1")
+}
+
 // interruptDisplacedSweep runs sweepDisplaced for serverID over a seeded displaced tree
 // holding a full working set, with the removal stopped before it starts — the state a
 // crash between the sweep's rename and its traversal leaves — and returns the path the
@@ -478,7 +934,7 @@ func interruptDisplacedSweep(t *testing.T, m *Manager, serverID string) string {
 
 	restore := removeDisplacedTree
 	removeDisplacedTree = func(string) error { return nil }
-	m.sweepDisplaced(serverID)
+	m.sweepDisplaced(serverID, nil)
 	removeDisplacedTree = restore
 
 	entries, err = os.ReadDir(m.scratchDir)
@@ -577,7 +1033,7 @@ func TestDisplacedSweepSyncsTheRenameBeforeRemoving(t *testing.T) {
 	}
 	t.Cleanup(func() { syncSweepScratchRoot, removeDisplacedTree = restoreSync, restoreRemove })
 
-	m.sweepDisplaced("s1")
+	m.sweepDisplaced("s1", nil)
 
 	if len(calls) != 2 || calls[0] != "sync "+m.scratchDir ||
 		!strings.HasPrefix(calls[1], "remove "+filepath.Join(m.scratchDir, sweepingPrefix+"s1-")) {
@@ -605,7 +1061,7 @@ func TestDisplacedSweepSyncFailureLeavesTheTreeWhole(t *testing.T) {
 	}
 	t.Cleanup(func() { syncSweepScratchRoot, removeDisplacedTree = restoreSync, restoreRemove })
 
-	m.sweepDisplaced("s1")
+	m.sweepDisplaced("s1", nil)
 
 	if removed {
 		t.Fatal("the sweep removed the tree although the scratch root sync failed: its rename " +
@@ -665,7 +1121,7 @@ func TestDisplacedTreeNotTreatedAsLiveScratch(t *testing.T) {
 	if _, err := os.Stat(displaced); err != nil {
 		t.Fatalf("displaced tree removed by the s1 hydrate-leftover sweep: %v", err)
 	}
-	m.sweepDisplaced("s2")
+	m.sweepDisplaced("s2", nil)
 	if _, err := os.Stat(displaced); err != nil {
 		t.Fatalf("displaced tree for s1 removed by an s2 displaced sweep (wrong id): %v", err)
 	}

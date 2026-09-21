@@ -330,6 +330,31 @@ type Manager struct {
 	// files and take no reservation.
 	reserved map[string]bool
 
+	// sweepingSlot marks a server id whose .displaced-<id> slot a displaced sweep is
+	// currently deciding about — from the Lstat that finds the tree through the rename
+	// out of the slot to the put-back or the commit to remove (issue #3118, PR #3121
+	// review round 3). Only that window is claimed, not the world-sized traversal that
+	// follows it.
+	//
+	// It exists because the slot holds ONE tree and two sweeps for one id can reach it
+	// at once: running-id snapshots take no reservation (#829 item 4), so an old dropped
+	// stream's sweep can overlap a newer one's. While both are past their rename,
+	// whatever one of them puts back occupies the slot against the other — and the other
+	// may be holding the hydrate's live recovery copy, which then goes under .sweeping-
+	// for the next boot to delete. No rule about the individual trees closes that: a tree
+	// whose classification FAILED is retained on purpose (putBackSweptTree), and that
+	// retention is what costs the other tree.
+	//
+	// The claim is NON-BLOCKING: a sweep that finds the id claimed declines, renaming
+	// nothing and leaving the tree where it is. Declining is the established posture for
+	// this GC — a declined sweep leaks one tree until the next successful snapshot
+	// reclaims it (#906/#2291) — and it keeps a sweep from waiting on another sweep's
+	// filesystem work. It is NOT the per-id reservation #829 item 4 declined: that one
+	// would span a whole running-id snapshot and reject concurrent commands with BUSY,
+	// while this is in-process, covers a handful of syscalls in the GC tail, and refuses
+	// no command.
+	sweepingSlot map[string]bool
+
 	// events/logs/metrics are the merged streams the session forwards. Per-instance
 	// pumps fan their events into them (FR-MON-2, FR-MON-3).
 	events  chan session.StatusEvent
@@ -372,6 +397,7 @@ func New(drivers map[string]execution.ExecutionDriver, scratchDir string, openCo
 		startCmds:          map[string]session.Command{},
 		orphans:            map[string]orphanEntry{},
 		reserved:           map[string]bool{},
+		sweepingSlot:       map[string]bool{},
 		events:             make(chan session.StatusEvent, 32),
 		logs:               make(chan session.LogEvent, 256),
 		metrics:            make(chan session.MetricsEvent, 32),
@@ -936,11 +962,15 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		// would have reclaimed before. That is the safe direction — a declined sweep leaks
 		// one world-sized tree until the next successful snapshot for the id reclaims it,
 		// which is the #906 GC-on-success contract itself, where the ungated sweep's
-		// failure was an unrecoverable delete. What remains is the microseconds between
-		// the check and the sweep's rename (issue #2799: the removal itself runs on the
-		// renamed tree, off the slot); closing that too would mean taking a per-id
-		// reservation on running-id snapshots, reversing the item-4 decision above, for a
-		// window that much smaller.
+		// failure was an unrecoverable delete. The microseconds between the check and the
+		// sweep's rename (issue #2799: the removal itself runs on the renamed tree, off
+		// the slot) were left open on the reading that they could only leak. They could
+		// not: the check passes until the racing hydrate renames the working dir aside, so
+		// the hydrate can clear world-less junk from the slot and park its own live set
+		// there in between, and the rename takes THAT (issue #3118). The pin therefore
+		// goes into sweepDisplaced as well and is checked again after the rename, while
+		// putting the tree back is still possible — closing the window without the per-id
+		// reservation item 4 declined, so that decision still stands.
 		var quiesced bool
 		var rawRestore func()
 		quiesced, rawRestore = m.quiesceRunning(ctx, cmd.ServerID, workingDir)
@@ -1141,8 +1171,14 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		// GC. The tradeoff is stated in STORAGE.md Section 4.6 — the sweep now sometimes
 		// leaks a tree it would have reclaimed, until the next successful snapshot for the
 		// id reclaims it.
+		//
+		// The pin goes INTO the sweep as well (issue #3118), because this check cannot
+		// cover what the sweep's rename takes: it passes until the racing hydrate renames
+		// the working dir aside, and the hydrate can park its live set in the slot in
+		// between. The sweep checks again once the tree is out of the slot, while putting
+		// it back is still possible.
 		if ok, why := pin.current(); ok {
-			m.sweepDisplaced(cmd.ServerID)
+			m.sweepDisplaced(cmd.ServerID, pin.current)
 		} else {
 			m.logger.Info("skipped sweeping the displaced recovery tree: the working dir is no longer the directory this snapshot packed",
 				"server_id", cmd.ServerID, "reason", why)
@@ -1773,8 +1809,10 @@ func (m *Manager) removeScratch(serverID string) {
 	m.sweepHydrateLeftovers(serverID)
 	// The successful stopped-id snapshot proves the store supersedes this server's
 	// world, so a displaced tree a prior hydrate kept aside for recovery (issue #906)
-	// is now redundant and reclaimed alongside the scratch.
-	m.sweepDisplaced(serverID)
+	// is now redundant and reclaimed alongside the scratch. No identity re-check is
+	// passed: this path holds the per-id reservation, so no hydrate can park a fresh
+	// recovery copy in the slot mid-sweep (issue #3118).
+	m.sweepDisplaced(serverID, nil)
 }
 
 // sweepDisplaced removes the .displaced-<id> tree a prior hydrate moved aside for
@@ -1800,41 +1838,198 @@ func (m *Manager) removeScratch(serverID string) {
 // or a removal error) leaves the tree under its .sweeping- name, which
 // ReclaimInterruptedDisplacedSweeps removes at the next Worker boot.
 //
-// The function itself is unconditional; the CALLERS establish that the success really
-// does supersede the tree being removed, and they do it differently. The stopped-id
-// caller (removeScratch) holds a per-id reservation, so no hydrate can be racing it.
-// The running-id caller takes no reservation (#829 item 4), so it gates this call on
-// the working-dir identity pin instead (issue #2291, reusing the #2284 pin): an old
+// The function itself removes nothing unconditionally; the CALLERS establish that the
+// success really does supersede the tree being removed, and they do it differently. The
+// stopped-id caller (removeScratch) holds a per-id reservation, so no hydrate can be
+// racing it and it passes a nil stillPinned. The running-id caller takes no reservation
+// (#829 item 4), so it gates this call on the working-dir identity pin instead (issue
+// #2291, reusing the #2284 pin) and hands that pin's check in as stillPinned: an old
 // dropped stream's snapshot can still succeed after a NEW stream re-placed the server
 // here and hydrated it, and the .displaced-<id> it would sweep is then that hydrate's
 // recovery copy — a tree this snapshot never published, holding the published state
 // plus whatever the world progressed since its PACK — rather than a world the success
-// supersedes. That is the window issue #917 item 3 named and left open; the gate closes
-// it down to the microseconds between the caller's check and this rename, which
-// nothing short of the reservation item 4 declined can close. The residual direction is
-// a LEAK, never a loss: a declined sweep keeps one world-sized tree until the next
-// successful snapshot for the id reclaims it, which is the #906 contract itself.
-func (m *Manager) sweepDisplaced(serverID string) {
-	displaced := filepath.Join(m.scratchDir, displacedPrefix+serverID)
-	if _, err := os.Lstat(displaced); err != nil {
-		return
-	}
-	trash, err := os.MkdirTemp(m.scratchDir, sweepingPrefix+serverID+"-*")
-	if err != nil {
-		return
-	}
-	// MkdirTemp creates the dir; remove it so Rename can use the name.
-	_ = os.Remove(trash)
-	if err := os.Rename(displaced, trash); err != nil {
+// supersedes. That is the window issue #917 item 3 named and left open.
+//
+// RE-CHECK AFTER THE RENAME (issue #3118), because the caller's gate alone cannot cover
+// what the rename takes. The pin keeps passing right up to the moment the racing hydrate
+// renames the working dir aside, and the rename below takes whatever sits in the slot at
+// THAT instant, not what the Lstat above saw: a hydrate can clear world-less junk from
+// the slot and park its live set there in between, so the sweep's residual was never a
+// leak-only direction — it could take the fresh recovery copy. The identity is therefore
+// checked again once the tree is out of the slot and before anything is unlinked. A
+// removal then happens only while the working dir is still the tree this snapshot
+// packed; a tree that holds a working set and was taken from a slot whose working dir was
+// replaced meanwhile goes back where it came from, and only when the slot is empty —
+// putBackSweptTree has the full rule and what it costs. Every uncertainty resolves to "not current"
+// (workingDirRef.current), so an unreadable identity puts the tree back too: the leak
+// direction, at worst one more tree until the next successful snapshot.
+//
+// What a decline costs is that LEAK — one world-sized tree until the next successful
+// snapshot for the id reclaims it, which is the #906 contract itself. The one loss left
+// is crash-conditional: a power loss after the rename out of the slot and before the
+// put-back is durable rolls the tree back to its .sweeping- name, which the next boot
+// reclaims. That window is strictly narrower than the unconditional removal it replaced,
+// and the boot reclaim is deliberately not taught to put trees back — a .sweeping- tree
+// is garbage in every other case.
+func (m *Manager) sweepDisplaced(serverID string, stillPinned func() (bool, string)) {
+	trash, remove := m.detachDisplacedTree(serverID, stillPinned)
+	if !remove {
 		return
 	}
 	// Make the rename durable before the traversal unlinks anything, so a power loss
 	// cannot roll it back over a half-deleted tree and put that tree back in the slot.
+	// Both still happen after the rename and before the first unlink (#2799); they run
+	// OUTSIDE the slot claim because they no longer touch the slot, and a world-sized
+	// traversal is not something another sweep for this id should have to wait behind.
 	if err := syncSweepScratchRoot(m.scratchDir); err != nil {
 		return
 	}
 	_ = removeDisplacedTree(trash)
 }
+
+// detachDisplacedTree performs the slot-visible half of a sweep under this id's slot
+// claim (sweepingSlot): find the tree, rename it out of the slot, re-check the caller's
+// identity pin and either hand the tree over for removal or put it back. It reports the
+// name the tree now sits under and whether removing it is justified.
+//
+// Everything that reads or writes .displaced-<id> is inside the claim, and nothing else
+// is. A sweep that cannot take the claim returns having touched nothing: the tree it
+// would have swept stays in the slot, and the next successful snapshot for the id sweeps
+// it instead. That decline is what keeps two sweeps from deciding about one slot at once,
+// which is the precondition for a put-back of one tree costing the other (issue #3118).
+func (m *Manager) detachDisplacedTree(serverID string, stillPinned func() (bool, string)) (string, bool) {
+	if !m.claimDisplacedSlot(serverID) {
+		return "", false
+	}
+	defer m.releaseDisplacedSlot(serverID)
+	displaced := filepath.Join(m.scratchDir, displacedPrefix+serverID)
+	if _, err := os.Lstat(displaced); err != nil {
+		return "", false
+	}
+	trash, err := os.MkdirTemp(m.scratchDir, sweepingPrefix+serverID+"-*")
+	if err != nil {
+		return "", false
+	}
+	// MkdirTemp creates the dir; remove it so Rename can use the name.
+	_ = os.Remove(trash)
+	if err := renameSweptTree(displaced, trash); err != nil {
+		return "", false
+	}
+	pinned, why := true, ""
+	if stillPinned != nil {
+		pinned, why = stillPinned()
+	}
+	if !pinned {
+		m.putBackSweptTree(serverID, displaced, trash, why)
+		return "", false
+	}
+	return trash, true
+}
+
+// claimDisplacedSlot takes this id's displaced-slot claim for the window above, reporting
+// whether it was free. Mirrors reserve/release, and like them it must be paired with
+// releaseDisplacedSlot on every exit path. It never waits: see the sweepingSlot field.
+func (m *Manager) claimDisplacedSlot(serverID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.sweepingSlot[serverID] {
+		return false
+	}
+	m.sweepingSlot[serverID] = true
+	return true
+}
+
+// releaseDisplacedSlot drops the claim so the next sweep for the id can take it.
+func (m *Manager) releaseDisplacedSlot(serverID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.sweepingSlot, serverID)
+}
+
+// putBackSweptTree renames a tree the sweep had taken out of the .displaced-<id> slot
+// back into it, for the re-check above (issue #3118). It runs before any unlink, so the
+// tree is still whole.
+//
+// THE TREE must hold a working set, by sweptTreeHoldsWorkingSet — the rule the HYDRATE
+// applies to this same slot, type-aware and error-returning, pinned to the adapter's copy
+// by a twin test rather than shared through an import the layering does not allow. It is
+// deliberately not hasWorkingSet: that one reads through a symlink and folds every read
+// failure into "no working set", and both answers are "delete this at the next boot" here
+// (PR #3121 review, round 2). Running-id sweeps take NO cross-stream
+// reservation, so TWO can be in this window at once, and world-less junk put back by one
+// of them occupies the slot against the other, which may be holding the hydrate's live
+// set. That set would then go under .sweeping- for the next boot to delete, which is the
+// loss this function exists to prevent (PR #3121 review, round 1). Junk is left under
+// .sweeping- instead: it is the garbage the boot reclaim expects, and what this sweep was
+// going to do with it anyway.
+//
+// THE SLOT must be empty, and empty is the whole rule, not a proxy for "holds nothing
+// worth keeping": os.Rename REFUSES any existing directory as its target (an EEXIST it
+// raises itself, before the syscall — unlike rename(2), which would replace an empty
+// one), so a slot holding marker-only junk blocks the put-back whatever this function
+// decides about it. Emptying it first is not an option: the sweep holds no reservation,
+// so RemoveAll on the slot is exactly the in-place removal issue #2799 forbids — a
+// hydrate can clear that junk and park its live set between the read and the removal, and
+// the removal would then delete a live world. Only the hydrate, under its per-id
+// reservation, can clear the slot. The Lstat is therefore an early-out and a log
+// distinction; what makes the put-back safe is the rename refusing to clobber whatever a
+// concurrent hydrate parked since.
+//
+// ON READ UNCERTAINTY the tree is KEPT, not dropped: an unclassifiable tree falls through
+// to the put-back. The asymmetry is the point — putting back a tree that turns out to be
+// junk costs at worst an occupied slot, while leaving one that turns out to be real costs
+// the only copy of the unpublished delta at the next boot. It is the direction the
+// hydrate takes on the same read (an unreadable slot fails the hydrate rather than being
+// reclassified into a discard).
+//
+// That retention is only safe because THIS id's slot claim (sweepingSlot) makes this
+// function the only sweep deciding about the slot: the tree put back here can no longer
+// occupy the slot against a concurrent sweep holding a proven recovery tree. The
+// invariant the pair upholds: a tree that holds a working set is never deleted because
+// some OTHER tree's classification was junk or uncertain.
+//
+// A tree that cannot go back stays under its .sweeping- name for
+// ReclaimInterruptedDisplacedSweeps, and that is logged: it decides what the next boot
+// deletes, and a .sweeping- tree is garbage everywhere else. Junk left behind is not
+// logged — it IS ordinary garbage, indistinguishable from an interrupted sweep's.
+//
+// The put-back can also lose a race to a LATER hydrate's own park into the same empty
+// slot: that park then fails with ENOTEMPTY and fails the hydrate, which deletes nothing
+// before its park (datatransfer.unpackAndSwap) and is simply retried.
+func (m *Manager) putBackSweptTree(serverID, displaced, trash, why string) {
+	if holds, err := sweptTreeHoldsWorkingSet(trash); err == nil && !holds {
+		// PROVABLY world-less junk is not worth putting back, and putting it back is
+		// actively harmful: it occupies the slot against a CONCURRENT sweep that is
+		// holding the real thing. Left under .sweeping-, where it is the garbage the boot
+		// reclaim expects — which is also what this sweep would have done with it.
+		// A tree that could not be classified falls through and is kept.
+		return
+	}
+	back := false
+	if _, err := os.Lstat(displaced); os.IsNotExist(err) {
+		back = os.Rename(trash, displaced) == nil
+	}
+	if !back {
+		m.logger.Info("left a swept displaced tree for the next boot to reclaim: the working dir was replaced while this snapshot swept it, and it could not go back into the slot",
+			"server_id", serverID, "swept_to", trash, "reason", why)
+		return
+	}
+	// The put-back needs the durability its rename out of the slot was about to get: a
+	// power loss that rolled it back would strand the tree under a name the next boot
+	// reclaims. Best-effort, like every other step of the sweep.
+	_ = syncSweepScratchRoot(m.scratchDir)
+	m.logger.Info("put back the displaced tree this snapshot was sweeping: the working dir was replaced mid-sweep, so the tree may be the replacing hydrate's recovery copy",
+		"server_id", serverID, "retained", displaced, "reason", why)
+}
+
+// renameSweptTree is the os.Rename sweepDisplaced empties the slot with, indirected
+// through a package var (mirroring removeDisplacedTree) so a test can land a racing
+// hydrate's park in the one gap that decides what this rename takes — between the Lstat
+// that found the slot occupied and the rename itself — rather than race for it. Only the
+// rename OUT of the slot goes through it; putBackSweptTree renames back with os.Rename
+// directly, so a test's seam cannot also intercept the recovery. Production always uses
+// os.Rename.
+var renameSweptTree = os.Rename
 
 // syncSweepScratchRoot is the fsyncDir sweepDisplaced makes its rename durable with,
 // indirected through a package var (mirroring removeDisplacedTree) so a test can pin
