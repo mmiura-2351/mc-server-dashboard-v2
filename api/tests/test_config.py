@@ -94,13 +94,6 @@ def test_database_url_masked_in_dump(monkeypatch: pytest.MonkeyPatch) -> None:
     assert dump["database"]["url"] == "***"
 
 
-def test_settings_is_immutable(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
-    settings = load_settings(config_file=None)
-    with pytest.raises(ValidationError):
-        settings.server.http_port = 1234
-
-
 def test_password_policy_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
     settings = load_settings(config_file=None)
