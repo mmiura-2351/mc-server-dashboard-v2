@@ -9,6 +9,7 @@ import {
   t,
 } from "../i18n/index.ts";
 import { useActiveCommunity } from "../permissions/ActiveCommunityProvider.tsx";
+import { classifyQueryResult } from "../queryState.ts";
 import { dashboardPath, LANDING_PATH } from "../routes.ts";
 
 // Authenticated shell chrome: left nav (community scope + admin group) and a
@@ -72,8 +73,12 @@ function CommunitySwitcher() {
     refetchCommunities,
   } = useActiveCommunity();
   const navigate = useNavigate();
+  const resultState = classifyQueryResult({
+    data: communities,
+    isError: communitiesError,
+  });
 
-  if (communitiesError && communities === undefined) {
+  if (resultState.kind === "error") {
     return (
       <div className="community-switcher" role="alert">
         {t("shell.communitiesError")}{" "}
@@ -88,7 +93,7 @@ function CommunitySwitcher() {
     );
   }
 
-  if (communities === undefined) {
+  if (resultState.kind === "pending") {
     return (
       <div className="community-switcher" aria-busy="true">
         {t("auth.loading")}
@@ -96,7 +101,7 @@ function CommunitySwitcher() {
     );
   }
 
-  if (communities.length === 0) {
+  if (resultState.data.length === 0) {
     return (
       <div className="community-switcher no-community">
         {t("shell.noCommunity")}
@@ -115,7 +120,7 @@ function CommunitySwitcher() {
         navigate(dashboardPath(id));
       }}
     >
-      {communities.map((c) => (
+      {resultState.data.map((c) => (
         <option key={c.id} value={c.id}>
           {c.name}
         </option>

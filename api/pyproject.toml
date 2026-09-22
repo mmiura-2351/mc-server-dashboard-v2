@@ -12,14 +12,14 @@ dependencies = [
     # generator (grpcio-tools 1.80.0 emits protobuf-6 code). grpcio 1.81.0
     # (2026-06-01) is inside the 7-day cooldown as of this change, so cap below
     # it; lift the cap to <2 once it ages out (docs/dev/DEPENDENCIES.md Section 3).
-    "grpcio>=1.80.0,<1.84",
+    "grpcio>=1.80.0,<1.85",
     "protobuf>=6.31.1,<7",
     # API framework stack (ARCHITECTURE.md Section 7.4). 0.x libraries cap the
     # next minor; 1.x+/2.x cap the next major (docs/dev/DEPENDENCIES.md Section 1). All
     # versions respect the 7-day cooldown (Section 3): released on/before
     # 2026-05-28 as of this change.
     "fastapi>=0.136.3,<0.142",          # 2026-05-23
-    "uvicorn>=0.48.0,<0.53",            # 2026-05-24
+    "uvicorn>=0.48.0,<0.54",            # 2026-05-24
     # WebSocket protocol implementation for uvicorn (#507). Bare uvicorn ships no
     # WS library, so its auto-selector resolves AutoWebSocketsProtocol to None and
     # silently downgrades every WS upgrade to plain HTTP — the live /events
@@ -91,14 +91,14 @@ dependencies = [
 dev = [
     # ruff 0.15.15 (2026-05-28) is inside the 7-day cooldown as of this
     # change; cap below it. Lift the cap once it ages out (Section 3).
-    "ruff>=0.15.14,<0.16.7",
+    "ruff>=0.15.14,<0.16.8",
     "mypy>=2.1.0",
     "pytest>=9.0.3",
     "import-linter>=2.11",
     # Control-plane codegen. grpcio-tools bundles protoc + the python/grpc
     # generators; mypy-protobuf adds .pyi type stubs. Both pinned outside the
     # cooldown (grpcio-tools 1.80.0 2026-03-30; mypy-protobuf 5.1.0 2026-04-28).
-    "grpcio-tools>=1.80.0,<1.84",
+    "grpcio-tools>=1.80.0,<1.85",
     "mypy-protobuf>=5.1.0,<6",
     # Async test support for pytest (async DB-probe + endpoint tests).
     # 1.4.0 (2026-05-26) is inside the 7-day cooldown as of this change; cap
