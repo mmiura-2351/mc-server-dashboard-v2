@@ -21,6 +21,7 @@ import { t } from "../i18n/index.ts";
 import { useActiveCommunity } from "../permissions/ActiveCommunityProvider.tsx";
 import { type Can, useCan } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
+import { classifyQueryResult } from "../queryState.ts";
 import { dashboardPath } from "../routes.ts";
 import {
   isEulaNotAccepted,
@@ -315,18 +316,19 @@ function Loaded({ communityId }: { communityId: string }) {
         { signal },
       ),
   });
+  const resultState = classifyQueryResult(query);
 
   // Hooks must be called unconditionally (Rules of Hooks), so filter/sort are
   // computed before the early-return branches. They operate on an empty array
   // when the query has not resolved yet.
-  const servers = query.data ?? [];
+  const servers = resultState.kind === "data" ? resultState.data : [];
   const filtered = useMemo(
     () => filterServers(servers, searchDraft, filters.state),
     [servers, searchDraft, filters.state],
   );
   const sorted = useMemo(() => sortServers(filtered, sort), [filtered, sort]);
 
-  if (query.isPending) {
+  if (resultState.kind === "pending") {
     return (
       <DashboardChrome>
         <p className="sub">{t("dashboard.loading")}</p>
@@ -337,7 +339,7 @@ function Loaded({ communityId }: { communityId: string }) {
   // failed). A failed background refetch retains `data`, so the cached list
   // keeps rendering through transient API blips; the WS-driven degraded pill
   // already signals that live updates are down (#1724).
-  if (query.data === undefined) {
+  if (resultState.kind === "error") {
     return (
       <DashboardChrome>
         <p className="field-error">{t("dashboard.loadError")}</p>
