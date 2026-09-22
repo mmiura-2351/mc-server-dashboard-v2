@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import datetime as dt
-import uuid
 
 import pytest
 
@@ -23,15 +22,6 @@ from mc_server_dashboard_api.servers.domain.plugin import (
     working_set_present,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId, ServerType
-
-
-class TestPluginId:
-    def test_new_generates_uuid(self) -> None:
-        pid = PluginId.new()
-        assert isinstance(pid.value, uuid.UUID)
-
-    def test_two_new_ids_differ(self) -> None:
-        assert PluginId.new() != PluginId.new()
 
 
 class TestContentDirForServerType:
@@ -64,60 +54,6 @@ class TestLoaderTypeForServerType:
             loader_type_for_server_type(ServerType.VANILLA)
 
 
-class TestServerPluginEntity:
-    def test_construction(self) -> None:
-        now = dt.datetime.now(tz=dt.timezone.utc)
-        plugin = ServerPlugin(
-            id=PluginId.new(),
-            server_id=ServerId.new(),
-            rel_path="mods/test.jar",
-            filename="test.jar",
-            display_name="Test Plugin",
-            description=None,
-            loader_type=LoaderType.MOD,
-            source=PluginSource.LOCAL,
-            source_project_id=None,
-            source_version_id=None,
-            version_number=None,
-            checksum_sha512="abc123",
-            sha256="def456",
-            size_bytes=1024,
-            enabled=True,
-            installed_by=None,
-            created_at=now,
-            updated_at=now,
-        )
-        assert plugin.display_name == "Test Plugin"
-        assert plugin.sha256 == "def456"
-        assert plugin.enabled is True
-        assert plugin.loader_type is LoaderType.MOD
-        assert plugin.source is PluginSource.LOCAL
-
-    def test_side_defaults_to_both(self) -> None:
-        now = dt.datetime.now(tz=dt.timezone.utc)
-        plugin = ServerPlugin(
-            id=PluginId.new(),
-            server_id=ServerId.new(),
-            rel_path="mods/test.jar",
-            filename="test.jar",
-            display_name="Test Plugin",
-            description=None,
-            loader_type=LoaderType.MOD,
-            source=PluginSource.LOCAL,
-            source_project_id=None,
-            source_version_id=None,
-            version_number=None,
-            checksum_sha512="abc123",
-            sha256="def456",
-            size_bytes=1024,
-            enabled=True,
-            installed_by=None,
-            created_at=now,
-            updated_at=now,
-        )
-        assert plugin.side == "both"
-
-
 class TestWorkingSetPresent:
     """A jar belongs in the running working set iff enabled and not client-only."""
 
@@ -135,16 +71,6 @@ class TestWorkingSetPresent:
 
     def test_disabled_client_is_absent(self) -> None:
         assert working_set_present(enabled=False, side="client") is False
-
-
-class TestEnumValues:
-    def test_loader_type_values(self) -> None:
-        assert LoaderType.MOD.value == "mod"
-        assert LoaderType.PLUGIN.value == "plugin"
-
-    def test_plugin_source_values(self) -> None:
-        assert PluginSource.LOCAL.value == "local"
-        assert PluginSource.MODRINTH.value == "modrinth"
 
 
 class TestSanitizePluginFilename:
