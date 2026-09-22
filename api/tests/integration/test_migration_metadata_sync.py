@@ -43,13 +43,19 @@ import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
+from unittest.mock import Mock
 
 import pytest
-from sqlalchemy import Connection, MetaData, inspect
+from sqlalchemy import Connection, Integer, MetaData, String, create_engine, inspect
 from sqlalchemy.engine.interfaces import (
+    ReflectedCheckConstraint,
+    ReflectedColumn,
     ReflectedConstraint,
     ReflectedForeignKeyConstraint,
     ReflectedIndex,
+    ReflectedPrimaryKeyConstraint,
+    ReflectedUniqueConstraint,
 )
 from sqlalchemy.engine.reflection import Inspector
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -151,21 +157,29 @@ def _as_optional_string(value: object, *, property_name: str) -> str | None:
     return value
 
 
-def _normalize_sql(value: str | None, *, local_schema: str | None) -> str | None:
-    """Normalize PostgreSQL-reflected SQL without weakening its semantics.
+def _normalize_sql(
+    value: str | None,
+    *,
+    local_schema: str | None,
+    normalize_local_sequence: bool = False,
+) -> str | None:
+    """Normalize only the test schema on a reflected serial-sequence default.
 
-    Reflection already gives both contracts PostgreSQL's canonical expression.
-    Whitespace is immaterial. The reference schema qualifies its generated
-    serial sequence (``'<schema>.sequence'``), while the public schema does not;
-    removing that exact test-only qualifier makes the local sequence equivalent.
+    PostgreSQL already canonicalizes reflected SQL. General whitespace or
+    string-literal rewriting would erase semantic differences, so every other
+    expression is returned byte-for-byte.
     """
 
-    if value is None:
-        return None
-    normalized = " ".join(value.split())
-    if local_schema is not None:
-        normalized = normalized.replace(f"'{local_schema}.", "'")
-    return normalized
+    if value is None or local_schema is None or not normalize_local_sequence:
+        return value
+    prefix = f"nextval('{local_schema}."
+    suffix = "'::regclass)"
+    if not value.startswith(prefix) or not value.endswith(suffix):
+        return value
+    sequence_name = value[len(prefix) : -len(suffix)]
+    if not sequence_name or "'" in sequence_name:
+        return value
+    return f"nextval('{sequence_name}'::regclass)"
 
 
 def _normalize_keyword(value: object) -> object:
@@ -239,7 +253,9 @@ def _table_contract(
         properties[f"{prefix}.type"] = _normalize_type(sync_conn, column["type"])
         properties[f"{prefix}.nullable"] = column["nullable"]
         properties[f"{prefix}.server_default"] = _normalize_sql(
-            column["default"], local_schema=schema
+            column["default"],
+            local_schema=schema,
+            normalize_local_sequence=True,
         )
 
     primary_key = inspector.get_pk_constraint(table, schema=schema)
@@ -432,33 +448,172 @@ def test_revision_id_length() -> None:
     )
 
 
-@pytest.mark.parametrize(
-    "property_name",
-    [
-        "column.id.type",
-        "column.id.nullable",
-        "column.id.server_default",
-        "primary_key.pk_example.columns",
-        "foreign_key.fk_example_parent.columns",
-        "foreign_key.fk_example_parent.referred_schema",
-        "foreign_key.fk_example_parent.referred_table",
-        "foreign_key.fk_example_parent.referred_columns",
-        "foreign_key.fk_example_parent.ondelete",
-        "foreign_key.fk_example_parent.onupdate",
-        "foreign_key.fk_example_parent.deferrable",
-        "foreign_key.fk_example_parent.initially",
-        "foreign_key.fk_example_parent.match",
-        "unique_constraint.uq_example_name.columns",
-        "check_constraint.ck_example_state.expression",
-        "index.ix_example_name.unique",
-        "index.ix_example_name.columns",
-        "index.ix_example_name.expressions",
-        "index.ix_example_name.predicate",
-    ],
+def test_sql_normalization_preserves_literal_whitespace() -> None:
+    expression = "value = 'meaningful  repeated  spaces'"
+
+    assert (
+        _normalize_sql(
+            expression,
+            local_schema=_METADATA_SCHEMA,
+            normalize_local_sequence=True,
+        )
+        == expression
+    )
+
+
+def test_sql_normalization_preserves_unrelated_schema_text() -> None:
+    expression = f"value = '{_METADATA_SCHEMA}.not_a_sequence'"
+
+    assert (
+        _normalize_sql(
+            expression,
+            local_schema=_METADATA_SCHEMA,
+            normalize_local_sequence=True,
+        )
+        == expression
+    )
+
+
+def test_sql_normalization_removes_reference_schema_from_sequence_default() -> None:
+    expression = f"nextval('{_METADATA_SCHEMA}.login_attempt_id_seq'::regclass)"
+
+    assert (
+        _normalize_sql(
+            expression,
+            local_schema=_METADATA_SCHEMA,
+            normalize_local_sequence=True,
+        )
+        == "nextval('login_attempt_id_seq'::regclass)"
+    )
+
+
+_COMPARED_PROPERTIES = (
+    "column.id.type",
+    "column.id.nullable",
+    "column.id.server_default",
+    "primary_key.pk_example.columns",
+    "foreign_key.fk_example_parent.columns",
+    "foreign_key.fk_example_parent.referred_schema",
+    "foreign_key.fk_example_parent.referred_table",
+    "foreign_key.fk_example_parent.referred_columns",
+    "foreign_key.fk_example_parent.ondelete",
+    "foreign_key.fk_example_parent.onupdate",
+    "foreign_key.fk_example_parent.deferrable",
+    "foreign_key.fk_example_parent.initially",
+    "foreign_key.fk_example_parent.match",
+    "unique_constraint.uq_example_name.columns",
+    "check_constraint.ck_example_state.expression",
+    "index.ix_example_name.unique",
+    "index.ix_example_name.columns",
+    "index.ix_example_name.expressions",
+    "index.ix_example_name.predicate",
 )
+
+
+def _reflected_table_contract(*, mutation: str | None = None) -> Mapping[str, object]:
+    column: ReflectedColumn = {
+        "name": "id",
+        "type": String(),
+        "nullable": False,
+        "default": "'expected'::character varying",
+    }
+    primary_key: ReflectedPrimaryKeyConstraint = {
+        "name": "pk_example",
+        "constrained_columns": ["id"],
+    }
+    foreign_key: ReflectedForeignKeyConstraint = {
+        "name": "fk_example_parent",
+        "constrained_columns": ["parent_id"],
+        "referred_schema": None,
+        "referred_table": "parent",
+        "referred_columns": ["id"],
+        "options": {"ondelete": "CASCADE"},
+    }
+    unique_constraint: ReflectedUniqueConstraint = {
+        "name": "uq_example_name",
+        "column_names": ["name"],
+    }
+    check_constraint: ReflectedCheckConstraint = {
+        "name": "ck_example_state",
+        "sqltext": "state::text = 'ready'::text",
+    }
+    index: ReflectedIndex = {
+        "name": "ix_example_name",
+        "unique": False,
+        "column_names": ["name"],
+        "expressions": ["name"],
+        "dialect_options": {"postgresql_where": "name IS NOT NULL"},
+    }
+
+    if mutation == "column.id.type":
+        column["type"] = Integer()
+    elif mutation == "column.id.nullable":
+        column["nullable"] = True
+    elif mutation == "column.id.server_default":
+        column["default"] = "'mutated'::character varying"
+    elif mutation == "primary_key.pk_example.columns":
+        primary_key["constrained_columns"] = ["other_id"]
+    elif mutation == "foreign_key.fk_example_parent.columns":
+        foreign_key["constrained_columns"] = ["other_parent_id"]
+    elif mutation == "foreign_key.fk_example_parent.referred_schema":
+        foreign_key["referred_schema"] = "other_schema"
+    elif mutation == "foreign_key.fk_example_parent.referred_table":
+        foreign_key["referred_table"] = "other_parent"
+    elif mutation == "foreign_key.fk_example_parent.referred_columns":
+        foreign_key["referred_columns"] = ["other_id"]
+    elif mutation == "foreign_key.fk_example_parent.ondelete":
+        foreign_key["options"]["ondelete"] = "RESTRICT"
+    elif mutation == "foreign_key.fk_example_parent.onupdate":
+        foreign_key["options"]["onupdate"] = "CASCADE"
+    elif mutation == "foreign_key.fk_example_parent.deferrable":
+        foreign_key["options"]["deferrable"] = True
+    elif mutation == "foreign_key.fk_example_parent.initially":
+        foreign_key["options"]["initially"] = "DEFERRED"
+    elif mutation == "foreign_key.fk_example_parent.match":
+        foreign_key["options"]["match"] = "FULL"
+    elif mutation == "unique_constraint.uq_example_name.columns":
+        unique_constraint["column_names"] = ["other_name"]
+    elif mutation == "check_constraint.ck_example_state.expression":
+        check_constraint["sqltext"] = "state::text = 'mutated'::text"
+    elif mutation == "index.ix_example_name.unique":
+        index["unique"] = True
+    elif mutation == "index.ix_example_name.columns":
+        index["column_names"] = ["other_name"]
+    elif mutation == "index.ix_example_name.expressions":
+        index["expressions"] = ["lower(name::text)"]
+    elif mutation == "index.ix_example_name.predicate":
+        index["dialect_options"]["postgresql_where"] = "name IS NULL"
+    elif mutation is not None:
+        raise AssertionError(f"no reflected mutation for {mutation}")
+
+    inspector = Mock(spec=Inspector)
+    inspector.get_columns.return_value = [column]
+    inspector.get_pk_constraint.return_value = primary_key
+    inspector.get_foreign_keys.return_value = [foreign_key]
+    inspector.get_unique_constraints.return_value = [unique_constraint]
+    inspector.get_check_constraints.return_value = [check_constraint]
+    inspector.get_indexes.return_value = [index]
+    engine = create_engine("sqlite://")
+    try:
+        with engine.connect() as sync_conn:
+            return _table_contract(
+                sync_conn,
+                cast(Inspector, inspector),
+                "example",
+                schema=None,
+            )
+    finally:
+        engine.dispose()
+
+
+def test_reflected_contract_records_every_compared_property() -> None:
+    assert set(_reflected_table_contract()) == set(_COMPARED_PROPERTIES)
+
+
+@pytest.mark.parametrize("property_name", _COMPARED_PROPERTIES)
 def test_schema_diff_reports_each_mutated_property(property_name: str) -> None:
-    metadata = {property_name: "expected"}
-    migrated = {property_name: "mutated"}
+    metadata = _reflected_table_contract()
+    migrated = _reflected_table_contract(mutation=property_name)
 
     differences = _schema_differences(
         metadata,
@@ -467,9 +622,12 @@ def test_schema_diff_reports_each_mutated_property(property_name: str) -> None:
     )
     message = _format_schema_differences(differences)
 
+    assert [difference.property for difference in differences] == [
+        f"table.example.{property_name}"
+    ]
     assert f"table.example.{property_name}" in message
-    assert "ORM metadata='expected'" in message
-    assert "migrated database='mutated'" in message
+    assert "ORM metadata=" in message
+    assert "migrated database=" in message
 
 
 def test_schema_diff_reports_missing_property() -> None:
