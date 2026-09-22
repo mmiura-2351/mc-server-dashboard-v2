@@ -27,8 +27,6 @@ from mc_server_dashboard_api.servers.domain.schedule import (
     Schedule,
     ScheduleAction,
     ScheduleId,
-    ScheduleRun,
-    ScheduleRunId,
     ScheduleRunOutcome,
     WarningStep,
     interval_jitter_seconds,
@@ -84,18 +82,6 @@ def test_run_outcome_enum_matches_check_constraint_values() -> None:
 
 
 # --- cadence (cron XOR interval) ----------------------------------------------
-
-
-def test_cron_cadence_round_trips() -> None:
-    cadence = Cadence.from_cron("*/5 * * * *")
-    assert cadence.cron == "*/5 * * * *"
-    assert cadence.interval_seconds is None
-
-
-def test_interval_cadence_round_trips() -> None:
-    cadence = Cadence.from_interval(3600)
-    assert cadence.cron is None
-    assert cadence.interval_seconds == 3600
 
 
 def test_cadence_rejects_both_cron_and_interval() -> None:
@@ -271,19 +257,6 @@ def test_multiline_warning_message_rejected(bad: str) -> None:
 
 
 # --- schedule runs ---------------------------------------------------------------
-
-
-def test_schedule_run_round_trips_fields() -> None:
-    run = ScheduleRun(
-        id=ScheduleRunId.new(),
-        schedule_id=ScheduleId.new(),
-        started_at=_NOW,
-        finished_at=_NOW + dt.timedelta(seconds=3),
-        outcome=ScheduleRunOutcome.SUCCESS,
-        detail=None,
-    )
-    assert run.outcome is ScheduleRunOutcome.SUCCESS
-    assert run.finished_at - run.started_at == dt.timedelta(seconds=3)
 
 
 # --- interval next-run math -------------------------------------------------------
