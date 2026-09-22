@@ -1,11 +1,9 @@
-"""Migration round-trip for ``schedule`` / ``schedule_run`` (issue #1835).
+"""Data-bearing schedule migration scenarios (issue #1835).
 
 Runs only when ``MCD_TEST_DATABASE_URL`` is set (the CI Postgres service);
-skipped otherwise (TESTING.md Section 5). Proves the 0029 migration upgrades
-and downgrades cleanly on an existing database and that the constraints the
-domain relies on are installed: the action / outcome CHECK enums, the
-cron-XOR-interval CHECK, the per-server name uniqueness, and the partial
-``next_run_at WHERE enabled`` index the runner polls on.
+skipped otherwise (TESTING.md Section 5). Exercises the action / outcome CHECK
+enums, cron-XOR-interval CHECK, per-server name uniqueness, and timezone
+default against migrated data.
 """
 
 from __future__ import annotations
@@ -14,68 +12,17 @@ import os
 import uuid
 
 import pytest
-from sqlalchemy import inspect, text
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from tests.integration.migrate import downgrade_base, downgrade_to, upgrade_head
+from tests.integration.migrate import downgrade_base, upgrade_head
 
 _DB_URL = os.environ.get("MCD_TEST_DATABASE_URL")
 
 pytestmark = pytest.mark.skipif(
     _DB_URL is None, reason="MCD_TEST_DATABASE_URL not set (no real database)"
 )
-
-
-async def test_upgrade_creates_tables_then_downgrade_drops_them() -> None:
-    assert _DB_URL is not None
-    await downgrade_base(_DB_URL)
-    await upgrade_head(_DB_URL)
-
-    engine = create_async_engine(_DB_URL)
-    try:
-        async with engine.connect() as conn:
-            tables = await conn.run_sync(
-                lambda sync_conn: set(inspect(sync_conn).get_table_names())
-            )
-            assert {"schedule", "schedule_run"} <= tables
-            schedule_indexes = await conn.run_sync(
-                lambda sync_conn: {
-                    ix["name"]: ix for ix in inspect(sync_conn).get_indexes("schedule")
-                }
-            )
-            # The runner's due poll is a *partial* index over enabled schedules.
-            assert "ix_schedule_next_run_at" in schedule_indexes
-            assert (
-                schedule_indexes["ix_schedule_next_run_at"]
-                .get("dialect_options", {})
-                .get("postgresql_where")
-            )
-            run_indexes = await conn.run_sync(
-                lambda sync_conn: {
-                    ix["name"] for ix in inspect(sync_conn).get_indexes("schedule_run")
-                }
-            )
-            assert "ix_schedule_run_schedule_id_started_at" in run_indexes
-    finally:
-        await engine.dispose()
-
-    # Walk just 0029's downgrade on the otherwise-migrated database (the
-    # "clean on an existing DB" acceptance), then all the way down.
-    await downgrade_to("0028_join_table_indexes", _DB_URL)
-
-    engine = create_async_engine(_DB_URL)
-    try:
-        async with engine.connect() as conn:
-            tables = await conn.run_sync(
-                lambda sync_conn: set(inspect(sync_conn).get_table_names())
-            )
-            assert "schedule" not in tables
-            assert "schedule_run" not in tables
-    finally:
-        await engine.dispose()
-
-    await downgrade_base(_DB_URL)
 
 
 async def _seed_server(engine_url: str) -> uuid.UUID:

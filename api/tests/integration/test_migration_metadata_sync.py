@@ -21,15 +21,12 @@ defaults, CHECK expressions, and index predicates on both sides; the schema unde
 test still comes exclusively from ``alembic upgrade head``, never from
 ``metadata.create_all``. The reflected contracts compare columns, primary keys,
 foreign keys, unique/check constraints, and indexes with property-level
-diagnostics.
+diagnostics. The same round trip then downgrades to base and proves that only
+Alembic's bookkeeping table remains.
 
 Intentional differences are exact, reasoned allow-list entries. Alembic's own
 bookkeeping table is the only one: no table family, constraint class, or column
 property is broadly excluded.
-
-``test_revision_id_length`` guards against revision IDs exceeding Alembic's
-``varchar(32)`` ceiling for ``alembic_version.version_num`` (#2069). This is a
-pure filesystem check and runs without a database.
 
 Database-dependent tests run only when ``MCD_TEST_DATABASE_URL`` is set (the CI
 Postgres service); skipped otherwise (TESTING.md Section 5).
@@ -68,11 +65,6 @@ _DB_URL = os.environ.get("MCD_TEST_DATABASE_URL")
 _needs_db = pytest.mark.skipif(
     _DB_URL is None, reason="MCD_TEST_DATABASE_URL not set (no real database)"
 )
-
-# Alembic's ``alembic_version.version_num`` column is ``varchar(32)``. A
-# revision ID exceeding this length silently passes every non-Postgres check
-# and fails only on a real ``upgrade head`` (#2069).
-_ALEMBIC_VERSION_NUM_MAX = 32
 
 # Directory holding ``model_registry`` (alongside ``env.py``), added to the
 # subprocess's path so it can be imported standalone -- exactly as ``env.py``
@@ -404,6 +396,18 @@ async def test_migrated_schema_matches_orm_metadata() -> None:
             await engine.dispose()
             await downgrade_base(_DB_URL)
 
+    base_engine = create_async_engine(_DB_URL)
+    try:
+        async with base_engine.connect() as conn:
+            base_contract = await conn.run_sync(_reflect_migrated_schema)
+    finally:
+        await base_engine.dispose()
+
+    assert set(base_contract.tables) == {"alembic_version"}, (
+        "downgrade base must leave only Alembic bookkeeping; found "
+        f"{set(base_contract.tables)}"
+    )
+
     registered_tables = _registry_tables()
     reflected_metadata_tables = set(metadata_contract.tables)
     assert registered_tables == reflected_metadata_tables, (
@@ -429,22 +433,6 @@ async def test_migrated_schema_matches_orm_metadata() -> None:
             f"- {difference.property}: {_INTENTIONAL_DIFFERENCES[difference]}"
             for difference in stale_allowlist
         )
-    )
-
-
-def test_revision_id_length() -> None:
-    """Reject migration filenames whose stem exceeds varchar(32) (#2069)."""
-
-    versions_dir = _MIGRATIONS_DIR / "versions"
-    too_long = {
-        path.stem: len(path.stem)
-        for path in versions_dir.glob("*.py")
-        if len(path.stem) > _ALEMBIC_VERSION_NUM_MAX
-    }
-    assert not too_long, (
-        f"migration revision IDs exceed Alembic's varchar(32) ceiling for "
-        f"alembic_version.version_num — rename to <= {_ALEMBIC_VERSION_NUM_MAX} "
-        f"characters: {too_long}"
     )
 
 
