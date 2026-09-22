@@ -13,6 +13,21 @@ import {
 // wrong-limit data. The two builders must never collide, yet both must stay
 // under the shared prefix so a single invalidate refreshes both.
 describe("admin community query keys", () => {
+  it.each([
+    [
+      "list",
+      adminCommunitiesListKey(50, 0),
+      [...ADMIN_COMMUNITIES_KEY, "list", { limit: 50, offset: 0 }],
+    ],
+    [
+      "picker",
+      adminCommunitiesPickerKey(100),
+      [...ADMIN_COMMUNITIES_KEY, "picker", { limit: 100 }],
+    ],
+  ])("encodes the %s request shape", (_name, actual, expected) => {
+    expect(actual).toEqual(expected);
+  });
+
   it("the list and picker first-page keys are distinct", () => {
     expect(adminCommunitiesListKey(50, 0)).not.toEqual(
       adminCommunitiesPickerKey(100),
@@ -26,14 +41,5 @@ describe("admin community query keys", () => {
     expect(adminCommunitiesListKey(50, 0)).not.toEqual(
       adminCommunitiesListKey(100, 0),
     );
-  });
-
-  it("both keys start with the shared prefix used for invalidation", () => {
-    expect(adminCommunitiesListKey(50, 0).slice(0, 2)).toEqual([
-      ...ADMIN_COMMUNITIES_KEY,
-    ]);
-    expect(adminCommunitiesPickerKey(100).slice(0, 2)).toEqual([
-      ...ADMIN_COMMUNITIES_KEY,
-    ]);
   });
 });

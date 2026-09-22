@@ -15,16 +15,11 @@ describe("postLoginPath", () => {
     ).toBe("/communities/c1?tab=logs");
   });
 
-  it("rejects protocol-relative paths (//evil.com)", () => {
-    expect(postLoginPath({ pathname: "//evil.com/x", search: "" })).toBe(
-      LANDING_PATH,
-    );
-  });
-
-  it("rejects backslash protocol-relative paths (/\\evil.com)", () => {
-    expect(postLoginPath({ pathname: "/\\evil.com", search: "" })).toBe(
-      LANDING_PATH,
-    );
+  it.each([
+    ["protocol-relative", "//evil.com/x"],
+    ["backslash protocol-relative", "/\\evil.com"],
+  ])("rejects %s paths", (_kind, pathname) => {
+    expect(postLoginPath({ pathname, search: "" })).toBe(LANDING_PATH);
   });
 
   it("falls back to LANDING_PATH for missing state", () => {
