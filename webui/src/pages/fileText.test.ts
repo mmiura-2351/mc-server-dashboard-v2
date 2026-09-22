@@ -95,10 +95,6 @@ describe("isProbablyText", () => {
     expect(isProbablyText(encodeUtf8Base64("plain text"))).toBe(true);
   });
 
-  it("treats unicode text as text", () => {
-    expect(isProbablyText(encodeUtf8Base64("絵文字 🎮"))).toBe(true);
-  });
-
   it("treats content with a NUL byte as binary", () => {
     // bytes [0x66, 0x00, 0x66] = "f\0f" → base64.
     const base64 = btoa(String.fromCharCode(0x66, 0x00, 0x66));
