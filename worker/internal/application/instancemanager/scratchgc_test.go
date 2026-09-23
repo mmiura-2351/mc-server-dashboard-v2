@@ -211,6 +211,61 @@ func TestFinalSnapshotSweepsHydrateLeftovers(t *testing.T) {
 	}
 }
 
+// The hydrate leftovers go BEFORE the scratch dir, and the order is the whole point
+// (issue #3167) — the same hazard issue #2934 closed on the deleted-server reclaim.
+// <scratch>/<id> is what keeps the id advertised: both held-set scans skip
+// .hydrate-<id>-* (isReservedScratchName), so the instant that dir goes the id leaves
+// held_servers and no PER-ID pass is ever offered it again. A server deleted or
+// re-placed elsewhere never gets another stopped-id snapshot, the API stops deriving the
+// id into unknown_held_server_ids, and datatransfer's own sweep runs only if the server
+// is re-placed onto this Worker. Sweeping AFTER the removal therefore turned every
+// interruption in that window into a world-sized tree that only a Worker BOOT reclaims
+// (ReclaimHydrateLeftovers) — the backstop, not the plan: a Worker runs for months
+// between boots.
+//
+// This path is MORE exposed than the reclaim #2934 fixed, not less. It runs on a session
+// command lane, which shutdown abandons without waiting at all (Runner.serve joins no
+// lane, issue #3168), so an ordinary SIGTERM reaches the window that a crash reaches on
+// the reclaim path — which Close does join.
+func TestStoppedIDGCSweepsHydrateLeftoversBeforeTheScratchDirGoes(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	dir := seedScratch(t, m, "s1")
+	leftover := filepath.Join(m.scratchDir, ".hydrate-s1-stale")
+	if err := os.MkdirAll(leftover, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	// The removal seam IS the instant after which no per-id pass is ever offered this id
+	// again, so it is where the leftover has to be gone already. The reclaim path pins
+	// the same ordering on the log record its own removal emits; this one emits none on
+	// its success path, so the seam stands in for that record.
+	removed := false
+	restore := removeScratchTree
+	removeScratchTree = func(path string) error {
+		removed = true
+		if _, err := os.Stat(leftover); !os.IsNotExist(err) {
+			t.Errorf("the s1 hydrate leftover was still there when the scratch dir was removed "+
+				"(stat err = %v): an interruption in that window strands a world-sized tree no "+
+				"per-id pass can reach again (issue #3167)", err)
+		}
+		return restore(path)
+	}
+	t.Cleanup(func() { removeScratchTree = restore })
+
+	m.removeScratch("s1")
+
+	if !removed {
+		t.Fatal("removeScratch did not remove the scratch dir through the seam this test " +
+			"observes the order through; the ordering is no longer pinned")
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("scratch dir not reclaimed after the final snapshot: stat err = %v", err)
+	}
+	if _, err := os.Stat(leftover); !os.IsNotExist(err) {
+		t.Fatalf("s1 hydrate leftover not reclaimed: stat err = %v", err)
+	}
+}
+
 // sweepHydrateLeftovers removes only the .hydrate-<id>-* siblings for the given id,
 // leaving the server's own scratch dir and unrelated entries untouched (issue #806).
 func TestSweepHydrateLeftovers(t *testing.T) {
@@ -1003,6 +1058,58 @@ func TestBootReclaimsInterruptedDisplacedSweeps(t *testing.T) {
 	for _, p := range keep {
 		if _, err := os.Stat(p); err != nil {
 			t.Fatalf("boot reclaim removed %s, which is not an interrupted displaced sweep: %v", filepath.Base(p), err)
+		}
+	}
+}
+
+// A .hydrate-<id>-* tree left by an interrupted hydrate — or by a GC path killed
+// between its leftover sweep and the scratch removal that ends the id's advertisement —
+// is reclaimed at the next Worker boot (issue #3167), and by nothing else once that
+// scratch dir is gone: both held-set scans skip .hydrate- names, so the id is never
+// advertised again, the API never re-derives it into unknown_held_server_ids, and
+// datatransfer's own sweep runs only if the server is re-placed onto this Worker. A
+// server deleted or re-placed elsewhere leaked a world-sized tree permanently.
+//
+// Deleting them at boot is unconditional for the reasons ReclaimInterruptedDisplacedSweeps
+// is (issue #2799): no hydrate is in flight — the session that dispatches one does not
+// exist until after this call — the container orphan sweep has already stopped every
+// writer, and a .hydrate- tree is never the copy worth keeping. A hydrate parks the live
+// set it displaces DIRECTLY at .displaced-<id> precisely so the recovery copy is never
+// under a sweepable name (issue #910); what a .hydrate- name holds is either the temp
+// tree unpacked from the store or the superseded set oldest-wins elected to drop, which
+// unpackAndSwap leaves "for the next leftover sweep" in its own words (issue #3112).
+//
+// Everything else in the scratch root — a live scratch, a recovery tree, an interrupted
+// displaced sweep's tree — is not this reclaim's to touch. The leftover names are
+// hardcoded rather than built from hydratePrefix, as in hydrate_prefix_name_test.go:
+// building them from the constant would make the test follow a rename rather than catch
+// it, and this reclaim is now a third participant in that cross-package prefix contract.
+func TestBootReclaimsHydrateLeftovers(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	// Both crash-left forms: the per-hydrate temp tree and the superseded live set. Each
+	// is a FULL working set carrying a generation marker, indistinguishable from a server
+	// dir except by name.
+	leftovers := []string{
+		filepath.Join(m.scratchDir, ".hydrate-s1-123456"),
+		filepath.Join(m.scratchDir, ".hydrate-s1-superseded-654321"),
+	}
+	for _, dir := range leftovers {
+		seedHydrateShapedTree(t, dir, 7)
+	}
+	keep := []string{seedScratch(t, m, "s1"), seedDisplaced(t, m, "s2"), interruptDisplacedSweep(t, m, "s3")}
+
+	ReclaimHydrateLeftovers(m.scratchDir)
+
+	for _, dir := range leftovers {
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Fatalf("hydrate leftover %s survived the boot reclaim (stat err = %v): nothing "+
+				"else ever reclaims one once the id's scratch dir is gone (issue #3167)",
+				filepath.Base(dir), err)
+		}
+	}
+	for _, p := range keep {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("boot reclaim removed %s, which is not a hydrate leftover: %v", filepath.Base(p), err)
 		}
 	}
 }

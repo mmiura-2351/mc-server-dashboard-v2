@@ -252,6 +252,50 @@ func ReclaimInterruptedDisplacedSweeps(scratchDir string) {
 	}
 }
 
+// ReclaimHydrateLeftovers removes every .hydrate-<id>-* tree in scratchDir (issue
+// #3167) — the per-hydrate temp tree datatransfer.unpackAndSwap unpacks into, and the
+// superseded working set it parks aside when oldest-wins keeps an older .displaced-<id>
+// instead (issue #2278). It is the sibling of ReclaimInterruptedDisplacedSweeps above,
+// runs at the same point in boot and for the same reason: nothing else reclaims one once
+// the id's scratch dir is gone. Both held-set scans skip .hydrate- names
+// (isReservedScratchName), so such a tree is never advertised on its own; the per-id
+// sweeps (removeScratch, ReclaimDeletedScratches) are only ever offered an id the
+// scratch dir still advertises; and datatransfer's own sweep runs only if the server is
+// re-placed onto this Worker. A server deleted or re-placed elsewhere mid-hydrate
+// therefore leaked a world-sized tree permanently.
+//
+// Unconditional at boot, and what that rests on:
+//
+//   - Nothing can be building one. The only creation site is unpackAndSwap, reached from
+//     a HydrateTrigger, and the session that dispatches commands does not exist until
+//     after this call — the same argument ReclaimInterruptedDisplacedSweeps makes for a
+//     sweep in flight.
+//   - Nothing can still be writing into one. A .hydrate- tree is never bind-mounted (a
+//     container gets <scratch>/<id>), and a container that held a tree under its old
+//     name across a park-aside is stopped by the container orphan sweep, which this call
+//     runs after.
+//   - None of them is the copy worth keeping. The live set a hydrate displaces is parked
+//     DIRECTLY at .displaced-<id> whenever that slot is free, precisely so the recovery
+//     copy is never left under a name a sweep deletes (issue #910). What is left under a
+//     .hydrate- name is the store's own copy being unpacked, or the set oldest-wins
+//     elected to DROP — including the case where the post-swap drop declined and left it
+//     "for the next leftover sweep" (issue #3112). Every existing sweeper already deletes
+//     these three unconditionally, so this pass changes WHEN they go, not what goes.
+//
+// Best-effort: an unreadable scratch root or a failed removal is ignored and retried at
+// the next boot.
+func ReclaimHydrateLeftovers(scratchDir string) {
+	entries, err := os.ReadDir(scratchDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), hydratePrefix) {
+			_ = os.RemoveAll(filepath.Join(scratchDir, e.Name()))
+		}
+	}
+}
+
 // hasWorkingSet reports whether workingDir holds a real working set: at least one
 // child that is NOT the generation marker. A dir holding only the marker (or no
 // children, or unreadable) holds no working set.

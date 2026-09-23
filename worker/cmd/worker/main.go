@@ -115,6 +115,15 @@ func run(ctx context.Context) error {
 	// each is a world-sized leak. Nothing sweeps at boot, so every such tree is garbage.
 	// Run after the orphan sweep above, so no container can still be writing into it.
 	instancemanager.ReclaimInterruptedDisplacedSweeps(cfg.Worker.ScratchDir)
+	// Reclaim any .hydrate-<id>-* tree an interrupted hydrate — or a GC path killed
+	// between its leftover sweep and its scratch removal — left behind (issue #3167).
+	// Once the id's scratch dir is gone nothing else ever reaches one: the held-set scans
+	// skip .hydrate- names, so the id is never advertised and no per-id sweep is offered
+	// it again. Unconditional for the same reasons as the sweep reclaim above: no hydrate
+	// can be in flight (the session that dispatches one starts below), the orphan sweep
+	// has stopped every writer, and a .hydrate- name never holds the recovery copy — a
+	// hydrate parks that at .displaced-<id> precisely so a sweep cannot take it (#910).
+	instancemanager.ReclaimHydrateLeftovers(cfg.Worker.ScratchDir)
 	// Advertise the working sets already on the persistent scratch, each tagged
 	// with its generation, so the API skips the destructive hydrate on a same-worker
 	// restart only when the held generation is fresh enough (issue #763): a hydrate
