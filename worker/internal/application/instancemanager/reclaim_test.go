@@ -24,9 +24,9 @@ func TestReclaimDeletedScratchesRemovesScratchAndHydrateLeftovers(t *testing.T) 
 	}
 
 	// The SYNCHRONOUS body, as the rest of this file's per-id tests use. The
-	// asynchronous entry point removes the scratch dir first and sweeps the hydrate
-	// leftover after, so the leftover check would race that goroutine on its own
-	// (issue #1888), and the only barrier available is Close — which since issue
+	// asynchronous entry point runs that body on a goroutine, so both checks below
+	// would race it whatever order it removes in (issue #1888), and the only
+	// barrier available is Close — which since issue
 	// #2933 also STOPS the reclaim at its loop top, so a spawn that has not reached
 	// its first id yet reclaims nothing. TestCloseJoinsAnInFlightReclaim covers the
 	// goroutine and its join; this test is about what one id's reclaim removes.

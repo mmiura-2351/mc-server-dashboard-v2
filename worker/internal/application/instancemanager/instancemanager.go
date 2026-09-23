@@ -481,9 +481,13 @@ func (m *Manager) goBackground(fn func()) bool {
 // THE WAIT ABOVE IS NOT THE PROCESS'S BOUND, and the gap is left open on purpose
 // (issue #2934). Under compose the Worker gets Docker's stop_grace_period between
 // SIGTERM and SIGKILL, and compose.yaml sets none, so that is the 10 s default —
-// while this wait reaches roughly 220 s at worst: a retry stop already inside
-// inst.Stop costs flushTimeout + stopDeadline + restoreSaveTimeout (90 + 100 + 30 s
-// at the containerdriver defaults), and the one reclaim id in flight costs a
+// while this wait reaches roughly 280 s at worst: a retry stop already inside
+// inst.Stop costs flushTimeout + stopDeadline + the kill call + the post-kill exit
+// confirmation + restoreSaveTimeout (90 + 100 + 30 + 30 + 30 s at the
+// containerdriver defaults). Those last three ADD rather than share: the kill runs
+// on a context detached from stopDeadline so it reaches the daemon even when the
+// earlier phases consumed the whole budget, and waitExitDone honours no context at
+// all. The one reclaim id in flight costs a
 // RemoveAll per tree (3.4 s for a 4 GB / 21k-file working set, measured warm on
 // ext4). A SIGKILL therefore lands mid-Close whenever shutdown finds either in
 // flight. The 10 s stands anyway, because NOTHING IT CUTS IS A DURABLE LOSS THIS
@@ -492,7 +496,7 @@ func (m *Manager) goBackground(fn func()) bool {
 // longer grace period simply does not reach.
 //
 //   - reserved, orphans and converging are in-memory and die with the process
-//     either way — at 10 s or at 220 s.
+//     either way — at 10 s or at 280 s.
 //   - a reclaim cut anywhere in its per-id body leaves <scratch>/<id> on disk, and
 //     that dir IS the advertisement that re-offers the id: the held-set scans
 //     report it, the API re-derives unknown_held_server_ids from that report, and
@@ -500,17 +504,22 @@ func (m *Manager) goBackground(fn func()) bool {
 //     reclaimDeletedScratches is what makes this true at every point in the body
 //     rather than most of them. The residual is a dir holding nothing but its
 //     generation marker: not advertised, and not data.
-//   - a retry stop cut mid-escalation DOES lose something: between the flush's
-//     save-off and the escalation, restoreSaveOnAfterFailedStop never runs, so a
-//     surviving MC container is left with auto-save disabled — and it is not a
-//     compose service, so nothing else stops it. What makes the timer the wrong
-//     instrument is that shutdown already gives that up on the far more common
-//     path: the SAME inst.Stop, dispatched as an operator StopServer, runs on a
-//     session lane that nothing joins, so it is abandoned the moment run()
-//     returns — at any grace period. A stop_grace_period
-//     sized to this wait would honour the converger's escalation while leaving the
-//     identical operator one unbounded, and would add up to ~220 s to every
-//     redeploy that happens to find a wedged orphan.
+//   - a retry stop cut mid-escalation DOES leave something behind, and a grace
+//     period sized to this wait WOULD prevent it: between the flush's save-off and
+//     restoreSaveOnAfterFailedStop nothing re-enables auto-save, so the SIGKILL
+//     leaves a surviving MC container saving nothing — and it is not a compose
+//     service, so this timer never reaches it. What makes the loss non-durable is
+//     not the timer but the repair that already exists for exactly this crash
+//     class: the next Worker boot's container sweep issues an RCON save-on to
+//     every running orphan BEFORE its graceful stop (containerdriver.sweepSaveOn,
+//     issue #1710 — "a worker crash mid-snapshot leaves the MC server with
+//     auto-save disabled"), so the shutdown hook saves the world either way. Under
+//     restart: unless-stopped that boot is seconds away. A grace period would only
+//     move the save-on earlier — onto a container the failed retry stop is leaving
+//     running regardless — and would charge up to ~280 s to every redeploy that
+//     happens to find a wedged orphan. The same escalation dispatched as an
+//     operator StopServer is abandoned outright at SIGTERM (its session lane is
+//     joined by nothing), so the timer would not even make the two paths agree.
 //
 // Close is idempotent and terminal: it is safe to call on a manager that has
 // already been closed (the flag is monotonic, cancelling a cancelled context is a

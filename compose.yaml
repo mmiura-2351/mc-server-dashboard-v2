@@ -429,23 +429,29 @@ services:
     # NO stop_grace_period, deliberately (issue #2934). SIGTERM ends the
     # control-plane session and then runs Manager.Close, which joins the
     # manager's background goroutines; Docker's 10 s default is the only upstream
-    # bound on that, and Close's own worst case is far longer — about 220 s when
+    # bound on that, and Close's own worst case is far longer — about 280 s when
     # an orphan converger is inside a retry stop (90 s flush + 100 s escalation +
-    # 30 s save-on restore, at the containerdriver defaults), a few seconds when
-    # it is the one deleted-scratch reclaim id in flight (3.4 s for a 4 GB /
-    # 21k-file working set, measured warm on ext4). So the SIGKILL does land
-    # mid-Close. It stands because nothing it cuts is a durable loss THIS TIMER
-    # COULD PREVENT — weaker than "nothing durable is at stake", and the last
-    # item below is why the weaker claim is the honest one: the reservations
-    # and orphan records are in memory and die with the process at any grace
-    # period; a reclaim cut mid-body leaves the scratch dir that keeps the id in
-    # held_servers, so the next registration's reclaim finishes it; and a retry
-    # stop cut mid-escalation loses no more than the identical operator-dispatched
-    # StopServer, which runs on a session lane nothing joins and is abandoned at
-    # SIGTERM whatever this value is. Raising it would buy the rare converger path
-    # a bound the common lane path still would not have, and charge up to ~220 s
-    # to every redeploy that finds a wedged orphan. The leg-by-leg argument lives
-    # with the bound it is about: Manager.Close's doc comment in
+    # 30 s kill call + 30 s exit confirmation + 30 s save-on restore, at the
+    # containerdriver defaults; the last three are each detached from the deadline
+    # before them, so they add rather than share), a few seconds when it is the one
+    # deleted-scratch reclaim id in flight (3.4 s for a 4 GB / 21k-file working
+    # set, measured warm on ext4). So the SIGKILL does land mid-Close. It stands
+    # because nothing it cuts is a durable loss — not because nothing is cut:
+    #  - the reservations and orphan records are in memory and die with the
+    #    process at any grace period;
+    #  - a reclaim cut mid-body leaves the scratch dir that keeps the id in
+    #    held_servers, so the next registration's reclaim finishes it;
+    #  - a retry stop cut between the flush's save-off and its save-on restore
+    #    DOES leave a surviving MC container saving nothing, and a long enough
+    #    grace would prevent that — but the next Worker boot's container sweep
+    #    already issues an RCON save-on to every running orphan before stopping it
+    #    (containerdriver.sweepSaveOn, issue #1710), which is the repair built for
+    #    exactly this crash class, and `restart: unless-stopped` puts that boot
+    #    seconds away.
+    # Raising this would move that save-on earlier onto a container the failed
+    # retry stop leaves running anyway, and charge up to ~280 s to every redeploy
+    # that finds a wedged orphan. The leg-by-leg argument lives with the bound it
+    # is about: Manager.Close's doc comment in
     # worker/internal/application/instancemanager/instancemanager.go.
     #
     # The MC server containers are not compose services, so neither this timer nor
@@ -544,15 +550,18 @@ services:
     # NO stop_grace_period either (issue #2934), for a different reason than the
     # worker's. The relay's own shutdown bound is drainTimeout (30 s,
     # relay/cmd/relay/main.go): a ceiling on waiting for in-flight handle
-    # goroutines so their sessions' End events reach the reporter. That wait
-    # either finishes in milliseconds — a handler already past its splice — or
-    # cannot finish at all: splice.Splice takes no context, so an ESTABLISHED
-    # player session ends only on peer close or its 5 min idle timeout, and
-    # closing the listener does not touch it. 10 s covers the first case and no
-    # achievable grace period covers the second, which is why RELAY.md Section 17
-    # already states dropping in-flight sessions on restart as the contract. What
-    # a truncated drain costs is game_session rows whose End never arrived:
-    # history, not control state.
+    # goroutines so their sessions' End events reach the reporter. 10 s truncates
+    # that window for real: splice.Splice takes no context, so an ESTABLISHED
+    # player session ends when its peer closes — which can happen at any point in
+    # the drain, not only in its first seconds — and the reporter's own 5 s flush
+    # tick means an End produced after roughly T+5 s is still buffered when the
+    # SIGKILL lands. What it does NOT do is leave that history open: the relay's
+    # next Register carries active_session_ids, and the API closes every open
+    # game_session row absent from it (close_absent — "orphan healing after a
+    # relay crash", proto/mcsd/relay/v1/relay.proto, RELAY.md Sections 6 and 10).
+    # So the cost is an ended_at late by the relay's restart, on a history table,
+    # repaired by the mechanism built for this exact case — and RELAY.md Section 17
+    # already states dropping in-flight sessions on restart as the contract.
     # Gated behind the `relay` compose profile so default bring-up is unchanged
     # (issue #960, epic #659). Add `relay` to COMPOSE_PROFILES in .env to enable
     # it, then configure the required relay keys in .env (see .env.example and
