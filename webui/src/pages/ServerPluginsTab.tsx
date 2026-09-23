@@ -11,7 +11,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import {
-  ApiError,
   api,
   isUploadAbortError,
   postFormWithProgress,
@@ -35,6 +34,7 @@ import { formatRange, humanizeBytes } from "../format.ts";
 import { type TranslationKey, t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
+import { pluginErrorPresentation } from "./serverPluginsErrorPresentation.ts";
 import { atRest, normalizeState } from "./serverState.ts";
 
 type ServerResponse = components["schemas"]["ServerResponse"];
@@ -96,52 +96,6 @@ function applyNoun(text: string, noun: ContentNoun): string {
     .replace(/\{Noun\}/g, noun.singularCap);
 }
 
-/**
- * Map API reason codes to i18n keys for plugin operation errors.
- *
- * `file_too_large` (413-only) and `worker_unavailable` (503-only) are
- * deliberately absent: the API emits each at exactly one status and its message
- * equals that status's fallback below, so a reason branch here would only
- * duplicate the fallback. The remaining reasons each carry a message distinct
- * from the 413/503 fallbacks, so every branch below is load-bearing (#2460).
- */
-const pluginErrorKeys: Record<string, TranslationKey> = {
-  plugin_already_exists: "plugins.error.alreadyExists",
-  server_not_stopped: "plugins.error.notStopped",
-  server_unsettled: "plugins.error.unsettled",
-  server_busy: "plugins.error.busy",
-  invalid_path: "plugins.error.invalidPath",
-  catalog_upstream_failed: "plugins.error.catalogUpstreamFailed",
-  catalog_project_not_found: "plugins.error.catalogNotFound",
-  checksum_mismatch: "plugins.error.checksumMismatch",
-  unsupported_server_type: "plugins.error.unsupportedServerType",
-  invalid_side: "plugins.error.invalidSide",
-  invalid_display_name: "plugins.error.invalidDisplayName",
-  bedrock_port_range_exhausted: "plugins.error.bedrockPortRangeExhausted",
-  bedrock_port_taken: "plugins.error.bedrockPortTaken",
-  not_found: "plugins.error.notFound",
-};
-
-function pluginErrorMessage(error: unknown, noun: ContentNoun): string {
-  if (!(error instanceof ApiError)) return t("plugins.error.generic");
-
-  // Check reason first (most specific).
-  if (error.reason !== undefined) {
-    const key = pluginErrorKeys[error.reason];
-    if (key !== undefined) return applyNoun(t(key), noun);
-  }
-
-  // Check status (less specific).
-  switch (error.status) {
-    case 413:
-      return applyNoun(t("plugins.error.tooLarge"), noun);
-    case 503:
-      return t("plugins.error.workerUnavailable");
-  }
-
-  return t("plugins.error.generic");
-}
-
 /** Map a manifest mod id to a friendly plugin name, falling back to the id. */
 function nameOfPlugin(plugins: PluginResponse[], modId: string): string {
   const match = plugins.find((p) => p.mod_identifier === modId);
@@ -196,7 +150,7 @@ export function ServerPluginsTab({
 
   const onError = (error: unknown) => {
     if (onForbidden(error)) return;
-    showToast(pluginErrorMessage(error, noun), "error");
+    showToast(tn(pluginErrorPresentation(error)), "error");
   };
 
   const refresh = () => {
