@@ -486,7 +486,10 @@ func (m *Manager) goBackground(fn func()) bool {
 // at the containerdriver defaults), and the one reclaim id in flight costs a
 // RemoveAll per tree (3.4 s for a 4 GB / 21k-file working set, measured warm on
 // ext4). A SIGKILL therefore lands mid-Close whenever shutdown finds either in
-// flight. The 10 s stands anyway, because NOTHING IT CUTS IS DURABLE:
+// flight. The 10 s stands anyway, because NOTHING IT CUTS IS A DURABLE LOSS THIS
+// TIMER COULD PREVENT — which is the claim the legs below support, and is weaker
+// than "nothing durable is at stake": the last of them is a real loss that a
+// longer grace period simply does not reach.
 //
 //   - reserved, orphans and converging are in-memory and die with the process
 //     either way — at 10 s or at 220 s.
@@ -497,10 +500,14 @@ func (m *Manager) goBackground(fn func()) bool {
 //     reclaimDeletedScratches is what makes this true at every point in the body
 //     rather than most of them. The residual is a dir holding nothing but its
 //     generation marker: not advertised, and not data.
-//   - a retry stop cut mid-escalation loses nothing that shutdown does not already
-//     give up on the far more common path. The SAME inst.Stop, dispatched as an
-//     operator StopServer, runs on a session lane that nothing joins, so it is
-//     abandoned the moment run() returns — at any grace period. A stop_grace_period
+//   - a retry stop cut mid-escalation DOES lose something: between the flush's
+//     save-off and the escalation, restoreSaveOnAfterFailedStop never runs, so a
+//     surviving MC container is left with auto-save disabled — and it is not a
+//     compose service, so nothing else stops it. What makes the timer the wrong
+//     instrument is that shutdown already gives that up on the far more common
+//     path: the SAME inst.Stop, dispatched as an operator StopServer, runs on a
+//     session lane that nothing joins, so it is abandoned the moment run()
+//     returns — at any grace period. A stop_grace_period
 //     sized to this wait would honour the converger's escalation while leaving the
 //     identical operator one unbounded, and would add up to ~220 s to every
 //     redeploy that happens to find a wedged orphan.

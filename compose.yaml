@@ -434,7 +434,9 @@ services:
     # 30 s save-on restore, at the containerdriver defaults), a few seconds when
     # it is the one deleted-scratch reclaim id in flight (3.4 s for a 4 GB /
     # 21k-file working set, measured warm on ext4). So the SIGKILL does land
-    # mid-Close. It stands because nothing it cuts is durable: the reservations
+    # mid-Close. It stands because nothing it cuts is a durable loss THIS TIMER
+    # COULD PREVENT — weaker than "nothing durable is at stake", and the last
+    # item below is why the weaker claim is the honest one: the reservations
     # and orphan records are in memory and die with the process at any grace
     # period; a reclaim cut mid-body leaves the scratch dir that keeps the id in
     # held_servers, so the next registration's reclaim finishes it; and a retry
