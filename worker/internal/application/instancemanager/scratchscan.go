@@ -29,6 +29,12 @@ const displacedPrefix = ".displaced-"
 // exactly the incident diagnostics someone reads after a crashed hydrate. The constant
 // is duplicated rather than imported to keep this application package off the adapter,
 // and pinned to its creation site by the twin tests in hydrate_prefix_name_test.go.
+//
+// Since issue #3167 the boot reclaim below (ReclaimHydrateLeftovers) removes every such
+// tree, so what ScanHeldServers skips is a tree already swept at this very boot — or one
+// whose removal failed, which is why that scan keeps the skip. HeldServers is the scan
+// the skip is load-bearing for either way: it runs on every re-registration, where a
+// hydrate can be IN FLIGHT and its temp tree is a live one rather than a leftover.
 const hydratePrefix = ".hydrate-"
 
 // sweepingPrefix is the dot-prefixed name prefix sweepDisplaced renames a

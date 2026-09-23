@@ -19,7 +19,9 @@ import (
 //     worker/internal/adapters/datatransfer/datatransfer.go.
 //   - the held-set scans here SKIP it, using hydratePrefix in scratchscan.go.
 //   - both leftover SWEEPS RECLAIM it — Manager.sweepHydrateLeftovers here and
-//     datatransfer.sweepHydrateLeftovers there (issue #2409).
+//     datatransfer.sweepHydrateLeftovers there (issue #2409) — and so does the boot
+//     reclaim, ReclaimHydrateLeftovers in scratchscan.go (issue #3167), pinned to the
+//     same literal by TestBootReclaimsHydrateLeftovers in scratchgc_test.go.
 //
 // So this test, its sweep companion below, and their twins in
 // worker/internal/adapters/datatransfer each assert the SAME hardcoded literal
@@ -62,8 +64,9 @@ func TestHeldScansSkipTheSharedHydrateTempPrefix(t *testing.T) {
 //
 // This is the reclamation of last resort for an id the API deleted or re-placed
 // elsewhere (issue #806): datatransfer's own sweep runs only when the id is
-// re-hydrated onto this Worker, so a miss here leaks the world-sized orphan
-// permanently.
+// re-hydrated onto this Worker, so a miss here leaks the world-sized orphan until the
+// next Worker boot reclaims it (ReclaimHydrateLeftovers, issue #3167) — months away
+// on a Worker that does not restart.
 func TestHydrateLeftoverSweepMatchesTheSharedHydratePrefix(t *testing.T) {
 	scratch := t.TempDir()
 

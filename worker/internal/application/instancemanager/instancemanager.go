@@ -2119,7 +2119,11 @@ var removeDisplacedTree = os.RemoveAll
 // hydrate for serverID left in the scratch root. The next start's leftover sweep
 // (datatransfer.sweepHydrateLeftovers) clears them too, but only if the server is
 // re-placed onto this Worker; a deleted/re-placed-elsewhere id would otherwise leak
-// the world-sized orphan permanently. The prefix is built from hydratePrefix — the
+// the world-sized orphan until the next Worker boot, where ReclaimHydrateLeftovers
+// takes it (issue #3167) — months away on a Worker that does not restart, which is
+// why this per-id sweep stays the one that runs at the time it matters, and why its
+// CALLERS run it before the scratch removal that ends the id's advertisement. The
+// prefix is built from hydratePrefix — the
 // same constant the held-set scans skip on — and matches datatransfer.hydrateTmpPrefix
 // exactly (".hydrate-<id>-"), so only this id's leftovers are touched — not another
 // server's dir or a similarly named one. Best-effort: a removal failure is ignored
@@ -2201,10 +2205,11 @@ func (m *Manager) reclaimDeletedScratches(serverIDs []string) {
 		// .hydrate-<id>-* (isReservedScratchName) — so the instant it is removed the
 		// id leaves held_servers, the API stops deriving it into
 		// unknown_held_server_ids, and this pass is the only one that would ever be
-		// offered the id again; nothing reclaims a .hydrate- tree at boot the way
-		// ReclaimInterruptedDisplacedSweeps reclaims a .sweeping- one. Sweeping after
-		// the removal made every interruption in that window a permanent,
-		// world-sized leak. This way round, an interruption anywhere in the body
+		// offered the id again; only a Worker BOOT reclaims a .hydrate- tree
+		// (ReclaimHydrateLeftovers, issue #3167), and that is the backstop rather than
+		// the plan — a Worker runs for months between boots. Sweeping after the removal
+		// made every interruption in that window a world-sized leak nothing on this
+		// Worker's runtime ever reclaims. This way round, an interruption anywhere in the body
 		// leaves the scratch dir standing, and with it the advertisement that
 		// re-offers the id — which is what makes "a partial reclaim is finished
 		// idempotently by the next registration" true at EVERY point in the body,

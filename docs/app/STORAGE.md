@@ -696,7 +696,8 @@ decision and had nowhere to put the tree back. The cases where such a tree was s
 something, and why none of them can be told apart at boot, are under "when it declines",
 below. If the Worker crashed or the
 removal failed, the tree stays under that name until the next Worker boot, which removes
-every `.sweeping-*` tree before
+every `.sweeping-*` tree — and, by the sibling pass beside it, every `.hydrate-*` tree —
+before
 it scans the held servers. A server deleted after
 a failed final
 snapshot never snapshots again and its displaced tree therefore **persists on the
@@ -704,6 +705,19 @@ Worker indefinitely** — bounded to one working-set worth of disk per deleted
 server. Note: the deleted-server scratch reclaim (`ReclaimDeletedScratches`)
 intentionally does **not** reclaim `.displaced-<id>` trees — only the scratch dir
 and `.hydrate-<id>-*` leftovers.
+
+A `.hydrate-<id>-*` tree is the opposite case, and its lifecycle differs accordingly: it
+is either the temp tree a hydrate unpacks the store copy into or the working set
+oldest-wins elected to **drop**, never the copy worth keeping (a hydrate parks that
+directly at `.displaced-<id>` for exactly this reason), so every sweep deletes one
+unconditionally. Three do it per id — the next hydrate for that server, the post-final-snapshot
+scratch GC and the deleted-server reclaim — and each of the last two sweeps the leftovers
+**before** removing `<scratch>/<id>`, because that directory is what keeps the id in
+`held_servers` and therefore what makes any later per-id pass reachable at all. For an id
+that never comes back (deleted, or re-placed onto another Worker) none of the three runs
+again, so the Worker also removes every `.hydrate-*` tree at boot, in the same pass
+position as the `.sweeping-*` reclaim above: after the container orphan sweep, before the
+held-server scan.
 
 **Scratch capacity.** One hydrate that displaces a live working set peaks at **three
 world-sized copies of that server**: the unpacked temp tree, the retained
@@ -787,9 +801,9 @@ WARN  displaced recovery tree for unknown/unassigned server found at boot; manua
    safely in the store (or the world is genuinely not needed), delete the
    displaced tree: `rm -rf <scratch>/.displaced-<id>`. The directory name is
    dot-prefixed so it is never touched by any Worker-internal sweep (the
-   `sweepHydrateLeftovers`, snapshot-spool and boot-time `.sweeping-*` sweeps only
-   target their own prefixes); only `sweepDisplaced` removes it, and only on a
-   successful snapshot for the matching id.
+   `sweepHydrateLeftovers`, snapshot-spool and boot-time `.sweeping-*` / `.hydrate-*`
+   sweeps only target their own prefixes); only `sweepDisplaced` removes it, and only on
+   a successful snapshot for the matching id.
 
 #### When is manual cleanup safe?
 

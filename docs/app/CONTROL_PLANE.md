@@ -213,8 +213,10 @@ keeps its scratch, so the next registration advertises it in `held_servers` agai
 the API re-derives `unknown_held_server_ids` from that advertisement.
 The two removals happen **in that order** for the same reason: the scratch dir is
 what keeps the id in `held_servers`, and the held-set scans skip `.hydrate-` names,
-so removing the dir first would leave any leftover unreachable — no later pass is
-ever offered the id again. Sweeping first makes an interruption **anywhere** in the
+so removing the dir first would leave any leftover unreachable by every **per-id**
+pass — no later one is ever offered the id again, and only a Worker boot, which sweeps
+`.hydrate-*` trees wholesale (STORAGE.md Section 4.6), still reclaims it. The
+post-final-snapshot scratch GC sweeps in that same order, and for the same reason. Sweeping first makes an interruption **anywhere** in the
 per-id body recoverable — at any shutdown budget, and for a crash or a power loss
 too. That is why this leg needs no budget of its own: the Worker's
 `stop_grace_period` (`compose.yaml`, 300 s) is sized for `Manager.Close`'s
