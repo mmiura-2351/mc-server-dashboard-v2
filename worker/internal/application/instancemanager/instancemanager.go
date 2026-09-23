@@ -478,22 +478,22 @@ func (m *Manager) goBackground(fn func()) bool {
 // the same events died with the process anyway. Each site states its own drop:
 // pump, logPump, metricsPump, statusDispatcher.
 //
-// THE WAIT ABOVE IS NOT THE PROCESS'S BOUND, and the gap is left open on purpose
-// (issue #2934). Under compose the Worker gets Docker's stop_grace_period between
-// SIGTERM and SIGKILL, and compose.yaml sets none, so that is the 10 s default —
-// while this wait reaches roughly 280 s at worst: a retry stop already inside
-// inst.Stop costs flushTimeout + stopDeadline + the kill call + the post-kill exit
-// confirmation + restoreSaveTimeout (90 + 100 + 30 + 30 + 30 s at the
-// containerdriver defaults). Those last three ADD rather than share: the kill runs
-// on a context detached from stopDeadline so it reaches the daemon even when the
-// earlier phases consumed the whole budget, and waitExitDone honours no context at
-// all. The one reclaim id in flight costs a
-// RemoveAll per tree (3.4 s for a 4 GB / 21k-file working set, measured warm on
-// ext4). A SIGKILL therefore lands mid-Close whenever shutdown finds either in
-// flight. The 10 s stands anyway, because NOTHING IT CUTS IS A DURABLE LOSS THIS
-// TIMER COULD PREVENT — which is the claim the legs below support, and is weaker
-// than "nothing durable is at stake": the last of them is a real loss that a
-// longer grace period simply does not reach.
+// THIS WAIT IS WHAT compose.yaml's stop_grace_period ON THE WORKER IS SIZED FOR
+// (issue #2934, owner decision 2026-09-23). Under compose the process gets that
+// long between SIGTERM and SIGKILL, and the two numbers are a pair: change this
+// bound and the compose value is wrong, and vice versa.
+//
+// The bound is roughly 280 s. A retry stop already inside inst.Stop costs
+// flushTimeout + stopDeadline + the kill call + the post-kill exit confirmation +
+// restoreSaveTimeout (90 + 100 + 30 + 30 + 30 s at the containerdriver defaults).
+// Those last three ADD rather than share: the kill runs on a context detached from
+// stopDeadline so it reaches the daemon even when the earlier phases consumed the
+// whole budget, and waitExitDone honours no context at all. The one reclaim id in
+// flight costs a RemoveAll per tree instead (3.4 s for a 4 GB / 21k-file working
+// set, measured warm on ext4). Docker's 10 s default cut both.
+//
+// ONE LEG IS WHY THE VALUE EXISTS, and the other two are honest about not needing
+// it:
 //
 //   - reserved, orphans and converging are in-memory and die with the process
 //     either way — at 10 s or at 280 s.
@@ -504,22 +504,23 @@ func (m *Manager) goBackground(fn func()) bool {
 //     reclaimDeletedScratches is what makes this true at every point in the body
 //     rather than most of them. The residual is a dir holding nothing but its
 //     generation marker: not advertised, and not data.
-//   - a retry stop cut mid-escalation DOES leave something behind, and a grace
-//     period sized to this wait WOULD prevent it: between the flush's save-off and
-//     restoreSaveOnAfterFailedStop nothing re-enables auto-save, so the SIGKILL
-//     leaves a surviving MC container saving nothing — and it is not a compose
-//     service, so this timer never reaches it. What makes the loss non-durable is
-//     not the timer but the repair that already exists for exactly this crash
-//     class: the next Worker boot's container sweep issues an RCON save-on to
-//     every running orphan BEFORE its graceful stop (containerdriver.sweepSaveOn,
-//     issue #1710 — "a worker crash mid-snapshot leaves the MC server with
-//     auto-save disabled"), so the shutdown hook saves the world either way. Under
-//     restart: unless-stopped that boot is seconds away. A grace period would only
-//     move the save-on earlier — onto a container the failed retry stop is leaving
-//     running regardless — and would charge up to ~280 s to every redeploy that
-//     happens to find a wedged orphan. The same escalation dispatched as an
-//     operator StopServer is abandoned outright at SIGTERM (its session lane is
-//     joined by nothing), so the timer would not even make the two paths agree.
+//   - a retry stop cut between the flush's save-off and restoreSaveOnAfterFailedStop
+//     leaves a SURVIVING MC container with auto-save disabled, and the grace period
+//     is what lets that restore run. The container is not a compose service, so
+//     nothing stops it on the way out. containerdriver.sweepSaveOn (issue #1710)
+//     does issue an RCON save-on to every running orphan before its graceful stop,
+//     but only at the NEXT Worker boot — and `restart: unless-stopped` brings no
+//     boot after an explicit stop, so `docker compose down` leaves that container
+//     running, saving nothing, until the stack returns. stop_grace_period applies
+//     to `down` as much as to a redeploy, which is what makes it the instrument
+//     that reaches this leg.
+//
+// The cost is bounded: the value is a CEILING, not a wait, so a Close with nothing
+// in flight still returns in milliseconds and the timer is never observed. What it
+// does NOT reach is the same escalation dispatched as an operator StopServer: that
+// runs on a session lane nothing joins, so it is abandoned the moment run()
+// returns, at any value. Closing that one is a change to the lanes, not to this
+// timer.
 //
 // Close is idempotent and terminal: it is safe to call on a manager that has
 // already been closed (the flag is monotonic, cancelling a cancelled context is a
@@ -2181,9 +2182,10 @@ func (m *Manager) reclaimDeletedScratches(serverIDs []string) {
 		// leaves the scratch dir standing, and with it the advertisement that
 		// re-offers the id — which is what makes "a partial reclaim is finished
 		// idempotently by the next registration" true at EVERY point in the body,
-		// not merely at most of them. It matters because the interruption is routine
-		// rather than rare: Close joins this reclaim, and the whole shutdown is
-		// bounded by Docker's stop_grace_period (compose.yaml).
+		// not merely at most of them. It is also what keeps this leg out of the
+		// shutdown budget: compose.yaml's stop_grace_period is sized for Close's
+		// retry-stop leg, and an interruption here costs nothing at any value of it —
+		// or in a crash or a power loss, which no value reaches.
 		m.sweepHydrateLeftovers(id)
 		dir := filepath.Join(m.scratchDir, id)
 		if _, statErr := os.Stat(dir); statErr == nil {

@@ -51,11 +51,12 @@ func TestReclaimDeletedScratchesRemovesScratchAndHydrateLeftovers(t *testing.T) 
 // interruption anywhere in it leaves the scratch dir, and with it the
 // advertisement that re-offers the id at the next registration.
 //
-// This is the leg that carries the #2934 stance. Close joins this reclaim, and the
-// Worker's shutdown is bounded by Docker's stop_grace_period (10 s by default,
-// compose.yaml), so the interruption is a routine SIGKILL rather than a rare
-// crash: "a partial reclaim is finished idempotently by the next registration"
-// has to hold at every point in the body, and with the other order it did not.
+// The ordering is what makes this leg need no shutdown budget of its own (#2934).
+// Close joins this reclaim and compose.yaml's stop_grace_period bounds the whole
+// shutdown, but the value there is sized for the retry-stop leg, not this one:
+// "a partial reclaim is finished idempotently by the next registration" has to
+// hold at every point in the body, and with the other order it did not — at any
+// grace period, and for a crash or a power loss too.
 func TestReclaimSweepsHydrateLeftoversBeforeTheScratchDirGoes(t *testing.T) {
 	h := newBlockingReclaimLogger()
 	m := newManager(t, &fakeDriver{}, nil).WithLogger(slog.New(h))

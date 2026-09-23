@@ -215,10 +215,10 @@ The two removals happen **in that order** for the same reason: the scratch dir i
 what keeps the id in `held_servers`, and the held-set scans skip `.hydrate-` names,
 so removing the dir first would leave any leftover unreachable — no later pass is
 ever offered the id again. Sweeping first makes an interruption **anywhere** in the
-per-id body recoverable, which matters because the Worker's whole shutdown is
-bounded by Docker's `stop_grace_period` (10 s by default; the stance recorded in
-`compose.yaml` and in `Manager.Close`'s doc comment), so a SIGKILL inside that body
-is routine rather than exceptional. The list is
+per-id body recoverable — at any shutdown budget, and for a crash or a power loss
+too. That is why this leg needs no budget of its own: the Worker's
+`stop_grace_period` (`compose.yaml`, 300 s) is sized for `Manager.Close`'s
+retry-stop leg, not for this one. The list is
 fail-safe: a DB error on the API side yields an empty list rather than misclassifying
 a live server as deleted.
 A refusal never rides in the ack: `RegisterAck` carries no accept/reject flag —

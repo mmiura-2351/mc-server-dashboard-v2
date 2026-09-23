@@ -263,17 +263,20 @@ services:
       dockerfile: api/Dockerfile
     image: mcsd-api:dev
     restart: unless-stopped
-    # NO stop_grace_period here either (issue #2934). The api's teardown has no
-    # bound worth matching: uvicorn keeps its defaults (serve.py passes only the
-    # bind), so its graceful shutdown waits on in-flight requests indefinitely and
-    # a data-plane snapshot upload outlives any value worth setting. Killing one
-    # is a failed upload the Worker re-runs at its next snapshot, and the
-    # half-written object is reclaimed by the app-level multipart sweep plus the
-    # bucket's AbortIncompleteMultipartUpload rule (DEPLOYMENT.md Section 5). The
-    # lifespan's own teardown is prompt: it cancels its background tasks, stops
-    # the gRPC server with grace=None (every RPC aborted immediately, so the
-    # long-lived worker/relay session streams do not hold it) and disposes the
-    # engine.
+    # NO stop_grace_period, and this is the one service where that is the answer
+    # (issue #2934, owner decision 2026-09-23). The worker and the relay each got
+    # a value because each has a FINITE code-level bound to cover — ~280 s and
+    # ~40 s. The api has none to match: uvicorn keeps its defaults (serve.py
+    # passes only the bind), so its graceful shutdown waits on in-flight requests
+    # indefinitely, and a data-plane snapshot upload outlives any value worth
+    # setting. There is no number that is "the bound" here, only an arbitrary one.
+    # Nothing durable rides on it either: killing an upload is a failed upload the
+    # Worker re-runs at its next snapshot, and the half-written object is
+    # reclaimed by the app-level multipart sweep plus the bucket's
+    # AbortIncompleteMultipartUpload rule (DEPLOYMENT.md Section 5). The lifespan's
+    # own teardown is prompt: it cancels its background tasks, stops the gRPC
+    # server with grace=None (every RPC aborted immediately, so the long-lived
+    # worker/relay session streams do not hold it) and disposes the engine.
     environment:
       # An entry below with a LITERAL value is a pin this deployment owns, not a
       # default: setting that same MCD_API_* name in .env changes nothing,
@@ -426,37 +429,38 @@ services:
     build: ./worker
     image: mcsd-worker:dev
     restart: unless-stopped
-    # NO stop_grace_period, deliberately (issue #2934). SIGTERM ends the
-    # control-plane session and then runs Manager.Close, which joins the
-    # manager's background goroutines; Docker's 10 s default is the only upstream
-    # bound on that, and Close's own worst case is far longer — about 280 s when
-    # an orphan converger is inside a retry stop (90 s flush + 100 s escalation +
-    # 30 s kill call + 30 s exit confirmation + 30 s save-on restore, at the
-    # containerdriver defaults; the last three are each detached from the deadline
-    # before them, so they add rather than share), a few seconds when it is the one
-    # deleted-scratch reclaim id in flight (3.4 s for a 4 GB / 21k-file working
-    # set, measured warm on ext4). So the SIGKILL does land mid-Close. It stands
-    # because nothing it cuts is a durable loss — not because nothing is cut:
-    #  - the reservations and orphan records are in memory and die with the
-    #    process at any grace period;
-    #  - a reclaim cut mid-body leaves the scratch dir that keeps the id in
-    #    held_servers, so the next registration's reclaim finishes it;
-    #  - a retry stop cut between the flush's save-off and its save-on restore
-    #    DOES leave a surviving MC container saving nothing, and a long enough
-    #    grace would prevent that — but the next Worker boot's container sweep
-    #    already issues an RCON save-on to every running orphan before stopping it
-    #    (containerdriver.sweepSaveOn, issue #1710), which is the repair built for
-    #    exactly this crash class, and `restart: unless-stopped` puts that boot
-    #    seconds away.
-    # Raising this would move that save-on earlier onto a container the failed
-    # retry stop leaves running anyway, and charge up to ~280 s to every redeploy
-    # that finds a wedged orphan. The leg-by-leg argument lives with the bound it
-    # is about: Manager.Close's doc comment in
-    # worker/internal/application/instancemanager/instancemanager.go.
+    # Covers Manager.Close's own worst case, which is ~280 s (issue #2934, owner
+    # decision 2026-09-23). SIGTERM ends the control-plane session and then runs
+    # Close, which JOINS the manager's background goroutines; Docker's 10 s
+    # default cut that join, and the code-level bound is far longer: 90 s flush +
+    # 100 s escalation + 30 s kill call + 30 s exit confirmation + 30 s save-on
+    # restore, at the containerdriver defaults. The last three each run on a
+    # context detached from the deadline before them, so they ADD rather than
+    # share — see Manager.Close's doc comment
+    # (worker/internal/application/instancemanager/instancemanager.go), which
+    # carries the leg-by-leg derivation. 300s is that bound plus headroom.
     #
-    # The MC server containers are not compose services, so neither this timer nor
-    # `docker compose down` touches them; the Worker's boot sweep force-removes
-    # them on the way back up.
+    # WHAT IT BUYS is one leg: restoreSaveOnAfterFailedStop. A retry stop cut
+    # between the flush's save-off and that restore leaves a surviving Minecraft
+    # container saving nothing, and this timer is what lets the restore run before
+    # the Worker is removed. The other legs never needed it — the reservations and
+    # orphan records are in memory and die with the process at any value, and a
+    # reclaim cut mid-body leaves the scratch dir that keeps the id in
+    # held_servers, so the next registration's reclaim finishes it.
+    #
+    # Why the boot repair is not enough on its own: containerdriver.sweepSaveOn
+    # (#1710) does issue an RCON save-on to every running orphan before stopping
+    # it, but only at the NEXT Worker boot. `restart: unless-stopped` does not
+    # restart a container after an explicit stop, so `make down` brings no boot —
+    # and the Minecraft containers are not Compose services, so they keep running,
+    # with auto-save off, until the stack returns. stop_grace_period DOES apply to
+    # `docker compose down`, which is what makes it the right instrument here.
+    #
+    # The cost is bounded and rarely paid: the timer is a CEILING, not a wait, so
+    # a Close that finds nothing in flight still exits in milliseconds. The full
+    # ~5 min is only reachable while a converger is inside a retry stop against a
+    # wedged daemon.
+    stop_grace_period: 300s
     environment:
       MCD_WORKER_API_GRPC_ENDPOINT: api:50051
       MCD_WORKER_API_CREDENTIAL: ${MCD_API_CONTROL__WORKER_CREDENTIAL}
@@ -547,21 +551,26 @@ services:
     build: ./relay
     image: mcsd-relay:dev
     restart: unless-stopped
-    # NO stop_grace_period either (issue #2934), for a different reason than the
-    # worker's. The relay's own shutdown bound is drainTimeout (30 s,
-    # relay/cmd/relay/main.go): a ceiling on waiting for in-flight handle
-    # goroutines so their sessions' End events reach the reporter. 10 s truncates
-    # that window for real: splice.Splice takes no context, so an ESTABLISHED
-    # player session ends when its peer closes — which can happen at any point in
-    # the drain, not only in its first seconds — and the reporter's own 5 s flush
-    # tick means an End produced after roughly T+5 s is still buffered when the
-    # SIGKILL lands. What it does NOT do is leave that history open: the relay's
-    # next Register carries active_session_ids, and the API closes every open
-    # game_session row absent from it (close_absent — "orphan healing after a
-    # relay crash", proto/mcsd/relay/v1/relay.proto, RELAY.md Sections 6 and 10).
-    # So the cost is an ended_at late by the relay's restart, on a history table,
-    # repaired by the mechanism built for this exact case — and RELAY.md Section 17
-    # already states dropping in-flight sessions on restart as the contract.
+    # Covers the relay's own ~40 s shutdown bound (issue #2934, owner decision
+    # 2026-09-23): gameLn.Drain(drainTimeout) waits up to 30 s for in-flight
+    # handle goroutines, and only THEN does svcStop() release Reporter.Run into
+    # its separate DefaultShutdownTimeout (10 s) final flush — the two are
+    # sequential, so they add (relay/cmd/relay/main.go,
+    # relay/internal/session/reporter.go). The metrics server's own 5 s Shutdown
+    # runs concurrently and adds nothing. 45s is 40 s plus headroom.
+    #
+    # WHAT IT BUYS is a session's REAL End. splice.Splice takes no context, so an
+    # established player session ends when its peer closes — which can happen at
+    # any point in the drain, not only in its first seconds — and the reporter's
+    # 5 s flush tick leaves an End produced after roughly T+5 s still buffered.
+    # Under the 10 s default that End died with the process and the row was healed
+    # approximately instead: the relay's next Register carries active_session_ids
+    # and the API closes every open game_session row absent from it (close_absent
+    # — "orphan healing after a relay crash", proto/mcsd/relay/v1/relay.proto,
+    # RELAY.md Sections 6 and 10), stamping ended_at at REGISTRATION time rather
+    # than at the true close. The heal stays the backstop for an actual crash;
+    # this timer keeps an orderly stop from needing it.
+    stop_grace_period: 45s
     # Gated behind the `relay` compose profile so default bring-up is unchanged
     # (issue #960, epic #659). Add `relay` to COMPOSE_PROFILES in .env to enable
     # it, then configure the required relay keys in .env (see .env.example and
