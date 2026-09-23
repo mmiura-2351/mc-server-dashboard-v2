@@ -478,6 +478,50 @@ func (m *Manager) goBackground(fn func()) bool {
 // the same events died with the process anyway. Each site states its own drop:
 // pump, logPump, metricsPump, statusDispatcher.
 //
+// THIS WAIT IS WHAT compose.yaml's stop_grace_period ON THE WORKER IS SIZED FOR
+// (issue #2934, owner decision 2026-09-23). Under compose the process gets that
+// long between SIGTERM and SIGKILL, and the two numbers are a pair: change this
+// bound and the compose value is wrong, and vice versa.
+//
+// The bound is roughly 280 s. A retry stop already inside inst.Stop costs
+// flushTimeout + stopDeadline + the kill call + the post-kill exit confirmation +
+// restoreSaveTimeout (90 + 100 + 30 + 30 + 30 s at the containerdriver defaults).
+// Those last three ADD rather than share: the kill runs on a context detached from
+// stopDeadline so it reaches the daemon even when the earlier phases consumed the
+// whole budget, and waitExitDone honours no context at all. The one reclaim id in
+// flight costs a RemoveAll per tree instead (3.4 s for a 4 GB / 21k-file working
+// set, measured warm on ext4). Docker's 10 s default cut both.
+//
+// ONE LEG IS WHY THE VALUE EXISTS, and the other two are honest about not needing
+// it:
+//
+//   - reserved, orphans and converging are in-memory and die with the process
+//     either way — at 10 s or at 280 s.
+//   - a reclaim cut anywhere in its per-id body leaves <scratch>/<id> on disk, and
+//     that dir IS the advertisement that re-offers the id: the held-set scans
+//     report it, the API re-derives unknown_held_server_ids from that report, and
+//     the next registration's reclaim finishes the removal. The sweep order in
+//     reclaimDeletedScratches is what makes this true at every point in the body
+//     rather than most of them. The residual is a dir holding nothing but its
+//     generation marker: not advertised, and not data.
+//   - a retry stop cut between the flush's save-off and restoreSaveOnAfterFailedStop
+//     leaves a SURVIVING MC container with auto-save disabled, and the grace period
+//     is what lets that restore run. The container is not a compose service, so
+//     nothing stops it on the way out. containerdriver.sweepSaveOn (issue #1710)
+//     does issue an RCON save-on to every running orphan before its graceful stop,
+//     but only at the NEXT Worker boot — and `restart: unless-stopped` brings no
+//     boot after an explicit stop, so `docker compose down` leaves that container
+//     running, saving nothing, until the stack returns. stop_grace_period applies
+//     to `down` as much as to a redeploy, which is what makes it the instrument
+//     that reaches this leg.
+//
+// The cost is bounded: the value is a CEILING, not a wait, so a Close with nothing
+// in flight still returns in milliseconds and the timer is never observed. What it
+// does NOT reach is the same escalation dispatched as an operator StopServer: that
+// runs on a session lane nothing joins, so it is abandoned the moment run()
+// returns, at any value. Closing that one is a change to the lanes, not to this
+// timer.
+//
 // Close is idempotent and terminal: it is safe to call on a manager that has
 // already been closed (the flag is monotonic, cancelling a cancelled context is a
 // no-op, and a settled WaitGroup returns from Wait immediately), and a closed
@@ -2070,8 +2114,9 @@ func (m *Manager) sweepHydrateLeftovers(serverID string) {
 // ReclaimDeletedScratches removes scratch dirs for server ids the API confirmed
 // no longer exist (issue #924). It runs asynchronously on a goroutine so it does
 // not block heartbeats or command dispatch. Per id it validates the id, claims a
-// reservation (skipping running/orphaned/reserved ids), removes the scratch dir
-// and hydrate leftovers, then releases the reservation. .displaced-<id> trees are
+// reservation (skipping running/orphaned/reserved ids), sweeps this id's hydrate
+// leftovers, removes the scratch dir, then releases the reservation. That order
+// is load-bearing rather than incidental — see the body. .displaced-<id> trees are
 // intentionally NOT reclaimed (issue #911: retained for operator recovery).
 //
 // Reclamation contract update (issue #924, extending #841):
@@ -2125,6 +2170,23 @@ func (m *Manager) reclaimDeletedScratches(serverIDs []string) {
 			// an in-flight command — skip it rather than interfere.
 			continue
 		}
+		// The leftovers go FIRST, and the order is load-bearing (issue #2934).
+		// <scratch>/<id> is what keeps the id advertised — both held-set scans skip
+		// .hydrate-<id>-* (isReservedScratchName) — so the instant it is removed the
+		// id leaves held_servers, the API stops deriving it into
+		// unknown_held_server_ids, and this pass is the only one that would ever be
+		// offered the id again; nothing reclaims a .hydrate- tree at boot the way
+		// ReclaimInterruptedDisplacedSweeps reclaims a .sweeping- one. Sweeping after
+		// the removal made every interruption in that window a permanent,
+		// world-sized leak. This way round, an interruption anywhere in the body
+		// leaves the scratch dir standing, and with it the advertisement that
+		// re-offers the id — which is what makes "a partial reclaim is finished
+		// idempotently by the next registration" true at EVERY point in the body,
+		// not merely at most of them. It is also what keeps this leg out of the
+		// shutdown budget: compose.yaml's stop_grace_period is sized for Close's
+		// retry-stop leg, and an interruption here costs nothing at any value of it —
+		// or in a crash or a power loss, which no value reaches.
+		m.sweepHydrateLeftovers(id)
 		dir := filepath.Join(m.scratchDir, id)
 		if _, statErr := os.Stat(dir); statErr == nil {
 			if err := os.RemoveAll(dir); err != nil {
@@ -2135,7 +2197,6 @@ func (m *Manager) reclaimDeletedScratches(serverIDs []string) {
 					"server_id", id, "dir", dir)
 			}
 		}
-		m.sweepHydrateLeftovers(id)
 		// NOTE: .displaced-<id> trees are intentionally NOT reclaimed here
 		// (issue #911). They are retained for operator recovery.
 		m.release(id)
