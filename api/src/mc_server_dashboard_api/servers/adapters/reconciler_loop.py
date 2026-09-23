@@ -22,7 +22,6 @@ iteration (and the tick is skipped until it succeeds).
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 
@@ -30,6 +29,7 @@ from mc_server_dashboard_api.core.adapters.metrics import (
     reconciler_last_success_timestamp_seconds,
     reconciler_ticks_total,
 )
+from mc_server_dashboard_api.core.adapters.periodic_runner import run_periodic
 from mc_server_dashboard_api.servers.application.reconciler import RunReconcilerTick
 from mc_server_dashboard_api.servers.application.startup_reset import (
     ResetUnverifiableObservedStates,
@@ -64,35 +64,42 @@ async def run_reconciler_loop(
 
     reset_done = False
     warned_ports = False
-    while True:
-        try:
-            if not reset_done:
-                await reset()
-                reset_done = True
-            if not warned_ports:
-                try:
-                    await warn_missing_ports()
-                except Exception:  # noqa: BLE001 - informational; never gate ticking
-                    _LOG.warning(
-                        "startup legacy-port check failed; will retry next iteration",
-                        exc_info=True,
-                    )
-                else:
-                    warned_ports = True
-            # Count the tick attempt and stamp the last clean tick, so an operator
-            # can alert on a stalled reconciler via /metrics (issue #282).
-            reconciler_ticks_total.inc()
-            await reconciler.tick()
-            reconciler_last_success_timestamp_seconds.set(time.time())
-        except asyncio.CancelledError:
-            raise
-        except Exception:  # noqa: BLE001 - one bad tick must not kill the loop
-            if reset_done:
-                _LOG.exception("reconciler tick failed; continuing")
-            else:
+
+    async def run_tick() -> None:
+        nonlocal reset_done, warned_ports
+
+        if not reset_done:
+            await reset()
+            reset_done = True
+        if not warned_ports:
+            try:
+                await warn_missing_ports()
+            except Exception:  # noqa: BLE001 - informational; never gate ticking
                 _LOG.warning(
-                    "startup observed-state reset failed; skipping tick, "
-                    "will retry next iteration",
+                    "startup legacy-port check failed; will retry next iteration",
                     exc_info=True,
                 )
-        await asyncio.sleep(tick_seconds)
+            else:
+                warned_ports = True
+        # Count the tick attempt and stamp the last clean tick, so an operator
+        # can alert on a stalled reconciler via /metrics (issue #282).
+        reconciler_ticks_total.inc()
+        await reconciler.tick()
+        reconciler_last_success_timestamp_seconds.set(time.time())
+
+    def on_error() -> None:
+        if reset_done:
+            _LOG.exception("reconciler tick failed; continuing")
+        else:
+            _LOG.warning(
+                "startup observed-state reset failed; skipping tick, "
+                "will retry next iteration",
+                exc_info=True,
+            )
+
+    await run_periodic(
+        run_tick,
+        tick_seconds=tick_seconds,
+        on_error=on_error,
+        run_immediately=True,
+    )

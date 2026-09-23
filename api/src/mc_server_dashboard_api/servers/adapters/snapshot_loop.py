@@ -15,9 +15,9 @@ the task (on shutdown) ends the loop cleanly.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 
+from mc_server_dashboard_api.core.adapters.periodic_runner import run_periodic
 from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
     RunSnapshotCadenceTick,
 )
@@ -30,14 +30,8 @@ async def run_snapshot_loop(
 ) -> None:
     """Run ``scheduler.tick()`` every ``tick_seconds`` until cancelled."""
 
-    while True:
-        # Sleep first so the initial tick is deferred by one full cadence.
-        # A transient DB/worker outage at boot no longer causes a ~90-line
-        # ERROR traceback on the very first tick (issue #1760).
-        await asyncio.sleep(tick_seconds)
-        try:
-            await scheduler.tick()
-        except asyncio.CancelledError:
-            raise
-        except Exception:  # noqa: BLE001 - one bad tick must not kill the loop
-            _LOG.exception("snapshot scheduler tick failed; continuing")
+    await run_periodic(
+        scheduler.tick,
+        tick_seconds=tick_seconds,
+        on_error=lambda: _LOG.exception("snapshot scheduler tick failed; continuing"),
+    )
