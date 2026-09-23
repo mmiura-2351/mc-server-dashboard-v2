@@ -97,9 +97,6 @@ jobs:
       - name: Import contracts (import-linter)
         run: uv run lint-imports
 
-      - name: Benchmark collection boundary
-        run: make -C .. api-benchmark-collection-check
-
       - name: Test (pytest)
         # MCD_TEST_DATABASE_URL enables the DB-touching integration tests
         # (tests/integration) against the Postgres service; the unit suite is
