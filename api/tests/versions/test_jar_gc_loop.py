@@ -1,19 +1,13 @@
-"""Tests for the JAR-pool GC lifespan loop driver (D4, issue #293).
-
-The loop runs the GC use case on its cadence, survives a failing pass, and stops
-cleanly when its task is cancelled (the shutdown path). The use case is replaced
-with a tiny spy so these stay fast and deterministic. Mirrors the snapshot/backup
-loop tests.
-"""
+"""Wiring test for the JAR-pool GC lifespan task."""
 
 from __future__ import annotations
 
-import asyncio
 from typing import cast
+from unittest.mock import AsyncMock
 
 import pytest
 
-from mc_server_dashboard_api.versions.adapters.jar_gc_loop import run_jar_gc_loop
+from mc_server_dashboard_api.versions.adapters import jar_gc_loop
 from mc_server_dashboard_api.versions.application.jar_gc import (
     JarGcResult,
     RunJarPoolGc,
@@ -21,71 +15,28 @@ from mc_server_dashboard_api.versions.application.jar_gc import (
 
 
 class _SpyGc:
-    def __init__(self, *, fail_first: bool = False) -> None:
+    def __init__(self) -> None:
         self.runs = 0
-        self._fail_first = fail_first
 
     async def __call__(self) -> JarGcResult:
         self.runs += 1
-        if self._fail_first and self.runs == 1:
-            raise RuntimeError("boom")
         return JarGcResult(scanned=0, deleted=0, freed_bytes=0)
 
 
-async def _run_for_runs(spy: _SpyGc, *, until: int) -> None:
-    task = asyncio.create_task(run_jar_gc_loop(cast(RunJarPoolGc, spy), tick_seconds=0))
-    for _ in range(10000):
-        if spy.runs >= until:
-            break
-        await asyncio.sleep(0)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-
-async def test_loop_sleeps_before_first_tick(
+async def test_wires_gc_and_interval_to_periodic_runner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The loop awaits a full cadence before its first tick (issue #1760)."""
-    spy = _SpyGc()
-    runs_at_first_sleep: list[int] = []
-    real_sleep = asyncio.sleep
+    gc = _SpyGc()
+    runner = AsyncMock()
+    monkeypatch.setattr(jar_gc_loop, "run_periodic", runner)
 
-    async def _recording_sleep(delay: float) -> None:
-        if not runs_at_first_sleep:
-            runs_at_first_sleep.append(spy.runs)
-        await real_sleep(0)
+    await jar_gc_loop.run_jar_gc_loop(cast(RunJarPoolGc, gc), tick_seconds=17)
 
-    monkeypatch.setattr(asyncio, "sleep", _recording_sleep)
-    task = asyncio.create_task(run_jar_gc_loop(cast(RunJarPoolGc, spy), tick_seconds=1))
-    for _ in range(10000):
-        if runs_at_first_sleep:
-            break
-        await real_sleep(0)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-    assert runs_at_first_sleep == [0]
-
-
-async def test_loop_runs_repeatedly() -> None:
-    spy = _SpyGc()
-    await _run_for_runs(spy, until=3)
-    assert spy.runs >= 3
-
-
-async def test_loop_survives_a_failing_pass() -> None:
-    spy = _SpyGc(fail_first=True)
-    await _run_for_runs(spy, until=3)
-    assert spy.runs >= 3
-
-
-async def test_loop_stops_cleanly_on_cancel() -> None:
-    spy = _SpyGc()
-    task = asyncio.create_task(run_jar_gc_loop(cast(RunJarPoolGc, spy), tick_seconds=0))
-    await asyncio.sleep(0)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    assert task.cancelled()
+    runner.assert_awaited_once()
+    call = runner.await_args
+    assert call is not None
+    callback = call.args[0]
+    assert call.kwargs["tick_seconds"] == 17
+    assert callable(call.kwargs["on_error"])
+    await callback()
+    assert gc.runs == 1
