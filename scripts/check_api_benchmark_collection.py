@@ -5,12 +5,15 @@ The API pytest configuration disables the benchmark plugin by default, but that
 does not prevent benchmark functions from being collected and run once as
 ordinary tests.  This guard exercises both collection paths so a future change
 cannot accidentally make ``api-test`` and ``bench-api`` collect the same tree.
+The normal selector is supplied by the Makefile so this check exercises the
+same selector as ``api-test``.
 """
 
 from __future__ import annotations
 
 import subprocess
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 _BENCHMARK_PREFIX = "tests/benchmarks/"
@@ -32,10 +35,10 @@ def _collect(api_root: Path, *args: str) -> list[str]:
     return [line for line in result.stdout.splitlines() if line]
 
 
-def main() -> int:
+def main(normal_args: Sequence[str]) -> int:
     api_root = Path(__file__).resolve().parent.parent / "api"
     try:
-        normal = _collect(api_root)
+        normal = _collect(api_root, *normal_args)
         benchmark = _collect(api_root, "tests/benchmarks", "--benchmark-enable")
     except RuntimeError as exc:
         print(f"api-benchmark-collection-check: {exc}", file=sys.stderr)
@@ -66,4 +69,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))
