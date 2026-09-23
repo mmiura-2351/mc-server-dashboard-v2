@@ -193,6 +193,9 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Benchmarks are a dedicated suite: `api-test` must not collect them as regular
+# tests, while `make bench-api` still collects the directory explicitly.
+norecursedirs = ["benchmarks"]
 asyncio_mode = "auto"
 # Suite-wide timeout safety net (#158, pytest-timeout). A per-test cap turns an
 # unbounded await (a wrongly-accepted gRPC session hanging call.code() forever,
