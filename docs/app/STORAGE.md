@@ -697,8 +697,7 @@ something, and why none of them can be told apart at boot, are under "when it de
 below. If the Worker crashed or the
 removal failed, the tree stays under that name until the next Worker boot, which removes
 every `.sweeping-*` tree — and, by the sibling pass beside it, every `.hydrate-*` tree —
-before
-it scans the held servers. A server deleted after
+before it scans the held servers. A server deleted after
 a failed final
 snapshot never snapshots again and its displaced tree therefore **persists on the
 Worker indefinitely** — bounded to one working-set worth of disk per deleted
@@ -710,14 +709,14 @@ A `.hydrate-<id>-*` tree is the opposite case, and its lifecycle differs accordi
 is either the temp tree a hydrate unpacks the store copy into or the working set
 oldest-wins elected to **drop**, never the copy worth keeping (a hydrate parks that
 directly at `.displaced-<id>` for exactly this reason), so every sweep deletes one
-unconditionally. Three do it per id — the next hydrate for that server, the post-final-snapshot
-scratch GC and the deleted-server reclaim — and each of the last two sweeps the leftovers
-**before** removing `<scratch>/<id>`, because that directory is what keeps the id in
-`held_servers` and therefore what makes any later per-id pass reachable at all. For an id
-that never comes back (deleted, or re-placed onto another Worker) none of the three runs
-again, so the Worker also removes every `.hydrate-*` tree at boot, in the same pass
-position as the `.sweeping-*` reclaim above: after the container orphan sweep, before the
-held-server scan.
+unconditionally. Three do it per id — the next hydrate for that server, the
+post-final-snapshot scratch GC and the deleted-server reclaim — and each of the last two
+sweeps the leftovers **before** removing `<scratch>/<id>`, because that directory is what
+keeps the id in `held_servers` and therefore what makes any later per-id pass reachable at
+all. For an id that never comes back (deleted, or re-placed onto another Worker) none of
+the three runs again, so the Worker also removes every `.hydrate-*` tree at boot, in the
+same pass position as the `.sweeping-*` reclaim above: after the container orphan sweep,
+before the held-server scan.
 
 **Scratch capacity.** One hydrate that displaces a live working set peaks at **three
 world-sized copies of that server**: the unpacked temp tree, the retained
