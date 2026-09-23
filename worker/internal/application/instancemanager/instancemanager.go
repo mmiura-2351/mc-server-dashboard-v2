@@ -478,6 +478,33 @@ func (m *Manager) goBackground(fn func()) bool {
 // the same events died with the process anyway. Each site states its own drop:
 // pump, logPump, metricsPump, statusDispatcher.
 //
+// THE WAIT ABOVE IS NOT THE PROCESS'S BOUND, and the gap is left open on purpose
+// (issue #2934). Under compose the Worker gets Docker's stop_grace_period between
+// SIGTERM and SIGKILL, and compose.yaml sets none, so that is the 10 s default —
+// while this wait reaches roughly 220 s at worst: a retry stop already inside
+// inst.Stop costs flushTimeout + stopDeadline + restoreSaveTimeout (90 + 100 + 30 s
+// at the containerdriver defaults), and the one reclaim id in flight costs a
+// RemoveAll per tree (3.4 s for a 4 GB / 21k-file working set, measured warm on
+// ext4). A SIGKILL therefore lands mid-Close whenever shutdown finds either in
+// flight. The 10 s stands anyway, because NOTHING IT CUTS IS DURABLE:
+//
+//   - reserved, orphans and converging are in-memory and die with the process
+//     either way — at 10 s or at 220 s.
+//   - a reclaim cut anywhere in its per-id body leaves <scratch>/<id> on disk, and
+//     that dir IS the advertisement that re-offers the id: the held-set scans
+//     report it, the API re-derives unknown_held_server_ids from that report, and
+//     the next registration's reclaim finishes the removal. The sweep order in
+//     reclaimDeletedScratches is what makes this true at every point in the body
+//     rather than most of them. The residual is a dir holding nothing but its
+//     generation marker: not advertised, and not data.
+//   - a retry stop cut mid-escalation loses nothing that shutdown does not already
+//     give up on the far more common path. The SAME inst.Stop, dispatched as an
+//     operator StopServer, runs on a session lane that nothing joins, so it is
+//     abandoned the moment run() returns — at any grace period. A stop_grace_period
+//     sized to this wait would honour the converger's escalation while leaving the
+//     identical operator one unbounded, and would add up to ~220 s to every
+//     redeploy that happens to find a wedged orphan.
+//
 // Close is idempotent and terminal: it is safe to call on a manager that has
 // already been closed (the flag is monotonic, cancelling a cancelled context is a
 // no-op, and a settled WaitGroup returns from Wait immediately), and a closed
@@ -2070,8 +2097,9 @@ func (m *Manager) sweepHydrateLeftovers(serverID string) {
 // ReclaimDeletedScratches removes scratch dirs for server ids the API confirmed
 // no longer exist (issue #924). It runs asynchronously on a goroutine so it does
 // not block heartbeats or command dispatch. Per id it validates the id, claims a
-// reservation (skipping running/orphaned/reserved ids), removes the scratch dir
-// and hydrate leftovers, then releases the reservation. .displaced-<id> trees are
+// reservation (skipping running/orphaned/reserved ids), sweeps this id's hydrate
+// leftovers, removes the scratch dir, then releases the reservation. That order
+// is load-bearing rather than incidental — see the body. .displaced-<id> trees are
 // intentionally NOT reclaimed (issue #911: retained for operator recovery).
 //
 // Reclamation contract update (issue #924, extending #841):
@@ -2125,6 +2153,22 @@ func (m *Manager) reclaimDeletedScratches(serverIDs []string) {
 			// an in-flight command — skip it rather than interfere.
 			continue
 		}
+		// The leftovers go FIRST, and the order is load-bearing (issue #2934).
+		// <scratch>/<id> is what keeps the id advertised — both held-set scans skip
+		// .hydrate-<id>-* (isReservedScratchName) — so the instant it is removed the
+		// id leaves held_servers, the API stops deriving it into
+		// unknown_held_server_ids, and this pass is the only one that would ever be
+		// offered the id again; nothing reclaims a .hydrate- tree at boot the way
+		// ReclaimInterruptedDisplacedSweeps reclaims a .sweeping- one. Sweeping after
+		// the removal made every interruption in that window a permanent,
+		// world-sized leak. This way round, an interruption anywhere in the body
+		// leaves the scratch dir standing, and with it the advertisement that
+		// re-offers the id — which is what makes "a partial reclaim is finished
+		// idempotently by the next registration" true at EVERY point in the body,
+		// not merely at most of them. It matters because the interruption is routine
+		// rather than rare: Close joins this reclaim, and the whole shutdown is
+		// bounded by Docker's stop_grace_period (compose.yaml).
+		m.sweepHydrateLeftovers(id)
 		dir := filepath.Join(m.scratchDir, id)
 		if _, statErr := os.Stat(dir); statErr == nil {
 			if err := os.RemoveAll(dir); err != nil {
@@ -2135,7 +2179,6 @@ func (m *Manager) reclaimDeletedScratches(serverIDs []string) {
 					"server_id", id, "dir", dir)
 			}
 		}
-		m.sweepHydrateLeftovers(id)
 		// NOTE: .displaced-<id> trees are intentionally NOT reclaimed here
 		// (issue #911). They are retained for operator recovery.
 		m.release(id)
