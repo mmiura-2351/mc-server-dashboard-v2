@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -112,12 +114,15 @@ func TestResolveRconHost(t *testing.T) {
 // the next Worker boot") that the function test does not reach.
 //
 // run() is reachable without Docker or a live API. The control-plane dial is lazy
-// (grpc.NewClient connects on first use), the container driver's client construction
-// only parses the docker host (NewEngineClient), the orphan sweep's failure against a
-// socket that does not exist is deliberately non-fatal, and Run returns nil at once on
-// a cancelled context. So an already-cancelled context walks the whole boot sequence
-// and stops at the session — TestRunFailsFastOnMissingConfig already calls run() for
-// the config leg; this covers the scratch legs.
+// (grpc.NewClient connects on first use), the container driver's client construction only
+// parses the docker host (NewEngineClient), and Run returns nil at once on a cancelled
+// context. TestRunFailsFastOnMissingConfig already calls run() for the config leg; this
+// covers the scratch legs.
+//
+// What this test must NOT fake is the orphan sweep's success: since review round 2 the
+// reclaims are gated on it (see run()), so boot is given a docker socket that ANSWERS the
+// sweep's container list — with no containers, which is the quiescence the reclaims
+// require. The failed-sweep half is TestBootLeavesScratchLeftoversWhenTheOrphanSweepFails.
 func TestBootReclaimsScratchLeftovers(t *testing.T) {
 	scratch := t.TempDir()
 	gone := []string{
@@ -132,13 +137,21 @@ func TestBootReclaimsScratchLeftovers(t *testing.T) {
 		seedScratchTree(t, filepath.Join(scratch, "s1")),
 		seedScratchTree(t, filepath.Join(scratch, ".displaced-s2")),
 	}
-	setBootEnv(t, scratch, "unix://"+filepath.Join(t.TempDir(), "no-such-docker.sock"))
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+	// The session's first dial is the end of the boot sequence — everything asserted below
+	// has already happened by then — so that connection is where this test sends the
+	// shutdown, rather than pre-cancelling a context the orphan sweep's own Engine call
+	// needs. The timer only backstops it: a boot that never reaches the session then fails
+	// on the assertions instead of hanging the package.
+	endpoint := cancelOnFirstDial(t, cancel)
+	backstop := time.AfterFunc(30*time.Second, cancel)
+	t.Cleanup(func() { backstop.Stop() })
+	setBootEnv(t, scratch, fakeDockerSocket(t), endpoint)
+
 	if err := run(ctx); err != nil {
-		t.Fatalf("run() on an already-cancelled context = %v, want nil: this test needs the "+
-			"boot sequence to complete and the session to return, as a clean shutdown does", err)
+		t.Fatalf("run() = %v, want nil: this test needs the boot sequence to complete and the "+
+			"session to return, as a clean shutdown does", err)
 	}
 
 	for _, dir := range gone {
@@ -174,7 +187,9 @@ func TestBootReclaimsWaitForTheContainerOrphanSweep(t *testing.T) {
 		seedScratchTree(t, filepath.Join(scratch, ".hydrate-s1-123456")),
 		seedScratchTree(t, filepath.Join(scratch, ".sweeping-s1-123456")),
 	}
-	setBootEnv(t, scratch, "tcp://127.0.0.1:2375")
+	// The endpoint is never dialled: the context is already cancelled, so the session
+	// returns before it would be.
+	setBootEnv(t, scratch, "tcp://127.0.0.1:2375", "127.0.0.1:1")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -195,35 +210,142 @@ func TestBootReclaimsWaitForTheContainerOrphanSweep(t *testing.T) {
 	}
 }
 
-// setBootEnv gives run() the minimum configuration Load accepts, pointed at the test's
-// own scratch dir and at a docker host of the caller's choosing (the one knob that
-// decides whether the instance-manager build succeeds). Every key run() reads is set
-// explicitly, including the ones set to empty, so the ambient environment of the host
-// running the suite cannot change what is exercised.
-func setBootEnv(t *testing.T, scratch, dockerHost string) {
+// A FAILED container orphan sweep leaves the boot reclaims with nothing to stand on, so
+// they must delete nothing (PR #3170 review round 2). Both of them rest on one premise —
+// no container this Worker started is still writing into a tree they are about to
+// recursively delete — and the sweep is what establishes it. A failed sweep is
+// deliberately non-fatal (buildInstanceManager logs it: a docker socket flap must not stop
+// the Worker from serving), so the premise can simply be false here.
+//
+// The path that makes it dangerous rather than untidy: a sweep that failed at an EARLIER
+// boot leaves an orphan running with <scratch>/<id> bind-mounted, and the Worker does not
+// know about it (nothing re-adopts containers, so its instance map is empty). A
+// HydrateTrigger for that id therefore proceeds and renames the live tree aside — to
+// .hydrate-<id>-superseded-* when the .displaced-<id> slot is occupied (issue #2278), and
+// to .displaced-<id> otherwise, from where a later successful snapshot's sweep renames it
+// to .sweeping-<id>-*. The orphan's mount follows the inode, so it keeps writing into the
+// renamed tree. A boot whose sweep fails again would then delete a LIVE world, and the
+// server's open descriptors would keep writing into unlinked inodes, losing everything
+// after that too.
+//
+// Skipping costs a delay: the trees wait for a boot whose sweep succeeds, and that is
+// strictly better than deleting a live world, because the leak is recoverable and the
+// deletion is not.
+func TestBootLeavesScratchLeftoversWhenTheOrphanSweepFails(t *testing.T) {
+	scratch := t.TempDir()
+	leftovers := []string{
+		seedScratchTree(t, filepath.Join(scratch, ".hydrate-s1-123456")),
+		seedScratchTree(t, filepath.Join(scratch, ".hydrate-s1-superseded-654321")),
+		seedScratchTree(t, filepath.Join(scratch, ".sweeping-s1-123456")),
+	}
+	// A docker socket that does not exist: the sweep's container list fails, which
+	// buildInstanceManager logs and does not treat as fatal, so boot continues.
+	setBootEnv(t, scratch, "unix://"+filepath.Join(t.TempDir(), "no-such-docker.sock"), "127.0.0.1:1")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := run(ctx); err != nil {
+		t.Fatalf("run() = %v, want nil: a failed orphan sweep is non-fatal by design, and this "+
+			"test needs boot to reach the reclaims and decline them", err)
+	}
+
+	for _, dir := range leftovers {
+		if _, err := os.Stat(dir); err != nil {
+			t.Errorf("%s was reclaimed although the container orphan sweep failed: the sweep is "+
+				"what proves no orphan is still writing into that tree, and without it this can "+
+				"be a running server's live world (%v)", filepath.Base(dir), err)
+		}
+	}
+}
+
+// setBootEnv gives run() the configuration Load accepts, pointed at the test's own scratch
+// dir, docker host and control-plane endpoint — the three knobs that decide what the boot
+// sequence does. EVERY key applyEnv reads is set here, including the ones set to empty:
+// leaving one inherited lets a malformed ambient value fail these tests during
+// configuration loading instead of at the boot step they exercise (PR #3170 review round
+// 2). The comment on each is what the boot path does with it.
+func setBootEnv(t *testing.T, scratch, dockerHost, grpcEndpoint string) {
 	t.Helper()
 	for k, v := range map[string]string{
-		"MCD_WORKER_CONFIG":                       "", // no TOML layer: defaults + env only
-		"MCD_WORKER_API_GRPC_ENDPOINT":            "127.0.0.1:1",
-		"MCD_WORKER_API_CREDENTIAL":               "test-credential",
-		"MCD_WORKER_API_TLS_INSECURE":             "true",
-		"MCD_WORKER_API_TLS_CA_FILE":              "",
-		"MCD_WORKER_API_TLS_CLIENT_CERT_FILE":     "",
-		"MCD_WORKER_API_TLS_CLIENT_KEY_FILE":      "",
-		"MCD_WORKER_WORKER_ID":                    "11111111-1111-1111-1111-111111111111",
-		"MCD_WORKER_WORKER_SCRATCH_DIR":           scratch,
-		"MCD_WORKER_WORKER_DRIVERS":               "container",
-		"MCD_WORKER_WORKER_MAX_SERVERS":           "1",
-		"MCD_WORKER_DRIVER_CONTAINER_IMAGES":      "21=eclipse-temurin:21-jre",
-		"MCD_WORKER_DRIVER_CONTAINER_NETWORK":     "",
-		"MCD_WORKER_DRIVER_CONTAINER_DOCKER_HOST": dockerHost,
-		// The boot path warns about the plaintext dial and about the orphan sweep it
-		// cannot run; neither is what these tests assert, so keep the suite output clean.
+		"MCD_WORKER_CONFIG":                          "", // no TOML layer: defaults + env only
+		"MCD_WORKER_API_GRPC_ENDPOINT":               grpcEndpoint,
+		"MCD_WORKER_API_CREDENTIAL":                  "test-credential",
+		"MCD_WORKER_API_TLS_INSECURE":                "true", // no CA file to build, plaintext dial
+		"MCD_WORKER_API_TLS_CA_FILE":                 "",
+		"MCD_WORKER_API_TLS_CLIENT_CERT_FILE":        "",
+		"MCD_WORKER_API_TLS_CLIENT_KEY_FILE":         "",
+		"MCD_WORKER_WORKER_ID":                       "11111111-1111-1111-1111-111111111111",
+		"MCD_WORKER_WORKER_SCRATCH_DIR":              scratch,
+		"MCD_WORKER_WORKER_DRIVERS":                  "container", // the only driver config accepts
+		"MCD_WORKER_WORKER_MAX_SERVERS":              "1",
+		"MCD_WORKER_WORKER_METRICS_INTERVAL_SECONDS": "15", // the stock cadence
+		"MCD_WORKER_DRIVER_CONTAINER_IMAGES":         "21=eclipse-temurin:21-jre",
+		"MCD_WORKER_DRIVER_CONTAINER_NETWORK":        "",
+		"MCD_WORKER_DRIVER_CONTAINER_GAME_BIND_IP":   "127.0.0.1", // validated as an IP
+		"MCD_WORKER_DRIVER_CONTAINER_DOCKER_HOST":    dockerHost,
+		// The boot path warns about the plaintext dial and, in the failed-sweep tests,
+		// about the sweep it could not run; neither is what these tests assert, so keep
+		// the suite output clean.
 		"MCD_WORKER_LOG_LEVEL":  "error",
 		"MCD_WORKER_LOG_FORMAT": "json",
 	} {
 		t.Setenv(k, v)
 	}
+}
+
+// fakeDockerSocket serves the one Engine call a no-container orphan sweep makes — the
+// labelled container list — over a unix socket, so cd.Sweep SUCCEEDS and boot's quiescence
+// premise holds for real rather than by assumption. Anything else the sweep might call is
+// a test failure, not a 404 to shrug at: it would mean this fake no longer stands in for
+// the sweep it is imitating.
+func fakeDockerSocket(t *testing.T) string {
+	t.Helper()
+	sock := filepath.Join(t.TempDir(), "docker.sock")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{
+		ReadHeaderTimeout: 5 * time.Second,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !strings.HasSuffix(r.URL.Path, "/containers/json") {
+				t.Errorf("fake docker: unexpected Engine call %s %s, want only the orphan "+
+					"sweep's container list", r.Method, r.URL.Path)
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte("[]"))
+		}),
+	}
+	go func() { _ = srv.Serve(l) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	return "unix://" + sock
+}
+
+// cancelOnFirstDial returns a control-plane endpoint whose first inbound connection
+// cancels the boot context. The session's dial is the first thing in run() to open that
+// connection (grpc.NewClient is lazy, so nothing before the session touches it), which
+// makes it a signal that the whole boot sequence has run — without pre-cancelling a
+// context the orphan sweep's own Engine call needs.
+func cancelOnFirstDial(t *testing.T, cancel context.CancelFunc) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			cancel()
+			_ = conn.Close()
+		}
+	}()
+	return l.Addr().String()
 }
 
 // seedScratchTree creates a world-shaped directory: what a live working set, a crash-left
