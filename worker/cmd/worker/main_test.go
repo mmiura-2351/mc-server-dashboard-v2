@@ -266,7 +266,7 @@ func TestBootLeavesScratchLeftoversWhenTheOrphanSweepFails(t *testing.T) {
 // 2). The comment on each is what the boot path does with it.
 func setBootEnv(t *testing.T, scratch, dockerHost, grpcEndpoint string) {
 	t.Helper()
-	for k, v := range map[string]string{
+	keys := map[string]string{
 		"MCD_WORKER_CONFIG":                          "", // no TOML layer: defaults + env only
 		"MCD_WORKER_API_GRPC_ENDPOINT":               grpcEndpoint,
 		"MCD_WORKER_API_CREDENTIAL":                  "test-credential",
@@ -288,8 +288,26 @@ func setBootEnv(t *testing.T, scratch, dockerHost, grpcEndpoint string) {
 		// the suite output clean.
 		"MCD_WORKER_LOG_LEVEL":  "error",
 		"MCD_WORKER_LOG_FORMAT": "json",
-	} {
+	}
+	for k, v := range keys {
 		t.Setenv(k, v)
+	}
+	// The claim above is checked, not trusted: an MCD_WORKER_* variable this map does not
+	// name is one the ambient environment still controls, and a malformed value there fails
+	// these tests in configuration loading instead of at the boot step they exercise. Only
+	// a variable that is actually SET can do that, which is exactly what this sees — so a
+	// key added to applyEnv and missed here surfaces the first time anyone's environment
+	// carries it, including CI's.
+	for _, kv := range os.Environ() {
+		name, _, _ := strings.Cut(kv, "=")
+		if !strings.HasPrefix(name, "MCD_WORKER_") {
+			continue
+		}
+		if _, isolated := keys[name]; !isolated {
+			t.Fatalf("%s is set in the environment but setBootEnv does not isolate it: these "+
+				"tests would exercise the ambient value, and a malformed one would fail them "+
+				"in config loading rather than at the boot step under test", name)
+		}
 	}
 }
 

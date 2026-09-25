@@ -697,7 +697,9 @@ something, and why none of them can be told apart at boot, are under "when it de
 below. If the Worker crashed or the
 removal failed, the tree stays under that name until the next Worker boot, which removes
 every `.sweeping-*` tree — and, by the sibling pass beside it, every `.hydrate-*` tree —
-before it scans the held servers. A server deleted after
+before it scans the held servers. Both passes run only when that boot's **container orphan
+sweep succeeded**: a boot that cannot prove no container is still running leaves the trees
+alone, because an unswept orphan may still be writing into one (below). A server deleted after
 a failed final
 snapshot never snapshots again and its displaced tree therefore **persists on the
 Worker indefinitely** — bounded to one working-set worth of disk per deleted
@@ -717,6 +719,20 @@ all. For an id that never comes back (deleted, or re-placed onto another Worker)
 the three runs again, so the Worker also removes every `.hydrate-*` tree at boot, in the
 same pass position as the `.sweeping-*` reclaim above: after the container orphan sweep,
 before the held-server scan.
+
+Both boot passes are **gated on that sweep having succeeded**, and the reason is a tree
+that is not garbage at all. A sweep that failed at an earlier boot leaves an orphan
+container running with `<scratch>/<id>` bind-mounted, and nothing re-adopts containers, so
+the Worker does not know it exists: a hydrate for that id then parks the *live* tree aside
+— at `.hydrate-<id>-superseded-*` when the `.displaced-<id>` slot is occupied, otherwise at
+`.displaced-<id>` and from there to `.sweeping-<id>-*` at the next successful snapshot's
+sweep — while the orphan's mount follows the inode and keeps writing into it. Deleting that
+at the next boot would destroy a live world, and the server's open descriptors would go on
+writing into unlinked inodes. So a boot whose sweep failed logs a `WARN` and defers both
+reclaims; the trees wait for a boot whose sweep succeeds. The sweep itself stays
+**non-fatal** on purpose — a transient Docker socket failure must not stop the Worker from
+serving every other server — which is exactly why the reclaims check it rather than assume
+it.
 
 **Scratch capacity.** One hydrate that displaces a live working set peaks at **three
 world-sized copies of that server**: the unpacked temp tree, the retained
