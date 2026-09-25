@@ -440,21 +440,22 @@ services:
     # (worker/internal/application/instancemanager/instancemanager.go), which
     # carries the leg-by-leg derivation. 300s is that bound plus headroom.
     #
-    # WHAT IT BUYS is one leg: restoreSaveOnAfterFailedStop. A retry stop cut
-    # between the flush's save-off and that restore leaves a surviving Minecraft
-    # container saving nothing, and this timer is what lets the restore run before
-    # the Worker is removed. The other legs never needed it — the reservations and
-    # orphan records are in memory and die with the process at any value, and a
-    # reclaim cut mid-body leaves the scratch dir that keeps the id in
+    # WHAT IT BUYS is one leg: the stop escalation a Close finds in flight gets to
+    # finish instead of being cut half-issued. The other legs never needed it — the
+    # reservations and orphan records are in memory and die with the process at any
+    # value, and a reclaim cut mid-body leaves the scratch dir that keeps the id in
     # held_servers, so the next registration's reclaim finishes it.
     #
-    # Why the boot repair is not enough on its own: containerdriver.sweepSaveOn
-    # (#1710) does issue an RCON save-on to every running orphan before stopping
-    # it, but only at the NEXT Worker boot. `restart: unless-stopped` does not
-    # restart a container after an explicit stop, so `make down` brings no boot —
-    # and the Minecraft containers are not Compose services, so they keep running,
-    # with auto-save off, until the stack returns. stop_grace_period DOES apply to
-    # `docker compose down`, which is what makes it the right instrument here.
+    # It no longer carries the auto-save leg (#3166). A retry stop cut between the
+    # flush's save-off and restoreSaveOnAfterFailedStop leaves a surviving Minecraft
+    # container saving nothing, and Close now issues that save-on itself the moment
+    # the shutdown starts — beside its join, so it costs no shutdown latency — which
+    # is why the leg did not need a larger number. The boot repair stays the
+    # backstop, not the plan: containerdriver.sweepSaveOn (#1710) issues an RCON
+    # save-on to every running orphan before stopping it, but only at the NEXT
+    # Worker boot, and `restart: unless-stopped` does not restart a container after
+    # an explicit stop, so `make down` brings no boot — while the Minecraft
+    # containers, not being Compose services, keep running until the stack returns.
     #
     # The cost is bounded and rarely paid: the timer is a CEILING, not a wait, so
     # a Close that finds nothing in flight still exits in milliseconds. The full
