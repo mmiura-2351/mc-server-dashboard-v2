@@ -21,18 +21,26 @@ import (
 type saveOnRecorder struct {
 	mu        sync.Mutex
 	lines     []string
+	byServer  map[string][]string
 	failLines map[string]error
 }
 
-func (r *saveOnRecorder) open(context.Context, string, string, string) (execution.ServerControl, error) {
-	return recordedControl{rec: r}, nil
+func (r *saveOnRecorder) open(_ context.Context, serverID, _, _ string) (execution.ServerControl, error) {
+	return recordedControl{rec: r, serverID: serverID}, nil
 }
 
-type recordedControl struct{ rec *saveOnRecorder }
+type recordedControl struct {
+	rec      *saveOnRecorder
+	serverID string
+}
 
 func (c recordedControl) Execute(_ context.Context, line string) (string, error) {
 	c.rec.mu.Lock()
 	c.rec.lines = append(c.rec.lines, line)
+	if c.rec.byServer == nil {
+		c.rec.byServer = map[string][]string{}
+	}
+	c.rec.byServer[c.serverID] = append(c.rec.byServer[c.serverID], line)
 	err := c.rec.failLines[line]
 	c.rec.mu.Unlock()
 	if err != nil {
@@ -42,6 +50,26 @@ func (c recordedControl) Execute(_ context.Context, line string) (string, error)
 }
 
 func (c recordedControl) Close() error { return nil }
+
+// hasFor / allFor scope the recorder to one server, for the tests that drive two at
+// once (a parked converger holding Close in its join while an operator stop arms a
+// bracket beside it).
+func (r *saveOnRecorder) hasFor(serverID, line string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, l := range r.byServer[serverID] {
+		if l == line {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *saveOnRecorder) allFor(serverID string) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.byServer[serverID]...)
+}
 
 func (r *saveOnRecorder) count(line string) int {
 	r.mu.Lock()
@@ -144,10 +172,13 @@ func (d *flushGatedDriver) Start(_ context.Context, spec execution.InstanceSpec)
 // (DialContext plus a handshake deadline), which is also what lets a BOUNDED
 // restore give up on its own.
 //
-// Dials before arm() answer instantly, so the stop's own flush is never gated.
+// Dials before arm() answer instantly, so the stop's own flush is never gated, and
+// onlyServer (when set) confines the gate to one id so a second server's flush can
+// run to completion beside a blocked one.
 type gatedDialControl struct {
 	rec         *saveOnRecorder
 	gate        atomic.Bool
+	onlyServer  string
 	dialEntered chan struct{}
 	release     chan struct{}
 	releaseOnce sync.Once
@@ -159,9 +190,10 @@ func newGatedDialControl(rec *saveOnRecorder) *gatedDialControl {
 
 func (g *gatedDialControl) arm() { g.gate.Store(true) }
 
-func (g *gatedDialControl) open(ctx context.Context, _, _, _ string) (execution.ServerControl, error) {
-	if !g.gate.Load() {
-		return recordedControl{rec: g.rec}, nil
+func (g *gatedDialControl) open(ctx context.Context, serverID, _, _ string) (execution.ServerControl, error) {
+	answer := recordedControl{rec: g.rec, serverID: serverID}
+	if !g.gate.Load() || (g.onlyServer != "" && serverID != g.onlyServer) {
+		return answer, nil
 	}
 	select {
 	case g.dialEntered <- struct{}{}:
@@ -169,7 +201,7 @@ func (g *gatedDialControl) open(ctx context.Context, _, _, _ string) (execution.
 	}
 	select {
 	case <-g.release:
-		return recordedControl{rec: g.rec}, nil
+		return answer, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -519,5 +551,145 @@ func TestFailedStopKeepsTheDebtUntilItsRestoreRan(t *testing.T) {
 	m.mu.Unlock()
 	if stillOutstanding {
 		t.Fatal("the outstanding save-off outlived the stop that settled it; a later Close would dial a server whose stop is long resolved")
+	}
+}
+
+// THE LEDGER IS READ MORE THAN ONCE, because a stop already dispatched can open its
+// bracket AFTER the first read. The flush's own RCON dial stands between the command
+// and its save-off, and that dial is a TCP connect plus an AUTH handshake — up to
+// rcon's 30 s ceiling, not an instant — so a stop that was in flight when the
+// shutdown began can land its save-off well after Close drained. Close outlives that
+// by however long its joined work takes and then returns: the operator lane it
+// belongs to is never joined (#3168), so the process exited under a survivor with
+// auto-save off.
+//
+// The window is reproduced exactly: Close starts BEFORE the save-off, with a parked
+// converger holding it inside its join so the late bracket has somewhere to land.
+func TestCloseRestoresSaveOnForADebtArmedAfterItsFirstDrain(t *testing.T) {
+	rec := &saveOnRecorder{}
+	gate := newGatedDialControl(rec)
+	gate.onlyServer = "s1" // only the operator stop's dial is held; the converger's runs
+	gate.arm()
+	d := &flushGatedDriver{}
+	m := newSaveOnManager(t, d, gate.open)
+	shrinkOrphanConverger(m)
+	seedScratch(t, m, "s1")
+	seedScratch(t, m, "s2")
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	operator := d.inst
+	converger := newFlushGatedInstance("s2", errors.New("driver: process survived kill"))
+	t.Cleanup(func() { gate.releaseDial(); operator.releaseStop(); converger.releaseStop(); m.Close() })
+
+	// The converger's retry runs its flush and parks in the escalation, which is what
+	// Close will be joining.
+	m.recordOrphan("s2", converger, "container", "1.21")
+	awaitEnter(t, converger.stopEntered)
+
+	// The operator stop is dispatched now and parks in its flush's DIAL, before any
+	// save-off — the state the window starts from.
+	stopped := make(chan session.CommandResult, 1)
+	go func() {
+		stopped <- m.Handle(context.Background(),
+			session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+	}()
+	awaitEnter(t, gate.dialEntered)
+	if rec.hasFor("s1", "save-off") {
+		t.Fatalf("s1 rcon lines = %v, want the flush to still be dialing", rec.allFor("s1"))
+	}
+
+	closed := make(chan struct{})
+	go func() { m.Close(); close(closed) }()
+	// Close has now read the ledger once and is inside its join, held by the parked
+	// converger.
+	select {
+	case <-m.shutdown.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not cancel the shutdown context")
+	}
+
+	// Only now does the operator flush get its connection and disable auto-save: the
+	// bracket is opened after the first drain.
+	gate.releaseDial()
+	awaitEnter(t, operator.stopEntered)
+	if !rec.hasFor("s1", "save-off") {
+		t.Fatalf("s1 rcon lines = %v, want the late flush to have issued save-off", rec.allFor("s1"))
+	}
+
+	// Let the join finish. Close must not return before settling the late bracket.
+	converger.releaseStop()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return once the parked converger finished")
+	}
+	if !rec.hasFor("s1", "save-on") {
+		t.Fatalf("s1 rcon lines = %v, want save-on: the Worker exited leaving a survivor with auto-save off", rec.allFor("s1"))
+	}
+
+	operator.releaseStop()
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the operator stop did not return once released")
+	}
+}
+
+// ...and once the ledger is SEALED, the flush must not open a bracket at all. That is
+// what makes the read above the LAST one, and so what makes Close terminate: after
+// the seal no debt can be created, so no third pass is needed and no drain loop can
+// spin against a lane that keeps re-arming.
+//
+// Skipping the save-off costs this stop its quiesce — save-all and the settle still
+// run, exactly as when a save-off fails (#1038) — and that cost is confined to a lane
+// whose escalation cannot complete anyway: the seal is set after Close has joined
+// everything it joins, so nothing reaching this branch has a stop the Worker will see
+// through.
+func TestFlushSkipsSaveOffOnceTheSaveOnLedgerIsSealed(t *testing.T) {
+	rec := &saveOnRecorder{}
+	gate := newGatedDialControl(rec)
+	gate.onlyServer = "s1"
+	gate.arm()
+	d := &flushGatedDriver{}
+	m := newSaveOnManager(t, d, gate.open)
+	seedScratch(t, m, "s1")
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	inst := d.inst
+	t.Cleanup(func() { gate.releaseDial(); inst.releaseStop(); m.Close() })
+
+	stopped := make(chan session.CommandResult, 1)
+	go func() {
+		stopped <- m.Handle(context.Background(),
+			session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+	}()
+	awaitEnter(t, gate.dialEntered)
+
+	// Nothing holds this Close: it joins its pumps and seals the ledger.
+	closed := make(chan struct{})
+	go func() { m.Close(); close(closed) }()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return")
+	}
+
+	// The flush gets its connection only now, with the ledger sealed.
+	gate.releaseDial()
+	awaitEnter(t, inst.stopEntered)
+	if rec.hasFor("s1", "save-off") {
+		t.Fatalf("s1 rcon lines = %v: a bracket was opened after the ledger was sealed, and nothing is left to close it", rec.allFor("s1"))
+	}
+	if !rec.hasFor("s1", "save-all") {
+		t.Fatalf("s1 rcon lines = %v, want save-all: skipping the quiesce must not skip the flush", rec.allFor("s1"))
+	}
+
+	inst.releaseStop()
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the operator stop did not return once released")
 	}
 }

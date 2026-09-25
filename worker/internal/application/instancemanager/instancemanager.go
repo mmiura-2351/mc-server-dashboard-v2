@@ -308,6 +308,11 @@ type Manager struct {
 	// Both ends err towards one redundant, idempotent save-on rather than towards a
 	// surviving world that saves nothing.
 	//
+	// A flush can also be REFUSED an entry, once saveOnSealed is set, and then it does
+	// not disable auto-save at all. That is the third side of the same bias: past the
+	// seal there is no longer anyone to restore, so the only safe bracket is the one
+	// that is never opened.
+	//
 	// It exists so the bracket can be closed by the WORKER rather than by the next
 	// boot (issue #3166). The escalation between the two points is tens of seconds
 	// to minutes long — the kill call plus the post-kill exit confirmation after a
@@ -320,6 +325,13 @@ type Manager struct {
 	// one lane no timer can, the operator stop that Runner.serve abandons without
 	// waiting (#3168).
 	pendingSaveOn map[string]saveOnTarget
+	// saveOnSealed forbids any further entry in pendingSaveOn. Close sets it in the
+	// same critical section as its LAST read of the ledger, which is what makes that
+	// read final: a flush either lands its mark before the seal and is in the map
+	// Close took, or observes the seal and does not disable auto-save at all. Without
+	// it the drain would need a loop, and the loop's termination would be an argument
+	// about whether some other lane can keep re-arming.
+	saveOnSealed bool
 	// closingSaveOnTimeout bounds each save-on Close issues from pendingSaveOn,
 	// which is the whole of the latency this change can add to a shutdown. A field
 	// (not the const it defaults to) so a test can shrink it, mirroring
@@ -547,11 +559,10 @@ func (m *Manager) goBackground(fn func()) bool {
 //     does not bring after an explicit stop, so `docker compose down` leaves that
 //     container running and saving nothing until the stack returns.
 //     THIS LEG NO LONGER WAITS FOR THE GRACE PERIOD: Close settles it up front,
-//     from pendingSaveOn, at the moment the shutdown starts (issue #3166). What the
-//     timer still buys on this leg is the escalation itself — a stop the Worker is
-//     already driving gets to finish rather than being cut half-issued — and the
-//     save-off race markPendingSaveOn names, which lands after the drain and is
-//     closed by restoreSaveOnAfterFailedStop as before.
+//     from pendingSaveOn, at the moment the shutdown starts (issue #3166), and again
+//     after the join for a bracket that was opened in between. What the timer still
+//     buys on this leg is the escalation itself — a stop the Worker is already driving
+//     gets to finish rather than being cut half-issued.
 //     The drain's own cost is closingSaveOnTimeout (5 s), paid once and only when a
 //     server does not answer, which leaves this bound where it was.
 //
@@ -581,12 +592,25 @@ func (m *Manager) Close() {
 	m.mu.Lock()
 	m.closed = true
 	m.mu.Unlock()
-	pending := m.takePendingSaveOn()
 	m.stopBackground()
 	// Settle the outstanding save-off debts BESIDE the join, never in front of it
 	// (issue #3166). Started here, each restore overlaps the escalation Close is
 	// already waiting out, so a Close that had work to do pays nothing for them and
-	// one with nothing outstanding does not enter the loop at all.
+	// one with nothing outstanding starts none.
+	//
+	// THE LEDGER IS READ TWICE, and the second read is why. A stop dispatched before
+	// the shutdown began has its own RCON dial between the command and its save-off —
+	// a TCP connect plus an AUTH handshake, up to rcon's 30 s ceiling — so it can open
+	// a bracket long after the first read, and its lane is one Close never joins
+	// (#3168): the Worker would exit under a survivor with auto-save off. The second
+	// read happens after the join, when nothing Close joins is left to arm anything,
+	// and it SEALS the ledger in the same critical section, so a flush that arrives
+	// later declines to disable auto-save instead. Two passes, no loop, and the
+	// termination argument is local: after the seal no debt can exist.
+	//
+	// The second pass costs no extra time. Both passes share one WaitGroup and the
+	// first pass's restores are already bounded, so the join below ends no earlier
+	// than they do — the wait is still one closingSaveOnTimeout past the join, not two.
 	//
 	// THE WAIT IS JOINED AND BOUNDED, and both halves are required. Unjoined, the
 	// process exit that follows Close (main.go returns immediately after) kills a
@@ -608,14 +632,18 @@ func (m *Manager) Close() {
 	// so goBackground would (correctly) refuse them, and joining them here is what
 	// keeps them from outliving the manager the way issue #2777's pumps did.
 	var restores sync.WaitGroup
-	for serverID, target := range pending {
-		restores.Add(1)
-		go func() {
-			defer restores.Done()
-			m.restoreSaveOnWhileClosing(serverID, target.driver, target.mcVersion)
-		}()
+	settle := func(pending map[string]saveOnTarget) {
+		for serverID, target := range pending {
+			restores.Add(1)
+			go func() {
+				defer restores.Done()
+				m.restoreSaveOnWhileClosing(serverID, target.driver, target.mcVersion)
+			}()
+		}
 	}
+	settle(m.takePendingSaveOn())
 	m.background.Wait()
+	settle(m.sealPendingSaveOn())
 	restores.Wait()
 }
 
@@ -1553,12 +1581,24 @@ func (m *Manager) flushBeforeStopWithDriver(ctx context.Context, serverID, drive
 	// The bracket is opened here rather than at the dial above because a flush that
 	// could not dial never sends anything, and the forced stop path never calls this
 	// function at all (TestForcedFailedStopSkipsSaveOn).
-	m.markPendingSaveOn(serverID, driverName, mcVersion)
+	//
+	// A REFUSED debt means the ledger is sealed, and then auto-save must not be
+	// disabled at all: Close has joined everything it joins and read the ledger for
+	// the last time, so nothing would ever re-enable it. This lane reaches the dial
+	// only because it was dispatched before the shutdown began, and it is not joined,
+	// so the process exits under it mid-escalation — the stop the quiesce exists to
+	// protect never completes anyway. Skipping costs this one stop its quiesce, no
+	// more than a save-off that fails already does (#1038), and it is the only shape
+	// that cannot leave auto-save off: nothing was turned off.
+	quiesce := m.markPendingSaveOn(serverID, driverName, mcVersion)
 
 	// Disable auto-save so settleWorkingSet converges quickly even with active
 	// players (#1038). Best-effort: if save-off fails, save-all still runs — the
 	// settle may time out but the flush is no worse than before this fix.
-	if _, err := ctrl.Execute(ctx, "save-off"); err != nil {
+	if !quiesce {
+		m.logger.Warn("stop flush: worker is closing; skipping save-off so auto-save cannot be left disabled",
+			"server_id", serverID)
+	} else if _, err := ctrl.Execute(ctx, "save-off"); err != nil {
 		m.logger.Warn("stop flush: save-off failed; proceeding with save-all",
 			"server_id", serverID, "error", err)
 	}
@@ -1706,18 +1746,27 @@ type saveOnTarget struct {
 	mcVersion string
 }
 
-// markPendingSaveOn records that serverID's pre-stop flush disabled auto-save and
-// nothing has restored it yet.
+// markPendingSaveOn records that serverID's pre-stop flush is about to disable
+// auto-save. It reports whether the debt was taken on, and a FALSE means the caller
+// must not disable auto-save at all: the ledger is sealed, Close has already read it
+// for the last time, and a bracket opened now would be closed by nobody.
 //
-// A mark that lands after Close has already drained (the flush's save-off racing
-// the drain, microseconds wide) is NOT covered by the shutdown restore: it sits
-// here until attemptStop clears it, and the bracket is closed by
-// restoreSaveOnAfterFailedStop at the end of the escalation exactly as it was
-// before issue #3166 — which is the leg compose's stop_grace_period budgets.
-func (m *Manager) markPendingSaveOn(serverID, driverName, mcVersion string) {
+// The seal is what bounds Close's drain to two passes instead of a loop. Without it
+// the drain would have to keep re-reading — a stop dispatched before the shutdown
+// began has its own RCON dial (a TCP connect plus an AUTH handshake, up to rcon's
+// 30 s ceiling) between the command and its save-off, so it can arm a debt long after
+// the first read — and a loop whose exit depends on no lane re-arming is a loop whose
+// termination is an argument about other code. Refusing instead makes it a local
+// invariant: after the seal, no debt can exist, so the pass that set it is the last
+// one needed.
+func (m *Manager) markPendingSaveOn(serverID, driverName, mcVersion string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.saveOnSealed {
+		return false
+	}
 	m.pendingSaveOn[serverID] = saveOnTarget{driver: driverName, mcVersion: mcVersion}
+	return true
 }
 
 // clearPendingSaveOn forgets serverID's outstanding save-off, because its stop has
@@ -1733,8 +1782,23 @@ func (m *Manager) clearPendingSaveOn(serverID string) {
 // takePendingSaveOn hands Close the whole outstanding set and empties it, so the
 // restores it issues cannot be issued a second time.
 func (m *Manager) takePendingSaveOn() map[string]saveOnTarget {
+	return m.drainPendingSaveOn(false)
+}
+
+// sealPendingSaveOn is Close's LAST read: it takes the outstanding set and, in the
+// same critical section, forbids any further debt. Doing both under one lock is what
+// makes it final — a mark either lands before this and is in the map it returns, or
+// observes the seal and never opens a bracket at all.
+func (m *Manager) sealPendingSaveOn() map[string]saveOnTarget {
+	return m.drainPendingSaveOn(true)
+}
+
+func (m *Manager) drainPendingSaveOn(seal bool) map[string]saveOnTarget {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if seal {
+		m.saveOnSealed = true
+	}
 	pending := m.pendingSaveOn
 	m.pendingSaveOn = map[string]saveOnTarget{}
 	return pending
