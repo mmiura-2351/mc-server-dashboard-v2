@@ -307,8 +307,8 @@ type Manager struct {
 	// not — and a Worker that goes down inside it leaves a SURVIVING Minecraft
 	// container with auto-save off: the container is not a Compose service, so
 	// nothing stops it on the way out. Close drains this map and issues the save-on
-	// itself, which costs no shutdown latency (it runs beside the join, not in front
-	// of it) and reaches the one lane no timer can, the operator stop that
+	// itself, beside its join rather than in front of it, so its worst-case bound is
+	// unchanged — and it reaches the one lane no timer can, the operator stop that
 	// Runner.serve abandons without waiting (#3168).
 	pendingSaveOn map[string]saveOnTarget
 	// closed records that Close has run, so a command still in flight during
@@ -572,6 +572,12 @@ func (m *Manager) Close() {
 	// Close with nothing outstanding still returns in milliseconds. In front of the
 	// Wait each restore would instead add its whole budget to that bound, for no
 	// gain — the container it dials is alive either way.
+	//
+	// One case can still get slower, and it is the BEST case rather than the bound: a
+	// quiesced stop that resolves in the same instant leaves no join for this restore
+	// to hide behind, so a Close that would have returned at once pays up to
+	// restoreSaveTimeout — and only if that dial hangs instead of being refused,
+	// which a just-exited container normally is.
 	//
 	// They ride a LOCAL WaitGroup, not m.background: the flag above is already set,
 	// so goBackground would (correctly) refuse them, and joining them here is what
