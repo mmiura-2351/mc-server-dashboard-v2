@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -136,12 +137,52 @@ func (d *flushGatedDriver) Start(_ context.Context, spec execution.InstanceSpec)
 	return d.inst, nil
 }
 
-// newSaveOnManager builds a manager whose RCON goes through rec. It registers no
+// gatedDialControl is an openControl whose dial can be ARMED to block, modeling a
+// server that TCP-accepts but never finishes the RCON handshake. A fixture that
+// answers instantly cannot show whether Close waited for the restore to land, so
+// the slow dial is the whole point. It honours ctx exactly as rcon.Dial does
+// (DialContext plus a handshake deadline), which is also what lets a BOUNDED
+// restore give up on its own.
+//
+// Dials before arm() answer instantly, so the stop's own flush is never gated.
+type gatedDialControl struct {
+	rec         *saveOnRecorder
+	gate        atomic.Bool
+	dialEntered chan struct{}
+	release     chan struct{}
+	releaseOnce sync.Once
+}
+
+func newGatedDialControl(rec *saveOnRecorder) *gatedDialControl {
+	return &gatedDialControl{rec: rec, dialEntered: make(chan struct{}, 1), release: make(chan struct{})}
+}
+
+func (g *gatedDialControl) arm() { g.gate.Store(true) }
+
+func (g *gatedDialControl) open(ctx context.Context, _, _, _ string) (execution.ServerControl, error) {
+	if !g.gate.Load() {
+		return recordedControl{rec: g.rec}, nil
+	}
+	select {
+	case g.dialEntered <- struct{}{}:
+	default:
+	}
+	select {
+	case <-g.release:
+		return recordedControl{rec: g.rec}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (g *gatedDialControl) releaseDial() { g.releaseOnce.Do(func() { close(g.release) }) }
+
+// newSaveOnManager builds a manager whose RCON goes through open. It registers no
 // Close: every test here closes explicitly and has to release its parked stop
 // first, so the cleanup is per-test.
-func newSaveOnManager(t *testing.T, d execution.ExecutionDriver, rec *saveOnRecorder) *Manager {
+func newSaveOnManager(t *testing.T, d execution.ExecutionDriver, open controlFunc) *Manager {
 	t.Helper()
-	m := New(map[string]execution.ExecutionDriver{"container": d}, t.TempDir(), rec.open)
+	m := New(map[string]execution.ExecutionDriver{"container": d}, t.TempDir(), open)
 	m.settlePollInterval = 0
 	return m
 }
@@ -157,11 +198,10 @@ func newSaveOnManager(t *testing.T, d execution.ExecutionDriver, rec *saveOnReco
 // The assertion is made while the stop is STILL PARKED, and that is what makes it
 // a pin on the timing rather than merely on the call: the parked escalation is
 // what Close is waiting for, so a restore issued after that Wait could not appear
-// here. It is also the "no added shutdown latency" property — the restore runs
-// beside the join, not in front of it.
+// here.
 func TestCloseRestoresSaveOnForAConvergerStopStillInFlight(t *testing.T) {
 	rec := &saveOnRecorder{}
-	m := newSaveOnManager(t, &fakeDriver{}, rec)
+	m := newSaveOnManager(t, &fakeDriver{}, rec.open)
 	shrinkOrphanConverger(m)
 	seedScratch(t, m, "s1")
 	inst := newFlushGatedInstance("s1", errors.New("driver: process survived kill"))
@@ -193,14 +233,14 @@ func TestCloseRestoresSaveOnForAConvergerStopStillInFlight(t *testing.T) {
 // The same window on the OPERATOR lane, which is where a timer cannot reach it:
 // Runner.serve joins no command lane (#3168), so an in-flight StopServer is
 // abandoned the moment run() returns and its save-off was never restored at all —
-// not by the escalation (the process exits under it) and not by
-// compose's stop_grace_period (nothing waits for that lane). Close's drain is
-// keyed on the outstanding save-off rather than on which lane issued it, so this
-// lane is covered by the same code (issue #3166).
+// not by the escalation (the process exits under it) and not by compose's
+// stop_grace_period (nothing waits for that lane). Close's drain is keyed on the
+// outstanding save-off rather than on which lane issued it, so this lane is
+// covered by the same code (issue #3166).
 func TestCloseRestoresSaveOnForAnOperatorStopStillInFlight(t *testing.T) {
 	rec := &saveOnRecorder{}
 	d := &flushGatedDriver{}
-	m := newSaveOnManager(t, d, rec)
+	m := newSaveOnManager(t, d, rec.open)
 	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
@@ -240,6 +280,131 @@ func TestCloseRestoresSaveOnForAnOperatorStopStillInFlight(t *testing.T) {
 	}
 }
 
+// Close must not merely ISSUE the restore, it must not return until the save-on
+// has landed: the process exits the moment run() returns (main.go), which kills a
+// restore still in flight — so a shutdown that left it unjoined would have moved
+// the loss rather than fixed it.
+//
+// A fixture that answers instantly cannot show this, which is why the dial is
+// gated here: the test proves Close is still inside itself while the restore is
+// parked in the dial, then releases it and requires the save-on to be recorded by
+// the time Close returns. The stop runs on the operator lane deliberately — Close
+// joins nothing there, so the restore is the ONLY thing that can be holding it.
+func TestCloseWaitsForTheShutdownRestoreToLand(t *testing.T) {
+	rec := &saveOnRecorder{}
+	gate := newGatedDialControl(rec)
+	d := &flushGatedDriver{}
+	m := newSaveOnManager(t, d, gate.open)
+	seedScratch(t, m, "s1")
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	inst := d.inst
+	t.Cleanup(func() { gate.releaseDial(); inst.releaseStop(); m.Close() })
+
+	stopped := make(chan session.CommandResult, 1)
+	go func() {
+		stopped <- m.Handle(context.Background(),
+			session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+	}()
+	awaitEnter(t, inst.stopEntered)
+	// From here every dial blocks: the flush already has its connection, so the next
+	// one is the shutdown restore's.
+	gate.arm()
+
+	closed := make(chan struct{})
+	go func() { m.Close(); close(closed) }()
+	awaitEnter(t, gate.dialEntered)
+
+	select {
+	case <-closed:
+		t.Fatal("Close returned while its save-on was still dialing: the process exit that follows kills the restore")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	gate.releaseDial()
+	inst.releaseStop()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return once the restore completed")
+	}
+	if !rec.has("save-on") {
+		t.Fatalf("rcon lines = %v, want save-on to have landed before Close returned", rec.all())
+	}
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the operator stop did not return once released")
+	}
+}
+
+// ...but the wait is BOUNDED. The restore is one dial plus one command against a
+// server on the same docker network, sub-second whenever that server answers at
+// all; a server that does not answer within the bound is, in this exact window, a
+// server whose stop is escalating BECAUSE it is not answering, and holding the
+// Worker's shutdown open for it buys nothing the next boot's sweepSaveOn does not
+// already cover. An unbounded wait here would instead put the failure path's
+// generous restoreSaveTimeout on a shutdown leg that nothing overlaps.
+//
+// The gate is never released, so the only thing that can end this Close is the
+// bound.
+func TestCloseBoundsTheWaitForAnUnreachableRestore(t *testing.T) {
+	// The relationship is the requirement, not the number: the shutdown restore has
+	// no escalation to hide behind, so it cannot carry the budget sized for one that
+	// does.
+	if closingSaveOnTimeout >= restoreSaveTimeout {
+		t.Fatalf("closingSaveOnTimeout = %s, want it well under restoreSaveTimeout (%s): nothing overlaps the shutdown restore",
+			closingSaveOnTimeout, restoreSaveTimeout)
+	}
+
+	rec := &saveOnRecorder{}
+	gate := newGatedDialControl(rec)
+	d := &flushGatedDriver{}
+	m := newSaveOnManager(t, d, gate.open)
+	m.closingSaveOnTimeout = time.Millisecond
+	seedScratch(t, m, "s1")
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	inst := d.inst
+	t.Cleanup(func() { gate.releaseDial(); inst.releaseStop(); m.Close() })
+
+	stopped := make(chan session.CommandResult, 1)
+	go func() {
+		stopped <- m.Handle(context.Background(),
+			session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+	}()
+	awaitEnter(t, inst.stopEntered)
+	gate.arm()
+
+	closed := make(chan struct{})
+	go func() { m.Close(); close(closed) }()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close never returned: the shutdown restore's wait is unbounded")
+	}
+	// Nothing landed, and that is the point: the bound is what ended this Close, and
+	// the unreachable server is left to the next boot's sweepSaveOn. Asserted before
+	// the release below, because the stop's OWN failure-path restore issues a save-on
+	// once the dial answers.
+	if rec.has("save-on") {
+		t.Fatalf("rcon lines = %v, want no save-on: the gated dial never answered", rec.all())
+	}
+
+	// The failure-path restore that follows the stop carries the generous
+	// restoreSaveTimeout, so the dial is released first rather than making the test
+	// wait that budget out.
+	gate.releaseDial()
+	inst.releaseStop()
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the operator stop did not return once released")
+	}
+}
+
 // A stop that CONFIRMED termination leaves nothing to restore: the container is
 // gone, so a save-on at shutdown would dial a server that no longer exists. The
 // outstanding save-off has to be forgotten when the stop resolves, not held until
@@ -247,7 +412,7 @@ func TestCloseRestoresSaveOnForAnOperatorStopStillInFlight(t *testing.T) {
 func TestCloseIssuesNoSaveOnOnceTheStopResolved(t *testing.T) {
 	rec := &saveOnRecorder{}
 	d := &flushOrphanDriver{stopAfter: 0} // the first Stop confirms termination
-	m := newSaveOnManager(t, d, rec)
+	m := newSaveOnManager(t, d, rec.open)
 	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
@@ -267,19 +432,21 @@ func TestCloseIssuesNoSaveOnOnceTheStopResolved(t *testing.T) {
 	}
 }
 
-// A flush whose save-off never landed disabled nothing, so the shutdown has
-// nothing to restore — the rule TestForcedFailedStopSkipsSaveOn already holds for
-// the forced path and quiesceRunning's own saveOff flag for the snapshot bracket.
+// A save-off whose ROUND TRIP failed may still have disabled auto-save: rcon.Execute
+// writes the command and only then waits for a reply, so a timeout says nothing
+// about whether Minecraft ran it. The debt is therefore recorded before the command
+// goes on the wire, and the shutdown restores auto-save for a server whose save-off
+// was merely reported as failing — the direction that costs one idempotent save-on
+// when wrong, instead of a surviving world that saves nothing.
 //
-// The parked stop CONFIRMS termination once released, so the only save-on that
-// could appear is the shutdown's: attemptStop's failure restore never runs. And
-// the release waits for the shutdown to be cancelled, which happens after Close's
-// drain has already decided about this id — without that anchor the stop could
-// resolve first and forget the entry, and a drain that ignored the failed save-off
-// would still pass.
-func TestCloseIssuesNoSaveOnWhenTheStopFlushNeverDisabledAutoSave(t *testing.T) {
-	rec := &saveOnRecorder{failLines: map[string]error{"save-off": errors.New("rcon down")}}
-	m := newSaveOnManager(t, &fakeDriver{}, rec)
+// The parked stop CONFIRMS termination once released, so the failure-path restore
+// never runs: the save-on this test sees can only be the shutdown's. And the
+// release waits for the shutdown context to be cancelled, which happens after
+// Close's drain has already read this id — without that anchor the stop could
+// resolve first and forget the debt.
+func TestCloseRestoresSaveOnWhenTheFlushSaveOffReportedFailure(t *testing.T) {
+	rec := &saveOnRecorder{failLines: map[string]error{"save-off": errors.New("rcon read timeout")}}
+	m := newSaveOnManager(t, &fakeDriver{}, rec.open)
 	shrinkOrphanConverger(m)
 	seedScratch(t, m, "s1")
 	inst := newFlushGatedInstance("s1", nil) // the released Stop confirms termination
@@ -302,7 +469,55 @@ func TestCloseIssuesNoSaveOnWhenTheStopFlushNeverDisabledAutoSave(t *testing.T) 
 		t.Fatal("Close did not return once the parked retry stop finished")
 	}
 
-	if rec.has("save-on") {
-		t.Fatalf("rcon lines = %v: the shutdown restored auto-save on a server whose save-off never landed", rec.all())
+	if !rec.has("save-on") {
+		t.Fatalf("rcon lines = %v, want save-on: a save-off whose reply timed out may still have landed", rec.all())
+	}
+}
+
+// The debt must outlive the driver Stop's RETURN, all the way past the restore that
+// the failure calls for. Forgetting it in between is not a cosmetic ordering: Close
+// joins no command lane, so a drain landing in that window finds an empty map and
+// the process exits under a survivor with auto-save still off.
+//
+// Asserted from inside the restore's own dial, which is the one instant where the
+// ordering is observable without a race.
+func TestFailedStopKeepsTheDebtUntilItsRestoreRan(t *testing.T) {
+	rec := &saveOnRecorder{}
+	d := &flushOrphanDriver{stopAfter: 1} // the stop fails: the restore path runs
+	var m *Manager
+	dials := 0
+	var sawRestoreDial, debtAtRestoreDial bool
+	m = newSaveOnManager(t, d, func(context.Context, string, string, string) (execution.ServerControl, error) {
+		dials++
+		if dials == 2 { // dial 1 is the flush's; dial 2 is the failed-stop restore's
+			sawRestoreDial = true
+			m.mu.Lock()
+			_, debtAtRestoreDial = m.pendingSaveOn["s1"]
+			m.mu.Unlock()
+		}
+		return recordedControl{rec: rec}, nil
+	})
+	closeWithTest(t, m)
+	seedScratch(t, m, "s1")
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+
+	if res := m.Handle(context.Background(),
+		session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"}); res.Success {
+		t.Fatalf("stop = %+v, want failure (driver could not confirm termination)", res)
+	}
+
+	if !sawRestoreDial {
+		t.Fatalf("rcon lines = %v, want the failed-stop restore to have dialed", rec.all())
+	}
+	if !debtAtRestoreDial {
+		t.Fatal("the outstanding save-off was forgotten before its restore ran: a Close draining in that window exits under a survivor with auto-save off")
+	}
+	m.mu.Lock()
+	_, stillOutstanding := m.pendingSaveOn["s1"]
+	m.mu.Unlock()
+	if stillOutstanding {
+		t.Fatal("the outstanding save-off outlived the stop that settled it; a later Close would dial a server whose stop is long resolved")
 	}
 }

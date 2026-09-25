@@ -449,13 +449,17 @@ services:
     # It no longer carries the auto-save leg (#3166). A retry stop cut between the
     # flush's save-off and restoreSaveOnAfterFailedStop leaves a surviving Minecraft
     # container saving nothing, and Close now issues that save-on itself the moment
-    # the shutdown starts — beside its join, so it costs no shutdown latency — which
-    # is why the leg did not need a larger number. The boot repair stays the
-    # backstop, not the plan: containerdriver.sweepSaveOn (#1710) issues an RCON
-    # save-on to every running orphan before stopping it, but only at the NEXT
-    # Worker boot, and `restart: unless-stopped` does not restart a container after
-    # an explicit stop, so `make down` brings no boot — while the Minecraft
-    # containers, not being Compose services, keep running until the stack returns.
+    # the shutdown starts, beside its join — which is why the leg did not need a
+    # larger number here. That drain is bounded by closingSaveOnTimeout (5 s,
+    # instancemanager.go): it is the only latency the fix can add, it is paid once
+    # however many servers are draining and only when one does not answer, and it
+    # sits well inside the 30 s save-on leg the 300 s above already counts — so this
+    # value did not move and does not need to. The boot repair stays the backstop,
+    # not the plan: containerdriver.sweepSaveOn (#1710) issues an RCON save-on to
+    # every running orphan before stopping it, but only at the NEXT Worker boot, and
+    # `restart: unless-stopped` does not restart a container after an explicit stop,
+    # so `make down` brings no boot — while the Minecraft containers, not being
+    # Compose services, keep running until the stack returns.
     #
     # The cost is bounded and rarely paid: the timer is a CEILING, not a wait, so
     # a Close that finds nothing in flight still exits in milliseconds. The full
