@@ -29,6 +29,12 @@ const displacedPrefix = ".displaced-"
 // exactly the incident diagnostics someone reads after a crashed hydrate. The constant
 // is duplicated rather than imported to keep this application package off the adapter,
 // and pinned to its creation site by the twin tests in hydrate_prefix_name_test.go.
+//
+// Since issue #3167 the boot reclaim below (ReclaimHydrateLeftovers) removes every such
+// tree, so what ScanHeldServers skips is a tree already swept at this very boot — or one
+// whose removal failed, which is why that scan keeps the skip. HeldServers is the scan
+// the skip is load-bearing for either way: it runs on every re-registration, where a
+// hydrate can be IN FLIGHT and its temp tree is a live one rather than a leftover.
 const hydratePrefix = ".hydrate-"
 
 // sweepingPrefix is the dot-prefixed name prefix sweepDisplaced renames a
@@ -228,8 +234,13 @@ func WarnOrphanDisplacedTrees(scratchDir string, held []session.HeldServer, log 
 // ReclaimInterruptedDisplacedSweeps removes every .sweeping-<id>-* tree in scratchDir
 // (issue #2799): a displaced tree sweepDisplaced renamed out of its slot but did not
 // finish removing, because the Worker crashed mid-traversal or the removal failed. It
-// runs once at boot, where it is unconditional: no sweep is in flight yet, and the sweep
-// had already decided each such tree was garbage. It stays unconditional now that a sweep
+// runs once at boot, where it is unconditional GIVEN ITS PRECONDITION: no sweep is in
+// flight yet, and the sweep had already decided each such tree was garbage. The
+// precondition is the CALLER's to establish — no container this Worker started is still
+// writing into the tree, which only a SUCCESSFUL container orphan sweep proves, so run()
+// skips this call (and its .hydrate- sibling below) when that sweep failed (PR #3170
+// review round 2). Without that gate a tree a hydrate parked aside while an unswept orphan
+// kept writing into it is deleted under a live server. It stays unconditional now that a sweep
 // can also leave one behind by withdrawing its removal and having nowhere to put the tree
 // back (issue #3118), and it is deliberately not taught to put trees back itself: the
 // withdrawn case, the crash mid-traversal and a power loss inside the sweep's own
@@ -247,6 +258,54 @@ func ReclaimInterruptedDisplacedSweeps(scratchDir string) {
 	}
 	for _, e := range entries {
 		if strings.HasPrefix(e.Name(), sweepingPrefix) {
+			_ = os.RemoveAll(filepath.Join(scratchDir, e.Name()))
+		}
+	}
+}
+
+// ReclaimHydrateLeftovers removes every .hydrate-<id>-* tree in scratchDir (issue
+// #3167) — the per-hydrate temp tree datatransfer.unpackAndSwap unpacks into, and the
+// superseded working set it parks aside when oldest-wins keeps an older .displaced-<id>
+// instead (issue #2278). It is the sibling of ReclaimInterruptedDisplacedSweeps above,
+// runs at the same point in boot and for the same reason: nothing else reclaims one once
+// the id's scratch dir is gone. Both held-set scans skip .hydrate- names
+// (isReservedScratchName), so such a tree is never advertised on its own; the per-id
+// sweeps (removeScratch, ReclaimDeletedScratches) are only ever offered an id the
+// scratch dir still advertises; and datatransfer's own sweep runs only if the server is
+// re-placed onto this Worker. A server deleted or re-placed elsewhere mid-hydrate
+// therefore leaked a world-sized tree permanently.
+//
+// Unconditional at boot, and what that rests on:
+//
+//   - Nothing can be building one. The only creation site is unpackAndSwap, reached from
+//     a HydrateTrigger, and the session that dispatches commands does not exist until
+//     after this call — the same argument ReclaimInterruptedDisplacedSweeps makes for a
+//     sweep in flight.
+//   - Nothing can still be writing into one — and this one is a PRECONDITION the caller
+//     must establish, not something this function can check. A .hydrate- tree is never
+//     bind-mounted (a container gets <scratch>/<id>), but a container that held such a
+//     tree under its old name across a park-aside keeps writing into it through the
+//     inode, and only the container orphan sweep stops that. run() therefore calls this
+//     ONLY when that sweep succeeded (PR #3170 review round 2): a failed sweep is
+//     non-fatal by design, so quiescence has to be checked rather than assumed, and the
+//     trees wait for a boot whose sweep succeeds.
+//   - None of them is the copy worth keeping. The live set a hydrate displaces is parked
+//     DIRECTLY at .displaced-<id> whenever that slot is free, precisely so the recovery
+//     copy is never left under a name a sweep deletes (issue #910). What is left under a
+//     .hydrate- name is the store's own copy being unpacked, or the set oldest-wins
+//     elected to DROP — including the case where the post-swap drop declined and left it
+//     "for the next leftover sweep" (issue #3112). Every existing sweeper already deletes
+//     these three unconditionally, so this pass changes WHEN they go, not what goes.
+//
+// Best-effort: an unreadable scratch root or a failed removal is ignored and retried at
+// the next boot.
+func ReclaimHydrateLeftovers(scratchDir string) {
+	entries, err := os.ReadDir(scratchDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), hydratePrefix) {
 			_ = os.RemoveAll(filepath.Join(scratchDir, e.Name()))
 		}
 	}

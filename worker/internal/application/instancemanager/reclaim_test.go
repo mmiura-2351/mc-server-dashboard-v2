@@ -44,10 +44,11 @@ func TestReclaimDeletedScratchesRemovesScratchAndHydrateLeftovers(t *testing.T) 
 // held-set scans skip .hydrate-<id>-* (isReservedScratchName), so the instant that
 // dir goes the id leaves held_servers, the API never re-derives it into
 // unknown_held_server_ids, and this reclaim is the only pass that would ever be
-// offered the id again — nothing sweeps a .hydrate- tree at boot the way
-// ReclaimInterruptedDisplacedSweeps sweeps a .sweeping- one. Sweeping AFTER the
-// removal therefore made every interruption in that window a permanent,
-// world-sized leak. Sweeping before it makes the body recoverable instead: an
+// offered the id again — only a Worker BOOT reclaims a .hydrate- tree
+// (ReclaimHydrateLeftovers, issue #3167), and a Worker runs for months between
+// boots, so that is the backstop and not the plan. Sweeping AFTER the removal
+// therefore made every interruption in that window a world-sized leak no runtime
+// pass ever reclaims. Sweeping before it makes the body recoverable instead: an
 // interruption anywhere in it leaves the scratch dir, and with it the
 // advertisement that re-offers the id at the next registration.
 //

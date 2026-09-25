@@ -1815,9 +1815,19 @@ func (m *Manager) handleStop(ctx context.Context, cmd session.Command, graceful 
 	return session.CommandResult{CommandID: cmd.CommandID, Success: true}
 }
 
-// removeScratch deletes the server's local working-set scratch dir, plus any
-// .hydrate-<id>-* temp/trash siblings a crash mid-hydrate left behind for this
-// id (datatransfer.unpackAndSwap, issue #772, swept via sweepHydrateLeftovers).
+// removeScratchTree is the os.RemoveAll removeScratch takes the scratch dir out with,
+// indirected through a package var (mirroring removeDisplacedTree) so a test can observe
+// the exact instant the id stops being advertised — the point after which no per-id pass
+// is ever offered it again, and therefore the point the hydrate-leftover sweep has to
+// precede (issue #3167). The deleted-server reclaim needs no such seam: its own removal
+// logs on success, so the test there parks on that record. Production always uses
+// os.RemoveAll.
+var removeScratchTree = os.RemoveAll
+
+// removeScratch sweeps any .hydrate-<id>-* temp/trash siblings a crash mid-hydrate left
+// behind for this id (datatransfer.unpackAndSwap, issue #772, swept via
+// sweepHydrateLeftovers) and then deletes the server's local working-set scratch dir.
+// That order is load-bearing rather than incidental — see the body (issue #3167).
 // It is best-effort: a removal failure is logged, never surfaced — the working
 // set has already been captured (the snapshot that triggers it succeeded), and
 // leftover scratch is a hygiene problem, not a failure. A missing dir is a no-op
@@ -1845,12 +1855,28 @@ func (m *Manager) handleStop(ctx context.Context, cmd session.Command, graceful 
 //     removes the scratch dir and hydrate leftovers but NOT .displaced-<id> trees
 //     (issue #911).
 func (m *Manager) removeScratch(serverID string) {
+	// The leftovers go FIRST, and the order is load-bearing (issue #3167, the same
+	// hazard issue #2934 closed on the deleted-server reclaim). <scratch>/<id> is what
+	// keeps the id advertised — both held-set scans skip .hydrate-<id>-*
+	// (isReservedScratchName) — so the instant it is removed the id leaves held_servers
+	// and no PER-ID pass is ever offered it again: a deleted or re-placed-elsewhere
+	// server gets no further stopped-id snapshot, the API stops deriving the id into
+	// unknown_held_server_ids, and datatransfer's own sweep runs only if the server comes
+	// back to this Worker. Sweeping after the removal therefore left every interruption
+	// in that window a world-sized tree only a Worker BOOT reclaims
+	// (ReclaimHydrateLeftovers) — the backstop, not the plan, on a Worker that runs for
+	// months. This way round, an interruption anywhere in here leaves the scratch dir
+	// standing, and with it the advertisement that re-offers the id.
+	//
+	// This path is MORE exposed than that reclaim, not less: it runs on a session command
+	// lane, which shutdown abandons without waiting at all (Runner.serve joins no lane),
+	// so an ordinary SIGTERM reaches the window a crash reaches there.
+	m.sweepHydrateLeftovers(serverID)
 	dir := filepath.Join(m.scratchDir, serverID)
-	if err := os.RemoveAll(dir); err != nil {
+	if err := removeScratchTree(dir); err != nil {
 		m.logger.Warn("failed to remove scratch dir after final snapshot",
 			"server_id", serverID, "dir", dir, "error", err)
 	}
-	m.sweepHydrateLeftovers(serverID)
 	// The successful stopped-id snapshot proves the store supersedes this server's
 	// world, so a displaced tree a prior hydrate kept aside for recovery (issue #906)
 	// is now redundant and reclaimed alongside the scratch. No identity re-check is
@@ -2093,7 +2119,12 @@ var removeDisplacedTree = os.RemoveAll
 // hydrate for serverID left in the scratch root. The next start's leftover sweep
 // (datatransfer.sweepHydrateLeftovers) clears them too, but only if the server is
 // re-placed onto this Worker; a deleted/re-placed-elsewhere id would otherwise leak
-// the world-sized orphan permanently. The prefix is built from hydratePrefix — the
+// the world-sized orphan until the next Worker boot, where ReclaimHydrateLeftovers takes
+// it (issue #3167) — months away on a Worker that does not restart, which is why this
+// per-id sweep stays the one that runs at the time it matters, and why its CALLERS run it
+// before the scratch removal that ends the id's advertisement.
+//
+// The prefix is built from hydratePrefix — the
 // same constant the held-set scans skip on — and matches datatransfer.hydrateTmpPrefix
 // exactly (".hydrate-<id>-"), so only this id's leftovers are touched — not another
 // server's dir or a similarly named one. Best-effort: a removal failure is ignored
@@ -2175,11 +2206,12 @@ func (m *Manager) reclaimDeletedScratches(serverIDs []string) {
 		// .hydrate-<id>-* (isReservedScratchName) — so the instant it is removed the
 		// id leaves held_servers, the API stops deriving it into
 		// unknown_held_server_ids, and this pass is the only one that would ever be
-		// offered the id again; nothing reclaims a .hydrate- tree at boot the way
-		// ReclaimInterruptedDisplacedSweeps reclaims a .sweeping- one. Sweeping after
-		// the removal made every interruption in that window a permanent,
-		// world-sized leak. This way round, an interruption anywhere in the body
-		// leaves the scratch dir standing, and with it the advertisement that
+		// offered the id again; only a Worker BOOT reclaims a .hydrate- tree
+		// (ReclaimHydrateLeftovers, issue #3167), and that is the backstop rather than
+		// the plan — a Worker runs for months between boots. Sweeping after the removal
+		// made every interruption in that window a world-sized leak nothing on this
+		// Worker's runtime ever reclaims. This way round, an interruption anywhere
+		// in the body leaves the scratch dir standing, and with it the advertisement that
 		// re-offers the id — which is what makes "a partial reclaim is finished
 		// idempotently by the next registration" true at EVERY point in the body,
 		// not merely at most of them. It is also what keeps this leg out of the
