@@ -696,14 +696,43 @@ decision and had nowhere to put the tree back. The cases where such a tree was s
 something, and why none of them can be told apart at boot, are under "when it declines",
 below. If the Worker crashed or the
 removal failed, the tree stays under that name until the next Worker boot, which removes
-every `.sweeping-*` tree before
-it scans the held servers. A server deleted after
+every `.sweeping-*` tree — and, by the sibling pass beside it, every `.hydrate-*` tree —
+before it scans the held servers. Both passes run only when that boot's **container orphan
+sweep succeeded**: a boot that cannot prove no container is still running leaves the trees
+alone, because an unswept orphan may still be writing into one (below). A server deleted after
 a failed final
 snapshot never snapshots again and its displaced tree therefore **persists on the
 Worker indefinitely** — bounded to one working-set worth of disk per deleted
 server. Note: the deleted-server scratch reclaim (`ReclaimDeletedScratches`)
 intentionally does **not** reclaim `.displaced-<id>` trees — only the scratch dir
 and `.hydrate-<id>-*` leftovers.
+
+A `.hydrate-<id>-*` tree is the opposite case, and its lifecycle differs accordingly: it
+is either the temp tree a hydrate unpacks the store copy into or the working set
+oldest-wins elected to **drop**, never the copy worth keeping (a hydrate parks that
+directly at `.displaced-<id>` for exactly this reason), so every sweep deletes one
+unconditionally. Three do it per id — the next hydrate for that server, the
+post-final-snapshot scratch GC and the deleted-server reclaim — and each of the last two
+sweeps the leftovers **before** removing `<scratch>/<id>`, because that directory is what
+keeps the id in `held_servers` and therefore what makes any later per-id pass reachable at
+all. For an id that never comes back (deleted, or re-placed onto another Worker) none of
+the three runs again, so the Worker also removes every `.hydrate-*` tree at boot, in the
+same pass position as the `.sweeping-*` reclaim above: after the container orphan sweep,
+before the held-server scan.
+
+Both boot passes are **gated on that sweep having succeeded**, and the reason is a tree
+that is not garbage at all. A sweep that failed at an earlier boot leaves an orphan
+container running with `<scratch>/<id>` bind-mounted, and nothing re-adopts containers, so
+the Worker does not know it exists: a hydrate for that id then parks the *live* tree aside
+— at `.hydrate-<id>-superseded-*` when the `.displaced-<id>` slot is occupied, otherwise at
+`.displaced-<id>` and from there to `.sweeping-<id>-*` at the next successful snapshot's
+sweep — while the orphan's mount follows the inode and keeps writing into it. Deleting that
+at the next boot would destroy a live world, and the server's open descriptors would go on
+writing into unlinked inodes. So a boot whose sweep failed logs a `WARN` and defers both
+reclaims; the trees wait for a boot whose sweep succeeds. The sweep itself stays
+**non-fatal** on purpose — a transient Docker socket failure must not stop the Worker from
+serving every other server — which is exactly why the reclaims check it rather than assume
+it.
 
 **Scratch capacity.** One hydrate that displaces a live working set peaks at **three
 world-sized copies of that server**: the unpacked temp tree, the retained
@@ -787,9 +816,9 @@ WARN  displaced recovery tree for unknown/unassigned server found at boot; manua
    safely in the store (or the world is genuinely not needed), delete the
    displaced tree: `rm -rf <scratch>/.displaced-<id>`. The directory name is
    dot-prefixed so it is never touched by any Worker-internal sweep (the
-   `sweepHydrateLeftovers`, snapshot-spool and boot-time `.sweeping-*` sweeps only
-   target their own prefixes); only `sweepDisplaced` removes it, and only on a
-   successful snapshot for the matching id.
+   `sweepHydrateLeftovers`, snapshot-spool and boot-time `.sweeping-*` / `.hydrate-*`
+   sweeps only target their own prefixes); only `sweepDisplaced` removes it, and only on
+   a successful snapshot for the matching id.
 
 #### When is manual cleanup safe?
 

@@ -478,6 +478,50 @@ func (m *Manager) goBackground(fn func()) bool {
 // the same events died with the process anyway. Each site states its own drop:
 // pump, logPump, metricsPump, statusDispatcher.
 //
+// THIS WAIT IS WHAT compose.yaml's stop_grace_period ON THE WORKER IS SIZED FOR
+// (issue #2934, owner decision 2026-09-23). Under compose the process gets that
+// long between SIGTERM and SIGKILL, and the two numbers are a pair: change this
+// bound and the compose value is wrong, and vice versa.
+//
+// The bound is roughly 280 s. A retry stop already inside inst.Stop costs
+// flushTimeout + stopDeadline + the kill call + the post-kill exit confirmation +
+// restoreSaveTimeout (90 + 100 + 30 + 30 + 30 s at the containerdriver defaults).
+// Those last three ADD rather than share: the kill runs on a context detached from
+// stopDeadline so it reaches the daemon even when the earlier phases consumed the
+// whole budget, and waitExitDone honours no context at all. The one reclaim id in
+// flight costs a RemoveAll per tree instead (3.4 s for a 4 GB / 21k-file working
+// set, measured warm on ext4). Docker's 10 s default cut both.
+//
+// ONE LEG IS WHY THE VALUE EXISTS, and the other two are honest about not needing
+// it:
+//
+//   - reserved, orphans and converging are in-memory and die with the process
+//     either way — at 10 s or at 280 s.
+//   - a reclaim cut anywhere in its per-id body leaves <scratch>/<id> on disk, and
+//     that dir IS the advertisement that re-offers the id: the held-set scans
+//     report it, the API re-derives unknown_held_server_ids from that report, and
+//     the next registration's reclaim finishes the removal. The sweep order in
+//     reclaimDeletedScratches is what makes this true at every point in the body
+//     rather than most of them. The residual is a dir holding nothing but its
+//     generation marker: not advertised, and not data.
+//   - a retry stop cut between the flush's save-off and restoreSaveOnAfterFailedStop
+//     leaves a SURVIVING MC container with auto-save disabled, and the grace period
+//     is what lets that restore run. The container is not a compose service, so
+//     nothing stops it on the way out. containerdriver.sweepSaveOn (issue #1710)
+//     does issue an RCON save-on to every running orphan before its graceful stop,
+//     but only at the NEXT Worker boot — and `restart: unless-stopped` brings no
+//     boot after an explicit stop, so `docker compose down` leaves that container
+//     running, saving nothing, until the stack returns. stop_grace_period applies
+//     to `down` as much as to a redeploy, which is what makes it the instrument
+//     that reaches this leg.
+//
+// The cost is bounded: the value is a CEILING, not a wait, so a Close with nothing
+// in flight still returns in milliseconds and the timer is never observed. What it
+// does NOT reach is the same escalation dispatched as an operator StopServer: that
+// runs on a session lane nothing joins, so it is abandoned the moment run()
+// returns, at any value. Closing that one is a change to the lanes, not to this
+// timer.
+//
 // Close is idempotent and terminal: it is safe to call on a manager that has
 // already been closed (the flag is monotonic, cancelling a cancelled context is a
 // no-op, and a settled WaitGroup returns from Wait immediately), and a closed
@@ -1771,9 +1815,19 @@ func (m *Manager) handleStop(ctx context.Context, cmd session.Command, graceful 
 	return session.CommandResult{CommandID: cmd.CommandID, Success: true}
 }
 
-// removeScratch deletes the server's local working-set scratch dir, plus any
-// .hydrate-<id>-* temp/trash siblings a crash mid-hydrate left behind for this
-// id (datatransfer.unpackAndSwap, issue #772, swept via sweepHydrateLeftovers).
+// removeScratchTree is the os.RemoveAll removeScratch takes the scratch dir out with,
+// indirected through a package var (mirroring removeDisplacedTree) so a test can observe
+// the exact instant the id stops being advertised — the point after which no per-id pass
+// is ever offered it again, and therefore the point the hydrate-leftover sweep has to
+// precede (issue #3167). The deleted-server reclaim needs no such seam: its own removal
+// logs on success, so the test there parks on that record. Production always uses
+// os.RemoveAll.
+var removeScratchTree = os.RemoveAll
+
+// removeScratch sweeps any .hydrate-<id>-* temp/trash siblings a crash mid-hydrate left
+// behind for this id (datatransfer.unpackAndSwap, issue #772, swept via
+// sweepHydrateLeftovers) and then deletes the server's local working-set scratch dir.
+// That order is load-bearing rather than incidental — see the body (issue #3167).
 // It is best-effort: a removal failure is logged, never surfaced — the working
 // set has already been captured (the snapshot that triggers it succeeded), and
 // leftover scratch is a hygiene problem, not a failure. A missing dir is a no-op
@@ -1801,12 +1855,28 @@ func (m *Manager) handleStop(ctx context.Context, cmd session.Command, graceful 
 //     removes the scratch dir and hydrate leftovers but NOT .displaced-<id> trees
 //     (issue #911).
 func (m *Manager) removeScratch(serverID string) {
+	// The leftovers go FIRST, and the order is load-bearing (issue #3167, the same
+	// hazard issue #2934 closed on the deleted-server reclaim). <scratch>/<id> is what
+	// keeps the id advertised — both held-set scans skip .hydrate-<id>-*
+	// (isReservedScratchName) — so the instant it is removed the id leaves held_servers
+	// and no PER-ID pass is ever offered it again: a deleted or re-placed-elsewhere
+	// server gets no further stopped-id snapshot, the API stops deriving the id into
+	// unknown_held_server_ids, and datatransfer's own sweep runs only if the server comes
+	// back to this Worker. Sweeping after the removal therefore left every interruption
+	// in that window a world-sized tree only a Worker BOOT reclaims
+	// (ReclaimHydrateLeftovers) — the backstop, not the plan, on a Worker that runs for
+	// months. This way round, an interruption anywhere in here leaves the scratch dir
+	// standing, and with it the advertisement that re-offers the id.
+	//
+	// This path is MORE exposed than that reclaim, not less: it runs on a session command
+	// lane, which shutdown abandons without waiting at all (Runner.serve joins no lane),
+	// so an ordinary SIGTERM reaches the window a crash reaches there.
+	m.sweepHydrateLeftovers(serverID)
 	dir := filepath.Join(m.scratchDir, serverID)
-	if err := os.RemoveAll(dir); err != nil {
+	if err := removeScratchTree(dir); err != nil {
 		m.logger.Warn("failed to remove scratch dir after final snapshot",
 			"server_id", serverID, "dir", dir, "error", err)
 	}
-	m.sweepHydrateLeftovers(serverID)
 	// The successful stopped-id snapshot proves the store supersedes this server's
 	// world, so a displaced tree a prior hydrate kept aside for recovery (issue #906)
 	// is now redundant and reclaimed alongside the scratch. No identity re-check is
@@ -2049,7 +2119,12 @@ var removeDisplacedTree = os.RemoveAll
 // hydrate for serverID left in the scratch root. The next start's leftover sweep
 // (datatransfer.sweepHydrateLeftovers) clears them too, but only if the server is
 // re-placed onto this Worker; a deleted/re-placed-elsewhere id would otherwise leak
-// the world-sized orphan permanently. The prefix is built from hydratePrefix — the
+// the world-sized orphan until the next Worker boot, where ReclaimHydrateLeftovers takes
+// it (issue #3167) — months away on a Worker that does not restart, which is why this
+// per-id sweep stays the one that runs at the time it matters, and why its CALLERS run it
+// before the scratch removal that ends the id's advertisement.
+//
+// The prefix is built from hydratePrefix — the
 // same constant the held-set scans skip on — and matches datatransfer.hydrateTmpPrefix
 // exactly (".hydrate-<id>-"), so only this id's leftovers are touched — not another
 // server's dir or a similarly named one. Best-effort: a removal failure is ignored
@@ -2070,8 +2145,9 @@ func (m *Manager) sweepHydrateLeftovers(serverID string) {
 // ReclaimDeletedScratches removes scratch dirs for server ids the API confirmed
 // no longer exist (issue #924). It runs asynchronously on a goroutine so it does
 // not block heartbeats or command dispatch. Per id it validates the id, claims a
-// reservation (skipping running/orphaned/reserved ids), removes the scratch dir
-// and hydrate leftovers, then releases the reservation. .displaced-<id> trees are
+// reservation (skipping running/orphaned/reserved ids), sweeps this id's hydrate
+// leftovers, removes the scratch dir, then releases the reservation. That order
+// is load-bearing rather than incidental — see the body. .displaced-<id> trees are
 // intentionally NOT reclaimed (issue #911: retained for operator recovery).
 //
 // Reclamation contract update (issue #924, extending #841):
@@ -2125,6 +2201,24 @@ func (m *Manager) reclaimDeletedScratches(serverIDs []string) {
 			// an in-flight command — skip it rather than interfere.
 			continue
 		}
+		// The leftovers go FIRST, and the order is load-bearing (issue #2934).
+		// <scratch>/<id> is what keeps the id advertised — both held-set scans skip
+		// .hydrate-<id>-* (isReservedScratchName) — so the instant it is removed the
+		// id leaves held_servers, the API stops deriving it into
+		// unknown_held_server_ids, and this pass is the only one that would ever be
+		// offered the id again; only a Worker BOOT reclaims a .hydrate- tree
+		// (ReclaimHydrateLeftovers, issue #3167), and that is the backstop rather than
+		// the plan — a Worker runs for months between boots. Sweeping after the removal
+		// made every interruption in that window a world-sized leak nothing on this
+		// Worker's runtime ever reclaims. This way round, an interruption anywhere
+		// in the body leaves the scratch dir standing, and with it the advertisement that
+		// re-offers the id — which is what makes "a partial reclaim is finished
+		// idempotently by the next registration" true at EVERY point in the body,
+		// not merely at most of them. It is also what keeps this leg out of the
+		// shutdown budget: compose.yaml's stop_grace_period is sized for Close's
+		// retry-stop leg, and an interruption here costs nothing at any value of it —
+		// or in a crash or a power loss, which no value reaches.
+		m.sweepHydrateLeftovers(id)
 		dir := filepath.Join(m.scratchDir, id)
 		if _, statErr := os.Stat(dir); statErr == nil {
 			if err := os.RemoveAll(dir); err != nil {
@@ -2135,7 +2229,6 @@ func (m *Manager) reclaimDeletedScratches(serverIDs []string) {
 					"server_id", id, "dir", dir)
 			}
 		}
-		m.sweepHydrateLeftovers(id)
 		// NOTE: .displaced-<id> trees are intentionally NOT reclaimed here
 		// (issue #911). They are retained for operator recovery.
 		m.release(id)

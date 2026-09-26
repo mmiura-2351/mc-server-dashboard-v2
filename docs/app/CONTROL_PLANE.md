@@ -203,14 +203,25 @@ API answers `RegisterAck`: the `heartbeat_interval` it expects,
 the `transfer_deadline` that bounds one data-plane transfer Worker-side
 (Section 5.2), and `unknown_held_server_ids` — the subset of `held_servers` whose
 server the API has since deleted while the scratch was live. The Worker
-reclaims the scratch dir and `.hydrate-<id>-*` leftovers for
+reclaims the `.hydrate-<id>-*` leftovers and then the scratch dir for
 each listed id but does **not** reclaim `.displaced-<id>` trees (retained for
 operator recovery, STORAGE.md Section 4.6). That reclaim is **best-effort**: the
 Worker skips any id that is running, that has a failed-stop orphan pending, or that
 another mutating lifecycle command holds in flight, and once shutdown is signalled it
 stops after the id it is on, leaving the rest untouched. An id it does not reclaim
 keeps its scratch, so the next registration advertises it in `held_servers` again and
-the API re-derives `unknown_held_server_ids` from that advertisement. The list is
+the API re-derives `unknown_held_server_ids` from that advertisement.
+The two removals happen **in that order** for the same reason: the scratch dir is
+what keeps the id in `held_servers`, and the held-set scans skip `.hydrate-` names,
+so removing the dir first would leave any leftover unreachable by every **per-id**
+pass — no later one is ever offered the id again, and only a Worker boot, which sweeps
+`.hydrate-*` trees wholesale (STORAGE.md Section 4.6), still reclaims it. The
+post-final-snapshot scratch GC sweeps in that same order, and for the same reason.
+Sweeping first makes an interruption **anywhere** in the
+per-id body recoverable — at any shutdown budget, and for a crash or a power loss
+too. That is why this leg needs no budget of its own: the Worker's
+`stop_grace_period` (`compose.yaml`, 300 s) is sized for `Manager.Close`'s
+retry-stop leg, not for this one. The list is
 fail-safe: a DB error on the API side yields an empty list rather than misclassifying
 a live server as deleted.
 A refusal never rides in the ack: `RegisterAck` carries no accept/reject flag —
