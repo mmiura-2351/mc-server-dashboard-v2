@@ -5,38 +5,11 @@ Section 4. The fakes implement only what the PermissionChecker / membership
 visibility evaluator reaches through the UnitOfWork; the helpers below seed
 members, roles, and grants concisely.
 
-**Uniqueness and foreign keys are deliberately unmodelled, and this records what
-that costs.** No writer here enforces either: every ``add`` and ``update`` keys a
-row in by id, nothing rejects a name a sibling row already holds, and memberships
-and grants accept any parent id. The real schema enforces both
-(``community/adapters/models.py``, migration 0004), so these fakes are *more
-permissive than the adapter* -- the direction that hides defects rather than
-inventing them.
-
-The cost is that no fast test in this context can express a duplicate-name
-outcome; a green run here says nothing about it. That silence hid issue #2611:
-renaming a role onto a name already used in the same community violated
-``uq_role_community_name`` and was a deterministic 500 -- an ordinary user
-action, not a race -- while ``community/api/roles.py`` caught a
-``RoleAlreadyExistsError`` nothing on that path could raise. Every fast test
-agreed with the code, because the fakes agreed with the code.
-
-One concurrent-delete outcome *is* expressible, because it needs no constraint:
-``communities.update`` and ``roles.update`` issue an ``UPDATE ... WHERE id``,
-whose zero-row match on a deleted row is a rowcount rather than a violation, and
-the adapters raise not-found on it (#2613). The fakes mirror that raise, so their
-absent-row branch is a modelled outcome and not a silence. Everything a *foreign
-key* would have caught is still outside them.
-
-Mirroring the schema here was considered and declined (issue #2625): it is a
-second model to keep in sync, and this defect class is caught where it is real.
-Both outcomes are expressible only against real PostgreSQL, under
-``tests/integration/`` -- a duplicate outcome is pinned there for each of the four
-unique constraints in ``test_community_repositories.py``, the #2611 rename path
-included; for concurrent deletes, ``community/adapters/integrity.py`` records why
-no foreign key is translated today. What ``test_fake_repository_isolation.py``
-pins of these fakes is their entity isolation and their update-is-not-an-insert
-semantics (#2516, #2557) -- constraint fidelity is deliberately not pinned.
+The Port-visible uniqueness and update semantics are shared with the PostgreSQL
+adapter through the repository contracts in ``tests/contracts`` (#3135).
+Foreign keys remain deliberately unmodelled: application tests seed related
+contexts independently, while PostgreSQL integration tests own referential and
+cascade behavior.
 """
 
 from __future__ import annotations
@@ -54,7 +27,11 @@ from mc_server_dashboard_api.community.domain.entities import (
     Role,
 )
 from mc_server_dashboard_api.community.domain.errors import (
+    CommunityAlreadyExistsError,
     CommunityNotFoundError,
+    MembershipAlreadyExistsError,
+    ResourceGrantAlreadyExistsError,
+    RoleAlreadyExistsError,
     RoleNotFoundError,
 )
 from mc_server_dashboard_api.community.domain.repositories import (
@@ -105,6 +82,8 @@ class FakeCommunityRepository(CommunityRepository):
         self.by_id[community.id] = self._copy(community)
 
     async def add(self, community: Community) -> None:
+        if any(row.name == community.name for row in self.by_id.values()):
+            raise CommunityAlreadyExistsError(community.name.value)
         self.by_id[community.id] = self._copy(community)
 
     async def get_by_id(self, community_id: CommunityId) -> Community | None:
@@ -142,9 +121,19 @@ class FakeCommunityRepository(CommunityRepository):
         # the entity in regardless made this an insert the adapter cannot
         # perform (#2557). The adapter now checks that rowcount and reports the
         # zero-row write as not-found rather than as a success (#2613).
-        if community.id not in self.by_id:
+        stored = self.by_id.get(community.id)
+        if stored is None:
             raise CommunityNotFoundError(str(community.id.value))
-        self.by_id[community.id] = self._copy(community)
+        if any(
+            row.id != community.id and row.name == community.name
+            for row in self.by_id.values()
+        ):
+            raise CommunityAlreadyExistsError(community.name.value)
+        self.by_id[community.id] = replace(
+            stored,
+            name=community.name,
+            updated_at=community.updated_at,
+        )
 
     async def delete(self, community_id: CommunityId) -> None:
         self.by_id.pop(community_id, None)
@@ -167,6 +156,12 @@ class FakeMembershipRepository(MembershipRepository):
         self.by_id[membership.id] = self._copy(membership)
 
     async def add(self, membership: Membership) -> None:
+        if any(
+            row.user_id == membership.user_id
+            and row.community_id == membership.community_id
+            for row in self.by_id.values()
+        ):
+            raise MembershipAlreadyExistsError(str(membership.id.value))
         self.by_id[membership.id] = self._copy(membership)
 
     async def get_by_id(self, membership_id: MembershipId) -> Membership | None:
@@ -239,6 +234,11 @@ class FakeRoleRepository(RoleRepository):
         self.by_id[role.id] = self._copy(role)
 
     async def add(self, role: Role) -> None:
+        if any(
+            row.community_id == role.community_id and row.name == role.name
+            for row in self.by_id.values()
+        ):
+            raise RoleAlreadyExistsError(role.name.value)
         self.by_id[role.id] = self._copy(role)
 
     async def get_by_id(self, role_id: RoleId) -> Role | None:
@@ -263,9 +263,22 @@ class FakeRoleRepository(RoleRepository):
         # entity in regardless made this an insert the adapter cannot perform
         # (#2557). The adapter now checks that rowcount and reports the zero-row
         # write as not-found rather than as a success (#2613).
-        if role.id not in self.by_id:
+        stored = self.by_id.get(role.id)
+        if stored is None:
             raise RoleNotFoundError(str(role.id.value))
-        self.by_id[role.id] = self._copy(role)
+        if any(
+            row.id != role.id
+            and row.community_id == stored.community_id
+            and row.name == role.name
+            for row in self.by_id.values()
+        ):
+            raise RoleAlreadyExistsError(role.name.value)
+        self.by_id[role.id] = replace(
+            stored,
+            name=role.name,
+            permissions=set(role.permissions),
+            updated_at=role.updated_at,
+        )
 
     async def delete(self, role_id: RoleId) -> None:
         self.by_id.pop(role_id, None)
@@ -286,6 +299,13 @@ class FakeResourceGrantRepository(ResourceGrantRepository):
         self.by_id[grant.id] = self._copy(grant)
 
     async def add(self, grant: ResourceGrant) -> None:
+        if any(
+            row.user_id == grant.user_id
+            and row.resource_type == grant.resource_type
+            and row.resource_id == grant.resource_id
+            for row in self.by_id.values()
+        ):
+            raise ResourceGrantAlreadyExistsError(str(grant.id.value))
         self.by_id[grant.id] = self._copy(grant)
 
     async def get_by_id(self, grant_id: ResourceGrantId) -> ResourceGrant | None:
