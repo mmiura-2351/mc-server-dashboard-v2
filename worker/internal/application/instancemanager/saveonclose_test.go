@@ -23,6 +23,14 @@ type saveOnRecorder struct {
 	lines     []string
 	byServer  map[string][]string
 	failLines map[string]error
+	// blockLines holds a command ON THE WIRE until its channel is closed, and records
+	// it only then, so the recorded order is the order the server would have seen. It
+	// is how a test puts the ledger and the wire out of step deliberately: the entry
+	// exists, the write does not.
+	blockLines map[string]chan struct{}
+	// blocked names the lines that have entered a hold, so a test anchors on the write
+	// being in flight instead of on a sleep.
+	blocked map[string]bool
 }
 
 func (r *saveOnRecorder) open(_ context.Context, serverID, _, _ string) (execution.ServerControl, error) {
@@ -35,6 +43,19 @@ type recordedControl struct {
 }
 
 func (c recordedControl) Execute(_ context.Context, line string) (string, error) {
+	c.rec.mu.Lock()
+	hold := c.rec.blockLines[line]
+	if hold != nil {
+		if c.rec.blocked == nil {
+			c.rec.blocked = map[string]bool{}
+		}
+		c.rec.blocked[line] = true
+	}
+	c.rec.mu.Unlock()
+	if hold != nil {
+		<-hold
+	}
+
 	c.rec.mu.Lock()
 	c.rec.lines = append(c.rec.lines, line)
 	if c.rec.byServer == nil {
@@ -69,6 +90,61 @@ func (r *saveOnRecorder) allFor(serverID string) []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]string(nil), r.byServer[serverID]...)
+}
+
+// indexFor reports where line landed in serverID's sequence, or -1. The ORDER is the
+// assertion for the send leg: a save-on recorded before the save-off it undoes leaves
+// auto-save off however many commands follow.
+func (r *saveOnRecorder) indexFor(serverID, line string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i, l := range r.byServer[serverID] {
+		if l == line {
+			return i
+		}
+	}
+	return -1
+}
+
+// release frees a held line, and releaseAll every one of them for a cleanup that must
+// not leave a lane parked inside a write. Both are idempotent via the nil-out, so a
+// test can release in the body AND register the cleanup.
+func (r *saveOnRecorder) release(line string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if hold := r.blockLines[line]; hold != nil {
+		close(hold)
+		r.blockLines[line] = nil
+	}
+}
+
+func (r *saveOnRecorder) releaseAll() {
+	r.mu.Lock()
+	lines := make([]string, 0, len(r.blockLines))
+	for line := range r.blockLines {
+		lines = append(lines, line)
+	}
+	r.mu.Unlock()
+	for _, line := range lines {
+		r.release(line)
+	}
+}
+
+// awaitBlockedLine waits until line is being held on the wire, so a test anchors on
+// the write being in flight rather than on a sleep.
+func awaitBlockedLine(t *testing.T, rec *saveOnRecorder, line string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		rec.mu.Lock()
+		held := rec.blocked[line]
+		rec.mu.Unlock()
+		if held {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("%q never reached its hold; rcon lines = %v", line, rec.all())
 }
 
 func (r *saveOnRecorder) count(line string) int {
@@ -686,6 +762,117 @@ func TestFlushSkipsSaveOffOnceTheSaveOnLedgerIsSealed(t *testing.T) {
 		t.Fatalf("s1 rcon lines = %v, want save-all: skipping the quiesce must not skip the flush", rec.allFor("s1"))
 	}
 
+	inst.releaseStop()
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the operator stop did not return once released")
+	}
+}
+
+// LEG: THE SEND. Registering the debt is not the same event as putting save-off on
+// the wire, and everything between the two is on this side of the ledger's edge:
+// the statement gap, a preemption, or a slow Execute. A drain that read the entry
+// and dialed straight away could complete its save-on first and leave the order
+// save-on → save-off → save-all, with the entry already taken so the sealing pass
+// sees nothing — the Worker exits under a survivor whose auto-save is off.
+//
+// So a drain never overtakes a save-off it has not seen return. Here the save-off
+// is held ON THE WIRE, which is the same side of the edge as the statement gap the
+// finding names: the entry exists, the write does not.
+func TestCloseWaitsForAnInFlightSaveOffBeforeRestoring(t *testing.T) {
+	rec := &saveOnRecorder{blockLines: map[string]chan struct{}{"save-off": make(chan struct{})}}
+	d := &flushGatedDriver{}
+	m := newSaveOnManager(t, d, rec.open)
+	seedScratch(t, m, "s1")
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	inst := d.inst
+	t.Cleanup(func() { rec.releaseAll(); inst.releaseStop(); m.Close() })
+
+	stopped := make(chan session.CommandResult, 1)
+	go func() {
+		stopped <- m.Handle(context.Background(),
+			session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+	}()
+	// The flush has registered its debt and is inside the save-off write.
+	awaitBlockedLine(t, rec, "save-off")
+
+	closed := make(chan struct{})
+	go func() { m.Close(); close(closed) }()
+
+	// The drain has the entry and must be holding, not dialing.
+	select {
+	case <-closed:
+		t.Fatalf("Close returned while a save-off was still on the wire; s1 rcon lines = %v", rec.allFor("s1"))
+	case <-time.After(50 * time.Millisecond):
+	}
+	if rec.hasFor("s1", "save-on") {
+		t.Fatalf("s1 rcon lines = %v: save-on was issued before the save-off it is meant to undo", rec.allFor("s1"))
+	}
+
+	rec.release("save-off")
+	inst.releaseStop()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return once the save-off completed")
+	}
+
+	off, on := rec.indexFor("s1", "save-off"), rec.indexFor("s1", "save-on")
+	if on < 0 {
+		t.Fatalf("s1 rcon lines = %v, want a save-on once the write returned", rec.allFor("s1"))
+	}
+	if off < 0 || off > on {
+		t.Fatalf("s1 rcon lines = %v, want save-off before save-on: a restore that lands first leaves auto-save off", rec.allFor("s1"))
+	}
+
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the operator stop did not return once released")
+	}
+}
+
+// LEG: THE SEND, when the write never comes back. The hold above is bounded by the
+// drain's own budget, and on expiry it declines to restore rather than guessing. That
+// is the honest inference and not a concession: a save-off whose write has not
+// returned within the budget is one the server is not answering, so it most likely
+// never landed and auto-save is still on — while a save-on issued over a save-off
+// that lands later leaves auto-save OFF, which is the very state being repaired. Such
+// a server is the one containerdriver.sweepSaveOn covers at the next boot (#1710).
+func TestCloseDeclinesToRestoreAnUnconfirmedSaveOff(t *testing.T) {
+	rec := &saveOnRecorder{blockLines: map[string]chan struct{}{"save-off": make(chan struct{})}}
+	d := &flushGatedDriver{}
+	m := newSaveOnManager(t, d, rec.open)
+	m.closingSaveOnTimeout = 50 * time.Millisecond
+	seedScratch(t, m, "s1")
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	inst := d.inst
+	t.Cleanup(func() { rec.releaseAll(); inst.releaseStop(); m.Close() })
+
+	stopped := make(chan session.CommandResult, 1)
+	go func() {
+		stopped <- m.Handle(context.Background(),
+			session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+	}()
+	awaitBlockedLine(t, rec, "save-off")
+
+	closed := make(chan struct{})
+	go func() { m.Close(); close(closed) }()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close never returned: the hold on an unconfirmed save-off is unbounded")
+	}
+	if rec.hasFor("s1", "save-on") {
+		t.Fatalf("s1 rcon lines = %v: a save-on was issued over a save-off the Worker never saw return", rec.allFor("s1"))
+	}
+
+	rec.release("save-off")
 	inst.releaseStop()
 	select {
 	case <-stopped:

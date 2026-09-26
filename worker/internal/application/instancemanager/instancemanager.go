@@ -637,7 +637,7 @@ func (m *Manager) Close() {
 			restores.Add(1)
 			go func() {
 				defer restores.Done()
-				m.restoreSaveOnWhileClosing(serverID, target.driver, target.mcVersion)
+				m.restoreSaveOnWhileClosing(serverID, target)
 			}()
 		}
 	}
@@ -1590,7 +1590,7 @@ func (m *Manager) flushBeforeStopWithDriver(ctx context.Context, serverID, drive
 	// protect never completes anyway. Skipping costs this one stop its quiesce, no
 	// more than a save-off that fails already does (#1038), and it is the only shape
 	// that cannot leave auto-save off: nothing was turned off.
-	quiesce := m.markPendingSaveOn(serverID, driverName, mcVersion)
+	written, quiesce := m.markPendingSaveOn(serverID, driverName, mcVersion)
 
 	// Disable auto-save so settleWorkingSet converges quickly even with active
 	// players (#1038). Best-effort: if save-off fails, save-all still runs — the
@@ -1598,9 +1598,18 @@ func (m *Manager) flushBeforeStopWithDriver(ctx context.Context, serverID, drive
 	if !quiesce {
 		m.logger.Warn("stop flush: worker is closing; skipping save-off so auto-save cannot be left disabled",
 			"server_id", serverID)
-	} else if _, err := ctrl.Execute(ctx, "save-off"); err != nil {
-		m.logger.Warn("stop flush: save-off failed; proceeding with save-all",
-			"server_id", serverID, "error", err)
+	} else {
+		_, err := ctrl.Execute(ctx, "save-off")
+		// Close the edge the moment the write is back, before anything is done with its
+		// outcome: a shutdown restore for this id is holding on it, and what it needs to
+		// know is that the command is no longer in flight — not whether it was answered.
+		// Closed on the error path too, for the same reason the entry was recorded before
+		// the write: a round trip that failed may still have disabled auto-save.
+		close(written)
+		if err != nil {
+			m.logger.Warn("stop flush: save-off failed; proceeding with save-all",
+				"server_id", serverID, "error", err)
+		}
 	}
 
 	if _, err := ctrl.Execute(ctx, "save-all"); err != nil {
@@ -1698,15 +1707,43 @@ func (m *Manager) restoreSaveOnAfterFailedStop(ctx context.Context, serverID, dr
 // confirms termination leaves nobody to read the setting, and one that does not
 // reaches its own restore, which is idempotent.
 //
-// It logs its own framing rather than borrowing the failed-stop one because the
-// two are different things to tell an operator about the same server: here the
-// stop has not failed, it has simply not finished. It also carries its own, much
-// shorter budget (closingSaveOnTimeout): the failed-stop restore is hidden inside a
-// join Close is doing anyway, while this one is added to the Worker's shutdown.
-func (m *Manager) restoreSaveOnWhileClosing(serverID, driverName, mcVersion string) {
-	if err := m.dialAndSaveOn(context.Background(), m.closingSaveOnTimeout, serverID, driverName, mcVersion); err != nil {
+// It differs from that one in two ways beyond its logging, which says "the stop has
+// not finished" rather than "the stop failed" because that is the true thing to tell
+// an operator here. First, it HOLDS until the bracket's save-off write has returned:
+// the ledger entry exists from before that write, so the entry alone does not say the
+// command has gone out, and a restore that overtook it would leave auto-save off (the
+// second clause of the ledger invariant, saveOnTarget). Second, it carries a much
+// shorter budget (closingSaveOnTimeout) covering the hold and the restore together:
+// the failed-stop restore is hidden inside a join Close is doing anyway, while this
+// one is added to the Worker's shutdown.
+func (m *Manager) restoreSaveOnWhileClosing(serverID string, target saveOnTarget) {
+	// Do not overtake the save-off this bracket may still be writing. The entry exists
+	// from before the command goes on the wire, so reading it says nothing about
+	// whether the write has happened; the edge says that, and it is the second clause
+	// of the ledger invariant (saveOnTarget).
+	// The hold and the restore share ONE budget, so the drain still costs at most one
+	// closingSaveOnTimeout rather than two. A write that returns at the very last
+	// instant leaves a non-positive remainder, which makes the dial below fail at once
+	// through its own error path — no separate branch for it.
+	deadline := time.Now().Add(m.closingSaveOnTimeout)
+	hold := time.NewTimer(m.closingSaveOnTimeout)
+	defer hold.Stop()
+	select {
+	case <-target.written:
+	case <-hold.C:
+		// DECLINE rather than guess, and this is the honest inference rather than a
+		// concession: a save-off whose write has not returned within the budget is one
+		// the server is not answering, so it most likely never landed and auto-save is
+		// still on — while a save-on issued over a save-off that lands afterwards leaves
+		// auto-save OFF, which is the state being repaired. Such a server is exactly the
+		// one containerdriver.sweepSaveOn reaches at the next boot (issue #1710).
+		m.logger.Error("worker closing: auto-save NOT restored; the server never confirmed its save-off, so a restore could be overtaken by it",
+			"server_id", serverID, "driver", target.driver, "timeout", m.closingSaveOnTimeout)
+		return
+	}
+	if err := m.dialAndSaveOn(context.Background(), time.Until(deadline), serverID, target.driver, target.mcVersion); err != nil {
 		m.logger.Error("worker closing: auto-save NOT restored on a server whose stop is still in flight; if it survives the stop it runs with auto-save disabled until the next Worker boot",
-			"server_id", serverID, "driver", driverName, "error", err)
+			"server_id", serverID, "driver", target.driver, "error", err)
 		return
 	}
 	m.logger.Warn("worker closing: re-enabled auto-save on a server whose stop is still in flight",
@@ -1737,19 +1774,50 @@ func (m *Manager) dialAndSaveOn(ctx context.Context, timeout time.Duration, serv
 	return nil
 }
 
-// saveOnTarget is the RCON target of an outstanding pre-stop save-off: the driver
-// that runs the server and its Minecraft version, the pair every out-of-band
-// save-on needs to resolve the dial host (#1712) and the password's charset
-// (#3116) after the instance has been evicted.
+// saveOnTarget is one entry in the ledger: the RCON target of an outstanding
+// pre-stop save-off — the driver that runs the server and its Minecraft version, the
+// pair every out-of-band save-on needs to resolve the dial host (#1712) and the
+// password's charset (#3116) after the instance has been evicted — plus the edge that
+// orders the restore after the write.
+//
+// THE LEDGER INVARIANT, which the three windows of issues #3166's review rounds were
+// all failures of, stated once so the protocol is a rule rather than a series of
+// boundary fixes:
+//
+//	For every save-off this manager writes, exactly one of these restores it:
+//	  - the lane, when attemptStop's outcome calls for restoreSaveOnAfterFailedStop;
+//	    the entry is cleared only after that has run, so the clear cannot race it;
+//	  - a Close drain, and only after the write has RETURNED, so the restore can
+//	    never precede the save-off it undoes.
+//	A save-off is never written for a bracket the seal refused, and no bracket is
+//	opened after the seal.
+//
+// written is that second clause's mechanism: the flush creates the entry before the
+// command goes on the wire and closes this channel once the Execute has returned,
+// whatever it returned. A drain waits on it before dialing. Everything between the
+// mark and the write therefore sits on one side of a real happens-before edge — the
+// statement gap, a preemption of any length, a slow write, resilientControl's redial
+// retry — instead of racing the drain.
+//
+// The rejected alternative was a claim the sender re-checks: the drain takes the
+// entry, and a flush that no longer owns one does not write. It cannot be made total.
+// check-then-write is two steps, so a drain claiming between them still lands its
+// save-on first, and closing THAT would need m.mu held across RCON I/O — which would
+// serialise every server's flush behind one lock. Ordering the write ahead of the
+// restore needs no lock at all, because the flush is the only writer of the edge and
+// the drain only reads it.
 type saveOnTarget struct {
 	driver    string
 	mcVersion string
+	written   chan struct{}
 }
 
 // markPendingSaveOn records that serverID's pre-stop flush is about to disable
-// auto-save. It reports whether the debt was taken on, and a FALSE means the caller
-// must not disable auto-save at all: the ledger is sealed, Close has already read it
-// for the last time, and a bracket opened now would be closed by nobody.
+// auto-save, and returns the edge the caller MUST close once its save-off write has
+// returned — see saveOnTarget for the ledger invariant this pair implements. It also
+// reports whether the debt was taken on, and a FALSE means the caller must not disable
+// auto-save at all: the ledger is sealed, Close has already read it for the last time,
+// and a bracket opened now would be closed by nobody.
 //
 // The seal is what bounds Close's drain to two passes instead of a loop. Without it
 // the drain would have to keep re-reading — a stop dispatched before the shutdown
@@ -1759,14 +1827,15 @@ type saveOnTarget struct {
 // termination is an argument about other code. Refusing instead makes it a local
 // invariant: after the seal, no debt can exist, so the pass that set it is the last
 // one needed.
-func (m *Manager) markPendingSaveOn(serverID, driverName, mcVersion string) bool {
+func (m *Manager) markPendingSaveOn(serverID, driverName, mcVersion string) (chan struct{}, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.saveOnSealed {
-		return false
+		return nil, false
 	}
-	m.pendingSaveOn[serverID] = saveOnTarget{driver: driverName, mcVersion: mcVersion}
-	return true
+	written := make(chan struct{})
+	m.pendingSaveOn[serverID] = saveOnTarget{driver: driverName, mcVersion: mcVersion, written: written}
+	return written, true
 }
 
 // clearPendingSaveOn forgets serverID's outstanding save-off, because its stop has
