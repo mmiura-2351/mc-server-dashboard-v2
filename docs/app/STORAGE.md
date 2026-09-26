@@ -732,7 +732,11 @@ writing into unlinked inodes. So a boot whose sweep failed logs a `WARN` and def
 reclaims; the trees wait for a boot whose sweep succeeds. The sweep itself stays
 **non-fatal** on purpose — a transient Docker socket failure must not stop the Worker from
 serving every other server — which is exactly why the reclaims check it rather than assume
-it.
+it. The same signal gates one more boot step, for the same reason applied to reading rather
+than deleting: the held-server scan advertises the recorded generations **unjudged** when
+the sweep did not succeed, because its region fsck would otherwise read a live orphan's
+world mid-write and the generation 0 that follows dispatches a hydrate over it
+(CONTROL_PLANE.md Section 4.1).
 
 **Scratch capacity.** One hydrate that displaces a live working set peaks at **three
 world-sized copies of that server**: the unpacked temp tree, the retained

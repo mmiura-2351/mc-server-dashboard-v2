@@ -197,7 +197,15 @@ forced gen-0 hydrate that would roll it back by up to a snapshot interval. Only 
 *genuinely* torn scratch (a chunk overrunning EOF, an entry past EOF, a severed
 prefix) falls back to generation 0. The fsck requires a quiesced working set
 (regionfsck's safety contract), so the Worker's startup sequence runs the
-container orphan sweep first to stop any live writers before scanning. A Worker that reports nothing held, or one
+container orphan sweep first to stop any live writers before scanning — and when
+that sweep **fails**, which is deliberately non-fatal, the scan advertises every
+held set at the generation its marker records and **runs no fsck at all**. An
+unswept orphan keeps writing into its bind-mounted scratch and nothing re-adopts
+it, so a fsck there would read a world mid-write and a generation 0 would send a
+destructive hydrate over a live server; the judgement waits for the next boot
+whose sweep succeeds, while the *advertisement* is never withheld (reporting
+nothing held would make the API hydrate every server on that Worker). A Worker
+that reports nothing held, or one
 that does not set the field, always hydrates. The
 API answers `RegisterAck`: the `heartbeat_interval` it expects,
 the `transfer_deadline` that bounds one data-plane transfer Worker-side
