@@ -293,6 +293,51 @@ type Manager struct {
 	// in currentOrphan, in the same critical section that observes the record gone,
 	// so the flag can never outlive its goroutine or block its successor.
 	converging map[string]bool
+	// pendingSaveOn names the servers a pre-stop flush MAY have disabled auto-save on
+	// and whose stop has not resolved yet — the save-off bracket
+	// flushBeforeStopWithDriver opens and only a confirmed termination (nothing to
+	// restore) or restoreSaveOnAfterFailedStop (the survivor) closes. It holds the
+	// RCON target the restore needs, because by then the instance is evicted from
+	// startCmds and controlTargetFor would answer empty (issue #2021).
+	//
+	// "MAY have" is the honest tense at both ends, and both are deliberate. The entry
+	// is written BEFORE save-off goes on the wire, because rcon.Execute writes the
+	// command and only then waits for a reply, so a failed round trip does not mean
+	// the server did not run it; and it is removed only once attemptStop has done
+	// whatever its outcome calls for, never before the restore that outcome triggers.
+	// Both ends err towards one redundant, idempotent save-on rather than towards a
+	// surviving world that saves nothing.
+	//
+	// A flush can also be REFUSED an entry, once saveOnSealed is set, and then it does
+	// not disable auto-save at all. That is the third side of the same bias: past the
+	// seal there is no longer anyone to restore, so the only safe bracket is the one
+	// that is never opened.
+	//
+	// It exists so the bracket can be closed by the WORKER rather than by the next
+	// boot (issue #3166). The escalation between the two points is tens of seconds
+	// to minutes long — the kill call plus the post-kill exit confirmation after a
+	// flush that succeeded, the whole stopDeadline before them after one that did
+	// not — and a Worker that goes down inside it leaves a SURVIVING Minecraft
+	// container with auto-save off: the container is not a Compose service, so
+	// nothing stops it on the way out. Close drains this map and issues the save-on
+	// itself, beside its join rather than in front of it and bounded by
+	// closingSaveOnTimeout, so its worst-case bound is unchanged — and it reaches the
+	// one lane no timer can, the operator stop that Runner.serve abandons without
+	// waiting (#3168).
+	pendingSaveOn map[string]saveOnTarget
+	// saveOnSealed forbids any further entry in pendingSaveOn. Close sets it in the
+	// same critical section as its LAST read of the ledger, which is what makes that
+	// read final: a flush either lands its mark before the seal and is in the map
+	// Close took, or observes the seal and does not disable auto-save at all. Without
+	// it the drain would need a loop, and the loop's termination would be an argument
+	// about whether some other lane can keep re-arming.
+	saveOnSealed bool
+	// closingSaveOnTimeout bounds each save-on Close issues from pendingSaveOn,
+	// which is the whole of the latency this change can add to a shutdown. A field
+	// (not the const it defaults to) so a test can shrink it, mirroring
+	// fsckRetryDelay. Read only by Close, which has already set closed under mu, so
+	// it needs no synchronisation of its own.
+	closingSaveOnTimeout time.Duration
 	// closed records that Close has run, so a command still in flight during
 	// shutdown does not spawn a background goroutine nothing will ever join — a
 	// converger for an orphan it records (issue #2493), or the pumps for an
@@ -408,6 +453,8 @@ func New(drivers map[string]execution.ExecutionDriver, scratchDir string, openCo
 		orphanProbeInterval:    defaultOrphanProbeInterval,
 		orphanProbeMaxInterval: defaultOrphanProbeMaxInterval,
 		converging:             map[string]bool{},
+		pendingSaveOn:          map[string]saveOnTarget{},
+		closingSaveOnTimeout:   closingSaveOnTimeout,
 	}
 	m.shutdown, m.stopBackground = context.WithCancel(context.Background())
 	m.goBackground(m.statusDispatcher)
@@ -505,22 +552,36 @@ func (m *Manager) goBackground(fn func()) bool {
 //     rather than most of them. The residual is a dir holding nothing but its
 //     generation marker: not advertised, and not data.
 //   - a retry stop cut between the flush's save-off and restoreSaveOnAfterFailedStop
-//     leaves a SURVIVING MC container with auto-save disabled, and the grace period
-//     is what lets that restore run. The container is not a compose service, so
-//     nothing stops it on the way out. containerdriver.sweepSaveOn (issue #1710)
-//     does issue an RCON save-on to every running orphan before its graceful stop,
-//     but only at the NEXT Worker boot — and `restart: unless-stopped` brings no
-//     boot after an explicit stop, so `docker compose down` leaves that container
-//     running, saving nothing, until the stack returns. stop_grace_period applies
-//     to `down` as much as to a redeploy, which is what makes it the instrument
-//     that reaches this leg.
+//     leaves a SURVIVING MC container with auto-save disabled: the container is not
+//     a compose service, so nothing stops it on the way out, and
+//     containerdriver.sweepSaveOn (issue #1710) issues its RCON save-on to every
+//     running orphan only at the NEXT Worker boot — which `restart: unless-stopped`
+//     does not bring after an explicit stop, so `docker compose down` leaves that
+//     container running and saving nothing until the stack returns.
+//     THIS LEG NO LONGER WAITS FOR THE GRACE PERIOD: Close settles it up front,
+//     from pendingSaveOn, at the moment the shutdown starts (issue #3166), and again
+//     after the join for a bracket that was opened in between. What the timer still
+//     buys on this leg is the escalation itself — a stop the Worker is already driving
+//     gets to finish rather than being cut half-issued.
+//     The drain's own cost is closingSaveOnTimeout (5 s), paid once and only when a
+//     server does not answer, which leaves this bound where it was.
 //
 // The cost is bounded: the value is a CEILING, not a wait, so a Close with nothing
 // in flight still returns in milliseconds and the timer is never observed. What it
 // does NOT reach is the same escalation dispatched as an operator StopServer: that
 // runs on a session lane nothing joins, so it is abandoned the moment run()
 // returns, at any value. Closing that one is a change to the lanes, not to this
-// timer.
+// timer (#3168) — though the auto-save half of it is already covered, because the
+// drain above is keyed on the outstanding save-off rather than on which lane
+// issued it.
+//
+// TWO CASES REMAIN UNCOVERED, by the drain and by the timer alike, because neither
+// is a shutdown: a host power loss inside the bracket, and the MC server crashing
+// inside it. Nothing runs Close in the first, and in the second the world the
+// save-off was protecting is already lost. The only repair for them is
+// containerdriver.sweepSaveOn at the next boot, which reaches a still-running
+// container whenever a boot follows — and does not arrive at all while the stack
+// stays down.
 //
 // Close is idempotent and terminal: it is safe to call on a manager that has
 // already been closed (the flag is monotonic, cancelling a cancelled context is a
@@ -532,7 +593,58 @@ func (m *Manager) Close() {
 	m.closed = true
 	m.mu.Unlock()
 	m.stopBackground()
+	// Settle the outstanding save-off debts BESIDE the join, never in front of it
+	// (issue #3166). Started here, each restore overlaps the escalation Close is
+	// already waiting out, so a Close that had work to do pays nothing for them and
+	// one with nothing outstanding starts none.
+	//
+	// THE LEDGER IS READ TWICE, and the second read is why. A stop dispatched before
+	// the shutdown began has its own RCON dial between the command and its save-off —
+	// a TCP connect plus an AUTH handshake, up to rcon's 30 s ceiling — so it can open
+	// a bracket long after the first read, and its lane is one Close never joins
+	// (#3168): the Worker would exit under a survivor with auto-save off. The second
+	// read happens after the join, when nothing Close joins is left to arm anything,
+	// and it SEALS the ledger in the same critical section, so a flush that arrives
+	// later declines to disable auto-save instead. Two passes, no loop, and the
+	// termination argument is local: after the seal no debt can exist.
+	//
+	// The second pass costs no extra time. Both passes share one WaitGroup and the
+	// first pass's restores are already bounded, so the join below ends no earlier
+	// than they do — the wait is still one closingSaveOnTimeout past the join, not two.
+	//
+	// THE WAIT IS JOINED AND BOUNDED, and both halves are required. Unjoined, the
+	// process exit that follows Close (main.go returns immediately after) kills a
+	// restore still in flight, which would move the loss rather than close it.
+	// Unbounded, a server that never answers would put the failure path's generous
+	// restoreSaveTimeout on a shutdown leg that nothing overlaps. So each restore
+	// carries closingSaveOnTimeout instead — 5 s, derived at that constant — and
+	// THE WHOLE ADDED LATENCY OF THIS CHANGE IS THAT ONE BOUND, paid once however
+	// many servers are draining, and only when a server does not answer.
+	//
+	// Close's ~280 s worst case is therefore unchanged, and so is the compose value
+	// paired with it: 5 s is well inside the restoreSaveTimeout leg that bound already
+	// counts. What CAN get slower is the best case — a quiesced stop that resolves in
+	// the same instant leaves no join for its restore to hide behind, so a Close that
+	// would have returned at once pays up to those 5 s, and only if the dial hangs
+	// rather than being refused, which a just-exited container normally is.
+	//
+	// They ride a LOCAL WaitGroup, not m.background: the flag above is already set,
+	// so goBackground would (correctly) refuse them, and joining them here is what
+	// keeps them from outliving the manager the way issue #2777's pumps did.
+	var restores sync.WaitGroup
+	settle := func(pending map[string]saveOnTarget) {
+		for serverID, target := range pending {
+			restores.Add(1)
+			go func() {
+				defer restores.Done()
+				m.restoreSaveOnWhileClosing(serverID, target)
+			}()
+		}
+	}
+	settle(m.takePendingSaveOn())
 	m.background.Wait()
+	settle(m.sealPendingSaveOn())
+	restores.Wait()
 }
 
 // WithLogger sets the manager's logger.
@@ -802,6 +914,38 @@ func (m *Manager) recordGenerationIfUnchanged(ref *workingDirRef, workingDir, se
 // timed-out request still re-enables auto-save), and must therefore carry its own
 // deadline so the call cannot hang the goroutine forever.
 const restoreSaveTimeout = 30 * time.Second
+
+// closingSaveOnTimeout bounds the SAME RCON call when Close issues it for a stop
+// bracket still outstanding at shutdown (issue #3166). It is deliberately far
+// shorter than restoreSaveTimeout above, and the reason is what the two budgets
+// have to overlap with rather than any difference in the work:
+//
+//   - restoreSaveTimeout is spent inside a Close that is already waiting out the
+//     escalation it follows, so it is hidden. This one has nothing to hide behind —
+//     Close joins no command lane at all — so whatever it spends is added to the
+//     Worker's shutdown, which is the cost the whole change exists to avoid.
+//   - the work is one rcon.Dial (TCP connect plus the AUTH handshake) and one
+//     Execute round trip, both of which are sub-second whenever the server answers
+//     at all — rcon's own defaultExecuteTimeout comment says so, and its 30 s is a
+//     ceiling against a wedged peer rather than a duration anything spends.
+//   - a server that has NOT answered within this bound is, in this exact window, a
+//     server whose stop is escalating precisely because it is not answering. Holding
+//     the shutdown open longer for it buys nothing: containerdriver.sweepSaveOn
+//     repairs a container that survives at the next boot, and one that does not
+//     survive needs no restore. containerdriver bounds that same boot-time dial with
+//     sweepCallMargin for the same reason.
+//
+// 5 s is an order of magnitude above the healthy case and half of Docker's own 10 s
+// default grace, so the drain can never be what an unconfigured deployment is
+// SIGKILLed for. It is also the WHOLE of the latency this change can add to a
+// shutdown: Close's restores run concurrently, so a drain of any size costs at most
+// this once, and Close's ~280 s worst case — which compose's stop_grace_period is
+// sized for — is untouched, since 5 s is well inside the restoreSaveTimeout leg that
+// bound already counts.
+//
+// Manager.closingSaveOnTimeout defaults to it so a test can shrink it, mirroring
+// fsckRetryDelay.
+const closingSaveOnTimeout = 5 * time.Second
 
 // snapshotFsckAttempts is how many times the pre-pack region fsck is run for a
 // RUNNING server's periodic snapshot before the snapshot is refused (#907). The
@@ -1398,6 +1542,13 @@ func (m *Manager) quiesceRunning(ctx context.Context, serverID, workingDir strin
 // settleWorkingSet never converges within the budget. save-on is NOT sent — the
 // server is about to be stopped, so there is nothing to restore, and re-enabling
 // writes during the settle window would reintroduce the convergence problem.
+//
+// That leaves auto-save off on a server that is still running until the stop
+// resolves, so a save-off that LANDED is recorded in pendingSaveOn: a stop that
+// confirms termination has nothing to restore, one that fails reaches
+// restoreSaveOnAfterFailedStop, and a Worker that starts closing before either
+// happens settles the debt itself rather than leaving it to the next boot (issue
+// #3166).
 func (m *Manager) flushBeforeStopWithDriver(ctx context.Context, serverID, driverName, mcVersion string) bool {
 	raw, err := m.openControl(ctx, serverID, driverName, mcVersion)
 	if err != nil {
@@ -1419,12 +1570,46 @@ func (m *Manager) flushBeforeStopWithDriver(ctx context.Context, serverID, drive
 	}
 	defer func() { _ = ctrl.Close() }()
 
+	// Record the debt BEFORE the command goes on the wire, not after it answers.
+	// rcon.Execute writes save-off and only then waits for a reply, so a round trip
+	// that times out says nothing about whether Minecraft ran it — and even a clean
+	// success can be interrupted between the reply and the record. Recording first is
+	// the only ordering with no window, and it errs the way that costs least: a debt
+	// for a save-off that never landed is one idempotent save-on, while a missing one
+	// is a surviving world that saves nothing (issue #3166).
+	//
+	// The bracket is opened here rather than at the dial above because a flush that
+	// could not dial never sends anything, and the forced stop path never calls this
+	// function at all (TestForcedFailedStopSkipsSaveOn).
+	//
+	// A REFUSED debt means the ledger is sealed, and then auto-save must not be
+	// disabled at all: Close has joined everything it joins and read the ledger for
+	// the last time, so nothing would ever re-enable it. This lane reaches the dial
+	// only because it was dispatched before the shutdown began, and it is not joined,
+	// so the process exits under it mid-escalation — the stop the quiesce exists to
+	// protect never completes anyway. Skipping costs this one stop its quiesce, no
+	// more than a save-off that fails already does (#1038), and it is the only shape
+	// that cannot leave auto-save off: nothing was turned off.
+	written, quiesce := m.markPendingSaveOn(serverID, driverName, mcVersion)
+
 	// Disable auto-save so settleWorkingSet converges quickly even with active
 	// players (#1038). Best-effort: if save-off fails, save-all still runs — the
 	// settle may time out but the flush is no worse than before this fix.
-	if _, err := ctrl.Execute(ctx, "save-off"); err != nil {
-		m.logger.Warn("stop flush: save-off failed; proceeding with save-all",
-			"server_id", serverID, "error", err)
+	if !quiesce {
+		m.logger.Warn("stop flush: worker is closing; skipping save-off so auto-save cannot be left disabled",
+			"server_id", serverID)
+	} else {
+		_, err := ctrl.Execute(ctx, "save-off")
+		// Close the edge the moment the write is back, before anything is done with its
+		// outcome: a shutdown restore for this id is holding on it, and what it needs to
+		// know is that the command is no longer in flight — not whether it was answered.
+		// Closed on the error path too, for the same reason the entry was recorded before
+		// the write: a round trip that failed may still have disabled auto-save.
+		close(written)
+		if err != nil {
+			m.logger.Warn("stop flush: save-off failed; proceeding with save-all",
+				"server_id", serverID, "error", err)
+		}
 	}
 
 	if _, err := ctrl.Execute(ctx, "save-all"); err != nil {
@@ -1498,23 +1683,194 @@ func (m *Manager) restoreSaveOn(ctx context.Context, serverID string, ctrl execu
 // accepts driverName and mcVersion explicitly (captured before eviction) and
 // dials a fresh RCON connection on a context detached from the (possibly
 // cancelled) request.
+//
+// It is no longer the only closer of that bracket: restoreSaveOnWhileClosing
+// settles the same debt from pendingSaveOn when the Worker starts closing with the
+// escalation still in flight (issue #3166). The two are independent and both
+// idempotent — this one runs whenever the graceful stop failed, whether or not the
+// shutdown already pre-empted it.
 func (m *Manager) restoreSaveOnAfterFailedStop(ctx context.Context, serverID, driverName, mcVersion string) {
-	restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restoreSaveTimeout)
-	defer cancel()
-	ctrl, err := m.openControl(restoreCtx, serverID, driverName, mcVersion)
-	if err != nil {
-		m.logger.Error("failed stop: auto-save NOT restored (rcon open failed); surviving server is running with auto-save disabled",
+	if err := m.dialAndSaveOn(ctx, restoreSaveTimeout, serverID, driverName, mcVersion); err != nil {
+		m.logger.Error("failed stop: auto-save NOT restored; surviving server is running with auto-save disabled",
 			"server_id", serverID, "driver", driverName, "error", err)
-		return
-	}
-	defer func() { _ = ctrl.Close() }()
-	if _, err := ctrl.Execute(restoreCtx, "save-on"); err != nil {
-		m.logger.Error("failed stop: auto-save NOT restored (save-on failed); surviving server is running with auto-save disabled",
-			"server_id", serverID, "error", err)
 		return
 	}
 	m.logger.Warn("stop failed with the server possibly still alive; re-enabled auto-save on the survivor",
 		"server_id", serverID)
+}
+
+// restoreSaveOnWhileClosing re-enables auto-save on a server whose pre-stop flush
+// disabled it and whose stop is STILL IN FLIGHT when the Worker starts closing
+// (issue #3166). It is the same RCON call restoreSaveOnAfterFailedStop makes,
+// issued at the start of the shutdown instead of at the end of the escalation:
+// both outcomes of that escalation are fine to have pre-empted — a stop that
+// confirms termination leaves nobody to read the setting, and one that does not
+// reaches its own restore, which is idempotent.
+//
+// It differs from that one in two ways beyond its logging, which says "the stop has
+// not finished" rather than "the stop failed" because that is the true thing to tell
+// an operator here. First, it HOLDS until the bracket's save-off write has returned:
+// the ledger entry exists from before that write, so the entry alone does not say the
+// command has gone out, and a restore that overtook it would leave auto-save off (the
+// second clause of the ledger invariant, saveOnTarget). Second, it carries a much
+// shorter budget (closingSaveOnTimeout) covering the hold and the restore together:
+// the failed-stop restore is hidden inside a join Close is doing anyway, while this
+// one is added to the Worker's shutdown.
+func (m *Manager) restoreSaveOnWhileClosing(serverID string, target saveOnTarget) {
+	// Do not overtake the save-off this bracket may still be writing. The entry exists
+	// from before the command goes on the wire, so reading it says nothing about
+	// whether the write has happened; the edge says that, and it is the second clause
+	// of the ledger invariant (saveOnTarget).
+	// The hold and the restore share ONE budget, so the drain still costs at most one
+	// closingSaveOnTimeout rather than two. A write that returns at the very last
+	// instant leaves a non-positive remainder, which makes the dial below fail at once
+	// through its own error path — no separate branch for it.
+	deadline := time.Now().Add(m.closingSaveOnTimeout)
+	hold := time.NewTimer(m.closingSaveOnTimeout)
+	defer hold.Stop()
+	select {
+	case <-target.written:
+	case <-hold.C:
+		// DECLINE rather than guess, and this is the honest inference rather than a
+		// concession: a save-off whose write has not returned within the budget is one
+		// the server is not answering, so it most likely never landed and auto-save is
+		// still on — while a save-on issued over a save-off that lands afterwards leaves
+		// auto-save OFF, which is the state being repaired. Such a server is exactly the
+		// one containerdriver.sweepSaveOn reaches at the next boot (issue #1710).
+		m.logger.Error("worker closing: auto-save NOT restored; the server never confirmed its save-off, so a restore could be overtaken by it",
+			"server_id", serverID, "driver", target.driver, "timeout", m.closingSaveOnTimeout)
+		return
+	}
+	if err := m.dialAndSaveOn(context.Background(), time.Until(deadline), serverID, target.driver, target.mcVersion); err != nil {
+		m.logger.Error("worker closing: auto-save NOT restored on a server whose stop is still in flight; if it survives the stop it runs with auto-save disabled until the next Worker boot",
+			"server_id", serverID, "driver", target.driver, "error", err)
+		return
+	}
+	m.logger.Warn("worker closing: re-enabled auto-save on a server whose stop is still in flight",
+		"server_id", serverID)
+}
+
+// dialAndSaveOn dials a FRESH RCON connection for serverID and issues save-on on
+// a context detached from ctx and bounded by restoreSaveTimeout, so a cancelled
+// request — or a Worker already shutting down — still re-enables auto-save. It is
+// the mechanism both out-of-band restores share; each caller logs its own framing.
+//
+// A fresh dial rather than a reused one is the point: the caller's connection is
+// closed by then (the flush's ctrl) or poisoned (the rcon client marks the
+// connection broken on any Execute error), and the instance is evicted from
+// startCmds, so driverName and mcVersion have to be passed in — controlTargetFor
+// would answer empty (issues #2021, #1712, #3116).
+func (m *Manager) dialAndSaveOn(ctx context.Context, timeout time.Duration, serverID, driverName, mcVersion string) error {
+	restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+	defer cancel()
+	ctrl, err := m.openControl(restoreCtx, serverID, driverName, mcVersion)
+	if err != nil {
+		return fmt.Errorf("open rcon: %w", err)
+	}
+	defer func() { _ = ctrl.Close() }()
+	if _, err := ctrl.Execute(restoreCtx, "save-on"); err != nil {
+		return fmt.Errorf("save-on: %w", err)
+	}
+	return nil
+}
+
+// saveOnTarget is one entry in the ledger: the RCON target of an outstanding
+// pre-stop save-off — the driver that runs the server and its Minecraft version, the
+// pair every out-of-band save-on needs to resolve the dial host (#1712) and the
+// password's charset (#3116) after the instance has been evicted — plus the edge that
+// orders the restore after the write.
+//
+// THE LEDGER INVARIANT, which the three windows of issues #3166's review rounds were
+// all failures of, stated once so the protocol is a rule rather than a series of
+// boundary fixes:
+//
+//	For every save-off this manager writes, exactly one of these restores it:
+//	  - the lane, when attemptStop's outcome calls for restoreSaveOnAfterFailedStop;
+//	    the entry is cleared only after that has run, so the clear cannot race it;
+//	  - a Close drain, and only after the write has RETURNED, so the restore can
+//	    never precede the save-off it undoes.
+//	A save-off is never written for a bracket the seal refused, and no bracket is
+//	opened after the seal.
+//
+// written is that second clause's mechanism: the flush creates the entry before the
+// command goes on the wire and closes this channel once the Execute has returned,
+// whatever it returned. A drain waits on it before dialing. Everything between the
+// mark and the write therefore sits on one side of a real happens-before edge — the
+// statement gap, a preemption of any length, a slow write, resilientControl's redial
+// retry — instead of racing the drain.
+//
+// The rejected alternative was a claim the sender re-checks: the drain takes the
+// entry, and a flush that no longer owns one does not write. It cannot be made total.
+// check-then-write is two steps, so a drain claiming between them still lands its
+// save-on first, and closing THAT would need m.mu held across RCON I/O — which would
+// serialise every server's flush behind one lock. Ordering the write ahead of the
+// restore needs no lock at all, because the flush is the only writer of the edge and
+// the drain only reads it.
+type saveOnTarget struct {
+	driver    string
+	mcVersion string
+	written   chan struct{}
+}
+
+// markPendingSaveOn records that serverID's pre-stop flush is about to disable
+// auto-save, and returns the edge the caller MUST close once its save-off write has
+// returned — see saveOnTarget for the ledger invariant this pair implements. It also
+// reports whether the debt was taken on, and a FALSE means the caller must not disable
+// auto-save at all: the ledger is sealed, Close has already read it for the last time,
+// and a bracket opened now would be closed by nobody.
+//
+// The seal is what bounds Close's drain to two passes instead of a loop. Without it
+// the drain would have to keep re-reading — a stop dispatched before the shutdown
+// began has its own RCON dial (a TCP connect plus an AUTH handshake, up to rcon's
+// 30 s ceiling) between the command and its save-off, so it can arm a debt long after
+// the first read — and a loop whose exit depends on no lane re-arming is a loop whose
+// termination is an argument about other code. Refusing instead makes it a local
+// invariant: after the seal, no debt can exist, so the pass that set it is the last
+// one needed.
+func (m *Manager) markPendingSaveOn(serverID, driverName, mcVersion string) (chan struct{}, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.saveOnSealed {
+		return nil, false
+	}
+	written := make(chan struct{})
+	m.pendingSaveOn[serverID] = saveOnTarget{driver: driverName, mcVersion: mcVersion, written: written}
+	return written, true
+}
+
+// clearPendingSaveOn forgets serverID's outstanding save-off, because its stop has
+// resolved: the server is either gone (nothing to restore) or about to reach
+// restoreSaveOnAfterFailedStop. Without it a later Close would dial a server whose
+// stop confirmed termination long ago.
+func (m *Manager) clearPendingSaveOn(serverID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.pendingSaveOn, serverID)
+}
+
+// takePendingSaveOn hands Close the whole outstanding set and empties it, so the
+// restores it issues cannot be issued a second time.
+func (m *Manager) takePendingSaveOn() map[string]saveOnTarget {
+	return m.drainPendingSaveOn(false)
+}
+
+// sealPendingSaveOn is Close's LAST read: it takes the outstanding set and, in the
+// same critical section, forbids any further debt. Doing both under one lock is what
+// makes it final — a mark either lands before this and is in the map it returns, or
+// observes the seal and never opens a bracket at all.
+func (m *Manager) sealPendingSaveOn() map[string]saveOnTarget {
+	return m.drainPendingSaveOn(true)
+}
+
+func (m *Manager) drainPendingSaveOn(seal bool) map[string]saveOnTarget {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if seal {
+		m.saveOnSealed = true
+	}
+	pending := m.pendingSaveOn
+	m.pendingSaveOn = map[string]saveOnTarget{}
+	return pending
 }
 
 // settleWorkingSet waits for an asynchronous save-all to finish writing the
@@ -2348,7 +2704,15 @@ func (m *Manager) attemptStop(ctx context.Context, serverID string, inst executi
 			return m.flushBeforeStopWithDriver(flushCtx, serverID, driverName, mcVersion)
 		}
 	}
-	if err := inst.Stop(ctx, graceful, preFallback); err != nil {
+	err := inst.Stop(ctx, graceful, preFallback)
+	// The flush's save-off is settled only once this call has done whatever the
+	// stop's outcome calls for: a confirmed termination leaves nobody to restore it
+	// for, and a failure reaches restoreSaveOnAfterFailedStop below. DEFERRED rather
+	// than placed here, so the clear can never precede that restore — Close joins no
+	// command lane, so a drain landing in between would find an empty map and let the
+	// process exit under a survivor with auto-save still off (issue #3166).
+	defer m.clearPendingSaveOn(serverID)
+	if err != nil {
 		// Record the orphan and hand it to a converger, so the Worker keeps working
 		// the stop on its own instead of waiting for an operator to notice (issue
 		// #2475). recordOrphan is idempotent on the converger: the retries the
