@@ -880,3 +880,55 @@ func TestCloseDeclinesToRestoreAnUnconfirmedSaveOff(t *testing.T) {
 		t.Fatal("the operator stop did not return once released")
 	}
 }
+
+// LEG: THE EDGE IS THE WRITE, not the flush. The hold exists to order the restore
+// after the save-off, so it must be released by that command's return and nothing
+// later. Releasing it at the end of the flush instead would make the drain wait out
+// save-all and the settle — up to settleBudget, far past its own budget — so a
+// bracket whose save-off DID go out would be declined rather than restored.
+//
+// Here save-off returns promptly and save-all is the command left on the wire.
+func TestCloseRestoresOnceTheSaveOffReturnsWithoutAwaitingTheRestOfTheFlush(t *testing.T) {
+	rec := &saveOnRecorder{blockLines: map[string]chan struct{}{"save-all": make(chan struct{})}}
+	d := &flushGatedDriver{}
+	m := newSaveOnManager(t, d, rec.open)
+	// Short enough that a hold released only at the flush's return could not survive it,
+	// so the assertion below is about WHICH event releases the hold.
+	m.closingSaveOnTimeout = 200 * time.Millisecond
+	seedScratch(t, m, "s1")
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	inst := d.inst
+	t.Cleanup(func() { rec.releaseAll(); inst.releaseStop(); m.Close() })
+
+	stopped := make(chan session.CommandResult, 1)
+	go func() {
+		stopped <- m.Handle(context.Background(),
+			session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+	}()
+	// save-off is through; the flush is now held on save-all, so it will not return.
+	awaitBlockedLine(t, rec, "save-all")
+	if !rec.hasFor("s1", "save-off") {
+		t.Fatalf("s1 rcon lines = %v, want save-off to have returned before save-all was entered", rec.allFor("s1"))
+	}
+
+	closed := make(chan struct{})
+	go func() { m.Close(); close(closed) }()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return")
+	}
+	if !rec.hasFor("s1", "save-on") {
+		t.Fatalf("s1 rcon lines = %v, want save-on: the save-off returned, so the hold had nothing left to wait for", rec.allFor("s1"))
+	}
+
+	rec.releaseAll()
+	inst.releaseStop()
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the operator stop did not return once released")
+	}
+}
