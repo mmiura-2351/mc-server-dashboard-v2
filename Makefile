@@ -27,7 +27,7 @@
 
 .PHONY: all check lint format test docs-check migrations-check test-client-check \
 	image-pins-check \
-	api-env-check api-lint api-format api-test \
+	api-env-check api-benchmark-collection-check api-lint api-format api-test \
 	worker-lint worker-format worker-test worker-test-race worker-e2e-compile \
 	relay-lint relay-format relay-test relay-test-race relay-e2e relay-e2e-compile \
 	bedrock-e2e \
@@ -192,9 +192,18 @@ image-pins-check:
 #
 # Same shape as docs-check/migrations-check/test-client-check: the self-test
 # first (pure stdlib, plain python3 -- no venv), then the real run it guards.
+# Keep the normal collection selector in one place: both `api-test` and its
+# collection guard expand this variable. `bench-api` deliberately uses an
+# explicit benchmark path instead.
+API_TEST_SELECTOR := --ignore=tests/benchmarks
+API_TEST_EXTRA_ARGS ?=
+
 api-env-check:
 	python3 scripts/check_api_env.py --self-test
 	cd api && uv run python ../scripts/check_api_env.py
+
+api-benchmark-collection-check: api-env-check
+	python3 scripts/check_api_benchmark_collection.py $(API_TEST_SELECTOR)
 
 api-lint: api-env-check
 	cd api && uv run ruff check .
@@ -211,8 +220,8 @@ api-format: api-env-check
 # rebalances the queue so a slow file can't strand an idle worker (#1729). The
 # scratch-DB fixtures are worker-safe (per-worker `<dbname>_<uuid>`, #1146).
 # Coverage stays CI-only (#325) -- not added here.
-api-test: api-env-check
-	cd api && uv run pytest -n auto --dist worksteal
+api-test: api-benchmark-collection-check
+	cd api && uv run pytest -n auto --dist worksteal $(API_TEST_SELECTOR) $(API_TEST_EXTRA_ARGS)
 
 # ---------------------------------------------------------------------------
 # worker/ (Go)
