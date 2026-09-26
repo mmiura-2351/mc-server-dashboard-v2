@@ -51,7 +51,7 @@ func TestHeldScansSkipTheSharedHydrateTempPrefix(t *testing.T) {
 	m := New(nil, scratch, nil)
 	closeWithTest(t, m)
 	want := []session.HeldServer{{ServerID: "s1", Generation: 7}}
-	assertHeld(t, "ScanHeldServers", ScanHeldServers(scratch, nil), want)
+	assertHeld(t, "ScanHeldServers", ScanHeldServers(scratch, true, nil), want)
 	assertHeld(t, "HeldServers", m.HeldServers(), want)
 }
 

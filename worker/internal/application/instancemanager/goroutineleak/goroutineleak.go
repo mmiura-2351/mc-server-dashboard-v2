@@ -29,8 +29,10 @@ import (
 )
 
 // frames names the background goroutines a Manager owns: the ones New and
-// startPumps launch, the metrics pump's teardown watcher, and the deleted-scratch
-// reclaim ReclaimDeletedScratches launches (issue #2878). A goroutine dump
+// startPumps launch, the metrics pump's teardown watcher, the deleted-scratch
+// reclaim ReclaimDeletedScratches launches (issue #2878), and the save-on
+// restores Close itself launches for the stop brackets still outstanding when the
+// Worker goes down (issue #3166). A goroutine dump
 // is the only evidence that says whether they are still there once the manager
 // that started them is gone, which is how issue #2777 was found — the
 // instancemanager package's own test run left ~91k of them behind. The trailing
@@ -46,6 +48,7 @@ var frames = []string{
 	"instancemanager.(*Manager).logPump(",
 	"instancemanager.(*Manager).statusDispatcher(",
 	"instancemanager.(*Manager).reclaimDeletedScratches(",
+	"instancemanager.(*Manager).restoreSaveOnWhileClosing(",
 }
 
 // live counts the manager-owned background goroutines currently in the runtime

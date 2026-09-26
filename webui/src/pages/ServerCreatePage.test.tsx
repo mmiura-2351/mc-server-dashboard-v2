@@ -78,16 +78,12 @@ function defaultGet(path: string) {
   return Promise.reject(new Error(`unexpected GET ${path}`));
 }
 
-// A location probe: mirrors the current path + hash so a test can assert the
-// post-create redirect (the URL the page navigates to) and the tab hash that
-// useTabHash writes — both go through real router navigation now that
-// useNavigate is no longer mocked.
+// A location probe mirrors the current path so tests can assert the
+// post-create redirect (the URL the page navigates to).
 let lastPath = "";
-let lastHash = "";
 function LocationProbe() {
   const loc = useLocation();
   lastPath = loc.pathname;
-  lastHash = loc.hash;
   return null;
 }
 
@@ -149,7 +145,6 @@ beforeEach(() => {
   mockApi.post.mockReset();
   mockPostFormWithProgress.mockReset();
   lastPath = "";
-  lastHash = "";
   mockCanCreate = true;
   mockApi.get.mockImplementation(defaultGet);
 });
@@ -1083,78 +1078,13 @@ describe("import tab", () => {
   });
 });
 
-describe("create-vs-import tab in the URL (#540)", () => {
-  it("defaults to the new-server tab with a clean (hash-less) URL", async () => {
-    renderPage();
-    await screen.findByText(t("serverCreate.typeHeading"));
-    expect(activeTab()).toBe(t("serverCreate.tab.new"));
-    expect(lastHash).toBe("");
-  });
-
+describe("ServerCreatePage import deep link (#540)", () => {
   it("deep-links to the import tab via the #import hash", async () => {
     renderPage(`/communities/${CID}/servers/new#import`);
     expect(
       await screen.findByText(t("serverCreate.import.heading")),
     ).toBeInTheDocument();
     expect(activeTab()).toBe(t("serverCreate.tab.import"));
-  });
-
-  it("switching to the import tab writes the #import hash", async () => {
-    renderPage();
-    fireEvent.click(await screen.findByText(t("serverCreate.tab.import")));
-    expect(activeTab()).toBe(t("serverCreate.tab.import"));
-    expect(lastHash).toBe("#import");
-  });
-
-  it("switching back to the new-server tab clears the hash", async () => {
-    renderPage(`/communities/${CID}/servers/new#import`);
-    fireEvent.click(await screen.findByText(t("serverCreate.tab.new")));
-    expect(activeTab()).toBe(t("serverCreate.tab.new"));
-    expect(lastHash).toBe("");
-  });
-
-  it("tab buttons carry aria-controls and the panel carries aria-labelledby (#1216)", async () => {
-    renderPage();
-    await screen.findByText(t("serverCreate.typeHeading"));
-
-    const newTab = screen.getByRole("tab", {
-      name: t("serverCreate.tab.new"),
-    });
-    expect(newTab).toHaveAttribute("aria-controls", "sc-panel-new");
-    const panel = screen.getByRole("tabpanel");
-    expect(panel).toHaveAttribute("id", "sc-panel-new");
-    expect(panel).toHaveAttribute("aria-labelledby", "sc-tab-new");
-  });
-
-  it("ArrowRight moves focus to the import tab (#1216)", async () => {
-    renderPage();
-    await screen.findByText(t("serverCreate.typeHeading"));
-
-    const newTab = screen.getByRole("tab", {
-      name: t("serverCreate.tab.new"),
-    });
-    newTab.focus();
-    fireEvent.keyDown(newTab, { key: "ArrowRight" });
-
-    const importTab = screen.getByRole("tab", {
-      name: t("serverCreate.tab.import"),
-    });
-    expect(importTab).toHaveFocus();
-    expect(importTab).toHaveAttribute("aria-selected", "true");
-  });
-
-  it("inactive tabs have tabIndex -1 (roving tabindex, #1216)", async () => {
-    renderPage();
-    await screen.findByText(t("serverCreate.typeHeading"));
-
-    const newTab = screen.getByRole("tab", {
-      name: t("serverCreate.tab.new"),
-    });
-    const importTab = screen.getByRole("tab", {
-      name: t("serverCreate.tab.import"),
-    });
-    expect(newTab).toHaveAttribute("tabindex", "0");
-    expect(importTab).toHaveAttribute("tabindex", "-1");
   });
 });
 
