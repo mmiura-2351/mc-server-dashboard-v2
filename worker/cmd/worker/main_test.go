@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"io"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -258,6 +261,99 @@ func TestBootLeavesScratchLeftoversWhenTheOrphanSweepFails(t *testing.T) {
 	}
 }
 
+// The held-set scan's region fsck rests on the SAME premise as the two boot reclaims —
+// nobody is writing into what it reads — and the container orphan sweep is what
+// establishes it, so it is gated on the sweep too (issue #3171). The two tests below are
+// that gate's legs at the real call site: the fsck exists to catch a durable gen-N marker
+// left next to a torn world by a power loss (issue #834), and its verdict is only
+// meaningful on a quiesced set, which regionfsck states as its own contract. After a
+// FAILED sweep an orphan can still be running with <scratch>/<id> bind-mounted and the
+// Worker does not know it (nothing re-adopts containers, PR #3170), so the scan can read a
+// mid-write world, call it torn and advertise generation 0 — a false "hydrate me" that
+// dispatches a destructive hydrate over a live world.
+//
+// What these two observe is the scan's own WARN, not the Register, and that is deliberate.
+// run() hands its scan result to session.NewRunner, but Runner.runOnce REPLACES
+// caps.HeldServers with the command handler's in-session HeldServers() before every
+// registration, including the first (session.go, issue #1711), and that scan carries no
+// fsck — so no boot fsck verdict, gen 0 or otherwise, reaches the wire today. A wire-level
+// assertion would therefore pin #1711's refresh instead of this gate and would stay green
+// with the gate deleted. The WARN is where the boot scan's decision is observable, and it
+// is also what an operator reads after a sweep failure: the false-corruption line over a
+// live world is itself part of the fault.
+func TestBootDoesNotJudgeHeldWorldsWhenTheOrphanSweepFails(t *testing.T) {
+	scratch := t.TempDir()
+	seedTornWorkingSet(t, filepath.Join(scratch, "s1"), 9)
+	// A docker socket that does not exist: the sweep's container list fails, which
+	// buildInstanceManager logs and does not treat as fatal, so boot continues unquiesced.
+	setBootEnv(t, scratch, "unix://"+filepath.Join(t.TempDir(), "no-such-docker.sock"), "127.0.0.1:1")
+	t.Setenv("MCD_WORKER_LOG_LEVEL", "warn")
+	logged := captureStderr(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := run(ctx); err != nil {
+		t.Fatalf("run() = %v, want nil: a failed orphan sweep is non-fatal by design, and this "+
+			"test needs boot to reach the held-set scan", err)
+	}
+
+	out := logged()
+	if strings.Contains(out, "has a corrupt region") {
+		t.Errorf("boot judged s1's world torn although the container orphan sweep failed: the "+
+			"sweep is what proves nothing is writing into it, and a mid-write read of a running "+
+			"orphan's live world reads as torn (issue #3171)\nboot log:\n%s", out)
+	}
+	// The other half: the set must still be ENUMERATED at its recorded generation. Dropping
+	// it from the advertisement would report nothing held and make the API hydrate every
+	// server on this Worker, which is worse than the fault.
+	for _, want := range []string{"skipping the held-set region fsck", `"server_id":"s1"`, `"generation":9`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("boot log does not contain %q: the scan must still advertise s1 at the "+
+				"generation its marker records (issue #3171)\nboot log:\n%s", want, out)
+		}
+	}
+}
+
+// The quiesced leg: on a boot whose sweep DID establish that nothing is writing, a
+// genuinely torn set must still be advertised at generation 0 (issue #834). That rule is
+// why the fsck exists, and the gate above must not weaken it.
+//
+// This leg is also what keeps the failed-sweep leg honest: both use the same fixture, so
+// if that image ever stopped reading as torn, this test fails instead of the other one
+// passing vacuously.
+func TestBootJudgesATornHeldWorldWhenTheOrphanSweepSucceeds(t *testing.T) {
+	scratch := t.TempDir()
+	seedTornWorkingSet(t, filepath.Join(scratch, "s1"), 9)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// The sweep must SUCCEED here, so boot is given a docker socket that answers its
+	// container list and the shutdown comes from the session's first dial — the same
+	// arrangement TestBootReclaimsScratchLeftovers needs, and for the same reason.
+	endpoint := cancelOnFirstDial(t, cancel)
+	backstop := time.AfterFunc(30*time.Second, cancel)
+	t.Cleanup(func() { backstop.Stop() })
+	setBootEnv(t, scratch, fakeDockerSocket(t), endpoint)
+	t.Setenv("MCD_WORKER_LOG_LEVEL", "warn")
+	logged := captureStderr(t)
+
+	if err := run(ctx); err != nil {
+		t.Fatalf("run() = %v, want nil: this test needs the boot sequence to complete and the "+
+			"session to return, as a clean shutdown does", err)
+	}
+
+	out := logged()
+	for _, want := range []string{
+		"held set has a corrupt region; advertising generation 0 to force a hydrate",
+		`"server_id":"s1"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("boot log does not contain %q: a torn held set must still be advertised at "+
+				"generation 0 on a boot whose orphan sweep succeeded, or the marker the power "+
+				"loss made durable boots the torn world (issue #834)\nboot log:\n%s", want, out)
+		}
+	}
+}
+
 // setBootEnv gives run() the configuration Load accepts, pointed at the test's own scratch
 // dir, docker host and control-plane endpoint — the three knobs that decide what the boot
 // sequence does. EVERY key applyEnv reads is set here, including the ones set to empty:
@@ -364,6 +460,69 @@ func cancelOnFirstDial(t *testing.T, cancel context.CancelFunc) string {
 		}
 	}()
 	return l.Addr().String()
+}
+
+// seedTornWorkingSet creates a held working set whose one region file is GENUINELY torn,
+// alongside the generation marker the scan reads: an 8 KiB file holding only the two
+// header sectors, whose location entry 0 points at sector 2 — exactly EOF — so the chunk
+// it references starts past the end of the file (regionfsck's sector_out_of_bounds). This
+// is the shape a crash mid-chunk-save leaves, and the one the fsck exists to catch.
+//
+// The image and the marker name are spelled out here rather than shared with the
+// instancemanager fixtures, which are behind an internal package's test files; the two
+// boot tests are paired so the shape cannot rot silently — the sweep-succeeded leg fails
+// the moment this stops reading as torn.
+func seedTornWorkingSet(t *testing.T, dir string, gen int) {
+	t.Helper()
+	region := make([]byte, 2*4096)
+	region[2] = 2 // location entry 0: sector offset 2, which is EOF in an 8 KiB file.
+	region[3] = 1 // one sector.
+	if err := os.MkdirAll(filepath.Join(dir, "region"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "region", "r.0.0.mca"), region, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	// instancemanager's generationFile constant; a rename there fails these tests loudly,
+	// because a set with no marker is advertised at generation 0 either way.
+	if err := os.WriteFile(filepath.Join(dir, ".mcsd_generation"), []byte(strconv.Itoa(gen)), 0o640); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// captureStderr redirects os.Stderr to a pipe for the rest of the test and returns the
+// reader for what boot logged there — run() builds its own logger over os.Stderr
+// (newLogger), so this is where a test of the wiring observes a boot decision that nothing
+// else exposes. The returned func restores os.Stderr and reads the pipe once; it is also
+// registered as cleanup, so a t.Fatal inside the captured window cannot leave the process
+// logging into a closed pipe. The pipe's buffer bounds what may be logged before the read:
+// at level warn the whole boot writes a handful of lines, far under it, and a boot that
+// exceeded it would block rather than lose output.
+func captureStderr(t *testing.T) func() string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	var once sync.Once
+	var out string
+	read := func() string {
+		once.Do(func() {
+			os.Stderr = orig
+			_ = w.Close()
+			b, readErr := io.ReadAll(r)
+			_ = r.Close()
+			if readErr != nil {
+				t.Errorf("read captured stderr: %v", readErr)
+			}
+			out = string(b)
+		})
+		return out
+	}
+	t.Cleanup(func() { read() })
+	return read
 }
 
 // seedScratchTree creates a world-shaped directory: what a live working set, a crash-left
