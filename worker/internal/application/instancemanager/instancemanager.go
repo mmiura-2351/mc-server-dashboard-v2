@@ -2238,6 +2238,16 @@ func (m *Manager) removeScratch(serverID string) {
 	// is now redundant and reclaimed alongside the scratch. No identity re-check is
 	// passed: this path holds the per-id reservation, so no hydrate can park a fresh
 	// recovery copy in the slot mid-sweep (issue #3118).
+	//
+	// It does NOT follow that this path removes whatever it finds. The id's slot claim is
+	// taken here exactly as it is on the running-id path (detachDisplacedTree), and it is
+	// this path's ONE way to decline: the reservation rejects hydrates and starts, not a
+	// running-id sweep from an older, already-dropped stream, which takes no reservation
+	// of its own and whose lanes are a different stream's — so such a sweep can be holding
+	// the claim when this one arrives. The tree is then left in the slot untouched, and
+	// here that leak has no next tick behind it: the removal above has just retired the
+	// advertisement that keeps the id eligible for any later per-id pass, so the tree waits
+	// for a re-placement onto this Worker or for an operator (STORAGE.md Section 4.6).
 	m.sweepDisplaced(serverID, nil)
 }
 
@@ -2382,10 +2392,12 @@ func (m *Manager) releaseDisplacedSlot(serverID string) {
 // deliberately not hasWorkingSet: that one reads through a symlink and folds every read
 // failure into "no working set", and both answers are "delete this at the next boot" here
 // (PR #3121 review, round 2). Running-id sweeps take NO cross-stream
-// reservation, so TWO can be in this window at once, and world-less junk put back by one
-// of them occupies the slot against the other, which may be holding the hydrate's live
-// set. That set would then go under .sweeping- for the next boot to delete, which is the
-// loss this function exists to prevent (PR #3121 review, round 1). Junk is left under
+// reservation, so TWO sweeps for one id can be in this window at once — only a running-id
+// one ever reaches this put-back, but the sweep it would block may be the stopped-id one,
+// whose reservation does not exclude a sweep that takes none — and world-less junk put back
+// by one of them occupies the slot against the other, which may be holding the hydrate's
+// live set. That set would then go under .sweeping- for the next boot to delete, which is
+// the loss this function exists to prevent (PR #3121 review, round 1). Junk is left under
 // .sweeping- instead: it is the garbage the boot reclaim expects, and what this sweep was
 // going to do with it anyway.
 //

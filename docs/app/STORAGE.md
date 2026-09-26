@@ -840,7 +840,13 @@ Do **not** delete the displaced tree speculatively: it may be the only copy of t
 world, and the next authoritative snapshot for this server would have GC'd it for
 free.
 
-#### When a running-id snapshot sweeps a displaced tree — and when it declines
+#### When a snapshot sweeps a displaced tree — and when it declines
+
+Both snapshot-success branches call `sweepDisplaced`, and what can make each of them
+decline differs. The identity pin below is the **running-id** branch's alone — the
+stopped-id branch holds the per-id reservation instead, so no hydrate can be racing it —
+while the id's slot claim further down is taken by **both**, and either branch declines
+when it finds that claim already held.
 
 A running-id periodic snapshot for server id S succeeds and calls `sweepDisplaced`
 even if S had a stop→failed-final→re-place→hydrate sequence in between: the
@@ -915,12 +921,13 @@ Two things have to hold for the tree to go back, and both are content, not names
   slot*: it must be a directory (checked without following a symlink, so a link to a
   populated directory is junk on both sides) holding at least one entry that is not
   Worker-private generation state. Running-id snapshots take no per-server reservation, so
-  *two* sweeps for one id can be in this window at once, and world-less junk put back by
-  one of them would occupy the slot against the other, which may be holding the hydrate's
-  live set. Junk is left under `.sweeping-` instead, which is what the sweep was going to
-  do with it anyway. A tree the Worker cannot *read* is **kept**, not dropped: a transient
-  `EACCES`/`EMFILE`/`EIO` must never become "delete this at the next boot", the same
-  direction an unreadable slot takes on the hydrate side.
+  *two* sweeps for one id can be in this window at once (only a running-id sweep ever puts
+  a tree back, but the sweep it would block may be the stopped-id one), and world-less
+  junk put back by one of them would occupy the slot against the other, which may be
+  holding the hydrate's live set. Junk is left under `.sweeping-` instead, which is what
+  the sweep was going to do with it anyway. A tree the Worker cannot *read* is **kept**,
+  not dropped: a transient `EACCES`/`EMFILE`/`EIO` must never become "delete this at the
+  next boot", the same direction an unreadable slot takes on the hydrate side.
 - **The slot must be empty.** Not "must hold nothing worth keeping": a directory rename
   cannot replace an existing directory here, so marker-only junk in the slot blocks the
   put-back whatever the sweep thinks of it, and emptying the slot first is not available to
@@ -929,18 +936,26 @@ Two things have to hold for the tree to go back, and both are content, not names
   park its live set in between, and the removal would take the live set). Only a hydrate,
   under its per-id reservation, clears the slot.
 
-**One sweep decides about the slot at a time.** Keeping an unclassifiable tree is only safe
-because no *other* sweep can be deciding about the same slot meanwhile. Running-id snapshots
-take no per-server reservation, so two sweeps for one id can reach it at once — and while
-both sit between their rename and their decision, whatever one of them puts back occupies
-the slot against the other, which may be holding the hydrate's live recovery copy. The
-Worker therefore claims the id's slot for that window, in memory, and a sweep that finds it
-claimed **declines**: it renames nothing and the tree stays where it is, to be swept by the
-next successful snapshot for the id. The claim covers only the few syscalls from finding the
-tree to putting it back or committing to remove it — never the world-sized traversal — and
-it refuses no command, so it is not the per-server reservation CONTROL_PLANE.md Section 4.1
-records as deliberately not taken. The invariant it buys, together with the two content
-rules above: **a tree that holds a working set is never deleted because some other tree's
+**One sweep decides about the slot at a time.** Keeping an unclassifiable tree is only
+safe because no *other* sweep can be deciding about the same slot meanwhile. Running-id
+snapshots take no per-server reservation, so two sweeps for one id can reach it at once —
+two running-id ones, or one from an older, already-dropped stream reaching it alongside
+the stopped-id sweep, whose reservation rejects hydrates and starts but not a sweep that
+takes no reservation at all — and while both sit between their rename and their decision,
+whatever one of them puts back occupies the slot against the other, which may be holding
+the hydrate's live recovery copy. The Worker therefore claims the id's slot for that
+window, in memory. **Both** branches take that claim, and whichever sweep finds it already
+held **declines**: it renames nothing and the tree stays where it is, to be swept by the
+next successful snapshot for the id. For the stopped-id branch that is the *only* way to
+decline — it passes no identity pin — and the one decline with no next tick behind it:
+that branch has just removed `<scratch>/<id>`, the advertisement that keeps the id
+eligible for any later per-id pass (Lifecycle, above), so a tree left in the slot there
+waits for a re-placement onto this Worker or for an operator (step 4 of the recovery
+procedure above). The claim covers only the few syscalls from finding the tree to putting
+it back or committing to remove it — never the world-sized traversal — and it refuses no
+command, so it is not the per-server reservation CONTROL_PLANE.md Section 4.1 records as
+deliberately not taken. The invariant it buys, together with the two content rules above:
+**a tree that holds a working set is never deleted because some other tree's
 classification came out junk or uncertain.**
 
 Both outcomes are logged, since they decide what the next boot deletes:
