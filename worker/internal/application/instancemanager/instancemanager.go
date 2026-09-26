@@ -2240,14 +2240,21 @@ func (m *Manager) removeScratch(serverID string) {
 	// recovery copy in the slot mid-sweep (issue #3118).
 	//
 	// It does NOT follow that this path removes whatever it finds. The id's slot claim is
-	// taken here exactly as it is on the running-id path (detachDisplacedTree), and it is
-	// this path's ONE way to decline: the reservation rejects hydrates and starts, not a
-	// running-id sweep from an older, already-dropped stream, which takes no reservation
-	// of its own and whose lanes are a different stream's — so such a sweep can be holding
-	// the claim when this one arrives. The tree is then left in the slot untouched, and
-	// here that leak has no next tick behind it: the removal above has just retired the
-	// advertisement that keeps the id eligible for any later per-id pass, so the tree waits
-	// for a re-placement onto this Worker or for an operator (STORAGE.md Section 4.6).
+	// taken here exactly as it is on the running-id path (detachDisplacedTree), and a claim
+	// another sweep already holds is this path's one DELIBERATE decline: the reservation
+	// rejects hydrates and starts, not a running-id sweep from an older, already-dropped
+	// stream, which takes no reservation of its own and whose lanes are a different
+	// stream's — so such a sweep can be holding the claim when this one arrives.
+	//
+	// It is not the only way the tree is left behind. Every step is best-effort, so a slot
+	// Lstat cannot read, a .sweeping- name MkdirTemp cannot create and a failed rename out
+	// of the slot leave it exactly where a held claim does (an ABSENT slot is not this case:
+	// there is simply no tree to sweep). What is specific to this path is where all of them
+	// land — the removal above has just retired the advertisement that keeps the id eligible
+	// for any later per-id pass, so a tree left in the slot waits for a re-placement onto
+	// this Worker or for an operator (STORAGE.md Section 4.6); no next tick reclaims it.
+	// Only past the rename does a failure leave the tree under .sweeping- instead, which the
+	// next boot's ReclaimInterruptedDisplacedSweeps takes.
 	m.sweepDisplaced(serverID, nil)
 }
 

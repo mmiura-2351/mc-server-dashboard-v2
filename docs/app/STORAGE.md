@@ -842,11 +842,12 @@ free.
 
 #### When a snapshot sweeps a displaced tree — and when it declines
 
-Both snapshot-success branches call `sweepDisplaced`, and what can make each of them
-decline differs. The identity pin below is the **running-id** branch's alone — the
-stopped-id branch holds the per-id reservation instead, so no hydrate can be racing it —
-while the id's slot claim further down is taken by **both**, and either branch declines
-when it finds that claim already held.
+Both snapshot-success branches call `sweepDisplaced`, and the checks that make them
+decline deliberately differ. The identity pin below is the **running-id** branch's alone —
+the stopped-id branch holds the per-id reservation instead, so no hydrate can be racing it
+— while the id's slot claim further down is taken by **both**, and either branch declines
+when it finds that claim already held. Those are the checks; a sweep is best-effort at
+every step besides, so a tree also survives a sweep that simply failed.
 
 A running-id periodic snapshot for server id S succeeds and calls `sweepDisplaced`
 even if S had a stop→failed-final→re-place→hydrate sequence in between: the
@@ -946,17 +947,22 @@ whatever one of them puts back occupies the slot against the other, which may be
 the hydrate's live recovery copy. The Worker therefore claims the id's slot for that
 window, in memory. **Both** branches take that claim, and whichever sweep finds it already
 held **declines**: it renames nothing and the tree stays where it is, to be swept by the
-next successful snapshot for the id. For the stopped-id branch that is the *only* way to
-decline — it passes no identity pin — and the one decline with no next tick behind it:
-that branch has just removed `<scratch>/<id>`, the advertisement that keeps the id
-eligible for any later per-id pass (Lifecycle, above), so a tree left in the slot there
-waits for a re-placement onto this Worker or for an operator (step 4 of the recovery
-procedure above). The claim covers only the few syscalls from finding the tree to putting
-it back or committing to remove it — never the world-sized traversal — and it refuses no
-command, so it is not the per-server reservation CONTROL_PLANE.md Section 4.1 records as
-deliberately not taken. The invariant it buys, together with the two content rules above:
-**a tree that holds a working set is never deleted because some other tree's
-classification came out junk or uncertain.**
+next successful snapshot for the id. For the stopped-id branch that is the only
+*deliberate* decline, since it passes no identity pin — but not the only way it leaves the
+tree behind: the sweep is best-effort at every step, so a slot it cannot read, a
+`.sweeping-` name it cannot create and a rename out of the slot that fails all leave the
+tree exactly where a held claim does (a slot that holds *nothing* is not this case — there
+is simply no tree to sweep). What is specific to that branch is where those outcomes land:
+it has just removed `<scratch>/<id>`, the advertisement that keeps the id eligible for any
+later per-id pass (Lifecycle, above), so a tree left in the slot there waits for a
+re-placement onto this Worker or for an operator (step 4 of the recovery procedure above)
+— no next tick reclaims it. Only past the rename does a failure leave the tree under
+`.sweeping-` instead, where the next boot's reclaim takes it. The claim covers only the
+few syscalls from finding the tree to putting it back or committing to remove it — never
+the world-sized traversal — and it refuses no command, so it is not the per-server
+reservation CONTROL_PLANE.md Section 4.1 records as deliberately not taken. The invariant
+it buys, together with the two content rules above: **a tree that holds a working set is
+never deleted because some other tree's classification came out junk or uncertain.**
 
 Both outcomes are logged, since they decide what the next boot deletes:
 
