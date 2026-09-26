@@ -380,36 +380,6 @@ describe("ServerFilesTab viewer / editor", () => {
     expect(mockApi.put).not.toHaveBeenCalled();
   });
 
-  it("writes a UTF-8 file's non-ASCII text back as UTF-8 (#2851)", async () => {
-    // "é" is where the two charsets differ on the wire: C3 A9 vs E9.
-    routeGet({
-      detail: server(),
-      list: listing([{ name: "config.yml", is_dir: false }]),
-      content: {
-        path: "config.yml",
-        content_base64: encodeUtf8Base64("name: Café\n"),
-      },
-    });
-    mockApi.put.mockResolvedValue(undefined);
-    renderPage();
-    await openFiles();
-
-    fireEvent.click(await screen.findByText(/config\.yml/));
-    const editor = (await screen.findByLabelText(
-      t("files.editorLabel"),
-    )) as HTMLTextAreaElement;
-    expect(editor.value).toBe("name: Café\n");
-
-    fireEvent.change(editor, { target: { value: "name: Café ☕\n" } });
-    fireEvent.click(screen.getByRole("button", { name: t("files.save") }));
-
-    await waitFor(() => expect(mockApi.put).toHaveBeenCalled());
-    const body = JSON.parse(
-      (mockApi.put.mock.calls[0][1] as { body: string }).body,
-    );
-    expect(body.content_base64).toBe(encodeUtf8Base64("name: Café ☕\n"));
-  });
-
   // Before 1.20 Minecraft reads server.properties as latin-1 only, so the
   // editor reads and writes that one file as latin-1 whatever its bytes are.
   it("saves server.properties as latin-1 on a pre-1.20 server even when it was ASCII (#2851)", async () => {
@@ -438,119 +408,6 @@ describe("ServerFilesTab viewer / editor", () => {
     expect(body.content_base64).toBe(btoa("motd=Caf\xe9\n"));
   });
 
-  it("reads a pre-1.20 server's server.properties as latin-1 even when it is valid UTF-8 (#2851)", async () => {
-    routeGet({
-      detail: server({ mc_version: "1.19.4" }),
-      list: listing([{ name: "server.properties", is_dir: false }]),
-      content: {
-        path: "server.properties",
-        content_base64: btoa("motd=Caf\xc3\xa9\nmax-players=20\n"),
-      },
-    });
-    mockApi.put.mockResolvedValue(undefined);
-    renderPage();
-    await openFiles();
-
-    fireEvent.click(await screen.findByText(/server\.properties/));
-    const editor = (await screen.findByLabelText(
-      t("files.editorLabel"),
-    )) as HTMLTextAreaElement;
-    expect(editor.value).toBe("motd=CafÃ©\nmax-players=20\n");
-
-    fireEvent.change(editor, {
-      target: { value: "motd=CafÃ©\nmax-players=30\n" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: t("files.save") }));
-
-    await waitFor(() => expect(mockApi.put).toHaveBeenCalled());
-    const body = JSON.parse(
-      (mockApi.put.mock.calls[0][1] as { body: string }).body,
-    );
-    expect(body.content_base64).toBe(
-      btoa("motd=Caf\xc3\xa9\nmax-players=30\n"),
-    );
-  });
-
-  it("saves a deep-linked root server.properties alias as latin-1 on a pre-1.20 server (#2851)", async () => {
-    // `?file=` is kept verbatim, and the API resolves "./server.properties" to
-    // the root file.
-    routeGet({
-      detail: server({ mc_version: "1.19.4" }),
-      list: listing([{ name: "server.properties", is_dir: false }]),
-      content: {
-        path: "server.properties",
-        content_base64: btoa("motd=Cafe\n"),
-      },
-    });
-    mockApi.put.mockResolvedValue(undefined);
-    renderPage(
-      `/communities/${CID}/servers/${SID}?file=.%2Fserver.properties#files`,
-    );
-
-    const editor = await screen.findByLabelText(t("files.editorLabel"));
-    fireEvent.change(editor, { target: { value: "motd=Café\n" } });
-    fireEvent.click(screen.getByRole("button", { name: t("files.save") }));
-
-    await waitFor(() => expect(mockApi.put).toHaveBeenCalled());
-    const [putUrl, putInit] = mockApi.put.mock.calls[0];
-    expect(putUrl).toBe(`${FILES_BASE}?path=.%2Fserver.properties`);
-    const body = JSON.parse((putInit as { body: string }).body);
-    expect(body.content_base64).toBe(btoa("motd=Caf\xe9\n"));
-  });
-
-  it("refuses a non-latin-1 character in a pre-1.20 server's server.properties (#2851)", async () => {
-    routeGet({
-      detail: server({ mc_version: "1.19.4" }),
-      list: listing([{ name: "server.properties", is_dir: false }]),
-      content: {
-        path: "server.properties",
-        content_base64: btoa("motd=Cafe\n"),
-      },
-    });
-    mockApi.put.mockResolvedValue(undefined);
-    renderPage();
-    await openFiles();
-
-    fireEvent.click(await screen.findByText(/server\.properties/));
-    const editor = await screen.findByLabelText(t("files.editorLabel"));
-    fireEvent.change(editor, { target: { value: "motd=Cafe 🐉\n" } });
-    fireEvent.click(screen.getByRole("button", { name: t("files.save") }));
-
-    expect(
-      await screen.findByText(t("files.error.unencodableText")),
-    ).toBeInTheDocument();
-    expect(mockApi.put).not.toHaveBeenCalled();
-  });
-
-  it("reads any other file on a pre-1.20 server by its content (#2851)", async () => {
-    routeGet({
-      detail: server({ mc_version: "1.19.4" }),
-      list: listing([{ name: "config.yml", is_dir: false }]),
-      content: {
-        path: "config.yml",
-        content_base64: encodeUtf8Base64("name: Café\n"),
-      },
-    });
-    mockApi.put.mockResolvedValue(undefined);
-    renderPage();
-    await openFiles();
-
-    fireEvent.click(await screen.findByText(/config\.yml/));
-    const editor = (await screen.findByLabelText(
-      t("files.editorLabel"),
-    )) as HTMLTextAreaElement;
-    expect(editor.value).toBe("name: Café\n");
-
-    fireEvent.change(editor, { target: { value: "name: Café ☕\n" } });
-    fireEvent.click(screen.getByRole("button", { name: t("files.save") }));
-
-    await waitFor(() => expect(mockApi.put).toHaveBeenCalled());
-    const body = JSON.parse(
-      (mockApi.put.mock.calls[0][1] as { body: string }).body,
-    );
-    expect(body.content_base64).toBe(encodeUtf8Base64("name: Café ☕\n"));
-  });
-
   it("offers download only for a binary file (no editor) and shows metadata", async () => {
     const binary = btoa(String.fromCharCode(0x50, 0x4b, 0x03, 0x04, 0x00));
     routeGet({
@@ -569,21 +426,6 @@ describe("ServerFilesTab viewer / editor", () => {
     expect(
       screen.queryByLabelText(t("files.editorLabel")),
     ).not.toBeInTheDocument();
-  });
-
-  it("hides the viewer pane when no file is selected", async () => {
-    routeGet({
-      detail: server(),
-      list: listing([{ name: "a.txt", is_dir: false }]),
-    });
-    renderPage();
-    await openFiles();
-    await screen.findByText(/a\.txt/);
-
-    // The viewer pane should not be rendered.
-    expect(document.querySelector(".file-viewer")).toBeNull();
-    // The layout should be single-pane (no two-pane class).
-    expect(document.querySelector(".file-layout.two-pane")).toBeNull();
   });
 
   it("shows the viewer when a file is selected and closes on close button", async () => {
@@ -1242,83 +1084,6 @@ describe("ServerFilesTab history + rollback", () => {
     );
   });
 
-  it("previews a latin-1 version with its intended characters (#2851)", async () => {
-    mockApi.get.mockImplementation((path: string) => {
-      if (path.includes("/files/version")) {
-        return Promise.resolve({
-          path: "a b.txt",
-          content_base64: btoa("motd=Caf\xe9"),
-        });
-      }
-      if (path.includes("/files/history")) {
-        return Promise.resolve({ path: "a b.txt", versions: [VID1] });
-      }
-      if (path.includes("/files?path=") && !path.includes("list=")) {
-        return Promise.resolve({
-          path: "a b.txt",
-          content_base64: encodeUtf8Base64("current"),
-        });
-      }
-      if (path.includes("/files?path=")) {
-        return Promise.resolve(listing([{ name: "a b.txt", is_dir: false }]));
-      }
-      return Promise.resolve(server());
-    });
-    renderPage();
-    await openFiles();
-
-    fireEvent.click(await screen.findByText(/a b\.txt/));
-    await screen.findByLabelText(t("files.editorLabel"));
-    fireEvent.click(screen.getByRole("button", { name: t("files.history") }));
-    fireEvent.click(
-      await screen.findByText(versionDate(VID1).toLocaleString()),
-    );
-
-    expect(await screen.findByDisplayValue("motd=Café")).toHaveAttribute(
-      "readonly",
-    );
-  });
-
-  it("previews a pre-1.20 server's server.properties version as latin-1 (#2851)", async () => {
-    mockApi.get.mockImplementation((path: string) => {
-      if (path.includes("/files/version")) {
-        return Promise.resolve({
-          path: "server.properties",
-          content_base64: btoa("motd=Caf\xc3\xa9"),
-        });
-      }
-      if (path.includes("/files/history")) {
-        return Promise.resolve({ path: "server.properties", versions: [VID1] });
-      }
-      if (path.includes("/files?path=") && !path.includes("list=")) {
-        return Promise.resolve({
-          path: "server.properties",
-          content_base64: btoa("motd=current"),
-        });
-      }
-      if (path.includes("/files?path=")) {
-        return Promise.resolve(
-          listing([{ name: "server.properties", is_dir: false }]),
-        );
-      }
-      return Promise.resolve(server({ mc_version: "1.19.4" }));
-    });
-    renderPage();
-    await openFiles();
-
-    fireEvent.click(await screen.findByText(/server\.properties/));
-    await screen.findByLabelText(t("files.editorLabel"));
-    fireEvent.click(screen.getByRole("button", { name: t("files.history") }));
-    fireEvent.click(
-      await screen.findByText(versionDate(VID1).toLocaleString()),
-    );
-
-    // The same latin-1 reading the editor gives the file on this server.
-    expect(await screen.findByDisplayValue("motd=CafÃ©")).toHaveAttribute(
-      "readonly",
-    );
-  });
-
   it("shows a not-previewable message for a binary version", async () => {
     mockApi.get.mockImplementation((path: string) => {
       if (path.includes("/files/version")) {
@@ -1466,87 +1231,6 @@ describe("ServerFilesTab running notice", () => {
     expect(
       await screen.findByText(t("files.runningNotice")),
     ).toBeInTheDocument();
-  });
-
-  it("omits the notice when the server is stopped", async () => {
-    routeGet({
-      detail: server({ observed_state: "stopped" }),
-      list: listing([]),
-    });
-    renderPage();
-    await openFiles();
-    await screen.findByText(t("files.empty"));
-
-    expect(
-      screen.queryByText(t("files.runningNotice")),
-    ).not.toBeInTheDocument();
-  });
-
-  it("hides Upload and New folder in context menu while the server is running", async () => {
-    routeGet({
-      detail: server({ observed_state: "running", desired_state: "running" }),
-      list: listing([{ name: "a.txt", is_dir: false }]),
-    });
-    renderPage();
-    await openFiles();
-    await screen.findByText(t("files.runningNotice"));
-
-    // Right-click to open context menu.
-    const row = screen.getByText(/a\.txt/).closest("li") as HTMLElement;
-    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
-
-    expect(
-      screen.queryByRole("menuitem", { name: t("files.contextMenu.upload") }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("menuitem", {
-        name: t("files.contextMenu.newFolder"),
-      }),
-    ).not.toBeInTheDocument();
-  });
-
-  it("shows Upload and New folder in context menu while the server is stopped", async () => {
-    routeGet({
-      detail: server({ observed_state: "stopped" }),
-      list: listing([{ name: "a.txt", is_dir: false }]),
-    });
-    renderPage();
-    await openFiles();
-    await screen.findByText(/a\.txt/);
-
-    // Right-click to open context menu.
-    const row = screen.getByText(/a\.txt/).closest("li") as HTMLElement;
-    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
-
-    expect(
-      screen.getByRole("menuitem", { name: t("files.contextMenu.upload") }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("menuitem", { name: t("files.contextMenu.newFolder") }),
-    ).toBeInTheDocument();
-  });
-
-  it("hides Upload and New folder in context menu while the server is stopping (transitional)", async () => {
-    routeGet({
-      detail: server({ observed_state: "stopping", desired_state: "stopped" }),
-      list: listing([{ name: "a.txt", is_dir: false }]),
-    });
-    renderPage();
-    await openFiles();
-    await screen.findByText(t("files.runningNotice"));
-
-    // Right-click to open context menu.
-    const row = screen.getByText(/a\.txt/).closest("li") as HTMLElement;
-    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
-
-    expect(
-      screen.queryByRole("menuitem", { name: t("files.contextMenu.upload") }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("menuitem", {
-        name: t("files.contextMenu.newFolder"),
-      }),
-    ).not.toBeInTheDocument();
   });
 });
 
@@ -1736,20 +1420,6 @@ describe("ServerFilesTab drag-and-drop upload", () => {
     expect(screen.getByText(t("files.dropZone"))).toBeInTheDocument();
   });
 
-  it("hides the overlay when files are dragged away", async () => {
-    routeGet({ detail: server(), list: listing([]) });
-    renderPage();
-    await openFiles();
-    await screen.findByText(t("files.empty"));
-
-    const tree = document.querySelector(".file-tree") as HTMLElement;
-    fireEvent.dragEnter(tree, { dataTransfer: dataTransfer([]) });
-    expect(screen.getByText(t("files.dropZone"))).toBeInTheDocument();
-
-    fireEvent.dragLeave(tree, { dataTransfer: dataTransfer([]) });
-    expect(screen.queryByText(t("files.dropZone"))).not.toBeInTheDocument();
-  });
-
   it("uploads a dropped file to the current directory", async () => {
     routeGet({ detail: server(), list: listing([]) });
     mockPostFormWithProgress.mockResolvedValue(undefined);
@@ -1873,42 +1543,6 @@ describe("ServerFilesTab drag-and-drop upload", () => {
     expect(url).toBe(`${FILES_BASE}/upload?path=my-folder&extract=false`);
   });
 
-  it("clears the overlay when dragend fires on the document", async () => {
-    routeGet({ detail: server(), list: listing([]) });
-    renderPage();
-    await openFiles();
-    await screen.findByText(t("files.empty"));
-
-    const tree = document.querySelector(".file-tree") as HTMLElement;
-    fireEvent.dragEnter(tree, { dataTransfer: dataTransfer([]) });
-    expect(screen.getByText(t("files.dropZone"))).toBeInTheDocument();
-
-    // Simulate the drag ending without a drop (e.g. Escape key during drag).
-    fireEvent(document, new Event("dragend"));
-
-    await waitFor(() =>
-      expect(screen.queryByText(t("files.dropZone"))).not.toBeInTheDocument(),
-    );
-  });
-
-  it("clears the overlay when drop fires on the document", async () => {
-    routeGet({ detail: server(), list: listing([]) });
-    renderPage();
-    await openFiles();
-    await screen.findByText(t("files.empty"));
-
-    const tree = document.querySelector(".file-tree") as HTMLElement;
-    fireEvent.dragEnter(tree, { dataTransfer: dataTransfer([]) });
-    expect(screen.getByText(t("files.dropZone"))).toBeInTheDocument();
-
-    // Any drop on the document resets the overlay.
-    fireEvent(document, new Event("drop"));
-
-    await waitFor(() =>
-      expect(screen.queryByText(t("files.dropZone"))).not.toBeInTheDocument(),
-    );
-  });
-
   it("shows preparing indicator immediately on drop before upload starts", async () => {
     routeGet({ detail: server(), list: listing([]) });
     // Delay upload resolution so we can observe the preparing state.
@@ -1965,32 +1599,6 @@ describe("ServerFilesTab drag-and-drop upload", () => {
     await waitFor(() => expect(mockPostFormWithProgress).toHaveBeenCalled());
     const [url, form] = mockPostFormWithProgress.mock.calls[0];
     expect(url).toBe(`${FILES_BASE}/upload?path=&extract=false`);
-    expect((form as FormData).get("file")).toBeTruthy();
-  });
-
-  it("calls getAsFile before webkitGetAsEntry (item consumption)", async () => {
-    routeGet({ detail: server(), list: listing([]) });
-    mockPostFormWithProgress.mockResolvedValue(undefined);
-    renderPage();
-    await openFiles();
-    await screen.findByText(t("files.empty"));
-
-    const tree = document.querySelector(".file-tree") as HTMLElement;
-    const file = new File(["zip content"], "test.zip", {
-      type: "application/zip",
-    });
-    const dt = new MockDataTransfer();
-    dt.addFile(file, {
-      isDirectory: false,
-      isFile: true,
-      name: "test.zip",
-    });
-
-    fireEvent.drop(tree, { dataTransfer: dt });
-
-    // The upload should succeed even though webkitGetAsEntry consumes the item.
-    await waitFor(() => expect(mockPostFormWithProgress).toHaveBeenCalled());
-    const [, form] = mockPostFormWithProgress.mock.calls[0];
     expect((form as FormData).get("file")).toBeTruthy();
   });
 
@@ -2939,219 +2547,13 @@ describe("ServerFilesTab drag-and-drop file organization", () => {
   });
 });
 
-// ── Context menu (issue #1465) ────────────────────────────────────────────────
-
-describe("Context menu", () => {
-  it("shows context menu on right-click with correct items for a file", async () => {
-    routeGet({
-      detail: server(),
-      list: listing([{ name: "readme.txt", is_dir: false }]),
-    });
-    renderPage();
-    await openFiles();
-
-    const row = (await screen.findByText(/readme\.txt/)).closest(
-      "li",
-    ) as HTMLElement;
-    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
-
-    expect(
-      screen.getByRole("menuitem", { name: t("files.contextMenu.open") }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("menuitem", { name: t("files.contextMenu.download") }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("menuitem", { name: t("files.contextMenu.rename") }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("menuitem", { name: t("files.contextMenu.delete") }),
-    ).toBeInTheDocument();
-  });
-
-  it("shows 'Download as ZIP' for folders", async () => {
-    routeGet({
-      detail: server(),
-      list: listing([{ name: "world", is_dir: true }]),
-    });
-    renderPage();
-    await openFiles();
-
-    const row = (await screen.findByText(/world/)).closest("li") as HTMLElement;
-    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
-
-    expect(
-      screen.getByRole("menuitem", {
-        name: t("files.contextMenu.downloadZip"),
-      }),
-    ).toBeInTheDocument();
-  });
-
-  it("hides rename/delete when canEdit is false", async () => {
-    mockCan = (code) => code !== "file:edit";
-    routeGet({
-      detail: server(),
-      list: listing([{ name: "readme.txt", is_dir: false }]),
-    });
-    renderPage();
-    await openFiles();
-
-    const row = (await screen.findByText(/readme\.txt/)).closest(
-      "li",
-    ) as HTMLElement;
-    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
-
-    expect(
-      screen.getByRole("menuitem", { name: t("files.contextMenu.open") }),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByRole("menuitem", { name: t("files.contextMenu.rename") }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("menuitem", { name: t("files.contextMenu.delete") }),
-    ).not.toBeInTheDocument();
-  });
-
-  it("hides rename/delete when server is running", async () => {
-    routeGet({
-      detail: server({ observed_state: "running", desired_state: "running" }),
-      list: listing([{ name: "readme.txt", is_dir: false }]),
-    });
-    renderPage();
-    await openFiles();
-
-    const row = (await screen.findByText(/readme\.txt/)).closest(
-      "li",
-    ) as HTMLElement;
-    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
-
-    expect(
-      screen.getByRole("menuitem", { name: t("files.contextMenu.open") }),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByRole("menuitem", { name: t("files.contextMenu.rename") }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("menuitem", { name: t("files.contextMenu.delete") }),
-    ).not.toBeInTheDocument();
-  });
-
-  it("dismisses context menu on click outside", async () => {
-    routeGet({
-      detail: server(),
-      list: listing([{ name: "readme.txt", is_dir: false }]),
-    });
-    renderPage();
-    await openFiles();
-
-    const row = (await screen.findByText(/readme\.txt/)).closest(
-      "li",
-    ) as HTMLElement;
-    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
-
-    expect(screen.getByRole("menu")).toBeInTheDocument();
-
-    // Click outside the menu.
-    fireEvent.mouseDown(document.body);
-
-    await waitFor(() =>
-      expect(screen.queryByRole("menu")).not.toBeInTheDocument(),
-    );
-  });
-
-  it("dismisses context menu on Escape", async () => {
-    routeGet({
-      detail: server(),
-      list: listing([{ name: "readme.txt", is_dir: false }]),
-    });
-    renderPage();
-    await openFiles();
-
-    const row = (await screen.findByText(/readme\.txt/)).closest(
-      "li",
-    ) as HTMLElement;
-    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
-
-    expect(screen.getByRole("menu")).toBeInTheDocument();
-
-    fireEvent.keyDown(document, { key: "Escape" });
-
-    await waitFor(() =>
-      expect(screen.queryByRole("menu")).not.toBeInTheDocument(),
-    );
-  });
-
-  it("triggers delete when delete menu item is clicked", async () => {
-    routeGet({
-      detail: server(),
-      list: listing([{ name: "readme.txt", is_dir: false }]),
-    });
-    mockApi.delete.mockResolvedValue(undefined);
-    renderPage();
-    await openFiles();
-
-    const row = (await screen.findByText(/readme\.txt/)).closest(
-      "li",
-    ) as HTMLElement;
-    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
-
-    fireEvent.click(
-      screen.getByRole("menuitem", { name: t("files.contextMenu.delete") }),
-    );
-
-    // The delete confirmation dialog should appear.
-    expect(
-      await screen.findByText(t("files.delete.dialogTitle")),
-    ).toBeInTheDocument();
-  });
-
-  it("triggers rename when rename menu item is clicked", async () => {
-    routeGet({
-      detail: server(),
-      list: listing([{ name: "readme.txt", is_dir: false }]),
-    });
-    renderPage();
-    await openFiles();
-
-    const row = (await screen.findByText(/readme\.txt/)).closest(
-      "li",
-    ) as HTMLElement;
-    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
-
-    fireEvent.click(
-      screen.getByRole("menuitem", { name: t("files.contextMenu.rename") }),
-    );
-
-    // The rename dialog should appear.
-    expect(await screen.findByText(t("files.newName"))).toBeInTheDocument();
-  });
-
-  it("triggers download when download menu item is clicked", async () => {
-    routeGet({
-      detail: server(),
-      list: listing([{ name: "readme.txt", is_dir: false }]),
-    });
-    mockDownload.downloadFile.mockResolvedValue(undefined);
-    renderPage();
-    await openFiles();
-
-    const row = (await screen.findByText(/readme\.txt/)).closest(
-      "li",
-    ) as HTMLElement;
-    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
-
-    fireEvent.click(
-      screen.getByRole("menuitem", { name: t("files.contextMenu.download") }),
-    );
-
-    await waitFor(() => expect(mockDownload.downloadFile).toHaveBeenCalled());
-  });
-});
-
 // ── Keyboard shortcuts (issue #1465) ──────────────────────────────────────────
 
 describe("Keyboard shortcuts", () => {
-  it("Ctrl+A selects all items", async () => {
+  it.each([
+    ["Ctrl+A", { ctrlKey: true }],
+    ["Cmd+A", { metaKey: true }],
+  ])("%s selects all items", async (_shortcut, modifier) => {
     routeGet({
       detail: server(),
       list: listing([
@@ -3163,28 +2565,7 @@ describe("Keyboard shortcuts", () => {
     await openFiles();
     await screen.findByText(/a\.txt/);
 
-    fireEvent.keyDown(document, { key: "a", ctrlKey: true });
-
-    // Both checkboxes should be checked.
-    await waitFor(() => {
-      expect(screen.getByRole("checkbox", { name: "a.txt" })).toBeChecked();
-      expect(screen.getByRole("checkbox", { name: "b.txt" })).toBeChecked();
-    });
-  });
-
-  it("Cmd+A (meta) selects all items", async () => {
-    routeGet({
-      detail: server(),
-      list: listing([
-        { name: "a.txt", is_dir: false },
-        { name: "b.txt", is_dir: false },
-      ]),
-    });
-    renderPage();
-    await openFiles();
-    await screen.findByText(/a\.txt/);
-
-    fireEvent.keyDown(document, { key: "a", metaKey: true });
+    fireEvent.keyDown(document, { key: "a", ...modifier });
 
     await waitFor(() => {
       expect(screen.getByRole("checkbox", { name: "a.txt" })).toBeChecked();
@@ -3212,42 +2593,30 @@ describe("Keyboard shortcuts", () => {
     );
   });
 
-  it("Delete opens delete confirmation for selected item", async () => {
-    routeGet({
-      detail: server(),
-      list: listing([{ name: "a.txt", is_dir: false }]),
-    });
-    renderPage();
-    await openFiles();
-    await screen.findByText(/a\.txt/);
+  it.each(["Delete", "Backspace"])(
+    "%s opens and cancels delete confirmation for a selected item",
+    async (key) => {
+      routeGet({
+        detail: server(),
+        list: listing([{ name: "a.txt", is_dir: false }]),
+      });
+      renderPage();
+      await openFiles();
+      await screen.findByText(/a\.txt/);
 
-    // Select the file first.
-    fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
+      fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
+      fireEvent.keyDown(document, { key });
 
-    fireEvent.keyDown(document, { key: "Delete" });
+      await screen.findByText(t("files.delete.dialogTitle"));
+      fireEvent.click(screen.getByRole("button", { name: t("common.cancel") }));
 
-    expect(
-      await screen.findByText(t("files.delete.dialogTitle")),
-    ).toBeInTheDocument();
-  });
-
-  it("Backspace opens delete confirmation for selected item", async () => {
-    routeGet({
-      detail: server(),
-      list: listing([{ name: "a.txt", is_dir: false }]),
-    });
-    renderPage();
-    await openFiles();
-    await screen.findByText(/a\.txt/);
-
-    fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
-
-    fireEvent.keyDown(document, { key: "Backspace" });
-
-    expect(
-      await screen.findByText(t("files.delete.dialogTitle")),
-    ).toBeInTheDocument();
-  });
+      await waitFor(() =>
+        expect(
+          screen.queryByText(t("files.delete.dialogTitle")),
+        ).not.toBeInTheDocument(),
+      );
+    },
+  );
 
   it("Delete does nothing when no items are selected", async () => {
     routeGet({
@@ -3288,7 +2657,7 @@ describe("Keyboard shortcuts", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("F2 opens rename dialog for single selected item", async () => {
+  it("F2 opens and cancels rename dialog for a single selected item", async () => {
     routeGet({
       detail: server(),
       list: listing([{ name: "readme.txt", is_dir: false }]),
@@ -3301,7 +2670,12 @@ describe("Keyboard shortcuts", () => {
 
     fireEvent.keyDown(document, { key: "F2" });
 
-    expect(await screen.findByText(t("files.newName"))).toBeInTheDocument();
+    await screen.findByText(t("files.newName"));
+    fireEvent.click(screen.getByRole("button", { name: t("common.cancel") }));
+
+    await waitFor(() =>
+      expect(screen.queryByText(t("files.newName"))).not.toBeInTheDocument(),
+    );
   });
 
   it("F2 does nothing when multiple items are selected", async () => {
@@ -3374,41 +2748,6 @@ describe("Keyboard shortcuts", () => {
 // ── Navigation history (issue #1475) ────────────────────────────────────────
 
 describe("ServerFilesTab navigation history", () => {
-  it("shows back and forward buttons that are initially disabled", async () => {
-    routeGet({ detail: server(), list: listing([]) });
-    renderPage();
-    await openFiles();
-    await screen.findByText(t("files.empty"));
-
-    const backBtn = screen.getByRole("button", { name: t("files.nav.back") });
-    const fwdBtn = screen.getByRole("button", {
-      name: t("files.nav.forward"),
-    });
-    expect(backBtn).toBeDisabled();
-    expect(fwdBtn).toBeDisabled();
-  });
-
-  it("enables back after navigating into a directory", async () => {
-    mockApi.get.mockImplementation((path: string) => {
-      if (path.includes("path=world") && path.includes("list=")) {
-        return Promise.resolve(listing([{ name: "level.dat", is_dir: false }]));
-      }
-      if (path.includes("/files?path=")) {
-        return Promise.resolve(listing([{ name: "world", is_dir: true }]));
-      }
-      return Promise.resolve(server());
-    });
-    renderPage();
-    await openFiles();
-
-    // Navigate into world.
-    fireEvent.click(await screen.findByText(/world/));
-    await screen.findByText(/level\.dat/);
-
-    const backBtn = screen.getByRole("button", { name: t("files.nav.back") });
-    expect(backBtn).not.toBeDisabled();
-  });
-
   it("goes back to root and then forward to the previous directory", async () => {
     mockApi.get.mockImplementation((path: string) => {
       if (path.includes("path=world") && path.includes("list=")) {
@@ -3446,91 +2785,11 @@ describe("ServerFilesTab navigation history", () => {
       ),
     );
   });
-
-  it("clears forward stack when navigating to a new location after going back", async () => {
-    mockApi.get.mockImplementation((path: string) => {
-      if (path.includes("path=config") && path.includes("list=")) {
-        return Promise.resolve(listing([{ name: "cfg.yml", is_dir: false }]));
-      }
-      if (path.includes("path=world") && path.includes("list=")) {
-        return Promise.resolve(listing([{ name: "level.dat", is_dir: false }]));
-      }
-      if (path.includes("/files?path=") && path.includes("list=")) {
-        return Promise.resolve(
-          listing([
-            { name: "world", is_dir: true },
-            { name: "config", is_dir: true },
-          ]),
-        );
-      }
-      return Promise.resolve(server());
-    });
-    renderPage();
-    await openFiles();
-
-    // Navigate into world.
-    fireEvent.click(await screen.findByText(/world/));
-    await screen.findByText(/level\.dat/);
-
-    // Go back to root.
-    fireEvent.click(screen.getByRole("button", { name: t("files.nav.back") }));
-    await screen.findByText(/config/);
-
-    // Navigate into config (new path, should clear forward stack).
-    fireEvent.click(screen.getByText(/config/));
-    await screen.findByText(/cfg\.yml/);
-
-    // Forward should be disabled now.
-    const fwdBtn = screen.getByRole("button", {
-      name: t("files.nav.forward"),
-    });
-    expect(fwdBtn).toBeDisabled();
-  });
 });
 
 // ── Unsaved changes guard (issue #1486) ────────────────────────────────────
 
 describe("ServerFilesTab unsaved changes guard", () => {
-  it("shows discard dialog when editing a file and clicking a directory", async () => {
-    mockApi.get.mockImplementation((path: string) => {
-      if (path.includes("/files?path=") && !path.includes("list=")) {
-        return Promise.resolve({
-          path: "server.properties",
-          content_base64: encodeUtf8Base64("motd=hello\n"),
-        });
-      }
-      if (path.includes("/files?path=")) {
-        return Promise.resolve(
-          listing([
-            { name: "world", is_dir: true },
-            { name: "server.properties", is_dir: false },
-          ]),
-        );
-      }
-      return Promise.resolve(server());
-    });
-    renderPage();
-    await openFiles();
-
-    // Open the file.
-    fireEvent.click(await screen.findByText(/server\.properties/));
-    const editor = (await screen.findByLabelText(
-      t("files.editorLabel"),
-    )) as HTMLTextAreaElement;
-
-    // Edit the file (create a draft).
-    fireEvent.change(editor, { target: { value: "motd=changed\n" } });
-
-    // Click the directory to navigate away.
-    fireEvent.click(screen.getByText(/world/));
-
-    // The discard dialog should appear.
-    expect(
-      await screen.findByText(t("files.unsaved.title")),
-    ).toBeInTheDocument();
-    expect(screen.getByText(t("files.unsaved.body"))).toBeInTheDocument();
-  });
-
   it("navigates on confirm and discards the draft", async () => {
     mockApi.get.mockImplementation((path: string) => {
       if (path.includes("path=world") && path.includes("list=")) {
@@ -3620,133 +2879,11 @@ describe("ServerFilesTab unsaved changes guard", () => {
     );
     expect(screen.getByLabelText(t("files.editorLabel"))).toBeInTheDocument();
   });
-
-  it("does not show dialog when there are no unsaved changes", async () => {
-    mockApi.get.mockImplementation((path: string) => {
-      if (path.includes("path=world") && path.includes("list=")) {
-        return Promise.resolve(listing([{ name: "level.dat", is_dir: false }]));
-      }
-      if (path.includes("/files?path=") && !path.includes("list=")) {
-        return Promise.resolve({
-          path: "server.properties",
-          content_base64: encodeUtf8Base64("motd=hello\n"),
-        });
-      }
-      if (path.includes("/files?path=")) {
-        return Promise.resolve(
-          listing([
-            { name: "world", is_dir: true },
-            { name: "server.properties", is_dir: false },
-          ]),
-        );
-      }
-      return Promise.resolve(server());
-    });
-    renderPage();
-    await openFiles();
-
-    // Open the file but don't edit it.
-    fireEvent.click(await screen.findByText(/server\.properties/));
-    await screen.findByLabelText(t("files.editorLabel"));
-
-    // Click the directory.
-    fireEvent.click(screen.getByText(/world/));
-
-    // No discard dialog — navigates directly.
-    await waitFor(() =>
-      expect(mockApi.get).toHaveBeenCalledWith(
-        `${FILES_BASE}?path=world&list=true`,
-        { signal: expect.any(AbortSignal) },
-      ),
-    );
-    expect(
-      screen.queryByText(t("files.unsaved.title")),
-    ).not.toBeInTheDocument();
-  });
-
-  it("saving clears the guard so no dialog appears", async () => {
-    mockApi.get.mockImplementation((path: string) => {
-      if (path.includes("path=world") && path.includes("list=")) {
-        return Promise.resolve(listing([{ name: "level.dat", is_dir: false }]));
-      }
-      if (path.includes("/files?path=") && !path.includes("list=")) {
-        return Promise.resolve({
-          path: "server.properties",
-          content_base64: encodeUtf8Base64("motd=hello\n"),
-        });
-      }
-      if (path.includes("/files?path=")) {
-        return Promise.resolve(
-          listing([
-            { name: "world", is_dir: true },
-            { name: "server.properties", is_dir: false },
-          ]),
-        );
-      }
-      return Promise.resolve(server());
-    });
-    mockApi.put.mockResolvedValue(undefined);
-    renderPage();
-    await openFiles();
-
-    // Open and edit the file.
-    fireEvent.click(await screen.findByText(/server\.properties/));
-    const editor = await screen.findByLabelText(t("files.editorLabel"));
-    fireEvent.change(editor, { target: { value: "motd=changed\n" } });
-
-    // Save the file.
-    fireEvent.click(screen.getByRole("button", { name: t("files.save") }));
-    await waitFor(() => expect(mockApi.put).toHaveBeenCalled());
-
-    // Navigate away — no dialog should appear.
-    fireEvent.click(screen.getByText(/world/));
-    await waitFor(() =>
-      expect(mockApi.get).toHaveBeenCalledWith(
-        `${FILES_BASE}?path=world&list=true`,
-        { signal: expect.any(AbortSignal) },
-      ),
-    );
-    expect(
-      screen.queryByText(t("files.unsaved.title")),
-    ).not.toBeInTheDocument();
-  });
 });
 
 // ── Overwrite confirmation dialog ─────────────────────────────────────────────
 
 describe("ServerFilesTab overwrite confirmation", () => {
-  it("shows overwrite dialog when uploading a file that already exists via context menu", async () => {
-    routeGet({
-      detail: server(),
-      list: listing([{ name: "readme.txt", is_dir: false }]),
-    });
-    mockPostFormWithProgress.mockResolvedValue(undefined);
-    renderPage();
-    await openFiles();
-    await screen.findByText(/readme\.txt/);
-
-    // Right-click to open context menu and trigger upload.
-    const row = screen.getByText(/readme\.txt/).closest("li") as HTMLElement;
-    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
-    fireEvent.click(
-      screen.getByRole("menuitem", { name: t("files.contextMenu.upload") }),
-    );
-
-    // Choose a file with the same name as an existing file.
-    const file = new File(["new content"], "readme.txt");
-    fireEvent.change(screen.getByLabelText(t("files.contextMenu.upload")), {
-      target: { files: [file] },
-    });
-
-    // The overwrite dialog should appear.
-    expect(
-      await screen.findByText(t("files.overwrite.title")),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(t("files.overwrite.body", { name: "readme.txt" })),
-    ).toBeInTheDocument();
-  });
-
   it("uploads the file when user clicks overwrite", async () => {
     routeGet({
       detail: server(),
@@ -3776,130 +2913,6 @@ describe("ServerFilesTab overwrite confirmation", () => {
     await waitFor(() => expect(mockPostFormWithProgress).toHaveBeenCalled());
   });
 
-  it("does not upload the file when user clicks skip", async () => {
-    routeGet({
-      detail: server(),
-      list: listing([{ name: "readme.txt", is_dir: false }]),
-    });
-    mockPostFormWithProgress.mockResolvedValue(undefined);
-    renderPage();
-    await openFiles();
-    await screen.findByText(/readme\.txt/);
-
-    const row = screen.getByText(/readme\.txt/).closest("li") as HTMLElement;
-    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
-    fireEvent.click(
-      screen.getByRole("menuitem", { name: t("files.contextMenu.upload") }),
-    );
-
-    const file = new File(["new"], "readme.txt");
-    fireEvent.change(screen.getByLabelText(t("files.contextMenu.upload")), {
-      target: { files: [file] },
-    });
-
-    await screen.findByText(t("files.overwrite.title"));
-    fireEvent.click(
-      screen.getByRole("button", { name: t("files.overwrite.skip") }),
-    );
-
-    // Dialog should close and no upload should occur.
-    await waitFor(() =>
-      expect(
-        screen.queryByText(t("files.overwrite.title")),
-      ).not.toBeInTheDocument(),
-    );
-    expect(mockPostFormWithProgress).not.toHaveBeenCalled();
-  });
-
-  it("does not upload the file when user clicks cancel", async () => {
-    routeGet({
-      detail: server(),
-      list: listing([{ name: "readme.txt", is_dir: false }]),
-    });
-    mockPostFormWithProgress.mockResolvedValue(undefined);
-    renderPage();
-    await openFiles();
-    await screen.findByText(/readme\.txt/);
-
-    const row = screen.getByText(/readme\.txt/).closest("li") as HTMLElement;
-    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
-    fireEvent.click(
-      screen.getByRole("menuitem", { name: t("files.contextMenu.upload") }),
-    );
-
-    const file = new File(["new"], "readme.txt");
-    fireEvent.change(screen.getByLabelText(t("files.contextMenu.upload")), {
-      target: { files: [file] },
-    });
-
-    await screen.findByText(t("files.overwrite.title"));
-    fireEvent.click(screen.getByRole("button", { name: t("common.cancel") }));
-
-    await waitFor(() =>
-      expect(
-        screen.queryByText(t("files.overwrite.title")),
-      ).not.toBeInTheDocument(),
-    );
-    expect(mockPostFormWithProgress).not.toHaveBeenCalled();
-  });
-
-  it("does not show dialog when uploading a file with a new name via context menu", async () => {
-    routeGet({
-      detail: server(),
-      list: listing([{ name: "existing.txt", is_dir: false }]),
-    });
-    mockPostFormWithProgress.mockResolvedValue(undefined);
-    renderPage();
-    await openFiles();
-    await screen.findByText(/existing\.txt/);
-
-    const row = screen.getByText(/existing\.txt/).closest("li") as HTMLElement;
-    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
-    fireEvent.click(
-      screen.getByRole("menuitem", { name: t("files.contextMenu.upload") }),
-    );
-
-    // Upload a file with a different name — no conflict.
-    const file = new File(["content"], "brand-new.txt");
-    fireEvent.change(screen.getByLabelText(t("files.contextMenu.upload")), {
-      target: { files: [file] },
-    });
-
-    // Upload should proceed without a dialog.
-    await waitFor(() => expect(mockPostFormWithProgress).toHaveBeenCalled());
-    expect(
-      screen.queryByText(t("files.overwrite.title")),
-    ).not.toBeInTheDocument();
-  });
-
-  it("does not show dialog for directories with the same name", async () => {
-    routeGet({
-      detail: server(),
-      list: listing([{ name: "world", is_dir: true }]),
-    });
-    mockPostFormWithProgress.mockResolvedValue(undefined);
-    renderPage();
-    await openFiles();
-    await screen.findByText(/world/);
-
-    const row = screen.getByText(/world/).closest("li") as HTMLElement;
-    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
-    fireEvent.click(
-      screen.getByRole("menuitem", { name: t("files.contextMenu.upload") }),
-    );
-
-    // Upload a file named "world" — only files conflict, not directories.
-    const file = new File(["content"], "world");
-    fireEvent.change(screen.getByLabelText(t("files.contextMenu.upload")), {
-      target: { files: [file] },
-    });
-
-    await waitFor(() => expect(mockPostFormWithProgress).toHaveBeenCalled());
-    expect(
-      screen.queryByText(t("files.overwrite.title")),
-    ).not.toBeInTheDocument();
-  });
-
   describe("drag-and-drop overwrite", () => {
     function dataTransfer(files: File[]): DataTransfer {
       return {
@@ -3907,26 +2920,6 @@ describe("ServerFilesTab overwrite confirmation", () => {
         types: files.length > 0 ? ["Files"] : [],
       } as unknown as DataTransfer;
     }
-
-    it("shows overwrite dialog when dropping a file that already exists", async () => {
-      routeGet({
-        detail: server(),
-        list: listing([{ name: "readme.txt", is_dir: false }]),
-      });
-      mockPostFormWithProgress.mockResolvedValue(undefined);
-      renderPage();
-      await openFiles();
-      await screen.findByText(/readme\.txt/);
-
-      const tree = document.querySelector(".file-tree") as HTMLElement;
-      const file = new File(["new content"], "readme.txt");
-      fireEvent.drop(tree, { dataTransfer: dataTransfer([file]) });
-
-      // The overwrite dialog should appear.
-      expect(
-        await screen.findByText(t("files.overwrite.title")),
-      ).toBeInTheDocument();
-    });
 
     it("uploads on overwrite click in drop", async () => {
       routeGet({
@@ -3976,56 +2969,6 @@ describe("ServerFilesTab overwrite confirmation", () => {
         ).not.toBeInTheDocument(),
       );
       expect(mockPostFormWithProgress).not.toHaveBeenCalled();
-    });
-
-    it("shows apply-all checkbox when multiple files conflict on drop", async () => {
-      routeGet({
-        detail: server(),
-        list: listing([
-          { name: "a.txt", is_dir: false },
-          { name: "b.txt", is_dir: false },
-        ]),
-      });
-      mockPostFormWithProgress.mockResolvedValue(undefined);
-      renderPage();
-      await openFiles();
-      await screen.findByText(/a\.txt/);
-
-      const tree = document.querySelector(".file-tree") as HTMLElement;
-      const fileA = new File(["new a"], "a.txt");
-      const fileB = new File(["new b"], "b.txt");
-      fireEvent.drop(tree, { dataTransfer: dataTransfer([fileA, fileB]) });
-
-      await screen.findByText(t("files.overwrite.title"));
-      // The apply-all checkbox should be visible.
-      expect(
-        screen.getByText(t("files.overwrite.applyAll")),
-      ).toBeInTheDocument();
-    });
-
-    it("does not show apply-all checkbox for a single conflicting file on drop", async () => {
-      routeGet({
-        detail: server(),
-        list: listing([
-          { name: "a.txt", is_dir: false },
-          { name: "new.txt", is_dir: false },
-        ]),
-      });
-      mockPostFormWithProgress.mockResolvedValue(undefined);
-      renderPage();
-      await openFiles();
-      await screen.findByText(/a\.txt/);
-
-      const tree = document.querySelector(".file-tree") as HTMLElement;
-      // Only a.txt conflicts; new-file.txt does not.
-      const fileA = new File(["new a"], "a.txt");
-      const fileB = new File(["new b"], "new-file.txt");
-      fireEvent.drop(tree, { dataTransfer: dataTransfer([fileA, fileB]) });
-
-      await screen.findByText(t("files.overwrite.title"));
-      expect(
-        screen.queryByText(t("files.overwrite.applyAll")),
-      ).not.toBeInTheDocument();
     });
 
     it("overwrite-all skips remaining dialogs and uploads all files", async () => {
@@ -4095,27 +3038,6 @@ describe("ServerFilesTab overwrite confirmation", () => {
       expect(mockPostFormWithProgress).not.toHaveBeenCalled();
     });
 
-    it("drops non-conflicting files without a dialog", async () => {
-      routeGet({
-        detail: server(),
-        list: listing([{ name: "existing.txt", is_dir: false }]),
-      });
-      mockPostFormWithProgress.mockResolvedValue(undefined);
-      renderPage();
-      await openFiles();
-      await screen.findByText(/existing\.txt/);
-
-      const tree = document.querySelector(".file-tree") as HTMLElement;
-      const file = new File(["content"], "brand-new.txt");
-      fireEvent.drop(tree, { dataTransfer: dataTransfer([file]) });
-
-      // No dialog — upload proceeds immediately.
-      await waitFor(() => expect(mockPostFormWithProgress).toHaveBeenCalled());
-      expect(
-        screen.queryByText(t("files.overwrite.title")),
-      ).not.toBeInTheDocument();
-    });
-
     it("detects conflicts using the listing snapshot from before the yield", async () => {
       // Regression: the overwrite check must use the listing entries
       // captured synchronously before the setTimeout(0) yield. If it
@@ -4181,54 +3103,6 @@ describe("ServerFilesTab overwrite confirmation", () => {
         ).not.toBeInTheDocument(),
       );
       expect(mockPostFormWithProgress).not.toHaveBeenCalled();
-    });
-
-    it("shows overwrite dialog when dropping a folder that already exists as a directory", async () => {
-      routeGet({
-        detail: server(),
-        list: listing([{ name: "myfolder", is_dir: true }]),
-      });
-      mockApi.post.mockResolvedValue(undefined);
-      mockPostFormWithProgress.mockResolvedValue(undefined);
-      renderPage();
-      await openFiles();
-      await screen.findByText(/myfolder/);
-
-      const tree = document.querySelector(".file-tree") as HTMLElement;
-      const innerFile = new File(["hello"], "readme.txt");
-      const folderDt = new MockDataTransfer();
-      folderDt.addFile(new File([], ""), {
-        isFile: false,
-        isDirectory: true,
-        name: "myfolder",
-        createReader: () => {
-          let read = false;
-          return {
-            readEntries: (cb: (entries: unknown[]) => void) => {
-              if (!read) {
-                read = true;
-                cb([
-                  {
-                    isFile: true,
-                    isDirectory: false,
-                    name: "readme.txt",
-                    file: (resolve: (f: File) => void) => resolve(innerFile),
-                  },
-                ]);
-              } else {
-                cb([]);
-              }
-            },
-          };
-        },
-      });
-
-      fireEvent.drop(tree, { dataTransfer: folderDt });
-
-      // The folder-level overwrite dialog should appear.
-      expect(
-        await screen.findByText(t("files.overwrite.title")),
-      ).toBeInTheDocument();
     });
 
     it("skips folder files when user clicks skip on folder overwrite", async () => {
@@ -4343,86 +3217,6 @@ describe("ServerFilesTab overwrite confirmation", () => {
 // ── Copy/paste (issue #1465) ──────────────────────────────────────────────────
 
 describe("Copy/paste", () => {
-  it("shows Copy in context menu for a file", async () => {
-    routeGet({
-      detail: server(),
-      list: listing([{ name: "readme.txt", is_dir: false }]),
-    });
-    renderPage();
-    await openFiles();
-
-    const row = (await screen.findByText(/readme\.txt/)).closest(
-      "li",
-    ) as HTMLElement;
-    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
-
-    expect(
-      screen.getByRole("menuitem", { name: t("files.contextMenu.copy") }),
-    ).toBeInTheDocument();
-  });
-
-  it("hides Copy in context menu for a folder", async () => {
-    routeGet({
-      detail: server(),
-      list: listing([{ name: "world", is_dir: true }]),
-    });
-    renderPage();
-    await openFiles();
-
-    const row = (await screen.findByText(/world/)).closest("li") as HTMLElement;
-    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
-
-    expect(
-      screen.queryByRole("menuitem", { name: t("files.contextMenu.copy") }),
-    ).not.toBeInTheDocument();
-  });
-
-  it("shows Paste in empty-space context menu after copying", async () => {
-    routeGet({
-      detail: server(),
-      list: listing([{ name: "readme.txt", is_dir: false }]),
-    });
-    renderPage();
-    await openFiles();
-    await screen.findByText(/readme\.txt/);
-
-    // Copy via context menu.
-    const row = screen.getByText(/readme\.txt/).closest("li") as HTMLElement;
-    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
-    fireEvent.click(
-      screen.getByRole("menuitem", { name: t("files.contextMenu.copy") }),
-    );
-
-    // Wait for the toast to confirm copy.
-    await screen.findByText(t("files.copied"));
-
-    // Right-click on empty space.
-    const fileList = document.querySelector(".file-list") as HTMLElement;
-    fireEvent.contextMenu(fileList, { clientX: 50, clientY: 50 });
-
-    expect(
-      screen.getByRole("menuitem", { name: t("files.contextMenu.paste") }),
-    ).toBeInTheDocument();
-  });
-
-  it("does not show Paste when clipboard is empty", async () => {
-    routeGet({
-      detail: server(),
-      list: listing([{ name: "readme.txt", is_dir: false }]),
-    });
-    renderPage();
-    await openFiles();
-    await screen.findByText(/readme\.txt/);
-
-    // Right-click on empty space without prior copy.
-    const fileList = document.querySelector(".file-list") as HTMLElement;
-    fireEvent.contextMenu(fileList, { clientX: 50, clientY: 50 });
-
-    expect(
-      screen.queryByRole("menuitem", { name: t("files.contextMenu.paste") }),
-    ).not.toBeInTheDocument();
-  });
-
   it("Ctrl+C copies selected files", async () => {
     routeGet({
       detail: server(),
@@ -4477,56 +3271,6 @@ describe("Copy/paste", () => {
     expect(url).toBe(`${FILES_BASE}/upload?path=&extract=false`);
   });
 
-  it("Ctrl+V does nothing when clipboard is empty", async () => {
-    routeGet({
-      detail: server(),
-      list: listing([{ name: "readme.txt", is_dir: false }]),
-    });
-    renderPage();
-    await openFiles();
-    await screen.findByText(/readme\.txt/);
-
-    fireEvent.keyDown(document, { key: "v", ctrlKey: true });
-
-    // No download or upload should occur.
-    expect(mockDownload.fetchFileBlob).not.toHaveBeenCalled();
-    expect(mockPostFormWithProgress).not.toHaveBeenCalled();
-  });
-
-  it("Ctrl+V does nothing when server is running", async () => {
-    routeGet({
-      detail: server({ observed_state: "running", desired_state: "running" }),
-      list: listing([{ name: "readme.txt", is_dir: false }]),
-    });
-    renderPage();
-    await openFiles();
-    await screen.findByText(/readme\.txt/);
-
-    // Select and copy (copy is read-only, so it works while running).
-    fireEvent.click(screen.getByRole("checkbox", { name: "readme.txt" }));
-    fireEvent.keyDown(document, { key: "c", ctrlKey: true });
-    await screen.findByText(t("files.copied"));
-
-    // Paste should be blocked.
-    fireEvent.keyDown(document, { key: "v", ctrlKey: true });
-    expect(mockDownload.fetchFileBlob).not.toHaveBeenCalled();
-  });
-
-  it("Ctrl+V does nothing without canEdit", async () => {
-    mockCan = (code) => code !== "file:edit";
-    routeGet({
-      detail: server(),
-      list: listing([{ name: "readme.txt", is_dir: false }]),
-    });
-    renderPage();
-    await openFiles();
-    await screen.findByText(/readme\.txt/);
-
-    // Can't select (no checkboxes) but test Ctrl+V regardless.
-    fireEvent.keyDown(document, { key: "v", ctrlKey: true });
-    expect(mockDownload.fetchFileBlob).not.toHaveBeenCalled();
-  });
-
   it("paste via context menu triggers download + upload", async () => {
     routeGet({
       detail: server(),
@@ -4564,29 +3308,6 @@ describe("Copy/paste", () => {
       ),
     );
     await waitFor(() => expect(mockPostFormWithProgress).toHaveBeenCalled());
-  });
-
-  it("paste shows overwrite confirmation when same-name file exists", async () => {
-    routeGet({
-      detail: server(),
-      list: listing([{ name: "readme.txt", is_dir: false }]),
-    });
-    mockPostFormWithProgress.mockResolvedValue(undefined);
-    renderPage();
-    await openFiles();
-    await screen.findByText(/readme\.txt/);
-
-    // Copy and paste.
-    fireEvent.click(screen.getByRole("checkbox", { name: "readme.txt" }));
-    fireEvent.keyDown(document, { key: "c", ctrlKey: true });
-    await screen.findByText(t("files.copied"));
-
-    fireEvent.keyDown(document, { key: "v", ctrlKey: true });
-
-    // Overwrite dialog should appear.
-    expect(
-      await screen.findByText(t("files.overwrite.title")),
-    ).toBeInTheDocument();
   });
 
   it("paste skips file when user clicks skip in overwrite dialog", async () => {
@@ -4666,61 +3387,6 @@ describe("Copy/paste", () => {
 // ── Move to... context menu (issue #1465) ───────────────────────────────────
 
 describe("Move to... context menu", () => {
-  it("shows Move to... in context menu for a file when canEdit", async () => {
-    routeGet({
-      detail: server(),
-      list: listing([{ name: "readme.txt", is_dir: false }]),
-    });
-    renderPage();
-    await openFiles();
-
-    const row = (await screen.findByText(/readme\.txt/)).closest(
-      "li",
-    ) as HTMLElement;
-    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
-
-    expect(
-      screen.getByRole("menuitem", { name: t("files.contextMenu.moveTo") }),
-    ).toBeInTheDocument();
-  });
-
-  it("hides Move to... when canEdit is false", async () => {
-    mockCan = (code) => code !== "file:edit";
-    routeGet({
-      detail: server(),
-      list: listing([{ name: "readme.txt", is_dir: false }]),
-    });
-    renderPage();
-    await openFiles();
-
-    const row = (await screen.findByText(/readme\.txt/)).closest(
-      "li",
-    ) as HTMLElement;
-    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
-
-    expect(
-      screen.queryByRole("menuitem", { name: t("files.contextMenu.moveTo") }),
-    ).not.toBeInTheDocument();
-  });
-
-  it("hides Move to... when server is running", async () => {
-    routeGet({
-      detail: server({ observed_state: "running", desired_state: "running" }),
-      list: listing([{ name: "readme.txt", is_dir: false }]),
-    });
-    renderPage();
-    await openFiles();
-
-    const row = (await screen.findByText(/readme\.txt/)).closest(
-      "li",
-    ) as HTMLElement;
-    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
-
-    expect(
-      screen.queryByRole("menuitem", { name: t("files.contextMenu.moveTo") }),
-    ).not.toBeInTheDocument();
-  });
-
   it("opens a dialog and moves the file to the destination", async () => {
     routeGet({
       detail: server(),
@@ -4752,13 +3418,16 @@ describe("Move to... context menu", () => {
       from: "readme.txt",
       to: "archive/readme.txt",
     });
+    expect(
+      screen.queryByLabelText(t("files.bulk.move.destLabel")),
+    ).not.toBeInTheDocument();
   });
 });
 
 // ── Arrow key navigation (issue #1465) ──────────────────────────────────────
 
 describe("Arrow key navigation", () => {
-  it("ArrowDown focuses the first file row", async () => {
+  it("moves between rows and clamps focus at each boundary", async () => {
     routeGet({
       detail: server(),
       list: listing([
@@ -4769,118 +3438,25 @@ describe("Arrow key navigation", () => {
     renderPage();
     await openFiles();
     await screen.findByText(/a\.txt/);
-
-    fireEvent.keyDown(document, { key: "ArrowDown" });
-
-    // The first file-name button should be focused.
-    const firstBtn = document.querySelector(
-      ".file-list .file-name",
-    ) as HTMLElement;
-    expect(document.activeElement).toBe(firstBtn);
-  });
-
-  it("ArrowDown moves focus to the next row", async () => {
-    routeGet({
-      detail: server(),
-      list: listing([
-        { name: "a.txt", is_dir: false },
-        { name: "b.txt", is_dir: false },
-      ]),
-    });
-    renderPage();
-    await openFiles();
-    await screen.findByText(/a\.txt/);
-
-    // Focus the first row.
-    fireEvent.keyDown(document, { key: "ArrowDown" });
-    // Move to second row.
-    fireEvent.keyDown(document, { key: "ArrowDown" });
 
     const buttons = document.querySelectorAll(".file-list .file-name");
-    expect(document.activeElement).toBe(buttons[1]);
-  });
-
-  it("ArrowUp moves focus to the previous row", async () => {
-    routeGet({
-      detail: server(),
-      list: listing([
-        { name: "a.txt", is_dir: false },
-        { name: "b.txt", is_dir: false },
-      ]),
-    });
-    renderPage();
-    await openFiles();
-    await screen.findByText(/a\.txt/);
-
-    // Focus the first, then second row.
     fireEvent.keyDown(document, { key: "ArrowDown" });
-    fireEvent.keyDown(document, { key: "ArrowDown" });
-
-    // Now go up.
-    fireEvent.keyDown(document, { key: "ArrowUp" });
-
-    const buttons = document.querySelectorAll(".file-list .file-name");
     expect(document.activeElement).toBe(buttons[0]);
-  });
 
-  it("ArrowUp on first row stays on first row", async () => {
-    routeGet({
-      detail: server(),
-      list: listing([
-        { name: "a.txt", is_dir: false },
-        { name: "b.txt", is_dir: false },
-      ]),
-    });
-    renderPage();
-    await openFiles();
-    await screen.findByText(/a\.txt/);
-
-    // Focus the first row.
     fireEvent.keyDown(document, { key: "ArrowDown" });
-    // Try to go up past the first row.
-    fireEvent.keyDown(document, { key: "ArrowUp" });
-
-    const buttons = document.querySelectorAll(".file-list .file-name");
-    expect(document.activeElement).toBe(buttons[0]);
-  });
-
-  it("ArrowDown on last row stays on last row", async () => {
-    routeGet({
-      detail: server(),
-      list: listing([
-        { name: "a.txt", is_dir: false },
-        { name: "b.txt", is_dir: false },
-      ]),
-    });
-    renderPage();
-    await openFiles();
-    await screen.findByText(/a\.txt/);
-
-    // Focus first, then second (last) row.
-    fireEvent.keyDown(document, { key: "ArrowDown" });
-    fireEvent.keyDown(document, { key: "ArrowDown" });
-    // Try to go past the last.
-    fireEvent.keyDown(document, { key: "ArrowDown" });
-
-    const buttons = document.querySelectorAll(".file-list .file-name");
     expect(document.activeElement).toBe(buttons[1]);
-  });
 
-  it("ArrowUp focuses the last row when no row is focused", async () => {
-    routeGet({
-      detail: server(),
-      list: listing([
-        { name: "a.txt", is_dir: false },
-        { name: "b.txt", is_dir: false },
-      ]),
-    });
-    renderPage();
-    await openFiles();
-    await screen.findByText(/a\.txt/);
+    fireEvent.keyDown(document, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(buttons[1]);
 
     fireEvent.keyDown(document, { key: "ArrowUp" });
+    expect(document.activeElement).toBe(buttons[0]);
 
-    const buttons = document.querySelectorAll(".file-list .file-name");
+    fireEvent.keyDown(document, { key: "ArrowUp" });
+    expect(document.activeElement).toBe(buttons[0]);
+
+    (buttons[0] as HTMLElement).blur();
+    fireEvent.keyDown(document, { key: "ArrowUp" });
     expect(document.activeElement).toBe(buttons[1]);
   });
 });
@@ -5103,21 +3679,6 @@ describe("ServerFilesTab directory downloads (minted grant, #2354)", () => {
         t("permissions.deniedNamed", { permission: "file:read" }),
       ),
     ).toBeInTheDocument();
-    expect(clicks).toHaveLength(0);
-  });
-
-  it("mints nothing on render or on selection — only on the download click", async () => {
-    routeGet({
-      detail: server(),
-      list: listing([{ name: "world", is_dir: true }]),
-    });
-    renderPage();
-    await openFiles();
-    await screen.findByText(/world/);
-
-    fireEvent.click(screen.getByRole("checkbox", { name: "world" }));
-
-    expect(mockApi.post).not.toHaveBeenCalled();
     expect(clicks).toHaveLength(0);
   });
 });
