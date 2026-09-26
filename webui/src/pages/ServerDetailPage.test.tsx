@@ -11,7 +11,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
-import { MemoryRouter, Route, Routes, useNavigate } from "react-router";
+import { MemoryRouter, Route, Routes } from "react-router";
 import {
   afterEach,
   beforeEach,
@@ -136,17 +136,6 @@ function routeGet(
   });
 }
 
-// A history probe: drives navigate(-1) so a test can simulate the Back button
-// against the in-memory router (#514 tab history).
-function BackProbe() {
-  const navigate = useNavigate();
-  return (
-    <button type="button" onClick={() => navigate(-1)}>
-      router-back
-    </button>
-  );
-}
-
 function renderPage(path = `/communities/${CID}/servers/${SID}`) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -155,7 +144,6 @@ function renderPage(path = `/communities/${CID}/servers/${SID}`) {
     <MemoryRouter initialEntries={[path]}>
       <QueryClientProvider client={queryClient}>
         <ToastProvider>
-          <BackProbe />
           <Routes>
             <Route
               path="/communities/:cid/servers/:sid"
@@ -320,49 +308,40 @@ describe("ServerDetailPage scaffold + header", () => {
   });
 });
 
+const CONTENT_TAB_CASES = [
+  { serverType: "paper", visible: "plugins", hidden: ["mods"] },
+  { serverType: "fabric", visible: "mods", hidden: ["plugins"] },
+  { serverType: "forge", visible: "mods", hidden: ["plugins"] },
+  { serverType: "vanilla", visible: null, hidden: ["plugins", "mods"] },
+] as const;
+
 describe("ServerDetailPage loader-aware content tab (#1320)", () => {
-  it("labels the content tab 'Plugins' for a paper server", async () => {
-    mockApi.get.mockResolvedValue(server({ server_type: "paper" }));
-    renderPage();
+  it.each(CONTENT_TAB_CASES)(
+    "renders the content tab for a $serverType server",
+    async ({ serverType, visible, hidden }) => {
+      mockApi.get.mockResolvedValue(server({ server_type: serverType }));
+      renderPage();
 
-    expect(
-      await screen.findByRole("tab", { name: t("serverDetail.tab.plugins") }),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByRole("tab", { name: t("serverDetail.tab.mods") }),
-    ).not.toBeInTheDocument();
-  });
-
-  it("labels the content tab 'Mods' for fabric and forge servers", async () => {
-    for (const type of ["fabric", "forge"]) {
-      mockApi.get.mockResolvedValue(server({ server_type: type }));
-      const { unmount } = renderPage();
-
-      expect(
-        await screen.findByRole("tab", { name: t("serverDetail.tab.mods") }),
-      ).toBeInTheDocument();
-      expect(
-        screen.queryByRole("tab", { name: t("serverDetail.tab.plugins") }),
-      ).not.toBeInTheDocument();
-      unmount();
-    }
-  });
-
-  it("hides the content tab for vanilla servers", async () => {
-    mockApi.get.mockResolvedValue(server({ server_type: "vanilla" }));
-    renderPage();
-
-    await screen.findByRole("tab", { name: t("serverDetail.tab.overview") });
-    expect(
-      screen.queryByRole("tab", { name: t("serverDetail.tab.plugins") }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("tab", { name: t("serverDetail.tab.mods") }),
-    ).not.toBeInTheDocument();
-  });
+      await screen.findByRole("tab", { name: t("serverDetail.tab.overview") });
+      if (visible !== null) {
+        expect(
+          screen.getByRole("tab", {
+            name: t(`serverDetail.tab.${visible}`),
+          }),
+        ).toBeInTheDocument();
+      }
+      for (const tab of hidden) {
+        expect(
+          screen.queryByRole("tab", {
+            name: t(`serverDetail.tab.${tab}`),
+          }),
+        ).not.toBeInTheDocument();
+      }
+    },
+  );
 });
 
-describe("ServerDetailPage URL-driven tabs (#514)", () => {
+describe("ServerDetailPage page-specific tabs (#514, #1894, #2017, #1898)", () => {
   let restoreWs: () => void;
   beforeEach(() => {
     restoreWs = installMockWebSocket();
@@ -385,38 +364,6 @@ describe("ServerDetailPage URL-driven tabs (#514)", () => {
     await screen.findByText("survival");
     expect(activeTab()).toBe(t("serverDetail.tab.settings"));
     expect(screen.getByDisplayValue("survival")).toBeInTheDocument();
-  });
-
-  it("Back restores the previously active tab", async () => {
-    routeGet();
-    renderPage();
-    await screen.findByText("survival");
-    expect(activeTab()).toBe(t("serverDetail.tab.overview"));
-
-    fireEvent.click(
-      screen.getByRole("tab", { name: t("serverDetail.tab.settings") }),
-    );
-    expect(activeTab()).toBe(t("serverDetail.tab.settings"));
-
-    // Simulate the browser Back button: navigate(-1) pops the pushed tab entry.
-    fireEvent.click(screen.getByText("router-back"));
-    await waitFor(() =>
-      expect(activeTab()).toBe(t("serverDetail.tab.overview")),
-    );
-  });
-
-  it("tab buttons carry aria-controls and the panel carries aria-labelledby (#1216)", async () => {
-    mockApi.get.mockResolvedValue(server());
-    renderPage();
-    await screen.findByText("survival");
-
-    const overviewTab = screen.getByRole("tab", {
-      name: t("serverDetail.tab.overview"),
-    });
-    expect(overviewTab).toHaveAttribute("aria-controls", "sd-panel-overview");
-    const panel = screen.getByRole("tabpanel");
-    expect(panel).toHaveAttribute("id", "sd-panel-overview");
-    expect(panel).toHaveAttribute("aria-labelledby", "sd-tab-overview");
   });
 
   it("wraps the plugins tab body in a labelled tabpanel (#1894)", async () => {
@@ -459,24 +406,6 @@ describe("ServerDetailPage URL-driven tabs (#514)", () => {
     const panel = await screen.findByRole("tabpanel");
     expect(panel).toHaveAttribute("id", "sd-panel-plugins");
     expect(panel).toHaveAttribute("aria-labelledby", "sd-tab-plugins");
-  });
-
-  it("ArrowRight moves focus to the next tab (#1216)", async () => {
-    mockApi.get.mockResolvedValue(server());
-    renderPage();
-    await screen.findByText("survival");
-
-    const overviewTab = screen.getByRole("tab", {
-      name: t("serverDetail.tab.overview"),
-    });
-    overviewTab.focus();
-    fireEvent.keyDown(overviewTab, { key: "ArrowRight" });
-
-    const consoleTab = screen.getByRole("tab", {
-      name: t("serverDetail.tab.console"),
-    });
-    expect(consoleTab).toHaveFocus();
-    expect(consoleTab).toHaveAttribute("aria-selected", "true");
   });
 
   it("ArrowRight skips the hidden plugins tab on vanilla servers (#2017)", async () => {
@@ -552,21 +481,6 @@ describe("ServerDetailPage URL-driven tabs (#514)", () => {
 
     panel.focus();
     expect(panel).toHaveFocus();
-  });
-
-  it("inactive tabs have tabIndex -1 (roving tabindex, #1216)", async () => {
-    mockApi.get.mockResolvedValue(server());
-    renderPage();
-    await screen.findByText("survival");
-
-    const overviewTab = screen.getByRole("tab", {
-      name: t("serverDetail.tab.overview"),
-    });
-    const settingsTab = screen.getByRole("tab", {
-      name: t("serverDetail.tab.settings"),
-    });
-    expect(overviewTab).toHaveAttribute("tabindex", "0");
-    expect(settingsTab).toHaveAttribute("tabindex", "-1");
   });
 });
 
