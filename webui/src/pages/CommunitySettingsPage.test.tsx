@@ -3,27 +3,15 @@
 // handling (happy-dom may not replicate tabIndex-based focusability faithfully).
 
 /**
- * URL-driven tab tests for the community-settings page (#514): the active tab
- * lives in the URL hash (WEBUI_SPEC.md Section 5 names #members / #audit ...),
- * deep links land on the named tab, switching pushes history, and Back restores
- * the prior tab (simulated with MemoryRouter + a navigate(-1) probe).
+ * Page-specific tab tests for the community-settings page (#514, #2058):
+ * deep links land on the named tab, and a permission-denied panel remains
+ * keyboard reachable. Generic URL and WAI-ARIA tab behavior lives in
+ * urlState.test.tsx.
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import {
-  act,
-  fireEvent,
-  render,
-  screen,
-  waitFor,
-} from "@testing-library/react";
-import {
-  MemoryRouter,
-  Route,
-  Routes,
-  useLocation,
-  useNavigate,
-} from "react-router";
+import { act, render, screen } from "@testing-library/react";
+import { MemoryRouter, Route, Routes } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client.ts";
 import { setAccessToken } from "../auth/tokenStore.ts";
@@ -84,22 +72,6 @@ function routeGet() {
   });
 }
 
-// A history probe: drives navigate(-1) so a test can simulate the Back button.
-function BackProbe() {
-  const navigate = useNavigate();
-  return (
-    <button type="button" onClick={() => navigate(-1)}>
-      router-back
-    </button>
-  );
-}
-
-let lastHash = "";
-function HashProbe() {
-  lastHash = useLocation().hash;
-  return null;
-}
-
 function renderPage(path = `/communities/${CID}/settings`) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -108,8 +80,6 @@ function renderPage(path = `/communities/${CID}/settings`) {
     <MemoryRouter initialEntries={[path]}>
       <QueryClientProvider client={queryClient}>
         <ToastProvider>
-          <BackProbe />
-          <HashProbe />
           <Routes>
             <Route
               path="/communities/:cid/settings"
@@ -132,7 +102,7 @@ function activeTab(): string | null {
   );
 }
 
-describe("CommunitySettingsPage URL-driven tabs (#514)", () => {
+describe("CommunitySettingsPage page-specific tabs (#514, #2058)", () => {
   beforeEach(() => {
     setAccessToken("tok-1");
     mockApi.get.mockReset();
@@ -142,95 +112,10 @@ describe("CommunitySettingsPage URL-driven tabs (#514)", () => {
   });
   afterEach(() => vi.clearAllMocks());
 
-  it("defaults to Members with a clean (hash-less) URL", async () => {
-    renderPage();
-    await screen.findAllByText("Sakura");
-    expect(activeTab()).toBe(t("communitySettings.tab.members"));
-    expect(lastHash).toBe("");
-  });
-
   it("deep-links to the tab named by the URL hash", async () => {
     renderPage(`/communities/${CID}/settings#audit`);
     await screen.findAllByText("Sakura");
     expect(activeTab()).toBe(t("communitySettings.tab.audit"));
-  });
-
-  it("switching a tab writes its hash", async () => {
-    renderPage();
-    await screen.findAllByText("Sakura");
-
-    fireEvent.click(
-      screen.getByRole("tab", { name: t("communitySettings.tab.roles") }),
-    );
-    expect(activeTab()).toBe(t("communitySettings.tab.roles"));
-    expect(lastHash).toBe("#roles");
-  });
-
-  it("Back restores the previously active tab", async () => {
-    renderPage();
-    await screen.findAllByText("Sakura");
-
-    fireEvent.click(
-      screen.getByRole("tab", { name: t("communitySettings.tab.roles") }),
-    );
-    fireEvent.click(
-      screen.getByRole("tab", { name: t("communitySettings.tab.audit") }),
-    );
-    expect(activeTab()).toBe(t("communitySettings.tab.audit"));
-
-    fireEvent.click(screen.getByText("router-back"));
-    await waitFor(() =>
-      expect(activeTab()).toBe(t("communitySettings.tab.roles")),
-    );
-
-    fireEvent.click(screen.getByText("router-back"));
-    await waitFor(() =>
-      expect(activeTab()).toBe(t("communitySettings.tab.members")),
-    );
-  });
-
-  it("tab buttons carry aria-controls and the panel carries aria-labelledby (#1216)", async () => {
-    renderPage();
-    await screen.findAllByText("Sakura");
-
-    const membersTab = screen.getByRole("tab", {
-      name: t("communitySettings.tab.members"),
-    });
-    expect(membersTab).toHaveAttribute("aria-controls", "cs-panel-members");
-    const panel = screen.getByRole("tabpanel");
-    expect(panel).toHaveAttribute("id", "cs-panel-members");
-    expect(panel).toHaveAttribute("aria-labelledby", "cs-tab-members");
-  });
-
-  it("ArrowRight moves focus to the next tab (#1216)", async () => {
-    renderPage();
-    await screen.findAllByText("Sakura");
-
-    const membersTab = screen.getByRole("tab", {
-      name: t("communitySettings.tab.members"),
-    });
-    membersTab.focus();
-    fireEvent.keyDown(membersTab, { key: "ArrowRight" });
-
-    const rolesTab = screen.getByRole("tab", {
-      name: t("communitySettings.tab.roles"),
-    });
-    expect(rolesTab).toHaveFocus();
-    expect(rolesTab).toHaveAttribute("aria-selected", "true");
-  });
-
-  it("inactive tabs have tabIndex -1 (roving tabindex, #1216)", async () => {
-    renderPage();
-    await screen.findAllByText("Sakura");
-
-    const membersTab = screen.getByRole("tab", {
-      name: t("communitySettings.tab.members"),
-    });
-    const rolesTab = screen.getByRole("tab", {
-      name: t("communitySettings.tab.roles"),
-    });
-    expect(membersTab).toHaveAttribute("tabindex", "0");
-    expect(rolesTab).toHaveAttribute("tabindex", "-1");
   });
 
   it("a tabpanel whose content has no focusable element is focusable (#2058)", async () => {
