@@ -131,6 +131,7 @@ class UserRepositoryContract:
         user.email = EmailAddress("renamed@example.com")
         user.password_hash = "rotated-hash"
         user.updated_at = _NOW + dt.timedelta(hours=1)
+        user.created_at = _NOW + dt.timedelta(days=1)
         async with user_repository_harness.open() as transaction:
             await transaction.repository.update(user)
             user.password_hash = "rewritten-after-update"
@@ -146,6 +147,7 @@ class UserRepositoryContract:
         assert loaded.password_hash == "rotated-hash"
         assert loaded.active is True
         assert loaded.updated_at == _NOW + dt.timedelta(hours=1)
+        assert loaded.created_at == _NOW
 
     async def test_update_of_missing_row_is_a_no_op(
         self, user_repository_harness: RepositoryHarness[UserRepository]

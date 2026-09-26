@@ -120,7 +120,8 @@ class FakeUserRepository(UserRepository):
         # matches no row, so nothing is written and no row appears -- keying the
         # entity in regardless made this an insert the adapter cannot perform
         # (#2557).
-        if user.id not in self.by_id:
+        stored = self.by_id.get(user.id)
+        if stored is None:
             return
         if any(
             row.id != user.id and row.username == user.username
@@ -131,7 +132,15 @@ class FakeUserRepository(UserRepository):
             row.id != user.id and row.email == user.email for row in self.by_id.values()
         ):
             raise EmailAlreadyExistsError(user.email.value)
-        self.by_id[user.id] = self._copy(user)
+        self.by_id[user.id] = replace(
+            stored,
+            username=user.username,
+            email=user.email,
+            password_hash=user.password_hash,
+            is_platform_admin=user.is_platform_admin,
+            active=user.active,
+            updated_at=user.updated_at,
+        )
 
     async def delete(self, user_id: UserId) -> None:
         self.by_id.pop(user_id, None)

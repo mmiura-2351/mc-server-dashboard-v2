@@ -121,14 +121,19 @@ class FakeCommunityRepository(CommunityRepository):
         # the entity in regardless made this an insert the adapter cannot
         # perform (#2557). The adapter now checks that rowcount and reports the
         # zero-row write as not-found rather than as a success (#2613).
-        if community.id not in self.by_id:
+        stored = self.by_id.get(community.id)
+        if stored is None:
             raise CommunityNotFoundError(str(community.id.value))
         if any(
             row.id != community.id and row.name == community.name
             for row in self.by_id.values()
         ):
             raise CommunityAlreadyExistsError(community.name.value)
-        self.by_id[community.id] = self._copy(community)
+        self.by_id[community.id] = replace(
+            stored,
+            name=community.name,
+            updated_at=community.updated_at,
+        )
 
     async def delete(self, community_id: CommunityId) -> None:
         self.by_id.pop(community_id, None)
@@ -258,16 +263,22 @@ class FakeRoleRepository(RoleRepository):
         # entity in regardless made this an insert the adapter cannot perform
         # (#2557). The adapter now checks that rowcount and reports the zero-row
         # write as not-found rather than as a success (#2613).
-        if role.id not in self.by_id:
+        stored = self.by_id.get(role.id)
+        if stored is None:
             raise RoleNotFoundError(str(role.id.value))
         if any(
             row.id != role.id
-            and row.community_id == role.community_id
+            and row.community_id == stored.community_id
             and row.name == role.name
             for row in self.by_id.values()
         ):
             raise RoleAlreadyExistsError(role.name.value)
-        self.by_id[role.id] = self._copy(role)
+        self.by_id[role.id] = replace(
+            stored,
+            name=role.name,
+            permissions=set(role.permissions),
+            updated_at=role.updated_at,
+        )
 
     async def delete(self, role_id: RoleId) -> None:
         self.by_id.pop(role_id, None)

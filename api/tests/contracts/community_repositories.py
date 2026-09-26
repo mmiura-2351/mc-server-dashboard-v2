@@ -187,6 +187,9 @@ class CommunityRepositoryContract:
 
         community.name = CommunityName("renamed")
         community.updated_at = _NOW + dt.timedelta(hours=1)
+        community.created_at = _NOW + dt.timedelta(days=1)
+        community.max_servers = 99
+        community.max_members = 42
         async with community_repository_harness.open() as transaction:
             await transaction.repository.update(community)
             community.name = CommunityName("rewritten-after-update")
@@ -198,6 +201,9 @@ class CommunityRepositoryContract:
         assert loaded is not None
         assert loaded.name == CommunityName("renamed")
         assert loaded.updated_at == _NOW + dt.timedelta(hours=1)
+        assert loaded.created_at == _NOW
+        assert loaded.max_servers is None
+        assert loaded.max_members is None
 
     async def test_update_of_missing_row_reports_not_found_without_inserting(
         self, community_repository_harness: RepositoryHarness[CommunityRepository]
@@ -382,6 +388,9 @@ class RoleRepositoryContract:
         role.name = RoleName("Moderator")
         role.permissions = {Permission("server:read"), Permission("server:start")}
         role.updated_at = _NOW + dt.timedelta(hours=1)
+        role.community_id = role_repository_harness.other_community_id
+        role.created_at = _NOW + dt.timedelta(days=1)
+        role.is_preset = True
         async with role_repository_harness.open() as transaction:
             await transaction.repository.update(role)
             role.name = RoleName("rewritten-after-update")
@@ -398,6 +407,9 @@ class RoleRepositoryContract:
             Permission("server:start"),
         }
         assert loaded.updated_at == _NOW + dt.timedelta(hours=1)
+        assert loaded.community_id == role_repository_harness.community_id
+        assert loaded.created_at == _NOW
+        assert loaded.is_preset is False
 
     async def test_update_of_missing_row_reports_not_found_without_inserting(
         self, role_repository_harness: RoleRepositoryHarness
