@@ -78,6 +78,28 @@ func isReservedScratchName(name string) bool {
 // unknown generation the API treats as older than any published store generation,
 // forcing the hydrate that recovers the consistent store copy.
 //
+// quiesced is the CALLER's statement that no container this Worker started can still
+// be writing into a scratch tree — the same premise the boot reclaims above require,
+// established by the container orphan sweep and by nothing else. The fsck is skipped
+// when it is false and every held set is advertised at its RECORDED generation
+// (issue #3171). A torn verdict is only meaningful on a quiesced set (regionfsck
+// states that contract at its own site): after a failed sweep an orphan can still be
+// running with <scratch>/<id> bind-mounted, and since nothing re-adopts containers
+// the Worker does not even know the world is live, so the scan would read a world
+// mid-write, judge a healthy set torn and advertise a 0 that dispatches a DESTRUCTIVE
+// hydrate over it. Reporting the marker is the scan's honest answer in that state:
+// the marker is on disk, and judging what it names is what quiescence buys.
+//
+// The costs of the two directions are not symmetric, which is what settles it. An
+// unjudged genuinely-torn set is booted at its recorded generation for this one boot,
+// with the consistent store copy still in place and the fsck arriving at the next boot
+// whose sweep succeeds — the same "wait for a boot that can prove it" the reclaims
+// above take. A judged live world is hydrated over while its server writes, and that
+// loses the world's progression AND everything written after it (the descriptors keep
+// writing into unlinked inodes). Skipping the scan entirely — the other candidate —
+// advertises NOTHING held, so the API hydrates every server on this Worker, which is
+// strictly worse than either.
+//
 // The fsck uses the single region rule set (issue #927/#926 item 1): a held scratch
 // of a crashed or non-gracefully-stopped 26.x server is live-format (unaligned tails)
 // and structurally sound, so it now PASSES and the worker advertises its held
@@ -97,7 +119,7 @@ func isReservedScratchName(name string) bool {
 // does not validate that a name is a server id — a non-server directory under
 // scratch is harmless to report because the API only consults this for ids it has
 // assigned to the Worker.
-func ScanHeldServers(scratchDir string, log *slog.Logger) []session.HeldServer {
+func ScanHeldServers(scratchDir string, quiesced bool, log *slog.Logger) []session.HeldServer {
 	entries, err := os.ReadDir(scratchDir)
 	if err != nil {
 		return nil
@@ -121,7 +143,7 @@ func ScanHeldServers(scratchDir string, log *slog.Logger) []session.HeldServer {
 		}
 		held = append(held, session.HeldServer{
 			ServerID:   entry.Name(),
-			Generation: heldGeneration(workingDir, entry.Name(), log),
+			Generation: heldGeneration(workingDir, entry.Name(), quiesced, log),
 		})
 	}
 	return held
@@ -133,8 +155,26 @@ func ScanHeldServers(scratchDir string, log *slog.Logger) []session.HeldServer {
 // consistent store copy over the torn local world. A fsck I/O error leaves the
 // recorded generation untouched (best-effort, logged): the API integrity gate is
 // the correctness backstop, so the scan must not wedge on a read fault.
-func heldGeneration(workingDir, serverID string, log *slog.Logger) uint64 {
+//
+// The fsck does not run at all unless the caller established quiescence (issue
+// #3171): on a world a container may still be writing, a torn verdict is not a fact
+// about the world but an artefact of the read, and the 0 it produces sends a
+// destructive hydrate over a live server. The recorded generation is what the Worker
+// can honestly say there, and the fsck resumes at the next boot that can prove the
+// premise. ScanHeldServers' doc has the full argument, including why skipping the
+// advertisement instead is worse.
+func heldGeneration(workingDir, serverID string, quiesced bool, log *slog.Logger) uint64 {
 	gen := readGeneration(workingDir)
+	if !quiesced {
+		if log != nil {
+			log.Warn("skipping the held-set region fsck: the container orphan sweep did not "+
+				"establish that no container is still writing, so a torn-looking region here may "+
+				"be a running orphan's live world read mid-write; advertising the recorded "+
+				"generation and re-checking at the next boot whose sweep succeeds (issue #3171)",
+				"server_id", serverID, "generation", gen)
+		}
+		return gen
+	}
 	report, err := regionfsck.CheckWorkingSet(workingDir)
 	if err != nil {
 		if log != nil {
