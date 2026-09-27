@@ -101,6 +101,7 @@ class UserRepositoryContract:
             for handed_out in (by_id, by_username, by_email, listed[0]):
                 handed_out.email = EmailAddress("rewritten@example.com")
                 handed_out.active = False
+            await transaction.commit()
 
         async with user_repository_harness.open() as transaction:
             reloaded = await transaction.repository.get_by_id(user.id)
@@ -242,6 +243,7 @@ class RefreshTokenRepositoryContract:
             assert [row.id for row in listed] == [target.id]
             by_hash.revoked_at = _NOW
             listed[0].expires_at = _NOW
+            await transaction.commit()
 
         async with refresh_token_repository_harness.open() as transaction:
             reloaded = await transaction.repository.get_by_token_hash(target.token_hash)

@@ -167,6 +167,7 @@ class CommunityRepositoryContract:
             assert by_name is not None
             by_id.name = CommunityName("rewritten-by-id")
             by_name.max_members = 42
+            await transaction.commit()
 
         async with community_repository_harness.open() as transaction:
             reloaded = await transaction.repository.get_by_id(community.id)
@@ -290,6 +291,7 @@ class MembershipRepositoryContract:
                 handed_out.community_id = (
                     membership_repository_harness.other_community_id
                 )
+            await transaction.commit()
 
         async with membership_repository_harness.open() as transaction:
             reloaded = await transaction.repository.get_by_id(target.id)
@@ -367,6 +369,7 @@ class RoleRepositoryContract:
             for handed_out in (by_id, by_ids[0], listed[0]):
                 handed_out.name = RoleName("rewritten")
                 handed_out.permissions.add(Permission("server:delete"))
+            await transaction.commit()
 
         async with role_repository_harness.open() as transaction:
             reloaded = await transaction.repository.get_by_id(target.id)
@@ -515,6 +518,7 @@ class ResourceGrantRepositoryContract:
             assert cross_community is None
             for handed_out in (by_id, by_key, listed[0], listed_for_user[0]):
                 handed_out.permissions.add(Permission("server:delete"))
+            await transaction.commit()
 
         async with resource_grant_repository_harness.open() as transaction:
             reloaded = await transaction.repository.get_by_id(target.id)
