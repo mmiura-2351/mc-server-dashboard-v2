@@ -86,8 +86,10 @@ func run(ctx context.Context) error {
 	// orphan sweep (cd.Sweep), which force-removes every container this Worker
 	// previously started. Orphaned containers keep writing to their bind-mounted
 	// scratch dirs, so the fsck inside ScanHeldServers must not run until the sweep
-	// has quiesced all live writers. ScanHeldServers is called below, after the
-	// manager is fully initialised. caps is not needed until NewRunner.
+	// has quiesced all live writers — and must not run at all when the sweep could not
+	// establish that, which is what quiesced reports (issue #3171). ScanHeldServers is
+	// called below, after the manager is fully initialised. caps is not needed until
+	// NewRunner.
 	manager, quiesced, err := buildInstanceManager(sigCtx, cfg, logger)
 	if err != nil {
 		return err
@@ -163,7 +165,16 @@ func run(ctx context.Context) error {
 	// this call; ScanHeldServers fscks region files and regionfsck requires a
 	// quiesced working set — scanning a live world races the server's writes and
 	// can false-positive a healthy region as corrupt (issue #834).
-	heldServers := instancemanager.ScanHeldServers(cfg.Worker.ScratchDir, logger)
+	//
+	// Completing is not the same as SUCCEEDING, so the sweep's own verdict is threaded
+	// in (issue #3171). With quiescence unproven the scan advertises each set at the
+	// generation its marker records and skips the fsck, because the torn verdict it
+	// would reach on a running orphan's world is an artefact of reading it mid-write —
+	// and a generation 0 is what makes the API dispatch the hydrate that would unpack
+	// over that live world. Unlike the reclaims above, this call is NOT skipped: an
+	// advertisement withheld reports nothing held, and the API then hydrates every
+	// server on this Worker. The gate is on the judgement, not on the report.
+	heldServers := instancemanager.ScanHeldServers(cfg.Worker.ScratchDir, quiesced, logger)
 	// Log a WARN for each .displaced-<id> tree whose server id is not in the held
 	// set (issue #911): those trees are orphaned recovery copies — the server was
 	// deleted or re-placed elsewhere — and will never be GC'd automatically. The
@@ -205,10 +216,11 @@ func run(ctx context.Context) error {
 //
 // The second return value reports whether that sweep ESTABLISHED QUIESCENCE: no container
 // this Worker previously started is still running, and therefore none can still be writing
-// into a scratch tree. It is false when a sweep failed — which stays non-fatal — and the
-// caller's boot reclaims are gated on it (see run(), PR #3170 review round 2). It is true
-// when no container driver was built, because then this Worker has started no containers
-// at all.
+// into a scratch tree. It is false when a sweep failed — which stays non-fatal — and every
+// boot step that rests on that premise is gated on it: the two scratch reclaims, which
+// delete trees (PR #3170 review round 2), and the held-set scan's region fsck, which judges
+// them (issue #3171). Both gates are in run(). It is true when no container driver was
+// built, because then this Worker has started no containers at all.
 func buildInstanceManager(ctx context.Context, cfg config.Config, logger *slog.Logger) (*instancemanager.Manager, bool, error) {
 	wc := cfg.Worker
 	quiesced := true
