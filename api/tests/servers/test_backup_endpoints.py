@@ -15,9 +15,9 @@ cases and authorization Ports faked (NFR-TEST-1, no database). Verifies:
 from __future__ import annotations
 
 import datetime as dt
-import inspect
 import uuid
 from collections.abc import AsyncIterator
+from typing import TYPE_CHECKING, Protocol, cast
 
 import httpx2
 import pytest
@@ -69,7 +69,6 @@ from mc_server_dashboard_api.identity.application.authenticate_request import (
 )
 from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.servers.application.backups import (
-    DownloadBackup,
     ListedBackup,
     RestoreResult,
     download_grant_resource,
@@ -99,10 +98,18 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerNotStoppedError,
     WorkingSetSeedFailedError,
 )
-from mc_server_dashboard_api.servers.domain.value_objects import ServerId
+from mc_server_dashboard_api.servers.domain.value_objects import (
+    CommunityId as ServerCommunityId,
+)
+from mc_server_dashboard_api.servers.domain.value_objects import (
+    ServerId,
+)
 from tests.audit.fakes import RecordingAuditRecorder
 from tests.client_utils import enter_client
 from tests.identity.fakes import FakeClock, FakeUnitOfWork, make_user
+
+if TYPE_CHECKING:
+    from mc_server_dashboard_api.servers.application.backups import DownloadBackup
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 
@@ -141,6 +148,35 @@ class _FakeUseCase:
         if self._error is not None:
             raise self._error
         return self._result
+
+
+class _DownloadUseCase(Protocol):
+    """The backup-download route's narrow use-case surface."""
+
+    async def resolve(
+        self,
+        *,
+        community_id: ServerCommunityId,
+        server_id: ServerId,
+        backup_id: BackupId,
+    ) -> Backup: ...
+
+    async def archive_size(
+        self,
+        *,
+        community_id: ServerCommunityId,
+        server_id: ServerId,
+        backup: Backup,
+    ) -> int: ...
+
+    def archive_stream(
+        self,
+        *,
+        community_id: ServerCommunityId,
+        server_id: ServerId,
+        backup: Backup,
+        byte_range: tuple[int, int] | None = None,
+    ) -> AsyncIterator[bytes]: ...
 
 
 def _backup(server_id: ServerId) -> Backup:
@@ -186,7 +222,7 @@ def _app(
     list_: _FakeUseCase | None = None,
     restore: _FakeUseCase | None = None,
     delete: _FakeUseCase | None = None,
-    download: _FakeDownload | None = None,
+    download: _DownloadUseCase | None = None,
     upload: _FakeUseCase | None = None,
     statistics: _FakeUseCase | None = None,
     global_statistics: _FakeUseCase | None = None,
@@ -622,10 +658,10 @@ _ARCHIVE = b"archive-bytes"
 class _FakeDownload:
     """A download use case over fixed archive bytes, ranged like the real one.
 
-    The three methods mirror :class:`DownloadBackup`'s signatures exactly, down to
-    the ids this double never reads; the test below holds them there. The backup
-    row is resolved once by :meth:`resolve` and carried (opaque here) into
-    :meth:`archive_size` and :meth:`archive_stream` (issue #2456).
+    The three methods satisfy :class:`_DownloadUseCase`, checked by mypy alongside
+    the real use case. The backup row is resolved once by :meth:`resolve` and
+    carried (opaque here) into :meth:`archive_size` and :meth:`archive_stream`
+    (issue #2456).
 
     A fresh stream per call (an async generator is exhausted by its first
     consumer, and one test fetches the same archive twice). ``declared``
@@ -662,20 +698,20 @@ class _FakeDownload:
     async def resolve(
         self,
         *,
-        community_id: CommunityId,
+        community_id: ServerCommunityId,
         server_id: ServerId,
         backup_id: BackupId,
-    ) -> object:
-        # The single row load; the opaque handle it returns is ignored by the two
-        # methods below, which read fixed bytes (issue #2456).
-        return object()
+    ) -> Backup:
+        # The single row load; the backup it returns is ignored by the two methods
+        # below, which read fixed bytes (issue #2456).
+        return _backup(server_id)
 
     async def archive_size(
         self,
         *,
-        community_id: CommunityId,
+        community_id: ServerCommunityId,
         server_id: ServerId,
-        backup: object,
+        backup: Backup,
     ) -> int:
         if self._error is not None:
             raise self._error
@@ -686,9 +722,9 @@ class _FakeDownload:
     def archive_stream(
         self,
         *,
-        community_id: CommunityId,
+        community_id: ServerCommunityId,
         server_id: ServerId,
-        backup: object,
+        backup: Backup,
         byte_range: tuple[int, int] | None = None,
     ) -> AsyncIterator[bytes]:
         self.ranges.append(byte_range)
@@ -707,34 +743,9 @@ class _FakeDownload:
             raise self._mid_stream_error
 
 
-def test_the_download_double_has_the_real_use_cases_shape() -> None:
-    # _FakeDownload is the only stand-in for DownloadBackup in this file, so it is
-    # also the only description of that interface a reader gets here. Nothing else
-    # keeps the two in step: when #2382 split the use case into archive_size() +
-    # archive_stream(), the then-current double kept passing because the tests
-    # holding it reject before it is ever called (issue #2384). Comparing the two
-    # directly makes the next such split red here, at the double, instead of
-    # leaving a double that misdescribes what it stands for.
-    #
-    # Names, kinds and defaults only, deliberately not annotations: whether an
-    # annotation comes back as a string or as the type itself is decided by
-    # ``from __future__ import annotations`` in the module that declared it, so
-    # comparing them would redden every method at once the day either module
-    # drops that import — an alarm about nothing, on the one test here whose
-    # whole value is that a red means something.
-    def methods(cls: type) -> dict[str, list[tuple[str, object, object]]]:
-        return {
-            name: [
-                (p.name, p.kind, p.default)
-                for p in inspect.signature(func).parameters.values()
-            ]
-            for name, func in inspect.getmembers(cls, inspect.isfunction)
-            if not name.startswith("_")
-        }
-
-    real = methods(DownloadBackup)
-    assert real, "found no public methods on DownloadBackup to compare against"
-    assert methods(_FakeDownload) == real
+if TYPE_CHECKING:
+    _real_download: _DownloadUseCase = cast(DownloadBackup, None)
+    _fake_download: _DownloadUseCase = _FakeDownload()
 
 
 def _bearer() -> dict[str, str]:

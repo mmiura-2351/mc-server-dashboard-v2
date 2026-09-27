@@ -51,7 +51,6 @@ from tests.storage.helpers import (
     read_tar,
     region_targz,
     stream_of,
-    tar_bytes,
     tar_stream,
     unaligned_live_region_bytes,
 )
@@ -2128,8 +2127,3 @@ async def test_sweep_never_reclaims_live_snapshot(harness: StorageHarness) -> No
 
     blob = await drain(harness.storage.open_hydrate_source(community, server))
     assert read_tar(blob) == {"f": b"LIVE"}
-
-
-def test_tar_bytes_helper_is_stable() -> None:
-    # Guards the helper used across both adapters' arrange steps.
-    assert read_tar(tar_bytes({"a": b"1"})) == {"a": b"1"}

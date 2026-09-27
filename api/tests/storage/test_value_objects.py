@@ -28,31 +28,25 @@ def test_relpath_root_has_empty_parts(raw: str) -> None:
     assert RelPath(raw).value == "."
 
 
-@pytest.mark.parametrize("raw", ["/etc/passwd", "/world/level.dat"])
-def test_relpath_rejects_absolute(raw: str) -> None:
-    with pytest.raises(PathTraversalError):
-        RelPath(raw)
-
-
-@pytest.mark.parametrize("raw", ["../escape", "world/../../escape", "..", "a/../../b"])
-def test_relpath_rejects_parent_traversal(raw: str) -> None:
-    with pytest.raises(PathTraversalError):
-        RelPath(raw)
-
-
 @pytest.mark.parametrize(
     "raw",
     [
-        "world/\x00null.dat",  # NUL
-        "config/foo\tbar.txt",  # TAB (a C0 control)
-        "config/foo\x1f.txt",  # unit separator (top of the C0 range)
-        "config/foo\x7f.txt",  # DEL
-        "a\rb/level.dat",  # CR
-        "a\nb/level.dat",  # LF
-        "config\r\n/foo.txt",  # CRLF (header-injection shape)
+        pytest.param("/etc/passwd", id="absolute-etc"),
+        pytest.param("/world/level.dat", id="absolute-world-file"),
+        pytest.param("../escape", id="parent-at-root"),
+        pytest.param("world/../../escape", id="parent-after-child"),
+        pytest.param("..", id="parent-root"),
+        pytest.param("a/../../b", id="multiple-parent-components"),
+        pytest.param("world/\x00null.dat", id="nul"),
+        pytest.param("config/foo\tbar.txt", id="tab"),
+        pytest.param("config/foo\x1f.txt", id="unit-separator"),
+        pytest.param("config/foo\x7f.txt", id="delete-control"),
+        pytest.param("a\rb/level.dat", id="carriage-return"),
+        pytest.param("a\nb/level.dat", id="line-feed"),
+        pytest.param("config\r\n/foo.txt", id="carriage-return-line-feed"),
     ],
 )
-def test_relpath_rejects_control_characters(raw: str) -> None:
+def test_relpath_rejects_invalid_paths(raw: str) -> None:
     with pytest.raises(PathTraversalError):
         RelPath(raw)
 

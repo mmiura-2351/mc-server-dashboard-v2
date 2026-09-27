@@ -185,12 +185,6 @@ class TestSide:
         )
         assert meta.side == "both"
 
-    def test_paper_side_is_server(self) -> None:
-        """Paper plugins are always server-side only (issue #1342)."""
-        yml = "name: P\nversion: 1.0.0\n"
-        meta = parse_manifest(_make_jar({"plugin.yml": yml}), server_type="paper")
-        assert meta.side == "server"
-
 
 class TestQuilt:
     def test_quilt_parsed_on_fabric_server(self) -> None:

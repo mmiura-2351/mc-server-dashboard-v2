@@ -30,78 +30,65 @@ class TestAnyAndFallback:
         assert version_satisfies("1", "^", "fabric") is True
 
 
-class TestSemverComparisons:
+class TestSemver:
     @pytest.mark.parametrize(
         ("version", "spec", "expected"),
         [
-            ("1.20.1", ">=1.20", True),
-            ("1.19.4", ">=1.20", False),
-            ("1.20.0", ">=1.20", True),
-            ("1.20.0", ">1.20", False),
-            ("1.20.1", ">1.20", True),
-            ("1.19.9", "<1.20", True),
-            ("1.20.0", "<1.20", False),
-            ("1.20.0", "<=1.20", True),
-            ("1.20.1", "<=1.20", False),
-            ("1.20", "=1.20", True),
-            ("1.20.0", "1.20", True),
-            ("1.21", "1.20", False),
+            pytest.param("1.20.1", ">=1.20", True, id="greater-equal-newer"),
+            pytest.param("1.19.4", ">=1.20", False, id="greater-equal-older"),
+            pytest.param("1.20.0", ">=1.20", True, id="greater-equal-boundary"),
+            pytest.param("1.20.0", ">1.20", False, id="greater-than-boundary"),
+            pytest.param("1.20.1", ">1.20", True, id="greater-than-newer"),
+            pytest.param("1.19.9", "<1.20", True, id="less-than-older"),
+            pytest.param("1.20.0", "<1.20", False, id="less-than-boundary"),
+            pytest.param("1.20.0", "<=1.20", True, id="less-equal-boundary"),
+            pytest.param("1.20.1", "<=1.20", False, id="less-equal-newer"),
+            pytest.param("1.20", "=1.20", True, id="explicit-equality"),
+            pytest.param("1.20.0", "1.20", True, id="implicit-equality-zero-patch"),
+            pytest.param("1.21", "1.20", False, id="implicit-equality-different-minor"),
+            pytest.param("1.2.3", "~1.2.3", True, id="tilde-exact"),
+            pytest.param("1.2.9", "~1.2.3", True, id="tilde-patch"),
+            pytest.param("1.3.0", "~1.2.3", False, id="tilde-next-minor"),
+            pytest.param("1.2.0", "~1.2", True, id="tilde-short-boundary"),
+            pytest.param("1.2.9", "~1.2", True, id="tilde-short-patch"),
+            pytest.param("1.3.0", "~1.2", False, id="tilde-short-next-minor"),
+            pytest.param("1.1.0", "~1.2", False, id="tilde-short-previous-minor"),
+            pytest.param("1.2.3", "^1.2.3", True, id="caret-exact"),
+            pytest.param("1.9.0", "^1.2.3", True, id="caret-same-major"),
+            pytest.param("2.0.0", "^1.2.3", False, id="caret-next-major"),
+            pytest.param("1.0.0", "^1", True, id="caret-short-boundary"),
+            pytest.param("1.9.9", "^1", True, id="caret-short-same-major"),
+            pytest.param("2.0.0", "^1", False, id="caret-short-next-major"),
+            pytest.param("0.2.3", "^0.2.3", True, id="caret-zero-exact"),
+            pytest.param("0.3.0", "^0.2.3", False, id="caret-zero-next-minor"),
+            pytest.param("1.2.0", "1.2.x", True, id="x-range-boundary"),
+            pytest.param("1.2.9", "1.2.x", True, id="x-range-patch"),
+            pytest.param("1.3.0", "1.2.x", False, id="x-range-next-minor"),
+            pytest.param("1.2.0", "1.2.*", True, id="star-range-boundary"),
+            pytest.param("1.5.0", "1.x", True, id="x-range-major"),
+            pytest.param("2.0.0", "1.x", False, id="x-range-next-major"),
+            # Semver ``+build`` metadata must not affect precedence (issue #1293).
+            pytest.param(
+                "1.0.0+build", ">=1.0.0", True, id="build-metadata-comparison"
+            ),
+            pytest.param(
+                "0.92.2+1.20.1", "=0.92.2", True, id="build-metadata-equality"
+            ),
+            pytest.param(
+                "0.92.2+1.20.1", "0.92.2", True, id="build-metadata-implicit-equality"
+            ),
+            pytest.param(
+                "0.92.2+1.20.1", ">=0.92.0", True, id="build-metadata-fabric-range"
+            ),
+            pytest.param(
+                "0.11.2+build.123", ">=0.11.0", True, id="build-metadata-generic-range"
+            ),
+            pytest.param(
+                "0.91.0+x", ">=0.92.0", False, id="build-metadata-out-of-range"
+            ),
         ],
     )
-    def test_comparison_predicates(
-        self, version: str, spec: str, expected: bool
-    ) -> None:
-        assert version_satisfies(version, spec, "fabric") is expected
-
-
-class TestSemverTilde:
-    @pytest.mark.parametrize(
-        ("version", "spec", "expected"),
-        [
-            ("1.2.3", "~1.2.3", True),
-            ("1.2.9", "~1.2.3", True),
-            ("1.3.0", "~1.2.3", False),
-            ("1.2.0", "~1.2", True),
-            ("1.2.9", "~1.2", True),
-            ("1.3.0", "~1.2", False),
-            ("1.1.0", "~1.2", False),
-        ],
-    )
-    def test_tilde(self, version: str, spec: str, expected: bool) -> None:
-        assert version_satisfies(version, spec, "fabric") is expected
-
-
-class TestSemverCaret:
-    @pytest.mark.parametrize(
-        ("version", "spec", "expected"),
-        [
-            ("1.2.3", "^1.2.3", True),
-            ("1.9.0", "^1.2.3", True),
-            ("2.0.0", "^1.2.3", False),
-            ("1.0.0", "^1", True),
-            ("1.9.9", "^1", True),
-            ("2.0.0", "^1", False),
-            ("0.2.3", "^0.2.3", True),
-            ("0.3.0", "^0.2.3", False),
-        ],
-    )
-    def test_caret(self, version: str, spec: str, expected: bool) -> None:
-        assert version_satisfies(version, spec, "fabric") is expected
-
-
-class TestSemverXRange:
-    @pytest.mark.parametrize(
-        ("version", "spec", "expected"),
-        [
-            ("1.2.0", "1.2.x", True),
-            ("1.2.9", "1.2.x", True),
-            ("1.3.0", "1.2.x", False),
-            ("1.2.0", "1.2.*", True),
-            ("1.5.0", "1.x", True),
-            ("2.0.0", "1.x", False),
-        ],
-    )
-    def test_x_range(self, version: str, spec: str, expected: bool) -> None:
+    def test_predicates(self, version: str, spec: str, expected: bool) -> None:
         assert version_satisfies(version, spec, "fabric") is expected
 
 
@@ -123,32 +110,6 @@ class TestSemverCombinations:
     def test_quilt_uses_semver_dialect(self) -> None:
         assert version_satisfies("1.5.0", ">=1.0", "quilt") is True
         assert version_satisfies("0.9.0", ">=1.0", "quilt") is False
-
-
-class TestSemverBuildMetadata:
-    """Semver ``+build`` metadata must be ignored for precedence (issue #1293).
-
-    Real Fabric mod versions carry build metadata (e.g. ``0.92.2+1.20.1``,
-    ``0.11.2+build.123``); per semver it MUST NOT affect comparison.
-    """
-
-    @pytest.mark.parametrize(
-        ("version", "spec", "expected"),
-        [
-            ("1.0.0+build", ">=1.0.0", True),
-            ("0.92.2+1.20.1", "=0.92.2", True),
-            ("0.92.2+1.20.1", "0.92.2", True),
-            # A realistic Fabric-API-style version against a typical range.
-            ("0.92.2+1.20.1", ">=0.92.0", True),
-            ("0.11.2+build.123", ">=0.11.0", True),
-            # Build metadata on a genuinely out-of-range version stays False.
-            ("0.91.0+x", ">=0.92.0", False),
-        ],
-    )
-    def test_build_metadata_ignored(
-        self, version: str, spec: str, expected: bool
-    ) -> None:
-        assert version_satisfies(version, spec, "fabric") is expected
 
 
 class TestMavenIntervals:

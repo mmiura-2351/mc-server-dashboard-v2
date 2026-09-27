@@ -5,7 +5,8 @@ and once per *worker*. Only workers run tests, so a scratch database created on
 the controller is never used — it is created and immediately dropped again. The
 :func:`tests.conftest._is_xdist_controller` predicate lets ``pytest_configure``
 skip creation on the controller while still creating it for workers and for
-serial (no ``-n``) runs. These tests pin that three-way distinction.
+serial (no ``-n``) runs. These tests pin those states, including the conservative
+fallback when xdist did not register its options.
 """
 
 from __future__ import annotations
@@ -32,22 +33,18 @@ def _config(*, dist: str | None = "no", worker: bool = False) -> pytest.Config:
     return cast(pytest.Config, config)
 
 
-def test_xdist_controller_is_detected() -> None:
-    # `-n` active (dist != "no") and no `workerinput` -> this is the controller.
-    assert _is_xdist_controller(_config(dist="load", worker=False)) is True
-
-
-def test_xdist_worker_is_not_a_controller() -> None:
-    # `-n` active but `workerinput` present -> this is a worker, which needs its DB.
-    assert _is_xdist_controller(_config(dist="load", worker=True)) is False
-
-
-def test_serial_run_is_not_a_controller() -> None:
-    # No `-n` (dist == "no") -> single process that needs its own scratch DB.
-    assert _is_xdist_controller(_config(dist="no", worker=False)) is False
-
-
-def test_missing_dist_option_is_not_a_controller() -> None:
-    # Conservative default: if xdist never registered its options, treat the run
-    # as serial and create the DB rather than skip it.
-    assert _is_xdist_controller(_config(dist=None, worker=False)) is False
+@pytest.mark.parametrize(
+    ("dist", "worker", "expected"),
+    [
+        pytest.param("load", False, True, id="xdist-controller"),
+        pytest.param("load", True, False, id="xdist-worker"),
+        pytest.param("no", False, False, id="serial-run"),
+        # If xdist did not register its options, create the DB rather than risk an
+        # unsafe shared-database run by treating the process as a controller.
+        pytest.param(None, False, False, id="missing-xdist-options"),
+    ],
+)
+def test_xdist_controller_detection(
+    dist: str | None, worker: bool, expected: bool
+) -> None:
+    assert _is_xdist_controller(_config(dist=dist, worker=worker)) is expected
