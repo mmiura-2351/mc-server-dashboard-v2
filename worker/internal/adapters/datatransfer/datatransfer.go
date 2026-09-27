@@ -287,10 +287,12 @@ func (c *Client) Snapshot(ctx context.Context, url, token, srcDir string, baseGe
 // ScanHeldServers (scratchscan.go) skips the .displaced-<id> sibling and never
 // reports a .hydrate-* temp leftover as a held server it assigned, so a
 // crash-leftover .hydrate-* sibling is never matched; a stale one is also reclaimed
-// by the next hydrate's leftover sweep below (if the id is re-placed here) and by
+// by the next hydrate's leftover sweep below (if the id is re-placed here), by
 // the post-final-snapshot scratch GC, which sweeps this id's .hydrate-<id>-* siblings
-// alongside removing scratchDir/<id> once the stopped-id final snapshot publishes
-// (issue #766/#841/#842, instancemanager.removeScratch).
+// BEFORE removing scratchDir/<id> once the stopped-id final snapshot publishes
+// (issue #766/#841/#842/#3167, instancemanager.removeScratch), and — for an id that
+// never comes back, which none of those reach — by the boot reclaim
+// (instancemanager.ReclaimHydrateLeftovers, issue #3167).
 //
 // Displaced-tree retention (issue #906): the old working set this hydrate replaces
 // is NOT deleted — it is renamed aside to the per-server .displaced-<id> sibling.

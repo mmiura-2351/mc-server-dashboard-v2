@@ -17,7 +17,9 @@ import (
 //   - instancemanager's held-set scans SKIP it, using their own hydratePrefix in
 //     worker/internal/application/instancemanager/scratchscan.go.
 //   - both leftover SWEEPS RECLAIM it — sweepHydrateLeftovers here and
-//     Manager.sweepHydrateLeftovers there (issue #2409).
+//     Manager.sweepHydrateLeftovers there (issue #2409) — and so does the boot reclaim,
+//     instancemanager.ReclaimHydrateLeftovers (issue #3167), which is the only pass that
+//     still reaches a tree whose server never comes back to this Worker.
 //
 // So this test, its sweep companion below, and their twins in
 // worker/internal/application/instancemanager each assert the SAME hardcoded

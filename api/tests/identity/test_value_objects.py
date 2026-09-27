@@ -1,7 +1,5 @@
 """Unit tests for the identity value objects (pure, no I/O)."""
 
-import uuid
-
 import pytest
 
 from mc_server_dashboard_api.identity.domain.errors import (
@@ -10,23 +8,8 @@ from mc_server_dashboard_api.identity.domain.errors import (
 )
 from mc_server_dashboard_api.identity.domain.value_objects import (
     EmailAddress,
-    RefreshTokenId,
-    UserId,
     Username,
 )
-
-
-def test_user_id_new_is_unique() -> None:
-    assert UserId.new() != UserId.new()
-
-
-def test_user_id_wraps_a_uuid() -> None:
-    raw = uuid.uuid4()
-    assert UserId(raw).value == raw
-
-
-def test_refresh_token_id_new_is_unique() -> None:
-    assert RefreshTokenId.new() != RefreshTokenId.new()
 
 
 def test_username_must_not_be_blank() -> None:

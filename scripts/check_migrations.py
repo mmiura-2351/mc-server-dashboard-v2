@@ -19,6 +19,9 @@ violation:
 2. **Unique revision ids.** No two files may declare the same ``revision``.
 3. **Unique filename prefixes.** No two files may share the same numeric
    ``NNNN_`` prefix (the human-facing ordering that collided three times in M2).
+4. **Bounded revision ids.** Every ``revision`` must fit Alembic's
+   ``alembic_version.version_num`` varchar(32) column. A longer id otherwise
+   fails only when PostgreSQL applies the migration.
 
 The head count agrees with ``alembic heads --resolve-dependencies``, which CI
 runs alongside this script, on any tree whose edges are ``down_revision`` --
@@ -27,7 +30,7 @@ resolution, so on a tree that uses a construct outside that model it
 **declines to judge** the head count rather than emit a verdict it cannot
 stand behind (#2534): it exits clean, names the construct and the file, and
 points at the authoritative ``alembic heads --resolve-dependencies`` step in
-``.github/workflows/api.yml``. Checks 2 and 3 need no graph resolution and
+``.github/workflows/api.yml``. Checks 2 through 4 need no graph resolution and
 still apply.
 
 Two constructs trigger that decline: a non-``None`` ``depends_on`` -- alembic
@@ -51,8 +54,8 @@ alembic too, but such a tree declines anyway: declaring the label is itself a
 trigger.)
 
 The DB-gated metadata-sync test covers chain validity, but only on the merge
-ref and only when CI actually runs; this fast non-DB step makes the head/number
-invariants explicit and self-tested.
+ref and only when CI actually runs; this fast non-DB step makes the migration
+source invariants explicit and self-tested.
 
 Pure standard library; runs under any Python 3.8+ (the api/ venv or a system
 python). Exit status is non-zero when any check fails.
@@ -72,6 +75,9 @@ from pathlib import Path
 # The numeric ordering prefix of a version filename (e.g. ``0011`` in
 # ``0011_user_active.py``).
 FILENAME_PREFIX = re.compile(r"^(\d+)_")
+
+# Alembic creates ``alembic_version.version_num`` as varchar(32).
+REVISION_ID_MAX_LENGTH = 32
 
 
 class Migration:
@@ -214,7 +220,7 @@ def check_migrations(migrations: list[Migration], label_root: Path) -> list[str]
     """Return a list of violation messages (empty if clean).
 
     The head check is skipped -- not passed -- on a tree that uses a construct
-    ``unmodelled_constructs`` reports; the other two checks need no graph
+    ``unmodelled_constructs`` reports; the other checks need no graph
     resolution and always apply.
     """
     errors: list[str] = []
@@ -230,6 +236,17 @@ def check_migrations(migrations: list[Migration], label_root: Path) -> list[str]
         if len(paths) > 1:
             files = ", ".join(label(p) for p in sorted(paths))
             errors.append(f"duplicate revision id {revision!r}: {files}")
+
+    # 4. Revision ids must fit Alembic's version bookkeeping column. Checking
+    # the parsed assignment (rather than the filename) guards the value the DB
+    # actually stores.
+    for migration in migrations:
+        if len(migration.revision) > REVISION_ID_MAX_LENGTH:
+            errors.append(
+                f"{label(migration.path)}: revision id {migration.revision!r} is "
+                f"{len(migration.revision)} characters; "
+                f"alembic_version.version_num allows {REVISION_ID_MAX_LENGTH}"
+            )
 
     # 3. Unique numeric filename prefixes.
     by_prefix: dict[str, list[Path]] = {}
@@ -387,6 +404,13 @@ def _self_test() -> int:
         mig("0002_c.py", "0002_c", "0002_b"),
     ]
     expect("duplicate filename prefix", dup_prefix, flagged=True)
+
+    # Alembic stores the current revision in ``alembic_version.version_num``,
+    # whose varchar(32) column rejects a longer id only at upgrade time.
+    max_length_revision = [mig("0001_max.py", "r" * 32, None)]
+    expect("revision id fits version column", max_length_revision, flagged=False)
+    overlong_revision = [mig("0001_long.py", "r" * 33, None)]
+    expect("revision id exceeds version column", overlong_revision, flagged=True)
 
     # A merge migration reconciles two heads: both parents are consumed, so the
     # merge is the single head (this is what alembic reports for such a tree).

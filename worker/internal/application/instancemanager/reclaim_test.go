@@ -24,9 +24,9 @@ func TestReclaimDeletedScratchesRemovesScratchAndHydrateLeftovers(t *testing.T) 
 	}
 
 	// The SYNCHRONOUS body, as the rest of this file's per-id tests use. The
-	// asynchronous entry point removes the scratch dir first and sweeps the hydrate
-	// leftover after, so the leftover check would race that goroutine on its own
-	// (issue #1888), and the only barrier available is Close — which since issue
+	// asynchronous entry point runs that body on a goroutine, so both checks below
+	// would race it whatever order it removes in (issue #1888), and the only
+	// barrier available is Close — which since issue
 	// #2933 also STOPS the reclaim at its loop top, so a spawn that has not reached
 	// its first id yet reclaims nothing. TestCloseJoinsAnInFlightReclaim covers the
 	// goroutine and its join; this test is about what one id's reclaim removes.
@@ -37,6 +37,52 @@ func TestReclaimDeletedScratchesRemovesScratchAndHydrateLeftovers(t *testing.T) 
 	if _, err := os.Stat(leftover); !os.IsNotExist(err) {
 		t.Fatalf("hydrate leftover not reclaimed for deleted server: stat err = %v", err)
 	}
+}
+
+// The hydrate leftovers go BEFORE the scratch dir, and the order is the whole
+// point (issue #2934). <scratch>/<id> is what keeps the id advertised: both
+// held-set scans skip .hydrate-<id>-* (isReservedScratchName), so the instant that
+// dir goes the id leaves held_servers, the API never re-derives it into
+// unknown_held_server_ids, and this reclaim is the only pass that would ever be
+// offered the id again — only a Worker BOOT reclaims a .hydrate- tree
+// (ReclaimHydrateLeftovers, issue #3167), and a Worker runs for months between
+// boots, so that is the backstop and not the plan. Sweeping AFTER the removal
+// therefore made every interruption in that window a world-sized leak no runtime
+// pass ever reclaims. Sweeping before it makes the body recoverable instead: an
+// interruption anywhere in it leaves the scratch dir, and with it the
+// advertisement that re-offers the id at the next registration.
+//
+// The ordering is what makes this leg need no shutdown budget of its own (#2934).
+// Close joins this reclaim and compose.yaml's stop_grace_period bounds the whole
+// shutdown, but the value there is sized for the retry-stop leg, not this one:
+// "a partial reclaim is finished idempotently by the next registration" has to
+// hold at every point in the body, and with the other order it did not — at any
+// grace period, and for a crash or a power loss too.
+func TestReclaimSweepsHydrateLeftoversBeforeTheScratchDirGoes(t *testing.T) {
+	h := newBlockingReclaimLogger()
+	m := newManager(t, &fakeDriver{}, nil).WithLogger(slog.New(h))
+	// Registered AFTER newManager's Close, so cleanups run it FIRST (see
+	// TestCloseJoinsAnInFlightReclaim).
+	t.Cleanup(h.unpark)
+	seedScratch(t, m, "s1")
+	leftover := filepath.Join(m.scratchDir, ".hydrate-s1-stale")
+	if err := os.MkdirAll(leftover, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	m.ReclaimDeletedScratches([]string{"s1"})
+	// The parked record is emitted by the scratch removal itself, so reaching it
+	// means <scratch>/s1 is already gone — the exact instant after which no pass is
+	// ever offered this id again.
+	select {
+	case <-h.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the reclaim never reached its removal; the log record this test parks on has changed")
+	}
+	if _, err := os.Stat(leftover); !os.IsNotExist(err) {
+		t.Fatalf("the hydrate leftover outlived the scratch dir that advertises the id, so nothing can reclaim it: stat err = %v", err)
+	}
+	h.unpark()
 }
 
 // ReclaimDeletedScratches MUST NOT remove .displaced-<id> trees (issue #911).
@@ -169,7 +215,7 @@ func (h *blockingReclaimLogger) WithGroup(string) slog.Handler      { return h }
 func (h *blockingReclaimLogger) unpark() { h.releaseOnce.Do(func() { close(h.release) }) }
 
 // newBlockingReclaimLogger parks on the record reclaimDeletedScratches emits after
-// removing a scratch dir and before sweeping the hydrate leftovers.
+// removing a scratch dir and before releasing the reservation.
 func newBlockingReclaimLogger() *blockingReclaimLogger {
 	return &blockingReclaimLogger{
 		msg:     "reclaimed orphaned scratch for deleted server",
@@ -181,8 +227,8 @@ func newBlockingReclaimLogger() *blockingReclaimLogger {
 // Close JOINS a reclaim in flight (issue #2878). The reclaim was the one
 // manager-owned goroutine spawned with a bare go, so Close neither waited for it
 // nor cancelled it: parked here it has removed the scratch tree but has not yet
-// swept the hydrate leftovers or released the reservation, and a Close that
-// returned in that window lets the process exit inside it.
+// released the reservation, and a Close that returned in that window lets the
+// process exit inside it.
 func TestCloseJoinsAnInFlightReclaim(t *testing.T) {
 	awaitManagerGoroutines(t, 0)
 	h := newBlockingReclaimLogger()
@@ -191,11 +237,7 @@ func TestCloseJoinsAnInFlightReclaim(t *testing.T) {
 	// below would otherwise leave Close joining a reclaim nothing ever releases,
 	// and the package would hang instead of failing.
 	t.Cleanup(h.unpark)
-	seedScratch(t, m, "s1")
-	leftover := filepath.Join(m.scratchDir, ".hydrate-s1-stale")
-	if err := os.MkdirAll(leftover, 0o750); err != nil {
-		t.Fatal(err)
-	}
+	dir := seedScratch(t, m, "s1")
 
 	m.ReclaimDeletedScratches([]string{"s1"})
 	select {
@@ -225,8 +267,16 @@ func TestCloseJoinsAnInFlightReclaim(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Close did not return after the reclaim it joined had finished")
 	}
-	if _, err := os.Stat(leftover); !os.IsNotExist(err) {
-		t.Fatalf("Close returned before the joined reclaim finished its sweep: stat err = %v", err)
+	// The work still ahead of the park is the release, so that is what proves Close
+	// waited for the body rather than merely for the goroutine's last log record.
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("the joined reclaim did not remove the scratch dir: stat err = %v", err)
+	}
+	m.mu.Lock()
+	stillReserved := len(m.reserved)
+	m.mu.Unlock()
+	if stillReserved != 0 {
+		t.Fatalf("Close returned before the joined reclaim released its reservation: %d held", stillReserved)
 	}
 	awaitManagerGoroutines(t, 0)
 }

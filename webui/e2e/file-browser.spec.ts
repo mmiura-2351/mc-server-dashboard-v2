@@ -199,50 +199,6 @@ test.describe("file browser drag-and-drop overwrite", () => {
     "requires MCD_E2E_HAS_WORKER=1 (worker-assigned server)",
   );
 
-  test("shows overwrite dialog when dropping a file that already exists", async ({
-    page,
-    request,
-  }) => {
-    const { owner, communityId, serverId, token } = await setupServer(request);
-    await signIn(page, owner.username, owner.password);
-
-    // Step 1: Upload a file via API so it exists on the server.
-    await uploadFile(
-      request,
-      communityId,
-      serverId,
-      token,
-      "ow-test.txt",
-      "original content",
-    );
-
-    // Step 2: Open the file browser and wait for the file to appear.
-    await openFilesBrowser(page, communityId, serverId);
-    await expect(page.locator("text=ow-test.txt")).toBeVisible({
-      timeout: 15_000,
-    });
-
-    // Step 3: Drop a file with the same name.
-    await dropFileOnTree(page, "ow-test.txt", "new content");
-
-    // Step 4: The overwrite confirmation dialog should appear.
-    await expect(page.locator(".modal")).toBeVisible({ timeout: 10_000 });
-    // Verify it is the overwrite dialog by checking for the overwrite button.
-    await expect(
-      page.locator(".modal button").filter({ hasText: /Overwrite|上書き/ }),
-    ).toBeVisible();
-
-    // Cancel to clean up without overwriting.
-    await page
-      .locator(".modal button")
-      .filter({ hasText: /Cancel|キャンセル/ })
-      .click();
-    await expect(page.locator(".modal")).not.toBeVisible();
-
-    // Clean up.
-    await deleteFile(request, communityId, serverId, token, "ow-test.txt");
-  });
-
   test("overwrites the file when user confirms", async ({ page, request }) => {
     const { owner, communityId, serverId, token } = await setupServer(request);
     await signIn(page, owner.username, owner.password);

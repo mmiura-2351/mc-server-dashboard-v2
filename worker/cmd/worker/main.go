@@ -86,9 +86,11 @@ func run(ctx context.Context) error {
 	// orphan sweep (cd.Sweep), which force-removes every container this Worker
 	// previously started. Orphaned containers keep writing to their bind-mounted
 	// scratch dirs, so the fsck inside ScanHeldServers must not run until the sweep
-	// has quiesced all live writers. ScanHeldServers is called below, after the
-	// manager is fully initialised. caps is not needed until NewRunner.
-	manager, err := buildInstanceManager(sigCtx, cfg, logger)
+	// has quiesced all live writers — and must not run at all when the sweep could not
+	// establish that, which is what quiesced reports (issue #3171). ScanHeldServers is
+	// called below, after the manager is fully initialised. caps is not needed until
+	// NewRunner.
+	manager, quiesced, err := buildInstanceManager(sigCtx, cfg, logger)
 	if err != nil {
 		return err
 	}
@@ -110,11 +112,50 @@ func run(ctx context.Context) error {
 	// it was when the process simply exited underneath these goroutines; the
 	// individual drops are stated at each pump in instancemanager.go.
 	defer manager.Close()
-	// Reclaim any .sweeping-<id>-* tree a displaced-tree sweep renamed out of its slot
-	// but did not finish removing (issue #2799): nothing else ever reclaims one, and
-	// each is a world-sized leak. Nothing sweeps at boot, so every such tree is garbage.
-	// Run after the orphan sweep above, so no container can still be writing into it.
-	instancemanager.ReclaimInterruptedDisplacedSweeps(cfg.Worker.ScratchDir)
+	// The two boot reclaims: every .sweeping-<id>-* tree a displaced-tree sweep renamed
+	// out of its slot but did not finish removing (issue #2799), and every .hydrate-<id>-*
+	// tree an interrupted hydrate — or a GC path killed between its leftover sweep and its
+	// scratch removal — left behind (issue #3167). Nothing else ever reclaims either once
+	// the id's scratch dir is gone: the held-set scans skip both prefixes, so the id is
+	// never advertised as held and no per-id sweep is offered it again. No hydrate can be
+	// in flight to own one either — the session that dispatches hydrates starts below.
+	//
+	// BOTH ARE GATED ON THE ORPHAN SWEEP HAVING SUCCEEDED (PR #3170 review round 2). They
+	// delete world-sized trees outright, and they share one premise: no container this
+	// Worker started is still writing into what is about to be recursively deleted. The
+	// container orphan sweep inside buildInstanceManager is what establishes that premise,
+	// and its failure is deliberately non-fatal — so the premise can simply be false here.
+	//
+	// What that costs when it is: a sweep that failed at an EARLIER boot leaves an orphan
+	// running with <scratch>/<id> bind-mounted, and nothing re-adopts containers, so this
+	// Worker's instance map does not know it exists. A HydrateTrigger for that id then
+	// proceeds and renames the live tree aside — to .hydrate-<id>-superseded-* when the
+	// .displaced-<id> slot is occupied (issue #2278), and to .displaced-<id> otherwise,
+	// from where a later successful snapshot's sweep renames it to .sweeping-<id>-*. The
+	// orphan's mount follows the inode, so it keeps writing into the renamed tree. A boot
+	// whose sweep fails again would delete a LIVE world, and the server's open descriptors
+	// would go on writing into unlinked inodes, losing everything after that too.
+	//
+	// Skipping costs a delay instead: the trees wait for a boot whose sweep succeeds. The
+	// leak is recoverable, the deletion is not, which is the same direction every
+	// uncertainty in the sweep path already resolves to (sweepDisplaced, putBackSweptTree).
+	//
+	// Making the sweep FATAL was the alternative and is worse: a transient docker socket
+	// flap would then stop the Worker from serving every server on the host, including the
+	// ones with no leftovers at all, to protect trees that a later boot reclaims anyway —
+	// and with docker down those trees stay unreclaimable either way. The non-fatal sweep
+	// is a deliberate posture (buildInstanceManager states it); this gate keeps the
+	// reclaims honest about it rather than overturning it.
+	if quiesced {
+		instancemanager.ReclaimInterruptedDisplacedSweeps(cfg.Worker.ScratchDir)
+		instancemanager.ReclaimHydrateLeftovers(cfg.Worker.ScratchDir)
+	} else {
+		logger.Warn("skipping the boot scratch reclaims: the container orphan sweep did not "+
+			"establish that no container is still writing, so a .sweeping-<id>-* or "+
+			"a .hydrate-<id>-* tree here may be a running orphan's live world; the next boot "+
+			"whose sweep succeeds reclaims them (issues #2799/#3167)",
+			"scratch_dir", cfg.Worker.ScratchDir)
+	}
 	// Advertise the working sets already on the persistent scratch, each tagged
 	// with its generation, so the API skips the destructive hydrate on a same-worker
 	// restart only when the held generation is fresh enough (issue #763): a hydrate
@@ -124,7 +165,16 @@ func run(ctx context.Context) error {
 	// this call; ScanHeldServers fscks region files and regionfsck requires a
 	// quiesced working set — scanning a live world races the server's writes and
 	// can false-positive a healthy region as corrupt (issue #834).
-	heldServers := instancemanager.ScanHeldServers(cfg.Worker.ScratchDir, logger)
+	//
+	// Completing is not the same as SUCCEEDING, so the sweep's own verdict is threaded
+	// in (issue #3171). With quiescence unproven the scan advertises each set at the
+	// generation its marker records and skips the fsck, because the torn verdict it
+	// would reach on a running orphan's world is an artefact of reading it mid-write —
+	// and a generation 0 is what makes the API dispatch the hydrate that would unpack
+	// over that live world. Unlike the reclaims above, this call is NOT skipped: an
+	// advertisement withheld reports nothing held, and the API then hydrates every
+	// server on this Worker. The gate is on the judgement, not on the report.
+	heldServers := instancemanager.ScanHeldServers(cfg.Worker.ScratchDir, quiesced, logger)
 	// Log a WARN for each .displaced-<id> tree whose server id is not in the held
 	// set (issue #911): those trees are orphaned recovery copies — the server was
 	// deleted or re-placed elsewhere — and will never be GC'd automatically. The
@@ -163,8 +213,17 @@ func run(ctx context.Context) error {
 // working-dir server.properties. A driver is constructed only when
 // worker.drivers advertises it; the container driver also sweeps leftover
 // containers from a previous run before any server is launched.
-func buildInstanceManager(ctx context.Context, cfg config.Config, logger *slog.Logger) (*instancemanager.Manager, error) {
+//
+// The second return value reports whether that sweep ESTABLISHED QUIESCENCE: no container
+// this Worker previously started is still running, and therefore none can still be writing
+// into a scratch tree. It is false when a sweep failed — which stays non-fatal — and every
+// boot step that rests on that premise is gated on it: the two scratch reclaims, which
+// delete trees (PR #3170 review round 2), and the held-set scan's region fsck, which judges
+// them (issue #3171). Both gates are in run(). It is true when no container driver was
+// built, because then this Worker has started no containers at all.
+func buildInstanceManager(ctx context.Context, cfg config.Config, logger *slog.Logger) (*instancemanager.Manager, bool, error) {
 	wc := cfg.Worker
+	quiesced := true
 
 	// containerRconHost resolves the RCON dial host for a server. It is empty
 	// (loopback) unless a container driver with a configured network is built, in
@@ -184,7 +243,7 @@ func buildInstanceManager(ctx context.Context, cfg config.Config, logger *slog.L
 		case "container":
 			docker, err := containerdriver.NewEngineClient(cfg.Driver.Container.DockerHost)
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			// The container driver dials RCON at the host the driver derives from its
 			// topology (loopback when no network, the container name when a network is
@@ -208,7 +267,11 @@ func buildInstanceManager(ctx context.Context, cfg config.Config, logger *slog.L
 			if err := cd.Sweep(ctx); err != nil {
 				// A failed sweep is logged, not fatal: leftover containers block the
 				// affected servers' restart but must not stop the Worker from serving.
+				// It does, however, leave quiescence UNPROVEN: an orphan may still be
+				// running and writing into its bind-mounted scratch tree, which is why
+				// the caller's boot reclaims decline rather than delete (run()).
 				logger.Warn("container orphan sweep failed", "error", err)
+				quiesced = false
 			}
 			drivers[name] = cd
 		}
@@ -243,7 +306,7 @@ func buildInstanceManager(ctx context.Context, cfg config.Config, logger *slog.L
 		WithLogger(logger).
 		WithWorkerID(wc.ID).
 		WithTunnelDialer(tunnelDialerAdapter{tunnelDialer}).
-		WithBedrockTunneler(bedrockTunnelerAdapter{bedrockTunnel}), nil
+		WithBedrockTunneler(bedrockTunnelerAdapter{bedrockTunnel}), quiesced, nil
 }
 
 // tunnelDialerAdapter adapts a tunnel.Dialer to instancemanager.TunnelDialer,

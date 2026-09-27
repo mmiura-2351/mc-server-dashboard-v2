@@ -71,7 +71,7 @@ func TestScanHeldServersReportsNonEmptyDirsWithGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := ScanHeldServers(scratch, nil)
+	got := ScanHeldServers(scratch, true, nil)
 	sort.Slice(got, func(i, j int) bool { return got[i].ServerID < got[j].ServerID })
 	want := []session.HeldServer{
 		{ServerID: "held-nomarker", Generation: 0},
@@ -126,7 +126,7 @@ func TestScanHeldServersSkipsGenerationMarkerTempLeftover(t *testing.T) {
 	// Both callers share hasWorkingSet, so both are asserted — non-fatally, so a
 	// regression names every caller it broke in one run.
 	want := session.HeldServer{ServerID: "leftover-plus-world", Generation: 0}
-	if got := ScanHeldServers(scratch, nil); len(got) != 1 || got[0] != want {
+	if got := ScanHeldServers(scratch, true, nil); len(got) != 1 || got[0] != want {
 		t.Errorf("ScanHeldServers = %v, want [%v]", got, want)
 	}
 	m := New(nil, scratch, nil)
@@ -139,7 +139,7 @@ func TestScanHeldServersSkipsGenerationMarkerTempLeftover(t *testing.T) {
 // TestScanHeldServersMissingScratchRoot verifies an absent scratch root yields an
 // empty list (a fresh Worker holds nothing), not a panic or error.
 func TestScanHeldServersMissingScratchRoot(t *testing.T) {
-	got := ScanHeldServers(filepath.Join(t.TempDir(), "does-not-exist"), nil)
+	got := ScanHeldServers(filepath.Join(t.TempDir(), "does-not-exist"), true, nil)
 	if len(got) != 0 {
 		t.Fatalf("held = %v, want empty", got)
 	}
@@ -152,6 +152,12 @@ func TestScanHeldServersMissingScratchRoot(t *testing.T) {
 // marker next to a torn local world. Advertising gen N would let the #767 skip gate
 // boot the torn world; advertising 0 forces a hydrate that recovers the consistent
 // store copy.
+//
+// This is the QUIESCED leg (quiesced=true): the boot whose container orphan sweep
+// succeeded, where the fsck's verdict is trustworthy because no live writer is left.
+// The other leg — the same fixture on a boot whose sweep did not establish that — is
+// TestScanHeldServersAdvertisesTheRecordedGenerationWhenQuiescenceIsUnproven, and the
+// two together are the whole rule (issue #3171).
 func TestScanHeldServersTornRegionForcesHydrate(t *testing.T) {
 	scratch := t.TempDir()
 
@@ -183,7 +189,7 @@ func TestScanHeldServersTornRegionForcesHydrate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := ScanHeldServers(scratch, nil)
+	got := ScanHeldServers(scratch, true, nil)
 	sort.Slice(got, func(i, j int) bool { return got[i].ServerID < got[j].ServerID })
 	want := []session.HeldServer{
 		{ServerID: "sound-server", Generation: 4},
@@ -195,6 +201,72 @@ func TestScanHeldServersTornRegionForcesHydrate(t *testing.T) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("held = %v, want %v", got, want)
+		}
+	}
+}
+
+// TestScanHeldServersAdvertisesTheRecordedGenerationWhenQuiescenceIsUnproven verifies
+// the boot scan does NOT judge a held world when the container orphan sweep did not
+// establish quiescence (issue #3171): every held set is advertised at the generation its
+// marker records, torn-looking or not.
+//
+// The fsck's verdict is only meaningful on a quiesced set — regionfsck states that
+// contract at its own site, and the gen-0 rule above inherits it. After a failed sweep
+// an orphan container can still be running with <scratch>/<id> bind-mounted: the failure
+// is deliberately non-fatal, and nothing re-adopts containers, so the Worker does not
+// even know the world is live (PR #3170). The scan then reads a mid-write world and can
+// call a healthy set torn, and a generation 0 is a false "hydrate me" — the API's skip
+// gate dispatches the destructive hydrate over a world that is still being written.
+//
+// Advertising the marker unjudged costs the opposite risk, and it is the smaller one: a
+// genuinely torn set is booted at its recorded generation for this ONE boot, with the
+// consistent store copy still there, while the alternative destroys a live world
+// irrecoverably. The fsck is deferred, not dropped — it runs at the next boot whose sweep
+// succeeds, the leg TestScanHeldServersTornRegionForcesHydrate pins. The remaining
+// alternative, skipping the scan altogether, advertises NOTHING held and makes the API
+// hydrate every server on this Worker, which is worse than either.
+func TestScanHeldServersAdvertisesTheRecordedGenerationWhenQuiescenceIsUnproven(t *testing.T) {
+	scratch := t.TempDir()
+
+	// The SAME fixtures the quiesced leg above advertises at 0 and 4: a genuinely torn
+	// region with a durable gen-9 marker, and a structurally sound one at gen 4. Only the
+	// quiescence argument differs between the two tests, so only it can explain the
+	// different answer.
+	torn := filepath.Join(scratch, "torn-server", "region")
+	if err := os.MkdirAll(torn, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(torn, "r.0.0.mca"), healthyRegion()[:3*fsckSector-10], 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeGeneration(filepath.Join(scratch, "torn-server"), 9); err != nil {
+		t.Fatal(err)
+	}
+	sound := filepath.Join(scratch, "sound-server", "region")
+	if err := os.MkdirAll(sound, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sound, "r.0.0.mca"), healthyRegion(), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeGeneration(filepath.Join(scratch, "sound-server"), 4); err != nil {
+		t.Fatal(err)
+	}
+
+	got := ScanHeldServers(scratch, false, nil)
+	sort.Slice(got, func(i, j int) bool { return got[i].ServerID < got[j].ServerID })
+	want := []session.HeldServer{
+		{ServerID: "sound-server", Generation: 4},
+		{ServerID: "torn-server", Generation: 9},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("held = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("held = %v, want %v: with quiescence unproven the scan reports what the "+
+				"marker says, because the set it would judge may be a running orphan's live "+
+				"world (issue #3171)", got, want)
 		}
 	}
 }
@@ -223,7 +295,7 @@ func TestScanHeldServersLiveFormatScratchAdvertisesHeldGeneration(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	got := ScanHeldServers(scratch, nil)
+	got := ScanHeldServers(scratch, true, nil)
 	want := []session.HeldServer{{ServerID: "live-server", Generation: 11}}
 	if len(got) != len(want) || got[0] != want[0] {
 		t.Fatalf("held = %v, want %v", got, want)

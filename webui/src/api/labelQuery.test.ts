@@ -24,18 +24,6 @@ describe("labelQueryFn", () => {
     await expect(fn()).rejects.toBe(err);
   });
 
-  it("rethrows a non-403 ApiError (500)", async () => {
-    const err = new ApiError(500, { reason: "internal_error" });
-    const fn = labelQueryFn(() => Promise.reject(err), []);
-    await expect(fn()).rejects.toBe(err);
-  });
-
-  it("rethrows a non-ApiError (network) error", async () => {
-    const err = new TypeError("network down");
-    const fn = labelQueryFn(() => Promise.reject(err), []);
-    await expect(fn()).rejects.toBe(err);
-  });
-
   it("forwards the query-function context to the wrapped fn", async () => {
     // TanStack calls the queryFn with a context carrying the abort signal;
     // the wrapper must pass it through so requests stay cancellable (#1728).

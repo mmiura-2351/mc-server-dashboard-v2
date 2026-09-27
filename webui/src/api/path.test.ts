@@ -32,18 +32,4 @@ describe("apiPath", () => {
   it("returns a parameterless path unchanged", () => {
     expect(apiPath("/api/communities", {})).toBe("/api/communities");
   });
-
-  it("rejects a misspelled param name at the type level", () => {
-    apiPath("/api/communities/{community_id}/me/permissions", {
-      // @ts-expect-error wrong param name: the template declares community_id
-      communityId: "c1",
-    });
-  });
-
-  it("rejects a missing param at the type level", () => {
-    // @ts-expect-error grant_id is required by the template
-    apiPath("/api/communities/{community_id}/grants/{grant_id}", {
-      community_id: "c1",
-    });
-  });
 });

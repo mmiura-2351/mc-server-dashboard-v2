@@ -778,29 +778,18 @@ describe("ServerPluginsTab Paper: no side column, no download button (issue #134
   });
 });
 
-describe("ServerPluginsTab error messages (issue #1345)", () => {
+describe("ServerPluginsTab error presentation glue", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  /**
-   * Trigger the file upload mutation with a failing ApiError.
-   *
-   * The status/reason pair must be one the API actually emits — every plugin
-   * mutation shares one `onError`, so a fixture is read as a description of a
-   * real response (issue #2421).
-   */
-  async function triggerUploadError(status: number, reason: string) {
+  async function triggerUploadError(error: ApiError) {
     mockGets({ plugins: [plugin()], validation: EMPTY_VALIDATION });
-    mockPostFormWithProgress.mockRejectedValue(
-      new ApiError(status, { reason }),
-    );
+    mockPostFormWithProgress.mockRejectedValue(error);
     renderTab();
     await waitFor(() => {
       expect(screen.getByText("Sodium")).toBeInTheDocument();
     });
-    // Click the Upload JAR button to open the file picker, then simulate a
-    // file selection via the hidden input.
     const input = document.querySelector(
       'input[type="file"]',
     ) as HTMLInputElement;
@@ -810,139 +799,31 @@ describe("ServerPluginsTab error messages (issue #1345)", () => {
     fireEvent.change(input, { target: { files: [file] } });
   }
 
-  it("shows a specific message for plugin_already_exists", async () => {
-    await triggerUploadError(409, "plugin_already_exists");
-    await waitFor(() => {
-      expect(
-        screen.getByText(
-          "A mod with the same name or project is already installed.",
-        ),
-      ).toBeInTheDocument();
-    });
+  it("renders the mapper-selected message with the loader-aware noun", async () => {
+    await triggerUploadError(
+      new ApiError(409, { reason: "plugin_already_exists" }),
+    );
+
+    expect(
+      await screen.findByText(
+        "A mod with the same name or project is already installed.",
+      ),
+    ).toBeInTheDocument();
   });
 
-  it("shows a specific message for server_unsettled", async () => {
-    await triggerUploadError(409, "server_unsettled");
-    await waitFor(() => {
-      expect(
-        screen.getByText(
-          "The server is not ready. Wait for the current operation to finish.",
-        ),
-      ).toBeInTheDocument();
-    });
-  });
+  it("routes a 403 through onForbidden instead of the mapper", async () => {
+    await triggerUploadError(
+      new ApiError(403, { reason: "forbidden", permission: "plugin:manage" }),
+    );
 
-  it("shows a specific message for catalog_upstream_failed", async () => {
-    // 502 is the status the catalog-backed plugin routes render this reason
-    // with (plugins.py `_bad_gateway`); the upload mock is only the vehicle,
-    // since every plugin mutation shares one `onError`.
-    await triggerUploadError(502, "catalog_upstream_failed");
-    await waitFor(() => {
-      expect(
-        screen.getByText("Could not reach Modrinth. Please try again later."),
-      ).toBeInTheDocument();
-    });
-  });
-
-  it("shows a specific message for invalid_path", async () => {
-    await triggerUploadError(422, "invalid_path");
-    await waitFor(() => {
-      expect(
-        screen.getByText(
-          "Invalid file. Only .jar files can be uploaded as mods.",
-        ),
-      ).toBeInTheDocument();
-    });
-  });
-
-  // The reason→key map deliberately omits `file_too_large` (413-only): its
-  // message equals the 413 status fallback, so the status alone carries it
-  // (#2460). This pins that the drop left the rendered message identical.
-  it("shows the tooLarge message for a 413 (carried by the status fallback)", async () => {
-    await triggerUploadError(413, "file_too_large");
-    await waitFor(() => {
-      expect(
-        screen.getByText(
-          "The file is too large. Maximum upload size is 512 MB.",
-        ),
-      ).toBeInTheDocument();
-    });
-  });
-
-  // A Geyser install that exhausts the Bedrock UDP port window raises a truthful
-  // 503 `bedrock_port_range_exhausted` (plugins.py / catalog.py
-  // `_service_unavailable`). Its own reason entry now names the port cause rather
-  // than falling to the 503 worker-disconnect message (issue #2657).
-  it("shows a specific message for bedrock_port_range_exhausted", async () => {
-    await triggerUploadError(503, "bedrock_port_range_exhausted");
-    await waitFor(() => {
-      expect(
-        screen.getByText(
-          "No free port is available in the Bedrock port range. Please try again later.",
-        ),
-      ).toBeInTheDocument();
-    });
-  });
-
-  // The UNIQUE(bedrock_port) backstop firing on a concurrent allocation racer
-  // raises 409 `bedrock_port_taken` (plugins.py / catalog.py `_conflict`).
-  it("shows a specific message for bedrock_port_taken", async () => {
-    await triggerUploadError(409, "bedrock_port_taken");
-    await waitFor(() => {
-      expect(
-        screen.getByText(
-          "The Bedrock port is already in use. Please try again.",
-        ),
-      ).toBeInTheDocument();
-    });
-  });
-
-  // A blank or over-long display name raises 422 `invalid_display_name`
-  // (plugins.py `_unprocessable`).
-  it("shows a specific message for invalid_display_name", async () => {
-    await triggerUploadError(422, "invalid_display_name");
-    await waitFor(() => {
-      expect(
-        screen.getByText("The display name is invalid."),
-      ).toBeInTheDocument();
-    });
-  });
-
-  // The `case 503` fallback is load-bearing for a reason-less 503 — a proxy or
-  // gateway 503 whose body carries no `reason` (issue #2657). It must still
-  // render workerUnavailable; deleting the branch would drop this to generic.
-  it("shows the workerUnavailable message for a reason-less 503", async () => {
-    mockGets({ plugins: [plugin()], validation: EMPTY_VALIDATION });
-    mockPostFormWithProgress.mockRejectedValue(new ApiError(503, {}));
-    renderTab();
-    await waitFor(() => {
-      expect(screen.getByText("Sodium")).toBeInTheDocument();
-    });
-    const input = document.querySelector(
-      'input[type="file"]',
-    ) as HTMLInputElement;
-    const file = new File(["x"], "test.jar", {
-      type: "application/java-archive",
-    });
-    fireEvent.change(input, { target: { files: [file] } });
-    await waitFor(() => {
-      expect(
-        screen.getByText(
-          "The server agent is disconnected. Please try again later.",
-        ),
-      ).toBeInTheDocument();
-    });
-  });
-
-  it("falls back to the generic message for an unknown reason", async () => {
-    // A deliberately synthetic reason on a real upload status: the point is a
-    // reason the mapping table does not know, so it must not be a real one.
-    await triggerUploadError(409, "some_unknown_reason");
-    await waitFor(() => {
-      expect(
-        screen.getByText("Something went wrong. Please try again."),
-      ).toBeInTheDocument();
-    });
+    expect(
+      await screen.findByText(
+        t("permissions.deniedNamed", { permission: "plugin:manage" }),
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("plugins.error.generic")),
+    ).not.toBeInTheDocument();
   });
 });
 

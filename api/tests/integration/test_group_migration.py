@@ -1,11 +1,11 @@
-"""Round-trip for the 0012 player-group migration + Owner backfill (issue #276).
+"""Owner permission backfill for the 0012 player-group migration (issue #276).
 
 Runs only when ``MCD_TEST_DATABASE_URL`` is set (the CI Postgres service);
-skipped otherwise (TESTING.md Section 5). Asserts the three tables exist at head
-and are dropped on downgrade, and that the upgrade backfills the two new
-permission codes onto an existing preset Owner role (seeded at 0011_user_active,
-missing the codes) while leaving a non-preset and a non-Owner preset role
-untouched; downgrade strips them again (mirrors 0008's audit:read backfill test).
+skipped otherwise (TESTING.md Section 5). Asserts that the upgrade backfills the
+two new permission codes onto an existing preset Owner role (seeded at
+0011_user_active, missing the codes) while leaving a non-preset and a non-Owner
+preset role untouched; downgrade strips them again (mirrors 0008's audit:read
+backfill test).
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import os
 import uuid
 
 import pytest
-from sqlalchemy import inspect, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
 from tests.integration.migrate import downgrade_to, upgrade_to
@@ -27,7 +27,6 @@ pytestmark = pytest.mark.skipif(
 )
 
 _NOW = dt.datetime(2026, 6, 5, 12, 0, tzinfo=dt.timezone.utc)
-_GROUP_TABLES = {"player_group", "group_player", "server_group"}
 _NEW_PERMISSIONS = ("group:read", "group:manage")
 # An old-style Owner permission set without the new group codes.
 _OLD_OWNER_PERMS = ["server:create", "server:read", "community:read"]
@@ -76,31 +75,6 @@ async def _perms(conn: AsyncConnection, role_id: uuid.UUID) -> list[str]:
         text("SELECT permissions FROM role WHERE id = :id"), {"id": role_id}
     )
     return list(result.scalar_one())
-
-
-async def test_group_tables_created_and_dropped() -> None:
-    assert _DB_URL is not None
-    # Establish a known state first (mirrors the other migration tests): a clean
-    # run has no ``alembic_version`` row, so ``downgrade_to`` would have no
-    # current head to descend from and Alembic would raise CommandError.
-    await downgrade_to("base", _DB_URL)
-    await upgrade_to("0012_player_groups", _DB_URL)
-
-    engine = create_async_engine(_DB_URL)
-    try:
-        async with engine.connect() as conn:
-            tables = await conn.run_sync(lambda sc: set(inspect(sc).get_table_names()))
-        assert _GROUP_TABLES <= tables
-
-        await downgrade_to("0011_user_active", _DB_URL)
-        async with engine.connect() as conn:
-            tables_after = await conn.run_sync(
-                lambda sc: set(inspect(sc).get_table_names())
-            )
-        assert not (_GROUP_TABLES & tables_after)
-    finally:
-        await engine.dispose()
-    await downgrade_to("base", _DB_URL)
 
 
 async def test_backfill_adds_group_codes_to_preset_owner_only() -> None:

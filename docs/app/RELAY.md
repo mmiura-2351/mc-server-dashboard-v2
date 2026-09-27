@@ -700,5 +700,11 @@ for *new* joins); relay-mediated status pings with a 5 s cache (Section 7).
   (`relay_bedrock_bind_failures_total`), and the shared per-IP cap rejections
   reused with `listener="bedrock"`. All labels are bounded enums — no
   per-client-IP/source-address label.
-- **Graceful drain on shutdown** — restart drops in-flight sessions rather
-  than draining them; a drain window is not provided.
+- **Graceful drain on shutdown** — restart drops in-flight *player* sessions
+  rather than draining them: connections are not held open, migrated, or given
+  a window to finish. What the process does wait for is the **session-record**
+  drain — `gameLn.Drain` (30 s) for the in-flight handlers, then the reporter's
+  final flush (10 s) — so a session that closes during shutdown still reports
+  its real `End` instead of being healed approximately by `close_absent`
+  (Sections 6 and 10). `compose.yaml` budgets that wait with
+  `stop_grace_period: 45s` on the `relay` service (issue #2934).

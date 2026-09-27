@@ -20,6 +20,8 @@ import inspect
 import logging
 from collections.abc import Awaitable, Callable
 
+from mc_server_dashboard_api.core.adapters.periodic_runner import run_periodic
+
 _LOG = logging.getLogger(__name__)
 
 Sweep = Callable[[], Awaitable[None]] | Callable[[], None]
@@ -28,16 +30,14 @@ Sweep = Callable[[], Awaitable[None]] | Callable[[], None]
 async def run_storage_sweep_loop(sweep: Sweep, *, tick_seconds: float) -> None:
     """Run one sweep every ``tick_seconds`` until cancelled."""
 
-    while True:
-        # Sleep first so the initial tick is deferred by one full cadence; the
-        # startup hook already runs one sweep before this loop is created.
-        await asyncio.sleep(tick_seconds)
-        try:
-            if inspect.iscoroutinefunction(sweep):
-                await sweep()
-            else:
-                await asyncio.to_thread(sweep)
-        except asyncio.CancelledError:
-            raise
-        except Exception:  # noqa: BLE001 - one bad pass must not kill the loop
-            _LOG.exception("storage sweep pass failed; continuing")
+    async def run_sweep() -> None:
+        if inspect.iscoroutinefunction(sweep):
+            await sweep()
+        else:
+            await asyncio.to_thread(sweep)
+
+    await run_periodic(
+        run_sweep,
+        tick_seconds=tick_seconds,
+        on_error=lambda: _LOG.exception("storage sweep pass failed; continuing"),
+    )

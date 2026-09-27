@@ -781,7 +781,7 @@ requires-dist = [
     { name = "bcrypt", specifier = ">=5.0.0,<6" },
     { name = "cronsim", specifier = ">=2.7,<3" },
     { name = "fastapi", specifier = ">=0.136.3,<0.142" },
-    { name = "grpcio", specifier = ">=1.80.0,<1.84" },
+    { name = "grpcio", specifier = ">=1.80.0,<1.85" },
     { name = "httpx2", specifier = ">=2.5.0,<3" },
     { name = "prometheus-client", specifier = ">=0.25.0,<0.27" },
     { name = "protobuf", specifier = ">=6.31.1,<7" },
@@ -789,13 +789,13 @@ requires-dist = [
     { name = "pyjwt", specifier = ">=2.13.0,<3" },
     { name = "python-multipart", specifier = ">=0.0.29,<0.0.33" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.50,<3" },
-    { name = "uvicorn", specifier = ">=0.48.0,<0.53" },
+    { name = "uvicorn", specifier = ">=0.48.0,<0.54" },
     { name = "websockets", specifier = ">=16.0,<18" },
 ]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "grpcio-tools", specifier = ">=1.80.0,<1.84" },
+    { name = "grpcio-tools", specifier = ">=1.80.0,<1.85" },
     { name = "import-linter", specifier = ">=2.11" },
     { name = "mypy", specifier = ">=2.1.0" },
     { name = "mypy-protobuf", specifier = ">=5.1.0,<6" },
@@ -805,7 +805,7 @@ dev = [
     { name = "pytest-cov", specifier = ">=7.1.0,<8" },
     { name = "pytest-timeout", specifier = ">=2.4.0,<3" },
     { name = "pytest-xdist", specifier = ">=3.6.1,<4" },
-    { name = "ruff", specifier = ">=0.15.14,<0.16.7" },
+    { name = "ruff", specifier = ">=0.15.14,<0.16.8" },
 ]
 
 [[package]]
