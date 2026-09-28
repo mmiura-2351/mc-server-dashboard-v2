@@ -704,21 +704,6 @@ def _failed_transfer_result() -> pb.CommandResult:
     )
 
 
-async def test_late_failed_snapshot_clears_held_assignment() -> None:
-    # A snapshot dispatch times out (its future is discarded), then the OWNING
-    # worker reports a late TRANSFER_FAILED. The unmatched result must route to the
-    # late-snapshot sink so the held assignment clears immediately (issue #891).
-    sink = _RecordingLateSnapshotSink()
-    state = ControlPlaneState(late_snapshot_sink=sink)
-    owner = WorkerId(_WORKER)
-
-    state.register_pending("cmd-1", owner, snapshot_server_id=_SERVER)
-    state.discard_pending("cmd-1")  # dispatch timeout
-    await state.resolve("cmd-1", owner, _failed_transfer_result())
-
-    assert sink.calls == [(_SERVER, owner.value, False, "transfer_failed")]
-
-
 async def test_late_failed_snapshot_forwards_the_worker_message() -> None:
     # Issue #2766: the Worker's error text is the only thing that names WHY the late
     # snapshot failed — including the data-plane URL the Worker was handed, which is

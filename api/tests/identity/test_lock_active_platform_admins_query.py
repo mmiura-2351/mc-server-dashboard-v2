@@ -52,24 +52,19 @@ def _compile(stmt: Select[Any]) -> str:
 
 
 @pytest.mark.asyncio
-async def test_lock_active_platform_admins_has_order_by_id(
+@pytest.mark.parametrize(
+    "required_clause",
+    [
+        pytest.param('ORDER BY "user".id', id="orders-admin-locks-deterministically"),
+        pytest.param("FOR UPDATE", id="locks-active-admins"),
+    ],
+)
+async def test_lock_active_platform_admins_has_required_lock_semantics(
     repo: SqlAlchemyUserRepository,
     _captured_stmt: list[Any],
+    required_clause: str,
 ) -> None:
-    """ORDER BY prevents deadlocks from non-deterministic scan order."""
     await repo.lock_active_platform_admins()
     assert len(_captured_stmt) == 1
     sql = _compile(_captured_stmt[0])
-    assert 'ORDER BY "user".id' in sql
-
-
-@pytest.mark.asyncio
-async def test_lock_active_platform_admins_for_update(
-    repo: SqlAlchemyUserRepository,
-    _captured_stmt: list[Any],
-) -> None:
-    """The rows are locked FOR UPDATE so concurrent guards serialize on them."""
-    await repo.lock_active_platform_admins()
-    assert len(_captured_stmt) == 1
-    sql = _compile(_captured_stmt[0])
-    assert "FOR UPDATE" in sql
+    assert required_clause in sql
