@@ -31,6 +31,7 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/rcon"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/regionfsck"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/scratchformat"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
 
@@ -2065,7 +2066,7 @@ func (m *Manager) launchReserved(ctx context.Context, cmd session.Command, drive
 	// TestCommandErrorContract asserts this emission against that declaration, and the
 	// API's phrase is pinned to the same entry (issue #2843).
 	workingDir := filepath.Join(m.scratchDir, cmd.ServerID)
-	if _, err := os.Stat(filepath.Join(workingDir, generationFile)); os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(workingDir, scratchformat.GenerationMarkerFile)); os.IsNotExist(err) {
 		m.release(cmd.ServerID)
 		m.logger.Warn("launch refused: working dir absent",
 			"server_id", cmd.ServerID, "working_dir", workingDir, "reason", "working_set_absent")
@@ -2480,8 +2481,8 @@ var removeDisplacedTree = os.RemoveAll
 // per-id sweep stays the one that runs at the time it matters, and why its CALLERS run it
 // before the scratch removal that ends the id's advertisement.
 //
-// The prefix is built from hydratePrefix — the
-// same constant the held-set scans skip on — and matches datatransfer.hydrateTmpPrefix
+// The prefix is built from the name the held-set scans skip on, and matches
+// datatransfer.hydrateTmpPrefix
 // exactly (".hydrate-<id>-"), so only this id's leftovers are touched — not another
 // server's dir or a similarly named one. Best-effort: a removal failure is ignored
 // (a leftover is wasted disk, never a correctness problem).
@@ -2490,7 +2491,7 @@ func (m *Manager) sweepHydrateLeftovers(serverID string) {
 	if err != nil {
 		return
 	}
-	prefix := hydratePrefix + serverID + "-"
+	prefix := scratchformat.HydratePrefix + serverID + "-"
 	for _, e := range entries {
 		if strings.HasPrefix(e.Name(), prefix) {
 			_ = os.RemoveAll(filepath.Join(m.scratchDir, e.Name()))
