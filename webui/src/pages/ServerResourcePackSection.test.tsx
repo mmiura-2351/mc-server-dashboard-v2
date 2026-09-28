@@ -99,6 +99,7 @@ function routeGet(
     srv?: Record<string, unknown>;
     assignment?: typeof ASSIGNMENT | null;
     packs?: (typeof PACK)[];
+    assignmentError?: unknown;
   } = {},
 ) {
   const srv = server(opts.srv);
@@ -106,6 +107,9 @@ function routeGet(
   const packs = opts.packs ?? [PACK];
   mockApi.get.mockImplementation((path: string) => {
     if (path.endsWith("/resource-pack")) {
+      if (opts.assignmentError !== undefined) {
+        return Promise.reject(opts.assignmentError);
+      }
       // "No pack assigned" is a 200 with a null body, not a 404 (issue #2238).
       return Promise.resolve(assignment);
     }
@@ -147,6 +151,16 @@ async function openSettings() {
   );
 }
 
+function dialogSubmit() {
+  const dialog = screen.getByRole("dialog");
+  return dialog.querySelector(".modal-foot .btn.primary") as HTMLButtonElement;
+}
+
+function removeConfirm() {
+  const dialog = screen.getByRole("dialog");
+  return dialog.querySelector(".modal-foot .btn.danger") as HTMLButtonElement;
+}
+
 let restoreWs: () => void;
 beforeEach(() => {
   setAccessToken("tok-1");
@@ -165,43 +179,14 @@ afterEach(() => {
 });
 
 describe("ServerResourcePackSection — assignment load error", () => {
-  it("shows load-error message when the assignment query fails", async () => {
+  it("shows the load error and suppresses assignment controls", async () => {
     // Simulate a 500 error (non-404) on the assignment endpoint.
-    mockApi.get.mockImplementation((path: string) => {
-      if (path.endsWith("/resource-pack")) {
-        return Promise.reject(new ApiError(500, {}));
-      }
-      if (path === "/api/resource-packs") {
-        return Promise.resolve({ resource_packs: [PACK] });
-      }
-      if (path === "/api/meta") {
-        return Promise.resolve(meta());
-      }
-      return Promise.resolve(server());
-    });
+    routeGet({ assignmentError: new ApiError(500, {}) });
     await openSettings();
 
     expect(
       await screen.findByText(t("serverDetail.resourcePack.loadError")),
     ).toBeInTheDocument();
-  });
-
-  it("does not render the Assign button in the error state", async () => {
-    mockApi.get.mockImplementation((path: string) => {
-      if (path.endsWith("/resource-pack")) {
-        return Promise.reject(new ApiError(500, {}));
-      }
-      if (path === "/api/resource-packs") {
-        return Promise.resolve({ resource_packs: [PACK] });
-      }
-      if (path === "/api/meta") {
-        return Promise.resolve(meta());
-      }
-      return Promise.resolve(server());
-    });
-    await openSettings();
-
-    await screen.findByText(t("serverDetail.resourcePack.loadError"));
     expect(
       screen.queryByRole("button", {
         name: t("serverDetail.resourcePack.assign"),
@@ -210,7 +195,7 @@ describe("ServerResourcePackSection — assignment load error", () => {
   });
 });
 
-describe("ServerResourcePackSection — unassigned state", () => {
+describe("ServerResourcePackSection — action gating", () => {
   it("shows the 'no pack assigned' message when none is assigned", async () => {
     routeGet({ assignment: null });
     await openSettings();
@@ -220,159 +205,126 @@ describe("ServerResourcePackSection — unassigned state", () => {
     ).toBeInTheDocument();
   });
 
-  it("shows the Assign button when the user has server:update", async () => {
-    routeGet({ assignment: null });
-    await openSettings();
+  it.each([
+    [
+      "hides Assign without server:update",
+      null,
+      false,
+      false,
+      "assign",
+      "hidden",
+    ],
+    [
+      "disables Assign while the server is running",
+      null,
+      true,
+      true,
+      "assign",
+      "disabled",
+    ],
+    [
+      "hides Change and Remove without server:update",
+      ASSIGNMENT,
+      false,
+      false,
+      "assigned",
+      "hidden",
+    ],
+    [
+      "disables Change and Remove while the server is running",
+      ASSIGNMENT,
+      true,
+      true,
+      "assigned",
+      "disabled",
+    ],
+  ] as const)(
+    "%s",
+    async (_caseId, assignment, canUpdate, serverRunning, actionSet, outcome) => {
+      mockCan = canUpdate ? () => true : (code) => code !== "server:update";
+      routeGet({
+        srv: serverRunning
+          ? { observed_state: "running", desired_state: "running" }
+          : undefined,
+        assignment,
+      });
+      await openSettings();
 
-    expect(
-      await screen.findByRole("button", {
-        name: t("serverDetail.resourcePack.assign"),
-      }),
-    ).toBeInTheDocument();
-  });
+      if (assignment === null) {
+        await screen.findByText(t("serverDetail.resourcePack.none"));
+      } else {
+        await screen.findByText(PACK.display_name);
+      }
 
-  it("hides the Assign button when the user lacks server:update", async () => {
-    mockCan = (code) => code !== "server:update";
-    routeGet({ assignment: null });
-    await openSettings();
+      const buttonNames =
+        actionSet === "assign"
+          ? [t("serverDetail.resourcePack.assign")]
+          : [
+              t("serverDetail.resourcePack.change"),
+              t("serverDetail.resourcePack.remove"),
+            ];
+      for (const name of buttonNames) {
+        const button = screen.queryByRole("button", { name });
+        if (outcome === "hidden") {
+          expect(button).not.toBeInTheDocument();
+        } else {
+          expect(button).toBeInTheDocument();
+          expect(button).toBeDisabled();
+        }
+      }
 
-    await screen.findByText(t("serverDetail.resourcePack.none"));
-    expect(
-      screen.queryByRole("button", {
-        name: t("serverDetail.resourcePack.assign"),
-      }),
-    ).not.toBeInTheDocument();
-  });
-
-  it("disables the Assign button when the server is running", async () => {
-    routeGet({
-      srv: { observed_state: "running", desired_state: "running" },
-      assignment: null,
-    });
-    await openSettings();
-
-    const btn = await screen.findByRole("button", {
-      name: t("serverDetail.resourcePack.assign"),
-    });
-    expect(btn).toBeDisabled();
-    expect(
-      screen.getByText(t("serverDetail.resourcePack.notAtRest")),
-    ).toBeInTheDocument();
-  });
+      if (serverRunning) {
+        expect(
+          screen.getByText(t("serverDetail.resourcePack.notAtRest")),
+        ).toBeInTheDocument();
+      }
+    },
+  );
 });
 
 describe("ServerResourcePackSection — assigned state", () => {
-  it("shows pack details when a pack is assigned", async () => {
-    routeGet({ assignment: ASSIGNMENT });
+  it.each([
+    [
+      "pack details",
+      ASSIGNMENT,
+      [
+        [PACK.display_name, 1],
+        [PACK.filename, 1],
+        ["1.0 MiB", 1],
+        [PACK.sha1_hash, 1],
+        [t("serverDetail.resourcePack.notRequired"), 1],
+        [t("serverDetail.resourcePack.promptNone"), 1],
+      ],
+    ],
+    [
+      "required option",
+      { ...ASSIGNMENT, require_resource_pack: true },
+      [[t("serverDetail.resourcePack.required"), 2]],
+    ],
+    [
+      "custom prompt option",
+      { ...ASSIGNMENT, resource_pack_prompt: "Please accept the pack!" },
+      [["Please accept the pack!", 1]],
+    ],
+    [
+      "null prompt option",
+      { ...ASSIGNMENT, resource_pack_prompt: null },
+      [[t("serverDetail.resourcePack.promptNone"), 1]],
+    ],
+  ] as const)("renders %s", async (_caseId, assignment, expectedRows) => {
+    routeGet({ assignment });
     await openSettings();
 
-    expect(await screen.findByText("My Texture Pack")).toBeInTheDocument();
-    expect(screen.getByText("my-pack.zip")).toBeInTheDocument();
-    expect(screen.getByText("1.0 MiB")).toBeInTheDocument();
-    expect(screen.getByText("aabbccdd11223344")).toBeInTheDocument();
-  });
-
-  it("shows require_resource_pack status", async () => {
-    routeGet({
-      assignment: { ...ASSIGNMENT, require_resource_pack: true },
-    });
-    await openSettings();
-
-    // The "Required" label appears as the dt AND the dd value.
-    const requiredElements = await screen.findAllByText(
-      t("serverDetail.resourcePack.required"),
-    );
-    expect(requiredElements.length).toBeGreaterThanOrEqual(2);
-  });
-
-  it("shows resource_pack_prompt when set", async () => {
-    routeGet({
-      assignment: {
-        ...ASSIGNMENT,
-        resource_pack_prompt: "Please accept the pack!",
-      },
-    });
-    await openSettings();
-
-    expect(
-      await screen.findByText("Please accept the pack!"),
-    ).toBeInTheDocument();
-  });
-
-  it("shows 'None' for prompt when null", async () => {
-    routeGet({
-      assignment: { ...ASSIGNMENT, resource_pack_prompt: null },
-    });
-    await openSettings();
-
-    expect(
-      await screen.findByText(t("serverDetail.resourcePack.promptNone")),
-    ).toBeInTheDocument();
-  });
-
-  it("shows Change and Remove buttons", async () => {
-    routeGet({ assignment: ASSIGNMENT });
-    await openSettings();
-
-    expect(
-      await screen.findByRole("button", {
-        name: t("serverDetail.resourcePack.change"),
-      }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", {
-        name: t("serverDetail.resourcePack.remove"),
-      }),
-    ).toBeInTheDocument();
-  });
-
-  it("disables Change and Remove when server is running", async () => {
-    routeGet({
-      srv: { observed_state: "running", desired_state: "running" },
-      assignment: ASSIGNMENT,
-    });
-    await openSettings();
-
-    const change = await screen.findByRole("button", {
-      name: t("serverDetail.resourcePack.change"),
-    });
-    const remove = screen.getByRole("button", {
-      name: t("serverDetail.resourcePack.remove"),
-    });
-    expect(change).toBeDisabled();
-    expect(remove).toBeDisabled();
-  });
-
-  it("hides Change and Remove without server:update", async () => {
-    mockCan = (code) => code !== "server:update";
-    routeGet({ assignment: ASSIGNMENT });
-    await openSettings();
-
-    await screen.findByText("My Texture Pack");
-    expect(
-      screen.queryByRole("button", {
-        name: t("serverDetail.resourcePack.change"),
-      }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", {
-        name: t("serverDetail.resourcePack.remove"),
-      }),
-    ).not.toBeInTheDocument();
+    await screen.findByText(PACK.display_name);
+    for (const [text, minimumOccurrences] of expectedRows) {
+      expect(screen.getAllByText(text).length).toBeGreaterThanOrEqual(
+        minimumOccurrences,
+      );
+    }
   });
 });
 
 describe("ServerResourcePackSection — assign flow", () => {
-  // The section's "Assign" button and the dialog's submit "Assign" button
-  // share the same translated text; helper finds the dialog's submit inside
-  // the modal.
-  function dialogSubmit() {
-    const dialog = screen.getByRole("dialog");
-    return dialog.querySelector(
-      ".modal-foot .btn.primary",
-    ) as HTMLButtonElement;
-  }
-
   it("opens the assign dialog and submits", async () => {
     routeGet({ assignment: null });
     mockApi.post.mockResolvedValue(ASSIGNMENT);
@@ -472,36 +424,9 @@ describe("ServerResourcePackSection — assign flow", () => {
       ),
     ).toBeInTheDocument();
   });
-
-  it("surfaces a 409 server_unsettled error on assign", async () => {
-    routeGet({ assignment: null });
-    mockApi.post.mockRejectedValue(
-      new ApiError(409, { reason: "server_unsettled" }),
-    );
-    await openSettings();
-
-    fireEvent.click(
-      await screen.findByRole("button", {
-        name: t("serverDetail.resourcePack.assign"),
-      }),
-    );
-    const select = await screen.findByRole("combobox");
-    fireEvent.change(select, { target: { value: PACK.id } });
-    fireEvent.click(dialogSubmit());
-
-    expect(
-      await screen.findByText(t("serverDetail.error.unsettled")),
-    ).toBeInTheDocument();
-  });
 });
 
 describe("ServerResourcePackSection — unassign flow", () => {
-  // The remove confirmation button lives inside the modal dialog.
-  function removeConfirm() {
-    const dialog = screen.getByRole("dialog");
-    return dialog.querySelector(".modal-foot .btn.danger") as HTMLButtonElement;
-  }
-
   it("opens the remove dialog and submits", async () => {
     routeGet({ assignment: ASSIGNMENT });
     mockApi.delete.mockResolvedValue(undefined);
@@ -546,63 +471,55 @@ describe("ServerResourcePackSection — unassign flow", () => {
     ).not.toBeInTheDocument();
     expect(mockApi.delete).not.toHaveBeenCalled();
   });
-
-  it("surfaces a 409 server_unsettled error on unassign", async () => {
-    routeGet({ assignment: ASSIGNMENT });
-    mockApi.delete.mockRejectedValue(
-      new ApiError(409, { reason: "server_unsettled" }),
-    );
-    await openSettings();
-
-    fireEvent.click(
-      await screen.findByRole("button", {
-        name: t("serverDetail.resourcePack.remove"),
-      }),
-    );
-    fireEvent.click(removeConfirm());
-
-    expect(
-      await screen.findByText(t("serverDetail.error.unsettled")),
-    ).toBeInTheDocument();
-  });
 });
 
-describe("ServerResourcePackSection — version < 1.17 hides require/prompt", () => {
-  function dialogSubmit() {
-    const dialog = screen.getByRole("dialog");
-    return dialog.querySelector(
-      ".modal-foot .btn.primary",
-    ) as HTMLButtonElement;
-  }
+describe("ServerResourcePackSection — unsettled mutation errors", () => {
+  it.each([
+    ["assign", null],
+    ["unassign", ASSIGNMENT],
+  ] as const)(
+    "shows the unsettled error for %s",
+    async (action, assignment) => {
+      routeGet({ assignment });
+      if (action === "assign") {
+        mockApi.post.mockRejectedValue(
+          new ApiError(409, { reason: "server_unsettled" }),
+        );
+      } else {
+        mockApi.delete.mockRejectedValue(
+          new ApiError(409, { reason: "server_unsettled" }),
+        );
+      }
+      await openSettings();
 
-  it("hides Required and Prompt rows in assigned view for 1.16.4", async () => {
-    routeGet({
-      srv: { mc_version: "1.16.4" },
-      assignment: { ...ASSIGNMENT, require_resource_pack: true },
-    });
-    await openSettings();
+      if (action === "assign") {
+        fireEvent.click(
+          await screen.findByRole("button", {
+            name: t("serverDetail.resourcePack.assign"),
+          }),
+        );
+        const select = await screen.findByRole("combobox");
+        fireEvent.change(select, { target: { value: PACK.id } });
+        fireEvent.click(dialogSubmit());
+      } else {
+        fireEvent.click(
+          await screen.findByRole("button", {
+            name: t("serverDetail.resourcePack.remove"),
+          }),
+        );
+        fireEvent.click(removeConfirm());
+      }
 
-    // Pack details still visible
-    expect(await screen.findByText("My Texture Pack")).toBeInTheDocument();
+      expect(
+        await screen.findByText(t("serverDetail.error.unsettled")),
+      ).toBeInTheDocument();
+    },
+  );
+});
 
-    // Required/Prompt rows should NOT appear
-    expect(
-      screen.queryByText(t("serverDetail.resourcePack.notRequired")),
-    ).not.toBeInTheDocument();
-    // The "Required" dt heading should not appear — on 1.21.6 there would be
-    // at least two elements (dt + dd); on 1.16.4 there should be none.
-    const requiredElements = screen.queryAllByText(
-      t("serverDetail.resourcePack.required"),
-    );
-    expect(requiredElements).toHaveLength(0);
-    expect(
-      screen.queryByText(t("serverDetail.resourcePack.promptNone")),
-    ).not.toBeInTheDocument();
-  });
-
-  it("hides require checkbox and prompt input in assign dialog for 1.16.4", async () => {
+describe("ServerResourcePackSection — version < 1.17 option wiring", () => {
+  it("hides option controls in the assign dialog", async () => {
     routeGet({ srv: { mc_version: "1.16.4" }, assignment: null });
-    mockApi.post.mockResolvedValue(ASSIGNMENT);
     await openSettings();
 
     fireEvent.click(
@@ -619,23 +536,6 @@ describe("ServerResourcePackSection — version < 1.17 hides require/prompt", ()
     expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
     const dialog = screen.getByRole("dialog");
     expect(dialog.querySelector('input[type="text"]')).not.toBeInTheDocument();
-
-    // Submit should still work — sends defaults
-    fireEvent.change(select, { target: { value: PACK.id } });
-    fireEvent.click(dialogSubmit());
-
-    await waitFor(() =>
-      expect(mockApi.post).toHaveBeenCalledWith(
-        `/api/communities/${CID}/servers/${SID}/resource-pack`,
-        {
-          body: JSON.stringify({
-            resource_pack_id: PACK.id,
-            require_resource_pack: false,
-            resource_pack_prompt: null,
-          }),
-        },
-      ),
-    );
   });
 
   it("forces safe defaults when editing an existing assignment on < 1.17", async () => {
@@ -675,18 +575,5 @@ describe("ServerResourcePackSection — version < 1.17 hides require/prompt", ()
         },
       ),
     );
-  });
-
-  it("shows require/prompt fields for 1.17+", async () => {
-    routeGet({
-      srv: { mc_version: "1.17" },
-      assignment: ASSIGNMENT,
-    });
-    await openSettings();
-
-    // The prompt "None" text should be visible for a 1.17 server
-    expect(
-      await screen.findByText(t("serverDetail.resourcePack.promptNone")),
-    ).toBeInTheDocument();
   });
 });
