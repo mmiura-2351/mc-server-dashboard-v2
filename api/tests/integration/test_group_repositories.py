@@ -376,7 +376,7 @@ async def test_save_after_concurrent_group_delete_without_players_reports_not_fo
     # same reason: ``FakeGroupRepository.save`` raises this not-found from a dict
     # of its own, with no second connection to see the racer's delete, so
     # asserting it establishes nothing about the adapter -- both branches it
-    # models (tests/servers/test_fake_repository_isolation.py) get one here.
+    # models (tests/contracts/server_repositories.py) get one here.
     #
     # With the player set emptied there is no INSERT, so nothing violates the FK
     # that carries the not-found for the player-carrying branch (#2583) -- save
