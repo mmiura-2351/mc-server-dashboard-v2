@@ -19,9 +19,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from mc_server_dashboard_api.config import LogSettings
 
 _COMPOSE_FILE = Path(__file__).resolve().parents[2] / "compose.yaml"
+_API_LOG_DEFAULTS = LogSettings()
 
 
 def _compose_service(name: str) -> str:
@@ -46,29 +49,38 @@ def _compose_service(name: str) -> str:
     return "".join(lines[start:end])
 
 
-def test_compose_forwards_the_api_log_settings() -> None:
-    """Defaulted to the settings' own defaults, so bring-up is unchanged."""
-
-    defaults = LogSettings()
-    api = _compose_service("api")
-
-    assert f'MCD_API_LOG__LEVEL: "${{MCD_API_LOG__LEVEL:-{defaults.level}}}"' in api
-    assert f'MCD_API_LOG__FORMAT: "${{MCD_API_LOG__FORMAT:-{defaults.format}}}"' in api
-
-
-def test_compose_forwards_the_worker_log_settings() -> None:
-    """Same gap, same fix. The Go services' keys are flat, not nested."""
-
-    worker = _compose_service("worker")
-
-    assert 'MCD_WORKER_LOG_LEVEL: "${MCD_WORKER_LOG_LEVEL:-info}"' in worker
-    assert 'MCD_WORKER_LOG_FORMAT: "${MCD_WORKER_LOG_FORMAT:-json}"' in worker
-
-
-def test_compose_forwards_the_relay_log_settings() -> None:
-    """The relay is profile-gated, but its env is interpolated either way."""
-
-    relay = _compose_service("relay")
-
-    assert 'MCD_RELAY_LOG_LEVEL: "${MCD_RELAY_LOG_LEVEL:-info}"' in relay
-    assert 'MCD_RELAY_LOG_FORMAT: "${MCD_RELAY_LOG_FORMAT:-json}"' in relay
+@pytest.mark.parametrize(
+    ("service", "settings"),
+    [
+        pytest.param(
+            "api",
+            (
+                "MCD_API_LOG__LEVEL: "
+                f'"${{MCD_API_LOG__LEVEL:-{_API_LOG_DEFAULTS.level}}}"',
+                "MCD_API_LOG__FORMAT: "
+                f'"${{MCD_API_LOG__FORMAT:-{_API_LOG_DEFAULTS.format}}}"',
+            ),
+            id="api-service",
+        ),
+        pytest.param(
+            "worker",
+            (
+                'MCD_WORKER_LOG_LEVEL: "${MCD_WORKER_LOG_LEVEL:-info}"',
+                'MCD_WORKER_LOG_FORMAT: "${MCD_WORKER_LOG_FORMAT:-json}"',
+            ),
+            id="worker-service",
+        ),
+        pytest.param(
+            "relay",
+            (
+                'MCD_RELAY_LOG_LEVEL: "${MCD_RELAY_LOG_LEVEL:-info}"',
+                'MCD_RELAY_LOG_FORMAT: "${MCD_RELAY_LOG_FORMAT:-json}"',
+            ),
+            id="relay-service",
+        ),
+    ],
+)
+def test_compose_forwards_log_settings(service: str, settings: tuple[str, str]) -> None:
+    compose_service = _compose_service(service)
+    for setting in settings:
+        assert setting in compose_service
