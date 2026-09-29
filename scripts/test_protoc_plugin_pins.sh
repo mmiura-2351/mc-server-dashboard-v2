@@ -57,7 +57,7 @@
 #      they touch into a temp directory.
 #
 # Hermetic by construction. Assertions 1 and 6 only expand Makefile variables
-# through the `mk` probe below and compare the answers as strings; assertions
+# through the shared `mk` probe and compare the answers as strings; assertions
 # 2-4 are `make -n` runs (dry run -- nothing executed, nothing installed, no
 # network) against temp paths substituted for both the plugin and its stamp, and
 # call `mk` themselves during setup. So the developer's real worker/.bin is
@@ -77,51 +77,21 @@
 # Exit code: 0 = all pass, non-zero = at least one failure.
 set -uo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-
 pass=0
 fail=0
 
 ok()        { echo "  PASS: $1"; pass=$((pass + 1)); }
 fail_test() { echo "  FAIL: $1"; fail=$((fail + 1)); }
 
-# Ask make what a variable expands to, under the `VAR=value` overrides passed
-# after the variable name. `--eval` defines a throwaway target *before* the
-# makefile is read -- the variable is still empty at that point -- and what
-# makes the probe work is that a recipe body is expanded only when the recipe
-# runs, by which time the makefile has defined it. So the answer is make's own
-# expansion and this script never reimplements the derivation it is pinning.
-# --no-print-directory: `make scripts-test` runs this script with MAKELEVEL
-# exported, and a make that sees MAKELEVEL > 0 counts itself a sub-make and
-# turns on -w, which would put "Entering directory" on stdout.
-mk() {
-	local var="$1"
-	shift
-	(cd "$ROOT" && make --no-print-directory \
-		--eval="mcsd-probe:;@echo \$($var)" mcsd-probe "$@")
-}
-
-# A tool's stamp for a given version, rebased into a temp directory: make's
-# name, our directory.
-stamp_in() {
-	local dir="$1" stamp_var="$2" version_var="$3" version="$4"
-	echo "$dir/$(basename "$(mk "$stamp_var" "$version_var=$version")")"
-}
-
-# Every tool installed through the stamp mechanism, as <stamp var>:<version
-# var>. Assertion 5 seeds one stamp per entry, so a cleanup that reaches beyond
-# its own tool is caught whichever pair of names collides.
-STAMP_VARS=(
-	"GOLANGCI_STAMP:GOLANGCI_VERSION"
-	"PROTOC_GEN_GO_STAMP:PROTOC_GEN_GO_VERSION"
-	"PROTOC_GEN_GO_GRPC_STAMP:PROTOC_GEN_GO_GRPC_VERSION"
-)
+# shellcheck source=scripts/version_pin_test_lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/version_pin_test_lib.sh"
 
 # One stamp per tool, all at the same superseded version.
 seed_stamps() {
-	local dir="$1" entry
-	for entry in "${STAMP_VARS[@]}"; do
-		: > "$(stamp_in "$dir" "${entry%%:*}" "${entry##*:}" v0.0.0-old)"
+	local dir="$1" entry _bin_var stamp_var version_var
+	for entry in "${VERSION_PIN_TOOLS[@]}"; do
+		IFS=: read -r _bin_var stamp_var version_var <<< "$entry"
+		: > "$(stamp_in "$dir" "$stamp_var" "$version_var" v0.0.0-old)"
 	done
 }
 
@@ -136,8 +106,7 @@ trap 'rm -rf "$tmp"' EXIT
 # the wrong rule.
 assert_plugin() {
 	local label="$1" bin_var="$2" stamp_var="$3" version_var="$4" token="$5"
-	local version bin_name dir bin stamp recipe own_old new entry sibling missing
-	local stamp_dir bin_dir
+	local version bin_name dir bin stamp recipe own_old new entry _bin_entry stamp_entry version_entry sibling missing
 
 	version="$(mk "$version_var")"
 	bin_name="$(basename "$(mk "$bin_var")")"
@@ -220,8 +189,9 @@ assert_plugin() {
 	(cd "$ROOT" && make --no-print-directory "$new" "$stamp_var=$new") >/dev/null 2>&1
 
 	missing=""
-	for entry in "${STAMP_VARS[@]}"; do
-		sibling="$(stamp_in "$dir" "${entry%%:*}" "${entry##*:}" v0.0.0-old)"
+	for entry in "${VERSION_PIN_TOOLS[@]}"; do
+		IFS=: read -r _bin_entry stamp_entry version_entry <<< "$entry"
+		sibling="$(stamp_in "$dir" "$stamp_entry" "$version_entry" v0.0.0-old)"
 		[ "$sibling" = "$own_old" ] && continue
 		[ -e "$sibling" ] || missing="$missing $(basename "$sibling")"
 	done
@@ -243,13 +213,7 @@ assert_plugin() {
 	#    into $tmp, so this is the only one that sees where the Makefile
 	#    actually puts them -- and compared as strings, so the real worker/.bin
 	#    is still neither read nor written.
-	stamp_dir="$(dirname "$(mk "$stamp_var")")"
-	bin_dir="$(dirname "$(mk "$bin_var")")"
-	if [ "$stamp_dir" = "$bin_dir" ]; then
-		ok "$label: the stamp sits in the plugin's directory"
-	else
-		fail_test "$label: the stamp is not swept with the plugin ($stamp_var is in $stamp_dir, $bin_var in $bin_dir)"
-	fi
+	assert_stamp_directory "$label" plugin "$bin_var" "$stamp_var"
 }
 
 echo "=== protoc plugin version-pin tests ==="
