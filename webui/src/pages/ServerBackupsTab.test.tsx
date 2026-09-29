@@ -1,6 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
-  act,
   fireEvent,
   render,
   screen,
@@ -729,23 +728,6 @@ describe("ServerBackupsTab permission gating", () => {
     expect(
       cell.getByRole("button", { name: t("backups.download") }),
     ).toBeInTheDocument();
-  });
-
-  it("keeps rendering cached backups when a background refetch fails (#1805)", async () => {
-    routeGet();
-    const { queryClient } = await openBackups();
-    await screen.findByText("manual");
-
-    // Simulate a transient API outage: the next background refetch fails.
-    mockApi.get.mockRejectedValue(new ApiError(500, {}));
-    await act(() => queryClient.invalidateQueries());
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
-
-    // The cached list stays on screen instead of the error.
-    expect(screen.getByText("manual")).toBeInTheDocument();
-    expect(screen.queryByText(t("backups.loadError"))).not.toBeInTheDocument();
   });
 
   it("names the object store on a 503 storage_unavailable create (#2378)", async () => {

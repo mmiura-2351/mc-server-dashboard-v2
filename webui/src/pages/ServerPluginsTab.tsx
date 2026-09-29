@@ -34,6 +34,7 @@ import { formatRange, humanizeBytes } from "../format.ts";
 import { type TranslationKey, t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
+import { classifyQueryResult } from "../queryState.ts";
 import { pluginErrorPresentation } from "./serverPluginsErrorPresentation.ts";
 import { atRest, normalizeState } from "./serverState.ts";
 
@@ -380,17 +381,18 @@ export function ServerPluginsTab({
   if (!canRead) {
     return <p className="sub">{tn("plugins.noRead")}</p>;
   }
-  if (listQuery.isPending) {
+  const listState = classifyQueryResult(listQuery);
+  if (listState.kind === "pending") {
     return <p className="sub">{tn("plugins.loading")}</p>;
   }
   // Error only when there is nothing to show (initial load failed). A failed
   // background refetch retains `data`, so the cached list keeps rendering
   // through transient API blips (#1805).
-  if (listQuery.data === undefined) {
+  if (listState.kind === "error") {
     return <p className="field-error">{tn("plugins.loadError")}</p>;
   }
 
-  const plugins = listQuery.data.plugins;
+  const plugins = listState.data.plugins;
   const updates = updatesQuery.data?.updates ?? [];
   const updateMap = new Map(
     updates.map((u: PluginUpdateInfoResponse) => [u.plugin.id, u]),
@@ -791,16 +793,18 @@ function DependenciesView({
       ),
   });
 
-  if (query.isPending) {
+  const queryState = classifyQueryResult(query);
+
+  if (queryState.kind === "pending") {
     return <p className="sub">{t("plugins.dependencies.loading")}</p>;
   }
   // Error only when there is nothing to show (initial load failed). A failed
   // background refetch retains `data`, so the cached list keeps rendering
   // through transient API blips (#1805).
-  if (query.data === undefined) {
+  if (queryState.kind === "error") {
     return <p className="field-error">{t("plugins.error.generic")}</p>;
   }
-  const deps = query.data.dependencies;
+  const deps = queryState.data.dependencies;
   if (deps.length === 0) {
     return <p className="sub">{t("plugins.dependencies.empty")}</p>;
   }
@@ -1194,16 +1198,18 @@ function SearchResults({
     },
   });
 
-  if (searchQuery.isPending) {
+  const searchState = classifyQueryResult(searchQuery);
+
+  if (searchState.kind === "pending") {
     return <p className="sub">{applyNoun(t("plugins.loading"), noun)}</p>;
   }
   // Error only when there is nothing to show (initial load failed). A failed
   // background refetch retains `data`, so the cached list keeps rendering
   // through transient API blips (#1805).
-  if (searchQuery.data === undefined) {
+  if (searchState.kind === "error") {
     return <p className="field-error">{t("plugins.error.generic")}</p>;
   }
-  const hits = searchQuery.data.hits;
+  const hits = searchState.data.hits;
   if (hits.length === 0) {
     return <p className="sub">{t("plugins.search.empty")}</p>;
   }

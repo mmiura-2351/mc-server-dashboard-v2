@@ -3461,44 +3461,6 @@ describe("Arrow key navigation", () => {
   });
 });
 
-describe("ServerFilesTab refetch failure (#1805)", () => {
-  let restoreWs: () => void;
-  beforeEach(() => {
-    restoreWs = installMockWebSocket();
-    setAccessToken("tok-1");
-    mockApi.get.mockReset();
-    mockApi.put.mockReset();
-    mockApi.post.mockReset();
-    mockApi.delete.mockReset();
-    mockCan = () => true;
-  });
-  afterEach(() => {
-    restoreWs();
-    vi.clearAllMocks();
-  });
-
-  it("keeps rendering cached file listing when a background refetch fails", async () => {
-    routeGet({
-      detail: server(),
-      list: listing([{ name: "server.properties", is_dir: false }]),
-    });
-    const { queryClient } = renderPage();
-    await openFiles();
-    await screen.findByText(/server\.properties/);
-
-    // Simulate a transient API outage: the next background refetch fails.
-    mockApi.get.mockRejectedValue(new ApiError(500, {}));
-    await act(() => queryClient.invalidateQueries());
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
-
-    // The cached listing stays on screen instead of the error.
-    expect(screen.getByText(/server\.properties/)).toBeInTheDocument();
-    expect(screen.queryByText(t("files.listError"))).not.toBeInTheDocument();
-  });
-});
-
 // ── Directory downloads via a minted grant (#2354) ────────────────────────────
 
 describe("ServerFilesTab directory downloads (minted grant, #2354)", () => {

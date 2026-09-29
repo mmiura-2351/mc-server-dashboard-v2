@@ -5,6 +5,7 @@ import { apiPath } from "../api/path.ts";
 import { t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
+import { classifyQueryResult } from "../queryState.ts";
 import {
   AuditFilterFields,
   type AuditFilters,
@@ -93,6 +94,7 @@ function Loaded({ communityId }: { communityId: string }) {
       api.get(auditUrl(communityId, filters, offset), { signal }),
     placeholderData: keepPreviousData,
   });
+  const queryState = classifyQueryResult(query);
 
   useEffect(() => {
     if (query.isError) {
@@ -137,12 +139,12 @@ function Loaded({ communityId }: { communityId: string }) {
         </button>
       </div>
 
-      {query.isPending ? (
+      {queryState.kind === "pending" ? (
         <p className="sub">{t("communitySettings.audit.loading")}</p>
       ) : /* Error only when there is nothing to show (initial load failed).
            A failed background refetch retains `data`, so the cached list
            keeps rendering through transient API blips (#1805). */
-      query.data === undefined ? (
+      queryState.kind === "error" ? (
         <p className="field-error">{t("communitySettings.audit.loadError")}</p>
       ) : records.length === 0 ? (
         <p className="sub">{t("communitySettings.audit.empty")}</p>

@@ -16,6 +16,7 @@ import { useUploadProgress } from "../components/useUploadProgress.ts";
 import { type TranslationKey, t } from "../i18n/index.ts";
 import { useActiveCommunity } from "../permissions/ActiveCommunityProvider.tsx";
 import { useCanCode } from "../permissions/useCan.ts";
+import { classifyQueryResult } from "../queryState.ts";
 import { dashboardPath } from "../routes.ts";
 import { handleTabKeyDown, panelId, tabId, useTabHash } from "./urlState.ts";
 
@@ -261,6 +262,7 @@ function NewServerWizard({ communityId }: { communityId: string }) {
     queryKey: ["versions"],
     queryFn: ({ signal }) => api.get("/api/versions", { signal }),
   });
+  const typesState = classifyQueryResult(typesQuery);
   const catalogTypes = typesQuery.data?.server_types ?? [];
 
   // In relay mode the game port is hidden and API-managed: players join port-less
@@ -296,6 +298,7 @@ function NewServerWizard({ communityId }: { communityId: string }) {
       ),
     enabled: type !== null,
   });
+  const versionsState = classifyQueryResult(versionsQuery);
   const versions = versionsQuery.data?.versions ?? [];
 
   // Preselect the latest version (catalogs list newest first) whenever the list
@@ -403,13 +406,13 @@ function NewServerWizard({ communityId }: { communityId: string }) {
       {step === 1 && (
         <div className="card">
           <h2>{t("serverCreate.typeHeading")}</h2>
-          {typesQuery.isPending ? (
+          {typesState.kind === "pending" ? (
             <p className="sub">{t("serverCreate.typeLoading")}</p>
           ) : /* Error only when there is nothing to show (initial load
                failed). A failed background refetch retains `data`, so
                the cached types keep rendering through transient API
                blips (#1805). */
-          typesQuery.data === undefined ? (
+          typesState.kind === "error" ? (
             <p className="field-error">{t("serverCreate.typeLoadError")}</p>
           ) : (
             <>
@@ -442,14 +445,14 @@ function NewServerWizard({ communityId }: { communityId: string }) {
                   <label htmlFor="version-select">
                     {t("serverCreate.versionLabel")}
                   </label>
-                  {versionsQuery.isPending ? (
+                  {versionsState.kind === "pending" ? (
                     <p className="sub">{t("serverCreate.versionLoading")}</p>
                   ) : /* Error only when there is nothing to show
                        (initial load failed). A failed background
                        refetch retains `data`, so the cached versions
                        keep rendering through transient blips
                        (#1805). */
-                  versionsQuery.data === undefined ? (
+                  versionsState.kind === "error" ? (
                     <p className="field-error">
                       {t("serverCreate.versionLoadError")}
                     </p>

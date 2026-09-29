@@ -22,6 +22,7 @@ import { shortId } from "../format.ts";
 import { type TranslationKey, t } from "../i18n/index.ts";
 import { type Can, useCan } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
+import { classifyQueryResult } from "../queryState.ts";
 import { dashboardPath } from "../routes.ts";
 import {
   isEulaNotAccepted,
@@ -183,18 +184,20 @@ function Loaded({
       ),
   });
 
-  if (query.isPending) {
+  const queryState = classifyQueryResult(query);
+
+  if (queryState.kind === "pending") {
     return <p className="sub">{t("serverDetail.loading")}</p>;
   }
   // Full-page error only when there is nothing to show (the initial load
   // failed). A failed background refetch retains `data`, so the cached page
   // keeps rendering through transient API blips; the WS-driven degraded pill
   // already signals that live updates are down (#1724).
-  if (query.data === undefined) {
+  if (queryState.kind === "error") {
     return <p className="field-error">{t("serverDetail.loadError")}</p>;
   }
 
-  const server = query.data;
+  const server = queryState.data;
   const hidePlugins = PLUGIN_UNSUPPORTED_TYPES.has(server.server_type);
   const visibleTabs = hidePlugins
     ? TABS.filter((name) => name !== "plugins")

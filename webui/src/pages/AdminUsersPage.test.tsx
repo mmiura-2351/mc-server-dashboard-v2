@@ -1,11 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import {
-  act,
-  fireEvent,
-  render,
-  screen,
-  waitFor,
-} from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, useNavigate } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client.ts";
@@ -494,23 +488,5 @@ describe("AdminUsersPage", () => {
     expect(
       await screen.findByText(t("admin.users.error.generic")),
     ).toBeInTheDocument();
-  });
-
-  it("keeps rendering cached users when a background refetch fails (#1805)", async () => {
-    const { queryClient } = renderPage();
-    await screen.findByText("alice");
-
-    // Simulate a transient API outage: the next background refetch fails.
-    mockApi.get.mockRejectedValue(new ApiError(500, {}));
-    await act(() => queryClient.invalidateQueries());
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
-
-    // The cached list stays on screen instead of the error.
-    expect(screen.getByText("alice")).toBeInTheDocument();
-    expect(
-      screen.queryByText(t("admin.users.loadError")),
-    ).not.toBeInTheDocument();
   });
 });

@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { adminCommunitiesPickerKey } from "../api/adminQueryKeys.ts";
 import { api } from "../api/client.ts";
 import { t } from "../i18n/index.ts";
+import { classifyQueryResult } from "../queryState.ts";
 import {
   AuditFilterFields,
   type AuditFilters,
@@ -110,6 +111,7 @@ export function AdminAuditPage() {
     queryFn: ({ signal }) => api.get(auditUrl(filters, offset), { signal }),
     placeholderData: keepPreviousData,
   });
+  const queryState = classifyQueryResult(query);
 
   const apply = () => {
     // The backend's `actor` param is a UUID; reject free text inline rather
@@ -172,12 +174,12 @@ export function AdminAuditPage() {
         </button>
       </div>
 
-      {query.isPending ? (
+      {queryState.kind === "pending" ? (
         <p className="sub">{t("communitySettings.audit.loading")}</p>
       ) : /* Error only when there is nothing to show (initial load failed).
            A failed background refetch retains `data`, so the cached list
            keeps rendering through transient API blips (#1805). */
-      query.data === undefined ? (
+      queryState.kind === "error" ? (
         <p className="field-error">{t("communitySettings.audit.loadError")}</p>
       ) : records.length === 0 ? (
         <p className="sub">{t("communitySettings.audit.empty")}</p>
