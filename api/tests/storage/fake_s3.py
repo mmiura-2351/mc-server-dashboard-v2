@@ -16,7 +16,7 @@ makes the failure-injection seams (used by the crash-safety tests) trivial.
 from __future__ import annotations
 
 import datetime as dt
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 
 from mc_server_dashboard_api.storage.adapters.object_store import (
@@ -31,54 +31,14 @@ from mc_server_dashboard_api.storage.domain.errors import (
     ObjectStoreUnavailableError,
 )
 
-# Store time reported for an object seeded straight into ``objects`` without a
-# stamp. Fixed and far future so the JAR-pool (#293) and plugin-cache (#1332) GC
-# safety windows spare it under *any* clock: a test that seeds an object and
-# forgets the stamp then reddens on the delete it was not asserting, instead of
-# passing by accident. Reading the host clock here made that fail-loud property
-# depend on the host clock running later than the caller's ``now`` minus the
-# window — an unstated environmental assumption (#2529). Spelled identically in
-# ``tests/versions/fakes.py`` and ``tests/servers/fakes.py``: three copies, one
-# beside each store-time dict, because ``api/tests/`` has no shared helper module
-# to hold it (only ``tests/conftest.py``). PR #2540's review weighed that at two
-# copies and PR #2573's at three; both accepted. A fourth copy is the trigger to
-# stop copying: extract the constant to ``tests/store_times.py`` and import it at
-# all four sites (issue #2576).
+# Store time for a directly seeded object with no stamp. The far-future value
+# makes GC tests fail loudly if they forget to give an old object a store time.
+# The plugin-cache and JAR-pool fakes use the same sentinel convention (#2529).
 _UNSTAMPED_STORE_TIME = dt.datetime(9999, 1, 1, tzinfo=dt.UTC)
 
-# Write stamps read the host clock. That is the standing convention for every
-# write in this fake and in the two sibling fakes (``tests/versions/fakes.py``,
-# ``tests/servers/fakes.py``), recorded here once rather than at all five stamps
-# (issue #2576):
-#
-# - Not the sentinel above. It means "no store time for this key", so a write
-#   reusing it would also make it mean "written just now": an object written
-#   through the fake would report the year 9999 and silently disable the GC
-#   safety window the test meant to exercise — the fail-loud direction #2529
-#   established, inverted. PR #2540 added the siblings' host-clock ``put`` stamps
-#   in the same commit that replaced their read-side wall-clock fallback with the
-#   sentinel, and PR #2573 left the stamps here (in place since #295) untouched
-#   when it brought the sentinel over: the split is the design, not an oversight.
-# - Not a fixed constant either, and that is what the pins say:
-#   ``tests/versions/test_jar_pool_fake.py`` and
-#   ``tests/servers/test_plugin_cache_store_fake.py`` bracket the siblings'
-#   ``put`` between two host-clock reads, so any constant reddens them, a past
-#   one included. ``tests/versions/test_ensure_jar.py``'s ``_PastClock``
-#   (``now() + GC_SAFETY_WINDOW + 1h``) is a weaker, end-to-end check on top: it
-#   stops ageing the JAR the test just put once the stamp is the sentinel, but a
-#   past constant would slip by it.
-# - The three stamps below are pinned the same way, by
-#   ``tests/storage/test_fake_s3.py``: it brackets each of ``put_object``,
-#   ``upload_multipart`` and ``copy_object`` between two host-clock reads, so a
-#   sentinel or a constant stamp reddens exactly that path's test (issue #2606).
-#   Until that suite existed these three reddened no test at all and this comment
-#   was the only thing holding them (the asymmetry PR #2603 recorded in prose).
-# - Revisit if a GC test ever writes through a fake instead of seeding the store
-#   time and pins its clock to a *constant* ahead of the host clock: it would
-#   read the fresh stamp as ancient and pass for the wrong reason. None does
-#   today (checked at #2576). ``tests/versions/test_ensure_jar.py`` does run the
-#   GC ahead of the host clock over a ``put``-stamped JAR, but derives that clock
-#   from ``now()`` and means the ageing, so it passes for its own reason.
+# Writes stamp the current clock value. The shared S3Client contract controls
+# that clock for each write path; ordinary adapter tests default to UTC now.
+# The sentinel above is reserved for direct, unstamped test seeding.
 
 
 class FakeS3Store:
@@ -90,8 +50,9 @@ class FakeS3Store:
     observable in tests.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, clock: Callable[[], dt.datetime] | None = None) -> None:
         self.objects: dict[str, bytes] = {}
+        self._clock = clock or (lambda: dt.datetime.now(dt.UTC))
         self.multipart_parts: dict[str, int] = {}
         # Per-key count of completed multipart uploads. Unlike ``multipart_parts``
         # (which records only the last upload's part count, so re-uploading
@@ -101,8 +62,7 @@ class FakeS3Store:
         # Per-key store time, mirroring S3 ``LastModified`` for the JAR-pool GC
         # safety window (#293). Set on every write, as the real backend stamps an
         # object it stores. A key a test seeded directly into ``objects`` has
-        # none — see :data:`_UNSTAMPED_STORE_TIME` (issue #2542), where the
-        # host-clock convention the write stamps follow is recorded too (#2576).
+        # none — see :data:`_UNSTAMPED_STORE_TIME` (issue #2542).
         self.mtimes: dict[str, dt.datetime] = {}
         # In-progress multipart uploads keyed by upload id, each a
         # (key, initiated) pair — the orphan-part sweep input (issue #903). Tests
@@ -162,7 +122,7 @@ class FakeS3Client:
 
     async def put_object(self, key: str, body: bytes) -> None:
         self._store.objects[key] = bytes(body)
-        self._store.mtimes[key] = dt.datetime.now(dt.UTC)
+        self._store.mtimes[key] = self._store._clock()
 
     async def upload_multipart(self, key: str, parts: AsyncIterator[bytes]) -> None:
         # Consume part-by-part (never a single whole-body read) and tally the parts,
@@ -176,7 +136,7 @@ class FakeS3Client:
         self._store.objects[key] = bytes(buf)
         self._store.multipart_parts[key] = count
         self._store.upload_calls[key] = self._store.upload_calls.get(key, 0) + 1
-        self._store.mtimes[key] = dt.datetime.now(dt.UTC)
+        self._store.mtimes[key] = self._store._clock()
 
     async def head_object(self, key: str) -> int | None:
         obj = self._store.objects.get(key)
@@ -188,7 +148,7 @@ class FakeS3Client:
         if src_key not in self._store.objects:
             raise NotFoundError(f"object not found: {src_key}")
         self._store.objects[dst_key] = self._store.objects[src_key]
-        self._store.mtimes[dst_key] = dt.datetime.now(dt.UTC)
+        self._store.mtimes[dst_key] = self._store._clock()
 
     async def delete_object(self, key: str) -> None:
         self._store.objects.pop(key, None)
