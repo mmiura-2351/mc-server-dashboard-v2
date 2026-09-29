@@ -23,6 +23,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
     ArchiveTooLargeError,
     IncompleteTransferError,
     IntegrityCheckError,
+    MissingRegionsError,
     NotFoundError,
     PathTraversalError,
     SnapshotHandleError,
@@ -39,6 +40,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     RelPath,
     ServerId,
 )
+from mc_server_dashboard_api.storage.integrity.region import ReasonCode
 from tests.storage.conftest import StorageHarness, build_harness
 from tests.storage.helpers import (
     bomb_targz,
@@ -520,8 +522,13 @@ async def test_commit_refuses_corrupt_region_and_preserves_prior(
     await harness.storage.write_snapshot(
         handle, tar_stream({"world/region/r.0.0.mca": corrupt_region_bytes()})
     )
-    with pytest.raises(IntegrityCheckError):
+    with pytest.raises(IntegrityCheckError) as excinfo:
         await harness.storage.commit_snapshot(handle)
+
+    # The report names the corrupt file and its reason so a caller can surface why.
+    report = excinfo.value.report
+    assert len(report.corrupt) == 1
+    assert report.corrupt[0].reason is ReasonCode.NOT_4096_ALIGNED
 
     # The corrupt transfer never published: the prior healthy region is still live.
     blob = await drain(harness.storage.open_hydrate_source(community, server))
@@ -539,6 +546,67 @@ async def test_commit_publishes_a_structurally_healthy_region(
 
     blob = await drain(harness.storage.open_hydrate_source(community, server))
     assert read_tar(blob) == files
+
+
+async def test_commit_refuses_partial_region_loss_and_keeps_prior(
+    harness: StorageHarness,
+) -> None:
+    """The missing-region gate (issue #854): a publish that DROPS some-but-not-all of
+    a live dimension's region files is refused.
+
+    Every other gate validates only files that exist, so a vanished region is
+    structurally valid absence. A staged set that lost a region a dimension still
+    populates is the corruption signature: refuse with :class:`MissingRegionsError`
+    (carrying the report), publish nothing, and do not bump the generation.
+    """
+
+    community, server = new_scope()
+    prior = {
+        "world/region/r.0.0.mca": healthy_region_bytes(),
+        "world/region/r.0.1.mca": healthy_region_bytes(),
+    }
+    await harness.publish(community, server, prior)
+    generation = await harness.storage.current_generation(community, server)
+
+    handle = await harness.storage.begin_snapshot(community, server)
+    await harness.storage.write_snapshot(
+        handle, tar_stream({"world/region/r.0.0.mca": healthy_region_bytes()})
+    )
+    with pytest.raises(MissingRegionsError) as excinfo:
+        await harness.storage.commit_snapshot(handle)
+
+    report = excinfo.value.report
+    assert len(report.partial_loss) == 1
+    assert report.partial_loss[0].directory == Path("world/region")
+    assert report.partial_loss[0].lost == ("r.0.1.mca",)
+
+    # The refused transfer never published and never bumped the generation.
+    blob = await drain(harness.storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == prior
+    assert await harness.storage.current_generation(community, server) == generation
+
+
+async def test_commit_allows_full_dimension_delete(harness: StorageHarness) -> None:
+    """A publish that removes a WHOLE dimension's regions (legitimate delete) is
+    allowed — only a partial loss is the corruption signature (issue #854)."""
+
+    community, server = new_scope()
+    await harness.publish(
+        community,
+        server,
+        {
+            "world/region/r.0.0.mca": healthy_region_bytes(),
+            "world/DIM-1/region/r.0.0.mca": healthy_region_bytes(),
+            "world/DIM-1/region/r.0.1.mca": healthy_region_bytes(),
+        },
+    )
+
+    # The Nether (DIM-1) is deleted entirely; the overworld is unchanged.
+    after = {"world/region/r.0.0.mca": healthy_region_bytes()}
+    await harness.publish(community, server, after)
+
+    blob = await drain(harness.storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == after
 
 
 async def test_running_source_publish_then_backup_create_succeeds(
@@ -957,8 +1025,10 @@ async def test_restore_corrupt_backup_without_force_is_refused(
     )
     key = await harness.storage.put_backup(community, server, stream_of(corrupt))
 
-    with pytest.raises(IntegrityCheckError):
+    with pytest.raises(IntegrityCheckError) as excinfo:
         await harness.storage.restore_backup(community, server, key)
+    assert len(excinfo.value.report.corrupt) == 1
+    assert excinfo.value.report.corrupt[0].reason is ReasonCode.SECTOR_OUT_OF_BOUNDS
 
     # The refused restore never published: the prior healthy region is still live.
     blob = await drain(harness.storage.open_hydrate_source(community, server))
@@ -2127,3 +2197,28 @@ async def test_sweep_never_reclaims_live_snapshot(harness: StorageHarness) -> No
 
     blob = await drain(harness.storage.open_hydrate_source(community, server))
     assert read_tar(blob) == {"f": b"LIVE"}
+
+
+async def test_active_staging_survives_concurrent_sweep(
+    harness: StorageHarness,
+) -> None:
+    """An in-flight transfer's staging must survive a sweep that runs mid-transfer.
+
+    Both adapters pin the staging area with an in-process active-staging lease for
+    the life of the handle (begin -> commit/abort), so a sweep scheduled while the
+    transfer is mid-flight skips it (issues #160/#183) and the commit still publishes
+    the staged bytes.
+    """
+
+    community, server = new_scope()
+    await harness.publish(community, server, {"f": b"LIVE"})
+
+    # Begin + stage an in-flight transfer, but do NOT commit/abort yet.
+    handle = await harness.storage.begin_snapshot(community, server)
+    await harness.storage.write_snapshot(handle, tar_stream({"f": b"INFLIGHT"}))
+
+    await harness.sweep()
+
+    await harness.storage.commit_snapshot(handle)
+    blob = await drain(harness.storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == {"f": b"INFLIGHT"}

@@ -3,10 +3,10 @@
 The backend-agnostic snapshot/hydrate/abort/commit contract is in
 ``test_port_contract.py`` (run against both adapters). This file keeps only the
 fs realization details — the ``current`` symlink target, the on-disk Section 2
-layout, fs reclaim of the superseded snapshot directory, the incremental
-pipe-streamed hydrate bounded by the fs ``_CHUNK``, and the fs symlink-escape
-member rejection — which reach into the filesystem tree and so cannot be
-backend-neutral.
+layout, fs reclaim of the superseded snapshot directory, the ``current`` link
+and staging cleanup behind each refused commit/restore, the hydrate yields
+bounded by the fs ``_CHUNK``, and the fs symlink-escape member rejection — which
+reach into the filesystem tree and so cannot be backend-neutral.
 """
 
 from __future__ import annotations
@@ -29,7 +29,6 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     CommunityId,
     ServerId,
 )
-from mc_server_dashboard_api.storage.integrity.region import ReasonCode
 from tests.storage.helpers import (
     corrupt_region_bytes,
     drain,
@@ -123,13 +122,13 @@ async def test_layout_conformance_matches_section_2(tmp_path: Path) -> None:
     assert (live / "world" / "level.dat").read_bytes() == b"x"
 
 
-async def test_hydrate_streams_incrementally_not_buffered(tmp_path: Path) -> None:
-    """A working set larger than one chunk is yielded in multiple bounded chunks.
+async def test_hydrate_yields_are_bounded_by_the_fs_chunk(tmp_path: Path) -> None:
+    """Every hydrate yield is bounded by the fs ``_CHUNK``.
 
     Memory-bound evidence specific to the fs adapter: the hydrate tar is generated
-    incrementally (pipe + ``tarfile`` stream mode), so a payload several chunks
-    long surfaces as several yields rather than one whole-archive buffer; peak
-    memory is one pipe buffer plus one ``_CHUNK``.
+    incrementally (pipe + ``tarfile`` stream mode), so peak memory is one pipe
+    buffer plus one ``_CHUNK``. That the stream is incremental at all is the shared
+    contract (``test_port_contract.py``).
     """
 
     from mc_server_dashboard_api.storage.adapters.fs import _CHUNK
@@ -152,7 +151,6 @@ async def test_hydrate_streams_incrementally_not_buffered(tmp_path: Path) -> Non
 
     stream = storage.open_hydrate_source(community, server)
     chunks = [chunk async for chunk in stream]
-    assert len(chunks) > 1  # incremental, not one buffered blob
     assert all(len(c) <= _CHUNK for c in chunks)  # each yield is bounded
     assert read_tar(b"".join(chunks)) == big
 
@@ -194,15 +192,13 @@ async def test_abort_discards_staging_and_leaves_current_untouched(
     assert snapshot_dir(tmp_path, community, server) == live_before
 
 
-async def test_commit_refuses_a_corrupt_region_and_keeps_prior_snapshot(
+async def test_corrupt_region_refusal_keeps_current_link_and_cleans_staging(
     tmp_path: Path,
 ) -> None:
-    """The integrity gate (issue #739): a corrupt ``.mca`` in staging is not published.
-
-    A working set carrying a structurally corrupt region file must be refused at
-    ``commit_snapshot`` with :class:`IntegrityCheckError` carrying the report; the
-    prior ``current`` is left resolving to the last good snapshot and the corrupt
-    staging area is cleaned (last-known-good retention, #703).
+    """fs realization of the integrity-gate refusal (issue #739): the ``current``
+    symlink still resolves to the last good snapshot directory and the corrupt
+    staging dir is cleaned (last-known-good retention, #703). The refusal and its
+    report are the shared contract (``test_port_contract.py``).
     """
 
     storage = FsStorage(tmp_path)
@@ -216,48 +212,23 @@ async def test_commit_refuses_a_corrupt_region_and_keeps_prior_snapshot(
     await storage.write_snapshot(
         handle, tar_stream({"world/region/r.0.0.mca": corrupt_region_bytes()})
     )
-    with pytest.raises(IntegrityCheckError) as excinfo:
+    with pytest.raises(IntegrityCheckError):
         await storage.commit_snapshot(handle)
-
-    # The report names the corrupt file and its reason so a caller can surface why.
-    report = excinfo.value.report
-    assert len(report.corrupt) == 1
-    assert report.corrupt[0].reason is ReasonCode.NOT_4096_ALIGNED
 
     # current still resolves to the prior good snapshot; staging was cleaned.
     assert snapshot_dir(tmp_path, community, server) == good_live
-    blob = await drain(storage.open_hydrate_source(community, server))
-    assert read_tar(blob) == {"world/region/r.0.0.mca": healthy_region_bytes()}
     server_root = good_live.parent.parent
     incoming = server_root / "incoming"
     assert not incoming.exists() or not any(incoming.iterdir())
 
 
-async def test_commit_publishes_a_healthy_region_unchanged(tmp_path: Path) -> None:
-    """A healthy working set publishes exactly as before (no gate regression)."""
-
-    storage = FsStorage(tmp_path)
-    community, server = new_scope()
-    files = {
-        "world/region/r.0.0.mca": healthy_region_bytes(),
-        "server.properties": b"x",
-    }
-    await _publish(storage, community, server, files)
-
-    blob = await drain(storage.open_hydrate_source(community, server))
-    assert read_tar(blob) == files
-
-
-async def test_commit_refuses_partial_region_loss_and_keeps_prior(
+async def test_missing_region_refusal_keeps_current_link_and_cleans_staging(
     tmp_path: Path,
 ) -> None:
-    """The missing-region gate (issue #854): a publish that DROPS some-but-not-all of
-    a live dimension's region files is refused.
-
-    Every other gate validates only files that exist, so a vanished region is
-    structurally valid absence. A staged set that lost a region a dimension still
-    populates is the corruption signature: refuse with :class:`MissingRegionsError`
-    (carrying the report), keep the prior ``current``, and clean staging (#703).
+    """fs realization of the missing-region refusal (issue #854): the ``current``
+    symlink still resolves to the prior snapshot directory and the staging dir is
+    cleaned (#703). The refusal, its report, and the unchanged hydrate are the
+    shared contract (``test_port_contract.py``).
     """
 
     storage = FsStorage(tmp_path)
@@ -277,48 +248,13 @@ async def test_commit_refuses_partial_region_loss_and_keeps_prior(
     await storage.write_snapshot(
         handle, tar_stream({"world/region/r.0.0.mca": healthy_region_bytes()})
     )
-    with pytest.raises(MissingRegionsError) as excinfo:
+    with pytest.raises(MissingRegionsError):
         await storage.commit_snapshot(handle)
-
-    report = excinfo.value.report
-    assert len(report.partial_loss) == 1
-    assert report.partial_loss[0].directory == Path("world/region")
-    assert report.partial_loss[0].lost == ("r.0.1.mca",)
 
     # current still resolves to the prior snapshot; staging was cleaned.
     assert snapshot_dir(tmp_path, community, server) == good_live
-    blob = await drain(storage.open_hydrate_source(community, server))
-    assert read_tar(blob) == {
-        "world/region/r.0.0.mca": healthy_region_bytes(),
-        "world/region/r.0.1.mca": healthy_region_bytes(),
-    }
     incoming = good_live.parent.parent / "incoming"
     assert not incoming.exists() or not any(incoming.iterdir())
-
-
-async def test_commit_allows_full_dimension_delete(tmp_path: Path) -> None:
-    """A publish that removes a WHOLE dimension's regions (legitimate delete) is
-    allowed — only a partial loss is the corruption signature (issue #854)."""
-
-    storage = FsStorage(tmp_path)
-    community, server = new_scope()
-    await _publish(
-        storage,
-        community,
-        server,
-        {
-            "world/region/r.0.0.mca": healthy_region_bytes(),
-            "world/DIM-1/region/r.0.0.mca": healthy_region_bytes(),
-            "world/DIM-1/region/r.0.1.mca": healthy_region_bytes(),
-        },
-    )
-
-    # The Nether (DIM-1) is deleted entirely; the overworld is unchanged.
-    after = {"world/region/r.0.0.mca": healthy_region_bytes()}
-    await _publish(storage, community, server, after)
-
-    blob = await drain(storage.open_hydrate_source(community, server))
-    assert read_tar(blob) == after
 
 
 async def _put_backup(
@@ -339,15 +275,13 @@ async def _put_backup(
     return await storage.put_backup(community, server, _stream())
 
 
-async def test_restore_corrupt_backup_without_force_refuses_and_keeps_current(
+async def test_restore_refusal_keeps_current_link_and_cleans_staging(
     tmp_path: Path,
 ) -> None:
-    """The restore gate (issue #743): a corrupt backup is refused without ``force``.
-
-    Restoring a backup whose extracted working set is structurally corrupt must
-    raise :class:`IntegrityCheckError` (carrying the report), clean the restore
-    staging, and leave ``current`` resolving to the prior good snapshot — the
-    publish never runs (last-known-good, #703).
+    """fs realization of the restore-gate refusal (issue #743): the restore staging
+    is cleaned and ``current`` still resolves to the prior good snapshot directory —
+    the publish never runs (last-known-good, #703). The refusal, its report, and the
+    unchanged hydrate are the shared contract (``test_port_contract.py``).
     """
 
     storage = FsStorage(tmp_path)
@@ -365,65 +299,13 @@ async def test_restore_corrupt_backup_without_force_refuses_and_keeps_current(
         {"world/region/r.0.0.mca": mode_invariant_corrupt_region_bytes()},
     )
 
-    with pytest.raises(IntegrityCheckError) as excinfo:
+    with pytest.raises(IntegrityCheckError):
         await storage.restore_backup(community, server, key)
-    assert len(excinfo.value.report.corrupt) == 1
-    assert excinfo.value.report.corrupt[0].reason is ReasonCode.SECTOR_OUT_OF_BOUNDS
 
     # current still resolves to the prior good snapshot; restore staging was cleaned.
     assert snapshot_dir(tmp_path, community, server) == good_live
-    blob = await drain(storage.open_hydrate_source(community, server))
-    assert read_tar(blob) == {"world/region/r.0.0.mca": healthy_region_bytes()}
     incoming = good_live.parent.parent / "incoming"
     assert not incoming.exists() or not any(incoming.iterdir())
-
-
-async def test_restore_corrupt_backup_with_force_publishes_and_reports_corruption(
-    tmp_path: Path,
-) -> None:
-    """``force=True`` publishes a corrupt backup but still surfaces the corruption.
-
-    The operator override (#703: better a corrupt restore on purpose than no
-    restore): the corrupt working set is published to ``current`` anyway, and the
-    returned report is non-healthy so the caller can quarantine + audit (#743).
-    """
-
-    storage = FsStorage(tmp_path)
-    community, server = new_scope()
-    await _publish(
-        storage, community, server, {"world/region/r.0.0.mca": healthy_region_bytes()}
-    )
-    # The restore gate runs in live mode (issue #923), so use a tear the live rule
-    # still catches (a location entry past EOF), not a mere unaligned size.
-    corrupt_region = mode_invariant_corrupt_region_bytes()
-    key = await _put_backup(
-        storage, community, server, {"world/region/r.0.0.mca": corrupt_region}
-    )
-
-    report = await storage.restore_backup(community, server, key, force=True)
-
-    assert not report.healthy
-    assert len(report.corrupt) == 1
-    # The corrupt backup was published despite the corruption.
-    blob = await drain(storage.open_hydrate_source(community, server))
-    assert read_tar(blob) == {"world/region/r.0.0.mca": corrupt_region}
-
-
-async def test_restore_healthy_backup_returns_healthy_report(tmp_path: Path) -> None:
-    """A healthy restore publishes as before and returns a healthy report (#743)."""
-
-    storage = FsStorage(tmp_path)
-    community, server = new_scope()
-    await _publish(storage, community, server, {"server.properties": b"motd=original"})
-    key = await _put_backup(
-        storage, community, server, {"world/region/r.0.0.mca": healthy_region_bytes()}
-    )
-
-    report = await storage.restore_backup(community, server, key)
-
-    assert report.healthy
-    blob = await drain(storage.open_hydrate_source(community, server))
-    assert read_tar(blob) == {"world/region/r.0.0.mca": healthy_region_bytes()}
 
 
 async def test_write_snapshot_rejects_symlink_escape_member(tmp_path: Path) -> None:
