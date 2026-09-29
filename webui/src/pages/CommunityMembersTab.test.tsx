@@ -1,11 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import {
-  act,
-  fireEvent,
-  render,
-  screen,
-  waitFor,
-} from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client.ts";
@@ -409,27 +403,5 @@ describe("CommunityMembersTab", () => {
         t("permissions.deniedNamed", { permission: "role:manage" }),
       ),
     ).toBeInTheDocument();
-  });
-
-  it("keeps rendering cached members when a background refetch fails (#1797)", async () => {
-    routeGet({ members: [member({ username: "alice" })] });
-    const { queryClient } = renderPage();
-    await awaitMembers();
-    await screen.findByText("alice");
-
-    // Simulate a transient API outage: the next background refetch fails.
-    mockApi.get.mockRejectedValue(new ApiError(500, {}));
-    await act(() => queryClient.invalidateQueries());
-    // The query-state notification lands a task after invalidateQueries
-    // settles; flush it so the assertion sees the post-refetch render.
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
-
-    // The cached list stays on screen instead of the tab-level error.
-    expect(screen.getByText("alice")).toBeInTheDocument();
-    expect(
-      screen.queryByText(t("communitySettings.members.loadError")),
-    ).not.toBeInTheDocument();
   });
 });

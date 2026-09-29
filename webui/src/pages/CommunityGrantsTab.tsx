@@ -15,6 +15,7 @@ import {
 } from "../permissions/catalog.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
+import { classifyQueryResult } from "../queryState.ts";
 
 type GrantResponse = components["schemas"]["GrantResponse"];
 type MemberResponse = components["schemas"]["MemberResponse"];
@@ -136,16 +137,24 @@ export function CommunityGrantsTab({
     },
   });
 
-  if (grants.isPending || members.isPending || servers.isPending) {
+  const grantsState = classifyQueryResult(grants);
+  const membersState = classifyQueryResult(members);
+  const serversState = classifyQueryResult(servers);
+
+  if (
+    grantsState.kind === "pending" ||
+    membersState.kind === "pending" ||
+    serversState.kind === "pending"
+  ) {
     return <p className="sub">{t("communitySettings.grants.loading")}</p>;
   }
   // Error only when there is nothing to show (an initial load failed). A
   // failed background refetch retains `data`, so the cached list keeps
   // rendering through transient API blips (#1797).
   if (
-    grants.data === undefined ||
-    members.data === undefined ||
-    servers.data === undefined
+    grantsState.kind === "error" ||
+    membersState.kind === "error" ||
+    serversState.kind === "error"
   ) {
     return (
       <p className="field-error">{t("communitySettings.grants.loadError")}</p>
@@ -153,9 +162,9 @@ export function CommunityGrantsTab({
   }
 
   const usernameById = new Map(
-    members.data.map((m) => [m.user_id, m.username]),
+    membersState.data.map((m) => [m.user_id, m.username]),
   );
-  const serverNameById = new Map(servers.data.map((s) => [s.id, s.name]));
+  const serverNameById = new Map(serversState.data.map((s) => [s.id, s.name]));
 
   return (
     <section className="grants">
@@ -179,7 +188,7 @@ export function CommunityGrantsTab({
           onChange={(e) => setFilterUserId(e.target.value)}
         >
           <option value="">{t("communitySettings.grants.filterAll")}</option>
-          {members.data.map((m) => (
+          {membersState.data.map((m) => (
             <option key={m.user_id} value={m.user_id}>
               {m.username ?? t("communitySettings.grants.unknownUser")}
             </option>
@@ -187,7 +196,7 @@ export function CommunityGrantsTab({
         </select>
       </label>
 
-      {grants.data.length === 0 ? (
+      {grantsState.data.length === 0 ? (
         <p className="sub">{t("communitySettings.grants.empty")}</p>
       ) : (
         <table className="data">
@@ -200,7 +209,7 @@ export function CommunityGrantsTab({
             </tr>
           </thead>
           <tbody>
-            {grants.data.map((grant) => (
+            {grantsState.data.map((grant) => (
               <tr key={grant.id}>
                 <td>{usernameById.get(grant.user_id) ?? grant.user_id}</td>
                 <td>
@@ -236,8 +245,8 @@ export function CommunityGrantsTab({
         <CreateGrantDialog
           open={createOpen}
           communityId={communityId}
-          members={members.data}
-          servers={servers.data}
+          members={membersState.data}
+          servers={serversState.data}
           onClose={() => setCreateOpen(false)}
         />
       )}

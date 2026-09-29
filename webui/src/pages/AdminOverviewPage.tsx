@@ -3,6 +3,7 @@ import { api } from "../api/client.ts";
 import type { components } from "../api/schema";
 import { heartbeatAge, humanizeBytes, statusPill } from "../format.ts";
 import { t } from "../i18n/index.ts";
+import { classifyQueryResult } from "../queryState.ts";
 
 // Platform admin Overview (WEBUI_SPEC.md 6.12): worker count by status, total
 // servers running, global backup stats, jar-pool stats. All four read from the
@@ -33,15 +34,9 @@ export function AdminOverviewPage() {
     refetchInterval: REFRESH_INTERVAL_MS,
   });
 
-  const isPending =
-    workersQuery.isPending || backupsQuery.isPending || jarPoolQuery.isPending;
-  // Error only when there is nothing to show (an initial load failed). A
-  // failed background refetch (including polling blips) retains `data`, so the
-  // cached overview keeps rendering through transient API outages (#1805).
-  const isDataMissing =
-    workersQuery.data === undefined ||
-    backupsQuery.data === undefined ||
-    jarPoolQuery.data === undefined;
+  const workersState = classifyQueryResult(workersQuery);
+  const backupsState = classifyQueryResult(backupsQuery);
+  const jarPoolState = classifyQueryResult(jarPoolQuery);
 
   return (
     <div className="admin-overview">
@@ -52,19 +47,27 @@ export function AdminOverviewPage() {
         </div>
       </div>
 
-      {isPending ? (
+      {workersState.kind === "pending" ||
+      backupsState.kind === "pending" ||
+      jarPoolState.kind === "pending" ? (
         <p className="sub" role="status">
           {t("admin.overview.loading")}
         </p>
-      ) : isDataMissing ? (
+      ) : /* Error only when there is nothing to show (an initial load
+           failed). A failed background refetch (including polling blips)
+           retains `data`, so the cached overview keeps rendering through
+           transient API outages (#1805). */
+      workersState.kind === "error" ||
+        backupsState.kind === "error" ||
+        jarPoolState.kind === "error" ? (
         <p className="field-error" role="alert">
           {t("admin.overview.loadError")}
         </p>
       ) : (
         <Loaded
-          workers={workersQuery.data?.workers ?? []}
-          backups={backupsQuery.data}
-          jarPool={jarPoolQuery.data}
+          workers={workersState.data.workers}
+          backups={backupsState.data}
+          jarPool={jarPoolState.data}
         />
       )}
     </div>

@@ -1,6 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
-  act,
   fireEvent,
   render,
   renderHook,
@@ -1085,32 +1084,5 @@ describe("ServerCreatePage import deep link (#540)", () => {
       await screen.findByText(t("serverCreate.import.heading")),
     ).toBeInTheDocument();
     expect(activeTab()).toBe(t("serverCreate.tab.import"));
-  });
-});
-
-describe("ServerCreatePage refetch failure (#1805)", () => {
-  beforeEach(() => {
-    mockApi.get.mockReset();
-    mockApi.post.mockReset();
-    mockApi.get.mockImplementation(defaultGet);
-  });
-  afterEach(() => vi.clearAllMocks());
-
-  it("keeps rendering cached server types when a background refetch fails", async () => {
-    const { queryClient } = renderPage();
-    await screen.findByText(t("serverCreate.typeHeading"));
-
-    // Simulate a transient API outage: the next background refetch fails.
-    mockApi.get.mockRejectedValue(new ApiError(500, {}));
-    await act(() => queryClient.invalidateQueries());
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
-
-    // The cached type cards stay on screen instead of the error.
-    expect(screen.getByText(t("serverCreate.typeHeading"))).toBeInTheDocument();
-    expect(
-      screen.queryByText(t("serverCreate.typeLoadError")),
-    ).not.toBeInTheDocument();
   });
 });

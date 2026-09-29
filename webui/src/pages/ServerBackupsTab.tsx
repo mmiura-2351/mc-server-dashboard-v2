@@ -37,6 +37,7 @@ import { formatDateTime, humanizeBytes, shortId } from "../format.ts";
 import { type TranslationKey, t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
+import { classifyQueryResult } from "../queryState.ts";
 import { serverKey } from "./serverKey.ts";
 import { normalizeState } from "./serverState.ts";
 import { serversKey } from "./useCommunityEvents.ts";
@@ -273,7 +274,8 @@ export function ServerBackupsTab({
   // The listing is the primary content; its loading/error drive the whole tab.
   // Statistics is secondary and handled inline below, so a stats-only failure
   // can no longer blank a healthy listing (#2554).
-  if (listQuery.isPending) {
+  const listState = classifyQueryResult(listQuery);
+  if (listState.kind === "pending") {
     return <p className="sub">{t("backups.loading")}</p>;
   }
   // Error only when there is nothing to show (an initial load failed). A
@@ -281,7 +283,7 @@ export function ServerBackupsTab({
   // rendering through transient API blips (#1805). Route the error through
   // createErrorMessage so a specific reason (e.g. storage_unavailable) reaches
   // the user instead of the generic load message (#2554).
-  if (listQuery.data === undefined) {
+  if (listState.kind === "error") {
     return (
       <p className="field-error">
         {t(createErrorMessage(listQuery.error, "backups.loadError"))}
@@ -290,7 +292,7 @@ export function ServerBackupsTab({
   }
 
   const stats = statsQuery.data;
-  const backups = listQuery.data.backups;
+  const backups = listState.data.backups;
   const busy = create.isPending || upload.isPending;
 
   return (

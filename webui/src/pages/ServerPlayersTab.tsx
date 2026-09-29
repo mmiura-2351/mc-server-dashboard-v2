@@ -11,6 +11,7 @@ import { formatDateTime } from "../format.ts";
 import { type TranslationKey, t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
+import { classifyQueryResult } from "../queryState.ts";
 
 type GroupResponse = components["schemas"]["GroupResponse"];
 type GameSessionResponse = components["schemas"]["GameSessionResponse"];
@@ -138,17 +139,19 @@ export function ServerPlayersTab({
     onError,
   });
 
-  if (attached.isPending) {
+  const attachedState = classifyQueryResult(attached);
+
+  if (attachedState.kind === "pending") {
     return <p className="sub">{t("players.loading")}</p>;
   }
   // Error only when there is nothing to show (the initial load failed). A
   // failed background refetch retains `data`, so the cached list keeps
   // rendering through transient API blips (#1797).
-  if (attached.data === undefined) {
+  if (attachedState.kind === "error") {
     return <p className="field-error">{t("players.loadError")}</p>;
   }
 
-  const attachedGroups = attached.data;
+  const attachedGroups = attachedState.data;
   const attachedIds = new Set(attachedGroups.map((g) => g.id));
   const communityGroups = community.data ?? [];
   // Picker = community groups not already attached (WEBUI_SPEC.md 6.8).
@@ -294,6 +297,7 @@ function SessionsView({
     queryFn: ({ signal }) =>
       api.get(sessionsUrl(communityId, serverId, offset), { signal }),
   });
+  const queryState = classifyQueryResult(query);
 
   const sessions: GameSessionResponse[] = query.data?.sessions ?? [];
   const hasPrev = offset > 0;
@@ -302,12 +306,12 @@ function SessionsView({
   return (
     <div className="card">
       <h2>{t("sessions.heading")}</h2>
-      {query.isPending ? (
+      {queryState.kind === "pending" ? (
         <p className="sub">{t("sessions.loading")}</p>
       ) : /* Error only when there is nothing to show (initial load failed).
            A failed background refetch retains `data`, so the cached list
            keeps rendering through transient API blips (#1805). */
-      query.data === undefined ? (
+      queryState.kind === "error" ? (
         <p className="field-error">{t("sessions.loadError")}</p>
       ) : sessions.length === 0 ? (
         <p className="sub">{t("sessions.empty")}</p>

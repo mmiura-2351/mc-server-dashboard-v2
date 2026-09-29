@@ -14,6 +14,7 @@ import {
 } from "../permissions/catalog.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
+import { classifyQueryResult } from "../queryState.ts";
 
 type RoleResponse = components["schemas"]["RoleResponse"];
 
@@ -78,13 +79,15 @@ export function CommunityRolesTab({
     },
   });
 
-  if (roles.isPending) {
+  const rolesState = classifyQueryResult(roles);
+
+  if (rolesState.kind === "pending") {
     return <p className="sub">{t("communitySettings.roles.loading")}</p>;
   }
   // Error only when there is nothing to show (the initial load failed). A
   // failed background refetch retains `data`, so the cached list keeps
   // rendering through transient API blips (#1797).
-  if (roles.data === undefined) {
+  if (rolesState.kind === "error") {
     return (
       <p className="field-error">{t("communitySettings.roles.loadError")}</p>
     );
@@ -105,12 +108,12 @@ export function CommunityRolesTab({
         )}
       </div>
 
-      {roles.data.length === 0 ? (
+      {rolesState.data.length === 0 ? (
         <p className="sub">{t("communitySettings.roles.empty")}</p>
       ) : (
         <table className="data">
           <tbody>
-            {roles.data.map((role) => (
+            {rolesState.data.map((role) => (
               <tr key={role.id}>
                 <td>
                   {role.name}

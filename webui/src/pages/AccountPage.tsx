@@ -8,6 +8,7 @@ import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
 import { PasswordInput } from "../components/PasswordInput.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { type TranslationKey, t } from "../i18n/index.ts";
+import { classifyQueryResult } from "../queryState.ts";
 
 type UserResponse = components["schemas"]["UserResponse"];
 type CommunityResponse = components["schemas"]["CommunityResponse"];
@@ -55,8 +56,10 @@ export function AccountPage() {
     queryKey: ["communities"],
     queryFn: ({ signal }) => api.get("/api/communities", { signal }),
   });
+  const userState = classifyQueryResult(userQuery);
+  const communitiesState = classifyQueryResult(communitiesQuery);
 
-  if (userQuery.isPending) {
+  if (userState.kind === "pending") {
     return (
       <div className="account">
         <p className="sub">{t("account.loading")}</p>
@@ -66,7 +69,7 @@ export function AccountPage() {
   // Full-page error only when there is nothing to show (the initial load
   // failed). A failed background refetch retains `data`, so the cached page
   // keeps rendering through transient API blips (#1797).
-  if (userQuery.data === undefined) {
+  if (userState.kind === "error") {
     return (
       <div className="account">
         <p className="sub">{t("account.loadError")}</p>
@@ -76,11 +79,11 @@ export function AccountPage() {
 
   return (
     <Loaded
-      user={userQuery.data}
-      communities={communitiesQuery.data ?? []}
-      communitiesError={
-        communitiesQuery.isError && communitiesQuery.data === undefined
+      user={userState.data}
+      communities={
+        communitiesState.kind === "data" ? communitiesState.data : []
       }
+      communitiesError={communitiesState.kind === "error"}
       showToast={showToast}
     />
   );

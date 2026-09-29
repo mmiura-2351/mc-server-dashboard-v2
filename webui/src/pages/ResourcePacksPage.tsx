@@ -27,6 +27,7 @@ import { useUploadProgress } from "../components/useUploadProgress.ts";
 import { formatDateTime, humanizeBytes, shortId } from "../format.ts";
 import { t } from "../i18n/index.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
+import { classifyQueryResult } from "../queryState.ts";
 
 type ResourcePackResponse = components["schemas"]["ResourcePackResponse"];
 
@@ -49,6 +50,7 @@ export function ResourcePacksPage() {
     queryKey: PACKS_KEY,
     queryFn: ({ signal }) => api.get("/api/resource-packs", { signal }),
   });
+  const listState = classifyQueryResult(listQuery);
 
   const refresh = () => {
     queryClient.invalidateQueries({ queryKey: PACKS_KEY });
@@ -114,20 +116,20 @@ export function ResourcePacksPage() {
         </div>
       </div>
 
-      {listQuery.isPending ? (
+      {listState.kind === "pending" ? (
         <p className="sub" role="status">
           {t("resourcePacks.loading")}
         </p>
       ) : /* Error only when there is nothing to show (initial load failed).
            A failed background refetch retains `data`, so the cached page
            keeps rendering through transient API blips (#1805). */
-      listQuery.data === undefined ? (
+      listState.kind === "error" ? (
         <p className="field-error" role="alert">
           {t("resourcePacks.loadError")}
         </p>
       ) : (
         <div className="card table-card">
-          {listQuery.data.resource_packs.length === 0 ? (
+          {listState.data.resource_packs.length === 0 ? (
             <p className="sub">{t("resourcePacks.empty")}</p>
           ) : (
             <table className="data">
@@ -143,7 +145,7 @@ export function ResourcePacksPage() {
                 </tr>
               </thead>
               <tbody>
-                {listQuery.data.resource_packs.map((pack) => (
+                {listState.data.resource_packs.map((pack) => (
                   <tr key={pack.id}>
                     <td>{pack.display_name}</td>
                     <td>{pack.filename}</td>

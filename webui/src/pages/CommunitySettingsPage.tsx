@@ -4,6 +4,7 @@ import { api } from "../api/client.ts";
 import { apiPath } from "../api/path.ts";
 import { type TranslationKey, t } from "../i18n/index.ts";
 import { type Can, useCan } from "../permissions/useCan.ts";
+import { classifyQueryResult } from "../queryState.ts";
 import { dashboardPath } from "../routes.ts";
 import { CommunityAuditTab } from "./CommunityAuditTab.tsx";
 import { CommunityGeneralTab } from "./CommunityGeneralTab.tsx";
@@ -57,17 +58,19 @@ function Loaded({ communityId }: { communityId: string }) {
       ),
   });
 
-  if (query.isPending) {
+  const queryState = classifyQueryResult(query);
+
+  if (queryState.kind === "pending") {
     return <p className="sub">{t("communitySettings.loading")}</p>;
   }
   // Full-page error only when there is nothing to show (the initial load
   // failed). A failed background refetch retains `data`, so the cached page
   // keeps rendering through transient API blips (#1797).
-  if (query.data === undefined) {
+  if (queryState.kind === "error") {
     return <p className="field-error">{t("communitySettings.loadError")}</p>;
   }
 
-  const community = query.data;
+  const community = queryState.data;
   return (
     <>
       <div className="page-head">

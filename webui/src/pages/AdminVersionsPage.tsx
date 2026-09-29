@@ -11,6 +11,7 @@ import { SimpleConfirmDialog } from "../components/SimpleConfirmDialog.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { humanizeBytes } from "../format.ts";
 import { t } from "../i18n/index.ts";
+import { classifyQueryResult } from "../queryState.ts";
 
 // Platform admin Versions page (WEBUI_SPEC.md 6.12): per-type catalog freshness,
 // refresh (all or one type), and the shared JAR pool stats + GC. The catalog
@@ -24,8 +25,7 @@ export function AdminVersionsPage() {
     queryKey: ["versions", "types"],
     queryFn: ({ signal }) => api.get("/api/versions", { signal }),
   });
-
-  const types = typesQuery.data?.server_types ?? [];
+  const typesState = classifyQueryResult(typesQuery);
 
   return (
     <div className="admin-versions">
@@ -36,19 +36,19 @@ export function AdminVersionsPage() {
         </div>
       </div>
 
-      {typesQuery.isPending ? (
+      {typesState.kind === "pending" ? (
         <p className="sub" role="status">
           {t("admin.versions.loading")}
         </p>
       ) : /* Error only when there is nothing to show (initial load failed).
            A failed background refetch retains `data`, so the cached page
            keeps rendering through transient API blips (#1805). */
-      typesQuery.data === undefined ? (
+      typesState.kind === "error" ? (
         <p className="field-error" role="alert">
           {t("admin.versions.loadError")}
         </p>
       ) : (
-        <Catalog types={types} />
+        <Catalog types={typesState.data.server_types} />
       )}
 
       <JarPool />
@@ -190,6 +190,7 @@ function JarPool() {
     queryFn: ({ signal }) =>
       api.get("/api/versions/jar-pool/stats", { signal }),
   });
+  const statsState = classifyQueryResult(statsQuery);
 
   const gc = useMutation({
     mutationFn: () => api.post("/api/versions/jar-pool/gc"),
@@ -213,23 +214,23 @@ function JarPool() {
   return (
     <div className="card jar-pool">
       <h2>{t("admin.versions.jarPool")}</h2>
-      {statsQuery.isPending ? (
+      {statsState.kind === "pending" ? (
         <p className="sub" role="status">
           {t("admin.versions.loading")}
         </p>
       ) : /* Error only when there is nothing to show (initial load failed).
            A failed background refetch retains `data`, so the cached page
            keeps rendering through transient API blips (#1805). */
-      statsQuery.data === undefined ? (
+      statsState.kind === "error" ? (
         <p className="field-error" role="alert">
           {t("admin.versions.loadError")}
         </p>
       ) : (
         <dl className="kv">
           <dt>{t("admin.versions.jarPoolCached")}</dt>
-          <dd>{statsQuery.data?.count ?? 0}</dd>
+          <dd>{statsState.data.count}</dd>
           <dt>{t("admin.versions.jarPoolSize")}</dt>
-          <dd>{humanizeBytes(statsQuery.data?.total_bytes ?? 0)}</dd>
+          <dd>{humanizeBytes(statsState.data.total_bytes)}</dd>
         </dl>
       )}
       <div className="jar-pool-actions">

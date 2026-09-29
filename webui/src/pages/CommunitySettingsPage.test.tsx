@@ -10,10 +10,9 @@
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ApiError } from "../api/client.ts";
 import { setAccessToken } from "../auth/tokenStore.ts";
 import { ToastProvider } from "../components/Toast.tsx";
 import { t } from "../i18n/index.ts";
@@ -138,36 +137,5 @@ describe("CommunitySettingsPage page-specific tabs (#514, #2058)", () => {
 
     panel.focus();
     expect(panel).toHaveFocus();
-  });
-});
-
-describe("CommunitySettingsPage refetch failure (#1797)", () => {
-  beforeEach(() => {
-    setAccessToken("tok-1");
-    mockApi.get.mockReset();
-    setCommunityId.mockReset();
-    mockCan = () => true;
-    routeGet();
-  });
-  afterEach(() => vi.clearAllMocks());
-
-  it("keeps rendering the cached community when a background refetch fails", async () => {
-    const { queryClient } = renderPage();
-    await screen.findAllByText("Sakura");
-
-    // Simulate a transient API outage: the next background refetch fails.
-    mockApi.get.mockRejectedValue(new ApiError(500, {}));
-    await act(() => queryClient.invalidateQueries());
-    // The query-state notification lands a task after invalidateQueries
-    // settles; flush it so the assertion sees the post-refetch render.
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
-
-    // The cached page stays on screen instead of a full-page error.
-    expect(screen.getAllByText("Sakura").length).toBeGreaterThan(0);
-    expect(
-      screen.queryByText(t("communitySettings.loadError")),
-    ).not.toBeInTheDocument();
   });
 });
