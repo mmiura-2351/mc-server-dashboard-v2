@@ -8,6 +8,7 @@ fake :class:`JarFetcher` / :class:`JarPool` hold bytes in memory.
 from __future__ import annotations
 
 import datetime as dt
+from collections.abc import Callable
 
 from mc_server_dashboard_api.versions.domain.fetcher import (
     FetchError,
@@ -127,15 +128,14 @@ class FakeJarFetcher(JarFetcher):
 # that fail-loud property depend on the host clock running later than the test's
 # fixed ``now`` minus the window — an unstated environmental assumption (#2529).
 # Spelled identically in ``tests/storage/fake_s3.py`` and
-# ``tests/servers/fakes.py``; the trigger for extracting the three copies into a
-# shared module is recorded beside the ``fake_s3.py`` one (issue #2576).
+# ``tests/servers/fakes.py`` (issue #2576).
 _UNSTAMPED_STORE_TIME = dt.datetime(9999, 1, 1, tzinfo=dt.UTC)
 
 
 class FakeJarPool(JarPool):
     """In-memory content-addressed JAR pool."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, clock: Callable[[], dt.datetime] | None = None) -> None:
         self.stored: dict[str, bytes] = {}
         self.put_calls = 0
         # Each ``delete`` call, including the ones for keys already gone.
@@ -145,6 +145,7 @@ class FakeJarPool(JarPool):
         # GC tests set it to age a JAR past the safety window. A JAR seeded
         # straight into ``stored`` has none — see :data:`_UNSTAMPED_STORE_TIME`.
         self.modified_at: dict[str, dt.datetime] = {}
+        self._clock = clock or (lambda: dt.datetime.now(dt.UTC))
 
     async def has(self, sha256: str) -> bool:
         return sha256 in self.stored
@@ -161,12 +162,11 @@ class FakeJarPool(JarPool):
         # head-checks the content key and skips the upload (``last_modified``
         # stays) — and neither Port docstring picks a side, so the fake keeps the
         # first stamp rather than claim one backend's behaviour (issue #2529).
-        # The stamp reads the host clock by convention, recorded with
-        # ``tests/storage/fake_s3.py``'s copy of the sentinel (issue #2576);
-        # ``tests/versions/test_jar_pool_fake.py`` pins it, and
+        # The shared Port contract controls the clock; ordinary use-case tests
+        # retain the UTC host-clock default, while
         # ``tests/versions/test_ensure_jar.py``'s ``_PastClock`` stops ageing the
         # JAR the test just put if this line ever stamps the far-future sentinel.
-        self.modified_at.setdefault(key, dt.datetime.now(dt.UTC))
+        self.modified_at.setdefault(key, self._clock())
         return key
 
     async def stats(self) -> PoolStats:
