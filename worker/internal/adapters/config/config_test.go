@@ -202,75 +202,44 @@ func TestLoadKeepsNonBlankCredentialVerbatim(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsUnknownDriver(t *testing.T) {
-	env := mapEnv(map[string]string{
-		"MCD_WORKER_API_GRPC_ENDPOINT":       "api:50051",
-		"MCD_WORKER_API_CREDENTIAL":          "secret",
-		"MCD_WORKER_API_TLS_INSECURE":        "true",
-		"MCD_WORKER_WORKER_SCRATCH_DIR":      "/scratch",
-		"MCD_WORKER_WORKER_DRIVERS":          "container,bogus",
-		"MCD_WORKER_DRIVER_CONTAINER_IMAGES": "21=eclipse-temurin:21-jre",
-	})
-
-	_, err := Load("", env)
-	if err == nil {
-		t.Fatal("Load() with unknown driver: want error, got nil")
+// Load rejects a single invalid value on an otherwise valid config, and the error
+// names the offending key so the operator can find it.
+func TestLoadRejectsInvalidValue(t *testing.T) {
+	tests := []struct {
+		name     string
+		env      map[string]string // overrides on baseEnv; "" unsets a key
+		wantKeys []string
+	}{
+		{name: "unknown driver", env: map[string]string{"MCD_WORKER_WORKER_DRIVERS": "container,bogus"}, wantKeys: []string{"bogus"}},
+		// worker.drivers no longer has a zero-config default (issue #781), so a
+		// config that simply omits it is rejected — the path every
+		// previously-zero-config worker now hits. The error names "container" so
+		// the operator knows what to advertise.
+		{name: "omitted drivers", env: map[string]string{"MCD_WORKER_WORKER_DRIVERS": ""}, wantKeys: []string{"worker.drivers", "container"}},
+		{name: "container without images", env: map[string]string{"MCD_WORKER_DRIVER_CONTAINER_IMAGES": ""}, wantKeys: []string{"driver.container.images"}},
+		{name: "malformed max_servers", env: map[string]string{"MCD_WORKER_WORKER_MAX_SERVERS": "not-a-number"}, wantKeys: []string{"WORKER_MAX_SERVERS"}},
+		{name: "malformed metrics_interval_seconds", env: map[string]string{"MCD_WORKER_WORKER_METRICS_INTERVAL_SECONDS": "not-a-number"}, wantKeys: []string{"WORKER_METRICS_INTERVAL_SECONDS"}},
+		{name: "malformed game_bind_ip", env: map[string]string{"MCD_WORKER_DRIVER_CONTAINER_GAME_BIND_IP": "not-an-ip"}, wantKeys: []string{"driver.container.game_bind_ip"}},
+		{name: "unknown log level", env: map[string]string{"MCD_WORKER_LOG_LEVEL": "trace"}, wantKeys: []string{"log.level"}},
+		{name: "log level typo", env: map[string]string{"MCD_WORKER_LOG_LEVEL": "debgu"}, wantKeys: []string{"log.level"}},
 	}
-	if !contains(err.Error(), "bogus") {
-		t.Errorf("error %q does not name the bad driver", err.Error())
-	}
-}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := baseEnv(t.TempDir())
+			for k, v := range tc.env {
+				env[k] = v
+			}
 
-// TestLoadRejectsOmittedDrivers pins the headline breaking change (issue #781):
-// worker.drivers no longer has a zero-config default, so a config that simply
-// omits it is rejected — the path every previously-zero-config worker now hits.
-// The error names "container" so the operator knows what to advertise.
-func TestLoadRejectsOmittedDrivers(t *testing.T) {
-	env := mapEnv(map[string]string{
-		"MCD_WORKER_API_GRPC_ENDPOINT":       "api:50051",
-		"MCD_WORKER_API_CREDENTIAL":          "secret",
-		"MCD_WORKER_API_TLS_INSECURE":        "true",
-		"MCD_WORKER_WORKER_SCRATCH_DIR":      "/scratch",
-		"MCD_WORKER_DRIVER_CONTAINER_IMAGES": "21=eclipse-temurin:21-jre",
-	})
-
-	_, err := Load("", env)
-	if err == nil {
-		t.Fatal("Load() with omitted worker.drivers: want error, got nil")
-	}
-	if !contains(err.Error(), "worker.drivers") {
-		t.Errorf("error %q does not name worker.drivers", err.Error())
-	}
-	if !contains(err.Error(), "container") {
-		t.Errorf("error %q does not name the valid container driver", err.Error())
-	}
-}
-
-func TestLoadRejectsMalformedMaxServers(t *testing.T) {
-	env := mapEnv(map[string]string{
-		"MCD_WORKER_API_GRPC_ENDPOINT":  "api:50051",
-		"MCD_WORKER_API_CREDENTIAL":     "secret",
-		"MCD_WORKER_API_TLS_INSECURE":   "true",
-		"MCD_WORKER_WORKER_SCRATCH_DIR": "/scratch",
-		"MCD_WORKER_WORKER_MAX_SERVERS": "not-a-number",
-	})
-
-	if _, err := Load("", env); err == nil {
-		t.Fatal("Load() with malformed max_servers: want error, got nil")
-	}
-}
-
-func TestLoadRejectsMalformedMetricsInterval(t *testing.T) {
-	env := mapEnv(map[string]string{
-		"MCD_WORKER_API_GRPC_ENDPOINT":               "api:50051",
-		"MCD_WORKER_API_CREDENTIAL":                  "secret",
-		"MCD_WORKER_API_TLS_INSECURE":                "true",
-		"MCD_WORKER_WORKER_SCRATCH_DIR":              "/scratch",
-		"MCD_WORKER_WORKER_METRICS_INTERVAL_SECONDS": "not-a-number",
-	})
-
-	if _, err := Load("", env); err == nil {
-		t.Fatal("Load() with malformed metrics_interval_seconds: want error, got nil")
+			_, err := Load("", mapEnv(env))
+			if err == nil {
+				t.Fatal("Load(): want error, got nil")
+			}
+			for _, key := range tc.wantKeys {
+				if !contains(err.Error(), key) {
+					t.Errorf("error %q does not name %q", err.Error(), key)
+				}
+			}
+		})
 	}
 }
 
@@ -507,10 +476,22 @@ func TestLoadContainerImagesFromEnv(t *testing.T) {
 	}
 }
 
-func TestLoadGameBindIPFromFile(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "worker.toml")
-	body := `
+// Each primitive driver.container setting loads from the config file and from its
+// environment variable onto the same field.
+func TestLoadContainerSettingFromFileOrEnv(t *testing.T) {
+	tests := []struct {
+		name   string
+		envKey string
+		value  string
+		got    func(Config) string
+	}{
+		{"game_bind_ip", "MCD_WORKER_DRIVER_CONTAINER_GAME_BIND_IP", "0.0.0.0", func(c Config) string { return c.Driver.Container.GameBindIP }},
+		{"network", "MCD_WORKER_DRIVER_CONTAINER_NETWORK", "mcsd", func(c Config) string { return c.Driver.Container.Network }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name+" from file", func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "worker.toml")
+			body := `
 [api]
 grpc_endpoint = "api:50051"
 credential = "secret"
@@ -523,165 +504,36 @@ scratch_dir = "` + t.TempDir() + `"
 drivers = ["container"]
 
 [driver.container]
-game_bind_ip = "0.0.0.0"
+` + tc.name + ` = "` + tc.value + `"
 
 [driver.container.images]
 21 = "eclipse-temurin:21-jre"
 `
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
 
-	cfg, err := Load(path, emptyEnv)
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if cfg.Driver.Container.GameBindIP != "0.0.0.0" {
-		t.Fatalf("GameBindIP = %q, want 0.0.0.0 from file", cfg.Driver.Container.GameBindIP)
-	}
-}
+			cfg, err := Load(path, emptyEnv)
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if got := tc.got(cfg); got != tc.value {
+				t.Fatalf("%s = %q, want %q from file", tc.name, got, tc.value)
+			}
+		})
 
-func TestLoadGameBindIPFromEnv(t *testing.T) {
-	env := mapEnv(map[string]string{
-		"MCD_WORKER_API_GRPC_ENDPOINT":             "api:50051",
-		"MCD_WORKER_API_CREDENTIAL":                "secret",
-		"MCD_WORKER_API_TLS_INSECURE":              "true",
-		"MCD_WORKER_WORKER_SCRATCH_DIR":            t.TempDir(),
-		"MCD_WORKER_WORKER_DRIVERS":                "container",
-		"MCD_WORKER_DRIVER_CONTAINER_IMAGES":       "21=eclipse-temurin:21-jre",
-		"MCD_WORKER_DRIVER_CONTAINER_GAME_BIND_IP": "0.0.0.0",
-	})
+		t.Run(tc.name+" from env", func(t *testing.T) {
+			env := baseEnv(t.TempDir())
+			env[tc.envKey] = tc.value
 
-	cfg, err := Load("", env)
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if cfg.Driver.Container.GameBindIP != "0.0.0.0" {
-		t.Fatalf("GameBindIP = %q, want 0.0.0.0 from env", cfg.Driver.Container.GameBindIP)
-	}
-}
-
-func TestLoadNetworkFromFile(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "worker.toml")
-	body := `
-[api]
-grpc_endpoint = "api:50051"
-credential = "secret"
-
-[api.tls]
-insecure = true
-
-[worker]
-scratch_dir = "` + t.TempDir() + `"
-drivers = ["container"]
-
-[driver.container]
-network = "mcsd"
-
-[driver.container.images]
-21 = "eclipse-temurin:21-jre"
-`
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg, err := Load(path, emptyEnv)
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if cfg.Driver.Container.Network != "mcsd" {
-		t.Fatalf("Network = %q, want mcsd from file", cfg.Driver.Container.Network)
-	}
-}
-
-func TestLoadNetworkFromEnv(t *testing.T) {
-	env := mapEnv(map[string]string{
-		"MCD_WORKER_API_GRPC_ENDPOINT":        "api:50051",
-		"MCD_WORKER_API_CREDENTIAL":           "secret",
-		"MCD_WORKER_API_TLS_INSECURE":         "true",
-		"MCD_WORKER_WORKER_SCRATCH_DIR":       t.TempDir(),
-		"MCD_WORKER_WORKER_DRIVERS":           "container",
-		"MCD_WORKER_DRIVER_CONTAINER_IMAGES":  "21=eclipse-temurin:21-jre",
-		"MCD_WORKER_DRIVER_CONTAINER_NETWORK": "mcsd",
-	})
-
-	cfg, err := Load("", env)
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if cfg.Driver.Container.Network != "mcsd" {
-		t.Fatalf("Network = %q, want mcsd from env", cfg.Driver.Container.Network)
-	}
-}
-
-func TestLoadRejectsMalformedGameBindIP(t *testing.T) {
-	env := mapEnv(map[string]string{
-		"MCD_WORKER_API_GRPC_ENDPOINT":             "api:50051",
-		"MCD_WORKER_API_CREDENTIAL":                "secret",
-		"MCD_WORKER_API_TLS_INSECURE":              "true",
-		"MCD_WORKER_WORKER_SCRATCH_DIR":            "/scratch",
-		"MCD_WORKER_WORKER_DRIVERS":                "container",
-		"MCD_WORKER_DRIVER_CONTAINER_IMAGES":       "21=eclipse-temurin:21-jre",
-		"MCD_WORKER_DRIVER_CONTAINER_GAME_BIND_IP": "not-an-ip",
-	})
-
-	_, err := Load("", env)
-	if err == nil {
-		t.Fatal("Load() with malformed game_bind_ip: want error, got nil")
-	}
-	if !contains(err.Error(), "game_bind_ip") {
-		t.Errorf("error %q does not mention driver.container.game_bind_ip", err.Error())
-	}
-}
-
-func TestLoadRejectsContainerWithoutImages(t *testing.T) {
-	env := mapEnv(map[string]string{
-		"MCD_WORKER_API_GRPC_ENDPOINT":  "api:50051",
-		"MCD_WORKER_API_CREDENTIAL":     "secret",
-		"MCD_WORKER_API_TLS_INSECURE":   "true",
-		"MCD_WORKER_WORKER_SCRATCH_DIR": "/scratch",
-		"MCD_WORKER_WORKER_DRIVERS":     "container",
-	})
-
-	if _, err := Load("", env); err == nil {
-		t.Fatal("Load() advertising container without images: want error, got nil")
-	}
-}
-
-func TestLoadRejectsBadLogLevel(t *testing.T) {
-	env := mapEnv(map[string]string{
-		"MCD_WORKER_API_GRPC_ENDPOINT":       "api:50051",
-		"MCD_WORKER_API_CREDENTIAL":          "secret",
-		"MCD_WORKER_API_TLS_INSECURE":        "true",
-		"MCD_WORKER_WORKER_SCRATCH_DIR":      t.TempDir(),
-		"MCD_WORKER_WORKER_DRIVERS":          "container",
-		"MCD_WORKER_DRIVER_CONTAINER_IMAGES": "21=eclipse-temurin:21-jre",
-		"MCD_WORKER_LOG_LEVEL":               "trace",
-	})
-
-	_, err := Load("", env)
-	if err == nil {
-		t.Fatal("Load() with unknown log.level: want error, got nil")
-	}
-	if !contains(err.Error(), "log.level") {
-		t.Errorf("error %q does not mention log.level", err.Error())
-	}
-}
-
-func TestLoadRejectsBadLogLevelTypo(t *testing.T) {
-	env := mapEnv(map[string]string{
-		"MCD_WORKER_API_GRPC_ENDPOINT":       "api:50051",
-		"MCD_WORKER_API_CREDENTIAL":          "secret",
-		"MCD_WORKER_API_TLS_INSECURE":        "true",
-		"MCD_WORKER_WORKER_SCRATCH_DIR":      t.TempDir(),
-		"MCD_WORKER_WORKER_DRIVERS":          "container",
-		"MCD_WORKER_DRIVER_CONTAINER_IMAGES": "21=eclipse-temurin:21-jre",
-		"MCD_WORKER_LOG_LEVEL":               "debgu",
-	})
-
-	if _, err := Load("", env); err == nil {
-		t.Fatal("Load() with typo in log.level: want error, got nil")
+			cfg, err := Load("", mapEnv(env))
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if got := tc.got(cfg); got != tc.value {
+				t.Fatalf("%s = %q, want %q from env", tc.name, got, tc.value)
+			}
+		})
 	}
 }
 

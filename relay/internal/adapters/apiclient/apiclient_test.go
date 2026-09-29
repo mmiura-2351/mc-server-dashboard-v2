@@ -13,48 +13,45 @@ import (
 
 // --- fromProtoDecision ---
 
-func TestFromProtoDecisionTunnel(t *testing.T) {
-	if got := fromProtoDecision(relayv1.JoinDecision_JOIN_DECISION_TUNNEL); got != DecisionTunnel {
-		t.Errorf("TUNNEL → %d, want %d", got, DecisionTunnel)
+func TestFromProtoDecision(t *testing.T) {
+	tests := []struct {
+		name string
+		in   relayv1.JoinDecision
+		want Decision
+	}{
+		{"tunnel", relayv1.JoinDecision_JOIN_DECISION_TUNNEL, DecisionTunnel},
+		{"stopped", relayv1.JoinDecision_JOIN_DECISION_STOPPED, DecisionStopped},
+		{"not found", relayv1.JoinDecision_JOIN_DECISION_NOT_FOUND, DecisionNotFound},
+		{"unspecified", relayv1.JoinDecision_JOIN_DECISION_UNSPECIFIED, DecisionUnknown},
+		// A future enum value the relay does not know about falls to DecisionUnknown.
+		{"unrecognised", relayv1.JoinDecision(99), DecisionUnknown},
 	}
-}
-
-func TestFromProtoDecisionStopped(t *testing.T) {
-	if got := fromProtoDecision(relayv1.JoinDecision_JOIN_DECISION_STOPPED); got != DecisionStopped {
-		t.Errorf("STOPPED → %d, want %d", got, DecisionStopped)
-	}
-}
-
-func TestFromProtoDecisionNotFound(t *testing.T) {
-	if got := fromProtoDecision(relayv1.JoinDecision_JOIN_DECISION_NOT_FOUND); got != DecisionNotFound {
-		t.Errorf("NOT_FOUND → %d, want %d", got, DecisionNotFound)
-	}
-}
-
-func TestFromProtoDecisionUnspecified(t *testing.T) {
-	if got := fromProtoDecision(relayv1.JoinDecision_JOIN_DECISION_UNSPECIFIED); got != DecisionUnknown {
-		t.Errorf("UNSPECIFIED → %d, want %d", got, DecisionUnknown)
-	}
-}
-
-func TestFromProtoDecisionUnrecognised(t *testing.T) {
-	// A future enum value the relay does not know about falls to DecisionUnknown.
-	if got := fromProtoDecision(relayv1.JoinDecision(99)); got != DecisionUnknown {
-		t.Errorf("unknown(99) → %d, want %d", got, DecisionUnknown)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := fromProtoDecision(tc.in); got != tc.want {
+				t.Errorf("%v → %d, want %d", tc.in, got, tc.want)
+			}
+		})
 	}
 }
 
 // --- toProtoIntent ---
 
-func TestToProtoIntentStatus(t *testing.T) {
-	if got := toProtoIntent(IntentStatus); got != relayv1.JoinIntent_JOIN_INTENT_STATUS {
-		t.Errorf("IntentStatus → %v, want JOIN_INTENT_STATUS", got)
+func TestToProtoIntent(t *testing.T) {
+	tests := []struct {
+		name string
+		in   Intent
+		want relayv1.JoinIntent
+	}{
+		{"status", IntentStatus, relayv1.JoinIntent_JOIN_INTENT_STATUS},
+		{"login", IntentLogin, relayv1.JoinIntent_JOIN_INTENT_LOGIN},
 	}
-}
-
-func TestToProtoIntentLogin(t *testing.T) {
-	if got := toProtoIntent(IntentLogin); got != relayv1.JoinIntent_JOIN_INTENT_LOGIN {
-		t.Errorf("IntentLogin → %v, want JOIN_INTENT_LOGIN", got)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := toProtoIntent(tc.in); got != tc.want {
+				t.Errorf("%v → %v, want %v", tc.in, got, tc.want)
+			}
+		})
 	}
 }
 

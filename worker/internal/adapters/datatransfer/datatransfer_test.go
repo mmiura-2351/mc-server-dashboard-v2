@@ -710,43 +710,47 @@ func closedDataPlane(t *testing.T) (*http.Client, string) {
 	return client, transferURL
 }
 
-// TestHydrateErrorNamesTheDataPlaneURL pins that a hydrate against an unreachable
-// data plane names the URL the Worker was handed (issue #2595). An operator who
-// keeps the shipped compose default (MCD_API_SERVER__DATA_PLANE_BASE_URL pinned to
-// the compose-internal http://api:8000) and then adds a Worker on a second host
-// gets no boot-time signal at all — the variable is set, so the API's startup
+// TestTransferErrorNamesTheDataPlaneURL pins that a transfer against an
+// unreachable data plane names the URL the Worker was handed (issue #2595). An
+// operator who keeps the shipped compose default (MCD_API_SERVER__DATA_PLANE_BASE_URL
+// pinned to the compose-internal http://api:8000) and then adds a Worker on a second
+// host gets no boot-time signal at all — the variable is set, so the API's startup
 // warning stays quiet (DEPLOYMENT.md Section 8). The first failed transfer is the
-// only signal, so the URL has to be readable off it rather than inferred.
+// only signal, so the URL has to be readable off it rather than inferred. Hydrate
+// and snapshot are the two halves of the transfer pair the misconfiguration breaks,
+// and each fails on its own error path.
 //
 // The property comes from net/http wrapping transport failures in *url.Error, which
 // formats the URL. That is incidental today; pinned here so a later rewrite of these
 // error paths (a sanitized message, a sentinel error, a wrap that drops %w) cannot
 // silently take the diagnosis away. Asserts on the URL only — the dial error text
 // under it is resolver- and platform-dependent.
-func TestHydrateErrorNamesTheDataPlaneURL(t *testing.T) {
-	client, transferURL := closedDataPlane(t)
-
-	_, err := New(client).Hydrate(context.Background(), transferURL, "tok", filepath.Join(t.TempDir(), "dest"))
-	if err == nil {
-		t.Fatal("expected an error hydrating from an unreachable data plane")
+func TestTransferErrorNamesTheDataPlaneURL(t *testing.T) {
+	tests := []struct {
+		name     string
+		transfer func(t *testing.T, c *Client, transferURL string) error
+	}{
+		{"hydrate", func(t *testing.T, c *Client, transferURL string) error {
+			_, err := c.Hydrate(context.Background(), transferURL, "tok", filepath.Join(t.TempDir(), "dest"))
+			return err
+		}},
+		{"snapshot", func(t *testing.T, c *Client, transferURL string) error {
+			_, err := c.Snapshot(context.Background(), transferURL, "tok", t.TempDir(), 0, "worker-1")
+			return err
+		}},
 	}
-	if !strings.Contains(err.Error(), transferURL) {
-		t.Fatalf("hydrate error must name the data-plane URL %q, got: %v", transferURL, err)
-	}
-}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client, transferURL := closedDataPlane(t)
 
-// TestSnapshotErrorNamesTheDataPlaneURL is TestHydrateErrorNamesTheDataPlaneURL for
-// the push direction: the snapshot upload is the other half of the transfer pair the
-// misconfiguration breaks, and it fails on its own error path.
-func TestSnapshotErrorNamesTheDataPlaneURL(t *testing.T) {
-	client, transferURL := closedDataPlane(t)
-
-	_, err := New(client).Snapshot(context.Background(), transferURL, "tok", t.TempDir(), 0, "worker-1")
-	if err == nil {
-		t.Fatal("expected an error snapshotting to an unreachable data plane")
-	}
-	if !strings.Contains(err.Error(), transferURL) {
-		t.Fatalf("snapshot error must name the data-plane URL %q, got: %v", transferURL, err)
+			err := tc.transfer(t, New(client), transferURL)
+			if err == nil {
+				t.Fatalf("expected an error from %s against an unreachable data plane", tc.name)
+			}
+			if !strings.Contains(err.Error(), transferURL) {
+				t.Fatalf("%s error must name the data-plane URL %q, got: %v", tc.name, transferURL, err)
+			}
+		})
 	}
 }
 
@@ -759,102 +763,76 @@ type fakeInfo struct {
 
 func (f fakeInfo) Size() int64 { return f.size }
 
-// TestWriteRegularGrowingFile verifies that a file that grows between the stat
-// and the copy does not cause ErrWriteTooLong: the tar entry must be exactly
-// the header-declared size and the archive must untar cleanly.
-func TestWriteRegularGrowingFile(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "latest.log")
-	// Write 5 bytes to disk.
-	original := []byte("hello")
-	if err := os.WriteFile(path, original, 0o640); err != nil {
-		t.Fatal(err)
+// TestWriteRegularSizeDriftBetweenWalkAndCopy verifies that a file whose size
+// changed between the ReadDir stat and the copy leaves a consistent tar: the entry
+// is exactly the header-declared (stat-time) size and the archive untars cleanly.
+// A grown file is capped (no ErrWriteTooLong); a shrunk file is zero-padded. Each
+// drift is logged (issue #820).
+func TestWriteRegularSizeDriftBetweenWalkAndCopy(t *testing.T) {
+	tests := []struct {
+		name        string
+		onDisk      string
+		statSize    int64
+		wantContent string
+		wantLog     string
+	}{
+		{
+			name:        "grown file is capped",
+			onDisk:      "hello",
+			statSize:    3,
+			wantContent: "hel",
+			wantLog:     "snapshot: file grew between walk and copy; capped",
+		},
+		{
+			name:        "shrunk file is zero-padded",
+			onDisk:      "hi!",
+			statSize:    6,
+			wantContent: "hi!\x00\x00\x00",
+			wantLog:     "snapshot: file shrank between walk and copy; zero-padded",
+		},
 	}
-	// Stat reports only 3 bytes (simulating the ReadDir-time snapshot before the
-	// file grew to 5 bytes).
-	realInfo, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	info := fakeInfo{FileInfo: realInfo, size: 3}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "latest.log")
+			if err := os.WriteFile(path, []byte(tc.onDisk), 0o640); err != nil {
+				t.Fatal(err)
+			}
+			realInfo, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Stat reports the walk-time size, before the file changed on disk.
+			info := fakeInfo{FileInfo: realInfo, size: tc.statSize}
 
-	var buf bytes.Buffer
-	tw := tar.NewWriter(&buf)
-	if err := writeRegular(tw, "latest.log", path, info, slog.Default()); err != nil {
-		t.Fatalf("writeRegular with grown file: %v", err)
-	}
-	if err := tw.Close(); err != nil {
-		t.Fatalf("tw.Close with grown file: %v", err)
-	}
+			h := &capturingHandler{}
+			var buf bytes.Buffer
+			tw := tar.NewWriter(&buf)
+			if err := writeRegular(tw, "latest.log", path, info, slog.New(h)); err != nil {
+				t.Fatalf("writeRegular: %v", err)
+			}
+			if err := tw.Close(); err != nil {
+				t.Fatalf("tw.Close: %v", err)
+			}
 
-	// The archive must untar cleanly and the entry must be exactly 3 bytes.
-	tr := tar.NewReader(&buf)
-	h, err := tr.Next()
-	if err != nil {
-		t.Fatalf("tar.Next: %v", err)
-	}
-	if h.Size != 3 {
-		t.Fatalf("header.Size = %d, want 3", h.Size)
-	}
-	content, err := io.ReadAll(tr)
-	if err != nil {
-		t.Fatalf("read entry: %v", err)
-	}
-	if int64(len(content)) != h.Size {
-		t.Fatalf("entry bytes = %d, want %d", len(content), h.Size)
-	}
-	// Content must be the first 3 bytes of the file (the file grew, we capped).
-	if string(content) != "hel" {
-		t.Fatalf("entry content = %q, want %q", string(content), "hel")
-	}
-}
-
-// TestWriteRegularShrinkingFile verifies that a file that shrinks between the
-// stat and the copy does not leave the tar in an inconsistent state: the entry
-// is zero-padded to the header-declared size and the archive untars cleanly.
-func TestWriteRegularShrinkingFile(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "latest.log")
-	// Write 3 bytes to disk.
-	if err := os.WriteFile(path, []byte("hi!"), 0o640); err != nil {
-		t.Fatal(err)
-	}
-	// Stat reports 6 bytes (simulating the ReadDir-time snapshot before the
-	// file shrank from 6 bytes to 3 bytes).
-	realInfo, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	info := fakeInfo{FileInfo: realInfo, size: 6}
-
-	var buf bytes.Buffer
-	tw := tar.NewWriter(&buf)
-	if err := writeRegular(tw, "latest.log", path, info, slog.Default()); err != nil {
-		t.Fatalf("writeRegular with shrunk file: %v", err)
-	}
-	if err := tw.Close(); err != nil {
-		t.Fatalf("tw.Close with shrunk file: %v", err)
-	}
-
-	// The archive must untar cleanly and the entry must be exactly 6 bytes.
-	tr := tar.NewReader(&buf)
-	h, err := tr.Next()
-	if err != nil {
-		t.Fatalf("tar.Next: %v", err)
-	}
-	if h.Size != 6 {
-		t.Fatalf("header.Size = %d, want 6", h.Size)
-	}
-	content, err := io.ReadAll(tr)
-	if err != nil {
-		t.Fatalf("read entry: %v", err)
-	}
-	if int64(len(content)) != h.Size {
-		t.Fatalf("entry bytes = %d, want %d", len(content), h.Size)
-	}
-	// First 3 bytes are the file content; last 3 are zero-padding.
-	if string(content) != "hi!\x00\x00\x00" {
-		t.Fatalf("entry content = %q, want %q", content, "hi!\x00\x00\x00")
+			tr := tar.NewReader(&buf)
+			hdr, err := tr.Next()
+			if err != nil {
+				t.Fatalf("tar.Next: %v", err)
+			}
+			if hdr.Size != tc.statSize {
+				t.Fatalf("header.Size = %d, want %d", hdr.Size, tc.statSize)
+			}
+			content, err := io.ReadAll(tr)
+			if err != nil {
+				t.Fatalf("read entry: %v", err)
+			}
+			if string(content) != tc.wantContent {
+				t.Fatalf("entry content = %q, want %q", content, tc.wantContent)
+			}
+			if !h.hasMessage(tc.wantLog) {
+				t.Fatalf("expected log message %q, captured records: %v", tc.wantLog, h.records)
+			}
+		})
 	}
 }
 
@@ -985,68 +963,6 @@ func TestWriteRegularVanishedFileOtherErrorFails(t *testing.T) {
 			t.Skip("running as root: permission check skipped")
 		}
 		t.Fatal("expected an error for a permission-denied open, got nil")
-	}
-}
-
-// TestWriteRegularGrowingFileLogsCapLine verifies that a log line is emitted
-// when a grown file is capped at its header-declared size (issue #820).
-func TestWriteRegularGrowingFileLogsCapLine(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "latest.log")
-	// Write 5 bytes to disk.
-	if err := os.WriteFile(p, []byte("hello"), 0o640); err != nil {
-		t.Fatal(err)
-	}
-	realInfo, err := os.Stat(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Stat reports 3 bytes (file "grew" from 3 to 5 after the walk).
-	info := fakeInfo{FileInfo: realInfo, size: 3}
-
-	h := &capturingHandler{}
-	log := slog.New(h)
-	var buf bytes.Buffer
-	tw := tar.NewWriter(&buf)
-	if err := writeRegular(tw, "latest.log", p, info, log); err != nil {
-		t.Fatalf("writeRegular: %v", err)
-	}
-	_ = tw.Close()
-
-	const wantMsg = "snapshot: file grew between walk and copy; capped"
-	if !h.hasMessage(wantMsg) {
-		t.Fatalf("expected log message %q, captured records: %v", wantMsg, h.records)
-	}
-}
-
-// TestWriteRegularShrinkingFileLogsPadLine verifies that a log line is emitted
-// when a shrunken file is zero-padded to its header-declared size (issue #820).
-func TestWriteRegularShrinkingFileLogsPadLine(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "latest.log")
-	// Write 3 bytes to disk.
-	if err := os.WriteFile(p, []byte("hi!"), 0o640); err != nil {
-		t.Fatal(err)
-	}
-	realInfo, err := os.Stat(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Stat reports 6 bytes (file "shrank" from 6 to 3 after the walk).
-	info := fakeInfo{FileInfo: realInfo, size: 6}
-
-	h := &capturingHandler{}
-	log := slog.New(h)
-	var buf bytes.Buffer
-	tw := tar.NewWriter(&buf)
-	if err := writeRegular(tw, "latest.log", p, info, log); err != nil {
-		t.Fatalf("writeRegular: %v", err)
-	}
-	_ = tw.Close()
-
-	const wantMsg = "snapshot: file shrank between walk and copy; zero-padded"
-	if !h.hasMessage(wantMsg) {
-		t.Fatalf("expected log message %q, captured records: %v", wantMsg, h.records)
 	}
 }
 
