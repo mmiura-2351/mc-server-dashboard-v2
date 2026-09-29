@@ -585,17 +585,16 @@ func TestWriteGenerationKeepsTempFormDirectory(t *testing.T) {
 // TestStrandedGenerationTempMatchesTheMarkerTempPredicates proves the temp name
 // writeGeneration actually creates is the one every consumer's marker-temp predicate
 // matches (issue #2287). The creation site and the three predicates are coupled only
-// by the string they share, so a rename of generationFile that misses the creation
+// by the string they share, so a rename of the marker name that misses the creation
 // site would strand temps no consumer recognises: hasWorkingSet (issue #2279) and the
 // snapshot pack (issue #834) would read a leftover as working-set content — the Worker
 // then advertises holding a world it does not hold — and sweepGenerationTemps (issue
 // #2283) would stop reclaiming them.
 //
-// So the expectations here are DERIVED from generationFile rather than hardcoded: a
+// So the expectations here are DERIVED from the shared marker name rather than hardcoded: a
 // rename that carries the creation site with it keeps this test green, while one that
-// leaves the creation site behind turns it red. That is the opposite of the literal
-// pin in generation_marker_name_test.go, which guards the marker's cross-package NAME;
-// this guards the temp PATTERN against the constant it is built from.
+// leaves the creation site behind turns it red. The scratchformat contract pins the
+// persisted marker NAME; this guards the temp PATTERN against that name.
 //
 // The temp is stranded through the real creation site: a directory sitting at the
 // marker path makes the rename fail, leaving behind exactly what a crash between the

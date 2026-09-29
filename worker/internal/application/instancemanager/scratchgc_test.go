@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/scratchformat"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
 
@@ -1080,18 +1081,16 @@ func TestBootReclaimsInterruptedDisplacedSweeps(t *testing.T) {
 // unpackAndSwap leaves "for the next leftover sweep" in its own words (issue #3112).
 //
 // Everything else in the scratch root — a live scratch, a recovery tree, an interrupted
-// displaced sweep's tree — is not this reclaim's to touch. The leftover names are
-// hardcoded rather than built from hydratePrefix, as in hydrate_prefix_name_test.go:
-// building them from the constant would make the test follow a rename rather than catch
-// it, and this reclaim is now a third participant in that cross-package prefix contract.
+// displaced sweep's tree — is not this reclaim's to touch. The persisted prefix
+// is pinned by the shared scratchformat contract test.
 func TestBootReclaimsHydrateLeftovers(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	// Both crash-left forms: the per-hydrate temp tree and the superseded live set. Each
 	// is a FULL working set carrying a generation marker, indistinguishable from a server
 	// dir except by name.
 	leftovers := []string{
-		filepath.Join(m.scratchDir, ".hydrate-s1-123456"),
-		filepath.Join(m.scratchDir, ".hydrate-s1-superseded-654321"),
+		filepath.Join(m.scratchDir, scratchformat.HydratePrefix+"s1-123456"),
+		filepath.Join(m.scratchDir, scratchformat.HydratePrefix+"s1-superseded-654321"),
 	}
 	for _, dir := range leftovers {
 		seedHydrateShapedTree(t, dir, 7)

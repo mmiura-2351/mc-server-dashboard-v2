@@ -56,10 +56,9 @@ const (
 // issue #2802 it is the LAUNCH GUARD's predicate — launchReserved refuses a launch
 // over a working set carrying no marker, because that is precisely the claim a
 // skipped hydrate relied on — so a hand-seeded working set that omits it has its
-// StartServer refused before the driver is ever reached. The name is spelled out
-// here rather than imported because the const is unexported in each package that
-// owns it; those packages pin the literal in their own
-// generation_marker_name_test.go.
+// StartServer refused before the driver is ever reached. The persisted name is
+// part of internal/domain/scratchformat's compatibility contract; keep this local
+// seed aligned with its GenerationMarkerFile constant.
 const generationMarkerFile = ".mcsd_generation"
 
 // seedWorkingSet materialises a working set for serverID under scratchDir: the
