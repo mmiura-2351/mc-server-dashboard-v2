@@ -2338,8 +2338,7 @@ class FakeResourcePackStore(ResourcePackStore):
 # that fail-loud property depend on the host clock running later than the test's
 # fixed ``now`` minus the window — an unstated environmental assumption (#2529).
 # Spelled identically in ``tests/storage/fake_s3.py`` and
-# ``tests/versions/fakes.py``; the trigger for extracting the three copies into a
-# shared module is recorded beside the ``fake_s3.py`` one (issue #2576).
+# ``tests/versions/fakes.py`` (issue #2576).
 _UNSTAMPED_STORE_TIME = dt.datetime(9999, 1, 1, tzinfo=dt.UTC)
 
 
@@ -2356,7 +2355,7 @@ class FakePluginCacheStore(PluginCacheStore):
     still pin that the cache was read (issue #2462).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, clock: Callable[[], dt.datetime] | None = None) -> None:
         self.blobs: dict[str, bytes] = {}
         self.puts: list[str] = []
         self.deleted: list[str] = []
@@ -2366,6 +2365,7 @@ class FakePluginCacheStore(PluginCacheStore):
         # a blob past the safety window. A blob seeded straight into ``blobs``
         # has none — see :data:`_UNSTAMPED_STORE_TIME` (issue #2529).
         self.modified_at: dict[str, dt.datetime] = {}
+        self._clock = clock or (lambda: dt.datetime.now(dt.UTC))
 
     async def put(self, sha256: str, stream: AsyncIterator[bytes]) -> None:
         self.puts.append(sha256)
@@ -2375,11 +2375,10 @@ class FakePluginCacheStore(PluginCacheStore):
         # a re-put leaves the object's ``last_modified`` alone — stamp the first
         # put only (issue #2529). The plugin-cache GC re-checks live references
         # before deleting precisely because of that.
-        # The stamp reads the host clock by convention, recorded with
-        # ``tests/storage/fake_s3.py``'s copy of the sentinel (issue #2576);
-        # ``tests/servers/test_plugin_cache_store_fake.py`` pins it.
+        # The shared Port contract controls the clock; ordinary use-case tests
+        # retain the UTC host-clock default.
         self.blobs.setdefault(sha256, data)
-        self.modified_at.setdefault(sha256, dt.datetime.now(dt.UTC))
+        self.modified_at.setdefault(sha256, self._clock())
 
     def open(self, sha256: str) -> AsyncIterator[bytes]:
         self.opens.append(sha256)

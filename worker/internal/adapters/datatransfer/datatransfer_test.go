@@ -14,7 +14,12 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/scratchformat"
 )
+
+// Existing fixtures keep their short name; production uses scratchformat directly.
+const generationMarkerFile = scratchformat.GenerationMarkerFile
 
 // tarOf builds an in-memory tar of {name: content}.
 func tarOf(files map[string]string) []byte {
@@ -1790,9 +1795,9 @@ func TestSwapParksSupersededSetUnderSweepableName(t *testing.T) {
 		t.Fatalf("retained tree at swap-in = %q, want %q (oldest-wins keeps the existing tree in place, issue #2278)",
 			retainedAtSwap, ".displaced-server")
 	}
-	if !strings.HasPrefix(supersededAtSwap, ".hydrate-server-superseded-") {
-		t.Fatalf("superseded set at swap-in = %q, want a .hydrate-server-superseded-* name (sweepable, issue #2278)",
-			supersededAtSwap)
+	if want := scratchformat.HydratePrefix + "server-superseded-"; !strings.HasPrefix(supersededAtSwap, want) {
+		t.Fatalf("superseded set at swap-in = %q, want %q prefix (sweepable, issue #2278)",
+			supersededAtSwap, want)
 	}
 }
 
