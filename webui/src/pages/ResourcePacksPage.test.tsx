@@ -225,25 +225,11 @@ describe("resource packs library", () => {
     ).toBeInTheDocument();
   });
 
-  it("shows delete button only for own packs when not admin", async () => {
-    signedIn({ user: NON_ADMIN });
-
-    renderApp({ path: "/resource-packs" });
-
-    // Wait for the list to render.
-    await screen.findByText("Faithful");
-
-    // NON_ADMIN (u2) uploaded Sphax (rp2), so its row should have a delete button.
-    // Faithful was uploaded by u1, so no delete button for non-admin.
-    const deleteButtons = screen.getAllByRole("button", {
-      name: t("resourcePacks.delete"),
-    });
-    // Only one delete button — the one for Sphax (u2's pack).
-    expect(deleteButtons).toHaveLength(1);
-  });
-
-  it("shows delete buttons for all packs when admin", async () => {
-    signedIn({ user: ADMIN });
+  it.each([
+    ["member can delete only their own pack", NON_ADMIN, 1],
+    ["platform admin can delete every pack", ADMIN, 2],
+  ] as const)("%s", async (_caseId, user, expectedDeleteButtons) => {
+    signedIn({ user });
 
     renderApp({ path: "/resource-packs" });
 
@@ -252,7 +238,7 @@ describe("resource packs library", () => {
     const deleteButtons = screen.getAllByRole("button", {
       name: t("resourcePacks.delete"),
     });
-    expect(deleteButtons).toHaveLength(2);
+    expect(deleteButtons).toHaveLength(expectedDeleteButtons);
   });
 
   it("uploads a resource pack through the dialog", async () => {

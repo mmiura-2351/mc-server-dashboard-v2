@@ -1226,8 +1226,8 @@ class FakeGroupRepository(GroupRepository):
         # (CommunityNotFoundError, #2924), which is NOT modelled: the parent row
         # lives in the community context, not in this fake, so it cannot be
         # checked here. Same reason and same answer as ``attach``'s server-side
-        # FK below -- the rule is stated once, in the module docstring of
-        # tests/servers/test_fake_repository_isolation.py.
+        # FK below -- both parents are checked by their use cases, while this
+        # fake implements only the GroupRepository Port.
         self.by_id[group.id] = self._copy(group)
 
     async def get_by_id(self, group_id: GroupId) -> PlayerGroup | None:

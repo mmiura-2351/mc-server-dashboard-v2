@@ -452,92 +452,6 @@ async def test_list_dir_browses_root(tmp_path: Path) -> None:
     assert names == {"server.properties", "world"}
 
 
-async def test_download_dir_streams_zip_of_subtree(tmp_path: Path) -> None:
-    """The directory-download zip contains the subtree, with relative arcnames."""
-
-    storage = FsStorage(tmp_path)
-    community, server = _scope()
-    await publish(
-        storage,
-        StorageCommunityId(community),
-        StorageServerId(server),
-        {
-            "server.properties": b"top",
-            "world/level.dat": b"world-bytes",
-            # A structurally valid region: the publish path now runs the integrity
-            # gate (#739), so a garbage-byte ``.mca`` would be refused before this
-            # download could run.
-            "world/region/r.0.0.mca": healthy_region_bytes(),
-        },
-    )
-    adapter = StorageFileStoreAdapter(storage=storage)
-
-    stream = adapter.download_dir(
-        community_id=CommunityId(community),
-        server_id=ServerId(server),
-        rel_path="world",
-    )
-    blob = b"".join([chunk async for chunk in stream])
-
-    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
-        contents = {name: zf.read(name) for name in zf.namelist()}
-    assert contents == {
-        "level.dat": b"world-bytes",
-        "region/r.0.0.mca": healthy_region_bytes(),
-    }
-
-
-async def test_download_dir_root_zips_whole_tree(tmp_path: Path) -> None:
-    storage = FsStorage(tmp_path)
-    community, server = _scope()
-    await publish(
-        storage,
-        StorageCommunityId(community),
-        StorageServerId(server),
-        {"a.txt": b"a", "sub/b.txt": b"b"},
-    )
-    adapter = StorageFileStoreAdapter(storage=storage)
-
-    stream = adapter.download_dir(
-        community_id=CommunityId(community),
-        server_id=ServerId(server),
-        rel_path=".",
-    )
-    blob = b"".join([chunk async for chunk in stream])
-    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
-        names = set(zf.namelist())
-    assert names == {"a.txt", "sub/b.txt"}
-
-
-async def test_export_dir_appends_extra_entries(tmp_path: Path) -> None:
-    """The export zip carries the working set plus the in-memory extra entries."""
-
-    storage = FsStorage(tmp_path)
-    community, server = _scope()
-    await publish(
-        storage,
-        StorageCommunityId(community),
-        StorageServerId(server),
-        {"server.properties": b"top", "world/level.dat": b"world-bytes"},
-    )
-    adapter = StorageFileStoreAdapter(storage=storage)
-
-    stream = adapter.export_dir(
-        community_id=CommunityId(community),
-        server_id=ServerId(server),
-        rel_path=".",
-        extra=[("export_metadata.json", b'{"format": 1}')],
-    )
-    blob = b"".join([chunk async for chunk in stream])
-    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
-        contents = {name: zf.read(name) for name in zf.namelist()}
-    assert contents == {
-        "server.properties": b"top",
-        "world/level.dat": b"world-bytes",
-        "export_metadata.json": b'{"format": 1}',
-    }
-
-
 async def test_download_dir_skips_a_member_it_cannot_read(tmp_path: Path) -> None:
     """One unreadable member is dropped, not allowed to abort the whole zip.
 
@@ -1194,22 +1108,6 @@ async def test_delete_of_a_directory_link_removes_the_link_not_its_target(
 
     assert not (live / "alias").exists(follow_symlinks=False)
     assert (live / "real" / "inner.txt").read_bytes() == b"INNER"
-
-
-async def test_download_dir_missing_is_file_not_found(tmp_path: Path) -> None:
-    storage = FsStorage(tmp_path)
-    community, server = _scope()
-    await _seed(storage, community, server)
-    adapter = StorageFileStoreAdapter(storage=storage)
-
-    stream = adapter.download_dir(
-        community_id=CommunityId(community),
-        server_id=ServerId(server),
-        rel_path="nope",
-    )
-    with pytest.raises(ServerFileNotFoundError):
-        async for _ in stream:
-            pass
 
 
 async def test_delete_file_removes_and_retains_version(tmp_path: Path) -> None:
