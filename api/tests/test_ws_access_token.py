@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import uuid
 
+import pytest
 from fastapi import FastAPI, WebSocket
 from starlette.testclient import TestClient
 
@@ -160,17 +161,22 @@ def _events_app() -> FastAPI:
     return app
 
 
-def test_server_events_echoes_accepted_subprotocol() -> None:
+@pytest.mark.parametrize(
+    "url_template",
+    [
+        pytest.param(
+            "/api/communities/{community}/servers/{server}/events?streams=status",
+            id="server-events-route",
+        ),
+        pytest.param(
+            "/api/communities/{community}/events",
+            id="community-events-route",
+        ),
+    ],
+)
+def test_event_routes_echo_accepted_subprotocol(url_template: str) -> None:
     cid, sid = uuid.uuid4(), uuid.uuid4()
-    url = f"/api/communities/{cid}/servers/{sid}/events?streams=status"
-    with TestClient(_events_app()) as client:
-        with client.websocket_connect(url, subprotocols=["access_token", "jwt"]) as ws:
-            assert ws.accepted_subprotocol == "access_token"
-
-
-def test_community_events_echoes_accepted_subprotocol() -> None:
-    cid = uuid.uuid4()
-    url = f"/api/communities/{cid}/events"
+    url = url_template.format(community=cid, server=sid)
     with TestClient(_events_app()) as client:
         with client.websocket_connect(url, subprotocols=["access_token", "jwt"]) as ws:
             assert ws.accepted_subprotocol == "access_token"

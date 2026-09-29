@@ -276,14 +276,29 @@ def test_create_duplicate_name_is_409() -> None:
     assert resp.json()["reason"] == "schedule_name_exists"
 
 
-def test_create_invalid_cron_is_422() -> None:
-    app = _app(
-        member=True,
-        allow=True,
-        create=_FakeUseCase(error=InvalidCronExpressionError("bad")),
-    )
+@pytest.mark.parametrize(
+    "route",
+    [
+        pytest.param("create", id="create-schedule-route"),
+        pytest.param("preview", id="preview-schedule-route"),
+    ],
+)
+def test_malformed_cron_is_422(route: str) -> None:
+    if route == "create":
+        app = _app(
+            member=True,
+            allow=True,
+            create=_FakeUseCase(error=InvalidCronExpressionError("bad")),
+        )
+        url = _url(uuid.uuid4(), uuid.uuid4())
+        body = _create_body()
+    else:
+        app = _app(member=True, allow=True, preview=_preview_use_case())
+        url = _preview_url(uuid.uuid4(), uuid.uuid4())
+        body = {"cron": "not valid"}
+
     client = _client(app)
-    resp = client.post(_url(uuid.uuid4(), uuid.uuid4()), json=_create_body())
+    resp = client.post(url, json=body)
     assert resp.status_code == 422
     assert resp.json()["reason"] == "invalid_cron"
 
@@ -520,17 +535,6 @@ def test_preview_interval_returns_5_datetimes() -> None:
     assert resp.status_code == 200
     body = resp.json()
     assert len(body["next_runs"]) == 5
-
-
-def test_preview_invalid_cron_is_422() -> None:
-    app = _app(member=True, allow=True, preview=_preview_use_case())
-    client = _client(app)
-    resp = client.post(
-        _preview_url(uuid.uuid4(), uuid.uuid4()),
-        json={"cron": "not valid"},
-    )
-    assert resp.status_code == 422
-    assert resp.json()["reason"] == "invalid_cron"
 
 
 def test_preview_no_cadence_is_422() -> None:
