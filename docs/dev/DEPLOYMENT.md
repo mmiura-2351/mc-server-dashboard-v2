@@ -390,13 +390,15 @@ data as a deliberate cutover, and back up both volumes first.
 `api/tests/storage/test_object_live_seaweedfs.py` exercises the load-bearing
 object-store assumptions (read-after-write on the pointer overwrite PUT,
 server-side CopyObject, multipart + prefix list, and the startup sweep) against a
-real endpoint. `api/tests/servers/test_resource_pack_store_contract.py` runs its
+real endpoint. `api/tests/storage/test_s3_client_contract.py` runs the same
+S3Client assertions against the fake and the live adapter.
+`api/tests/servers/test_resource_pack_store_contract.py` runs its
 `live-s3` parametrization against the same endpoint (the resource pack store's
-`size()` == `open()` byte-count invariant). Both are skipped unless
+`size()` == `open()` byte-count invariant). Live cases are skipped unless
 `MCD_TEST_S3_ENDPOINT` is set, so `make check` and the main `check` CI job stay
 green without an S3 instance. CI runs them in the api workflow's separate
 `live-s3` job, which starts a SeaweedFS container and supplies the endpoint;
-that job fails if either module skips. To run them locally against a
+that job fails if any case skips. To run them locally against a
 throwaway SeaweedFS, run this from the repository root — the first line reads
 the image out of `compose.yaml`'s `seaweedfs` pin instead of restating it, so a
 local run exercises the deployed version and there is no second copy of the tag
@@ -412,6 +414,7 @@ docker run -d --name swfs-test -p 8333:8333 \
 cd api && MCD_TEST_S3_ENDPOINT=http://localhost:8333 \
   MCD_TEST_S3_ACCESS_KEY=testak MCD_TEST_S3_SECRET_KEY=testsk \
   uv run pytest tests/storage/test_object_live_seaweedfs.py \
+    tests/storage/test_s3_client_contract.py \
     tests/servers/test_resource_pack_store_contract.py
 
 docker rm -f swfs-test
