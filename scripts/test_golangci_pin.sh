@@ -40,7 +40,7 @@
 #      directory.
 #
 # Hermetic by construction. Assertions 1 and 5 only expand Makefile variables
-# through the `mk` probe below and compare the answers as strings; assertions
+# through the shared `mk` probe and compare the answers as strings; assertions
 # 2-4 are `make -n` runs (dry run -- nothing is executed, nothing is installed,
 # no network) against temp paths substituted for $(GOLANGCI) and
 # $(GOLANGCI_STAMP), and call `mk` themselves during setup. So the developer's
@@ -61,35 +61,14 @@
 # Exit code: 0 = all pass, non-zero = at least one failure.
 set -uo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-
 pass=0
 fail=0
 
 ok()        { echo "  PASS: $1"; pass=$((pass + 1)); }
 fail_test() { echo "  FAIL: $1"; fail=$((fail + 1)); }
 
-# Ask make what a variable expands to, under the `VAR=value` overrides passed
-# after the variable name. `--eval` defines a throwaway target *before* the
-# makefile is read -- $(GOLANGCI_STAMP) is still empty at that point -- and what
-# makes the probe work is that a recipe body is expanded only when the recipe
-# runs, by which time the makefile has defined it. So the answer is make's own
-# expansion and this script never reimplements the derivation it is pinning.
-# --no-print-directory: `make scripts-test` runs this script with MAKELEVEL
-# exported, and a make that sees MAKELEVEL > 0 counts itself a sub-make and
-# turns on -w, which would put "Entering directory" on stdout.
-mk() {
-	local var="$1"
-	shift
-	(cd "$ROOT" && make --no-print-directory \
-		--eval="mcsd-probe:;@echo \$($var)" mcsd-probe "$@")
-}
-
-# $(GOLANGCI_STAMP) for a given GOLANGCI_VERSION, rebased into a temp directory:
-# make's name, our directory.
-stamp_in() {
-	echo "$1/$(basename "$(mk GOLANGCI_STAMP GOLANGCI_VERSION="$2")")"
-}
+# shellcheck source=scripts/version_pin_test_lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/version_pin_test_lib.sh"
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -117,7 +96,7 @@ echo "=== golangci-lint version-pin tests ==="
 	dir="$tmp/bumped"
 	mkdir -p "$dir"
 	bin="$dir/golangci-lint"
-	: > "$(stamp_in "$dir" v0.0.0-previous)"
+	: > "$(stamp_in "$dir" GOLANGCI_STAMP GOLANGCI_VERSION v0.0.0-previous)"
 	: > "$bin"
 
 	# Both overrides are load-bearing: GOLANGCI_VERSION is what the install
@@ -125,7 +104,7 @@ echo "=== golangci-lint version-pin tests ==="
 	# beside the previous version's stamp.
 	recipe="$(cd "$ROOT" && make -n "$bin" GOLANGCI="$bin" \
 		GOLANGCI_VERSION=v0.0.0-bumped \
-		GOLANGCI_STAMP="$(stamp_in "$dir" v0.0.0-bumped)" 2>&1)"
+		GOLANGCI_STAMP="$(stamp_in "$dir" GOLANGCI_STAMP GOLANGCI_VERSION v0.0.0-bumped)" 2>&1)"
 	case "$recipe" in
 		*"golangci-lint@v0.0.0-bumped"*)
 			ok "a bumped GOLANGCI_VERSION reinstalls over an existing binary" ;;
@@ -142,7 +121,7 @@ echo "=== golangci-lint version-pin tests ==="
 	bin="$dir/golangci-lint"
 
 	recipe="$(cd "$ROOT" && make -n "$bin" GOLANGCI="$bin" \
-		GOLANGCI_STAMP="$(stamp_in "$dir" "$version")" 2>&1)"
+		GOLANGCI_STAMP="$(stamp_in "$dir" GOLANGCI_STAMP GOLANGCI_VERSION "$version")" 2>&1)"
 	case "$recipe" in
 		*"go install"*golangci-lint*)
 			ok "a missing binary is installed" ;;
@@ -157,7 +136,7 @@ echo "=== golangci-lint version-pin tests ==="
 	dir="$tmp/current"
 	mkdir -p "$dir"
 	bin="$dir/golangci-lint"
-	stamp="$(stamp_in "$dir" "$version")"
+	stamp="$(stamp_in "$dir" GOLANGCI_STAMP GOLANGCI_VERSION "$version")"
 	: > "$stamp"
 	: > "$bin"
 
@@ -178,15 +157,7 @@ echo "=== golangci-lint version-pin tests ==="
 #    this is the only one that sees where the Makefile actually puts them -- and
 #    compared as strings, so the real worker/.bin is still neither read nor
 #    written.
-{
-	stamp_dir="$(dirname "$(mk GOLANGCI_STAMP)")"
-	bin_dir="$(dirname "$(mk GOLANGCI)")"
-	if [ "$stamp_dir" = "$bin_dir" ]; then
-		ok "the stamp sits in the binary's directory"
-	else
-		fail_test "the stamp is not swept with the binary (GOLANGCI_STAMP is in $stamp_dir, GOLANGCI in $bin_dir)"
-	fi
-}
+assert_stamp_directory "" binary GOLANGCI GOLANGCI_STAMP
 
 # ---------------------------------------------------------------------------
 echo
