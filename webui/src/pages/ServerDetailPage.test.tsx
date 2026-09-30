@@ -8,6 +8,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router";
 import {
@@ -2184,8 +2185,11 @@ describe("ServerDetailPage settings slug (issue #961)", () => {
       screen.getByRole("button", { name: t("serverDetail.settings.save") }),
     );
 
-    const error = await screen.findByText(t("serverDetail.settings.slugTaken"));
-    expect(error.closest(".field")).toContainElement(slugInput);
+    // Scope the wait to the slug field so a duplicate toast cannot stall the
+    // query until it auto-dismisses; the no-toast check then runs at once.
+    await within(slugInput.closest(".field") as HTMLElement).findByText(
+      t("serverDetail.settings.slugTaken"),
+    );
     expect(document.querySelector(".toast")).toBeNull();
     expect(slugInput).toHaveValue("taken-slug");
   });
