@@ -5,6 +5,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -380,53 +381,6 @@ describe("DashboardPage lifecycle actions", () => {
     ).toBeInTheDocument();
   });
 
-  it("optimistically shows the transitional pill immediately on start", async () => {
-    // The mutation never resolves during this test — the pill must already
-    // show "Starting" before the API responds.
-    mockApi.get.mockResolvedValue([
-      server({ observed_state: "stopped", desired_state: "stopped" }),
-    ]);
-    mockApi.post.mockReturnValue(new Promise(() => {}));
-    renderPage();
-
-    // Only the server card renders the state pill (the filter is a dropdown).
-    await waitFor(() =>
-      expect(screen.getAllByText(t("dashboard.state.stopped"))).toHaveLength(1),
-    );
-    fireEvent.click(screen.getByRole("button", { name: t("dashboard.start") }));
-
-    // After the action, the server's pill changes to "starting"; "stopped" is
-    // gone.
-    await waitFor(() =>
-      expect(screen.getAllByText(t("dashboard.state.starting"))).toHaveLength(
-        1,
-      ),
-    );
-    expect(
-      screen.queryByText(t("dashboard.state.stopped")),
-    ).not.toBeInTheDocument();
-  });
-
-  it("optimistically shows the transitional pill immediately on stop", async () => {
-    mockApi.get.mockResolvedValue([server({ observed_state: "running" })]);
-    mockApi.post.mockReturnValue(new Promise(() => {}));
-    renderPage();
-
-    await waitFor(() =>
-      expect(screen.getAllByText(t("dashboard.state.running"))).toHaveLength(1),
-    );
-    fireEvent.click(screen.getByRole("button", { name: t("dashboard.stop") }));
-
-    await waitFor(() =>
-      expect(screen.getAllByText(t("dashboard.state.stopping"))).toHaveLength(
-        1,
-      ),
-    );
-    expect(
-      screen.queryByText(t("dashboard.state.running")),
-    ).not.toBeInTheDocument();
-  });
-
   it("labels the Start button as Restart when the server is crashed", async () => {
     mockApi.get.mockResolvedValue([
       server({
@@ -449,94 +403,58 @@ describe("DashboardPage lifecycle actions", () => {
     expect(startButton).toBeDefined();
   });
 
-  it("reverts the pill to the previous state on error", async () => {
-    mockApi.get.mockResolvedValue([server({ observed_state: "stopped" })]);
-    mockApi.post.mockRejectedValue(
-      new ApiError(409, { reason: "port_conflict" }),
-    );
-    renderPage();
-
-    await waitFor(() =>
-      expect(screen.getAllByText(t("dashboard.state.stopped"))).toHaveLength(1),
-    );
-    fireEvent.click(screen.getByRole("button", { name: t("dashboard.start") }));
-
-    // After the error, the server pill reverts to "Stopped".
-    await waitFor(() =>
-      expect(screen.getAllByText(t("dashboard.state.stopped"))).toHaveLength(1),
-    );
-  });
-
-  it("does not clobber a WS update to another server on rollback (#1727)", async () => {
-    // Two servers: s1 stopped, s2 stopped. We start s1, a WS event pushes s2
-    // → running during the in-flight window, then the POST rejects. The
-    // rollback must not restore s2 to "stopped".
-    //
-    // Strategy: use mockRejectedValue (instant rejection) — the WS event is
-    // delivered before the click so it is already in the cache when onMutate
-    // snapshots it. A whole-list rollback clobbers the WS update because the
-    // snapshot was taken BEFORE the WS event in the real race; simulate that
-    // by checking the cache directly after onError (setQueryData is sync,
-    // runs before the async refetch from onSettled).
+  it("drives only the clicked row through the optimistic lifecycle", async () => {
+    // The transition state machine itself is covered in
+    // useLifecycleMutation.test.tsx; this pins the dashboard's wiring: the row's
+    // own server id and list cache, the live status frame landing in that same
+    // cache, its buttons held while in flight, and its toast receiving the verb
+    // (worker_busy reads differently for stop).
     mockApi.get.mockResolvedValue([
-      server({
-        id: "s1",
-        name: "alpha",
-        observed_state: "stopped",
-        desired_state: "stopped",
-      }),
-      server({
-        id: "s2",
-        name: "bravo",
-        observed_state: "stopped",
-        desired_state: "stopped",
-      }),
+      server({ id: "s1", name: "alpha" }),
+      server({ id: "s2", name: "bravo" }),
     ]);
+    let rejectPost!: (err: unknown) => void;
+    mockApi.post.mockReturnValue(
+      new Promise((_resolve, reject) => {
+        rejectPost = reject;
+      }),
+    );
     const { queryClient } = renderPage();
 
-    // Wait for both server cards to render.
-    await screen.findByText("alpha");
-    await screen.findByText("bravo");
+    const alpha = (await screen.findByText("alpha")).closest(
+      ".server-card",
+    ) as HTMLElement;
+    const bravo = screen
+      .getByText("bravo")
+      .closest(".server-card") as HTMLElement;
+    fireEvent.click(
+      within(bravo).getByRole("button", { name: t("dashboard.stop") }),
+    );
 
-    // Open the WS socket and push s2 → running.
+    expect(
+      await within(bravo).findByText(t("dashboard.state.stopping")),
+    ).toBeInTheDocument();
+    expect(mockApi.post).toHaveBeenCalledWith(
+      `/api/communities/${CID}/servers/s2/stop`,
+    );
+    // The pill reads the in-flight verb, so pin the list-cache write directly.
+    expect(
+      queryClient
+        .getQueryData<{ id: string; observed_state: string }[]>(serversKey(CID))
+        ?.map((s) => s.observed_state),
+    ).toEqual(["running", "stopping"]);
+    expect(
+      within(bravo).getByRole("button", { name: t("dashboard.restart") }),
+    ).toBeDisabled();
+    expect(within(alpha).getByText(t("dashboard.state.running"))).toBeVisible();
+    expect(
+      within(alpha).getByRole("button", { name: t("dashboard.stop") }),
+    ).toBeEnabled();
+
+    // bravo crashes mid-flight: stop applies again, but the open request still
+    // holds its buttons.
     act(() => {
       MockWebSocket.last().open();
-      MockWebSocket.last().message({
-        stream: "status",
-        ts: "t",
-        payload: { state: "running", detail: "" },
-        server_id: "s2",
-      });
-    });
-
-    // Now set the POST to reject. When we click start for s1, onMutate takes
-    // a snapshot of the list (s1:stopped, s2:running), then onError restores
-    // the snapshot. A surgical rollback should only revert s1.
-    //
-    // BUT: the real race has onMutate snapshot BEFORE the WS event. To
-    // simulate that we directly seed the pre-WS snapshot into context by
-    // manipulating the mutation: capture the snapshot that onMutate will take,
-    // then inject a WS event AFTER onMutate runs but before onError.
-    //
-    // The cleanest way: a deferred POST that lets us inject the WS event
-    // between onMutate and onError.
-    let rejectPost!: (err: unknown) => void;
-    const postPromise = new Promise((_resolve, reject) => {
-      rejectPost = reject;
-    });
-    postPromise.catch(() => {}); // Prevent unhandled-rejection noise in tests.
-    mockApi.post.mockReturnValue(postPromise);
-
-    // Start s1 — onMutate snapshots: s1:stopped, s2:running.
-    const startButtons = screen.getAllByRole("button", {
-      name: t("dashboard.start"),
-    });
-    fireEvent.click(startButtons[0]);
-
-    // While s1's POST is in flight, another WS status frame pushes s2 →
-    // "crashed" (a distinct state from both "stopped" and "running" so we
-    // can tell whether the rollback clobbered it).
-    act(() => {
       MockWebSocket.last().message({
         stream: "status",
         ts: "t",
@@ -544,88 +462,22 @@ describe("DashboardPage lifecycle actions", () => {
         server_id: "s2",
       });
     });
+    expect(
+      within(bravo).getByRole("button", { name: t("dashboard.stop") }),
+    ).toBeDisabled();
 
-    // Hang the refetch (from onSettled's invalidate) so we observe the
-    // rollback result, not the refetch masking it.
+    // Hang the settle refetch so the pill below is the cache, not a reload.
     mockApi.get.mockReturnValue(new Promise(() => {}));
+    act(() => rejectPost(new ApiError(409, { reason: "worker_busy" })));
 
-    rejectPost(new ApiError(409, { reason: "port_conflict" }));
-
-    // Wait for the error toast to confirm onError ran.
-    await waitFor(() =>
-      expect(
-        screen.queryByText(t("dashboard.lifecycle.portConflict")),
-      ).toBeInTheDocument(),
-    );
-
-    // s2 must still show "crashed" (the latest WS value), not "running"
-    // (the onMutate snapshot that a whole-list restore would write back).
-    const cache = queryClient.getQueryData<unknown[]>(serversKey(CID)) as {
-      id: string;
-      observed_state: string;
-    }[];
-    const s2 = cache?.find((s) => s.id === "s2");
-    expect(s2?.observed_state).toBe("crashed");
-  });
-
-  it("preserves a WS update to the same server if its state changed mid-flight (#1727)", async () => {
-    // s1 is stopped. We start it (→ "starting"), but a WS frame pushes it to
-    // "running" before the POST rejects. The rollback must not clobber it.
-    mockApi.get.mockResolvedValue([
-      server({ observed_state: "stopped", desired_state: "stopped" }),
-    ]);
-    let rejectPost!: (err: unknown) => void;
-    const postPromise = new Promise((_resolve, reject) => {
-      rejectPost = reject;
-    });
-    postPromise.catch(() => {}); // Prevent unhandled-rejection noise in tests.
-    mockApi.post.mockReturnValue(postPromise);
-    renderPage();
-
-    await waitFor(() =>
-      expect(screen.getAllByText(t("dashboard.state.stopped"))).toHaveLength(1),
-    );
-
-    // Open the WS socket.
-    act(() => {
-      MockWebSocket.last().open();
-    });
-
-    fireEvent.click(screen.getByRole("button", { name: t("dashboard.start") }));
-
-    // Optimistic update shows "starting".
-    await waitFor(() =>
-      expect(screen.getAllByText(t("dashboard.state.starting"))).toHaveLength(
-        1,
-      ),
-    );
-
-    // WS pushes s1 → running while POST is in flight.
-    act(() => {
-      MockWebSocket.last().message({
-        stream: "status",
-        ts: "t",
-        payload: { state: "running", detail: "" },
-        server_id: "s1",
-      });
-    });
-
-    // Hang the refetch so we observe the rollback result.
-    mockApi.get.mockReturnValue(new Promise(() => {}));
-
-    rejectPost(new ApiError(409, { reason: "port_conflict" }));
-
-    // Wait for the error toast to confirm onError ran.
-    await waitFor(() =>
-      expect(
-        screen.queryByText(t("dashboard.lifecycle.portConflict")),
-      ).toBeInTheDocument(),
-    );
-
-    // The pill should show "running" (from WS), not "stopped" (from rollback).
-    await waitFor(() =>
-      expect(screen.getAllByText(t("dashboard.state.running"))).toHaveLength(1),
-    );
+    expect(
+      await screen.findByText(t("dashboard.lifecycle.stopPending")),
+    ).toBeInTheDocument();
+    // The failed stop does not roll the newer crash back to "running".
+    expect(within(bravo).getByText(t("dashboard.state.crashed"))).toBeVisible();
+    expect(
+      within(bravo).getByRole("button", { name: t("dashboard.stop") }),
+    ).toBeEnabled();
   });
 });
 

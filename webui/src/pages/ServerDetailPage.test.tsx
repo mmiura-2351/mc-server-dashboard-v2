@@ -26,7 +26,12 @@ import { t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { meta } from "../test/meta.ts";
 import { installMockWebSocket, MockWebSocket } from "../test/mockWebSocket.ts";
-import { ServerDetailPage, sparklinePoints } from "./ServerDetailPage.tsx";
+import {
+  ServerDetailPage,
+  serverKey,
+  sparklinePoints,
+} from "./ServerDetailPage.tsx";
+import { serversKey } from "./useCommunityEvents.ts";
 
 const CID = "c1";
 const SID = "s1";
@@ -774,117 +779,104 @@ describe("ServerDetailPage lifecycle controls", () => {
     });
     afterEach(() => restoreWs());
 
-    function statePill(): string | null {
-      const pills = document.querySelectorAll(".detail-title .pill");
-      return pills[0]?.textContent ?? null;
-    }
-
-    it("optimistically shows the starting pill immediately on start", async () => {
-      mockApi.get.mockResolvedValue(
-        server({ observed_state: "stopped", desired_state: "stopped" }),
-      );
-      mockApi.post.mockReturnValue(new Promise(() => {}));
-      renderPage();
-
-      await screen.findByText("survival");
-      fireEvent.click(
-        screen.getByRole("button", { name: t("serverDetail.start") }),
-      );
-
-      await waitFor(() =>
-        expect(statePill()).toBe(t("dashboard.state.starting")),
-      );
-    });
-
-    it("optimistically shows the stopping pill on stop", async () => {
+    it("wires the header controls to the optimistic lifecycle", async () => {
+      // The transition state machine itself is covered in
+      // useLifecycleMutation.test.tsx; this pins the detail page's wiring: the
+      // header pill's detail cache, the live status frame landing in that same
+      // cache, the controls held while in flight, the dashboard list refreshed
+      // on settle, and the toast receiving the verb (command_failed reads
+      // differently for restart).
       mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
-      mockApi.post.mockReturnValue(new Promise(() => {}));
-      renderPage();
-
-      await screen.findByText("survival");
-      fireEvent.click(screen.getByRole("button", { name: /Stop/ }));
-      fireEvent.click(
-        screen.getByRole("menuitem", { name: t("serverDetail.stopGraceful") }),
-      );
-
-      await waitFor(() =>
-        expect(statePill()).toBe(t("dashboard.state.stopping")),
-      );
-    });
-
-    it("reverts the pill to the previous state on lifecycle error", async () => {
-      mockApi.get.mockResolvedValue(
-        server({ observed_state: "stopped", desired_state: "stopped" }),
-      );
-      mockApi.post.mockRejectedValue(
-        new ApiError(409, { reason: "port_conflict" }),
-      );
-      renderPage();
-
-      await screen.findByText("survival");
-      fireEvent.click(
-        screen.getByRole("button", { name: t("serverDetail.start") }),
-      );
-
-      // After the error, the pill reverts to "Stopped".
-      await waitFor(() =>
-        expect(statePill()).toBe(t("dashboard.state.stopped")),
-      );
-    });
-
-    it("preserves a WS update that arrived mid-flight on rollback (#1727)", async () => {
-      // The server is stopped. We start it (→ "starting"), but a WS status
-      // frame pushes it to "running" before the POST rejects. The rollback
-      // must not clobber the WS-delivered state.
-      mockApi.get.mockResolvedValue(
-        server({ observed_state: "stopped", desired_state: "stopped" }),
-      );
       let rejectPost!: (err: unknown) => void;
-      const postPromise = new Promise((_resolve, reject) => {
-        rejectPost = reject;
-      });
-      postPromise.catch(() => {}); // Prevent unhandled-rejection noise in tests.
-      mockApi.post.mockReturnValue(postPromise);
-      renderPage();
+      mockApi.post.mockReturnValue(
+        new Promise((_resolve, reject) => {
+          rejectPost = reject;
+        }),
+      );
+      const { queryClient } = renderPage();
+      queryClient.setQueryData(serversKey(CID), [server()]);
+      const statePill = () =>
+        document.querySelector(".detail-title .pill")?.textContent;
 
       await screen.findByText("survival");
       fireEvent.click(
-        screen.getByRole("button", { name: t("serverDetail.start") }),
+        screen.getByRole("button", { name: t("serverDetail.restart") }),
       );
 
-      // Optimistic update shows "starting".
       await waitFor(() =>
-        expect(statePill()).toBe(t("dashboard.state.starting")),
+        expect(statePill()).toBe(t("dashboard.state.restarting")),
       );
+      expect(mockApi.post).toHaveBeenCalledWith(
+        `/api/communities/${CID}/servers/${SID}/restart`,
+      );
+      expect(
+        screen.queryByRole("button", { name: t("serverDetail.restart") }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: t("serverDetail.export") }),
+      ).toBeDisabled();
 
-      // WS pushes the server → running while the POST is still in flight.
+      // The server crashes mid-flight: restart applies again, but the open
+      // request still holds it.
       act(() => {
         MockWebSocket.last().open();
         MockWebSocket.last().message(
           JSON.stringify({
             stream: "status",
             ts: "t",
-            payload: { state: "running", detail: "" },
+            payload: { state: "crashed", detail: "" },
           }),
         );
       });
+      expect(
+        screen.getByRole("button", { name: t("serverDetail.restart") }),
+      ).toBeDisabled();
 
-      // Hang the refetch so we observe the rollback result.
+      // Hang the settle refetch so the pill below is the cache, not a reload.
       mockApi.get.mockReturnValue(new Promise(() => {}));
+      act(() => rejectPost(new ApiError(409, { reason: "command_failed" })));
 
-      rejectPost(new ApiError(409, { reason: "port_conflict" }));
+      expect(
+        await screen.findByText(t("dashboard.lifecycle.restartPending")),
+      ).toBeInTheDocument();
+      // The failed restart does not roll the newer crash back to "running".
+      expect(statePill()).toBe(t("dashboard.state.crashed"));
+      expect(
+        screen.getByRole("button", { name: t("serverDetail.restart") }),
+      ).toBeEnabled();
+      expect(queryClient.getQueryState(serversKey(CID))?.isInvalidated).toBe(
+        true,
+      );
+    });
 
-      // Wait for the error toast to confirm onError ran.
-      await waitFor(() =>
-        expect(
-          screen.queryByText(t("dashboard.lifecycle.portConflict")),
-        ).toBeInTheDocument(),
+    it("wires the Start button to POST start and the starting pill", async () => {
+      // The smoke above drives Restart; this pins that Start on a stopped
+      // server sends its own verb and writes its own transitional state.
+      mockApi.get.mockResolvedValue(
+        server({ observed_state: "stopped", desired_state: "stopped" }),
+      );
+      mockApi.post.mockReturnValue(new Promise(() => {}));
+      const { queryClient } = renderPage();
+      const statePill = () =>
+        document.querySelector(".detail-title .pill")?.textContent;
+
+      await screen.findByText("survival");
+      fireEvent.click(
+        screen.getByRole("button", { name: t("serverDetail.start") }),
       );
 
-      // The pill should show "running" (from WS), not "stopped" (rolled back).
       await waitFor(() =>
-        expect(statePill()).toBe(t("dashboard.state.running")),
+        expect(statePill()).toBe(t("dashboard.state.starting")),
       );
+      expect(mockApi.post).toHaveBeenCalledTimes(1);
+      expect(mockApi.post).toHaveBeenCalledWith(
+        `/api/communities/${CID}/servers/${SID}/start`,
+      );
+      expect(
+        queryClient.getQueryData<{ observed_state: string }>(
+          serverKey(CID, SID),
+        )?.observed_state,
+      ).toBe("starting");
     });
   });
 });

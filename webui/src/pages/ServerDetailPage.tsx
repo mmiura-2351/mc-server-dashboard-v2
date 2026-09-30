@@ -22,11 +22,7 @@ import { type Can, useCan } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
 import { classifyQueryResult } from "../queryState.ts";
 import { dashboardPath } from "../routes.ts";
-import {
-  isEulaNotAccepted,
-  type LifecycleAction,
-  lifecycleErrorMessage,
-} from "./lifecycleErrors.ts";
+import { isEulaNotAccepted, lifecycleErrorMessage } from "./lifecycleErrors.ts";
 import { stripMinecraftCodes } from "./mcFormat.ts";
 import { ServerAddressBadges } from "./ServerAddressBadges.tsx";
 import { ServerBackupsTab } from "./ServerBackupsTab.tsx";
@@ -44,6 +40,7 @@ import {
 } from "./serverState.ts";
 import { handleTabKeyDown, panelId, tabId, useTabHash } from "./urlState.ts";
 import { serversKey } from "./useCommunityEvents.ts";
+import { useLifecycleMutation } from "./useLifecycleMutation.ts";
 import {
   type LogEntry,
   type MetricsSample,
@@ -410,15 +407,6 @@ function Header({
   );
 }
 
-// The lifecycle verb is the request path's last segment, query string aside.
-// Both the optimistic pill and the failure message key off it (issue #2435).
-function lifecycleActionOf(path: string): LifecycleAction | undefined {
-  const verb = path.split("/").pop()?.replace(/\?.*/, "");
-  return verb === "start" || verb === "stop" || verb === "restart"
-    ? verb
-    : undefined;
-}
-
 function Controls({
   server,
   communityId,
@@ -430,17 +418,10 @@ function Controls({
 }) {
   const { showToast } = useToast();
   const onForbidden = useOnForbidden();
-  const queryClient = useQueryClient();
   const state = normalizeState(server.observed_state);
   const desired = normalizeState(server.desired_state);
   const [eulaOpen, setEulaOpen] = useState(false);
 
-  const invalidate = () => {
-    queryClient.invalidateQueries({
-      queryKey: serverKey(communityId, server.id),
-    });
-    queryClient.invalidateQueries({ queryKey: serversKey(communityId) });
-  };
   const onError = (error: unknown) => {
     if (onForbidden(error)) {
       return;
@@ -448,40 +429,17 @@ function Controls({
     showToast(t(lifecycleErrorMessage(error)), "error");
   };
 
-  const lifecycle = useMutation({
-    mutationFn: (path: string) => api.post(path as never),
-    onMutate: (path: string) => {
-      // Optimistically set the observed_state to the transitional state so
-      // the pill transitions instantly, before the API responds (#1071).
-      const action = lifecycleActionOf(path);
-      const transitional =
-        action === "stop"
-          ? "stopping"
-          : action === "restart"
-            ? "restarting"
-            : "starting";
-      const key = serverKey(communityId, server.id);
-      const previousState =
-        queryClient.getQueryData<ServerResponse>(key)?.observed_state;
-      queryClient.setQueryData<ServerResponse>(key, (old) =>
-        old ? { ...old, observed_state: transitional } : old,
-      );
-      return { previousState, transitional };
-    },
-    onSettled: invalidate,
-    onError: (error, path, context) => {
-      // Surgically roll back only observed_state, and only if the cache still
-      // holds the transitional value we wrote. A WS status frame that arrived
-      // mid-flight takes precedence (#1727).
-      if (context?.previousState !== undefined) {
-        const key = serverKey(communityId, server.id);
-        const prev = context.previousState;
-        queryClient.setQueryData<ServerResponse>(key, (old) =>
-          old && old.observed_state === context.transitional
-            ? { ...old, observed_state: prev }
-            : old,
-        );
-      }
+  // The optimistic pill, its #1727-safe rollback and the settle refetch live
+  // in useLifecycleMutation, shared with the dashboard rows (issue #3146).
+  const lifecycle = useLifecycleMutation({
+    communityId,
+    serverId: server.id,
+    cacheKey: serverKey(communityId, server.id),
+    invalidateKeys: [
+      serverKey(communityId, server.id),
+      serversKey(communityId),
+    ],
+    onError: (error, action) => {
       if (onForbidden(error)) {
         return;
       }
@@ -489,10 +447,7 @@ function Controls({
         setEulaOpen(true);
         return;
       }
-      showToast(
-        t(lifecycleErrorMessage(error, lifecycleActionOf(path))),
-        "error",
-      );
+      showToast(t(lifecycleErrorMessage(error, action)), "error");
     },
   });
 
@@ -502,7 +457,6 @@ function Controls({
     onError,
   });
 
-  const base = `/api/communities/${communityId}/servers/${server.id}`;
   const pending = lifecycle.isPending || exportMutation.isPending;
 
   return (
@@ -514,7 +468,7 @@ function Controls({
               type="button"
               className="btn success"
               disabled={pending}
-              onClick={() => lifecycle.mutate(`${base}/start`)}
+              onClick={() => lifecycle.mutate({ action: "start" })}
             >
               {t(
                 state === "crashed"
@@ -528,7 +482,10 @@ function Controls({
             <StopControl
               disabled={pending}
               onStop={(force) =>
-                lifecycle.mutate(`${base}/stop${force ? "?force=true" : ""}`)
+                lifecycle.mutate({
+                  action: "stop",
+                  query: force ? "force=true" : undefined,
+                })
               }
             />
           )}
@@ -538,7 +495,7 @@ function Controls({
               type="button"
               className="btn"
               disabled={pending}
-              onClick={() => lifecycle.mutate(`${base}/restart`)}
+              onClick={() => lifecycle.mutate({ action: "restart" })}
             >
               {t("serverDetail.restart")}
             </button>
@@ -572,7 +529,10 @@ function Controls({
               className="btn primary"
               onClick={() => {
                 setEulaOpen(false);
-                lifecycle.mutate(`${base}/start?accept_eula=true`);
+                lifecycle.mutate({
+                  action: "start",
+                  query: "accept_eula=true",
+                });
               }}
             >
               {t("serverDetail.eulaDialog.accept")}

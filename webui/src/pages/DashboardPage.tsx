@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   type ReactNode,
   useCallback,
@@ -39,6 +39,10 @@ import {
 } from "./serverState.ts";
 import { useFilterParams } from "./urlState.ts";
 import { serversKey, useCommunityEvents } from "./useCommunityEvents.ts";
+import {
+  transitionalState,
+  useLifecycleMutation,
+} from "./useLifecycleMutation.ts";
 
 type ServerResponse = components["schemas"]["ServerResponse"];
 
@@ -609,62 +613,24 @@ function SortableHeader({
 
 // The per-server lifecycle mutation plus the observed/optimistic state, shared by
 // the card and table rows so neither duplicates the start/stop/restart business
-// logic (#541).
+// logic (#541). The optimistic list-cache patch, its #1727-safe rollback and the
+// settle refetch live in useLifecycleMutation, shared with the detail page.
 function useLifecycle(server: ServerResponse, communityId: string) {
   const { showToast } = useToast();
   const onForbidden = useOnForbidden();
   const queryClient = useQueryClient();
   const [eulaOpen, setEulaOpen] = useState(false);
 
-  const mutation = useMutation({
-    mutationFn: (action: LifecycleAction) =>
-      api.post(
-        apiPath(
-          `/api/communities/{community_id}/servers/{server_id}/${action}`,
-          {
-            community_id: communityId,
-            server_id: server.id,
-          },
-        ),
-      ),
-    // Optimistically patch the server's observed_state in the list cache so
-    // the pill transitions instantly, before the API responds (#1071).
-    onMutate: (action: LifecycleAction) => {
-      const key = serversKey(communityId);
-      const previousState = queryClient
-        .getQueryData<ServerResponse[]>(key)
-        ?.find((s) => s.id === server.id)?.observed_state;
-      const optimistic = requestedState(action);
-      queryClient.setQueryData<ServerResponse[]>(key, (old) =>
-        old?.map((s) =>
-          s.id === server.id ? { ...s, observed_state: optimistic } : s,
-        ),
-      );
-      return { previousState, optimistic };
-    },
-    // Always re-fetch the list once the request settles (no polling loop here).
-    onSettled: () => {
-      queryClient.invalidateQueries({ queryKey: serversKey(communityId) });
-    },
-    onError: (error, action, context) => {
-      // Surgically roll back only the mutated server's observed_state, and
-      // only if the cache still holds the optimistic value we wrote. A WS
-      // status frame that arrived mid-flight takes precedence (#1727).
-      if (context?.previousState !== undefined) {
-        const key = serversKey(communityId);
-        const prev = context.previousState;
-        queryClient.setQueryData<ServerResponse[]>(key, (old) =>
-          old?.map((s) =>
-            s.id === server.id && s.observed_state === context.optimistic
-              ? { ...s, observed_state: prev }
-              : s,
-          ),
-        );
-      }
+  const mutation = useLifecycleMutation({
+    communityId,
+    serverId: server.id,
+    cacheKey: serversKey(communityId),
+    invalidateKeys: [serversKey(communityId)],
+    onError: (error, action) => {
       // 403 → the permission glue (toast + capability refetch). Everything
       // else → the shared lifecycle mapping: known non-race 409 reasons get a
       // specific toast, other 409s the "state changed — refresh" treatment
-      // (SPEC 7.4; the refetch already runs in onSettled), recognized 503
+      // (SPEC 7.4; the refetch already runs on settle), recognized 503
       // reasons their own message, the rest a generic toast. The verb goes with
       // it on both the 409 and the 503 path: for a few reasons what the failure
       // left pending, or left unconfirmed, depends on it (issues #2435/#2440/
@@ -701,7 +667,7 @@ function useLifecycle(server: ServerResponse, communityId: string) {
   // While a request is in flight, show the transition it requests so the pill
   // moves immediately, before the list refetch returns.
   const displayState: ObservedState = mutation.isPending
-    ? requestedState(mutation.variables)
+    ? transitionalState(mutation.variables.action)
     : state;
 
   return {
@@ -793,7 +759,7 @@ function ServerCard({ server, communityId, can }: ServerRowProps) {
             state={state}
             pending={mutation.isPending}
             can={can}
-            onRun={mutation.mutate}
+            onRun={(action) => mutation.mutate({ action })}
           />
         ))}
         <span className="right" title={server.assigned_worker_id ?? undefined}>
@@ -913,7 +879,7 @@ function ServerRow({ server, communityId, can }: ServerRowProps) {
             state={state}
             pending={mutation.isPending}
             can={can}
-            onRun={mutation.mutate}
+            onRun={(action) => mutation.mutate({ action })}
           />
         ))}
         <EulaModal
@@ -1005,15 +971,3 @@ const LABEL_KEY = {
   stop: "dashboard.stop",
   restart: "dashboard.restart",
 } as const;
-
-// The requested target state for an in-flight action, used for the optimistic
-// transitional pill.
-function requestedState(action: LifecycleAction | undefined): ObservedState {
-  if (action === "stop") {
-    return "stopping";
-  }
-  if (action === "restart") {
-    return "restarting";
-  }
-  return "starting";
-}
