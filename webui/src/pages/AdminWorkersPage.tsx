@@ -8,6 +8,7 @@ import { useToast } from "../components/Toast.tsx";
 import { heartbeatAge, humanizeBytes, statusPill } from "../format.ts";
 import { t } from "../i18n/index.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
+import { classifyQueryResult } from "../queryState.ts";
 
 // Platform admin Workers page (WEBUI_SPEC.md 6.12): the full fleet table with a
 // per-worker drain/undrain toggle. Drain is `PUT /workers/{id}/drain` (200 with
@@ -29,6 +30,7 @@ export function AdminWorkersPage() {
     queryFn: ({ signal }) => api.get("/api/workers", { signal }),
     refetchInterval: REFRESH_INTERVAL_MS,
   });
+  const workersState = classifyQueryResult(workersQuery);
 
   return (
     <div className="admin-workers">
@@ -39,19 +41,19 @@ export function AdminWorkersPage() {
         </div>
       </div>
 
-      {workersQuery.isPending ? (
+      {workersState.kind === "pending" ? (
         <p className="sub" role="status">
           {t("admin.workers.loading")}
         </p>
       ) : /* Error only when there is nothing to show (initial load failed).
            A failed background refetch retains `data`, so the cached page
            keeps rendering through transient API blips (#1805). */
-      workersQuery.data === undefined ? (
+      workersState.kind === "error" ? (
         <p className="field-error" role="alert">
           {t("admin.workers.loadError")}
         </p>
       ) : (
-        <Loaded workers={workersQuery.data?.workers ?? []} />
+        <Loaded workers={workersState.data.workers} />
       )}
     </div>
   );

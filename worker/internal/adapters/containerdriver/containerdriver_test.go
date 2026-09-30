@@ -1169,69 +1169,44 @@ func TestStartCreateSpec(t *testing.T) {
 	}
 }
 
-// The launch container carries the per-server memory ceiling as the Docker
-// host-config Memory limit, converted MiB→bytes (issue #707).
-func TestStartLaunchContainerMemoryLimit(t *testing.T) {
-	docker := newFakeDocker()
-	d := newTestDriver(docker, nil, errors.New("no rcon"))
-
-	s := spec()
-	s.MemoryLimitMB = 2048
-	if _, err := d.Start(context.Background(), s); err != nil {
-		t.Fatalf("Start: %v", err)
+// The launch container carries the per-server resource allocation. A memory
+// ceiling becomes the Docker host-config Memory limit, converted MiB→bytes; unset
+// (0) leaves the container unconstrained (issue #707). The CPU weight is
+// proportional to CPUMillis at 1024 shares = 1 core; unset (0) keeps the
+// historical fixed weight so existing servers do not regress (issue #724).
+func TestStartLaunchContainerResources(t *testing.T) {
+	tests := []struct {
+		name          string
+		memoryLimitMB uint32
+		cpuMillis     uint32
+		wantMemory    int64
+		wantCPUShares int64
+	}{
+		{name: "unset allocation", wantMemory: 0, wantCPUShares: gameServerCPUShares},
+		{name: "memory ceiling", memoryLimitMB: 2048, wantMemory: int64(2048) * 1024 * 1024, wantCPUShares: gameServerCPUShares},
+		// 1500m, not 2000m: 2000m → 2048 would equal the default weight and could
+		// not tell the conversion from the fallback.
+		{name: "cpu allocation", cpuMillis: 1500, wantMemory: 0, wantCPUShares: 1536},
 	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			docker := newFakeDocker()
+			d := newTestDriver(docker, nil, errors.New("no rcon"))
 
-	const wantBytes = int64(2048) * 1024 * 1024
-	if got := docker.createSpec.MemoryLimitBytes; got != wantBytes {
-		t.Fatalf("MemoryLimitBytes = %d, want %d (2048 MiB)", got, wantBytes)
-	}
-}
+			s := spec()
+			s.MemoryLimitMB = tc.memoryLimitMB
+			s.CPUMillis = tc.cpuMillis
+			if _, err := d.Start(context.Background(), s); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
 
-// An unset memory ceiling (0) leaves the launch container unconstrained: the
-// create payload carries no memory limit (issue #707).
-func TestStartLaunchContainerNoMemoryLimit(t *testing.T) {
-	docker := newFakeDocker()
-	d := newTestDriver(docker, nil, errors.New("no rcon"))
-
-	if _, err := d.Start(context.Background(), spec()); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-
-	if got := docker.createSpec.MemoryLimitBytes; got != 0 {
-		t.Fatalf("MemoryLimitBytes = %d, want 0 (unconstrained)", got)
-	}
-}
-
-// The launch container's CPU weight is proportional to the per-server CPU
-// allocation: CPUMillis is mapped to CpuShares at 1024 shares = 1 core, so
-// 2000m → 2048 (issue #724).
-func TestStartLaunchContainerCPUShares(t *testing.T) {
-	docker := newFakeDocker()
-	d := newTestDriver(docker, nil, errors.New("no rcon"))
-
-	s := spec()
-	s.CPUMillis = 2000
-	if _, err := d.Start(context.Background(), s); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-
-	if got := docker.createSpec.CPUShares; got != 2048 {
-		t.Fatalf("CPUShares = %d, want 2048 (2000m)", got)
-	}
-}
-
-// An unset CPU allocation (0) keeps the historical fixed weight (2048), so
-// existing servers do not regress (issue #724).
-func TestStartLaunchContainerNoCPUMillisKeepsDefaultShares(t *testing.T) {
-	docker := newFakeDocker()
-	d := newTestDriver(docker, nil, errors.New("no rcon"))
-
-	if _, err := d.Start(context.Background(), spec()); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-
-	if got := docker.createSpec.CPUShares; got != gameServerCPUShares {
-		t.Fatalf("CPUShares = %d, want %d (default)", got, gameServerCPUShares)
+			if got := docker.createSpec.MemoryLimitBytes; got != tc.wantMemory {
+				t.Errorf("MemoryLimitBytes = %d, want %d", got, tc.wantMemory)
+			}
+			if got := docker.createSpec.CPUShares; got != tc.wantCPUShares {
+				t.Errorf("CPUShares = %d, want %d", got, tc.wantCPUShares)
+			}
+		})
 	}
 }
 

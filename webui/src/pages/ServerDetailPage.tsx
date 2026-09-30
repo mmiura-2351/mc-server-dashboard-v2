@@ -3,7 +3,6 @@ import {
   type KeyboardEvent,
   memo,
   type ReactNode,
-  useCallback,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -14,7 +13,6 @@ import { ApiError, api } from "../api/client.ts";
 import { saveUrlAs } from "../api/download.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
-import { copyToClipboard } from "../clipboard.ts";
 import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
 import { Modal } from "../components/Modal.tsx";
 import { useToast } from "../components/Toast.tsx";
@@ -22,13 +20,11 @@ import { shortId } from "../format.ts";
 import { type TranslationKey, t } from "../i18n/index.ts";
 import { type Can, useCan } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
+import { classifyQueryResult } from "../queryState.ts";
 import { dashboardPath } from "../routes.ts";
-import {
-  isEulaNotAccepted,
-  type LifecycleAction,
-  lifecycleErrorMessage,
-} from "./lifecycleErrors.ts";
+import { isEulaNotAccepted, lifecycleErrorMessage } from "./lifecycleErrors.ts";
 import { stripMinecraftCodes } from "./mcFormat.ts";
+import { ServerAddressBadges } from "./ServerAddressBadges.tsx";
 import { ServerBackupsTab } from "./ServerBackupsTab.tsx";
 import { ServerFilesTab } from "./ServerFilesTab.tsx";
 import { ServerPlayersTab } from "./ServerPlayersTab.tsx";
@@ -36,6 +32,7 @@ import { ServerPluginsTab } from "./ServerPluginsTab.tsx";
 import { ServerResourcePackSection } from "./ServerResourcePackSection.tsx";
 import { ServerSchedulesTab } from "./ServerSchedulesTab.tsx";
 import { serverKey } from "./serverKey.ts";
+import { serverSettingsErrorPresentation } from "./serverSettingsErrorPresentation.ts";
 import {
   actionApplies,
   atRest,
@@ -44,6 +41,7 @@ import {
 } from "./serverState.ts";
 import { handleTabKeyDown, panelId, tabId, useTabHash } from "./urlState.ts";
 import { serversKey } from "./useCommunityEvents.ts";
+import { useLifecycleMutation } from "./useLifecycleMutation.ts";
 import {
   type LogEntry,
   type MetricsSample,
@@ -183,18 +181,20 @@ function Loaded({
       ),
   });
 
-  if (query.isPending) {
+  const queryState = classifyQueryResult(query);
+
+  if (queryState.kind === "pending") {
     return <p className="sub">{t("serverDetail.loading")}</p>;
   }
   // Full-page error only when there is nothing to show (the initial load
   // failed). A failed background refetch retains `data`, so the cached page
   // keeps rendering through transient API blips; the WS-driven degraded pill
   // already signals that live updates are down (#1724).
-  if (query.data === undefined) {
+  if (queryState.kind === "error") {
     return <p className="field-error">{t("serverDetail.loadError")}</p>;
   }
 
-  const server = query.data;
+  const server = queryState.data;
   const hidePlugins = PLUGIN_UNSUPPORTED_TYPES.has(server.server_type);
   const visibleTabs = hidePlugins
     ? TABS.filter((name) => name !== "plugins")
@@ -325,65 +325,6 @@ function Header({
   // applying hint (WEBUI_SPEC.md 6.4).
   const drifting = server.desired_state !== server.observed_state;
 
-  // Clickable-copy state for the join-hostname badge.
-  const [copied, setCopied] = useState(false);
-  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Bedrock address:port badge (issue #1543): its own copy state, mirroring
-  // the Java join-hostname badge above.
-  const [bedrockCopied, setBedrockCopied] = useState(false);
-  const bedrockCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
-    null,
-  );
-
-  useEffect(() => {
-    return () => {
-      if (copyTimerRef.current !== null) clearTimeout(copyTimerRef.current);
-      if (bedrockCopyTimerRef.current !== null) {
-        clearTimeout(bedrockCopyTimerRef.current);
-      }
-    };
-  }, []);
-
-  const handleCopy = useCallback(() => {
-    if (server.join_hostname === null) return;
-    if (copyTimerRef.current !== null) clearTimeout(copyTimerRef.current);
-    copyToClipboard(server.join_hostname).then(
-      () => {
-        setCopied(true);
-        copyTimerRef.current = setTimeout(() => setCopied(false), 1500);
-      },
-      () => {
-        setCopied(false);
-      },
-    );
-  }, [server.join_hostname]);
-
-  const bedrockAddress =
-    server.bedrock_address !== null && server.bedrock_port !== null
-      ? `${server.bedrock_address}:${server.bedrock_port}`
-      : null;
-
-  const handleCopyBedrock = useCallback(() => {
-    if (server.bedrock_address === null) return;
-    if (bedrockCopyTimerRef.current !== null) {
-      clearTimeout(bedrockCopyTimerRef.current);
-    }
-    // Copy the host only: Bedrock's "Add Server" screen has a separate Port
-    // field, and pasting `host:port` into the address field fails validation.
-    copyToClipboard(server.bedrock_address).then(
-      () => {
-        setBedrockCopied(true);
-        bedrockCopyTimerRef.current = setTimeout(
-          () => setBedrockCopied(false),
-          1500,
-        );
-      },
-      () => {
-        setBedrockCopied(false);
-      },
-    );
-  }, [server.bedrock_address]);
-
   return (
     <div className="page-head">
       <div>
@@ -441,43 +382,17 @@ function Header({
           <span className="badge type">
             {server.server_type} {server.mc_version}
           </span>
-          {server.join_hostname !== null ? (
-            <button
-              type="button"
-              className="badge copyable"
-              title={server.join_hostname}
-              onClick={handleCopy}
-            >
-              {copied
-                ? t("serverDetail.copiedJoinHostname")
-                : server.join_hostname}
-            </button>
-          ) : (
-            <span className="badge">
-              {server.game_port !== null
-                ? `:${server.game_port}`
-                : t("serverDetail.noPort")}
-            </span>
-          )}
-          {bedrockAddress !== null && (
-            <button
-              type="button"
-              className="badge copyable"
-              title={t("serverDetail.bedrockAddressCopyTitle", {
-                port: server.bedrock_port ?? "",
-              })}
-              onClick={handleCopyBedrock}
-            >
-              {bedrockCopied ? (
-                t("serverDetail.copiedBedrockAddress")
-              ) : (
-                <>
-                  {t("serverDetail.bedrockLabel")}: {server.bedrock_address}:
-                  {server.bedrock_port}
-                </>
-              )}
-            </button>
-          )}
+          <ServerAddressBadges
+            server={server}
+            buttonClassName="badge copyable"
+            fallback={
+              <span className="badge">
+                {server.game_port !== null
+                  ? `:${server.game_port}`
+                  : t("serverDetail.noPort")}
+              </span>
+            }
+          />
           <span
             className="badge"
             title={server.assigned_worker_id ?? undefined}
@@ -493,15 +408,6 @@ function Header({
   );
 }
 
-// The lifecycle verb is the request path's last segment, query string aside.
-// Both the optimistic pill and the failure message key off it (issue #2435).
-function lifecycleActionOf(path: string): LifecycleAction | undefined {
-  const verb = path.split("/").pop()?.replace(/\?.*/, "");
-  return verb === "start" || verb === "stop" || verb === "restart"
-    ? verb
-    : undefined;
-}
-
 function Controls({
   server,
   communityId,
@@ -513,17 +419,10 @@ function Controls({
 }) {
   const { showToast } = useToast();
   const onForbidden = useOnForbidden();
-  const queryClient = useQueryClient();
   const state = normalizeState(server.observed_state);
   const desired = normalizeState(server.desired_state);
   const [eulaOpen, setEulaOpen] = useState(false);
 
-  const invalidate = () => {
-    queryClient.invalidateQueries({
-      queryKey: serverKey(communityId, server.id),
-    });
-    queryClient.invalidateQueries({ queryKey: serversKey(communityId) });
-  };
   const onError = (error: unknown) => {
     if (onForbidden(error)) {
       return;
@@ -531,40 +430,17 @@ function Controls({
     showToast(t(lifecycleErrorMessage(error)), "error");
   };
 
-  const lifecycle = useMutation({
-    mutationFn: (path: string) => api.post(path as never),
-    onMutate: (path: string) => {
-      // Optimistically set the observed_state to the transitional state so
-      // the pill transitions instantly, before the API responds (#1071).
-      const action = lifecycleActionOf(path);
-      const transitional =
-        action === "stop"
-          ? "stopping"
-          : action === "restart"
-            ? "restarting"
-            : "starting";
-      const key = serverKey(communityId, server.id);
-      const previousState =
-        queryClient.getQueryData<ServerResponse>(key)?.observed_state;
-      queryClient.setQueryData<ServerResponse>(key, (old) =>
-        old ? { ...old, observed_state: transitional } : old,
-      );
-      return { previousState, transitional };
-    },
-    onSettled: invalidate,
-    onError: (error, path, context) => {
-      // Surgically roll back only observed_state, and only if the cache still
-      // holds the transitional value we wrote. A WS status frame that arrived
-      // mid-flight takes precedence (#1727).
-      if (context?.previousState !== undefined) {
-        const key = serverKey(communityId, server.id);
-        const prev = context.previousState;
-        queryClient.setQueryData<ServerResponse>(key, (old) =>
-          old && old.observed_state === context.transitional
-            ? { ...old, observed_state: prev }
-            : old,
-        );
-      }
+  // The optimistic pill, its #1727-safe rollback and the settle refetch live
+  // in useLifecycleMutation, shared with the dashboard rows (issue #3146).
+  const lifecycle = useLifecycleMutation({
+    communityId,
+    serverId: server.id,
+    cacheKey: serverKey(communityId, server.id),
+    invalidateKeys: [
+      serverKey(communityId, server.id),
+      serversKey(communityId),
+    ],
+    onError: (error, action) => {
       if (onForbidden(error)) {
         return;
       }
@@ -572,10 +448,7 @@ function Controls({
         setEulaOpen(true);
         return;
       }
-      showToast(
-        t(lifecycleErrorMessage(error, lifecycleActionOf(path))),
-        "error",
-      );
+      showToast(t(lifecycleErrorMessage(error, action)), "error");
     },
   });
 
@@ -585,7 +458,6 @@ function Controls({
     onError,
   });
 
-  const base = `/api/communities/${communityId}/servers/${server.id}`;
   const pending = lifecycle.isPending || exportMutation.isPending;
 
   return (
@@ -597,7 +469,7 @@ function Controls({
               type="button"
               className="btn success"
               disabled={pending}
-              onClick={() => lifecycle.mutate(`${base}/start`)}
+              onClick={() => lifecycle.mutate({ action: "start" })}
             >
               {t(
                 state === "crashed"
@@ -611,7 +483,10 @@ function Controls({
             <StopControl
               disabled={pending}
               onStop={(force) =>
-                lifecycle.mutate(`${base}/stop${force ? "?force=true" : ""}`)
+                lifecycle.mutate({
+                  action: "stop",
+                  query: force ? "force=true" : undefined,
+                })
               }
             />
           )}
@@ -621,7 +496,7 @@ function Controls({
               type="button"
               className="btn"
               disabled={pending}
-              onClick={() => lifecycle.mutate(`${base}/restart`)}
+              onClick={() => lifecycle.mutate({ action: "restart" })}
             >
               {t("serverDetail.restart")}
             </button>
@@ -655,7 +530,10 @@ function Controls({
               className="btn primary"
               onClick={() => {
                 setEulaOpen(false);
-                lifecycle.mutate(`${base}/start?accept_eula=true`);
+                lifecycle.mutate({
+                  action: "start",
+                  query: "accept_eula=true",
+                });
               }}
             >
               {t("serverDetail.eulaDialog.accept")}
@@ -1422,50 +1300,6 @@ function fromRows(rows: ConfigRow[]): Record<string, unknown> {
   return out;
 }
 
-// Map a settings save/delete error reason to a specific message; otherwise the
-// generic toast. 422 carries a port reason (port_out_of_range) or the snapshot
-// cadence reason (invalid_snapshot_interval), 409 the at-rest gate
-// (server_not_stopped) and export the unsettled gate.
-function settingsErrorMessage(error: unknown): TranslationKey {
-  if (error instanceof ApiError) {
-    switch (error.reason) {
-      case "server_not_stopped":
-        return "serverDetail.error.notStopped";
-      case "server_unsettled":
-        return "serverDetail.error.unsettled";
-      case "port_taken":
-        return "serverDetail.error.portTaken";
-      case "port_out_of_range":
-        return "serverDetail.error.portOutOfRange";
-      case "invalid_snapshot_interval":
-        return "serverDetail.error.invalidSnapshotInterval";
-      case "retired_config_key":
-        return "serverDetail.error.retiredConfigKey";
-      case "invalid_memory_limit":
-        return "serverDetail.error.invalidMemoryLimit";
-      case "invalid_cpu_allocation":
-        return "serverDetail.error.invalidCpuAllocation";
-      // The config-blob guard (issue #94). This editor reads every value as
-      // JSON, so all four of its rules describe something a row can carry: a
-      // typed `null`, a literal nested past the depth cap, an oversized paste,
-      // and an unpaired surrogate escape.
-      case "config_too_large":
-        return "serverDetail.error.configTooLarge";
-      case "config_null_value":
-        return "serverDetail.error.configNullValue";
-      case "config_invalid_shape":
-        return "serverDetail.error.configInvalidShape";
-      case "config_lone_surrogate":
-        return "serverDetail.error.configLoneSurrogate";
-      case "invalid_slug":
-        return "serverDetail.error.invalidSlug";
-      case "slug_taken":
-        return "serverDetail.error.slugTaken";
-    }
-  }
-  return "serverDetail.error.generic";
-}
-
 function Settings({
   server,
   communityId,
@@ -1560,18 +1394,15 @@ function Settings({
     if (onForbidden(error)) {
       return;
     }
-    // Surface slug-specific errors inline on the field rather than as toasts.
-    if (error instanceof ApiError) {
-      if (error.reason === "invalid_slug" || error.reason === "slug_taken") {
-        setSlugError(
-          error.reason === "slug_taken"
-            ? t("serverDetail.settings.slugTaken")
-            : t("serverDetail.settings.slugInvalid"),
-        );
-        return;
-      }
+    // Slug-specific errors land inline on the field rather than as toasts.
+    const { target, key } = serverSettingsErrorPresentation(
+      error instanceof ApiError ? error.reason : undefined,
+    );
+    if (target === "slug") {
+      setSlugError(t(key));
+      return;
     }
-    showToast(t(settingsErrorMessage(error)), "error");
+    showToast(t(key), "error");
   };
 
   const save = useMutation({

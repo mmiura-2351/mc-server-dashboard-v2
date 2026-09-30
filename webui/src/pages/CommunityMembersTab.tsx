@@ -10,6 +10,7 @@ import { useToast } from "../components/Toast.tsx";
 import { t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
+import { classifyQueryResult } from "../queryState.ts";
 
 type MemberResponse = components["schemas"]["MemberResponse"];
 type RoleResponse = components["schemas"]["RoleResponse"];
@@ -86,13 +87,15 @@ export function CommunityMembersTab({
     },
   });
 
-  if (members.isPending) {
+  const membersState = classifyQueryResult(members);
+
+  if (membersState.kind === "pending") {
     return <p className="sub">{t("communitySettings.members.loading")}</p>;
   }
   // Error only when there is nothing to show (the initial load failed). A
   // failed background refetch retains `data`, so the cached list keeps
   // rendering through transient API blips (#1797).
-  if (members.data === undefined) {
+  if (membersState.kind === "error") {
     return (
       <p className="field-error">{t("communitySettings.members.loadError")}</p>
     );
@@ -114,7 +117,7 @@ export function CommunityMembersTab({
         )}
       </div>
 
-      {members.data.length === 0 ? (
+      {membersState.data.length === 0 ? (
         <p className="sub">{t("communitySettings.members.empty")}</p>
       ) : (
         <table className="data">
@@ -126,7 +129,7 @@ export function CommunityMembersTab({
             </tr>
           </thead>
           <tbody>
-            {members.data.map((member) => (
+            {membersState.data.map((member) => (
               <MemberRow
                 key={member.membership_id}
                 communityId={communityId}

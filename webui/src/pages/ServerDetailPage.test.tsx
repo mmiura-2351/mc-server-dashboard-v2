@@ -1,8 +1,6 @@
 // @vitest-environment jsdom
-// Pinned to jsdom: the copy-to-clipboard tests assert the
-// document.execCommand("copy") fallback (skipped when happy-dom provides
-// navigator.clipboard), and the WAI-ARIA focus-return test relies on jsdom's
-// focus handling (issue #1751).
+// Pinned to jsdom: the WAI-ARIA focus-return test relies on jsdom's focus
+// handling (issue #1751).
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   act,
@@ -10,6 +8,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router";
 import {
@@ -28,7 +27,12 @@ import { t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { meta } from "../test/meta.ts";
 import { installMockWebSocket, MockWebSocket } from "../test/mockWebSocket.ts";
-import { ServerDetailPage, sparklinePoints } from "./ServerDetailPage.tsx";
+import {
+  ServerDetailPage,
+  serverKey,
+  sparklinePoints,
+} from "./ServerDetailPage.tsx";
+import { serversKey } from "./useCommunityEvents.ts";
 
 const CID = "c1";
 const SID = "s1";
@@ -263,48 +267,6 @@ describe("ServerDetailPage scaffold + header", () => {
     expect(
       await screen.findByText(t("serverDetail.loadError")),
     ).toBeInTheDocument();
-  });
-
-  it("keeps rendering cached data when a background refetch fails (#1724)", async () => {
-    mockApi.get.mockResolvedValue(server());
-    const { queryClient } = renderPage();
-    await screen.findByText("survival");
-
-    // Simulate a transient API outage: the next background refetch fails.
-    mockApi.get.mockRejectedValue(new ApiError(500, {}));
-    await act(() => queryClient.invalidateQueries());
-    // The query-state notification lands a task after invalidateQueries
-    // settles; flush it so the assertion sees the post-refetch render.
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
-
-    // The cached page stays on screen instead of a full-page error.
-    expect(screen.getByText("survival")).toBeInTheDocument();
-    expect(
-      screen.queryByText(t("serverDetail.loadError")),
-    ).not.toBeInTheDocument();
-  });
-
-  it("recovers to fresh data once a refetch succeeds after a failure (#1724)", async () => {
-    mockApi.get.mockResolvedValue(server());
-    const { queryClient } = renderPage();
-    await screen.findByText("survival");
-
-    mockApi.get.mockRejectedValue(new ApiError(500, {}));
-    await act(() => queryClient.invalidateQueries());
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
-
-    // The API comes back: the next refetch replaces the stale data.
-    mockApi.get.mockResolvedValue(server({ name: "renamed" }));
-    await act(() => queryClient.invalidateQueries());
-
-    expect(await screen.findByText("renamed")).toBeInTheDocument();
-    expect(
-      screen.queryByText(t("serverDetail.loadError")),
-    ).not.toBeInTheDocument();
   });
 });
 
@@ -794,23 +756,6 @@ describe("ServerDetailPage lifecycle controls", () => {
     ).toBeInTheDocument();
   });
 
-  it("gives a lifecycle 409 the state-changed treatment", async () => {
-    mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
-    mockApi.post.mockRejectedValue(
-      new ApiError(409, { reason: "transition_conflict" }),
-    );
-    renderPage();
-
-    await screen.findByText("survival");
-    fireEvent.click(
-      screen.getByRole("button", { name: t("serverDetail.restart") }),
-    );
-
-    expect(
-      await screen.findByText(t("dashboard.stateChanged")),
-    ).toBeInTheDocument();
-  });
-
   describe("optimistic state transition (#1071)", () => {
     let restoreWs: () => void;
     beforeEach(() => {
@@ -818,117 +763,104 @@ describe("ServerDetailPage lifecycle controls", () => {
     });
     afterEach(() => restoreWs());
 
-    function statePill(): string | null {
-      const pills = document.querySelectorAll(".detail-title .pill");
-      return pills[0]?.textContent ?? null;
-    }
-
-    it("optimistically shows the starting pill immediately on start", async () => {
-      mockApi.get.mockResolvedValue(
-        server({ observed_state: "stopped", desired_state: "stopped" }),
-      );
-      mockApi.post.mockReturnValue(new Promise(() => {}));
-      renderPage();
-
-      await screen.findByText("survival");
-      fireEvent.click(
-        screen.getByRole("button", { name: t("serverDetail.start") }),
-      );
-
-      await waitFor(() =>
-        expect(statePill()).toBe(t("dashboard.state.starting")),
-      );
-    });
-
-    it("optimistically shows the stopping pill on stop", async () => {
+    it("wires the header controls to the optimistic lifecycle", async () => {
+      // The transition state machine itself is covered in
+      // useLifecycleMutation.test.tsx; this pins the detail page's wiring: the
+      // header pill's detail cache, the live status frame landing in that same
+      // cache, the controls held while in flight, the dashboard list refreshed
+      // on settle, and the toast receiving the verb (command_failed reads
+      // differently for restart).
       mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
-      mockApi.post.mockReturnValue(new Promise(() => {}));
-      renderPage();
-
-      await screen.findByText("survival");
-      fireEvent.click(screen.getByRole("button", { name: /Stop/ }));
-      fireEvent.click(
-        screen.getByRole("menuitem", { name: t("serverDetail.stopGraceful") }),
-      );
-
-      await waitFor(() =>
-        expect(statePill()).toBe(t("dashboard.state.stopping")),
-      );
-    });
-
-    it("reverts the pill to the previous state on lifecycle error", async () => {
-      mockApi.get.mockResolvedValue(
-        server({ observed_state: "stopped", desired_state: "stopped" }),
-      );
-      mockApi.post.mockRejectedValue(
-        new ApiError(409, { reason: "port_conflict" }),
-      );
-      renderPage();
-
-      await screen.findByText("survival");
-      fireEvent.click(
-        screen.getByRole("button", { name: t("serverDetail.start") }),
-      );
-
-      // After the error, the pill reverts to "Stopped".
-      await waitFor(() =>
-        expect(statePill()).toBe(t("dashboard.state.stopped")),
-      );
-    });
-
-    it("preserves a WS update that arrived mid-flight on rollback (#1727)", async () => {
-      // The server is stopped. We start it (→ "starting"), but a WS status
-      // frame pushes it to "running" before the POST rejects. The rollback
-      // must not clobber the WS-delivered state.
-      mockApi.get.mockResolvedValue(
-        server({ observed_state: "stopped", desired_state: "stopped" }),
-      );
       let rejectPost!: (err: unknown) => void;
-      const postPromise = new Promise((_resolve, reject) => {
-        rejectPost = reject;
-      });
-      postPromise.catch(() => {}); // Prevent unhandled-rejection noise in tests.
-      mockApi.post.mockReturnValue(postPromise);
-      renderPage();
+      mockApi.post.mockReturnValue(
+        new Promise((_resolve, reject) => {
+          rejectPost = reject;
+        }),
+      );
+      const { queryClient } = renderPage();
+      queryClient.setQueryData(serversKey(CID), [server()]);
+      const statePill = () =>
+        document.querySelector(".detail-title .pill")?.textContent;
 
       await screen.findByText("survival");
       fireEvent.click(
-        screen.getByRole("button", { name: t("serverDetail.start") }),
+        screen.getByRole("button", { name: t("serverDetail.restart") }),
       );
 
-      // Optimistic update shows "starting".
       await waitFor(() =>
-        expect(statePill()).toBe(t("dashboard.state.starting")),
+        expect(statePill()).toBe(t("dashboard.state.restarting")),
       );
+      expect(mockApi.post).toHaveBeenCalledWith(
+        `/api/communities/${CID}/servers/${SID}/restart`,
+      );
+      expect(
+        screen.queryByRole("button", { name: t("serverDetail.restart") }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: t("serverDetail.export") }),
+      ).toBeDisabled();
 
-      // WS pushes the server → running while the POST is still in flight.
+      // The server crashes mid-flight: restart applies again, but the open
+      // request still holds it.
       act(() => {
         MockWebSocket.last().open();
         MockWebSocket.last().message(
           JSON.stringify({
             stream: "status",
             ts: "t",
-            payload: { state: "running", detail: "" },
+            payload: { state: "crashed", detail: "" },
           }),
         );
       });
+      expect(
+        screen.getByRole("button", { name: t("serverDetail.restart") }),
+      ).toBeDisabled();
 
-      // Hang the refetch so we observe the rollback result.
+      // Hang the settle refetch so the pill below is the cache, not a reload.
       mockApi.get.mockReturnValue(new Promise(() => {}));
+      act(() => rejectPost(new ApiError(409, { reason: "command_failed" })));
 
-      rejectPost(new ApiError(409, { reason: "port_conflict" }));
+      expect(
+        await screen.findByText(t("dashboard.lifecycle.restartPending")),
+      ).toBeInTheDocument();
+      // The failed restart does not roll the newer crash back to "running".
+      expect(statePill()).toBe(t("dashboard.state.crashed"));
+      expect(
+        screen.getByRole("button", { name: t("serverDetail.restart") }),
+      ).toBeEnabled();
+      expect(queryClient.getQueryState(serversKey(CID))?.isInvalidated).toBe(
+        true,
+      );
+    });
 
-      // Wait for the error toast to confirm onError ran.
-      await waitFor(() =>
-        expect(
-          screen.queryByText(t("dashboard.lifecycle.portConflict")),
-        ).toBeInTheDocument(),
+    it("wires the Start button to POST start and the starting pill", async () => {
+      // The smoke above drives Restart; this pins that Start on a stopped
+      // server sends its own verb and writes its own transitional state.
+      mockApi.get.mockResolvedValue(
+        server({ observed_state: "stopped", desired_state: "stopped" }),
+      );
+      mockApi.post.mockReturnValue(new Promise(() => {}));
+      const { queryClient } = renderPage();
+      const statePill = () =>
+        document.querySelector(".detail-title .pill")?.textContent;
+
+      await screen.findByText("survival");
+      fireEvent.click(
+        screen.getByRole("button", { name: t("serverDetail.start") }),
       );
 
-      // The pill should show "running" (from WS), not "stopped" (rolled back).
       await waitFor(() =>
-        expect(statePill()).toBe(t("dashboard.state.running")),
+        expect(statePill()).toBe(t("dashboard.state.starting")),
       );
+      expect(mockApi.post).toHaveBeenCalledTimes(1);
+      expect(mockApi.post).toHaveBeenCalledWith(
+        `/api/communities/${CID}/servers/${SID}/start`,
+      );
+      expect(
+        queryClient.getQueryData<{ observed_state: string }>(
+          serverKey(CID, SID),
+        )?.observed_state,
+      ).toBe("starting");
     });
   });
 });
@@ -1491,50 +1423,9 @@ describe("ServerDetailPage settings", () => {
     expect(config).toEqual({ resolved_jar_sha256: "abc123", motd: "bye" });
   });
 
-  it("surfaces a 422 invalid_snapshot_interval specifically on save", async () => {
-    routeGet({ srv: { observed_state: "stopped" } });
-    mockApi.patch.mockRejectedValue(
-      new ApiError(422, { reason: "invalid_snapshot_interval" }),
-    );
-    renderPage();
-
-    await screen.findByText("survival");
-    openSettings();
-    fireEvent.click(
-      screen.getByRole("button", { name: t("serverDetail.settings.save") }),
-    );
-
-    expect(
-      await screen.findByText(t("serverDetail.error.invalidSnapshotInterval")),
-    ).toBeInTheDocument();
-  });
-
-  // All four config-blob reasons (issue #94). This editor reads every value as
-  // JSON (`settings.configHint`), so each rule is something a user can type into
-  // a row: `null`, a literal nested past the depth cap, an oversized paste, and
-  // a `"\ud800"` escape. Each must name its own rule — falling through to the
-  // generic toast tells the user nothing about which row to fix.
-  it.each([
-    ["config_too_large", "serverDetail.error.configTooLarge"],
-    ["config_null_value", "serverDetail.error.configNullValue"],
-    ["config_invalid_shape", "serverDetail.error.configInvalidShape"],
-    ["config_lone_surrogate", "serverDetail.error.configLoneSurrogate"],
-  ] as const)("surfaces a 422 %s specifically on save", async (reason, key) => {
-    routeGet({ srv: { observed_state: "stopped" } });
-    mockApi.patch.mockRejectedValue(new ApiError(422, { reason }));
-    renderPage();
-
-    await screen.findByText("survival");
-    openSettings();
-    fireEvent.click(
-      screen.getByRole("button", { name: t("serverDetail.settings.save") }),
-    );
-
-    expect(await screen.findByText(t(key))).toBeInTheDocument();
-    expect(screen.queryByText(t("serverDetail.error.generic"))).toBeNull();
-  });
-
-  it("surfaces a 409 server_not_stopped specifically on save", async () => {
+  // The reason → message table lives in
+  // serverSettingsErrorPresentation.test.ts; these pin the save wiring.
+  it("toasts a mapped save failure and keeps the edited form", async () => {
     routeGet({ srv: { observed_state: "running" } });
     mockApi.patch.mockRejectedValue(
       new ApiError(409, { reason: "server_not_stopped" }),
@@ -1543,13 +1434,40 @@ describe("ServerDetailPage settings", () => {
 
     await screen.findByText("survival");
     openSettings();
+    fireEvent.change(screen.getByDisplayValue("survival"), {
+      target: { value: "renamed" },
+    });
     fireEvent.click(
       screen.getByRole("button", { name: t("serverDetail.settings.save") }),
     );
 
     expect(
-      await screen.findByText(t("serverDetail.error.notStopped")),
+      (await screen.findByText(t("serverDetail.error.notStopped"))).closest(
+        ".toast",
+      ),
+    ).not.toBeNull();
+    expect(screen.getByDisplayValue("renamed")).toBeInTheDocument();
+  });
+
+  it("routes a save 403 through the permission glue, not the mapper", async () => {
+    routeGet({ srv: { observed_state: "stopped" } });
+    mockApi.patch.mockRejectedValue(
+      new ApiError(403, { reason: "forbidden", permission: "server:update" }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.settings.save") }),
+    );
+
+    expect(
+      await screen.findByText(
+        t("permissions.deniedNamed", { permission: "server:update" }),
+      ),
     ).toBeInTheDocument();
+    expect(screen.queryByText(t("serverDetail.error.generic"))).toBeNull();
   });
 
   it("disables the save button without server:update", async () => {
@@ -1870,27 +1788,6 @@ describe("ServerDetailPage settings memory limit", () => {
     openSettings();
     expect(memoryInput()).toBeDisabled();
   });
-
-  it("surfaces a 422 invalid_memory_limit specifically on save", async () => {
-    routeGet({
-      srv: { observed_state: "stopped", memory_limit_mb: null, config: {} },
-    });
-    mockApi.patch.mockRejectedValue(
-      new ApiError(422, { reason: "invalid_memory_limit" }),
-    );
-    renderPage();
-
-    await screen.findByText("survival");
-    openSettings();
-    fireEvent.change(memoryInput(), { target: { value: "2048" } });
-    fireEvent.click(
-      screen.getByRole("button", { name: t("serverDetail.settings.save") }),
-    );
-
-    expect(
-      await screen.findByText(t("serverDetail.error.invalidMemoryLimit")),
-    ).toBeInTheDocument();
-  });
 });
 
 describe("ServerDetailPage settings CPU allocation", () => {
@@ -2108,215 +2005,19 @@ describe("ServerDetailPage settings CPU allocation", () => {
     openSettings();
     expect(cpuInput()).toBeDisabled();
   });
-
-  it("surfaces a 422 invalid_cpu_allocation specifically on save", async () => {
-    routeGet({
-      srv: { observed_state: "stopped", cpu_millis: null, config: {} },
-    });
-    mockApi.patch.mockRejectedValue(
-      new ApiError(422, { reason: "invalid_cpu_allocation" }),
-    );
-    renderPage();
-
-    await screen.findByText("survival");
-    openSettings();
-    fireEvent.change(cpuInput(), { target: { value: "1500" } });
-    fireEvent.click(
-      screen.getByRole("button", { name: t("serverDetail.settings.save") }),
-    );
-
-    expect(
-      await screen.findByText(t("serverDetail.error.invalidCpuAllocation")),
-    ).toBeInTheDocument();
-  });
 });
 
-describe("ServerDetailPage header join_hostname (issue #961)", () => {
-  it("shows the port badge when join_hostname is null", async () => {
-    mockApi.get.mockResolvedValue(
-      server({ join_hostname: null, game_port: 25565 }),
-    );
-    renderPage();
-
-    expect(await screen.findByText(":25565")).toBeInTheDocument();
-  });
-
-  it("shows join_hostname as a clickable badge when non-null", async () => {
-    mockApi.get.mockResolvedValue(
-      server({ join_hostname: "myserver.relay.example.com", game_port: 25565 }),
-    );
-    renderPage();
-
-    const badge = await screen.findByRole("button", {
-      name: "myserver.relay.example.com",
-    });
-    expect(badge).toBeInTheDocument();
-    expect(badge).toHaveAttribute("title", "myserver.relay.example.com");
-    // Port badge is hidden when join_hostname is shown.
-    expect(screen.queryByText(":25565")).not.toBeInTheDocument();
-  });
-
-  it("badge shows hostname without a label prefix", async () => {
-    mockApi.get.mockResolvedValue(
-      server({ join_hostname: "survival.relay.example.com", game_port: 25565 }),
-    );
-    renderPage();
-
-    // The badge must show just the hostname, not "Join address: hostname".
-    const badge = await screen.findByText("survival.relay.example.com");
-    expect(badge).toBeInTheDocument();
-    expect(badge.textContent).toBe("survival.relay.example.com");
-  });
-
-  it("clicking the badge copies via execCommand fallback and shows Copied!", async () => {
-    mockApi.get.mockResolvedValue(
-      server({ join_hostname: "myserver.relay.example.com" }),
-    );
-    renderPage();
-    await screen.findByText("myserver.relay.example.com");
-
-    // jsdom does not define execCommand; define it so vi.spyOn can wrap it.
-    if (!("execCommand" in document)) {
-      Object.defineProperty(document, "execCommand", {
-        value: () => true,
-        writable: true,
-        configurable: true,
-      });
-    }
-    const execSpy = vi.spyOn(document, "execCommand").mockReturnValue(true);
-
-    fireEvent.click(screen.getByText("myserver.relay.example.com"));
-
-    expect(execSpy).toHaveBeenCalledWith("copy");
-    expect(
-      await screen.findByText(t("serverDetail.copiedJoinHostname")),
-    ).toBeInTheDocument();
-
-    execSpy.mockRestore();
-  });
-
-  it("badge reverts to hostname when copy fails (no error state)", async () => {
-    mockApi.get.mockResolvedValue(
-      server({ join_hostname: "myserver.relay.example.com" }),
-    );
-    renderPage();
-    await screen.findByText("myserver.relay.example.com");
-
-    if (!("execCommand" in document)) {
-      Object.defineProperty(document, "execCommand", {
-        value: () => false,
-        writable: true,
-        configurable: true,
-      });
-    }
-    const execSpy = vi.spyOn(document, "execCommand").mockReturnValue(false);
-
-    fireEvent.click(screen.getByText("myserver.relay.example.com"));
-
-    // On failure the badge stays showing the hostname (no error state).
-    expect(screen.getByText("myserver.relay.example.com")).toBeInTheDocument();
-
-    execSpy.mockRestore();
-  });
-
-  it("Copied! does not stick permanently when a re-click fails (issue #976)", async () => {
-    mockApi.get.mockResolvedValue(
-      server({ join_hostname: "myserver.relay.example.com" }),
-    );
-    renderPage();
-    await screen.findByText("myserver.relay.example.com");
-
-    if (!("execCommand" in document)) {
-      Object.defineProperty(document, "execCommand", {
-        value: () => true,
-        writable: true,
-        configurable: true,
-      });
-    }
-    const execSpy = vi.spyOn(document, "execCommand").mockReturnValue(true);
-
-    // Click 1 succeeds — badge shows "Copied!".
-    fireEvent.click(screen.getByText("myserver.relay.example.com"));
-    expect(
-      await screen.findByText(t("serverDetail.copiedJoinHostname")),
-    ).toBeInTheDocument();
-
-    // Click 2 fails while "Copied!" is still showing.
-    execSpy.mockReturnValue(false);
-    fireEvent.click(screen.getByText(t("serverDetail.copiedJoinHostname")));
-
-    // The badge must revert to the hostname (not stay stuck on "Copied!").
-    expect(
-      await screen.findByText("myserver.relay.example.com"),
-    ).toBeInTheDocument();
-
-    execSpy.mockRestore();
-  });
-
-  it("badge is keyboard-accessible (native button)", async () => {
-    mockApi.get.mockResolvedValue(
-      server({ join_hostname: "myserver.relay.example.com" }),
-    );
-    renderPage();
-
-    // A <button> is natively focusable and activates on Enter/Space.
-    const badge = await screen.findByRole("button", {
-      name: "myserver.relay.example.com",
-    });
-    expect(badge.tagName).toBe("BUTTON");
-  });
-});
-
-describe("ServerDetailPage header join address display (issue #982)", () => {
-  it("shows hostname only — no port substring — when join_hostname is set", async () => {
-    mockApi.get.mockResolvedValue(
-      server({ join_hostname: "survival.relay.example.com", game_port: 25565 }),
-    );
-    renderPage();
-
-    await screen.findByText("survival.relay.example.com");
-    // The port must not appear anywhere in the header when relay is on.
-    expect(screen.queryByText(/:25565/)).not.toBeInTheDocument();
-    expect(screen.queryByText("25565")).not.toBeInTheDocument();
-  });
-});
-
-describe("ServerDetailPage header Bedrock address badge (issue #1543)", () => {
-  it("shows the Bedrock badge when bedrock_port is set", async () => {
-    mockApi.get.mockResolvedValue(
-      server({ bedrock_address: "play.example.com", bedrock_port: 19132 }),
-    );
-    renderPage();
-
-    const badge = await screen.findByRole("button", {
-      name: `${t("serverDetail.bedrockLabel")}: play.example.com:19132`,
-    });
-    expect(badge).toBeInTheDocument();
-    // Tooltip copies the host only and points the port at Bedrock's Port field.
-    expect(badge).toHaveAttribute(
-      "title",
-      t("serverDetail.bedrockAddressCopyTitle", { port: 19132 }),
-    );
-  });
-
-  it("hides the Bedrock badge when bedrock_port is null", async () => {
-    mockApi.get.mockResolvedValue(
-      server({ bedrock_address: null, bedrock_port: null }),
-    );
-    renderPage();
-
-    await screen.findByText("survival");
-    expect(
-      screen.queryByRole("button", {
-        name: new RegExp(t("serverDetail.bedrockLabel")),
-      }),
-    ).not.toBeInTheDocument();
-  });
-
-  it("Java badge is unchanged when the Bedrock badge is also shown", async () => {
+describe("ServerDetailPage header addresses (issues #961, #982, #1543)", () => {
+  // Display, copy and reset behavior live in ServerAddressBadges.test.tsx; this
+  // pins what the header owns: it hands the server's addresses to the badges.
+  // The relay-off port fallback is covered by the scaffold test above.
+  it("wires the server's Java and Bedrock addresses into the header badges", async () => {
+    // Joining needs no permission: a caller with no actions still sees them.
+    mockCan = () => false;
     mockApi.get.mockResolvedValue(
       server({
         join_hostname: "survival.relay.example.com",
+        game_port: 25565,
         bedrock_address: "play.example.com",
         bedrock_port: 19132,
       }),
@@ -2324,50 +2025,15 @@ describe("ServerDetailPage header Bedrock address badge (issue #1543)", () => {
     renderPage();
 
     expect(
-      await screen.findByRole("button", {
-        name: "survival.relay.example.com",
-      }),
-    ).toBeInTheDocument();
-  });
-
-  it("clicking the Bedrock badge copies the host only and shows Copied!", async () => {
-    mockApi.get.mockResolvedValue(
-      server({ bedrock_address: "play.example.com", bedrock_port: 19132 }),
-    );
-    renderPage();
-    const badge = await screen.findByRole("button", {
-      name: `${t("serverDetail.bedrockLabel")}: play.example.com:19132`,
-    });
-
-    if (!("execCommand" in document)) {
-      Object.defineProperty(document, "execCommand", {
-        value: () => true,
-        writable: true,
-        configurable: true,
-      });
-    }
-    // Capture the value handed to the clipboard fallback textarea: it must be
-    // the bare host with no `:port` (Bedrock's Port field is separate).
-    let copiedText: string | null = null;
-    const execSpy = vi
-      .spyOn(document, "execCommand")
-      .mockImplementation((command) => {
-        if (command === "copy") {
-          const areas = document.querySelectorAll("textarea");
-          copiedText = areas[areas.length - 1]?.value ?? null;
-        }
-        return true;
-      });
-
-    fireEvent.click(badge);
-
-    expect(execSpy).toHaveBeenCalledWith("copy");
-    expect(copiedText).toBe("play.example.com");
+      await screen.findByRole("button", { name: "survival.relay.example.com" }),
+    ).toHaveAttribute("class", "badge copyable");
     expect(
-      await screen.findByText(t("serverDetail.copiedBedrockAddress")),
-    ).toBeInTheDocument();
-
-    execSpy.mockRestore();
+      screen.getByRole("button", {
+        name: `${t("dashboard.bedrockLabel")}: play.example.com:19132`,
+      }),
+    ).toHaveAttribute("class", "badge copyable");
+    // Relay mode: the game port appears nowhere in the header.
+    expect(screen.queryByText(/25565/)).not.toBeInTheDocument();
   });
 });
 
@@ -2519,36 +2185,13 @@ describe("ServerDetailPage settings slug (issue #961)", () => {
       screen.getByRole("button", { name: t("serverDetail.settings.save") }),
     );
 
-    expect(
-      await screen.findByText(t("serverDetail.settings.slugTaken")),
-    ).toBeInTheDocument();
-  });
-
-  it("surfaces a 422 invalid_slug error inline on save", async () => {
-    routeGet({
-      srv: {
-        observed_state: "stopped",
-        join_hostname: "survival.relay.example.com",
-        slug: "survival",
-      },
-    });
-    mockApi.patch.mockRejectedValue(
-      new ApiError(422, { reason: "invalid_slug" }),
+    // Scope the wait to the slug field so a duplicate toast cannot stall the
+    // query until it auto-dismisses; the no-toast check then runs at once.
+    await within(slugInput.closest(".field") as HTMLElement).findByText(
+      t("serverDetail.settings.slugTaken"),
     );
-    renderPage();
-
-    await screen.findByText("survival");
-    openSettings();
-
-    const slugInput = screen.getByLabelText(t("serverDetail.settings.slug"));
-    fireEvent.change(slugInput, { target: { value: "reserved" } });
-    fireEvent.click(
-      screen.getByRole("button", { name: t("serverDetail.settings.save") }),
-    );
-
-    expect(
-      await screen.findByText(t("serverDetail.settings.slugInvalid")),
-    ).toBeInTheDocument();
+    expect(document.querySelector(".toast")).toBeNull();
+    expect(slugInput).toHaveValue("taken-slug");
   });
 });
 

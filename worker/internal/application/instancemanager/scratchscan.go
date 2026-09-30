@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/regionfsck"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/scratchformat"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
 
@@ -17,25 +18,6 @@ import (
 // and emit a confusing server_id=.displaced-<id> corrupt warning. The constant is
 // duplicated rather than imported to keep this application package off the adapter.
 const displacedPrefix = ".displaced-"
-
-// hydratePrefix is the dot-prefixed name prefix datatransfer builds its per-hydrate
-// temp tree and superseded-set aside from (hydrateTmpPrefix, ".hydrate-<id>-*"). A
-// crash between a hydrate's aside/unpack and its swap-in leaves such a sibling of the
-// server-id scratch dirs behind, and it is a FULL working set carrying a generation
-// marker — so the held-set scans must skip it for the same reasons they skip
-// .displaced- (issue #2290): it is not a held server, and enumerating it advertises a
-// server id the API never assigned, pays a per-boot header fsck of a world-sized tree
-// that is about to be swept anyway, and names a directory rather than a server id in
-// exactly the incident diagnostics someone reads after a crashed hydrate. The constant
-// is duplicated rather than imported to keep this application package off the adapter,
-// and pinned to its creation site by the twin tests in hydrate_prefix_name_test.go.
-//
-// Since issue #3167 the boot reclaim below (ReclaimHydrateLeftovers) removes every such
-// tree, so what ScanHeldServers skips is a tree already swept at this very boot — or one
-// whose removal failed, which is why that scan keeps the skip. HeldServers is the scan
-// the skip is load-bearing for either way: it runs on every re-registration, where a
-// hydrate can be IN FLIGHT and its temp tree is a live one rather than a leftover.
-const hydratePrefix = ".hydrate-"
 
 // sweepingPrefix is the dot-prefixed name prefix sweepDisplaced renames a
 // .displaced-<id> tree to (".sweeping-<id>-*") before removing it, so the slot is
@@ -53,7 +35,7 @@ const sweepingPrefix = ".sweeping-"
 // than a working set it holds for an assigned server. Both held-set scans
 // share it so they can never drift apart on what they enumerate.
 func isReservedScratchName(name string) bool {
-	return strings.HasPrefix(name, displacedPrefix) || strings.HasPrefix(name, hydratePrefix) ||
+	return strings.HasPrefix(name, displacedPrefix) || strings.HasPrefix(name, scratchformat.HydratePrefix) ||
 		strings.HasPrefix(name, sweepingPrefix)
 }
 
@@ -345,7 +327,7 @@ func ReclaimHydrateLeftovers(scratchDir string) {
 		return
 	}
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), hydratePrefix) {
+		if strings.HasPrefix(e.Name(), scratchformat.HydratePrefix) {
 			_ = os.RemoveAll(filepath.Join(scratchDir, e.Name()))
 		}
 	}
@@ -421,7 +403,7 @@ func sweptTreeHoldsWorkingSet(path string) (bool, error) {
 // held sets — a set the Worker cannot prove it holds must not be advertised.
 func holdsWorkingSet(children []os.DirEntry) bool {
 	for _, child := range children {
-		if !strings.HasPrefix(child.Name(), generationFile) {
+		if !strings.HasPrefix(child.Name(), scratchformat.GenerationMarkerFile) {
 			return true
 		}
 	}

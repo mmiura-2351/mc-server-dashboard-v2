@@ -36,22 +36,9 @@ import (
 	"strings"
 	"syscall"
 	"time"
-)
 
-// generationMarkerFile is the Worker-private marker at the working-set root (inside
-// scratchDir/<id>, NOT its parent) recording the local generation (issue #763). THIS
-// ADAPTER writes it on the 200 hydrate path: unpackAndSwap puts it into the temp tree
-// before the swap-in rename so it is atomic with the new destDir (issue #917). That
-// write is a correctness dependency, not a corrective touch-up — a destDir with no
-// marker reads as generation 0, so the API re-dispatches hydrate and that spurious
-// retry discards this working set whenever a .displaced-<id> is retained (issue
-// #2278). writeGeneration still covers the
-// 204 and snapshot paths (and is idempotent on the 200 path). The marker is excluded
-// from a snapshot pack so this Worker-private state never lands in the authoritative
-// stored working set (and is never re-hydrated to another Worker or the live
-// Minecraft dir). Kept as a local constant to avoid the adapter depending on the
-// instancemanager package.
-const generationMarkerFile = ".mcsd_generation"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/scratchformat"
+)
 
 // generationHeader is the response header the API data plane stamps on a hydrate
 // (the store generation served) and a snapshot (the new store generation
@@ -388,7 +375,7 @@ func unpackAndSwap(r io.Reader, destDir string, gen uint64, log *slog.Logger) er
 	// gen 0 and re-dispatches hydrate, and that spurious retry discards this working
 	// set whenever a .displaced-<id> is retained (issue #2278). writeFile fsyncs the
 	// contents; fsyncTree below makes the dir entry durable.
-	if err := writeFile(filepath.Join(tmpDir, generationMarkerFile),
+	if err := writeFile(filepath.Join(tmpDir, scratchformat.GenerationMarkerFile),
 		strings.NewReader(strconv.FormatUint(gen, 10)), 0o640); err != nil {
 		return err
 	}
@@ -591,7 +578,7 @@ func displacedSlotHoldsWorkingSet(displaced string) (os.FileInfo, bool, error) {
 			return nil, false, readErr
 		}
 		for _, e := range entries {
-			if !strings.HasPrefix(e.Name(), generationMarkerFile) {
+			if !strings.HasPrefix(e.Name(), scratchformat.GenerationMarkerFile) {
 				return info, true, nil
 			}
 		}
@@ -673,18 +660,11 @@ func fsyncDir(dir string) error {
 	return d.Sync()
 }
 
-// hydratePrefix is the dot-prefixed literal every per-hydrate name in the scratch
-// root starts with. The creation site (hydrateTmpPrefix) and the leftover sweep
-// both build their name from it, so neither can drift from the other under a
-// rename (issue #2409); instancemanager duplicates it for its held-set scans and
-// its own sweep, pinned by the twin tests in hydrate_prefix_name_test.go.
-const hydratePrefix = ".hydrate-"
-
 // hydrateTmpPrefix is the dot-prefixed name prefix for the per-hydrate temp dir,
 // derived from destDir's basename so a crash leftover is recognizable and the
 // leftover sweep can match it.
 func hydrateTmpPrefix(destDir string) string {
-	return hydratePrefix + filepath.Base(destDir) + "-"
+	return scratchformat.HydratePrefix + filepath.Base(destDir) + "-"
 }
 
 // sweepHydrateLeftovers removes temp/trash dirs a previous crashed hydrate for the
@@ -695,7 +675,7 @@ func sweepHydrateLeftovers(parent, serverID string) {
 	if err != nil {
 		return
 	}
-	prefix := hydratePrefix + serverID + "-"
+	prefix := scratchformat.HydratePrefix + serverID + "-"
 	for _, e := range entries {
 		if strings.HasPrefix(e.Name(), prefix) {
 			_ = os.RemoveAll(filepath.Join(parent, e.Name()))
@@ -863,7 +843,7 @@ func walkInto(tw *tar.Writer, root, dir string, log *slog.Logger) error {
 		// would let it leak into the snapshot. It only ever lives at the root, so the
 		// dir == root guard keeps a same-prefixed file in a sub-tree (which would be
 		// part of the legitimate world) untouched.
-		if dir == root && strings.HasPrefix(entry.Name(), generationMarkerFile) {
+		if dir == root && strings.HasPrefix(entry.Name(), scratchformat.GenerationMarkerFile) {
 			continue
 		}
 		full := filepath.Join(dir, entry.Name())

@@ -283,7 +283,8 @@ export const ja: Record<TranslationKey, string> = {
     "サーバーホストと通信できず、再起動を確認できませんでした。すでに復帰している可能性があります。停止したままの場合は、システムが自動的に起動します。",
   // Live-status degraded indicator: WS down, polling fallback (SPEC 6.2 / 7.2).
   "dashboard.liveDegraded": "再接続中 — 表示の更新が遅れることがあります",
-  // Clickable join-hostname copy feedback.
+  // Clickable join-hostname copy feedback (ServerAddressBadges, shared by the
+  // dashboard and the server detail header).
   "dashboard.copiedJoinHostname": "コピーしました！",
   // Bedrock address:port badge (issue #1543).
   "dashboard.bedrockLabel": "Bedrock",
@@ -324,13 +325,6 @@ export const ja: Record<TranslationKey, string> = {
   "serverDetail.noWorker": "ホスト未割り当て",
   "serverDetail.worker": "ホスト",
   "serverDetail.noPort": "ポートなし",
-  // Relay join hostname (issue #961).
-  "serverDetail.copiedJoinHostname": "コピーしました！",
-  // Bedrock address:port badge (issue #1543).
-  "serverDetail.bedrockLabel": "Bedrock",
-  "serverDetail.copiedBedrockAddress": "コピーしました！",
-  "serverDetail.bedrockAddressCopyTitle":
-    "アドレスをコピー（ポート {port} は別のポート欄に入力）",
   // Tabs (WEBUI_SPEC.md 6.4–6.9).
   "serverDetail.tab.overview": "概要",
   "serverDetail.tab.console": "コンソール",
@@ -460,11 +454,6 @@ export const ja: Record<TranslationKey, string> = {
     "設定の上書きはJSONオブジェクトである必要があります。入れ子は上書き全体で8階層までなので、それより深い値は階層を浅くしてください。",
   "serverDetail.error.configLoneSurrogate":
     "上書きのキーまたは値に壊れた文字（途中で欠けた絵文字など）が含まれています。該当の文字を入力し直すか削除してください。",
-  // Relay join address name errors (issue #961).
-  "serverDetail.error.invalidSlug":
-    "参加アドレス名は有効なDNSラベルである必要があります: 小文字・数字・ハイフンのみ、先頭と末尾にハイフン不可。",
-  "serverDetail.error.slugTaken":
-    "その参加アドレス名はすでに使用されています。",
   "serverDetail.error.generic": "問題が発生しました。もう一度お試しください。",
   // EULA acceptance dialog (issue #1104).
   "serverDetail.eulaDialog.title": "Minecraft EULAに同意しますか？",

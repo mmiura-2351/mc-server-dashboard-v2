@@ -202,36 +202,65 @@ func TestReconnectReRegisters(t *testing.T) {
 	<-done
 }
 
+// A command the Worker does not handle is answered with the canned
+// "unsupported" result (CommandErrorInternal) correlated to its id and never
+// reaches a handler. The empty-ServerID guard only applies to handled kinds, so
+// an orphan command of an unknown (or empty) Kind stays unsupported too (issue
+// #1618).
 func TestUnsupportedCommandIsAcknowledged(t *testing.T) {
-	transport := newFakeTransport(acceptedAck())
-	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
-	clock := newFakeClock()
-	r := NewRunner(dialer, testCaps(), clock, discardLogger())
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan struct{})
-	go func() { _ = r.Run(ctx); close(done) }()
-
-	transport.commands <- Command{CommandID: "cmd-7", ServerID: "srv-1", Kind: "StartServer"}
-
-	waitFor(t, func() bool { return len(transport.resultsCopy()) == 1 })
-	got := transport.resultsCopy()[0]
-	if got.CommandID != "cmd-7" {
-		t.Errorf("result CommandID = %q, want cmd-7 (correlation)", got.CommandID)
+	tests := []struct {
+		name        string
+		withHandler bool
+		cmd         Command
+	}{
+		{"handled kind without a handler", false, Command{CommandID: "cmd-7", ServerID: "srv-1", Kind: "StartServer"}},
+		// An unset/unknown command oneof (empty Kind) must stay unsupported even
+		// with a handler wired.
+		{"empty kind with a handler", true, Command{CommandID: "cmd-2", ServerID: "srv-1", Kind: ""}},
+		{"orphan with empty kind", true, Command{CommandID: "empty", ServerID: "", Kind: ""}},
+		{"orphan with unknown fleet kind", true, Command{CommandID: "fleet", ServerID: "", Kind: "SomeFutureFleetCommand"}},
 	}
-	if got.Success {
-		t.Error("result Success = true, want false (unsupported)")
-	}
-	if got.ErrorCode != CommandErrorInternal {
-		t.Errorf("result ErrorCode = %v, want CommandErrorInternal", got.ErrorCode)
-	}
-	if got.ErrorMessage == "" {
-		t.Error("result ErrorMessage empty, want an explanation")
-	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			transport := newFakeTransport(acceptedAck())
+			dialer := &fakeDialer{transports: []*fakeTransport{transport}}
+			clock := newFakeClock()
+			handler := newFakeHandler(CommandResult{Success: true})
+			var opts []Option
+			if tc.withHandler {
+				opts = append(opts, WithCommandHandler(handler))
+			}
+			r := NewRunner(dialer, testCaps(), clock, discardLogger(), opts...)
 
-	cancel()
-	<-done
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan struct{})
+			go func() { _ = r.Run(ctx); close(done) }()
+
+			transport.commands <- tc.cmd
+
+			waitFor(t, func() bool { return len(transport.resultsCopy()) == 1 })
+			got := transport.resultsCopy()[0]
+			if got.CommandID != tc.cmd.CommandID {
+				t.Errorf("result CommandID = %q, want %q (correlation)", got.CommandID, tc.cmd.CommandID)
+			}
+			if got.Success {
+				t.Error("result Success = true, want false (unsupported)")
+			}
+			if got.ErrorCode != CommandErrorInternal {
+				t.Errorf("result ErrorCode = %v, want CommandErrorInternal", got.ErrorCode)
+			}
+			if got.ErrorMessage == "" {
+				t.Error("result ErrorMessage empty, want an explanation")
+			}
+			if n := len(handler.handledCopy()); n != 0 {
+				t.Errorf("handler invoked %d times, want 0", n)
+			}
+
+			cancel()
+			<-done
+		})
+	}
 }
 
 func TestLifecycleCommandDispatchedToHandler(t *testing.T) {
@@ -336,35 +365,6 @@ func TestSuccessfulCommandResultIsNotWarnLogged(t *testing.T) {
 	waitFor(t, func() bool { return len(transport.resultsCopy()) == 1 })
 	if n := len(capture.recordsAtLevel(slog.LevelWarn)); n != 0 {
 		t.Errorf("warn records = %d, want 0 for a successful command", n)
-	}
-
-	cancel()
-	<-done
-}
-
-func TestUnknownCommandStillUnsupportedWithHandler(t *testing.T) {
-	transport := newFakeTransport(acceptedAck())
-	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
-	clock := newFakeClock()
-	handler := newFakeHandler(CommandResult{Success: true})
-	r := NewRunner(dialer, testCaps(), clock, discardLogger(), WithCommandHandler(handler))
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan struct{})
-	go func() { _ = r.Run(ctx); close(done) }()
-
-	// An unset/unknown command oneof (empty Kind) must stay unsupported and never
-	// reach the handler, even with one wired.
-	transport.commands <- Command{CommandID: "cmd-2", ServerID: "srv-1", Kind: ""}
-
-	waitFor(t, func() bool { return len(transport.resultsCopy()) == 1 })
-	got := transport.resultsCopy()[0]
-	if got.Success {
-		t.Fatal("an unknown command should remain unsupported even with a handler")
-	}
-	if len(handler.handledCopy()) != 0 {
-		t.Fatal("an unknown command should not reach the handler")
 	}
 
 	cancel()
@@ -898,94 +898,77 @@ func TestQuickCommandStillSerializesWithinServer(t *testing.T) {
 	<-done
 }
 
-func TestStatusEventsForwardedAsStatusChange(t *testing.T) {
-	transport := newFakeTransport(acceptedAck())
-	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
-	clock := newFakeClock()
-	handler := newFakeHandler(CommandResult{})
-	r := NewRunner(dialer, testCaps(), clock, discardLogger(), WithCommandHandler(handler))
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan struct{})
-	go func() { _ = r.Run(ctx); close(done) }()
-
-	waitFor(t, func() bool {
-		transport.mu.Lock()
-		defer transport.mu.Unlock()
-		return transport.registers == 1
-	})
-
-	handler.events <- StatusEvent{ServerID: "srv-1", State: "running"}
-
-	waitFor(t, func() bool { return len(transport.statusesCopy()) == 1 })
-	got := transport.statusesCopy()[0]
-	if got.ServerID != "srv-1" || got.State != "running" {
-		t.Fatalf("forwarded status = %+v, want srv-1 running", got)
+// Each event stream the handler emits is forwarded onto its own transport frame
+// with every field carried unchanged.
+func TestHandlerEventsForwardedAsFrames(t *testing.T) {
+	status := StatusEvent{ServerID: "srv-1", State: "running", Detail: "ready"}
+	logLine := LogEvent{ServerID: "srv-1", Line: "hello", Stream: LogStreamStderr}
+	metrics := MetricsEvent{ServerID: "srv-1", CPUMillis: 250, MemoryBytes: 4096, PlayerCount: 3}
+	tests := []struct {
+		name   string
+		emit   func(h *fakeHandler)
+		frames func(tr *fakeTransport) []any
+		want   any
+	}{
+		{
+			name:   "status event as status change",
+			emit:   func(h *fakeHandler) { h.events <- status },
+			frames: func(tr *fakeTransport) []any { return anys(tr.statusesCopy()) },
+			want:   status,
+		},
+		{
+			name:   "log event as log line",
+			emit:   func(h *fakeHandler) { h.logs <- logLine },
+			frames: func(tr *fakeTransport) []any { return anys(tr.logLinesCopy()) },
+			want:   logLine,
+		},
+		{
+			name:   "metrics event as metrics",
+			emit:   func(h *fakeHandler) { h.metrics <- metrics },
+			frames: func(tr *fakeTransport) []any { return anys(tr.metricsCopy()) },
+			want:   metrics,
+		},
 	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			transport := newFakeTransport(acceptedAck())
+			dialer := &fakeDialer{transports: []*fakeTransport{transport}}
+			clock := newFakeClock()
+			handler := newFakeHandler(CommandResult{})
+			r := NewRunner(dialer, testCaps(), clock, discardLogger(), WithCommandHandler(handler))
 
-	cancel()
-	<-done
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan struct{})
+			go func() { _ = r.Run(ctx); close(done) }()
+
+			waitFor(t, func() bool {
+				transport.mu.Lock()
+				defer transport.mu.Unlock()
+				return transport.registers == 1
+			})
+
+			tc.emit(handler)
+
+			waitFor(t, func() bool { return len(tc.frames(transport)) == 1 })
+			if got := tc.frames(transport)[0]; got != tc.want {
+				t.Fatalf("forwarded frame = %+v, want %+v", got, tc.want)
+			}
+
+			cancel()
+			<-done
+		})
+	}
 }
 
-func TestLogEventsForwardedAsLogLine(t *testing.T) {
-	transport := newFakeTransport(acceptedAck())
-	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
-	clock := newFakeClock()
-	handler := newFakeHandler(CommandResult{})
-	r := NewRunner(dialer, testCaps(), clock, discardLogger(), WithCommandHandler(handler))
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan struct{})
-	go func() { _ = r.Run(ctx); close(done) }()
-
-	waitFor(t, func() bool {
-		transport.mu.Lock()
-		defer transport.mu.Unlock()
-		return transport.registers == 1
-	})
-
-	handler.logs <- LogEvent{ServerID: "srv-1", Line: "hello", Stream: LogStreamStderr}
-
-	waitFor(t, func() bool { return len(transport.logLinesCopy()) == 1 })
-	got := transport.logLinesCopy()[0]
-	if got.ServerID != "srv-1" || got.Line != "hello" || got.Stream != LogStreamStderr {
-		t.Fatalf("forwarded log = %+v, want srv-1 hello stderr", got)
+// anys widens a typed frame slice so the forwarding table can compare frames of
+// different types through one assertion.
+func anys[T any](in []T) []any {
+	out := make([]any, len(in))
+	for i, v := range in {
+		out[i] = v
 	}
-
-	cancel()
-	<-done
-}
-
-func TestMetricsEventsForwardedAsMetrics(t *testing.T) {
-	transport := newFakeTransport(acceptedAck())
-	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
-	clock := newFakeClock()
-	handler := newFakeHandler(CommandResult{})
-	r := NewRunner(dialer, testCaps(), clock, discardLogger(), WithCommandHandler(handler))
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan struct{})
-	go func() { _ = r.Run(ctx); close(done) }()
-
-	waitFor(t, func() bool {
-		transport.mu.Lock()
-		defer transport.mu.Unlock()
-		return transport.registers == 1
-	})
-
-	handler.metrics <- MetricsEvent{ServerID: "srv-1", CPUMillis: 250, MemoryBytes: 4096}
-
-	waitFor(t, func() bool { return len(transport.metricsCopy()) == 1 })
-	got := transport.metricsCopy()[0]
-	if got.ServerID != "srv-1" || got.CPUMillis != 250 || got.MemoryBytes != 4096 {
-		t.Fatalf("forwarded metrics = %+v", got)
-	}
-
-	cancel()
-	<-done
+	return out
 }
 
 func TestCleanShutdownOnCancel(t *testing.T) {
@@ -1239,46 +1222,6 @@ func TestEmptyServerIDCommandDoesNotBlockReceiveLoop(t *testing.T) {
 	ids := handler.handledIDs()
 	if len(ids) != 1 || ids[0] != "stop-s2" {
 		t.Errorf("handler processed %v, want only [stop-s2]", ids)
-	}
-
-	cancel()
-	<-done
-}
-
-// An empty-ServerID command with an unknown (or empty) Kind must still get the
-// canned "unsupported" result with CommandErrorInternal — the empty-ServerID
-// guard only applies to handled kinds (issue #1618).
-func TestEmptyServerIDUnknownKindStaysUnsupported(t *testing.T) {
-	transport := newFakeTransport(acceptedAck())
-	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
-	clock := newFakeClock()
-	handler := newFakeHandler(CommandResult{Success: true})
-	r := NewRunner(dialer, testCaps(), clock, discardLogger(), WithCommandHandler(handler))
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan struct{})
-	go func() { _ = r.Run(ctx); close(done) }()
-
-	transport.commands <- Command{CommandID: "empty", ServerID: "", Kind: ""}
-	transport.commands <- Command{CommandID: "fleet", ServerID: "", Kind: "SomeFutureFleetCommand"}
-
-	waitFor(t, func() bool { return len(transport.resultsCopy()) == 2 })
-
-	for _, res := range transport.resultsCopy() {
-		if res.Success {
-			t.Errorf("result %q Success = true, want false (unsupported)", res.CommandID)
-		}
-		if res.ErrorCode != CommandErrorInternal {
-			t.Errorf("result %q ErrorCode = %v, want CommandErrorInternal", res.CommandID, res.ErrorCode)
-		}
-		if res.ErrorMessage == "" {
-			t.Errorf("result %q ErrorMessage empty, want an explanation", res.CommandID)
-		}
-	}
-
-	if n := len(handler.handledCopy()); n != 0 {
-		t.Errorf("handler invoked %d times, want 0", n)
 	}
 
 	cancel()

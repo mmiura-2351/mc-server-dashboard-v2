@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from collections.abc import Callable
 
 import pytest
 
@@ -84,33 +85,28 @@ def test_run_outcome_enum_matches_check_constraint_values() -> None:
 # --- cadence (cron XOR interval) ----------------------------------------------
 
 
-def test_cadence_rejects_both_cron_and_interval() -> None:
+@pytest.mark.parametrize(
+    "construct",
+    [
+        pytest.param(
+            lambda: Cadence(cron="* * * * *", interval_seconds=60),
+            id="cron-and-interval",
+        ),
+        pytest.param(
+            lambda: Cadence(cron=None, interval_seconds=None), id="no-cadence"
+        ),
+        pytest.param(lambda: Cadence.from_cron("   "), id="blank-cron"),
+        pytest.param(lambda: Cadence.from_interval(0), id="zero-interval"),
+        pytest.param(lambda: Cadence.from_interval(-60), id="negative-interval"),
+        pytest.param(lambda: Cadence.from_interval(True), id="boolean-interval"),
+        # The 60-second floor prevents a sub-tick cadence that can never fire.
+        pytest.param(lambda: Cadence.from_interval(1), id="one-second-interval"),
+        pytest.param(lambda: Cadence.from_interval(59), id="subminute-interval"),
+    ],
+)
+def test_cadence_rejects_invalid_inputs(construct: Callable[[], Cadence]) -> None:
     with pytest.raises(InvalidScheduleCadenceError):
-        Cadence(cron="* * * * *", interval_seconds=60)
-
-
-def test_cadence_rejects_neither_cron_nor_interval() -> None:
-    with pytest.raises(InvalidScheduleCadenceError):
-        Cadence(cron=None, interval_seconds=None)
-
-
-def test_cadence_rejects_blank_cron() -> None:
-    with pytest.raises(InvalidScheduleCadenceError):
-        Cadence.from_cron("   ")
-
-
-@pytest.mark.parametrize("bad", [0, -60, True])
-def test_cadence_rejects_non_positive_interval(bad: int) -> None:
-    with pytest.raises(InvalidScheduleCadenceError):
-        Cadence.from_interval(bad)
-
-
-@pytest.mark.parametrize("bad", [1, 59])
-def test_cadence_rejects_sub_minute_interval(bad: int) -> None:
-    # The 60-second floor (issue #1838 review): a sub-tick interval would never
-    # fire (the runner's staleness gate) and cron is minute-granular anyway.
-    with pytest.raises(InvalidScheduleCadenceError):
-        Cadence.from_interval(bad)
+        construct()
 
 
 def test_cadence_accepts_the_minimum_interval() -> None:

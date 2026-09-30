@@ -181,8 +181,9 @@ func TestBootReclaimsScratchLeftovers(t *testing.T) {
 //
 // The remaining ordering — the two reclaims against ScanHeldServers below them — is not
 // pinned, and cannot regress into a fault: both scans skip .hydrate- and .sweeping- names
-// by prefix (isReservedScratchName, pinned by TestHeldScansSkipTheSharedHydrateTempPrefix
-// and TestInterruptedDisplacedSweepIsNotAdvertisedAsHeld), so the held set is identical
+// by prefix (isReservedScratchName, pinned by
+// TestHydrateScratchIsDiscoveredAndCrashLeftTreesAreReclaimed and
+// TestInterruptedDisplacedSweepIsNotAdvertisedAsHeld), so the held set is identical
 // whichever side of the scan the reclaims run on.
 func TestBootReclaimsWaitForTheContainerOrphanSweep(t *testing.T) {
 	scratch := t.TempDir()
@@ -483,7 +484,7 @@ func seedTornWorkingSet(t *testing.T, dir string, gen int) {
 	if err := os.WriteFile(filepath.Join(dir, "region", "r.0.0.mca"), region, 0o640); err != nil {
 		t.Fatal(err)
 	}
-	// instancemanager's generationFile constant; a rename there fails these tests loudly,
+	// scratchformat.GenerationMarkerFile; a rename there fails these tests loudly,
 	// because a set with no marker is advertised at generation 0 either way.
 	if err := os.WriteFile(filepath.Join(dir, ".mcsd_generation"), []byte(strconv.Itoa(gen)), 0o640); err != nil {
 		t.Fatal(err)

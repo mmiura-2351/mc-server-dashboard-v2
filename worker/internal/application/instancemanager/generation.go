@@ -6,17 +6,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-)
 
-// generationFile is the name of the per-server marker file the Worker writes
-// inside scratchDir/<server_id> to record the GENERATION its local working set is
-// at (issue #763): the authoritative store generation the set was last hydrated
-// from or last snapshotted to. It lives INSIDE the scratch dir so it shares the
-// scratch's lifecycle — a same-Worker restart retains it (the API re-reports the
-// generation), and the post-final-snapshot scratch GC (issue #762/#841,
-// removeScratch's os.RemoveAll over scratchDir/<id>) drops it together with the
-// working set, so a GC'd server reports holding nothing and the API hydrates afresh.
-const generationFile = ".mcsd_generation"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/scratchformat"
+)
 
 // writeGeneration records gen as the working-set generation in workingDir. It is
 // best-effort from the caller's view: a write failure is returned for logging but
@@ -95,12 +87,12 @@ func writeGenerationGuarded(workingDir string, gen uint64, guard func() bool) er
 	if err := os.MkdirAll(workingDir, 0o750); err != nil {
 		return err
 	}
-	// The pattern is DERIVED from generationFile, not spelled out: hasWorkingSet
+	// The pattern is DERIVED from the marker name, not spelled out: hasWorkingSet
 	// (issue #2279), the snapshot pack (issue #834) and sweepGenerationTemps
 	// (issue #2283) all recognise a temp by that same prefix, so a literal here
 	// would let a rename of the constant leave the creation site behind and strand
 	// temps no consumer matches (issue #2287).
-	tmp, err := os.CreateTemp(workingDir, generationFile+"-*")
+	tmp, err := os.CreateTemp(workingDir, scratchformat.GenerationMarkerFile+"-*")
 	if err != nil {
 		return err
 	}
@@ -133,7 +125,7 @@ func writeGenerationGuarded(workingDir string, gen uint64, guard func() bool) er
 	// it is inert until reclaimed — by the next successful marker write's sweep
 	// (sweepGenerationTemps, issue #2283) or by the scratch GC's RemoveAll, the same two
 	// reclaims that cover a crash-stranded temp.
-	if err := os.Rename(tmpName, filepath.Join(workingDir, generationFile)); err != nil {
+	if err := os.Rename(tmpName, filepath.Join(workingDir, scratchformat.GenerationMarkerFile)); err != nil {
 		return err
 	}
 	sweepGenerationTemps(workingDir)
@@ -184,7 +176,7 @@ func sweepGenerationTemps(workingDir string) {
 		return
 	}
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasPrefix(entry.Name(), generationFile+"-") {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), scratchformat.GenerationMarkerFile+"-") {
 			continue
 		}
 		_ = os.Remove(filepath.Join(workingDir, entry.Name()))
@@ -314,7 +306,7 @@ func fsyncDir(dir string) error {
 // generation": the API treats it as older than any published store generation and
 // hydrates, which is the safe direction (never skip a hydrate on an unknown set).
 func readGeneration(workingDir string) uint64 {
-	data, err := os.ReadFile(filepath.Join(workingDir, generationFile))
+	data, err := os.ReadFile(filepath.Join(workingDir, scratchformat.GenerationMarkerFile))
 	if err != nil {
 		return 0
 	}

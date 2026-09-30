@@ -1,10 +1,4 @@
-import {
-  act,
-  fireEvent,
-  renderHook,
-  screen,
-  waitFor,
-} from "@testing-library/react";
+import { fireEvent, renderHook, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearAccessToken } from "../auth/tokenStore.ts";
 import {
@@ -225,25 +219,11 @@ describe("resource packs library", () => {
     ).toBeInTheDocument();
   });
 
-  it("shows delete button only for own packs when not admin", async () => {
-    signedIn({ user: NON_ADMIN });
-
-    renderApp({ path: "/resource-packs" });
-
-    // Wait for the list to render.
-    await screen.findByText("Faithful");
-
-    // NON_ADMIN (u2) uploaded Sphax (rp2), so its row should have a delete button.
-    // Faithful was uploaded by u1, so no delete button for non-admin.
-    const deleteButtons = screen.getAllByRole("button", {
-      name: t("resourcePacks.delete"),
-    });
-    // Only one delete button — the one for Sphax (u2's pack).
-    expect(deleteButtons).toHaveLength(1);
-  });
-
-  it("shows delete buttons for all packs when admin", async () => {
-    signedIn({ user: ADMIN });
+  it.each([
+    ["member can delete only their own pack", NON_ADMIN, 1],
+    ["platform admin can delete every pack", ADMIN, 2],
+  ] as const)("%s", async (_caseId, user, expectedDeleteButtons) => {
+    signedIn({ user });
 
     renderApp({ path: "/resource-packs" });
 
@@ -252,7 +232,7 @@ describe("resource packs library", () => {
     const deleteButtons = screen.getAllByRole("button", {
       name: t("resourcePacks.delete"),
     });
-    expect(deleteButtons).toHaveLength(2);
+    expect(deleteButtons).toHaveLength(expectedDeleteButtons);
   });
 
   it("uploads a resource pack through the dialog", async () => {
@@ -424,24 +404,5 @@ describe("resource packs library", () => {
     expect(
       await screen.findByText(t("resourcePacks.error.inUse")),
     ).toBeInTheDocument();
-  });
-
-  it("keeps rendering cached packs when a background refetch fails (#1805)", async () => {
-    signedIn();
-    const { queryClient } = renderApp({ path: "/resource-packs" });
-    await screen.findByText("Faithful");
-
-    // Simulate a transient API outage: resource packs endpoint fails.
-    signedIn({ listError: true });
-    await act(() => queryClient.invalidateQueries());
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
-
-    // The cached list stays on screen instead of the error.
-    expect(screen.getByText("Faithful")).toBeInTheDocument();
-    expect(
-      screen.queryByText(t("resourcePacks.loadError")),
-    ).not.toBeInTheDocument();
   });
 });

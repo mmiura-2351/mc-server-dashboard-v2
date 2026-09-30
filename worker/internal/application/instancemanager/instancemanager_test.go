@@ -492,75 +492,44 @@ func TestRestartRefusedWhenWorkingSetDestroyed(t *testing.T) {
 	}
 }
 
-// The command's memory limit (bytes on the wire, #706) is converted to MiB on the
-// InstanceSpec ceiling; unset stays 0 (default heap).
-func TestStartConvertsMemoryLimitBytesToSpecMiB(t *testing.T) {
-	d := &fakeDriver{}
-	m := newManager(t, d, nil)
-	seedScratch(t, m, "s1")
-	cmd := startCmd()
-	cmd.MemoryLimitBytes = 2048 * 1024 * 1024
-
-	if res := m.Handle(context.Background(), cmd); !res.Success {
-		t.Fatalf("StartServer = %+v, want success", res)
+// The command's resource allocation reaches the InstanceSpec: the memory limit
+// (bytes on the wire, #706) is converted to MiB, and the CPU allocation
+// (millicores, #723) is carried as-is with no derivation. Unset stays 0 (default
+// heap, default weight).
+func TestStartCarriesResourceAllocationToSpec(t *testing.T) {
+	tests := []struct {
+		name             string
+		memoryLimitBytes uint64
+		cpuMillis        uint32
+		wantMemoryMB     uint32
+		wantCPUMillis    uint32
+	}{
+		{name: "unset allocation"},
+		{name: "memory limit", memoryLimitBytes: 2048 * 1024 * 1024, wantMemoryMB: 2048},
+		{name: "cpu allocation", cpuMillis: 2000, wantCPUMillis: 2000},
 	}
-	d.mu.Lock()
-	got := d.started[0].MemoryLimitMB
-	d.mu.Unlock()
-	if got != 2048 {
-		t.Fatalf("MemoryLimitMB = %d, want 2048", got)
-	}
-}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			d := &fakeDriver{}
+			m := newManager(t, d, nil)
+			seedScratch(t, m, "s1")
+			cmd := startCmd()
+			cmd.MemoryLimitBytes = tc.memoryLimitBytes
+			cmd.CPUMillis = tc.cpuMillis
 
-func TestStartDefaultMemoryLimitIsZero(t *testing.T) {
-	d := &fakeDriver{}
-	m := newManager(t, d, nil)
-
-	seedScratch(t, m, "s1")
-	if res := m.Handle(context.Background(), startCmd()); !res.Success {
-		t.Fatalf("StartServer = %+v, want success", res)
-	}
-	d.mu.Lock()
-	got := d.started[0].MemoryLimitMB
-	d.mu.Unlock()
-	if got != 0 {
-		t.Fatalf("MemoryLimitMB = %d, want 0 (unset)", got)
-	}
-}
-
-// The command's CPU allocation (millicores, #723) is carried as-is onto the
-// InstanceSpec; unset stays 0 (default weight). No derivation.
-func TestStartCarriesCPUMillisToSpec(t *testing.T) {
-	d := &fakeDriver{}
-	m := newManager(t, d, nil)
-	seedScratch(t, m, "s1")
-	cmd := startCmd()
-	cmd.CPUMillis = 2000
-
-	if res := m.Handle(context.Background(), cmd); !res.Success {
-		t.Fatalf("StartServer = %+v, want success", res)
-	}
-	d.mu.Lock()
-	got := d.started[0].CPUMillis
-	d.mu.Unlock()
-	if got != 2000 {
-		t.Fatalf("CPUMillis = %d, want 2000", got)
-	}
-}
-
-func TestStartDefaultCPUMillisIsZero(t *testing.T) {
-	d := &fakeDriver{}
-	m := newManager(t, d, nil)
-
-	seedScratch(t, m, "s1")
-	if res := m.Handle(context.Background(), startCmd()); !res.Success {
-		t.Fatalf("StartServer = %+v, want success", res)
-	}
-	d.mu.Lock()
-	got := d.started[0].CPUMillis
-	d.mu.Unlock()
-	if got != 0 {
-		t.Fatalf("CPUMillis = %d, want 0 (unset)", got)
+			if res := m.Handle(context.Background(), cmd); !res.Success {
+				t.Fatalf("StartServer = %+v, want success", res)
+			}
+			d.mu.Lock()
+			got := d.started[0]
+			d.mu.Unlock()
+			if got.MemoryLimitMB != tc.wantMemoryMB {
+				t.Errorf("MemoryLimitMB = %d, want %d", got.MemoryLimitMB, tc.wantMemoryMB)
+			}
+			if got.CPUMillis != tc.wantCPUMillis {
+				t.Errorf("CPUMillis = %d, want %d", got.CPUMillis, tc.wantCPUMillis)
+			}
+		})
 	}
 }
 

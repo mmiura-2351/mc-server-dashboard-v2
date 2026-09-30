@@ -17,6 +17,7 @@ import { Modal } from "../components/Modal.tsx";
 import { ResizableTable } from "../components/ResizableColumns.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { t } from "../i18n/index.ts";
+import { classifyQueryResult } from "../queryState.ts";
 import { useOffsetParam } from "./urlState.ts";
 
 // Platform admin Communities page (WEBUI_SPEC.md 6.12): list ALL communities and
@@ -55,6 +56,7 @@ export function AdminCommunitiesPage() {
     queryFn: ({ signal }) => api.get(communitiesUrl(offset), { signal }),
     placeholderData: keepPreviousData,
   });
+  const communitiesState = classifyQueryResult(communities);
 
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ADMIN_COMMUNITIES_KEY });
@@ -118,14 +120,14 @@ export function AdminCommunitiesPage() {
         </div>
       </div>
 
-      {communities.isPending ? (
+      {communitiesState.kind === "pending" ? (
         <p className="sub" role="status">
           {t("admin.communities.loading")}
         </p>
       ) : /* Error only when there is nothing to show (initial load failed).
            A failed background refetch retains `data`, so the cached page
            keeps rendering through transient API blips (#1805). */
-      communities.data === undefined ? (
+      communitiesState.kind === "error" ? (
         <p className="field-error" role="alert">
           {t("admin.communities.loadError")}
         </p>

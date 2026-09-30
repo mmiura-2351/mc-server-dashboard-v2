@@ -60,24 +60,25 @@ def _compile(stmt: Select[Any]) -> str:
 
 
 @pytest.mark.asyncio
-async def test_lock_owner_query_has_order_by_membership_id(
+@pytest.mark.parametrize(
+    "required_clause",
+    [
+        pytest.param(
+            "ORDER BY membership_role.membership_id",
+            id="orders-membership-locks-deterministically",
+        ),
+        pytest.param(
+            "FOR UPDATE OF membership_role",
+            id="locks-membership-roles-only",
+        ),
+    ],
+)
+async def test_lock_owner_query_has_required_lock_semantics(
     repo: SqlAlchemyMembershipRepository,
     _captured_stmt: list[Any],
+    required_clause: str,
 ) -> None:
-    """ORDER BY prevents deadlocks from non-deterministic scan order."""
     await repo.lock_owner_role_holders(CommunityId(uuid.uuid4()), RoleId(uuid.uuid4()))
     assert len(_captured_stmt) == 1
     sql = _compile(_captured_stmt[0])
-    assert "ORDER BY membership_role.membership_id" in sql
-
-
-@pytest.mark.asyncio
-async def test_lock_owner_query_for_update_targets_membership_role_only(
-    repo: SqlAlchemyMembershipRepository,
-    _captured_stmt: list[Any],
-) -> None:
-    """OF clause narrows the lock to membership_role, not the joined table."""
-    await repo.lock_owner_role_holders(CommunityId(uuid.uuid4()), RoleId(uuid.uuid4()))
-    assert len(_captured_stmt) == 1
-    sql = _compile(_captured_stmt[0])
-    assert "FOR UPDATE OF membership_role" in sql
+    assert required_clause in sql

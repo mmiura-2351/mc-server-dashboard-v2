@@ -98,7 +98,7 @@ export type LifecycleAction = "start" | "stop" | "restart";
 //
 // The refetch is deliberately kept (issue #2420): it is not a side effect of
 // this mapping — every lifecycle mutation invalidates in `onSettled` regardless
-// of outcome (DashboardPage.tsx / ServerDetailPage.tsx) — and for the stop and
+// of outcome (useLifecycleMutation.ts) — and for the stop and
 // restart cases above the client's view really is stale, so dropping it for
 // this reason would leave the toast pointing at a state the UI is not showing.
 const SPECIFIC_409_MESSAGE: Record<string, TranslationKey> = {
