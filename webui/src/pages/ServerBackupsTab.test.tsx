@@ -453,23 +453,6 @@ describe("ServerBackupsTab create / upload / download / delete", () => {
       ).toBeInTheDocument();
       expect(clicks).toHaveLength(0);
     });
-
-    it("shows the generic backups error when the mint 404s", async () => {
-      routeGet();
-      mockApi.post.mockRejectedValue(
-        new ApiError(404, { reason: "not_found" }),
-      );
-      await openBackups();
-
-      fireEvent.click(
-        await screen.findByRole("button", { name: t("backups.download") }),
-      );
-
-      expect(
-        await screen.findByText(t("backups.error.generic")),
-      ).toBeInTheDocument();
-      expect(clicks).toHaveLength(0);
-    });
   });
 
   it("deletes after typed confirm with a DELETE to the backup", async () => {
@@ -638,6 +621,25 @@ describe("ServerBackupsTab restore (stopped-only two-step)", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("surfaces a failed stop from the restore dialog", async () => {
+    routeGet({ srv: { observed_state: "running" } });
+    mockApi.post.mockRejectedValue(
+      new ApiError(409, { reason: "server_busy" }),
+    );
+    await openBackups();
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: t("backups.restore") }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: t("backups.restoreDialog.stop") }),
+    );
+
+    expect(
+      await screen.findByText(t("backups.error.serverBusy")),
+    ).toBeInTheDocument();
+  });
+
   it("surfaces a 409 server_not_stopped specifically on restore", async () => {
     routeGet({ srv: { observed_state: "stopped", desired_state: "stopped" } });
     mockApi.post.mockRejectedValue(
@@ -657,8 +659,15 @@ describe("ServerBackupsTab restore (stopped-only two-step)", () => {
     );
 
     expect(
-      await screen.findByText(t("backups.error.notStopped")),
-    ).toBeInTheDocument();
+      (await screen.findByText(t("backups.error.notStopped"))).closest(
+        ".toast",
+      ),
+    ).not.toBeNull();
+    // Unlike a 403, the failure keeps the dialog and its typed phrase so the
+    // user can retry once the server has stopped.
+    expect(
+      screen.getByPlaceholderText(t("backups.restoreDialog.phrase")),
+    ).toHaveValue("RESTORE");
   });
 });
 
@@ -730,43 +739,21 @@ describe("ServerBackupsTab permission gating", () => {
     ).toBeInTheDocument();
   });
 
-  it("names the object store on a 503 storage_unavailable create (#2378)", async () => {
-    // The status switch maps a bare 503 to the worker-unavailable toast, which
-    // would misattribute an object-store outage to the server host. The reason
-    // is checked first, so the specific message wins.
+  it("names the upload limit on a reasonless 413 upload", async () => {
+    // A proxy's body-size refusal carries no problem+json reason, so only the
+    // status can name it.
     routeGet();
-    mockApi.post.mockRejectedValue(
-      new ApiError(503, { reason: "storage_unavailable" }),
-    );
+    mockPostFormWithProgress.mockRejectedValue(new ApiError(413, undefined));
     await openBackups();
 
-    fireEvent.click(
-      await screen.findByRole("button", { name: t("backups.create") }),
-    );
-    expect(
-      await screen.findByText(t("backups.error.storageUnavailable")),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByText(t("backups.error.workerUnavailable")),
-    ).not.toBeInTheDocument();
-  });
+    const input = (await screen.findByLabelText(
+      t("backups.upload"),
+    )) as HTMLInputElement;
+    const file = new File(["x"], "b.tar.gz", { type: "application/gzip" });
+    fireEvent.change(input, { target: { files: [file] } });
 
-  it("names the contention on a 409 worker_busy create (#2436)", async () => {
-    // The API no longer flattens a dispatch failure to command_failed, so a
-    // SnapshotTrigger the Worker refused with BUSY now arrives as worker_busy.
-    // It is the same retryable contention as server_busy, so it takes the same
-    // message rather than the generic "something went wrong".
-    routeGet();
-    mockApi.post.mockRejectedValue(
-      new ApiError(409, { reason: "worker_busy" }),
-    );
-    await openBackups();
-
-    fireEvent.click(
-      await screen.findByRole("button", { name: t("backups.create") }),
-    );
     expect(
-      await screen.findByText(t("backups.error.serverBusy")),
+      await screen.findByText(t("backups.error.tooLarge")),
     ).toBeInTheDocument();
   });
 
@@ -821,8 +808,9 @@ describe("ServerBackupsTab permission gating", () => {
 
 describe("ServerBackupsTab query error surfacing (#2554)", () => {
   it("surfaces a 503 storage_unavailable on the listing with the specific message", async () => {
-    // The listing query failing initially must route through createErrorMessage
-    // so the object-store reason reaches the user, not the generic load message.
+    // The listing query failing initially must route through the presentation
+    // contract so the object-store reason reaches the user, not the generic load
+    // message.
     routeGet({
       listError: new ApiError(503, { reason: "storage_unavailable" }),
     });
@@ -837,6 +825,13 @@ describe("ServerBackupsTab query error surfacing (#2554)", () => {
     expect(
       screen.queryByText(t("backups.error.workerUnavailable")),
     ).not.toBeInTheDocument();
+  });
+
+  it("falls back to the load message for an unmapped listing failure", async () => {
+    routeGet({ listError: new ApiError(500, { reason: "internal_error" }) });
+    await openBackups();
+
+    expect(await screen.findByText(t("backups.loadError"))).toBeInTheDocument();
   });
 
   it("keeps the listing rendered when statistics alone fails", async () => {

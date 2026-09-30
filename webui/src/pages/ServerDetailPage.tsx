@@ -32,6 +32,7 @@ import { ServerPluginsTab } from "./ServerPluginsTab.tsx";
 import { ServerResourcePackSection } from "./ServerResourcePackSection.tsx";
 import { ServerSchedulesTab } from "./ServerSchedulesTab.tsx";
 import { serverKey } from "./serverKey.ts";
+import { serverSettingsErrorPresentation } from "./serverSettingsErrorPresentation.ts";
 import {
   actionApplies,
   atRest,
@@ -1299,50 +1300,6 @@ function fromRows(rows: ConfigRow[]): Record<string, unknown> {
   return out;
 }
 
-// Map a settings save/delete error reason to a specific message; otherwise the
-// generic toast. 422 carries a port reason (port_out_of_range) or the snapshot
-// cadence reason (invalid_snapshot_interval), 409 the at-rest gate
-// (server_not_stopped) and export the unsettled gate.
-function settingsErrorMessage(error: unknown): TranslationKey {
-  if (error instanceof ApiError) {
-    switch (error.reason) {
-      case "server_not_stopped":
-        return "serverDetail.error.notStopped";
-      case "server_unsettled":
-        return "serverDetail.error.unsettled";
-      case "port_taken":
-        return "serverDetail.error.portTaken";
-      case "port_out_of_range":
-        return "serverDetail.error.portOutOfRange";
-      case "invalid_snapshot_interval":
-        return "serverDetail.error.invalidSnapshotInterval";
-      case "retired_config_key":
-        return "serverDetail.error.retiredConfigKey";
-      case "invalid_memory_limit":
-        return "serverDetail.error.invalidMemoryLimit";
-      case "invalid_cpu_allocation":
-        return "serverDetail.error.invalidCpuAllocation";
-      // The config-blob guard (issue #94). This editor reads every value as
-      // JSON, so all four of its rules describe something a row can carry: a
-      // typed `null`, a literal nested past the depth cap, an oversized paste,
-      // and an unpaired surrogate escape.
-      case "config_too_large":
-        return "serverDetail.error.configTooLarge";
-      case "config_null_value":
-        return "serverDetail.error.configNullValue";
-      case "config_invalid_shape":
-        return "serverDetail.error.configInvalidShape";
-      case "config_lone_surrogate":
-        return "serverDetail.error.configLoneSurrogate";
-      case "invalid_slug":
-        return "serverDetail.error.invalidSlug";
-      case "slug_taken":
-        return "serverDetail.error.slugTaken";
-    }
-  }
-  return "serverDetail.error.generic";
-}
-
 function Settings({
   server,
   communityId,
@@ -1437,18 +1394,15 @@ function Settings({
     if (onForbidden(error)) {
       return;
     }
-    // Surface slug-specific errors inline on the field rather than as toasts.
-    if (error instanceof ApiError) {
-      if (error.reason === "invalid_slug" || error.reason === "slug_taken") {
-        setSlugError(
-          error.reason === "slug_taken"
-            ? t("serverDetail.settings.slugTaken")
-            : t("serverDetail.settings.slugInvalid"),
-        );
-        return;
-      }
+    // Slug-specific errors land inline on the field rather than as toasts.
+    const { target, key } = serverSettingsErrorPresentation(
+      error instanceof ApiError ? error.reason : undefined,
+    );
+    if (target === "slug") {
+      setSlugError(t(key));
+      return;
     }
-    showToast(t(settingsErrorMessage(error)), "error");
+    showToast(t(key), "error");
   };
 
   const save = useMutation({

@@ -8,6 +8,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router";
 import {
@@ -755,23 +756,6 @@ describe("ServerDetailPage lifecycle controls", () => {
     ).toBeInTheDocument();
   });
 
-  it("gives a lifecycle 409 the state-changed treatment", async () => {
-    mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
-    mockApi.post.mockRejectedValue(
-      new ApiError(409, { reason: "transition_conflict" }),
-    );
-    renderPage();
-
-    await screen.findByText("survival");
-    fireEvent.click(
-      screen.getByRole("button", { name: t("serverDetail.restart") }),
-    );
-
-    expect(
-      await screen.findByText(t("dashboard.stateChanged")),
-    ).toBeInTheDocument();
-  });
-
   describe("optimistic state transition (#1071)", () => {
     let restoreWs: () => void;
     beforeEach(() => {
@@ -1439,50 +1423,9 @@ describe("ServerDetailPage settings", () => {
     expect(config).toEqual({ resolved_jar_sha256: "abc123", motd: "bye" });
   });
 
-  it("surfaces a 422 invalid_snapshot_interval specifically on save", async () => {
-    routeGet({ srv: { observed_state: "stopped" } });
-    mockApi.patch.mockRejectedValue(
-      new ApiError(422, { reason: "invalid_snapshot_interval" }),
-    );
-    renderPage();
-
-    await screen.findByText("survival");
-    openSettings();
-    fireEvent.click(
-      screen.getByRole("button", { name: t("serverDetail.settings.save") }),
-    );
-
-    expect(
-      await screen.findByText(t("serverDetail.error.invalidSnapshotInterval")),
-    ).toBeInTheDocument();
-  });
-
-  // All four config-blob reasons (issue #94). This editor reads every value as
-  // JSON (`settings.configHint`), so each rule is something a user can type into
-  // a row: `null`, a literal nested past the depth cap, an oversized paste, and
-  // a `"\ud800"` escape. Each must name its own rule — falling through to the
-  // generic toast tells the user nothing about which row to fix.
-  it.each([
-    ["config_too_large", "serverDetail.error.configTooLarge"],
-    ["config_null_value", "serverDetail.error.configNullValue"],
-    ["config_invalid_shape", "serverDetail.error.configInvalidShape"],
-    ["config_lone_surrogate", "serverDetail.error.configLoneSurrogate"],
-  ] as const)("surfaces a 422 %s specifically on save", async (reason, key) => {
-    routeGet({ srv: { observed_state: "stopped" } });
-    mockApi.patch.mockRejectedValue(new ApiError(422, { reason }));
-    renderPage();
-
-    await screen.findByText("survival");
-    openSettings();
-    fireEvent.click(
-      screen.getByRole("button", { name: t("serverDetail.settings.save") }),
-    );
-
-    expect(await screen.findByText(t(key))).toBeInTheDocument();
-    expect(screen.queryByText(t("serverDetail.error.generic"))).toBeNull();
-  });
-
-  it("surfaces a 409 server_not_stopped specifically on save", async () => {
+  // The reason → message table lives in
+  // serverSettingsErrorPresentation.test.ts; these pin the save wiring.
+  it("toasts a mapped save failure and keeps the edited form", async () => {
     routeGet({ srv: { observed_state: "running" } });
     mockApi.patch.mockRejectedValue(
       new ApiError(409, { reason: "server_not_stopped" }),
@@ -1491,13 +1434,40 @@ describe("ServerDetailPage settings", () => {
 
     await screen.findByText("survival");
     openSettings();
+    fireEvent.change(screen.getByDisplayValue("survival"), {
+      target: { value: "renamed" },
+    });
     fireEvent.click(
       screen.getByRole("button", { name: t("serverDetail.settings.save") }),
     );
 
     expect(
-      await screen.findByText(t("serverDetail.error.notStopped")),
+      (await screen.findByText(t("serverDetail.error.notStopped"))).closest(
+        ".toast",
+      ),
+    ).not.toBeNull();
+    expect(screen.getByDisplayValue("renamed")).toBeInTheDocument();
+  });
+
+  it("routes a save 403 through the permission glue, not the mapper", async () => {
+    routeGet({ srv: { observed_state: "stopped" } });
+    mockApi.patch.mockRejectedValue(
+      new ApiError(403, { reason: "forbidden", permission: "server:update" }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.settings.save") }),
+    );
+
+    expect(
+      await screen.findByText(
+        t("permissions.deniedNamed", { permission: "server:update" }),
+      ),
     ).toBeInTheDocument();
+    expect(screen.queryByText(t("serverDetail.error.generic"))).toBeNull();
   });
 
   it("disables the save button without server:update", async () => {
@@ -1818,27 +1788,6 @@ describe("ServerDetailPage settings memory limit", () => {
     openSettings();
     expect(memoryInput()).toBeDisabled();
   });
-
-  it("surfaces a 422 invalid_memory_limit specifically on save", async () => {
-    routeGet({
-      srv: { observed_state: "stopped", memory_limit_mb: null, config: {} },
-    });
-    mockApi.patch.mockRejectedValue(
-      new ApiError(422, { reason: "invalid_memory_limit" }),
-    );
-    renderPage();
-
-    await screen.findByText("survival");
-    openSettings();
-    fireEvent.change(memoryInput(), { target: { value: "2048" } });
-    fireEvent.click(
-      screen.getByRole("button", { name: t("serverDetail.settings.save") }),
-    );
-
-    expect(
-      await screen.findByText(t("serverDetail.error.invalidMemoryLimit")),
-    ).toBeInTheDocument();
-  });
 });
 
 describe("ServerDetailPage settings CPU allocation", () => {
@@ -2056,27 +2005,6 @@ describe("ServerDetailPage settings CPU allocation", () => {
     openSettings();
     expect(cpuInput()).toBeDisabled();
   });
-
-  it("surfaces a 422 invalid_cpu_allocation specifically on save", async () => {
-    routeGet({
-      srv: { observed_state: "stopped", cpu_millis: null, config: {} },
-    });
-    mockApi.patch.mockRejectedValue(
-      new ApiError(422, { reason: "invalid_cpu_allocation" }),
-    );
-    renderPage();
-
-    await screen.findByText("survival");
-    openSettings();
-    fireEvent.change(cpuInput(), { target: { value: "1500" } });
-    fireEvent.click(
-      screen.getByRole("button", { name: t("serverDetail.settings.save") }),
-    );
-
-    expect(
-      await screen.findByText(t("serverDetail.error.invalidCpuAllocation")),
-    ).toBeInTheDocument();
-  });
 });
 
 describe("ServerDetailPage header addresses (issues #961, #982, #1543)", () => {
@@ -2257,36 +2185,13 @@ describe("ServerDetailPage settings slug (issue #961)", () => {
       screen.getByRole("button", { name: t("serverDetail.settings.save") }),
     );
 
-    expect(
-      await screen.findByText(t("serverDetail.settings.slugTaken")),
-    ).toBeInTheDocument();
-  });
-
-  it("surfaces a 422 invalid_slug error inline on save", async () => {
-    routeGet({
-      srv: {
-        observed_state: "stopped",
-        join_hostname: "survival.relay.example.com",
-        slug: "survival",
-      },
-    });
-    mockApi.patch.mockRejectedValue(
-      new ApiError(422, { reason: "invalid_slug" }),
+    // Scope the wait to the slug field so a duplicate toast cannot stall the
+    // query until it auto-dismisses; the no-toast check then runs at once.
+    await within(slugInput.closest(".field") as HTMLElement).findByText(
+      t("serverDetail.settings.slugTaken"),
     );
-    renderPage();
-
-    await screen.findByText("survival");
-    openSettings();
-
-    const slugInput = screen.getByLabelText(t("serverDetail.settings.slug"));
-    fireEvent.change(slugInput, { target: { value: "reserved" } });
-    fireEvent.click(
-      screen.getByRole("button", { name: t("serverDetail.settings.save") }),
-    );
-
-    expect(
-      await screen.findByText(t("serverDetail.settings.slugInvalid")),
-    ).toBeInTheDocument();
+    expect(document.querySelector(".toast")).toBeNull();
+    expect(slugInput).toHaveValue("taken-slug");
   });
 });
 
