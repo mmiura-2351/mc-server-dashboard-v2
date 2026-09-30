@@ -26,7 +26,11 @@ import { t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { meta } from "../test/meta.ts";
 import { installMockWebSocket, MockWebSocket } from "../test/mockWebSocket.ts";
-import { ServerDetailPage, sparklinePoints } from "./ServerDetailPage.tsx";
+import {
+  ServerDetailPage,
+  serverKey,
+  sparklinePoints,
+} from "./ServerDetailPage.tsx";
 import { serversKey } from "./useCommunityEvents.ts";
 
 const CID = "c1";
@@ -843,6 +847,36 @@ describe("ServerDetailPage lifecycle controls", () => {
       expect(queryClient.getQueryState(serversKey(CID))?.isInvalidated).toBe(
         true,
       );
+    });
+
+    it("wires the Start button to POST start and the starting pill", async () => {
+      // The smoke above drives Restart; this pins that Start on a stopped
+      // server sends its own verb and writes its own transitional state.
+      mockApi.get.mockResolvedValue(
+        server({ observed_state: "stopped", desired_state: "stopped" }),
+      );
+      mockApi.post.mockReturnValue(new Promise(() => {}));
+      const { queryClient } = renderPage();
+      const statePill = () =>
+        document.querySelector(".detail-title .pill")?.textContent;
+
+      await screen.findByText("survival");
+      fireEvent.click(
+        screen.getByRole("button", { name: t("serverDetail.start") }),
+      );
+
+      await waitFor(() =>
+        expect(statePill()).toBe(t("dashboard.state.starting")),
+      );
+      expect(mockApi.post).toHaveBeenCalledTimes(1);
+      expect(mockApi.post).toHaveBeenCalledWith(
+        `/api/communities/${CID}/servers/${SID}/start`,
+      );
+      expect(
+        queryClient.getQueryData<{ observed_state: string }>(
+          serverKey(CID, SID),
+        )?.observed_state,
+      ).toBe("starting");
     });
   });
 });
