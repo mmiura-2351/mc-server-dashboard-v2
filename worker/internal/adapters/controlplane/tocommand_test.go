@@ -1,265 +1,143 @@
 package controlplane
 
 import (
+	"reflect"
 	"testing"
 
 	controlplanev1 "github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/controlplane/mcsd/controlplane/v1"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
 
-// An unset launch_mode (UNSPECIFIED) maps to the empty launch mode, which the
-// instancemanager treats as the historical JAR launch (issue #305).
-func TestToCommandStartDefaultLaunchModeIsEmpty(t *testing.T) {
-	cmd := toCommand(&controlplanev1.ApiCommand{
-		CommandId: "c1",
-		ServerId:  "s1",
-		Command: &controlplanev1.ApiCommand_Start{
-			Start: &controlplanev1.StartServer{
+// toCommand carries the oneof's name into Kind and every payload field the
+// instancemanager handler reads onto the domain command; fields the command does
+// not carry stay zero. Comparing the whole struct pins both halves.
+func TestToCommandMapsPayload(t *testing.T) {
+	tests := []struct {
+		name string
+		cmd  *controlplanev1.ApiCommand
+		want session.Command
+	}{
+		{
+			// An unset launch_mode (UNSPECIFIED) maps to the empty launch mode,
+			// which the instancemanager treats as the historical JAR launch (issue
+			// #305). Unset memory_limit_bytes / cpu_millis stay 0.
+			name: "start with defaults",
+			cmd: &controlplanev1.ApiCommand{Command: &controlplanev1.ApiCommand_Start{Start: &controlplanev1.StartServer{
 				Driver:           controlplanev1.ExecutionDriverKind_EXECUTION_DRIVER_KIND_CONTAINER,
 				JarRelpath:       "server.jar",
 				MinecraftVersion: "1.21",
+			}}},
+			want: session.Command{
+				Kind: "StartServer", Driver: "container", LaunchMode: "",
+				JarRelpath: "server.jar", MinecraftVersion: "1.21",
 			},
 		},
-	})
-	if cmd.Kind != "StartServer" {
-		t.Fatalf("Kind = %q, want StartServer", cmd.Kind)
-	}
-	if cmd.LaunchMode != "" {
-		t.Fatalf("LaunchMode = %q, want empty (default JAR)", cmd.LaunchMode)
-	}
-}
-
-// An explicit LAUNCH_MODE_JAR maps to the "jar" name.
-func TestToCommandStartJarLaunchMode(t *testing.T) {
-	cmd := toCommand(&controlplanev1.ApiCommand{
-		CommandId: "c1",
-		ServerId:  "s1",
-		Command: &controlplanev1.ApiCommand_Start{
-			Start: &controlplanev1.StartServer{LaunchMode: controlplanev1.LaunchMode_LAUNCH_MODE_JAR},
+		{
+			name: "start with jar launch mode",
+			cmd: &controlplanev1.ApiCommand{Command: &controlplanev1.ApiCommand_Start{Start: &controlplanev1.StartServer{
+				LaunchMode: controlplanev1.LaunchMode_LAUNCH_MODE_JAR,
+			}}},
+			want: session.Command{Kind: "StartServer", LaunchMode: "jar"},
 		},
-	})
-	if cmd.LaunchMode != "jar" {
-		t.Fatalf("LaunchMode = %q, want jar", cmd.LaunchMode)
-	}
-}
-
-// LAUNCH_MODE_FORGE_ARGSFILE maps to the "forge-argsfile" name.
-func TestToCommandStartForgeLaunchMode(t *testing.T) {
-	cmd := toCommand(&controlplanev1.ApiCommand{
-		CommandId: "c1",
-		ServerId:  "s1",
-		Command: &controlplanev1.ApiCommand_Start{
-			Start: &controlplanev1.StartServer{LaunchMode: controlplanev1.LaunchMode_LAUNCH_MODE_FORGE_ARGSFILE},
+		{
+			name: "start with forge argsfile launch mode",
+			cmd: &controlplanev1.ApiCommand{Command: &controlplanev1.ApiCommand_Start{Start: &controlplanev1.StartServer{
+				LaunchMode: controlplanev1.LaunchMode_LAUNCH_MODE_FORGE_ARGSFILE,
+			}}},
+			want: session.Command{Kind: "StartServer", LaunchMode: "forge-argsfile"},
 		},
-	})
-	if cmd.LaunchMode != "forge-argsfile" {
-		t.Fatalf("LaunchMode = %q, want forge-argsfile", cmd.LaunchMode)
-	}
-}
-
-// The wire memory_limit_bytes (the per-server ceiling, #706) is carried onto the
-// domain command unchanged; unset (0) stays 0.
-func TestToCommandStartCarriesMemoryLimitBytes(t *testing.T) {
-	cmd := toCommand(&controlplanev1.ApiCommand{
-		CommandId: "c1",
-		ServerId:  "s1",
-		Command: &controlplanev1.ApiCommand_Start{
-			Start: &controlplanev1.StartServer{MemoryLimitBytes: 2048 * 1024 * 1024},
+		{
+			// The per-server memory ceiling (#706) and soft CPU allocation (#723)
+			// are carried unchanged.
+			name: "start with resource limits",
+			cmd: &controlplanev1.ApiCommand{Command: &controlplanev1.ApiCommand_Start{Start: &controlplanev1.StartServer{
+				MemoryLimitBytes: 2048 * 1024 * 1024,
+				CpuMillis:        2000,
+			}}},
+			want: session.Command{Kind: "StartServer", MemoryLimitBytes: 2048 * 1024 * 1024, CPUMillis: 2000},
 		},
-	})
-	if cmd.MemoryLimitBytes != 2048*1024*1024 {
-		t.Fatalf("MemoryLimitBytes = %d, want %d", cmd.MemoryLimitBytes, 2048*1024*1024)
-	}
-}
-
-func TestToCommandStartMemoryLimitBytesDefaultsToZero(t *testing.T) {
-	cmd := toCommand(&controlplanev1.ApiCommand{
-		CommandId: "c1",
-		ServerId:  "s1",
-		Command: &controlplanev1.ApiCommand_Start{
-			Start: &controlplanev1.StartServer{},
+		{
+			name: "stop with force",
+			cmd:  &controlplanev1.ApiCommand{Command: &controlplanev1.ApiCommand_Stop{Stop: &controlplanev1.StopServer{Force: true}}},
+			want: session.Command{Kind: "StopServer", Force: true},
 		},
-	})
-	if cmd.MemoryLimitBytes != 0 {
-		t.Fatalf("MemoryLimitBytes = %d, want 0 (unset)", cmd.MemoryLimitBytes)
-	}
-	if cmd.CPUMillis != 0 {
-		t.Fatalf("CPUMillis = %d, want 0 (unset)", cmd.CPUMillis)
-	}
-}
-
-// The wire cpu_millis (the per-server soft CPU allocation, #723) is carried onto
-// the domain command unchanged; unset (0) stays 0.
-func TestToCommandStartCarriesCPUMillis(t *testing.T) {
-	cmd := toCommand(&controlplanev1.ApiCommand{
-		CommandId: "c1",
-		ServerId:  "s1",
-		Command: &controlplanev1.ApiCommand_Start{
-			Start: &controlplanev1.StartServer{CpuMillis: 2000},
+		{
+			name: "restart",
+			cmd:  &controlplanev1.ApiCommand{Command: &controlplanev1.ApiCommand_Restart{Restart: &controlplanev1.RestartServer{}}},
+			want: session.Command{Kind: "RestartServer"},
 		},
-	})
-	if cmd.CPUMillis != 2000 {
-		t.Fatalf("CPUMillis = %d, want 2000", cmd.CPUMillis)
-	}
-}
-
-func TestToCommandMapsHydrateTrigger(t *testing.T) {
-	cmd := toCommand(&controlplanev1.ApiCommand{
-		CommandId: "c1",
-		ServerId:  "s1",
-		Command: &controlplanev1.ApiCommand_Hydrate{
-			Hydrate: &controlplanev1.HydrateTrigger{
-				TransferUrl:   "https://api/working-set",
-				TransferToken: "tok",
+		{
+			name: "server command",
+			cmd:  &controlplanev1.ApiCommand{Command: &controlplanev1.ApiCommand_ServerCommand{ServerCommand: &controlplanev1.ServerCommand{Line: "say hi"}}},
+			want: session.Command{Kind: "ServerCommand", Line: "say hi"},
+		},
+		{
+			name: "hydrate trigger",
+			cmd: &controlplanev1.ApiCommand{Command: &controlplanev1.ApiCommand_Hydrate{Hydrate: &controlplanev1.HydrateTrigger{
+				TransferUrl: "https://api/working-set", TransferToken: "tok",
+			}}},
+			want: session.Command{Kind: "HydrateTrigger", TransferURL: "https://api/working-set", TransferToken: "tok"},
+		},
+		{
+			name: "snapshot trigger",
+			cmd: &controlplanev1.ApiCommand{Command: &controlplanev1.ApiCommand_Snapshot{Snapshot: &controlplanev1.SnapshotTrigger{
+				TransferUrl: "https://api/snapshot", TransferToken: "tok",
+			}}},
+			want: session.Command{Kind: "SnapshotTrigger", TransferURL: "https://api/snapshot", TransferToken: "tok"},
+		},
+		{
+			name: "read file",
+			cmd:  &controlplanev1.ApiCommand{Command: &controlplanev1.ApiCommand_ReadFile{ReadFile: &controlplanev1.ReadFile{Path: "server.properties"}}},
+			want: session.Command{Kind: "ReadFile", Path: "server.properties"},
+		},
+		{
+			name: "edit file",
+			cmd:  &controlplanev1.ApiCommand{Command: &controlplanev1.ApiCommand_EditFile{EditFile: &controlplanev1.EditFile{Path: "ops.json", Content: []byte("[]")}}},
+			want: session.Command{Kind: "EditFile", Path: "ops.json", Content: []byte("[]")},
+		},
+		{
+			name: "list files",
+			cmd:  &controlplanev1.ApiCommand{Command: &controlplanev1.ApiCommand_ListFiles{ListFiles: &controlplanev1.ListFiles{Path: "plugins"}}},
+			want: session.Command{Kind: "ListFiles", Path: "plugins"},
+		},
+		{
+			name: "tunnel dial",
+			cmd: &controlplanev1.ApiCommand{Command: &controlplanev1.ApiCommand_TunnelDial{TunnelDial: &controlplanev1.TunnelDial{
+				ServerId: "s1", Endpoint: "relay.example:25665", Token: "tok-abc", TlsCaPem: "ca-pem",
+			}}},
+			want: session.Command{
+				Kind: "TunnelDial", TunnelEndpoint: "relay.example:25665", TunnelToken: "tok-abc", TunnelCAPEM: "ca-pem",
 			},
 		},
-	})
-	if cmd.Kind != "HydrateTrigger" {
-		t.Fatalf("Kind = %q, want HydrateTrigger", cmd.Kind)
-	}
-	if cmd.TransferURL != "https://api/working-set" || cmd.TransferToken != "tok" {
-		t.Fatalf("transfer fields = %q/%q", cmd.TransferURL, cmd.TransferToken)
-	}
-}
-
-func TestToCommandMapsSnapshotTrigger(t *testing.T) {
-	cmd := toCommand(&controlplanev1.ApiCommand{
-		CommandId: "c2",
-		ServerId:  "s1",
-		Command: &controlplanev1.ApiCommand_Snapshot{
-			Snapshot: &controlplanev1.SnapshotTrigger{
-				TransferUrl:   "https://api/snapshot",
-				TransferToken: "tok",
+		{
+			// OpenBedrockTunnel / CloseBedrockTunnel (issue #1544) carry the
+			// credential the bedrocktunnel QUIC client (issue #1546) dials the relay
+			// with.
+			name: "open bedrock tunnel",
+			cmd: &controlplanev1.ApiCommand{Command: &controlplanev1.ApiCommand_OpenBedrockTunnel{OpenBedrockTunnel: &controlplanev1.OpenBedrockTunnel{
+				ServerId: "s1", RelayEndpoint: "relay.example:25675", BedrockPort: 19132, Token: "tok-abc", TlsCaPem: "ca-pem",
+			}}},
+			want: session.Command{
+				Kind: "OpenBedrockTunnel", BedrockRelayEndpoint: "relay.example:25675", BedrockPort: 19132,
+				BedrockToken: "tok-abc", BedrockCAPEM: "ca-pem",
 			},
 		},
-	})
-	if cmd.Kind != "SnapshotTrigger" {
-		t.Fatalf("Kind = %q, want SnapshotTrigger", cmd.Kind)
-	}
-	if cmd.TransferURL != "https://api/snapshot" || cmd.TransferToken != "tok" {
-		t.Fatalf("transfer fields = %q/%q", cmd.TransferURL, cmd.TransferToken)
-	}
-}
-
-func TestToCommandMapsReadFile(t *testing.T) {
-	cmd := toCommand(&controlplanev1.ApiCommand{
-		CommandId: "c3",
-		ServerId:  "s1",
-		Command: &controlplanev1.ApiCommand_ReadFile{
-			ReadFile: &controlplanev1.ReadFile{Path: "server.properties"},
+		{
+			name: "close bedrock tunnel",
+			cmd:  &controlplanev1.ApiCommand{Command: &controlplanev1.ApiCommand_CloseBedrockTunnel{CloseBedrockTunnel: &controlplanev1.CloseBedrockTunnel{ServerId: "s1"}}},
+			want: session.Command{Kind: "CloseBedrockTunnel"},
 		},
-	})
-	if cmd.Kind != "ReadFile" {
-		t.Fatalf("Kind = %q, want ReadFile", cmd.Kind)
 	}
-	if cmd.Path != "server.properties" {
-		t.Fatalf("Path = %q, want server.properties", cmd.Path)
-	}
-}
-
-func TestToCommandMapsEditFile(t *testing.T) {
-	cmd := toCommand(&controlplanev1.ApiCommand{
-		CommandId: "c4",
-		ServerId:  "s1",
-		Command: &controlplanev1.ApiCommand_EditFile{
-			EditFile: &controlplanev1.EditFile{Path: "ops.json", Content: []byte("[]")},
-		},
-	})
-	if cmd.Kind != "EditFile" {
-		t.Fatalf("Kind = %q, want EditFile", cmd.Kind)
-	}
-	if cmd.Path != "ops.json" || string(cmd.Content) != "[]" {
-		t.Fatalf("Path/Content = %q/%q", cmd.Path, cmd.Content)
-	}
-}
-
-func TestToCommandMapsListFiles(t *testing.T) {
-	cmd := toCommand(&controlplanev1.ApiCommand{
-		CommandId: "c5",
-		ServerId:  "s1",
-		Command: &controlplanev1.ApiCommand_ListFiles{
-			ListFiles: &controlplanev1.ListFiles{Path: "plugins"},
-		},
-	})
-	if cmd.Kind != "ListFiles" {
-		t.Fatalf("Kind = %q, want ListFiles", cmd.Kind)
-	}
-	if cmd.Path != "plugins" {
-		t.Fatalf("Path = %q, want plugins", cmd.Path)
-	}
-}
-
-func TestToCommandMapsTunnelDial(t *testing.T) {
-	cmd := toCommand(&controlplanev1.ApiCommand{
-		CommandId: "c6",
-		ServerId:  "s1",
-		Command: &controlplanev1.ApiCommand_TunnelDial{
-			TunnelDial: &controlplanev1.TunnelDial{
-				ServerId: "s1",
-				Endpoint: "relay.example:25665",
-				Token:    "tok-abc",
-				TlsCaPem: "ca-pem",
-			},
-		},
-	})
-	if cmd.Kind != "TunnelDial" {
-		t.Fatalf("Kind = %q, want TunnelDial", cmd.Kind)
-	}
-	if cmd.TunnelEndpoint != "relay.example:25665" {
-		t.Fatalf("TunnelEndpoint = %q, want relay.example:25665", cmd.TunnelEndpoint)
-	}
-	if cmd.TunnelToken != "tok-abc" {
-		t.Fatalf("TunnelToken = %q, want tok-abc", cmd.TunnelToken)
-	}
-	if cmd.TunnelCAPEM != "ca-pem" {
-		t.Fatalf("TunnelCAPEM = %q, want ca-pem", cmd.TunnelCAPEM)
-	}
-}
-
-// OpenBedrockTunnel / CloseBedrockTunnel (issue #1544) carry the credential the
-// bedrocktunnel QUIC client (issue #1546) dials the relay with; toCommand must
-// map both the Kind and the payload fields the instancemanager handler needs.
-func TestToCommandMapsOpenBedrockTunnel(t *testing.T) {
-	cmd := toCommand(&controlplanev1.ApiCommand{
-		CommandId: "c7",
-		ServerId:  "s1",
-		Command: &controlplanev1.ApiCommand_OpenBedrockTunnel{
-			OpenBedrockTunnel: &controlplanev1.OpenBedrockTunnel{
-				ServerId:      "s1",
-				RelayEndpoint: "relay.example:25675",
-				BedrockPort:   19132,
-				Token:         "tok-abc",
-				TlsCaPem:      "ca-pem",
-			},
-		},
-	})
-	if cmd.Kind != "OpenBedrockTunnel" {
-		t.Fatalf("Kind = %q, want OpenBedrockTunnel", cmd.Kind)
-	}
-	if cmd.BedrockRelayEndpoint != "relay.example:25675" {
-		t.Fatalf("BedrockRelayEndpoint = %q, want relay.example:25675", cmd.BedrockRelayEndpoint)
-	}
-	if cmd.BedrockPort != 19132 {
-		t.Fatalf("BedrockPort = %d, want 19132", cmd.BedrockPort)
-	}
-	if cmd.BedrockToken != "tok-abc" {
-		t.Fatalf("BedrockToken = %q, want tok-abc", cmd.BedrockToken)
-	}
-	if cmd.BedrockCAPEM != "ca-pem" {
-		t.Fatalf("BedrockCAPEM = %q, want ca-pem", cmd.BedrockCAPEM)
-	}
-}
-
-func TestToCommandMapsCloseBedrockTunnelKind(t *testing.T) {
-	cmd := toCommand(&controlplanev1.ApiCommand{
-		CommandId: "c8",
-		ServerId:  "s1",
-		Command: &controlplanev1.ApiCommand_CloseBedrockTunnel{
-			CloseBedrockTunnel: &controlplanev1.CloseBedrockTunnel{ServerId: "s1"},
-		},
-	})
-	if cmd.Kind != "CloseBedrockTunnel" {
-		t.Fatalf("Kind = %q, want CloseBedrockTunnel", cmd.Kind)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.cmd.CommandId, tc.cmd.ServerId = "c1", "s1"
+			got := toCommand(tc.cmd)
+			want := tc.want
+			want.CommandID, want.ServerID = "c1", "s1"
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("toCommand =\n  %+v\nwant\n  %+v", got, want)
+			}
+		})
 	}
 }
 
@@ -283,31 +161,31 @@ func TestToFileListingMapsEntries(t *testing.T) {
 	}
 }
 
-func TestMapErrorCodeFileAccessDenied(t *testing.T) {
-	got := mapErrorCode(session.CommandErrorFileAccessDenied)
-	if got != controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_FILE_ACCESS_DENIED {
-		t.Fatalf("mapErrorCode = %v, want FILE_ACCESS_DENIED", got)
+// Every domain error code maps onto its own wire value, and an unrecognized code
+// falls back to INTERNAL.
+func TestMapErrorCode(t *testing.T) {
+	tests := []struct {
+		name string
+		code session.CommandErrorCode
+		want controlplanev1.CommandErrorCode
+	}{
+		{"internal", session.CommandErrorInternal, controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_INTERNAL},
+		{"server not found", session.CommandErrorServerNotFound, controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_SERVER_NOT_FOUND},
+		{"invalid state", session.CommandErrorInvalidState, controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_INVALID_STATE},
+		{"driver unavailable", session.CommandErrorDriverUnavailable, controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_DRIVER_UNAVAILABLE},
+		{"transfer failed", session.CommandErrorTransferFailed, controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_TRANSFER_FAILED},
+		{"file access denied", session.CommandErrorFileAccessDenied, controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_FILE_ACCESS_DENIED},
+		{"port conflict", session.CommandErrorPortConflict, controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_PORT_CONFLICT},
+		{"image missing", session.CommandErrorImageMissing, controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_IMAGE_MISSING},
+		{"busy", session.CommandErrorBusy, controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_BUSY},
+		{"unrecognized", session.CommandErrorCode(99), controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_INTERNAL},
 	}
-}
-
-func TestMapErrorCodePortConflict(t *testing.T) {
-	got := mapErrorCode(session.CommandErrorPortConflict)
-	if got != controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_PORT_CONFLICT {
-		t.Fatalf("mapErrorCode = %v, want PORT_CONFLICT", got)
-	}
-}
-
-func TestMapErrorCodeImageMissing(t *testing.T) {
-	got := mapErrorCode(session.CommandErrorImageMissing)
-	if got != controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_IMAGE_MISSING {
-		t.Fatalf("mapErrorCode = %v, want IMAGE_MISSING", got)
-	}
-}
-
-func TestMapErrorCodeBusy(t *testing.T) {
-	got := mapErrorCode(session.CommandErrorBusy)
-	if got != controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_BUSY {
-		t.Fatalf("mapErrorCode = %v, want BUSY", got)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := mapErrorCode(tc.code); got != tc.want {
+				t.Fatalf("mapErrorCode(%v) = %v, want %v", tc.code, got, tc.want)
+			}
+		})
 	}
 }
 

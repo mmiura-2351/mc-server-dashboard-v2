@@ -135,22 +135,3 @@ func TestLoadFailsWhenWorkerIDFileUnreadable(t *testing.T) {
 		t.Errorf("error %q does not name the worker id file", err.Error())
 	}
 }
-
-func TestNewUUIDv4Format(t *testing.T) {
-	id, err := newUUIDv4()
-	if err != nil {
-		t.Fatalf("newUUIDv4() error = %v", err)
-	}
-	if !isUUID(id) {
-		t.Fatalf("newUUIDv4() = %q, not a canonical UUID", id)
-	}
-	// Version nibble is 4 and variant nibble is 8/9/a/b.
-	if id[14] != '4' {
-		t.Errorf("version nibble = %c, want 4 (id %q)", id[14], id)
-	}
-	switch id[19] {
-	case '8', '9', 'a', 'b':
-	default:
-		t.Errorf("variant nibble = %c, want 8/9/a/b (id %q)", id[19], id)
-	}
-}

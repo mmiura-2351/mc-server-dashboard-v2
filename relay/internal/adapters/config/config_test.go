@@ -316,39 +316,32 @@ public_endpoint = "relay:25665"
 	}
 }
 
-func TestValidateZeroStatusCacheMaxEntries(t *testing.T) {
-	env := envMap(map[string]string{"MCD_RELAY_GAME_STATUS_CACHE_MAX_ENTRIES": "0"})
-	_, err := Load(writeTOML(t, minimalTOML), env)
-	if err == nil {
-		t.Fatal("status_cache_max_entries=0 should fail validation")
+// Load rejects a single invalid primitive value on an otherwise valid config, and
+// the error names the offending key so the operator can find it.
+func TestValidateRejectsInvalidValue(t *testing.T) {
+	tests := []struct {
+		name    string
+		envKey  string
+		value   string
+		wantKey string
+	}{
+		{"zero status_cache_max_entries", "MCD_RELAY_GAME_STATUS_CACHE_MAX_ENTRIES", "0", "status_cache_max_entries"},
+		{"unknown log level", "MCD_RELAY_LOG_LEVEL", "trace", "log.level"},
+		{"log level typo", "MCD_RELAY_LOG_LEVEL", "debgu", "log.level"},
+		{"unknown log format", "MCD_RELAY_LOG_FORMAT", "yaml", "log.format"},
+		{"non-boolean metrics.enabled", "MCD_RELAY_METRICS_ENABLED", "notabool", "METRICS_ENABLED"},
 	}
-	if !strings.Contains(err.Error(), "status_cache_max_entries") {
-		t.Errorf("error %q does not mention status_cache_max_entries", err.Error())
-	}
-}
-
-func TestValidateBadLogLevel(t *testing.T) {
-	env := envMap(map[string]string{"MCD_RELAY_LOG_LEVEL": "trace"})
-	_, err := Load(writeTOML(t, minimalTOML), env)
-	if err == nil {
-		t.Fatal("unknown log.level should fail")
-	}
-	if !strings.Contains(err.Error(), "log.level") {
-		t.Errorf("error %q does not mention log.level", err.Error())
-	}
-}
-
-func TestValidateBadLogLevelTypo(t *testing.T) {
-	env := envMap(map[string]string{"MCD_RELAY_LOG_LEVEL": "debgu"})
-	if _, err := Load(writeTOML(t, minimalTOML), env); err == nil {
-		t.Error("typo log.level should fail")
-	}
-}
-
-func TestValidateBadLogFormat(t *testing.T) {
-	env := envMap(map[string]string{"MCD_RELAY_LOG_FORMAT": "yaml"})
-	if _, err := Load(writeTOML(t, minimalTOML), env); err == nil {
-		t.Error("unknown log.format should fail")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := envMap(map[string]string{tc.envKey: tc.value})
+			_, err := Load(writeTOML(t, minimalTOML), env)
+			if err == nil {
+				t.Fatalf("%s=%q should fail validation", tc.envKey, tc.value)
+			}
+			if !strings.Contains(err.Error(), tc.wantKey) {
+				t.Errorf("error %q does not mention %s", err.Error(), tc.wantKey)
+			}
+		})
 	}
 }
 
@@ -368,12 +361,5 @@ listen = "` + listen + `"
 		if !strings.Contains(err.Error(), "metrics.listen") {
 			t.Errorf("error %q does not mention metrics.listen", err.Error())
 		}
-	}
-}
-
-func TestValidateBadMetricsEnabled(t *testing.T) {
-	env := envMap(map[string]string{"MCD_RELAY_METRICS_ENABLED": "notabool"})
-	if _, err := Load(writeTOML(t, minimalTOML), env); err == nil {
-		t.Error("non-boolean metrics.enabled should fail")
 	}
 }
