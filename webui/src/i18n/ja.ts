@@ -283,7 +283,8 @@ export const ja: Record<TranslationKey, string> = {
     "サーバーホストと通信できず、再起動を確認できませんでした。すでに復帰している可能性があります。停止したままの場合は、システムが自動的に起動します。",
   // Live-status degraded indicator: WS down, polling fallback (SPEC 6.2 / 7.2).
   "dashboard.liveDegraded": "再接続中 — 表示の更新が遅れることがあります",
-  // Clickable join-hostname copy feedback.
+  // Clickable join-hostname copy feedback (ServerAddressBadges, shared by the
+  // dashboard and the server detail header).
   "dashboard.copiedJoinHostname": "コピーしました！",
   // Bedrock address:port badge (issue #1543).
   "dashboard.bedrockLabel": "Bedrock",
@@ -324,13 +325,6 @@ export const ja: Record<TranslationKey, string> = {
   "serverDetail.noWorker": "ホスト未割り当て",
   "serverDetail.worker": "ホスト",
   "serverDetail.noPort": "ポートなし",
-  // Relay join hostname (issue #961).
-  "serverDetail.copiedJoinHostname": "コピーしました！",
-  // Bedrock address:port badge (issue #1543).
-  "serverDetail.bedrockLabel": "Bedrock",
-  "serverDetail.copiedBedrockAddress": "コピーしました！",
-  "serverDetail.bedrockAddressCopyTitle":
-    "アドレスをコピー（ポート {port} は別のポート欄に入力）",
   // Tabs (WEBUI_SPEC.md 6.4–6.9).
   "serverDetail.tab.overview": "概要",
   "serverDetail.tab.console": "コンソール",

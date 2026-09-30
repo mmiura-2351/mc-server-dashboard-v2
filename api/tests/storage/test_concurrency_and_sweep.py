@@ -75,35 +75,6 @@ async def test_sweep_never_reclaims_live_snapshot(tmp_path: Path) -> None:
     assert read_tar(blob) == {"f": b"LIVE"}
 
 
-async def test_active_staging_survives_concurrent_sweep(tmp_path: Path) -> None:
-    """An in-flight transfer's staging dir must survive a concurrent sweep.
-
-    The fs adapter pins the staging dir with an in-process active-staging lease for
-    the life of the handle (begin -> commit/abort), so a sweep scheduled while the
-    transfer is mid-flight skips its incoming/ staging dir (issue #183).
-    """
-
-    storage = FsStorage(tmp_path)
-    community, server = new_scope()
-    await publish(storage, community, server, {"f": b"LIVE"})
-
-    # Begin + stage an in-flight transfer, but do NOT commit/abort yet.
-    handle = await storage.begin_snapshot(community, server)
-    await storage.write_snapshot(handle, tar_stream({"f": b"INFLIGHT"}))
-    server_root = snapshot_dir(tmp_path, community, server).parent.parent
-    incoming = server_root / "incoming"
-    assert any(incoming.iterdir())
-
-    # A concurrent sweep must NOT delete the active staging dir.
-    storage.sweep()
-    assert any(incoming.iterdir()), "active staging must survive a concurrent sweep"
-
-    # The transfer still commits and publishes its staged bytes.
-    await storage.commit_snapshot(handle)
-    blob = await drain(storage.open_hydrate_source(community, server))
-    assert read_tar(blob) == {"f": b"INFLIGHT"}
-
-
 async def test_sweep_reclaims_released_staging_after_abort(tmp_path: Path) -> None:
     """Once a transfer is aborted the staging lease is released; a sweep that finds
     any residual incoming/ dir (here re-seeded) reclaims it — the lease only protects

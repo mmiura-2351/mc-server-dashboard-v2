@@ -56,9 +56,9 @@ export default defineConfig({
     // #1750). Four files depend on jsdom-specific DOM behavior and pin
     // themselves back to jsdom with a `// @vitest-environment jsdom` docblock:
     // ServerFilesTab (DataTransfer/webkitGetAsEntry drag-and-drop), AccountPage
-    // (label matching), and DashboardPage/ServerDetailPage (the execCommand
-    // clipboard fallback and WAI-ARIA focus return). jsdom stays a dev-dep for
-    // them.
+    // (label matching), ServerAddressBadges (the execCommand clipboard
+    // fallback) and ServerDetailPage (WAI-ARIA focus return). jsdom stays a
+    // dev-dep for them.
     environment: "happy-dom",
     setupFiles: ["./src/test/setup.ts"],
     // Unit tests live under src/; the Playwright E2E specs under e2e/ are run by

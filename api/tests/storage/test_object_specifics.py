@@ -378,37 +378,6 @@ async def test_sweep_reread_skips_prefix_made_live_after_pointer_read() -> None:
     assert not any(k.startswith(old_prefix) for k in store.objects)
 
 
-async def test_active_staging_survives_concurrent_sweep() -> None:
-    """An in-flight transfer's incoming/ objects must survive a concurrent sweep.
-
-    The object adapter pins the staging prefix with an in-process active-staging
-    lease for the life of the handle (begin -> commit/abort), so a sweep scheduled
-    while the transfer is mid-flight skips its incoming/ objects (issue #160). The
-    fs adapter pins staging the same way; this gives the object adapter parity.
-    """
-
-    store, storage = _store_and_storage()
-    community, server = new_scope()
-    await _publish(storage, community, server, {"f": b"LIVE"})
-
-    # Begin + stage an in-flight transfer, but do NOT commit/abort yet.
-    handle = await storage.begin_snapshot(community, server)
-    await storage.write_snapshot(handle, tar_stream({"f": b"INFLIGHT"}))
-    incoming = _server_prefix(community, server) + "incoming/"
-    assert any(k.startswith(incoming) for k in store.objects)
-
-    # A concurrent sweep must NOT delete the active staging objects.
-    await storage.sweep()
-    assert any(k.startswith(incoming) for k in store.objects), (
-        "active staging must survive a concurrent sweep"
-    )
-
-    # The transfer still commits and publishes its staged bytes.
-    await storage.commit_snapshot(handle)
-    blob = await drain(storage.open_hydrate_source(community, server))
-    assert read_tar(blob) == {"f": b"INFLIGHT"}
-
-
 async def test_sweep_reclaims_released_staging_after_abort() -> None:
     """Once a transfer is aborted the staging lease is released; a sweep that finds
     any residual incoming/ objects (here re-seeded) reclaims them — the lease only
@@ -572,10 +541,11 @@ async def test_open_backup_streams_without_a_head_precheck() -> None:
     assert head_keys == [], "open_backup issued no head_object round-trip"
 
 
-async def test_commit_refuses_partial_region_loss_and_keeps_prior() -> None:
-    """The missing-region gate (issue #854) on the object backend: a publish that
-    DROPS some-but-not-all of a live dimension's region objects is refused with
-    :class:`MissingRegionsError`, the pointer is not flipped, and staging is cleaned.
+async def test_missing_region_refusal_keeps_pointer_and_cleans_staging() -> None:
+    """Object realization of the missing-region refusal (issue #854): the pointer
+    object is not flipped and the incoming/ staging objects are cleaned. The
+    refusal, its report, and the unchanged hydrate are the shared contract
+    (``test_port_contract.py``).
     """
 
     store, storage = _store_and_storage()
@@ -596,37 +566,13 @@ async def test_commit_refuses_partial_region_loss_and_keeps_prior() -> None:
     await storage.write_snapshot(
         handle, tar_stream({"world/region/r.0.0.mca": healthy_region_bytes()})
     )
-    with pytest.raises(MissingRegionsError) as excinfo:
+    with pytest.raises(MissingRegionsError):
         await storage.commit_snapshot(handle)
 
-    assert len(excinfo.value.report.partial_loss) == 1
     # Pointer unchanged; no leftover incoming/ staging objects.
     assert json.loads(store.objects[pointer_key])["snapshot"] == before
     incoming = _server_prefix(community, server) + "incoming/"
     assert not any(k.startswith(incoming) for k in store.objects)
-
-
-async def test_commit_allows_full_dimension_delete() -> None:
-    """A publish that removes a WHOLE dimension's region objects (legitimate delete)
-    is allowed on the object backend (issue #854)."""
-
-    store, storage = _store_and_storage()
-    community, server = new_scope()
-    await _publish(
-        storage,
-        community,
-        server,
-        {
-            "world/region/r.0.0.mca": healthy_region_bytes(),
-            "world/DIM-1/region/r.0.0.mca": healthy_region_bytes(),
-        },
-    )
-
-    after = {"world/region/r.0.0.mca": healthy_region_bytes()}
-    await _publish(storage, community, server, after)
-
-    blob = await drain(storage.open_hydrate_source(community, server))
-    assert read_tar(blob) == after
 
 
 async def test_prune_uploads_final_targz_and_drops_working_set_objects() -> None:

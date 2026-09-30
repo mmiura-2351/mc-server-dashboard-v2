@@ -299,7 +299,8 @@ export const en = {
     "Could not reach the server host to confirm the restart. The server may already be coming back; if it stays down the system will start it again automatically.",
   // Live-status degraded indicator: WS down, polling fallback (SPEC 6.2 / 7.2).
   "dashboard.liveDegraded": "Reconnecting — updates may lag",
-  // Clickable join-hostname copy feedback.
+  // Clickable join-hostname copy feedback (ServerAddressBadges, shared by the
+  // dashboard and the server detail header).
   "dashboard.copiedJoinHostname": "Copied!",
   // Bedrock address:port badge (issue #1543): shown alongside the Java
   // join-hostname badge when the server holds a bedrock_port.
@@ -343,16 +344,6 @@ export const en = {
   "serverDetail.noWorker": "no host assigned",
   "serverDetail.worker": "Host",
   "serverDetail.noPort": "no port",
-  // Relay join hostname (issue #961): shown in the header when the relay is enabled.
-  "serverDetail.copiedJoinHostname": "Copied!",
-  // Bedrock address:port badge (issue #1543): shown alongside the Java
-  // join-hostname badge when the server holds a bedrock_port.
-  "serverDetail.bedrockLabel": "Bedrock",
-  "serverDetail.copiedBedrockAddress": "Copied!",
-  // Badge tooltip: the copy action yields the host only; Bedrock's "Add Server"
-  // screen has a separate Port field, so the port is not part of the copied value.
-  "serverDetail.bedrockAddressCopyTitle":
-    "Copy address — enter port {port} in the separate Port field",
   // Tabs (WEBUI_SPEC.md 6.4–6.9). Built tabs: Overview, Settings; the rest are
   // placeholders pending later phases.
   "serverDetail.tab.overview": "Overview",

@@ -4,14 +4,12 @@ import {
   useCallback,
   useEffect,
   useMemo,
-  useRef,
   useState,
 } from "react";
 import { Link, useParams } from "react-router";
 import { api } from "../api/client.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
-import { copyToClipboard } from "../clipboard.ts";
 import { Modal } from "../components/Modal.tsx";
 import { Popover } from "../components/Popover.tsx";
 import { ResizableTable } from "../components/ResizableColumns.tsx";
@@ -28,6 +26,7 @@ import {
   type LifecycleAction,
   lifecycleErrorMessage,
 } from "./lifecycleErrors.ts";
+import { ServerAddressBadges } from "./ServerAddressBadges.tsx";
 import {
   actionApplies,
   bucketOf,
@@ -759,63 +758,6 @@ function ServerCard({ server, communityId, can }: ServerRowProps) {
     setEulaOpen,
     acceptEulaAndStart,
   } = useLifecycle(server, communityId);
-  const [copied, setCopied] = useState(false);
-  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Bedrock address:port badge (issue #1543): its own copy state, mirroring
-  // the Java join-hostname badge above.
-  const [bedrockCopied, setBedrockCopied] = useState(false);
-  const bedrockCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
-    null,
-  );
-
-  useEffect(() => {
-    return () => {
-      if (copyTimerRef.current !== null) clearTimeout(copyTimerRef.current);
-      if (bedrockCopyTimerRef.current !== null) {
-        clearTimeout(bedrockCopyTimerRef.current);
-      }
-    };
-  }, []);
-
-  const handleCopy = useCallback(() => {
-    if (server.join_hostname === null) return;
-    if (copyTimerRef.current !== null) clearTimeout(copyTimerRef.current);
-    copyToClipboard(server.join_hostname).then(
-      () => {
-        setCopied(true);
-        copyTimerRef.current = setTimeout(() => setCopied(false), 1500);
-      },
-      () => {
-        setCopied(false);
-      },
-    );
-  }, [server.join_hostname]);
-
-  const bedrockAddress =
-    server.bedrock_address !== null && server.bedrock_port !== null
-      ? `${server.bedrock_address}:${server.bedrock_port}`
-      : null;
-
-  const handleCopyBedrock = useCallback(() => {
-    if (server.bedrock_address === null) return;
-    if (bedrockCopyTimerRef.current !== null) {
-      clearTimeout(bedrockCopyTimerRef.current);
-    }
-    // Copy the host only: Bedrock's "Add Server" screen has a separate Port
-    // field, and pasting `host:port` into the address field fails validation.
-    copyToClipboard(server.bedrock_address).then(
-      () => {
-        setBedrockCopied(true);
-        bedrockCopyTimerRef.current = setTimeout(
-          () => setBedrockCopied(false),
-          1500,
-        );
-      },
-      () => {
-        setBedrockCopied(false);
-      },
-    );
-  }, [server.bedrock_address]);
 
   return (
     <div className="card server-card">
@@ -832,39 +774,15 @@ function ServerCard({ server, communityId, can }: ServerRowProps) {
         <span className="badge type">
           {server.server_type} {server.mc_version}
         </span>
-        {server.join_hostname !== null ? (
-          <button
-            type="button"
-            className="badge copyable"
-            title={server.join_hostname}
-            onClick={handleCopy}
-          >
-            {copied ? t("dashboard.copiedJoinHostname") : server.join_hostname}
-          </button>
-        ) : (
-          server.game_port !== null && (
-            <span className="badge">:{server.game_port}</span>
-          )
-        )}
-        {bedrockAddress !== null && (
-          <button
-            type="button"
-            className="badge copyable"
-            title={t("dashboard.bedrockAddressCopyTitle", {
-              port: server.bedrock_port ?? "",
-            })}
-            onClick={handleCopyBedrock}
-          >
-            {bedrockCopied ? (
-              t("dashboard.copiedBedrockAddress")
-            ) : (
-              <>
-                {t("dashboard.bedrockLabel")}: {server.bedrock_address}:
-                {server.bedrock_port}
-              </>
-            )}
-          </button>
-        )}
+        <ServerAddressBadges
+          server={server}
+          buttonClassName="badge copyable"
+          fallback={
+            server.game_port !== null && (
+              <span className="badge">:{server.game_port}</span>
+            )
+          }
+        />
       </div>
       <div className="foot">
         {(["start", "stop", "restart"] as const).map((action) => (
@@ -951,63 +869,6 @@ function ServerRow({ server, communityId, can }: ServerRowProps) {
     setEulaOpen,
     acceptEulaAndStart,
   } = useLifecycle(server, communityId);
-  const [copied, setCopied] = useState(false);
-  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Bedrock address:port badge (issue #1543): its own copy state, mirroring
-  // the Java join-hostname button above.
-  const [bedrockCopied, setBedrockCopied] = useState(false);
-  const bedrockCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
-    null,
-  );
-
-  useEffect(() => {
-    return () => {
-      if (copyTimerRef.current !== null) clearTimeout(copyTimerRef.current);
-      if (bedrockCopyTimerRef.current !== null) {
-        clearTimeout(bedrockCopyTimerRef.current);
-      }
-    };
-  }, []);
-
-  const handleCopy = useCallback(() => {
-    if (server.join_hostname === null) return;
-    if (copyTimerRef.current !== null) clearTimeout(copyTimerRef.current);
-    copyToClipboard(server.join_hostname).then(
-      () => {
-        setCopied(true);
-        copyTimerRef.current = setTimeout(() => setCopied(false), 1500);
-      },
-      () => {
-        setCopied(false);
-      },
-    );
-  }, [server.join_hostname]);
-
-  const bedrockAddress =
-    server.bedrock_address !== null && server.bedrock_port !== null
-      ? `${server.bedrock_address}:${server.bedrock_port}`
-      : null;
-
-  const handleCopyBedrock = useCallback(() => {
-    if (server.bedrock_address === null) return;
-    if (bedrockCopyTimerRef.current !== null) {
-      clearTimeout(bedrockCopyTimerRef.current);
-    }
-    // Copy the host only: Bedrock's "Add Server" screen has a separate Port
-    // field, and pasting `host:port` into the address field fails validation.
-    copyToClipboard(server.bedrock_address).then(
-      () => {
-        setBedrockCopied(true);
-        bedrockCopyTimerRef.current = setTimeout(
-          () => setBedrockCopied(false),
-          1500,
-        );
-      },
-      () => {
-        setBedrockCopied(false);
-      },
-    );
-  }, [server.bedrock_address]);
 
   return (
     <tr>
@@ -1024,53 +885,19 @@ function ServerRow({ server, communityId, can }: ServerRowProps) {
         {server.server_type} {server.mc_version}
       </td>
       <td>
-        {server.join_hostname !== null ? (
-          <button
-            type="button"
-            className="copyable"
-            title={server.join_hostname}
-            style={{
-              cursor: "pointer",
-              background: "none",
-              border: "none",
-              padding: 0,
-              font: "inherit",
-              color: "inherit",
-            }}
-            onClick={handleCopy}
-          >
-            {copied ? t("dashboard.copiedJoinHostname") : server.join_hostname}
-          </button>
-        ) : (
-          (server.game_port ?? "—")
-        )}
-        {bedrockAddress !== null && (
-          <button
-            type="button"
-            className="copyable"
-            title={t("dashboard.bedrockAddressCopyTitle", {
-              port: server.bedrock_port ?? "",
-            })}
-            style={{
-              cursor: "pointer",
-              background: "none",
-              border: "none",
-              padding: 0,
-              font: "inherit",
-              color: "inherit",
-            }}
-            onClick={handleCopyBedrock}
-          >
-            {bedrockCopied ? (
-              t("dashboard.copiedBedrockAddress")
-            ) : (
-              <>
-                {t("dashboard.bedrockLabel")}: {server.bedrock_address}:
-                {server.bedrock_port}
-              </>
-            )}
-          </button>
-        )}
+        <ServerAddressBadges
+          server={server}
+          buttonClassName="copyable"
+          buttonStyle={{
+            cursor: "pointer",
+            background: "none",
+            border: "none",
+            padding: 0,
+            font: "inherit",
+            color: "inherit",
+          }}
+          fallback={server.game_port ?? "—"}
+        />
       </td>
       <td className="dim" title={server.assigned_worker_id ?? undefined}>
         {server.assigned_worker_id !== null
