@@ -778,9 +778,10 @@ describe("ServerDetailPage lifecycle controls", () => {
     it("wires the header controls to the optimistic lifecycle", async () => {
       // The transition state machine itself is covered in
       // useLifecycleMutation.test.tsx; this pins the detail page's wiring: the
-      // header pill's detail cache, the controls held while in flight, the
-      // dashboard list refreshed on settle, and the toast receiving the verb
-      // (command_failed reads differently for restart).
+      // header pill's detail cache, the live status frame landing in that same
+      // cache, the controls held while in flight, the dashboard list refreshed
+      // on settle, and the toast receiving the verb (command_failed reads
+      // differently for restart).
       mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
       let rejectPost!: (err: unknown) => void;
       mockApi.post.mockReturnValue(
@@ -811,14 +812,31 @@ describe("ServerDetailPage lifecycle controls", () => {
         screen.getByRole("button", { name: t("serverDetail.export") }),
       ).toBeDisabled();
 
-      // Hang the settle refetch so the pill below is the rollback, not a reload.
+      // The server crashes mid-flight: restart applies again, but the open
+      // request still holds it.
+      act(() => {
+        MockWebSocket.last().open();
+        MockWebSocket.last().message(
+          JSON.stringify({
+            stream: "status",
+            ts: "t",
+            payload: { state: "crashed", detail: "" },
+          }),
+        );
+      });
+      expect(
+        screen.getByRole("button", { name: t("serverDetail.restart") }),
+      ).toBeDisabled();
+
+      // Hang the settle refetch so the pill below is the cache, not a reload.
       mockApi.get.mockReturnValue(new Promise(() => {}));
       act(() => rejectPost(new ApiError(409, { reason: "command_failed" })));
 
       expect(
         await screen.findByText(t("dashboard.lifecycle.restartPending")),
       ).toBeInTheDocument();
-      expect(statePill()).toBe(t("dashboard.state.running"));
+      // The failed restart does not roll the newer crash back to "running".
+      expect(statePill()).toBe(t("dashboard.state.crashed"));
       expect(
         screen.getByRole("button", { name: t("serverDetail.restart") }),
       ).toBeEnabled();

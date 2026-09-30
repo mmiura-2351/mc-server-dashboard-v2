@@ -406,8 +406,9 @@ describe("DashboardPage lifecycle actions", () => {
   it("drives only the clicked row through the optimistic lifecycle", async () => {
     // The transition state machine itself is covered in
     // useLifecycleMutation.test.tsx; this pins the dashboard's wiring: the row's
-    // own server id and list cache, its pending-disabled buttons, and its toast
-    // receiving the verb (worker_busy reads differently for stop).
+    // own server id and list cache, the live status frame landing in that same
+    // cache, its buttons held while in flight, and its toast receiving the verb
+    // (worker_busy reads differently for stop).
     mockApi.get.mockResolvedValue([
       server({ id: "s1", name: "alpha" }),
       server({ id: "s2", name: "bravo" }),
@@ -450,14 +451,30 @@ describe("DashboardPage lifecycle actions", () => {
       within(alpha).getByRole("button", { name: t("dashboard.stop") }),
     ).toBeEnabled();
 
-    // Hang the settle refetch so the pill below is the rollback, not a reload.
+    // bravo crashes mid-flight: stop applies again, but the open request still
+    // holds its buttons.
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message({
+        stream: "status",
+        ts: "t",
+        payload: { state: "crashed", detail: "" },
+        server_id: "s2",
+      });
+    });
+    expect(
+      within(bravo).getByRole("button", { name: t("dashboard.stop") }),
+    ).toBeDisabled();
+
+    // Hang the settle refetch so the pill below is the cache, not a reload.
     mockApi.get.mockReturnValue(new Promise(() => {}));
     act(() => rejectPost(new ApiError(409, { reason: "worker_busy" })));
 
     expect(
       await screen.findByText(t("dashboard.lifecycle.stopPending")),
     ).toBeInTheDocument();
-    expect(within(bravo).getByText(t("dashboard.state.running"))).toBeVisible();
+    // The failed stop does not roll the newer crash back to "running".
+    expect(within(bravo).getByText(t("dashboard.state.crashed"))).toBeVisible();
     expect(
       within(bravo).getByRole("button", { name: t("dashboard.stop") }),
     ).toBeEnabled();
