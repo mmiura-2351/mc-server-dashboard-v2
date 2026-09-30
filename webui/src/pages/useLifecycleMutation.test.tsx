@@ -267,18 +267,20 @@ describe("useLifecycleMutation", () => {
     await waitFor(() => expect(listState("s1")).toBe("starting"));
     await waitFor(() => expect(listState("s2")).toBe("stopping"));
 
-    await act(async () => startS1.reject(new ApiError(500, {})));
+    await act(async () => startS1.resolve(undefined));
 
-    await waitFor(() => expect(s1.result.current.isError).toBe(true));
-    expect(listState("s1")).toBe("stopped");
-    expect(listState("s2")).toBe("stopping");
+    await waitFor(() => expect(s1.result.current.isSuccess).toBe(true));
     expect(s2.result.current.isPending).toBe(true);
-    expect(s2.onError).not.toHaveBeenCalled();
-
-    await act(async () => stopS2.resolve(undefined));
-
-    await waitFor(() => expect(s2.result.current.isSuccess).toBe(true));
-    expect(listState("s1")).toBe("stopped");
+    expect(listState("s1")).toBe("starting");
     expect(listState("s2")).toBe("stopping");
+
+    // s2 rolls back to its own captured state, not s1's.
+    const error = new ApiError(500, {});
+    await act(async () => stopS2.reject(error));
+
+    await waitFor(() => expect(s2.onError).toHaveBeenCalledWith(error, "stop"));
+    expect(s1.onError).not.toHaveBeenCalled();
+    expect(listState("s1")).toBe("starting");
+    expect(listState("s2")).toBe("running");
   });
 });

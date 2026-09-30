@@ -16,6 +16,7 @@ import { t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { installMockWebSocket, MockWebSocket } from "../test/mockWebSocket.ts";
 import { DashboardPage } from "./DashboardPage.tsx";
+import { serversKey } from "./useCommunityEvents.ts";
 
 const CID = "c1";
 
@@ -417,7 +418,7 @@ describe("DashboardPage lifecycle actions", () => {
         rejectPost = reject;
       }),
     );
-    renderPage();
+    const { queryClient } = renderPage();
 
     const alpha = (await screen.findByText("alpha")).closest(
       ".server-card",
@@ -435,6 +436,12 @@ describe("DashboardPage lifecycle actions", () => {
     expect(mockApi.post).toHaveBeenCalledWith(
       `/api/communities/${CID}/servers/s2/stop`,
     );
+    // The pill reads the in-flight verb, so pin the list-cache write directly.
+    expect(
+      queryClient
+        .getQueryData<{ id: string; observed_state: string }[]>(serversKey(CID))
+        ?.map((s) => s.observed_state),
+    ).toEqual(["running", "stopping"]);
     expect(
       within(bravo).getByRole("button", { name: t("dashboard.restart") }),
     ).toBeDisabled();
