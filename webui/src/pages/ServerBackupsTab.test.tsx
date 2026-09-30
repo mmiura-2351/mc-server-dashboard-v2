@@ -621,6 +621,25 @@ describe("ServerBackupsTab restore (stopped-only two-step)", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("surfaces a failed stop from the restore dialog", async () => {
+    routeGet({ srv: { observed_state: "running" } });
+    mockApi.post.mockRejectedValue(
+      new ApiError(409, { reason: "server_busy" }),
+    );
+    await openBackups();
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: t("backups.restore") }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: t("backups.restoreDialog.stop") }),
+    );
+
+    expect(
+      await screen.findByText(t("backups.error.serverBusy")),
+    ).toBeInTheDocument();
+  });
+
   it("surfaces a 409 server_not_stopped specifically on restore", async () => {
     routeGet({ srv: { observed_state: "stopped", desired_state: "stopped" } });
     mockApi.post.mockRejectedValue(
@@ -720,6 +739,24 @@ describe("ServerBackupsTab permission gating", () => {
     ).toBeInTheDocument();
   });
 
+  it("names the upload limit on a reasonless 413 upload", async () => {
+    // A proxy's body-size refusal carries no problem+json reason, so only the
+    // status can name it.
+    routeGet();
+    mockPostFormWithProgress.mockRejectedValue(new ApiError(413, undefined));
+    await openBackups();
+
+    const input = (await screen.findByLabelText(
+      t("backups.upload"),
+    )) as HTMLInputElement;
+    const file = new File(["x"], "b.tar.gz", { type: "application/gzip" });
+    fireEvent.change(input, { target: { files: [file] } });
+
+    expect(
+      await screen.findByText(t("backups.error.tooLarge")),
+    ).toBeInTheDocument();
+  });
+
   it("names the platform-managed path on a 422 platform_managed_path upload (#2790)", async () => {
     // A member under the root server.properties path is refused before the
     // archive is stored (issue #2869). Without an arm for the reason the switch
@@ -788,6 +825,13 @@ describe("ServerBackupsTab query error surfacing (#2554)", () => {
     expect(
       screen.queryByText(t("backups.error.workerUnavailable")),
     ).not.toBeInTheDocument();
+  });
+
+  it("falls back to the load message for an unmapped listing failure", async () => {
+    routeGet({ listError: new ApiError(500, { reason: "internal_error" }) });
+    await openBackups();
+
+    expect(await screen.findByText(t("backups.loadError"))).toBeInTheDocument();
   });
 
   it("keeps the listing rendered when statistics alone fails", async () => {
