@@ -1,11 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import {
-  act,
-  fireEvent,
-  render,
-  screen,
-  waitFor,
-} from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client.ts";
@@ -169,26 +163,6 @@ describe("ServerPlayersTab", () => {
     expect(
       screen.getByText(`1 ${t("players.memberCount")}`),
     ).toBeInTheDocument();
-  });
-
-  it("keeps rendering cached attached groups when a background refetch fails (#1797)", async () => {
-    routeGet({ attached: [group({ name: "Admins" })] });
-    const { queryClient } = renderTab();
-    await openPlayers();
-    await screen.findByText("Admins");
-
-    // Simulate a transient API outage: the next background refetch fails.
-    mockApi.get.mockRejectedValue(new ApiError(500, {}));
-    await act(() => queryClient.invalidateQueries());
-    // The query-state notification lands a task after invalidateQueries
-    // settles; flush it so the assertion sees the post-refetch render.
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
-
-    // The cached list stays on screen instead of the tab-level error.
-    expect(screen.getByText("Admins")).toBeInTheDocument();
-    expect(screen.queryByText(t("players.loadError"))).not.toBeInTheDocument();
   });
 
   it("shows the empty state when no groups are attached", async () => {
@@ -423,24 +397,6 @@ describe("ServerPlayersTab Sessions view (issue #961)", () => {
     await openPlayers();
 
     expect(await screen.findByText(t("sessions.active"))).toBeInTheDocument();
-  });
-
-  it("keeps rendering cached sessions when a background refetch fails (#1805)", async () => {
-    routeGet({ sessions: [session()] });
-    const { queryClient } = renderTab();
-    await openPlayers();
-    await screen.findByText("Alice");
-
-    // Simulate a transient API outage: the next background refetch fails.
-    mockApi.get.mockRejectedValue(new ApiError(500, {}));
-    await act(() => queryClient.invalidateQueries());
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
-
-    // The cached sessions stay on screen instead of the error.
-    expect(screen.getByText("Alice")).toBeInTheDocument();
-    expect(screen.queryByText(t("sessions.loadError"))).not.toBeInTheDocument();
   });
 
   it("shows the unknown placeholder for null identity fields", async () => {

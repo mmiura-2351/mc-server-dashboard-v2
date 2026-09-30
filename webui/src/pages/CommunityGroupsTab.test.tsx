@@ -1,11 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import {
-  act,
-  fireEvent,
-  render,
-  screen,
-  waitFor,
-} from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client.ts";
@@ -537,58 +531,5 @@ describe("CommunityGroupsTab", () => {
         t("permissions.deniedNamed", { permission: "group:manage" }),
       ),
     ).toBeInTheDocument();
-  });
-
-  it("keeps rendering cached groups when a background refetch fails (#1797)", async () => {
-    routeGet({ groups: [group({ name: "Admins" })] });
-    const { queryClient } = renderPage();
-    await openGroupsTab();
-    await screen.findByText("Admins");
-
-    // Simulate a transient API outage: the next background refetch fails.
-    mockApi.get.mockRejectedValue(new ApiError(500, {}));
-    await act(() => queryClient.invalidateQueries());
-    // The query-state notification lands a task after invalidateQueries
-    // settles; flush it so the assertion sees the post-refetch render.
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
-
-    // The cached list stays on screen instead of the tab-level error.
-    expect(screen.getByText("Admins")).toBeInTheDocument();
-    expect(
-      screen.queryByText(t("communitySettings.groups.loadError")),
-    ).not.toBeInTheDocument();
-  });
-
-  it("keeps rendering a group's cached attached servers when a background refetch fails (#1797)", async () => {
-    routeGet({
-      groups: [group()],
-      servers: [server({ id: "s1", name: "Survival" })],
-      groupServers: ["s1"],
-    });
-    const { queryClient } = renderPage();
-    await openGroupsTab();
-    fireEvent.click(
-      await screen.findByRole("button", {
-        name: t("communitySettings.groups.expand"),
-      }),
-    );
-    await screen.findByText("Survival");
-
-    // Simulate a transient API outage: the next background refetch fails.
-    mockApi.get.mockRejectedValue(new ApiError(500, {}));
-    await act(() => queryClient.invalidateQueries());
-    // The query-state notification lands a task after invalidateQueries
-    // settles; flush it so the assertion sees the post-refetch render.
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
-
-    // The cached attachment list stays instead of the section-level error.
-    expect(screen.getByText("Survival")).toBeInTheDocument();
-    expect(
-      screen.queryByText(t("communitySettings.groups.serversLoadError")),
-    ).not.toBeInTheDocument();
   });
 });

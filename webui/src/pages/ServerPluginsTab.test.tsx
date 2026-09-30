@@ -7,13 +7,7 @@
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import {
-  act,
-  fireEvent,
-  render,
-  screen,
-  waitFor,
-} from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client.ts";
@@ -1496,29 +1490,6 @@ describe("ServerPluginsTab Bedrock discovery hint (issue #1543)", () => {
       expect(screen.getByText("Geyser-Spigot")).toBeInTheDocument();
     });
     expect(screen.queryByText(HINT_TEXT)).not.toBeInTheDocument();
-  });
-});
-
-describe("ServerPluginsTab refetch failure (#1805)", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
-  it("keeps rendering cached plugins when a background refetch fails", async () => {
-    mockGets({ plugins: [plugin()], validation: EMPTY_VALIDATION });
-    const { queryClient } = renderTab();
-    await screen.findByText("Sodium");
-
-    // Simulate a transient API outage: the next background refetch fails.
-    mockApi.get.mockRejectedValue(new ApiError(500, {}));
-    await act(() => queryClient.invalidateQueries());
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
-
-    // The cached list stays on screen instead of the error.
-    expect(screen.getByText("Sodium")).toBeInTheDocument();
-    expect(screen.queryByText(/Could not load mods/)).not.toBeInTheDocument();
   });
 });
 

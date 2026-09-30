@@ -57,6 +57,7 @@ import { humanizeBytes } from "../format.ts";
 import { t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
+import { classifyQueryResult } from "../queryState.ts";
 import {
   type DecodedText,
   decodeBase64Text,
@@ -537,6 +538,7 @@ export function ServerFilesTab({
         { signal },
       ) as Promise<DirListing>,
   });
+  const listingState = classifyQueryResult(listing);
 
   const refetchList = () =>
     queryClient.invalidateQueries({ queryKey: listKey });
@@ -1271,17 +1273,17 @@ export function ServerFilesTab({
               <span>{t("files.dropZone")}</span>
             </div>
           )}
-          {listing.isPending ? (
+          {listingState.kind === "pending" ? (
             <p className="sub">{t("files.loading")}</p>
           ) : /* Error only when there is nothing to show (initial load
                failed). A failed background refetch retains `data`, so
                the cached listing keeps rendering through transient API
                blips (#1805). */
-          listing.data === undefined ? (
+          listingState.kind === "error" ? (
             <p className="field-error">{t("files.listError")}</p>
           ) : (
             <Listing
-              listing={listing.data}
+              listing={listingState.data}
               dir={dir}
               communityId={communityId}
               serverId={serverId}
@@ -2258,18 +2260,20 @@ function Viewer({
     onError,
   });
 
-  if (content.isPending) {
+  const contentState = classifyQueryResult(content);
+
+  if (contentState.kind === "pending") {
     return <p className="sub">{t("files.loading")}</p>;
   }
   // Error only when there is nothing to show (initial load failed). A failed
   // background refetch retains `data`, so the cached content keeps rendering
   // through transient API blips (#1805).
-  if (content.data === undefined) {
+  if (contentState.kind === "error") {
     return <p className="field-error">{t("files.openError")}</p>;
   }
 
-  const decoded = isProbablyText(content.data.content_base64)
-    ? decodeBase64Text(content.data.content_base64, { path, mcVersion })
+  const decoded = isProbablyText(contentState.data.content_base64)
+    ? decodeBase64Text(contentState.data.content_base64, { path, mcVersion })
     : null;
   const isText = decoded !== null;
   const downloadName = path.split("/").at(-1) ?? path;
@@ -2431,6 +2435,8 @@ function HistoryDrawer({
         { signal },
       ) as Promise<FileContent>,
   });
+  const historyState = classifyQueryResult(history);
+  const previewState = classifyQueryResult(preview);
 
   const rollback = useMutation({
     mutationFn: (versionId: string) =>
@@ -2463,19 +2469,19 @@ function HistoryDrawer({
       }
     >
       <p className="field-hint">{t("files.history.hint")}</p>
-      {history.isPending ? (
+      {historyState.kind === "pending" ? (
         <p className="sub">{t("files.history.loading")}</p>
       ) : /* Error only when there is nothing to show (initial load
            failed). A failed background refetch retains `data`, so the
            cached history keeps rendering through transient blips
            (#1805). */
-      history.data === undefined ? (
+      historyState.kind === "error" ? (
         <p className="field-error">{t("files.history.error")}</p>
-      ) : history.data.versions.length === 0 ? (
+      ) : historyState.data.versions.length === 0 ? (
         <p className="sub">{t("files.history.empty")}</p>
       ) : (
         <ul className="files-history-list">
-          {history.data.versions.map((versionId) => (
+          {historyState.data.versions.map((versionId) => (
             <li key={versionId} className="files-history-row">
               <button
                 type="button"
@@ -2546,22 +2552,22 @@ function HistoryDrawer({
           <p className="files-history-date">
             {versionDate(previewing).toLocaleString()}
           </p>
-          {preview.isPending ? (
+          {previewState.kind === "pending" ? (
             <p className="sub">{t("files.history.preview.loading")}</p>
           ) : /* Error only when there is nothing to show (initial load
                failed). A failed background refetch retains `data`, so
                the cached preview keeps rendering through transient
                blips (#1805). */
-          preview.data === undefined ? (
+          previewState.kind === "error" ? (
             <p className="field-error">{t("files.history.preview.error")}</p>
-          ) : isProbablyText(preview.data.content_base64) ? (
+          ) : isProbablyText(previewState.data.content_base64) ? (
             <textarea
               className="file-editor"
               spellCheck={false}
               readOnly
               aria-label={t("files.editorLabel")}
               value={
-                decodeBase64Text(preview.data.content_base64, {
+                decodeBase64Text(previewState.data.content_base64, {
                   path,
                   mcVersion,
                 }).text

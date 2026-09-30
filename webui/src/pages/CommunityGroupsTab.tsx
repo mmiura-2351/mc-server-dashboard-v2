@@ -11,6 +11,7 @@ import { useToast } from "../components/Toast.tsx";
 import { t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
+import { classifyQueryResult } from "../queryState.ts";
 
 type GroupResponse = components["schemas"]["GroupResponse"];
 type PlayerResponse = components["schemas"]["PlayerResponse"];
@@ -108,13 +109,15 @@ export function CommunityGroupsTab({
     },
   });
 
-  if (groups.isPending) {
+  const groupsState = classifyQueryResult(groups);
+
+  if (groupsState.kind === "pending") {
     return <p className="sub">{t("communitySettings.groups.loading")}</p>;
   }
   // Error only when there is nothing to show (the initial load failed). A
   // failed background refetch retains `data`, so the cached list keeps
   // rendering through transient API blips (#1797).
-  if (groups.data === undefined) {
+  if (groupsState.kind === "error") {
     return (
       <p className="field-error">{t("communitySettings.groups.loadError")}</p>
     );
@@ -135,11 +138,11 @@ export function CommunityGroupsTab({
         )}
       </div>
 
-      {groups.data.length === 0 ? (
+      {groupsState.data.length === 0 ? (
         <p className="sub">{t("communitySettings.groups.empty")}</p>
       ) : (
         <ul className="group-list">
-          {groups.data.map((group) => (
+          {groupsState.data.map((group) => (
             <li className="group-item" key={group.id}>
               <div className="group-row">
                 <span className="group-name">{group.name}</span>
@@ -336,6 +339,7 @@ function GroupDetail({
   });
 
   const serverById = new Map(servers.map((s) => [s.id, s]));
+  const attachedServersState = classifyQueryResult(attachedServers);
   const attachedIds = attachedServers.data ?? [];
   const attachedSet = new Set(attachedIds);
   // Picker = community servers not already attached.
@@ -377,12 +381,12 @@ function GroupDetail({
 
       <div className="card">
         <h3>{t("communitySettings.groups.serversHeading")}</h3>
-        {attachedServers.isPending ? (
+        {attachedServersState.kind === "pending" ? (
           <p className="sub">{t("communitySettings.groups.serversLoading")}</p>
         ) : /* Error only when there is nothing to show (the initial load
                failed). A failed background refetch retains `data`, so the
                cached list keeps rendering through transient blips (#1797). */
-        attachedServers.data === undefined ? (
+        attachedServersState.kind === "error" ? (
           <p className="field-error">
             {t("communitySettings.groups.serversLoadError")}
           </p>

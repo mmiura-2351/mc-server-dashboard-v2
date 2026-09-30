@@ -15,6 +15,7 @@ import { PasswordInput } from "../components/PasswordInput.tsx";
 import { ResizableTable } from "../components/ResizableColumns.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { type TranslationKey, t } from "../i18n/index.ts";
+import { classifyQueryResult } from "../queryState.ts";
 import { useOffsetParam } from "./urlState.ts";
 
 // Platform admin Users page (WEBUI_SPEC.md 6.12 / 2.1): a paginated user table
@@ -117,6 +118,7 @@ export function AdminUsersPage() {
     queryFn: ({ signal }) => api.get(usersUrl(offset), { signal }),
     placeholderData: keepPreviousData,
   });
+  const usersState = classifyQueryResult(usersQuery);
 
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ["users", "list"] });
@@ -222,14 +224,14 @@ export function AdminUsersPage() {
         </button>
       </div>
 
-      {usersQuery.isPending ? (
+      {usersState.kind === "pending" ? (
         <p className="sub" role="status">
           {t("admin.users.loading")}
         </p>
       ) : /* Error only when there is nothing to show (initial load failed).
            A failed background refetch retains `data`, so the cached page
            keeps rendering through transient API blips (#1805). */
-      usersQuery.data === undefined ? (
+      usersState.kind === "error" ? (
         <p className="field-error" role="alert">
           {t("admin.users.loadError")}
         </p>
