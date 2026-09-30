@@ -482,10 +482,6 @@ export const en = {
     "The config overrides must be a JSON object, and may not nest more than 8 levels deep in total. Flatten the value that nests deeper.",
   "serverDetail.error.configLoneSurrogate":
     "A config override key or value contains a broken character — often half of an emoji left behind by a copy-paste. Retype or remove that text.",
-  // Relay join address name errors (issue #961).
-  "serverDetail.error.invalidSlug":
-    "The join address name must be a valid DNS label: lowercase letters, digits, hyphens; cannot start or end with a hyphen.",
-  "serverDetail.error.slugTaken": "That join address name is already in use.",
   "serverDetail.error.generic": "Something went wrong. Please try again.",
   // EULA acceptance dialog (issue #1104).
   "serverDetail.eulaDialog.title": "Accept Minecraft EULA?",

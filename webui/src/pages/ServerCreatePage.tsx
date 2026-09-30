@@ -18,6 +18,10 @@ import { useActiveCommunity } from "../permissions/ActiveCommunityProvider.tsx";
 import { useCanCode } from "../permissions/useCan.ts";
 import { classifyQueryResult } from "../queryState.ts";
 import { dashboardPath } from "../routes.ts";
+import {
+  serverCreateErrorPresentation,
+  serverImportErrorPresentation,
+} from "./serverCreateErrorPresentation.ts";
 import { handleTabKeyDown, panelId, tabId, useTabHash } from "./urlState.ts";
 
 // Server create wizard (WEBUI_SPEC.md 6.3). Two steps for a fresh server
@@ -89,29 +93,6 @@ const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 function slugCreateValid(value: string): boolean {
   return value.trim() === "" || SLUG_RE.test(value.trim());
 }
-
-// Create-path problem reasons that map to a specific inline/toast message. A
-// 409 `port_taken` is surfaced specifically (issue requirement); everything else
-// falls back to the generic toast.
-const CREATE_ERROR_KEY: Record<string, TranslationKey> = {
-  port_taken: "serverCreate.error.port_taken",
-  port_out_of_range: "serverCreate.error.port_out_of_range",
-  server_name_exists: "serverCreate.error.server_name_exists",
-  invalid_server_name: "serverCreate.error.invalid_server_name",
-  unknown_version: "serverCreate.error.unknown_version",
-  invalid_memory_limit: "serverCreate.error.invalid_memory_limit",
-  invalid_cpu_allocation: "serverCreate.error.invalid_cpu_allocation",
-  invalid_slug: "serverCreate.error.invalid_slug",
-  slug_taken: "serverCreate.error.slug_taken",
-  // The config-blob guard (issue #94) as far as this wizard can trip it. The
-  // POST carries a flat object of raw override strings plus the two
-  // range-checked numbers, so only the size ceiling and the lone-surrogate rule
-  // are reachable from here; `config_null_value` and `config_invalid_shape`
-  // need a JSON-typed value, which only the Settings tab's editor produces, so
-  // arms for those two would be dead.
-  config_too_large: "serverCreate.error.config_too_large",
-  config_lone_surrogate: "serverCreate.error.config_lone_surrogate",
-};
 
 export function ServerCreatePage() {
   // Create in the community named by the URL `:cid` (#784), not the active one:
@@ -392,9 +373,7 @@ function NewServerWizard({ communityId }: { communityId: string }) {
       );
       navigate(`${dashboardPath(communityId)}/servers/${server.id}`);
     } catch (err) {
-      if (!handleCreateError(err, showToast, setNameError, setSlugError)) {
-        showToast(t("serverCreate.genericError"), "error");
-      }
+      handleCreateError(err, showToast, setNameError, setSlugError);
       setSubmitting(false);
     }
   }
@@ -839,9 +818,7 @@ function ImportForm({ communityId }: { communityId: string }) {
         setSubmitting(false);
         return;
       }
-      if (!handleImportError(err, showToast, setNameError)) {
-        showToast(t("serverCreate.genericError"), "error");
-      }
+      handleImportError(err, showToast, setNameError);
       setSubmitting(false);
     }
   }
@@ -905,97 +882,66 @@ function ImportForm({ communityId }: { communityId: string }) {
 // Shared error surfacing
 // ---------------------------------------------------------------------------
 
-// Surface a create failure. A mapped reason becomes a specific inline error or
-// toast: `invalid_server_name` and a structural validation_error on `name` go
-// inline against the name field; `invalid_slug`/`slug_taken` go inline against
-// the slug field; all other mapped reasons become toasts.
-// Returns whether it was handled.
+// Surface a create failure where the presentation contract places it
+// (serverCreateErrorPresentation.ts): inline on the name or slug field, or as a
+// toast.
 function handleCreateError(
   err: unknown,
   showToast: (m: string, k: "error") => void,
   setNameError: (m: string) => void,
   setSlugError: (m: string) => void,
-): boolean {
-  if (!(err instanceof ApiError)) {
-    return false;
+): void {
+  if (surfaceNameValidationError(err, setNameError)) {
+    return;
   }
-  if (err.reason !== undefined) {
-    if (err.reason === "invalid_server_name") {
-      setNameError(t("serverCreate.error.invalid_server_name"));
-      return true;
-    }
-    if (err.reason === "invalid_slug") {
-      setSlugError(t("serverCreate.error.invalid_slug"));
-      return true;
-    }
-    if (err.reason === "slug_taken") {
-      setSlugError(t("serverCreate.error.slug_taken"));
-      return true;
-    }
-    const key = CREATE_ERROR_KEY[err.reason];
-    if (key !== undefined) {
-      showToast(t(key), "error");
-      return true;
-    }
-    if (err.reason === "validation_error") {
-      const fields = fieldErrorsFromValidation(err.body, ["name"]);
-      if (fields?.name !== undefined) {
-        setNameError(fields.name);
-        return true;
-      }
-    }
+  const { target, key } = serverCreateErrorPresentation(
+    err instanceof ApiError ? err.reason : undefined,
+  );
+  if (target === "name") {
+    setNameError(t(key));
+  } else if (target === "slug") {
+    setSlugError(t(key));
+  } else {
+    showToast(t(key), "error");
   }
-  return false;
 }
 
 // Import-specific surfacing: a bad archive / oversize upload, plus the create
-// reasons it shares (name conflict, …).
-//
-// The import tab has no slug field, so a reason the create path reports *inline
-// against that field* has nowhere to land here. `slug_taken` is reachable from
-// import (issue #3022: the join address is auto-assigned, and a racer can take
-// it between the assignment and the commit that inserts the row), and it used to
-// be swallowed — the create handler set its slug error and returned "handled",
-// so the caller showed no toast and the operator saw nothing at all, which is
-// worse than the 500 it replaced. It is answered here instead, asking for a
-// retry rather than pointing at a field the operator never filled in: the next
-// attempt draws a fresh address. The delegated call now routes any *other*
-// slug-field reason to a toast rather than a discarding setter, so a "handled"
-// return always means something was actually displayed. Only `invalid_slug`
-// takes that route today, and import cannot trigger it (it sends no explicit
-// slug).
+// reasons it shares (name conflict, …). The import form has no slug field, so
+// its presentation only ever targets the name field or a toast.
 function handleImportError(
   err: unknown,
   showToast: (m: string, k: "error") => void,
   setNameError: (m: string) => void,
+): void {
+  if (surfaceNameValidationError(err, setNameError)) {
+    return;
+  }
+  const problem = err instanceof ApiError ? err : undefined;
+  const { target, key } = serverImportErrorPresentation(
+    problem?.status,
+    problem?.reason,
+  );
+  if (target === "name") {
+    setNameError(t(key));
+  } else {
+    showToast(t(key), "error");
+  }
+}
+
+// A structural validation_error on `name` carries the API's own message, so it
+// goes inline against the name field verbatim. Returns whether it was handled.
+function surfaceNameValidationError(
+  err: unknown,
+  setNameError: (m: string) => void,
 ): boolean {
-  if (!(err instanceof ApiError)) {
+  if (!(err instanceof ApiError) || err.reason !== "validation_error") {
     return false;
   }
-  if (err.status === 413) {
-    showToast(t("serverCreate.import.tooLarge"), "error");
-    return true;
+  const fields = fieldErrorsFromValidation(err.body, ["name"]);
+  if (fields?.name === undefined) {
+    return false;
   }
-  if (err.reason === "invalid_export_metadata") {
-    showToast(t("serverCreate.import.error.invalid_export_metadata"), "error");
-    return true;
-  }
-  if (err.reason === "platform_managed_path") {
-    // An archive member stored under the root server.properties path, refused
-    // before the row is created (issue #2869): publishing it would stand a
-    // directory where the platform keeps a file. Import gets its own string
-    // rather than the Backups upload's because the two archives can be tripped
-    // by different things — a tar can carry a real server.properties directory
-    // member, a zip cannot (`_zip_entries` skips directory entries), so here the
-    // offending entry is always a file the operator can find and delete.
-    showToast(t("serverCreate.import.error.platform_managed_path"), "error");
-    return true;
-  }
-  if (err.reason === "slug_taken") {
-    showToast(t("serverCreate.import.error.slug_taken"), "error");
-    return true;
-  }
-  return handleCreateError(err, showToast, setNameError, (m) =>
-    showToast(m, "error"),
-  );
+  setNameError(fields.name);
+  return true;
 }

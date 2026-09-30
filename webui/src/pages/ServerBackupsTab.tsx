@@ -38,6 +38,10 @@ import { type TranslationKey, t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
 import { classifyQueryResult } from "../queryState.ts";
+import {
+  backupErrorPresentation,
+  backupRestoreErrorPresentation,
+} from "./serverBackupsErrorPresentation.ts";
 import { serverKey } from "./serverKey.ts";
 import { normalizeState } from "./serverState.ts";
 import { serversKey } from "./useCommunityEvents.ts";
@@ -56,55 +60,14 @@ function statsKey(communityId: string, serverId: string) {
   return ["backups", communityId, serverId, "statistics"] as const;
 }
 
-// Map a create/upload/restore/query error to a specific message; otherwise the
-// caller's `fallback` (mutations use the generic message, the load guards pass a
-// load-context one so an unmapped failure still reads as a load failure, #2554).
-function createErrorMessage(
+// The presentation contract reads only an API problem's status and reason; a
+// failure that is not an API problem (a network error) takes the fallback.
+function backupErrorKey(
   error: unknown,
-  fallback: TranslationKey = "backups.error.generic",
+  fallback?: TranslationKey,
 ): TranslationKey {
-  if (!(error instanceof ApiError)) return fallback;
-
-  // Check reason first (most specific).
-  switch (error.reason) {
-    case "server_unsettled":
-      return "backups.error.unsettled";
-    case "server_not_stopped":
-      return "backups.error.serverMustBeStopped";
-    case "server_busy":
-    case "worker_busy":
-      // Two layers, one remedy (issue #2436). `server_busy` is API-side
-      // lifecycle-lock contention; `worker_busy` is the Worker refusing a
-      // SnapshotTrigger because another mutating command for this server is
-      // already in flight — the create was refused without being applied and
-      // clears on its own, so the operator's only move for either is to wait.
-      // Naming which layer was busy would be internals they cannot act on, the
-      // same call the lifecycle surfaces made (lifecycleErrors.ts).
-      return "backups.error.serverBusy";
-    case "invalid_archive":
-      return "backups.error.invalidArchive";
-    case "platform_managed_path":
-      // An uploaded archive whose member lands under the root server.properties
-      // path (issue #2869): a verdict about the archive's contents, so the
-      // generic toast would hide the one member the user has to remove.
-      return "backups.error.platformManagedPath";
-    case "worker_unavailable":
-      return "backups.error.workerUnavailable";
-    case "storage_unavailable":
-      // The object store, not the server host, is down (issue #2378). Without
-      // this case the 503 below would blame the host for a storage outage.
-      return "backups.error.storageUnavailable";
-  }
-
-  // Check status (less specific).
-  switch (error.status) {
-    case 413:
-      return "backups.error.tooLarge";
-    case 503:
-      return "backups.error.workerUnavailable";
-  }
-
-  return fallback;
+  const problem = error instanceof ApiError ? error : undefined;
+  return backupErrorPresentation(problem?.status, problem?.reason, fallback);
 }
 
 export function ServerBackupsTab({
@@ -147,7 +110,7 @@ export function ServerBackupsTab({
     if (onForbidden(error)) {
       return;
     }
-    showToast(t(createErrorMessage(error)), "error");
+    showToast(t(backupErrorKey(error)), "error");
   };
 
   const statsQuery = useQuery({
@@ -281,12 +244,12 @@ export function ServerBackupsTab({
   // Error only when there is nothing to show (an initial load failed). A
   // failed background refetch retains `data`, so the cached page keeps
   // rendering through transient API blips (#1805). Route the error through
-  // createErrorMessage so a specific reason (e.g. storage_unavailable) reaches
+  // the presentation contract so a specific reason (e.g. storage_unavailable) reaches
   // the user instead of the generic load message (#2554).
   if (listState.kind === "error") {
     return (
       <p className="field-error">
-        {t(createErrorMessage(listQuery.error, "backups.loadError"))}
+        {t(backupErrorKey(listQuery.error, "backups.loadError"))}
       </p>
     );
   }
@@ -303,7 +266,7 @@ export function ServerBackupsTab({
           slot rather than discarding the message. */}
       {statsQuery.isPending ? null : stats === undefined ? (
         <p className="field-error backups-stats-error">
-          {t(createErrorMessage(statsQuery.error, "backups.stats.loadError"))}
+          {t(backupErrorKey(statsQuery.error, "backups.stats.loadError"))}
         </p>
       ) : (
         <div className="card metrics-strip backups-stats">
@@ -875,11 +838,11 @@ function RestoreDialog({
         onClose();
         return;
       }
-      if (error instanceof ApiError && error.reason === "server_not_stopped") {
-        showToast(t("backups.error.notStopped"), "error");
-        return;
-      }
-      showToast(t(createErrorMessage(error)), "error");
+      const problem = error instanceof ApiError ? error : undefined;
+      showToast(
+        t(backupRestoreErrorPresentation(problem?.status, problem?.reason)),
+        "error",
+      );
     },
   });
 
@@ -899,7 +862,7 @@ function RestoreDialog({
       if (onForbidden(error)) {
         return;
       }
-      showToast(t(createErrorMessage(error)), "error");
+      showToast(t(backupErrorKey(error)), "error");
     },
   });
 
