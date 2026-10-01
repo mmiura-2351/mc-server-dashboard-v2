@@ -181,13 +181,23 @@ above cannot recover from: it would skip the hydrate that corrects the tree. The
 skips the stamp instead (a `WARN` naming the reason; the publish itself still succeeds),
 so the set stays advertised at the hydrate's generation and the next start re-hydrates.
 
-Before advertising a held set's generation the
-Worker structurally fsck's its region files: a periodic running-id
+At boot, before the first registration, the
+Worker structurally fsck's each held set's region files: a periodic running-id
 snapshot makes the generation marker durable while the live world files are never
 fsynced by the Worker, so a power loss can leave a durable gen-N marker next to a
 torn local world. A held set whose region is torn is advertised at **generation 0**
 — treated as stale, forcing the hydrate that recovers the consistent store copy
-rather than booting the torn world. The fsck applies a single byte-precise
+rather than booting the torn world. The Worker makes that verdict stick by
+**rewriting the set's generation marker to 0** (atomically and fsynced; skipped when
+it already reads 0), because what every `Register` carries, the first included, is a
+fresh read of the markers with no fsck: the boot verdict reaches the API only through
+the marker. So every registration of that process advertises 0, a reconnect included,
+until the hydrate it dispatches rewrites the marker to the generation it served, which
+needs no separate invalidation. A restart reads the same 0. The original generation
+survives only in the boot `WARN` that reports the corrupt region (its
+`recorded_generation`), and a false torn verdict costs one hydrate. If the marker
+cannot be rewritten, the `WARN` says so and registrations carry the recorded
+generation, the same best-effort outcome as a fsck I/O error. The fsck applies a single byte-precise
 region rule: a *structurally sound* scratch left by a
 crashed or non-gracefully-stopped 26.x server is **live-format** — its region
 files carry the legitimate unpadded (non-4096-aligned) tail — so it PASSES and
@@ -199,7 +209,8 @@ prefix) falls back to generation 0. The fsck requires a quiesced working set
 (regionfsck's safety contract), so the Worker's startup sequence runs the
 container orphan sweep first to stop any live writers before scanning — and when
 that sweep **fails**, which is deliberately non-fatal, the scan advertises every
-held set at the generation its marker records and **runs no fsck at all**. An
+held set at the generation its marker records, **runs no fsck at all** and rewrites
+no marker. An
 unswept orphan keeps writing into its bind-mounted scratch and nothing re-adopts
 it, so a fsck there would read a world mid-write and a generation 0 would send a
 destructive hydrate over a live server; the judgement waits for the next boot

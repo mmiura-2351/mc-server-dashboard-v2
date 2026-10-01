@@ -524,9 +524,10 @@ func TestWarnOrphanDisplacedTreesMissingScratchRootIsSafe(t *testing.T) {
 
 // TestManagerHeldServersReadsCurrentGenerations verifies the Manager.HeldServers
 // method returns the current generation for each held working set (issue #1711).
-// Unlike the boot-time ScanHeldServers, HeldServers skips the region fsck: a
-// torn region in the scratch keeps its recorded generation because the Worker
-// is still running and the fsck is only needed to detect post-crash corruption.
+// Unlike the boot-time ScanHeldServers, HeldServers runs no region fsck: it reads
+// the marker, and the quiesced boot scan has already persisted any torn verdict
+// there as 0 (issue #3178, TestScanHeldServersTornRegionForcesHydrate), so the
+// verdict reaches every Register without re-judging worlds this Worker may be running.
 func TestManagerHeldServersReadsCurrentGenerations(t *testing.T) {
 	scratch := t.TempDir()
 
