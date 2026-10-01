@@ -131,6 +131,12 @@ func ScanHeldServers(scratchDir string, quiesced bool, log *slog.Logger) []sessi
 	return held
 }
 
+// rewriteTornMarker is the marker write heldGeneration persists a torn verdict with —
+// writeGeneration, indirected through a package var (mirroring readSweptTree) so a test
+// can fail it without a chmod fixture, which root ignores. Production always uses
+// writeGeneration.
+var rewriteTornMarker = writeGeneration
+
 // heldGeneration returns the generation to advertise for a held working set: the
 // recorded marker generation when the set is structurally sound, or 0 when a region
 // fsck finds it torn (issue #834) — a 0 forces the API to hydrate, recovering the
@@ -166,12 +172,25 @@ func heldGeneration(workingDir, serverID string, quiesced bool, log *slog.Logger
 		return gen
 	}
 	if !report.Healthy() {
-		first := report.Corrupt[0]
+		var rewriteErr error
+		if gen != 0 {
+			rewriteErr = rewriteTornMarker(workingDir, 0)
+		}
 		if log != nil {
-			log.Warn("held set has a corrupt region; advertising generation 0 to force a hydrate",
-				"server_id", serverID, "recorded_generation", gen,
+			first := report.Corrupt[0]
+			attrs := []any{"server_id", serverID, "recorded_generation", gen,
 				"corrupt", len(report.Corrupt), "scanned", report.Scanned,
-				"example", filepath.Base(first.Path), "reason", first.Reason.String())
+				"example", filepath.Base(first.Path), "reason", first.Reason.String()}
+			if rewriteErr != nil {
+				log.Warn("held set has a corrupt region but its generation marker could not be "+
+					"rewritten to 0; registrations advertise the recorded generation until a "+
+					"hydrate rewrites the marker or a later quiesced boot judges the set again",
+					append(attrs, "error", rewriteErr)...)
+			} else {
+				log.Warn("held set has a corrupt region; its generation marker now reads 0, forcing "+
+					"a hydrate (recorded_generation is the only surviving record of the original, "+
+					"see STORAGE.md Section 4.6)", attrs...)
+			}
 		}
 		return 0
 	}
