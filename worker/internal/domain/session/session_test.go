@@ -1342,8 +1342,12 @@ func TestReRegistrationRefreshesHeldServers(t *testing.T) {
 	}
 	handler.setHeldServers(initialHeld)
 
+	// The boot list differs from the provider's, so the first Register shows which one the
+	// Runner sent. The provider must win from the very first registration: the Worker's
+	// boot scan persists its torn verdicts in the generation marker the provider reads
+	// (issue #3178), so the marker — not the boot list — is the one source of truth.
 	caps := testCaps()
-	caps.HeldServers = initialHeld
+	caps.HeldServers = []HeldServer{{ServerID: "server-a", Generation: 99}}
 	r := NewRunner(dialer, caps, clock, discardLogger(),
 		WithCommandHandler(handler),
 		WithBackoff(Backoff{Initial: time.Millisecond, Max: time.Millisecond}),
@@ -1357,13 +1361,14 @@ func TestReRegistrationRefreshesHeldServers(t *testing.T) {
 	// Wait for the first registration.
 	waitFor(t, func() bool { return t1.registerCount() == 1 })
 
-	// The first registration must carry the initial held servers.
+	// The first registration must carry the provider's held servers, not the boot list.
 	caps1 := t1.registeredCaps()
 	if len(caps1) != 1 {
 		t.Fatalf("expected 1 register on t1, got %d", len(caps1))
 	}
 	if len(caps1[0].HeldServers) != 1 || caps1[0].HeldServers[0].Generation != 1 {
-		t.Fatalf("first register held = %+v, want generation 1", caps1[0].HeldServers)
+		t.Fatalf("first register held = %+v, want the provider's generation 1, not the boot "+
+			"list's 99", caps1[0].HeldServers)
 	}
 
 	// Simulate a generation advance: the handler now returns updatedHeld.
