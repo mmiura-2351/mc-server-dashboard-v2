@@ -232,9 +232,9 @@ func heldGeneration(workingDir, serverID string, quiesced bool, log *slog.Logger
 // ScanHeldServers, what the API is told.
 //
 // It runs no region fsck, and it does not need one: the torn-region verdict (issue
-// #834) is reached once, by the quiesced boot scan, and persisted in the very marker
-// read here (issue #3178), so a torn set reads 0 until a hydrate replaces the tree and
-// rewrites the marker. Re-judging here would pay a region walk per held world on every
+// #834) is reached by the quiesced boot scan or by a launch's fsck (issue #3201), and
+// persisted in the very marker read here (issue #3178), so a torn set reads 0 until a
+// hydrate replaces the tree and rewrites the marker. Re-judging here would pay a region walk per held world on every
 // reconnect and, worse, read worlds this Worker is running mid-write.
 func (m *Manager) HeldServers() []session.HeldServer {
 	entries, err := os.ReadDir(m.scratchDir)
