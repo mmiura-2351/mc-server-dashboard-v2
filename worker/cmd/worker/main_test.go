@@ -22,6 +22,7 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/clock"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/config"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/controlplane"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/application/instancemanager"
 	controlplanev1 "github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/controlplane/mcsd/controlplane/v1"
@@ -382,6 +383,56 @@ func TestBootJudgesATornHeldWorldWhenTheOrphanSweepSucceeds(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("boot log does not contain %q (issues #834, #3178)\nboot log:\n%s", want, out)
 		}
+	}
+}
+
+// The launch fsck (issue #3201) rests on the same premise as the boot scan's: it judges a
+// world only when the orphan sweep established that nothing is writing it (issue #3171).
+// buildInstanceManager is where the sweep's verdict is known, so this pins that it reaches
+// the manager: a start the API skipped the hydrate for over a torn held set is refused
+// before driver.Start on the quiesced leg, and launched unjudged on the failed-sweep leg.
+func TestLaunchFsckFollowsTheOrphanSweepVerdict(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		dockerHost func(t *testing.T) string
+		wantTorn   bool
+		wantMarker string
+	}{
+		{name: "sweep succeeded", dockerHost: fakeDockerSocket, wantTorn: true, wantMarker: "0"},
+		{
+			name: "sweep failed",
+			dockerHost: func(t *testing.T) string {
+				return "unix://" + filepath.Join(t.TempDir(), "no-such-docker.sock")
+			},
+			wantTorn: false, wantMarker: "9",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scratch := t.TempDir()
+			seedTornWorkingSet(t, filepath.Join(scratch, "s1"), 9)
+			setBootEnv(t, scratch, tc.dockerHost(t), "127.0.0.1:1")
+			cfg, err := config.Load("", os.Getenv)
+			if err != nil {
+				t.Fatal(err)
+			}
+			manager, _, err := buildInstanceManager(context.Background(), cfg, slog.New(slog.DiscardHandler))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(manager.Close)
+
+			res := manager.Handle(context.Background(), session.Command{
+				CommandID: "c1", ServerID: "s1", Kind: "StartServer", Driver: "container", MinecraftVersion: "1.21",
+			})
+
+			torn := !res.Success && strings.Contains(res.ErrorMessage, "working set torn")
+			if torn != tc.wantTorn {
+				t.Errorf("start over a torn held set = %+v, want the torn refusal: %v", res, tc.wantTorn)
+			}
+			if got, err := os.ReadFile(filepath.Join(scratch, "s1", ".mcsd_generation")); err != nil || string(got) != tc.wantMarker {
+				t.Errorf("s1 marker = %q (err %v), want %q", got, err, tc.wantMarker)
+			}
+		})
 	}
 }
 
