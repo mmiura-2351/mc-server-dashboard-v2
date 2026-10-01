@@ -197,8 +197,8 @@ needs no separate invalidation. A restart reads the same 0. The original generat
 survives only in the boot `WARN` that reports the corrupt region (its
 `recorded_generation`), and a false torn verdict costs one hydrate. If the marker
 cannot be rewritten, the `WARN` says so and registrations carry the recorded
-generation, the same best-effort outcome as a fsck I/O error. The fsck applies a single byte-precise
-region rule: a *structurally sound* scratch left by a
+generation, the same best-effort outcome as a fsck I/O error. The fsck applies a
+single byte-precise region rule: a *structurally sound* scratch left by a
 crashed or non-gracefully-stopped 26.x server is **live-format** — its region
 files carry the legitimate unpadded (non-4096-aligned) tail — so it PASSES and
 the Worker advertises its **held generation**. The skip gate (Section 5.1) can then boot
