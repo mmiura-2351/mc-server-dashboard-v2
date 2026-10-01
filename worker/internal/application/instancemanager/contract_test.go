@@ -253,6 +253,27 @@ func driveRow(t *testing.T, row contractRow) session.CommandResult {
 		}
 		return m.Handle(ctx, contractCmd(t, row.Kind, serverID))
 
+	case "working_set_torn":
+		// A held set (marker present) whose region is torn, retained on a Worker whose
+		// boot sweep established quiescence, with no hydrate since its last launch: the
+		// scratch a refused final snapshot leaves behind (issue #3201).
+		m := newContractManager(t, &fakeDriver{}).WithQuiesced(true)
+		seedWorkingSet(t, m, serverID, tornRegion())
+		if err := writeGeneration(filepath.Join(m.scratchDir, serverID), 9); err != nil {
+			t.Fatal(err)
+		}
+		return m.Handle(ctx, contractCmd(t, row.Kind, serverID))
+
+	case "running_working_set_torn":
+		// A RUNNING instance whose world is torn underneath it: the restart's relaunch
+		// meets launchReserved's fsck here (issue #3201). The running snapshot's fsck
+		// retries are made immediate; their count is what that path asserts, not the wait.
+		m := newContractManager(t, &fakeDriver{}).WithQuiesced(true)
+		m.fsckRetryDelay = 0
+		startRunning(t, m)
+		seedWorkingSet(t, m, serverID, tornRegion())
+		return m.Handle(ctx, contractCmd(t, row.Kind, serverID))
+
 	case "orphan_pending":
 		// A failed first Stop records the server as a failed-stop orphan; the row
 		// command then runs against that pending orphan (issue #251/#253).

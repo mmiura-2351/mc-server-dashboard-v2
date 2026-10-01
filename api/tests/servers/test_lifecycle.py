@@ -3401,6 +3401,53 @@ async def test_restart_over_a_destroyed_working_set_is_not_reported_as_not_runni
     assert stored.assigned_worker_id == WorkerId(worker)
 
 
+async def test_restart_over_a_torn_working_set_is_reported_as_torn(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Issue #3201: a restart's relaunch is a launch no hydrate preceded, so the Worker
+    # judges the world its own stop left and refuses a torn one, after the stop
+    # confirmed. Neither "not running" nor "working_set_absent" is true of it; name it,
+    # and leave the row desired=running and assigned so the reconciler's
+    # redispatch_start takes the hydrate replay.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(
+            status=worker_status("RestartServer", "running_working_set_torn"),
+            message=worker_message("working_set_torn.launch")
+            % "/var/lib/mcsd/scratch/s",
+        )
+    )
+    use_case = RestartServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+
+    with (
+        caplog.at_level(logging.WARNING),
+        pytest.raises(CommandDispatchError) as excinfo,
+    ):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert not isinstance(excinfo.value, ServerNotRunningError)
+    assert excinfo.value.reason == "working_set_torn"
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("torn" in m for m in warnings)
+    assert not any("destroyed out of band" in m for m in warnings)
+    assert uow.commits == 1
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.desired_state is DesiredState.RUNNING
+    assert stored.assigned_worker_id == WorkerId(worker)
+
+
 async def test_restart_over_failed_stop_orphan_names_the_orphan() -> None:
     # Issue #2466: the Worker answers INVALID_STATE when it holds a failed-stop
     # orphan for the id -- a process it could not confirm dead, so probably still
@@ -3929,11 +3976,18 @@ class _RefusesFirstStartControlPlane(FakeControlPlane):
     (issue #2499): the status is read from the contract table, and the message
     carries the "working dir absent" phrase the API's discriminator keys on.
     Only the first start is refused, so a test can see what the API does next.
+    ``refusal`` swaps in another launch refusal (the torn set's, issue #3201).
     """
 
-    def __init__(self, **kwargs: object) -> None:
+    def __init__(
+        self, *, refusal: CommandOutcome | None = None, **kwargs: object
+    ) -> None:
         super().__init__(**kwargs)  # type: ignore[arg-type]
         self.starts = 0
+        self._refusal = refusal or CommandOutcome(
+            status=worker_status("StartServer", "working_set_absent"),
+            message=_WORKING_SET_ABSENT_LAUNCH_MESSAGE,
+        )
 
     async def start(
         self,
@@ -3958,10 +4012,7 @@ class _RefusesFirstStartControlPlane(FakeControlPlane):
         self.starts += 1
         if self.starts > 1:
             return outcome
-        return CommandOutcome(
-            status=worker_status("StartServer", "working_set_absent"),
-            message=_WORKING_SET_ABSENT_LAUNCH_MESSAGE,
-        )
+        return self._refusal
 
 
 async def test_redispatch_start_relaunches_with_a_hydrate_when_the_set_is_absent() -> (
@@ -4055,6 +4106,109 @@ async def test_start_relaunches_with_a_hydrate_when_the_working_set_is_absent() 
     # The start SUCCEEDED, so the intent stands: no compensation back to stopped.
     assert result.desired_state is DesiredState.RUNNING
     assert uow.servers.by_id[ServerId(server_id)].assigned_worker_id == WorkerId(worker)
+
+
+# The Worker's launch-time refusal of a held set it judged TORN (issue #3201,
+# instancemanager.go launchReserved), read from the contract table like the absent one.
+_WORKING_SET_TORN_LAUNCH_MESSAGE = (
+    worker_message("working_set_torn.launch") % "/var/lib/mcsd/scratch/s"
+)
+
+
+def _torn_start_refusal() -> CommandOutcome:
+    return CommandOutcome(
+        status=worker_status("StartServer", "working_set_torn"),
+        message=_WORKING_SET_TORN_LAUNCH_MESSAGE,
+    )
+
+
+async def test_redispatch_start_relaunches_with_a_hydrate_when_the_set_is_torn(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Issue #3201: the held inventory said the Worker holds generation 5, so the
+    # start skipped the hydrate, but the Worker's launch fsck found the held set torn
+    # (a stopped server whose final snapshot the pre-pack fsck refused keeps its torn
+    # scratch) and refused. The refusal is replayed WITH the hydrate, exactly as an
+    # absent set's is, and logged as what it is -- not as a scratch destroyed out of
+    # band.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.STOPPED,
+            worker_id=worker,
+        )
+    )
+    cp = _RefusesFirstStartControlPlane(
+        refusal=_torn_start_refusal(),
+        held={(WorkerId(worker), ServerId(server_id)): 5},
+    )
+
+    with caplog.at_level(logging.WARNING):
+        await _start_server(uow, cp, store_generation=5).redispatch_start(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert [k for k, _, _ in cp.dispatched] == ["start", "hydrate", "start"]
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(
+        "torn" in m and "re-launching WITH a full hydrate" in m for m in warnings
+    )
+    assert not any("destroyed out of band" in m for m in warnings)
+
+
+async def test_start_relaunches_with_a_hydrate_when_the_working_set_is_torn() -> None:
+    # The user-facing start meets the same refusal through the same ``_launch``.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    cp = _RefusesFirstStartControlPlane(
+        refusal=_torn_start_refusal(),
+        place_to=WorkerId(worker),
+        held={(WorkerId(worker), ServerId(server_id)): 5},
+    )
+
+    result = await StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(generation=5),
+        file_store=FakeFileStore(seed_eula=True),
+    )(community_id=CommunityId(community), server_id=ServerId(server_id))
+
+    assert [k for k, _, _ in cp.dispatched] == ["start", "hydrate", "start"]
+    assert result.desired_state is DesiredState.RUNNING
+
+
+async def test_a_torn_refusal_after_a_hydrate_is_not_replayed() -> None:
+    # The replay is bounded the same way for both refusals: a start that followed a
+    # hydrate is not replayed again, so a Worker refusing twice surfaces as a failure.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.STOPPED,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(
+        held={(WorkerId(worker), ServerId(server_id)): 5},
+        outcomes={"start": _torn_start_refusal()},
+    )
+
+    with pytest.raises(CommandDispatchError):
+        await _start_server(uow, cp, store_generation=5).redispatch_start(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert [k for k, _, _ in cp.dispatched] == ["start", "hydrate", "start"]
 
 
 async def test_redispatch_start_hydrates_when_held_generation_is_stale() -> None:

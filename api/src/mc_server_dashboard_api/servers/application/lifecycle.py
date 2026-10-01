@@ -183,6 +183,21 @@ _WORKING_SET_ABSENT_MARKER = "working dir absent"
 # it down, and what the operator has to act on is the scratch.
 _WORKING_SET_ABSENT_REASON = "working_set_absent"
 
+# The phrase identifying the Worker's launch refusal of a held working set it judged
+# TORN (issue #3201, launchReserved's region fsck), inside its SERVER_NOT_FOUND
+# message. It is a second discriminator rather than a reuse of
+# ``_WORKING_SET_ABSENT_MARKER`` because the two call for the same replay but not the
+# same report: the absent phrase is logged as a scratch destroyed out of band, while a
+# torn set is a world a crash or a killed stop left behind. Declared as
+# "working_set_torn.launch" in proto/contract/command_error_contract.json and pinned
+# equal to it there (issue #2843).
+_WORKING_SET_TORN_MARKER = "working set torn"
+
+# The 409 body reason for a RESTART the Worker refused on its relaunch because the
+# world its own stop left is torn (issue #3201). Kept out of ``_SANITIZED_REASONS``
+# for the reason ``_WORKING_SET_ABSENT_REASON`` is.
+_WORKING_SET_TORN_REASON = "working_set_torn"
+
 
 def is_working_set_absent_refusal(outcome: CommandOutcome) -> bool:
     """Whether an outcome is the Worker's "I hold no working set for this id" refusal.
@@ -219,6 +234,23 @@ def is_working_set_absent_refusal(outcome: CommandOutcome) -> bool:
     return (
         outcome.status is CommandStatus.SERVER_NOT_FOUND
         and _WORKING_SET_ABSENT_MARKER in outcome.message
+    )
+
+
+def is_working_set_torn_refusal(outcome: CommandOutcome) -> bool:
+    """Whether an outcome is the Worker's "the held working set is torn" refusal.
+
+    Emitted only by ``launchReserved`` (issue #3201), on a launch no hydrate preceded
+    whose held set fails the structural region fsck: a StartServer the API skipped
+    the hydrate for, or a RestartServer's relaunch. Like the absent refusal it means
+    the launch needs a hydrate, and it is answered the same way: ``_launch`` replays
+    a start with the hydrate, and a restart leaves the server down for the
+    reconciler's ``redispatch_start`` to take that replay.
+    """
+
+    return (
+        outcome.status is CommandStatus.SERVER_NOT_FOUND
+        and _WORKING_SET_TORN_MARKER in outcome.message
     )
 
 
@@ -802,7 +834,8 @@ class StartServer:
         set it was told to reuse is not on its disk — is replayed here with the full
         hydrate (issue #2499). That refusal is the only launch-time evidence the held
         inventory can be wrong, so both skip_hydrate callers recover through this one
-        site rather than each failing their own way.
+        site rather than each failing their own way. A held set the Worker refuses as
+        TORN (issue #3201) is replayed the same way.
 
         A hydrate that SUCCEEDS refreshes the held-working-set inventory (issue #2477)
         so the generation-gated check above, and the reconciler's short held-start
@@ -917,6 +950,33 @@ class StartServer:
                 "for this id, though the held-working-set inventory said it did. The "
                 "scratch was destroyed out of band under a running Worker; "
                 "re-launching WITH a full hydrate (%s)",
+                worker_id.value,
+                server_id.value,
+                outcome.message,
+            )
+            return await self._launch(
+                server,
+                community_id,
+                server_id,
+                worker_id,
+                dispatch,
+                skip_hydrate=False,
+            )
+        if skip_hydrate and is_working_set_torn_refusal(outcome):
+            # The Worker holds the working set but its launch fsck found it TORN
+            # (issue #3201): a stopped server whose final snapshot the pre-pack fsck
+            # refused keeps its torn scratch, while this inventory still carries the
+            # generation the Worker last declared on a publish (#2481). The same replay
+            # recovers it -- the hydrate replaces the tree with the store's copy and
+            # re-records the held generation -- bounded the same way, since the Worker
+            # does not judge a launch a successful hydrate preceded. Logged on its own
+            # terms: nothing was destroyed out of band; a crash or a killed stop left a
+            # torn world, and the Worker's WARN names the corrupt region.
+            _LOG.warning(
+                "worker %s refused the start for server %s: the working set it holds "
+                "is torn (a structurally corrupt region), though the held-working-set "
+                "inventory said it could be reused; re-launching WITH a full hydrate "
+                "(%s)",
                 worker_id.value,
                 server_id.value,
                 outcome.message,
@@ -2132,6 +2192,28 @@ class RestartServer:
                 kind="RestartServer",
                 outcome=outcome,
                 reason=_WORKING_SET_ABSENT_REASON,
+            )
+        if is_working_set_torn_refusal(outcome):
+            # The Worker refused the RELAUNCH because the world this restart's own
+            # stop left is torn (issue #3201): a relaunch is a launch no hydrate
+            # preceded, so the Worker judges it, and a stop escalated to a kill can
+            # tear it. The recovery is the absent arm's above, from the same shipped
+            # parts: the row stays desired=running and assigned, and the reconciler's
+            # redispatch_start meets the same refusal and replays it WITH a hydrate. It
+            # precedes the generic SERVER_NOT_FOUND arm for the same reason too.
+            _LOG.warning(
+                "worker %s refused the restart of server %s on its relaunch: the world "
+                "its stop left is torn (a structurally corrupt region); the server is "
+                "left down and the reconciler re-launches it WITH a full hydrate (%s)",
+                worker_id.value,
+                server_id.value,
+                outcome.message,
+            )
+            raise _dispatch_failure(
+                server_id=server_id,
+                kind="RestartServer",
+                outcome=outcome,
+                reason=_WORKING_SET_TORN_REASON,
             )
         if outcome.status is CommandStatus.SERVER_NOT_FOUND:
             # The Worker holds no live instance for this id, so there is nothing to
