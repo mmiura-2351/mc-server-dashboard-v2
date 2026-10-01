@@ -788,14 +788,59 @@ PARITY_CASES: list[tuple[str, bytes, dict[str, str]]] = [
         {"rcon.password": "one\\", "motd": "hi"},
     ),
     (
-        "a continuation line is never a comment",
+        "a continuation of a non-empty line is never a comment",
         b"rcon.password=one\\\n#two\n",
         {"rcon.password": "one#two"},
+    ),
+    (
+        "a lone backslash continuing a non-empty line joins the next line",
+        b"motd=a\\\n  \\\n!b\n",
+        {"motd": "a!b"},
     ),
     (
         "a blank continuation line ends the value",
         b"rcon.password=one\\\n\nmotd=hi\n",
         {"rcon.password": "one", "motd": "hi"},
+    ),
+    # A zero-length continuation: a lone backslash, blanks aside, continues a
+    # logical line that is still empty, and Java reads the line after it as the
+    # start of a logical line (issue #3041).
+    ("a zero-length continuation onto a blank line", b"\\\n\n", {}),
+    ("a zero-length continuation onto a hash comment", b"\\\n#comment\\\n", {}),
+    ("a zero-length continuation onto a bang comment", b"\\\n!bang\n", {}),
+    (
+        "a zero-length continuation onto a blank-led comment",
+        b"\\\n\t#c\nk=v\n",
+        {"k": "v"},
+    ),
+    (
+        "a zero-length continuation onto a property",
+        b"\\\n#c\\\nresource-pack=old\n",
+        {"resource-pack": "old"},
+    ),
+    ("a zero-length continuation is an empty key at EOF", b"\\\n", {"": ""}),
+    ("a zero-length continuation before a lone CR at EOF", b"\\\r", {"": ""}),
+    ("a zero-length continuation before CRLF at EOF is nothing", b"\\\r\n", {}),
+    ("two zero-length continuations ending in CRLF", b"\\\n\\\r\n", {}),
+    (
+        "a lone backslash after a hash comment is an empty key",
+        b"\\\n#c\\\n\\\n",
+        {"": ""},
+    ),
+    (
+        "a lone backslash after a bang comment is an empty key",
+        b"\\\n!c\\\n\\\n",
+        {"": ""},
+    ),
+    (
+        "a lone backslash after two comments is an empty key",
+        b"\\\n#a\\\n!b\\\n\\\n",
+        {"": ""},
+    ),
+    (
+        "a lone backslash after a comment ending in CRLF is nothing",
+        b"\\\n#c\\\n\\\r\n",
+        {},
     ),
     (
         "an escaped dot in the key",
@@ -1250,6 +1295,32 @@ def test_writes_read_back_through_java_properties_load(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.skipif(not _JDK_ON_PATH, reason="no JDK on PATH")
+def test_parity_cases_are_what_java_properties_load_reads(tmp_path: Path) -> None:
+    # PARITY_CASES pins what _parse reads; this pins that every row is what the
+    # reference reads too, so the table cannot drift from Java along with _parse
+    # (issue #3041). The malformed-escape row is left out: the reference throws
+    # on it, which is the one place _parse deliberately reads a file Java refuses.
+    cases = [
+        (name, content, expected)
+        for name, content, expected in PARITY_CASES
+        if name != "a malformed unicode escape keeps the u literal"
+    ]
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+    for index, (_, content, _) in enumerate(cases):
+        (cases_dir / f"{index:03d}").write_bytes(content)
+
+    read = _java_reads(tmp_path, cases_dir)
+
+    mismatches = [
+        (name, expected, read[f"{index:03d}"])
+        for index, (name, _, expected) in enumerate(cases)
+        if read[f"{index:03d}"] != expected
+    ]
+    assert not mismatches
+
+
 def _requested_keys(
     game_port: int | None, pack: ResourcePackProperties | None
 ) -> set[str]:
@@ -1328,25 +1399,66 @@ def test_apply_platform_properties_appends_straight_after_a_trailing_comment() -
     assert out == b"rcon.password=z\n#c\\\nenable-rcon=true\nrcon.port=25575\n"
 
 
+# A comment inside a zero-length continuation hid the platform line below it:
+# Java reads "\", then the comment, then the platform line on its own, while
+# _parse used to fold the comment and that line into one property keyed "#c..."
+# (issue #3041). These are the three consequences the issue measured.
+
+
+def test_apply_platform_properties_clears_a_pack_line_below_a_comment() -> None:
+    out = apply_platform_properties(
+        b" \\\n#c\\\nresource-pack=old\\\n",
+        game_port=25565,
+        rcon_password="tok",
+        resource_pack=None,
+    )
+    assert out == (
+        b" \\\n#c\\\n"
+        b"server-port=25565\nenable-rcon=true\nrcon.port=25575\nrcon.password=tok\n"
+    )
+
+
+def test_apply_platform_properties_rewrites_the_port_java_reads() -> None:
+    out = apply_platform_properties(
+        b"server-port=7\r\n \\\n#c\\\n\x0cserver-port=1\\\n",
+        game_port=25565,
+        rcon_password="tok",
+        resource_pack=None,
+    )
+    assert out == (
+        b"server-port=25565\n \\\n#c\\\n"
+        b"enable-rcon=true\nrcon.port=25575\nrcon.password=tok\n"
+    )
+
+
+def test_apply_platform_properties_keeps_a_password_below_a_comment() -> None:
+    out = apply_platform_properties(
+        b"#top\n\x0c\\\n!c\\\r\x0crcon.password=pw",
+        game_port=None,
+        rcon_password="tok",
+        resource_pack=None,
+    )
+    assert _get_property(out, "rcon.password") == "pw"
+
+
 # The continued last lines an append has to end, each with the line that ends it
 # (issue #2994): an empty line, unless the logical line is EMPTY once its
-# continuation is accumulated and the file does not end in CRLF, where it takes
-# "=". While that line is still empty, Java reads a "#" / "!" line as a comment
-# rather than as its continuation, and the next line starts a logical line of
-# its own; _parse joins them, so the "after-a-comment" rows are where the two
-# disagree on which line is the last. These pins hold each choice where no JDK
-# is on PATH; the JDK test below is what shows each choice leaves Java reading
-# the file's own lines as it did.
+# continuation is accumulated, where it takes "=". An empty closer means nothing
+# dangles: an empty logical line that ends the file in CRLF is no property at
+# all, and while a line is still empty a "#" / "!" line after it is a comment
+# rather than its continuation (issue #3041). These pins hold each choice where
+# no JDK is on PATH; the JDK test below is what shows each choice leaves Java
+# reading the file's own lines as it did.
 _CONTINUED_LAST_LINES: list[tuple[str, bytes, bytes]] = [
     ("empty-lf", b"\\\n", b"=\n"),
     ("empty-unterminated", b"\\", b"=\n"),
     ("empty-lone-cr", b"\\\r", b"=\n"),
-    ("empty-crlf", b"\\\r\n", b"\n"),
+    ("empty-crlf", b"\\\r\n", b""),
     ("empty-blank-led-line", b"   \\\n", b"=\n"),
     ("empty-blank-led-continuation", b"\\\n  \\\n", b"=\n"),
     ("empty-tab-led-unterminated", b"\\\n\t\\", b"=\n"),
     ("empty-crlf-then-lf", b"\\\r\n\\\n", b"=\n"),
-    ("empty-lf-then-crlf", b"\\\n\\\r\n", b"\n"),
+    ("empty-lf-then-crlf", b"\\\n\\\r\n", b""),
     ("empty-crlf-then-lone-cr", b"\\\r\n\\\r", b"=\n"),
     ("three-backslashes-keep-two", b"\\\\\\\n", b"\n"),
     ("key-only", b"require-\\\n", b"\n"),
@@ -1359,10 +1471,10 @@ _CONTINUED_LAST_LINES: list[tuple[str, bytes, bytes]] = [
     ("empty-after-two-comments", b"\\\n#a\\\n#b\\\n\\\n", b"=\n"),
     ("empty-after-a-blank-led-comment", b"\\\n  #c\\\n\\\n", b"=\n"),
     ("empty-after-a-blank-and-a-comment", b"\\\n\n#c\\\n\\\n", b"=\n"),
-    ("empty-crlf-after-a-comment", b"\\\n#c\\\n\\\r\n", b"\n"),
+    ("empty-crlf-after-a-comment", b"\\\n#c\\\n\\\r\n", b""),
     ("value-after-a-comment", b"\\\n#c\\\nk=v\\\n", b"\n"),
     ("value-continued-onto-a-hash", b"k=\\\n#c\\\n\\\n", b"\n"),
-    ("comment-after-an-empty-line", b"\\\n#comment\\\n", b"\n"),
+    ("comment-after-an-empty-line", b"\\\n#comment\\\n", b""),
 ]
 
 
@@ -1393,7 +1505,7 @@ def test_apply_platform_properties_keeps_what_java_reads_from_the_files_own_line
     # whether ending a continuation changed what the SERVER reads from the file's
     # own lines -- and on an empty continued line it did, where _parse saw no
     # change (issue #2994). So the shapes above, both reproductions and the
-    # zero-length continuations _parse reads differently from Java go through the
+    # zero-length continuations _parse once misread (issue #3041) go through the
     # JDK in one run: what Java reads from the file's own keys must survive the
     # write, nothing lost and nothing invented, and every key the call asked for
     # must be there.

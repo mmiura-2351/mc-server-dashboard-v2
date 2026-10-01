@@ -288,10 +288,18 @@ def _parse(content: bytes) -> list[_Property]:
     """Return every property in *content*, in file order, parsed the Java way.
 
     Blank lines and ``#`` / ``!`` comments are dropped; a comment does NOT continue
-    on a trailing backslash, while an ordinary line does and its continuation is
-    never itself a comment. Repeated keys are all returned -- callers decide
-    between "the value the server reads" (the last) and "every occurrence" (the
-    guard, which must see an appended duplicate as the change it is).
+    on a trailing backslash, while an ordinary line does. Once the continued line
+    has text in it, its continuation is never itself a comment; until then -- a
+    lone backslash, blanks aside, a zero-length continuation -- Java reads the
+    next line as the START of the logical line, so a blank line there is skipped
+    and a ``#`` / ``!`` line is a comment (issue #3041). At EOF a lone backslash
+    is an empty key with an empty value, unless its line ends in ``\\r\\n``:
+    after that terminator Java reads one more, empty, line before it sees EOF.
+    A property's span starts at the first lone backslash leading into it, so
+    dropping the property drops them too. Repeated keys are all returned --
+    callers decide between "the value the server reads" (the last) and "every
+    occurrence" (the guard, which must see an appended duplicate as the change
+    it is).
     """
 
     props: list[_Property] = []
@@ -300,6 +308,11 @@ def _parse(content: bytes) -> list[_Property]:
         start = offset
         line, offset = _natural_line(content, offset)
         line = line.lstrip(_BLANKS)
+        while line == b"\\" and offset < len(content):
+            line, offset = _natural_line(content, offset)
+            line = line.lstrip(_BLANKS)
+        if line == b"\\" and content.endswith(b"\r\n"):
+            continue
         if not line or line[:1] in (b"#", b"!"):
             continue
         while _ends_with_odd_backslash(line):
@@ -474,15 +487,8 @@ def _ends_in_dangling_continuation(content: bytes, props: list[_Property]) -> bo
     the line below it -- and it dangles only when its last natural line carries
     the odd run. That line belongs to a property only when the last property's
     span reaches EOF: a comment does not continue, so a file ending in ``#c\\``
-    swallows nothing (:func:`_parse`).
-
-    That is :func:`_parse`'s reading, the one this module's own reads of the file
-    go through. Java's can end sooner: while a continued line is still empty,
-    Java reads a ``#`` / ``!`` line after it as a comment rather than as its
-    continuation, so to Java a file ending ``\\``, ``#c\\`` ends in a comment.
-    The append needs a line in front of it all the same -- without one,
-    :func:`_parse` joins the appended key onto ``#c`` -- and
-    :func:`_continuation_end` picks one that leaves Java's reading alone too.
+    swallows nothing -- nor does one ending ``\\``, ``#c\\``, where the comment
+    follows a zero-length continuation (:func:`_parse`).
 
     Neither this shape nor the file that has one is normal for a
     ``server.properties``; a hand-edited or truncated file is where it turns up.
@@ -499,8 +505,8 @@ def _ends_in_dangling_continuation(content: bytes, props: list[_Property]) -> bo
     return _ends_with_odd_backslash(tail[cut + 1 :].lstrip(_BLANKS))
 
 
-def _continuation_end(content: bytes, start: int) -> bytes:
-    """Return the line that ends *content*'s dangling last property, at *start*.
+def _continuation_end(content: bytes, prop: _Property) -> bytes:
+    """Return the line that ends *content*'s dangling last property, *prop*.
 
     The line has to end the continuation without changing what
     ``Properties.load`` reads from the property it ends (issue #2994). An empty
@@ -511,40 +517,14 @@ def _continuation_end(content: bytes, start: int) -> bytes:
     every natural line of it is a lone backslash, blanks aside. Java reads
     ``"" = ""`` from that line only because EOF ends it; followed by an empty
     line, it reads the line as blank and the property is gone. ``=`` ends it as
-    ``"" = ""`` instead. Unless *content* ends in ``\\r\\n``: Java already reads
-    no property at all from an empty continued line that ends the file that way,
-    so ``=`` would invent one, and the empty line is right after all. Both are
-    what the JDK reads (checked in the tests); :func:`_parse` reads a ``""``
-    property from the CRLF file as well, which is its divergence from Java
-    rather than a property to preserve.
-
-    That logical line need not begin at *start*. While a continued line is still
-    empty, Java reads a ``#`` / ``!`` line after it as a comment, which never
-    continues, and starts a new logical line below it; :func:`_parse` joins the
-    comment on instead (:func:`_ends_in_dangling_continuation`). So the walk
-    skips such a comment as Java does and goes on with a new, empty line.
-    *start* itself is a line Java starts too: :func:`_parse` only ever joins
-    lines Java keeps apart, never the reverse. A blank line needs no rule of its
-    own -- it ends the line either way, and :func:`_parse` never joins past one.
-
-    The ``=`` is for the empty line only: after ``k=v`` it would make the value
-    ``v=``. When the comment is the last line, nothing dangles for Java at all,
-    and the empty line is only what keeps :func:`_parse` from joining the append
-    onto it.
+    ``"" = ""`` instead. The ``=`` is for the empty line only: after ``k=v`` it
+    would make the value ``v=``. An empty line that ends the file in ``\\r\\n``
+    is no property at all (:func:`_parse`), so it never dangles and needs
+    neither. All of it is what the JDK reads (checked in the tests).
     """
 
-    continued = False
-    offset = start
-    while offset < len(content):
-        line, offset = _natural_line(content, offset)
-        line = line.lstrip(_BLANKS)
-        if line[:1] in (b"#", b"!"):
-            continued = False
-        elif line == b"\\":
-            continued = True
-        else:
-            return b"\n"
-    if continued and not content.endswith(b"\r\n"):
+    lines = content[prop.start : prop.end].splitlines()
+    if all(line.lstrip(_BLANKS) == b"\\" for line in lines):
         return b"=\n"
     return b"\n"
 
@@ -607,7 +587,7 @@ def _rewrite(
         if out and not out.endswith(b"\n"):
             out += b"\n"
         if cursor < len(content) and _ends_in_dangling_continuation(content, props):
-            out += _continuation_end(content, props[-1].start)
+            out += _continuation_end(content, props[-1])
         for line in appended:
             out += line + b"\n"
     return bytes(out)
