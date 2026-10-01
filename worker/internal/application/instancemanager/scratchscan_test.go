@@ -279,6 +279,33 @@ func TestScanHeldServersFailedTornMarkerRewriteIsBestEffort(t *testing.T) {
 	}
 }
 
+// TestScanHeldServersTornSetWithoutAMarkerGainsNone verifies the torn-verdict rewrite is
+// skipped when the marker already reads 0 — in particular when there is no marker at all.
+// An absent marker already advertises 0, and it is also the launch guard's refusal
+// predicate (issue #2802): creating one here would let a start the API skipped the
+// hydrate for boot the torn world instead of being refused and replayed with the hydrate.
+func TestScanHeldServersTornSetWithoutAMarkerGainsNone(t *testing.T) {
+	scratch := t.TempDir()
+	torn := filepath.Join(scratch, "torn-server", "region")
+	if err := os.MkdirAll(torn, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(torn, "r.0.0.mca"), healthyRegion()[:3*fsckSector-10], 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	got := ScanHeldServers(scratch, true, nil)
+
+	want := session.HeldServer{ServerID: "torn-server", Generation: 0}
+	if len(got) != 1 || got[0] != want {
+		t.Errorf("held = %v, want [%v]", got, want)
+	}
+	if _, err := os.Stat(filepath.Join(scratch, "torn-server", generationFile)); !os.IsNotExist(err) {
+		t.Errorf("torn-server gained a generation marker (stat err = %v), want none: an absent "+
+			"marker is the launch guard's refusal predicate (issue #2802)", err)
+	}
+}
+
 // readMarkerBytes returns the raw generation marker in workingDir, failing the test when
 // it cannot be read: the assertions using it compare bytes, so a missing marker must not
 // pass as an empty one.
