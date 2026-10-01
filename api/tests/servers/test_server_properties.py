@@ -1119,6 +1119,32 @@ def _java_runs_source_files() -> bool:
 _JDK_ON_PATH = _java_runs_source_files()
 
 
+def _java_reads(tmp_path: Path, cases_dir: Path) -> dict[str, dict[str, str]]:
+    """Return what ``Properties.load`` reads from each file in *cases_dir*, by name."""
+
+    probe = tmp_path / "Probe.java"
+    probe.write_text(_PROBE_JAVA, encoding="ascii")
+
+    result = subprocess.run(
+        ["java", str(probe), str(cases_dir)],
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stderr
+
+    read: dict[str, dict[str, str]] = {}
+    for line in result.stdout.splitlines():
+        name, *fields = line.split(" ")
+        read[name] = {
+            bytes.fromhex(key).decode("utf-16-be"): bytes.fromhex(value).decode(
+                "utf-16-be"
+            )
+            for key, value in zip(fields[::2], fields[1::2], strict=True)
+        }
+    return read
+
+
 def _utf16_units(text: str) -> str:
     """Return *text* as the hex of its UTF-16 units, which a Java string is."""
 
@@ -1393,26 +1419,7 @@ def test_apply_platform_properties_keeps_what_java_reads_from_the_files_own_line
                 content, game_port=25565, rcon_password="tok", resource_pack=pack
             )
             (cases_dir / f"{index:03d}-out{which}").write_bytes(out)
-    probe = tmp_path / "Probe.java"
-    probe.write_text(_PROBE_JAVA, encoding="ascii")
-
-    result = subprocess.run(
-        ["java", str(probe), str(cases_dir)],
-        capture_output=True,
-        text=True,
-        timeout=90,
-    )
-    assert result.returncode == 0, result.stderr
-
-    read: dict[str, dict[str, str]] = {}
-    for line in result.stdout.splitlines():
-        name, *fields = line.split(" ")
-        read[name] = {
-            bytes.fromhex(key).decode("utf-16-be"): bytes.fromhex(value).decode(
-                "utf-16-be"
-            )
-            for key, value in zip(fields[::2], fields[1::2], strict=True)
-        }
+    read = _java_reads(tmp_path, cases_dir)
     changed = []
     for index, content in enumerate(contents):
         own = {
