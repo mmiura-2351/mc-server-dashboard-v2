@@ -26,8 +26,13 @@
 //   - A line whose first non-whitespace character is '#' or '!' is a comment and
 //     is dropped -- a comment does NOT continue on a trailing backslash.
 //   - A line ending in an ODD number of backslashes continues onto the next
-//     line, whose own leading whitespace is skipped; a continuation line is
-//     never a comment, and a blank continuation line ends the value.
+//     line, whose own leading whitespace is skipped. Once the continued line
+//     has text in it, a continuation line is never a comment, and a blank one
+//     ends the value. Until then -- a lone backslash, a zero-length
+//     continuation -- the next line is read as the START of the logical line:
+//     blank, it is skipped, and '#' or '!' make it a comment (issue #3041).
+//     At EOF a lone backslash is an empty key with an empty value, unless its
+//     line ends in "\r\n", after which Java reads one more, empty, line.
 //   - The key runs to the first unescaped '=', ':' or whitespace. Whitespace
 //     after the key, then one optional '=' or ':', then further whitespace are
 //     skipped; everything remaining -- trailing whitespace included -- is the
@@ -38,6 +43,7 @@
 package javaproperties
 
 import (
+	"bytes"
 	"strings"
 	"unicode/utf16"
 	"unicode/utf8"
@@ -75,12 +81,18 @@ func parse(data []byte) map[string]string {
 	for i := 0; i < len(data); {
 		line, next := naturalLine(data, i)
 		line = trimLeadingBlanks(line)
+		i = next
+		for isLoneBackslash(line) && i < len(data) {
+			line, i = naturalLine(data, i)
+			line = trimLeadingBlanks(line)
+		}
+		if isLoneBackslash(line) && bytes.HasSuffix(data, []byte("\r\n")) {
+			continue
+		}
 		if len(line) == 0 || line[0] == '#' || line[0] == '!' {
-			i = next
 			continue
 		}
 		logical := line
-		i = next
 		for endsWithOddBackslash(logical) {
 			logical = logical[:len(logical)-1]
 			if i >= len(data) {
@@ -133,6 +145,11 @@ func trimLeadingBlanks(line []byte) []byte {
 }
 
 func isBlank(c byte) bool { return c == ' ' || c == '\t' || c == '\f' }
+
+// isLoneBackslash reports whether line, already stripped of its leading blanks,
+// is a zero-length continuation: a single backslash, which continues a logical
+// line without adding anything to it.
+func isLoneBackslash(line []byte) bool { return len(line) == 1 && line[0] == '\\' }
 
 // endsWithOddBackslash reports whether line ends in an odd-length backslash run,
 // which is what makes it continue onto the next line (an even run is a sequence

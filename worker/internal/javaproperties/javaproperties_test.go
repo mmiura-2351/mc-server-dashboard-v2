@@ -103,14 +103,87 @@ var parityCases = []struct {
 		want:  map[string]string{"rcon.password": `one\`, "motd": "hi"},
 	},
 	{
-		name:  "a continuation line is never a comment",
+		name:  "a continuation of a non-empty line is never a comment",
 		input: "rcon.password=one\\\n#two\n",
 		want:  map[string]string{"rcon.password": "one#two"},
+	},
+	{
+		name:  "a lone backslash continuing a non-empty line joins the next line",
+		input: "motd=a\\\n  \\\n!b\n",
+		want:  map[string]string{"motd": "a!b"},
 	},
 	{
 		name:  "a blank continuation line ends the value",
 		input: "rcon.password=one\\\n\nmotd=hi\n",
 		want:  map[string]string{"rcon.password": "one", "motd": "hi"},
+	},
+	// A zero-length continuation: a lone backslash, blanks aside, continues a
+	// logical line that is still empty, and Java reads the line after it as the
+	// start of a logical line (issue #3041).
+	{
+		name:  "a zero-length continuation onto a blank line",
+		input: "\\\n\n",
+		want:  map[string]string{},
+	},
+	{
+		name:  "a zero-length continuation onto a hash comment",
+		input: "\\\n#comment\\\n",
+		want:  map[string]string{},
+	},
+	{
+		name:  "a zero-length continuation onto a bang comment",
+		input: "\\\n!bang\n",
+		want:  map[string]string{},
+	},
+	{
+		name:  "a zero-length continuation onto a blank-led comment",
+		input: "\\\n\t#c\nk=v\n",
+		want:  map[string]string{"k": "v"},
+	},
+	{
+		name:  "a zero-length continuation onto a property",
+		input: "\\\n#c\\\nresource-pack=old\n",
+		want:  map[string]string{"resource-pack": "old"},
+	},
+	{
+		name:  "a zero-length continuation is an empty key at EOF",
+		input: "\\\n",
+		want:  map[string]string{"": ""},
+	},
+	{
+		name:  "a zero-length continuation before a lone CR at EOF",
+		input: "\\\r",
+		want:  map[string]string{"": ""},
+	},
+	{
+		name:  "a zero-length continuation before CRLF at EOF is nothing",
+		input: "\\\r\n",
+		want:  map[string]string{},
+	},
+	{
+		name:  "two zero-length continuations ending in CRLF",
+		input: "\\\n\\\r\n",
+		want:  map[string]string{},
+	},
+	{
+		name:  "a lone backslash after a hash comment is an empty key",
+		input: "\\\n#c\\\n\\\n",
+		want:  map[string]string{"": ""},
+	},
+	{
+		name:  "a lone backslash after a bang comment is an empty key",
+		input: "\\\n!c\\\n\\\n",
+		want:  map[string]string{"": ""},
+	},
+	{
+		name:  "a lone backslash after two comments is an empty key",
+		input: "\\\n#a\\\n!b\\\n\\\n",
+		want:  map[string]string{"": ""},
+	},
+	{
+		name:  "a lone backslash after a comment ending in CRLF is nothing",
+		input: "\\\n#c\\\n\\\r\n",
+		want:  map[string]string{},
 	},
 	{
 		name:  "an escaped dot in the key",
@@ -232,8 +305,8 @@ func TestParseParity(t *testing.T) {
 				t.Fatalf("Parse(%q) = %#v, want %#v", tc.input, got, tc.want)
 			}
 			for k, want := range tc.want {
-				if got[k] != want {
-					t.Errorf("Parse(%q)[%q] = %q, want %q", tc.input, k, got[k], want)
+				if v, ok := got[k]; !ok || v != want {
+					t.Errorf("Parse(%q) = %#v, want %#v", tc.input, got, tc.want)
 				}
 			}
 		})
@@ -243,7 +316,7 @@ func TestParseParity(t *testing.T) {
 // TestParseUTF8KeepsTheGrammar runs the parity table through the 1.20+ reader:
 // the charset changes how a non-ASCII byte decodes, never the grammar, and the
 // table's one non-ASCII input is not valid UTF-8, so it falls back to latin-1.
-// The other 39 inputs are pure ASCII and are asserted against the same wants
+// The other 53 inputs are pure ASCII and are asserted against the same wants
 // TestParseParity asserts for Parse, which is what pins that the two readers
 // agree on every ASCII key and value.
 func TestParseUTF8KeepsTheGrammar(t *testing.T) {
@@ -254,8 +327,8 @@ func TestParseUTF8KeepsTheGrammar(t *testing.T) {
 				t.Fatalf("ParseUTF8(%q) = %#v, want %#v", tc.input, got, tc.want)
 			}
 			for k, want := range tc.want {
-				if got[k] != want {
-					t.Errorf("ParseUTF8(%q)[%q] = %q, want %q", tc.input, k, got[k], want)
+				if v, ok := got[k]; !ok || v != want {
+					t.Errorf("ParseUTF8(%q) = %#v, want %#v", tc.input, got, tc.want)
 				}
 			}
 		})
