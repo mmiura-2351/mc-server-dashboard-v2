@@ -284,20 +284,38 @@ def test_the_declared_phrase_is_the_api_discriminator() -> None:
     contain. A reword therefore reddens the Worker test, and accepting it in the
     table reddens this one until the API constant follows.
 
-    Every declared message names the same phrase today, so this compares them all
-    to the one marker rather than inventing a lookup for a second discriminator
-    that does not exist. A message with a different phrase fails here -- loudly,
-    which is the point: it needs its own API constant and its own line below.
+    Each declared message maps to the API constant that discriminates it below;
+    the torn-set launch refusal (issue #3201) is the second discriminator. A message
+    with no entry fails here -- loudly, which is the point: it needs its own API
+    constant and its own line. The phrases must also not overlap, or one refusal
+    would be read as the other: the API replays both, but reports them differently.
     """
 
-    for message in _messages():
-        assert message["phrase"] == lifecycle._WORKING_SET_ABSENT_MARKER, (
+    discriminators = {
+        "working_set_absent.snapshot": lifecycle._WORKING_SET_ABSENT_MARKER,
+        "working_set_absent.launch": lifecycle._WORKING_SET_ABSENT_MARKER,
+        "working_set_torn.launch": lifecycle._WORKING_SET_TORN_MARKER,
+    }
+    messages = _messages()
+    assert {m["name"] for m in messages} == set(discriminators), (
+        "the table's messages and the API discriminators below disagree: "
+        f"{sorted(m['name'] for m in messages)} vs {sorted(discriminators)}. A "
+        "message the API tells apart by text needs its constant named here."
+    )
+    for message in messages:
+        marker = discriminators[message["name"]]
+        assert message["phrase"] == marker, (
             f"the table's message {message['name']!r} ({message['site']}) declares "
             f"the phrase {message['phrase']!r}, but the API discriminates on "
-            f"{lifecycle._WORKING_SET_ABSENT_MARKER!r}. The Worker emission and the "
-            "API match are the two halves of one contract: reword them together, or "
-            "the refusal stops being told from a plain SERVER_NOT_FOUND."
+            f"{marker!r}. The Worker emission and the API match are the two halves "
+            "of one contract: reword them together, or the refusal stops being told "
+            "from a plain SERVER_NOT_FOUND."
         )
+        for other in set(discriminators.values()) - {marker}:
+            assert other not in message["text"], (
+                f"the message {message['name']!r} also contains {other!r}, so the API "
+                "would read it as that refusal too."
+            )
 
 
 def test_every_error_row_declares_its_api_handling() -> None:
