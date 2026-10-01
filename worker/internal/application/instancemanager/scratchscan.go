@@ -60,16 +60,30 @@ func isReservedScratchName(name string) bool {
 // unknown generation the API treats as older than any published store generation,
 // forcing the hydrate that recovers the consistent store copy.
 //
+// The verdict is PERSISTED: the set's marker is rewritten to 0 (issue #3178). The list
+// this returns is not what reaches the API — the session replaces it with the in-session
+// HeldServers() before every Register, the first included (issue #1711), and that scan
+// runs no fsck — so a verdict kept only here would never leave the process. With the
+// marker at 0, every later registration advertises 0 too, and the hydrate it dispatches
+// clears it through its own marker write (handleHydrate's recordGeneration), with no
+// verdict anywhere else that could go stale. A restart re-reads 0 as well, so even a
+// later boot whose sweep fails still sends the hydrate. The costs, accepted: the boot
+// scan writes to disk; the original generation survives only in the WARN (which a manual
+// recovery from a displaced torn tree needs, STORAGE.md Section 4.6); and a false torn
+// verdict is durable, costing one hydrate that parks the replaced tree aside as any
+// hydrate does. A rewrite that fails is logged and degrades to advertising the recorded
+// generation, the same best-effort class as a fsck I/O error.
+//
 // quiesced is the CALLER's statement that no container this Worker started can still
 // be writing into a scratch tree — the same premise the boot reclaims above require,
 // established by the container orphan sweep and by nothing else. The fsck is skipped
-// when it is false and every held set is advertised at its RECORDED generation
-// (issue #3171). A torn verdict is only meaningful on a quiesced set (regionfsck
-// states that contract at its own site): after a failed sweep an orphan can still be
-// running with <scratch>/<id> bind-mounted, and since nothing re-adopts containers
-// the Worker does not even know the world is live, so the scan would read a world
-// mid-write, judge a healthy set torn and advertise a 0 that dispatches a DESTRUCTIVE
-// hydrate over it. Reporting the marker is the scan's honest answer in that state:
+// when it is false, no marker is rewritten, and every held set is advertised at its
+// RECORDED generation (issue #3171). A torn verdict is only meaningful on a quiesced set
+// (regionfsck states that contract at its own site): after a failed sweep an orphan
+// can still be running with <scratch>/<id> bind-mounted, and since nothing re-adopts
+// containers the Worker does not even know the world is live, so the scan would read a
+// world mid-write, judge a healthy set torn and advertise a 0 that dispatches a
+// DESTRUCTIVE hydrate over it. Reporting the marker is the scan's honest answer in that state:
 // the marker is on disk, and judging what it names is what quiescence buys.
 //
 // The costs of the two directions are not symmetric, which is what settles it. An
@@ -90,7 +104,7 @@ func isReservedScratchName(name string) bool {
 // torn scratch (a referenced chunk overrunning EOF, an entry past EOF, a severed
 // prefix) still fails the byte-precise check and falls back to gen 0 as before. The
 // fsck reads only the region headers (regionfsck), so it is bounded; it runs at most
-// once per held set at registration. A fsck I/O error is best-effort (logged, the
+// once per held set per boot. A fsck I/O error is best-effort (logged, the
 // recorded generation stands): the API gate remains the correctness backstop, and
 // the startup scan must not wedge on a read fault.
 //
@@ -131,20 +145,31 @@ func ScanHeldServers(scratchDir string, quiesced bool, log *slog.Logger) []sessi
 	return held
 }
 
+// rewriteTornMarker is the marker write heldGeneration persists a torn verdict with —
+// writeGeneration, indirected through a package var (mirroring readSweptTree) so a test
+// can fail it without a chmod fixture, which root ignores. Production always uses
+// writeGeneration.
+var rewriteTornMarker = writeGeneration
+
 // heldGeneration returns the generation to advertise for a held working set: the
 // recorded marker generation when the set is structurally sound, or 0 when a region
 // fsck finds it torn (issue #834) — a 0 forces the API to hydrate, recovering the
-// consistent store copy over the torn local world. A fsck I/O error leaves the
-// recorded generation untouched (best-effort, logged): the API integrity gate is
-// the correctness backstop, so the scan must not wedge on a read fault.
+// consistent store copy over the torn local world. A torn set's marker is rewritten to
+// 0 (skipped when it already reads 0, which covers an absent marker: creating one would
+// drop the launch guard's refusal, issue #2802) so the in-session scan every Register
+// sends carries the verdict (issue #3178); the WARN is then the only record of the
+// recorded generation, which is why it names it. A fsck I/O error leaves the recorded
+// generation untouched (best-effort, logged): the API integrity gate is the correctness
+// backstop, so the scan must not wedge on a read fault. A failed rewrite is the same
+// class: logged, and the marker's recorded generation is what registrations then carry.
 //
 // The fsck does not run at all unless the caller established quiescence (issue
 // #3171): on a world a container may still be writing, a torn verdict is not a fact
-// about the world but an artefact of the read, and the 0 it produces sends a
-// destructive hydrate over a live server. The recorded generation is what the Worker
-// can honestly say there, and the fsck resumes at the next boot that can prove the
-// premise. ScanHeldServers' doc has the full argument, including why skipping the
-// advertisement instead is worse.
+// about the world but an artefact of the read, and the 0 it produces — persisted in the
+// marker, at that — sends a destructive hydrate over a live server. The recorded
+// generation is what the Worker can honestly say there, and the fsck resumes at the
+// next boot that can prove the premise. ScanHeldServers' doc has the full argument,
+// including why skipping the advertisement instead is worse.
 func heldGeneration(workingDir, serverID string, quiesced bool, log *slog.Logger) uint64 {
 	gen := readGeneration(workingDir)
 	if !quiesced {
@@ -166,12 +191,25 @@ func heldGeneration(workingDir, serverID string, quiesced bool, log *slog.Logger
 		return gen
 	}
 	if !report.Healthy() {
-		first := report.Corrupt[0]
+		var rewriteErr error
+		if gen != 0 {
+			rewriteErr = rewriteTornMarker(workingDir, 0)
+		}
 		if log != nil {
-			log.Warn("held set has a corrupt region; advertising generation 0 to force a hydrate",
-				"server_id", serverID, "recorded_generation", gen,
+			first := report.Corrupt[0]
+			attrs := []any{"server_id", serverID, "recorded_generation", gen,
 				"corrupt", len(report.Corrupt), "scanned", report.Scanned,
-				"example", filepath.Base(first.Path), "reason", first.Reason.String())
+				"example", filepath.Base(first.Path), "reason", first.Reason.String()}
+			if rewriteErr != nil {
+				log.Warn("held set has a corrupt region but its generation marker could not be "+
+					"rewritten to 0; registrations advertise the recorded generation until a "+
+					"hydrate rewrites the marker or a later quiesced boot judges the set again",
+					append(attrs, "error", rewriteErr)...)
+			} else {
+				log.Warn("held set has a corrupt region; its generation marker now reads 0, forcing "+
+					"a hydrate (recorded_generation is the only surviving record of the original, "+
+					"see STORAGE.md Section 4.6)", attrs...)
+			}
 		}
 		return 0
 	}
@@ -179,12 +217,16 @@ func heldGeneration(workingDir, serverID string, quiesced bool, log *slog.Logger
 }
 
 // HeldServers returns the working sets this Worker currently holds in its local
-// scratch, each tagged with its recorded generation (issue #1711). Unlike the
-// boot-time ScanHeldServers, it skips the region fsck: the Worker is still
-// running, so the torn-region recovery path (issue #834) is not needed for
-// freshness — only the recorded generation marker matters. The session calls
-// this before each (re-)registration so the advertised held set reflects
-// servers placed or generations advanced since boot.
+// scratch, each tagged with its recorded generation (issue #1711). The session calls
+// this before each registration, the first included, so the advertised held set
+// reflects servers placed or generations advanced since boot — which makes this, not
+// ScanHeldServers, what the API is told.
+//
+// It runs no region fsck, and it does not need one: the torn-region verdict (issue
+// #834) is reached once, by the quiesced boot scan, and persisted in the very marker
+// read here (issue #3178), so a torn set reads 0 until a hydrate replaces the tree and
+// rewrites the marker. Re-judging here would pay a region walk per held world on every
+// reconnect and, worse, read worlds this Worker is running mid-write.
 func (m *Manager) HeldServers() []session.HeldServer {
 	entries, err := os.ReadDir(m.scratchDir)
 	if err != nil {

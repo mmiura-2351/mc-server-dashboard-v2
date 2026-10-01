@@ -174,6 +174,14 @@ func run(ctx context.Context) error {
 	// over that live world. Unlike the reclaims above, this call is NOT skipped: an
 	// advertisement withheld reports nothing held, and the API then hydrates every
 	// server on this Worker. The gate is on the judgement, not on the report.
+	//
+	// The list returned here is NOT what the first Register carries: the session
+	// replaces it with manager.HeldServers() before every registration (issue #1711),
+	// and that scan reads the generation markers without a fsck. A quiesced scan
+	// therefore writes its torn verdict INTO the marker (generation 0, issue #3178),
+	// which is how it reaches the API on the first Register and on every reconnect
+	// after it, until a hydrate rewrites the marker. The returned list still feeds the
+	// displaced-tree check below and the boot Capabilities.
 	heldServers := instancemanager.ScanHeldServers(cfg.Worker.ScratchDir, quiesced, logger)
 	// Log a WARN for each .displaced-<id> tree whose server id is not in the held
 	// set (issue #911): those trees are orphaned recovery copies — the server was

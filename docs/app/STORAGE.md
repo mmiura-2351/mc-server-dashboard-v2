@@ -649,9 +649,10 @@ snapshotted successfully elsewhere — what remains true is that a success on B 
 B's working set, never this tree.
 
 The case this gets right is the torn-world path: a torn `<scratch>/<id>` fails the
-boot region fsck and advertises generation 0, so the API's skip gate dispatches a hydrate
-— and retaining the older *intact* tree is better than retaining the torn one. The cost is
-real and goes the other way when the newer tree is fine: the discarded set is the store
+boot region fsck, the Worker rewrites its generation marker to 0 so every registration
+advertises generation 0 (CONTROL_PLANE.md Section 4.1), and the API's skip gate dispatches
+a hydrate — and retaining the older *intact* tree is better than retaining the torn one.
+The cost is real and goes the other way when the newer tree is fine: the discarded set is the store
 copy **plus everything Minecraft wrote since**, none of which was published either, so it
 can be strictly newer than the tree retained. (Concretely: a server whose snapshots keep
 being refused by the integrity gate runs for days, an operator's `restore_backup` bumps
@@ -733,9 +734,9 @@ reclaims; the trees wait for a boot whose sweep succeeds. The sweep itself stays
 **non-fatal** on purpose — a transient Docker socket failure must not stop the Worker from
 serving every other server — which is exactly why the reclaims check it rather than assume
 it. The same signal gates one more boot step, for the same reason applied to reading rather
-than deleting: the held-server scan advertises the recorded generations **unjudged** when
-the sweep did not succeed, because its region fsck would otherwise read a live orphan's
-world mid-write and the generation 0 that follows dispatches a hydrate over it
+than deleting: the held-server scan advertises the recorded generations **unjudged** (and
+rewrites no marker) when the sweep did not succeed, because its region fsck would otherwise
+read a live orphan's world mid-write and the generation 0 that follows dispatches a hydrate over it
 (CONTROL_PLANE.md Section 4.1).
 
 **Scratch capacity.** One hydrate that displaces a live working set peaks at **three
@@ -788,7 +789,12 @@ WARN  displaced recovery tree for unknown/unassigned server found at boot; manua
 1. **Identify the displaced tree.** The boot WARN gives the full path. Or scan the
    Worker's `worker.scratch_dir` for directories matching `.displaced-*`.
 2. **Assess the world.** The displaced tree is a plain working-set directory (the
-   same layout the Worker normally holds in `<scratch>/<id>`). `level.dat` and
+   same layout the Worker normally holds in `<scratch>/<id>`). A tree displaced because
+   the boot region fsck judged it **torn** carries a `.mcsd_generation` marker of `0`:
+   the Worker rewrote it so the verdict reached the API, and the generation the tree was
+   actually at survives only as `recorded_generation` in that boot's `held set has a
+   corrupt region` `WARN` for the server id. Grep the Worker log for it before judging
+   how old the tree is. `level.dat` and
    region dirs live under `world/` inside the displaced tree (e.g.
    `.displaced-<id>/world/level.dat`, `.displaced-<id>/world/region/`). Inspect
    those paths to confirm the world data looks intact. **Check its age.** Under

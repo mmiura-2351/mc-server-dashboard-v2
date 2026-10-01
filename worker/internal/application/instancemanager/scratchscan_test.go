@@ -2,10 +2,12 @@ package instancemanager
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
@@ -188,6 +190,7 @@ func TestScanHeldServersTornRegionForcesHydrate(t *testing.T) {
 	if err := writeGeneration(filepath.Join(scratch, "sound-server"), 4); err != nil {
 		t.Fatal(err)
 	}
+	soundMarker := readMarkerBytes(t, filepath.Join(scratch, "sound-server"))
 
 	got := ScanHeldServers(scratch, true, nil)
 	sort.Slice(got, func(i, j int) bool { return got[i].ServerID < got[j].ServerID })
@@ -203,6 +206,116 @@ func TestScanHeldServersTornRegionForcesHydrate(t *testing.T) {
 			t.Fatalf("held = %v, want %v", got, want)
 		}
 	}
+
+	// The verdict is PERSISTED, not just returned (issue #3178): the session replaces the
+	// boot list with the in-session HeldServers() before every Register, and that scan runs
+	// no fsck, so a verdict held only in this return value never reaches the API. The torn
+	// set's marker therefore reads 0 from now on, and every later scan reports 0 until a
+	// hydrate's own marker write replaces it.
+	if gen := readGeneration(filepath.Join(scratch, "torn-server")); gen != 0 {
+		t.Errorf("torn-server marker = %d after the quiesced boot scan, want 0: the in-session "+
+			"scan every Register sends reads the marker, so a torn verdict that is not written "+
+			"there is advertised at the recorded generation and boots the torn world (issue #3178)", gen)
+	}
+	m := New(nil, scratch, nil)
+	closeWithTest(t, m)
+	inSession := m.HeldServers()
+	sort.Slice(inSession, func(i, j int) bool { return inSession[i].ServerID < inSession[j].ServerID })
+	if len(inSession) != len(want) || inSession[0] != want[0] || inSession[1] != want[1] {
+		t.Errorf("HeldServers() after the boot scan = %v, want %v: the registration payload must "+
+			"carry the boot fsck's verdict (issue #3178)", inSession, want)
+	}
+	// A sound set is judged, not touched: its marker is the exact bytes it was.
+	if after := readMarkerBytes(t, filepath.Join(scratch, "sound-server")); string(after) != string(soundMarker) {
+		t.Errorf("sound-server marker = %q after the boot scan, want it byte-identical %q", after, soundMarker)
+	}
+}
+
+// TestScanHeldServersFailedTornMarkerRewriteIsBestEffort verifies a torn verdict whose
+// marker rewrite fails degrades to the pre-#3178 behaviour instead of failing the scan:
+// the boot list still says 0, the marker keeps its recorded generation (so the in-session
+// scan advertises that, the same outcome as a fsck I/O error), and the failure is logged
+// with the recorded generation so an operator can tell what the API was told.
+func TestScanHeldServersFailedTornMarkerRewriteIsBestEffort(t *testing.T) {
+	scratch := t.TempDir()
+	torn := filepath.Join(scratch, "torn-server", "region")
+	if err := os.MkdirAll(torn, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(torn, "r.0.0.mca"), healthyRegion()[:3*fsckSector-10], 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeGeneration(filepath.Join(scratch, "torn-server"), 9); err != nil {
+		t.Fatal(err)
+	}
+	orig := rewriteTornMarker
+	rewriteTornMarker = func(string, uint64) error { return errors.New("injected: disk full") }
+	t.Cleanup(func() { rewriteTornMarker = orig })
+	h := &capturingSlogHandler{}
+
+	got := ScanHeldServers(scratch, true, slog.New(h))
+
+	want := []session.HeldServer{{ServerID: "torn-server", Generation: 0}}
+	if len(got) != 1 || got[0] != want[0] {
+		t.Errorf("held = %v, want %v", got, want)
+	}
+	if gen := readGeneration(filepath.Join(scratch, "torn-server")); gen != 9 {
+		t.Errorf("torn-server marker = %d, want 9 untouched by the failed rewrite", gen)
+	}
+	var logged bool
+	for _, r := range h.records {
+		if r.Level != slog.LevelWarn || !strings.Contains(r.Message, "could not be rewritten") {
+			continue
+		}
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "recorded_generation" && a.Value.Kind() == slog.KindUint64 && a.Value.Uint64() == 9 {
+				logged = true
+			}
+			return true
+		})
+	}
+	if !logged {
+		t.Errorf("no WARN reporting the failed marker rewrite with recorded_generation=9; records: %v", h.records)
+	}
+}
+
+// TestScanHeldServersTornSetWithoutAMarkerGainsNone verifies the torn-verdict rewrite is
+// skipped when the marker already reads 0 — in particular when there is no marker at all.
+// An absent marker already advertises 0, and it is also the launch guard's refusal
+// predicate (issue #2802): creating one here would let a start the API skipped the
+// hydrate for boot the torn world instead of being refused and replayed with the hydrate.
+func TestScanHeldServersTornSetWithoutAMarkerGainsNone(t *testing.T) {
+	scratch := t.TempDir()
+	torn := filepath.Join(scratch, "torn-server", "region")
+	if err := os.MkdirAll(torn, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(torn, "r.0.0.mca"), healthyRegion()[:3*fsckSector-10], 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	got := ScanHeldServers(scratch, true, nil)
+
+	want := session.HeldServer{ServerID: "torn-server", Generation: 0}
+	if len(got) != 1 || got[0] != want {
+		t.Errorf("held = %v, want [%v]", got, want)
+	}
+	if _, err := os.Stat(filepath.Join(scratch, "torn-server", generationFile)); !os.IsNotExist(err) {
+		t.Errorf("torn-server gained a generation marker (stat err = %v), want none: an absent "+
+			"marker is the launch guard's refusal predicate (issue #2802)", err)
+	}
+}
+
+// readMarkerBytes returns the raw generation marker in workingDir, failing the test when
+// it cannot be read: the assertions using it compare bytes, so a missing marker must not
+// pass as an empty one.
+func readMarkerBytes(t *testing.T, workingDir string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(workingDir, generationFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
 
 // TestScanHeldServersAdvertisesTheRecordedGenerationWhenQuiescenceIsUnproven verifies
@@ -269,6 +382,12 @@ func TestScanHeldServersAdvertisesTheRecordedGenerationWhenQuiescenceIsUnproven(
 				"world (issue #3171)", got, want)
 		}
 	}
+	// An unjudged set is not rewritten either (issue #3178): the marker is what every later
+	// Register reads, so a write here would carry the unproven verdict to the API anyway.
+	if gen := readGeneration(filepath.Join(scratch, "torn-server")); gen != 9 {
+		t.Errorf("torn-server marker = %d after an unquiesced boot scan, want 9 untouched: a boot "+
+			"that cannot prove no orphan is writing must not persist a torn verdict (issue #3171)", gen)
+	}
 }
 
 // TestScanHeldServersLiveFormatScratchAdvertisesHeldGeneration verifies the boot
@@ -294,11 +413,16 @@ func TestScanHeldServersLiveFormatScratchAdvertisesHeldGeneration(t *testing.T) 
 	if err := writeGeneration(filepath.Join(scratch, "live-server"), 11); err != nil {
 		t.Fatal(err)
 	}
+	before := readMarkerBytes(t, filepath.Join(scratch, "live-server"))
 
 	got := ScanHeldServers(scratch, true, nil)
 	want := []session.HeldServer{{ServerID: "live-server", Generation: 11}}
 	if len(got) != len(want) || got[0] != want[0] {
 		t.Fatalf("held = %v, want %v", got, want)
+	}
+	if after := readMarkerBytes(t, filepath.Join(scratch, "live-server")); string(after) != string(before) {
+		t.Errorf("live-server marker = %q after the boot scan, want it byte-identical %q: only a "+
+			"torn verdict rewrites the marker (issue #3178)", after, before)
 	}
 }
 
@@ -400,9 +524,10 @@ func TestWarnOrphanDisplacedTreesMissingScratchRootIsSafe(t *testing.T) {
 
 // TestManagerHeldServersReadsCurrentGenerations verifies the Manager.HeldServers
 // method returns the current generation for each held working set (issue #1711).
-// Unlike the boot-time ScanHeldServers, HeldServers skips the region fsck: a
-// torn region in the scratch keeps its recorded generation because the Worker
-// is still running and the fsck is only needed to detect post-crash corruption.
+// Unlike the boot-time ScanHeldServers, HeldServers runs no region fsck: it reads
+// the marker, and the quiesced boot scan has already persisted any torn verdict
+// there as 0 (issue #3178, TestScanHeldServersTornRegionForcesHydrate), so the
+// verdict reaches every Register without re-judging worlds this Worker may be running.
 func TestManagerHeldServersReadsCurrentGenerations(t *testing.T) {
 	scratch := t.TempDir()
 
