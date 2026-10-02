@@ -116,6 +116,36 @@ async def test_gap_marker_is_not_duplicated_while_still_behind() -> None:
     await sub.aclose()
 
 
+async def test_discard_buffered_drops_only_the_named_streams() -> None:
+    # The status snapshot supersedes the buffered status events (#1795): they
+    # are discarded, while the other streams keep their order.
+    bus = InProcessRealTimeEvents()
+    sub = bus.subscribe(server_id="s1", streams=_ALL)
+    log = RealTimeEvent(stream=EventStream.LOG, payload={"line": "x"})
+
+    bus.publish(server_id="s1", event=_status("running"))
+    bus.publish(server_id="s1", event=log)
+    bus.publish(server_id="s1", event=_status("stopping"))
+    sub.discard_buffered(frozenset({EventStream.STATUS}))
+    bus.publish(server_id="s1", event=_status("stopped"))
+
+    drained = [await asyncio.wait_for(sub.__anext__(), timeout=1) for _ in range(2)]
+    assert drained == [log, _status("stopped")]
+    await sub.aclose()
+
+
+async def test_discard_buffered_of_everything_leaves_the_subscriber_waiting() -> None:
+    bus = InProcessRealTimeEvents()
+    sub = bus.subscribe(server_id="s1", streams=_ALL)
+
+    bus.publish(server_id="s1", event=_status("running"))
+    sub.discard_buffered(frozenset({EventStream.STATUS}))
+
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(sub.__anext__(), timeout=0.05)
+    await sub.aclose()
+
+
 async def test_unsubscribe_cleans_up_buffer_no_leak() -> None:
     bus = InProcessRealTimeEvents()
     sub = bus.subscribe(server_id="s1", streams=_ALL)

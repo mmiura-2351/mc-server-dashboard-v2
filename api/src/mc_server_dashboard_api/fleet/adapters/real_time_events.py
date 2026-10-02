@@ -71,6 +71,9 @@ class _Subscription(EventSubscription):
         self._buffer.append(event)
         self._ready.set()
 
+    def discard_buffered(self, streams: frozenset[EventStream]) -> None:
+        pass
+
     def __aiter__(self) -> "_Subscription":
         return self
 

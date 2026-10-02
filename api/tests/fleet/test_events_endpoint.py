@@ -307,6 +307,62 @@ def test_slow_consumer_receives_a_gap_frame_then_a_fresh_snapshot() -> None:
     assert third["payload"] == {"state": "2"}
 
 
+def _drain_until_log(ws: object, line: str) -> list[dict[str, object]]:
+    """Receive frames up to and including the log frame carrying ``line``."""
+
+    frames: list[dict[str, object]] = []
+    while True:
+        frame = ws.receive_json()  # type: ignore[attr-defined]
+        frames.append(frame)
+        if frame["stream"] == "log" and frame["payload"] == {"line": line}:
+            return frames
+
+
+def _final_state(frames: list[dict[str, object]]) -> object:
+    """The state a client holds after applying every status/snapshot frame."""
+
+    states = [
+        frame["payload"]["state"]  # type: ignore[index]
+        for frame in frames
+        if frame["stream"] in ("status", "snapshot")
+    ]
+    return states[-1]
+
+
+def test_buffered_status_older_than_the_post_gap_snapshot_is_discarded() -> None:
+    """A retained status frame must not undo the snapshot that superseded it.
+
+    ``running`` is published and still buffered when the worker disconnects:
+    that write commits ``unknown`` without publishing anything. The overflow's
+    post-gap snapshot reads ``unknown``; delivering the older buffered
+    ``running`` after it would leave the client on ``running`` indefinitely.
+    """
+
+    bus = InProcessRealTimeEvents(max_queue=2)
+    community, server = uuid.uuid4(), uuid.uuid4()
+    read_server = _FakeReadServer(found=True, state=ObservedState.RUNNING)
+    app = _app(bus=bus, read_server=read_server)
+    client = _client(app)
+    with client.websocket_connect(_url(community, server, "status,log")) as ws:
+        _skip_snapshot(ws)
+        for _ in range(2):
+            bus.publish(
+                server_id=str(server),
+                event=RealTimeEvent(
+                    stream=EventStream.STATUS, payload={"state": "running"}
+                ),
+            )
+        # The worker-disconnect write: persisted, never published.
+        read_server.state = ObservedState.UNKNOWN
+        bus.publish(
+            server_id=str(server),
+            event=RealTimeEvent(stream=EventStream.LOG, payload={"line": "end"}),
+        )
+        frames = _drain_until_log(ws, "end")
+    assert "gap" in [frame["stream"] for frame in frames]
+    assert _final_state(frames) == "unknown"
+
+
 def test_gap_on_a_stream_without_status_sends_no_snapshot() -> None:
     bus = InProcessRealTimeEvents(max_queue=1)
     community, server = uuid.uuid4(), uuid.uuid4()

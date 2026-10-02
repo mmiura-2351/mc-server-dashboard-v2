@@ -456,6 +456,55 @@ def test_gap_is_followed_by_a_fresh_snapshot() -> None:
     assert third["payload"] == {"state": "2"}
 
 
+def test_buffered_status_older_than_the_post_gap_snapshot_is_discarded() -> None:
+    """A retained status frame must not undo the snapshot that superseded it.
+
+    ``running`` is published and still buffered when the worker disconnects:
+    that write commits ``unknown`` without publishing anything. The overflow's
+    post-gap snapshot reads ``unknown``; delivering the older buffered
+    ``running`` after it would leave the client on ``running`` indefinitely.
+    """
+
+    bus = InProcessRealTimeEvents(max_queue=2)
+    community, server = uuid.uuid4(), uuid.uuid4()
+    servers = _FakeListServers(
+        [_FakeServer(id=ServerId(server), observed_state=ObservedState.RUNNING)]
+    )
+    app = _app(bus=bus, lookup={str(server): community}, list_servers=servers)
+    client = _client(app)
+    with client.websocket_connect(_url(community)) as ws:
+        _skip_snapshot(ws)
+        for _ in range(2):
+            bus.publish(
+                server_id=str(server),
+                event=RealTimeEvent(
+                    stream=EventStream.STATUS, payload={"state": "running"}
+                ),
+            )
+        # The worker-disconnect write: persisted, never published.
+        servers.servers = [
+            _FakeServer(id=ServerId(server), observed_state=ObservedState.UNKNOWN)
+        ]
+        bus.publish(
+            server_id=str(server),
+            event=notification_event(kind="k", title="end"),
+        )
+        frames = []
+        while True:
+            frame = ws.receive_json()
+            frames.append(frame)
+            if frame["stream"] == "notification":
+                break
+    states = []
+    for frame in frames:
+        if frame["stream"] == "status":
+            states.append(frame["payload"]["state"])
+        elif frame["stream"] == "snapshot":
+            states.extend(entry["state"] for entry in frame["payload"]["servers"])
+    assert "gap" in [frame["stream"] for frame in frames]
+    assert states[-1] == "unknown"
+
+
 # --- connection lifecycle --------------------------------------------------
 
 
