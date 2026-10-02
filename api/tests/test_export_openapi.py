@@ -21,6 +21,9 @@ def _clear_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "MCD_API_AUTH__TOKEN__SIGNING_KEY",
         "MCD_API_CONTROL__ENABLED",
         "MCD_API_CONTROL__TLS__INSECURE",
+        # The docs surface is off by default (issue #2568); the export reads
+        # ``app.openapi()`` in-process, so it must not depend on the HTTP route.
+        "MCD_API_DOCS__ENABLED",
     ):
         monkeypatch.delenv(name, raising=False)
 

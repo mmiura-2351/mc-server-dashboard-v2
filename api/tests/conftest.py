@@ -115,6 +115,11 @@ def _set_test_env(monkeypatch: pytest.MonkeyPatch) -> None:
     # Section 5.1, required-unless-insecure). Tests that exercise the TLS posture
     # or the fail-fast set these explicitly.
     monkeypatch.setenv("MCD_API_CONTROL__TLS__INSECURE", "true")
+    # Mount the OpenAPI schema and docs pages by default (off in code, issue
+    # #2568) so the shared app carries every route the factory can register and
+    # the route-walking tests see the docs mount. The gating tests set this
+    # explicitly.
+    monkeypatch.setenv("MCD_API_DOCS__ENABLED", "true")
 
 
 @pytest.fixture(autouse=True)

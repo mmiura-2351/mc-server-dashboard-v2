@@ -385,6 +385,11 @@ services:
       MCD_API_METRICS__ENABLED: "${MCD_API_METRICS__ENABLED:-false}"
       MCD_API_METRICS__HOST: "${MCD_API_METRICS__HOST:-0.0.0.0}"
       MCD_API_METRICS__PORT: "${MCD_API_METRICS__PORT:-9090}"
+      # OpenAPI schema and docs pages (/api/openapi.json, /api/docs, /api/redoc),
+      # off by default (issue #2568). Unlike the metrics listener these are on
+      # 8000, so enabling them publishes the full route inventory to the
+      # internet through cloudflared (SECURITY.md Section 5).
+      MCD_API_DOCS__ENABLED: "${MCD_API_DOCS__ENABLED:-false}"
       # Log verbosity and format (CONFIGURATION.md Section 5.10), forwarded with
       # `:-` defaults so the .env knobs are not silently inert here (issue
       # #2794). This is the pair an operator reaches for during an incident, and

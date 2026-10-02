@@ -847,8 +847,10 @@ loopback publish in `compose.yaml` constrains only *host* reachability — the
 tunnel reaches the API over the `mcsd` network, past that bind. Treat
 anything you mount on the API's HTTP port as internet-facing. This is why the
 Prometheus exposition is not on that port (see the metrics subsection at the end
-of this section); the OpenAPI schema, the docs routes and `/api/readyz`
-are reachable from the internet. To restrict a
+of this section), and why the OpenAPI schema and docs routes are mounted only
+when `MCD_API_DOCS__ENABLED=true` (off by default; CONFIGURATION.md Section
+5.10). `/api/healthz` and `/api/readyz` are reachable from the internet
+deliberately (SECURITY.md Section 5). To restrict a
 path, use a Cloudflare Access policy on the public hostname; the repo ships no
 such rule.
 
