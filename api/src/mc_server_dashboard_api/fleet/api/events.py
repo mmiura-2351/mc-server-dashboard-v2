@@ -30,6 +30,13 @@ arrives, the socket simply stays quiet; a slow client that overflows its buffer
 gets a ``gap`` frame and keeps the newest events. Nothing else depends on a
 subscriber, so a closed socket never affects the control plane or REST.
 
+Missed events are never replayed, so every status subscription opens with a
+``snapshot`` frame of the persisted observed state of its scope, and gets a
+fresh one right after every ``gap`` frame (#1795): a (re)connecting or
+overflowed client converges from the stream alone, whatever its own resync
+discipline. The snapshot is read after the subscription is registered, so no
+transition falls between the two (:func:`_relay`).
+
 The endpoints are send-only, but the socket is still read: a companion reader
 task drains (and discards) anything the client sends, because uvicorn surfaces
 a client disconnect only through ``receive()`` or a failing send — without the
@@ -66,6 +73,7 @@ from mc_server_dashboard_api.community.domain.value_objects import (
 from mc_server_dashboard_api.dependencies import (
     ServerCommunityLookup,
     get_current_user_ws,
+    get_list_servers,
     get_membership_visibility,
     get_permission_checker,
     get_read_server,
@@ -81,7 +89,10 @@ from mc_server_dashboard_api.fleet.domain.real_time_events import (
 )
 from mc_server_dashboard_api.http_datetime import serialize_utc
 from mc_server_dashboard_api.identity.domain.entities import User
-from mc_server_dashboard_api.servers.application.manage_server import ReadServer
+from mc_server_dashboard_api.servers.application.manage_server import (
+    ListServers,
+    ReadServer,
+)
 from mc_server_dashboard_api.servers.domain.errors import ServerNotFoundError
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId as ServersCommunityId,
@@ -103,6 +114,11 @@ _CLOSE_NOT_FOUND = 4404
 # is a tight-enough bound on how long a removed member can keep receiving without
 # adding query load.
 _REAUTHZ_INTERVAL_SECONDS = 60.0
+
+# The ``stream`` of the status snapshot frame (#1795). Synthesised by this
+# endpoint from persisted state, never published on the bus, so it is not an
+# :class:`EventStream`.
+_SNAPSHOT_STREAM = "snapshot"
 
 # The streams a client may subscribe to (the gap marker is always delivered and
 # is never selectable).
@@ -192,8 +208,26 @@ async def server_events(
     async def _deliver(event: RealTimeEvent) -> None:
         await websocket.send_text(_encoded(event, _FRAME_SLOT, _frame))
 
+    # Only a STATUS subscriber gets the status snapshot: a log-only client never
+    # asked for status and receives none.
+    snapshot = (
+        functools.partial(
+            _server_snapshot,
+            read_server=read_server,
+            community_id=community_id,
+            server_id=server_id,
+        )
+        if EventStream.STATUS in streams
+        else None
+    )
     try:
-        await _relay(websocket, subscription, reauthorize=recheck, deliver=_deliver)
+        await _relay(
+            websocket,
+            subscription,
+            reauthorize=recheck,
+            deliver=_deliver,
+            snapshot=snapshot,
+        )
     finally:
         await subscription.aclose()
 
@@ -206,6 +240,7 @@ async def community_events(
     visibility: Annotated[MembershipVisibility, Depends(get_membership_visibility)],
     checker: Annotated[PermissionChecker, Depends(get_permission_checker)],
     lookup: Annotated[ServerCommunityLookup, Depends(get_server_community_lookup)],
+    list_servers: Annotated[ListServers, Depends(get_list_servers)],
     bus: Annotated[RealTimeEvents, Depends(get_real_time_events)],
 ) -> None:
     """Stream operator events for every server of one community (#288, #1836).
@@ -274,7 +309,17 @@ async def community_events(
         )
 
     try:
-        await _relay(websocket, subscription, reauthorize=recheck, deliver=_deliver)
+        await _relay(
+            websocket,
+            subscription,
+            reauthorize=recheck,
+            deliver=_deliver,
+            snapshot=functools.partial(
+                _community_snapshot,
+                list_servers=list_servers,
+                community_id=community_id,
+            ),
+        )
     finally:
         await subscription.aclose()
 
@@ -299,8 +344,21 @@ async def _relay(
     *,
     reauthorize: Callable[[], Awaitable[int | None]],
     deliver: Callable[[RealTimeEvent], Awaitable[None]],
+    snapshot: Callable[[], Awaitable[str | None]] | None,
 ) -> None:
     """Deliver subscription events until the client goes away or authz is revoked.
+
+    When ``snapshot`` is given, its frame is sent first, and again right after
+    each delivered GAP marker (#1795): the stream replays nothing, so the
+    snapshot is what lets a (re)connecting or overflowed client converge without
+    a REST round-trip. The caller has already registered ``subscription``, so a
+    transition committed after the snapshot read is in the buffer and is
+    delivered after it; one that raced the read may arrive as a duplicate,
+    which is harmless because status frames are idempotent sets. A GAP is
+    surfaced only after its dropped events were published, and the state they
+    carried is committed before its publish, so the post-gap snapshot covers
+    them. ``snapshot`` returning ``None`` means the subscribed server no longer
+    exists: the socket closes ``4404``, as the next re-authz would.
 
     Each turn of the loop races three outcomes: the next buffered event (handed
     to ``deliver``), the wall-clock re-authz deadline expiring (``reauthorize``
@@ -318,9 +376,23 @@ async def _relay(
     loop = asyncio.get_running_loop()
     deadline = loop.time() + _REAUTHZ_INTERVAL_SECONDS
 
+    async def _send_snapshot() -> bool:
+        """Send a fresh snapshot frame; return False once the socket is closed."""
+
+        if snapshot is None:
+            return True
+        text = await snapshot()
+        if text is None:
+            await websocket.close(code=_CLOSE_NOT_FOUND)
+            return False
+        await websocket.send_text(text)
+        return True
+
     disconnected = asyncio.create_task(_client_gone(websocket))
     next_event = asyncio.ensure_future(subscription.__anext__())
     try:
+        if not await _send_snapshot():
+            return
         while True:
             done, _pending = await asyncio.wait(
                 {next_event, disconnected},
@@ -336,6 +408,8 @@ async def _relay(
                     return
                 next_event = asyncio.ensure_future(subscription.__anext__())
                 await deliver(event)
+                if event.stream is EventStream.GAP and not await _send_snapshot():
+                    return
             # Check the wall-clock deadline unconditionally: a busy stream must
             # not prevent re-authorization from running.
             if loop.time() >= deadline:
@@ -489,6 +563,67 @@ def _frame(event: RealTimeEvent) -> dict[str, object]:
         "ts": serialize_utc(ts),
         "payload": event.payload,
     }
+
+
+async def _server_snapshot(
+    *, read_server: ReadServer, community_id: uuid.UUID, server_id: uuid.UUID
+) -> str | None:
+    """Encode the per-server status snapshot frame, or ``None`` if the server is gone.
+
+    ``{stream: "snapshot", ts, payload: {state}}`` — the persisted observed state
+    the REST server read reports. There is no ``detail``: it rides only a live
+    status transition and is not persisted.
+    """
+
+    try:
+        server = await read_server(
+            community_id=ServersCommunityId(community_id),
+            server_id=ServerId(server_id),
+        )
+    except ServerNotFoundError:
+        return None
+    return _snapshot_text({"state": server.observed_state.value})
+
+
+async def _community_snapshot(
+    *, list_servers: ListServers, community_id: uuid.UUID
+) -> str:
+    """Encode the community status snapshot frame: every server's observed state.
+
+    ``{stream: "snapshot", ts, payload: {servers: [{server_id, state}]}, server_id:
+    null}`` — the community frame shape, server-agnostic like the GAP marker. The
+    list is the community's whole server set, exactly what the stream's
+    community-level ``server:read`` gate already lets the subscriber see (the
+    REST servers list under the same gate), so a client can also reconcile
+    servers created or deleted while it was away.
+    """
+
+    servers = await list_servers(community_id=ServersCommunityId(community_id))
+    payload: dict[str, object] = {
+        "servers": [
+            {"server_id": str(server.id.value), "state": server.observed_state.value}
+            for server in servers
+        ]
+    }
+    return _snapshot_text(payload, server_agnostic=True)
+
+
+def _snapshot_text(payload: dict[str, object], *, server_agnostic: bool = False) -> str:
+    """Encode a snapshot frame; ``ts`` is the time the snapshot was read.
+
+    ``server_agnostic`` appends the community shape's ``server_id: null``.
+    Encoded per send (a snapshot is per-subscriber, never shared), with the same
+    ``json.dumps`` arguments as :func:`_encoded`.
+    """
+
+    frame: dict[str, object] = {
+        "stream": _SNAPSHOT_STREAM,
+        "ts": serialize_utc(dt.datetime.now(dt.timezone.utc)),
+        "payload": payload,
+    }
+    if server_agnostic:
+        frame["server_id"] = None
+    return json.dumps(frame, separators=(",", ":"), ensure_ascii=False)
 
 
 # Cache slots for the encoded wire text, stashed on the event instance itself —

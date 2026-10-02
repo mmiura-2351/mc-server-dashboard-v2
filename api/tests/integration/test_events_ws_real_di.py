@@ -198,6 +198,9 @@ async def test_community_events_real_graph_accepts_and_delivers(
     client = _client(_app(user, bus, lookup={str(server): community.value}))
     url = f"/api/communities/{community.value}/events"
     with client.websocket_connect(url) as ws:
+        # The on-subscribe snapshot (#1795) is read through the real
+        # ``get_list_servers`` -- the community has no servers yet.
+        snapshot = ws.receive_json()
         bus.publish(
             server_id=str(server),
             event=RealTimeEvent(
@@ -205,6 +208,8 @@ async def test_community_events_real_graph_accepts_and_delivers(
             ),
         )
         frame = ws.receive_json()
+    assert snapshot["stream"] == "snapshot"
+    assert snapshot["payload"] == {"servers": []}
     assert frame["stream"] == "status"
     assert frame["server_id"] == str(server)
 

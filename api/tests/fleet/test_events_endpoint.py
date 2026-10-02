@@ -357,7 +357,9 @@ def test_snapshot_wire_text_is_the_compact_frame_shape() -> None:
     with client.websocket_connect(_url(community, server)) as ws:
         text = ws.receive_text()
     ts = json.loads(text)["ts"]
-    assert text == f'{{"stream":"snapshot","ts":"{ts}","payload":{{"state":"running"}}}}'
+    assert (
+        text == f'{{"stream":"snapshot","ts":"{ts}","payload":{{"state":"running"}}}}'
+    )
 
 
 def test_no_snapshot_without_the_status_stream() -> None:
@@ -865,6 +867,7 @@ async def test_cancellation_while_parked_leaves_no_orphan_tasks() -> None:
             subscription,
             reauthorize=_reauthorize,
             deliver=_deliver,
+            snapshot=None,
         )
     )
     await asyncio.sleep(0.01)  # let the loop park on its helper tasks
