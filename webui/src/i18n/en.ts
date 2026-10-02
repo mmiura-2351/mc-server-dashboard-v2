@@ -376,6 +376,16 @@ export const en = {
   "serverDetail.console.notRunning":
     "Commands are available only while the server is running.",
   "serverDetail.commandFailed": "Command failed.",
+  // Console command failures by cause (issue #2450); see
+  // serverConsoleErrorPresentation.ts for what each reason means.
+  "serverDetail.console.error.workerUnavailable":
+    "Could not reach the server host, so it is unknown whether the command ran. Check the console output before sending it again.",
+  "serverDetail.console.error.notRunning":
+    "Command not sent: the server is not running. Start it before sending commands.",
+  "serverDetail.console.error.failedStopOrphan":
+    "Command not sent: the server's previous stop did not finish, so its process may still be running. The system is shutting it down automatically.",
+  "serverDetail.console.error.rconFailed":
+    "The server's console connection (RCON) failed, so the command may not have run. Check the console output before sending it again.",
   // Lifecycle controls.
   "serverDetail.start": "Start",
   "serverDetail.startCrashed": "Restart",

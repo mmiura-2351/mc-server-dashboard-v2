@@ -356,6 +356,14 @@ export const ja: Record<TranslationKey, string> = {
   "serverDetail.console.notRunning":
     "コマンドはサーバーの稼働中のみ使用できます。",
   "serverDetail.commandFailed": "コマンドが失敗しました。",
+  "serverDetail.console.error.workerUnavailable":
+    "サーバーホストと通信できなかったため、コマンドが実行されたかどうかは不明です。再送信する前にコンソールの出力を確認してください。",
+  "serverDetail.console.error.notRunning":
+    "サーバーが稼働していないため、コマンドは送信されませんでした。先にサーバーを起動してください。",
+  "serverDetail.console.error.failedStopOrphan":
+    "サーバーの前回の停止が完了しておらず、プロセスがまだ動作している可能性があるため、コマンドは送信されませんでした。システムが自動的に停止処理を進めています。",
+  "serverDetail.console.error.rconFailed":
+    "サーバーのコンソール接続（RCON）でエラーが発生したため、コマンドが実行されていない可能性があります。再送信する前にコンソールの出力を確認してください。",
   // Lifecycle controls.
   "serverDetail.start": "起動",
   "serverDetail.startCrashed": "再起動",
