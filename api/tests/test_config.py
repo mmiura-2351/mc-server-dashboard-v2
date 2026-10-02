@@ -1225,6 +1225,23 @@ def test_effective_data_plane_base_url_none_when_both_unset(
     assert settings.server.effective_data_plane_base_url is None
 
 
+# --- control.restart_timeout_seconds (issue #2774) ---
+
+
+def test_restart_budget_spans_the_stop_leg_and_the_relaunch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A RestartServer is ONE dispatch carrying the graceful stop leg (the stop
+    # budget's job: flush + docker-stop escalation) followed by the relaunch (what
+    # a StartServer dispatch does under the command budget). Its deadline is the
+    # sum of the two; either budget alone falls short by the other leg.
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    monkeypatch.setenv("MCD_API_CONTROL__STOP_TIMEOUT_SECONDS", "300")
+    monkeypatch.setenv("MCD_API_CONTROL__COMMAND_TIMEOUT_SECONDS", "45")
+    settings = load_settings(config_file=None)
+    assert settings.control.restart_timeout_seconds == 345
+
+
 # --- masked_dump completeness (issue #1993) ---
 
 

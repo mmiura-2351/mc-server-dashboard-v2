@@ -970,6 +970,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 hydrate_timeout_seconds=settings.control.hydrate_timeout_seconds,
                 snapshot_timeout_seconds=settings.control.snapshot_timeout_seconds,
                 stop_timeout_seconds=settings.control.stop_timeout_seconds,
+                restart_timeout_seconds=settings.control.restart_timeout_seconds,
             )
 
             def _make_schedule_execute() -> ExecuteScheduleAction:
@@ -1084,6 +1085,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 hydrate_timeout_seconds=settings.control.hydrate_timeout_seconds,
                 snapshot_timeout_seconds=settings.control.snapshot_timeout_seconds,
                 stop_timeout_seconds=settings.control.stop_timeout_seconds,
+                restart_timeout_seconds=settings.control.restart_timeout_seconds,
             )
             # Build a fresh StartServer/StopServer (each with its own UnitOfWork)
             # per reconcile action so concurrent actions never share a session

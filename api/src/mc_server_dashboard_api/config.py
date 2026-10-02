@@ -229,6 +229,21 @@ class ControlSettings(_Section):
     # without a credential) treats a blank as missing (#939).
     _blank_credential = field_validator("worker_credential")(_blank_to_none)
 
+    @property
+    def restart_timeout_seconds(self) -> int:
+        """Deadline for the RESTART command's worker round-trip (issue #2774).
+
+        One RestartServer dispatch carries the same graceful stop leg as a stop
+        (flush + docker-stop escalation, budgeted by ``stop_timeout_seconds``) and
+        then the relaunch (the StartServer leg, budgeted by
+        ``command_timeout_seconds``), so its deadline is the sum of the two —
+        derived rather than a separate knob, so it can never drift below either leg.
+        Not a term of the reconciler grace floor: the reconciler never replays a
+        restart, and the start it may re-dispatch meanwhile is refused BUSY by the
+        Worker's reservation held across the whole restart.
+        """
+        return self.stop_timeout_seconds + self.command_timeout_seconds
+
 
 class LogSettings(_Section):
     """Observability (CONFIGURATION.md Section 5.10)."""
