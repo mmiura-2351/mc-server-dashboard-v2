@@ -190,8 +190,22 @@ Global resource pack library (not community-scoped) and per-server assignment.
 
 | Path | Notes |
 |---|---|
-| `WS /communities/{cid}/servers/{sid}/events?streams=status,log,metrics,notification` | Typed frames `{stream, ts, payload}`. `status`: `{state, detail}` · `log`: `{line, stream}` · `metrics`: `{cpu_millis, memory_bytes, player_count}` · `notification`: `{kind, title, detail}` (operator notice) · `gap`: client fell behind (always delivered). |
-| `WS /communities/{cid}/events` | Community-wide **status + notification** firehose; frames carry `server_id`. |
+| `WS /communities/{cid}/servers/{sid}/events?streams=status,log,metrics,notification` | Typed frames `{stream, ts, payload}`. `status`: `{state, detail}` · `log`: `{line, stream}` · `metrics`: `{cpu_millis, memory_bytes, player_count}` · `notification`: `{kind, title, detail}` (operator notice) · `gap`: client fell behind (always delivered) · `snapshot`: `{state}` (see below). |
+| `WS /communities/{cid}/events` | Community-wide **status + notification** firehose; frames carry `server_id`. `snapshot`: `{servers: [{server_id, state}]}` with `server_id: null` (see below). |
+
+Missed frames are never replayed (delivery is best-effort), so a connection
+that carries status opens with a **`snapshot`** frame and gets a fresh one
+right after every `gap` frame: the persisted observed state of the stream's
+scope — the server for the per-server stream (only when `status` is among the
+subscribed streams), every server of the community for the community stream.
+Its `ts` is the time the snapshot was read. It has no `detail`, which only a
+live `status` transition carries. A client applies it like status frames, and
+on the community stream it is the complete server set, so a server missing from
+the client's list (or absent from the snapshot) means the set changed. The
+subscription is registered before the snapshot is read, so no transition is
+lost between the two; one that races the read is delivered after the
+snapshot, in order, ending at the newest state. A server deleted before its
+per-server snapshot can be read closes the socket with 4404.
 
 Auth: browsers pass the access token via `Sec-WebSocket-Protocol` as two
 subprotocols `["access_token", "<jwt>"]`; the server echoes `access_token` as
@@ -619,6 +633,9 @@ backend support; the tab body also self-guards with an "unsupported" notice).
 - One WS per open server-detail page + one community WS for the dashboard.
 - Reconnect with exponential backoff + jitter; resubscribe on open; banner
   shows degraded mode; REST polling fallback for status only.
+- Converge from the `snapshot` frame (Section 2.6) on every (re)connect and
+  after every `gap`; the one-shot REST refetch on reopen / `gap` stays as a
+  belt-and-suspenders reconcile.
 
 ### 7.3 Permission-driven rendering
 - Capabilities come from `GET /communities/{cid}/me/permissions`:

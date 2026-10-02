@@ -351,14 +351,16 @@ async def _relay(
     When ``snapshot`` is given, its frame is sent first, and again right after
     each delivered GAP marker (#1795): the stream replays nothing, so the
     snapshot is what lets a (re)connecting or overflowed client converge without
-    a REST round-trip. The caller has already registered ``subscription``, so a
-    transition committed after the snapshot read is in the buffer and is
-    delivered after it; one that raced the read may arrive as a duplicate,
-    which is harmless because status frames are idempotent sets. A GAP is
-    surfaced only after its dropped events were published, and the state they
-    carried is committed before its publish, so the post-gap snapshot covers
-    them. ``snapshot`` returning ``None`` means the subscribed server no longer
-    exists: the socket closes ``4404``, as the next re-authz would.
+    a REST round-trip. The caller has already registered ``subscription``, and
+    a transition is committed before it is published, so every transition the
+    snapshot read misses is in the buffer and is delivered after it; one that
+    raced the read may repeat (or briefly precede) what the snapshot already
+    showed, which is harmless because status frames are idempotent sets
+    applied in order, ending at the newest state. A GAP is surfaced only after
+    its dropped events were published, and so committed, so the post-gap
+    snapshot covers them. ``snapshot`` returning ``None`` means the subscribed
+    server no longer exists: the socket closes ``4404``, as the next re-authz
+    would.
 
     Each turn of the loop races three outcomes: the next buffered event (handed
     to ``deliver``), the wall-clock re-authz deadline expiring (``reauthorize``
