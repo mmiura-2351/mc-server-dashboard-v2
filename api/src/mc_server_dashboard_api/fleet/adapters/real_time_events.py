@@ -78,6 +78,9 @@ class _Subscription(EventSubscription):
         if not self._buffer and not self._gap_pending:
             self._ready.clear()
 
+    def take_dropped(self) -> frozenset[EventStream]:
+        return frozenset()
+
     def __aiter__(self) -> "_Subscription":
         return self
 

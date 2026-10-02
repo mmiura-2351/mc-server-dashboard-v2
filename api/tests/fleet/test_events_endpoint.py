@@ -369,6 +369,45 @@ def test_buffered_status_older_than_the_post_gap_snapshot_is_discarded() -> None
     assert _final_state(frames) == "unknown"
 
 
+def test_gap_that_dropped_no_status_reads_no_snapshot() -> None:
+    """A log flood overflowing a slow client must not cost a DB read per gap.
+
+    The dropped events are all log lines: the client missed no status, so the
+    gap needs no fresh snapshot, and the server is read only for the authz
+    gate and the subscribe snapshot.
+    """
+
+    bus = InProcessRealTimeEvents(max_queue=2)
+    community, server = uuid.uuid4(), uuid.uuid4()
+
+    class _CountingReadServer(_FakeReadServer):
+        reads = 0
+
+        async def __call__(self, **kwargs: object) -> object:
+            self.reads += 1
+            return await super().__call__(**kwargs)
+
+    read_server = _CountingReadServer(found=True)
+    app = _app(bus=bus, read_server=read_server)
+    client = _client(app)
+    with client.websocket_connect(_url(community, server, "status,log")) as ws:
+        _skip_snapshot(ws)
+        for i in range(20):
+            bus.publish(
+                server_id=str(server),
+                event=RealTimeEvent(stream=EventStream.LOG, payload={"line": str(i)}),
+            )
+        bus.publish(
+            server_id=str(server),
+            event=RealTimeEvent(stream=EventStream.LOG, payload={"line": "end"}),
+        )
+        frames = _drain_until_log(ws, "end")
+    streams = [frame["stream"] for frame in frames]
+    assert "gap" in streams
+    assert "snapshot" not in streams
+    assert read_server.reads == 2  # the authz gate + the subscribe snapshot
+
+
 def test_gap_on_a_stream_without_status_sends_no_snapshot() -> None:
     bus = InProcessRealTimeEvents(max_queue=1)
     community, server = uuid.uuid4(), uuid.uuid4()
@@ -896,6 +935,59 @@ def test_client_sent_data_is_ignored_and_delivery_continues() -> None:
         )
         frame = ws.receive_json()
     assert frame["stream"] == "status"
+
+
+class _GoneDuringReadSocket:
+    """A client that disconnects while the snapshot is being read.
+
+    Once the disconnect has been received, any send or close is what uvicorn
+    rejects with ``RuntimeError`` ("Unexpected ASGI message ... after sending
+    'websocket.close'"); the relay must notice the client is gone instead.
+    """
+
+    def __init__(self) -> None:
+        self.gone = asyncio.Event()
+
+    async def receive(self) -> dict[str, object]:
+        self.gone.set()
+        return {"type": "websocket.disconnect"}
+
+    async def send_text(self, text: str) -> None:
+        raise RuntimeError("Unexpected ASGI message 'websocket.send'")
+
+    async def close(self, code: int) -> None:
+        raise RuntimeError("Unexpected ASGI message 'websocket.close'")
+
+
+@pytest.mark.parametrize("snapshot_text", ["{}", None], ids=["send", "close-4404"])
+async def test_client_gone_during_the_snapshot_read_ends_the_relay_quietly(
+    snapshot_text: str | None,
+) -> None:
+    from mc_server_dashboard_api.fleet.api import events as events_module
+
+    socket = _GoneDuringReadSocket()
+    bus = InProcessRealTimeEvents()
+    subscription = bus.subscribe(server_id="s", streams=frozenset({EventStream.STATUS}))
+
+    async def _snapshot() -> str | None:
+        await socket.gone.wait()
+        await asyncio.sleep(0)  # the reader task observes the disconnect
+        return snapshot_text
+
+    async def _reauthorize() -> int | None:
+        return None
+
+    async def _deliver(event: RealTimeEvent) -> None:
+        raise AssertionError("no events are published in this test")
+
+    await events_module._relay(
+        socket,  # type: ignore[arg-type]
+        subscription,
+        reauthorize=_reauthorize,
+        deliver=_deliver,
+        snapshot=_snapshot,
+    )
+    await subscription.aclose()
 
 
 async def test_cancellation_while_parked_leaves_no_orphan_tasks() -> None:

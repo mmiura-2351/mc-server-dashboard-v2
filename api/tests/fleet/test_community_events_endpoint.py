@@ -511,6 +511,47 @@ def test_buffered_status_older_than_the_post_gap_snapshot_is_discarded() -> None
     assert states[-1] == "unknown"
 
 
+def test_gap_that_dropped_no_status_reads_no_snapshot() -> None:
+    """A notification flood overflowing a slow client costs no snapshot read."""
+
+    bus = InProcessRealTimeEvents(max_queue=2)
+    community, server = uuid.uuid4(), uuid.uuid4()
+
+    class _CountingListServers(_FakeListServers):
+        reads = 0
+
+        async def __call__(self, **kwargs: object) -> list[_FakeServer]:
+            self.reads += 1
+            return await super().__call__(**kwargs)
+
+    servers = _CountingListServers(
+        [_FakeServer(id=ServerId(server), observed_state=ObservedState.RUNNING)]
+    )
+    app = _app(bus=bus, lookup={str(server): community}, list_servers=servers)
+    client = _client(app)
+    with client.websocket_connect(_url(community)) as ws:
+        _skip_snapshot(ws)
+        for i in range(20):
+            bus.publish(
+                server_id=str(server),
+                event=notification_event(kind="k", title=str(i)),
+            )
+        bus.publish(
+            server_id=str(server),
+            event=notification_event(kind="k", title="end"),
+        )
+        frames = []
+        while True:
+            frame = ws.receive_json()
+            frames.append(frame)
+            if frame["stream"] == "notification" and frame["payload"]["title"] == "end":
+                break
+    streams = [frame["stream"] for frame in frames]
+    assert "gap" in streams
+    assert "snapshot" not in streams
+    assert servers.reads == 1  # the subscribe snapshot only
+
+
 # --- connection lifecycle --------------------------------------------------
 
 
