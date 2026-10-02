@@ -7,7 +7,8 @@
  * socket lifecycle (connect, backoff reconnect, reconnect-on-rotate, teardown);
  * this module builds the stream-subscription URL and parses the API's typed
  * frames (`_frame` in events.py: `{stream, ts, payload}`, no `server_id` on the
- * per-server stream) into a discriminated {@link ServerFrame}.
+ * per-server stream) into a discriminated {@link ServerFrame}, including the
+ * status `snapshot` the API sends on subscribe and after every gap.
  *
  * One connection per open detail page, shared by all tabs (Overview, Console):
  * the caller subscribes to all three streams once and routes parsed frames to
@@ -41,12 +42,27 @@ export interface MetricsFrame {
   playerCount: number;
 }
 
+/**
+ * The status snapshot the API sends on subscribe and after every gap (#1795):
+ * the server's persisted observed state. No `detail` — it rides only a live
+ * status transition and is not persisted.
+ */
+export interface SnapshotFrame {
+  kind: "snapshot";
+  state: string;
+}
+
 /** A gap marker: the client fell behind and missed events (best-effort). */
 export interface GapFrame {
   kind: "gap";
 }
 
-export type ServerFrame = StatusFrame | LogFrame | MetricsFrame | GapFrame;
+export type ServerFrame =
+  | StatusFrame
+  | SnapshotFrame
+  | LogFrame
+  | MetricsFrame
+  | GapFrame;
 
 export interface ServerEventsCallbacks {
   /** A parsed frame from any subscribed stream (or the GAP marker). */
@@ -103,6 +119,10 @@ export function parseServerFrame(raw: string): ServerFrame | null {
       state,
       detail: typeof detail === "string" ? detail : "",
     };
+  }
+  if (stream === "snapshot") {
+    const { state } = payload as { state?: unknown };
+    return typeof state === "string" ? { kind: "snapshot", state } : null;
   }
   if (stream === "log") {
     const { line, stream: src } = payload as {

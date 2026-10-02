@@ -27,6 +27,17 @@ function gapFrame() {
   });
 }
 
+function snapshotFrame(servers: [string, string][]) {
+  return JSON.stringify({
+    stream: "snapshot",
+    ts: "t",
+    payload: {
+      servers: servers.map(([server_id, state]) => ({ server_id, state })),
+    },
+    server_id: null,
+  });
+}
+
 function notificationFrame(serverId: string, title: string, detail: string) {
   return JSON.stringify({
     stream: "notification",
@@ -99,6 +110,86 @@ describe("useCommunityEvents", () => {
     expect(queryClient.getQueryData(serversKey(CID))).toEqual([
       { id: "s1", observed_state: "running" },
     ]);
+  });
+
+  it("patches every cached server from a snapshot frame without a refetch", () => {
+    const { queryClient, invalidateSpy } = setup([
+      serverRow("s1", "stopped"),
+      serverRow("s2", "running"),
+    ]);
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        snapshotFrame([
+          ["s1", "running"],
+          ["s2", "crashed"],
+        ]),
+      );
+    });
+    expect(queryClient.getQueryData(serversKey(CID))).toEqual([
+      { id: "s1", observed_state: "running" },
+      { id: "s2", observed_state: "crashed" },
+    ]);
+    expect(invalidateSpy).not.toHaveBeenCalled();
+  });
+
+  it("converges from the snapshot on a reconnect", () => {
+    const { queryClient } = setup([serverRow("s1", "running")]);
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().fail();
+    });
+    act(() => {
+      vi.advanceTimersByTime(30000);
+    });
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(snapshotFrame([["s1", "stopped"]]));
+    });
+    expect(queryClient.getQueryData(serversKey(CID))).toEqual([
+      { id: "s1", observed_state: "stopped" },
+    ]);
+  });
+
+  it("refetches the list when the snapshot names a server not loaded", () => {
+    const { queryClient, invalidateSpy } = setup([serverRow("s1", "stopped")]);
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        snapshotFrame([
+          ["s1", "running"],
+          ["s2", "starting"],
+        ]),
+      );
+    });
+    expect(queryClient.getQueryData(serversKey(CID))).toEqual([
+      { id: "s1", observed_state: "running" },
+    ]);
+    expect(invalidateSpy).toHaveBeenCalledTimes(1);
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: serversKey(CID) });
+  });
+
+  it("refetches the list when a loaded server is missing from the snapshot", () => {
+    const { invalidateSpy } = setup([
+      serverRow("s1", "stopped"),
+      serverRow("s2", "stopped"),
+    ]);
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(snapshotFrame([["s1", "stopped"]]));
+    });
+    expect(invalidateSpy).toHaveBeenCalledTimes(1);
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: serversKey(CID) });
+  });
+
+  it("ignores a snapshot that arrives before the list is loaded", () => {
+    const { queryClient, invalidateSpy } = setup(undefined);
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(snapshotFrame([["s1", "running"]]));
+    });
+    expect(queryClient.getQueryData(serversKey(CID))).toBeUndefined();
+    expect(invalidateSpy).not.toHaveBeenCalled();
   });
 
   it("refetches the list for an unknown server (created after load)", () => {

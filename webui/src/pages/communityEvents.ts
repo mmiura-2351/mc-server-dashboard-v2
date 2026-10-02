@@ -5,8 +5,9 @@
  * (`eventsSocket.ts`) for the dashboard's one community-scoped events stream
  * (`WS /communities/{cid}/events`, STATUS only). The core owns the socket
  * lifecycle (connect, backoff reconnect, reconnect-on-rotate, teardown); this
- * module supplies the community URL and parses the API's status frames and the
- * GAP marker (the client fell behind and frames were dropped).
+ * module supplies the community URL and parses the API's status frames, the
+ * status snapshot it sends on subscribe and after every gap, and the GAP marker
+ * (the client fell behind and frames were dropped).
  *
  * This module carries no React or TanStack Query: the caller supplies callbacks
  * for status frames and the degraded transitions, so the dashboard hook can
@@ -43,17 +44,21 @@ export interface NotificationEvent {
 }
 
 /**
- * A parsed community-stream frame: a routable STATUS, a NOTIFICATION, or the
- * GAP marker.
+ * A parsed community-stream frame: a routable STATUS, a NOTIFICATION, the
+ * status SNAPSHOT (every server's observed state, sent on subscribe and after
+ * every gap, #1795), or the GAP marker.
  */
 export type CommunityFrame =
   | ({ kind: "status" } & StatusEvent)
   | ({ kind: "notification" } & NotificationEvent)
+  | { kind: "snapshot"; servers: StatusEvent[] }
   | { kind: "gap" };
 
 export interface CommunityEventsCallbacks {
   /** A parsed STATUS frame for a known server in this community. */
   onStatus: (event: StatusEvent) => void;
+  /** The status snapshot: the observed state of every server in the community. */
+  onSnapshot: (servers: StatusEvent[]) => void;
   /** A parsed NOTIFICATION frame (operator notice, e.g. a schedule failure). */
   onNotification: (event: NotificationEvent) => void;
   /** The stream fell behind and dropped frames (slow-client overflow). */
@@ -96,6 +101,9 @@ export function parseCommunityFrame(raw: string): CommunityFrame | null {
   }
   if (stream === "notification") {
     return parseNotification(server_id, payload);
+  }
+  if (stream === "snapshot") {
+    return parseSnapshot(payload);
   }
   if (stream !== "status" || typeof server_id !== "string") {
     return null;
@@ -143,6 +151,33 @@ function parseNotification(
 }
 
 /**
+ * Parse a SNAPSHOT frame's `{servers: [{server_id, state}]}` payload. A
+ * malformed entry rejects the whole frame: a partial snapshot would misreport
+ * the community's server set.
+ */
+function parseSnapshot(payload: unknown): CommunityFrame | null {
+  if (typeof payload !== "object" || payload === null) {
+    return null;
+  }
+  const { servers } = payload as { servers?: unknown };
+  if (!Array.isArray(servers)) {
+    return null;
+  }
+  const parsed: StatusEvent[] = [];
+  for (const entry of servers) {
+    const { server_id, state } = (entry ?? {}) as {
+      server_id?: unknown;
+      state?: unknown;
+    };
+    if (typeof server_id !== "string" || typeof state !== "string") {
+      return null;
+    }
+    parsed.push({ serverId: server_id, state });
+  }
+  return { kind: "snapshot", servers: parsed };
+}
+
+/**
  * Owns one community events socket and its reconnect loop. Construct it, call
  * {@link start}, and {@link close} it on community switch / sign-out. Not for
  * reuse across communities — make a new one per active community id.
@@ -165,6 +200,10 @@ export class CommunityEventsClient {
           }
           if (frame.kind === "gap") {
             callbacks.onGap();
+            return;
+          }
+          if (frame.kind === "snapshot") {
+            callbacks.onSnapshot(frame.servers);
             return;
           }
           if (frame.kind === "notification") {

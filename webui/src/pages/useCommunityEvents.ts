@@ -7,10 +7,12 @@
  * server not in the loaded list (created after load) triggers one list refetch
  * to pick it up. While the socket is down it falls back to polling the servers
  * list every 10s (status only) and reports `degraded` so the dashboard can show
- * the live-degraded indicator; healthy WS does no polling. Because the API
- * replays nothing on subscribe, every reconnect and every GAP frame (dropped
- * frames on a slow client) triggers one list refetch to reconcile whatever the
- * missed window contained (#1723).
+ * the live-degraded indicator; healthy WS does no polling. The API replays no
+ * missed frames, but it opens every connection — and follows every GAP frame
+ * (dropped frames on a slow client) — with a status snapshot of the whole
+ * community, which patches the cache the same way (#1795). Every reconnect and
+ * every GAP frame still triggers one list refetch as a belt-and-suspenders
+ * reconcile (#1723).
  *
  * The client is recreated per active community id and torn down on switch /
  * unmount (sign-out unmounts the dashboard), so a stale community's socket
@@ -86,6 +88,31 @@ export function useCommunityEvents(communityId: string): boolean {
       );
     };
 
+    // The snapshot is every server's current state (#1795): patch them all in
+    // place. It carries states only, so a server created or deleted since the
+    // list loaded (the sets differ) needs one list refetch.
+    const applySnapshot = (servers: StatusEvent[]) => {
+      const key = serversKey(communityId);
+      const current = queryClient.getQueryData<ServerResponse[]>(key);
+      if (current === undefined) {
+        return;
+      }
+      const states = new Map(servers.map((s) => [s.serverId, s.state]));
+      queryClient.setQueryData<ServerResponse[]>(
+        key,
+        current.map((s) => {
+          const state = states.get(s.id);
+          return state === undefined ? s : { ...s, observed_state: state };
+        }),
+      );
+      if (
+        states.size !== current.length ||
+        current.some((s) => !states.has(s.id))
+      ) {
+        queryClient.invalidateQueries({ queryKey: key });
+      }
+    };
+
     // Resync gate (#1723): true only until the socket's first connect outcome.
     // Any later open — drop→reopen, an open after failed initial connects, or
     // a rotation reconnect — follows a window in which status frames may have
@@ -104,6 +131,7 @@ export function useCommunityEvents(communityId: string): boolean {
 
     const client = new CommunityEventsClient(communityId, {
       onStatus: applyStatus,
+      onSnapshot: applySnapshot,
       onNotification: notify,
       onGap: () => {
         // The stream fell behind and dropped status frames for an unknown set

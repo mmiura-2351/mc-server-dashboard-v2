@@ -67,6 +67,17 @@ describe("parseServerFrame", () => {
     });
   });
 
+  it("parses a snapshot frame to the subscribe-time observed state", () => {
+    expect(parseServerFrame(frame("snapshot", { state: "crashed" }))).toEqual({
+      kind: "snapshot",
+      state: "crashed",
+    });
+  });
+
+  it("drops a snapshot frame without a state", () => {
+    expect(parseServerFrame(frame("snapshot", {}))).toBeNull();
+  });
+
   it("parses a gap marker (no payload required)", () => {
     expect(parseServerFrame(frame("gap", {}))).toEqual({ kind: "gap" });
     expect(

@@ -281,6 +281,63 @@ describe("useServerEvents", () => {
     });
   });
 
+  it("patches the detail query observed_state from a snapshot frame", () => {
+    const { queryClient } = setup();
+    queryClient.setQueryData(serverKey(CID, SID), {
+      id: SID,
+      observed_state: "running",
+    });
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(frame("snapshot", { state: "stopped" }));
+    });
+    expect(queryClient.getQueryData(serverKey(CID, SID))).toEqual({
+      id: SID,
+      observed_state: "stopped",
+    });
+  });
+
+  it("clears windowed metrics when a snapshot shows the server at rest", () => {
+    setup();
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        frame("metrics", { cpu_millis: 1, memory_bytes: 2, player_count: 3 }),
+      );
+    });
+    expect(state.metrics).toHaveLength(1);
+    act(() => {
+      MockWebSocket.last().message(frame("snapshot", { state: "stopped" }));
+    });
+    expect(state.metrics).toEqual([]);
+  });
+
+  it("keeps the status detail across a snapshot of the same state", () => {
+    // A reconnect's snapshot carries no detail (it is not persisted); the crash
+    // reason the live transition carried still describes the state.
+    setup();
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        frame("status", { state: "crashed", detail: "exit 1" }),
+      );
+      MockWebSocket.last().message(frame("snapshot", { state: "crashed" }));
+    });
+    expect(state.statusDetail).toBe("exit 1");
+  });
+
+  it("drops the status detail when a snapshot shows a different state", () => {
+    setup();
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        frame("status", { state: "unknown", detail: "worker lost" }),
+      );
+      MockWebSocket.last().message(frame("snapshot", { state: "crashed" }));
+    });
+    expect(state.statusDetail).toBe("");
+  });
+
   it("goes degraded on loss and refetches the detail query once (status only)", () => {
     const { invalidateSpy } = setup();
     act(() => {

@@ -13,10 +13,12 @@
  * Degraded handling follows SPEC 7.2: on socket loss the client reconnects with
  * backoff and the hook refetches the detail query once (status-only REST
  * fallback) and reports `degraded` for the banner; there is NO log/metrics
- * polling fallback — those streams resume when the socket reopens. Because the
- * API replays nothing on subscribe, every reconnect and every gap frame also
- * refetches the detail query once, so a status transition from the missed
- * window cannot leave the header pill stale forever (#1723).
+ * polling fallback — those streams resume when the socket reopens. The API
+ * replays no missed frames, but it opens every connection — and follows every
+ * gap frame — with a status snapshot, which patches the header pill the same
+ * way a status frame does (#1795); every reconnect and every gap frame also
+ * still refetches the detail query once as a belt-and-suspenders reconcile
+ * (#1723).
  *
  * The client is recreated per (community, server) pair and torn down on unmount
  * / navigation, so a stale page's socket never patches another server's cache.
@@ -209,22 +211,40 @@ export function useServerEvents(
     setDegraded(false);
     setStatusDetail("");
 
+    const applyState = (state: string) => {
+      // Patch the detail query so the header pill updates live (no refetch).
+      queryClient.setQueryData<ServerResponse>(
+        serverKey(communityId, serverId),
+        (current) =>
+          current === undefined
+            ? current
+            : { ...current, observed_state: state },
+      );
+      // Once the server settles at rest there is no metrics stream (SPEC
+      // 7.2); drop the windowed samples so the strip falls back to the idle
+      // copy instead of freezing the last numbers forever.
+      if (atRest(normalizeState(state))) {
+        setMetrics([]);
+      }
+    };
+
+    // The state whose live transition carried the current status detail. A
+    // snapshot carries no detail (it is not persisted), so it keeps the detail
+    // only while it still reports that same state (#1795).
+    let detailState: string | null = null;
+
     const onFrame = (frame: ServerFrame) => {
       if (frame.kind === "status") {
-        // Patch the detail query so the header pill updates live (no refetch).
-        queryClient.setQueryData<ServerResponse>(
-          serverKey(communityId, serverId),
-          (current) =>
-            current === undefined
-              ? current
-              : { ...current, observed_state: frame.state },
-        );
+        applyState(frame.state);
         setStatusDetail(frame.detail);
-        // Once the server settles at rest there is no metrics stream (SPEC
-        // 7.2); drop the windowed samples so the strip falls back to the idle
-        // copy instead of freezing the last numbers forever.
-        if (atRest(normalizeState(frame.state))) {
-          setMetrics([]);
+        detailState = frame.state;
+        return;
+      }
+      if (frame.kind === "snapshot") {
+        applyState(frame.state);
+        if (frame.state !== detailState) {
+          setStatusDetail("");
+          detailState = frame.state;
         }
         return;
       }
