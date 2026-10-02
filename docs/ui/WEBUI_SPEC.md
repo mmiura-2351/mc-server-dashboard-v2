@@ -216,6 +216,16 @@ frame published after the discard is delivered after the snapshot, in order;
 one that raced the read may repeat what the snapshot showed, which is harmless
 because status frames are idempotent sets.
 
+Residual (until #3212): this argument holds only for writes that publish a
+status frame after they commit. A write that commits without publishing —
+today the worker-disconnect `unknown` write and the `lifecycle.py`
+observed-state writes — can be overridden by a status frame published before
+it: if that frame reaches the buffer while the snapshot read is in flight and
+the silent write commits before the read, the snapshot shows the silent write
+and the older frame is delivered after it. Without a later frame or snapshot,
+the client keeps the older state. #3212 makes every observed-state write
+publish, which closes this.
+
 Auth: browsers pass the access token via `Sec-WebSocket-Protocol` as two
 subprotocols `["access_token", "<jwt>"]`; the server echoes `access_token` as
 the accepted subprotocol (RFC 6455). The `Authorization: Bearer` header is also
@@ -647,9 +657,12 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   belt-and-suspenders reconcile.
 - A live state (status or snapshot frame) outlives the REST reads of the query
   it patches: received before the query has loaded, or while a read is in
-  flight, it is re-applied when the response lands, unless that read started
-  after the frame arrived — then the response is the newer truth (it can carry
-  a change no frame announced).
+  flight, it is re-applied when the response lands, unless the request of the
+  attempt that produced the response (retries included) started after the
+  frame arrived — then the response is the newer truth (it can carry a change
+  no frame announced). The dashboard reconciles the server set the same way:
+  a live server missing from the landed list, or a listed server missing from
+  a newer snapshot, triggers one list refetch.
 
 ### 7.3 Permission-driven rendering
 - Capabilities come from `GET /communities/{cid}/me/permissions`:

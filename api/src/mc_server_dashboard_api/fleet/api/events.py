@@ -369,6 +369,12 @@ async def _relay(
       snapshot, in order. One that raced the read may repeat what the snapshot
       showed, which is harmless: status frames are idempotent sets.
 
+    Residual until #3212: a write that commits without publishing (the worker
+    disconnect's ``unknown``, the ``lifecycle.py`` observed-state writes) can be
+    overridden by a status event published before it that entered the buffer
+    during the read — the snapshot shows the silent write, the older event
+    follows it.
+
     No event is held outside the buffer while a snapshot is read: the next one
     is requested only after the previous delivery (and its post-gap snapshot)
     completed. ``snapshot`` returning ``None`` means the subscribed server no
