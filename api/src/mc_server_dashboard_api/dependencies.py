@@ -161,6 +161,7 @@ from mc_server_dashboard_api.identity.application.authenticate_download_grant im
 )
 from mc_server_dashboard_api.identity.application.authenticate_request import (
     AuthenticateRequest,
+    Authentication,
 )
 from mc_server_dashboard_api.identity.application.change_password import ChangePassword
 from mc_server_dashboard_api.identity.application.delete_account import DeleteAccount
@@ -1131,7 +1132,7 @@ async def get_current_user(
     if credentials is None:
         raise _unauthenticated()
     try:
-        return await use_case(access_token=credentials.credentials)
+        return (await use_case(access_token=credentials.credentials)).user
     except InvalidAccessTokenError as exc:
         raise _unauthenticated() from exc
 
@@ -1184,13 +1185,14 @@ def ws_accept_subprotocol(websocket: WebSocket) -> str | None:
     return None
 
 
-async def get_current_user_ws(websocket: WebSocket) -> User | None:
-    """The authenticated user behind a WebSocket handshake, or ``None``.
+async def get_current_user_ws(websocket: WebSocket) -> Authentication | None:
+    """The authentication behind a WebSocket handshake, or ``None``.
 
     Returns ``None`` for a missing/malformed/expired token rather than raising:
     a WebSocket route must reject by closing the connection with a policy code
     (it cannot return an HTTP status once the upgrade is in flight), so the route
-    decides the close, not an exception (Section 6.13).
+    decides the close, not an exception (Section 6.13). The result carries the
+    token's expiry, at which the route ends the session (#1862).
     """
 
     token = _ws_access_token(websocket)
@@ -2890,7 +2892,7 @@ def require_download_access(
         mint_for_resource: str | None = None
         if credentials is not None:
             try:
-                user = await authenticate(access_token=credentials.credentials)
+                user = (await authenticate(access_token=credentials.credentials)).user
             except InvalidAccessTokenError as exc:
                 raise _unauthenticated() from exc
         else:

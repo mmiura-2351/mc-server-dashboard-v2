@@ -26,7 +26,7 @@ export class MockWebSocket {
 
   onopen: (() => void) | null = null;
   onmessage: ((event: { data: string }) => void) | null = null;
-  onclose: (() => void) | null = null;
+  onclose: ((event: { code: number }) => void) | null = null;
   onerror: (() => void) | null = null;
   closed = false;
 
@@ -53,10 +53,15 @@ export class MockWebSocket {
     });
   }
 
-  /** Simulate a server/network close: error then close, as a browser does. */
+  /** Simulate a network failure: error then an abnormal (1006) close. */
   fail(): void {
     this.onerror?.();
-    this.onclose?.();
+    this.onclose?.({ code: 1006 });
+  }
+
+  /** Simulate the server closing the socket with an application `code`. */
+  serverClose(code: number): void {
+    this.onclose?.({ code });
   }
 }
 

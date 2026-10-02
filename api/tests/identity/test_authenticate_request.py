@@ -8,7 +8,12 @@ from mc_server_dashboard_api.identity.application.authenticate_request import (
     AuthenticateRequest,
 )
 from mc_server_dashboard_api.identity.domain.errors import InvalidAccessTokenError
-from tests.identity.fakes import FakeTokenService, FakeUnitOfWork, make_user
+from tests.identity.fakes import (
+    FAKE_ACCESS_EXPIRY,
+    FakeTokenService,
+    FakeUnitOfWork,
+    make_user,
+)
 
 
 def _auth(uow: FakeUnitOfWork) -> AuthenticateRequest:
@@ -22,7 +27,19 @@ async def test_valid_token_returns_user() -> None:
 
     resolved = await _auth(uow)(access_token=f"access::{user.id.value}")
 
-    assert resolved.id == user.id
+    assert resolved.user.id == user.id
+
+
+async def test_valid_token_reports_when_the_authentication_lapses() -> None:
+    # The token's expiry rides along so a long-lived consumer (an events
+    # WebSocket, #1862) can end its session when the credential would lapse.
+    user = make_user()
+    uow = FakeUnitOfWork()
+    uow.users.seed(user)
+
+    resolved = await _auth(uow)(access_token=f"access::{user.id.value}")
+
+    assert resolved.expires_at == FAKE_ACCESS_EXPIRY
 
 
 async def test_invalid_token_is_rejected() -> None:

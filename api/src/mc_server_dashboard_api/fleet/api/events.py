@@ -17,7 +17,17 @@ same condition would produce:
   typo fails loudly instead of silently subscribing to everything;
 - ``4401`` — unauthenticated (missing / invalid / expired token);
 - ``4403`` — authenticated member without ``server:read`` on the resource;
-- ``4404`` — not a member, or the server does not exist in this community.
+- ``4404`` — not a member, or the server does not exist in this community;
+- ``4419`` — the access token the socket was opened with has expired (mid-stream
+  only; see below).
+
+The socket lives no longer than the access token it was opened with (#1862): it
+is authenticated once, at the handshake, so at the instant that token would stop
+verifying the socket closes with ``4419`` — distinct from the handshake's
+``4401`` so a client knows to refresh its session before reconnecting rather
+than retrying with the token it has. A browser never sees ``4401`` anyway: a
+close before accept reaches it as a failed handshake, not as a close code.
+Nothing is delivered after the expiry, however busy the stream.
 
 Authorization is re-checked mid-stream: the two-layer gate is re-run every
 :data:`_REAUTHZ_INTERVAL_SECONDS` of wall-clock time, so a member removed or a
@@ -89,7 +99,9 @@ from mc_server_dashboard_api.fleet.domain.real_time_events import (
     RealTimeEvents,
 )
 from mc_server_dashboard_api.http_datetime import serialize_utc
-from mc_server_dashboard_api.identity.domain.entities import User
+from mc_server_dashboard_api.identity.application.authenticate_request import (
+    Authentication,
+)
 from mc_server_dashboard_api.servers.application.manage_server import (
     ListServers,
     ReadServer,
@@ -109,6 +121,8 @@ _CLOSE_BAD_REQUEST = 4400
 _CLOSE_UNAUTHENTICATED = 4401
 _CLOSE_FORBIDDEN = 4403
 _CLOSE_NOT_FOUND = 4404
+# HTTP 419 "Authentication Timeout": a previously valid credential has lapsed.
+_CLOSE_TOKEN_EXPIRED = 4419
 
 # How often the two-layer authorization gate is re-run (wall-clock deadline).
 # A constant, not a config knob: the check is two indexed queries, and a minute
@@ -163,15 +177,16 @@ async def server_events(
     websocket: WebSocket,
     community_id: uuid.UUID,
     server_id: uuid.UUID,
-    user: Annotated[User | None, Depends(get_current_user_ws)],
+    authentication: Annotated[Authentication | None, Depends(get_current_user_ws)],
     visibility: Annotated[MembershipVisibility, Depends(get_membership_visibility)],
     checker: Annotated[PermissionChecker, Depends(get_permission_checker)],
     read_server: Annotated[ReadServer, Depends(get_read_server)],
     bus: Annotated[RealTimeEvents, Depends(get_real_time_events)],
 ) -> None:
-    if user is None:
+    if authentication is None:
         await websocket.close(code=_CLOSE_UNAUTHENTICATED)
         return
+    user = authentication.user
 
     community = CommunityId(community_id)
     auth_user = AuthUser(
@@ -231,6 +246,7 @@ async def server_events(
             reauthorize=recheck,
             deliver=_deliver,
             snapshot=snapshot,
+            expires_at=authentication.expires_at,
         )
     finally:
         await subscription.aclose()
@@ -240,7 +256,7 @@ async def server_events(
 async def community_events(
     websocket: WebSocket,
     community_id: uuid.UUID,
-    user: Annotated[User | None, Depends(get_current_user_ws)],
+    authentication: Annotated[Authentication | None, Depends(get_current_user_ws)],
     visibility: Annotated[MembershipVisibility, Depends(get_membership_visibility)],
     checker: Annotated[PermissionChecker, Depends(get_permission_checker)],
     lookup: Annotated[ServerCommunityLookup, Depends(get_server_community_lookup)],
@@ -268,9 +284,10 @@ async def community_events(
     the per-server STATUS and NOTIFICATION fan-out ships here.
     """
 
-    if user is None:
+    if authentication is None:
         await websocket.close(code=_CLOSE_UNAUTHENTICATED)
         return
+    user = authentication.user
 
     community = CommunityId(community_id)
     auth_user = AuthUser(
@@ -323,6 +340,7 @@ async def community_events(
                 list_servers=list_servers,
                 community_id=community_id,
             ),
+            expires_at=authentication.expires_at,
         )
     finally:
         await subscription.aclose()
@@ -349,8 +367,9 @@ async def _relay(
     reauthorize: Callable[[], Awaitable[int | None]],
     deliver: Callable[[RealTimeEvent], Awaitable[None]],
     snapshot: Callable[[], Awaitable[str | None]] | None,
+    expires_at: dt.datetime,
 ) -> None:
-    """Deliver subscription events until the client goes away or authz is revoked.
+    """Deliver events until the client goes away, authz is revoked, or ``expires_at``.
 
     When ``snapshot`` is given, its frame is sent first, and again right after
     a delivered GAP marker when ``take_dropped`` reports status drops recorded
@@ -389,43 +408,63 @@ async def _relay(
     client gone during the read (its disconnect consumed by the reader task)
     ends the relay without a send: the server rejects any send after it.
 
-    Each turn of the loop races three outcomes: the next buffered event (handed
+    Each turn of the loop races four outcomes: the next buffered event (handed
     to ``deliver``), the wall-clock re-authz deadline expiring (``reauthorize``
-    re-runs the accept-time gate; a denial closes the socket with its code), and
-    the client disconnecting. The deadline is absolute wall-clock time so a busy
-    stream cannot indefinitely postpone re-authorization. Disconnect is observed
-    by a companion reader task (:func:`_client_gone`) because a client gone from
-    a quiet topic never wakes the delivery wait (#1695). The pending-event task
-    is kept across re-checks, so no event is dropped; every exit path —
-    disconnect, subscription end, revocation, an exception, cancellation on
-    server shutdown — discards both helper tasks. The caller owns
-    ``subscription.aclose()``.
+    re-runs the accept-time gate; a denial closes the socket with its code), the
+    access token reaching ``expires_at`` (the socket closes ``4419`` before any
+    further delivery, #1862), and the client disconnecting. Both deadlines are
+    absolute wall-clock time so a busy stream cannot postpone either. The expiry
+    is enforced across the whole relay, not only the wait: a snapshot read, a
+    delivery or a re-authz still in flight at that instant is cancelled, so a
+    slow lookup can neither hold the socket open past expiry nor send on the
+    lapsed credential. Disconnect
+    is observed by a companion reader task (:func:`_client_gone`) because a
+    client gone from a quiet topic never wakes the delivery wait (#1695). The
+    pending-event task is kept across re-checks, so no event is dropped; every
+    exit path — disconnect, subscription end, revocation, expiry, an exception,
+    cancellation on server shutdown — discards both helper tasks. The caller
+    owns ``subscription.aclose()``.
     """
 
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + _REAUTHZ_INTERVAL_SECONDS
+    # The token's expiry on the loop clock: the wall-clock time it has left now.
+    expiry = (
+        loop.time() + (expires_at - dt.datetime.now(dt.timezone.utc)).total_seconds()
+    )
 
-    async def _send_snapshot() -> bool:
-        """Send a fresh snapshot frame; return False once the socket is closed."""
+    next_event: asyncio.Future[RealTimeEvent] | None = None
+
+    async def _send_snapshot() -> int | None:
+        """Send a fresh snapshot frame; return a close code to end the relay.
+
+        Sends nothing once the client is gone (the caller sees ``disconnected``
+        and stops); returns ``4404`` if the subscribed server no longer exists.
+        """
 
         if snapshot is None:
-            return True
+            return None
         subscription.discard_buffered(_SNAPSHOT_SUPERSEDES)
         text = await snapshot()
         if disconnected.done():
             # The client left during the read: nothing may be sent any more.
-            return False
+            return None
         if text is None:
-            await websocket.close(code=_CLOSE_NOT_FOUND)
-            return False
+            return _CLOSE_NOT_FOUND
         await websocket.send_text(text)
-        return True
+        return None
 
-    disconnected = asyncio.create_task(_client_gone(websocket))
-    next_event: asyncio.Future[RealTimeEvent] | None = None
-    try:
-        if not await _send_snapshot():
-            return
+    async def _run() -> int | None:
+        """Relay until the relay must end; return the close code, if any.
+
+        Every terminal close is returned rather than performed, so the caller
+        closes exactly once, outside the expiry scope (see below).
+        """
+
+        nonlocal next_event
+        deadline = loop.time() + _REAUTHZ_INTERVAL_SECONDS
+        code = await _send_snapshot()
+        if code is not None or disconnected.done():
+            return code
         next_event = asyncio.ensure_future(subscription.__anext__())
         while True:
             done, _pending = await asyncio.wait(
@@ -434,28 +473,53 @@ async def _relay(
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if disconnected in done:
-                return
+                return None
+            # An event that completed alongside the expiry, before the lapse
+            # could cancel the wait, is not delivered either.
+            if loop.time() >= expiry:
+                return _CLOSE_TOKEN_EXPIRED
             if next_event in done:
                 try:
                     event = next_event.result()
                 except StopAsyncIteration:
-                    return
+                    return None
                 await deliver(event)
                 if (
                     event.stream is EventStream.GAP
                     and EventStream.STATUS in subscription.take_dropped()
-                    and not await _send_snapshot()
                 ):
-                    return
+                    code = await _send_snapshot()
+                    if code is not None or disconnected.done():
+                        return code
                 next_event = asyncio.ensure_future(subscription.__anext__())
             # Check the wall-clock deadline unconditionally: a busy stream must
             # not prevent re-authorization from running.
             if loop.time() >= deadline:
                 denied = await reauthorize()
                 if denied is not None:
-                    await websocket.close(code=denied)
-                    return
+                    return denied
                 deadline = loop.time() + _REAUTHZ_INTERVAL_SECONDS
+
+    # The token's expiry bounds every await of the relay — snapshot reads,
+    # deliveries (the community membership lookup) and re-authz alike — so
+    # work still in flight at expiry is cancelled and never sends (#1862).
+    lapse = asyncio.timeout_at(expiry)
+    disconnected = asyncio.create_task(_client_gone(websocket))
+    try:
+        try:
+            async with lapse:
+                close_code = await _run()
+        except TimeoutError:
+            if not lapse.expired():
+                raise
+            close_code = _CLOSE_TOKEN_EXPIRED
+        # The one close, outside the lapse: a close once started is never
+        # cancelled by the expiry nor followed by a second one (Starlette
+        # rejects any send after a close). A client already gone (its
+        # disconnect consumed by the reader task, possibly during cancelled
+        # work) gets no close: the server rejects any send after it.
+        if close_code is not None and not disconnected.done():
+            await websocket.close(code=close_code)
     except WebSocketDisconnect:
         # Client went away mid-send; the caller cleans up the subscription.
         pass

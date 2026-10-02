@@ -133,10 +133,9 @@ def _events_app() -> FastAPI:
         InProcessRealTimeEvents,
     )
     from mc_server_dashboard_api.servers.domain.value_objects import ObservedState
-    from tests.identity.fakes import make_user
+    from tests.identity.fakes import make_authentication
 
     app = create_app()
-    user = make_user()
 
     class _AllowAll(PermissionChecker):
         async def can(
@@ -161,7 +160,7 @@ def _events_app() -> FastAPI:
         async def __call__(self, **_kw: object) -> list[object]:
             return []
 
-    app.dependency_overrides[get_current_user_ws] = lambda: user
+    app.dependency_overrides[get_current_user_ws] = make_authentication
     app.dependency_overrides[get_membership_visibility] = _IsMember
     app.dependency_overrides[get_permission_checker] = _AllowAll
     app.dependency_overrides[get_read_server] = _Found

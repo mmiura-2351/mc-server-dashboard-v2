@@ -48,6 +48,7 @@ from tests.identity.fakes import (
     FakeTokenService,
     FakeUnitOfWork,
     RecordingFailureDelay,
+    make_authentication,
     make_brute_force_config,
     make_user,
 )
@@ -484,7 +485,7 @@ def test_logout_without_body_or_cookie_returns_204() -> None:
 
 def test_me_returns_user_with_valid_bearer() -> None:
     user = make_user()
-    fake = _Fake(result=user)
+    fake = _Fake(result=make_authentication(user))
     client = _client(authenticate=fake)
     resp = client.get("/api/users/me", headers={"Authorization": "Bearer good-token"})
     assert resp.status_code == 200
@@ -495,7 +496,7 @@ def test_me_returns_user_with_valid_bearer() -> None:
 def test_me_declares_no_store() -> None:
     # Per-user data rather than a credential, but the same rule: never stored
     # by a cache that a second user could read it from (issue #2587).
-    fake = _Fake(result=make_user())
+    fake = _Fake(result=make_authentication())
     client = _client(authenticate=fake)
     resp = client.get("/api/users/me", headers={"Authorization": "Bearer good-token"})
     assert resp.status_code == 200
@@ -503,7 +504,7 @@ def test_me_declares_no_store() -> None:
 
 
 def test_me_without_bearer_returns_401() -> None:
-    fake = _Fake(result=make_user())
+    fake = _Fake(result=make_authentication())
     client = _client(authenticate=fake)
     resp = client.get("/api/users/me")
     assert resp.status_code == 401

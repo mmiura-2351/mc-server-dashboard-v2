@@ -63,7 +63,20 @@ def test_access_token_round_trips_subject() -> None:
     clock = _FakeClock(dt.datetime(2026, 6, 4, tzinfo=dt.timezone.utc))
     svc = _service(clock)
     token = svc.issue_access_token(_USER)
-    assert svc.verify_access_token(token) == _USER
+    assert svc.verify_access_token(token).user_id == _USER
+
+
+def test_verified_access_token_reports_the_instant_it_stops_verifying() -> None:
+    # The expiry is reported so a long-lived consumer (an events WebSocket,
+    # #1862) can end its session exactly when the token would stop verifying.
+    # Mid-second issue: ``exp`` is whole seconds, so the reported instant is the
+    # truncated one, not ``now + ttl``.
+    clock = _FakeClock(dt.datetime(2026, 6, 4, 0, 0, 0, 700000, tzinfo=dt.timezone.utc))
+    svc = _service(clock, access_seconds=900)
+    token = svc.issue_access_token(_USER)
+    assert svc.verify_access_token(token).expires_at == dt.datetime(
+        2026, 6, 4, 0, 15, tzinfo=dt.timezone.utc
+    )
 
 
 def test_access_token_rejected_after_expiry() -> None:
@@ -81,7 +94,7 @@ def test_access_token_valid_just_before_expiry() -> None:
     svc = _service(clock, access_seconds=900)
     token = svc.issue_access_token(_USER)
     clock.set(dt.datetime(2026, 6, 4, 0, 14, tzinfo=dt.timezone.utc))
-    assert svc.verify_access_token(token) == _USER
+    assert svc.verify_access_token(token).user_id == _USER
 
 
 def test_token_signed_with_other_key_is_rejected() -> None:

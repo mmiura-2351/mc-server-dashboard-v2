@@ -47,6 +47,7 @@ from mc_server_dashboard_api.identity.domain.token_service import (
     IssuedDownloadGrant,
     IssuedRefreshToken,
     TokenService,
+    VerifiedAccessToken,
 )
 from mc_server_dashboard_api.identity.domain.value_objects import UserId
 
@@ -91,7 +92,7 @@ class JwtTokenService(TokenService):
         }
         return jwt.encode(claims, self._signing_key, algorithm=self._algorithm)
 
-    def verify_access_token(self, token: str) -> UserId:
+    def verify_access_token(self, token: str) -> VerifiedAccessToken:
         try:
             # Signature is checked by PyJWT; expiry is checked against the
             # injected Clock (not PyJWT's wall clock) so the domain has a single,
@@ -109,7 +110,12 @@ class JwtTokenService(TokenService):
             # promoted to a session token.
             if "purpose" in claims:
                 raise InvalidAccessTokenError
-            return UserId(uuid.UUID(claims["sub"]))
+            return VerifiedAccessToken(
+                user_id=UserId(uuid.UUID(claims["sub"])),
+                expires_at=dt.datetime.fromtimestamp(
+                    int(claims["exp"]), tz=dt.timezone.utc
+                ),
+            )
         except (jwt.InvalidTokenError, KeyError, ValueError) as exc:
             raise InvalidAccessTokenError from exc
 

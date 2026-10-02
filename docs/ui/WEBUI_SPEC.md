@@ -237,6 +237,17 @@ honored for non-browser clients. Close codes mirror REST: 4400 bad `streams`,
 Authorization is re-checked every 60 s mid-stream. Delivery is best-effort;
 REST keeps working if the socket dies (FR-MON-4).
 
+Lifetime: a socket is authenticated once, at the handshake, so it lives no
+longer than the access token it was opened with. At the instant that token
+expires the server closes it with **4419** (token expired); nothing is
+delivered after that, however busy the stream. The code is distinct from 4401
+because the remedy differs: the client refreshes its session before
+reconnecting (Section 7.1) instead of retrying with the token it has. (A
+browser never observes 4401 at all: a close before accept reaches it as a
+failed handshake.) Consequence: a dashboard left open sees its sockets cut and
+re-established once per access-token lifetime; the `snapshot` frame on
+reconnect is what keeps that seamless.
+
 Note: the data-plane endpoints (`/api/data-plane/...`) are Worker-credential-only
 transfer endpoints — not part of the UI surface.
 
@@ -618,7 +629,12 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   to the caller so the user can retry.
 - WS connections carry the access token in the `Sec-WebSocket-Protocol`
   subprotocol header (`["access_token", "<jwt>"]`); on token
-  rotation, sockets are reconnected (reconnect-on-rotate chosen).
+  rotation, sockets are reconnected (reconnect-on-rotate chosen). A socket
+  closed with 4419 (its token expired, Section 2.6) is not retried with that
+  token: the client refreshes through the same single-flight refresh the 401
+  retry uses, and the rotation reconnects it. A transient refresh failure
+  retries the refresh on the reconnect backoff; an auth-definitive one
+  hard-logs-out, exactly as for REST.
 - **Authenticated downloads.** An in-memory access token cannot ride a plain
   `<a href>`, so single-file / resource-pack / plugin downloads fetch the URL
   with the Authorization header and buffer the response as a Blob, capped at

@@ -48,6 +48,19 @@ class IssuedRefreshToken:
 
 
 @dataclass(frozen=True)
+class VerifiedAccessToken:
+    """A verified access token: its subject and the instant it stops verifying.
+
+    ``expires_at`` is reported so a consumer that outlives a single request (an
+    events WebSocket, #1862) can end its session exactly when the token would be
+    rejected, without knowing the token format or the configured TTL.
+    """
+
+    user_id: UserId
+    expires_at: dt.datetime
+
+
+@dataclass(frozen=True)
 class IssuedDownloadGrant:
     """A freshly minted download grant and the instant it stops verifying.
 
@@ -68,8 +81,8 @@ class TokenService(abc.ABC):
         """Return a signed access token carrying ``user_id`` and standard claims."""
 
     @abc.abstractmethod
-    def verify_access_token(self, token: str) -> UserId:
-        """Return the subject of a valid ``token``.
+    def verify_access_token(self, token: str) -> VerifiedAccessToken:
+        """Return the subject and expiry of a valid ``token``.
 
         Raises :class:`InvalidAccessTokenError` if the signature, format, or
         expiry check fails.

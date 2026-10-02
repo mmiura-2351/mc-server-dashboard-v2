@@ -15,6 +15,7 @@ import datetime as dt
 import json
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 import pytest
@@ -52,7 +53,7 @@ from mc_server_dashboard_api.fleet.domain.real_time_events import (
 from mc_server_dashboard_api.servers.domain.errors import ServerNotFoundError
 from mc_server_dashboard_api.servers.domain.value_objects import ObservedState
 from tests.client_utils import enter_client
-from tests.identity.fakes import make_user
+from tests.identity.fakes import make_authentication, make_user
 
 
 class _FakeVisibility(MembershipVisibility):
@@ -115,6 +116,7 @@ def _app(
     allow: bool = True,
     found: bool = True,
     authenticated: bool = True,
+    expires_in: dt.timedelta = dt.timedelta(hours=1),
     bus: RealTimeEvents | None = None,
     read_server: object | None = None,
 ) -> object:
@@ -125,7 +127,9 @@ def _app(
     user = make_user()
 
     def _user_or_none() -> object | None:
-        return user if authenticated else None
+        if not authenticated:
+            return None
+        return make_authentication(user, expires_in=expires_in)
 
     app.dependency_overrides[get_current_user_ws] = _user_or_none
     app.dependency_overrides[get_membership_visibility] = lambda: _FakeVisibility(
@@ -748,7 +752,7 @@ def test_mid_stream_revocation_closes_with_policy_code(
     app = _shared_app
     app.dependency_overrides.clear()
     user = make_user()
-    app.dependency_overrides[get_current_user_ws] = lambda: user
+    app.dependency_overrides[get_current_user_ws] = lambda: make_authentication(user)
     app.dependency_overrides[get_membership_visibility] = lambda: _FakeVisibility(
         member=True
     )
@@ -796,7 +800,7 @@ def test_mid_stream_revocation_closes_despite_busy_stream(
     app = _shared_app
     app.dependency_overrides.clear()
     user = make_user()
-    app.dependency_overrides[get_current_user_ws] = lambda: user
+    app.dependency_overrides[get_current_user_ws] = lambda: make_authentication(user)
     app.dependency_overrides[get_membership_visibility] = lambda: _FakeVisibility(
         member=True
     )
@@ -825,6 +829,93 @@ def test_mid_stream_revocation_closes_despite_busy_stream(
             # If we get here the socket was never closed — fail explicitly.
             pytest.fail("socket was not closed despite revocation")
     assert exc.value.code == 4403
+
+
+# --- session lifetime tied to the access token (#1862) ---------------------
+
+
+def test_socket_closes_4419_when_the_access_token_expires(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The socket ends when the token it was opened with would stop verifying.
+
+    Re-authz keeps passing every 50 ms, so the close can only come from the
+    token's own expiry, not from the membership/permission re-check.
+    """
+
+    from mc_server_dashboard_api.fleet.api import events as events_module
+
+    monkeypatch.setattr(events_module, "_REAUTHZ_INTERVAL_SECONDS", 0.05)
+
+    bus = InProcessRealTimeEvents()
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(bus=bus, expires_in=dt.timedelta(seconds=1))
+    client = _client(app)
+
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect(_url(community, server)) as ws:
+            _skip_snapshot(ws)
+            # A frame published while the token is still valid is delivered.
+            bus.publish(
+                server_id=str(server),
+                event=RealTimeEvent(
+                    stream=EventStream.STATUS, payload={"state": "running"}
+                ),
+            )
+            assert ws.receive_json()["payload"] == {"state": "running"}
+            ws.receive_json()
+    assert exc.value.code == 4419
+
+
+def test_token_expiry_during_the_snapshot_read_closes_without_the_snapshot() -> None:
+    """A read still in flight at expiry is abandoned; its frame is never sent."""
+
+    bus = InProcessRealTimeEvents()
+    community, server = uuid.uuid4(), uuid.uuid4()
+
+    class _SlowSnapshotRead(_FakeReadServer):
+        reads = 0
+
+        async def __call__(self, **kwargs: object) -> object:
+            self.reads += 1
+            if self.reads > 1:  # the first read is the accept-time gate
+                await asyncio.sleep(2.0)
+            return await super().__call__(**kwargs)
+
+    app = _app(
+        bus=bus,
+        read_server=_SlowSnapshotRead(found=True),
+        expires_in=dt.timedelta(seconds=0.3),
+    )
+    client = _client(app)
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect(_url(community, server)) as ws:
+            ws.receive_json()
+    assert exc.value.code == 4419
+
+
+def test_token_expiry_closes_despite_busy_stream() -> None:
+    """A stream that never goes quiet cannot postpone the expiry close."""
+
+    bus = InProcessRealTimeEvents()
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(bus=bus, expires_in=dt.timedelta(seconds=0.5))
+    client = _client(app)
+
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect(_url(community, server)) as ws:
+            _skip_snapshot(ws)
+            for i in range(30):
+                bus.publish(
+                    server_id=str(server),
+                    event=RealTimeEvent(
+                        stream=EventStream.STATUS, payload={"state": str(i)}
+                    ),
+                )
+                time.sleep(0.05)
+                ws.receive_json()
+            pytest.fail("socket outlived its access token")
+    assert exc.value.code == 4419
 
 
 def test_disconnect_cleans_up_subscription() -> None:
@@ -893,7 +984,7 @@ def test_no_reauthz_queries_after_disconnect_on_quiet_topic(
     app = _shared_app
     app.dependency_overrides.clear()
     user = make_user()
-    app.dependency_overrides[get_current_user_ws] = lambda: user
+    app.dependency_overrides[get_current_user_ws] = lambda: make_authentication(user)
     app.dependency_overrides[get_membership_visibility] = lambda: _FakeVisibility(
         member=True
     )
@@ -986,8 +1077,141 @@ async def test_client_gone_during_the_snapshot_read_ends_the_relay_quietly(
         reauthorize=_reauthorize,
         deliver=_deliver,
         snapshot=_snapshot,
+        expires_at=make_authentication().expires_at,
     )
     await subscription.aclose()
+
+
+async def test_client_gone_during_work_cancelled_by_expiry_ends_quietly() -> None:
+    """Expiry cancels work after the client left: no close is sent (#1862).
+
+    The 4419 close is skipped once the disconnect has been consumed, so the
+    expiry's cancellation adds no send-after-disconnect path.
+    """
+
+    from mc_server_dashboard_api.fleet.api import events as events_module
+
+    socket = _GoneDuringReadSocket()
+    bus = InProcessRealTimeEvents()
+    subscription = bus.subscribe(server_id="s", streams=frozenset({EventStream.STATUS}))
+
+    async def _snapshot() -> str | None:
+        await asyncio.sleep(10)  # still in flight when the token lapses
+        return "{}"
+
+    async def _reauthorize() -> int | None:
+        return None
+
+    async def _deliver(event: RealTimeEvent) -> None:
+        raise AssertionError("no events are published in this test")
+
+    await asyncio.wait_for(
+        events_module._relay(
+            socket,  # type: ignore[arg-type]
+            subscription,
+            reauthorize=_reauthorize,
+            deliver=_deliver,
+            snapshot=_snapshot,
+            expires_at=make_authentication(
+                expires_in=dt.timedelta(seconds=0.1)
+            ).expires_at,
+        ),
+        timeout=5,
+    )
+    await subscription.aclose()
+
+
+class _SlowCloseSocket:
+    """A connected client whose close handshake is slow (back-pressured).
+
+    Mirrors Starlette: once a close has been started, any further send or
+    close raises ``RuntimeError``. ``started`` / ``completed`` record the close
+    codes, so a close cancelled midway shows up as started but not completed.
+    """
+
+    def __init__(self) -> None:
+        self.started: list[int] = []
+        self.completed: list[int] = []
+        self._never = asyncio.Event()
+
+    async def receive(self) -> dict[str, object]:
+        await self._never.wait()  # the client never leaves
+        raise AssertionError("unreachable")
+
+    async def send_text(self, text: str) -> None:
+        if self.started:
+            raise RuntimeError('Cannot call "send" once a close message has been sent.')
+
+    async def close(self, code: int) -> None:
+        if self.started:
+            raise RuntimeError('Cannot call "send" once a close message has been sent.')
+        self.started.append(code)
+        await asyncio.sleep(0.4)  # still in flight when the token lapses
+        self.completed.append(code)
+
+
+async def _relay_with_slow_close(
+    *,
+    snapshot: Callable[[], Awaitable[str | None]] | None,
+    reauthorize: Callable[[], Awaitable[int | None]],
+) -> _SlowCloseSocket:
+    from mc_server_dashboard_api.fleet.api import events as events_module
+
+    socket = _SlowCloseSocket()
+    bus = InProcessRealTimeEvents()
+    subscription = bus.subscribe(server_id="s", streams=frozenset({EventStream.STATUS}))
+
+    async def _deliver(event: RealTimeEvent) -> None:
+        raise AssertionError("no events are published in this test")
+
+    await asyncio.wait_for(
+        events_module._relay(
+            socket,  # type: ignore[arg-type]
+            subscription,
+            reauthorize=reauthorize,
+            deliver=_deliver,
+            snapshot=snapshot,
+            expires_at=make_authentication(
+                expires_in=dt.timedelta(seconds=0.2)
+            ).expires_at,
+        ),
+        timeout=5,
+    )
+    await subscription.aclose()
+    return socket
+
+
+async def test_expiry_during_a_pending_4404_close_neither_cancels_nor_repeats_it() -> (
+    None
+):
+    """A 4404 close already under way completes; no 4419 follows it (#1862)."""
+
+    async def _gone() -> str | None:
+        return None  # the server was deleted: the relay closes 4404
+
+    async def _reauthorize() -> int | None:
+        return None
+
+    socket = await _relay_with_slow_close(snapshot=_gone, reauthorize=_reauthorize)
+    assert socket.started == [4404]
+    assert socket.completed == [4404]
+
+
+async def test_expiry_during_a_pending_4403_close_neither_cancels_nor_repeats_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 4403 re-authz close already under way completes; no 4419 follows it."""
+
+    from mc_server_dashboard_api.fleet.api import events as events_module
+
+    monkeypatch.setattr(events_module, "_REAUTHZ_INTERVAL_SECONDS", 0.05)
+
+    async def _revoked() -> int | None:
+        return 4403
+
+    socket = await _relay_with_slow_close(snapshot=None, reauthorize=_revoked)
+    assert socket.started == [4403]
+    assert socket.completed == [4403]
 
 
 async def test_cancellation_while_parked_leaves_no_orphan_tasks() -> None:
@@ -1022,6 +1246,7 @@ async def test_cancellation_while_parked_leaves_no_orphan_tasks() -> None:
             reauthorize=_reauthorize,
             deliver=_deliver,
             snapshot=None,
+            expires_at=make_authentication().expires_at,
         )
     )
     await asyncio.sleep(0.01)  # let the loop park on its helper tasks
