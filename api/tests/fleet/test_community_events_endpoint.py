@@ -447,13 +447,19 @@ def test_gap_is_followed_by_a_fresh_snapshot() -> None:
             )
         first = ws.receive_json()
         second = ws.receive_json()
+        # The retained status frames predate the snapshot and are superseded
+        # by it; live delivery resumes with the next transition.
+        bus.publish(
+            server_id=str(server),
+            event=RealTimeEvent(stream=EventStream.STATUS, payload={"state": "3"}),
+        )
         third = ws.receive_json()
     assert first["stream"] == "gap"
     assert second["stream"] == "snapshot"
     assert second["payload"] == {
         "servers": [{"server_id": str(server), "state": "running"}]
     }
-    assert third["payload"] == {"state": "2"}
+    assert third["payload"] == {"state": "3"}
 
 
 def test_buffered_status_older_than_the_post_gap_snapshot_is_discarded() -> None:

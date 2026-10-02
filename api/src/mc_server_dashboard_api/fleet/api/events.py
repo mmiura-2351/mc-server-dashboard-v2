@@ -120,6 +120,9 @@ _REAUTHZ_INTERVAL_SECONDS = 60.0
 # :class:`EventStream`.
 _SNAPSHOT_STREAM = "snapshot"
 
+# The buffered events a snapshot supersedes (:func:`_relay`).
+_SNAPSHOT_SUPERSEDES = frozenset({EventStream.STATUS})
+
 # The streams a client may subscribe to (the gap marker is always delivered and
 # is never selectable).
 _SUBSCRIBABLE: dict[str, EventStream] = {
@@ -351,16 +354,25 @@ async def _relay(
     When ``snapshot`` is given, its frame is sent first, and again right after
     each delivered GAP marker (#1795): the stream replays nothing, so the
     snapshot is what lets a (re)connecting or overflowed client converge without
-    a REST round-trip. The caller has already registered ``subscription``, and
-    a transition is committed before it is published, so every transition the
-    snapshot read misses is in the buffer and is delivered after it; one that
-    raced the read may repeat (or briefly precede) what the snapshot already
-    showed, which is harmless because status frames are idempotent sets
-    applied in order, ending at the newest state. A GAP is surfaced only after
-    its dropped events were published, and so committed, so the post-gap
-    snapshot covers them. ``snapshot`` returning ``None`` means the subscribed
-    server no longer exists: the socket closes ``4404``, as the next re-authz
-    would.
+    a REST round-trip. Its ordering argument:
+
+    - The caller has already registered ``subscription``, so every status event
+      published from then on reaches the buffer.
+    - Right before the snapshot is read, the buffered status events are
+      discarded. Each was published before the read, and a worker-reported
+      transition is committed before it is published, so the read sees it or a
+      newer state. Delivering it after the snapshot could only roll the client
+      back — and not every persisted change publishes a correcting event (a
+      worker disconnect commits ``unknown`` silently), so the rollback could
+      stand indefinitely.
+    - A status event published after the discard is delivered after the
+      snapshot, in order. One that raced the read may repeat what the snapshot
+      showed, which is harmless: status frames are idempotent sets.
+
+    No event is held outside the buffer while a snapshot is read: the next one
+    is requested only after the previous delivery (and its post-gap snapshot)
+    completed. ``snapshot`` returning ``None`` means the subscribed server no
+    longer exists: the socket closes ``4404``, as the next re-authz would.
 
     Each turn of the loop races three outcomes: the next buffered event (handed
     to ``deliver``), the wall-clock re-authz deadline expiring (``reauthorize``
@@ -383,6 +395,7 @@ async def _relay(
 
         if snapshot is None:
             return True
+        subscription.discard_buffered(_SNAPSHOT_SUPERSEDES)
         text = await snapshot()
         if text is None:
             await websocket.close(code=_CLOSE_NOT_FOUND)
@@ -391,10 +404,11 @@ async def _relay(
         return True
 
     disconnected = asyncio.create_task(_client_gone(websocket))
-    next_event = asyncio.ensure_future(subscription.__anext__())
+    next_event: asyncio.Future[RealTimeEvent] | None = None
     try:
         if not await _send_snapshot():
             return
+        next_event = asyncio.ensure_future(subscription.__anext__())
         while True:
             done, _pending = await asyncio.wait(
                 {next_event, disconnected},
@@ -408,10 +422,10 @@ async def _relay(
                     event = next_event.result()
                 except StopAsyncIteration:
                     return
-                next_event = asyncio.ensure_future(subscription.__anext__())
                 await deliver(event)
                 if event.stream is EventStream.GAP and not await _send_snapshot():
                     return
+                next_event = asyncio.ensure_future(subscription.__anext__())
             # Check the wall-clock deadline unconditionally: a busy stream must
             # not prevent re-authorization from running.
             if loop.time() >= deadline:
@@ -430,7 +444,8 @@ async def _relay(
         # resurface through the bare-cancelled helpers stripped of its original
         # cause — an anyio cancel scope would then refuse to absorb it.
         _discard(disconnected)
-        _discard(next_event)
+        if next_event is not None:
+            _discard(next_event)
 
 
 def _discard(task: asyncio.Future[Any]) -> None:

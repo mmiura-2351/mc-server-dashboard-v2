@@ -282,7 +282,7 @@ def test_notification_stream_is_subscribable_and_delivered() -> None:
 
 def test_slow_consumer_receives_a_gap_frame_then_a_fresh_snapshot() -> None:
     # The dropped status frames are never replayed, so the gap is followed by a
-    # fresh snapshot (#1795) before the retained window resumes.
+    # fresh snapshot (#1795), which supersedes the retained status frames.
     bus = InProcessRealTimeEvents(max_queue=1)
     community, server = uuid.uuid4(), uuid.uuid4()
     read_server = _FakeReadServer(found=True, state=ObservedState.STARTING)
@@ -300,11 +300,17 @@ def test_slow_consumer_receives_a_gap_frame_then_a_fresh_snapshot() -> None:
             )
         first = ws.receive_json()
         second = ws.receive_json()
+        # The retained status frames predate the snapshot and are superseded
+        # by it; live delivery resumes with the next transition.
+        bus.publish(
+            server_id=str(server),
+            event=RealTimeEvent(stream=EventStream.STATUS, payload={"state": "3"}),
+        )
         third = ws.receive_json()
     assert first["stream"] == "gap"
     assert second["stream"] == "snapshot"
     assert second["payload"] == {"state": "running"}
-    assert third["payload"] == {"state": "2"}
+    assert third["payload"] == {"state": "3"}
 
 
 def _drain_until_log(ws: object, line: str) -> list[dict[str, object]]:

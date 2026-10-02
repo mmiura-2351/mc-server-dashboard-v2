@@ -72,7 +72,11 @@ class _Subscription(EventSubscription):
         self._ready.set()
 
     def discard_buffered(self, streams: frozenset[EventStream]) -> None:
-        pass
+        kept = [event for event in self._buffer if event.stream not in streams]
+        self._buffer.clear()
+        self._buffer.extend(kept)
+        if not self._buffer and not self._gap_pending:
+            self._ready.clear()
 
     def __aiter__(self) -> "_Subscription":
         return self
