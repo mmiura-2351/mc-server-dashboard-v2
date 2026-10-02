@@ -235,6 +235,51 @@ async def test_create_backup_schedule_requires_backup_schedule() -> None:
     assert exc.value.permission == "backup:schedule"
 
 
+async def test_create_backup_defaults_to_only_when_running() -> None:
+    # Issue #2236: omitting the option on a new backup schedule turns it on.
+    uow, server = _uow()
+    schedule = await _create(uow)(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        authorize=_allow,
+        name="nightly backup",
+        action=ScheduleAction.BACKUP,
+        cron="0 3 * * *",
+    )
+    assert schedule.only_when_running is True
+
+
+async def test_create_backup_can_turn_only_when_running_off() -> None:
+    uow, server = _uow()
+    schedule = await _create(uow)(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        authorize=_allow,
+        name="nightly backup",
+        action=ScheduleAction.BACKUP,
+        cron="0 3 * * *",
+        only_when_running=False,
+    )
+    assert schedule.only_when_running is False
+    stored = await uow.schedules.get_by_id(schedule.id)
+    assert stored is not None and stored.only_when_running is False
+
+
+async def test_create_non_backup_with_only_when_running_is_payload_error() -> None:
+    uow, server = _uow()
+    with pytest.raises(InvalidSchedulePayloadError):
+        await _create(uow)(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            authorize=_allow,
+            name="nightly start",
+            action=ScheduleAction.START,
+            cron="0 3 * * *",
+            only_when_running=True,
+        )
+    assert uow.commits == 0
+
+
 async def test_create_stop_with_warnings_does_not_need_server_command() -> None:
     # A stop/restart warning is a fixed ``say`` broadcast, not a console command,
     # so it needs only server:stop, never server:command.
@@ -414,6 +459,56 @@ async def test_update_omitting_warning_steps_keeps_them() -> None:
     )
     assert len(updated.warning_steps) == 1
     assert updated.name == "renamed stop"
+
+
+async def test_update_toggles_only_when_running() -> None:
+    uow, server = _uow()
+    seeded = _seed_schedule(uow, server.id, action=ScheduleAction.BACKUP)
+    assert seeded.only_when_running is True
+    updated = await _update(uow)(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        schedule_id=seeded.id,
+        authorize=_allow,
+        only_when_running=False,
+    )
+    assert updated.only_when_running is False
+    stored = await uow.schedules.get_by_id(seeded.id)
+    assert stored is not None and stored.only_when_running is False
+
+
+async def test_update_omitting_only_when_running_keeps_it() -> None:
+    uow, server = _uow()
+    seeded = _seed_schedule(uow, server.id, action=ScheduleAction.BACKUP)
+    off = await _update(uow)(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        schedule_id=seeded.id,
+        authorize=_allow,
+        only_when_running=False,
+    )
+    renamed = await _update(uow)(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        schedule_id=off.id,
+        authorize=_allow,
+        name="renamed backup",
+    )
+    assert renamed.only_when_running is False
+
+
+async def test_update_non_backup_with_only_when_running_is_payload_error() -> None:
+    uow, server = _uow()
+    seeded = _seed_schedule(uow, server.id, action=ScheduleAction.START)
+    with pytest.raises(InvalidSchedulePayloadError):
+        await _update(uow)(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            schedule_id=seeded.id,
+            authorize=_allow,
+            only_when_running=False,
+        )
+    assert uow.commits == 0
 
 
 async def test_update_rename_to_existing_name_conflicts() -> None:
