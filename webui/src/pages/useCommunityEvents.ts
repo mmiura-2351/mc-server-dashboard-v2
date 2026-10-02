@@ -7,10 +7,19 @@
  * server not in the loaded list (created after load) triggers one list refetch
  * to pick it up. While the socket is down it falls back to polling the servers
  * list every 10s (status only) and reports `degraded` so the dashboard can show
- * the live-degraded indicator; healthy WS does no polling. Because the API
- * replays nothing on subscribe, every reconnect and every GAP frame (dropped
- * frames on a slow client) triggers one list refetch to reconcile whatever the
- * missed window contained (#1723).
+ * the live-degraded indicator; healthy WS does no polling. The API replays no
+ * missed frames, but it opens every connection — and follows every GAP frame
+ * that dropped status frames on a slow client — with a status snapshot of the
+ * whole community, which patches the cache the same way (#1795). Every
+ * reconnect and every GAP frame still triggers one list refetch as a
+ * belt-and-suspenders reconcile (#1723).
+ *
+ * A live state outlives the list's REST reads (#3213): one received before the
+ * list has loaded, or while a read is in flight, is re-applied when the
+ * response lands unless that read's request started after it
+ * ({@link observeRestResponses}), so an older response never rolls a pill back.
+ * The server set is reconciled the same way: a live server missing from the
+ * landed list, or a listed server missing from a newer snapshot, refetches it.
  *
  * The client is recreated per active community id and torn down on switch /
  * unmount (sign-out unmounts the dashboard), so a stale community's socket
@@ -26,6 +35,7 @@ import {
   type NotificationEvent,
   type StatusEvent,
 } from "./communityEvents.ts";
+import { observeRestResponses, stamp } from "./restReads.ts";
 
 type ServerResponse = components["schemas"]["ServerResponse"];
 
@@ -48,7 +58,68 @@ export function useCommunityEvents(communityId: string): boolean {
 
   useEffect(() => {
     setDegraded(false);
+    const key = serversKey(communityId);
     let pollTimer: ReturnType<typeof setInterval> | null = null;
+
+    // The live states not yet superseded by a REST read, each stamped with
+    // when it was received (#3213).
+    const live = new Map<string, { state: string; at: number }>();
+    // The latest snapshot's server set, until a REST read supersedes it.
+    let members: { ids: Set<string>; at: number } | null = null;
+
+    const refetch = () => {
+      queryClient.invalidateQueries({ queryKey: key });
+    };
+
+    // Write every live state over the cached list.
+    const patch = () => {
+      if (live.size === 0) {
+        return;
+      }
+      queryClient.setQueryData<ServerResponse[]>(key, (servers) =>
+        servers?.map((s) => {
+          const entry = live.get(s.id);
+          return entry === undefined
+            ? s
+            : { ...s, observed_state: entry.state };
+        }),
+      );
+    };
+
+    // Apply the live states to the cached list and reconcile its server set:
+    // a live server it lacks was created after its read, a listed server a
+    // newer snapshot lacks was deleted since — either way one refetch loads
+    // the current set. Deferred until the list has loaded.
+    const reconcile = () => {
+      const current = queryClient.getQueryData<ServerResponse[]>(key);
+      if (current === undefined) {
+        return;
+      }
+      patch();
+      const listed = new Set(current.map((s) => s.id));
+      const created = [...live.keys()].some((id) => !listed.has(id));
+      const deleted =
+        members !== null && current.some((s) => !members?.ids.has(s.id));
+      if (created || deleted) {
+        refetch();
+      }
+    };
+
+    const unobserve = observeRestResponses(
+      queryClient,
+      key,
+      (readStartedAt) => {
+        for (const [id, entry] of live) {
+          if (entry.at < readStartedAt) {
+            live.delete(id);
+          }
+        }
+        if (members !== null && members.at < readStartedAt) {
+          members = null;
+        }
+        reconcile();
+      },
+    );
 
     const stopPolling = () => {
       if (pollTimer !== null) {
@@ -62,28 +133,24 @@ export function useCommunityEvents(communityId: string): boolean {
       if (pollTimer !== null) {
         return;
       }
-      pollTimer = setInterval(() => {
-        queryClient.invalidateQueries({ queryKey: serversKey(communityId) });
-      }, POLL_INTERVAL_MS);
+      pollTimer = setInterval(refetch, POLL_INTERVAL_MS);
     };
 
     const applyStatus = (event: StatusEvent) => {
-      const key = serversKey(communityId);
-      const current = queryClient.getQueryData<ServerResponse[]>(key);
-      if (current === undefined) {
-        return;
+      live.set(event.serverId, { state: event.state, at: stamp() });
+      reconcile();
+    };
+
+    // The snapshot is every server's current state and the community's whole
+    // server set (#1795): it replaces the live states and the membership.
+    const applySnapshot = (servers: StatusEvent[]) => {
+      const at = stamp();
+      live.clear();
+      for (const s of servers) {
+        live.set(s.serverId, { state: s.state, at });
       }
-      const found = current.some((s) => s.id === event.serverId);
-      if (!found) {
-        // A server created after the list loaded: one refetch picks it up.
-        queryClient.invalidateQueries({ queryKey: key });
-        return;
-      }
-      queryClient.setQueryData<ServerResponse[]>(key, (servers) =>
-        servers?.map((s) =>
-          s.id === event.serverId ? { ...s, observed_state: event.state } : s,
-        ),
-      );
+      members = { ids: new Set(live.keys()), at };
+      reconcile();
     };
 
     // Resync gate (#1723): true only until the socket's first connect outcome.
@@ -104,18 +171,19 @@ export function useCommunityEvents(communityId: string): boolean {
 
     const client = new CommunityEventsClient(communityId, {
       onStatus: applyStatus,
+      onSnapshot: applySnapshot,
       onNotification: notify,
       onGap: () => {
         // The stream fell behind and dropped status frames for an unknown set
         // of servers: one list refetch reconciles them (#1723).
-        queryClient.invalidateQueries({ queryKey: serversKey(communityId) });
+        refetch();
       },
       onOpen: () => {
         stopPolling();
         if (!pristine) {
           // Transitions between the last poll tick (or the drop itself) and
           // this reopen were lost for good; reconcile once (#1723).
-          queryClient.invalidateQueries({ queryKey: serversKey(communityId) });
+          refetch();
         }
         pristine = false;
         setDegraded(false);
@@ -133,6 +201,7 @@ export function useCommunityEvents(communityId: string): boolean {
     return () => {
       client.close();
       stopPolling();
+      unobserve();
     };
   }, [communityId, queryClient, showToast]);
 

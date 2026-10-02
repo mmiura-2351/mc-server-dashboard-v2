@@ -1,9 +1,14 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import {
+  QueryClient,
+  QueryClientProvider,
+  useQuery,
+} from "@tanstack/react-query";
 import { act, render } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearAccessToken, setAccessToken } from "../auth/tokenStore.ts";
 import { installMockWebSocket, MockWebSocket } from "../test/mockWebSocket.ts";
+import { stampedQueryFn } from "./restReads.ts";
 import { serverKey } from "./serverKey.ts";
 import type { LogEntry } from "./useServerEvents.ts";
 import {
@@ -281,6 +286,63 @@ describe("useServerEvents", () => {
     });
   });
 
+  it("patches the detail query observed_state from a snapshot frame", () => {
+    const { queryClient } = setup();
+    queryClient.setQueryData(serverKey(CID, SID), {
+      id: SID,
+      observed_state: "running",
+    });
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(frame("snapshot", { state: "stopped" }));
+    });
+    expect(queryClient.getQueryData(serverKey(CID, SID))).toEqual({
+      id: SID,
+      observed_state: "stopped",
+    });
+  });
+
+  it("clears windowed metrics when a snapshot shows the server at rest", () => {
+    setup();
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        frame("metrics", { cpu_millis: 1, memory_bytes: 2, player_count: 3 }),
+      );
+    });
+    expect(state.metrics).toHaveLength(1);
+    act(() => {
+      MockWebSocket.last().message(frame("snapshot", { state: "stopped" }));
+    });
+    expect(state.metrics).toEqual([]);
+  });
+
+  it("keeps the status detail across a snapshot of the same state", () => {
+    // A reconnect's snapshot carries no detail (it is not persisted); the crash
+    // reason the live transition carried still describes the state.
+    setup();
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        frame("status", { state: "crashed", detail: "exit 1" }),
+      );
+      MockWebSocket.last().message(frame("snapshot", { state: "crashed" }));
+    });
+    expect(state.statusDetail).toBe("exit 1");
+  });
+
+  it("drops the status detail when a snapshot shows a different state", () => {
+    setup();
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        frame("status", { state: "unknown", detail: "worker lost" }),
+      );
+      MockWebSocket.last().message(frame("snapshot", { state: "crashed" }));
+    });
+    expect(state.statusDetail).toBe("");
+  });
+
   it("goes degraded on loss and refetches the detail query once (status only)", () => {
     const { invalidateSpy } = setup();
     act(() => {
@@ -464,5 +526,182 @@ describe("useServerEvents", () => {
       );
     });
     expect(state.statusDetail).toBe("");
+  });
+});
+
+type Detail = { id: string; observed_state: string };
+
+/**
+ * A detail query whose REST responses the test resolves by hand, so a response
+ * can land after a WS frame that is newer than its read (#3213).
+ */
+function setupDeferred({ retry = false }: { retry?: number | false } = {}) {
+  const pending: {
+    resolve: (row: Detail) => void;
+    reject: (error: Error) => void;
+  }[] = [];
+  // Wrapped like the page's, so each attempt (retries included) is stamped.
+  const queryFn = stampedQueryFn(
+    () =>
+      new Promise<Detail>((resolve, reject) => {
+        pending.push({ resolve, reject });
+      }),
+  );
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry, retryDelay: 1000 } },
+  });
+  function LiveProbe() {
+    // The page's order: the events hook, then the detail query.
+    state = useServerEvents(CID, SID);
+    useQuery({ queryKey: serverKey(CID, SID), queryFn });
+    return null;
+  }
+  const wrapper = ({ children }: { children: ReactNode }) => (
+    <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+  );
+  render(<LiveProbe />, { wrapper });
+  // Resolve the oldest outstanding REST read with `observed_state`.
+  const respond = async (observed_state: string) => {
+    const attempt = pending.shift();
+    expect(attempt).toBeDefined();
+    await act(async () => {
+      attempt?.resolve({ id: SID, observed_state });
+      await vi.advanceTimersByTimeAsync(0);
+    });
+  };
+  // Fail the oldest outstanding REST attempt (an HTTP error).
+  const fail = async () => {
+    const attempt = pending.shift();
+    expect(attempt).toBeDefined();
+    await act(async () => {
+      attempt?.reject(new Error("503"));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+  };
+  const cached = () =>
+    queryClient.getQueryData<Detail>(serverKey(CID, SID))?.observed_state;
+  return { queryClient, respond, fail, cached, pending };
+}
+
+describe("useServerEvents with REST reads in flight (#3213)", () => {
+  let restore: () => void;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    restore = installMockWebSocket();
+    setAccessToken("tok-1");
+  });
+
+  afterEach(() => {
+    restore();
+    clearAccessToken();
+    vi.useRealTimers();
+  });
+
+  it("keeps a snapshot that arrives before the cold detail load lands", async () => {
+    const { respond, cached } = setupDeferred();
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(frame("snapshot", { state: "running" }));
+    });
+    // The cold read captured the state before the transition.
+    await respond("stopped");
+    expect(cached()).toBe("running");
+  });
+
+  it("keeps a status frame that arrives before the cold detail load lands", async () => {
+    const { respond, cached } = setupDeferred();
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        frame("status", { state: "starting", detail: "" }),
+      );
+    });
+    await respond("stopped");
+    expect(cached()).toBe("starting");
+  });
+
+  it("keeps a reconnect snapshot over the older drop/reopen refetch response", async () => {
+    const { respond, cached, pending } = setupDeferred();
+    act(() => {
+      MockWebSocket.last().open();
+    });
+    await respond("running");
+    // The drop starts a status-only refetch whose read is still in flight
+    // when the reconnect's snapshot lands.
+    act(() => {
+      MockWebSocket.last().fail();
+    });
+    act(() => {
+      vi.advanceTimersByTime(30000);
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(frame("snapshot", { state: "stopped" }));
+    });
+    while (pending.length > 0) {
+      await respond("running");
+    }
+    expect(cached()).toBe("stopped");
+  });
+
+  it("lets a REST read started after the frame supersede it", async () => {
+    // A worker disconnect commits `unknown` without a frame; a read that
+    // started after the last frame is the newer truth.
+    const { queryClient, respond, cached } = setupDeferred();
+    act(() => {
+      MockWebSocket.last().open();
+    });
+    await respond("stopped");
+    act(() => {
+      MockWebSocket.last().message(
+        frame("status", { state: "running", detail: "" }),
+      );
+    });
+    act(() => {
+      queryClient.invalidateQueries({ queryKey: serverKey(CID, SID) });
+    });
+    await respond("unknown");
+    expect(cached()).toBe("unknown");
+  });
+});
+
+describe("useServerEvents with REST retries (#3213)", () => {
+  let restore: () => void;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    restore = installMockWebSocket();
+    setAccessToken("tok-1");
+  });
+
+  afterEach(() => {
+    restore();
+    clearAccessToken();
+    vi.useRealTimers();
+  });
+
+  it("lets a retry started after the snapshot supersede it", async () => {
+    const { respond, fail, cached } = setupDeferred({ retry: 1 });
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(frame("snapshot", { state: "running" }));
+    });
+    await fail();
+    // The retry's request starts after the snapshot (and after a silent
+    // worker-disconnect write): its response is the newer truth.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    await respond("unknown");
+    expect(cached()).toBe("unknown");
+  });
+
+  it("keeps a snapshot newer than the attempt that answers", async () => {
+    const { respond, cached } = setupDeferred({ retry: 1 });
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(frame("snapshot", { state: "running" }));
+    });
+    await respond("stopped");
+    expect(cached()).toBe("running");
   });
 });

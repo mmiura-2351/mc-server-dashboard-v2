@@ -106,6 +106,26 @@ class EventSubscription(AsyncIterator[RealTimeEvent], abc.ABC):
     """
 
     @abc.abstractmethod
+    def discard_buffered(self, streams: frozenset[EventStream]) -> None:
+        """Drop the buffered, not yet consumed events of ``streams``.
+
+        Events of other streams keep their order, and a pending GAP marker is
+        kept. Used when a status snapshot supersedes the buffered status events
+        (#1795): they were published, hence committed, before the snapshot was
+        read, so delivering them after it could only roll the client back.
+        """
+
+    @abc.abstractmethod
+    def take_dropped(self) -> frozenset[EventStream]:
+        """Return the streams that lost events to overflow since the last call.
+
+        Resets the record. Called right after a GAP marker is consumed, it names
+        what that gap (and any drop since) cost — only a gap that dropped status
+        events needs a fresh status snapshot (#1795). A
+        :meth:`discard_buffered` discard is not a drop.
+        """
+
+    @abc.abstractmethod
     async def aclose(self) -> None:
         """Release this subscription; subsequent iteration raises StopAsyncIteration."""
 

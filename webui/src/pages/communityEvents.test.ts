@@ -27,6 +27,15 @@ function gapFrame() {
   });
 }
 
+function snapshotFrame(servers: { server_id: string; state: string }[]) {
+  return JSON.stringify({
+    stream: "snapshot",
+    ts: "2026-06-06T00:00:00Z",
+    payload: { servers },
+    server_id: null,
+  });
+}
+
 function notificationFrame(
   serverId: string | null,
   kind: string,
@@ -69,6 +78,43 @@ describe("parseCommunityFrame", () => {
       serverId: "s1",
       state: "running",
     });
+  });
+
+  it("parses a snapshot frame to {kind, servers: [{serverId, state}]}", () => {
+    expect(
+      parseCommunityFrame(
+        snapshotFrame([
+          { server_id: "s1", state: "running" },
+          { server_id: "s2", state: "stopped" },
+        ]),
+      ),
+    ).toEqual({
+      kind: "snapshot",
+      servers: [
+        { serverId: "s1", state: "running" },
+        { serverId: "s2", state: "stopped" },
+      ],
+    });
+  });
+
+  it("parses an empty snapshot (a community with no servers)", () => {
+    expect(parseCommunityFrame(snapshotFrame([]))).toEqual({
+      kind: "snapshot",
+      servers: [],
+    });
+  });
+
+  it("drops a malformed snapshot frame", () => {
+    const snapshot = (payload: unknown) =>
+      JSON.stringify({ stream: "snapshot", ts: "t", payload, server_id: null });
+    expect(parseCommunityFrame(snapshot({}))).toBeNull();
+    expect(parseCommunityFrame(snapshot({ servers: "s1" }))).toBeNull();
+    expect(
+      parseCommunityFrame(snapshot({ servers: [{ server_id: "s1" }] })),
+    ).toBeNull();
+    expect(
+      parseCommunityFrame(snapshot({ servers: [{ state: "running" }] })),
+    ).toBeNull();
   });
 
   it("parses the server-agnostic GAP marker", () => {
@@ -151,11 +197,20 @@ describe("CommunityEventsClient", () => {
     const onStatus = vi.fn(overrides.onStatus);
     const onGap = vi.fn();
     const onNotification = vi.fn();
+    const onSnapshot = vi.fn();
     const onOpen = vi.fn();
     const onDown = vi.fn();
     return {
-      callbacks: { onStatus, onGap, onNotification, onOpen, onDown },
+      callbacks: {
+        onStatus,
+        onGap,
+        onNotification,
+        onSnapshot,
+        onOpen,
+        onDown,
+      },
       onStatus,
+      onSnapshot,
       onGap,
       onNotification,
       onOpen,
@@ -192,6 +247,21 @@ describe("CommunityEventsClient", () => {
 
     MockWebSocket.last().message(gapFrame());
     expect(onGap).toHaveBeenCalledTimes(1);
+    expect(onStatus).not.toHaveBeenCalled();
+    client.close();
+  });
+
+  it("fires onSnapshot with every server's state on a snapshot frame", () => {
+    const { client, onSnapshot, onStatus } = makeClient();
+    client.start();
+    MockWebSocket.last().open();
+
+    MockWebSocket.last().message(
+      snapshotFrame([{ server_id: "s1", state: "crashed" }]),
+    );
+    expect(onSnapshot).toHaveBeenCalledWith([
+      { serverId: "s1", state: "crashed" },
+    ]);
     expect(onStatus).not.toHaveBeenCalled();
     client.close();
   });

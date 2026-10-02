@@ -26,6 +26,7 @@ import {
   type LifecycleAction,
   lifecycleErrorMessage,
 } from "./lifecycleErrors.ts";
+import { stampedQueryFn } from "./restReads.ts";
 import { ServerAddressBadges } from "./ServerAddressBadges.tsx";
 import {
   actionApplies,
@@ -311,13 +312,15 @@ function Loaded({ communityId }: { communityId: string }) {
 
   const query = useQuery({
     queryKey: serversKey(communityId),
-    queryFn: ({ signal }) =>
+    // Stamped so live status frames are ordered against each REST attempt.
+    queryFn: stampedQueryFn(({ signal }) =>
       api.get(
         apiPath("/api/communities/{community_id}/servers", {
           community_id: communityId,
         }),
         { signal },
       ),
+    ),
   });
   const resultState = classifyQueryResult(query);
 

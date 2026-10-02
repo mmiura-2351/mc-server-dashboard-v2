@@ -13,10 +13,16 @@
  * Degraded handling follows SPEC 7.2: on socket loss the client reconnects with
  * backoff and the hook refetches the detail query once (status-only REST
  * fallback) and reports `degraded` for the banner; there is NO log/metrics
- * polling fallback — those streams resume when the socket reopens. Because the
- * API replays nothing on subscribe, every reconnect and every gap frame also
- * refetches the detail query once, so a status transition from the missed
- * window cannot leave the header pill stale forever (#1723).
+ * polling fallback — those streams resume when the socket reopens. The API
+ * replays no missed frames, but it opens every connection — and follows every
+ * gap frame that dropped status — with a status snapshot, which patches the
+ * header pill the same way a status frame does (#1795); every reconnect and
+ * every gap frame also still refetches the detail query once as a
+ * belt-and-suspenders reconcile (#1723). A live state outlives the detail query's REST reads (#3213): one
+ * received before the query has loaded, or while a read is in flight, is
+ * re-applied when the response lands unless that read's request started
+ * after it ({@link observeRestResponses}), so an older response never rolls
+ * the pill back.
  *
  * The client is recreated per (community, server) pair and torn down on unmount
  * / navigation, so a stale page's socket never patches another server's cache.
@@ -34,6 +40,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import type { components } from "../api/schema";
 import { stripMinecraftCodes } from "./mcFormat.ts";
+import { observeRestResponses, stamp } from "./restReads.ts";
 import { ServerEventsClient, type ServerFrame } from "./serverEvents.ts";
 import { serverKey } from "./serverKey.ts";
 import { atRest, normalizeState } from "./serverState.ts";
@@ -208,23 +215,66 @@ export function useServerEvents(
     setMetrics([]);
     setDegraded(false);
     setStatusDetail("");
+    const key = serverKey(communityId, serverId);
+
+    // The live state not yet superseded by a REST read, stamped with when it
+    // was received (#3213).
+    let live: { state: string; at: number } | null = null;
+
+    // Patch the detail query so the header pill updates live (no refetch).
+    const patch = () => {
+      if (live === null) {
+        return;
+      }
+      const { state } = live;
+      queryClient.setQueryData<ServerResponse>(key, (current) =>
+        current === undefined ? current : { ...current, observed_state: state },
+      );
+    };
+
+    const refetch = () => {
+      queryClient.invalidateQueries({ queryKey: key });
+    };
+
+    const unobserve = observeRestResponses(
+      queryClient,
+      key,
+      (readStartedAt) => {
+        if (live !== null && live.at < readStartedAt) {
+          live = null;
+        }
+        patch();
+      },
+    );
+
+    const applyState = (state: string) => {
+      live = { state, at: stamp() };
+      patch();
+      // Once the server settles at rest there is no metrics stream (SPEC
+      // 7.2); drop the windowed samples so the strip falls back to the idle
+      // copy instead of freezing the last numbers forever.
+      if (atRest(normalizeState(state))) {
+        setMetrics([]);
+      }
+    };
+
+    // The state whose live transition carried the current status detail. A
+    // snapshot carries no detail (it is not persisted), so it keeps the detail
+    // only while it still reports that same state (#1795).
+    let detailState: string | null = null;
 
     const onFrame = (frame: ServerFrame) => {
       if (frame.kind === "status") {
-        // Patch the detail query so the header pill updates live (no refetch).
-        queryClient.setQueryData<ServerResponse>(
-          serverKey(communityId, serverId),
-          (current) =>
-            current === undefined
-              ? current
-              : { ...current, observed_state: frame.state },
-        );
+        applyState(frame.state);
         setStatusDetail(frame.detail);
-        // Once the server settles at rest there is no metrics stream (SPEC
-        // 7.2); drop the windowed samples so the strip falls back to the idle
-        // copy instead of freezing the last numbers forever.
-        if (atRest(normalizeState(frame.state))) {
-          setMetrics([]);
+        detailState = frame.state;
+        return;
+      }
+      if (frame.kind === "snapshot") {
+        applyState(frame.state);
+        if (frame.state !== detailState) {
+          setStatusDetail("");
+          detailState = frame.state;
         }
         return;
       }
@@ -249,9 +299,7 @@ export function useServerEvents(
       // buffer and refetch the detail query once — a dropped status frame is
       // never replayed (#1723).
       logStore.appendGap();
-      queryClient.invalidateQueries({
-        queryKey: serverKey(communityId, serverId),
-      });
+      refetch();
     };
 
     // Lines emitted between a drop and the reconnect are lost for good (the
@@ -274,9 +322,7 @@ export function useServerEvents(
         if (!pristine) {
           // The onDown fallback refetched at drop time; transitions between
           // that refetch and this reopen were lost for good, reconcile once.
-          queryClient.invalidateQueries({
-            queryKey: serverKey(communityId, serverId),
-          });
+          refetch();
         }
         pristine = false;
         wasOpen = true;
@@ -291,14 +337,15 @@ export function useServerEvents(
         setDegraded(true);
         // Status-only REST fallback: one refetch picks up the latest observed
         // state while the socket is down (no log/metrics polling, SPEC 7.2).
-        queryClient.invalidateQueries({
-          queryKey: serverKey(communityId, serverId),
-        });
+        refetch();
       },
     });
     client.start();
 
-    return () => client.close();
+    return () => {
+      client.close();
+      unobserve();
+    };
   }, [communityId, serverId, queryClient, logStore]);
 
   return {

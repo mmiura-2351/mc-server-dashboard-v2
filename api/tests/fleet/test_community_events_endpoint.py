@@ -16,8 +16,10 @@ cleanup of the firehose subscription.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import time
 import uuid
+from dataclasses import dataclass
 
 import pytest
 from fastapi import FastAPI
@@ -37,6 +39,7 @@ from mc_server_dashboard_api.community.domain.value_objects import (
 )
 from mc_server_dashboard_api.dependencies import (
     get_current_user_ws,
+    get_list_servers,
     get_membership_visibility,
     get_permission_checker,
     get_real_time_events,
@@ -50,6 +53,10 @@ from mc_server_dashboard_api.fleet.domain.real_time_events import (
     RealTimeEvent,
     RealTimeEvents,
     notification_event,
+)
+from mc_server_dashboard_api.servers.domain.value_objects import (
+    ObservedState,
+    ServerId,
 )
 from tests.client_utils import enter_client
 from tests.identity.fakes import make_user
@@ -83,6 +90,24 @@ class _FakeLookup:
         return self._mapping.get(server_id)
 
 
+@dataclass(frozen=True)
+class _FakeServer:
+    """The slice of the ``Server`` entity the snapshot reads (id + observed state)."""
+
+    id: ServerId
+    observed_state: ObservedState
+
+
+class _FakeListServers:
+    """Stands in for ListServers: the community's servers, read for the snapshot."""
+
+    def __init__(self, servers: list[_FakeServer]) -> None:
+        self.servers = servers
+
+    async def __call__(self, **_kwargs: object) -> list[_FakeServer]:
+        return list(self.servers)
+
+
 _shared_app: FastAPI
 
 
@@ -99,6 +124,7 @@ def _app(
     authenticated: bool = True,
     bus: RealTimeEvents | None = None,
     lookup: dict[str, uuid.UUID] | None = None,
+    list_servers: _FakeListServers | None = None,
 ) -> object:
     # Reuse the per-worker shared app; clear overrides on entry so a helper called
     # twice in one test starts clean (the shared_app wrapper clears between tests).
@@ -117,6 +143,9 @@ def _app(
     app.dependency_overrides[get_server_community_lookup] = lambda: _FakeLookup(
         lookup or {}
     )
+    app.dependency_overrides[get_list_servers] = lambda: (
+        list_servers if list_servers is not None else _FakeListServers([])
+    )
     if bus is not None:
         app.dependency_overrides[get_real_time_events] = lambda: bus
     return app
@@ -128,6 +157,16 @@ def _client(app: object) -> TestClient:
 
 def _url(community: uuid.UUID) -> str:
     return f"/api/communities/{community}/events"
+
+
+def _skip_snapshot(ws: object) -> None:
+    """Consume the status snapshot every community stream opens with (#1795).
+
+    The snapshot is sent only after the subscription is registered, so receiving
+    it is also the barrier after which a publish is guaranteed to be delivered.
+    """
+
+    assert ws.receive_json()["stream"] == "snapshot"  # type: ignore[attr-defined]
 
 
 # --- auth / authorization before the upgrade -------------------------------
@@ -162,6 +201,7 @@ def test_status_event_is_delivered_with_server_id() -> None:
     app = _app(bus=bus, lookup={str(server): community})
     client = _client(app)
     with client.websocket_connect(_url(community)) as ws:
+        _skip_snapshot(ws)
         bus.publish(
             server_id=str(server),
             event=RealTimeEvent(
@@ -185,6 +225,7 @@ def test_fan_out_two_servers_in_community_both_arrive() -> None:
     )
     client = _client(app)
     with client.websocket_connect(_url(community)) as ws:
+        _skip_snapshot(ws)
         bus.publish(
             server_id=str(server_a),
             event=RealTimeEvent(stream=EventStream.STATUS, payload={"state": "a"}),
@@ -207,6 +248,7 @@ def test_other_communitys_server_never_appears() -> None:
     )
     client = _client(app)
     with client.websocket_connect(_url(community_a)) as ws:
+        _skip_snapshot(ws)
         # Community B's server is published first; it must be filtered out so the
         # only frame the A-stream sees is A's server.
         bus.publish(
@@ -228,6 +270,7 @@ def test_log_and_metrics_events_are_not_streamed() -> None:
     app = _app(bus=bus, lookup={str(server): community})
     client = _client(app)
     with client.websocket_connect(_url(community)) as ws:
+        _skip_snapshot(ws)
         # Log lines and metrics are per-server detail, not operator events;
         # only the following STATUS frame must be delivered.
         bus.publish(
@@ -257,6 +300,7 @@ def test_notification_event_is_delivered_with_server_id() -> None:
     app = _app(bus=bus, lookup={str(server): community})
     client = _client(app)
     with client.websocket_connect(_url(community)) as ws:
+        _skip_snapshot(ws)
         bus.publish(
             server_id=str(server),
             event=notification_event(
@@ -286,6 +330,7 @@ def test_other_communitys_notification_never_appears() -> None:
     )
     client = _client(app)
     with client.websocket_connect(_url(community_a)) as ws:
+        _skip_snapshot(ws)
         # Community B's notification is published first; it must be filtered out
         # so the only frame the A-stream sees is A's server's notification.
         bus.publish(
@@ -318,6 +363,7 @@ def test_community_frame_wire_text_is_the_exact_compact_json() -> None:
     client = _client(app)
     emitted = dt.datetime(2026, 6, 3, 12, 0, 0, tzinfo=dt.timezone.utc)
     with client.websocket_connect(_url(community)) as ws:
+        _skip_snapshot(ws)
         bus.publish(
             server_id=str(server),
             event=RealTimeEvent(
@@ -331,6 +377,179 @@ def test_community_frame_wire_text_is_the_exact_compact_json() -> None:
         '{"stream":"status","ts":"2026-06-03T12:00:00Z",'
         f'"payload":{{"state":"running"}},"server_id":"{server}"}}'
     )
+
+
+# --- status snapshot on subscribe (#1795) ----------------------------------
+
+
+def test_stream_opens_with_a_snapshot_of_every_community_server() -> None:
+    bus = InProcessRealTimeEvents()
+    community = uuid.uuid4()
+    server_a, server_b = uuid.uuid4(), uuid.uuid4()
+    servers = _FakeListServers(
+        [
+            _FakeServer(id=ServerId(server_a), observed_state=ObservedState.RUNNING),
+            _FakeServer(id=ServerId(server_b), observed_state=ObservedState.STOPPED),
+        ]
+    )
+    app = _app(bus=bus, list_servers=servers)
+    client = _client(app)
+    with client.websocket_connect(_url(community)) as ws:
+        frame = ws.receive_json()
+    assert frame["stream"] == "snapshot"
+    assert frame["server_id"] is None
+    assert frame["payload"] == {
+        "servers": [
+            {"server_id": str(server_a), "state": "running"},
+            {"server_id": str(server_b), "state": "stopped"},
+        ]
+    }
+    assert frame["ts"].endswith("Z")
+
+
+def test_snapshot_wire_text_is_the_compact_community_frame_shape() -> None:
+    bus = InProcessRealTimeEvents()
+    community, server = uuid.uuid4(), uuid.uuid4()
+    servers = _FakeListServers(
+        [_FakeServer(id=ServerId(server), observed_state=ObservedState.RUNNING)]
+    )
+    app = _app(bus=bus, list_servers=servers)
+    client = _client(app)
+    with client.websocket_connect(_url(community)) as ws:
+        text = ws.receive_text()
+    ts = json.loads(text)["ts"]
+    assert text == (
+        f'{{"stream":"snapshot","ts":"{ts}",'
+        f'"payload":{{"servers":[{{"server_id":"{server}","state":"running"}}]}},'
+        '"server_id":null}'
+    )
+
+
+def test_gap_is_followed_by_a_fresh_snapshot() -> None:
+    bus = InProcessRealTimeEvents(max_queue=1)
+    community, server = uuid.uuid4(), uuid.uuid4()
+    servers = _FakeListServers(
+        [_FakeServer(id=ServerId(server), observed_state=ObservedState.STARTING)]
+    )
+    app = _app(bus=bus, lookup={str(server): community}, list_servers=servers)
+    client = _client(app)
+    with client.websocket_connect(_url(community)) as ws:
+        _skip_snapshot(ws)
+        servers.servers = [
+            _FakeServer(id=ServerId(server), observed_state=ObservedState.RUNNING)
+        ]
+        for i in range(3):
+            bus.publish(
+                server_id=str(server),
+                event=RealTimeEvent(
+                    stream=EventStream.STATUS, payload={"state": str(i)}
+                ),
+            )
+        first = ws.receive_json()
+        second = ws.receive_json()
+        # The retained status frames predate the snapshot and are superseded
+        # by it; live delivery resumes with the next transition.
+        bus.publish(
+            server_id=str(server),
+            event=RealTimeEvent(stream=EventStream.STATUS, payload={"state": "3"}),
+        )
+        third = ws.receive_json()
+    assert first["stream"] == "gap"
+    assert second["stream"] == "snapshot"
+    assert second["payload"] == {
+        "servers": [{"server_id": str(server), "state": "running"}]
+    }
+    assert third["payload"] == {"state": "3"}
+
+
+def test_buffered_status_older_than_the_post_gap_snapshot_is_discarded() -> None:
+    """A retained status frame must not undo the snapshot that superseded it.
+
+    ``running`` is published and still buffered when the worker disconnects:
+    that write commits ``unknown`` without publishing anything. The overflow's
+    post-gap snapshot reads ``unknown``; delivering the older buffered
+    ``running`` after it would leave the client on ``running`` indefinitely.
+    """
+
+    bus = InProcessRealTimeEvents(max_queue=2)
+    community, server = uuid.uuid4(), uuid.uuid4()
+    servers = _FakeListServers(
+        [_FakeServer(id=ServerId(server), observed_state=ObservedState.RUNNING)]
+    )
+    app = _app(bus=bus, lookup={str(server): community}, list_servers=servers)
+    client = _client(app)
+    with client.websocket_connect(_url(community)) as ws:
+        _skip_snapshot(ws)
+        for _ in range(2):
+            bus.publish(
+                server_id=str(server),
+                event=RealTimeEvent(
+                    stream=EventStream.STATUS, payload={"state": "running"}
+                ),
+            )
+        # The worker-disconnect write: persisted, never published.
+        servers.servers = [
+            _FakeServer(id=ServerId(server), observed_state=ObservedState.UNKNOWN)
+        ]
+        bus.publish(
+            server_id=str(server),
+            event=notification_event(kind="k", title="end"),
+        )
+        frames = []
+        while True:
+            frame = ws.receive_json()
+            frames.append(frame)
+            if frame["stream"] == "notification":
+                break
+    states = []
+    for frame in frames:
+        if frame["stream"] == "status":
+            states.append(frame["payload"]["state"])
+        elif frame["stream"] == "snapshot":
+            states.extend(entry["state"] for entry in frame["payload"]["servers"])
+    assert "gap" in [frame["stream"] for frame in frames]
+    assert states[-1] == "unknown"
+
+
+def test_gap_that_dropped_no_status_reads_no_snapshot() -> None:
+    """A notification flood overflowing a slow client costs no snapshot read."""
+
+    bus = InProcessRealTimeEvents(max_queue=2)
+    community, server = uuid.uuid4(), uuid.uuid4()
+
+    class _CountingListServers(_FakeListServers):
+        reads = 0
+
+        async def __call__(self, **kwargs: object) -> list[_FakeServer]:
+            self.reads += 1
+            return await super().__call__(**kwargs)
+
+    servers = _CountingListServers(
+        [_FakeServer(id=ServerId(server), observed_state=ObservedState.RUNNING)]
+    )
+    app = _app(bus=bus, lookup={str(server): community}, list_servers=servers)
+    client = _client(app)
+    with client.websocket_connect(_url(community)) as ws:
+        _skip_snapshot(ws)
+        for i in range(20):
+            bus.publish(
+                server_id=str(server),
+                event=notification_event(kind="k", title=str(i)),
+            )
+        bus.publish(
+            server_id=str(server),
+            event=notification_event(kind="k", title="end"),
+        )
+        frames = []
+        while True:
+            frame = ws.receive_json()
+            frames.append(frame)
+            if frame["stream"] == "notification" and frame["payload"]["title"] == "end":
+                break
+    streams = [frame["stream"] for frame in frames]
+    assert "gap" in streams
+    assert "snapshot" not in streams
+    assert servers.reads == 1  # the subscribe snapshot only
 
 
 # --- connection lifecycle --------------------------------------------------
@@ -366,6 +585,7 @@ def test_disconnect_on_quiet_stream_releases_subscription() -> None:
     app = _app(bus=bus)
     client = _client(app)
     with client.websocket_connect(_url(community)) as ws:
+        _skip_snapshot(ws)
         assert bus.firehose_subscriber_count() == 1
         ws.close(1000)
         for _ in range(100):

@@ -122,6 +122,7 @@ def _events_app() -> FastAPI:
     )
     from mc_server_dashboard_api.dependencies import (
         get_current_user_ws,
+        get_list_servers,
         get_membership_visibility,
         get_permission_checker,
         get_read_server,
@@ -131,6 +132,7 @@ def _events_app() -> FastAPI:
     from mc_server_dashboard_api.fleet.adapters.real_time_events import (
         InProcessRealTimeEvents,
     )
+    from mc_server_dashboard_api.servers.domain.value_objects import ObservedState
     from tests.identity.fakes import make_user
 
     app = create_app()
@@ -148,14 +150,22 @@ def _events_app() -> FastAPI:
         ) -> bool:
             return True
 
+    class _FoundServer:
+        observed_state = ObservedState.STOPPED
+
     class _Found:
         async def __call__(self, **_kw: object) -> object:
-            return object()
+            return _FoundServer()
+
+    class _NoServers:
+        async def __call__(self, **_kw: object) -> list[object]:
+            return []
 
     app.dependency_overrides[get_current_user_ws] = lambda: user
     app.dependency_overrides[get_membership_visibility] = _IsMember
     app.dependency_overrides[get_permission_checker] = _AllowAll
     app.dependency_overrides[get_read_server] = _Found
+    app.dependency_overrides[get_list_servers] = _NoServers
     app.dependency_overrides[get_real_time_events] = InProcessRealTimeEvents
     app.dependency_overrides[get_server_community_lookup] = lambda: lambda **_kw: None
     return app

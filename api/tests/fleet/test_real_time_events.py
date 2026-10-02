@@ -116,6 +116,65 @@ async def test_gap_marker_is_not_duplicated_while_still_behind() -> None:
     await sub.aclose()
 
 
+async def test_discard_buffered_drops_only_the_named_streams() -> None:
+    # The status snapshot supersedes the buffered status events (#1795): they
+    # are discarded, while the other streams keep their order.
+    bus = InProcessRealTimeEvents()
+    sub = bus.subscribe(server_id="s1", streams=_ALL)
+    log = RealTimeEvent(stream=EventStream.LOG, payload={"line": "x"})
+
+    bus.publish(server_id="s1", event=_status("running"))
+    bus.publish(server_id="s1", event=log)
+    bus.publish(server_id="s1", event=_status("stopping"))
+    sub.discard_buffered(frozenset({EventStream.STATUS}))
+    bus.publish(server_id="s1", event=_status("stopped"))
+
+    drained = [await asyncio.wait_for(sub.__anext__(), timeout=1) for _ in range(2)]
+    assert drained == [log, _status("stopped")]
+    await sub.aclose()
+
+
+async def test_discard_buffered_of_everything_leaves_the_subscriber_waiting() -> None:
+    bus = InProcessRealTimeEvents()
+    sub = bus.subscribe(server_id="s1", streams=_ALL)
+
+    bus.publish(server_id="s1", event=_status("running"))
+    sub.discard_buffered(frozenset({EventStream.STATUS}))
+
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(sub.__anext__(), timeout=0.05)
+    await sub.aclose()
+
+
+async def test_take_dropped_reports_the_streams_that_lost_events() -> None:
+    # Only a gap that cost status events needs a fresh status snapshot (#1795),
+    # so the subscription reports which streams the overflow dropped.
+    bus = InProcessRealTimeEvents(max_queue=1)
+    sub = bus.subscribe(server_id="s1", streams=_ALL)
+    log = RealTimeEvent(stream=EventStream.LOG, payload={"line": "x"})
+
+    bus.publish(server_id="s1", event=log)
+    bus.publish(server_id="s1", event=log)  # drops a LOG event
+    assert sub.take_dropped() == frozenset({EventStream.LOG})
+    assert sub.take_dropped() == frozenset()  # reset by the take
+
+    bus.publish(server_id="s1", event=_status("running"))  # drops the LOG
+    bus.publish(server_id="s1", event=log)  # drops the STATUS
+    assert sub.take_dropped() == frozenset({EventStream.LOG, EventStream.STATUS})
+    await sub.aclose()
+
+
+async def test_discard_buffered_is_not_reported_as_dropped() -> None:
+    bus = InProcessRealTimeEvents()
+    sub = bus.subscribe(server_id="s1", streams=_ALL)
+
+    bus.publish(server_id="s1", event=_status("running"))
+    sub.discard_buffered(frozenset({EventStream.STATUS}))
+
+    assert sub.take_dropped() == frozenset()
+    await sub.aclose()
+
+
 async def test_unsubscribe_cleans_up_buffer_no_leak() -> None:
     bus = InProcessRealTimeEvents()
     sub = bus.subscribe(server_id="s1", streams=_ALL)

@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import json
 import time
 import uuid
+from dataclasses import dataclass
 
 import pytest
 from fastapi import FastAPI
@@ -48,6 +50,7 @@ from mc_server_dashboard_api.fleet.domain.real_time_events import (
     notification_event,
 )
 from mc_server_dashboard_api.servers.domain.errors import ServerNotFoundError
+from mc_server_dashboard_api.servers.domain.value_objects import ObservedState
 from tests.client_utils import enter_client
 from tests.identity.fakes import make_user
 
@@ -70,16 +73,31 @@ class _FakeChecker(PermissionChecker):
         return self._allow
 
 
-class _FakeReadServer:
-    """Stands in for the ReadServer ownership check: found, or cross-community."""
+@dataclass(frozen=True)
+class _FakeServer:
+    """The slice of the ``Server`` entity the endpoint reads (its observed state)."""
 
-    def __init__(self, *, found: bool) -> None:
+    observed_state: ObservedState
+
+
+class _FakeReadServer:
+    """Stands in for ReadServer: the ownership check and the snapshot read.
+
+    ``found`` decides the ownership check (cross-community -> not found); a found
+    server reports ``state`` as its observed state, which the on-subscribe
+    snapshot frame carries (#1795).
+    """
+
+    def __init__(
+        self, *, found: bool, state: ObservedState = ObservedState.RUNNING
+    ) -> None:
         self._found = found
+        self.state = state
 
     async def __call__(self, **_kwargs: object) -> object:
         if not self._found:
             raise ServerNotFoundError("x")
-        return object()
+        return _FakeServer(observed_state=self.state)
 
 
 _shared_app: FastAPI
@@ -98,6 +116,7 @@ def _app(
     found: bool = True,
     authenticated: bool = True,
     bus: RealTimeEvents | None = None,
+    read_server: object | None = None,
 ) -> object:
     # Reuse the per-worker shared app; clear overrides on entry so a helper called
     # twice in one test starts clean (the shared_app wrapper clears between tests).
@@ -113,7 +132,9 @@ def _app(
         member=member
     )
     app.dependency_overrides[get_permission_checker] = lambda: _FakeChecker(allow=allow)
-    app.dependency_overrides[get_read_server] = lambda: _FakeReadServer(found=found)
+    app.dependency_overrides[get_read_server] = lambda: (
+        read_server if read_server is not None else _FakeReadServer(found=found)
+    )
     if bus is not None:
         app.dependency_overrides[get_real_time_events] = lambda: bus
     return app
@@ -127,6 +148,16 @@ def _url(
     community: uuid.UUID, server: uuid.UUID, streams: str = "status,log,metrics"
 ) -> str:
     return f"/api/communities/{community}/servers/{server}/events?streams={streams}"
+
+
+def _skip_snapshot(ws: object) -> None:
+    """Consume the status snapshot every STATUS subscription opens with (#1795).
+
+    The snapshot is sent only after the subscription is registered, so receiving
+    it is also the barrier after which a publish is guaranteed to be delivered.
+    """
+
+    assert ws.receive_json()["stream"] == "snapshot"  # type: ignore[attr-defined]
 
 
 # --- auth / authorization before the upgrade -------------------------------
@@ -167,6 +198,7 @@ def test_status_event_is_delivered_as_a_frame() -> None:
     app = _app(bus=bus)
     client = _client(app)
     with client.websocket_connect(_url(community, server)) as ws:
+        _skip_snapshot(ws)
         bus.publish(
             server_id=str(server),
             event=RealTimeEvent(
@@ -185,6 +217,7 @@ def test_log_and_metrics_events_are_delivered() -> None:
     app = _app(bus=bus)
     client = _client(app)
     with client.websocket_connect(_url(community, server)) as ws:
+        _skip_snapshot(ws)
         bus.publish(
             server_id=str(server),
             event=RealTimeEvent(stream=EventStream.LOG, payload={"line": "hi"}),
@@ -205,6 +238,7 @@ def test_streams_query_filters_delivered_events() -> None:
     app = _app(bus=bus)
     client = _client(app)
     with client.websocket_connect(_url(community, server, streams="status")) as ws:
+        _skip_snapshot(ws)
         bus.publish(
             server_id=str(server),
             event=RealTimeEvent(stream=EventStream.LOG, payload={"line": "x"}),
@@ -246,12 +280,17 @@ def test_notification_stream_is_subscribable_and_delivered() -> None:
     assert "ts" in frame
 
 
-def test_slow_consumer_receives_a_gap_frame() -> None:
+def test_slow_consumer_receives_a_gap_frame_then_a_fresh_snapshot() -> None:
+    # The dropped status frames are never replayed, so the gap is followed by a
+    # fresh snapshot (#1795), which supersedes the retained status frames.
     bus = InProcessRealTimeEvents(max_queue=1)
     community, server = uuid.uuid4(), uuid.uuid4()
-    app = _app(bus=bus)
+    read_server = _FakeReadServer(found=True, state=ObservedState.STARTING)
+    app = _app(bus=bus, read_server=read_server)
     client = _client(app)
     with client.websocket_connect(_url(community, server)) as ws:
+        _skip_snapshot(ws)
+        read_server.state = ObservedState.RUNNING
         for i in range(3):
             bus.publish(
                 server_id=str(server),
@@ -261,8 +300,241 @@ def test_slow_consumer_receives_a_gap_frame() -> None:
             )
         first = ws.receive_json()
         second = ws.receive_json()
+        # The retained status frames predate the snapshot and are superseded
+        # by it; live delivery resumes with the next transition.
+        bus.publish(
+            server_id=str(server),
+            event=RealTimeEvent(stream=EventStream.STATUS, payload={"state": "3"}),
+        )
+        third = ws.receive_json()
     assert first["stream"] == "gap"
-    assert second["payload"] == {"state": "2"}
+    assert second["stream"] == "snapshot"
+    assert second["payload"] == {"state": "running"}
+    assert third["payload"] == {"state": "3"}
+
+
+def _drain_until_log(ws: object, line: str) -> list[dict[str, object]]:
+    """Receive frames up to and including the log frame carrying ``line``."""
+
+    frames: list[dict[str, object]] = []
+    while True:
+        frame = ws.receive_json()  # type: ignore[attr-defined]
+        frames.append(frame)
+        if frame["stream"] == "log" and frame["payload"] == {"line": line}:
+            return frames
+
+
+def _final_state(frames: list[dict[str, object]]) -> object:
+    """The state a client holds after applying every status/snapshot frame."""
+
+    states = [
+        frame["payload"]["state"]  # type: ignore[index]
+        for frame in frames
+        if frame["stream"] in ("status", "snapshot")
+    ]
+    return states[-1]
+
+
+def test_buffered_status_older_than_the_post_gap_snapshot_is_discarded() -> None:
+    """A retained status frame must not undo the snapshot that superseded it.
+
+    ``running`` is published and still buffered when the worker disconnects:
+    that write commits ``unknown`` without publishing anything. The overflow's
+    post-gap snapshot reads ``unknown``; delivering the older buffered
+    ``running`` after it would leave the client on ``running`` indefinitely.
+    """
+
+    bus = InProcessRealTimeEvents(max_queue=2)
+    community, server = uuid.uuid4(), uuid.uuid4()
+    read_server = _FakeReadServer(found=True, state=ObservedState.RUNNING)
+    app = _app(bus=bus, read_server=read_server)
+    client = _client(app)
+    with client.websocket_connect(_url(community, server, "status,log")) as ws:
+        _skip_snapshot(ws)
+        for _ in range(2):
+            bus.publish(
+                server_id=str(server),
+                event=RealTimeEvent(
+                    stream=EventStream.STATUS, payload={"state": "running"}
+                ),
+            )
+        # The worker-disconnect write: persisted, never published.
+        read_server.state = ObservedState.UNKNOWN
+        bus.publish(
+            server_id=str(server),
+            event=RealTimeEvent(stream=EventStream.LOG, payload={"line": "end"}),
+        )
+        frames = _drain_until_log(ws, "end")
+    assert "gap" in [frame["stream"] for frame in frames]
+    assert _final_state(frames) == "unknown"
+
+
+def test_gap_that_dropped_no_status_reads_no_snapshot() -> None:
+    """A log flood overflowing a slow client must not cost a DB read per gap.
+
+    The dropped events are all log lines: the client missed no status, so the
+    gap needs no fresh snapshot, and the server is read only for the authz
+    gate and the subscribe snapshot.
+    """
+
+    bus = InProcessRealTimeEvents(max_queue=2)
+    community, server = uuid.uuid4(), uuid.uuid4()
+
+    class _CountingReadServer(_FakeReadServer):
+        reads = 0
+
+        async def __call__(self, **kwargs: object) -> object:
+            self.reads += 1
+            return await super().__call__(**kwargs)
+
+    read_server = _CountingReadServer(found=True)
+    app = _app(bus=bus, read_server=read_server)
+    client = _client(app)
+    with client.websocket_connect(_url(community, server, "status,log")) as ws:
+        _skip_snapshot(ws)
+        for i in range(20):
+            bus.publish(
+                server_id=str(server),
+                event=RealTimeEvent(stream=EventStream.LOG, payload={"line": str(i)}),
+            )
+        bus.publish(
+            server_id=str(server),
+            event=RealTimeEvent(stream=EventStream.LOG, payload={"line": "end"}),
+        )
+        frames = _drain_until_log(ws, "end")
+    streams = [frame["stream"] for frame in frames]
+    assert "gap" in streams
+    assert "snapshot" not in streams
+    assert read_server.reads == 2  # the authz gate + the subscribe snapshot
+
+
+def test_gap_on_a_stream_without_status_sends_no_snapshot() -> None:
+    bus = InProcessRealTimeEvents(max_queue=1)
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(bus=bus)
+    client = _client(app)
+    with client.websocket_connect(_url(community, server, streams="log")) as ws:
+        _await_subscribers(bus, str(server), 1)
+        for i in range(3):
+            bus.publish(
+                server_id=str(server),
+                event=RealTimeEvent(stream=EventStream.LOG, payload={"line": str(i)}),
+            )
+        first = ws.receive_json()
+        second = ws.receive_json()
+    assert first["stream"] == "gap"
+    assert second["payload"] == {"line": "2"}
+
+
+# --- status snapshot on subscribe (#1795) ----------------------------------
+
+
+def _await_subscribers(bus: InProcessRealTimeEvents, server: str, count: int) -> None:
+    for _ in range(100):
+        if bus.subscriber_count(server) == count:
+            break
+        time.sleep(0.01)
+    assert bus.subscriber_count(server) == count
+
+
+def test_status_subscription_opens_with_a_snapshot_of_the_observed_state() -> None:
+    bus = InProcessRealTimeEvents()
+    community, server = uuid.uuid4(), uuid.uuid4()
+    read_server = _FakeReadServer(found=True, state=ObservedState.CRASHED)
+    app = _app(bus=bus, read_server=read_server)
+    client = _client(app)
+    with client.websocket_connect(_url(community, server)) as ws:
+        frame = ws.receive_json()
+    assert frame["stream"] == "snapshot"
+    assert frame["payload"] == {"state": "crashed"}
+    assert frame["ts"].endswith("Z")
+
+
+def test_snapshot_wire_text_is_the_compact_frame_shape() -> None:
+    bus = InProcessRealTimeEvents()
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(bus=bus)
+    client = _client(app)
+    with client.websocket_connect(_url(community, server)) as ws:
+        text = ws.receive_text()
+    ts = json.loads(text)["ts"]
+    assert (
+        text == f'{{"stream":"snapshot","ts":"{ts}","payload":{{"state":"running"}}}}'
+    )
+
+
+def test_no_snapshot_without_the_status_stream() -> None:
+    # A log-only subscriber never asked for status, so it gets none: its first
+    # frame is the first published log line.
+    bus = InProcessRealTimeEvents()
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(bus=bus)
+    client = _client(app)
+    with client.websocket_connect(_url(community, server, streams="log")) as ws:
+        _await_subscribers(bus, str(server), 1)
+        bus.publish(
+            server_id=str(server),
+            event=RealTimeEvent(stream=EventStream.LOG, payload={"line": "hi"}),
+        )
+        frame = ws.receive_json()
+    assert frame["stream"] == "log"
+
+
+def test_transition_racing_the_snapshot_read_is_delivered_after_it() -> None:
+    """The subscription is registered before the snapshot is read.
+
+    A transition published while the snapshot read is in flight therefore lands
+    in the subscription's buffer and is delivered after the snapshot -- never
+    lost between the read and the subscribe.
+    """
+
+    bus = InProcessRealTimeEvents()
+    community, server = uuid.uuid4(), uuid.uuid4()
+
+    class _RacingReadServer(_FakeReadServer):
+        reads = 0
+
+        async def __call__(self, **kwargs: object) -> object:
+            self.reads += 1
+            if self.reads == 2:  # the snapshot read (the first is the authz gate)
+                bus.publish(
+                    server_id=str(server),
+                    event=RealTimeEvent(
+                        stream=EventStream.STATUS, payload={"state": "stopping"}
+                    ),
+                )
+            return await super().__call__(**kwargs)
+
+    app = _app(bus=bus, read_server=_RacingReadServer(found=True))
+    client = _client(app)
+    with client.websocket_connect(_url(community, server)) as ws:
+        first = ws.receive_json()
+        second = ws.receive_json()
+    assert first["stream"] == "snapshot"
+    assert second["stream"] == "status"
+    assert second["payload"] == {"state": "stopping"}
+
+
+def test_server_deleted_before_the_snapshot_read_closes_4404() -> None:
+    bus = InProcessRealTimeEvents()
+    community, server = uuid.uuid4(), uuid.uuid4()
+
+    class _DeletedAfterAuthz(_FakeReadServer):
+        reads = 0
+
+        async def __call__(self, **kwargs: object) -> object:
+            self.reads += 1
+            if self.reads > 1:
+                raise ServerNotFoundError("x")
+            return await super().__call__(**kwargs)
+
+    app = _app(bus=bus, read_server=_DeletedAfterAuthz(found=True))
+    client = _client(app)
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect(_url(community, server)) as ws:
+            ws.receive_json()
+    assert exc.value.code == 4404
+    _await_subscribers(bus, str(server), 0)
 
 
 # --- frame ts carries the worker's emitted_at -----------------------------
@@ -275,6 +547,7 @@ def test_frame_ts_uses_worker_emitted_at() -> None:
     client = _client(app)
     emitted = dt.datetime(2026, 6, 3, 12, 0, 0, tzinfo=dt.timezone.utc)
     with client.websocket_connect(_url(community, server)) as ws:
+        _skip_snapshot(ws)
         bus.publish(
             server_id=str(server),
             event=RealTimeEvent(
@@ -296,6 +569,7 @@ def test_frame_ts_falls_back_to_receive_time_when_unset() -> None:
     client = _client(app)
     before = dt.datetime.now(dt.timezone.utc)
     with client.websocket_connect(_url(community, server)) as ws:
+        _skip_snapshot(ws)
         bus.publish(
             server_id=str(server),
             event=RealTimeEvent(
@@ -326,6 +600,7 @@ def test_frame_wire_text_is_the_exact_compact_json() -> None:
     client = _client(app)
     emitted = dt.datetime(2026, 6, 3, 12, 0, 0, tzinfo=dt.timezone.utc)
     with client.websocket_connect(_url(community, server)) as ws:
+        _skip_snapshot(ws)
         bus.publish(
             server_id=str(server),
             event=RealTimeEvent(
@@ -367,12 +642,10 @@ def test_frame_is_encoded_once_for_many_subscribers(
         client.websocket_connect(_url(community, server)) as ws2,
         client.websocket_connect(_url(community, server)) as ws3,
     ):
-        # All three subscriptions must be registered before the publish.
-        for _ in range(100):
-            if bus.subscriber_count(str(server)) == 3:
-                break
-            time.sleep(0.01)
-        assert bus.subscriber_count(str(server)) == 3
+        # All three subscriptions must be registered before the publish; each
+        # one's snapshot is sent only after it is.
+        for ws in (ws1, ws2, ws3):
+            _skip_snapshot(ws)
         bus.publish(
             server_id=str(server),
             event=RealTimeEvent(
@@ -433,6 +706,7 @@ def test_omitted_streams_subscribes_to_all() -> None:
         (EventStream.NOTIFICATION, {"kind": "k", "title": "t", "detail": ""}),
     ]
     with client.websocket_connect(url) as ws:
+        _skip_snapshot(ws)
         for stream, payload in cases:
             bus.publish(
                 server_id=str(server),
@@ -485,6 +759,7 @@ def test_mid_stream_revocation_closes_with_policy_code(
 
     with pytest.raises(WebSocketDisconnect) as exc:
         with client.websocket_connect(_url(community, server)) as ws:
+            _skip_snapshot(ws)
             # A frame published before the flip is still delivered.
             bus.publish(
                 server_id=str(server),
@@ -532,6 +807,7 @@ def test_mid_stream_revocation_closes_despite_busy_stream(
 
     with pytest.raises(WebSocketDisconnect) as exc:
         with client.websocket_connect(_url(community, server)) as ws:
+            _skip_snapshot(ws)
             # Revoke immediately — the stream will stay busy the whole time.
             checker.revoke()
             # Pump frames faster than the re-authz interval so the old code's
@@ -649,6 +925,7 @@ def test_client_sent_data_is_ignored_and_delivery_continues() -> None:
     app = _app(bus=bus)
     client = _client(app)
     with client.websocket_connect(_url(community, server)) as ws:
+        _skip_snapshot(ws)
         ws.send_text("ping")
         bus.publish(
             server_id=str(server),
@@ -658,6 +935,59 @@ def test_client_sent_data_is_ignored_and_delivery_continues() -> None:
         )
         frame = ws.receive_json()
     assert frame["stream"] == "status"
+
+
+class _GoneDuringReadSocket:
+    """A client that disconnects while the snapshot is being read.
+
+    Once the disconnect has been received, any send or close is what uvicorn
+    rejects with ``RuntimeError`` ("Unexpected ASGI message ... after sending
+    'websocket.close'"); the relay must notice the client is gone instead.
+    """
+
+    def __init__(self) -> None:
+        self.gone = asyncio.Event()
+
+    async def receive(self) -> dict[str, object]:
+        self.gone.set()
+        return {"type": "websocket.disconnect"}
+
+    async def send_text(self, text: str) -> None:
+        raise RuntimeError("Unexpected ASGI message 'websocket.send'")
+
+    async def close(self, code: int) -> None:
+        raise RuntimeError("Unexpected ASGI message 'websocket.close'")
+
+
+@pytest.mark.parametrize("snapshot_text", ["{}", None], ids=["send", "close-4404"])
+async def test_client_gone_during_the_snapshot_read_ends_the_relay_quietly(
+    snapshot_text: str | None,
+) -> None:
+    from mc_server_dashboard_api.fleet.api import events as events_module
+
+    socket = _GoneDuringReadSocket()
+    bus = InProcessRealTimeEvents()
+    subscription = bus.subscribe(server_id="s", streams=frozenset({EventStream.STATUS}))
+
+    async def _snapshot() -> str | None:
+        await socket.gone.wait()
+        await asyncio.sleep(0)  # the reader task observes the disconnect
+        return snapshot_text
+
+    async def _reauthorize() -> int | None:
+        return None
+
+    async def _deliver(event: RealTimeEvent) -> None:
+        raise AssertionError("no events are published in this test")
+
+    await events_module._relay(
+        socket,  # type: ignore[arg-type]
+        subscription,
+        reauthorize=_reauthorize,
+        deliver=_deliver,
+        snapshot=_snapshot,
+    )
+    await subscription.aclose()
 
 
 async def test_cancellation_while_parked_leaves_no_orphan_tasks() -> None:
@@ -691,6 +1021,7 @@ async def test_cancellation_while_parked_leaves_no_orphan_tasks() -> None:
             subscription,
             reauthorize=_reauthorize,
             deliver=_deliver,
+            snapshot=None,
         )
     )
     await asyncio.sleep(0.01)  # let the loop park on its helper tasks

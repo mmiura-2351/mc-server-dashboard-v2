@@ -1439,10 +1439,15 @@ def get_read_server(connection: HTTPConnection) -> ReadServer:
     return ReadServer(uow=ServersUnitOfWork(session_factory))
 
 
-def get_list_servers(request: Request) -> ListServers:
-    """Assemble the :class:`ListServers` use case (server:read)."""
+def get_list_servers(connection: HTTPConnection) -> ListServers:
+    """Assemble the :class:`ListServers` use case (server:read).
 
-    session_factory = create_session_factory(get_engine(request))
+    Typed as :class:`HTTPConnection` so it injects on both HTTP and WebSocket
+    routes; the community WebSocket events endpoint reads its on-subscribe status
+    snapshot through it (issue #1795).
+    """
+
+    session_factory = create_session_factory(get_engine(connection))
     return ListServers(uow=ServersUnitOfWork(session_factory))
 
 

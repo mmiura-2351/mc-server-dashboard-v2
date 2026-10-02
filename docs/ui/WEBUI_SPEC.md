@@ -190,8 +190,44 @@ Global resource pack library (not community-scoped) and per-server assignment.
 
 | Path | Notes |
 |---|---|
-| `WS /communities/{cid}/servers/{sid}/events?streams=status,log,metrics,notification` | Typed frames `{stream, ts, payload}`. `status`: `{state, detail}` · `log`: `{line, stream}` · `metrics`: `{cpu_millis, memory_bytes, player_count}` · `notification`: `{kind, title, detail}` (operator notice) · `gap`: client fell behind (always delivered). |
-| `WS /communities/{cid}/events` | Community-wide **status + notification** firehose; frames carry `server_id`. |
+| `WS /communities/{cid}/servers/{sid}/events?streams=status,log,metrics,notification` | Typed frames `{stream, ts, payload}`. `status`: `{state, detail}` · `log`: `{line, stream}` · `metrics`: `{cpu_millis, memory_bytes, player_count}` · `notification`: `{kind, title, detail}` (operator notice) · `gap`: client fell behind (always delivered) · `snapshot`: `{state}` (see below). |
+| `WS /communities/{cid}/events` | Community-wide **status + notification** firehose; frames carry `server_id`. `snapshot`: `{servers: [{server_id, state}]}` with `server_id: null` (see below). |
+
+Missed frames are never replayed (delivery is best-effort), so a connection
+that carries status opens with a **`snapshot`** frame and gets a fresh one
+right after a `gap` frame when status frames were dropped since the previous
+such check (a gap that dropped only other streams cost no status and is not
+followed by one; neither is a gap whose status losses happened while the
+previous gap was being delivered, since that gap's snapshot already covers
+them): the persisted observed state of the stream's scope — the server for the per-server stream (only when `status` is among the
+subscribed streams), every server of the community for the community stream.
+Its `ts` is the time the snapshot was read. It has no `detail`, which only a
+live `status` transition carries. A client applies it like status frames, and
+on the community stream it is the complete server set, so a server missing from
+the client's list (or absent from the snapshot) means the set changed. A
+server deleted before its per-server snapshot can be read closes the socket
+with 4404.
+
+Ordering: the subscription is registered before the snapshot is read, so every
+status transition published from then on reaches the subscriber's buffer.
+Right before each snapshot read, the status frames still buffered are
+discarded: each was published, hence committed, before the read, so the
+snapshot already shows it or a newer state. Delivering one after the snapshot
+could only roll the client back, and not every persisted change publishes a
+correcting frame (a worker disconnect commits `unknown` silently). A status
+frame published after the discard is delivered after the snapshot, in order;
+one that raced the read may repeat what the snapshot showed, which is harmless
+because status frames are idempotent sets.
+
+Residual (until #3212): this argument holds only for writes that publish a
+status frame after they commit. A write that commits without publishing —
+today the worker-disconnect `unknown` write and the `lifecycle.py`
+observed-state writes — can be overridden by a status frame published before
+it: if that frame reaches the buffer while the snapshot read is in flight and
+the silent write commits before the read, the snapshot shows the silent write
+and the older frame is delivered after it. Without a later frame or snapshot,
+the client keeps the older state. #3212 makes every observed-state write
+publish, which closes this.
 
 Auth: browsers pass the access token via `Sec-WebSocket-Protocol` as two
 subprotocols `["access_token", "<jwt>"]`; the server echoes `access_token` as
@@ -619,6 +655,17 @@ backend support; the tab body also self-guards with an "unsupported" notice).
 - One WS per open server-detail page + one community WS for the dashboard.
 - Reconnect with exponential backoff + jitter; resubscribe on open; banner
   shows degraded mode; REST polling fallback for status only.
+- Converge from the `snapshot` frame (Section 2.6) on every (re)connect and
+  after every `gap` that dropped status; the one-shot REST refetch on
+  reopen / `gap` stays as a belt-and-suspenders reconcile.
+- A live state (status or snapshot frame) outlives the REST reads of the query
+  it patches: received before the query has loaded, or while a read is in
+  flight, it is re-applied when the response lands, unless the request of the
+  attempt that produced the response (retries included) started after the
+  frame arrived — then the response is the newer truth (it can carry a change
+  no frame announced). The dashboard reconciles the server set the same way:
+  a live server missing from the landed list, or a listed server missing from
+  a newer snapshot, triggers one list refetch.
 
 ### 7.3 Permission-driven rendering
 - Capabilities come from `GET /communities/{cid}/me/permissions`:
