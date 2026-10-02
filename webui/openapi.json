@@ -1361,6 +1361,18 @@
             "title": "Name",
             "type": "string"
           },
+          "only_when_running": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Backup only: skip an occurrence that finds the server stopped. Omitted on a backup schedule it defaults to true; set on any other action it is rejected (422 invalid_payload).",
+            "title": "Only When Running"
+          },
           "timezone": {
             "default": "UTC",
             "title": "Timezone",
@@ -3202,6 +3214,18 @@
             ],
             "title": "Next Run At"
           },
+          "only_when_running": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Backup only: whether an occurrence that finds the server stopped is skipped. Always a boolean on a backup schedule, null on every other action.",
+            "title": "Only When Running"
+          },
           "server_id": {
             "title": "Server Id",
             "type": "string"
@@ -3234,6 +3258,7 @@
           "enabled",
           "command",
           "warning_steps",
+          "only_when_running",
           "next_run_at",
           "last_run_at",
           "created_at",
@@ -3767,6 +3792,18 @@
               }
             ],
             "title": "Name"
+          },
+          "only_when_running": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Backup only: skip an occurrence that finds the server stopped. Omitted, it keeps its value; set on any other action it is rejected (422 invalid_payload).",
+            "title": "Only When Running"
           },
           "timezone": {
             "anyOf": [
@@ -10202,7 +10239,7 @@
         "summary": "List Schedules"
       },
       "post": {
-        "description": "Create a per-server schedule.\n\nRequires `schedule:manage` **and** the action's own permission\n(`command`\u2192`server:command`, `start`\u2192`server:start`, `stop`\u2192`server:stop`,\n`restart`\u2192`server:restart`, `backup`\u2192`backup:schedule`), so `schedule:manage`\nalone cannot schedule an action the caller could not run directly. The\ncadence is `cron` XOR `interval_seconds`; `timezone` is an IANA zone.\n`command` is required for the `command` action; `warning_steps` (at most 5,\npositive distinct offsets \u2264 120 minutes) only on `stop`/`restart` \u2014 they are\nbroadcast as a fixed `say` message, so they need no `server:command`.\n\nAuthorization is **write-time only**: the runner later executes each\noccurrence as the system, so revoking a permission does not stop existing\nschedules \u2014 they must be disabled or deleted (the same write gate).\n\n`next_run_at` is computed from the cadence when `enabled`; `null` while\ndisabled. A missing permission is 403 with the code in the `permission`\nmember; a duplicate name is 409; validation failures are 422 with a typed\nreason (`invalid_cron`, `invalid_cadence`, `invalid_timezone`,\n`invalid_payload`, `invalid_schedule_name`).",
+        "description": "Create a per-server schedule.\n\nRequires `schedule:manage` **and** the action's own permission\n(`command`\u2192`server:command`, `start`\u2192`server:start`, `stop`\u2192`server:stop`,\n`restart`\u2192`server:restart`, `backup`\u2192`backup:schedule`), so `schedule:manage`\nalone cannot schedule an action the caller could not run directly. The\ncadence is `cron` XOR `interval_seconds`; `timezone` is an IANA zone.\n`command` is required for the `command` action; `warning_steps` (at most 5,\npositive distinct offsets \u2264 120 minutes) only on `stop`/`restart` \u2014 they are\nbroadcast as a fixed `say` message, so they need no `server:command`.\n`only_when_running` only on `backup` (defaults to `true` when omitted): an\noccurrence that finds the server stopped is recorded as `skipped`.\n\nAuthorization is **write-time only**: the runner later executes each\noccurrence as the system, so revoking a permission does not stop existing\nschedules \u2014 they must be disabled or deleted (the same write gate).\n\n`next_run_at` is computed from the cadence when `enabled`; `null` while\ndisabled. A missing permission is 403 with the code in the `permission`\nmember; a duplicate name is 409; validation failures are 422 with a typed\nreason (`invalid_cron`, `invalid_cadence`, `invalid_timezone`,\n`invalid_payload`, `invalid_schedule_name`).",
         "operationId": "create_schedule_api_communities__community_id__servers__server_id__schedules_post",
         "parameters": [
           {

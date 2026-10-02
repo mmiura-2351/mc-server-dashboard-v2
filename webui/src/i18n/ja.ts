@@ -660,6 +660,10 @@ export const ja: Record<TranslationKey, string> = {
   "schedules.dialog.commandPlaceholder":
     "例: say まもなくサーバーを再起動します",
   "schedules.dialog.enabledLabel": "有効",
+  "schedules.dialog.onlyWhenRunningLabel":
+    "サーバーの稼働中のみバックアップする",
+  "schedules.dialog.onlyWhenRunningHint":
+    "予定時刻にサーバーが停止している場合、バックアップを取らずに実行を「スキップ」として記録します。",
   "schedules.dialog.warningsLabel": "プレイヤーへの警告",
   "schedules.dialog.warningsHint":
     "アクションの指定分前にメッセージを通知します（最大5ステップ）。",

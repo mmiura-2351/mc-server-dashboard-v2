@@ -1915,6 +1915,8 @@ export interface paths {
          *     `command` is required for the `command` action; `warning_steps` (at most 5,
          *     positive distinct offsets ≤ 120 minutes) only on `stop`/`restart` — they are
          *     broadcast as a fixed `say` message, so they need no `server:command`.
+         *     `only_when_running` only on `backup` (defaults to `true` when omitted): an
+         *     occurrence that finds the server stopped is recorded as `skipped`.
          *
          *     Authorization is **write-time only**: the runner later executes each
          *     occurrence as the system, so revoking a permission does not stop existing
@@ -3199,6 +3201,11 @@ export interface components {
             /** Name */
             name: string;
             /**
+             * Only When Running
+             * @description Backup only: skip an occurrence that finds the server stopped. Omitted on a backup schedule it defaults to true; set on any other action it is rejected (422 invalid_payload).
+             */
+            only_when_running?: boolean | null;
+            /**
              * Timezone
              * @default UTC
              */
@@ -3901,6 +3908,11 @@ export interface components {
             name: string;
             /** Next Run At */
             next_run_at: string | null;
+            /**
+             * Only When Running
+             * @description Backup only: whether an occurrence that finds the server stopped is skipped. Always a boolean on a backup schedule, null on every other action.
+             */
+            only_when_running: boolean | null;
             /** Server Id */
             server_id: string;
             /** Timezone */
@@ -4125,6 +4137,11 @@ export interface components {
             interval_seconds?: number | null;
             /** Name */
             name?: string | null;
+            /**
+             * Only When Running
+             * @description Backup only: skip an occurrence that finds the server stopped. Omitted, it keeps its value; set on any other action it is rejected (422 invalid_payload).
+             */
+            only_when_running?: boolean | null;
             /** Timezone */
             timezone?: string | null;
             /** Warning Steps */
