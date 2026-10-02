@@ -8,6 +8,7 @@ import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearAccessToken, setAccessToken } from "../auth/tokenStore.ts";
 import { installMockWebSocket, MockWebSocket } from "../test/mockWebSocket.ts";
+import { stampedQueryFn } from "./restReads.ts";
 import { serverKey } from "./serverKey.ts";
 import type { LogEntry } from "./useServerEvents.ts";
 import {
@@ -534,14 +535,20 @@ type Detail = { id: string; observed_state: string };
  * A detail query whose REST responses the test resolves by hand, so a response
  * can land after a WS frame that is newer than its read (#3213).
  */
-function setupDeferred() {
-  const pending: ((row: Detail) => void)[] = [];
-  const queryFn = () =>
-    new Promise<Detail>((resolve) => {
-      pending.push(resolve);
-    });
+function setupDeferred({ retry = false }: { retry?: number | false } = {}) {
+  const pending: {
+    resolve: (row: Detail) => void;
+    reject: (error: Error) => void;
+  }[] = [];
+  // Wrapped like the page's, so each attempt (retries included) is stamped.
+  const queryFn = stampedQueryFn(
+    () =>
+      new Promise<Detail>((resolve, reject) => {
+        pending.push({ resolve, reject });
+      }),
+  );
   const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
+    defaultOptions: { queries: { retry, retryDelay: 1000 } },
   });
   function LiveProbe() {
     // The page's order: the events hook, then the detail query.
@@ -555,16 +562,25 @@ function setupDeferred() {
   render(<LiveProbe />, { wrapper });
   // Resolve the oldest outstanding REST read with `observed_state`.
   const respond = async (observed_state: string) => {
-    const resolve = pending.shift();
-    expect(resolve).toBeDefined();
+    const attempt = pending.shift();
+    expect(attempt).toBeDefined();
     await act(async () => {
-      resolve?.({ id: SID, observed_state });
+      attempt?.resolve({ id: SID, observed_state });
+      await vi.advanceTimersByTimeAsync(0);
+    });
+  };
+  // Fail the oldest outstanding REST attempt (an HTTP error).
+  const fail = async () => {
+    const attempt = pending.shift();
+    expect(attempt).toBeDefined();
+    await act(async () => {
+      attempt?.reject(new Error("503"));
       await vi.advanceTimersByTimeAsync(0);
     });
   };
   const cached = () =>
     queryClient.getQueryData<Detail>(serverKey(CID, SID))?.observed_state;
-  return { queryClient, respond, cached, pending };
+  return { queryClient, respond, fail, cached, pending };
 }
 
 describe("useServerEvents with REST reads in flight (#3213)", () => {
@@ -645,5 +661,47 @@ describe("useServerEvents with REST reads in flight (#3213)", () => {
     });
     await respond("unknown");
     expect(cached()).toBe("unknown");
+  });
+});
+
+describe("useServerEvents with REST retries (#3213)", () => {
+  let restore: () => void;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    restore = installMockWebSocket();
+    setAccessToken("tok-1");
+  });
+
+  afterEach(() => {
+    restore();
+    clearAccessToken();
+    vi.useRealTimers();
+  });
+
+  it("lets a retry started after the snapshot supersede it", async () => {
+    const { respond, fail, cached } = setupDeferred({ retry: 1 });
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(frame("snapshot", { state: "running" }));
+    });
+    await fail();
+    // The retry's request starts after the snapshot (and after a silent
+    // worker-disconnect write): its response is the newer truth.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    await respond("unknown");
+    expect(cached()).toBe("unknown");
+  });
+
+  it("keeps a snapshot newer than the attempt that answers", async () => {
+    const { respond, cached } = setupDeferred({ retry: 1 });
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(frame("snapshot", { state: "running" }));
+    });
+    await respond("stopped");
+    expect(cached()).toBe("running");
   });
 });

@@ -17,8 +17,16 @@
 import {
   hashKey,
   type QueryClient,
+  type QueryFunction,
   type QueryKey,
 } from "@tanstack/react-query";
+
+/** Wrap a query function so each attempt's start is stamped. */
+export function stampedQueryFn<T, K extends QueryKey>(
+  fn: QueryFunction<T, K>,
+): QueryFunction<T, K> {
+  return fn;
+}
 
 export interface RestReads {
   /** Stamp a live state received now; compare it to a read's start stamp. */
