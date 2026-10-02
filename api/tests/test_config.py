@@ -63,6 +63,14 @@ _SECTION_LOADING_CASES = [
         id="metrics-listener",
     ),
     pytest.param(
+        "docs",
+        {"enabled": False},
+        {"enabled": True},
+        {"enabled": "false"},
+        {"enabled": False},
+        id="docs-surface",
+    ),
+    pytest.param(
         "database",
         {"pool_size": 5, "max_overflow": 10},
         {"pool_size": 20, "max_overflow": 0},
@@ -294,6 +302,7 @@ def test_section_loading_respects_defaults_file_and_env_precedence(
 ) -> None:
     monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
     monkeypatch.delenv("MCD_API_AUTH__TOKEN__SIGNING_KEY", raising=False)
+    monkeypatch.delenv("MCD_API_DOCS__ENABLED", raising=False)
     assert set(env_values) <= set(file_values)
 
     settings = load_settings(config_file=None)

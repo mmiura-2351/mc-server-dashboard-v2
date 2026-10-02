@@ -11,9 +11,9 @@
 > [`DATABASE.md`](DATABASE.md), and [`CONFIGURATION.md`](CONFIGURATION.md); where
 > they disagree, the requirements win and this document is wrong.
 >
-> **Scope.** Authentication-hardening behaviour, the observability endpoints in
-> [Section 5](#5-observability-endpoints) (`/api/healthz`, `/api/readyz`, and the
-> separate Prometheus listener), plus
+> **Scope.** Authentication-hardening behaviour, the unauthenticated endpoints in
+> [Section 5](#5-unauthenticated-endpoints) (`/api/healthz`, `/api/readyz`, the
+> OpenAPI schema and docs pages, and the separate Prometheus listener), plus
 > [Section 6](#6-minecraft-server-container-trust-model), which records what a
 > Minecraft server container is trusted to do, which of the two docker networks
 > each service is attached to, and what is reachable from where. This document
@@ -30,7 +30,7 @@
 2. [Brute-force protection](#2-brute-force-protection)
 3. [Lockout-state home (decision)](#3-lockout-state-home-decision)
 4. [Trusted-proxy IP resolution](#4-trusted-proxy-ip-resolution)
-5. [Observability endpoints](#5-observability-endpoints)
+5. [Unauthenticated endpoints](#5-unauthenticated-endpoints)
 6. [Minecraft server container trust model](#6-minecraft-server-container-trust-model)
 7. [Related documents](#7-related-documents)
 
@@ -272,7 +272,7 @@ thereby evade or poison the per-IP brute-force counter.
 
 ---
 
-## 5. Observability endpoints
+## 5. Unauthenticated endpoints
 
 The API exposes two unauthenticated probes on its HTTP port, for orchestrators.
 Like the rest of the HTTP API they are namespaced under `/api` — the probes
@@ -288,7 +288,8 @@ They are **deliberately unauthenticated** so a probe needs no credential, and
 per-server identifying data.
 
 The Prometheus exposition is **not** one of them. It is served on a separate
-listener, described below.
+listener, described below. The OpenAPI schema and docs pages are not probes
+either; they are off by default (below).
 
 ### The port-publishing argument does not cover the HTTP port
 
@@ -303,9 +304,29 @@ Any statement of the form "Compose publishes only the API port, so X is not
 exposed" is therefore false for X on that port: the tunnel returns whatever is
 mounted there to an unauthenticated request.
 
-`/api/healthz` and `/api/readyz` are reachable that way, and are accepted as
-such on their content. Tightening `/api/readyz` (and the OpenAPI schema/docs
-routes, which are exposed the same way) is not implemented.
+### Reachability posture per endpoint
+
+Each unauthenticated endpoint has a deliberate posture under the tunnel topology
+(issue #2568):
+
+| Endpoint | Reachable from the edge | Why |
+|---|---|---|
+| `/api/healthz` | **Yes, deliberately.** | The compose healthcheck probes it, and its content is two booleans. |
+| `/api/readyz` | **Yes, deliberately.** | Component-level readiness (`database`, `control_plane`) is operationally useful and pairs with `/api/healthz`. Accepted cost: during an incident an outside observer can tell *which* dependency is down. |
+| `/api/openapi.json`, `/api/docs`, `/api/redoc` (and their `/api/docs-assets/*`) | **Only when `docs.enabled`**, which defaults to `false` (CONFIGURATION.md Section 5.10). | The schema is the complete route inventory: every admin route, every data-plane route, every request and response shape. It leaks no credential, but it is a free map for choosing where to probe. That is useful in development and of little use in production. With the key unset these paths are not mounted and return the ordinary `/api` 404. |
+| `/metrics` | **No.** It is on a separate listener. | See the next subsection. |
+
+Turning `docs.enabled` on puts the schema and docs pages on the internet like
+every other route on the port. Nothing in the API scopes them to an internal
+caller. The webui client generator does not need them: `make openapi-gen` reads
+`app.openapi()` in-process. To publish them but keep them away from strangers,
+put a Cloudflare Access policy on those paths (DEPLOYMENT.md Section 8).
+
+The docs pages are switched off in place and **not** moved to the metrics
+listener. That listener exists for a scrape target with no browser consumer.
+The docs pages are meant to be opened in a browser, so they only need a switch.
+`/api/readyz` was the one real candidate for the listener, and it stays on the
+main app.
 
 ### The Prometheus exposition (`metrics.*`)
 

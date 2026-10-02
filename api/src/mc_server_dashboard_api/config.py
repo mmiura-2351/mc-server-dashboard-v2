@@ -266,6 +266,20 @@ class MetricsSettings(_Section):
     port: int = Field(default=9090, ge=0, le=65535)
 
 
+class DocsSettings(_Section):
+    """OpenAPI schema and docs pages (CONFIGURATION.md Section 5.10, issue #2568).
+
+    ``enabled`` mounts ``/api/openapi.json``, ``/api/docs``, ``/api/redoc`` and
+    their ``/api/docs-assets`` on the HTTP API port. Off by default: under the
+    bundled tunnel topology every route on that port is on the internet
+    (SECURITY.md Section 5), and the schema is the complete route inventory. The
+    webui client export reads ``app.openapi()`` in-process, so it does not need
+    the route.
+    """
+
+    enabled: bool = False
+
+
 class DatabaseSettings(_Section):
     """Persistence (CONFIGURATION.md Section 5.2). ``url`` is a secret."""
 
@@ -882,6 +896,7 @@ class Settings(BaseSettings):
     control: ControlSettings = Field(default_factory=ControlSettings)
     log: LogSettings = Field(default_factory=LogSettings)
     metrics: MetricsSettings = Field(default_factory=MetricsSettings)
+    docs: DocsSettings = Field(default_factory=DocsSettings)
     database: DatabaseSettings
     storage: StorageSettings = Field(default_factory=StorageSettings)
     snapshot: SnapshotSettings = Field(default_factory=SnapshotSettings)
@@ -950,6 +965,7 @@ class Settings(BaseSettings):
             "control": control,
             "log": self.log.model_dump(),
             "metrics": self.metrics.model_dump(),
+            "docs": self.docs.model_dump(),
             "database": database,
             "storage": storage,
             "snapshot": self.snapshot.model_dump(),

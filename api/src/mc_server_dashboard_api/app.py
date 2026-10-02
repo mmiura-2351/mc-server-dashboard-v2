@@ -1284,17 +1284,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # health and readiness probes move under ``/api`` too so there is no
     # carve-out in the fallback (DEPLOYMENT.md, SECURITY.md). The Prometheus
     # exposition is not served here at all: it has its own listener (issue
-    # #2565, ``observability.py``).
+    # #2565, ``observability.py``). The schema and docs pages are mounted only
+    # when ``docs.enabled`` (issue #2568, off by default): every route on this
+    # port is on the internet under the tunnel topology (SECURITY.md Section 5).
     app = FastAPI(
         title="mc-server-dashboard API",
         lifespan=lifespan,
-        openapi_url="/api/openapi.json",
+        openapi_url="/api/openapi.json" if settings.docs.enabled else None,
         # Docs routes are self-hosted (issue #1990): the default CDN-backed
         # routes are disabled; mount_docs() below adds same-origin equivalents.
         docs_url=None,
         redoc_url=None,
     )
-    mount_docs(app)
+    if settings.docs.enabled:
+        mount_docs(app)
     # Render every error response as RFC 9457 problem+json (issue #371): one body
     # shape for application errors, framework HTTPExceptions, and 422 validation.
     install_problem_handlers(app)

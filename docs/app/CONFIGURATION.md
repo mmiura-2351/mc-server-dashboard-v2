@@ -475,6 +475,16 @@ listener bind failed; continuing without the metrics endpoint` and serves no
 exposition — the process itself keeps running (the bind is deliberately
 non-fatal). Move one of the two in that topology.
 
+The OpenAPI schema and the docs pages are served on `server.http_port`, so the
+tunnel publishes them whenever they are mounted. They are **off by default**
+(issue #2568): the schema is the complete route inventory. That helps in
+development, and in production it mostly helps an outside caller decide where to
+probe (SECURITY.md Section 5). `compose.yaml` forwards `MCD_API_DOCS__ENABLED`.
+
+| Key | Default | Secret | Meaning |
+|---|---|---|---|
+| `docs.enabled` | `false` | | Whether to mount `/api/openapi.json`, `/api/docs`, `/api/redoc` and their `/api/docs-assets/*` static assets. `false` mounts none of them, and those paths return the ordinary `/api` 404. `make openapi-gen` reads the schema in-process and does not need this. |
+
 ### 5.11 Web UI serving
 
 The API can serve the built browser UI (`webui/dist`) from its own origin with an
