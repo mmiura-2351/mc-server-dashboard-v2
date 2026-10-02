@@ -122,6 +122,7 @@ def _app(
     member: bool = True,
     allow: bool = True,
     authenticated: bool = True,
+    expires_in: dt.timedelta = dt.timedelta(hours=1),
     bus: RealTimeEvents | None = None,
     lookup: dict[str, uuid.UUID] | None = None,
     list_servers: _FakeListServers | None = None,
@@ -133,7 +134,9 @@ def _app(
     user = make_user()
 
     def _user_or_none() -> object | None:
-        return make_authentication(user) if authenticated else None
+        if not authenticated:
+            return None
+        return make_authentication(user, expires_in=expires_in)
 
     app.dependency_overrides[get_current_user_ws] = _user_or_none
     app.dependency_overrides[get_membership_visibility] = lambda: _FakeVisibility(
@@ -550,6 +553,21 @@ def test_gap_that_dropped_no_status_reads_no_snapshot() -> None:
     assert "gap" in streams
     assert "snapshot" not in streams
     assert servers.reads == 1  # the subscribe snapshot only
+
+
+# --- session lifetime tied to the access token (#1862) ---------------------
+
+
+def test_socket_closes_4419_when_the_access_token_expires() -> None:
+    # Re-authz is a minute away: the close comes from the token's own expiry.
+    community = uuid.uuid4()
+    client = _client(_app(expires_in=dt.timedelta(seconds=0.5)))
+
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect(_url(community)) as ws:
+            _skip_snapshot(ws)
+            ws.receive_json()
+    assert exc.value.code == 4419
 
 
 # --- connection lifecycle --------------------------------------------------

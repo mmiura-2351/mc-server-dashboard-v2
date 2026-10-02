@@ -17,7 +17,17 @@ same condition would produce:
   typo fails loudly instead of silently subscribing to everything;
 - ``4401`` — unauthenticated (missing / invalid / expired token);
 - ``4403`` — authenticated member without ``server:read`` on the resource;
-- ``4404`` — not a member, or the server does not exist in this community.
+- ``4404`` — not a member, or the server does not exist in this community;
+- ``4419`` — the access token the socket was opened with has expired (mid-stream
+  only; see below).
+
+The socket lives no longer than the access token it was opened with (#1862): it
+is authenticated once, at the handshake, so at the instant that token would stop
+verifying the socket closes with ``4419`` — distinct from the handshake's
+``4401`` so a client knows to refresh its session before reconnecting rather
+than retrying with the token it has. A browser never sees ``4401`` anyway: a
+close before accept reaches it as a failed handshake, not as a close code.
+Nothing is delivered after the expiry, however busy the stream.
 
 Authorization is re-checked mid-stream: the two-layer gate is re-run every
 :data:`_REAUTHZ_INTERVAL_SECONDS` of wall-clock time, so a member removed or a
@@ -111,6 +121,8 @@ _CLOSE_BAD_REQUEST = 4400
 _CLOSE_UNAUTHENTICATED = 4401
 _CLOSE_FORBIDDEN = 4403
 _CLOSE_NOT_FOUND = 4404
+# HTTP 419 "Authentication Timeout": a previously valid credential has lapsed.
+_CLOSE_TOKEN_EXPIRED = 4419
 
 # How often the two-layer authorization gate is re-run (wall-clock deadline).
 # A constant, not a config knob: the check is two indexed queries, and a minute
@@ -234,6 +246,7 @@ async def server_events(
             reauthorize=recheck,
             deliver=_deliver,
             snapshot=snapshot,
+            expires_at=authentication.expires_at,
         )
     finally:
         await subscription.aclose()
@@ -327,6 +340,7 @@ async def community_events(
                 list_servers=list_servers,
                 community_id=community_id,
             ),
+            expires_at=authentication.expires_at,
         )
     finally:
         await subscription.aclose()
@@ -353,8 +367,9 @@ async def _relay(
     reauthorize: Callable[[], Awaitable[int | None]],
     deliver: Callable[[RealTimeEvent], Awaitable[None]],
     snapshot: Callable[[], Awaitable[str | None]] | None,
+    expires_at: dt.datetime,
 ) -> None:
-    """Deliver subscription events until the client goes away or authz is revoked.
+    """Deliver events until the client goes away, authz is revoked, or ``expires_at``.
 
     When ``snapshot`` is given, its frame is sent first, and again right after
     a delivered GAP marker when ``take_dropped`` reports status drops recorded
@@ -393,21 +408,26 @@ async def _relay(
     client gone during the read (its disconnect consumed by the reader task)
     ends the relay without a send: the server rejects any send after it.
 
-    Each turn of the loop races three outcomes: the next buffered event (handed
+    Each turn of the loop races four outcomes: the next buffered event (handed
     to ``deliver``), the wall-clock re-authz deadline expiring (``reauthorize``
-    re-runs the accept-time gate; a denial closes the socket with its code), and
-    the client disconnecting. The deadline is absolute wall-clock time so a busy
-    stream cannot indefinitely postpone re-authorization. Disconnect is observed
-    by a companion reader task (:func:`_client_gone`) because a client gone from
-    a quiet topic never wakes the delivery wait (#1695). The pending-event task
-    is kept across re-checks, so no event is dropped; every exit path —
-    disconnect, subscription end, revocation, an exception, cancellation on
-    server shutdown — discards both helper tasks. The caller owns
-    ``subscription.aclose()``.
+    re-runs the accept-time gate; a denial closes the socket with its code), the
+    access token reaching ``expires_at`` (the socket closes ``4419`` before any
+    further delivery, #1862), and the client disconnecting. Both deadlines are
+    absolute wall-clock time so a busy stream cannot postpone either. Disconnect
+    is observed by a companion reader task (:func:`_client_gone`) because a
+    client gone from a quiet topic never wakes the delivery wait (#1695). The
+    pending-event task is kept across re-checks, so no event is dropped; every
+    exit path — disconnect, subscription end, revocation, expiry, an exception,
+    cancellation on server shutdown — discards both helper tasks. The caller
+    owns ``subscription.aclose()``.
     """
 
     loop = asyncio.get_running_loop()
     deadline = loop.time() + _REAUTHZ_INTERVAL_SECONDS
+    # The token's expiry on the loop clock: the wall-clock time it has left now.
+    expiry = (
+        loop.time() + (expires_at - dt.datetime.now(dt.timezone.utc)).total_seconds()
+    )
 
     async def _send_snapshot() -> bool:
         """Send a fresh snapshot frame; return False once the socket is closed."""
@@ -434,10 +454,15 @@ async def _relay(
         while True:
             done, _pending = await asyncio.wait(
                 {next_event, disconnected},
-                timeout=max(0.0, deadline - loop.time()),
+                timeout=max(0.0, min(deadline, expiry) - loop.time()),
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if disconnected in done:
+                return
+            # Checked before delivery: nothing reaches the client on a lapsed
+            # token, even an event that completed alongside the expiry.
+            if loop.time() >= expiry:
+                await websocket.close(code=_CLOSE_TOKEN_EXPIRED)
                 return
             if next_event in done:
                 try:

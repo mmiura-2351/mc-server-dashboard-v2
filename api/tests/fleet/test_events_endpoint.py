@@ -115,6 +115,7 @@ def _app(
     allow: bool = True,
     found: bool = True,
     authenticated: bool = True,
+    expires_in: dt.timedelta = dt.timedelta(hours=1),
     bus: RealTimeEvents | None = None,
     read_server: object | None = None,
 ) -> object:
@@ -125,7 +126,9 @@ def _app(
     user = make_user()
 
     def _user_or_none() -> object | None:
-        return make_authentication(user) if authenticated else None
+        if not authenticated:
+            return None
+        return make_authentication(user, expires_in=expires_in)
 
     app.dependency_overrides[get_current_user_ws] = _user_or_none
     app.dependency_overrides[get_membership_visibility] = lambda: _FakeVisibility(
@@ -827,6 +830,66 @@ def test_mid_stream_revocation_closes_despite_busy_stream(
     assert exc.value.code == 4403
 
 
+# --- session lifetime tied to the access token (#1862) ---------------------
+
+
+def test_socket_closes_4419_when_the_access_token_expires(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The socket ends when the token it was opened with would stop verifying.
+
+    Re-authz keeps passing every 50 ms, so the close can only come from the
+    token's own expiry, not from the membership/permission re-check.
+    """
+
+    from mc_server_dashboard_api.fleet.api import events as events_module
+
+    monkeypatch.setattr(events_module, "_REAUTHZ_INTERVAL_SECONDS", 0.05)
+
+    bus = InProcessRealTimeEvents()
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(bus=bus, expires_in=dt.timedelta(seconds=1))
+    client = _client(app)
+
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect(_url(community, server)) as ws:
+            _skip_snapshot(ws)
+            # A frame published while the token is still valid is delivered.
+            bus.publish(
+                server_id=str(server),
+                event=RealTimeEvent(
+                    stream=EventStream.STATUS, payload={"state": "running"}
+                ),
+            )
+            assert ws.receive_json()["payload"] == {"state": "running"}
+            ws.receive_json()
+    assert exc.value.code == 4419
+
+
+def test_token_expiry_closes_despite_busy_stream() -> None:
+    """A stream that never goes quiet cannot postpone the expiry close."""
+
+    bus = InProcessRealTimeEvents()
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(bus=bus, expires_in=dt.timedelta(seconds=0.5))
+    client = _client(app)
+
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect(_url(community, server)) as ws:
+            _skip_snapshot(ws)
+            for i in range(30):
+                bus.publish(
+                    server_id=str(server),
+                    event=RealTimeEvent(
+                        stream=EventStream.STATUS, payload={"state": str(i)}
+                    ),
+                )
+                time.sleep(0.05)
+                ws.receive_json()
+            pytest.fail("socket outlived its access token")
+    assert exc.value.code == 4419
+
+
 def test_disconnect_cleans_up_subscription() -> None:
     bus = InProcessRealTimeEvents()
     community, server = uuid.uuid4(), uuid.uuid4()
@@ -986,6 +1049,7 @@ async def test_client_gone_during_the_snapshot_read_ends_the_relay_quietly(
         reauthorize=_reauthorize,
         deliver=_deliver,
         snapshot=_snapshot,
+        expires_at=make_authentication().expires_at,
     )
     await subscription.aclose()
 
@@ -1022,6 +1086,7 @@ async def test_cancellation_while_parked_leaves_no_orphan_tasks() -> None:
             reauthorize=_reauthorize,
             deliver=_deliver,
             snapshot=None,
+            expires_at=make_authentication().expires_at,
         )
     )
     await asyncio.sleep(0.01)  # let the loop park on its helper tasks
