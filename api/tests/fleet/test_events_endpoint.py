@@ -15,6 +15,7 @@ import datetime as dt
 import json
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 import pytest
@@ -1118,6 +1119,99 @@ async def test_client_gone_during_work_cancelled_by_expiry_ends_quietly() -> Non
         timeout=5,
     )
     await subscription.aclose()
+
+
+class _SlowCloseSocket:
+    """A connected client whose close handshake is slow (back-pressured).
+
+    Mirrors Starlette: once a close has been started, any further send or
+    close raises ``RuntimeError``. ``started`` / ``completed`` record the close
+    codes, so a close cancelled midway shows up as started but not completed.
+    """
+
+    def __init__(self) -> None:
+        self.started: list[int] = []
+        self.completed: list[int] = []
+        self._never = asyncio.Event()
+
+    async def receive(self) -> dict[str, object]:
+        await self._never.wait()  # the client never leaves
+        raise AssertionError("unreachable")
+
+    async def send_text(self, text: str) -> None:
+        if self.started:
+            raise RuntimeError('Cannot call "send" once a close message has been sent.')
+
+    async def close(self, code: int) -> None:
+        if self.started:
+            raise RuntimeError('Cannot call "send" once a close message has been sent.')
+        self.started.append(code)
+        await asyncio.sleep(0.4)  # still in flight when the token lapses
+        self.completed.append(code)
+
+
+async def _relay_with_slow_close(
+    *,
+    snapshot: Callable[[], Awaitable[str | None]] | None,
+    reauthorize: Callable[[], Awaitable[int | None]],
+) -> _SlowCloseSocket:
+    from mc_server_dashboard_api.fleet.api import events as events_module
+
+    socket = _SlowCloseSocket()
+    bus = InProcessRealTimeEvents()
+    subscription = bus.subscribe(server_id="s", streams=frozenset({EventStream.STATUS}))
+
+    async def _deliver(event: RealTimeEvent) -> None:
+        raise AssertionError("no events are published in this test")
+
+    await asyncio.wait_for(
+        events_module._relay(
+            socket,  # type: ignore[arg-type]
+            subscription,
+            reauthorize=reauthorize,
+            deliver=_deliver,
+            snapshot=snapshot,
+            expires_at=make_authentication(
+                expires_in=dt.timedelta(seconds=0.2)
+            ).expires_at,
+        ),
+        timeout=5,
+    )
+    await subscription.aclose()
+    return socket
+
+
+async def test_expiry_during_a_pending_4404_close_neither_cancels_nor_repeats_it() -> (
+    None
+):
+    """A 4404 close already under way completes; no 4419 follows it (#1862)."""
+
+    async def _gone() -> str | None:
+        return None  # the server was deleted: the relay closes 4404
+
+    async def _reauthorize() -> int | None:
+        return None
+
+    socket = await _relay_with_slow_close(snapshot=_gone, reauthorize=_reauthorize)
+    assert socket.started == [4404]
+    assert socket.completed == [4404]
+
+
+async def test_expiry_during_a_pending_4403_close_neither_cancels_nor_repeats_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 4403 re-authz close already under way completes; no 4419 follows it."""
+
+    from mc_server_dashboard_api.fleet.api import events as events_module
+
+    monkeypatch.setattr(events_module, "_REAUTHZ_INTERVAL_SECONDS", 0.05)
+
+    async def _revoked() -> int | None:
+        return 4403
+
+    socket = await _relay_with_slow_close(snapshot=None, reauthorize=_revoked)
+    assert socket.started == [4403]
+    assert socket.completed == [4403]
 
 
 async def test_cancellation_while_parked_leaves_no_orphan_tasks() -> None:
