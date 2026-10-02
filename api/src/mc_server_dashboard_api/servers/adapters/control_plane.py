@@ -153,6 +153,7 @@ class FleetControlPlaneAdapter(ControlPlane):
         hydrate_timeout_seconds: float | None = None,
         snapshot_timeout_seconds: float | None = None,
         stop_timeout_seconds: float | None = None,
+        restart_timeout_seconds: float | None = None,
     ) -> None:
         self._registry = registry
         self._control_plane = control_plane
@@ -178,6 +179,11 @@ class FleetControlPlaneAdapter(ControlPlane):
         # a slow host, and under it the dispatch times out -> 503 -> the assignment
         # wedges and the stop-leg final snapshot is lost. ``None`` keeps the default.
         self._stop_timeout_seconds = stop_timeout_seconds
+        # A restart runs that same graceful stop leg and then relaunches, inside one
+        # dispatch, so it gets its own budget spanning both legs (issue #2774); under
+        # the general command deadline the API gave up mid-stop and answered 503 for
+        # a restart the worker went on to carry out. ``None`` keeps the default.
+        self._restart_timeout_seconds = restart_timeout_seconds
 
     async def place(
         self,
@@ -325,7 +331,12 @@ class FleetControlPlaneAdapter(ControlPlane):
     async def restart(
         self, *, worker_id: WorkerId, server_id: ServerId
     ) -> CommandOutcome:
-        return await self._dispatch(worker_id, server_id, RestartServerCommand())
+        return await self._dispatch(
+            worker_id,
+            server_id,
+            RestartServerCommand(),
+            timeout_override=self._restart_timeout_seconds,
+        )
 
     async def command(
         self, *, worker_id: WorkerId, server_id: ServerId, line: str

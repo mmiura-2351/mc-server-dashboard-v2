@@ -1755,6 +1755,7 @@ def get_servers_control_plane(
         hydrate_timeout_seconds=settings.control.hydrate_timeout_seconds,
         snapshot_timeout_seconds=settings.control.snapshot_timeout_seconds,
         stop_timeout_seconds=settings.control.stop_timeout_seconds,
+        restart_timeout_seconds=settings.control.restart_timeout_seconds,
     )
 
 

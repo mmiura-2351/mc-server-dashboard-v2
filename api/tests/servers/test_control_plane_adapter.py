@@ -11,6 +11,7 @@ import uuid
 
 import pytest
 
+from mc_server_dashboard_api.config import ControlSettings
 from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
 from mc_server_dashboard_api.fleet.domain.control_plane import (
     Command,
@@ -190,9 +191,85 @@ async def test_stop_carries_the_stop_timeout_override() -> None:
     assert fleet.last_timeout_override == 600
 
 
+async def test_restart_carries_the_restart_timeout_override() -> None:
+    # The restart runs the same graceful stop leg as a stop (flush + docker-stop
+    # escalation) and then relaunches, all inside one dispatch, so it carries its
+    # own budget rather than the general command deadline (#2774).
+    fleet = _CapturingFleetControlPlane()
+    adapter = FleetControlPlaneAdapter(
+        registry=None,  # type: ignore[arg-type]  # unused by restart
+        control_plane=fleet,
+        data_plane_base_url="https://api.example/",
+        worker_credential="shhh",
+        stop_timeout_seconds=600,
+        restart_timeout_seconds=630,
+    )
+
+    await adapter.restart(
+        worker_id=WorkerId(uuid.uuid4()), server_id=ServerId(uuid.uuid4())
+    )
+
+    assert fleet.last_timeout_override == 630
+
+
+class _DeadlineFleetControlPlane(FleetControlPlane):
+    """Answer after ``worker_seconds`` of Worker time, against the dispatch deadline.
+
+    Applies the deadline rule ``GrpcControlPlane.dispatch`` uses — the override
+    when one is given, else the default command budget — in virtual time, so a
+    restart's multi-minute stop leg is exercised without sleeping. The real
+    deadline is pinned in tests/fleet/test_control_plane.py.
+    """
+
+    def __init__(self, *, default_timeout: float, worker_seconds: float) -> None:
+        self._default_timeout = default_timeout
+        self._worker_seconds = worker_seconds
+
+    async def dispatch(
+        self,
+        *,
+        worker_id: FleetWorkerId,
+        server_id: str,
+        command: Command,
+        timeout_override: float | None = None,
+        snapshot_is_final: bool = False,
+    ) -> CommandResult:
+        timeout = (
+            self._default_timeout if timeout_override is None else timeout_override
+        )
+        if self._worker_seconds >= timeout:
+            raise CommandTimedOutError("cmd-1")
+        return CommandResult(code=CommandResultCode.OK)
+
+
+async def test_restart_with_a_full_flush_completes_within_the_wired_budget() -> None:
+    # #2774: a restart of a responsive server always runs its pre-stop flush (60 s
+    # settle, 90 s ceiling) and, worst case, the docker-stop escalation after it —
+    # ~250 s of stop leg before the relaunch even begins. Under the stock 30 s
+    # command budget the API abandoned the dispatch mid-stop and answered 503
+    # worker_unavailable for a restart the Worker went on to carry out. Wired with
+    # the stock settings, the same restart now resolves with the Worker's answer.
+    control = ControlSettings()
+    fleet = _DeadlineFleetControlPlane(
+        default_timeout=control.command_timeout_seconds,
+        worker_seconds=250 + 10,  # worst-case stop leg + a relaunch
+    )
+    adapter = FleetControlPlaneAdapter(
+        registry=None,  # type: ignore[arg-type]  # unused by restart
+        control_plane=fleet,
+        restart_timeout_seconds=control.restart_timeout_seconds,
+    )
+
+    outcome = await adapter.restart(
+        worker_id=WorkerId(uuid.uuid4()), server_id=ServerId(uuid.uuid4())
+    )
+
+    assert outcome.success
+
+
 async def test_non_budgeted_commands_use_the_default_timeout() -> None:
-    # Only the hydrate/snapshot/stop dispatches override the deadline; every other
-    # command stays on the default command timeout (override is None).
+    # Only the hydrate/snapshot/stop/restart dispatches override the deadline;
+    # every other command stays on the default command timeout (override is None).
     fleet = _CapturingFleetControlPlane()
     adapter = FleetControlPlaneAdapter(
         registry=None,  # type: ignore[arg-type]
@@ -202,10 +279,11 @@ async def test_non_budgeted_commands_use_the_default_timeout() -> None:
         hydrate_timeout_seconds=600,
         snapshot_timeout_seconds=600,
         stop_timeout_seconds=600,
+        restart_timeout_seconds=630,
     )
 
-    await adapter.restart(
-        worker_id=WorkerId(uuid.uuid4()), server_id=ServerId(uuid.uuid4())
+    await adapter.command(
+        worker_id=WorkerId(uuid.uuid4()), server_id=ServerId(uuid.uuid4()), line="list"
     )
 
     assert fleet.last_timeout_override is None
