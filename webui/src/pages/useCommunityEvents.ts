@@ -9,10 +9,10 @@
  * list every 10s (status only) and reports `degraded` so the dashboard can show
  * the live-degraded indicator; healthy WS does no polling. The API replays no
  * missed frames, but it opens every connection — and follows every GAP frame
- * (dropped frames on a slow client) — with a status snapshot of the whole
- * community, which patches the cache the same way (#1795). Every reconnect and
- * every GAP frame still triggers one list refetch as a belt-and-suspenders
- * reconcile (#1723).
+ * that dropped status frames on a slow client — with a status snapshot of the
+ * whole community, which patches the cache the same way (#1795). Every
+ * reconnect and every GAP frame still triggers one list refetch as a
+ * belt-and-suspenders reconcile (#1723).
  *
  * A live state outlives the list's REST reads (#3213): one received before the
  * list has loaded, or while a read is in flight, is re-applied when the

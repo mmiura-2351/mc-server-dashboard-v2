@@ -195,7 +195,9 @@ Global resource pack library (not community-scoped) and per-server assignment.
 
 Missed frames are never replayed (delivery is best-effort), so a connection
 that carries status opens with a **`snapshot`** frame and gets a fresh one
-right after every `gap` frame: the persisted observed state of the stream's
+right after every `gap` frame whose overflow dropped status frames (a gap that
+dropped only other streams cost no status and is not followed by one): the
+persisted observed state of the stream's
 scope — the server for the per-server stream (only when `status` is among the
 subscribed streams), every server of the community for the community stream.
 Its `ts` is the time the snapshot was read. It has no `detail`, which only a
@@ -653,8 +655,8 @@ backend support; the tab body also self-guards with an "unsupported" notice).
 - Reconnect with exponential backoff + jitter; resubscribe on open; banner
   shows degraded mode; REST polling fallback for status only.
 - Converge from the `snapshot` frame (Section 2.6) on every (re)connect and
-  after every `gap`; the one-shot REST refetch on reopen / `gap` stays as a
-  belt-and-suspenders reconcile.
+  after every `gap` that dropped status; the one-shot REST refetch on
+  reopen / `gap` stays as a belt-and-suspenders reconcile.
 - A live state (status or snapshot frame) outlives the REST reads of the query
   it patches: received before the query has loaded, or while a read is in
   flight, it is re-applied when the response lands, unless the request of the

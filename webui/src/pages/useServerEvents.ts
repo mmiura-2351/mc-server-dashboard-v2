@@ -15,10 +15,10 @@
  * fallback) and reports `degraded` for the banner; there is NO log/metrics
  * polling fallback — those streams resume when the socket reopens. The API
  * replays no missed frames, but it opens every connection — and follows every
- * gap frame — with a status snapshot, which patches the header pill the same
- * way a status frame does (#1795); every reconnect and every gap frame also
- * still refetches the detail query once as a belt-and-suspenders reconcile
- * (#1723). A live state outlives the detail query's REST reads (#3213): one
+ * gap frame that dropped status — with a status snapshot, which patches the
+ * header pill the same way a status frame does (#1795); every reconnect and
+ * every gap frame also still refetches the detail query once as a
+ * belt-and-suspenders reconcile (#1723). A live state outlives the detail query's REST reads (#3213): one
  * received before the query has loaded, or while a read is in flight, is
  * re-applied when the response lands unless that read's request started
  * after it ({@link observeRestResponses}), so an older response never rolls

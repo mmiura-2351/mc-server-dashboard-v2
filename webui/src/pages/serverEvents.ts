@@ -8,7 +8,8 @@
  * this module builds the stream-subscription URL and parses the API's typed
  * frames (`_frame` in events.py: `{stream, ts, payload}`, no `server_id` on the
  * per-server stream) into a discriminated {@link ServerFrame}, including the
- * status `snapshot` the API sends on subscribe and after every gap.
+ * status `snapshot` the API sends on subscribe and after every gap that dropped
+ * status frames.
  *
  * One connection per open detail page, shared by all tabs (Overview, Console):
  * the caller subscribes to all three streams once and routes parsed frames to
@@ -43,7 +44,8 @@ export interface MetricsFrame {
 }
 
 /**
- * The status snapshot the API sends on subscribe and after every gap (#1795):
+ * The status snapshot the API sends on subscribe and after every gap that
+ * dropped status frames (#1795):
  * the server's persisted observed state. No `detail` — it rides only a live
  * status transition and is not persisted.
  */

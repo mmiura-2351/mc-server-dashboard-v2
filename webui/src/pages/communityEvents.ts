@@ -6,7 +6,8 @@
  * (`WS /communities/{cid}/events`, STATUS only). The core owns the socket
  * lifecycle (connect, backoff reconnect, reconnect-on-rotate, teardown); this
  * module supplies the community URL and parses the API's status frames, the
- * status snapshot it sends on subscribe and after every gap, and the GAP marker
+ * status snapshot it sends on subscribe and after every gap that dropped status,
+ * and the GAP marker
  * (the client fell behind and frames were dropped).
  *
  * This module carries no React or TanStack Query: the caller supplies callbacks
@@ -46,7 +47,7 @@ export interface NotificationEvent {
 /**
  * A parsed community-stream frame: a routable STATUS, a NOTIFICATION, the
  * status SNAPSHOT (every server's observed state, sent on subscribe and after
- * every gap, #1795), or the GAP marker.
+ * every gap that dropped status, #1795), or the GAP marker.
  */
 export type CommunityFrame =
   | ({ kind: "status" } & StatusEvent)

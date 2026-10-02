@@ -54,6 +54,8 @@ class _Subscription(EventSubscription):
         self._streams = streams
         self._buffer: deque[RealTimeEvent] = deque(maxlen=max_queue)
         self._gap_pending = False
+        # The streams that lost events to overflow since the last take_dropped.
+        self._dropped: set[EventStream] = set()
         self._closed = False
         # Set whenever there is something to consume (an event or a pending gap)
         # or the subscription is closed; the consumer awaits it.
@@ -68,6 +70,7 @@ class _Subscription(EventSubscription):
             # Buffer full: the leftmost (oldest) event is evicted by the bounded
             # deque on append. Signal the loss once with a coalesced gap marker.
             self._gap_pending = True
+            self._dropped.add(self._buffer[0].stream)
         self._buffer.append(event)
         self._ready.set()
 
@@ -79,7 +82,9 @@ class _Subscription(EventSubscription):
             self._ready.clear()
 
     def take_dropped(self) -> frozenset[EventStream]:
-        return frozenset()
+        dropped = frozenset(self._dropped)
+        self._dropped.clear()
+        return dropped
 
     def __aiter__(self) -> "_Subscription":
         return self

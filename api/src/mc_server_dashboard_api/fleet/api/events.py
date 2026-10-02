@@ -32,10 +32,11 @@ subscriber, so a closed socket never affects the control plane or REST.
 
 Missed events are never replayed, so every status subscription opens with a
 ``snapshot`` frame of the persisted observed state of its scope, and gets a
-fresh one right after every ``gap`` frame (#1795): a (re)connecting or
-overflowed client converges from the stream alone, whatever its own resync
-discipline. The snapshot is read after the subscription is registered, so no
-transition falls between the two (:func:`_relay`).
+fresh one right after every ``gap`` frame whose overflow dropped status events
+(#1795): a (re)connecting or overflowed client converges from the stream
+alone, whatever its own resync discipline. The snapshot is read after the
+subscription is registered, so no transition falls between the two
+(:func:`_relay`).
 
 The endpoints are send-only, but the socket is still read: a companion reader
 task drains (and discards) anything the client sends, because uvicorn surfaces
@@ -352,9 +353,12 @@ async def _relay(
     """Deliver subscription events until the client goes away or authz is revoked.
 
     When ``snapshot`` is given, its frame is sent first, and again right after
-    each delivered GAP marker (#1795): the stream replays nothing, so the
-    snapshot is what lets a (re)connecting or overflowed client converge without
-    a REST round-trip. Its ordering argument:
+    each delivered GAP marker whose overflow dropped status events (#1795): the
+    stream replays nothing, so the snapshot is what lets a (re)connecting or
+    overflowed client converge without a REST round-trip. A gap that dropped
+    only other streams cost the client no status, so it reads nothing — a slow
+    client on a chatty log stream does not turn every gap into a DB read. Its
+    ordering argument:
 
     - The caller has already registered ``subscription``, so every status event
       published from then on reaches the buffer.
@@ -378,7 +382,9 @@ async def _relay(
     No event is held outside the buffer while a snapshot is read: the next one
     is requested only after the previous delivery (and its post-gap snapshot)
     completed. ``snapshot`` returning ``None`` means the subscribed server no
-    longer exists: the socket closes ``4404``, as the next re-authz would.
+    longer exists: the socket closes ``4404``, as the next re-authz would. A
+    client gone during the read (its disconnect consumed by the reader task)
+    ends the relay without a send: the server rejects any send after it.
 
     Each turn of the loop races three outcomes: the next buffered event (handed
     to ``deliver``), the wall-clock re-authz deadline expiring (``reauthorize``
@@ -403,6 +409,9 @@ async def _relay(
             return True
         subscription.discard_buffered(_SNAPSHOT_SUPERSEDES)
         text = await snapshot()
+        if disconnected.done():
+            # The client left during the read: nothing may be sent any more.
+            return False
         if text is None:
             await websocket.close(code=_CLOSE_NOT_FOUND)
             return False
@@ -429,7 +438,11 @@ async def _relay(
                 except StopAsyncIteration:
                     return
                 await deliver(event)
-                if event.stream is EventStream.GAP and not await _send_snapshot():
+                if (
+                    event.stream is EventStream.GAP
+                    and EventStream.STATUS in subscription.take_dropped()
+                    and not await _send_snapshot()
+                ):
                     return
                 next_event = asyncio.ensure_future(subscription.__anext__())
             # Check the wall-clock deadline unconditionally: a busy stream must
