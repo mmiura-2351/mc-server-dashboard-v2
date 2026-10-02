@@ -1,17 +1,20 @@
 /**
- * Orders live WS states against the REST reads of one query (#3213).
+ * Orders live WS states against the REST reads of a query (#3213).
  *
  * A REST response can land after a WS frame that is newer than the response's
  * read: the cold load racing the subscribe snapshot, or a reopen/gap refetch
  * racing the frames that follow it. Writing the response over the cache would
- * then roll a live state back. This keeps one logical clock: a live state is
- * stamped when it is received, a REST read when it starts. When a response
- * lands, a live state stamped after its read started is newer than it and must
- * be re-applied on top; one stamped before is superseded by the response.
+ * then roll a live state back. One logical clock orders the two: a live state
+ * is stamped when it is received ({@link stamp}), a REST read when its request
+ * starts ({@link stampedQueryFn}). When a response lands, a live state stamped
+ * after that request started is newer than it and must be re-applied on top;
+ * one stamped before is superseded by the response, which can carry a change
+ * no frame announced.
  *
- * Read starts are observed from the query cache (`fetch` actions) and stamped
- * by {@link RestReads.refetch} for the hook's own refetches, which may restart
- * an in-flight fetch without a `fetch` action.
+ * The stamp is taken inside the query function, so every attempt counts —
+ * retries and restarted fetches included. The response that lands is always
+ * the latest attempt's: TanStack discards a cancelled fetch's result, and
+ * retries run one after another.
  */
 
 import {
@@ -21,51 +24,50 @@ import {
   type QueryKey,
 } from "@tanstack/react-query";
 
-/** Wrap a query function so each attempt's start is stamped. */
-export function stampedQueryFn<T, K extends QueryKey>(
-  fn: QueryFunction<T, K>,
-): QueryFunction<T, K> {
-  return fn;
-}
+let clock = 0;
 
-export interface RestReads {
-  /** Stamp a live state received now; compare it to a read's start stamp. */
-  stamp: () => number;
-  /** Refetch the query, stamping the start of its read. */
-  refetch: () => void;
-  /** Stop observing the query. */
-  close: () => void;
+/** The stamp of the latest query-function attempt, by query hash. */
+const attemptStarts = new Map<string, number>();
+
+/** Stamp a live state received now. */
+export function stamp(): number {
+  return ++clock;
 }
 
 /**
- * Observe `queryKey`'s REST reads. `onResponse` runs after each REST response
- * has been written to the cache, with the stamp of the read's start.
+ * Wrap a query function so each attempt's start is stamped. The query whose
+ * cache a live-events hook patches must use it, or {@link observeRestResponses}
+ * treats every response as older than every live state.
  */
-export function observeRestReads(
+export function stampedQueryFn<T, K extends QueryKey>(
+  fn: QueryFunction<T, K>,
+): QueryFunction<T, K> {
+  return (context) => {
+    attemptStarts.set(hashKey(context.queryKey), ++clock);
+    return fn(context);
+  };
+}
+
+/**
+ * Run `onResponse` after each REST response for `queryKey` has been written to
+ * the cache, with the stamp of the attempt that produced it. Returns the
+ * unsubscribe function.
+ */
+export function observeRestResponses(
   queryClient: QueryClient,
   queryKey: QueryKey,
   onResponse: (readStartedAt: number) => void,
-): RestReads {
-  let clock = 0;
-  let readStartedAt = 0;
+): () => void {
   const hash = hashKey(queryKey);
-  const close = queryClient.getQueryCache().subscribe((event) => {
-    if (event.type !== "updated" || event.query.queryHash !== hash) {
-      return;
-    }
-    if (event.action.type === "fetch") {
-      readStartedAt = ++clock;
-    } else if (event.action.type === "success" && !event.action.manual) {
+  return queryClient.getQueryCache().subscribe((event) => {
+    if (
+      event.type === "updated" &&
+      event.query.queryHash === hash &&
+      event.action.type === "success" &&
       // `manual` marks a `setQueryData` write (ours included), not a response.
-      onResponse(readStartedAt);
+      !event.action.manual
+    ) {
+      onResponse(attemptStarts.get(hash) ?? 0);
     }
   });
-  return {
-    stamp: () => ++clock,
-    refetch: () => {
-      readStartedAt = ++clock;
-      queryClient.invalidateQueries({ queryKey });
-    },
-    close,
-  };
 }

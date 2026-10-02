@@ -20,8 +20,9 @@
  * still refetches the detail query once as a belt-and-suspenders reconcile
  * (#1723). A live state outlives the detail query's REST reads (#3213): one
  * received before the query has loaded, or while a read is in flight, is
- * re-applied when the response lands unless that read started after it
- * ({@link observeRestReads}), so an older response never rolls the pill back.
+ * re-applied when the response lands unless that read's request started
+ * after it ({@link observeRestResponses}), so an older response never rolls
+ * the pill back.
  *
  * The client is recreated per (community, server) pair and torn down on unmount
  * / navigation, so a stale page's socket never patches another server's cache.
@@ -39,7 +40,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import type { components } from "../api/schema";
 import { stripMinecraftCodes } from "./mcFormat.ts";
-import { observeRestReads } from "./restReads.ts";
+import { observeRestResponses, stamp } from "./restReads.ts";
 import { ServerEventsClient, type ServerFrame } from "./serverEvents.ts";
 import { serverKey } from "./serverKey.ts";
 import { atRest, normalizeState } from "./serverState.ts";
@@ -231,15 +232,23 @@ export function useServerEvents(
       );
     };
 
-    const reads = observeRestReads(queryClient, key, (readStartedAt) => {
-      if (live !== null && live.at < readStartedAt) {
-        live = null;
-      }
-      patch();
-    });
+    const refetch = () => {
+      queryClient.invalidateQueries({ queryKey: key });
+    };
+
+    const unobserve = observeRestResponses(
+      queryClient,
+      key,
+      (readStartedAt) => {
+        if (live !== null && live.at < readStartedAt) {
+          live = null;
+        }
+        patch();
+      },
+    );
 
     const applyState = (state: string) => {
-      live = { state, at: reads.stamp() };
+      live = { state, at: stamp() };
       patch();
       // Once the server settles at rest there is no metrics stream (SPEC
       // 7.2); drop the windowed samples so the strip falls back to the idle
@@ -290,7 +299,7 @@ export function useServerEvents(
       // buffer and refetch the detail query once — a dropped status frame is
       // never replayed (#1723).
       logStore.appendGap();
-      reads.refetch();
+      refetch();
     };
 
     // Lines emitted between a drop and the reconnect are lost for good (the
@@ -313,7 +322,7 @@ export function useServerEvents(
         if (!pristine) {
           // The onDown fallback refetched at drop time; transitions between
           // that refetch and this reopen were lost for good, reconcile once.
-          reads.refetch();
+          refetch();
         }
         pristine = false;
         wasOpen = true;
@@ -328,14 +337,14 @@ export function useServerEvents(
         setDegraded(true);
         // Status-only REST fallback: one refetch picks up the latest observed
         // state while the socket is down (no log/metrics polling, SPEC 7.2).
-        reads.refetch();
+        refetch();
       },
     });
     client.start();
 
     return () => {
       client.close();
-      reads.close();
+      unobserve();
     };
   }, [communityId, serverId, queryClient, logStore]);
 

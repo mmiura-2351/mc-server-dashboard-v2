@@ -24,6 +24,7 @@ import { classifyQueryResult } from "../queryState.ts";
 import { dashboardPath } from "../routes.ts";
 import { isEulaNotAccepted, lifecycleErrorMessage } from "./lifecycleErrors.ts";
 import { stripMinecraftCodes } from "./mcFormat.ts";
+import { stampedQueryFn } from "./restReads.ts";
 import { ServerAddressBadges } from "./ServerAddressBadges.tsx";
 import { ServerBackupsTab } from "./ServerBackupsTab.tsx";
 import { ServerFilesTab } from "./ServerFilesTab.tsx";
@@ -172,7 +173,8 @@ function Loaded({
   const events = useServerEvents(communityId, serverId);
   const query = useQuery({
     queryKey: serverKey(communityId, serverId),
-    queryFn: ({ signal }) =>
+    // Stamped so live status frames are ordered against each REST attempt.
+    queryFn: stampedQueryFn(({ signal }) =>
       api.get(
         apiPath("/api/communities/{community_id}/servers/{server_id}", {
           community_id: communityId,
@@ -180,6 +182,7 @@ function Loaded({
         }),
         { signal },
       ),
+    ),
   });
 
   const queryState = classifyQueryResult(query);
