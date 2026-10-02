@@ -10,6 +10,9 @@ from __future__ import annotations
 import datetime as dt
 from dataclasses import replace
 
+from mc_server_dashboard_api.identity.application.authenticate_request import (
+    Authentication,
+)
 from mc_server_dashboard_api.identity.domain.brute_force import BruteForceConfig
 from mc_server_dashboard_api.identity.domain.clock import Clock
 from mc_server_dashboard_api.identity.domain.community_ownership import (
@@ -42,6 +45,7 @@ from mc_server_dashboard_api.identity.domain.token_service import (
     IssuedDownloadGrant,
     IssuedRefreshToken,
     TokenService,
+    VerifiedAccessToken,
 )
 from mc_server_dashboard_api.identity.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.identity.domain.value_objects import (
@@ -335,6 +339,11 @@ class StubHasher(PasswordHasher):
 _GRANT_EXPIRY = dt.datetime(2026, 6, 4, 12, 0, 30, tzinfo=dt.timezone.utc)
 
 
+# Fixed expiry for the fake's access tokens: like the grant deadline, the real
+# instant is the JWT adapter's concern (#1862).
+FAKE_ACCESS_EXPIRY = dt.datetime(2026, 6, 4, 12, 15, tzinfo=dt.timezone.utc)
+
+
 class FakeTokenService(TokenService):
     """Deterministic token service: access token == ``access::<uuid>``.
 
@@ -349,7 +358,7 @@ class FakeTokenService(TokenService):
     def issue_access_token(self, user_id: UserId) -> str:
         return f"access::{user_id.value}"
 
-    def verify_access_token(self, token: str) -> UserId:
+    def verify_access_token(self, token: str) -> VerifiedAccessToken:
         import uuid
 
         from mc_server_dashboard_api.identity.domain.errors import (
@@ -360,7 +369,10 @@ class FakeTokenService(TokenService):
         if not token.startswith(prefix):
             raise InvalidAccessTokenError
         try:
-            return UserId(uuid.UUID(token[len(prefix) :]))
+            return VerifiedAccessToken(
+                user_id=UserId(uuid.UUID(token[len(prefix) :])),
+                expires_at=FAKE_ACCESS_EXPIRY,
+            )
         except ValueError as exc:
             raise InvalidAccessTokenError from exc
 
@@ -554,4 +566,19 @@ def make_user(
         updated_at=moment,
         is_platform_admin=is_platform_admin,
         active=active,
+    )
+
+
+def make_authentication(
+    user: User | None = None, *, expires_in: dt.timedelta = dt.timedelta(hours=1)
+) -> Authentication:
+    """A handshake's authentication whose token lapses ``expires_in`` from now.
+
+    Relative to the wall clock because the events WebSocket ends its session at
+    that instant (#1862); the default hour outlives any test.
+    """
+
+    return Authentication(
+        user=user or make_user(),
+        expires_at=dt.datetime.now(dt.timezone.utc) + expires_in,
     )

@@ -64,7 +64,7 @@ from mc_server_dashboard_api.fleet.domain.real_time_events import (
 )
 from mc_server_dashboard_api.identity.domain.entities import User
 from tests.client_utils import enter_client
-from tests.identity.fakes import make_user
+from tests.identity.fakes import make_authentication, make_user
 from tests.integration.migrate import downgrade_base, upgrade_head
 
 _DB_URL = os.environ.get("MCD_TEST_DATABASE_URL")
@@ -176,7 +176,7 @@ def _app(
     """
 
     app = create_app()
-    app.dependency_overrides[get_current_user_ws] = lambda: user
+    app.dependency_overrides[get_current_user_ws] = lambda: make_authentication(user)
     app.dependency_overrides[get_real_time_events] = lambda: bus
     app.dependency_overrides[get_server_community_lookup] = lambda: _FakeLookup(
         lookup or {}

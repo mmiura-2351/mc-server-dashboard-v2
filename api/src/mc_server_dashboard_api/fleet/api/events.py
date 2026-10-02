@@ -89,7 +89,9 @@ from mc_server_dashboard_api.fleet.domain.real_time_events import (
     RealTimeEvents,
 )
 from mc_server_dashboard_api.http_datetime import serialize_utc
-from mc_server_dashboard_api.identity.domain.entities import User
+from mc_server_dashboard_api.identity.application.authenticate_request import (
+    Authentication,
+)
 from mc_server_dashboard_api.servers.application.manage_server import (
     ListServers,
     ReadServer,
@@ -163,15 +165,16 @@ async def server_events(
     websocket: WebSocket,
     community_id: uuid.UUID,
     server_id: uuid.UUID,
-    user: Annotated[User | None, Depends(get_current_user_ws)],
+    authentication: Annotated[Authentication | None, Depends(get_current_user_ws)],
     visibility: Annotated[MembershipVisibility, Depends(get_membership_visibility)],
     checker: Annotated[PermissionChecker, Depends(get_permission_checker)],
     read_server: Annotated[ReadServer, Depends(get_read_server)],
     bus: Annotated[RealTimeEvents, Depends(get_real_time_events)],
 ) -> None:
-    if user is None:
+    if authentication is None:
         await websocket.close(code=_CLOSE_UNAUTHENTICATED)
         return
+    user = authentication.user
 
     community = CommunityId(community_id)
     auth_user = AuthUser(
@@ -240,7 +243,7 @@ async def server_events(
 async def community_events(
     websocket: WebSocket,
     community_id: uuid.UUID,
-    user: Annotated[User | None, Depends(get_current_user_ws)],
+    authentication: Annotated[Authentication | None, Depends(get_current_user_ws)],
     visibility: Annotated[MembershipVisibility, Depends(get_membership_visibility)],
     checker: Annotated[PermissionChecker, Depends(get_permission_checker)],
     lookup: Annotated[ServerCommunityLookup, Depends(get_server_community_lookup)],
@@ -268,9 +271,10 @@ async def community_events(
     the per-server STATUS and NOTIFICATION fan-out ships here.
     """
 
-    if user is None:
+    if authentication is None:
         await websocket.close(code=_CLOSE_UNAUTHENTICATED)
         return
+    user = authentication.user
 
     community = CommunityId(community_id)
     auth_user = AuthUser(

@@ -59,7 +59,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerId,
 )
 from tests.client_utils import enter_client
-from tests.identity.fakes import make_user
+from tests.identity.fakes import make_authentication, make_user
 
 
 class _FakeVisibility(MembershipVisibility):
@@ -133,7 +133,7 @@ def _app(
     user = make_user()
 
     def _user_or_none() -> object | None:
-        return user if authenticated else None
+        return make_authentication(user) if authenticated else None
 
     app.dependency_overrides[get_current_user_ws] = _user_or_none
     app.dependency_overrides[get_membership_visibility] = lambda: _FakeVisibility(

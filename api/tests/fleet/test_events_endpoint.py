@@ -52,7 +52,7 @@ from mc_server_dashboard_api.fleet.domain.real_time_events import (
 from mc_server_dashboard_api.servers.domain.errors import ServerNotFoundError
 from mc_server_dashboard_api.servers.domain.value_objects import ObservedState
 from tests.client_utils import enter_client
-from tests.identity.fakes import make_user
+from tests.identity.fakes import make_authentication, make_user
 
 
 class _FakeVisibility(MembershipVisibility):
@@ -125,7 +125,7 @@ def _app(
     user = make_user()
 
     def _user_or_none() -> object | None:
-        return user if authenticated else None
+        return make_authentication(user) if authenticated else None
 
     app.dependency_overrides[get_current_user_ws] = _user_or_none
     app.dependency_overrides[get_membership_visibility] = lambda: _FakeVisibility(
@@ -748,7 +748,7 @@ def test_mid_stream_revocation_closes_with_policy_code(
     app = _shared_app
     app.dependency_overrides.clear()
     user = make_user()
-    app.dependency_overrides[get_current_user_ws] = lambda: user
+    app.dependency_overrides[get_current_user_ws] = lambda: make_authentication(user)
     app.dependency_overrides[get_membership_visibility] = lambda: _FakeVisibility(
         member=True
     )
@@ -796,7 +796,7 @@ def test_mid_stream_revocation_closes_despite_busy_stream(
     app = _shared_app
     app.dependency_overrides.clear()
     user = make_user()
-    app.dependency_overrides[get_current_user_ws] = lambda: user
+    app.dependency_overrides[get_current_user_ws] = lambda: make_authentication(user)
     app.dependency_overrides[get_membership_visibility] = lambda: _FakeVisibility(
         member=True
     )
@@ -893,7 +893,7 @@ def test_no_reauthz_queries_after_disconnect_on_quiet_topic(
     app = _shared_app
     app.dependency_overrides.clear()
     user = make_user()
-    app.dependency_overrides[get_current_user_ws] = lambda: user
+    app.dependency_overrides[get_current_user_ws] = lambda: make_authentication(user)
     app.dependency_overrides[get_membership_visibility] = lambda: _FakeVisibility(
         member=True
     )
