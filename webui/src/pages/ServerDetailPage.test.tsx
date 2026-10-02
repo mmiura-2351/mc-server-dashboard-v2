@@ -2668,6 +2668,27 @@ describe("ServerDetailPage Console tab", () => {
     expect(screen.getByText(/list/)).toBeInTheDocument();
   });
 
+  it("names the cause of a failed command in the transcript", async () => {
+    mockApi.post.mockRejectedValue(
+      new ApiError(503, { reason: "worker_unavailable" }),
+    );
+    await openConsole({ observed_state: "running" });
+
+    const input = screen.getByPlaceholderText(
+      t("serverDetail.console.commandPlaceholder"),
+    );
+    fireEvent.change(input, { target: { value: "stop" } });
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.console.send") }),
+    );
+
+    expect(
+      await screen.findByText(
+        t("serverDetail.console.error.workerUnavailable"),
+      ),
+    ).toBeInTheDocument();
+  });
+
   it("recalls the last command with ArrowUp", async () => {
     mockApi.post.mockResolvedValue({ output: "ok" });
     await openConsole({ observed_state: "running" });

@@ -31,6 +31,7 @@ import { ServerPlayersTab } from "./ServerPlayersTab.tsx";
 import { ServerPluginsTab } from "./ServerPluginsTab.tsx";
 import { ServerResourcePackSection } from "./ServerResourcePackSection.tsx";
 import { ServerSchedulesTab } from "./ServerSchedulesTab.tsx";
+import { consoleCommandErrorPresentation } from "./serverConsoleErrorPresentation.ts";
 import { serverKey } from "./serverKey.ts";
 import { serverSettingsErrorPresentation } from "./serverSettingsErrorPresentation.ts";
 import {
@@ -1034,7 +1035,7 @@ function Console({
       }
       events.appendLocal([
         { kind: "command", line },
-        { kind: "output", line: t("serverDetail.commandFailed") },
+        { kind: "output", line: t(consoleCommandErrorPresentation(error)) },
       ]);
     },
   });
