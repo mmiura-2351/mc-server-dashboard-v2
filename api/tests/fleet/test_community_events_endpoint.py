@@ -15,6 +15,7 @@ cleanup of the firehose subscription.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import json
 import time
@@ -566,6 +567,36 @@ def test_socket_closes_4419_when_the_access_token_expires() -> None:
     with pytest.raises(WebSocketDisconnect) as exc:
         with client.websocket_connect(_url(community)) as ws:
             _skip_snapshot(ws)
+            ws.receive_json()
+    assert exc.value.code == 4419
+
+
+def test_token_expiry_during_a_membership_lookup_closes_without_the_frame() -> None:
+    """A lookup still in flight at expiry is abandoned; its event is never sent."""
+
+    class _SlowLookup(_FakeLookup):
+        async def __call__(self, *, server_id: str) -> uuid.UUID | None:
+            await asyncio.sleep(2.0)
+            return await super().__call__(server_id=server_id)
+
+    bus = InProcessRealTimeEvents()
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(bus=bus, expires_in=dt.timedelta(seconds=0.5))
+    app.dependency_overrides[get_server_community_lookup] = lambda: _SlowLookup(  # type: ignore[attr-defined]
+        {str(server): community}
+    )
+    client = _client(app)
+
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect(_url(community)) as ws:
+            _skip_snapshot(ws)
+            bus.publish(
+                server_id=str(server),
+                event=RealTimeEvent(
+                    stream=EventStream.NOTIFICATION,
+                    payload={"kind": "k", "title": "t", "detail": "d"},
+                ),
+            )
             ws.receive_json()
     assert exc.value.code == 4419
 

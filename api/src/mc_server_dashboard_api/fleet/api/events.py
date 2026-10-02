@@ -413,7 +413,11 @@ async def _relay(
     re-runs the accept-time gate; a denial closes the socket with its code), the
     access token reaching ``expires_at`` (the socket closes ``4419`` before any
     further delivery, #1862), and the client disconnecting. Both deadlines are
-    absolute wall-clock time so a busy stream cannot postpone either. Disconnect
+    absolute wall-clock time so a busy stream cannot postpone either. The expiry
+    is enforced across the whole relay, not only the wait: a snapshot read, a
+    delivery or a re-authz still in flight at that instant is cancelled, so a
+    slow lookup can neither hold the socket open past expiry nor send on the
+    lapsed credential. Disconnect
     is observed by a companion reader task (:func:`_client_gone`) because a
     client gone from a quiet topic never wakes the delivery wait (#1695). The
     pending-event task is kept across re-checks, so no event is dropped; every
@@ -447,44 +451,61 @@ async def _relay(
 
     disconnected = asyncio.create_task(_client_gone(websocket))
     next_event: asyncio.Future[RealTimeEvent] | None = None
+    # The token's expiry bounds every await of the relay — snapshot reads,
+    # deliveries (the community membership lookup) and re-authz alike — so
+    # work still in flight at expiry is cancelled and never sends (#1862).
+    lapse = asyncio.timeout_at(expiry)
     try:
-        if not await _send_snapshot():
-            return
-        next_event = asyncio.ensure_future(subscription.__anext__())
-        while True:
-            done, _pending = await asyncio.wait(
-                {next_event, disconnected},
-                timeout=max(0.0, min(deadline, expiry) - loop.time()),
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if disconnected in done:
-                return
-            # Checked before delivery: nothing reaches the client on a lapsed
-            # token, even an event that completed alongside the expiry.
-            if loop.time() >= expiry:
-                await websocket.close(code=_CLOSE_TOKEN_EXPIRED)
-                return
-            if next_event in done:
-                try:
-                    event = next_event.result()
-                except StopAsyncIteration:
-                    return
-                await deliver(event)
-                if (
-                    event.stream is EventStream.GAP
-                    and EventStream.STATUS in subscription.take_dropped()
-                    and not await _send_snapshot()
-                ):
+        expired = False
+        try:
+            async with lapse:
+                if not await _send_snapshot():
                     return
                 next_event = asyncio.ensure_future(subscription.__anext__())
-            # Check the wall-clock deadline unconditionally: a busy stream must
-            # not prevent re-authorization from running.
-            if loop.time() >= deadline:
-                denied = await reauthorize()
-                if denied is not None:
-                    await websocket.close(code=denied)
-                    return
-                deadline = loop.time() + _REAUTHZ_INTERVAL_SECONDS
+                while True:
+                    done, _pending = await asyncio.wait(
+                        {next_event, disconnected},
+                        timeout=max(0.0, deadline - loop.time()),
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if disconnected in done:
+                        return
+                    # An event that completed alongside the expiry, before the
+                    # lapse could cancel the wait, is not delivered either.
+                    if loop.time() >= expiry:
+                        expired = True
+                        break
+                    if next_event in done:
+                        try:
+                            event = next_event.result()
+                        except StopAsyncIteration:
+                            return
+                        await deliver(event)
+                        if (
+                            event.stream is EventStream.GAP
+                            and EventStream.STATUS in subscription.take_dropped()
+                            and not await _send_snapshot()
+                        ):
+                            return
+                        next_event = asyncio.ensure_future(subscription.__anext__())
+                    # Check the wall-clock deadline unconditionally: a busy
+                    # stream must not prevent re-authorization from running.
+                    if loop.time() >= deadline:
+                        denied = await reauthorize()
+                        if denied is not None:
+                            await websocket.close(code=denied)
+                            return
+                        deadline = loop.time() + _REAUTHZ_INTERVAL_SECONDS
+        except TimeoutError:
+            if not lapse.expired():
+                raise
+            expired = True
+        # Closed outside the lapse, so the close itself is never cancelled. A
+        # client already gone (its disconnect consumed by the reader task,
+        # possibly during the cancelled work) gets no close: the server rejects
+        # any send after it.
+        if expired and not disconnected.done():
+            await websocket.close(code=_CLOSE_TOKEN_EXPIRED)
     except WebSocketDisconnect:
         # Client went away mid-send; the caller cleans up the subscription.
         pass

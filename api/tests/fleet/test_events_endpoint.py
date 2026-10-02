@@ -866,6 +866,33 @@ def test_socket_closes_4419_when_the_access_token_expires(
     assert exc.value.code == 4419
 
 
+def test_token_expiry_during_the_snapshot_read_closes_without_the_snapshot() -> None:
+    """A read still in flight at expiry is abandoned; its frame is never sent."""
+
+    bus = InProcessRealTimeEvents()
+    community, server = uuid.uuid4(), uuid.uuid4()
+
+    class _SlowSnapshotRead(_FakeReadServer):
+        reads = 0
+
+        async def __call__(self, **kwargs: object) -> object:
+            self.reads += 1
+            if self.reads > 1:  # the first read is the accept-time gate
+                await asyncio.sleep(2.0)
+            return await super().__call__(**kwargs)
+
+    app = _app(
+        bus=bus,
+        read_server=_SlowSnapshotRead(found=True),
+        expires_in=dt.timedelta(seconds=0.3),
+    )
+    client = _client(app)
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect(_url(community, server)) as ws:
+            ws.receive_json()
+    assert exc.value.code == 4419
+
+
 def test_token_expiry_closes_despite_busy_stream() -> None:
     """A stream that never goes quiet cannot postpone the expiry close."""
 
@@ -1050,6 +1077,45 @@ async def test_client_gone_during_the_snapshot_read_ends_the_relay_quietly(
         deliver=_deliver,
         snapshot=_snapshot,
         expires_at=make_authentication().expires_at,
+    )
+    await subscription.aclose()
+
+
+async def test_client_gone_during_work_cancelled_by_expiry_ends_quietly() -> None:
+    """Expiry cancels work after the client left: no close is sent (#1862).
+
+    The 4419 close is skipped once the disconnect has been consumed, so the
+    expiry's cancellation adds no send-after-disconnect path.
+    """
+
+    from mc_server_dashboard_api.fleet.api import events as events_module
+
+    socket = _GoneDuringReadSocket()
+    bus = InProcessRealTimeEvents()
+    subscription = bus.subscribe(server_id="s", streams=frozenset({EventStream.STATUS}))
+
+    async def _snapshot() -> str | None:
+        await asyncio.sleep(10)  # still in flight when the token lapses
+        return "{}"
+
+    async def _reauthorize() -> int | None:
+        return None
+
+    async def _deliver(event: RealTimeEvent) -> None:
+        raise AssertionError("no events are published in this test")
+
+    await asyncio.wait_for(
+        events_module._relay(
+            socket,  # type: ignore[arg-type]
+            subscription,
+            reauthorize=_reauthorize,
+            deliver=_deliver,
+            snapshot=_snapshot,
+            expires_at=make_authentication(
+                expires_in=dt.timedelta(seconds=0.1)
+            ).expires_at,
+        ),
+        timeout=5,
     )
     await subscription.aclose()
 
