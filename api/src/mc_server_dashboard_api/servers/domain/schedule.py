@@ -183,9 +183,14 @@ class Schedule:
     """Row of the ``schedule`` table: a per-server recurring action.
 
     The per-action payload is carried as typed fields — ``command`` (the console
-    line, ``COMMAND`` only) and ``warning_steps`` (``STOP`` / ``RESTART`` only,
-    optional) — and serialized into the ``payload`` jsonb column by the
-    repository adapter. ``next_run_at`` is the persisted due instant the runner
+    line, ``COMMAND`` only), ``warning_steps`` (``STOP`` / ``RESTART`` only,
+    optional) and ``only_when_running`` (``BACKUP`` only, issue #2236) — and
+    serialized into the ``payload`` jsonb column by the repository adapter.
+    ``only_when_running`` is a ``bool`` exactly for a backup schedule (``None``
+    defaults it to ``True``: a backup schedule skips an occurrence that finds
+    its server stopped unless the operator opts out) and ``None`` for every
+    other action, so a non-backup schedule never carries a value that reads as
+    meaningful. ``next_run_at`` is the persisted due instant the runner
     polls on; it is ``None`` exactly while the schedule is disabled.
     ``created_by`` is a soft actor reference (no FK) so the row survives the
     user's deletion, mirroring ``backup.created_by``.
@@ -202,6 +207,7 @@ class Schedule:
     timezone: str = DEFAULT_TIMEZONE
     command: str | None = None
     warning_steps: tuple[WarningStep, ...] = ()
+    only_when_running: bool | None = None
     next_run_at: dt.datetime | None = None
     last_run_at: dt.datetime | None = None
     created_by: uuid.UUID | None = None
@@ -235,6 +241,13 @@ class Schedule:
         ):
             raise InvalidSchedulePayloadError(
                 f"the {self.action.value} action carries no warning steps"
+            )
+        if self.action is ScheduleAction.BACKUP:
+            if self.only_when_running is None:
+                self.only_when_running = True
+        elif self.only_when_running is not None:
+            raise InvalidSchedulePayloadError(
+                f"the {self.action.value} action carries no only_when_running"
             )
         if len(self.warning_steps) > MAX_WARNING_STEPS:
             raise InvalidSchedulePayloadError(
