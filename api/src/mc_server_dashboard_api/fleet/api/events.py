@@ -353,12 +353,15 @@ async def _relay(
     """Deliver subscription events until the client goes away or authz is revoked.
 
     When ``snapshot`` is given, its frame is sent first, and again right after
-    each delivered GAP marker whose overflow dropped status events (#1795): the
-    stream replays nothing, so the snapshot is what lets a (re)connecting or
-    overflowed client converge without a REST round-trip. A gap that dropped
-    only other streams cost the client no status, so it reads nothing — a slow
-    client on a chatty log stream does not turn every gap into a DB read. Its
-    ordering argument:
+    a delivered GAP marker when ``take_dropped`` reports status drops recorded
+    since the previous accounting check (#1795): the stream replays nothing, so
+    the snapshot is what lets a (re)connecting or overflowed client converge
+    without a REST round-trip. A gap that dropped only other streams cost the
+    client no status, so it reads nothing — a slow client on a chatty log
+    stream does not turn every gap into a DB read. A pending GAP may also
+    concern losses the preceding snapshot already covers (a status event
+    evicted while the previous GAP was being delivered is accounted to that
+    GAP's snapshot), so it reads no further snapshot. Its ordering argument:
 
     - The caller has already registered ``subscription``, so every status event
       published from then on reaches the buffer.

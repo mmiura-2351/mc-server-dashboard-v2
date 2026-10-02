@@ -195,10 +195,11 @@ Global resource pack library (not community-scoped) and per-server assignment.
 
 Missed frames are never replayed (delivery is best-effort), so a connection
 that carries status opens with a **`snapshot`** frame and gets a fresh one
-right after every `gap` frame whose overflow dropped status frames (a gap that
-dropped only other streams cost no status and is not followed by one): the
-persisted observed state of the stream's
-scope — the server for the per-server stream (only when `status` is among the
+right after a `gap` frame when status frames were dropped since the previous
+such check (a gap that dropped only other streams cost no status and is not
+followed by one; neither is a gap whose status losses happened while the
+previous gap was being delivered, since that gap's snapshot already covers
+them): the persisted observed state of the stream's scope — the server for the per-server stream (only when `status` is among the
 subscribed streams), every server of the community for the community stream.
 Its `ts` is the time the snapshot was read. It has no `detail`, which only a
 live `status` transition carries. A client applies it like status frames, and
