@@ -7,7 +7,8 @@
  * token in the `Sec-WebSocket-Protocol` subprotocol header, reconnect with
  * exponential backoff + jitter on loss (reset on a successful open), reconnect
  * with the fresh token after a session refresh rotates it (reconnect-on-rotate),
- * and tear down cleanly. This module owns that machinery once; the two clients
+ * refresh the session first when the API closes the socket because its token
+ * expired, and tear down cleanly. This module owns that machinery once; the two clients
  * are thin wrappers supplying a URL builder and a raw-frame handler.
  *
  * The token rides the `Sec-WebSocket-Protocol` header as
@@ -20,7 +21,15 @@
  * so a hook can patch the query cache without entangling this core.
  */
 
+import { getRefresher } from "../api/client.ts";
 import { getAccessToken, onAccessTokenRotation } from "../auth/tokenStore.ts";
+
+/**
+ * The close code the API sends when the access token a socket was opened with
+ * expires (WEBUI_SPEC.md 2.6, #1862). Reconnecting with that token would only
+ * fail the handshake, so the session is refreshed before reconnecting.
+ */
+export const TOKEN_EXPIRED_CLOSE_CODE = 4419;
 
 /**
  * Backoff bounds (WEBUI_SPEC.md 7.2). Exponential from a small base, capped, so
@@ -70,6 +79,8 @@ export class EventsSocketClient {
   private attempt = 0;
   /** The token the live socket was opened with, to detect a stale connection. */
   private connectedToken: string | null = null;
+  /** The token the API last closed a socket for as expired; never reused. */
+  private expiredToken: string | null = null;
   private unsubscribeRotation: (() => void) | null = null;
   private stopped = false;
 
@@ -109,6 +120,10 @@ export class EventsSocketClient {
       this.scheduleReconnect();
       return;
     }
+    if (token === this.expiredToken) {
+      void this.refreshThenReconnect();
+      return;
+    }
     this.connectedToken = token;
     const socket = new WebSocket(this.buildUrl(), ["access_token", token]);
     this.socket = socket;
@@ -119,20 +134,44 @@ export class EventsSocketClient {
     socket.onmessage = (event) => {
       this.callbacks.onMessage(String(event.data));
     };
-    socket.onclose = () => this.onClosed(socket);
+    socket.onclose = (event) => this.onClosed(socket, event.code);
     socket.onerror = () => {
       // `error` is always followed by `close`; let `close` drive the reconnect
       // so a single failure is not counted twice.
     };
   }
 
-  private onClosed(socket: WebSocket): void {
+  private onClosed(socket: WebSocket, code: number): void {
     if (socket !== this.socket || this.stopped) {
       return;
     }
     this.socket = null;
     this.callbacks.onDown();
+    if (code === TOKEN_EXPIRED_CLOSE_CODE) {
+      this.expiredToken = this.connectedToken;
+      this.connect();
+      return;
+    }
     this.scheduleReconnect();
+  }
+
+  // The API closed a socket because its token expired: refresh through the
+  // shared single-flight path (the one the API client retries 401s through)
+  // before reconnecting. A refresh that rotates the token reconnects via
+  // reconnect-on-rotate, usually before this resumes. One that fails retries on
+  // the backoff (each attempt refreshes again, never offering the expired
+  // token); an auth-definitive failure hard-logs-out, which closes this client.
+  private async refreshThenReconnect(): Promise<void> {
+    const refresh = getRefresher();
+    const refreshed = refresh !== null && (await refresh());
+    if (this.stopped || this.socket !== null || this.timer !== null) {
+      return;
+    }
+    if (refreshed && getAccessToken() !== this.expiredToken) {
+      this.connect();
+    } else {
+      this.scheduleReconnect();
+    }
   }
 
   private scheduleReconnect(): void {
@@ -148,8 +187,8 @@ export class EventsSocketClient {
   }
 
   // A refresh rotated the access token: the live socket still carries the old
-  // one and the API will close it at the 60s re-auth, so reconnect now with the
-  // fresh token (reconnect-on-rotate, WEBUI_SPEC.md 7.1). A pending backoff is
+  // one and the API will close it when that token expires, so reconnect now
+  // with the fresh token (reconnect-on-rotate, WEBUI_SPEC.md 7.1). A pending backoff is
   // collapsed so the new token is used immediately rather than after the wait.
   private onRotation(): void {
     if (this.stopped || getAccessToken() === this.connectedToken) {

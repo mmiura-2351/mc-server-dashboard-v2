@@ -1,4 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  resetForTesting as resetClientForTesting,
+  setRefresher,
+} from "../api/client.ts";
 import { clearAccessToken, setAccessToken } from "../auth/tokenStore.ts";
 import { installMockWebSocket, MockWebSocket } from "../test/mockWebSocket.ts";
 import {
@@ -178,6 +182,7 @@ describe("CommunityEventsClient", () => {
   afterEach(() => {
     restore();
     clearAccessToken();
+    resetClientForTesting();
     vi.useRealTimers();
   });
 
@@ -351,6 +356,69 @@ describe("CommunityEventsClient", () => {
     const second = MockWebSocket.last();
     expect(MockWebSocket.instances).toHaveLength(2);
     expect(second.protocols).toEqual(["access_token", "tok-2"]);
+    client.close();
+  });
+
+  // The API closes the socket with 4419 when the token it was opened with
+  // expires (#1862): reconnecting with that token would only fail the
+  // handshake, so the session is refreshed first.
+  it("refreshes the session on a 4419 close and reconnects with the fresh token", async () => {
+    const refresher = vi.fn(async () => {
+      setAccessToken("tok-2");
+      return true;
+    });
+    setRefresher(refresher);
+    const { client, onDown } = makeClient();
+    client.start();
+    MockWebSocket.last().open();
+
+    MockWebSocket.last().serverClose(4419);
+    expect(onDown).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(refresher).toHaveBeenCalledTimes(1);
+    expect(MockWebSocket.instances).toHaveLength(2);
+    expect(MockWebSocket.last().protocols).toEqual(["access_token", "tok-2"]);
+    client.close();
+  });
+
+  it("never reconnects with the expired token when the refresh fails", async () => {
+    const refresher = vi.fn(async () => false); // transient: token unchanged
+    setRefresher(refresher);
+    const { client } = makeClient();
+    client.start();
+    MockWebSocket.last().open();
+
+    MockWebSocket.last().serverClose(4419);
+    await vi.advanceTimersByTimeAsync(60000);
+
+    // The refresh is retried on the backoff; the expired token is never offered.
+    expect(refresher.mock.calls.length).toBeGreaterThan(1);
+    expect(MockWebSocket.instances).toHaveLength(1);
+
+    refresher.mockImplementation(async () => {
+      setAccessToken("tok-2");
+      return true;
+    });
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(MockWebSocket.instances).toHaveLength(2);
+    expect(MockWebSocket.last().protocols).toEqual(["access_token", "tok-2"]);
+    client.close();
+  });
+
+  it("does not refresh on an ordinary close", async () => {
+    const refresher = vi.fn(async () => true);
+    setRefresher(refresher);
+    const { client } = makeClient();
+    client.start();
+    MockWebSocket.last().open();
+
+    MockWebSocket.last().fail();
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(refresher).not.toHaveBeenCalled();
+    expect(MockWebSocket.instances).toHaveLength(2);
+    expect(MockWebSocket.last().protocols).toEqual(["access_token", "tok-1"]);
     client.close();
   });
 
