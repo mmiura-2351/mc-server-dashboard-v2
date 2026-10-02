@@ -1,4 +1,8 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import {
+  QueryClient,
+  QueryClientProvider,
+  useQuery,
+} from "@tanstack/react-query";
 import { act, render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -326,5 +330,125 @@ describe("useCommunityEvents", () => {
     });
     expect(invalidateSpy).toHaveBeenCalledTimes(1);
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: serversKey(CID) });
+  });
+});
+
+type Row = ReturnType<typeof serverRow>;
+
+/**
+ * A servers-list query whose REST responses the test resolves by hand, so a
+ * response can land after a WS frame that is newer than its read (#3213).
+ */
+function setupDeferred() {
+  const pending: ((rows: Row[]) => void)[] = [];
+  const queryFn = () =>
+    new Promise<Row[]>((resolve) => {
+      pending.push(resolve);
+    });
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  function LiveProbe() {
+    // The page's order: the events hook, then the list query.
+    degradedSeen = useCommunityEvents(CID);
+    useQuery({ queryKey: serversKey(CID), queryFn });
+    return null;
+  }
+  const wrapper = ({ children }: { children: ReactNode }) => (
+    <QueryClientProvider client={queryClient}>
+      <ToastProvider>{children}</ToastProvider>
+    </QueryClientProvider>
+  );
+  render(<LiveProbe />, { wrapper });
+  // Resolve the oldest outstanding REST read with `rows`.
+  const respond = async (rows: Row[]) => {
+    const resolve = pending.shift();
+    expect(resolve).toBeDefined();
+    await act(async () => {
+      resolve?.(rows);
+      await vi.advanceTimersByTimeAsync(0);
+    });
+  };
+  const cached = () => queryClient.getQueryData<Row[]>(serversKey(CID));
+  return { queryClient, respond, cached, pending };
+}
+
+describe("useCommunityEvents with REST reads in flight (#3213)", () => {
+  let restore: () => void;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    restore = installMockWebSocket();
+    setAccessToken("tok-1");
+  });
+
+  afterEach(() => {
+    restore();
+    clearAccessToken();
+    vi.useRealTimers();
+  });
+
+  it("keeps a snapshot that arrives before the cold list load lands", async () => {
+    const { respond, cached } = setupDeferred();
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(snapshotFrame([["s1", "running"]]));
+    });
+    // The cold read captured the state before the transition.
+    await respond([serverRow("s1", "stopped")]);
+    expect(cached()).toEqual([{ id: "s1", observed_state: "running" }]);
+  });
+
+  it("keeps a status frame that arrives before the cold list load lands", async () => {
+    const { respond, cached } = setupDeferred();
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(statusFrame("s1", "starting"));
+    });
+    await respond([serverRow("s1", "stopped")]);
+    expect(cached()).toEqual([{ id: "s1", observed_state: "starting" }]);
+  });
+
+  it("keeps a reconnect snapshot over the older reopen refetch response", async () => {
+    const { respond, cached, pending } = setupDeferred();
+    act(() => {
+      MockWebSocket.last().open();
+    });
+    await respond([serverRow("s1", "running")]);
+    act(() => {
+      MockWebSocket.last().fail();
+    });
+    // The drop's poll ticks and the reconnect timer fire; settle each read.
+    act(() => {
+      vi.advanceTimersByTime(30000);
+    });
+    while (pending.length > 0) {
+      await respond([serverRow("s1", "running")]);
+    }
+    // The reopen starts a refetch; the snapshot lands before its response.
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(snapshotFrame([["s1", "stopped"]]));
+    });
+    await respond([serverRow("s1", "running")]);
+    expect(cached()).toEqual([{ id: "s1", observed_state: "stopped" }]);
+  });
+
+  it("lets a REST read started after the frame supersede it", async () => {
+    // A worker disconnect commits `unknown` without a frame; a read that
+    // started after the last frame is the newer truth.
+    const { queryClient, respond, cached } = setupDeferred();
+    act(() => {
+      MockWebSocket.last().open();
+    });
+    await respond([serverRow("s1", "stopped")]);
+    act(() => {
+      MockWebSocket.last().message(statusFrame("s1", "running"));
+    });
+    act(() => {
+      queryClient.invalidateQueries({ queryKey: serversKey(CID) });
+    });
+    await respond([serverRow("s1", "unknown")]);
+    expect(cached()).toEqual([{ id: "s1", observed_state: "unknown" }]);
   });
 });
