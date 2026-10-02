@@ -195,9 +195,9 @@ class ControlSettings(_Section):
     # Separate, generous deadline for the HYDRATE phase of a start (issue #822):
     # a working-set pull for a large world routinely exceeds the general command
     # timeout, so the hydrate trigger gets its own budget rather than forcing
-    # operators to inflate the global ``command_timeout_seconds`` (which governs
-    # every other command, and widens the duplicate-start window — see the grace
-    # invariant in app.py). A zero/negative deadline would fail every hydrate.
+    # operators to inflate the global ``command_timeout_seconds`` (which would
+    # loosen every command it governs and widen the duplicate-start window — see
+    # the grace invariant in app.py). A zero/negative deadline would fail every hydrate.
     hydrate_timeout_seconds: int = Field(default=600, gt=0)
     # Separate, generous deadline for the final SNAPSHOT a graceful stop captures
     # (issue #847): the stop holds the assignment until this snapshot settles, so the
