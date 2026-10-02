@@ -65,6 +65,10 @@ _INSERT_SCHEDULE = text(
     "false, now(), now())"
 )
 
+# A backup row's payload carries the backup-only flag (0037,
+# ``ck_schedule_backup_only_when_running``).
+_BACKUP_PAYLOAD = '{"only_when_running": true}'
+
 
 async def test_checks_reject_bad_action_and_non_xor_cadence() -> None:
     assert _DB_URL is not None
@@ -100,7 +104,7 @@ async def test_checks_reject_bad_action_and_non_xor_cadence() -> None:
                             "server_id": server_id,
                             "name": "bad-cadence",
                             "action": "backup",
-                            "payload": "{}",
+                            "payload": _BACKUP_PAYLOAD,
                             "cron": cron,
                             "interval_seconds": interval,
                         },
@@ -115,7 +119,7 @@ async def test_checks_reject_bad_action_and_non_xor_cadence() -> None:
                     "server_id": server_id,
                     "name": "nightly",
                     "action": "backup",
-                    "payload": "{}",
+                    "payload": _BACKUP_PAYLOAD,
                     "cron": None,
                     "interval_seconds": 3600,
                 },
@@ -137,7 +141,7 @@ async def test_checks_reject_bad_action_and_non_xor_cadence() -> None:
                         "server_id": server_id,
                         "name": "nightly",
                         "action": "backup",
-                        "payload": "{}",
+                        "payload": _BACKUP_PAYLOAD,
                         "cron": None,
                         "interval_seconds": 7200,
                     },
@@ -174,7 +178,7 @@ async def test_run_outcome_check_rejects_unknown_value() -> None:
                     "server_id": server_id,
                     "name": "nightly",
                     "action": "backup",
-                    "payload": "{}",
+                    "payload": _BACKUP_PAYLOAD,
                     "cron": None,
                     "interval_seconds": 3600,
                 },

@@ -15,6 +15,7 @@ import logging
 import os
 import uuid
 from collections.abc import AsyncIterator
+from dataclasses import replace
 
 import pytest
 from sqlalchemy import text
@@ -119,6 +120,7 @@ def _schedule(
     timezone: str = "UTC",
     command: str | None = None,
     warning_steps: tuple[WarningStep, ...] = (),
+    only_when_running: bool | None = None,
     enabled: bool = False,
     next_run_at: dt.datetime | None = None,
 ) -> Schedule:
@@ -134,6 +136,7 @@ def _schedule(
         timezone=timezone,
         command=command,
         warning_steps=warning_steps,
+        only_when_running=only_when_running,
         next_run_at=next_run_at,
         created_by=None,
     )
@@ -183,6 +186,61 @@ async def test_command_payload_round_trips(engine: AsyncEngine) -> None:
     assert fetched is not None
     assert fetched.command == "say the sun sets soon"
     assert fetched.warning_steps == ()
+
+
+async def test_backup_only_when_running_round_trips(engine: AsyncEngine) -> None:
+    # Issue #2236: the backup-only flag lives in the payload jsonb, survives a
+    # read back, and an update rewrites it.
+    server_id = await _seed_server(engine)
+    factory = create_session_factory(engine)
+    schedule = _schedule(server_id, only_when_running=False)
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.schedules.add(schedule)
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        fetched = await uow.schedules.get_by_id(schedule.id)
+    assert fetched is not None
+    assert fetched.only_when_running is False
+    async with engine.connect() as conn:
+        payload = (
+            await conn.execute(
+                text("SELECT payload FROM schedule WHERE id = :id"),
+                {"id": schedule.id.value},
+            )
+        ).scalar_one()
+    assert payload == {"only_when_running": False}
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.schedules.update(replace(fetched, only_when_running=True))
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        refetched = await uow.schedules.get_by_id(schedule.id)
+    assert refetched is not None
+    assert refetched.only_when_running is True
+
+
+async def test_non_backup_payload_carries_no_only_when_running(
+    engine: AsyncEngine,
+) -> None:
+    server_id = await _seed_server(engine)
+    factory = create_session_factory(engine)
+    schedule = _schedule(server_id, action=ScheduleAction.START)
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.schedules.add(schedule)
+        await uow.commit()
+
+    async with engine.connect() as conn:
+        payload = (
+            await conn.execute(
+                text("SELECT payload FROM schedule WHERE id = :id"),
+                {"id": schedule.id.value},
+            )
+        ).scalar_one()
+    assert payload == {}
 
 
 async def test_list_for_server_orders_by_name(engine: AsyncEngine) -> None:
@@ -390,7 +448,11 @@ async def _insert_corrupt_row(
                 server_id=server_id,
                 name=name,
                 action=action.value,
-                payload={},
+                payload=(
+                    {"only_when_running": True}
+                    if action is ScheduleAction.BACKUP
+                    else {}
+                ),
                 cron=None,
                 interval_seconds=0,  # below the floor: unhydratable
                 timezone="UTC",

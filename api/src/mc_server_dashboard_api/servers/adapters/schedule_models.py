@@ -10,9 +10,11 @@ serialized into the ``payload`` jsonb there.
 ``schedule.server_id`` FKs ``server`` (``ON DELETE CASCADE``); its lookups ride
 the ``UNIQUE(server_id, name)`` index (``server_id`` leading), so no separate
 single-column index is needed. The cadence is cron XOR interval, pinned by the
-``ck_schedule_cadence_xor`` CHECK. The partial index on ``next_run_at WHERE
-enabled`` is the runner's due-schedule poll. ``created_by`` is a plain nullable
-UUID (no FK) so the row survives the actor's deletion (the ``backup`` posture).
+``ck_schedule_cadence_xor`` CHECK; the backup-only ``only_when_running`` payload
+flag is pinned to backup rows by ``ck_schedule_backup_only_when_running``. The
+partial index on ``next_run_at WHERE enabled`` is the runner's due-schedule
+poll. ``created_by`` is a plain nullable UUID (no FK) so the row survives the
+actor's deletion (the ``backup`` posture).
 ``schedule_run.schedule_id`` FKs ``schedule`` (``ON DELETE CASCADE``), indexed
 with ``started_at`` for the newest-first history listing.
 """
@@ -54,6 +56,18 @@ class ScheduleModel(Base):
         CheckConstraint(
             "(cron IS NULL) != (interval_seconds IS NULL)",
             name="ck_schedule_cadence_xor",
+        ),
+        # The backup-only payload flag (issue #2236): a backup row carries a
+        # boolean ``only_when_running``; no other row carries the key at all.
+        # ``payload -> key IS NULL`` means the key is absent (a JSON null is a
+        # non-NULL jsonb); ``IS NOT DISTINCT FROM`` makes a missing key on a
+        # backup row a violation rather than an UNKNOWN that passes.
+        CheckConstraint(
+            "CASE WHEN action = 'backup' "
+            "THEN jsonb_typeof(payload -> 'only_when_running') "
+            "IS NOT DISTINCT FROM 'boolean' "
+            "ELSE payload -> 'only_when_running' IS NULL END",
+            name="ck_schedule_backup_only_when_running",
         ),
         # The runner's due poll: only enabled schedules carry a next_run_at.
         Index(
