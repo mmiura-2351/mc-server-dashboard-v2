@@ -459,7 +459,10 @@ branch on server state. This policy is shared by 6.10 (File Management) and
   is the ordered set of `backup` rows with `source = scheduled`. A scheduled
   backup that fails does not retry on every scheduler tick: it gets the runner's
   bounded retry (one, ~30 minutes later) plus an operator notification, then
-  waits for the next occurrence.
+  waits for the next occurrence. Each backup schedule carries a "back up only
+  while the server is running" option (on by default): an occurrence that finds
+  the server stopped is recorded as a `skipped` run, not archived; turning it
+  off backs up a stopped server too.
 - FR-BAK-4: Restore replaces a server's authoritative working set and **requires
   the server to be stopped** (per the 6.9 policy); hot-restore of a running
   server is not supported.
