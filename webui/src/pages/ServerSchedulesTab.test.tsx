@@ -103,6 +103,7 @@ function schedule(overrides: Record<string, unknown> = {}) {
     enabled: true,
     command: null,
     warning_steps: [],
+    only_when_running: true,
     next_run_at: "2026-06-07T00:00:00Z",
     last_run_at: "2026-06-06T00:00:00Z",
     created_at: "2026-06-01T00:00:00Z",
@@ -312,6 +313,106 @@ describe("ServerSchedulesTab create/edit dialog", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("shows the only-while-running option only for backup, checked by default", async () => {
+    routeGet({ schedules: [] });
+    routePost();
+    renderTab(canFor(ALL_CODES));
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: t("schedules.create") }),
+    );
+    const select = screen.getByLabelText(t("schedules.dialog.actionLabel"));
+    const option = () =>
+      screen.queryByLabelText(t("schedules.dialog.onlyWhenRunningLabel"));
+
+    // Default action is "command": no backup option.
+    expect(option()).not.toBeInTheDocument();
+
+    fireEvent.change(select, { target: { value: "backup" } });
+    expect(option()).toBeChecked();
+
+    fireEvent.change(select, { target: { value: "start" } });
+    expect(option()).not.toBeInTheDocument();
+  });
+
+  it("creates a backup schedule with the only-while-running option off", async () => {
+    routeGet({ schedules: [] });
+    routePost({ create: schedule() });
+    renderTab(canFor(ALL_CODES));
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: t("schedules.create") }),
+    );
+    fireEvent.change(screen.getByLabelText(t("schedules.dialog.nameLabel")), {
+      target: { value: "nightly backup" },
+    });
+    fireEvent.change(screen.getByLabelText(t("schedules.dialog.actionLabel")), {
+      target: { value: "backup" },
+    });
+    fireEvent.click(
+      screen.getByLabelText(t("schedules.dialog.onlyWhenRunningLabel")),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: t("schedules.dialog.create") }),
+    );
+
+    const createCalls = () =>
+      mockApi.post.mock.calls.filter(
+        (call) => !(call[0] as string).includes("/preview"),
+      );
+    await waitFor(() => expect(createCalls().length).toBe(1));
+    expect(JSON.parse(createCalls()[0][1].body).only_when_running).toBe(false);
+  });
+
+  it("sends no only-while-running value for a non-backup action", async () => {
+    routeGet({ schedules: [] });
+    routePost({ create: schedule() });
+    renderTab(canFor(ALL_CODES));
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: t("schedules.create") }),
+    );
+    fireEvent.change(screen.getByLabelText(t("schedules.dialog.nameLabel")), {
+      target: { value: "morning start" },
+    });
+    fireEvent.change(screen.getByLabelText(t("schedules.dialog.actionLabel")), {
+      target: { value: "start" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: t("schedules.dialog.create") }),
+    );
+
+    const createCalls = () =>
+      mockApi.post.mock.calls.filter(
+        (call) => !(call[0] as string).includes("/preview"),
+      );
+    await waitFor(() => expect(createCalls().length).toBe(1));
+    expect(JSON.parse(createCalls()[0][1].body).only_when_running).toBeNull();
+  });
+
+  it("edits a backup schedule's only-while-running option from its stored value", async () => {
+    routeGet({ schedules: [schedule({ only_when_running: false })] });
+    routePost();
+    mockApi.patch.mockResolvedValue(schedule());
+    renderTab(canFor(ALL_CODES));
+
+    fireEvent.click(await screen.findByText("nightly backup"));
+    fireEvent.click(screen.getByRole("button", { name: t("schedules.edit") }));
+    const option = screen.getByLabelText(
+      t("schedules.dialog.onlyWhenRunningLabel"),
+    );
+    expect(option).not.toBeChecked();
+    fireEvent.click(option);
+    fireEvent.click(
+      screen.getByRole("button", { name: t("schedules.dialog.save") }),
+    );
+
+    await waitFor(() => expect(mockApi.patch).toHaveBeenCalledTimes(1));
+    expect(
+      JSON.parse(mockApi.patch.mock.calls[0][1].body).only_when_running,
+    ).toBe(true);
+  });
+
   it("creates an interval schedule with the composed request body", async () => {
     routeGet({ schedules: [] });
     routePost({ create: schedule() });
@@ -352,6 +453,7 @@ describe("ServerSchedulesTab create/edit dialog", () => {
       interval_seconds: 1800,
       command: null,
       warning_steps: null,
+      only_when_running: true,
     });
   });
 

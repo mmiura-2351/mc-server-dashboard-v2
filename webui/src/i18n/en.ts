@@ -698,6 +698,10 @@ export const en = {
   "schedules.dialog.commandLabel": "Command line",
   "schedules.dialog.commandPlaceholder": "e.g. say Server restarting soon",
   "schedules.dialog.enabledLabel": "Enabled",
+  "schedules.dialog.onlyWhenRunningLabel":
+    "Back up only while the server is running",
+  "schedules.dialog.onlyWhenRunningHint":
+    "If the server is stopped at the scheduled time, the run is recorded as skipped instead of taking a backup.",
   "schedules.dialog.warningsLabel": "Player warnings",
   "schedules.dialog.warningsHint":
     "Broadcast a message this many minutes before the action (up to 5 steps).",

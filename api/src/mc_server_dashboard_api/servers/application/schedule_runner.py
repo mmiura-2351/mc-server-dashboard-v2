@@ -14,7 +14,8 @@ Outcome taxonomy (owner-confirmed):
 
 * **skipped** — the action's precondition was unmet: a ``command`` / ``stop`` /
   ``restart`` on a server that is not settled-running, a ``start`` on a server
-  that is not at rest, or any action while the server is transitional. Recorded
+  that is not at rest, a ``backup`` with ``only_when_running`` on a server that
+  is at rest (issue #2236), or any action while the server is transitional. Recorded
   as an honest history row, *not* notified (nothing was attempted).
 * **failure** — the dispatch reached the Worker / use case and was refused or the
   Worker was unavailable. Recorded and audited every occurrence; notified only on
@@ -191,21 +192,27 @@ def _is_running(server: Server) -> bool:
     )
 
 
-def _precondition_skip(server: Server, action: ScheduleAction) -> str | None:
+def _precondition_skip(
+    server: Server, action: ScheduleAction, *, only_when_running: bool | None
+) -> str | None:
     """Return a skip reason if ``action``'s precondition is unmet, else ``None``.
 
     ``command`` / ``stop`` / ``restart`` need a settled-running server; ``start``
     needs an at-rest one; ``backup`` needs either (only a *transitional* server is
-    unsettled, matching :class:`CreateBackup`'s own gate). Every other case — the
-    server mid-transition — is a skip, so a scheduled action never lands on a
-    server that is starting, stopping, restarting, or crashed.
+    unsettled, matching :class:`CreateBackup`'s own gate) — or, when
+    ``only_when_running`` is set (issue #2236), a settled-running one: an at-rest
+    server then skips as "server not running". Every other case — the server
+    mid-transition — is a skip, so a scheduled action never lands on a server
+    that is starting, stopping, restarting, or crashed.
     """
 
     if action is ScheduleAction.START:
         return None if server.is_at_rest() else "server not stopped"
     if action is ScheduleAction.BACKUP:
-        if _is_running(server) or server.is_at_rest():
+        if _is_running(server):
             return None
+        if server.is_at_rest():
+            return "server not running" if only_when_running else None
         return "server transitional"
     return None if _is_running(server) else "server not running"
 
@@ -296,8 +303,9 @@ class ActionResult:
 class ExecuteScheduleAction:
     """Map a schedule action to its existing use case and classify the outcome.
 
-    Deliberately time-trigger-free: it takes a server + action + command line, not
-    a :class:`Schedule`, so a non-schedule caller (the deferred crash-restart
+    Deliberately time-trigger-free: it takes a server + action + the action's
+    payload (command line, backup ``only_when_running``), not a
+    :class:`Schedule`, so a non-schedule caller (the deferred crash-restart
     policy, #653) can reuse the identical dispatch + precondition + outcome logic.
     It loads the server once to evaluate the precondition and to source the
     community scope the underlying use cases require.
@@ -311,7 +319,12 @@ class ExecuteScheduleAction:
     create_backup: CreateBackup
 
     async def __call__(
-        self, *, server_id: ServerId, action: ScheduleAction, command: str | None
+        self,
+        *,
+        server_id: ServerId,
+        action: ScheduleAction,
+        command: str | None,
+        only_when_running: bool | None,
     ) -> ActionResult:
         async with self.uow:
             server = await self.uow.servers.get_by_id(server_id)
@@ -320,7 +333,7 @@ class ExecuteScheduleAction:
             # server here is a rare race; skip quietly rather than notify.
             return ActionResult(ScheduleRunOutcome.SKIPPED, "server not found", None)
         community_id = server.community_id
-        reason = _precondition_skip(server, action)
+        reason = _precondition_skip(server, action, only_when_running=only_when_running)
         if reason is not None:
             return ActionResult(ScheduleRunOutcome.SKIPPED, reason, community_id)
         try:
@@ -675,6 +688,7 @@ class RunScheduleTick:
             server_id=schedule.server_id,
             action=schedule.action,
             command=schedule.command,
+            only_when_running=schedule.only_when_running,
         )
         finished_at = self.clock.now()
         return result, started_at, finished_at

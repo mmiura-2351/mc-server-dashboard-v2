@@ -130,7 +130,7 @@ Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 | GET / PATCH / DELETE | `…/groups/{gid}` | Read / rename / delete. |
 | POST / DELETE | `…/groups/{gid}/players[/{uuid}]` | Add / remove player (uuid + username). |
 | GET / PUT / DELETE | `…/groups/{gid}/servers[/{sid}]` | List / attach / detach server. |
-| GET / POST | `…/{sid}/schedules` | List / create a per-server schedule (`name`, `action` ∈ command\|start\|stop\|restart\|backup, `cron` XOR `interval_seconds`, `timezone`, `enabled`, `command` for `command`, `warning_steps` for stop/restart). Reads need `schedule:read`; writes need `schedule:manage` **and** the action's own permission (`command`→`server:command`, `start/stop/restart`→`server:{start,stop,restart}`, `backup`→`backup:schedule`) — anti-escalation. Authorization is write-time only: the runner executes as the system, so revoking a permission does not stop existing schedules. `next_run_at` is null while disabled, recomputed on enable. |
+| GET / POST | `…/{sid}/schedules` | List / create a per-server schedule (`name`, `action` ∈ command\|start\|stop\|restart\|backup, `cron` XOR `interval_seconds`, `timezone`, `enabled`, `command` for `command`, `warning_steps` for stop/restart, `only_when_running` for backup — defaults to `true`, skipping an occurrence that finds the server stopped; rejected on any other action). Reads need `schedule:read`; writes need `schedule:manage` **and** the action's own permission (`command`→`server:command`, `start/stop/restart`→`server:{start,stop,restart}`, `backup`→`backup:schedule`) — anti-escalation. Authorization is write-time only: the runner executes as the system, so revoking a permission does not stop existing schedules. `next_run_at` is null while disabled, recomputed on enable. |
 | GET / PATCH / DELETE | `…/{sid}/schedules/{scid}` | Read / edit (partial; action immutable) / delete a schedule. |
 | GET | `…/{sid}/schedules/{scid}/runs` | Execution history newest-first (`schedule:read`). |
 
@@ -537,7 +537,9 @@ numbers): the UI for the general scheduler.
   cadence = interval (minutes/hours) XOR cron expression; IANA timezone select
   (`Intl.supportedValuesOf("timeZone")`, default UTC); command-line field only
   for the `command` action; warning-steps editor (≤5 `{offset_minutes 1–120,
-  message}` rows) only for `stop`/`restart`. API validation failures map to
+  message}` rows) only for `stop`/`restart`; a "back up only while the server
+  is running" checkbox only for `backup` (checked by default; prefilled from
+  `only_when_running` on edit). API validation failures map to
   inline field errors via their typed 422 reasons (`invalid_cron`,
   `invalid_cadence`, `invalid_timezone`, `invalid_schedule_name`,
   `invalid_payload`) and the 409 duplicate name (`schedule_name_exists`).

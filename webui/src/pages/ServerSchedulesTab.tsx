@@ -502,7 +502,8 @@ interface WarningStepForm {
  * actions; on edit it is disabled (the action is immutable — delete and
  * recreate to change it). The cadence is a `cron` XOR `interval` choice; the
  * command line shows only for `command`; the warning-steps editor only for
- * `stop`/`restart`. Server validation errors map to inline field messages.
+ * `stop`/`restart`; the only-while-running option only for `backup`. Server
+ * validation errors map to inline field messages.
  */
 function ScheduleDialog({
   communityId,
@@ -562,6 +563,10 @@ function ScheduleDialog({
   const [timezone, setTimezone] = useState(existing?.timezone ?? "UTC");
   const [enabled, setEnabled] = useState(existing?.enabled ?? true);
   const [command, setCommand] = useState(existing?.command ?? "");
+  // Backup only (issue #2236): a new backup schedule defaults to on.
+  const [onlyWhenRunning, setOnlyWhenRunning] = useState(
+    existing?.only_when_running ?? true,
+  );
   const [warnings, setWarnings] = useState<WarningStepForm[]>(
     (existing?.warning_steps ?? []).map((step) => ({
       offset: String(step.offset_minutes),
@@ -692,6 +697,7 @@ function ScheduleDialog({
           interval_seconds: cadence.interval_seconds,
           command: action === "command" ? command : null,
           warning_steps: showWarnings ? warningSteps() : null,
+          only_when_running: action === "backup" ? onlyWhenRunning : null,
         };
         return api.patch(
           apiPath(
@@ -714,6 +720,7 @@ function ScheduleDialog({
         interval_seconds: cadence.interval_seconds,
         command: action === "command" ? command : null,
         warning_steps: showWarnings ? warningSteps() : null,
+        only_when_running: action === "backup" ? onlyWhenRunning : null,
       };
       return api.post(
         apiPath(
@@ -1046,6 +1053,20 @@ function ScheduleDialog({
             <span className="field-error">{warningError}</span>
           )}
         </fieldset>
+      )}
+
+      {action === "backup" && (
+        <div className="field">
+          <label className="checkbox">
+            <input
+              type="checkbox"
+              checked={onlyWhenRunning}
+              onChange={(e) => setOnlyWhenRunning(e.target.checked)}
+            />
+            {t("schedules.dialog.onlyWhenRunningLabel")}
+          </label>
+          <p className="sub">{t("schedules.dialog.onlyWhenRunningHint")}</p>
+        </div>
       )}
 
       <label className="checkbox">

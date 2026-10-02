@@ -47,6 +47,7 @@ def _schedule(
     enabled: bool = False,
     command: str | None = None,
     warning_steps: tuple[WarningStep, ...] = (),
+    only_when_running: bool | None = None,
     next_run_at: dt.datetime | None = None,
 ) -> Schedule:
     return Schedule(
@@ -61,6 +62,7 @@ def _schedule(
         timezone=timezone,
         command=command,
         warning_steps=warning_steps,
+        only_when_running=only_when_running,
         next_run_at=next_run_at,
     )
 
@@ -213,6 +215,51 @@ def test_other_actions_reject_warning_steps(action: ScheduleAction) -> None:
             command=command,
             warning_steps=(WarningStep(offset_minutes=5, message="soon"),),
         )
+
+
+def test_backup_defaults_to_only_when_running() -> None:
+    # Issue #2236: a backup schedule built without an explicit choice backs up
+    # only while its server is running.
+    assert _schedule(action=ScheduleAction.BACKUP).only_when_running is True
+
+
+def test_backup_can_opt_out_of_only_when_running() -> None:
+    schedule = _schedule(action=ScheduleAction.BACKUP, only_when_running=False)
+    assert schedule.only_when_running is False
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        ScheduleAction.COMMAND,
+        ScheduleAction.START,
+        ScheduleAction.STOP,
+        ScheduleAction.RESTART,
+    ],
+)
+def test_other_actions_carry_no_only_when_running(action: ScheduleAction) -> None:
+    command = "say hi" if action is ScheduleAction.COMMAND else None
+    assert _schedule(action=action, command=command).only_when_running is None
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        ScheduleAction.COMMAND,
+        ScheduleAction.START,
+        ScheduleAction.STOP,
+        ScheduleAction.RESTART,
+    ],
+)
+@pytest.mark.parametrize("value", [True, False])
+def test_other_actions_reject_only_when_running(
+    action: ScheduleAction, value: bool
+) -> None:
+    # The flag is backup-only (owner decision on #2236): a non-backup schedule
+    # must not carry a value that would read as meaningful.
+    command = "say hi" if action is ScheduleAction.COMMAND else None
+    with pytest.raises(InvalidSchedulePayloadError):
+        _schedule(action=action, command=command, only_when_running=value)
 
 
 def test_more_than_five_warning_steps_rejected() -> None:

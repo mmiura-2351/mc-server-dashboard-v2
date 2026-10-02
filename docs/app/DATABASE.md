@@ -703,7 +703,9 @@ interval**, evaluated in a per-schedule IANA timezone (cron) or as absolute
 elapsed time with a deterministic per-schedule jitter (interval). The runner
 polls `next_run_at` over enabled schedules. Scheduled backups (FR-BAK-3) are
 `action = backup` schedules; this table is the only backup-cadence mechanism
-(`backup_interval_hours` is not a config key, Section 7). A failed scheduled
+(`backup_interval_hours` is not a config key, Section 7). A backup schedule
+with `only_when_running` (the default) records a `skipped` run instead of an
+archive when its server is stopped at fire time. A failed scheduled
 backup does not retry every tick — it gets the runner's bounded retry (one,
 ~30 minutes) plus a notification, then waits for the next occurrence.
 
@@ -715,7 +717,7 @@ backup does not retry every tick — it gets the runner's bounded retry (one,
 | `server_id` | uuid FK → `server.id` | `ON DELETE CASCADE`; lookups ride the `UNIQUE(server_id, name)` index (leading column) |
 | `name` | text | operator-chosen; `UNIQUE(server_id, name)` |
 | `action` | text | `command` / `start` / `stop` / `restart` / `backup` (CHECK enum) |
-| `payload` | jsonb | per-action payload: `{"command": <line>}` for `command`; optional `{"warnings": [{offset_minutes, message}, …]}` for `stop`/`restart` (≤ 5 steps, offsets positive, distinct, ≤ 120 min); `{}` otherwise |
+| `payload` | jsonb | per-action payload: `{"command": <line>}` for `command`; optional `{"warnings": [{offset_minutes, message}, …]}` for `stop`/`restart` (≤ 5 steps, offsets positive, distinct, ≤ 120 min); `{"only_when_running": <bool>}` for `backup` (required — `true` skips an occurrence that finds the server stopped; CHECK `ck_schedule_backup_only_when_running` holds the key to `backup` rows as a boolean); `{}` otherwise |
 | `cron` | text nullable | 5-field cron expression |
 | `interval_seconds` | int nullable | fixed interval, minimum 60 s (domain-validated, matching cron's minute granularity); CHECK exactly one of `cron` / `interval_seconds` is non-NULL (`ck_schedule_cadence_xor`) |
 | `timezone` | text | IANA zone the cron cadence is evaluated in; NOT NULL, defaults `UTC` |

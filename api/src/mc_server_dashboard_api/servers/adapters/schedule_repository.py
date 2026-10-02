@@ -4,8 +4,9 @@ Work on an ``AsyncSession`` owned by the enclosing ``UnitOfWork``; they stage
 rows and run reads but never commit — commit is the unit of work's job
 (DATABASE.md Section 1). Rows are translated to/from the framework-free domain
 entities here, including the ``payload`` jsonb: the ``Schedule`` entity carries
-the per-action payload as typed fields (``command`` / ``warning_steps``), which
-serialize to ``{"command": ...}`` / ``{"warnings": [...]}`` / ``{}``.
+the per-action payload as typed fields (``command`` / ``warning_steps`` /
+``only_when_running``), which serialize to ``{"command": ...}`` /
+``{"warnings": [...]}`` / ``{"only_when_running": <bool>}`` / ``{}``.
 """
 
 from __future__ import annotations
@@ -50,6 +51,8 @@ _LOG = logging.getLogger(__name__)
 def _payload_json(schedule: Schedule) -> dict[str, Any]:
     if schedule.command is not None:
         return {"command": schedule.command}
+    if schedule.only_when_running is not None:
+        return {"only_when_running": schedule.only_when_running}
     if schedule.warning_steps:
         return {
             "warnings": [
@@ -80,6 +83,7 @@ def _to_schedule(row: ScheduleModel) -> Schedule:
         timezone=row.timezone,
         command=row.payload.get("command"),
         warning_steps=_warning_steps(row.payload),
+        only_when_running=row.payload.get("only_when_running"),
         next_run_at=row.next_run_at,
         last_run_at=row.last_run_at,
         created_by=row.created_by,

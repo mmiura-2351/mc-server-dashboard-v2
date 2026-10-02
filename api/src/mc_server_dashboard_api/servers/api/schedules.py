@@ -107,6 +107,14 @@ class CreateScheduleRequest(BaseModel):
     enabled: bool = True
     command: str | None = None
     warning_steps: list[WarningStepBody] | None = None
+    only_when_running: bool | None = Field(
+        default=None,
+        description=(
+            "Backup only: skip an occurrence that finds the server stopped. "
+            "Omitted on a backup schedule it defaults to true; set on any "
+            "other action it is rejected (422 invalid_payload)."
+        ),
+    )
 
 
 class UpdateScheduleRequest(BaseModel):
@@ -120,6 +128,14 @@ class UpdateScheduleRequest(BaseModel):
     enabled: bool | None = None
     command: str | None = None
     warning_steps: list[WarningStepBody] | None = None
+    only_when_running: bool | None = Field(
+        default=None,
+        description=(
+            "Backup only: skip an occurrence that finds the server stopped. "
+            "Omitted, it keeps its value; set on any other action it is "
+            "rejected (422 invalid_payload)."
+        ),
+    )
 
 
 class WarningStepResponse(BaseModel):
@@ -140,6 +156,13 @@ class ScheduleResponse(BaseModel):
     enabled: bool
     command: str | None
     warning_steps: list[WarningStepResponse]
+    only_when_running: bool | None = Field(
+        description=(
+            "Backup only: whether an occurrence that finds the server stopped "
+            "is skipped. Always a boolean on a backup schedule, null on every "
+            "other action."
+        ),
+    )
     next_run_at: UtcDatetime | None
     last_run_at: UtcDatetime | None
     created_at: UtcDatetime
@@ -164,6 +187,7 @@ class ScheduleResponse(BaseModel):
                 )
                 for step in schedule.warning_steps
             ],
+            only_when_running=schedule.only_when_running,
             next_run_at=schedule.next_run_at,
             last_run_at=schedule.last_run_at,
             created_at=schedule.created_at,
@@ -234,6 +258,8 @@ async def create_schedule(
     `command` is required for the `command` action; `warning_steps` (at most 5,
     positive distinct offsets ≤ 120 minutes) only on `stop`/`restart` — they are
     broadcast as a fixed `say` message, so they need no `server:command`.
+    `only_when_running` only on `backup` (defaults to `true` when omitted): an
+    occurrence that finds the server stopped is recorded as `skipped`.
 
     Authorization is **write-time only**: the runner later executes each
     occurrence as the system, so revoking a permission does not stop existing
@@ -260,6 +286,7 @@ async def create_schedule(
             enabled=body.enabled,
             command=body.command,
             warning_steps=_warning_inputs(body.warning_steps),
+            only_when_running=body.only_when_running,
             created_by=authorized.user_id.value,
         )
     except ServerNotFoundError as exc:
@@ -435,6 +462,7 @@ async def update_schedule(
             enabled=body.enabled,
             command=body.command,
             warning_steps=_warning_inputs(body.warning_steps),
+            only_when_running=body.only_when_running,
         )
     except (ServerNotFoundError, ScheduleNotFoundError) as exc:
         raise _not_found() from exc

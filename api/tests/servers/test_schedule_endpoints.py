@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from dataclasses import replace
 
 import pytest
 from fastapi import FastAPI
@@ -389,6 +390,47 @@ def test_create_returns_201_and_audits() -> None:
     assert resp.status_code == 201
     assert resp.json()["action"] == "restart"
     assert len(recorder.events) == 1
+
+
+def test_create_forwards_only_when_running_to_the_use_case() -> None:
+    # Issue #2236: the backup-only flag rides the create body; omitted, it is
+    # forwarded as None so the domain applies the backup default.
+    server = uuid.uuid4()
+    create = _FakeUseCase(result=_schedule(server))
+    app = _app(member=True, allow=True, create=create, recorder=_RecordingRecorder())
+    client = _client(app)
+    backup = {"name": "nightly", "action": "backup", "cron": "0 3 * * *"}
+    client.post(_url(uuid.uuid4(), server), json={**backup, "only_when_running": False})
+    client.post(_url(uuid.uuid4(), server), json=backup)
+    assert [call["only_when_running"] for call in create.calls] == [False, None]
+
+
+def test_update_forwards_only_when_running_to_the_use_case() -> None:
+    server = uuid.uuid4()
+    update = _FakeUseCase(result=_schedule(server))
+    app = _app(member=True, allow=True, update=update, recorder=_RecordingRecorder())
+    client = _client(app)
+    url = _url(uuid.uuid4(), server, schedule=uuid.uuid4())
+    client.patch(url, json={"only_when_running": True})
+    client.patch(url, json={"enabled": False})
+    assert [call["only_when_running"] for call in update.calls] == [True, None]
+
+
+def test_response_reports_only_when_running_for_backup_only() -> None:
+    server = uuid.uuid4()
+    backup = replace(
+        _schedule(server), action=ScheduleAction.BACKUP, only_when_running=False
+    )
+    app = _app(member=True, allow=True, list_=_FakeUseCase(result=[backup]))
+    client = _client(app)
+    assert client.get(_url(uuid.uuid4(), server)).json()[0]["only_when_running"] is (
+        False
+    )
+    app = _app(member=True, allow=True, list_=_FakeUseCase(result=[_schedule(server)]))
+    client = _client(app)
+    assert client.get(_url(uuid.uuid4(), server)).json()[0]["only_when_running"] is (
+        None
+    )
 
 
 def test_read_disabled_schedule_reports_null_next_run() -> None:

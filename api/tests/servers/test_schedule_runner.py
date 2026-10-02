@@ -133,6 +133,7 @@ def _schedule(
     cadence: Cadence | None = None,
     command: str | None = None,
     warning_steps: tuple[WarningStep, ...] = (),
+    only_when_running: bool | None = None,
     next_run_at: dt.datetime,
     last_run_at: dt.datetime | None = None,
     enabled: bool = True,
@@ -148,6 +149,7 @@ def _schedule(
         updated_at=_NOW,
         command=command,
         warning_steps=warning_steps,
+        only_when_running=only_when_running,
         next_run_at=next_run_at,
         last_run_at=last_run_at,
     )
@@ -363,6 +365,67 @@ async def test_backup_on_transitional_server_is_skipped(
     assert await env.uow.backups.list_for_server(server.id) == []
 
 
+async def test_only_when_running_backup_on_stopped_server_is_skipped() -> None:
+    # Issue #2236: with the option on (the default), an occurrence that finds
+    # the server stopped records a SKIP — no archive, no notification — and
+    # next_run_at advances normally.
+    env = _env()
+    server = _stopped_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.BACKUP,
+        only_when_running=True,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()
+
+    assert _runs(env, schedule) == [ScheduleRunOutcome.SKIPPED]
+    assert _run_details(env, schedule) == ["server not running"]
+    assert await env.uow.backups.list_for_server(server.id) == []
+    assert env.notifier.notifications == []
+    stored = env.uow.schedules.by_id[schedule.id]
+    assert stored.next_run_at is not None and stored.next_run_at > _NOW
+
+
+async def test_only_when_running_backup_on_running_server_succeeds() -> None:
+    env = _env()
+    server = _running_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.BACKUP,
+        only_when_running=True,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()
+
+    assert _runs(env, schedule) == [ScheduleRunOutcome.SUCCESS]
+    assert len(await env.uow.backups.list_for_server(server.id)) == 1
+
+
+async def test_backup_with_option_off_still_backs_up_a_stopped_server() -> None:
+    env = _env()
+    server = _stopped_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.BACKUP,
+        only_when_running=False,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()
+
+    assert _runs(env, schedule) == [ScheduleRunOutcome.SUCCESS]
+    assert len(await env.uow.backups.list_for_server(server.id)) == 1
+
+
 # --- failure path ----------------------------------------------------------
 
 
@@ -465,6 +528,7 @@ async def test_unexpected_exception_is_classified_as_failure() -> None:
     schedule = _schedule(
         server,
         action=ScheduleAction.BACKUP,
+        only_when_running=False,
         next_run_at=_NOW - dt.timedelta(seconds=10),
     )
     env.uow.servers.seed(server)
@@ -544,6 +608,7 @@ async def test_backup_storage_timeout_records_distinguishable_detail() -> None:
     schedule = _schedule(
         server,
         action=ScheduleAction.BACKUP,
+        only_when_running=False,
         next_run_at=_NOW - dt.timedelta(seconds=10),
     )
     env.uow.servers.seed(server)
@@ -561,6 +626,7 @@ async def test_backup_storage_internal_error_records_sanitized_detail() -> None:
     schedule = _schedule(
         server,
         action=ScheduleAction.BACKUP,
+        only_when_running=False,
         next_run_at=_NOW - dt.timedelta(seconds=10),
     )
     env.uow.servers.seed(server)
@@ -583,6 +649,7 @@ async def test_corrupt_backup_records_backup_corrupt_detail() -> None:
     schedule = _schedule(
         server,
         action=ScheduleAction.BACKUP,
+        only_when_running=False,
         next_run_at=_NOW - dt.timedelta(seconds=10),
     )
     env.uow.servers.seed(server)
@@ -603,6 +670,7 @@ async def test_storage_unavailable_records_distinct_detail() -> None:
     schedule = _schedule(
         server,
         action=ScheduleAction.BACKUP,
+        only_when_running=False,
         next_run_at=_NOW - dt.timedelta(seconds=10),
     )
     env.uow.servers.seed(server)
@@ -631,7 +699,12 @@ async def test_advance_does_not_resurrect_a_concurrently_disabled_schedule() -> 
         """Simulates a CRUD disable landing while the action executes."""
 
         async def __call__(
-            self, *, server_id: ServerId, action: ScheduleAction, command: str | None
+            self,
+            *,
+            server_id: ServerId,
+            action: ScheduleAction,
+            command: str | None,
+            only_when_running: bool | None,
         ) -> ActionResult:
             env.uow.schedules.by_id[schedule.id] = replace(
                 env.uow.schedules.by_id[schedule.id],
@@ -639,7 +712,11 @@ async def test_advance_does_not_resurrect_a_concurrently_disabled_schedule() -> 
                 next_run_at=None,
             )
             return await ExecuteScheduleAction.__call__(
-                self, server_id=server_id, action=action, command=command
+                self,
+                server_id=server_id,
+                action=action,
+                command=command,
+                only_when_running=only_when_running,
             )
 
     def _make_disabling() -> ExecuteScheduleAction:
@@ -674,6 +751,7 @@ async def test_overdue_backup_fires_exactly_one_catchup() -> None:
     schedule = _schedule(
         server,
         action=ScheduleAction.BACKUP,
+        only_when_running=False,
         next_run_at=_NOW - dt.timedelta(seconds=2 * _HOUR),  # two periods overdue
     )
     env.uow.servers.seed(server)
@@ -795,13 +873,18 @@ async def test_two_due_schedules_on_different_servers_run_concurrently() -> None
                 server_id: ServerId,
                 action: ScheduleAction,
                 command: str | None,
+                only_when_running: bool | None,
             ) -> ActionResult:
                 nonlocal max_concurrent
                 in_flight.add(server_id)
                 max_concurrent = max(max_concurrent, len(in_flight))
                 await asyncio.sleep(0)  # yield to allow true concurrency
                 result = await ExecuteScheduleAction.__call__(
-                    self, server_id=server_id, action=action, command=command
+                    self,
+                    server_id=server_id,
+                    action=action,
+                    command=command,
+                    only_when_running=only_when_running,
                 )
                 in_flight.discard(server_id)
                 return result
@@ -858,6 +941,7 @@ async def test_same_server_schedules_run_serially() -> None:
                 server_id: ServerId,
                 action: ScheduleAction,
                 command: str | None,
+                only_when_running: bool | None,
             ) -> ActionResult:
                 # Use command line as schedule identifier since we can't get
                 # schedule id here.
@@ -866,7 +950,11 @@ async def test_same_server_schedules_run_serially() -> None:
                 in_flight_count.append(len(in_flight))
                 await asyncio.sleep(0)
                 result = await ExecuteScheduleAction.__call__(
-                    self, server_id=server_id, action=action, command=command
+                    self,
+                    server_id=server_id,
+                    action=action,
+                    command=command,
+                    only_when_running=only_when_running,
                 )
                 in_flight.discard(key)
                 return result
@@ -925,13 +1013,18 @@ async def test_concurrent_cap_limits_parallel_executions() -> None:
                 server_id: ServerId,
                 action: ScheduleAction,
                 command: str | None,
+                only_when_running: bool | None,
             ) -> ActionResult:
                 nonlocal max_concurrent, in_flight
                 in_flight += 1
                 max_concurrent = max(max_concurrent, in_flight)
                 await asyncio.sleep(0)  # yield to let all allowed tasks enter
                 result = await ExecuteScheduleAction.__call__(
-                    self, server_id=server_id, action=action, command=command
+                    self,
+                    server_id=server_id,
+                    action=action,
+                    command=command,
+                    only_when_running=only_when_running,
                 )
                 in_flight -= 1
                 return result
@@ -1069,6 +1162,7 @@ async def test_failed_backup_retries_once_then_waits_for_next_occurrence() -> No
     schedule = _schedule(
         server,
         action=ScheduleAction.BACKUP,
+        only_when_running=False,
         next_run_at=_NOW - dt.timedelta(seconds=10),
     )
     env.uow.servers.seed(server)
@@ -1121,6 +1215,7 @@ async def test_successful_retry_clears_retry_and_is_not_notified() -> None:
     schedule = _schedule(
         server,
         action=ScheduleAction.BACKUP,
+        only_when_running=False,
         next_run_at=_NOW - dt.timedelta(seconds=10),
     )
     env.uow.servers.seed(server)
@@ -1161,6 +1256,7 @@ async def test_corrupt_backup_failure_is_not_retried() -> None:
     schedule = _schedule(
         server,
         action=ScheduleAction.BACKUP,
+        only_when_running=False,
         next_run_at=_NOW - dt.timedelta(seconds=10),
     )
     env.uow.servers.seed(server)
@@ -1217,12 +1313,20 @@ class _BoomExecute(ExecuteScheduleAction):
     """Executor that blows up for STOP actions, to test tick isolation."""
 
     async def __call__(
-        self, *, server_id: ServerId, action: ScheduleAction, command: str | None
+        self,
+        *,
+        server_id: ServerId,
+        action: ScheduleAction,
+        command: str | None,
+        only_when_running: bool | None,
     ) -> ActionResult:
         if action is ScheduleAction.STOP:
             raise RuntimeError("boom")
         return await super().__call__(
-            server_id=server_id, action=action, command=command
+            server_id=server_id,
+            action=action,
+            command=command,
+            only_when_running=only_when_running,
         )
 
 
@@ -1631,6 +1735,7 @@ async def test_successful_backup_run_prunes_per_retention_policy() -> None:
     schedule = _schedule(
         server,
         action=ScheduleAction.BACKUP,
+        only_when_running=False,
         next_run_at=_NOW - dt.timedelta(seconds=10),
     )
     env.uow.schedules.seed(schedule)
@@ -1665,6 +1770,7 @@ async def test_prune_failure_does_not_fail_the_successful_backup_run() -> None:
     schedule = _schedule(
         server,
         action=ScheduleAction.BACKUP,
+        only_when_running=False,
         next_run_at=_NOW - dt.timedelta(seconds=10),
     )
     env.uow.schedules.seed(schedule)
@@ -1691,6 +1797,7 @@ async def test_skipped_backup_run_does_not_prune() -> None:
     schedule = _schedule(
         server,
         action=ScheduleAction.BACKUP,
+        only_when_running=False,
         next_run_at=_NOW - dt.timedelta(seconds=10),
     )
     env.uow.schedules.seed(schedule)
@@ -1722,6 +1829,7 @@ async def test_failed_backup_run_does_not_prune() -> None:
     schedule = _schedule(
         server,
         action=ScheduleAction.BACKUP,
+        only_when_running=False,
         next_run_at=_NOW - dt.timedelta(seconds=10),
     )
     env.uow.schedules.seed(schedule)
@@ -1744,6 +1852,7 @@ async def test_successful_backup_retry_also_prunes() -> None:
     schedule = _schedule(
         server,
         action=ScheduleAction.BACKUP,
+        only_when_running=False,
         next_run_at=_NOW - dt.timedelta(seconds=10),
     )
     env.uow.schedules.seed(schedule)

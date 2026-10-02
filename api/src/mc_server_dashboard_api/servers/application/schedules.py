@@ -234,6 +234,7 @@ class CreateSchedule:
         enabled: bool = True,
         command: str | None = None,
         warning_steps: Sequence[WarningStepInput] | None = None,
+        only_when_running: bool | None = None,
         created_by: uuid.UUID | None = None,
     ) -> Schedule:
         async with self.uow:
@@ -255,6 +256,7 @@ class CreateSchedule:
                 timezone=timezone,
                 command=command,
                 warning_steps=_warning_steps(warning_steps),
+                only_when_running=only_when_running,
                 next_run_at=None,
                 last_run_at=None,
                 created_by=created_by,
@@ -305,8 +307,10 @@ class ReadSchedule:
 class UpdateSchedule:
     """Edit a schedule (schedule:manage + the action's permission).
 
-    A partial (PATCH) edit: a field left unset (``None``) keeps its current value;
-    ``warning_steps=[]`` clears the steps (distinct from omitting the field). The
+    A partial (PATCH) edit: a field left unset (``None``) keeps its current value
+    (``only_when_running`` included — a backup schedule's flag is always a
+    ``bool``, so ``None`` never means "clear"); ``warning_steps=[]`` clears the
+    steps (distinct from omitting the field). The
     action itself is immutable — to run a different action, delete and recreate
     (each gated) — so the write gate always checks the *existing* action's
     permission. The entity is rebuilt via :func:`dataclasses.replace` so its
@@ -332,6 +336,7 @@ class UpdateSchedule:
         enabled: bool | None = None,
         command: str | None = None,
         warning_steps: Sequence[WarningStepInput] | None = None,
+        only_when_running: bool | None = None,
     ) -> Schedule:
         async with self.uow:
             existing = await _load_schedule(
@@ -356,6 +361,11 @@ class UpdateSchedule:
                     existing.warning_steps
                     if warning_steps is None
                     else _warning_steps(warning_steps)
+                ),
+                only_when_running=(
+                    existing.only_when_running
+                    if only_when_running is None
+                    else only_when_running
                 ),
                 next_run_at=None,
                 updated_at=now,
