@@ -14,6 +14,11 @@
  * every GAP frame still triggers one list refetch as a belt-and-suspenders
  * reconcile (#1723).
  *
+ * A live state outlives the list's REST reads (#3213): one received before the
+ * list has loaded, or while a read is in flight, is re-applied when the
+ * response lands unless that read started after it ({@link observeRestReads}),
+ * so an older response never rolls a pill back.
+ *
  * The client is recreated per active community id and torn down on switch /
  * unmount (sign-out unmounts the dashboard), so a stale community's socket
  * never patches another community's cache.
@@ -28,6 +33,7 @@ import {
   type NotificationEvent,
   type StatusEvent,
 } from "./communityEvents.ts";
+import { observeRestReads } from "./restReads.ts";
 
 type ServerResponse = components["schemas"]["ServerResponse"];
 
@@ -50,7 +56,36 @@ export function useCommunityEvents(communityId: string): boolean {
 
   useEffect(() => {
     setDegraded(false);
+    const key = serversKey(communityId);
     let pollTimer: ReturnType<typeof setInterval> | null = null;
+
+    // The live states not yet superseded by a REST read, each stamped with
+    // when it was received (#3213).
+    const live = new Map<string, { state: string; at: number }>();
+
+    // Write every live state over the cached list.
+    const patch = () => {
+      if (live.size === 0) {
+        return;
+      }
+      queryClient.setQueryData<ServerResponse[]>(key, (servers) =>
+        servers?.map((s) => {
+          const entry = live.get(s.id);
+          return entry === undefined
+            ? s
+            : { ...s, observed_state: entry.state };
+        }),
+      );
+    };
+
+    const reads = observeRestReads(queryClient, key, (readStartedAt) => {
+      for (const [id, entry] of live) {
+        if (entry.at < readStartedAt) {
+          live.delete(id);
+        }
+      }
+      patch();
+    });
 
     const stopPolling = () => {
       if (pollTimer !== null) {
@@ -64,52 +99,44 @@ export function useCommunityEvents(communityId: string): boolean {
       if (pollTimer !== null) {
         return;
       }
-      pollTimer = setInterval(() => {
-        queryClient.invalidateQueries({ queryKey: serversKey(communityId) });
-      }, POLL_INTERVAL_MS);
+      pollTimer = setInterval(reads.refetch, POLL_INTERVAL_MS);
     };
 
     const applyStatus = (event: StatusEvent) => {
-      const key = serversKey(communityId);
+      live.set(event.serverId, { state: event.state, at: reads.stamp() });
       const current = queryClient.getQueryData<ServerResponse[]>(key);
       if (current === undefined) {
+        // The list has not loaded: the state is applied when it lands.
         return;
       }
-      const found = current.some((s) => s.id === event.serverId);
-      if (!found) {
+      if (!current.some((s) => s.id === event.serverId)) {
         // A server created after the list loaded: one refetch picks it up.
-        queryClient.invalidateQueries({ queryKey: key });
+        reads.refetch();
         return;
       }
-      queryClient.setQueryData<ServerResponse[]>(key, (servers) =>
-        servers?.map((s) =>
-          s.id === event.serverId ? { ...s, observed_state: event.state } : s,
-        ),
-      );
+      patch();
     };
 
     // The snapshot is every server's current state (#1795): patch them all in
     // place. It carries states only, so a server created or deleted since the
     // list loaded (the sets differ) needs one list refetch.
     const applySnapshot = (servers: StatusEvent[]) => {
-      const key = serversKey(communityId);
+      const at = reads.stamp();
+      live.clear();
+      for (const s of servers) {
+        live.set(s.serverId, { state: s.state, at });
+      }
       const current = queryClient.getQueryData<ServerResponse[]>(key);
       if (current === undefined) {
+        // The list has not loaded: the states are applied when it lands.
         return;
       }
-      const states = new Map(servers.map((s) => [s.serverId, s.state]));
-      queryClient.setQueryData<ServerResponse[]>(
-        key,
-        current.map((s) => {
-          const state = states.get(s.id);
-          return state === undefined ? s : { ...s, observed_state: state };
-        }),
-      );
+      patch();
       if (
-        states.size !== current.length ||
-        current.some((s) => !states.has(s.id))
+        live.size !== current.length ||
+        current.some((s) => !live.has(s.id))
       ) {
-        queryClient.invalidateQueries({ queryKey: key });
+        reads.refetch();
       }
     };
 
@@ -136,14 +163,14 @@ export function useCommunityEvents(communityId: string): boolean {
       onGap: () => {
         // The stream fell behind and dropped status frames for an unknown set
         // of servers: one list refetch reconciles them (#1723).
-        queryClient.invalidateQueries({ queryKey: serversKey(communityId) });
+        reads.refetch();
       },
       onOpen: () => {
         stopPolling();
         if (!pristine) {
           // Transitions between the last poll tick (or the drop itself) and
           // this reopen were lost for good; reconcile once (#1723).
-          queryClient.invalidateQueries({ queryKey: serversKey(communityId) });
+          reads.refetch();
         }
         pristine = false;
         setDegraded(false);
@@ -161,6 +188,7 @@ export function useCommunityEvents(communityId: string): boolean {
     return () => {
       client.close();
       stopPolling();
+      reads.close();
     };
   }, [communityId, queryClient, showToast]);
 
