@@ -50,7 +50,7 @@ class SetPlatformAdmin:
             ):
                 raise LastPlatformAdminError(str(target_id.value))
 
-            user.is_platform_admin = grant
-            user.updated_at = self.clock.now()
-            await self.uow.users.update(user)
+            await self.uow.users.set_platform_admin(
+                user.id, is_platform_admin=grant, updated_at=self.clock.now()
+            )
             await self.uow.commit()

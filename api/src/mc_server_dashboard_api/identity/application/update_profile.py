@@ -56,13 +56,20 @@ class UpdateProfile:
             if new_name is not None and new_name != user.username:
                 if await self.uow.users.get_by_username(new_name) is not None:
                     raise UsernameAlreadyExistsError(new_name.value)
-                user.username = new_name
             if new_email is not None and new_email != user.email:
                 if await self.uow.users.get_by_email(new_email) is not None:
                     raise EmailAlreadyExistsError(new_email.value)
-                user.email = new_email
 
-            user.updated_at = self.clock.now()
-            await self.uow.users.update(user)
+            # Write only the profile columns (#3214): the read above holds no
+            # lock, so persisting the whole entity would restore any security
+            # state (active, admin flag, password hash) changed since.
+            updated = await self.uow.users.update_profile(
+                user_id,
+                username=new_name,
+                email=new_email,
+                updated_at=self.clock.now(),
+            )
+            if updated is None:
+                raise UserNotFoundError(str(user_id.value))
             await self.uow.commit()
-        return user
+        return updated

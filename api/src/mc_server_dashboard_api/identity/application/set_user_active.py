@@ -58,9 +58,9 @@ class SetUserActive:
                 ):
                     raise LastPlatformAdminError(str(target_id.value))
 
-            user.active = active
-            user.updated_at = self.clock.now()
-            await self.uow.users.update(user)
+            await self.uow.users.set_active(
+                user.id, active=active, updated_at=self.clock.now()
+            )
             if not active:
                 # Revoke every session so the deactivation takes effect on the
                 # refresh path immediately, not only on access-token expiry.

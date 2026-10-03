@@ -65,7 +65,34 @@ class _FakeUserRepository(UserRepository):
     async def usernames_by_id(self, user_ids: list[UserId]) -> dict[UserId, Username]:
         raise NotImplementedError
 
-    async def update(self, user: User) -> None:
+    async def update_profile(
+        self,
+        user_id: UserId,
+        *,
+        username: Username | None,
+        email: EmailAddress | None,
+        updated_at: dt.datetime,
+    ) -> User | None:
+        raise NotImplementedError
+
+    async def change_password_hash(
+        self,
+        user_id: UserId,
+        *,
+        expected_hash: str,
+        new_hash: str,
+        updated_at: dt.datetime,
+    ) -> bool:
+        raise NotImplementedError
+
+    async def set_active(
+        self, user_id: UserId, *, active: bool, updated_at: dt.datetime
+    ) -> None:
+        raise NotImplementedError
+
+    async def set_platform_admin(
+        self, user_id: UserId, *, is_platform_admin: bool, updated_at: dt.datetime
+    ) -> None:
         raise NotImplementedError
 
     async def delete(self, user_id: UserId) -> None:

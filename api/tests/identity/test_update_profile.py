@@ -9,17 +9,25 @@ A change to one's own current value is not a conflict (idempotent).
 from __future__ import annotations
 
 import datetime as dt
+from collections.abc import Callable
+from dataclasses import replace
 
 import pytest
 
 from mc_server_dashboard_api.identity.application.update_profile import UpdateProfile
+from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.identity.domain.errors import (
     EmailAlreadyExistsError,
     UsernameAlreadyExistsError,
     UserNotFoundError,
 )
-from mc_server_dashboard_api.identity.domain.value_objects import UserId
-from tests.identity.fakes import FakeClock, FakeUnitOfWork, make_user
+from mc_server_dashboard_api.identity.domain.value_objects import UserId, Username
+from tests.identity.fakes import (
+    FakeClock,
+    FakeUnitOfWork,
+    FakeUserRepository,
+    make_user,
+)
 
 _NOW = dt.datetime(2026, 6, 4, tzinfo=dt.timezone.utc)
 
@@ -110,3 +118,59 @@ async def test_update_unknown_user_raises() -> None:
     uow = FakeUnitOfWork()
     with pytest.raises(UserNotFoundError):
         await _use_case(uow)(user_id=UserId.new(), username="x", email=None)
+
+
+class _ChangedAfterRead(FakeUserRepository):
+    """Applies ``change`` when the edit pre-checks the username.
+
+    That check runs after the use case's read and before its write, so the change
+    stands in for a request that committed in between (#3214).
+    """
+
+    def __init__(self, change: Callable[[dict[UserId, User]], None]) -> None:
+        super().__init__()
+        self._change = change
+
+    async def get_by_username(self, username: Username) -> User | None:
+        self._change(self.by_id)
+        return await super().get_by_username(username)
+
+
+async def test_update_does_not_restore_security_state_changed_after_the_read() -> None:
+    user = make_user(
+        username="alice", email="alice@example.com", now=_NOW, is_platform_admin=True
+    )
+
+    def administrator_acts(rows: dict[UserId, User]) -> None:
+        rows[user.id] = replace(
+            rows[user.id], active=False, is_platform_admin=False, password_hash="new"
+        )
+
+    uow = FakeUnitOfWork(users=_ChangedAfterRead(administrator_acts))
+    uow.users.seed(user)
+
+    updated = await _use_case(uow)(user_id=user.id, username="alice2", email=None)
+
+    stored = uow.users.by_id[user.id]
+    assert stored.username.value == "alice2"
+    assert (stored.active, stored.is_platform_admin, stored.password_hash) == (
+        False,
+        False,
+        "new",
+    )
+    # The response is the persisted row, not the stale read.
+    assert updated == stored
+
+
+async def test_update_of_user_deleted_after_the_read_raises() -> None:
+    user = make_user(username="alice", email="alice@example.com", now=_NOW)
+
+    def account_deleted(rows: dict[UserId, User]) -> None:
+        del rows[user.id]
+
+    uow = FakeUnitOfWork(users=_ChangedAfterRead(account_deleted))
+    uow.users.seed(user)
+
+    with pytest.raises(UserNotFoundError):
+        await _use_case(uow)(user_id=user.id, username="alice2", email=None)
+    assert uow.commits == 0

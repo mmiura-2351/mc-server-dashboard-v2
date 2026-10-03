@@ -114,28 +114,82 @@ class SqlAlchemyUserRepository(UserRepository):
         rows = (await self._session.execute(stmt)).all()
         return {UserId(row.id): Username(row.username) for row in rows}
 
-    async def update(self, user: User) -> None:
+    async def update_profile(
+        self,
+        user_id: UserId,
+        *,
+        username: Username | None,
+        email: EmailAddress | None,
+        updated_at: dt.datetime,
+    ) -> User | None:
+        values: dict[str, Any] = {"updated_at": updated_at}
+        if username is not None:
+            values["username"] = username.value
+        if email is not None:
+            values["email"] = email.value
+        # RETURNING hands back the row as written, so the caller sees columns
+        # committed concurrently instead of its stale read. populate_existing
+        # makes it overwrite any identity-map copy an earlier read in this
+        # transaction left alive (the map holds rows weakly, so usually none).
         stmt = (
             update(UserModel)
-            .where(UserModel.id == user.id.value)
-            .values(
-                username=user.username.value,
-                email=user.email.value,
-                password_hash=user.password_hash,
-                is_platform_admin=user.is_platform_admin,
-                active=user.active,
-                updated_at=user.updated_at,
-            )
+            .where(UserModel.id == user_id.value)
+            .values(**values)
+            .returning(UserModel)
+            .execution_options(populate_existing=True)
         )
-        # The Core UPDATE executes eagerly (unlike a staged ORM insert flushed at
+        # The UPDATE executes eagerly (unlike a staged ORM insert flushed at
         # commit), so a concurrent rename into a taken username/email raises the
         # IntegrityError here; translate it to the same domain conflict the
         # commit-time path raises so the update race is not a raw 500.
         try:
-            await self._session.execute(stmt)
+            row = (await self._session.execute(stmt)).scalar_one_or_none()
         except IntegrityError as exc:
             translate_integrity_error(exc)
             raise
+        return _to_user(row) if row is not None else None
+
+    async def change_password_hash(
+        self,
+        user_id: UserId,
+        *,
+        expected_hash: str,
+        new_hash: str,
+        updated_at: dt.datetime,
+    ) -> bool:
+        # Compare-and-set: under READ COMMITTED an UPDATE blocked behind a
+        # concurrent change re-checks its WHERE against the committed row, so a
+        # replaced hash matches nothing.
+        stmt = (
+            update(UserModel)
+            .where(
+                UserModel.id == user_id.value,
+                UserModel.password_hash == expected_hash,
+            )
+            .values(password_hash=new_hash, updated_at=updated_at)
+        )
+        result = cast(CursorResult[Any], await self._session.execute(stmt))
+        return result.rowcount > 0
+
+    async def set_active(
+        self, user_id: UserId, *, active: bool, updated_at: dt.datetime
+    ) -> None:
+        stmt = (
+            update(UserModel)
+            .where(UserModel.id == user_id.value)
+            .values(active=active, updated_at=updated_at)
+        )
+        await self._session.execute(stmt)
+
+    async def set_platform_admin(
+        self, user_id: UserId, *, is_platform_admin: bool, updated_at: dt.datetime
+    ) -> None:
+        stmt = (
+            update(UserModel)
+            .where(UserModel.id == user_id.value)
+            .values(is_platform_admin=is_platform_admin, updated_at=updated_at)
+        )
+        await self._session.execute(stmt)
 
     async def delete(self, user_id: UserId) -> None:
         stmt = delete(UserModel).where(UserModel.id == user_id.value)
