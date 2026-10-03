@@ -117,6 +117,12 @@ BACKUP_CLEAR_RETENTION: Final = "backup:clear_retention"
 # operator who ran the command (``None`` when run headless).
 BACKUP_QUARANTINE: Final = "backup:quarantine"
 SNAPSHOT_QUARANTINE: Final = "snapshot:quarantine"
+# The same sweep marking a backup UNREADABLE (issue #2374): its archive could not
+# be read back at all, or is missing. A separate operation from
+# ``backup:quarantine`` because the verdict and its remedy differ — a quarantined
+# world can still be force-restored, an unreadable archive cannot — so the trail
+# keeps them queryable apart. Same actor and target rules as above.
+BACKUP_MARK_UNREADABLE: Final = "backup:mark_unreadable"
 
 # File upload / download / rename / delete / mkdir / search (FR-FILE-*, issue
 # #259) plus write / rollback (issue #263). Recorded under the file:edit /

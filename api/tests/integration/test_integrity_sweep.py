@@ -254,3 +254,31 @@ async def test_sweep_is_idempotent_on_the_health_column(
         second.backups_quarantined,
         second.backups_healthy,
     )
+
+
+async def test_sweep_persists_unreadable_for_a_row_with_no_archive(
+    engine: AsyncEngine, tmp_path: Path
+) -> None:
+    """A row whose archive is gone is written ``unreadable`` through the real
+    ``ck_backup_health`` CHECK (issue #2374), not folded into ``quarantined``."""
+
+    community, server = await _seed_server(engine)
+    factory = create_session_factory(engine)
+    dangling_row = _backup(server, "no-such-archive")
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.backups.add(dangling_row)
+        await uow.commit()
+
+    sweep = IntegritySweep(
+        uow=ServersUnitOfWork(factory),
+        backup_store=StorageBackupStoreAdapter(storage=FsStorage(tmp_path)),
+        audit=LoggingAuditRecorder(
+            SqlAlchemyAuditWriter(factory, clock=AuditSystemClock())
+        ),
+    )
+    summary = await sweep()
+
+    async with ServersUnitOfWork(factory) as uow:
+        fetched = await uow.backups.get_by_id(dangling_row.id)
+    assert fetched is not None and fetched.health is BackupHealth.UNREADABLE
+    assert summary.backups_dangling == 1

@@ -585,7 +585,7 @@ this row only points at them.
 | `storage_ref` | text | locator of the archive in `Storage` (opaque to the DB) |
 | `size_bytes` | bigint nullable | recorded archive size; set at create/upload. NULL is reported as "unknown" in statistics — an honest gap, not a wrong total |
 | `source` | text | `manual` / `scheduled` / `event` / `uploaded` (CHECK enum). `uploaded` is an off-host archive brought in via the upload endpoint |
-| `health` | text | `healthy` / `quarantined` / `unknown` (CHECK enum). Structural health of the archived contents. A backup created through the integrity-gated create path is `healthy` by construction; an `uploaded` archive (which bypasses that gate) is `unknown` until the operator-run integrity sweep (`integrity_sweep_cli`, STORAGE.md) classifies it; a row a check found corrupt is `quarantined`. NOT NULL, defaults `unknown` |
+| `health` | text | `healthy` / `quarantined` / `unreadable` / `unknown` (CHECK enum). Health of the archive and its contents. A backup created through the integrity-gated create path is `healthy` by construction; an `uploaded` archive (which bypasses that gate) is `unknown` until the operator-run integrity sweep (`integrity_sweep_cli`, STORAGE.md) classifies it; a row a check found structurally corrupt is `quarantined` (still restorable with the `?force=true` override); a row whose archive could not be read back at all, or is missing, is `unreadable` (not restorable). The sweep re-checks every row, so a later sound read returns `quarantined` / `unreadable` to `healthy`. NOT NULL, defaults `unknown` |
 | `created_by` | uuid nullable | the user who triggered the backup; **soft reference** (no FK) so the row survives the actor's deletion (Section 9) |
 | `created_at` | timestamptz | |
 

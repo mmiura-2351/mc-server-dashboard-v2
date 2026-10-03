@@ -526,12 +526,18 @@ export const en = {
   "backups.col.creator": "By",
   "backups.unknownSize": "unknown",
   "backups.unknownCreator": "—",
-  // Condition badge (API `health`: healthy / quarantined / unknown). Plain
+  // Condition badge (API `health`: healthy / quarantined / unreadable /
+  // unknown). Plain
   // language — no internal jargon. A healthy backup shows nothing, keeping the
   // row quiet; only the at-risk states are flagged.
   "backups.health.quarantined": "Damaged",
   "backups.health.quarantinedTitle":
     "This backup's data is known to be damaged. Restoring it may produce a broken world.",
+  // Unreadable (#2374): the archive's bytes are gone, not the world damaged —
+  // nothing can restore it, and the remedy is on the storage side.
+  "backups.health.unreadable": "Unreadable",
+  "backups.health.unreadableTitle":
+    "This backup's file could not be read back from storage, so it cannot be restored. The storage is likely damaged, not the world. It is re-checked the next time an administrator runs the backup integrity check.",
   "backups.health.unknown": "Unverified",
   "backups.health.unknownTitle":
     "This backup has not been checked, so its condition is unknown.",
@@ -578,6 +584,9 @@ export const en = {
   "backups.restoreDialog.stopping": "Stopping the server…",
   "backups.restoreDialog.body":
     "This overwrites the server's current data with this backup. This cannot be undone.",
+  // Hover title on the disabled restore action of an unreadable backup (#2374).
+  "backups.restoreUnavailableUnreadable":
+    "This backup's file could not be read back from storage, so it cannot be restored.",
   "backups.restoreDialog.prompt": "Type RESTORE to confirm",
   "backups.restoreDialog.phrase": "RESTORE",
   "backups.restoreDialog.confirm": "Restore backup",
@@ -604,6 +613,8 @@ export const en = {
   "backups.deleted": "Backup deleted.",
   "backups.restored": "Backup restored.",
   "backups.error.notStopped": "Stop the server before restoring a backup.",
+  "backups.error.unreadable":
+    "This backup's file could not be read back from storage, so it cannot be restored.",
   "backups.error.unsettled":
     "The server is starting or stopping — try again once it is fully stopped or running.",
   "backups.error.invalidArchive": "That file is not a valid backup archive.",

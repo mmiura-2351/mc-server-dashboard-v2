@@ -420,9 +420,17 @@ export function ServerBackupsTab({
                       {t("backups.download")}
                     </button>
                     {canRestore && (
+                      // An unreadable archive (#2374) has no bytes to restore and
+                      // no override, so the action is disabled and says why.
                       <button
                         type="button"
                         className="btn sm"
+                        disabled={backup.health === "unreadable"}
+                        title={
+                          backup.health === "unreadable"
+                            ? t("backups.restoreUnavailableUnreadable")
+                            : undefined
+                        }
                         onClick={() => setRestoreTarget(backup)}
                       >
                         {t("backups.restore")}
@@ -478,24 +486,41 @@ export function ServerBackupsTab({
 }
 
 // Condition badge driven by the API `health` field (#745). A healthy backup
-// renders nothing — only the at-risk states (quarantined / unknown, and any
-// future value) earn a badge, so a clean list stays quiet. Each badge carries a
-// plain-language hover title; no internal jargon leaks.
+// renders nothing — only the at-risk states (quarantined / unreadable / unknown,
+// and any future value, which reads as unknown) earn a badge, so a clean list
+// stays quiet. Each badge carries a plain-language hover title; no internal
+// jargon leaks. Unreadable (#2374) is kept apart from quarantined because the
+// remedy differs: a damaged world can still be force-restored, an archive whose
+// bytes are gone cannot.
+const HEALTH_BADGES: Record<
+  string,
+  { className: string; label: TranslationKey; title: TranslationKey }
+> = {
+  quarantined: {
+    className: "health-quarantined",
+    label: "backups.health.quarantined",
+    title: "backups.health.quarantinedTitle",
+  },
+  unreadable: {
+    className: "health-unreadable",
+    label: "backups.health.unreadable",
+    title: "backups.health.unreadableTitle",
+  },
+};
+const UNKNOWN_BADGE = {
+  className: "health-unknown",
+  label: "backups.health.unknown",
+  title: "backups.health.unknownTitle",
+} as const;
+
 function HealthBadge({ health }: { health: string }) {
   if (health === "healthy") {
     return null;
   }
-  const quarantined = health === "quarantined";
+  const badge = HEALTH_BADGES[health] ?? UNKNOWN_BADGE;
   return (
-    <span
-      className={`badge ${quarantined ? "health-quarantined" : "health-unknown"}`}
-      title={t(
-        quarantined
-          ? "backups.health.quarantinedTitle"
-          : "backups.health.unknownTitle",
-      )}
-    >
-      {t(quarantined ? "backups.health.quarantined" : "backups.health.unknown")}
+    <span className={`badge ${badge.className}`} title={t(badge.title)}>
+      {t(badge.label)}
     </span>
   );
 }

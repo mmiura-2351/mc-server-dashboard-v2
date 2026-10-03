@@ -52,6 +52,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     BackupCorruptError,
     BackupNotFoundError,
     BackupStorageUnavailableError,
+    BackupUnreadableError,
     BackupUnsettledError,
     FileTooLargeError,
     InvalidBackupArchiveError,
@@ -739,6 +740,39 @@ async def test_restore_healthy_backup_with_force_stays_healthy() -> None:
     persisted = await backups.get_by_id(backup.id)
     assert persisted is not None
     assert persisted.health is BackupHealth.HEALTHY
+
+
+@pytest.mark.parametrize("force", [False, True])
+async def test_restore_unreadable_backup_is_refused_without_reading(
+    force: bool,
+) -> None:
+    """An UNREADABLE backup cannot be restored, with or without force (#2374).
+
+    Its archive's bytes are gone, so the operator override (#703) that publishes a
+    corrupt world has nothing to publish. The refusal comes from the recorded
+    verdict, before the archive is read, and leaves the verdict as it was: only a
+    sweep that reads the archive back in full revises it.
+    """
+
+    server = _at_rest()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    backups, backup = _restore_fixture(server, health=BackupHealth.UNREADABLE)
+    archive = FakeBackupArchiveStore()
+    archive.archives.add("ref")
+    uow = FakeUnitOfWork(servers=repo, backups=backups)
+
+    with pytest.raises(BackupUnreadableError):
+        await RestoreBackup(uow=uow, backup_store=archive)(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            backup_id=backup.id,
+            force=force,
+        )
+    assert archive.restore_calls == []
+    persisted = await backups.get_by_id(backup.id)
+    assert persisted is not None
+    assert persisted.health is BackupHealth.UNREADABLE
 
 
 async def test_restore_unknown_backup_is_not_found() -> None:

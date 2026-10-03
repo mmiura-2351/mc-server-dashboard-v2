@@ -505,6 +505,13 @@ body.col-resizing {
   border-color: rgba(242, 85, 85, 0.4);
   background: rgba(242, 85, 85, 0.08);
 }
+/* Unreadable (#2374): the archive's bytes are gone — as at-risk as quarantined,
+ * so it shares the warning colour; the label and title tell the two apart. */
+.badge.health-unreadable {
+  color: var(--red);
+  border-color: rgba(242, 85, 85, 0.4);
+  background: rgba(242, 85, 85, 0.08);
+}
 .badge.health-unknown {
   color: var(--text-faint);
 }

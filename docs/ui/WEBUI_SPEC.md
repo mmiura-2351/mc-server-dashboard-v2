@@ -455,12 +455,15 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 
 ### 6.7 Server detail — Backups
 - Stats header (count, total size, newest/oldest).
-- Table: created_at, source (`manual` / `scheduled` / `event` / `uploaded`), size, health (`healthy` / `quarantined` / `unknown`), creator;
+- Table: created_at, source (`manual` / `scheduled` / `event` / `uploaded`), size, health (`healthy` / `quarantined` / `unreadable` / `unknown`), creator;
   actions: download, restore, delete.
 - Restore: blocked with explanation while running (offer "stop now then
   restore" two-step); typed-confirm dialog. A `quarantined` backup requires a
   second force-acknowledge confirmation before the `?force=true` restore is
-  issued.
+  issued. An `unreadable` backup (its archive could not be read back from
+  storage) cannot be restored at all: its restore action is disabled with a
+  hover explanation, and its condition badge names the storage-side remedy
+  rather than the damaged-world one.
 - Create backup button (works on running servers — on-demand snapshot path);
   upload backup (file picker).
 - Schedule: backup cadence is a first-class `backup` schedule on the general

@@ -415,7 +415,9 @@ class BackupUnreadableError(ServerError):
     readability probe streamed the stored archive end to end and the store could not
     reproduce it — the body stopped short of its declared length, or the gzip stream
     never reached a trailer that matches its payload. The same read path backs
-    restore, so such a backup is unrestorable; the sweep quarantines it.
+    restore, so such a backup is unrestorable; the sweep marks it ``UNREADABLE``
+    (issue #2374). The restore use case raises it too, for a backup already
+    recorded ``UNREADABLE`` — refused before any read, ``force`` or not.
 
     Distinct from :class:`BackupCorruptError` (the archived *world* is structurally
     corrupt — the bytes are all there, the contents are bad) and from

@@ -66,7 +66,8 @@ export function backupErrorPresentation(
 /**
  * Select the restore dialog's message. A 409 `server_not_stopped` means the
  * state changed mid-flight, so it names restoring rather than the generic
- * stopped-only operation.
+ * stopped-only operation. A 409 `backup_unreadable` (#2374) means the backup's
+ * archive cannot be read back, so no retry or override will restore it.
  */
 export function backupRestoreErrorPresentation(
   status: number | undefined,
@@ -74,6 +75,9 @@ export function backupRestoreErrorPresentation(
 ): TranslationKey {
   if (reason === "server_not_stopped") {
     return "backups.error.notStopped";
+  }
+  if (reason === "backup_unreadable") {
+    return "backups.error.unreadable";
   }
   return backupErrorPresentation(status, reason);
 }

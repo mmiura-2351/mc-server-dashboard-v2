@@ -62,6 +62,15 @@ describe("backupRestoreErrorPresentation", () => {
     );
   });
 
+  // The backup was recorded unreadable (#2374) — e.g. by a sweep that ran while
+  // the dialog was open: the message names why it cannot be restored rather than
+  // a generic failure the user would retry.
+  it("names the unreadable archive for backup_unreadable", () => {
+    expect(backupRestoreErrorPresentation(409, "backup_unreadable")).toBe(
+      "backups.error.unreadable",
+    );
+  });
+
   it.each([
     [503, "storage_unavailable", "backups.error.storageUnavailable"],
     [404, "not_found", "backups.error.generic"],

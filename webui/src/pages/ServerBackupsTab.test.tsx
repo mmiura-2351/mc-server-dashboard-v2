@@ -300,6 +300,18 @@ describe("ServerBackupsTab condition badge (#745)", () => {
     ).toBeInTheDocument();
   });
 
+  it("badges an unreadable backup apart from a damaged one (#2374)", async () => {
+    routeGet({ backups: [backup({ health: "unreadable" })] });
+    await openBackups();
+
+    const badge = await screen.findByText(t("backups.health.unreadable"));
+    // The hover title carries the remedy, which differs from a damaged world's.
+    expect(badge).toHaveAttribute("title", t("backups.health.unreadableTitle"));
+    expect(
+      screen.queryByText(t("backups.health.quarantined")),
+    ).not.toBeInTheDocument();
+  });
+
   it("badges an unknown-health backup as unverified", async () => {
     routeGet({ backups: [backup({ health: "unknown" })] });
     await openBackups();
@@ -569,6 +581,29 @@ describe("ServerBackupsTab restore (stopped-only two-step)", () => {
         `/api/communities/${CID}/servers/${SID}/backups/${BID}/restore?force=true`,
       ),
     );
+  });
+
+  it("offers no restore for an unreadable backup, even when stopped (#2374)", async () => {
+    routeGet({
+      srv: { observed_state: "stopped", desired_state: "stopped" },
+      backups: [backup({ health: "unreadable" })],
+    });
+    await openBackups();
+
+    // The archive cannot be read back, so there is no override to offer: the
+    // restore action is disabled and says why instead of opening the dialog.
+    const restore = await screen.findByRole("button", {
+      name: t("backups.restore"),
+    });
+    expect(restore).toBeDisabled();
+    expect(restore).toHaveAttribute(
+      "title",
+      t("backups.restoreUnavailableUnreadable"),
+    );
+    fireEvent.click(restore);
+    expect(
+      screen.queryByPlaceholderText(t("backups.restoreDialog.phrase")),
+    ).not.toBeInTheDocument();
   });
 
   it("restores a healthy backup without force and with no extra acknowledgement", async () => {
