@@ -322,6 +322,42 @@ class MembershipRepositoryContract:
         assert missing_id is None
         assert missing_pair is None
 
+    async def test_locking_readers_scope_to_the_community(
+        self, membership_repository_harness: MembershipRepositoryHarness
+    ) -> None:
+        target = _membership(membership_repository_harness)
+        other = _membership(
+            membership_repository_harness,
+            user_id=membership_repository_harness.other_user_id,
+            community_id=membership_repository_harness.other_community_id,
+        )
+        async with membership_repository_harness.open() as transaction:
+            await transaction.repository.add(target)
+            await transaction.repository.add(other)
+            await transaction.commit()
+
+        async with membership_repository_harness.open() as transaction:
+            held = await transaction.repository.hold_for_users(
+                target.community_id,
+                [target.user_id, other.user_id, UserId(uuid.uuid4())],
+            )
+            none_held = await transaction.repository.hold_for_users(
+                target.community_id, []
+            )
+            locked = await transaction.repository.lock_by_user_and_community(
+                target.user_id, target.community_id
+            )
+            cross_community = await transaction.repository.lock_by_user_and_community(
+                target.user_id, other.community_id
+            )
+            await transaction.commit()
+
+        assert [membership.id for membership in held] == [target.id]
+        assert none_held == []
+        assert locked is not None
+        assert locked.id == target.id
+        assert cross_community is None
+
     async def test_user_and_community_pair_is_unique(
         self, membership_repository_harness: MembershipRepositoryHarness
     ) -> None:

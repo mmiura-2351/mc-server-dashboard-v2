@@ -247,6 +247,41 @@ class SqlAlchemyMembershipRepository(MembershipRepository):
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_membership(row) if row is not None else None
 
+    async def hold_for_users(
+        self, community_id: CommunityId, user_ids: Sequence[UserId]
+    ) -> list[Membership]:
+        if not user_ids:
+            return []
+        # One statement suffices: every row takes the same strength, and the
+        # row locking runs on the sorted rows, so they lock in id order.
+        stmt = (
+            select(MembershipModel)
+            .where(
+                MembershipModel.community_id == community_id.value,
+                MembershipModel.user_id.in_([user_id.value for user_id in user_ids]),
+            )
+            .order_by(MembershipModel.id)
+            .with_for_update(read=True, key_share=True)
+            .execution_options(populate_existing=True)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_membership(row) for row in rows]
+
+    async def lock_by_user_and_community(
+        self, user_id: UserId, community_id: CommunityId
+    ) -> Membership | None:
+        stmt = (
+            select(MembershipModel)
+            .where(
+                MembershipModel.user_id == user_id.value,
+                MembershipModel.community_id == community_id.value,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_membership(row) if row is not None else None
+
     async def list_for_user(self, user_id: UserId) -> list[Membership]:
         stmt = select(MembershipModel).where(MembershipModel.user_id == user_id.value)
         rows = (await self._session.execute(stmt)).scalars().all()

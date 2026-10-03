@@ -179,6 +179,22 @@ class FakeMembershipRepository(MembershipRepository):
                 return self._copy(membership)
         return None
 
+    async def hold_for_users(
+        self, community_id: CommunityId, user_ids: Sequence[UserId]
+    ) -> list[Membership]:
+        # In-memory equivalent: no concurrent transaction exists to wait for.
+        return [
+            self._copy(m)
+            for m in self.by_id.values()
+            if m.community_id == community_id and m.user_id in user_ids
+        ]
+
+    async def lock_by_user_and_community(
+        self, user_id: UserId, community_id: CommunityId
+    ) -> Membership | None:
+        # In-memory equivalent: no concurrent transaction exists to wait for.
+        return await self.get_by_user_and_community(user_id, community_id)
+
     async def list_for_user(self, user_id: UserId) -> list[Membership]:
         return [self._copy(m) for m in self.by_id.values() if m.user_id == user_id]
 

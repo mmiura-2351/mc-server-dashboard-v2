@@ -13,14 +13,11 @@ assume an authorized member and only do the data work.
   (server / file / backup families), and that the resource *exists* in the
   community — a fabricated ``resource_id`` is rejected with
   :class:`GrantResourceNotFoundError` rather than persisted as a ghost grant
-  (issue #361). The membership check is not held to the INSERT; the grant's
-  foreign key to the membership is what keeps a removal that commits in between
-  from leaving a ghost grant, surfacing as the same error (issue #3216). The
-  membership FK names the validated membership's id, so a remove-and-re-add in
-  between cannot hand the grant to the new membership. The resource check holds
-  the server until commit, ahead of the permission ceiling's locks (#3241), so a
-  server deletion either commits before it or waits and cascades to the grant;
-  the grant's foreign key to the server backs this.
+  (issue #361). Both checks hold their row until commit, in the permission
+  ceiling's lock order (#3241): a member removal or server deletion either
+  commits before them, failing the check, or waits and cascades to the grant.
+  The grant's foreign keys to the membership instance (by id) and the server
+  back this (issue #3216).
   A duplicate ``(user, resource_type, resource_id)`` surfaces as
   :class:`ResourceGrantAlreadyExistsError` (the unique constraint, translated by
   the UnitOfWork).
@@ -99,9 +96,13 @@ class CreateGrant:
 
         now = self.clock.now()
         async with self.uow:
-            membership = await self.uow.memberships.get_by_user_and_community(
-                user_id, community_id
+            # Hold the recipient's membership (the grant's parent) and the
+            # actor's (the ceiling's) before any other lock: the ceiling's lock
+            # order (#3241), so a member removal cannot deadlock with this.
+            held = await self.uow.memberships.hold_for_users(
+                community_id, [user_id, actor_id]
             )
+            membership = next((m for m in held if m.user_id == user_id), None)
             if membership is None:
                 raise GrantTargetNotMemberError(str(user_id.value))
             # Bound to the membership instance just validated, not the reusable

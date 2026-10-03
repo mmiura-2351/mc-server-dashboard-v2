@@ -52,6 +52,7 @@ from mc_server_dashboard_api.community.application.manage_grant import (
 from mc_server_dashboard_api.community.application.manage_membership import (
     AddMember,
     AssignRole,
+    RemoveMember,
     UnassignRole,
 )
 from mc_server_dashboard_api.community.application.manage_role import (
@@ -66,6 +67,8 @@ from mc_server_dashboard_api.community.domain.entities import (
     Role,
 )
 from mc_server_dashboard_api.community.domain.errors import (
+    GrantTargetNotMemberError,
+    MembershipNotFoundError,
     PermissionCeilingExceededError,
 )
 from mc_server_dashboard_api.community.domain.value_objects import (
@@ -100,6 +103,7 @@ pytestmark = pytest.mark.skipif(
 
 _START = Permission("server:start")
 _STOP = Permission("server:stop")
+_DELETE = Permission("server:delete")
 _ROLE_MANAGE = Permission("role:manage")
 _GRANT_MANAGE = Permission("grant:manage")
 
@@ -122,8 +126,9 @@ async def engine() -> AsyncIterator[AsyncEngine]:
 
 
 # Where a paused use case stops: at its first write, after a role update's
-# locked read of its target, or after the ceiling locked the actor's roles.
-_PausePoint = Literal["write", "target-read", "role-locks"]
+# locked read of its target, after the ceiling locked the actor's roles, or
+# after a member removal's last-owner guard locked the Owner assignments.
+_PausePoint = Literal["write", "target-read", "role-locks", "owner-guard"]
 
 
 class _Pause:
@@ -178,6 +183,13 @@ class _PausingMembershipRepository(SqlAlchemyMembershipRepository):
         role_ids = await super().lock_role_ids(membership_id)
         await self._pause.hold("role-locks")
         return role_ids
+
+    async def lock_owner_role_holders(
+        self, community_id: CommunityId, role_id: RoleId
+    ) -> list[MembershipId]:
+        holders = await super().lock_owner_role_holders(community_id, role_id)
+        await self._pause.hold("owner-guard")
+        return holders
 
     async def assign_role(self, membership_id: MembershipId, role_id: RoleId) -> None:
         await self._pause.hold("write")
@@ -457,6 +469,17 @@ async def _revoke_grant(world: _World, uow: SqlAlchemyUnitOfWork) -> None:
     )
 
 
+async def _add_delete_to_starters(world: _World, uow: SqlAlchemyUnitOfWork) -> None:
+    # Not a revocation but the same race from the other side: the role being
+    # assigned gains a permission the assigning manager lacks.
+    await UpdateRole(uow=uow, clock=SystemClock())(
+        community_id=world.community_id,
+        role_id=world.starters,
+        actor_id=world.owner,
+        permissions={_START, _DELETE},
+    )
+
+
 async def _race(world: _World, conferral: _Conferral, revocation: _Revocation) -> None:
     pause = _Pause()
     conferring = asyncio.create_task(
@@ -508,6 +531,130 @@ async def test_grant_creation_never_commits_after_the_actor_grant_is_revoked(
 ) -> None:
     world = await _world(engine, start_via_grant=True)
     await _race(world, _create_grant, _revoke_grant)
+
+
+async def test_assignment_never_commits_a_permission_its_role_gained_meanwhile(
+    engine: AsyncEngine,
+) -> None:
+    # The ceiling is evaluated against the role's permission set as the
+    # assignment commits it: had the owner's addition of server:delete committed
+    # in between, the manager -- who lacks server:delete -- would confer it.
+    world = await _world(engine)
+    await _race(world, _assign_role, _add_delete_to_starters)
+
+
+async def _add_co_owner(world: _World) -> UserId:
+    co_owner = UserId(uuid.uuid4())
+    await _insert_user(world.engine, co_owner.value, "co_owner")
+    await AddMember(
+        uow=SqlAlchemyUnitOfWork(world.factory),
+        users=IdentityUserDirectory(IdentityUnitOfWork(world.factory)),
+        clock=SystemClock(),
+    )(community_id=world.community_id, user_id=co_owner)
+    async with SqlAlchemyUnitOfWork(world.factory) as uow:
+        owner_role = next(
+            role
+            for role in await uow.roles.list_for_community(world.community_id)
+            if role.is_preset
+        )
+        membership = await uow.memberships.get_by_user_and_community(
+            co_owner, world.community_id
+        )
+        assert membership is not None
+        await uow.memberships.assign_role(membership.id, owner_role.id)
+        await uow.commit()
+    return co_owner
+
+
+async def _self_conferral(
+    world: _World, uow: SqlAlchemyUnitOfWork, actor: UserId, kind: str
+) -> object:
+    if kind == "assign-role":
+        await AssignRole(uow=uow)(
+            community_id=world.community_id,
+            user_id=actor,
+            role_id=world.starters,
+            actor_id=actor,
+        )
+        return None
+    return await CreateGrant(uow=uow, clock=SystemClock())(
+        community_id=world.community_id,
+        actor_id=actor,
+        user_id=actor,
+        resource_type="server",
+        resource_id=world.server_id,
+        permissions={_START},
+    )
+
+
+async def _actor_rows(world: _World, actor: UserId) -> int:
+    async with world.engine.connect() as conn:
+        return int(
+            (
+                await conn.execute(
+                    text(
+                        "SELECT (SELECT count(*) FROM membership WHERE user_id = :u)"
+                        " + (SELECT count(*) FROM resource_grant WHERE user_id = :u)"
+                    ),
+                    {"u": actor.value},
+                )
+            ).scalar_one()
+        )
+
+
+@pytest.mark.parametrize("kind", ["assign-role", "create-grant"])
+@pytest.mark.parametrize("actor_is_owner", [False, True], ids=["manager", "co-owner"])
+@pytest.mark.parametrize("removal_first", [False, True], ids=["conferral", "removal"])
+async def test_self_conferral_racing_the_actor_removal_does_not_deadlock(
+    engine: AsyncEngine, kind: str, actor_is_owner: bool, removal_first: bool
+) -> None:
+    # The actor confers to themselves -- a role assignment or a grant, both
+    # inserting a row under their own membership -- while they are removed. The
+    # conferral locks the actor's authority below that membership, and the
+    # removal deletes the membership and cascades to the same rows; whichever
+    # holds its first lock is paused there, the other runs into it, and both
+    # must then settle without a deadlock: the removal succeeds and the
+    # conferral either committed first (and was cascaded away) or is rejected,
+    # the membership and the authority under it being gone.
+    world = await _world(engine)
+    actor = await _add_co_owner(world) if actor_is_owner else world.manager
+
+    def conferral(uow: SqlAlchemyUnitOfWork) -> Coroutine[Any, Any, object]:
+        return _self_conferral(world, uow, actor, kind)
+
+    def removal(uow: SqlAlchemyUnitOfWork) -> Coroutine[Any, Any, None]:
+        return RemoveMember(uow=uow)(community_id=world.community_id, user_id=actor)
+
+    pid: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+    if removal_first:
+        pause = _Pause(at="owner-guard")
+        removing = asyncio.create_task(
+            removal(_PausingUnitOfWork(world.factory, pause))
+        )
+        await pause.reached.wait()
+        conferring = asyncio.create_task(conferral(_PidUnitOfWork(world.factory, pid)))
+        await _await_settled(world.engine, conferring, pid)
+    else:
+        pause = _Pause()
+        conferring = asyncio.create_task(
+            conferral(_PausingUnitOfWork(world.factory, pause))
+        )
+        await pause.reached.wait()
+        removing = asyncio.create_task(removal(_PidUnitOfWork(world.factory, pid)))
+        await _await_settled(world.engine, removing, pid)
+    pause.resume.set()
+    outcome, removed = await asyncio.gather(
+        conferring, removing, return_exceptions=True
+    )
+
+    assert not isinstance(removed, BaseException)
+    assert not isinstance(outcome, BaseException) or isinstance(
+        outcome,
+        MembershipNotFoundError
+        | GrantTargetNotMemberError
+        | PermissionCeilingExceededError,
+    )
+    assert await _actor_rows(world, actor) == 0
 
 
 class _DeletePidServersUnitOfWork(ServersUnitOfWork):

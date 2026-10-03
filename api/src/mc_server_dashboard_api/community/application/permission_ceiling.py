@@ -6,31 +6,47 @@ prevents a ``role:manage`` or ``grant:manage`` holder from escalating to
 owner-equivalent control by conferring permissions they do not possess.
 
 The ceiling is read under lock (#3241): the rows it is computed from -- the
-actor's roles, their assignments of those roles, and their grant on the
-resource -- stay share-locked until the conferring write commits. A revocation
-of any of them (a permission removed from the role, the role unassigned or
-deleted, the member removed, the grant revoked) therefore either commits first,
-and the ceiling sees it, or waits until the conferral has committed; a conferral
-never commits after the authority it relied on was revoked.
+actor's membership, their roles, their assignments of those roles, and their
+grant on the resource -- stay locked until the conferring write commits. A
+revocation of any of them (a permission removed from the role, the role
+unassigned or deleted, the member removed, the grant revoked) therefore either
+commits first, and the ceiling sees it, or waits until the conferral has
+committed; a conferral never commits after the authority it relied on was
+revoked. A role assignment also share-locks the role it assigns, so the set it
+confers is the one it commits.
 
 Lock order, the same for every transaction that locks through here:
 
-1. the grant's resource (``FOR KEY SHARE``, grant creation's existence check);
-2. role rows, one at a time in ascending id order (``FOR SHARE``; the role whose
+1. memberships: the actor's, and the recipient's a role assignment or grant
+   creation inserts its row under (``FOR KEY SHARE``, one statement in
+   ascending id order, taken by the use case before anything else);
+2. the grant's resource (``FOR KEY SHARE``, grant creation's existence check);
+3. role rows, one at a time in ascending id order (``FOR SHARE``; the role whose
    permissions an update replaces ``FOR UPDATE``, in its place in the order);
-3. the actor's ``membership_role`` rows (``FOR SHARE``);
-4. the actor's grant on the resource (``FOR SHARE``).
+4. the actor's ``membership_role`` rows (``FOR SHARE``);
+5. the actor's grant on the resource (``FOR SHARE``).
 
 Each row is taken at its final strength in one pass, so two actors editing each
-other's roles cannot deadlock. Roles precede their assignments and the resource
-precedes its grants because that is the order the cascades of a role deletion
-and a server deletion lock them in; assignments precede the grant as a member
-removal's cascade does.
+other's roles cannot deadlock, and the inserting write's foreign-key checks find
+their parents (the memberships, the server, the assigned role) already held.
+Against the deleters:
+
+- a member removal locks the membership first (``FOR UPDATE``), then its
+  last-owner guard locks the Owner assignments, then its cascade the
+  membership's assignments and grants -- the order above;
+- a role deletion locks the role, then its cascade the assignments;
+- a server deletion locks the server, then its cascade the grants;
+- a role unassignment locks only assignments (the Owner ones first, under the
+  last-owner guard).
+
+A community deletion cascades through every table and is not ordered with
+these; a deadlock there is detected by PostgreSQL and aborts one side.
 """
 
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 
 from mc_server_dashboard_api.community.domain.errors import (
     PermissionCeilingExceededError,
@@ -52,6 +68,7 @@ async def lock_actor_ceiling(
     resource_type: str | None = None,
     resource_id: uuid.UUID | None = None,
     role_to_update: RoleId | None = None,
+    roles_to_share: Sequence[RoleId] = (),
 ) -> set[Permission]:
     """Return the actor's ceiling, its sources locked until the transaction ends.
 
@@ -59,15 +76,21 @@ async def lock_actor_ceiling(
     community. When ``resource_type`` and ``resource_id`` are given (grant
     operations), the actor's own grant on that exact resource also counts.
 
-    ``role_to_update`` is locked ``FOR UPDATE`` in the same ordered pass as the
-    actor's roles, for a role update whose write depends on that role's current
-    state; it counts toward the ceiling only if the actor holds it.
+    ``role_to_update`` is locked ``FOR UPDATE``, and ``roles_to_share`` share-
+    locked, in the same ordered pass as the actor's roles, for a write that
+    depends on those roles' current state; they count toward the ceiling only
+    if the actor holds them. A caller that also inserts under a recipient's
+    membership holds both memberships first (lock order step 1); the actor's
+    is then already held here.
     """
-    membership = await uow.memberships.get_by_user_and_community(actor_id, community_id)
+    memberships = await uow.memberships.hold_for_users(community_id, [actor_id])
+    membership = memberships[0] if memberships else None
     role_ids = (
         [] if membership is None else await uow.memberships.list_role_ids(membership.id)
     )
-    roles = await uow.roles.lock_by_ids(role_ids, for_update=role_to_update)
+    roles = await uow.roles.lock_by_ids(
+        [*role_ids, *roles_to_share], for_update=role_to_update
+    )
     ceiling: set[Permission] = set()
     if membership is not None:
         # Locked after the roles, as a role deletion's cascade locks them. An

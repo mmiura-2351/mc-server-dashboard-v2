@@ -97,6 +97,30 @@ class MembershipRepository(abc.ABC):
         """Return the membership for ``(user_id, community_id)``, or ``None``."""
 
     @abc.abstractmethod
+    async def hold_for_users(
+        self, community_id: CommunityId, user_ids: Sequence[UserId]
+    ) -> list[Membership]:
+        """Return the memberships of ``user_ids``, held against removal until commit.
+
+        For a caller whose write depends on these memberships or inserts a row
+        under them (#3241): a member removal waits for this transaction, and a
+        membership one committed first is not returned. The rows are key-share
+        locked in ascending id order in one statement. Users without a
+        membership are skipped; order of the result is unspecified.
+        """
+
+    @abc.abstractmethod
+    async def lock_by_user_and_community(
+        self, user_id: UserId, community_id: CommunityId
+    ) -> Membership | None:
+        """Return :meth:`get_by_user_and_community`, locked for removal until commit.
+
+        A member removal takes this before any other lock (#3241), so it queues
+        behind a transaction holding the membership instead of deadlocking with
+        it over the rows below the membership.
+        """
+
+    @abc.abstractmethod
     async def list_for_user(self, user_id: UserId) -> list[Membership]:
         """Return all of ``user_id``'s memberships (FR-MEM-4 view scoping)."""
 

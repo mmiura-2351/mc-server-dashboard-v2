@@ -24,7 +24,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from mc_server_dashboard_api.community.application.permission_ceiling import (
-    enforce_permission_ceiling,
+    check_permission_ceiling,
+    lock_actor_ceiling,
 )
 from mc_server_dashboard_api.community.domain.clock import Clock
 from mc_server_dashboard_api.community.domain.entities import Membership, Role
@@ -161,7 +162,10 @@ class RemoveMember:
 
     async def __call__(self, *, community_id: CommunityId, user_id: UserId) -> None:
         async with self.uow:
-            membership = await self.uow.memberships.get_by_user_and_community(
+            # Locked before the last-owner guard's locks and the cascade's, the
+            # permission ceiling's lock order (#3241): a conferral holding this
+            # membership makes the removal wait here, holding nothing else.
+            membership = await self.uow.memberships.lock_by_user_and_community(
                 user_id, community_id
             )
             if membership is None:
@@ -241,22 +245,29 @@ class AssignRole:
         actor_id: UserId,
     ) -> None:
         async with self.uow:
-            membership = await self.uow.memberships.get_by_user_and_community(
-                user_id, community_id
+            # The recipient's membership (the assignment's parent) and the
+            # actor's (the ceiling's) are held first, and the assigned role is
+            # share-locked in the ceiling's role pass, so the set checked is the
+            # set conferred: the ceiling's lock order (#3241).
+            held = await self.uow.memberships.hold_for_users(
+                community_id, [user_id, actor_id]
             )
+            membership = next((m for m in held if m.user_id == user_id), None)
             if membership is None:
                 raise MembershipNotFoundError(str(user_id.value))
 
-            role = await self.uow.roles.get_by_id(role_id)
-            if role is None or role.community_id != community_id:
-                raise RoleNotFoundError(str(role_id.value))
-
-            await enforce_permission_ceiling(
+            ceiling = await lock_actor_ceiling(
                 self.uow,
                 actor_id=actor_id,
                 community_id=community_id,
-                conferred=role.permissions,
+                roles_to_share=[role_id],
             )
+            # Re-reads the role the ceiling's pass already holds.
+            role = next(iter(await self.uow.roles.lock_by_ids([role_id])), None)
+            if role is None or role.community_id != community_id:
+                raise RoleNotFoundError(str(role_id.value))
+
+            check_permission_ceiling(ceiling, role.permissions)
 
             if role_id in await self.uow.memberships.list_role_ids(membership.id):
                 return  # idempotent: already assigned, nothing to commit
