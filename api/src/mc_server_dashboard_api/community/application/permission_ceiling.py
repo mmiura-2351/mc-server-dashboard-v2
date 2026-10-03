@@ -16,8 +16,8 @@ never commits after the authority it relied on was revoked.
 Lock order, the same for every transaction that locks through here:
 
 1. the grant's resource (``FOR KEY SHARE``, grant creation's existence check);
-2. role rows, one at a time in ascending id order (``FOR SHARE``; the role an
-   update replaces the permissions of ``FOR UPDATE``, in its place in the order);
+2. role rows, one at a time in ascending id order (``FOR SHARE``; the role whose
+   permissions an update replaces ``FOR UPDATE``, in its place in the order);
 3. the actor's ``membership_role`` rows (``FOR SHARE``);
 4. the actor's grant on the resource (``FOR SHARE``).
 
