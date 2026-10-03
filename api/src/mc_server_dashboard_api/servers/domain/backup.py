@@ -53,21 +53,30 @@ class BackupSource(enum.Enum):
 
 
 class BackupHealth(enum.Enum):
-    """Structural health of a backup's archived contents (issue #742, #703).
+    """Health of a backup's archive and its contents (issue #742, #703, #2374).
 
     ``HEALTHY`` means the working set was structurally sound when the archive was
     written. A backup created through the normal create path is healthy *by
     construction*: the create-direction integrity gate (issue #749) refuses to
     archive a corrupt working set, so this records that fact rather than
     re-validating. ``QUARANTINED`` marks a backup whose contents a later check
-    found structurally corrupt (set by the future sweep, #744). ``UNKNOWN`` is
-    the honest default for rows that predate any check — legacy backups and
-    uploaded archives (which bypass the create gate) — until the sweep
-    classifies them.
+    found structurally corrupt — the bytes are all there, the world inside them is
+    bad, and the operator override (#703) can still restore it. ``UNREADABLE``
+    marks a backup whose archive a later check could not read back at all — the
+    store cannot produce its bytes, or holds none — so it cannot be restored, with
+    or without the override, and points at storage damage rather than at the
+    world. ``UNKNOWN`` is the honest default for rows that predate any check —
+    legacy backups and uploaded archives (which bypass the create gate) — until the
+    sweep classifies them.
+
+    No verdict but ``HEALTHY``-by-construction is final: the integrity sweep
+    re-reads every row whatever its current health, so a later successful read
+    moves a ``QUARANTINED`` or ``UNREADABLE`` row back to ``HEALTHY``.
     """
 
     HEALTHY = "healthy"
     QUARANTINED = "quarantined"
+    UNREADABLE = "unreadable"
     UNKNOWN = "unknown"
 
 

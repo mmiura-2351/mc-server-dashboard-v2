@@ -2,7 +2,8 @@
 
 Exercises :class:`IntegritySweep` against fakes (no DB, no real Storage), per
 TESTING.md Section 4. The sweep enumerates every server, re-checks each backup
-(extract-and-fsck) and persists ``HEALTHY`` / ``QUARANTINED`` on the backup row,
+(extract-and-fsck) and persists ``HEALTHY`` / ``QUARANTINED`` / ``UNREADABLE`` on
+the backup row,
 fscks the published ``current`` snapshot (report/audit only — snapshots are
 filesystem-only), audits each quarantine, and returns a summary. Re-running yields
 the same classification (idempotent).
@@ -17,6 +18,7 @@ import uuid
 import pytest
 
 from mc_server_dashboard_api.audit.domain.operations import (
+    BACKUP_MARK_UNREADABLE,
     BACKUP_QUARANTINE,
     SNAPSHOT_QUARANTINE,
     TARGET_BACKUP,
@@ -206,10 +208,11 @@ async def test_snapshot_on_an_unexamining_backend_is_not_counted_as_scanned() ->
     assert not [e for e in audit.events if e.operation == SNAPSHOT_QUARANTINE]
 
 
-async def test_dangling_backup_row_is_quarantined_and_counted() -> None:
+async def test_dangling_backup_row_is_marked_unreadable_and_counted() -> None:
     """A backup row whose archive is missing (crash-window dangling row) is
-    marked QUARANTINED, counted as ``backups_dangling`` in the summary, and
-    produces an audit entry — mirroring the lazy size backfill's handling."""
+    marked UNREADABLE (issue #2374) — there are no bytes to restore, the same
+    remedy as an archive the store cannot produce — counted as
+    ``backups_dangling`` in the summary, and audited as such."""
     sid = ServerId.new()
     dangling = _backup(sid, "gone", health=BackupHealth.UNKNOWN)
     sweep, uow, store, audit = _wire(servers=[_server(sid)], backups=[dangling])
@@ -218,19 +221,21 @@ async def test_dangling_backup_row_is_quarantined_and_counted() -> None:
 
     summary = await sweep()
 
-    assert uow.backups.by_id[dangling.id].health is BackupHealth.QUARANTINED
+    assert uow.backups.by_id[dangling.id].health is BackupHealth.UNREADABLE
     assert summary.backups_dangling == 1
     assert summary.backups_quarantined == 0
     assert summary.backups_healthy == 0
-    quarantines = [e for e in audit.events if e.operation == BACKUP_QUARANTINE]
-    assert len(quarantines) == 1
-    assert quarantines[0].target_id == dangling.id.value
+    marks = [e for e in audit.events if e.operation == BACKUP_MARK_UNREADABLE]
+    assert len(marks) == 1
+    assert marks[0].target_id == dangling.id.value
+    assert not [e for e in audit.events if e.operation == BACKUP_QUARANTINE]
 
 
-async def test_unreadable_archive_is_quarantined_and_counted_separately() -> None:
-    """A backup whose archive cannot be streamed back in full (issue #2371) is
-    QUARANTINED with the same audit entry, but counted as ``backups_unreadable`` —
-    the summary tells "the bytes are gone" from "the world is corrupt"."""
+async def test_unreadable_archive_is_marked_unreadable_not_quarantined() -> None:
+    """A backup whose archive cannot be streamed back in full (issue #2371) gets
+    its own verdict, UNREADABLE (issue #2374), and its own audit operation — not
+    the QUARANTINED a structurally corrupt world gets, because the remedies
+    differ: a corrupt world can still be force-restored, missing bytes cannot."""
 
     sid = ServerId.new()
     unreadable = _backup(sid, "torn", health=BackupHealth.HEALTHY)
@@ -239,14 +244,48 @@ async def test_unreadable_archive_is_quarantined_and_counted_separately() -> Non
 
     summary = await sweep()
 
-    assert uow.backups.by_id[unreadable.id].health is BackupHealth.QUARANTINED
+    assert uow.backups.by_id[unreadable.id].health is BackupHealth.UNREADABLE
     assert summary.backups_unreadable == 1
     assert summary.backups_quarantined == 0
     assert summary.backups_healthy == 0
-    quarantines = [e for e in audit.events if e.operation == BACKUP_QUARANTINE]
-    assert len(quarantines) == 1
-    assert quarantines[0].target_type == TARGET_BACKUP
-    assert quarantines[0].target_id == unreadable.id.value
+    marks = [e for e in audit.events if e.operation == BACKUP_MARK_UNREADABLE]
+    assert len(marks) == 1
+    assert marks[0].target_type == TARGET_BACKUP
+    assert marks[0].target_id == unreadable.id.value
+    assert not [e for e in audit.events if e.operation == BACKUP_QUARANTINE]
+
+
+async def test_previously_quarantined_row_is_reclassified_by_the_next_sweep() -> None:
+    """Rows quarantined before UNREADABLE existed mix both meanings (issue #2374);
+    the owner accepted that only because the next sweep re-examines them. Pin that
+    a QUARANTINED row is re-read, not skipped: an unproducible archive moves to
+    UNREADABLE and a now-sound one to HEALTHY."""
+
+    sid = ServerId.new()
+    torn = _backup(sid, "torn", health=BackupHealth.QUARANTINED)
+    sound = _backup(sid, "sound", health=BackupHealth.QUARANTINED)
+    sweep, uow, store, _audit = _wire(servers=[_server(sid)], backups=[torn, sound])
+    store.unreadable_refs.add("torn")
+
+    await sweep()
+
+    assert uow.backups.by_id[torn.id].health is BackupHealth.UNREADABLE
+    assert uow.backups.by_id[sound.id].health is BackupHealth.HEALTHY
+
+
+async def test_unreadable_verdict_is_revised_when_the_archive_reads_back() -> None:
+    """UNREADABLE is not terminal: a later sweep that reads the archive back in
+    full returns the row to HEALTHY (issue #2374, the revisability #2379 needs)."""
+
+    sid = ServerId.new()
+    backup = _backup(sid, "recovered", health=BackupHealth.UNREADABLE)
+    sweep, uow, _store, audit = _wire(servers=[_server(sid)], backups=[backup])
+
+    summary = await sweep()
+
+    assert uow.backups.by_id[backup.id].health is BackupHealth.HEALTHY
+    assert summary.backups_healthy == 1
+    assert not [e for e in audit.events if e.operation == BACKUP_MARK_UNREADABLE]
 
 
 async def test_unreadable_archive_does_not_abort_remaining_backups() -> None:
@@ -263,7 +302,7 @@ async def test_unreadable_archive_does_not_abort_remaining_backups() -> None:
 
     summary = await sweep()
 
-    assert uow.backups.by_id[unreadable.id].health is BackupHealth.QUARANTINED
+    assert uow.backups.by_id[unreadable.id].health is BackupHealth.UNREADABLE
     assert uow.backups.by_id[healthy.id].health is BackupHealth.HEALTHY
     assert summary.backups_unreadable == 1
     assert summary.backups_healthy == 1
@@ -284,6 +323,7 @@ async def test_store_outage_during_the_probe_never_quarantines() -> None:
 
     assert uow.backups.by_id[backup.id].health is BackupHealth.HEALTHY
     assert [e for e in audit.events if e.operation == BACKUP_QUARANTINE] == []
+    assert [e for e in audit.events if e.operation == BACKUP_MARK_UNREADABLE] == []
 
 
 async def test_store_outage_names_the_backup_the_pass_died_on(
@@ -321,7 +361,7 @@ async def test_dangling_row_does_not_abort_remaining_backups() -> None:
 
     summary = await sweep()
 
-    assert uow.backups.by_id[dangling.id].health is BackupHealth.QUARANTINED
+    assert uow.backups.by_id[dangling.id].health is BackupHealth.UNREADABLE
     assert uow.backups.by_id[healthy.id].health is BackupHealth.HEALTHY
     assert uow.backups.by_id[other.id].health is BackupHealth.HEALTHY
     assert summary.backups_dangling == 1

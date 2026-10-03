@@ -41,7 +41,7 @@ class BackupModel(Base):
             name="ck_backup_source",
         ),
         CheckConstraint(
-            "health IN ('healthy', 'quarantined', 'unknown')",
+            "health IN ('healthy', 'quarantined', 'unreadable', 'unknown')",
             name="ck_backup_health",
         ),
         # List a server's backups newest-first (DATABASE.md Section 8).
@@ -57,10 +57,12 @@ class BackupModel(Base):
     storage_ref: Mapped[str] = mapped_column(String, nullable=False)
     size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     source: Mapped[str] = mapped_column(String, nullable=False)
-    # Structural health of the archived contents (issue #742): 'healthy' when
-    # written through the integrity-gated create path, 'unknown' for legacy and
-    # uploaded rows until the sweep (#744) classifies them, 'quarantined' if found
-    # corrupt. Defaulted at the column so an INSERT that omits it lands 'unknown'.
+    # Health of the archive and its contents (issue #742): 'healthy' when written
+    # through the integrity-gated create path, 'unknown' for legacy and uploaded
+    # rows until the sweep (#744) classifies them, 'quarantined' if found
+    # structurally corrupt, 'unreadable' if the archive could not be read back at
+    # all (#2374). Defaulted at the column so an INSERT that omits it lands
+    # 'unknown'.
     health: Mapped[str] = mapped_column(
         String, nullable=False, server_default="unknown"
     )
