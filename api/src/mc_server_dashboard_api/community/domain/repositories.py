@@ -13,6 +13,7 @@ member-removal nor single-server deletion sweeps grants by cascade.
 from __future__ import annotations
 
 import abc
+import datetime as dt
 import uuid
 from collections.abc import Sequence
 
@@ -27,8 +28,10 @@ from mc_server_dashboard_api.community.domain.value_objects import (
     CommunityId,
     CommunityName,
     MembershipId,
+    Permission,
     ResourceGrantId,
     RoleId,
+    RoleName,
     UserId,
 )
 
@@ -161,8 +164,29 @@ class RoleRepository(abc.ABC):
         """Return all roles defined in ``community_id``."""
 
     @abc.abstractmethod
-    async def update(self, role: Role) -> None:
-        """Persist the mutable fields of ``role`` (its name and permission set).
+    async def lock_by_id(self, role_id: RoleId) -> Role | None:
+        """Return the role with ``role_id`` locked until the transaction ends.
+
+        For a caller whose write depends on the role's current state (#3215): a
+        concurrent locker waits, then reads the row as this transaction left it.
+        ``None`` if absent.
+        """
+
+    @abc.abstractmethod
+    async def update(
+        self,
+        role_id: RoleId,
+        *,
+        name: RoleName | None = None,
+        permissions: set[Permission] | None = None,
+        updated_at: dt.datetime,
+    ) -> Role:
+        """Write only the supplied columns (plus ``updated_at``); return the row.
+
+        A column left ``None`` keeps its stored value, so an edit cannot restore
+        what it read before a concurrent edit of another column committed
+        (#3215). The returned role is the row as written, concurrent changes
+        included.
 
         Never an insert: a role a concurrent delete removed since the caller's
         pre-read raises :class:`RoleNotFoundError` rather than writing nothing and

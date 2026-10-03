@@ -257,28 +257,41 @@ class FakeRoleRepository(RoleRepository):
             self._copy(r) for r in self.by_id.values() if r.community_id == community_id
         ]
 
-    async def update(self, role: Role) -> None:
-        # Mirror the adapter's ``UPDATE role ... WHERE id = :id``: a missing id
-        # matches no row, so nothing is written and no row appears -- keying the
-        # entity in regardless made this an insert the adapter cannot perform
-        # (#2557). The adapter now checks that rowcount and reports the zero-row
-        # write as not-found rather than as a success (#2613).
-        stored = self.by_id.get(role.id)
+    async def lock_by_id(self, role_id: RoleId) -> Role | None:
+        # In-memory equivalent: no concurrent transaction exists to wait for.
+        role = self.by_id.get(role_id)
+        return None if role is None else self._copy(role)
+
+    async def update(
+        self,
+        role_id: RoleId,
+        *,
+        name: RoleName | None = None,
+        permissions: set[Permission] | None = None,
+        updated_at: dt.datetime,
+    ) -> Role:
+        # Mirror the adapter's ``UPDATE role ... WHERE id = :id RETURNING``: a
+        # missing id matches no row, so nothing is written and no row appears
+        # (#2557), and the zero-row write is reported as not-found (#2613). Only
+        # the supplied columns change (#3215).
+        stored = self.by_id.get(role_id)
         if stored is None:
-            raise RoleNotFoundError(str(role.id.value))
-        if any(
-            row.id != role.id
+            raise RoleNotFoundError(str(role_id.value))
+        if name is not None and any(
+            row.id != role_id
             and row.community_id == stored.community_id
-            and row.name == role.name
+            and row.name == name
             for row in self.by_id.values()
         ):
-            raise RoleAlreadyExistsError(role.name.value)
-        self.by_id[role.id] = replace(
+            raise RoleAlreadyExistsError(name.value)
+        written = replace(
             stored,
-            name=role.name,
-            permissions=set(role.permissions),
-            updated_at=role.updated_at,
+            name=stored.name if name is None else name,
+            permissions=set(stored.permissions if permissions is None else permissions),
+            updated_at=updated_at,
         )
+        self.by_id[role_id] = written
+        return self._copy(written)
 
     async def delete(self, role_id: RoleId) -> None:
         self.by_id.pop(role_id, None)

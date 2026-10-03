@@ -305,10 +305,11 @@ async def test_role_rename_onto_an_existing_name_raises(engine: AsyncEngine) -> 
         await uow.roles.add(renamed)
         await uow.commit()
 
-    renamed.name = RoleName("Owner")
     with pytest.raises(RoleAlreadyExistsError):
         async with SqlAlchemyUnitOfWork(factory) as uow:
-            await uow.roles.update(renamed)
+            await uow.roles.update(
+                renamed.id, name=RoleName("Owner"), updated_at=renamed.updated_at
+            )
             await uow.commit()
 
 
@@ -611,10 +612,13 @@ async def test_update_role_persists_name_and_permissions(engine: AsyncEngine) ->
         await uow.roles.add(role)
         await uow.commit()
 
-    role.name = RoleName("Operator")
-    role.permissions = {Permission("server:restart")}
     async with SqlAlchemyUnitOfWork(factory) as uow:
-        await uow.roles.update(role)
+        await uow.roles.update(
+            role.id,
+            name=RoleName("Operator"),
+            permissions={Permission("server:restart")},
+            updated_at=role.updated_at,
+        )
         await uow.commit()
 
     async with SqlAlchemyUnitOfWork(factory) as uow:
