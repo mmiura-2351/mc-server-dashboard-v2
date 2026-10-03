@@ -16,9 +16,11 @@ assume an authorized member and only do the data work.
   (issue #361). The checks are not held to the INSERT; the grant's foreign keys
   to the membership and the server are what keep a removal or deletion that
   commits in between from leaving a ghost grant, and they surface as the same two
-  errors (issue #3216). A duplicate ``(user, resource_type, resource_id)``
-  surfaces as :class:`ResourceGrantAlreadyExistsError` (the unique constraint,
-  translated by the UnitOfWork).
+  errors (issue #3216). The membership FK names the validated membership's id,
+  so a remove-and-re-add in between cannot hand the grant to the new membership.
+  A duplicate ``(user, resource_type, resource_id)`` surfaces as
+  :class:`ResourceGrantAlreadyExistsError` (the unique constraint, translated by
+  the UnitOfWork).
 - :class:`RevokeGrant` deletes a grant by id, scoped to this community so a caller
   cannot probe another community's grant ids (FR-AUTHZ-4): a mismatch is reported
   as not-found.
@@ -93,22 +95,26 @@ class CreateGrant:
         }
 
         now = self.clock.now()
-        grant = ResourceGrant(
-            id=ResourceGrantId.new(),
-            user_id=user_id,
-            community_id=community_id,
-            resource_type=resource_type,
-            resource_id=resource_id,
-            permissions=validated,
-            created_at=now,
-            updated_at=now,
-        )
         async with self.uow:
             membership = await self.uow.memberships.get_by_user_and_community(
                 user_id, community_id
             )
             if membership is None:
                 raise GrantTargetNotMemberError(str(user_id.value))
+            # Bound to the membership instance just validated, not the reusable
+            # (user, community) pair: if it is removed before the INSERT -- even
+            # if the user is re-added meanwhile -- the FK rejects the grant.
+            grant = ResourceGrant(
+                id=ResourceGrantId.new(),
+                membership_id=membership.id,
+                user_id=user_id,
+                community_id=community_id,
+                resource_type=resource_type,
+                resource_id=resource_id,
+                permissions=validated,
+                created_at=now,
+                updated_at=now,
+            )
             if not await self.uow.resources.exists(
                 community_id, resource_type, resource_id
             ):

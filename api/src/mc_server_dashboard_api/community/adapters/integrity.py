@@ -41,7 +41,7 @@ resource-existence check. What keeps the maps apart is the coupling, not a
 contract.)
 
 **Two foreign keys are mapped: the parents of a resource grant** (migration
-0039, issue #3216). ``fk_resource_grant_user_id_membership`` and
+0039, issue #3216). ``fk_resource_grant_membership_id_membership`` and
 ``fk_resource_grant_resource_id_server`` are the very mechanism that serializes
 ``CreateGrant`` with a member removal or server deletion: when the deletion
 commits between the use case's checks and its INSERT, the INSERT fails its FK at
@@ -88,7 +88,9 @@ _COMMUNITY_NAME_CONSTRAINTS = frozenset({"uq_community_name"})
 _ROLE_NAME_CONSTRAINTS = frozenset({"uq_role_community_name"})
 _MEMBERSHIP_CONSTRAINTS = frozenset({"uq_membership_user_community"})
 _RESOURCE_GRANT_CONSTRAINTS = frozenset({"uq_resource_grant_user_resource"})
-_GRANT_MEMBERSHIP_CONSTRAINTS = frozenset({"fk_resource_grant_user_id_membership"})
+_GRANT_MEMBERSHIP_CONSTRAINTS = frozenset(
+    {"fk_resource_grant_membership_id_membership"}
+)
 _GRANT_RESOURCE_CONSTRAINTS = frozenset({"fk_resource_grant_resource_id_server"})
 
 

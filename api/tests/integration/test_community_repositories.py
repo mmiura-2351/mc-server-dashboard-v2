@@ -113,14 +113,19 @@ async def _seed_grant_parents(engine: AsyncEngine, *grants: ResourceGrant) -> No
     A membership the test already added is left as it is.
     """
 
+    memberships = {(g.membership_id, g.user_id, g.community_id) for g in grants}
     async with engine.begin() as conn:
-        for user_id, community_id in {(g.user_id, g.community_id) for g in grants}:
+        for membership_id, user_id, community_id in memberships:
             await conn.execute(
                 text(
                     "INSERT INTO membership (id, user_id, community_id, created_at) "
                     "VALUES (:id, :uid, :cid, now()) ON CONFLICT DO NOTHING"
                 ),
-                {"id": uuid.uuid4(), "uid": user_id.value, "cid": community_id.value},
+                {
+                    "id": membership_id.value,
+                    "uid": user_id.value,
+                    "cid": community_id.value,
+                },
             )
     for grant in grants:
         await _insert_server(engine, grant.resource_id, grant.community_id)
@@ -244,6 +249,7 @@ async def test_resource_grant_round_trip(engine: AsyncEngine) -> None:
     resource_id = uuid.uuid4()
     grant = ResourceGrant(
         id=ResourceGrantId.new(),
+        membership_id=MembershipId.new(),
         user_id=UserId(user_id),
         community_id=community.id,
         resource_type="server",
@@ -411,10 +417,12 @@ async def test_duplicate_resource_grant_triple_raises(engine: AsyncEngine) -> No
     await _insert_user(engine, user_id, "alice")
     community = _community()
     resource_id = uuid.uuid4()
+    membership_id = MembershipId.new()
 
     def _grant() -> ResourceGrant:
         return ResourceGrant(
             id=ResourceGrantId.new(),
+            membership_id=membership_id,
             user_id=UserId(user_id),
             community_id=community.id,
             resource_type="server",
@@ -457,6 +465,7 @@ async def test_deleting_community_cascades_to_all_dependents(
     resource_id = uuid.uuid4()
     grant = ResourceGrant(
         id=ResourceGrantId.new(),
+        membership_id=membership.id,
         user_id=UserId(user_id),
         community_id=community.id,
         resource_type="server",
@@ -587,6 +596,7 @@ async def test_list_grants_for_community_filters_by_user(engine: AsyncEngine) ->
     community = _community()
     grant_a = ResourceGrant(
         id=ResourceGrantId.new(),
+        membership_id=MembershipId.new(),
         user_id=UserId(alice),
         community_id=community.id,
         resource_type="server",
@@ -597,6 +607,7 @@ async def test_list_grants_for_community_filters_by_user(engine: AsyncEngine) ->
     )
     grant_b = ResourceGrant(
         id=ResourceGrantId.new(),
+        membership_id=MembershipId.new(),
         user_id=UserId(bob),
         community_id=community.id,
         resource_type="server",
@@ -630,8 +641,10 @@ async def test_delete_grant_by_id_removes_only_that_grant(
     user_id = uuid.uuid4()
     await _insert_user(engine, user_id, "alice")
     community = _community()
+    membership_id = MembershipId.new()
     target = ResourceGrant(
         id=ResourceGrantId.new(),
+        membership_id=membership_id,
         user_id=UserId(user_id),
         community_id=community.id,
         resource_type="server",
@@ -642,6 +655,7 @@ async def test_delete_grant_by_id_removes_only_that_grant(
     )
     survivor = ResourceGrant(
         id=ResourceGrantId.new(),
+        membership_id=membership_id,
         user_id=UserId(user_id),
         community_id=community.id,
         resource_type="server",

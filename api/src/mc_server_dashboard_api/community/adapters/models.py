@@ -56,6 +56,11 @@ class MembershipModel(Base):
         UniqueConstraint(
             "user_id", "community_id", name="uq_membership_user_community"
         ),
+        # The target of ``resource_grant``'s membership FK, which pins the grant's
+        # denormalized ``(user_id, community_id)`` to the membership it names.
+        UniqueConstraint(
+            "id", "user_id", "community_id", name="uq_membership_id_user_community"
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
@@ -122,9 +127,11 @@ class ResourceGrantModel(Base):
 
     Both parents are enforced foreign keys, ``ON DELETE CASCADE``, so a grant can
     neither be inserted for a membership or server that is gone nor outlive one
-    deleted concurrently (issue #3216): ``(user_id, community_id)`` references the
-    membership, and ``resource_id`` references ``server.id`` -- the only
-    ``resource_type`` the CHECK admits.
+    deleted concurrently (issue #3216): ``(membership_id, user_id, community_id)``
+    references the membership *instance* (a re-added member is a new row, so a
+    grant validated against the removed one cannot attach to it), and
+    ``resource_id`` references ``server.id`` -- the only ``resource_type`` the
+    CHECK admits.
     """
 
     __tablename__ = "resource_grant"
@@ -143,13 +150,14 @@ class ResourceGrantModel(Base):
         # A grant belongs to the membership it was made under: removing the member
         # removes it (FR-MEM-3), and none can be created for a removed one.
         ForeignKeyConstraint(
-            ["user_id", "community_id"],
-            ["membership.user_id", "membership.community_id"],
+            ["membership_id", "user_id", "community_id"],
+            ["membership.id", "membership.user_id", "membership.community_id"],
             ondelete="CASCADE",
         ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    membership_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("user.id", ondelete="CASCADE"),

@@ -33,6 +33,7 @@ from mc_server_dashboard_api.community.domain.repositories import (
 from mc_server_dashboard_api.community.domain.value_objects import (
     CommunityId,
     CommunityName,
+    MembershipId,
     UserId,
 )
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
@@ -128,7 +129,7 @@ async def _insert_communities(
 async def _insert_grant_parents(
     engine: AsyncEngine,
     *,
-    memberships: list[tuple[UserId, CommunityId]],
+    memberships: dict[tuple[UserId, CommunityId], MembershipId],
     servers: list[tuple[uuid.UUID, CommunityId]],
 ) -> None:
     """Insert the memberships and servers grants reference (issue #3216 FKs)."""
@@ -141,11 +142,11 @@ async def _insert_grant_parents(
             ),
             [
                 {
-                    "id": uuid.uuid4(),
+                    "id": membership_id.value,
                     "user_id": user_id.value,
                     "community_id": community_id.value,
                 }
-                for user_id, community_id in memberships
+                for (user_id, community_id), membership_id in memberships.items()
             ],
         )
         await connection.execute(
@@ -224,13 +225,17 @@ async def resource_grant_repository_harness(
     other_resource_id = uuid.uuid4()
     await _insert_users(engine, user_id, other_user_id)
     await _insert_communities(session_factory, community_id, other_community_id)
-    await _insert_grant_parents(
-        engine,
-        memberships=[
+    membership_ids = {
+        pair: MembershipId.new()
+        for pair in (
             (user_id, community_id),
             (user_id, other_community_id),
             (other_user_id, other_community_id),
-        ],
+        )
+    }
+    await _insert_grant_parents(
+        engine,
+        memberships=membership_ids,
         servers=[(resource_id, community_id), (other_resource_id, other_community_id)],
     )
     harness = _sql_harness(session_factory, lambda uow: uow.resource_grants)
@@ -242,6 +247,7 @@ async def resource_grant_repository_harness(
         other_community_id=other_community_id,
         resource_id=resource_id,
         other_resource_id=other_resource_id,
+        membership_ids=membership_ids,
     )
 
 

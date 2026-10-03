@@ -219,8 +219,15 @@ async def test_delete_cascades_to_resource_grants(engine: AsyncEngine) -> None:
     # Seed a membership + a resource grant on that server (community context).
     com = CommunityCommunityId(community_id)
     user = CommunityUserId(user_id)
+    membership = Membership(
+        id=MembershipId.new(),
+        user_id=user,
+        community_id=com,
+        created_at=_NOW,
+    )
     grant = ResourceGrant(
         id=ResourceGrantId.new(),
+        membership_id=membership.id,
         user_id=user,
         community_id=com,
         resource_type="server",
@@ -230,14 +237,7 @@ async def test_delete_cascades_to_resource_grants(engine: AsyncEngine) -> None:
         updated_at=_NOW,
     )
     async with CommunityUnitOfWork(factory) as uow:
-        await uow.memberships.add(
-            Membership(
-                id=MembershipId.new(),
-                user_id=user,
-                community_id=com,
-                created_at=_NOW,
-            )
-        )
+        await uow.memberships.add(membership)
         await uow.resource_grants.add(grant)
         await uow.commit()
 

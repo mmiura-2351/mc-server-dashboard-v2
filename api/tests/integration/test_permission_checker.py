@@ -168,6 +168,7 @@ async def test_resource_grant_scoped_to_exact_resource(engine: AsyncEngine) -> N
     server_y = uuid.uuid4()
     grant = ResourceGrant(
         id=ResourceGrantId.new(),
+        membership_id=membership.id,
         user_id=UserId(user_id),
         community_id=community.id,
         resource_type="server",
@@ -221,6 +222,7 @@ async def test_resource_grant_does_not_apply_in_a_different_community(
     server_id = uuid.uuid4()
     grant = ResourceGrant(
         id=ResourceGrantId.new(),
+        membership_id=membership_a.id,
         user_id=UserId(user_id),
         community_id=community_a.id,
         resource_type="server",

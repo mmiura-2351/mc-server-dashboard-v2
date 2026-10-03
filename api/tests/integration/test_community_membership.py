@@ -134,9 +134,14 @@ async def _grant(
         )
     factory = create_session_factory(engine)
     async with SqlAlchemyUnitOfWork(factory) as uow:
+        membership = await uow.memberships.get_by_user_and_community(
+            user_id, community_id
+        )
+        assert membership is not None
         await uow.resource_grants.add(
             ResourceGrant(
                 id=ResourceGrantId.new(),
+                membership_id=membership.id,
                 user_id=user_id,
                 community_id=community_id,
                 resource_type="server",

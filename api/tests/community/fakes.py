@@ -452,6 +452,7 @@ class FakeAuthzUnitOfWork(UnitOfWork):
 
         grant = ResourceGrant(
             id=ResourceGrantId.new(),
+            membership_id=self._membership_for(user_id, community_id).id,
             user_id=user_id,
             community_id=community_id,
             resource_type=resource_type,

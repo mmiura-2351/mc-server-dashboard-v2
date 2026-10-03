@@ -98,13 +98,16 @@ class ResourceGrant:
     """Row of the ``resource_grant`` table: a per-resource grant (DATABASE.md 6).
 
     A permission set granted to a member on a specific resource. Keyed by
-    ``user_id`` (not membership) for natural querying; ``(user_id,
-    community_id)`` names the membership it belongs to and ``resource_id`` the
-    server it targets (``server`` is the only M1 type), and the persistence layer
-    cascades the grant away with either (FR-MEM-3, Section 10).
+    ``user_id`` for natural querying; ``membership_id`` is the membership instance
+    it was granted under (that user's membership of ``community_id``) and
+    ``resource_id`` the server it targets (``server`` is the only M1 type). The
+    persistence layer cascades the grant away with either, and a removed and
+    re-added member holds a new membership, so no grant carries over (FR-MEM-3,
+    Section 10).
     """
 
     id: ResourceGrantId
+    membership_id: MembershipId
     user_id: UserId
     community_id: CommunityId
     resource_type: str

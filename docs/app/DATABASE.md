@@ -245,7 +245,9 @@ is added to (FR-MEM-1) and removed from (FR-MEM-3).
 | `created_at` | timestamptz | when the user joined |
 
 Constraints: `UNIQUE(user_id, community_id)` — a user is a member of a Community
-at most once.
+at most once. `UNIQUE(id, user_id, community_id)` — redundant with the primary key
+as a uniqueness rule; it exists as the target of `resource_grant`'s membership FK
+(Section 6).
 
 ### `role`
 
@@ -301,6 +303,7 @@ second term.
 | Column | Type | Notes |
 |---|---|---|
 | `id` | uuid PK | |
+| `membership_id` | uuid | the membership instance the grant was made under (composite FK below) |
 | `user_id` | uuid FK → `user.id` | the granted member; `ON DELETE CASCADE` |
 | `community_id` | uuid FK → `community.id` | the resource's Community; `ON DELETE CASCADE` |
 | `resource_type` | text | `server` (CHECK-constrained enum; the only M1 type) |
@@ -310,14 +313,18 @@ second term.
 
 Constraints: `UNIQUE(user_id, resource_type, resource_id)` — one grant row per
 member per resource (its `permissions` set is amended in place). FK
-`(user_id, community_id)` → `membership(user_id, community_id)`
-`ON DELETE CASCADE` — a grant belongs to the membership it was made under.
+`(membership_id, user_id, community_id)` → `membership(id, user_id, community_id)`
+`ON DELETE CASCADE` — a grant belongs to the membership it was made under, and its
+`user_id` / `community_id` are that membership's.
 
 > The grant is keyed by `user_id`, not `membership_id`, because the grant is
 > conceptually "to a user, on a resource that lives in a Community". Both of its
 > parents are enforced foreign keys with `ON DELETE CASCADE`: the membership,
-> through the composite `(user_id, community_id)` reference, and the server,
-> through `resource_id`. Removing a member or deleting a server therefore removes
+> through the composite `(membership_id, user_id, community_id)` reference, and
+> the server, through `resource_id`. The membership is referenced by its `id`, not
+> by the reusable `(user_id, community_id)` pair: a member removed and re-added
+> holds a new membership row, so a grant validated against the old one can never
+> attach to the new one. Removing a member or deleting a server therefore removes
 > its grants in the database (Section 10), and no grant can be inserted for a
 > membership or server that is gone. Grant creation checks both up front for a
 > clean error, but those checks are not held until its INSERT; the foreign keys
@@ -793,7 +800,7 @@ following must then be gone for that `(user, community)` pair, and nothing else:
 | What | How it is removed |
 |---|---|
 | Role assignments in this Community | `membership_role` rows `ON DELETE CASCADE` from the deleted `membership` |
-| Resource grants in this Community | `resource_grant` rows for `(user_id, community_id)` `ON DELETE CASCADE` from the deleted `membership` (composite FK, Section 6) |
+| Resource grants in this Community | `resource_grant` rows `ON DELETE CASCADE` from the deleted `membership` (composite FK on `membership_id`, Section 6) |
 | The membership itself | the `membership` row is the delete target |
 
 What must **not** be touched:

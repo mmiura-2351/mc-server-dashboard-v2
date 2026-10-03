@@ -34,6 +34,7 @@ from mc_server_dashboard_api.community.domain.permission_checker import (
 from mc_server_dashboard_api.community.domain.value_objects import (
     AuthUser,
     CommunityId,
+    MembershipId,
     Permission,
     ResourceGrantId,
     ResourceRef,
@@ -126,6 +127,7 @@ def _app(
 def _grant(community: CommunityId, user: UserId) -> ResourceGrant:
     return ResourceGrant(
         id=ResourceGrantId.new(),
+        membership_id=MembershipId.new(),
         user_id=user,
         community_id=community,
         resource_type="server",

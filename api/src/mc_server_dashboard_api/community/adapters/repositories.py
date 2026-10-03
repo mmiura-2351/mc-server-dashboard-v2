@@ -93,6 +93,7 @@ def _to_role(row: RoleModel) -> Role:
 def _to_resource_grant(row: ResourceGrantModel) -> ResourceGrant:
     return ResourceGrant(
         id=ResourceGrantId(row.id),
+        membership_id=MembershipId(row.membership_id),
         user_id=UserId(row.user_id),
         community_id=CommunityId(row.community_id),
         resource_type=row.resource_type,
@@ -416,6 +417,7 @@ class SqlAlchemyResourceGrantRepository(ResourceGrantRepository):
         self._session.add(
             ResourceGrantModel(
                 id=grant.id.value,
+                membership_id=grant.membership_id.value,
                 user_id=grant.user_id.value,
                 community_id=grant.community_id.value,
                 resource_type=grant.resource_type,

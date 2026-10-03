@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 import pytest
@@ -67,8 +68,10 @@ class ResourceGrantRepositoryHarness(RepositoryHarness[ResourceGrantRepository])
     """Grant-repository harness; its ids must satisfy the grant's parents.
 
     ``user_id`` is a member of both communities and ``other_user_id`` of
-    ``other_community_id``; ``resource_id`` / ``other_resource_id`` are servers in
-    ``community_id`` / ``other_community_id`` (the PostgreSQL FKs, issue #3216).
+    ``other_community_id``, with ``membership_ids`` naming each of those three
+    memberships by ``(user, community)``; ``resource_id`` / ``other_resource_id``
+    are servers in ``community_id`` / ``other_community_id`` (the PostgreSQL
+    FKs, issue #3216).
     """
 
     user_id: UserId
@@ -77,6 +80,7 @@ class ResourceGrantRepositoryHarness(RepositoryHarness[ResourceGrantRepository])
     other_community_id: CommunityId
     resource_id: uuid.UUID
     other_resource_id: uuid.UUID
+    membership_ids: Mapping[tuple[UserId, CommunityId], MembershipId]
 
 
 def _community(name: str = "guild") -> Community:
@@ -125,10 +129,13 @@ def _grant(
     community_id: CommunityId | None = None,
     resource_id: uuid.UUID | None = None,
 ) -> ResourceGrant:
+    user_id = user_id or harness.user_id
+    community_id = community_id or harness.community_id
     return ResourceGrant(
         id=ResourceGrantId.new(),
-        user_id=user_id or harness.user_id,
-        community_id=community_id or harness.community_id,
+        membership_id=harness.membership_ids[(user_id, community_id)],
+        user_id=user_id,
+        community_id=community_id,
         resource_type="server",
         resource_id=resource_id or harness.resource_id,
         permissions={Permission("server:read")},
