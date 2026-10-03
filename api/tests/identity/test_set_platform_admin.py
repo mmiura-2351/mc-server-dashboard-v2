@@ -59,6 +59,20 @@ async def test_revoke_locks_active_admins() -> None:
     assert uow.users.lock_calls == 1
 
 
+async def test_revoke_from_non_admin_locks_active_admins() -> None:
+    # The guard decides from the target as locked with the admin set (#3239):
+    # an unlocked read of "not an admin" may be stale by the time it writes.
+    admin = make_user(username="admin", is_platform_admin=True)
+    target = make_user(username="bob", email="bob@example.com")
+    uow = FakeUnitOfWork()
+    uow.users.seed(admin)
+    uow.users.seed(target)
+
+    await _use_case(uow)(target_id=target.id, grant=False)
+
+    assert uow.users.lock_calls == 1
+
+
 async def test_revoke_sets_flag_when_other_admin_remains() -> None:
     target = make_user(username="t", email="t@example.com", is_platform_admin=True)
     keep = make_user(username="keep", email="keep@example.com", is_platform_admin=True)

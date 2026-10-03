@@ -11,7 +11,16 @@ from __future__ import annotations
 import datetime as dt
 from typing import Any, cast
 
-from sqlalchemy import CursorResult, delete, func, select, text, update
+from sqlalchemy import (
+    CursorResult,
+    and_,
+    delete,
+    func,
+    or_,
+    select,
+    text,
+    update,
+)
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -231,21 +240,33 @@ class SqlAlchemyUserRepository(UserRepository):
         )
         return (await self._session.execute(stmt)).scalar_one()
 
-    async def lock_active_platform_admins(self) -> int:
-        # Lock the matched user rows FOR UPDATE so concurrent last-admin guards
-        # serialize on them (#260): the second transaction blocks until the first
-        # commits, then this re-read under READ COMMITTED sees the decremented
-        # set. A bare count(*) cannot be row-locked, so select the rows under the
-        # lock and count them here. ORDER BY id gives every transaction the same
-        # deterministic lock-acquisition order, so concurrent guards cannot
-        # deadlock by locking the matched rows in different scan orders (#2226).
+    async def lock_with_active_admins(self, user_id: UserId) -> tuple[User | None, int]:
+        # One statement over the admin set and the target (the Port documents
+        # the lock order). ORDER BY id makes every transaction acquire the row
+        # locks in the same order -- the locking runs on the sorted rows -- so
+        # concurrent guards cannot deadlock on scan order (#2226). A row waited
+        # on is re-checked against the WHERE once its writer commits, so an
+        # admin removed meanwhile drops out and the target comes back as
+        # committed. populate_existing overwrites any stale identity-map copy.
         stmt = (
-            select(UserModel.id)
-            .where(UserModel.is_platform_admin.is_(True), UserModel.active.is_(True))
+            select(UserModel)
+            .where(
+                or_(
+                    and_(
+                        UserModel.is_platform_admin.is_(True),
+                        UserModel.active.is_(True),
+                    ),
+                    UserModel.id == user_id.value,
+                )
+            )
             .order_by(UserModel.id)
-            .with_for_update()
+            .with_for_update(key_share=True)
+            .execution_options(populate_existing=True)
         )
-        return len((await self._session.execute(stmt)).all())
+        rows = (await self._session.execute(stmt)).scalars().all()
+        target = next((row for row in rows if row.id == user_id.value), None)
+        active_admins = sum(1 for row in rows if row.is_platform_admin and row.active)
+        return (_to_user(target) if target is not None else None), active_admins
 
 
 class SqlAlchemyRefreshTokenRepository(RefreshTokenRepository):

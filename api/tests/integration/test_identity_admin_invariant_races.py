@@ -13,7 +13,9 @@ for it, and the paused guard never acts on a state that has since changed:
   of admin on that account plus a removal of the last other admin;
 - two removals on different admins serialize, and exactly one wins;
 - removing admin from (or deleting) an account deactivated meanwhile is not
-  refused, because it no longer reduces the active-admin count.
+  refused, because it no longer reduces the active-admin count;
+- the guard's lock does not block the foreign-key check of a token rotation, so
+  the rotation cannot deadlock with the guard revoking that user's tokens.
 
 Runs only when ``MCD_TEST_DATABASE_URL`` is set (a real PostgreSQL); skipped
 otherwise (TESTING.md Section 5), mirroring ``test_identity_stale_user_writes.py``.
@@ -56,8 +58,15 @@ from mc_server_dashboard_api.identity.application.set_platform_admin import (
 from mc_server_dashboard_api.identity.application.set_user_active import (
     SetUserActive,
 )
+from mc_server_dashboard_api.identity.domain.entities import (
+    REVOKED_ROTATED,
+    RefreshToken,
+)
 from mc_server_dashboard_api.identity.domain.errors import LastPlatformAdminError
-from mc_server_dashboard_api.identity.domain.value_objects import UserId
+from mc_server_dashboard_api.identity.domain.value_objects import (
+    RefreshTokenId,
+    UserId,
+)
 from tests.identity.fakes import (
     FakeClock,
     FakeCommunityOwnership,
@@ -225,6 +234,28 @@ async def _delete_account(uow: SqlAlchemyUnitOfWork, target: UserId) -> None:
     )(user_id=target, password=_PASSWORD)
 
 
+def _token(user_id: UserId, token_hash: str) -> RefreshToken:
+    return RefreshToken(
+        id=RefreshTokenId.new(),
+        user_id=user_id,
+        token_hash=token_hash,
+        issued_at=_NOW,
+        expires_at=_NOW + dt.timedelta(days=14),
+    )
+
+
+async def _rotate_token(uow: SqlAlchemyUnitOfWork, user_id: UserId) -> None:
+    # A refresh rotation's writes, in its order: revoke the presented token
+    # (locking its row), then insert the successor, whose foreign-key check
+    # share-locks the user row at commit.
+    async with uow:
+        await uow.refresh_tokens.revoke(
+            "presented", revoked_at=_NOW, reason=REVOKED_ROTATED
+        )
+        await uow.refresh_tokens.add(_token(user_id, "successor"))
+        await uow.commit()
+
+
 # Every operation that can reduce the active-admin set.
 _REDUCERS = {
     "revoke": _revoke,
@@ -381,3 +412,21 @@ async def test_removal_after_the_account_stopped_counting_is_not_refused(
     assert kept is not None
     assert kept.is_platform_admin
     assert kept.active
+
+
+async def test_token_rotation_does_not_deadlock_with_a_deactivation(
+    engine: AsyncEngine,
+) -> None:
+    # The paused deactivation holds the user row from its guard; a lock that
+    # blocked the rotation's foreign-key check would leave the rotation holding
+    # the presented token's row while the deactivation's revocation waits on it.
+    _, plain = await _seed_admin_and_user(engine)
+    async with SqlAlchemyUnitOfWork(create_session_factory(engine)) as uow:
+        await uow.refresh_tokens.add(_token(plain, "presented"))
+        await uow.commit()
+
+    await _interleave(engine, _Step(_deactivate, plain), [_Step(_rotate_token, plain)])
+
+    # The rotation committed first, so the deactivation revoked its successor.
+    async with SqlAlchemyUnitOfWork(create_session_factory(engine)) as uow:
+        assert await uow.refresh_tokens.list_active_for_user(plain, now=_NOW) == []
