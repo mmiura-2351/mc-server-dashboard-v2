@@ -380,7 +380,7 @@ class RoleRepositoryContract:
         assert reloaded.permissions == {Permission("server:read")}
         assert missing is None
 
-    async def test_update_changes_only_an_existing_row_and_detaches_the_write(
+    async def test_lock_by_id_returns_a_detached_role_or_none(
         self, role_repository_harness: RoleRepositoryHarness
     ) -> None:
         role = _role(role_repository_harness)
@@ -388,28 +388,60 @@ class RoleRepositoryContract:
             await transaction.repository.add(role)
             await transaction.commit()
 
-        role.name = RoleName("Moderator")
-        role.permissions = {Permission("server:read"), Permission("server:start")}
-        role.updated_at = _NOW + dt.timedelta(hours=1)
-        role.community_id = role_repository_harness.other_community_id
-        role.created_at = _NOW + dt.timedelta(days=1)
-        role.is_preset = True
         async with role_repository_harness.open() as transaction:
-            await transaction.repository.update(role)
-            role.name = RoleName("rewritten-after-update")
-            role.permissions.add(Permission("server:delete"))
+            locked = await transaction.repository.lock_by_id(role.id)
+            missing = await transaction.repository.lock_by_id(RoleId.new())
+            assert locked is not None
+            locked.permissions.add(Permission("server:delete"))
+            await transaction.commit()
+
+        async with role_repository_harness.open() as transaction:
+            reloaded = await transaction.repository.get_by_id(role.id)
+
+        assert locked.name == RoleName("Editor")
+        assert missing is None
+        assert reloaded is not None
+        assert reloaded.permissions == {Permission("server:read")}
+
+    async def test_update_writes_only_the_supplied_columns_and_returns_the_row(
+        self, role_repository_harness: RoleRepositoryHarness
+    ) -> None:
+        role = _role(role_repository_harness)
+        async with role_repository_harness.open() as transaction:
+            await transaction.repository.add(role)
+            await transaction.commit()
+
+        permissions = {Permission("server:read"), Permission("server:start")}
+        async with role_repository_harness.open() as transaction:
+            renamed = await transaction.repository.update(
+                role.id,
+                name=RoleName("Moderator"),
+                updated_at=_NOW + dt.timedelta(hours=1),
+            )
+            replaced = await transaction.repository.update(
+                role.id,
+                permissions=permissions,
+                updated_at=_NOW + dt.timedelta(hours=2),
+            )
+            permissions.add(Permission("server:delete"))
+            replaced.permissions.add(Permission("server:delete"))
             await transaction.commit()
 
         async with role_repository_harness.open() as transaction:
             loaded = await transaction.repository.get_by_id(role.id)
 
+        # A rename keeps the stored permission set; a permission edit keeps the
+        # stored name.
+        assert renamed.name == RoleName("Moderator")
+        assert renamed.permissions == {Permission("server:read")}
+        assert replaced.name == RoleName("Moderator")
         assert loaded is not None
         assert loaded.name == RoleName("Moderator")
         assert loaded.permissions == {
             Permission("server:read"),
             Permission("server:start"),
         }
-        assert loaded.updated_at == _NOW + dt.timedelta(hours=1)
+        assert loaded.updated_at == _NOW + dt.timedelta(hours=2)
         assert loaded.community_id == role_repository_harness.community_id
         assert loaded.created_at == _NOW
         assert loaded.is_preset is False
@@ -417,14 +449,16 @@ class RoleRepositoryContract:
     async def test_update_of_missing_row_reports_not_found_without_inserting(
         self, role_repository_harness: RoleRepositoryHarness
     ) -> None:
-        role = _role(role_repository_harness)
+        missing = RoleId.new()
         with pytest.raises(RoleNotFoundError):
             async with role_repository_harness.open() as transaction:
-                await transaction.repository.update(role)
+                await transaction.repository.update(
+                    missing, name=RoleName("Moderator"), updated_at=_NOW
+                )
                 await transaction.commit()
 
         async with role_repository_harness.open() as transaction:
-            assert await transaction.repository.get_by_id(role.id) is None
+            assert await transaction.repository.get_by_id(missing) is None
 
     async def test_name_is_unique_within_a_community_for_add_and_update(
         self, role_repository_harness: RoleRepositoryHarness
@@ -449,10 +483,11 @@ class RoleRepositoryContract:
                 )
                 await transaction.commit()
 
-        renamed.name = RoleName("Owner")
         with pytest.raises(RoleAlreadyExistsError):
             async with role_repository_harness.open() as transaction:
-                await transaction.repository.update(renamed)
+                await transaction.repository.update(
+                    renamed.id, name=RoleName("Owner"), updated_at=_NOW
+                )
                 await transaction.commit()
 
 

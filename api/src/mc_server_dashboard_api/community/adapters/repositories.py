@@ -8,6 +8,7 @@ framework-free domain entities here.
 
 from __future__ import annotations
 
+import datetime as dt
 import uuid
 from collections.abc import Sequence
 from typing import Any, cast
@@ -342,18 +343,44 @@ class SqlAlchemyRoleRepository(RoleRepository):
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_role(row) for row in rows]
 
-    async def update(self, role: Role) -> None:
+    async def lock_by_id(self, role_id: RoleId) -> Role | None:
+        # populate_existing so the locked read, not an identity-map copy an
+        # earlier read in this transaction left alive, is what the caller sees.
+        stmt = (
+            select(RoleModel)
+            .where(RoleModel.id == role_id.value)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_role(row) if row is not None else None
+
+    async def update(
+        self,
+        role_id: RoleId,
+        *,
+        name: RoleName | None = None,
+        permissions: set[Permission] | None = None,
+        updated_at: dt.datetime,
+    ) -> Role:
+        values: dict[str, Any] = {"updated_at": updated_at}
+        if name is not None:
+            values["name"] = name.value
+        if permissions is not None:
+            values["permissions"] = sorted(perm.value for perm in permissions)
+        # RETURNING hands back the row as written, so the caller sees columns
+        # committed concurrently instead of its stale read (#3215).
+        # populate_existing makes it overwrite any identity-map copy an earlier
+        # read in this transaction left alive.
         stmt = (
             update(RoleModel)
-            .where(RoleModel.id == role.id.value)
-            .values(
-                name=role.name.value,
-                permissions=sorted(perm.value for perm in role.permissions),
-                updated_at=role.updated_at,
-            )
+            .where(RoleModel.id == role_id.value)
+            .values(**values)
+            .returning(RoleModel)
+            .execution_options(populate_existing=True)
         )
         try:
-            result = await self._session.execute(stmt)
+            row = (await self._session.execute(stmt)).scalar_one_or_none()
         except IntegrityError as exc:
             # A rename UPDATE violates uq_role_community_name at execute time,
             # inside the transaction (unlike a staged INSERT, which flushes at
@@ -367,11 +394,12 @@ class SqlAlchemyRoleRepository(RoleRepository):
         # The row is gone if nothing matched: a DeleteRole racer committed between
         # UpdateRole's pre-read and this write. The UPDATE raises nothing on a
         # zero-row match, so without this the caller was told the edit succeeded
-        # (issue #2613). The rowcount is the only place this write's target can be
+        # (issue #2613). This is the only place this write's target can be
         # re-asserted, so the not-found the pre-read would have raised is raised
         # here instead (404).
-        if cast("CursorResult[Any]", result).rowcount == 0:
-            raise RoleNotFoundError(str(role.id.value))
+        if row is None:
+            raise RoleNotFoundError(str(role_id.value))
+        return _to_role(row)
 
     async def delete(self, role_id: RoleId) -> None:
         stmt = delete(RoleModel).where(RoleModel.id == role_id.value)

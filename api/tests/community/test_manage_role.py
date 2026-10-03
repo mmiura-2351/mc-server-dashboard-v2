@@ -40,7 +40,7 @@ from mc_server_dashboard_api.community.domain.value_objects import (
     RoleName,
     UserId,
 )
-from tests.community.fakes import FakeAuthzUnitOfWork
+from tests.community.fakes import FakeAuthzUnitOfWork, FakeRoleRepository
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 
@@ -144,6 +144,43 @@ async def test_update_role_replaces_name_and_permissions() -> None:
     )
     assert role.name == RoleName("Operator")
     assert role.permissions == {Permission("server:stop")}
+
+
+class _RevokeOnReadRoleRepository(FakeRoleRepository):
+    """Commits a concurrent revocation right after a read hands the role out."""
+
+    def __init__(self, revoked: Permission) -> None:
+        super().__init__()
+        self._revoked = revoked
+
+    async def get_by_id(self, role_id: RoleId) -> Role | None:
+        role = await super().get_by_id(role_id)
+        stored = self.by_id[role_id]
+        stored.permissions = stored.permissions - {self._revoked}
+        return role
+
+
+async def test_update_role_rename_keeps_a_revocation_committed_after_its_read() -> None:
+    # The rename writes only the name (#3215): it neither restores the permission
+    # revoked since its read nor reports the stale set back.
+    uow = FakeAuthzUnitOfWork()
+    uow.roles = _RevokeOnReadRoleRepository(Permission("server:delete"))
+    community = CommunityId.new()
+    role_id = _seed_custom_role(
+        uow,
+        community,
+        permissions={Permission("server:start"), Permission("server:delete")},
+    )
+    role = await UpdateRole(uow=uow, clock=_FakeClock())(
+        community_id=community,
+        role_id=role_id,
+        actor_id=UserId(uuid.uuid4()),
+        name="Operators",
+    )
+    stored = uow.roles.by_id[role_id]
+    assert stored.name == RoleName("Operators")
+    assert stored.permissions == {Permission("server:start")}
+    assert role.permissions == {Permission("server:start")}
 
 
 async def test_update_role_rejects_editing_the_preset_owner_role() -> None:

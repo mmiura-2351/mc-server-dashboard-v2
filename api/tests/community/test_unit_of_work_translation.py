@@ -31,7 +31,7 @@ from mc_server_dashboard_api.community.adapters.repositories import (
 from mc_server_dashboard_api.community.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork,
 )
-from mc_server_dashboard_api.community.domain.entities import Community, Role
+from mc_server_dashboard_api.community.domain.entities import Community
 from mc_server_dashboard_api.community.domain.errors import (
     CommunityAlreadyExistsError,
     MembershipAlreadyExistsError,
@@ -40,7 +40,6 @@ from mc_server_dashboard_api.community.domain.errors import (
 from mc_server_dashboard_api.community.domain.value_objects import (
     CommunityId,
     CommunityName,
-    Permission,
     RoleId,
     RoleName,
 )
@@ -130,18 +129,6 @@ class _FakeExecuteSession:
         raise self._error
 
 
-def _role(name: str = "Editor") -> Role:
-    return Role(
-        id=RoleId.new(),
-        community_id=CommunityId.new(),
-        name=RoleName(name),
-        permissions={Permission("server:read")},
-        created_at=_NOW,
-        updated_at=_NOW,
-        is_preset=False,
-    )
-
-
 def _community(name: str = "guild") -> Community:
     return Community(
         id=CommunityId.new(),
@@ -155,14 +142,14 @@ async def test_role_update_translates_role_name_violation() -> None:
     session = _FakeExecuteSession(_integrity_error("uq_role_community_name"))
     repo = SqlAlchemyRoleRepository(session)  # type: ignore[arg-type]
     with pytest.raises(RoleAlreadyExistsError):
-        await repo.update(_role())
+        await repo.update(RoleId.new(), name=RoleName("Editor"), updated_at=_NOW)
 
 
 async def test_role_update_reraises_unknown_violation_untranslated() -> None:
     session = _FakeExecuteSession(_integrity_error("uq_some_other_constraint"))
     repo = SqlAlchemyRoleRepository(session)  # type: ignore[arg-type]
     with pytest.raises(IntegrityError):
-        await repo.update(_role())
+        await repo.update(RoleId.new(), name=RoleName("Editor"), updated_at=_NOW)
 
 
 async def test_community_update_translates_community_name_violation() -> None:

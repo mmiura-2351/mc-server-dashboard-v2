@@ -10,8 +10,9 @@ assume an authorized member and only do the data work.
   a duplicate name surfaces as :class:`RoleAlreadyExistsError` (the unique
   constraint, translated by the UnitOfWork).
 - :class:`UpdateRole` renames and/or replaces the permission set with the same
-  validation. The preset Owner role is immutable: its set must remain the full
-  catalog, so any edit is rejected (the simplest honest guard — issue #71).
+  validation, writing only the columns the request supplied. The preset Owner
+  role is immutable: its set must remain the full catalog, so any edit is
+  rejected (the simplest honest guard — issue #71).
 - :class:`DeleteRole` deletes a custom role; the preset Owner role is undeletable
   (the same invariant the membership context enforces — a community must keep its
   Owner role). Deleting a non-preset role cascades its ``membership_role`` rows via
@@ -145,28 +146,40 @@ class UpdateRole:
         permissions: set[Permission] | None = None,
     ) -> Role:
         async with self.uow:
-            role = await self.uow.roles.get_by_id(role_id)
+            # The ceiling below is evaluated against the set this write replaces,
+            # so a permission edit reads the role under a row lock (#3215):
+            # against an unlocked read, a permission removed concurrently would
+            # not count as newly conferred and could come back unchecked. A
+            # rename writes only the name, so its read needs no lock.
+            if permissions is None:
+                role = await self.uow.roles.get_by_id(role_id)
+            else:
+                role = await self.uow.roles.lock_by_id(role_id)
             if role is None or role.community_id != community_id:
                 raise RoleNotFoundError(str(role_id.value))
             if role.is_preset:
                 raise PresetRoleNotEditableError(str(role_id.value))
 
-            if name is not None:
-                role.name = RoleName(name)
+            new_name = RoleName(name) if name is not None else None
+            validated = None
             if permissions is not None:
                 validated = _validate_permissions(permissions)
-                conferred = validated - role.permissions
                 await enforce_permission_ceiling(
                     self.uow,
                     actor_id=actor_id,
                     community_id=community_id,
-                    conferred=conferred,
+                    conferred=validated - role.permissions,
                 )
-                role.permissions = validated
-            role.updated_at = self.clock.now()
-            await self.uow.roles.update(role)
+            # Write only the supplied columns (#3215), so an edit cannot restore
+            # a column it read before a concurrent edit of it committed.
+            updated = await self.uow.roles.update(
+                role_id,
+                name=new_name,
+                permissions=validated,
+                updated_at=self.clock.now(),
+            )
             await self.uow.commit()
-        return role
+        return updated
 
 
 @dataclass(frozen=True)
