@@ -1431,14 +1431,19 @@ class ObjectStorage(Storage):
           few MB, so two reads of one damaged body stop at different offsets. An
           RST only ever loses bytes, never invents them, so neither read got past
           the cut and the further one is the better estimate of it.
-        * **Both reads ended short, and either delivered no byte at all** — an
-          availability failure. A read that got nothing is the store refusing
-          outright: it never reached the body and says nothing about where this
-          object's bytes end, so paired with a short read it leaves one
-          observation of the body — exactly the ambiguity the re-read exists to
-          resolve — and paired with another empty read it is the outage signature.
-          Quarantining on it would condemn a backup because the store went down
-          mid-read.
+        * **Neither read delivered a byte** — the archive is unreadable (#2379).
+          The store answered ``HEAD`` for this object moments earlier, and a store
+          that is down fails there first, so an object it reproducibly serves
+          nothing of is dead rather than an outage. Calling it an outage stopped
+          every sweep pass on this one object, so no other backup was ever checked
+          again. A half-up backend can mislabel an intact archive this way; the
+          verdict is re-derived on every probe, so a later complete read clears it.
+        * **One read ended short after delivering bytes, the other delivered
+          none** — an availability failure. The empty read never reached the body
+          and says nothing about where this object's bytes end, so it cannot
+          corroborate the short one: that leaves one observation of the body —
+          exactly the ambiguity the re-read exists to resolve. Condemning on it
+          would mark a backup unreadable because the store went down mid-read.
 
         The offsets are byte-exact in practice, not rounded to 8 MiB chunks:
         ``_iter_body``'s ``read(_PART)`` returns whatever the connection has
@@ -1453,7 +1458,8 @@ class ObjectStorage(Storage):
         second = await self._probe_archive(client, backup_key, declared)
         if second.ended_at is None:
             return second
-        if first_end > 0 and second.ended_at > 0:
+        # Both delivered bytes, or neither did: only a mixed pair is an outage.
+        if (first_end > 0) == (second.ended_at > 0):
             return _ArchiveProbe(
                 defect=(
                     f"the store cannot deliver the body past "
