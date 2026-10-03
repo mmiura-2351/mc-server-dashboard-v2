@@ -64,14 +64,18 @@ function isAuthDefinitive(status: number): boolean {
   return status === 401 || status === 403;
 }
 
+/** A refresh exchange's outcome, before any token is adopted. */
+type RefreshOutcome =
+  | { status: "ok"; accessToken: string }
+  | { status: "auth-rejected" | "transient" };
+
 /**
  * POST /api/auth/refresh riding the httpOnly cookie (empty JSON body). 200
- * stores the rotated access token and resolves `{ status: "ok" }`; 401/403
- * resolves `{ status: "auth-rejected" }` (session is genuinely dead); network
- * errors and other non-2xx responses resolve `{ status: "transient" }` (session
- * may still be valid).
+ * yields the rotated access token (`"ok"`); 401/403 yield `"auth-rejected"`
+ * (session is genuinely dead); network errors and other non-2xx responses
+ * yield `"transient"` (session may still be valid). Stores nothing.
  */
-async function doRefresh(): Promise<RefreshResult> {
+async function requestRefresh(): Promise<RefreshOutcome> {
   let response: Response;
   try {
     response = await fetch("/api/auth/refresh", {
@@ -97,8 +101,16 @@ async function doRefresh(): Promise<RefreshResult> {
     // than forcing a hard logout.
     return { status: "transient" };
   }
-  setAccessToken(data.access_token);
-  return { status: "ok" };
+  return { status: "ok", accessToken: data.access_token };
+}
+
+/** Run one refresh exchange and store the rotated access token on success. */
+async function doRefresh(): Promise<RefreshResult> {
+  const outcome = await requestRefresh();
+  if (outcome.status === "ok") {
+    setAccessToken(outcome.accessToken);
+  }
+  return { status: outcome.status };
 }
 
 /**
@@ -117,6 +129,16 @@ async function doRefresh(): Promise<RefreshResult> {
  * control, and there is intentionally none.
  */
 export async function restoreSession(): Promise<boolean> {
+  const accessToken = await requestSessionToken();
+  if (accessToken === null) {
+    return false;
+  }
+  setAccessToken(accessToken);
+  return true;
+}
+
+/** POST /api/auth/session: the access token on a 200, else null. */
+async function requestSessionToken(): Promise<string | null> {
   let response: Response;
   try {
     response = await fetch("/api/auth/session", {
@@ -124,10 +146,10 @@ export async function restoreSession(): Promise<boolean> {
       credentials: "same-origin",
     });
   } catch {
-    return false;
+    return null;
   }
   if (!response.ok) {
-    return false;
+    return null;
   }
   let data: AccessTokenResponse;
   try {
@@ -135,10 +157,9 @@ export async function restoreSession(): Promise<boolean> {
   } catch {
     // A 200 with a malformed/empty body yields no usable token; treat it as a
     // failed restore so the bootstrap resolves signed-out rather than rejecting.
-    return false;
+    return null;
   }
-  setAccessToken(data.access_token);
-  return true;
+  return data.access_token;
 }
 
 /**
