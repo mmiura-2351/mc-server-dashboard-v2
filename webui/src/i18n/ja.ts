@@ -493,12 +493,18 @@ export const ja: Record<TranslationKey, string> = {
   "backups.col.creator": "作成者",
   "backups.unknownSize": "不明",
   "backups.unknownCreator": "—",
-  // Condition badge (API `health`: healthy / quarantined / unknown). Plain
+  // Condition badge (API `health`: healthy / quarantined / unreadable /
+  // unknown). Plain
   // language — no internal jargon. A healthy backup shows nothing, keeping the
   // row quiet; only the at-risk states are flagged.
   "backups.health.quarantined": "破損",
   "backups.health.quarantinedTitle":
     "このバックアップのデータは破損していることが判明しています。復元するとワールドが壊れる可能性があります。",
+  // Unreadable (#2374): the archive's bytes are gone, not the world damaged —
+  // nothing can restore it, and the remedy is on the storage side.
+  "backups.health.unreadable": "読み取り不能",
+  "backups.health.unreadableTitle":
+    "このバックアップのファイルをストレージから読み出せなかったため、復元できません。壊れているのはワールドではなく、ストレージである可能性が高いです。次に管理者がバックアップの整合性チェックを実行したときに再検査されます。",
   "backups.health.unknown": "未検証",
   "backups.health.unknownTitle":
     "このバックアップは検査されていないため、状態は不明です。",
@@ -545,6 +551,9 @@ export const ja: Record<TranslationKey, string> = {
   "backups.restoreDialog.stopping": "サーバーを停止しています…",
   "backups.restoreDialog.body":
     "サーバーの現在のデータをこのバックアップで上書きします。この操作は元に戻せません。",
+  // Hover title on the disabled restore action of an unreadable backup (#2374).
+  "backups.restoreUnavailableUnreadable":
+    "このバックアップのファイルをストレージから読み出せなかったため、復元できません。",
   "backups.restoreDialog.prompt": "確認のため RESTORE と入力",
   "backups.restoreDialog.phrase": "RESTORE",
   "backups.restoreDialog.confirm": "バックアップを復元",
@@ -572,6 +581,8 @@ export const ja: Record<TranslationKey, string> = {
   "backups.restored": "バックアップを復元しました。",
   "backups.error.notStopped":
     "バックアップを復元する前にサーバーを停止してください。",
+  "backups.error.unreadable":
+    "このバックアップのファイルをストレージから読み出せなかったため、復元できません。",
   "backups.error.unsettled":
     "サーバーが起動／停止の途中です。完全に停止または稼働してから再度お試しください。",
   "backups.error.invalidArchive":
