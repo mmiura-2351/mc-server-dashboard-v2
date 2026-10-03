@@ -10,8 +10,10 @@ covered in the per-adapter files.
 from __future__ import annotations
 
 import asyncio
+import gzip
 import hashlib
 import threading
+import zlib
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 
@@ -54,6 +56,7 @@ from tests.storage.helpers import (
     read_tar,
     region_targz,
     stream_of,
+    tar_bytes,
     tar_stream,
     unaligned_live_region_bytes,
 )
@@ -1082,21 +1085,44 @@ async def test_restore_healthy_backup_reports_healthy(
     assert read_tar(blob) == original
 
 
+# A gzip member header (no flags, no mtime) for hand-framed damaged archives.
+_GZIP_HEADER = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xff"
+
+
 def _unreadable_archive(shape: str) -> bytes:
-    """A stored archive whose bytes can no longer be read back (issue #3230)."""
+    """A stored archive whose bytes no longer read back as a tar.gz (issue #3230).
 
-    archive = region_targz({"world/region/r.0.0.mca": healthy_region_bytes()})
+    One shape per way ``tarfile`` reports it, so every exception the adapters
+    translate is pinned by a real archive rather than by a raised stand-in.
+    """
+
+    if shape == "not_gzip":
+        # Not even a gzip stream (``ReadError``).
+        return b"not a gzip stream " * 16
+    if shape == "bad_method":
+        # A gzip magic naming a compression method that is not deflate
+        # (``CompressionError`` from stream-mode reads).
+        return b"\x1f\x8b\x07\x00" + b"\x00" * 60
+    # One member large enough that damage partway lands inside its body.
+    tar = tar_bytes({"world/region/r.0.0.mca": bytes(range(256)) * 1000})
     if shape == "truncated":
-        # The stream stops mid-deflate: it never reaches the gzip trailer.
+        # The stream stops mid-deflate, short of its end-of-stream marker
+        # (``EOFError`` from ``r:gz``, ``ReadError`` from ``r|gz``).
+        archive = gzip.compress(tar)
         return archive[: len(archive) // 2]
-    if shape == "bad_deflate":
-        # A well-formed gzip header over a deflate block of the reserved type.
-        return b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xff" + b"\xff" * 64
-    # Bytes that do not even open as a gzip stream.
-    return b"not a gzip stream " * 16
+    if shape == "rotted_body":
+        # Sound deflate data up to a byte boundary, then a block of the reserved
+        # type — a rotted byte partway through the member body (``zlib.error``).
+        deflate = zlib.compressobj(9, zlib.DEFLATED, -zlib.MAX_WBITS)
+        body = deflate.compress(tar[:65536]) + deflate.flush(zlib.Z_SYNC_FLUSH)
+        return _GZIP_HEADER + body + b"\xff" * 64
+    assert shape == "split_member"
+    # A complete gzip member holding only the first part of the tar, followed by
+    # bytes that are not another member (``BadGzipFile`` from ``r:gz``).
+    return gzip.compress(tar[:65536]) + b"not a gzip member" * 4
 
 
-_UNREADABLE_SHAPES = ["truncated", "bad_deflate", "not_gzip"]
+_UNREADABLE_SHAPES = ["not_gzip", "bad_method", "truncated", "rotted_body"]
 
 
 @pytest.mark.parametrize("shape", _UNREADABLE_SHAPES)
@@ -1110,7 +1136,7 @@ async def test_check_backup_health_of_an_unreadable_archive_is_unreadable(
 
     community, server = new_scope()
     key = await harness.storage.put_backup(
-        community, server, stream_of(_unreadable_archive(shape))
+        community, server, stream_of(_unreadable_archive(shape), chunk=8192)
     )
 
     with pytest.raises(ArchiveUnreadableError):
@@ -1118,7 +1144,7 @@ async def test_check_backup_health_of_an_unreadable_archive_is_unreadable(
 
 
 @pytest.mark.parametrize("force", [False, True])
-@pytest.mark.parametrize("shape", _UNREADABLE_SHAPES)
+@pytest.mark.parametrize("shape", [*_UNREADABLE_SHAPES, "split_member"])
 async def test_restore_of_an_unreadable_archive_is_refused_and_keeps_current(
     harness: StorageHarness, shape: str, force: bool
 ) -> None:
@@ -1131,7 +1157,7 @@ async def test_restore_of_an_unreadable_archive_is_refused_and_keeps_current(
     live = {"world/region/r.0.0.mca": healthy_region_bytes()}
     await harness.publish(community, server, live)
     key = await harness.storage.put_backup(
-        community, server, stream_of(_unreadable_archive(shape))
+        community, server, stream_of(_unreadable_archive(shape), chunk=8192)
     )
 
     with pytest.raises(ArchiveUnreadableError):
