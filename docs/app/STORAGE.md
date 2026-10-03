@@ -1276,12 +1276,30 @@ and not only truncation. Decompressed output is discarded as it is produced
 (`GzipReadProbe`): nothing is staged to disk, nothing is buffered whole. It does
 not extract or region-fsck — that stays fs-only, above. An archive the store
 cannot reproduce raises `ArchiveUnreadableError`, which the servers seam
-translates to `BackupUnreadableError` and the sweep records as `QUARANTINED`,
-counted and logged apart from a structural quarantine so an operator can tell "the
-bytes are gone" from "the world is corrupt".
+translates to `BackupUnreadableError` and the sweep records as `UNREADABLE` — a
+verdict of its own, not the structural `QUARANTINED` — so the stored health, the
+summary, the audit trail and the webui all tell "the bytes are gone" from "the
+world is corrupt".
+
+**`UNREADABLE` vs. `QUARANTINED`.** The two verdicts carry different remedies. A
+`QUARANTINED` backup holds a structurally corrupt world: every byte is there, and
+the operator override (`?force=true`) can still restore it. An `UNREADABLE`
+backup's archive could not be read back at all — the store cannot produce its
+bytes, or (a dangling row) holds no archive for it — so nothing can restore it,
+and the fault points at storage rather than at the world. The restore use case
+therefore refuses an `UNREADABLE` backup from its recorded verdict, before any
+read and whatever `force` says (409 `backup_unreadable`), and the webui offers no
+restore for it. The sweep audits the two under separate operations
+(`backup:quarantine`, `backup:mark_unreadable`).
+
+Neither verdict is sticky. The sweep re-reads **every** backup row whatever its
+recorded health, so a `QUARANTINED` or `UNREADABLE` row whose archive now reads
+back sound returns to `HEALTHY`. The same pass is what re-classifies rows
+quarantined before `UNREADABLE` existed: migration `0038` leaves them as they are,
+so until a sweep completes a `quarantined` row may mean either finding.
 
 A false *unhealthy* is as harmful as a false *healthy* — it
-quarantines a restorable backup and emits a spurious audit entry — so the probe's
+condemns a restorable backup and emits a spurious audit entry — so the probe's
 leniency is pinned to what restore accepts. Restore reads the archive with
 `tarfile.open(mode="r:gz")`, which stops at the tar end-of-archive marker inside
 the first gzip member. Anything after a **complete** member therefore cannot make
@@ -1298,7 +1316,7 @@ Reading every archive is deliberate cost: the sweep is operator-invoked only
 config knob.
 
 **Damage vs. outage.** A body that ends early looks identical whether the object's
-bytes are damaged or the store is merely having a bad minute — and quarantining on
+bytes are damaged or the store is merely having a bad minute — and a verdict on
 the latter would condemn every backup in the deployment over one outage. The
 damage class the probe exists to catch is *persistent*: the transfer never gets
 past one fixed point, on every attempt. So the probe re-reads once, after a short
@@ -1322,8 +1340,8 @@ backoff so a momentary fault has a chance to clear, and the two reads decide:
   exits non-zero with an operator-facing message rather than a traceback.
 
 Accepting disagreeing stop points trades away some outage protection: a store that
-tears down both reads mid-body, at different points, now quarantines the backup
-rather than stopping the pass. The alternative was worse in practice — requiring
+tears down both reads mid-body, at different points, now marks the backup
+`UNREADABLE` rather than stopping the pass. The alternative was worse in practice — requiring
 the two points to be equal misread an RST-torn damaged body as an outage on about
 one probe in five, aborting the whole pass. The extra read is paid only on the
 failure path. A clean early EOF takes the same re-read path as a transport
