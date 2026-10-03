@@ -1089,11 +1089,17 @@ def _unreadable_archive(shape: str) -> bytes:
     if shape == "truncated":
         # The stream stops mid-deflate: it never reaches the gzip trailer.
         return archive[: len(archive) // 2]
+    if shape == "bad_deflate":
+        # A well-formed gzip header over a deflate block of the reserved type.
+        return b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xff" + b"\xff" * 64
     # Bytes that do not even open as a gzip stream.
     return b"not a gzip stream " * 16
 
 
-@pytest.mark.parametrize("shape", ["truncated", "not_gzip"])
+_UNREADABLE_SHAPES = ["truncated", "bad_deflate", "not_gzip"]
+
+
+@pytest.mark.parametrize("shape", _UNREADABLE_SHAPES)
 async def test_check_backup_health_of_an_unreadable_archive_is_unreadable(
     harness: StorageHarness, shape: str
 ) -> None:
@@ -1112,7 +1118,7 @@ async def test_check_backup_health_of_an_unreadable_archive_is_unreadable(
 
 
 @pytest.mark.parametrize("force", [False, True])
-@pytest.mark.parametrize("shape", ["truncated", "not_gzip"])
+@pytest.mark.parametrize("shape", _UNREADABLE_SHAPES)
 async def test_restore_of_an_unreadable_archive_is_refused_and_keeps_current(
     harness: StorageHarness, shape: str, force: bool
 ) -> None:

@@ -775,6 +775,38 @@ async def test_restore_unreadable_backup_is_refused_without_reading(
     assert persisted.health is BackupHealth.UNREADABLE
 
 
+@pytest.mark.parametrize("force", [False, True])
+async def test_restore_that_finds_the_archive_unreadable_marks_it_unreadable(
+    force: bool,
+) -> None:
+    """A restore can be the first read to find an archive's bytes gone (#3230): a
+    backup recorded HEALTHY whose archive will not extract. It is refused with
+    :class:`BackupUnreadableError`, ``force`` or not, and the verdict it reached is
+    recorded — the same one the sweep would have written — so the next attempt is
+    refused up front instead of re-reading the archive."""
+
+    server = _at_rest()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    backups, backup = _restore_fixture(server)
+    archive = FakeBackupArchiveStore()
+    archive.archives.add("ref")
+    archive.unreadable_refs.add("ref")
+    uow = FakeUnitOfWork(servers=repo, backups=backups)
+
+    with pytest.raises(BackupUnreadableError):
+        await RestoreBackup(uow=uow, backup_store=archive)(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            backup_id=backup.id,
+            force=force,
+        )
+    assert archive.restored == []
+    persisted = await backups.get_by_id(backup.id)
+    assert persisted is not None
+    assert persisted.health is BackupHealth.UNREADABLE
+
+
 async def test_restore_unknown_backup_is_not_found() -> None:
     server = _at_rest()
     repo = FakeServerRepository()

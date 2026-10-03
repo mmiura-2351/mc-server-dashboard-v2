@@ -149,6 +149,11 @@ class ArchiveUnreadableError(StorageError):
     describes the payload (silent bit-rot). Such a backup is unrestorable — the
     same read path backs restore — so the sweep quarantines it.
 
+    Also raised wherever an archive is extracted — ``restore_backup`` on both
+    backends and the fs ``check_backup_health`` — when its bytes do not read back
+    as a gzip-compressed tar: truncated, or damaged gzip / tar framing (issue
+    #3230).
+
     Deliberately distinct from :class:`IntegrityCheckError` ("the archived world is
     structurally corrupt") and from :class:`ObjectStoreUnavailableError` ("the store
     could not serve the request"): the bytes are gone, which is neither a verdict

@@ -483,6 +483,32 @@ async def test_restore_healthy_backup_reports_not_corrupt(tmp_path: Path) -> Non
     assert corrupt_count == 0
 
 
+async def test_restore_unreadable_archive_translates_to_unreadable(
+    tmp_path: Path,
+) -> None:
+    """A restore that finds its archive truncated (issue #3230): the storage
+    ``ArchiveUnreadableError`` becomes :class:`BackupUnreadableError` — the error
+    the edge answers 409 ``backup_unreadable`` — not a raw storage type (500)."""
+
+    storage = FsStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+    await _publish(storage, community, server, {"server.properties": b"motd=original"})
+    archive = region_targz({"world/region/r.0.0.mca": healthy_region_bytes()})
+
+    async def _truncated() -> AsyncIterator[bytes]:
+        yield archive[: len(archive) // 2]
+
+    key = await storage.put_backup(
+        StorageCommunityId(community.value), StorageServerId(server.value), _truncated()
+    )
+
+    with pytest.raises(BackupUnreadableError):
+        await adapter.restore(
+            community_id=community, server_id=server, storage_ref=key.value
+        )
+
+
 async def test_restore_unknown_ref_translates_to_backup_not_found(
     tmp_path: Path,
 ) -> None:

@@ -360,7 +360,10 @@ class RestoreBackup:
     :class:`BackupUnreadableError`, ``force`` or not: its archive could not be read
     back at all, so the override has nothing to publish. The refusal reads the
     recorded verdict rather than the archive and leaves it unchanged — only an
-    integrity sweep that reads the archive back in full revises it.
+    integrity sweep that reads the archive back in full revises it. A restore that
+    is itself the first read to find the archive unreadable (issue #3230) is
+    refused the same way and records ``UNREADABLE``, the verdict the sweep would
+    have reached, so the next attempt is refused up front.
 
     A backup carries the working set as it was when the backup was taken, so the
     republished ``server.properties`` holds the platform-managed values of THAT
@@ -429,14 +432,21 @@ class RestoreBackup:
                 # Refused restore (corrupt, no force): quarantine the backup so an
                 # operator sees it is corrupt, then re-raise for the edge to surface
                 # and audit. ``current`` was left untouched by Storage.
-                await self._quarantine(backup_id)
+                await self._mark_health(backup_id, BackupHealth.QUARANTINED)
+                raise
+            except BackupUnreadableError:
+                # The restore was the read that found the archive's bytes gone
+                # (issue #3230). Record the verdict the sweep would have, so the
+                # next attempt is refused up front instead of re-reading the
+                # archive; a sweep that later reads it back sound revises it.
+                await self._mark_health(backup_id, BackupHealth.UNREADABLE)
                 raise
             if corrupt_count > 0:
                 # Forced restore of a known-corrupt backup: it published, but the
                 # backup IS corrupt, so quarantine it; the edge audits the forced
                 # corrupt restore. Quarantine BEFORE the properties re-apply, so a
                 # failure there cannot leave a known-corrupt backup unmarked.
-                await self._quarantine(backup_id)
+                await self._mark_health(backup_id, BackupHealth.QUARANTINED)
                 await self._reapply_platform_properties(
                     community_id=community_id, server_id=server_id, server=server
                 )
@@ -457,9 +467,9 @@ class RestoreBackup:
                 )
             return RestoreResult(forced_corrupt=False, corrupt_count=0)
 
-    async def _quarantine(self, backup_id: BackupId) -> None:
+    async def _mark_health(self, backup_id: BackupId, health: BackupHealth) -> None:
         async with self.uow:
-            await self.uow.backups.update_health(backup_id, BackupHealth.QUARANTINED)
+            await self.uow.backups.update_health(backup_id, health)
             await self.uow.commit()
 
     async def _reapply_platform_properties(
