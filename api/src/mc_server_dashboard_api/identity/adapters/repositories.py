@@ -127,10 +127,10 @@ class SqlAlchemyUserRepository(UserRepository):
             values["username"] = username.value
         if email is not None:
             values["email"] = email.value
-        # RETURNING hands back the row as written; populate_existing overwrites
-        # the session's identity-map copy (loaded by an earlier get_by_id in the
-        # same transaction), so the caller sees concurrently committed columns
-        # instead of its stale read.
+        # RETURNING hands back the row as written, so the caller sees columns
+        # committed concurrently instead of its stale read. populate_existing
+        # makes it overwrite any identity-map copy an earlier read in this
+        # transaction left alive (the map holds rows weakly, so usually none).
         stmt = (
             update(UserModel)
             .where(UserModel.id == user_id.value)
