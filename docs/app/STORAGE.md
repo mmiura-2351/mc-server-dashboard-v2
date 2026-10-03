@@ -1332,10 +1332,15 @@ backoff so a momentary fault has a chance to clear, and the two reads decide:
   of one damaged body stop at different offsets (issue #2381). An RST only ever
   loses bytes, never invents them, so neither read got past the cut and the
   further one is the better estimate of it.
-- **Both reads ended short, and either delivered no byte at all** — the store
-  refusing outright. Such a read never reached the body and says nothing about
-  where this object's bytes end, so it stays `ObjectStoreUnavailableError` →
-  `BackupStorageUnavailableError` however far the other read got. The sweep does
+- **Neither read delivered a byte** — the archive is unreadable (issue #2379).
+  The store answered `HEAD` for this object moments earlier, and a store that is
+  down fails there first, so an object it reproducibly serves nothing of is
+  treated as dead rather than as an outage. Treating it as an outage stopped every
+  sweep pass on that one object, so no other backup was ever checked again.
+- **One read ended short after delivering bytes, the other delivered none** — an
+  outage. The empty read never reached the body and says nothing about where this
+  object's bytes end, so it cannot corroborate the short one, and the pair stays
+  `ObjectStoreUnavailableError` → `BackupStorageUnavailableError`. The sweep does
   not catch that: the pass stops, logging which backup it died on, and the CLI
   exits non-zero with an operator-facing message rather than a traceback.
 
@@ -1343,7 +1348,11 @@ Accepting disagreeing stop points trades away some outage protection: a store th
 tears down both reads mid-body, at different points, now marks the backup
 `UNREADABLE` rather than stopping the pass. The alternative was worse in practice — requiring
 the two points to be equal misread an RST-torn damaged body as an outage on about
-one probe in five, aborting the whole pass. The extra read is paid only on the
+one probe in five, aborting the whole pass. Condemning a reproducible zero-byte
+delivery trades away more of it: a backend that answers `HEAD` but serves no body
+— half-up, or failing between the `HEAD` and the reads — marks an intact backup
+`UNREADABLE`. That verdict is never terminal: every pass re-probes every row, and
+a later complete read returns it to `HEALTHY`. The extra read is paid only on the
 failure path. A clean early EOF takes the same re-read path as a transport
 teardown — it is the same observation and equally unable to tell damage from an
 outage on one attempt. The stop points are byte-exact in practice, not rounded to

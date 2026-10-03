@@ -12,10 +12,11 @@ decompressed output is discarded as it is produced — nothing is staged or buff
 The delicate case is telling *damage* from an *outage*: the reported defect
 surfaces as a connection teardown mid-body, exactly like a store having a bad
 minute. The probe re-reads after a teardown: a complete re-read is healthy, and
-the archive is called unreadable only when both reads delivered bytes and both
-ended short — at the further of the two offsets, since an RST-torn read loses a
-timing-dependent tail (#2381). A read that delivered nothing stays an
-availability failure, so a store refusing reads cannot quarantine backups.
+the archive is called unreadable when both reads delivered bytes and both ended
+short — at the further of the two offsets, since an RST-torn read loses a
+timing-dependent tail (#2381) — or when neither read delivered a byte at all
+(#2379). A read that delivered nothing never corroborates a short one: that pair
+stays an availability failure.
 """
 
 from __future__ import annotations
@@ -301,9 +302,11 @@ async def test_a_read_that_delivers_nothing_cannot_corroborate_a_short_one(
     assert isinstance(excinfo.value.__cause__, ObjectStoreUnavailableError)
 
 
-async def test_teardown_before_any_byte_reports_the_store_unavailable() -> None:
-    """A store refusing the read outright delivers nothing, reproducibly — that is
-    the outage signature, not evidence about this object's bytes."""
+async def test_reads_that_both_deliver_nothing_are_unreadable() -> None:
+    """Issue #2379: an object whose every read delivers no byte is dead, not an
+    outage. The store answered ``HEAD`` for it moments earlier — a store that is
+    down fails there first — and treating it as an outage aborted every sweep pass
+    on this one object, so no other backup was ever checked again."""
 
     store, storage = _store_and_storage()
     community, server = new_scope()
@@ -312,8 +315,29 @@ async def test_teardown_before_any_byte_reports_the_store_unavailable() -> None:
     object_key = storage._backup_key(community, server, key)
     store.read_aborts[object_key] = [0, 0]
 
-    with pytest.raises(ObjectStoreUnavailableError):
+    with pytest.raises(ArchiveUnreadableError) as excinfo:
         await storage.check_backup_health(community, server, key)
+
+    assert f"past 0 of the {len(archive)} declared" in str(excinfo.value)
+
+
+async def test_a_zero_delivery_verdict_is_not_sticky() -> None:
+    """The verdict is revisable (issue #2379): it is re-derived from the reads on
+    every probe, so once the store delivers the archive again it reads back healthy.
+    A half-up backend can make an intact archive deliver nothing, and that must not
+    leave it condemned."""
+
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+    key = await _put_backup(storage, community, server, _sound_archive())
+    object_key = storage._backup_key(community, server, key)
+    store.read_aborts[object_key] = [0, 0]
+    with pytest.raises(ArchiveUnreadableError):
+        await storage.check_backup_health(community, server, key)
+
+    report = await storage.check_backup_health(community, server, key)
+
+    assert report.healthy
 
 
 async def test_transient_teardown_that_does_not_recur_reads_back_healthy() -> None:
