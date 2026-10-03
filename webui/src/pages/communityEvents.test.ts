@@ -3,7 +3,17 @@ import {
   resetForTesting as resetClientForTesting,
   setRefresher,
 } from "../api/client.ts";
-import { clearAccessToken, setAccessToken } from "../auth/tokenStore.ts";
+import {
+  hardLogout,
+  refreshForRetry,
+  resetForTesting as resetSessionForTesting,
+  signIn,
+} from "../auth/session.ts";
+import {
+  clearAccessToken,
+  getAccessToken,
+  setAccessToken,
+} from "../auth/tokenStore.ts";
 import { installMockWebSocket, MockWebSocket } from "../test/mockWebSocket.ts";
 import {
   backoffDelayMs,
@@ -183,6 +193,8 @@ describe("CommunityEventsClient", () => {
     restore();
     clearAccessToken();
     resetClientForTesting();
+    resetSessionForTesting();
+    vi.unstubAllGlobals();
     vi.useRealTimers();
   });
 
@@ -403,6 +415,48 @@ describe("CommunityEventsClient", () => {
     await vi.advanceTimersByTimeAsync(60000);
     expect(MockWebSocket.instances).toHaveLength(2);
     expect(MockWebSocket.last().protocols).toEqual(["access_token", "tok-2"]);
+    client.close();
+  });
+
+  // The socket refreshes through the same session core as the REST client, so
+  // a refresh it began before the session changed must not hand it the old
+  // user's token to reconnect with (#3224).
+  it("never reconnects as the previous user when its refresh lands after a new sign-in", async () => {
+    const pendingFetches: ((response: Response) => void)[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        () =>
+          new Promise<Response>((resolve) => {
+            pendingFetches.push(resolve);
+          }),
+      ),
+    );
+    setRefresher(refreshForRetry);
+    const { client } = makeClient();
+    client.start();
+    MockWebSocket.last().open();
+    MockWebSocket.last().serverClose(4419);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(pendingFetches).toHaveLength(1);
+
+    hardLogout();
+    signIn("tok-B");
+    pendingFetches[0](
+      new Response(
+        JSON.stringify({
+          access_token: "late-tok-1",
+          refresh_token: "ignored",
+          token_type: "bearer",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(60000);
+
+    expect(getAccessToken()).toBe("tok-B");
+    const offered = MockWebSocket.instances.map((s) => s.protocols);
+    expect(offered).not.toContainEqual(["access_token", "late-tok-1"]);
     client.close();
   });
 
