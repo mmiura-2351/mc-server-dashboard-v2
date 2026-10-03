@@ -241,8 +241,9 @@ async def test_backup_restore_mid_body_failure_is_unavailable_and_keeps_current(
     None
 ):
     """``POST .../backups/{id}/restore``: the archive spool dies partway. That is
-    an outage (503), not the ``BackupCorruptError`` a damaged world gets (409) —
-    and the restore must publish nothing."""
+    an outage (503), not the ``BackupCorruptError`` a damaged world gets (500
+    ``working_set_corrupt``, which also quarantines the backup) — and the restore
+    must publish nothing."""
 
     storage, backing = _object_storage()
     community, server = _scope()
@@ -271,8 +272,8 @@ async def test_backup_create_mid_body_failure_is_unavailable_and_writes_nothing(
     rel_path: str,
 ) -> None:
     """``POST .../backups``: a working-set object dies partway while the archive
-    is built. An outage (503), not a corrupt world (409), and no archive object
-    is left behind to list as a backup."""
+    is built. An outage (503), not a corrupt world (500 ``working_set_corrupt``),
+    and no archive object is left behind to list as a backup."""
 
     storage, backing = _object_storage()
     community, server = _scope()
