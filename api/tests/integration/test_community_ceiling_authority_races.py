@@ -22,7 +22,7 @@ import os
 import uuid
 from collections.abc import AsyncIterator, Callable, Coroutine
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 from sqlalchemy import text
@@ -112,36 +112,38 @@ async def engine() -> AsyncIterator[AsyncEngine]:
         await downgrade_base(_DB_URL)
 
 
-class _Pause:
-    """Holds a use case at its write until released."""
+# Where a paused use case stops: at its first write, after a role update's
+# locked read of its target, or after the ceiling locked the actor's roles.
+_PausePoint = Literal["write", "target-read", "role-locks"]
 
-    def __init__(self) -> None:
+
+class _Pause:
+    """Holds a use case at its pause point until released."""
+
+    def __init__(self, at: _PausePoint = "write") -> None:
+        self.at = at
         self.reached = asyncio.Event()
         self.resume = asyncio.Event()
 
-    async def hold(self) -> None:
-        if self.reached.is_set():
+    async def hold(self, point: _PausePoint) -> None:
+        if point != self.at or self.reached.is_set():
             return
         self.reached.set()
         await self.resume.wait()
 
 
 class _PausingRoleRepository(SqlAlchemyRoleRepository):
-    def __init__(
-        self, session: AsyncSession, pause: _Pause, *, at_locked_read: bool
-    ) -> None:
+    def __init__(self, session: AsyncSession, pause: _Pause) -> None:
         super().__init__(session)
         self._pause = pause
-        self._at_locked_read = at_locked_read
 
     async def add(self, role: Role) -> None:
-        await self._pause.hold()
+        await self._pause.hold("write")
         await super().add(role)
 
     async def lock_by_id(self, role_id: RoleId) -> Role | None:
         role = await super().lock_by_id(role_id)
-        if self._at_locked_read:
-            await self._pause.hold()
+        await self._pause.hold("target-read")
         return role
 
     async def update(
@@ -152,7 +154,7 @@ class _PausingRoleRepository(SqlAlchemyRoleRepository):
         permissions: set[Permission] | None = None,
         updated_at: dt.datetime,
     ) -> Role:
-        await self._pause.hold()
+        await self._pause.hold("write")
         return await super().update(
             role_id, name=name, permissions=permissions, updated_at=updated_at
         )
@@ -163,8 +165,13 @@ class _PausingMembershipRepository(SqlAlchemyMembershipRepository):
         super().__init__(session)
         self._pause = pause
 
+    async def lock_role_ids(self, membership_id: MembershipId) -> list[RoleId]:
+        role_ids = await super().lock_role_ids(membership_id)
+        await self._pause.hold("role-locks")
+        return role_ids
+
     async def assign_role(self, membership_id: MembershipId, role_id: RoleId) -> None:
-        await self._pause.hold()
+        await self._pause.hold("write")
         await super().assign_role(membership_id, role_id)
 
 
@@ -174,30 +181,23 @@ class _PausingResourceGrantRepository(SqlAlchemyResourceGrantRepository):
         self._pause = pause
 
     async def add(self, grant: ResourceGrant) -> None:
-        await self._pause.hold()
+        await self._pause.hold("write")
         await super().add(grant)
 
 
 class _PausingUnitOfWork(SqlAlchemyUnitOfWork):
-    """Pauses at its first write, or at a role update's locked target read."""
+    """Pauses at the given pause's point."""
 
     def __init__(
-        self,
-        session_factory: async_sessionmaker[AsyncSession],
-        pause: _Pause,
-        *,
-        at_locked_read: bool = False,
+        self, session_factory: async_sessionmaker[AsyncSession], pause: _Pause
     ) -> None:
         super().__init__(session_factory)
         self._pause = pause
-        self._at_locked_read = at_locked_read
 
     async def __aenter__(self) -> _PausingUnitOfWork:
         await super().__aenter__()
         assert self._session is not None
-        self.roles = _PausingRoleRepository(
-            self._session, self._pause, at_locked_read=self._at_locked_read
-        )
+        self.roles = _PausingRoleRepository(self._session, self._pause)
         self.memberships = _PausingMembershipRepository(self._session, self._pause)
         self.resource_grants = _PausingResourceGrantRepository(
             self._session, self._pause
@@ -528,13 +528,16 @@ async def test_conferral_queued_behind_a_revocation_sees_it(
     assert isinstance(outcome, PermissionCeilingExceededError)
 
 
+@pytest.mark.parametrize("pause_at", ["target-read", "role-locks"])
 async def test_managers_editing_each_others_roles_do_not_deadlock(
-    engine: AsyncEngine,
+    engine: AsyncEngine, pause_at: _PausePoint
 ) -> None:
-    # The manager adds server:start to a role the co-manager holds while the
-    # co-manager adds it to the Managers role the manager holds: each edit locks
-    # the other's source of authority. The first is paused after reading its
-    # target under lock; both must then complete.
+    # The manager edits the CoManagers role the co-manager holds while the
+    # co-manager edits the Managers role the manager holds: each edit locks its
+    # target for update and the other's target as its own authority. The first
+    # is paused after one of its two lock steps, the second runs into it, and
+    # both must then complete: locking the target before the actor's roles, or
+    # the actor's roles before the target, would deadlock at one of the two.
     world = await _world(engine)
     co_manager = UserId(uuid.uuid4())
     await _insert_user(engine, co_manager.value, "co_manager")
@@ -554,12 +557,9 @@ async def test_managers_editing_each_others_roles_do_not_deadlock(
         await uow.memberships.assign_role(membership.id, co_managers.id)
         await uow.commit()
 
-    pause = _Pause()
+    pause = _Pause(at=pause_at)
     first = asyncio.create_task(
-        UpdateRole(
-            uow=_PausingUnitOfWork(world.factory, pause, at_locked_read=True),
-            clock=SystemClock(),
-        )(
+        UpdateRole(uow=_PausingUnitOfWork(world.factory, pause), clock=SystemClock())(
             community_id=world.community_id,
             role_id=co_managers.id,
             actor_id=world.manager,
