@@ -419,6 +419,26 @@ class RoleRepositoryContract:
         assert reloaded is not None
         assert reloaded.permissions == {Permission("server:read")}
 
+    async def test_lock_by_ids_returns_the_existing_roles_and_the_update_target(
+        self, role_repository_harness: RoleRepositoryHarness
+    ) -> None:
+        shared = _role(role_repository_harness, "Editor")
+        target = _role(role_repository_harness, "Viewer")
+        async with role_repository_harness.open() as transaction:
+            await transaction.repository.add(shared)
+            await transaction.repository.add(target)
+            await transaction.commit()
+
+        async with role_repository_harness.open() as transaction:
+            locked = await transaction.repository.lock_by_ids(
+                [shared.id, RoleId.new()], for_update=target.id
+            )
+            empty = await transaction.repository.lock_by_ids([])
+            await transaction.commit()
+
+        assert {role.id for role in locked} == {shared.id, target.id}
+        assert empty == []
+
     async def test_update_writes_only_the_supplied_columns_and_returns_the_row(
         self, role_repository_harness: RoleRepositoryHarness
     ) -> None:
@@ -579,6 +599,34 @@ class ResourceGrantRepositoryContract:
         assert reloaded is not None
         assert reloaded.permissions == {Permission("server:read")}
         assert missing is None
+
+    async def test_lock_for_user_resource_matches_the_full_key(
+        self, resource_grant_repository_harness: ResourceGrantRepositoryHarness
+    ) -> None:
+        target = _grant(resource_grant_repository_harness)
+        async with resource_grant_repository_harness.open() as transaction:
+            await transaction.repository.add(target)
+            await transaction.commit()
+
+        async with resource_grant_repository_harness.open() as transaction:
+            locked = await transaction.repository.lock_for_user_resource(
+                target.user_id,
+                target.community_id,
+                target.resource_type,
+                target.resource_id,
+            )
+            cross_community = await transaction.repository.lock_for_user_resource(
+                target.user_id,
+                resource_grant_repository_harness.other_community_id,
+                target.resource_type,
+                target.resource_id,
+            )
+            await transaction.commit()
+
+        assert locked is not None
+        assert locked.id == target.id
+        assert locked.permissions == target.permissions
+        assert cross_community is None
 
     async def test_user_resource_key_is_unique(
         self, resource_grant_repository_harness: ResourceGrantRepositoryHarness

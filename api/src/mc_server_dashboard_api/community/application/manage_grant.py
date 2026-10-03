@@ -13,11 +13,14 @@ assume an authorized member and only do the data work.
   (server / file / backup families), and that the resource *exists* in the
   community — a fabricated ``resource_id`` is rejected with
   :class:`GrantResourceNotFoundError` rather than persisted as a ghost grant
-  (issue #361). The checks are not held to the INSERT; the grant's foreign keys
-  to the membership and the server are what keep a removal or deletion that
-  commits in between from leaving a ghost grant, and they surface as the same two
-  errors (issue #3216). The membership FK names the validated membership's id,
-  so a remove-and-re-add in between cannot hand the grant to the new membership.
+  (issue #361). The membership check is not held to the INSERT; the grant's
+  foreign key to the membership is what keeps a removal that commits in between
+  from leaving a ghost grant, surfacing as the same error (issue #3216). The
+  membership FK names the validated membership's id, so a remove-and-re-add in
+  between cannot hand the grant to the new membership. The resource check holds
+  the server until commit, ahead of the permission ceiling's locks (#3241), so a
+  server deletion either commits before it or waits and cascades to the grant;
+  the grant's foreign key to the server backs this.
   A duplicate ``(user, resource_type, resource_id)`` surfaces as
   :class:`ResourceGrantAlreadyExistsError` (the unique constraint, translated by
   the UnitOfWork).

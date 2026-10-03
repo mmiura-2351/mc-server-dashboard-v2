@@ -28,7 +28,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from mc_server_dashboard_api.community.application.permission_ceiling import (
+    check_permission_ceiling,
     enforce_permission_ceiling,
+    lock_actor_ceiling,
 )
 from mc_server_dashboard_api.community.domain.clock import Clock
 from mc_server_dashboard_api.community.domain.entities import Role
@@ -149,11 +151,21 @@ class UpdateRole:
             # The ceiling below is evaluated against the set this write replaces,
             # so a permission edit reads the role under a row lock (#3215):
             # against an unlocked read, a permission removed concurrently would
-            # not count as newly conferred and could come back unchecked. A
-            # rename writes only the name, so its read needs no lock.
+            # not count as newly conferred and could come back unchecked. The
+            # actor's own authority is locked too (#3241), in one pass with the
+            # role so the locks follow the ceiling's global order; lock_by_id
+            # then re-reads the role that pass already holds. A rename writes
+            # only the name, so its read needs no lock.
+            ceiling: set[Permission] = set()
             if permissions is None:
                 role = await self.uow.roles.get_by_id(role_id)
             else:
+                ceiling = await lock_actor_ceiling(
+                    self.uow,
+                    actor_id=actor_id,
+                    community_id=community_id,
+                    role_to_update=role_id,
+                )
                 role = await self.uow.roles.lock_by_id(role_id)
             if role is None or role.community_id != community_id:
                 raise RoleNotFoundError(str(role_id.value))
@@ -164,12 +176,7 @@ class UpdateRole:
             validated = None
             if permissions is not None:
                 validated = _validate_permissions(permissions)
-                await enforce_permission_ceiling(
-                    self.uow,
-                    actor_id=actor_id,
-                    community_id=community_id,
-                    conferred=validated - role.permissions,
-                )
+                check_permission_ceiling(ceiling, validated - role.permissions)
             # Write only the supplied columns (#3215), so an edit cannot restore
             # a column it read before a concurrent edit of it committed.
             updated = await self.uow.roles.update(

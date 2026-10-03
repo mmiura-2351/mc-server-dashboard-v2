@@ -53,7 +53,7 @@ from mc_server_dashboard_api.community.application.manage_membership import (
 from mc_server_dashboard_api.community.application.provision_community import (
     ProvisionCommunity,
 )
-from mc_server_dashboard_api.community.domain.entities import ResourceGrant
+from mc_server_dashboard_api.community.domain.entities import ResourceGrant, Role
 from mc_server_dashboard_api.community.domain.errors import (
     GrantResourceNotFoundError,
     GrantTargetNotMemberError,
@@ -63,6 +63,8 @@ from mc_server_dashboard_api.community.domain.value_objects import (
     CommunityId,
     Permission,
     ResourceRef,
+    RoleId,
+    RoleName,
     UserId,
 )
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
@@ -174,7 +176,11 @@ class _World:
     engine: AsyncEngine
     factory: async_sessionmaker[AsyncSession]
     community_id: CommunityId
-    owner: UserId
+    # The creations' actor. Not an owner: the permission ceiling share-locks the
+    # actor's role assignments (#3241), and every member removal's last-owner
+    # guard locks all Owner assignments, so an owner's paused creation would
+    # hold the removal back instead of letting it commit first.
+    manager: UserId
     member: UserId
     server_id: uuid.UUID
 
@@ -223,8 +229,10 @@ def _add_member(factory: async_sessionmaker[AsyncSession]) -> AddMember:
 
 async def _world(engine: AsyncEngine) -> _World:
     owner = UserId(uuid.uuid4())
+    manager = UserId(uuid.uuid4())
     member = UserId(uuid.uuid4())
     await _insert_user(engine, owner.value, "owner")
+    await _insert_user(engine, manager.value, "manager")
     await _insert_user(engine, member.value, "member")
     factory = create_session_factory(engine)
     community = await ProvisionCommunity(
@@ -232,17 +240,36 @@ async def _world(engine: AsyncEngine) -> _World:
         users=IdentityUserDirectory(IdentityUnitOfWork(factory)),
         clock=SystemClock(),
     )(name="guild", owner_user_id=owner)
+    await _add_member(factory)(community_id=community.id, user_id=manager)
     await _add_member(factory)(community_id=community.id, user_id=member)
+    now = SystemClock().now()
+    managers = Role(
+        id=RoleId.new(),
+        community_id=community.id,
+        name=RoleName("Managers"),
+        permissions={Permission("grant:manage"), _START},
+        created_at=now,
+        updated_at=now,
+    )
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.roles.add(managers)
+        await uow.flush()
+        membership = await uow.memberships.get_by_user_and_community(
+            manager, community.id
+        )
+        assert membership is not None
+        await uow.memberships.assign_role(membership.id, managers.id)
+        await uow.commit()
     server_id = uuid.uuid4()
     await _insert_server(engine, server_id, community.id)
-    return _World(engine, factory, community.id, owner, member, server_id)
+    return _World(engine, factory, community.id, manager, member, server_id)
 
 
 def _paused_creation(world: _World, pause: _Pause) -> asyncio.Task[ResourceGrant]:
     return asyncio.create_task(
         CreateGrant(uow=_PausingUnitOfWork(world.factory, pause), clock=SystemClock())(
             community_id=world.community_id,
-            actor_id=world.owner,
+            actor_id=world.manager,
             user_id=world.member,
             resource_type="server",
             resource_id=world.server_id,
