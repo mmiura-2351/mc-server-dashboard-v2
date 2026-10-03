@@ -250,7 +250,10 @@ async def test_backup_restore_mid_body_failure_is_unavailable_and_keeps_current(
     adapter, ref = await _backup(storage, community, server)
     pointer_key = _server_prefix(community, server) + "current.json"
     pointer_before = backing.objects[pointer_key]
-    backing.read_aborts[_archive_key(community, server, ref)] = [_ABORT_AT]
+    # Derived from the compressed archive, which is far smaller than _CONTENT: a
+    # fixed offset past its end would deliver it whole before failing.
+    archive = backing.objects[_archive_key(community, server, ref)]
+    backing.read_aborts[_archive_key(community, server, ref)] = [len(archive) // 2]
 
     with pytest.raises(BackupStorageUnavailableError):
         await adapter.restore(community_id=community, server_id=server, storage_ref=ref)
