@@ -81,7 +81,16 @@ from mc_server_dashboard_api.core.adapters.database import create_session_factor
 from mc_server_dashboard_api.identity.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork as IdentityUnitOfWork,
 )
+from mc_server_dashboard_api.servers.adapters.unit_of_work import (
+    SqlAlchemyUnitOfWork as ServersUnitOfWork,
+)
+from mc_server_dashboard_api.servers.application.manage_server import DeleteServer
+from mc_server_dashboard_api.servers.domain.value_objects import (
+    CommunityId as ServersCommunityId,
+)
+from mc_server_dashboard_api.servers.domain.value_objects import ServerId
 from tests.integration.migrate import downgrade_base, upgrade_head
+from tests.servers.fakes import FakeBackupArchiveStore
 
 _DB_URL = os.environ.get("MCD_TEST_DATABASE_URL")
 
@@ -499,6 +508,66 @@ async def test_grant_creation_never_commits_after_the_actor_grant_is_revoked(
 ) -> None:
     world = await _world(engine, start_via_grant=True)
     await _race(world, _create_grant, _revoke_grant)
+
+
+class _DeletePidServersUnitOfWork(ServersUnitOfWork):
+    """Servers unit of work reporting the pid of the transaction that deletes.
+
+    :class:`DeleteServer` enters its unit of work twice (an at-rest check, then
+    the deleting transaction); the second entry is the one a lock would block.
+    """
+
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        pid: asyncio.Future[int],
+    ) -> None:
+        super().__init__(session_factory)
+        self._pid = pid
+        self._entries = 0
+
+    async def __aenter__(self) -> _DeletePidServersUnitOfWork:
+        await super().__aenter__()
+        self._entries += 1
+        if self._entries == 2:
+            assert self._session is not None
+            value = (
+                await self._session.execute(text("SELECT pg_backend_pid()"))
+            ).scalar_one()
+            self._pid.set_result(value)
+        return self
+
+
+async def test_grant_creation_on_the_actor_grant_survives_a_server_deletion(
+    engine: AsyncEngine,
+) -> None:
+    # The creation's ceiling holds the manager's grant on the server; the
+    # deletion removes the server and cascades to its grants. Had the creation
+    # not held the server first, the deletion would hold the server waiting for
+    # the grant while the creation's insert waited for the server: a deadlock.
+    world = await _world(engine, start_via_grant=True)
+
+    pause = _Pause()
+    creation = asyncio.create_task(
+        _create_grant(world, _PausingUnitOfWork(world.factory, pause))
+    )
+    await pause.reached.wait()
+    pid: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+    deletion = asyncio.create_task(
+        DeleteServer(
+            uow=_DeletePidServersUnitOfWork(world.factory, pid),
+            backup_store=FakeBackupArchiveStore(),
+        )(
+            community_id=ServersCommunityId(world.community_id.value),
+            server_id=ServerId(world.server_id),
+        )
+    )
+    await _await_settled(world.engine, deletion, pid)
+    pause.resume.set()
+    results = await asyncio.gather(creation, deletion, return_exceptions=True)
+
+    for result in results:
+        assert not isinstance(result, BaseException)
 
 
 async def test_conferral_queued_behind_a_revocation_sees_it(
