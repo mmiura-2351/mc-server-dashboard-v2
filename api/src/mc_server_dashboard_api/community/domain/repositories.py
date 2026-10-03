@@ -97,6 +97,30 @@ class MembershipRepository(abc.ABC):
         """Return the membership for ``(user_id, community_id)``, or ``None``."""
 
     @abc.abstractmethod
+    async def hold_for_users(
+        self, community_id: CommunityId, user_ids: Sequence[UserId]
+    ) -> list[Membership]:
+        """Return the memberships of ``user_ids``, held against removal until commit.
+
+        For a caller whose write depends on these memberships or inserts a row
+        under them (#3241): a member removal waits for this transaction, and a
+        membership one committed first is not returned. The rows are key-share
+        locked in ascending id order in one statement. Users without a
+        membership are skipped; order of the result is unspecified.
+        """
+
+    @abc.abstractmethod
+    async def lock_by_user_and_community(
+        self, user_id: UserId, community_id: CommunityId
+    ) -> Membership | None:
+        """Return :meth:`get_by_user_and_community`, locked for removal until commit.
+
+        A member removal takes this before any other lock (#3241), so it queues
+        behind a transaction holding the membership instead of deadlocking with
+        it over the rows below the membership.
+        """
+
+    @abc.abstractmethod
     async def list_for_user(self, user_id: UserId) -> list[Membership]:
         """Return all of ``user_id``'s memberships (FR-MEM-4 view scoping)."""
 
@@ -122,6 +146,20 @@ class MembershipRepository(abc.ABC):
     @abc.abstractmethod
     async def list_role_ids(self, membership_id: MembershipId) -> list[RoleId]:
         """Return the ids of the roles assigned to ``membership_id``."""
+
+    @abc.abstractmethod
+    async def lock_role_ids(
+        self, membership_id: MembershipId, role_ids: Sequence[RoleId]
+    ) -> list[RoleId]:
+        """Return which of ``role_ids`` are assigned, share-locked until commit.
+
+        For a caller whose write depends on the member holding these roles
+        (#3241): an unassignment or a cascade from a member removal or role
+        deletion waits for this transaction, and an assignment such a deletion
+        committed first is no longer returned. Only the assignments of
+        ``role_ids`` -- roles the caller has already locked -- are locked: an
+        assignment of a role it never locked would be a lock taken out of order.
+        """
 
     @abc.abstractmethod
     async def lock_owner_role_holders(
@@ -168,6 +206,20 @@ class RoleRepository(abc.ABC):
         For a caller whose write depends on the role's current state (#3215): a
         concurrent locker waits, then reads the row as this transaction left it.
         ``None`` if absent.
+        """
+
+    @abc.abstractmethod
+    async def lock_by_ids(
+        self, role_ids: Sequence[RoleId], *, for_update: RoleId | None = None
+    ) -> list[Role]:
+        """Lock the roles of ``role_ids`` and ``for_update``; return those that exist.
+
+        ``for_update`` is locked as :meth:`lock_by_id` does, every other role
+        share-locked: a concurrent edit or deletion of it waits for this
+        transaction, and a locker that waited reads the role as committed
+        (#3241). Rows are locked one at a time in ascending id order, each at its
+        final strength, so transactions locking overlapping sets through this
+        method cannot deadlock on them. Order of the result is unspecified.
         """
 
     @abc.abstractmethod
@@ -223,6 +275,21 @@ class ResourceGrantRepository(abc.ABC):
         """
 
     @abc.abstractmethod
+    async def lock_for_user_resource(
+        self,
+        user_id: UserId,
+        community_id: CommunityId,
+        resource_type: str,
+        resource_id: uuid.UUID,
+    ) -> ResourceGrant | None:
+        """Return :meth:`get_for_user_resource`, share-locked until commit.
+
+        For a caller whose write depends on the grant (#3241): a revocation, or
+        a cascade from a member removal or server deletion, waits for this
+        transaction, and a grant one committed first is no longer returned.
+        """
+
+    @abc.abstractmethod
     async def list_for_community(
         self, community_id: CommunityId, user_id: UserId | None = None
     ) -> list[ResourceGrant]:
@@ -242,15 +309,21 @@ class ResourceExistenceChecker(abc.ABC):
 
     Grant creation validates that ``resource_id`` names a real resource in the
     community before persisting, so a fabricated id cannot become a ghost grant.
-    The ``resource_grant`` FK to ``server`` backs this only for a resource deleted
-    concurrently (issue #3216): it does not know the community, so this Port is
-    what rejects a server of another community. The concrete adapter queries the
-    owning context's table (M1: ``server``) and is bound on the unit of work's
-    session, so the check runs inside the create transaction.
+    The ``resource_grant`` FK to ``server`` (issue #3216) does not know the
+    community, so this Port is what rejects a server of another community. The
+    concrete adapter queries the owning context's table (M1: ``server``) and is
+    bound on the unit of work's session, so the check runs inside the create
+    transaction.
     """
 
     @abc.abstractmethod
     async def exists(
         self, community_id: CommunityId, resource_type: str, resource_id: uuid.UUID
     ) -> bool:
-        """Return whether ``(resource_type, resource_id)`` is in ``community_id``."""
+        """Return whether ``(resource_type, resource_id)`` is in ``community_id``.
+
+        An existing resource is held against deletion until the transaction ends:
+        the grant creation locks the actor's own grant on it afterwards (#3241),
+        and a deletion, which removes the resource before cascading to its
+        grants, would otherwise deadlock with it.
+        """

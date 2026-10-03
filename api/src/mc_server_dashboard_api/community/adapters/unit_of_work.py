@@ -57,9 +57,15 @@ class SqlAlchemyResourceExistenceChecker(ResourceExistenceChecker):
     ) -> bool:
         if resource_type != "server":
             return False
-        stmt = select(ServerModel.id).where(
-            ServerModel.id == resource_id,
-            ServerModel.community_id == community_id.value,
+        # FOR KEY SHARE holds the server against deletion (the Port's contract)
+        # without blocking edits of its non-key columns.
+        stmt = (
+            select(ServerModel.id)
+            .where(
+                ServerModel.id == resource_id,
+                ServerModel.community_id == community_id.value,
+            )
+            .with_for_update(read=True, key_share=True)
         )
         return (await self._session.execute(stmt)).first() is not None
 

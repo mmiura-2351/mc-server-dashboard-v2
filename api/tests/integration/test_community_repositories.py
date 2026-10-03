@@ -543,6 +543,41 @@ async def test_deleting_membership_removes_only_membership_role_rows(
         assert await uow.roles.get_by_id(role.id) is not None
 
 
+async def test_lock_role_ids_returns_the_requested_assigned_role_ids(
+    engine: AsyncEngine,
+) -> None:
+    factory = create_session_factory(engine)
+    user_id = uuid.uuid4()
+    await _insert_user(engine, user_id, "alice")
+    community = _community()
+    roles = [_role(community.id, name="Alpha"), _role(community.id, name="Beta")]
+    membership = Membership(
+        id=MembershipId.new(),
+        user_id=UserId(user_id),
+        community_id=community.id,
+        created_at=_NOW,
+    )
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.communities.add(community)
+        for role in roles:
+            await uow.roles.add(role)
+        await uow.memberships.add(membership)
+        await uow.flush()
+        for role in roles:
+            await uow.memberships.assign_role(membership.id, role.id)
+        await uow.commit()
+
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        locked = await uow.memberships.lock_role_ids(
+            membership.id, [roles[0].id, RoleId.new()]
+        )
+        none_requested = await uow.memberships.lock_role_ids(membership.id, [])
+        await uow.commit()
+
+    assert locked == [roles[0].id]
+    assert none_requested == []
+
+
 async def test_update_role_persists_name_and_permissions(engine: AsyncEngine) -> None:
     factory = create_session_factory(engine)
     community = _community()

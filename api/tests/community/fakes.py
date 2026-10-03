@@ -179,6 +179,22 @@ class FakeMembershipRepository(MembershipRepository):
                 return self._copy(membership)
         return None
 
+    async def hold_for_users(
+        self, community_id: CommunityId, user_ids: Sequence[UserId]
+    ) -> list[Membership]:
+        # In-memory equivalent: no concurrent transaction exists to wait for.
+        return [
+            self._copy(m)
+            for m in self.by_id.values()
+            if m.community_id == community_id and m.user_id in user_ids
+        ]
+
+    async def lock_by_user_and_community(
+        self, user_id: UserId, community_id: CommunityId
+    ) -> Membership | None:
+        # In-memory equivalent: no concurrent transaction exists to wait for.
+        return await self.get_by_user_and_community(user_id, community_id)
+
     async def list_for_user(self, user_id: UserId) -> list[Membership]:
         return [self._copy(m) for m in self.by_id.values() if m.user_id == user_id]
 
@@ -201,6 +217,16 @@ class FakeMembershipRepository(MembershipRepository):
 
     async def list_role_ids(self, membership_id: MembershipId) -> list[RoleId]:
         return list(self.role_ids.get(membership_id, []))
+
+    async def lock_role_ids(
+        self, membership_id: MembershipId, role_ids: Sequence[RoleId]
+    ) -> list[RoleId]:
+        # In-memory equivalent: no concurrent transaction exists to wait for.
+        return [
+            role_id
+            for role_id in await self.list_role_ids(membership_id)
+            if role_id in role_ids
+        ]
 
     async def lock_owner_role_holders(
         self, community_id: CommunityId, role_id: RoleId
@@ -261,6 +287,13 @@ class FakeRoleRepository(RoleRepository):
         # In-memory equivalent: no concurrent transaction exists to wait for.
         role = self.by_id.get(role_id)
         return None if role is None else self._copy(role)
+
+    async def lock_by_ids(
+        self, role_ids: Sequence[RoleId], *, for_update: RoleId | None = None
+    ) -> list[Role]:
+        # In-memory equivalent: no concurrent transaction exists to wait for.
+        ids = {*role_ids, *([] if for_update is None else [for_update])}
+        return [self._copy(self.by_id[rid]) for rid in ids if rid in self.by_id]
 
     async def update(
         self,
@@ -341,6 +374,18 @@ class FakeResourceGrantRepository(ResourceGrantRepository):
             ):
                 return self._copy(grant)
         return None
+
+    async def lock_for_user_resource(
+        self,
+        user_id: UserId,
+        community_id: CommunityId,
+        resource_type: str,
+        resource_id: uuid.UUID,
+    ) -> ResourceGrant | None:
+        # In-memory equivalent: no concurrent transaction exists to wait for.
+        return await self.get_for_user_resource(
+            user_id, community_id, resource_type, resource_id
+        )
 
     async def list_for_community(
         self, community_id: CommunityId, user_id: UserId | None = None

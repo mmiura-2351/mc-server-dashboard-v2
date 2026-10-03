@@ -247,6 +247,41 @@ class SqlAlchemyMembershipRepository(MembershipRepository):
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_membership(row) if row is not None else None
 
+    async def hold_for_users(
+        self, community_id: CommunityId, user_ids: Sequence[UserId]
+    ) -> list[Membership]:
+        if not user_ids:
+            return []
+        # One statement suffices: every row takes the same strength, and the
+        # row locking runs on the sorted rows, so they lock in id order.
+        stmt = (
+            select(MembershipModel)
+            .where(
+                MembershipModel.community_id == community_id.value,
+                MembershipModel.user_id.in_([user_id.value for user_id in user_ids]),
+            )
+            .order_by(MembershipModel.id)
+            .with_for_update(read=True, key_share=True)
+            .execution_options(populate_existing=True)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_membership(row) for row in rows]
+
+    async def lock_by_user_and_community(
+        self, user_id: UserId, community_id: CommunityId
+    ) -> Membership | None:
+        stmt = (
+            select(MembershipModel)
+            .where(
+                MembershipModel.user_id == user_id.value,
+                MembershipModel.community_id == community_id.value,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_membership(row) if row is not None else None
+
     async def list_for_user(self, user_id: UserId) -> list[Membership]:
         stmt = select(MembershipModel).where(MembershipModel.user_id == user_id.value)
         rows = (await self._session.execute(stmt)).scalars().all()
@@ -280,6 +315,25 @@ class SqlAlchemyMembershipRepository(MembershipRepository):
     async def list_role_ids(self, membership_id: MembershipId) -> list[RoleId]:
         stmt = select(MembershipRoleModel.role_id).where(
             MembershipRoleModel.membership_id == membership_id.value
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [RoleId(row) for row in rows]
+
+    async def lock_role_ids(
+        self, membership_id: MembershipId, role_ids: Sequence[RoleId]
+    ) -> list[RoleId]:
+        if not role_ids:
+            return []
+        stmt = (
+            select(MembershipRoleModel.role_id)
+            .where(
+                MembershipRoleModel.membership_id == membership_id.value,
+                MembershipRoleModel.role_id.in_(
+                    [role_id.value for role_id in role_ids]
+                ),
+            )
+            .order_by(MembershipRoleModel.role_id)
+            .with_for_update(read=True)
         )
         rows = (await self._session.execute(stmt)).scalars().all()
         return [RoleId(row) for row in rows]
@@ -355,6 +409,28 @@ class SqlAlchemyRoleRepository(RoleRepository):
         )
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_role(row) if row is not None else None
+
+    async def lock_by_ids(
+        self, role_ids: Sequence[RoleId], *, for_update: RoleId | None = None
+    ) -> list[Role]:
+        ids = {role_id.value for role_id in role_ids}
+        if for_update is not None:
+            ids.add(for_update.value)
+        roles = []
+        # One statement per row, in ascending id order: a single statement takes
+        # one lock strength for all its rows, and a share lock upgraded later can
+        # deadlock with another transaction holding the same share lock.
+        for role_id in sorted(ids):
+            stmt = (
+                select(RoleModel)
+                .where(RoleModel.id == role_id)
+                .with_for_update(read=for_update is None or role_id != for_update.value)
+                .execution_options(populate_existing=True)
+            )
+            row = (await self._session.execute(stmt)).scalar_one_or_none()
+            if row is not None:
+                roles.append(_to_role(row))
+        return roles
 
     async def update(
         self,
@@ -444,6 +520,27 @@ class SqlAlchemyResourceGrantRepository(ResourceGrantRepository):
             ResourceGrantModel.community_id == community_id.value,
             ResourceGrantModel.resource_type == resource_type,
             ResourceGrantModel.resource_id == resource_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_resource_grant(row) if row is not None else None
+
+    async def lock_for_user_resource(
+        self,
+        user_id: UserId,
+        community_id: CommunityId,
+        resource_type: str,
+        resource_id: uuid.UUID,
+    ) -> ResourceGrant | None:
+        stmt = (
+            select(ResourceGrantModel)
+            .where(
+                ResourceGrantModel.user_id == user_id.value,
+                ResourceGrantModel.community_id == community_id.value,
+                ResourceGrantModel.resource_type == resource_type,
+                ResourceGrantModel.resource_id == resource_id,
+            )
+            .with_for_update(read=True)
+            .execution_options(populate_existing=True)
         )
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_resource_grant(row) if row is not None else None

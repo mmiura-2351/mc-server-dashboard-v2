@@ -57,6 +57,7 @@ from mc_server_dashboard_api.community.domain.entities import ResourceGrant
 from mc_server_dashboard_api.community.domain.errors import (
     GrantResourceNotFoundError,
     GrantTargetNotMemberError,
+    MembershipAlreadyExistsError,
 )
 from mc_server_dashboard_api.community.domain.value_objects import (
     AuthUser,
@@ -361,7 +362,10 @@ async def test_grant_cannot_attach_to_a_membership_re_added_mid_creation(
 ) -> None:
     # The creation validated the original membership; the user is removed and
     # re-added (without roles) before it resumes. The grant must not attach to
-    # the replacement membership, which nobody granted anything.
+    # the replacement membership, which nobody granted anything. Since the
+    # creation holds the membership it validated (#3241), the removal queues
+    # behind it and the re-add is refused as a duplicate meanwhile; either
+    # way, the user ends up without the grant.
     world = await _world(engine)
 
     pause = _Pause()
@@ -375,21 +379,18 @@ async def test_grant_cannot_attach_to_a_membership_re_added_mid_creation(
         )
     )
     await _await_settled(world.engine, removal, removal_pid)
-    add_pid: asyncio.Future[int] = asyncio.get_running_loop().create_future()
-    re_add = asyncio.create_task(
-        AddMember(
-            uow=_PidUnitOfWork(world.factory, add_pid),
-            users=IdentityUserDirectory(IdentityUnitOfWork(world.factory)),
-            clock=SystemClock(),
-        )(community_id=world.community_id, user_id=world.member)
+    (re_added,) = await asyncio.gather(
+        _add_member(world.factory)(
+            community_id=world.community_id, user_id=world.member
+        ),
+        return_exceptions=True,
     )
-    await _await_settled(world.engine, re_add, add_pid)
+    assert not isinstance(re_added, BaseException) or isinstance(
+        re_added, MembershipAlreadyExistsError
+    )
     pause.resume.set()
-    outcome, *rest = await asyncio.gather(
-        creation, removal, re_add, return_exceptions=True
-    )
-    for result in rest:
-        assert not isinstance(result, BaseException)
+    outcome, removed = await asyncio.gather(creation, removal, return_exceptions=True)
+    assert not isinstance(removed, BaseException)
 
     assert not isinstance(outcome, BaseException) or isinstance(
         outcome, GrantTargetNotMemberError
