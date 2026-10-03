@@ -8,11 +8,10 @@ assume an authorized member and only do the data work.
   The user is validated against the :class:`UserDirectory` Port first (so an
   unknown user fails cleanly rather than tripping the FK); a duplicate membership
   surfaces as :class:`MembershipAlreadyExistsError`.
-- :class:`RemoveMember` deletes the membership and, atomically in one
-  ``UnitOfWork`` (FR-MEM-3 / DATABASE.md Section 10), sweeps the member's resource
-  grants in *this* community (they FK ``user_id``, not ``membership_id``, so no
-  cascade) while ``membership_role`` rows go via DB cascade. It refuses to remove
-  the only holder of the preset Owner role, which would orphan the community.
+- :class:`RemoveMember` deletes the membership; its ``membership_role`` rows and
+  the member's resource grants in *this* community go with it by DB cascade
+  (FR-MEM-3 / DATABASE.md Section 10). It refuses to remove the only holder of
+  the preset Owner role, which would orphan the community.
 - :class:`ListMembers` returns the community's memberships with their role names.
 - :class:`AssignRole` / :class:`UnassignRole` attach/detach a community role to a
   member. They validate the role belongs to *this* community (the
@@ -150,7 +149,7 @@ class AddMember:
 
 @dataclass(frozen=True)
 class RemoveMember:
-    """Remove a member, sweeping their grants in this community atomically (FR-MEM-3).
+    """Remove a member, revoking their roles and grants in this community (FR-MEM-3).
 
     Self-removal is allowed: the route's ``member:remove`` permission is the only
     gate, so a member who holds it may remove themselves. The single guard is the
@@ -170,13 +169,10 @@ class RemoveMember:
 
             await _guard_last_owner(self.uow, community_id, membership)
 
-            # membership_role rows cascade from the membership delete; the grants
-            # FK user_id (not membership_id) so they need the explicit sweep — both
-            # in this one transaction (DATABASE.md Section 10).
+            # membership_role and resource_grant rows both cascade from the
+            # membership delete (DATABASE.md Section 10); the grant FK is also what
+            # stops a concurrent CreateGrant from committing after it (#3216).
             await self.uow.memberships.delete(membership.id)
-            await self.uow.resource_grants.delete_for_user_in_community(
-                user_id, community_id
-            )
             await self.uow.commit()
 
 

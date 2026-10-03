@@ -3,8 +3,6 @@
 A use case opens a unit of work as an async context manager, performs its writes
 through the repositories it exposes, and calls :meth:`commit` to make them
 durable; leaving the block without committing rolls back (DATABASE.md Section 1).
-This is what lets the FR-MEM-3 grant-cleanup-plus-membership-delete (Section 10)
-be applied atomically.
 """
 
 from __future__ import annotations

@@ -460,21 +460,3 @@ class SqlAlchemyResourceGrantRepository(ResourceGrantRepository):
     async def delete(self, grant_id: ResourceGrantId) -> None:
         stmt = delete(ResourceGrantModel).where(ResourceGrantModel.id == grant_id.value)
         await self._session.execute(stmt)
-
-    async def delete_for_user_in_community(
-        self, user_id: UserId, community_id: CommunityId
-    ) -> None:
-        stmt = delete(ResourceGrantModel).where(
-            ResourceGrantModel.user_id == user_id.value,
-            ResourceGrantModel.community_id == community_id.value,
-        )
-        await self._session.execute(stmt)
-
-    async def delete_for_resource(
-        self, resource_type: str, resource_id: uuid.UUID
-    ) -> None:
-        stmt = delete(ResourceGrantModel).where(
-            ResourceGrantModel.resource_type == resource_type,
-            ResourceGrantModel.resource_id == resource_id,
-        )
-        await self._session.execute(stmt)

@@ -2,11 +2,12 @@
 
 Against the in-memory fakes (TESTING.md Section 4). The authorization gate lives
 in the route dependency, so these verify only the data behaviour: add validates
-the user and stages a membership; remove sweeps grants in this community while
-leaving other communities' grants untouched (FR-MEM-2/3), and refuses to remove
-the last Owner-role holder; list returns members with their role names; role
-assign/unassign validate the role belongs to *this* community (cross-community
-assignment must fail — FR-AUTHZ-4).
+the user and stages a membership; remove deletes the membership in this
+community while leaving the user's other memberships untouched (FR-MEM-2/3), and
+refuses to remove the last Owner-role holder (the membership's grants cascade in
+PostgreSQL, pinned by ``tests/integration/test_community_membership.py``); list
+returns members with their role names; role assign/unassign validate the role
+belongs to *this* community (cross-community assignment must fail — FR-AUTHZ-4).
 """
 
 from __future__ import annotations
@@ -167,47 +168,34 @@ async def test_add_member_unknown_username_is_rejected_like_unknown_id() -> None
 # --- RemoveMember -----------------------------------------------------------
 
 
-async def test_remove_member_deletes_membership_and_sweeps_grants() -> None:
+async def test_remove_member_deletes_membership() -> None:
     uow = FakeAuthzUnitOfWork()
     community = _seed_community(uow)
     user = UserId(uuid.uuid4())
     uow.add_role(user, community.id, {Permission("server:read")})
-    uow.add_grant(
-        user, community.id, "server", uuid.uuid4(), {Permission("server:start")}
-    )
 
     await RemoveMember(uow=uow)(community_id=community.id, user_id=user)
 
     assert await uow.memberships.get_by_user_and_community(user, community.id) is None
-    assert uow.resource_grants.by_id == {}
     assert uow.commits == 1
 
 
-async def test_remove_member_keeps_grants_in_other_communities() -> None:
-    # FR-MEM-2/FR-MEM-3 scoping: removing the user from B leaves A's grants intact.
+async def test_remove_member_keeps_memberships_in_other_communities() -> None:
+    # FR-MEM-2/FR-MEM-3 scoping: removing the user from B leaves A intact.
     uow = FakeAuthzUnitOfWork()
     community_a = _seed_community(uow, "a")
     community_b = _seed_community(uow, "b")
     user = UserId(uuid.uuid4())
     uow.add_role(user, community_a.id, {Permission("server:read")})
     uow.add_role(user, community_b.id, {Permission("server:read")})
-    grant_a = uow.add_grant(
-        user, community_a.id, "server", uuid.uuid4(), {Permission("server:start")}
-    )
-    uow.add_grant(
-        user, community_b.id, "server", uuid.uuid4(), {Permission("server:start")}
-    )
 
     await RemoveMember(uow=uow)(community_id=community_b.id, user_id=user)
 
-    # The B membership and grant are gone; the A ones survive.
     assert await uow.memberships.get_by_user_and_community(user, community_b.id) is None
     assert (
         await uow.memberships.get_by_user_and_community(user, community_a.id)
         is not None
     )
-    remaining = set(uow.resource_grants.by_id)
-    assert remaining == {grant_a}
 
 
 async def test_remove_non_member_raises_not_found() -> None:

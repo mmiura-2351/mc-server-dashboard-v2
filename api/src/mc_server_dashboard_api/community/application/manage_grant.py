@@ -13,9 +13,12 @@ assume an authorized member and only do the data work.
   (server / file / backup families), and that the resource *exists* in the
   community — a fabricated ``resource_id`` is rejected with
   :class:`GrantResourceNotFoundError` rather than persisted as a ghost grant
-  (issue #361). A duplicate ``(user, resource_type, resource_id)`` surfaces as
-  :class:`ResourceGrantAlreadyExistsError` (the unique constraint, translated by
-  the UnitOfWork).
+  (issue #361). The checks are not held to the INSERT; the grant's foreign keys
+  to the membership and the server are what keep a removal or deletion that
+  commits in between from leaving a ghost grant, and they surface as the same two
+  errors (issue #3216). A duplicate ``(user, resource_type, resource_id)``
+  surfaces as :class:`ResourceGrantAlreadyExistsError` (the unique constraint,
+  translated by the UnitOfWork).
 - :class:`RevokeGrant` deletes a grant by id, scoped to this community so a caller
   cannot probe another community's grant ids (FR-AUTHZ-4): a mismatch is reported
   as not-found.

@@ -355,24 +355,6 @@ class FakeResourceGrantRepository(ResourceGrantRepository):
     async def delete(self, grant_id: ResourceGrantId) -> None:
         self.by_id.pop(grant_id, None)
 
-    async def delete_for_user_in_community(
-        self, user_id: UserId, community_id: CommunityId
-    ) -> None:
-        self.by_id = {
-            gid: g
-            for gid, g in self.by_id.items()
-            if not (g.user_id == user_id and g.community_id == community_id)
-        }
-
-    async def delete_for_resource(
-        self, resource_type: str, resource_id: uuid.UUID
-    ) -> None:
-        self.by_id = {
-            gid: g
-            for gid, g in self.by_id.items()
-            if not (g.resource_type == resource_type and g.resource_id == resource_id)
-        }
-
 
 class FakeResourceExistenceChecker(ResourceExistenceChecker):
     """In-memory resource-existence check keyed by ``(community, type, id)``.

@@ -2,12 +2,10 @@
 
 The ``<Entity>Repository`` interfaces (ARCHITECTURE.md Section 5.1) the domain
 depends on; concrete async-SQLAlchemy adapters implement them. Lookups return
-``None`` when absent rather than raising, so callers decide policy. The two
-grant-sweep methods (:meth:`ResourceGrantRepository.delete_for_user_in_community`
-and :meth:`ResourceGrantRepository.delete_for_resource`) are the use-case-driven
-cleanup paths DATABASE.md Section 10 documents: ``resource_grant`` is keyed by
-``user_id`` (not ``membership_id``) and ``resource_id`` carries no FK, so neither
-member-removal nor single-server deletion sweeps grants by cascade.
+``None`` when absent rather than raising, so callers decide policy. There is no
+grant-sweep method: ``resource_grant`` cascades from both its membership and its
+server (DATABASE.md Section 10), so member removal and server deletion remove the
+grants in the database, whatever order a concurrent grant creation lands in.
 """
 
 from __future__ import annotations
@@ -238,38 +236,17 @@ class ResourceGrantRepository(abc.ABC):
     async def delete(self, grant_id: ResourceGrantId) -> None:
         """Delete the grant with ``grant_id`` (the ``grant:manage`` revoke)."""
 
-    @abc.abstractmethod
-    async def delete_for_user_in_community(
-        self, user_id: UserId, community_id: CommunityId
-    ) -> None:
-        """Delete all of ``user_id``'s grants in ``community_id``.
-
-        Implements FR-MEM-3 (Section 10). Called by the remove-member use case in
-        the same transaction as the membership deletion, since grants FK
-        ``user_id`` (not ``membership_id``).
-        """
-
-    @abc.abstractmethod
-    async def delete_for_resource(
-        self, resource_type: str, resource_id: uuid.UUID
-    ) -> None:
-        """Delete all grants on a specific resource (Section 10 server-delete sweep).
-
-        ``resource_id`` carries no FK, so deleting the resource does not cascade;
-        the resource-delete use case calls this in the same transaction.
-        """
-
 
 class ResourceExistenceChecker(abc.ABC):
     """Port: does a grantable resource exist within a community? (issue #361).
 
     Grant creation validates that ``resource_id`` names a real resource in the
     community before persisting, so a fabricated id cannot become a ghost grant.
-    ``resource_grant.resource_id`` carries no FK (the resource lives in another
-    context's table), so existence cannot be enforced by the database; this Port is
-    the seam the create use case checks. The concrete adapter queries the owning
-    context's table (M1: ``server``) and is bound on the unit of work's session, so
-    the check runs inside the create transaction.
+    The ``resource_grant`` FK to ``server`` backs this only for a resource deleted
+    concurrently (issue #3216): it does not know the community, so this Port is
+    what rejects a server of another community. The concrete adapter queries the
+    owning context's table (M1: ``server``) and is bound on the unit of work's
+    session, so the check runs inside the create transaction.
     """
 
     @abc.abstractmethod
