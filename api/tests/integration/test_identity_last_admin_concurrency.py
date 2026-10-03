@@ -1,6 +1,6 @@
 """Concurrency test for the at-least-one-active-admin invariant (#260).
 
-Proves the FOR UPDATE lock in ``lock_active_platform_admins`` closes the
+Proves the row lock in ``lock_with_active_admins`` closes the
 last-two-admin race: two concurrent transactions each revoke one of the only two
 active platform admins. Without the lock both would read a count of 2, pass the
 guard, and commit -- leaving zero admins. With it, the two transactions serialize

@@ -140,16 +140,28 @@ async def test_delete_account_admin_locks_active_admins() -> None:
     assert uow.users.lock_calls == 1
 
 
-async def test_delete_account_non_admin_does_not_lock_active_admins() -> None:
-    # A non-admin self-delete never reduces the active-admin set, so it stays
-    # lock-free (#260).
+async def test_delete_account_non_admin_locks_active_admins() -> None:
+    # The guard decides from the account as locked with the admin set (#3239):
+    # an unlocked read of "not an admin" may be stale by the time it deletes.
     user = make_user(now=_NOW)
     uow = FakeUnitOfWork()
     uow.users.seed(user)
 
     await _use_case(uow, FakeCommunityOwnership())(user_id=user.id, password=_PASSWORD)
 
-    assert uow.users.lock_calls == 0
+    assert uow.users.lock_calls == 1
+
+
+async def test_delete_account_of_deactivated_admin_allowed() -> None:
+    # An admin deactivated after authenticating no longer counts toward the
+    # active-admin invariant, so deleting the account cannot reduce it (#3239).
+    admin = make_user(now=_NOW, is_platform_admin=True, active=False)
+    uow = FakeUnitOfWork()
+    uow.users.seed(admin)
+
+    await _use_case(uow, FakeCommunityOwnership())(user_id=admin.id, password=_PASSWORD)
+
+    assert admin.id not in uow.users.by_id
 
 
 async def test_delete_account_unknown_user_raises() -> None:
