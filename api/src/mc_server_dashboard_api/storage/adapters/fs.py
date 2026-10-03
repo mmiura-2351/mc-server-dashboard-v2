@@ -87,6 +87,9 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     VersionId,
     is_version_ring_member,
 )
+from mc_server_dashboard_api.storage.integrity.archive import (
+    archive_read_errors_as_unreadable,
+)
 from mc_server_dashboard_api.storage.integrity.region import (
     WorkingSetReport,
     check_missing_regions,
@@ -2665,10 +2668,16 @@ def _extract_tar_gz_into(archive: Path, dest: Path, max_bytes: int) -> None:
     body, so the size cap aborts a bomb (:class:`ArchiveTooLargeError`) before it
     fills the disk (#287). The count is over actual bytes read, not the forgeable
     member header.
+
+    An archive whose bytes cannot be read back — truncated, or damaged gzip / tar
+    framing — raises :class:`ArchiveUnreadableError` (issue #3230).
     """
 
     total = 0
-    with tarfile.open(archive, mode="r:gz") as tar:
+    with (
+        archive_read_errors_as_unreadable(),
+        tarfile.open(archive, mode="r:gz") as tar,
+    ):
         for member in tar:
             total = _extract_member_capped(tar, member, dest, total, max_bytes)
 

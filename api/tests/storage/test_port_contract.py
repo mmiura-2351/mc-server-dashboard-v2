@@ -21,6 +21,7 @@ from mc_server_dashboard_api.storage.adapters.fs import FsStorage
 from mc_server_dashboard_api.storage.adapters.object_store import ObjectStorage
 from mc_server_dashboard_api.storage.domain.errors import (
     ArchiveTooLargeError,
+    ArchiveUnreadableError,
     IncompleteTransferError,
     IntegrityCheckError,
     MissingRegionsError,
@@ -1079,6 +1080,59 @@ async def test_restore_healthy_backup_reports_healthy(
 
     blob = await drain(harness.storage.open_hydrate_source(community, server))
     assert read_tar(blob) == original
+
+
+def _unreadable_archive(shape: str) -> bytes:
+    """A stored archive whose bytes can no longer be read back (issue #3230)."""
+
+    archive = region_targz({"world/region/r.0.0.mca": healthy_region_bytes()})
+    if shape == "truncated":
+        # The stream stops mid-deflate: it never reaches the gzip trailer.
+        return archive[: len(archive) // 2]
+    # Bytes that do not even open as a gzip stream.
+    return b"not a gzip stream " * 16
+
+
+@pytest.mark.parametrize("shape", ["truncated", "not_gzip"])
+async def test_check_backup_health_of_an_unreadable_archive_is_unreadable(
+    harness: StorageHarness, shape: str
+) -> None:
+    """The sweep's probe reports an archive it cannot read back as
+    ``ArchiveUnreadableError`` on BOTH backends (issue #3230) — the verdict the
+    sweep records as ``UNREADABLE`` — never a raw ``EOFError`` / ``tarfile`` error
+    that would abort the whole pass."""
+
+    community, server = new_scope()
+    key = await harness.storage.put_backup(
+        community, server, stream_of(_unreadable_archive(shape))
+    )
+
+    with pytest.raises(ArchiveUnreadableError):
+        await harness.storage.check_backup_health(community, server, key)
+
+
+@pytest.mark.parametrize("force", [False, True])
+@pytest.mark.parametrize("shape", ["truncated", "not_gzip"])
+async def test_restore_of_an_unreadable_archive_is_refused_and_keeps_current(
+    harness: StorageHarness, shape: str, force: bool
+) -> None:
+    """A restore that finds its archive unreadable refuses with
+    ``ArchiveUnreadableError`` on BOTH backends (issue #3230), ``force`` or not —
+    the override publishes a corrupt world, but these bytes hold no world to
+    publish — and leaves the live snapshot untouched."""
+
+    community, server = new_scope()
+    live = {"world/region/r.0.0.mca": healthy_region_bytes()}
+    await harness.publish(community, server, live)
+    key = await harness.storage.put_backup(
+        community, server, stream_of(_unreadable_archive(shape))
+    )
+
+    with pytest.raises(ArchiveUnreadableError):
+        await harness.storage.restore_backup(community, server, key, force=force)
+
+    blob = await drain(harness.storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == live
 
 
 async def test_delete_backup_is_idempotent(harness: StorageHarness) -> None:

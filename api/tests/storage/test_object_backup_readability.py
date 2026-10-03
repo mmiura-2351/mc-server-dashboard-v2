@@ -371,3 +371,25 @@ async def test_a_sound_archive_is_read_only_once() -> None:
     await storage.check_backup_health(community, server, key)
 
     assert store.read_aborts[object_key] == [None]
+
+
+# --- restore: the same damage-vs-outage line (issue #3230) -------------------
+
+
+async def test_restore_of_a_body_short_of_its_declared_length_is_an_outage() -> None:
+    """A restore spools the archive with ONE read, so a body that ends cleanly short
+    of what ``HEAD`` declares is the single ambiguous observation the probe above
+    re-reads to classify. Restore does not condemn on it: it refuses as an outage
+    (no verdict about the archive) rather than reading the short spool and calling
+    the archive unreadable."""
+
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+    archive = _sound_archive()
+    key = await _put_backup(storage, community, server, archive)
+    object_key = storage._backup_key(community, server, key)
+    store.objects[object_key] = archive[: len(archive) // 2]
+    store.declared_sizes[object_key] = len(archive)
+
+    with pytest.raises(ObjectStoreUnavailableError):
+        await storage.restore_backup(community, server, key)
