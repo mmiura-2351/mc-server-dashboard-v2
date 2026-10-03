@@ -2,7 +2,7 @@
 
 Covers create (+ type validation), community-scoped read/list,
 cross-community not-found, update editability rules (at-rest
-gate, name clash), and delete (at-rest gate + grant sweep atomicity).
+gate, name clash), and delete (at-rest gate).
 """
 
 from __future__ import annotations
@@ -2250,7 +2250,7 @@ def _backup(server_id: ServerId, *, ref: str, created_at: dt.datetime) -> Backup
     )
 
 
-async def test_delete_removes_server_and_sweeps_grants() -> None:
+async def test_delete_removes_server() -> None:
     uow = FakeUnitOfWork()
     store = FakeBackupArchiveStore()
     community = CommunityId(uuid.uuid4())
@@ -2260,7 +2260,6 @@ async def test_delete_removes_server_and_sweeps_grants() -> None:
         community_id=community, server_id=server.id
     )
     assert server.id not in uow.servers.by_id
-    assert uow.resource_grants.swept == [("server", server.id.value)]
     assert uow.commits == 1
     # The working set is always packed into the retained final tar.gz (#777).
     assert store.pruned == [server.id]
@@ -2374,7 +2373,6 @@ async def test_delete_aborts_when_packing_the_working_set_fails() -> None:
             community_id=community, server_id=server.id
         )
     assert server.id in uow.servers.by_id
-    assert uow.resource_grants.swept == []
     assert uow.commits == 0
     # Nothing was deleted: the pack fails before any archive prune (intact state).
     assert store.deleted == []
@@ -2396,7 +2394,6 @@ async def test_delete_rejects_while_running() -> None:
             community_id=community, server_id=server.id
         )
     assert server.id in uow.servers.by_id
-    assert uow.resource_grants.swept == []
     assert uow.commits == 0
     # A running server's working set is never touched.
     assert store.pruned == []
@@ -2428,11 +2425,10 @@ async def test_delete_rechecks_at_rest_after_the_pack_window() -> None:
         await DeleteServer(uow=uow, backup_store=store)(
             community_id=community, server_id=server.id
         )
-    # The pack already ran (working set packed) but the row survives and no grants
-    # were swept: the delete is rejected and retryable once the server stops again.
+    # The pack already ran (working set packed) but the row survives: the delete
+    # is rejected and retryable once the server stops again.
     assert store.pruned == [server.id]
     assert server.id in uow.servers.by_id
-    assert uow.resource_grants.swept == []
     assert uow.commits == 0
 
 
@@ -2481,7 +2477,6 @@ async def test_delete_other_communitys_server_is_not_found() -> None:
         await DeleteServer(uow=uow, backup_store=store)(
             community_id=CommunityId(uuid.uuid4()), server_id=server.id
         )
-    assert uow.resource_grants.swept == []
     assert store.pruned == []
 
 
@@ -2712,8 +2707,7 @@ async def test_delete_rechecks_assignment_after_the_pack_window() -> None:
             community_id=community, server_id=server.id
         )
 
-    # Pack ran but the row survives; no grants swept.
+    # Pack ran but the row survives.
     assert store.pruned == [server.id]
     assert server.id in uow.servers.by_id
-    assert uow.resource_grants.swept == []
     assert uow.commits == 0

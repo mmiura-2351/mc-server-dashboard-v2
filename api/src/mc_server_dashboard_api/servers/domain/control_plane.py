@@ -4,8 +4,7 @@ The lifecycle use cases must place a server on a Worker, dispatch lifecycle /
 RCON commands to it, and adjust the Worker's placement load — all fleet concerns.
 The servers domain and application may not import the fleet context (import-linter
 contract), so they depend on this narrow Port; the wiring binds it to a fleet
-adapter that drives the real ``WorkerRegistry`` and ``ControlPlane`` (mirroring
-how the server-delete grant sweep is composed at the adapter layer).
+adapter that drives the real ``WorkerRegistry`` and ``ControlPlane``.
 
 The Port speaks the servers domain's own types: a :class:`WorkerId` value
 and a plain :class:`CommandOutcome`. No fleet type crosses the seam.

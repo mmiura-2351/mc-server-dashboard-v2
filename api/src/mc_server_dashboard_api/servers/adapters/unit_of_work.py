@@ -3,30 +3,18 @@
 Opens a session from the factory on ``__aenter__`` and binds the repositories to
 it; ``commit`` commits the transaction, while leaving the block without
 committing rolls back (the session is closed either way). This gives use cases
-the all-or-nothing transaction the Port promises (DATABASE.md Section 1) — needed
-for the server-delete-plus-grant-sweep (Section 10).
-
-The grant-sweep half binds the servers :class:`ResourceGrantSweeper` Port to the
-*community* context's resource-grant adapter on the **same** session, so the
-server delete and the grant sweep are one transaction. Reusing the community
-adapter here (an adapter-layer, cross-context composition) keeps the sweep logic
-in the one place that owns ``resource_grant`` while honouring the rule that the
-servers *domain* imports no other context (ARCHITECTURE.md Section 2.1).
+the all-or-nothing transaction the Port promises (DATABASE.md Section 1).
 """
 
 from __future__ import annotations
 
 import contextlib
-import uuid
 from collections.abc import AsyncIterator
 from types import TracebackType
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from mc_server_dashboard_api.community.adapters.repositories import (
-    SqlAlchemyResourceGrantRepository,
-)
 from mc_server_dashboard_api.servers.adapters.backup_repository import (
     SqlAlchemyBackupRepository,
 )
@@ -52,25 +40,7 @@ from mc_server_dashboard_api.servers.adapters.schedule_repository import (
     SqlAlchemyScheduleRepository,
     SqlAlchemyScheduleRunRepository,
 )
-from mc_server_dashboard_api.servers.domain.repositories import ResourceGrantSweeper
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
-
-
-class _ResourceGrantSweeperAdapter(ResourceGrantSweeper):
-    """Bind the servers grant-sweep Port to the community resource-grant adapter.
-
-    A thin wrapper so the community repository (which implements the *community*
-    Port) satisfies the servers ``ResourceGrantSweeper`` Port without the servers
-    domain ever referencing the community domain. Both share the one session.
-    """
-
-    def __init__(self, session: AsyncSession) -> None:
-        self._grants = SqlAlchemyResourceGrantRepository(session)
-
-    async def delete_for_resource(
-        self, resource_type: str, resource_id: uuid.UUID
-    ) -> None:
-        await self._grants.delete_for_resource(resource_type, resource_id)
 
 
 class SqlAlchemyUnitOfWork(UnitOfWork):
@@ -83,7 +53,6 @@ class SqlAlchemyUnitOfWork(UnitOfWork):
     async def __aenter__(self) -> SqlAlchemyUnitOfWork:
         self._session = self._session_factory()
         self.servers = SqlAlchemyServerRepository(self._session)
-        self.resource_grants = _ResourceGrantSweeperAdapter(self._session)
         self.backups = SqlAlchemyBackupRepository(self._session)
         self.groups = SqlAlchemyGroupRepository(self._session)
         self.game_sessions = SqlAlchemyGameSessionRepository(self._session)

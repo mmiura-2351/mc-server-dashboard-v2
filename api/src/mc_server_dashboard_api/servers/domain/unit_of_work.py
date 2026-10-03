@@ -3,9 +3,6 @@
 A use case opens a unit of work as an async context manager, performs its writes
 through the repositories it exposes, and calls :meth:`commit` to make them
 durable; leaving the block without committing rolls back (DATABASE.md Section 1).
-This is what lets the server delete and its resource-grant sweep (Section 10) be
-applied atomically: both ``servers`` and ``resource_grants`` run on the one
-transaction this unit of work owns.
 """
 
 from __future__ import annotations
@@ -22,10 +19,7 @@ from mc_server_dashboard_api.servers.domain.game_session_repository import (
 )
 from mc_server_dashboard_api.servers.domain.group_repository import GroupRepository
 from mc_server_dashboard_api.servers.domain.plugin_repository import PluginRepository
-from mc_server_dashboard_api.servers.domain.repositories import (
-    ResourceGrantSweeper,
-    ServerRepository,
-)
+from mc_server_dashboard_api.servers.domain.repositories import ServerRepository
 from mc_server_dashboard_api.servers.domain.resource_pack_repository import (
     ResourcePackRepository,
 )
@@ -39,7 +33,6 @@ class UnitOfWork(abc.ABC):
     """Port: an atomic transaction exposing the servers repositories."""
 
     servers: ServerRepository
-    resource_grants: ResourceGrantSweeper
     backups: BackupRepository
     groups: GroupRepository
     game_sessions: GameSessionRepository

@@ -107,6 +107,30 @@ async def _insert_server(
         )
 
 
+async def _seed_grant_parents(engine: AsyncEngine, *grants: ResourceGrant) -> None:
+    """Insert the membership and server each grant references (issue #3216 FKs).
+
+    A membership the test already added is left as it is.
+    """
+
+    memberships = {(g.membership_id, g.user_id, g.community_id) for g in grants}
+    async with engine.begin() as conn:
+        for membership_id, user_id, community_id in memberships:
+            await conn.execute(
+                text(
+                    "INSERT INTO membership (id, user_id, community_id, created_at) "
+                    "VALUES (:id, :uid, :cid, now()) ON CONFLICT DO NOTHING"
+                ),
+                {
+                    "id": membership_id.value,
+                    "uid": user_id.value,
+                    "cid": community_id.value,
+                },
+            )
+    for grant in grants:
+        await _insert_server(engine, grant.resource_id, grant.community_id)
+
+
 def _community(name: str = "guild") -> Community:
     return Community(
         id=CommunityId.new(),
@@ -225,6 +249,7 @@ async def test_resource_grant_round_trip(engine: AsyncEngine) -> None:
     resource_id = uuid.uuid4()
     grant = ResourceGrant(
         id=ResourceGrantId.new(),
+        membership_id=MembershipId.new(),
         user_id=UserId(user_id),
         community_id=community.id,
         resource_type="server",
@@ -235,6 +260,9 @@ async def test_resource_grant_round_trip(engine: AsyncEngine) -> None:
     )
     async with SqlAlchemyUnitOfWork(factory) as uow:
         await uow.communities.add(community)
+        await uow.commit()
+    await _seed_grant_parents(engine, grant)
+    async with SqlAlchemyUnitOfWork(factory) as uow:
         await uow.resource_grants.add(grant)
         await uow.commit()
 
@@ -389,10 +417,12 @@ async def test_duplicate_resource_grant_triple_raises(engine: AsyncEngine) -> No
     await _insert_user(engine, user_id, "alice")
     community = _community()
     resource_id = uuid.uuid4()
+    membership_id = MembershipId.new()
 
     def _grant() -> ResourceGrant:
         return ResourceGrant(
             id=ResourceGrantId.new(),
+            membership_id=membership_id,
             user_id=UserId(user_id),
             community_id=community.id,
             resource_type="server",
@@ -404,6 +434,9 @@ async def test_duplicate_resource_grant_triple_raises(engine: AsyncEngine) -> No
 
     async with SqlAlchemyUnitOfWork(factory) as uow:
         await uow.communities.add(community)
+        await uow.commit()
+    await _seed_grant_parents(engine, _grant())
+    async with SqlAlchemyUnitOfWork(factory) as uow:
         await uow.resource_grants.add(_grant())
         await uow.commit()
     with pytest.raises(ResourceGrantAlreadyExistsError):
@@ -432,6 +465,7 @@ async def test_deleting_community_cascades_to_all_dependents(
     resource_id = uuid.uuid4()
     grant = ResourceGrant(
         id=ResourceGrantId.new(),
+        membership_id=membership.id,
         user_id=UserId(user_id),
         community_id=community.id,
         resource_type="server",
@@ -444,6 +478,9 @@ async def test_deleting_community_cascades_to_all_dependents(
         await uow.communities.add(community)
         await uow.roles.add(role)
         await uow.memberships.add(membership)
+        await uow.commit()
+    await _seed_grant_parents(engine, grant)
+    async with SqlAlchemyUnitOfWork(factory) as uow:
         await uow.resource_grants.add(grant)
         await uow.commit()
     async with SqlAlchemyUnitOfWork(factory) as uow:
@@ -506,102 +543,6 @@ async def test_deleting_membership_removes_only_membership_role_rows(
         assert await uow.roles.get_by_id(role.id) is not None
 
 
-# --- use-case grant sweeps (DATABASE.md Section 10) ------------------------
-
-
-async def test_delete_grants_for_user_in_community_scopes_to_one_community(
-    engine: AsyncEngine,
-) -> None:
-    factory = create_session_factory(engine)
-    user_id = uuid.uuid4()
-    await _insert_user(engine, user_id, "alice")
-    community_a = _community("a")
-    community_b = _community("b")
-    grant_a = ResourceGrant(
-        id=ResourceGrantId.new(),
-        user_id=UserId(user_id),
-        community_id=community_a.id,
-        resource_type="server",
-        resource_id=uuid.uuid4(),
-        permissions={Permission("server:stop")},
-        created_at=_NOW,
-        updated_at=_NOW,
-    )
-    grant_b = ResourceGrant(
-        id=ResourceGrantId.new(),
-        user_id=UserId(user_id),
-        community_id=community_b.id,
-        resource_type="server",
-        resource_id=uuid.uuid4(),
-        permissions={Permission("server:stop")},
-        created_at=_NOW,
-        updated_at=_NOW,
-    )
-    async with SqlAlchemyUnitOfWork(factory) as uow:
-        await uow.communities.add(community_a)
-        await uow.communities.add(community_b)
-        await uow.resource_grants.add(grant_a)
-        await uow.resource_grants.add(grant_b)
-        await uow.commit()
-
-    async with SqlAlchemyUnitOfWork(factory) as uow:
-        await uow.resource_grants.delete_for_user_in_community(
-            UserId(user_id), community_a.id
-        )
-        await uow.commit()
-
-    async with SqlAlchemyUnitOfWork(factory) as uow:
-        # Only community A's grant is swept; community B's is untouched (FR-MEM-3).
-        assert await uow.resource_grants.get_by_id(grant_a.id) is None
-        assert await uow.resource_grants.get_by_id(grant_b.id) is not None
-
-
-async def test_delete_grants_for_resource_sweeps_one_resource(
-    engine: AsyncEngine,
-) -> None:
-    factory = create_session_factory(engine)
-    user_id = uuid.uuid4()
-    other_id = uuid.uuid4()
-    await _insert_user(engine, user_id, "alice")
-    await _insert_user(engine, other_id, "bob")
-    community = _community()
-    server_id = uuid.uuid4()
-    other_server_id = uuid.uuid4()
-    target = ResourceGrant(
-        id=ResourceGrantId.new(),
-        user_id=UserId(user_id),
-        community_id=community.id,
-        resource_type="server",
-        resource_id=server_id,
-        permissions={Permission("server:stop")},
-        created_at=_NOW,
-        updated_at=_NOW,
-    )
-    survivor = ResourceGrant(
-        id=ResourceGrantId.new(),
-        user_id=UserId(other_id),
-        community_id=community.id,
-        resource_type="server",
-        resource_id=other_server_id,
-        permissions={Permission("server:stop")},
-        created_at=_NOW,
-        updated_at=_NOW,
-    )
-    async with SqlAlchemyUnitOfWork(factory) as uow:
-        await uow.communities.add(community)
-        await uow.resource_grants.add(target)
-        await uow.resource_grants.add(survivor)
-        await uow.commit()
-
-    async with SqlAlchemyUnitOfWork(factory) as uow:
-        await uow.resource_grants.delete_for_resource("server", server_id)
-        await uow.commit()
-
-    async with SqlAlchemyUnitOfWork(factory) as uow:
-        assert await uow.resource_grants.get_by_id(target.id) is None
-        assert await uow.resource_grants.get_by_id(survivor.id) is not None
-
-
 async def test_update_role_persists_name_and_permissions(engine: AsyncEngine) -> None:
     factory = create_session_factory(engine)
     community = _community()
@@ -655,6 +596,7 @@ async def test_list_grants_for_community_filters_by_user(engine: AsyncEngine) ->
     community = _community()
     grant_a = ResourceGrant(
         id=ResourceGrantId.new(),
+        membership_id=MembershipId.new(),
         user_id=UserId(alice),
         community_id=community.id,
         resource_type="server",
@@ -665,6 +607,7 @@ async def test_list_grants_for_community_filters_by_user(engine: AsyncEngine) ->
     )
     grant_b = ResourceGrant(
         id=ResourceGrantId.new(),
+        membership_id=MembershipId.new(),
         user_id=UserId(bob),
         community_id=community.id,
         resource_type="server",
@@ -675,6 +618,9 @@ async def test_list_grants_for_community_filters_by_user(engine: AsyncEngine) ->
     )
     async with SqlAlchemyUnitOfWork(factory) as uow:
         await uow.communities.add(community)
+        await uow.commit()
+    await _seed_grant_parents(engine, grant_a, grant_b)
+    async with SqlAlchemyUnitOfWork(factory) as uow:
         await uow.resource_grants.add(grant_a)
         await uow.resource_grants.add(grant_b)
         await uow.commit()
@@ -695,8 +641,10 @@ async def test_delete_grant_by_id_removes_only_that_grant(
     user_id = uuid.uuid4()
     await _insert_user(engine, user_id, "alice")
     community = _community()
+    membership_id = MembershipId.new()
     target = ResourceGrant(
         id=ResourceGrantId.new(),
+        membership_id=membership_id,
         user_id=UserId(user_id),
         community_id=community.id,
         resource_type="server",
@@ -707,6 +655,7 @@ async def test_delete_grant_by_id_removes_only_that_grant(
     )
     survivor = ResourceGrant(
         id=ResourceGrantId.new(),
+        membership_id=membership_id,
         user_id=UserId(user_id),
         community_id=community.id,
         resource_type="server",
@@ -717,6 +666,9 @@ async def test_delete_grant_by_id_removes_only_that_grant(
     )
     async with SqlAlchemyUnitOfWork(factory) as uow:
         await uow.communities.add(community)
+        await uow.commit()
+    await _seed_grant_parents(engine, target, survivor)
+    async with SqlAlchemyUnitOfWork(factory) as uow:
         await uow.resource_grants.add(target)
         await uow.resource_grants.add(survivor)
         await uow.commit()

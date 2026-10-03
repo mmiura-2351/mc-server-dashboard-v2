@@ -245,7 +245,9 @@ is added to (FR-MEM-1) and removed from (FR-MEM-3).
 | `created_at` | timestamptz | when the user joined |
 
 Constraints: `UNIQUE(user_id, community_id)` — a user is a member of a Community
-at most once.
+at most once. `UNIQUE(id, user_id, community_id)` — redundant with the primary key
+as a uniqueness rule; it exists as the target of `resource_grant`'s membership FK
+(Section 6).
 
 ### `role`
 
@@ -301,27 +303,37 @@ second term.
 | Column | Type | Notes |
 |---|---|---|
 | `id` | uuid PK | |
+| `membership_id` | uuid | the membership instance the grant was made under (composite FK below) |
 | `user_id` | uuid FK → `user.id` | the granted member; `ON DELETE CASCADE` |
 | `community_id` | uuid FK → `community.id` | the resource's Community; `ON DELETE CASCADE` |
-| `resource_type` | text | e.g. `server` (CHECK-constrained enum) |
-| `resource_id` | uuid | id of the specific resource (e.g. a `server.id`) |
+| `resource_type` | text | `server` (CHECK-constrained enum; the only M1 type) |
+| `resource_id` | uuid FK → `server.id` | the specific resource; `ON DELETE CASCADE` |
 | `permissions` | text[] | `<resource>:<action>` codes granted on that resource |
 | `created_at` / `updated_at` | timestamptz | |
 
 Constraints: `UNIQUE(user_id, resource_type, resource_id)` — one grant row per
-member per resource (its `permissions` set is amended in place).
+member per resource (its `permissions` set is amended in place). FK
+`(membership_id, user_id, community_id)` → `membership(id, user_id, community_id)`
+`ON DELETE CASCADE` — a grant belongs to the membership it was made under, and its
+`user_id` / `community_id` are that membership's.
 
 > The grant is keyed by `user_id`, not `membership_id`, because the grant is
-> conceptually "to a user, on a resource that lives in a Community". To keep the
-> FR-MEM-3 invariant (removing a member revokes that Community's grants), grants
-> also carry `community_id` and are deleted when the membership is removed — see
-> Section 10. `resource_id` is a soft reference (no DB-level FK) because
-> `resource_type` is polymorphic; referential cleanup for the `server` resource
-> type is handled in the delete use case and by the membership-removal cascade.
-> Because there is no FK on `resource_id`, deleting a single server does not
-> remove its grants automatically: the server-delete use case must also delete the
-> `resource_grant` rows for `(resource_type='server', resource_id=<server.id>)` in
-> the same `UnitOfWork` transaction (Section 10), so no dangling grant rows remain.
+> conceptually "to a user, on a resource that lives in a Community". Both of its
+> parents are enforced foreign keys with `ON DELETE CASCADE`: the membership,
+> through the composite `(membership_id, user_id, community_id)` reference, and
+> the server, through `resource_id`. The membership is referenced by its `id`, not
+> by the reusable `(user_id, community_id)` pair: a member removed and re-added
+> holds a new membership row, so a grant validated against the old one can never
+> attach to the new one. Removing a member or deleting a server therefore removes
+> its grants in the database (Section 10), and no grant can be inserted for a
+> membership or server that is gone. Grant creation checks both up front for a
+> clean error, but those checks are not held until its INSERT; the foreign keys
+> are what keep a removal or deletion committing in between from leaving a ghost
+> grant (issue #3216), and the INSERT's violation is reported as the same
+> not-found the check would have given. `resource_id` references `server` because
+> `server` is the only `resource_type` the CHECK admits; adding a second resource
+> type means replacing this FK (e.g. with one nullable FK column per type), not
+> dropping it.
 
 ---
 
@@ -788,7 +800,7 @@ following must then be gone for that `(user, community)` pair, and nothing else:
 | What | How it is removed |
 |---|---|
 | Role assignments in this Community | `membership_role` rows `ON DELETE CASCADE` from the deleted `membership` |
-| Resource grants in this Community | `resource_grant` rows for `(user_id, community_id)` — deleted by the remove-member **use case** (they FK `user_id`, not `membership_id`) |
+| Resource grants in this Community | `resource_grant` rows `ON DELETE CASCADE` from the deleted `membership` (composite FK on `membership_id`, Section 6) |
 | The membership itself | the `membership` row is the delete target |
 
 What must **not** be touched:
@@ -809,18 +821,16 @@ cascade behavior — the cascade column in any table that carries
 deliberate exception: its references are soft (no FK), so its rows survive the
 deletion (Section 9).
 
-Also distinct, **deleting a single server** (without deleting its Community) must
-sweep the `resource_grant` rows that point at it. Since `resource_id` is a soft
-reference (no FK; Section 6), this is not automatic: the server-delete use case
-deletes the `resource_grant` rows for `(resource_type='server', resource_id=<server.id>)`
-in the same `UnitOfWork` transaction as the `server` row — the same pattern as the
-member-removal grant cleanup — so no dangling polymorphic grant rows remain.
+Also distinct, **deleting a single server** (without deleting its Community)
+removes the `resource_grant` rows that point at it, `ON DELETE CASCADE` through
+`resource_id` (Section 6).
 
-The two grant-cleanup paths above (cascade vs use-case) exist because
-`resource_grant` is keyed by `user_id` for natural querying (Section 6); the
-remove-member use case is responsible for deleting the matching grants in the same
-`UnitOfWork` transaction as the membership deletion, so the FR-MEM-3 invariant
-holds atomically.
+Both grant-cleanup paths are cascades rather than use-case sweeps on purpose. A
+sweep only deletes the grants its transaction can see, so a grant creation that
+passed its checks before the removal or deletion and committed after it would
+survive — for a removed member, a grant that re-adding the user would silently
+reactivate. The foreign keys close that window whatever order the two
+transactions land in (issue #3216).
 
 ---
 

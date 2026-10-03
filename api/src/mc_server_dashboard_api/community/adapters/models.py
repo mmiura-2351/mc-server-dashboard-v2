@@ -17,6 +17,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Integer,
     String,
     UniqueConstraint,
@@ -54,6 +55,11 @@ class MembershipModel(Base):
         # A user is a member of a community at most once (DATABASE.md Section 5).
         UniqueConstraint(
             "user_id", "community_id", name="uq_membership_user_community"
+        ),
+        # The target of ``resource_grant``'s membership FK, which pins the grant's
+        # denormalized ``(user_id, community_id)`` to the membership it names.
+        UniqueConstraint(
+            "id", "user_id", "community_id", name="uq_membership_id_user_community"
         ),
     )
 
@@ -119,8 +125,13 @@ class MembershipRoleModel(Base):
 class ResourceGrantModel(Base):
     """Row of the ``resource_grant`` table: a per-resource grant (DATABASE.md 6).
 
-    ``resource_id`` has no FK by design: ``resource_type`` is polymorphic, so the
-    reference is soft and cleaned up by use cases (Section 10).
+    Both parents are enforced foreign keys, ``ON DELETE CASCADE``, so a grant can
+    neither be inserted for a membership or server that is gone nor outlive one
+    deleted concurrently (issue #3216): ``(membership_id, user_id, community_id)``
+    references the membership *instance* (a re-added member is a new row, so a
+    grant validated against the removed one cannot attach to it), and
+    ``resource_id`` references ``server.id`` -- the only ``resource_type`` the
+    CHECK admits.
     """
 
     __tablename__ = "resource_grant"
@@ -136,9 +147,17 @@ class ResourceGrantModel(Base):
         CheckConstraint(
             "resource_type IN ('server')", name="ck_resource_grant_resource_type"
         ),
+        # A grant belongs to the membership it was made under: removing the member
+        # removes it (FR-MEM-3), and none can be created for a removed one.
+        ForeignKeyConstraint(
+            ["membership_id", "user_id", "community_id"],
+            ["membership.id", "membership.user_id", "membership.community_id"],
+            ondelete="CASCADE",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    membership_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("user.id", ondelete="CASCADE"),
@@ -150,7 +169,13 @@ class ResourceGrantModel(Base):
         nullable=False,
     )
     resource_type: Mapped[str] = mapped_column(String, nullable=False)
-    resource_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    # ``server`` is the only resource type (the CHECK above); a second type
+    # replaces this FK with one per type.
+    resource_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("server.id", ondelete="CASCADE"),
+        nullable=False,
+    )
     permissions: Mapped[list[str]] = mapped_column(ARRAY(String), nullable=False)
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False

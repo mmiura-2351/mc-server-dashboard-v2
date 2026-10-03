@@ -33,6 +33,7 @@ from mc_server_dashboard_api.community.domain.repositories import (
 from mc_server_dashboard_api.community.domain.value_objects import (
     CommunityId,
     CommunityName,
+    MembershipId,
     UserId,
 )
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
@@ -125,6 +126,50 @@ async def _insert_communities(
         await uow.commit()
 
 
+async def _insert_grant_parents(
+    engine: AsyncEngine,
+    *,
+    memberships: dict[tuple[UserId, CommunityId], MembershipId],
+    servers: list[tuple[uuid.UUID, CommunityId]],
+) -> None:
+    """Insert the memberships and servers grants reference (issue #3216 FKs)."""
+
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                "INSERT INTO membership (id, user_id, community_id, created_at) "
+                "VALUES (:id, :user_id, :community_id, now())"
+            ),
+            [
+                {
+                    "id": membership_id.value,
+                    "user_id": user_id.value,
+                    "community_id": community_id.value,
+                }
+                for (user_id, community_id), membership_id in memberships.items()
+            ],
+        )
+        await connection.execute(
+            text(
+                "INSERT INTO server "
+                "(id, community_id, name, mc_edition, mc_version, server_type, "
+                "config, slug, desired_state, observed_state, "
+                "created_at, updated_at) VALUES "
+                "(:id, :community_id, :name, 'java', '1.21', 'vanilla', "
+                "'{}'::jsonb, :slug, 'stopped', 'stopped', now(), now())"
+            ),
+            [
+                {
+                    "id": server_id,
+                    "community_id": community_id.value,
+                    "name": f"contract-{server_id}",
+                    "slug": f"contract-{str(server_id)[:8]}-00",
+                }
+                for server_id, community_id in servers
+            ],
+        )
+
+
 @pytest.fixture
 def community_repository_harness(
     engine: AsyncEngine,
@@ -176,8 +221,23 @@ async def resource_grant_repository_harness(
     other_user_id = UserId(uuid.uuid4())
     community_id = CommunityId.new()
     other_community_id = CommunityId.new()
+    resource_id = uuid.uuid4()
+    other_resource_id = uuid.uuid4()
     await _insert_users(engine, user_id, other_user_id)
     await _insert_communities(session_factory, community_id, other_community_id)
+    membership_ids = {
+        pair: MembershipId.new()
+        for pair in (
+            (user_id, community_id),
+            (user_id, other_community_id),
+            (other_user_id, other_community_id),
+        )
+    }
+    await _insert_grant_parents(
+        engine,
+        memberships=membership_ids,
+        servers=[(resource_id, community_id), (other_resource_id, other_community_id)],
+    )
     harness = _sql_harness(session_factory, lambda uow: uow.resource_grants)
     return ResourceGrantRepositoryHarness(
         open=harness.open,
@@ -185,6 +245,9 @@ async def resource_grant_repository_harness(
         other_user_id=other_user_id,
         community_id=community_id,
         other_community_id=other_community_id,
+        resource_id=resource_id,
+        other_resource_id=other_resource_id,
+        membership_ids=membership_ids,
     )
 
 

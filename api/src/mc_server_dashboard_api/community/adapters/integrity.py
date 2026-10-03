@@ -40,8 +40,19 @@ the adapter layer, which already reaches ``servers.adapters.models`` for the
 resource-existence check. What keeps the maps apart is the coupling, not a
 contract.)
 
-**Foreign keys are deliberately absent, and their absence is not a claim that
-they are unreachable.** Every FK in migration 0004 --
+**Two foreign keys are mapped: the parents of a resource grant** (migration
+0039, issue #3216). ``fk_resource_grant_membership_id_membership`` and
+``fk_resource_grant_resource_id_server`` are the very mechanism that serializes
+``CreateGrant`` with a member removal or server deletion: when the deletion
+commits between the use case's checks and its INSERT, the INSERT fails its FK at
+commit, and that is the ordinary losing side of the race, not a defect. It
+surfaces as the same typed error the use case's own pre-check raises
+(:class:`GrantTargetNotMemberError` / :class:`GrantResourceNotFoundError`), which
+the route already maps to 404. The INSERT is staged via ``session.add``, so it
+violates inside the unit of work's ``commit`` wrap.
+
+**The other foreign keys are deliberately absent, and their absence is not a
+claim that they are unreachable.** Every FK in migration 0004 --
 ``fk_role_community_id_community``, ``fk_membership_user_id_user``,
 ``fk_membership_community_id_community``,
 ``fk_membership_role_membership_id_membership``,
@@ -66,6 +77,8 @@ from sqlalchemy.exc import IntegrityError
 
 from mc_server_dashboard_api.community.domain.errors import (
     CommunityAlreadyExistsError,
+    GrantResourceNotFoundError,
+    GrantTargetNotMemberError,
     MembershipAlreadyExistsError,
     ResourceGrantAlreadyExistsError,
     RoleAlreadyExistsError,
@@ -75,10 +88,14 @@ _COMMUNITY_NAME_CONSTRAINTS = frozenset({"uq_community_name"})
 _ROLE_NAME_CONSTRAINTS = frozenset({"uq_role_community_name"})
 _MEMBERSHIP_CONSTRAINTS = frozenset({"uq_membership_user_community"})
 _RESOURCE_GRANT_CONSTRAINTS = frozenset({"uq_resource_grant_user_resource"})
+_GRANT_MEMBERSHIP_CONSTRAINTS = frozenset(
+    {"fk_resource_grant_membership_id_membership"}
+)
+_GRANT_RESOURCE_CONSTRAINTS = frozenset({"fk_resource_grant_resource_id_server"})
 
 
 def translate_integrity_error(exc: IntegrityError) -> None:
-    """Raise the matching domain error for a known unique violation, else return.
+    """Raise the matching domain error for a known violation, else return.
 
     An unrecognised violation is left to the caller to re-raise as-is.
     """
@@ -92,14 +109,18 @@ def translate_integrity_error(exc: IntegrityError) -> None:
         raise MembershipAlreadyExistsError(str(constraint)) from exc
     if constraint in _RESOURCE_GRANT_CONSTRAINTS:
         raise ResourceGrantAlreadyExistsError(str(constraint)) from exc
+    if constraint in _GRANT_MEMBERSHIP_CONSTRAINTS:
+        raise GrantTargetNotMemberError(str(constraint)) from exc
+    if constraint in _GRANT_RESOURCE_CONSTRAINTS:
+        raise GrantResourceNotFoundError(str(constraint)) from exc
 
 
 def _constraint_name(exc: IntegrityError) -> str | None:
     """Extract the violated constraint name from the wrapped driver error.
 
-    The constraint name lives on the asyncpg ``UniqueViolationError`` underneath
-    the SQLAlchemy wrapper (``exc.orig`` is the DBAPI shim; its ``__cause__`` is
-    the asyncpg error).
+    The constraint name lives on the asyncpg ``UniqueViolationError`` (or
+    ``ForeignKeyViolationError``) underneath the SQLAlchemy wrapper (``exc.orig``
+    is the DBAPI shim; its ``__cause__`` is the asyncpg error).
     """
 
     for candidate in (exc.orig, getattr(exc.orig, "__cause__", None)):

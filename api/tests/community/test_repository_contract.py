@@ -17,6 +17,7 @@ from mc_server_dashboard_api.community.domain.repositories import (
 )
 from mc_server_dashboard_api.community.domain.value_objects import (
     CommunityId,
+    MembershipId,
     UserId,
 )
 from tests.community.fakes import (
@@ -83,12 +84,26 @@ def role_repository_harness() -> RoleRepositoryHarness:
 def resource_grant_repository_harness() -> ResourceGrantRepositoryHarness:
     repository: ResourceGrantRepository = FakeResourceGrantRepository()
     harness = _fake_harness(repository)
+    user_id = UserId(uuid.uuid4())
+    other_user_id = UserId(uuid.uuid4())
+    community_id = CommunityId.new()
+    other_community_id = CommunityId.new()
     return ResourceGrantRepositoryHarness(
         open=harness.open,
-        user_id=UserId(uuid.uuid4()),
-        other_user_id=UserId(uuid.uuid4()),
-        community_id=CommunityId.new(),
-        other_community_id=CommunityId.new(),
+        user_id=user_id,
+        other_user_id=other_user_id,
+        community_id=community_id,
+        other_community_id=other_community_id,
+        resource_id=uuid.uuid4(),
+        other_resource_id=uuid.uuid4(),
+        membership_ids={
+            pair: MembershipId.new()
+            for pair in (
+                (user_id, community_id),
+                (user_id, other_community_id),
+                (other_user_id, other_community_id),
+            )
+        },
     )
 
 

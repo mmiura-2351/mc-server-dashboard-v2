@@ -698,6 +698,7 @@ async def test_delete_cascades_to_membership_grant_and_token(
     # so the delete exercises the ON DELETE CASCADE on user.id for all three
     # dependents (DATABASE.md Sections 4-6).
     community_id = uuid.uuid4()
+    membership_id = uuid.uuid4()
     async with engine.begin() as conn:
         await conn.execute(
             text(
@@ -711,20 +712,39 @@ async def test_delete_cascades_to_membership_grant_and_token(
                 "INSERT INTO membership (id, user_id, community_id, created_at) "
                 "VALUES (:id, :uid, :cid, now())"
             ),
-            {"id": uuid.uuid4(), "uid": user.id.value, "cid": community_id},
+            {"id": membership_id, "uid": user.id.value, "cid": community_id},
+        )
+        server_id = uuid.uuid4()
+        await conn.execute(
+            text(
+                "INSERT INTO server "
+                "(id, community_id, name, mc_edition, mc_version, server_type, "
+                "config, slug, desired_state, observed_state, "
+                "created_at, updated_at) VALUES "
+                "(:id, :cid, :name, 'java', '1.21', 'vanilla', "
+                "'{}'::jsonb, :slug, 'stopped', 'stopped', now(), now())"
+            ),
+            {
+                "id": server_id,
+                "cid": community_id,
+                "name": "survival",
+                "slug": f"srv-{str(server_id)[:8]}-00",
+            },
         )
         await conn.execute(
             text(
-                "INSERT INTO resource_grant (id, user_id, community_id, "
-                "resource_type, resource_id, permissions, created_at, updated_at) "
-                "VALUES (:id, :uid, :cid, 'server', :rid, "
+                "INSERT INTO resource_grant (id, membership_id, user_id, "
+                "community_id, resource_type, resource_id, permissions, "
+                "created_at, updated_at) "
+                "VALUES (:id, :mid, :uid, :cid, 'server', :rid, "
                 "ARRAY['server:start'], now(), now())"
             ),
             {
                 "id": uuid.uuid4(),
+                "mid": membership_id,
                 "uid": user.id.value,
                 "cid": community_id,
-                "rid": uuid.uuid4(),
+                "rid": server_id,
             },
         )
 

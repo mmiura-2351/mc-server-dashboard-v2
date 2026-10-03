@@ -3,8 +3,7 @@
 Opens a session from the factory on ``__aenter__`` and binds the repositories to
 it; ``commit`` flushes and commits the transaction, while leaving the block
 without committing rolls back (the session is closed either way). This gives use
-cases the all-or-nothing transaction the Port promises (DATABASE.md Section 1) —
-needed for the FR-MEM-3 grant-cleanup-plus-membership-delete (Section 10).
+cases the all-or-nothing transaction the Port promises (DATABASE.md Section 1).
 
 The :class:`ResourceExistenceChecker` Port is bound to a server-table query on the
 *same* session, so grant creation's existence check (issue #361) runs inside the

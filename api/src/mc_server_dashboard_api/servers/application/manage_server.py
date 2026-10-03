@@ -97,10 +97,6 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 )
 from mc_server_dashboard_api.servers.domain.version_validator import VersionValidator
 
-# The resource type a server grant is keyed by (DATABASE.md Sections 6, 10). The
-# delete sweep removes grants for ``(resource_type='server', resource_id=<id>)``.
-_SERVER_RESOURCE_TYPE = "server"
-
 # The only MC edition the version catalog can serve at M1 (Java-only; FR-VER-1).
 _SUPPORTED_EDITION = "java"
 
@@ -961,12 +957,8 @@ class DeleteServer:
                             server_id=server_id,
                             storage_ref=ref,
                         )
+                # The server's resource grants cascade from the row (Section 10).
                 await self.uow.servers.delete(server_id)
-                # No FK on resource_grant.resource_id, so the server delete does not
-                # cascade; sweep the grants in the same transaction (Section 10).
-                await self.uow.resource_grants.delete_for_resource(
-                    _SERVER_RESOURCE_TYPE, server_id.value
-                )
                 await self.uow.commit()
         # Forget the deleted server's Bedrock tunnel credential (issue #1544).
         # After the commit and outside the lock: the row is gone, so an at-rest

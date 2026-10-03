@@ -2,15 +2,13 @@
 
 Keeps the use cases under test against fakes (no database), per TESTING.md
 Section 4. The fake UnitOfWork shares its repositories across nested ``async
-with`` blocks, tracks commits, and records grant sweeps so tests can assert the
-server-delete-plus-grant-sweep atomicity (DATABASE.md Section 10).
+with`` blocks and tracks commits.
 """
 
 from __future__ import annotations
 
 import datetime as dt
 import io
-import uuid
 import zipfile
 from collections.abc import AsyncIterator, Callable, Iterable
 from contextlib import asynccontextmanager
@@ -101,7 +99,6 @@ from mc_server_dashboard_api.servers.domain.plugin_repository import (
     PluginRepository,
 )
 from mc_server_dashboard_api.servers.domain.repositories import (
-    ResourceGrantSweeper,
     ServerRepository,
 )
 from mc_server_dashboard_api.servers.domain.resource_pack import (
@@ -1051,16 +1048,6 @@ class FakeServerRepository(ServerRepository):
         self.by_id.pop(server_id, None)
 
 
-class FakeResourceGrantSweeper(ResourceGrantSweeper):
-    def __init__(self) -> None:
-        self.swept: list[tuple[str, uuid.UUID]] = []
-
-    async def delete_for_resource(
-        self, resource_type: str, resource_id: uuid.UUID
-    ) -> None:
-        self.swept.append((resource_type, resource_id))
-
-
 class FakeBackupRepository(BackupRepository):
     def __init__(self) -> None:
         self.by_id: dict[BackupId, Backup] = {}
@@ -1716,7 +1703,6 @@ class FakeUnitOfWork(UnitOfWork):
     # Narrow the Port-declared attribute types to the concrete fakes so tests can
     # reach their inspection helpers without casts.
     servers: FakeServerRepository
-    resource_grants: FakeResourceGrantSweeper
     backups: FakeBackupRepository
     groups: FakeGroupRepository
     game_sessions: FakeGameSessionRepository
@@ -1728,7 +1714,6 @@ class FakeUnitOfWork(UnitOfWork):
     def __init__(
         self,
         servers: FakeServerRepository | None = None,
-        resource_grants: FakeResourceGrantSweeper | None = None,
         backups: FakeBackupRepository | None = None,
         groups: FakeGroupRepository | None = None,
         game_sessions: FakeGameSessionRepository | None = None,
@@ -1738,7 +1723,6 @@ class FakeUnitOfWork(UnitOfWork):
         schedule_runs: FakeScheduleRunRepository | None = None,
     ) -> None:
         self.servers = servers or FakeServerRepository()
-        self.resource_grants = resource_grants or FakeResourceGrantSweeper()
         self.backups = backups or FakeBackupRepository()
         self.groups = groups or FakeGroupRepository()
         self.game_sessions = game_sessions or FakeGameSessionRepository()

@@ -3,9 +3,9 @@
 Runs only when ``MCD_TEST_DATABASE_URL`` is set (the CI Postgres service);
 skipped otherwise (TESTING.md Section 5). The schema is created and torn down per
 test via the real migrations so the adapters run against the documented shape
-(DATABASE.md Section 7, 10). A community (and, for the sweep test, a user +
+(DATABASE.md Section 7, 10). A community (and, for the cascade test, a user +
 membership + resource grant) are seeded through the community adapters; the
-server-delete grant sweep is exercised end to end via :class:`DeleteServer`.
+server-delete grant cascade is exercised end to end via :class:`DeleteServer`.
 """
 
 from __future__ import annotations
@@ -193,7 +193,7 @@ async def test_duplicate_name_in_community_conflicts(engine: AsyncEngine) -> Non
         )
 
 
-async def test_delete_sweeps_resource_grants(engine: AsyncEngine) -> None:
+async def test_delete_cascades_to_resource_grants(engine: AsyncEngine) -> None:
     community_id = await _seed_community(engine)
     user_id = uuid.uuid4()
     await _insert_user(engine, user_id, "alice")
@@ -219,8 +219,15 @@ async def test_delete_sweeps_resource_grants(engine: AsyncEngine) -> None:
     # Seed a membership + a resource grant on that server (community context).
     com = CommunityCommunityId(community_id)
     user = CommunityUserId(user_id)
+    membership = Membership(
+        id=MembershipId.new(),
+        user_id=user,
+        community_id=com,
+        created_at=_NOW,
+    )
     grant = ResourceGrant(
         id=ResourceGrantId.new(),
+        membership_id=membership.id,
         user_id=user,
         community_id=com,
         resource_type="server",
@@ -230,18 +237,11 @@ async def test_delete_sweeps_resource_grants(engine: AsyncEngine) -> None:
         updated_at=_NOW,
     )
     async with CommunityUnitOfWork(factory) as uow:
-        await uow.memberships.add(
-            Membership(
-                id=MembershipId.new(),
-                user_id=user,
-                community_id=com,
-                created_at=_NOW,
-            )
-        )
+        await uow.memberships.add(membership)
         await uow.resource_grants.add(grant)
         await uow.commit()
 
-    # Delete the server: the grant on it must be swept in the same transaction.
+    # Delete the server: the grant on it cascades away with the row.
     await DeleteServer(
         uow=ServersUnitOfWork(factory),
         backup_store=FakeBackupArchiveStore(),
