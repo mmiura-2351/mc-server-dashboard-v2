@@ -15,11 +15,19 @@ payload. Both are :class:`ArchiveUnreadableError`.
 Its leniency is calibrated against the restore path rather than against the gzip
 spec — see :class:`GzipReadProbe` — because condemning an archive restore would
 accept is as harmful as passing one it would not.
+
+The paths that extract an archive with ``tarfile`` instead — restore on both
+backends, and the fs health check — reach the same verdict through
+:func:`archive_read_errors_as_unreadable` (issue #3230).
 """
 
 from __future__ import annotations
 
+import contextlib
+import gzip
+import tarfile
 import zlib
+from collections.abc import Iterator
 
 from mc_server_dashboard_api.storage.domain.errors import ArchiveUnreadableError
 
@@ -127,3 +135,45 @@ class GzipReadProbe:
             raise ArchiveUnreadableError(
                 "archive ended before its gzip stream reached a trailer"
             )
+
+
+# What ``tarfile`` raises when an archive's own bytes cannot be read back
+# (issue #3230): a stream that ends before its gzip end-of-stream marker
+# (``EOFError`` from ``r:gz``, ``ReadError("unexpected end of data")`` from
+# ``r|gz``), damaged deflate data (``zlib.error``), bytes after a gzip member that
+# are not another member (``BadGzipFile``), a compression method that is not
+# deflate (``CompressionError``), or bytes that do not frame as a gzip tar at all
+# (``ReadError``). Deliberately NOT ``tarfile.TarError`` as a whole: its
+# ``FilterError`` branch refuses an unsafe member of a perfectly readable archive.
+# A plain ``OSError`` (an I/O fault reading the bytes) is not here either: it says
+# nothing about the archive's bytes, and each backend keeps its own I/O-fault
+# policy for it.
+_ARCHIVE_READ_ERRORS = (
+    EOFError,
+    zlib.error,
+    gzip.BadGzipFile,
+    tarfile.ReadError,
+    tarfile.CompressionError,
+)
+
+
+@contextlib.contextmanager
+def archive_read_errors_as_unreadable() -> Iterator[None]:
+    """Report a failure to read an archive's bytes as :class:`ArchiveUnreadableError`.
+
+    Wraps the ``tarfile`` read of a backup archive in restore and in the fs health
+    check, so a truncated or bit-rotted archive reaches the caller as the modelled
+    storage verdict rather than as a raw ``EOFError`` / ``tarfile`` error.
+    """
+
+    try:
+        yield
+    except _ARCHIVE_READ_ERRORS as exc:
+        cause = exc.__cause__
+        if isinstance(cause, OSError) and not isinstance(cause, gzip.BadGzipFile):
+            # ``tarfile.open(mode="r:gz")`` reports ANY ``OSError`` raised while it
+            # reads the first header as ``ReadError("not a gzip file")``. An I/O
+            # fault there is no verdict about the bytes: surface it as the I/O
+            # fault it is, for the backend's own policy to classify.
+            raise cause from None
+        raise ArchiveUnreadableError(f"archive could not be read back: {exc}") from exc

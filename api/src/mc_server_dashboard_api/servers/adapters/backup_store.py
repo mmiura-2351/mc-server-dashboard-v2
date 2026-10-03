@@ -143,6 +143,11 @@ class StorageBackupStoreAdapter(BackupArchiveStore):
             raise BackupCorruptError(
                 storage_ref, corrupt_count=len(exc.report.corrupt)
             ) from exc
+        except ArchiveUnreadableError as exc:
+            # The archive's bytes could not be read back while extracting it (issue
+            # #3230): truncated, or damaged gzip / tar framing. The same verdict the
+            # sweep's probe reaches, so it crosses the seam as the same error.
+            raise BackupUnreadableError(storage_ref) from exc
         except StorageUnavailableError as exc:
             # The object store surfaced a transport/backend failure during the restore
             # (issue #2273): already translated to a storage type at the object-client

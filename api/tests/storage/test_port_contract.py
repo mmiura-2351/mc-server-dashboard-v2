@@ -10,8 +10,10 @@ covered in the per-adapter files.
 from __future__ import annotations
 
 import asyncio
+import gzip
 import hashlib
 import threading
+import zlib
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 
@@ -21,6 +23,7 @@ from mc_server_dashboard_api.storage.adapters.fs import FsStorage
 from mc_server_dashboard_api.storage.adapters.object_store import ObjectStorage
 from mc_server_dashboard_api.storage.domain.errors import (
     ArchiveTooLargeError,
+    ArchiveUnreadableError,
     IncompleteTransferError,
     IntegrityCheckError,
     MissingRegionsError,
@@ -53,6 +56,7 @@ from tests.storage.helpers import (
     read_tar,
     region_targz,
     stream_of,
+    tar_bytes,
     tar_stream,
     unaligned_live_region_bytes,
 )
@@ -1079,6 +1083,88 @@ async def test_restore_healthy_backup_reports_healthy(
 
     blob = await drain(harness.storage.open_hydrate_source(community, server))
     assert read_tar(blob) == original
+
+
+# A gzip member header (no flags, no mtime) for hand-framed damaged archives.
+_GZIP_HEADER = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xff"
+
+
+def _unreadable_archive(shape: str) -> bytes:
+    """A stored archive whose bytes no longer read back as a tar.gz (issue #3230).
+
+    One shape per way ``tarfile`` reports it, so every exception the adapters
+    translate is pinned by a real archive rather than by a raised stand-in.
+    """
+
+    if shape == "not_gzip":
+        # Not even a gzip stream (``ReadError``).
+        return b"not a gzip stream " * 16
+    if shape == "bad_method":
+        # A gzip magic naming a compression method that is not deflate
+        # (``CompressionError`` from stream-mode reads).
+        return b"\x1f\x8b\x07\x00" + b"\x00" * 60
+    # One member large enough that damage partway lands inside its body.
+    tar = tar_bytes({"world/region/r.0.0.mca": bytes(range(256)) * 1000})
+    if shape == "truncated":
+        # The stream stops mid-deflate, short of its end-of-stream marker
+        # (``EOFError`` from ``r:gz``, ``ReadError`` from ``r|gz``).
+        archive = gzip.compress(tar)
+        return archive[: len(archive) // 2]
+    if shape == "rotted_body":
+        # Sound deflate data up to a byte boundary, then a block of the reserved
+        # type — a rotted byte partway through the member body (``zlib.error``).
+        deflate = zlib.compressobj(9, zlib.DEFLATED, -zlib.MAX_WBITS)
+        body = deflate.compress(tar[:65536]) + deflate.flush(zlib.Z_SYNC_FLUSH)
+        return _GZIP_HEADER + body + b"\xff" * 64
+    assert shape == "split_member"
+    # A complete gzip member holding only the first part of the tar, followed by
+    # bytes that are not another member (``BadGzipFile`` from ``r:gz``).
+    return gzip.compress(tar[:65536]) + b"not a gzip member" * 4
+
+
+_UNREADABLE_SHAPES = ["not_gzip", "bad_method", "truncated", "rotted_body"]
+
+
+@pytest.mark.parametrize("shape", _UNREADABLE_SHAPES)
+async def test_check_backup_health_of_an_unreadable_archive_is_unreadable(
+    harness: StorageHarness, shape: str
+) -> None:
+    """The sweep's probe reports an archive it cannot read back as
+    ``ArchiveUnreadableError`` on BOTH backends (issue #3230) — the verdict the
+    sweep records as ``UNREADABLE`` — never a raw ``EOFError`` / ``tarfile`` error
+    that would abort the whole pass."""
+
+    community, server = new_scope()
+    key = await harness.storage.put_backup(
+        community, server, stream_of(_unreadable_archive(shape), chunk=8192)
+    )
+
+    with pytest.raises(ArchiveUnreadableError):
+        await harness.storage.check_backup_health(community, server, key)
+
+
+@pytest.mark.parametrize("force", [False, True])
+@pytest.mark.parametrize("shape", [*_UNREADABLE_SHAPES, "split_member"])
+async def test_restore_of_an_unreadable_archive_is_refused_and_keeps_current(
+    harness: StorageHarness, shape: str, force: bool
+) -> None:
+    """A restore that finds its archive unreadable refuses with
+    ``ArchiveUnreadableError`` on BOTH backends (issue #3230), ``force`` or not —
+    the override publishes a corrupt world, but these bytes hold no world to
+    publish — and leaves the live snapshot untouched."""
+
+    community, server = new_scope()
+    live = {"world/region/r.0.0.mca": healthy_region_bytes()}
+    await harness.publish(community, server, live)
+    key = await harness.storage.put_backup(
+        community, server, stream_of(_unreadable_archive(shape), chunk=8192)
+    )
+
+    with pytest.raises(ArchiveUnreadableError):
+        await harness.storage.restore_backup(community, server, key, force=force)
+
+    blob = await drain(harness.storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == live
 
 
 async def test_delete_backup_is_idempotent(harness: StorageHarness) -> None:

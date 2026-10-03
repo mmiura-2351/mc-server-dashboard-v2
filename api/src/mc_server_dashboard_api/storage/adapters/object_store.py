@@ -100,7 +100,10 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     VersionId,
     is_version_ring_member,
 )
-from mc_server_dashboard_api.storage.integrity.archive import GzipReadProbe
+from mc_server_dashboard_api.storage.integrity.archive import (
+    GzipReadProbe,
+    archive_read_errors_as_unreadable,
+)
 from mc_server_dashboard_api.storage.integrity.region import (
     RegionFinding,
     WorkingSetReport,
@@ -1262,12 +1265,26 @@ class ObjectStorage(Storage):
         self._register_staging(incoming)
         try:
             async with self._client_factory() as client:
-                if await client.head_object(backup_key) is None:
+                declared = await client.head_object(backup_key)
+                if declared is None:
                     raise NotFoundError(f"backup not found: {key.value}")
                 # Stage the extracted archive under the incoming prefix, then publish
                 # it through the same pointer-flip path as a snapshot (Section 4.1).
                 spool = await _spool_object(client, backup_key, ".restore.", ".tar.gz")
                 try:
+                    # A body that ended cleanly short of what HEAD declared is one
+                    # observation that cannot tell damage from a bad minute — the
+                    # readability probe re-reads to decide (issue #2371). Restore
+                    # reads once, so it refuses as an outage instead of letting the
+                    # extraction below condemn the archive (issue #3230). Past this
+                    # check every declared byte is in the spool, so an archive that
+                    # will not extract is a verdict about its bytes.
+                    delivered = (await asyncio.to_thread(spool.stat)).st_size
+                    if delivered < declared:
+                        raise ObjectStoreUnavailableError(
+                            f"object store delivered {delivered} of the {declared} "
+                            f"declared bytes of {backup_key}"
+                        )
                     # Single sequential pass (#1945): open the gzip spool
                     # ONCE in stream mode and upload each member as it is
                     # encountered. The old per-member approach re-opened the
@@ -2309,12 +2326,18 @@ async def _archive_file_member_streams(
     traversal rule as ``_safe_archive_members``), and yields ``(name,
     chunk_stream)`` pairs. The caller MUST fully consume each chunk stream
     before advancing to the next member (stream mode reads sequentially).
+
+    An archive whose bytes cannot be read back — truncated, or damaged gzip / tar
+    framing — raises :class:`ArchiveUnreadableError` (issue #3230), from the
+    member walk or from a member's chunk stream.
     """
 
-    tar = await asyncio.to_thread(tarfile.open, str(spool), mode)
+    with archive_read_errors_as_unreadable():
+        tar = await asyncio.to_thread(tarfile.open, str(spool), mode)
     try:
         while True:
-            member = await asyncio.to_thread(tar.next)
+            with archive_read_errors_as_unreadable():
+                member = await asyncio.to_thread(tar.next)
             if member is None:
                 return
             if not member.isfile():
@@ -2336,7 +2359,8 @@ async def _fileobj_parts(member_file: Any) -> AsyncIterator[bytes]:
     """Stream a tar member file object in part-sized chunks (bounded memory)."""
 
     while True:
-        chunk = await asyncio.to_thread(member_file.read, _PART)
+        with archive_read_errors_as_unreadable():
+            chunk = await asyncio.to_thread(member_file.read, _PART)
         if not chunk:
             return
         yield chunk

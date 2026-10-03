@@ -94,7 +94,9 @@ class BackupArchiveStore(abc.ABC):
         when healthy; always ``0`` without ``force``, since a corrupt one raises)
         so the use case can quarantine + audit a forced corrupt restore. The
         application enforces the stop precondition; Storage enforces atomicity.
-        Raises :class:`BackupNotFoundError` for an unknown ref.
+        Raises :class:`BackupNotFoundError` for an unknown ref, and
+        :class:`BackupUnreadableError` — ``force`` or not, with ``current``
+        untouched — when the archive's bytes cannot be read back (issue #3230).
         """
 
     @abc.abstractmethod
@@ -110,8 +112,9 @@ class BackupArchiveStore(abc.ABC):
         On the fs backend the probe extracts the archive into throwaway staging and
         walks it for corrupt ``.mca`` region files (issue #738). On the object
         backend it instead streams the stored archive end to end to prove the store
-        can still produce it (issue #2371), returning ``0`` when it can and raising
-        :class:`BackupUnreadableError` when it cannot.
+        can still produce it (issue #2371), returning ``0`` when it can. Either
+        backend raises :class:`BackupUnreadableError` for an archive whose bytes
+        cannot be read back (issue #3230).
 
         Raises :class:`BackupNotFoundError` for an unknown ref, and
         :class:`BackupStorageUnavailableError` when the backend could not serve the

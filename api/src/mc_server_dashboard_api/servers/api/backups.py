@@ -565,10 +565,12 @@ async def restore_backup(
         )
         raise _conflict("server_not_stopped") from exc
     except BackupUnreadableError as exc:
-        # The backup's recorded verdict is UNREADABLE (issue #2374): its archive
-        # could not be read back, so no override can restore it. A conflict with
-        # the backup's state, not a fault of this request — and not retryable
-        # unchanged: only a sweep that reads the archive back revises the verdict.
+        # The backup's recorded verdict is UNREADABLE (issue #2374), or this
+        # restore just found its archive unreadable and recorded that (issue
+        # #3230): its archive could not be read back, so no override can restore
+        # it. A conflict with the backup's state, not a fault of this request — and
+        # not retryable unchanged: only a sweep that reads the archive back
+        # revises the verdict.
         await _record_failure(
             recorder,
             ops.BACKUP_RESTORE,

@@ -2015,7 +2015,7 @@ class FakeBackupArchiveStore(BackupArchiveStore):
         self.corrupt_refs: set[str] = set()
         self.corrupt_count = 1
         # refs whose stored archive cannot be streamed back in full (#2371): the
-        # sweep probe raises BackupUnreadableError for them. Distinct from
+        # sweep probe and restore (#3230) raise BackupUnreadableError. Distinct from
         # ``corrupt_refs`` — the bytes are gone, not the world.
         self.unreadable_refs: set[str] = set()
         # refs whose probe hits a backend outage (#2371): the probe raises
@@ -2074,6 +2074,8 @@ class FakeBackupArchiveStore(BackupArchiveStore):
         if storage_ref not in self.archives:
             raise BackupNotFoundError(storage_ref)
         self.restore_calls.append((server_id, storage_ref, force))
+        if storage_ref in self.unreadable_refs:
+            raise BackupUnreadableError(storage_ref)
         if storage_ref in self.corrupt_refs and not force:
             raise BackupCorruptError(storage_ref, corrupt_count=self.corrupt_count)
         self.restored.append((server_id, storage_ref))

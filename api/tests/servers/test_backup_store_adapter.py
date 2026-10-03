@@ -15,6 +15,7 @@ BackupNotFoundError).
 from __future__ import annotations
 
 import errno
+import gzip
 import os
 import tempfile
 import uuid
@@ -481,6 +482,32 @@ async def test_restore_healthy_backup_reports_not_corrupt(tmp_path: Path) -> Non
     )
 
     assert corrupt_count == 0
+
+
+async def test_restore_unreadable_archive_translates_to_unreadable(
+    tmp_path: Path,
+) -> None:
+    """A restore that finds its archive truncated (issue #3230): the storage
+    ``ArchiveUnreadableError`` becomes :class:`BackupUnreadableError` — the error
+    the edge answers 409 ``backup_unreadable`` — not a raw storage type (500)."""
+
+    storage = FsStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+    await _publish(storage, community, server, {"server.properties": b"motd=original"})
+    archive = region_targz({"world/region/r.0.0.mca": healthy_region_bytes()})
+
+    async def _truncated() -> AsyncIterator[bytes]:
+        yield archive[: len(archive) // 2]
+
+    key = await storage.put_backup(
+        StorageCommunityId(community.value), StorageServerId(server.value), _truncated()
+    )
+
+    with pytest.raises(BackupUnreadableError):
+        await adapter.restore(
+            community_id=community, server_id=server, storage_ref=key.value
+        )
 
 
 async def test_restore_unknown_ref_translates_to_backup_not_found(
@@ -1015,6 +1042,30 @@ async def test_check_backup_health_fs_io_fault_translates_to_unavailable(
     monkeypatch.setattr(fs_adapter, "_extract_tar_gz_into", _raise_errno(errno.EIO))
     with pytest.raises(BackupStorageUnavailableError):
         await adapter.check_backup_health(
+            community_id=community, server_id=server, storage_ref=ref
+        )
+
+
+@pytest.mark.parametrize("operation", ["restore", "check_backup_health"])
+async def test_fs_io_fault_reading_the_archive_is_unavailable_not_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    """An EIO while ``tarfile`` reads a sound archive is an outage, never the
+    unreadable verdict (issue #3230). ``tarfile``'s gzip open reports ANY
+    ``OSError`` on the first read as ``ReadError("not a gzip file")``, which the
+    archive-read translation must not take for damaged bytes — doing so would
+    condemn a sound backup over a device fault."""
+
+    storage = FsStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+    ref = await _put_backup(
+        storage, community, server, {"world/region/r.0.0.mca": healthy_region_bytes()}
+    )
+    monkeypatch.setattr(gzip.GzipFile, "read", _raise_errno(errno.EIO))
+
+    with pytest.raises(BackupStorageUnavailableError):
+        await getattr(adapter, operation)(
             community_id=community, server_id=server, storage_ref=ref
         )
 

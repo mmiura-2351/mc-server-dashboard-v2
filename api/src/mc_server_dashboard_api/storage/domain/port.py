@@ -515,7 +515,10 @@ class BackupStore(abc.ABC):
         working set either way (healthy on a clean restore, non-healthy on a forced
         corrupt one) so the caller can quarantine + audit. The application enforces
         the stop precondition; Storage enforces atomicity and stays DB-free. Raises
-        :class:`~.errors.NotFoundError` for an unknown key.
+        :class:`~.errors.NotFoundError` for an unknown key, and
+        :class:`~.errors.ArchiveUnreadableError` — ``force`` or not, ``current``
+        untouched — when the archive's bytes do not read back as a ``tar.gz``
+        (truncated, or damaged gzip / tar framing; issue #3230).
         """
 
     @abc.abstractmethod
@@ -535,6 +538,8 @@ class BackupStore(abc.ABC):
           decompressed-byte cap (the restore extractor), walks it for corrupt
           ``.mca`` region files (issue #738), discards the staging, and reports the
           findings in the returned :class:`~...integrity.region.WorkingSetReport`.
+          An archive that does not extract — truncated, or damaged gzip / tar
+          framing — raises :class:`~.errors.ArchiveUnreadableError` (issue #3230).
         - The **object** adapter streams the stored object end to end and proves the
           store can still *produce* the archive (issue #2371) — the precondition
           restore depends on, which a ``HEAD`` alone never tested. It does not
