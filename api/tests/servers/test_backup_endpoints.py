@@ -88,6 +88,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     BackupCorruptError,
     BackupNotFoundError,
     BackupStorageUnavailableError,
+    BackupUnreadableError,
     BackupUnsettledError,
     CommandDispatchError,
     FileTooLargeError,
@@ -560,6 +561,24 @@ def test_restore_corrupt_without_force_is_500_with_reason() -> None:
     # The gate-refused restore records backup:restore ERROR against the backup.
     assert [e.operation for e in recorder.events] == [ops.BACKUP_RESTORE]
     assert recorder.events[0].outcome is Outcome.ERROR
+    assert recorder.events[0].target_type == ops.TARGET_BACKUP
+
+
+def test_restore_unreadable_backup_is_409_with_reason() -> None:
+    # The backup's archive could not be read back (issue #2374): nothing can be
+    # restored from it, override or not, so the restore is refused as a conflict
+    # with the backup's recorded state rather than attempted.
+    use_case = _FakeUseCase(error=BackupUnreadableError("x"))
+    recorder = RecordingAuditRecorder()
+    app = _app(member=True, allow=True, restore=use_case, recorder=recorder)
+    client = _client(app)
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/restore?force=true")
+    )
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "backup_unreadable"
+    assert [e.operation for e in recorder.events] == [ops.BACKUP_RESTORE]
+    assert recorder.events[0].outcome is Outcome.DENIED
     assert recorder.events[0].target_type == ops.TARGET_BACKUP
 
 

@@ -92,6 +92,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     BackupCorruptError,
     BackupNotFoundError,
     BackupStorageUnavailableError,
+    BackupUnreadableError,
     BackupUnsettledError,
     CommandDispatchError,
     FileTooLargeError,
@@ -145,8 +146,10 @@ class BackupResponse(BaseModel):
     id: uuid.UUID
     server_id: uuid.UUID
     source: str
-    # Structural health of the archived contents (issue #742): ``healthy`` (gated
-    # create path), ``unknown`` (legacy/uploaded, not yet checked), ``quarantined``.
+    # Health of the archive and its contents (issue #742): ``healthy`` (gated
+    # create path), ``unknown`` (legacy/uploaded, not yet checked), ``quarantined``
+    # (structurally corrupt world, force-restorable), ``unreadable`` (the archive
+    # could not be read back at all; not restorable, issue #2374).
     health: str
     size_bytes: int | None
     created_by: uuid.UUID | None
@@ -534,7 +537,9 @@ async def restore_backup(
     quarantined it). ``?force=true`` is the operator override — it publishes a
     known-corrupt backup anyway (#703), records a distinct ``backup:force_restore``
     audit entry naming who forced it and the corrupt count, and quarantines it. The
-    create-direction gate (#749) has no such override.
+    create-direction gate (#749) has no such override. An ``unreadable`` backup
+    (#2374) is refused with 409 ``backup_unreadable`` whatever ``force`` says: its
+    archive could not be read back, so there is nothing to restore.
     """
 
     try:
@@ -559,6 +564,21 @@ async def restore_backup(
             target_type=ops.TARGET_BACKUP,
         )
         raise _conflict("server_not_stopped") from exc
+    except BackupUnreadableError as exc:
+        # The backup's recorded verdict is UNREADABLE (issue #2374): its archive
+        # could not be read back, so no override can restore it. A conflict with
+        # the backup's state, not a fault of this request — and not retryable
+        # unchanged: only a sweep that reads the archive back revises the verdict.
+        await _record_failure(
+            recorder,
+            ops.BACKUP_RESTORE,
+            Outcome.DENIED,
+            authorized,
+            community_id,
+            backup_id,
+            target_type=ops.TARGET_BACKUP,
+        )
+        raise _conflict("backup_unreadable") from exc
     except ServerBusyError as exc:
         # A concurrent lifecycle op held the per-server lock past the acquire
         # budget (issue #876): a transient 409 the caller retries.

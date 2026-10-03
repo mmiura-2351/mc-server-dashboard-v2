@@ -913,7 +913,9 @@ export interface paths {
          *     quarantined it). ``?force=true`` is the operator override — it publishes a
          *     known-corrupt backup anyway (#703), records a distinct ``backup:force_restore``
          *     audit entry naming who forced it and the corrupt count, and quarantines it. The
-         *     create-direction gate (#749) has no such override.
+         *     create-direction gate (#749) has no such override. An ``unreadable`` backup
+         *     (#2374) is refused with 409 ``backup_unreadable`` whatever ``force`` says: its
+         *     archive could not be read back, so there is nothing to restore.
          */
         post: operations["restore_backup_api_communities__community_id__servers__server_id__backups__backup_id__restore_post"];
         delete?: never;

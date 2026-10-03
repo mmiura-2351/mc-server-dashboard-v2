@@ -95,6 +95,7 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupCorruptError,
     BackupNotFoundError,
+    BackupUnreadableError,
     BackupUnsettledError,
     FileTooLargeError,
     InvalidBackupArchiveError,
@@ -355,6 +356,12 @@ class RestoreBackup:
     IS known-corrupt), and the returned :class:`RestoreResult` flags the forced
     corrupt restore so the edge audits who forced it.
 
+    An ``UNREADABLE`` backup (issue #2374) is refused up front with
+    :class:`BackupUnreadableError`, ``force`` or not: its archive could not be read
+    back at all, so the override has nothing to publish. The refusal reads the
+    recorded verdict rather than the archive and leaves it unchanged — only an
+    integrity sweep that reads the archive back in full revises it.
+
     A backup carries the working set as it was when the backup was taken, so the
     republished ``server.properties`` holds the platform-managed values of THAT
     moment — a ``server-port`` the server may since have been re-ported away from,
@@ -406,6 +413,8 @@ class RestoreBackup:
                 backup = await self.uow.backups.get_by_id(backup_id)
                 if backup is None or backup.server_id != server_id:
                     raise BackupNotFoundError(str(backup_id.value))
+                if backup.health is BackupHealth.UNREADABLE:
+                    raise BackupUnreadableError(str(backup_id.value))
                 storage_ref = backup.storage_ref
             if not server.is_at_rest():
                 raise ServerNotStoppedError(str(server_id.value))
