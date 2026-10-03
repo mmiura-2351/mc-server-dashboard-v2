@@ -282,7 +282,8 @@ async def test_a_read_that_delivers_nothing_cannot_corroborate_a_short_one(
     refusing, which says nothing about where THIS object's bytes end. Paired with a
     short read it leaves one observation of the body, which is exactly the ambiguity
     the re-read exists to resolve, so it stays an availability failure: taking the
-    maximum here would quarantine a backup because the store went down mid-read."""
+    maximum here would mark a backup UNREADABLE because the store went down
+    mid-read."""
 
     store, storage = _store_and_storage()
     community, server = new_scope()

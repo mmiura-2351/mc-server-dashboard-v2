@@ -134,6 +134,7 @@ async def test_an_object_that_delivers_nothing_is_condemned_then_revised() -> No
     assert backups.by_id[dead.id].health is BackupHealth.UNREADABLE
     assert backups.by_id[sound.id].health is BackupHealth.HEALTHY
     assert first.backups_unreadable == 1
+    assert first.backups_healthy == 1
 
     # The store delivers the archive again (the read-abort queue is drained): the
     # next pass reads it back in full and lifts the verdict.
