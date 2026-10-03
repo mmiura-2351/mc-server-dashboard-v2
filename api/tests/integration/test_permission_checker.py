@@ -80,6 +80,30 @@ async def _insert_user(engine: AsyncEngine, user_id: uuid.UUID, username: str) -
         )
 
 
+async def _insert_server(
+    engine: AsyncEngine, server_id: uuid.UUID, community_id: CommunityId
+) -> None:
+    """Insert the server a grant targets (fk_resource_grant_resource_id_server)."""
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO server "
+                "(id, community_id, name, mc_edition, mc_version, server_type, "
+                "config, slug, desired_state, observed_state, "
+                "created_at, updated_at) VALUES "
+                "(:id, :cid, :name, 'java', '1.21', 'vanilla', "
+                "'{}'::jsonb, :slug, 'stopped', 'stopped', now(), now())"
+            ),
+            {
+                "id": server_id,
+                "cid": community_id.value,
+                "name": f"srv-{server_id}",
+                "slug": f"srv-{str(server_id)[:8]}-00",
+            },
+        )
+
+
 def _community(name: str = "guild") -> Community:
     return Community(
         id=CommunityId.new(),
@@ -155,6 +179,9 @@ async def test_resource_grant_scoped_to_exact_resource(engine: AsyncEngine) -> N
     async with SqlAlchemyUnitOfWork(factory) as uow:
         await uow.communities.add(community)
         await uow.memberships.add(membership)
+        await uow.commit()
+    await _insert_server(engine, server_x, community.id)
+    async with SqlAlchemyUnitOfWork(factory) as uow:
         await uow.resource_grants.add(grant)
         await uow.commit()
 
@@ -187,6 +214,9 @@ async def test_resource_grant_does_not_apply_in_a_different_community(
     await _insert_user(engine, user_id, "alice")
     community_a = _community("a")
     community_b = _community("b")
+    # A member of both, so the grant in A is a valid row (its FK to the A
+    # membership); only the community scope of the check differs.
+    membership_a = _membership(user_id, community_a.id)
     membership_b = _membership(user_id, community_b.id)
     server_id = uuid.uuid4()
     grant = ResourceGrant(
@@ -202,7 +232,11 @@ async def test_resource_grant_does_not_apply_in_a_different_community(
     async with SqlAlchemyUnitOfWork(factory) as uow:
         await uow.communities.add(community_a)
         await uow.communities.add(community_b)
+        await uow.memberships.add(membership_a)
         await uow.memberships.add(membership_b)
+        await uow.commit()
+    await _insert_server(engine, server_id, community_a.id)
+    async with SqlAlchemyUnitOfWork(factory) as uow:
         await uow.resource_grants.add(grant)
         await uow.commit()
 

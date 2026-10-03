@@ -64,10 +64,19 @@ class RoleRepositoryHarness(RepositoryHarness[RoleRepository]):
 
 @dataclass(frozen=True)
 class ResourceGrantRepositoryHarness(RepositoryHarness[ResourceGrantRepository]):
+    """Grant-repository harness; its ids must satisfy the grant's parents.
+
+    ``user_id`` is a member of both communities and ``other_user_id`` of
+    ``other_community_id``; ``resource_id`` / ``other_resource_id`` are servers in
+    ``community_id`` / ``other_community_id`` (the PostgreSQL FKs, issue #3216).
+    """
+
     user_id: UserId
     other_user_id: UserId
     community_id: CommunityId
     other_community_id: CommunityId
+    resource_id: uuid.UUID
+    other_resource_id: uuid.UUID
 
 
 def _community(name: str = "guild") -> Community:
@@ -121,7 +130,7 @@ def _grant(
         user_id=user_id or harness.user_id,
         community_id=community_id or harness.community_id,
         resource_type="server",
-        resource_id=resource_id or uuid.uuid4(),
+        resource_id=resource_id or harness.resource_id,
         permissions={Permission("server:read")},
         created_at=_NOW,
         updated_at=_NOW,
@@ -520,6 +529,7 @@ class ResourceGrantRepositoryContract:
             resource_grant_repository_harness,
             user_id=resource_grant_repository_harness.other_user_id,
             community_id=resource_grant_repository_harness.other_community_id,
+            resource_id=resource_grant_repository_harness.other_resource_id,
         )
         async with resource_grant_repository_harness.open() as transaction:
             await transaction.repository.add(target)

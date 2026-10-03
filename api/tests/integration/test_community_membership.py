@@ -114,6 +114,24 @@ async def _grant(
     community_id: CommunityId,
     resource_id: uuid.UUID,
 ) -> None:
+    # The grant's server must exist (fk_resource_grant_resource_id_server).
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO server "
+                "(id, community_id, name, mc_edition, mc_version, server_type, "
+                "config, slug, desired_state, observed_state, "
+                "created_at, updated_at) VALUES "
+                "(:id, :cid, :name, 'java', '1.21', 'vanilla', "
+                "'{}'::jsonb, :slug, 'stopped', 'stopped', now(), now())"
+            ),
+            {
+                "id": resource_id,
+                "cid": community_id.value,
+                "name": f"srv-{resource_id}",
+                "slug": f"srv-{str(resource_id)[:8]}-00",
+            },
+        )
     factory = create_session_factory(engine)
     async with SqlAlchemyUnitOfWork(factory) as uow:
         await uow.resource_grants.add(

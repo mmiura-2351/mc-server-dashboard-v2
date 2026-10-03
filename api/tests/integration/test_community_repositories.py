@@ -107,6 +107,25 @@ async def _insert_server(
         )
 
 
+async def _seed_grant_parents(engine: AsyncEngine, *grants: ResourceGrant) -> None:
+    """Insert the membership and server each grant references (issue #3216 FKs).
+
+    A membership the test already added is left as it is.
+    """
+
+    async with engine.begin() as conn:
+        for user_id, community_id in {(g.user_id, g.community_id) for g in grants}:
+            await conn.execute(
+                text(
+                    "INSERT INTO membership (id, user_id, community_id, created_at) "
+                    "VALUES (:id, :uid, :cid, now()) ON CONFLICT DO NOTHING"
+                ),
+                {"id": uuid.uuid4(), "uid": user_id.value, "cid": community_id.value},
+            )
+    for grant in grants:
+        await _insert_server(engine, grant.resource_id, grant.community_id)
+
+
 def _community(name: str = "guild") -> Community:
     return Community(
         id=CommunityId.new(),
@@ -235,6 +254,9 @@ async def test_resource_grant_round_trip(engine: AsyncEngine) -> None:
     )
     async with SqlAlchemyUnitOfWork(factory) as uow:
         await uow.communities.add(community)
+        await uow.commit()
+    await _seed_grant_parents(engine, grant)
+    async with SqlAlchemyUnitOfWork(factory) as uow:
         await uow.resource_grants.add(grant)
         await uow.commit()
 
@@ -404,6 +426,9 @@ async def test_duplicate_resource_grant_triple_raises(engine: AsyncEngine) -> No
 
     async with SqlAlchemyUnitOfWork(factory) as uow:
         await uow.communities.add(community)
+        await uow.commit()
+    await _seed_grant_parents(engine, _grant())
+    async with SqlAlchemyUnitOfWork(factory) as uow:
         await uow.resource_grants.add(_grant())
         await uow.commit()
     with pytest.raises(ResourceGrantAlreadyExistsError):
@@ -444,6 +469,9 @@ async def test_deleting_community_cascades_to_all_dependents(
         await uow.communities.add(community)
         await uow.roles.add(role)
         await uow.memberships.add(membership)
+        await uow.commit()
+    await _seed_grant_parents(engine, grant)
+    async with SqlAlchemyUnitOfWork(factory) as uow:
         await uow.resource_grants.add(grant)
         await uow.commit()
     async with SqlAlchemyUnitOfWork(factory) as uow:
@@ -540,6 +568,9 @@ async def test_delete_grants_for_user_in_community_scopes_to_one_community(
     async with SqlAlchemyUnitOfWork(factory) as uow:
         await uow.communities.add(community_a)
         await uow.communities.add(community_b)
+        await uow.commit()
+    await _seed_grant_parents(engine, grant_a, grant_b)
+    async with SqlAlchemyUnitOfWork(factory) as uow:
         await uow.resource_grants.add(grant_a)
         await uow.resource_grants.add(grant_b)
         await uow.commit()
@@ -589,6 +620,9 @@ async def test_delete_grants_for_resource_sweeps_one_resource(
     )
     async with SqlAlchemyUnitOfWork(factory) as uow:
         await uow.communities.add(community)
+        await uow.commit()
+    await _seed_grant_parents(engine, target, survivor)
+    async with SqlAlchemyUnitOfWork(factory) as uow:
         await uow.resource_grants.add(target)
         await uow.resource_grants.add(survivor)
         await uow.commit()
@@ -675,6 +709,9 @@ async def test_list_grants_for_community_filters_by_user(engine: AsyncEngine) ->
     )
     async with SqlAlchemyUnitOfWork(factory) as uow:
         await uow.communities.add(community)
+        await uow.commit()
+    await _seed_grant_parents(engine, grant_a, grant_b)
+    async with SqlAlchemyUnitOfWork(factory) as uow:
         await uow.resource_grants.add(grant_a)
         await uow.resource_grants.add(grant_b)
         await uow.commit()
@@ -717,6 +754,9 @@ async def test_delete_grant_by_id_removes_only_that_grant(
     )
     async with SqlAlchemyUnitOfWork(factory) as uow:
         await uow.communities.add(community)
+        await uow.commit()
+    await _seed_grant_parents(engine, target, survivor)
+    async with SqlAlchemyUnitOfWork(factory) as uow:
         await uow.resource_grants.add(target)
         await uow.resource_grants.add(survivor)
         await uow.commit()

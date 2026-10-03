@@ -713,6 +713,23 @@ async def test_delete_cascades_to_membership_grant_and_token(
             ),
             {"id": uuid.uuid4(), "uid": user.id.value, "cid": community_id},
         )
+        server_id = uuid.uuid4()
+        await conn.execute(
+            text(
+                "INSERT INTO server "
+                "(id, community_id, name, mc_edition, mc_version, server_type, "
+                "config, slug, desired_state, observed_state, "
+                "created_at, updated_at) VALUES "
+                "(:id, :cid, :name, 'java', '1.21', 'vanilla', "
+                "'{}'::jsonb, :slug, 'stopped', 'stopped', now(), now())"
+            ),
+            {
+                "id": server_id,
+                "cid": community_id,
+                "name": "survival",
+                "slug": f"srv-{str(server_id)[:8]}-00",
+            },
+        )
         await conn.execute(
             text(
                 "INSERT INTO resource_grant (id, user_id, community_id, "
@@ -724,7 +741,7 @@ async def test_delete_cascades_to_membership_grant_and_token(
                 "id": uuid.uuid4(),
                 "uid": user.id.value,
                 "cid": community_id,
-                "rid": uuid.uuid4(),
+                "rid": server_id,
             },
         )
 

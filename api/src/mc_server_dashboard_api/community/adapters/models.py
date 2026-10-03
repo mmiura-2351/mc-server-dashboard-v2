@@ -17,6 +17,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Integer,
     String,
     UniqueConstraint,
@@ -119,8 +120,11 @@ class MembershipRoleModel(Base):
 class ResourceGrantModel(Base):
     """Row of the ``resource_grant`` table: a per-resource grant (DATABASE.md 6).
 
-    ``resource_id`` has no FK by design: ``resource_type`` is polymorphic, so the
-    reference is soft and cleaned up by use cases (Section 10).
+    Both parents are enforced foreign keys, ``ON DELETE CASCADE``, so a grant can
+    neither be inserted for a membership or server that is gone nor outlive one
+    deleted concurrently (issue #3216): ``(user_id, community_id)`` references the
+    membership, and ``resource_id`` references ``server.id`` -- the only
+    ``resource_type`` the CHECK admits.
     """
 
     __tablename__ = "resource_grant"
@@ -136,6 +140,13 @@ class ResourceGrantModel(Base):
         CheckConstraint(
             "resource_type IN ('server')", name="ck_resource_grant_resource_type"
         ),
+        # A grant belongs to the membership it was made under: removing the member
+        # removes it (FR-MEM-3), and none can be created for a removed one.
+        ForeignKeyConstraint(
+            ["user_id", "community_id"],
+            ["membership.user_id", "membership.community_id"],
+            ondelete="CASCADE",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
@@ -150,7 +161,13 @@ class ResourceGrantModel(Base):
         nullable=False,
     )
     resource_type: Mapped[str] = mapped_column(String, nullable=False)
-    resource_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    # ``server`` is the only resource type (the CHECK above); a second type
+    # replaces this FK with one per type.
+    resource_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("server.id", ondelete="CASCADE"),
+        nullable=False,
+    )
     permissions: Mapped[list[str]] = mapped_column(ARRAY(String), nullable=False)
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False

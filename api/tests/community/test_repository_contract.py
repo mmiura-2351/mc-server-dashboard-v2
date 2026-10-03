@@ -89,6 +89,8 @@ def resource_grant_repository_harness() -> ResourceGrantRepositoryHarness:
         other_user_id=UserId(uuid.uuid4()),
         community_id=CommunityId.new(),
         other_community_id=CommunityId.new(),
+        resource_id=uuid.uuid4(),
+        other_resource_id=uuid.uuid4(),
     )
 
 
