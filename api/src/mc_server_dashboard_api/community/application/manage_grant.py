@@ -106,8 +106,10 @@ class CreateGrant:
             if membership is None:
                 raise GrantTargetNotMemberError(str(user_id.value))
             # Bound to the membership instance just validated, not the reusable
-            # (user, community) pair: if it is removed before the INSERT -- even
-            # if the user is re-added meanwhile -- the FK rejects the grant.
+            # (user, community) pair. hold_for_users keeps that membership
+            # FOR KEY SHARE until commit, so it cannot be removed (or replaced
+            # by a re-add) before the INSERT; the instance-bound FK backs this
+            # by rejecting a grant whose membership is gone.
             grant = ResourceGrant(
                 id=ResourceGrantId.new(),
                 membership_id=membership.id,

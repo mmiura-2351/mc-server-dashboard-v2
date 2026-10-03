@@ -148,13 +148,17 @@ class MembershipRepository(abc.ABC):
         """Return the ids of the roles assigned to ``membership_id``."""
 
     @abc.abstractmethod
-    async def lock_role_ids(self, membership_id: MembershipId) -> list[RoleId]:
-        """Return :meth:`list_role_ids`, its assignments share-locked until commit.
+    async def lock_role_ids(
+        self, membership_id: MembershipId, role_ids: Sequence[RoleId]
+    ) -> list[RoleId]:
+        """Return which of ``role_ids`` are assigned, share-locked until commit.
 
         For a caller whose write depends on the member holding these roles
         (#3241): an unassignment or a cascade from a member removal or role
         deletion waits for this transaction, and an assignment such a deletion
-        committed first is no longer returned.
+        committed first is no longer returned. Only the assignments of
+        ``role_ids`` -- roles the caller has already locked -- are locked: an
+        assignment of a role it never locked would be a lock taken out of order.
         """
 
     @abc.abstractmethod

@@ -23,7 +23,8 @@ Lock order, the same for every transaction that locks through here:
 2. the grant's resource (``FOR KEY SHARE``, grant creation's existence check);
 3. role rows, one at a time in ascending id order (``FOR SHARE``; the role whose
    permissions an update replaces ``FOR UPDATE``, in its place in the order);
-4. the actor's ``membership_role`` rows (``FOR SHARE``);
+4. the actor's ``membership_role`` rows of the roles locked in step 3 only
+   (``FOR SHARE``; one added since names a role never locked, and is skipped);
 5. the actor's grant on the resource (``FOR SHARE``).
 
 Each row is taken at its final strength in one pass, so two actors editing each
@@ -93,10 +94,16 @@ async def lock_actor_ceiling(
     )
     ceiling: set[Permission] = set()
     if membership is not None:
-        # Locked after the roles, as a role deletion's cascade locks them. An
-        # assignment revoked since the read above is gone; one added since then
-        # names an unlocked role and is left out of the ceiling.
-        held = set(await uow.memberships.lock_role_ids(membership.id))
+        # Locked after the roles, as a role deletion's cascade locks them, and
+        # only those of the roles just locked: an assignment added since the
+        # read above names a role this pass never locked, so it is neither
+        # locked (that would be out of order) nor counted. An assignment revoked
+        # since then is gone.
+        held = set(
+            await uow.memberships.lock_role_ids(
+                membership.id, [role.id for role in roles]
+            )
+        )
         for role in roles:
             if role.id in held:
                 ceiling |= role.permissions

@@ -218,9 +218,15 @@ class FakeMembershipRepository(MembershipRepository):
     async def list_role_ids(self, membership_id: MembershipId) -> list[RoleId]:
         return list(self.role_ids.get(membership_id, []))
 
-    async def lock_role_ids(self, membership_id: MembershipId) -> list[RoleId]:
+    async def lock_role_ids(
+        self, membership_id: MembershipId, role_ids: Sequence[RoleId]
+    ) -> list[RoleId]:
         # In-memory equivalent: no concurrent transaction exists to wait for.
-        return await self.list_role_ids(membership_id)
+        return [
+            role_id
+            for role_id in await self.list_role_ids(membership_id)
+            if role_id in role_ids
+        ]
 
     async def lock_owner_role_holders(
         self, community_id: CommunityId, role_id: RoleId

@@ -20,8 +20,8 @@ import asyncio
 import datetime as dt
 import os
 import uuid
-from collections.abc import AsyncIterator, Callable, Coroutine
-from dataclasses import dataclass
+from collections.abc import AsyncIterator, Callable, Coroutine, Sequence
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 import pytest
@@ -57,12 +57,14 @@ from mc_server_dashboard_api.community.application.manage_membership import (
 )
 from mc_server_dashboard_api.community.application.manage_role import (
     CreateRole,
+    DeleteRole,
     UpdateRole,
 )
 from mc_server_dashboard_api.community.application.provision_community import (
     ProvisionCommunity,
 )
 from mc_server_dashboard_api.community.domain.entities import (
+    Membership,
     ResourceGrant,
     Role,
 )
@@ -126,9 +128,10 @@ async def engine() -> AsyncIterator[AsyncEngine]:
 
 
 # Where a paused use case stops: at its first write, after a role update's
-# locked read of its target, after the ceiling locked the actor's roles, or
-# after a member removal's last-owner guard locked the Owner assignments.
-_PausePoint = Literal["write", "target-read", "role-locks", "owner-guard"]
+# locked read of its target, after the ceiling's ordered role pass, after the
+# ceiling locked the actor's assignments, or after a member removal's last-owner
+# guard locked the Owner assignments.
+_PausePoint = Literal["write", "target-read", "role-pass", "role-locks", "owner-guard"]
 
 
 class _Pause:
@@ -160,6 +163,13 @@ class _PausingRoleRepository(SqlAlchemyRoleRepository):
         await self._pause.hold("target-read")
         return role
 
+    async def lock_by_ids(
+        self, role_ids: Sequence[RoleId], *, for_update: RoleId | None = None
+    ) -> list[Role]:
+        roles = await super().lock_by_ids(role_ids, for_update=for_update)
+        await self._pause.hold("role-pass")
+        return roles
+
     async def update(
         self,
         role_id: RoleId,
@@ -179,8 +189,10 @@ class _PausingMembershipRepository(SqlAlchemyMembershipRepository):
         super().__init__(session)
         self._pause = pause
 
-    async def lock_role_ids(self, membership_id: MembershipId) -> list[RoleId]:
-        role_ids = await super().lock_role_ids(membership_id)
+    async def lock_role_ids(
+        self, membership_id: MembershipId, role_ids: Sequence[RoleId]
+    ) -> list[RoleId]:
+        role_ids = await super().lock_role_ids(membership_id, role_ids)
         await self._pause.hold("role-locks")
         return role_ids
 
@@ -207,17 +219,27 @@ class _PausingResourceGrantRepository(SqlAlchemyResourceGrantRepository):
 
 
 class _PausingUnitOfWork(SqlAlchemyUnitOfWork):
-    """Pauses at the given pause's point."""
+    """Pauses at the given pause's point; reports its backend pid if asked."""
 
     def __init__(
-        self, session_factory: async_sessionmaker[AsyncSession], pause: _Pause
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        pause: _Pause,
+        pid: asyncio.Future[int] | None = None,
     ) -> None:
         super().__init__(session_factory)
         self._pause = pause
+        self._pid = pid
 
     async def __aenter__(self) -> _PausingUnitOfWork:
         await super().__aenter__()
         assert self._session is not None
+        if self._pid is not None:
+            self._pid.set_result(
+                (
+                    await self._session.execute(text("SELECT pg_backend_pid()"))
+                ).scalar_one()
+            )
         self.roles = _PausingRoleRepository(self._session, self._pause)
         self.memberships = _PausingMembershipRepository(self._session, self._pause)
         self.resource_grants = _PausingResourceGrantRepository(
@@ -655,6 +677,90 @@ async def test_self_conferral_racing_the_actor_removal_does_not_deadlock(
         | PermissionCeilingExceededError,
     )
     assert await _actor_rows(world, actor) == 0
+
+
+async def test_assignment_added_mid_conferral_does_not_deadlock_a_removal(
+    engine: AsyncEngine,
+) -> None:
+    # The owner's role creation has locked the roles it holds when an
+    # assignment of role R to the owner commits. A removal of bystander B (who
+    # also holds R) takes the owner's Owner assignment under its last-owner
+    # guard, and a deletion of R cascades to both R assignments. Had the
+    # conferral then share-locked the new R assignment -- whose role it never
+    # locked -- the three would wait on each other in a cycle: conferral on the
+    # removal (Owner assignment), removal on the deletion (B's R assignment),
+    # deletion on the conferral (the owner's R assignment). R's id sorts before
+    # the Owner role's and B's membership before the owner's, so each lock lands
+    # in that order.
+    world = await _world(engine)
+    bystander = UserId(uuid.uuid4())
+    await _insert_user(engine, bystander.value, "bystander")
+    late_role = replace(
+        _role(world.community_id, "Late", {_STOP}), id=RoleId(uuid.UUID(int=1))
+    )
+    async with SqlAlchemyUnitOfWork(world.factory) as uow:
+        await uow.roles.add(late_role)
+        await uow.memberships.add(
+            Membership(
+                id=MembershipId(uuid.UUID(int=2)),
+                user_id=bystander,
+                community_id=world.community_id,
+                created_at=SystemClock().now(),
+            )
+        )
+        await uow.flush()
+        await uow.memberships.assign_role(MembershipId(uuid.UUID(int=2)), late_role.id)
+        await uow.commit()
+
+    # 1. The conferral locks the owner's roles and pauses.
+    conferral_pause = _Pause(at="role-pass")
+    conferral_pid: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+    conferring = asyncio.create_task(
+        CreateRole(
+            uow=_PausingUnitOfWork(world.factory, conferral_pause, conferral_pid),
+            clock=SystemClock(),
+        )(
+            community_id=world.community_id,
+            actor_id=world.owner,
+            name="Launchers",
+            permissions={_START},
+        )
+    )
+    await conferral_pause.reached.wait()
+    # 2. R is assigned to the owner.
+    await AssignRole(uow=SqlAlchemyUnitOfWork(world.factory))(
+        community_id=world.community_id,
+        user_id=world.owner,
+        role_id=late_role.id,
+        actor_id=world.owner,
+    )
+    # 3. B's removal takes B's membership and the Owner assignments, and pauses.
+    removal_pause = _Pause(at="owner-guard")
+    removing = asyncio.create_task(
+        RemoveMember(uow=_PausingUnitOfWork(world.factory, removal_pause))(
+            community_id=world.community_id, user_id=bystander
+        )
+    )
+    await removal_pause.reached.wait()
+    # 4. The conferral resumes and queues on the owner's Owner assignment.
+    conferral_pause.resume.set()
+    await _await_settled(world.engine, conferring, conferral_pid)
+    # 5. R's deletion runs.
+    deletion_pid: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+    deleting = asyncio.create_task(
+        DeleteRole(uow=_PidUnitOfWork(world.factory, deletion_pid))(
+            community_id=world.community_id, role_id=late_role.id
+        )
+    )
+    await _await_settled(world.engine, deleting, deletion_pid)
+    # 6. The removal resumes; all three must complete.
+    removal_pause.resume.set()
+    results = await asyncio.gather(
+        conferring, removing, deleting, return_exceptions=True
+    )
+
+    for result in results:
+        assert not isinstance(result, BaseException)
 
 
 class _DeletePidServersUnitOfWork(ServersUnitOfWork):

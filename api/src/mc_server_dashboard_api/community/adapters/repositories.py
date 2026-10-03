@@ -319,10 +319,19 @@ class SqlAlchemyMembershipRepository(MembershipRepository):
         rows = (await self._session.execute(stmt)).scalars().all()
         return [RoleId(row) for row in rows]
 
-    async def lock_role_ids(self, membership_id: MembershipId) -> list[RoleId]:
+    async def lock_role_ids(
+        self, membership_id: MembershipId, role_ids: Sequence[RoleId]
+    ) -> list[RoleId]:
+        if not role_ids:
+            return []
         stmt = (
             select(MembershipRoleModel.role_id)
-            .where(MembershipRoleModel.membership_id == membership_id.value)
+            .where(
+                MembershipRoleModel.membership_id == membership_id.value,
+                MembershipRoleModel.role_id.in_(
+                    [role_id.value for role_id in role_ids]
+                ),
+            )
             .order_by(MembershipRoleModel.role_id)
             .with_for_update(read=True)
         )
