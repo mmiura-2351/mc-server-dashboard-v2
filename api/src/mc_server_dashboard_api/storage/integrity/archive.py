@@ -140,9 +140,10 @@ class GzipReadProbe:
 # What ``tarfile`` raises when an archive's own bytes cannot be read back
 # (issue #3230): a stream that ends before its gzip end-of-stream marker
 # (``EOFError`` from ``r:gz``, ``ReadError("unexpected end of data")`` from
-# ``r|gz``), damaged deflate data (``zlib.error``), a rotted gzip header or
-# trailer (``BadGzipFile``, ``CompressionError``), or bytes that do not frame as a
-# tar (``ReadError``). Deliberately NOT ``tarfile.TarError`` as a whole: its
+# ``r|gz``), damaged deflate data (``zlib.error``), bytes after a gzip member that
+# are not another member (``BadGzipFile``), a compression method that is not
+# deflate (``CompressionError``), or bytes that do not frame as a gzip tar at all
+# (``ReadError``). Deliberately NOT ``tarfile.TarError`` as a whole: its
 # ``FilterError`` branch refuses an unsafe member of a perfectly readable archive.
 # A plain ``OSError`` (an I/O fault reading the bytes) is not here either: it says
 # nothing about the archive's bytes, and each backend keeps its own I/O-fault
@@ -168,4 +169,11 @@ def archive_read_errors_as_unreadable() -> Iterator[None]:
     try:
         yield
     except _ARCHIVE_READ_ERRORS as exc:
+        cause = exc.__cause__
+        if isinstance(cause, OSError) and not isinstance(cause, gzip.BadGzipFile):
+            # ``tarfile.open(mode="r:gz")`` reports ANY ``OSError`` raised while it
+            # reads the first header as ``ReadError("not a gzip file")``. An I/O
+            # fault there is no verdict about the bytes: surface it as the I/O
+            # fault it is, for the backend's own policy to classify.
+            raise cause from None
         raise ArchiveUnreadableError(f"archive could not be read back: {exc}") from exc

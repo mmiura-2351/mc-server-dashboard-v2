@@ -15,6 +15,7 @@ BackupNotFoundError).
 from __future__ import annotations
 
 import errno
+import gzip
 import os
 import tempfile
 import uuid
@@ -1041,6 +1042,30 @@ async def test_check_backup_health_fs_io_fault_translates_to_unavailable(
     monkeypatch.setattr(fs_adapter, "_extract_tar_gz_into", _raise_errno(errno.EIO))
     with pytest.raises(BackupStorageUnavailableError):
         await adapter.check_backup_health(
+            community_id=community, server_id=server, storage_ref=ref
+        )
+
+
+@pytest.mark.parametrize("operation", ["restore", "check_backup_health"])
+async def test_fs_io_fault_reading_the_archive_is_unavailable_not_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    """An EIO while ``tarfile`` reads a sound archive is an outage, never the
+    unreadable verdict (issue #3230). ``tarfile``'s gzip open reports ANY
+    ``OSError`` on the first read as ``ReadError("not a gzip file")``, which the
+    archive-read translation must not take for damaged bytes — doing so would
+    condemn a sound backup over a device fault."""
+
+    storage = FsStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+    ref = await _put_backup(
+        storage, community, server, {"world/region/r.0.0.mca": healthy_region_bytes()}
+    )
+    monkeypatch.setattr(gzip.GzipFile, "read", _raise_errno(errno.EIO))
+
+    with pytest.raises(BackupStorageUnavailableError):
+        await getattr(adapter, operation)(
             community_id=community, server_id=server, storage_ref=ref
         )
 
