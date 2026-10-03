@@ -47,9 +47,56 @@ class UserRepository(abc.ABC):
         enriched with usernames without N+1 lookups (issue #78).
         """
 
+    # The writers below are operation-specific (#3214): each persists only the
+    # columns its operation owns, plus ``updated_at``, so a writer acting on a
+    # stale read cannot restore columns another operation changed meanwhile (a
+    # profile edit resurrecting ``active`` / ``is_platform_admin`` or an old
+    # password hash). A writer whose row is gone matches nothing.
+
     @abc.abstractmethod
-    async def update(self, user: User) -> None:
-        """Persist a mutated user (profile / password change, FR-AUTH self-service)."""
+    async def update_profile(
+        self,
+        user_id: UserId,
+        *,
+        username: Username | None,
+        email: EmailAddress | None,
+        updated_at: dt.datetime,
+    ) -> User | None:
+        """Set the supplied profile fields; return the persisted user, or ``None``.
+
+        An omitted (``None``) field is left untouched. The returned user is the
+        row as written, so its other columns reflect any concurrently committed
+        change rather than the caller's earlier read. A username/email taken by
+        another user raises the domain conflict error.
+        """
+
+    @abc.abstractmethod
+    async def change_password_hash(
+        self,
+        user_id: UserId,
+        *,
+        expected_hash: str,
+        new_hash: str,
+        updated_at: dt.datetime,
+    ) -> bool:
+        """Replace the hash only if it is still ``expected_hash``; return whether.
+
+        The caller verified the current password against ``expected_hash``; if the
+        stored hash changed since, that verification is stale and nothing is
+        written.
+        """
+
+    @abc.abstractmethod
+    async def set_active(
+        self, user_id: UserId, *, active: bool, updated_at: dt.datetime
+    ) -> None:
+        """Set the account lifecycle flag (issue #278)."""
+
+    @abc.abstractmethod
+    async def set_platform_admin(
+        self, user_id: UserId, *, is_platform_admin: bool, updated_at: dt.datetime
+    ) -> None:
+        """Set the platform-admin flag (FR-AUTH-6)."""
 
     @abc.abstractmethod
     async def delete(self, user_id: UserId) -> None:

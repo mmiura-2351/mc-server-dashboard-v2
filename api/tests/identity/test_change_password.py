@@ -10,6 +10,7 @@ revoked, and the change commits atomically.
 from __future__ import annotations
 
 import datetime as dt
+from dataclasses import replace
 
 import pytest
 
@@ -20,10 +21,14 @@ from mc_server_dashboard_api.identity.domain.errors import (
     PasswordPolicyError,
 )
 from mc_server_dashboard_api.identity.domain.password_policy import PasswordPolicy
-from mc_server_dashboard_api.identity.domain.value_objects import RefreshTokenId
+from mc_server_dashboard_api.identity.domain.value_objects import (
+    RefreshTokenId,
+    UserId,
+)
 from tests.identity.fakes import (
     FakeClock,
     FakeUnitOfWork,
+    FakeUserRepository,
     StubHasher,
     make_user,
 )
@@ -117,3 +122,42 @@ async def test_change_password_revokes_all_refresh_tokens() -> None:
     assert all(
         token.revoked_at == _NOW for token in uow.refresh_tokens.by_hash.values()
     )
+
+
+class _PasswordChangedDuringHash(StubHasher):
+    """Replaces the stored hash while the new password is hashed.
+
+    Hashing runs after the current-password verify and before the write, so the
+    replacement stands in for a password change that committed in between.
+    """
+
+    def __init__(self, users: FakeUserRepository, user_id: UserId) -> None:
+        super().__init__()
+        self._users = users
+        self._user_id = user_id
+
+    async def hash(self, plaintext: str) -> str:
+        stored = self._users.by_id[self._user_id]
+        self._users.by_id[self._user_id] = replace(stored, password_hash="concurrent")
+        return await super().hash(plaintext)
+
+
+async def test_change_password_refuses_when_the_hash_changed_after_the_verify() -> None:
+    # The verify depends on the hash read before the write (#3214): if another
+    # change replaced it meanwhile, the caller's current password is stale and
+    # the newer password must survive.
+    user = make_user(password=_CURRENT, now=_NOW)
+    uow = FakeUnitOfWork()
+    uow.users.seed(user)
+    use_case = ChangePassword(
+        uow=uow,
+        hasher=_PasswordChangedDuringHash(uow.users, user.id),
+        clock=FakeClock(_NOW),
+        policy=_policy(),
+    )
+
+    with pytest.raises(InvalidCredentialsError):
+        await use_case(user_id=user.id, current_password=_CURRENT, new_password=_NEW)
+
+    assert uow.users.by_id[user.id].password_hash == "concurrent"
+    assert uow.commits == 0

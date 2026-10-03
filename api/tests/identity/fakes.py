@@ -119,32 +119,69 @@ class FakeUserRepository(UserRepository):
         wanted = set(user_ids)
         return {uid: user.username for uid, user in self.by_id.items() if uid in wanted}
 
-    async def update(self, user: User) -> None:
-        # Mirror the adapter's ``UPDATE user ... WHERE id = :id``: a missing id
-        # matches no row, so nothing is written and no row appears -- keying the
-        # entity in regardless made this an insert the adapter cannot perform
-        # (#2557).
-        stored = self.by_id.get(user.id)
+    # The writers mirror the adapter's ``UPDATE user ... WHERE id = :id``: a
+    # missing id matches no row, so nothing is written and no row appears (#2557),
+    # and each writes only the columns its operation owns (#3214).
+
+    async def update_profile(
+        self,
+        user_id: UserId,
+        *,
+        username: Username | None,
+        email: EmailAddress | None,
+        updated_at: dt.datetime,
+    ) -> User | None:
+        stored = self.by_id.get(user_id)
         if stored is None:
-            return
-        if any(
-            row.id != user.id and row.username == user.username
+            return None
+        if username is not None and any(
+            row.id != user_id and row.username == username
             for row in self.by_id.values()
         ):
-            raise UsernameAlreadyExistsError(user.username.value)
-        if any(
-            row.id != user.id and row.email == user.email for row in self.by_id.values()
+            raise UsernameAlreadyExistsError(username.value)
+        if email is not None and any(
+            row.id != user_id and row.email == email for row in self.by_id.values()
         ):
-            raise EmailAlreadyExistsError(user.email.value)
-        self.by_id[user.id] = replace(
+            raise EmailAlreadyExistsError(email.value)
+        self.by_id[user_id] = replace(
             stored,
-            username=user.username,
-            email=user.email,
-            password_hash=user.password_hash,
-            is_platform_admin=user.is_platform_admin,
-            active=user.active,
-            updated_at=user.updated_at,
+            username=stored.username if username is None else username,
+            email=stored.email if email is None else email,
+            updated_at=updated_at,
         )
+        return self._copy(self.by_id[user_id])
+
+    async def change_password_hash(
+        self,
+        user_id: UserId,
+        *,
+        expected_hash: str,
+        new_hash: str,
+        updated_at: dt.datetime,
+    ) -> bool:
+        stored = self.by_id.get(user_id)
+        if stored is None or stored.password_hash != expected_hash:
+            return False
+        self.by_id[user_id] = replace(
+            stored, password_hash=new_hash, updated_at=updated_at
+        )
+        return True
+
+    async def set_active(
+        self, user_id: UserId, *, active: bool, updated_at: dt.datetime
+    ) -> None:
+        stored = self.by_id.get(user_id)
+        if stored is not None:
+            self.by_id[user_id] = replace(stored, active=active, updated_at=updated_at)
+
+    async def set_platform_admin(
+        self, user_id: UserId, *, is_platform_admin: bool, updated_at: dt.datetime
+    ) -> None:
+        stored = self.by_id.get(user_id)
+        if stored is not None:
+            self.by_id[user_id] = replace(
+                stored, is_platform_admin=is_platform_admin, updated_at=updated_at
+            )
 
     async def delete(self, user_id: UserId) -> None:
         self.by_id.pop(user_id, None)

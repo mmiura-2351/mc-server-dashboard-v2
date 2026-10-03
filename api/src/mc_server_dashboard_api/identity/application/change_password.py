@@ -52,8 +52,15 @@ class ChangePassword:
             self.policy.validate(new_password, username=user.username, email=user.email)
 
             now = self.clock.now()
-            user.password_hash = await self.hasher.hash(new_password)
-            user.updated_at = now
-            await self.uow.users.update(user)
+            # Compare against the hash just verified (#3214): a password changed
+            # concurrently since the read makes ``current_password`` stale, so
+            # the change is refused like a wrong current password.
+            if not await self.uow.users.change_password_hash(
+                user.id,
+                expected_hash=user.password_hash,
+                new_hash=await self.hasher.hash(new_password),
+                updated_at=now,
+            ):
+                raise InvalidCredentialsError
             await self.uow.refresh_tokens.revoke_all_for_user(user.id, revoked_at=now)
             await self.uow.commit()

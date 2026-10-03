@@ -615,18 +615,20 @@ async def test_deleting_user_cascades_to_refresh_tokens(
         assert await uow.refresh_tokens.get_by_token_hash("hashed-token") is None
 
 
-async def test_update_persists_username_and_email(engine: AsyncEngine) -> None:
+async def test_update_profile_persists_username_and_email(engine: AsyncEngine) -> None:
     factory = create_session_factory(engine)
     user = _user(username="alice", email="alice@example.com")
     async with SqlAlchemyUnitOfWork(factory) as uow:
         await uow.users.add(user)
         await uow.commit()
 
-    user.username = Username("alice2")
-    user.email = EmailAddress("alice2@example.com")
-    user.updated_at = _NOW + dt.timedelta(hours=1)
     async with SqlAlchemyUnitOfWork(factory) as uow:
-        await uow.users.update(user)
+        await uow.users.update_profile(
+            user.id,
+            username=Username("alice2"),
+            email=EmailAddress("alice2@example.com"),
+            updated_at=_NOW + dt.timedelta(hours=1),
+        )
         await uow.commit()
 
     async with SqlAlchemyUnitOfWork(factory) as uow:
@@ -637,7 +639,7 @@ async def test_update_persists_username_and_email(engine: AsyncEngine) -> None:
     assert loaded.updated_at == _NOW + dt.timedelta(hours=1)
 
 
-async def test_update_to_taken_username_surfaces_translated_error(
+async def test_update_profile_to_taken_username_surfaces_translated_error(
     engine: AsyncEngine,
 ) -> None:
     factory = create_session_factory(engine)
@@ -650,10 +652,11 @@ async def test_update_to_taken_username_surfaces_translated_error(
 
     # Renaming bob to alice violates the unique username index; the UnitOfWork's
     # commit must translate the IntegrityError to the domain conflict error.
-    bob.username = Username("alice")
     with pytest.raises(UsernameAlreadyExistsError):
         async with SqlAlchemyUnitOfWork(factory) as uow:
-            await uow.users.update(bob)
+            await uow.users.update_profile(
+                bob.id, username=Username("alice"), email=None, updated_at=_NOW
+            )
             await uow.commit()
 
 
@@ -853,7 +856,7 @@ async def test_list_page_orders_by_created_at_and_paginates(
         assert [u.username.value for u in page2] == ["third"]
 
 
-async def test_update_persists_active_and_platform_admin(
+async def test_flag_writers_persist_active_and_platform_admin(
     engine: AsyncEngine,
 ) -> None:
     factory = create_session_factory(engine)
@@ -862,10 +865,11 @@ async def test_update_persists_active_and_platform_admin(
         await uow.users.add(user)
         await uow.commit()
 
-    user.active = False
-    user.is_platform_admin = True
     async with SqlAlchemyUnitOfWork(factory) as uow:
-        await uow.users.update(user)
+        await uow.users.set_active(user.id, active=False, updated_at=_NOW)
+        await uow.users.set_platform_admin(
+            user.id, is_platform_admin=True, updated_at=_NOW
+        )
         await uow.commit()
 
     async with SqlAlchemyUnitOfWork(factory) as uow:

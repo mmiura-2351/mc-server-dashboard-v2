@@ -120,48 +120,159 @@ class UserRepositoryContract:
         assert missing_username is None
         assert missing_email is None
 
-    async def test_update_detaches_the_persisted_values(
+    async def test_update_profile_writes_only_the_supplied_profile_fields(
         self, user_repository_harness: RepositoryHarness[UserRepository]
     ) -> None:
         user = _user()
         async with user_repository_harness.open() as transaction:
             await transaction.repository.add(user)
+            await transaction.repository.set_active(
+                user.id, active=False, updated_at=_NOW
+            )
             await transaction.commit()
 
-        user.username = Username("alice-renamed")
-        user.email = EmailAddress("renamed@example.com")
-        user.password_hash = "rotated-hash"
-        user.updated_at = _NOW + dt.timedelta(hours=1)
-        user.created_at = _NOW + dt.timedelta(days=1)
+        later = _NOW + dt.timedelta(hours=1)
         async with user_repository_harness.open() as transaction:
-            await transaction.repository.update(user)
-            user.password_hash = "rewritten-after-update"
-            user.active = False
+            renamed = await transaction.repository.update_profile(
+                user.id,
+                username=Username("alice-renamed"),
+                email=None,
+                updated_at=later,
+            )
+            assert renamed is not None
+            renamed.active = True
             await transaction.commit()
 
         async with user_repository_harness.open() as transaction:
             loaded = await transaction.repository.get_by_id(user.id)
+            emailed = await transaction.repository.update_profile(
+                user.id,
+                username=None,
+                email=EmailAddress("renamed@example.com"),
+                updated_at=later,
+            )
+            await transaction.commit()
 
+        # The returned user is the row as written, detached like any reader's.
+        assert renamed.username == Username("alice-renamed")
         assert loaded is not None
         assert loaded.username == Username("alice-renamed")
-        assert loaded.email == EmailAddress("renamed@example.com")
-        assert loaded.password_hash == "rotated-hash"
-        assert loaded.active is True
-        assert loaded.updated_at == _NOW + dt.timedelta(hours=1)
+        assert loaded.email == EmailAddress("alice@example.com")
+        assert loaded.password_hash == "hash"
+        assert loaded.active is False
+        assert loaded.is_platform_admin is False
+        assert loaded.updated_at == later
         assert loaded.created_at == _NOW
+        assert emailed is not None
+        assert emailed.username == Username("alice-renamed")
+        assert emailed.email == EmailAddress("renamed@example.com")
+        assert emailed.active is False
 
-    async def test_update_of_missing_row_is_a_no_op(
+    async def test_update_profile_of_missing_row_returns_none(
         self, user_repository_harness: RepositoryHarness[UserRepository]
     ) -> None:
         user = _user()
         async with user_repository_harness.open() as transaction:
-            await transaction.repository.update(user)
+            updated = await transaction.repository.update_profile(
+                user.id, username=user.username, email=user.email, updated_at=_NOW
+            )
+            await transaction.commit()
+
+        async with user_repository_harness.open() as transaction:
+            assert await transaction.repository.get_by_id(user.id) is None
+        assert updated is None
+
+    async def test_change_password_hash_writes_only_over_the_expected_hash(
+        self, user_repository_harness: RepositoryHarness[UserRepository]
+    ) -> None:
+        user = _user()
+        later = _NOW + dt.timedelta(hours=1)
+        async with user_repository_harness.open() as transaction:
+            await transaction.repository.add(user)
+            await transaction.commit()
+
+        async with user_repository_harness.open() as transaction:
+            stale = await transaction.repository.change_password_hash(
+                user.id, expected_hash="other", new_hash="stale", updated_at=later
+            )
+            missing = await transaction.repository.change_password_hash(
+                UserId.new(), expected_hash="hash", new_hash="stale", updated_at=later
+            )
+            await transaction.commit()
+        async with user_repository_harness.open() as transaction:
+            untouched = await transaction.repository.get_by_id(user.id)
+
+        async with user_repository_harness.open() as transaction:
+            changed = await transaction.repository.change_password_hash(
+                user.id, expected_hash="hash", new_hash="rotated", updated_at=later
+            )
+            await transaction.commit()
+        async with user_repository_harness.open() as transaction:
+            loaded = await transaction.repository.get_by_id(user.id)
+
+        assert stale is False
+        assert missing is False
+        assert untouched is not None
+        assert untouched.password_hash == "hash"
+        assert untouched.updated_at == _NOW
+        assert changed is True
+        assert loaded is not None
+        assert loaded.password_hash == "rotated"
+        assert loaded.updated_at == later
+        assert loaded.username == Username("alice")
+
+    async def test_flag_writers_set_only_their_own_flag(
+        self, user_repository_harness: RepositoryHarness[UserRepository]
+    ) -> None:
+        user = _user()
+        later = _NOW + dt.timedelta(hours=1)
+        async with user_repository_harness.open() as transaction:
+            await transaction.repository.add(user)
+            await transaction.commit()
+
+        async with user_repository_harness.open() as transaction:
+            await transaction.repository.set_active(
+                user.id, active=False, updated_at=later
+            )
+            await transaction.commit()
+        async with user_repository_harness.open() as transaction:
+            deactivated = await transaction.repository.get_by_id(user.id)
+
+        async with user_repository_harness.open() as transaction:
+            await transaction.repository.set_platform_admin(
+                user.id, is_platform_admin=True, updated_at=later
+            )
+            await transaction.commit()
+        async with user_repository_harness.open() as transaction:
+            granted = await transaction.repository.get_by_id(user.id)
+
+        assert deactivated is not None
+        assert deactivated.active is False
+        assert deactivated.is_platform_admin is False
+        assert deactivated.updated_at == later
+        assert granted is not None
+        assert granted.is_platform_admin is True
+        assert granted.active is False
+        assert granted.username == Username("alice")
+        assert granted.password_hash == "hash"
+
+    async def test_flag_writers_of_missing_row_are_a_no_op(
+        self, user_repository_harness: RepositoryHarness[UserRepository]
+    ) -> None:
+        user = _user()
+        async with user_repository_harness.open() as transaction:
+            await transaction.repository.set_active(
+                user.id, active=False, updated_at=_NOW
+            )
+            await transaction.repository.set_platform_admin(
+                user.id, is_platform_admin=True, updated_at=_NOW
+            )
             await transaction.commit()
 
         async with user_repository_harness.open() as transaction:
             assert await transaction.repository.get_by_id(user.id) is None
 
-    async def test_username_and_email_are_unique_for_add_and_update(
+    async def test_username_and_email_are_unique_for_add_and_update_profile(
         self, user_repository_harness: RepositoryHarness[UserRepository]
     ) -> None:
         alice = _user(username="Alice", email="alice@example.com")
@@ -185,17 +296,21 @@ class UserRepositoryContract:
                 )
                 await transaction.commit()
 
-        bob.username = Username("alice")
         with pytest.raises(UsernameAlreadyExistsError):
             async with user_repository_harness.open() as transaction:
-                await transaction.repository.update(bob)
+                await transaction.repository.update_profile(
+                    bob.id, username=Username("alice"), email=None, updated_at=_NOW
+                )
                 await transaction.commit()
 
-        bob.username = Username("bob")
-        bob.email = EmailAddress("alice@example.com")
         with pytest.raises(EmailAlreadyExistsError):
             async with user_repository_harness.open() as transaction:
-                await transaction.repository.update(bob)
+                await transaction.repository.update_profile(
+                    bob.id,
+                    username=None,
+                    email=EmailAddress("alice@example.com"),
+                    updated_at=_NOW,
+                )
                 await transaction.commit()
 
 
