@@ -3,8 +3,9 @@
 Each test pauses one :class:`CreateGrant` after all its checks have passed, right
 before it stages the grant, lets the membership removal or server deletion run on
 another connection, then resumes the paused creation. ``resource_grant`` carries
-foreign keys to the membership it belongs to and to the server it targets, both
-``ON DELETE CASCADE``, so whichever order the two transactions land in, no grant
+foreign keys to the membership instance it belongs to (by id, so a re-added
+member's new membership is a different parent) and to the server it targets,
+both ``ON DELETE CASCADE``, so whichever order the transactions land in, no grant
 survives its parent: either the deletion commits first and the creation's INSERT
 fails its foreign key (surfacing as the typed not-found error the route maps to
 404), or the creation commits first and the deletion's cascade removes the grant.
@@ -20,6 +21,7 @@ import os
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from typing import Any
 
 import pytest
 from sqlalchemy import text
@@ -143,7 +145,7 @@ class _PausingUnitOfWork(SqlAlchemyUnitOfWork):
 
 
 async def _await_settled(
-    engine: AsyncEngine, competitor: asyncio.Task[None], pid: asyncio.Future[int]
+    engine: AsyncEngine, competitor: asyncio.Task[Any], pid: asyncio.Future[int]
 ) -> None:
     """Return once ``competitor`` has finished or is blocked on a lock.
 
@@ -339,6 +341,58 @@ async def test_rejoining_after_a_raced_removal_restores_no_permission(
     # Re-adding the user without any role must not resurrect the grant.
     await _add_member(world.factory)(
         community_id=world.community_id, user_id=world.member
+    )
+    can_start = await RoleGrantPermissionChecker(
+        SqlAlchemyUnitOfWork(world.factory)
+    ).can(
+        user=AuthUser(user_id=world.member),
+        operation=_START,
+        resource=ResourceRef(
+            community_id=world.community_id,
+            resource_type="server",
+            resource_id=world.server_id,
+        ),
+    )
+    assert can_start is False
+
+
+async def test_grant_cannot_attach_to_a_membership_re_added_mid_creation(
+    engine: AsyncEngine,
+) -> None:
+    # The creation validated the original membership; the user is removed and
+    # re-added (without roles) before it resumes. The grant must not attach to
+    # the replacement membership, which nobody granted anything.
+    world = await _world(engine)
+
+    pause = _Pause()
+    creation = _paused_creation(world, pause)
+    await pause.reached.wait()
+
+    removal_pid: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+    removal = asyncio.create_task(
+        RemoveMember(uow=_PidUnitOfWork(world.factory, removal_pid))(
+            community_id=world.community_id, user_id=world.member
+        )
+    )
+    await _await_settled(world.engine, removal, removal_pid)
+    add_pid: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+    re_add = asyncio.create_task(
+        AddMember(
+            uow=_PidUnitOfWork(world.factory, add_pid),
+            users=IdentityUserDirectory(IdentityUnitOfWork(world.factory)),
+            clock=SystemClock(),
+        )(community_id=world.community_id, user_id=world.member)
+    )
+    await _await_settled(world.engine, re_add, add_pid)
+    pause.resume.set()
+    outcome, *rest = await asyncio.gather(
+        creation, removal, re_add, return_exceptions=True
+    )
+    for result in rest:
+        assert not isinstance(result, BaseException)
+
+    assert not isinstance(outcome, BaseException) or isinstance(
+        outcome, GrantTargetNotMemberError
     )
     can_start = await RoleGrantPermissionChecker(
         SqlAlchemyUnitOfWork(world.factory)
