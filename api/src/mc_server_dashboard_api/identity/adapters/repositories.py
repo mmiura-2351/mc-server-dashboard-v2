@@ -11,6 +11,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import uuid
+from collections.abc import Sequence
 from typing import Any, cast
 
 from sqlalchemy import (
@@ -55,18 +56,18 @@ from mc_server_dashboard_api.identity.domain.value_objects import (
 # (not a hashed id) because there is a single global bootstrap, not one per
 # resource; an arbitrary but stable value distinct from other subsystems' keys.
 _BOOTSTRAP_LOCK_KEY = 0x6D63_7364_0001
-_CHAIN_LOCK_NAMESPACE = "mcsd:refresh-token-chain"
+_SESSION_LOCK_NAMESPACE = "mcsd:refresh-token-sessions"
 
 
-def _chain_lock_key(chain_id: uuid.UUID) -> int:
-    """Fold a rotation chain id into a signed 64-bit advisory-lock key.
+def _session_lock_key(user_id: uuid.UUID) -> int:
+    """Fold a user id into the signed 64-bit key of that user's session lock.
 
     Same scheme as the server lifecycle lock: a collision only over-serializes
-    two unrelated chains, never skips the lock.
+    two unrelated users, never skips the lock.
     """
 
     digest = hashlib.blake2b(
-        f"{_CHAIN_LOCK_NAMESPACE}:{chain_id}".encode(), digest_size=8
+        f"{_SESSION_LOCK_NAMESPACE}:{user_id}".encode(), digest_size=8
     ).digest()
     return int.from_bytes(digest, "big") - (1 << 63)
 
@@ -303,6 +304,7 @@ class SqlAlchemyRefreshTokenRepository(RefreshTokenRepository):
                 issued_at=token.issued_at,
                 expires_at=token.expires_at,
                 revoked_at=token.revoked_at,
+                revoked_reason=token.revoked_reason,
             )
         )
 
@@ -313,33 +315,44 @@ class SqlAlchemyRefreshTokenRepository(RefreshTokenRepository):
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_refresh_token(row) if row is not None else None
 
-    async def lock_chain_by_token_hash(self, token_hash: str) -> RefreshToken | None:
-        chain_id = (
+    async def _lock_sessions(self, user_ids: Sequence[uuid.UUID]) -> None:
+        # A row lock cannot serialize a session: a rotation's successor is a new
+        # row, invisible to a revocation whose UPDATE already chose its rows. So
+        # each takes this transaction-scoped advisory lock of the owner first
+        # (issues #3249, #3251). Ascending key order is the Port's lock order;
+        # one statement per key, because the order a single SELECT evaluates
+        # the locks in is not guaranteed.
+        for key in sorted({_session_lock_key(user_id) for user_id in user_ids}):
             await self._session.execute(
-                select(RefreshTokenModel.chain_id).where(
-                    RefreshTokenModel.token_hash == token_hash
+                text("SELECT pg_advisory_xact_lock(:key)").bindparams(key=key)
+            )
+
+    async def lock_sessions_by_token_hashes(
+        self, token_hashes: Sequence[str]
+    ) -> dict[str, RefreshToken]:
+        owners = (
+            (
+                await self._session.execute(
+                    select(RefreshTokenModel.user_id).where(
+                        RefreshTokenModel.token_hash.in_(token_hashes)
+                    )
                 )
             )
-        ).scalar_one_or_none()
-        if chain_id is None:
-            return None
-        # A row lock cannot serialize the chain: a rotation's successor is a new
-        # row, invisible to a logout whose revoke already chose its rows. Both
-        # take this transaction-scoped advisory lock instead (issue #3249).
-        await self._session.execute(
-            text("SELECT pg_advisory_xact_lock(:key)").bindparams(
-                key=_chain_lock_key(chain_id)
-            )
+            .scalars()
+            .all()
         )
-        # Re-read under the lock: under READ COMMITTED this statement sees what a
-        # competitor that held the lock committed.
+        if not owners:
+            return {}
+        await self._lock_sessions(owners)
+        # Re-read under the locks: under READ COMMITTED this statement sees what
+        # a competitor that held them committed.
         stmt = (
             select(RefreshTokenModel)
-            .where(RefreshTokenModel.token_hash == token_hash)
+            .where(RefreshTokenModel.token_hash.in_(token_hashes))
             .execution_options(populate_existing=True)
         )
-        row = (await self._session.execute(stmt)).scalar_one_or_none()
-        return _to_refresh_token(row) if row is not None else None
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return {row.token_hash: _to_refresh_token(row) for row in rows}
 
     async def revoke(
         self, token_hash: str, *, revoked_at: dt.datetime, reason: str
@@ -371,6 +384,7 @@ class SqlAlchemyRefreshTokenRepository(RefreshTokenRepository):
     async def revoke_all_for_user(
         self, user_id: UserId, *, revoked_at: dt.datetime
     ) -> None:
+        await self._lock_sessions([user_id.value])
         stmt = (
             update(RefreshTokenModel)
             .where(
@@ -432,6 +446,7 @@ class SqlAlchemyRefreshTokenRepository(RefreshTokenRepository):
         revoked_at: dt.datetime,
         reason: str,
     ) -> None:
+        await self._lock_sessions([user_id.value])
         stmt = update(RefreshTokenModel).where(
             RefreshTokenModel.user_id == user_id.value,
             (RefreshTokenModel.revoked_at.is_(None))

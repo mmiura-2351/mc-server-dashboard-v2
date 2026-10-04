@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import abc
 import datetime as dt
+from collections.abc import Sequence
 
 from mc_server_dashboard_api.identity.domain.entities import RefreshToken, User
 from mc_server_dashboard_api.identity.domain.value_objects import (
@@ -151,11 +152,12 @@ class UserRepository(abc.ABC):
         1. ``user`` rows: the active platform admins and the target, in one
            statement, in ascending id order, ``FOR NO KEY UPDATE``, before any
            other lock in the transaction;
-        2. the target's dependent rows: its refresh tokens, then, for a delete,
-           the row itself (``FOR UPDATE``) and its ``ON DELETE CASCADE`` rows. A
-           guard that must also lock rows of another context for the same
-           decision (the target's community ownership, #3217) takes them here,
-           after step 1.
+        2. the target's dependent rows: its session lock and refresh tokens (in
+           the order :class:`RefreshTokenRepository` documents), then, for a
+           delete, the row itself (``FOR UPDATE``) and its ``ON DELETE CASCADE``
+           rows. A guard that must also lock rows of another context for the
+           same decision (the target's community ownership, #3217) takes them
+           here, after step 1.
 
         One statement, not "admin set, then target": the target can become an
         admin in between, and a competing guard that locked it (a lower id)
@@ -176,7 +178,35 @@ class UserRepository(abc.ABC):
 
 
 class RefreshTokenRepository(abc.ABC):
-    """Port: persistence for :class:`RefreshToken` session records."""
+    """Port: persistence for :class:`RefreshToken` session records.
+
+    **Session lock.** Every write that must also cover the successors of a
+    session -- a rotation, a logout, a bulk revocation -- first takes the
+    *session lock* of the token's owner: one transaction-scoped lock per user,
+    held until the transaction ends (issues #3249, #3251). A row lock cannot do
+    this, because a rotation's successor is a new row that an ``UPDATE`` which
+    already chose its rows never sees. Under the lock a rotation reads its token
+    as the previous holder committed it, and a revocation sees every successor
+    committed before it.
+
+    The one lock order of the identity context; a transaction that takes more
+    than one of these takes them in this order:
+
+    1. ``user`` rows: the last-admin guards' ``FOR NO KEY UPDATE``
+       (:meth:`UserRepository.lock_with_active_admins`), or the ``UPDATE`` of the
+       user row itself (password change, deactivation);
+    2. session locks, in ascending lock-key order when there are several
+       (:meth:`lock_sessions_by_token_hashes`; :meth:`revoke_all_for_user` and
+       :meth:`revoke_all_for_user_except` take their user's themselves);
+    3. ``refresh_token`` rows (the revoking and rotating ``UPDATE`` statements),
+       then a user ``DELETE`` and its ``ON DELETE CASCADE`` rows.
+
+    A rotation's successor ``INSERT`` takes ``FOR KEY SHARE`` on its user row
+    after step 2. That conflicts only with ``FOR UPDATE``, which a guard does
+    not take and a user ``DELETE`` takes only in step 3, under that user's
+    session lock -- so it cannot close a wait cycle. Taking a session lock the
+    transaction already holds (a rotation's theft response) does not block.
+    """
 
     @abc.abstractmethod
     async def add(self, token: RefreshToken) -> None:
@@ -187,14 +217,18 @@ class RefreshTokenRepository(abc.ABC):
         """Return the token with ``token_hash``, or ``None`` if absent."""
 
     @abc.abstractmethod
-    async def lock_chain_by_token_hash(self, token_hash: str) -> RefreshToken | None:
-        """Lock the rotation chain of ``token_hash``, then return the token.
+    async def lock_sessions_by_token_hashes(
+        self, token_hashes: Sequence[str]
+    ) -> dict[str, RefreshToken]:
+        """Take the session locks of the tokens' owners; return the tokens by hash.
 
-        The lock is held until the transaction ends, so a rotation and a logout
-        of one chain serialize (issue #3249): whichever comes second waits for
-        the first to commit and then reads the token as the first left it -- a
-        rotation sees a logged-out token, a logout sees every successor the
-        rotation minted. ``None`` if no such token exists (nothing is locked).
+        A rotation, a logout and a revocation of one user's sessions thus
+        serialize: whichever comes second waits for the first to commit, then
+        reads the tokens as the first left them -- a rotation sees a revoked
+        token, a revocation sees every successor the rotation minted. An unknown
+        hash is absent from the result and locks nothing. Several owners (a
+        both-transports request whose two tokens belong to different users) are
+        locked in the class's order, so no two such requests can deadlock.
         """
 
     @abc.abstractmethod
@@ -216,7 +250,9 @@ class RefreshTokenRepository(abc.ABC):
 
         Ends one sign-in session as a whole, including a successor minted by a
         rotation whose response has not reached the client yet (issue #3249);
-        the user's other chains are untouched. Like :meth:`revoke_all_for_user`
+        the user's other chains are untouched. The caller holds the owner's
+        session lock (:meth:`lock_sessions_by_token_hashes`), so no successor of
+        the chain is still being minted. Like :meth:`revoke_all_for_user`
         it also re-stamps the chain's ``'rotated'`` predecessors to ``reason``,
         preserving their ``revoked_at``, so none stays graceable in the reuse
         window. Tokens revoked for another cause keep it.
@@ -227,6 +263,9 @@ class RefreshTokenRepository(abc.ABC):
         self, user_id: UserId, *, revoked_at: dt.datetime
     ) -> None:
         """Revoke every still-active token of ``user_id`` (family revoke).
+
+        Takes the user's session lock first, so the revocation also covers a
+        successor that a concurrent rotation is minting (issue #3251).
 
         Also re-stamps any already-revoked ``'rotated'`` predecessors to
         ``'family'``, preserving their original ``revoked_at`` via COALESCE, so
@@ -274,6 +313,10 @@ class RefreshTokenRepository(abc.ABC):
         reason: str,
     ) -> None:
         """Revoke ``user_id``'s active tokens except the kept one (issue #387, #606).
+
+        Takes the user's session lock first, like :meth:`revoke_all_for_user`.
+        Only the kept row is spared: a successor that a rotation of it minted is
+        another row, and is revoked.
 
         Also re-stamps any already-revoked ``'rotated'`` predecessors to
         ``reason``, preserving their original ``revoked_at`` via COALESCE, so

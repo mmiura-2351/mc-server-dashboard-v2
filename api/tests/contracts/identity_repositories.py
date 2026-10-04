@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import pytest
 
@@ -344,6 +344,23 @@ class RefreshTokenRepositoryContract:
         assert loaded.expires_at == expected_expiry
         assert loaded.revoked_at is None
 
+    async def test_add_persists_a_revoked_tokens_revocation(
+        self, refresh_token_repository_harness: RefreshTokenRepositoryHarness
+    ) -> None:
+        token = replace(
+            _token(refresh_token_repository_harness),
+            revoked_at=_NOW,
+            revoked_reason=REVOKED_LOGOUT,
+        )
+        async with refresh_token_repository_harness.open() as transaction:
+            await transaction.repository.add(token)
+            await transaction.commit()
+
+        async with refresh_token_repository_harness.open() as transaction:
+            loaded = await transaction.repository.get_by_token_hash("hash-1")
+
+        assert loaded == token
+
     async def test_readers_return_detached_entities_and_scope_active_sessions(
         self, refresh_token_repository_harness: RefreshTokenRepositoryHarness
     ) -> None:
@@ -382,20 +399,27 @@ class RefreshTokenRepositoryContract:
         assert relisted[0].expires_at == _NOW + dt.timedelta(days=30)
         assert missing is None
 
-    async def test_lock_chain_by_token_hash_reads_the_token(
+    async def test_lock_sessions_by_token_hashes_reads_the_known_tokens(
         self, refresh_token_repository_harness: RefreshTokenRepositoryHarness
     ) -> None:
-        token = _token(refresh_token_repository_harness)
-        async with refresh_token_repository_harness.open() as transaction:
+        harness = refresh_token_repository_harness
+        token = _token(harness)
+        other = _token(harness, "hash-2", user_id=harness.other_user_id)
+        async with harness.open() as transaction:
             await transaction.repository.add(token)
+            await transaction.repository.add(other)
             await transaction.commit()
 
-        async with refresh_token_repository_harness.open() as transaction:
-            locked = await transaction.repository.lock_chain_by_token_hash("hash-1")
-            missing = await transaction.repository.lock_chain_by_token_hash("missing")
+        async with harness.open() as transaction:
+            locked = await transaction.repository.lock_sessions_by_token_hashes(
+                ["hash-2", "missing", "hash-1"]
+            )
+            none = await transaction.repository.lock_sessions_by_token_hashes(
+                ["missing"]
+            )
 
-        assert locked == token
-        assert missing is None
+        assert locked == {"hash-1": token, "hash-2": other}
+        assert none == {}
 
     async def test_revoke_chain_ends_only_the_live_and_rotated_tokens_of_the_chain(
         self, refresh_token_repository_harness: RefreshTokenRepositoryHarness

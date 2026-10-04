@@ -34,10 +34,12 @@ before the family revoke) is closed by ``revoke_all_for_user`` re-stamping
 ``'rotated'`` rows to ``'family'`` while preserving their ``revoked_at``
 (issue #1960).
 
-The presented token is read under its rotation chain's lock, so a rotation and a
-logout of the same session serialize (issue #3249): a rotation that waited for a
-logout reads the token as logged out and takes the theft path above, and a logout
-that waited for a rotation revokes the successor it minted.
+The presented token is read under its owner's session lock, so a rotation
+serializes with a logout and with every bulk revocation of the user's sessions
+(issues #3249, #3251): a rotation that waited for one reads the token as revoked
+and takes the theft path above, and a revocation that waited for a rotation
+revokes the successor it minted. A both-transports request also locks the
+cookie token's owner, in the repository's lock order.
 """
 
 from __future__ import annotations
@@ -74,9 +76,15 @@ class RefreshSession:
         self, *, refresh_token: str, superseded_token: str | None = None
     ) -> TokenPair:
         token_hash = self.tokens.hash_refresh_token(refresh_token)
+        locked_hashes = [token_hash]
+        if superseded_token is not None:
+            locked_hashes.append(self.tokens.hash_refresh_token(superseded_token))
         now = self.clock.now()
         async with self.uow:
-            stored = await self.uow.refresh_tokens.lock_chain_by_token_hash(token_hash)
+            locked = await self.uow.refresh_tokens.lock_sessions_by_token_hashes(
+                locked_hashes
+            )
+            stored = locked.get(token_hash)
             if stored is None or stored.expires_at <= now:
                 raise InvalidRefreshTokenError
             if stored.revoked_reason == REVOKED_SUPERSEDED:

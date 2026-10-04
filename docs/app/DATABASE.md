@@ -209,11 +209,20 @@ expiry sweeps. A token is valid iff `revoked_at IS NULL AND expires_at > now()`.
 Logout revokes the presented token's whole chain, not just that token: a refresh
 rotated while its response was still in flight would otherwise leave a valid
 successor whose late `Set-Cookie` revives the session in a browser that logged
-out (AUTH_API.md Section 4). The user's other chains are untouched. A rotation
-and a logout of the same chain serialize on a transaction-scoped advisory lock
-keyed by `chain_id` — a row lock cannot, because the successor is a new row the
-logout's `UPDATE` would not see — so a successor still being minted is revoked
-too.
+out (AUTH_API.md Section 4). The user's other chains are untouched.
+
+Every revocation that must also end what a rotation is extending — logout, the
+superseded cookie of a both-transports logout (whose chain is revoked as
+`superseded`), and the bulk revocations of a password change, deactivation,
+account deletion, theft response or "revoke all other sessions" — serializes
+with rotation on the token owner's **session lock**: a transaction-scoped
+advisory lock keyed by `user_id`. A row lock cannot, because the successor is a
+new row the revocation's `UPDATE` would not see. Under the lock a revocation
+sees every successor committed before it, and a rotation that waited reads its
+token as revoked, so a successor still being minted is revoked too. The lock
+order it takes part in — `user` rows, then session locks in ascending key
+order, then `refresh_token` rows — is defined in one place, the
+`RefreshTokenRepository` Port (`identity/domain/repositories.py`).
 
 Tokens issued before the column existed carry no record of which token was
 rotated from which, so a rotated predecessor and its live successor look like two

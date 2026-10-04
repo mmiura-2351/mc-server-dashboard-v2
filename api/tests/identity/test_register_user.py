@@ -8,6 +8,7 @@ integration tests.
 from __future__ import annotations
 
 import datetime as dt
+from collections.abc import Sequence
 
 import pytest
 
@@ -127,7 +128,9 @@ class _FakeRefreshTokenRepository(RefreshTokenRepository):
     async def get_by_token_hash(self, token_hash: str) -> RefreshToken | None:
         raise NotImplementedError
 
-    async def lock_chain_by_token_hash(self, token_hash: str) -> RefreshToken | None:
+    async def lock_sessions_by_token_hashes(
+        self, token_hashes: Sequence[str]
+    ) -> dict[str, RefreshToken]:
         raise NotImplementedError
 
     async def revoke(
