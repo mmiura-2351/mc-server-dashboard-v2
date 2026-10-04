@@ -8,6 +8,7 @@ TESTING.md Section 4. The fake UnitOfWork shares its repositories across nested
 from __future__ import annotations
 
 import datetime as dt
+from collections.abc import Sequence
 from dataclasses import replace
 
 from mc_server_dashboard_api.identity.application.authenticate_request import (
@@ -232,10 +233,16 @@ class FakeRefreshTokenRepository(RefreshTokenRepository):
         token = self.by_hash.get(token_hash)
         return None if token is None else self._copy(token)
 
-    async def lock_chain_by_token_hash(self, token_hash: str) -> RefreshToken | None:
+    async def lock_sessions_by_token_hashes(
+        self, token_hashes: Sequence[str]
+    ) -> dict[str, RefreshToken]:
         # Single-threaded in-memory state: there is no competitor to serialize
         # with, so the lock is the read.
-        return await self.get_by_token_hash(token_hash)
+        return {
+            token_hash: self._copy(self.by_hash[token_hash])
+            for token_hash in token_hashes
+            if token_hash in self.by_hash
+        }
 
     async def revoke_chain(
         self, chain_id: RotationChainId, *, revoked_at: dt.datetime, reason: str

@@ -1,11 +1,15 @@
-"""No interleaving of a logout and a refresh may leave the session alive (#3249).
+"""No interleaving of a revocation and a refresh may leave a session alive.
 
 A refresh rotated server-side whose response is still in flight when the browser
 logs out with the old cookie used to leave its successor valid; the late
-``Set-Cookie`` then installed it over the next user's cookie. Logout now revokes
-the presented token's whole rotation chain, and a rotation and a logout of one
-chain serialize, so every successor -- committed, or still being minted -- dies
-with the session.
+``Set-Cookie`` then installed it over the next user's cookie (#3249). Logout now
+revokes the presented token's whole rotation chain. The same race hit every
+revocation meant to end sessions a rotation may be extending -- the bulk
+revocations of a password change, deactivation, account deletion, theft response
+or "revoke all other sessions", and the superseded cookie of a both-transports
+logout (#3251). Each of them serializes with rotation on the owner's session
+lock, so every successor -- committed, or still being minted -- dies with the
+session.
 
 Each test pauses one use case before it commits -- after it has read the token
 it acts on and written what it decided -- then starts the other on its own
@@ -42,9 +46,21 @@ from mc_server_dashboard_api.identity.adapters.repositories import (
 from mc_server_dashboard_api.identity.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork,
 )
+from mc_server_dashboard_api.identity.application.admin_delete_user import (
+    AdminDeleteUser,
+)
+from mc_server_dashboard_api.identity.application.change_password import (
+    ChangePassword,
+)
 from mc_server_dashboard_api.identity.application.logout import Logout
 from mc_server_dashboard_api.identity.application.refresh_session import (
     RefreshSession,
+)
+from mc_server_dashboard_api.identity.application.revoke_other_sessions import (
+    RevokeOtherSessions,
+)
+from mc_server_dashboard_api.identity.application.set_user_active import (
+    SetUserActive,
 )
 from mc_server_dashboard_api.identity.application.token_pair import TokenPair
 from mc_server_dashboard_api.identity.domain.entities import (
@@ -52,12 +68,19 @@ from mc_server_dashboard_api.identity.domain.entities import (
     RefreshToken,
 )
 from mc_server_dashboard_api.identity.domain.errors import InvalidRefreshTokenError
+from mc_server_dashboard_api.identity.domain.password_policy import PasswordPolicy
 from mc_server_dashboard_api.identity.domain.value_objects import (
     RefreshTokenId,
     RotationChainId,
     UserId,
 )
-from tests.identity.fakes import FakeClock, FakeTokenService, make_user
+from tests.identity.fakes import (
+    FakeClock,
+    FakeCommunityOwnership,
+    FakeTokenService,
+    StubHasher,
+    make_user,
+)
 from tests.integration.migrate import downgrade_base, upgrade_head
 
 _DB_URL = os.environ.get("MCD_TEST_DATABASE_URL")
@@ -76,6 +99,9 @@ _SETTLE_TIMEOUT = 10.0
 
 # The secret of the user's independent second sign-in.
 _OTHER_DEVICE = "other-device"
+# The secret of a third session's token rotated long past the grace window:
+# presenting it is the theft response.
+_STALE = "stale"
 
 
 @pytest.fixture
@@ -106,10 +132,10 @@ class _Pause:
 
 
 class _PausingRefreshTokenRepository(SqlAlchemyRefreshTokenRepository):
-    """Pauses a rotation before staging its successor, a logout after revoking.
+    """Pauses a rotation before staging its successor, a revocation after revoking.
 
     A rotation reaches ``add`` after it has revoked the presented token (when
-    that token was still active), so either paused use case holds every lock it
+    that token was still active), so any paused use case holds every lock it
     takes before it commits.
     """
 
@@ -125,6 +151,30 @@ class _PausingRefreshTokenRepository(SqlAlchemyRefreshTokenRepository):
         self, chain_id: RotationChainId, *, revoked_at: dt.datetime, reason: str
     ) -> None:
         await super().revoke_chain(chain_id, revoked_at=revoked_at, reason=reason)
+        await self._pause.hold()
+
+    async def revoke_all_for_user(
+        self, user_id: UserId, *, revoked_at: dt.datetime
+    ) -> None:
+        await super().revoke_all_for_user(user_id, revoked_at=revoked_at)
+        await self._pause.hold()
+
+    async def revoke_all_for_user_except(
+        self,
+        user_id: UserId,
+        *,
+        keep_token_hash: str | None,
+        keep_session_id: RefreshTokenId | None = None,
+        revoked_at: dt.datetime,
+        reason: str,
+    ) -> None:
+        await super().revoke_all_for_user_except(
+            user_id,
+            keep_token_hash=keep_token_hash,
+            keep_session_id=keep_session_id,
+            revoked_at=revoked_at,
+            reason=reason,
+        )
         await self._pause.hold()
 
 
@@ -200,11 +250,12 @@ def _logout(uow: SqlAlchemyUnitOfWork) -> Logout:
 
 
 async def _seed(engine: AsyncEngine) -> UserId:
-    """Seed one user with a rotated session (``old`` -> ``current``) and another.
+    """Seed one user with a rotated session (``old`` -> ``current``) and others.
 
     ``old`` was rotated five seconds ago, inside the reuse grace window, so it is
     still graceable; ``current`` is its live successor. ``other-device`` is an
-    independent sign-in of the same user. Returns the user's id.
+    independent sign-in of the same user, and ``stale`` the predecessor of a
+    third one, rotated an hour ago. Returns the user's id.
     """
 
     user = make_user()
@@ -228,11 +279,17 @@ async def _seed(engine: AsyncEngine) -> UserId:
         await uow.refresh_tokens.add(token("old", chain))
         await uow.refresh_tokens.add(token("current", chain))
         await uow.refresh_tokens.add(token(_OTHER_DEVICE, RotationChainId.new()))
+        await uow.refresh_tokens.add(token(_STALE, RotationChainId.new()))
         await uow.commit()
     async with SqlAlchemyUnitOfWork(factory) as uow:
         await uow.refresh_tokens.revoke(
             "hash::old",
             revoked_at=_NOW - dt.timedelta(seconds=5),
+            reason=REVOKED_ROTATED,
+        )
+        await uow.refresh_tokens.revoke(
+            f"hash::{_STALE}",
+            revoked_at=_NOW - dt.timedelta(hours=1),
             reason=REVOKED_ROTATED,
         )
         await uow.commit()
@@ -337,3 +394,165 @@ async def test_rotation_racing_a_paused_logout_mints_no_live_successor(
     assert logout_outcome is None
     assert isinstance(refresh_outcome, InvalidRefreshTokenError)
     assert await _active_secrets(engine, user) <= {_OTHER_DEVICE}
+
+
+async def _assert_refused(engine: AsyncEngine, outcome: object) -> None:
+    """The pair a rotation delivered -- the late ``Set-Cookie`` -- cannot refresh."""
+
+    assert isinstance(outcome, TokenPair)
+    with pytest.raises(InvalidRefreshTokenError):
+        await _refresh(SqlAlchemyUnitOfWork(create_session_factory(engine)))(
+            refresh_token=outcome.refresh_token
+        )
+
+
+_Revocation = Callable[[SqlAlchemyUnitOfWork, UserId], Coroutine[Any, Any, object]]
+
+
+async def _change_password(uow: SqlAlchemyUnitOfWork, user: UserId) -> None:
+    policy = PasswordPolicy(
+        min_length=12,
+        max_length=128,
+        max_bytes=None,
+        require_complexity=True,
+        complexity_classes=3,
+        check_common_list=True,
+        forbid_user_info=True,
+        forbid_simple_patterns=True,
+        common_passwords=frozenset(),
+    )
+    await ChangePassword(
+        uow=uow, hasher=StubHasher(), clock=FakeClock(_NOW), policy=policy
+    )(user_id=user, current_password="Wm7!qz#Lp2vT", new_password="Np4@xZ#Lq9wR")
+
+
+async def _deactivate(uow: SqlAlchemyUnitOfWork, user: UserId) -> None:
+    await SetUserActive(uow=uow, clock=FakeClock(_NOW))(
+        actor_id=UserId.new(), target_id=user, active=False
+    )
+
+
+async def _admin_delete(uow: SqlAlchemyUnitOfWork, user: UserId) -> None:
+    await AdminDeleteUser(
+        uow=uow, ownership=FakeCommunityOwnership(), clock=FakeClock(_NOW)
+    )(actor_id=UserId.new(), target_id=user)
+
+
+async def _theft_response(uow: SqlAlchemyUnitOfWork, user: UserId) -> object:
+    return await _refresh(uow)(refresh_token=_STALE)
+
+
+async def _revoke_other_sessions(uow: SqlAlchemyUnitOfWork, user: UserId) -> None:
+    await RevokeOtherSessions(
+        uow=uow, tokens=FakeTokenService(), clock=FakeClock(_NOW)
+    )(user_id=user, current_refresh_token=_OTHER_DEVICE)
+
+
+# (revocation, the sessions it spares).
+_REVOCATIONS: list[tuple[_Revocation, set[str]]] = [
+    (_change_password, set()),
+    (_deactivate, set()),
+    (_admin_delete, set()),
+    (_theft_response, set()),
+    (_revoke_other_sessions, {_OTHER_DEVICE}),
+]
+_REVOCATION_IDS = [
+    "change-password",
+    "deactivate",
+    "admin-delete",
+    "theft-response",
+    "revoke-other-sessions",
+]
+# ``old`` refreshed is a grace-window reuse: it mints a successor without
+# revoking -- or row-locking -- anything.
+_REFRESHED = ["current", "old"]
+_REFRESHED_IDS = ["active-token", "graced-refresh"]
+
+
+@pytest.mark.parametrize("refreshed", _REFRESHED, ids=_REFRESHED_IDS)
+@pytest.mark.parametrize(("revoke", "spared"), _REVOCATIONS, ids=_REVOCATION_IDS)
+async def test_bulk_revocation_racing_a_paused_rotation_revokes_its_successor(
+    engine: AsyncEngine, revoke: _Revocation, spared: set[str], refreshed: str
+) -> None:
+    # The rotation is about to mint its successor when the revocation starts.
+    # Had the revocation not waited for it, its UPDATE would have chosen its rows
+    # before the successor was committed (#3251).
+    user = await _seed(engine)
+
+    async def rotate(uow: SqlAlchemyUnitOfWork) -> object:
+        return await _refresh(uow)(refresh_token=refreshed)
+
+    async def revocation(uow: SqlAlchemyUnitOfWork) -> object:
+        return await revoke(uow, user)
+
+    pair, _ = await _interleave(engine, rotate, revocation)
+
+    assert await _active_secrets(engine, user) == spared
+    await _assert_refused(engine, pair)
+
+
+@pytest.mark.parametrize("refreshed", _REFRESHED, ids=_REFRESHED_IDS)
+@pytest.mark.parametrize(("revoke", "spared"), _REVOCATIONS, ids=_REVOCATION_IDS)
+async def test_rotation_racing_a_paused_bulk_revocation_mints_no_live_successor(
+    engine: AsyncEngine, revoke: _Revocation, spared: set[str], refreshed: str
+) -> None:
+    # The revocation has revoked the user's tokens but not committed when the
+    # refresh starts. Had the refresh not waited for it, it would have read the
+    # presented token as it was before and minted a successor the revocation
+    # never saw (#3251).
+    user = await _seed(engine)
+
+    async def revocation(uow: SqlAlchemyUnitOfWork) -> object:
+        return await revoke(uow, user)
+
+    async def rotate(uow: SqlAlchemyUnitOfWork) -> object:
+        return await _refresh(uow)(refresh_token=refreshed)
+
+    _, refresh_outcome = await _interleave(engine, revocation, rotate)
+
+    assert isinstance(refresh_outcome, InvalidRefreshTokenError)
+    assert await _active_secrets(engine, user) <= spared
+
+
+@pytest.mark.parametrize("refreshed", _REFRESHED, ids=_REFRESHED_IDS)
+async def test_both_transports_logout_racing_a_paused_rotation_of_the_cookie(
+    engine: AsyncEngine, refreshed: str
+) -> None:
+    # The cookie's session is being rotated when a logout carrying another token
+    # in its body supersedes the cookie. Revoking only the cookie token would
+    # leave the successor of its chain alive (#3251).
+    user = await _seed(engine)
+
+    async def rotate(uow: SqlAlchemyUnitOfWork) -> object:
+        return await _refresh(uow)(refresh_token=refreshed)
+
+    async def logout(uow: SqlAlchemyUnitOfWork) -> None:
+        await _logout(uow)(refresh_token=_OTHER_DEVICE, superseded_token=refreshed)
+
+    pair, logout_outcome = await _interleave(engine, rotate, logout)
+
+    assert logout_outcome is None
+    assert await _active_secrets(engine, user) == set()
+    await _assert_refused(engine, pair)
+
+
+@pytest.mark.parametrize("refreshed", _REFRESHED, ids=_REFRESHED_IDS)
+async def test_rotation_of_the_cookie_racing_a_paused_both_transports_logout(
+    engine: AsyncEngine, refreshed: str
+) -> None:
+    # The logout has locked both sessions and revoked the body token's when the
+    # cookie's session is refreshed. Had the refresh not waited for it, it would
+    # have minted a successor of the superseded cookie's chain (#3251).
+    user = await _seed(engine)
+
+    async def logout(uow: SqlAlchemyUnitOfWork) -> None:
+        await _logout(uow)(refresh_token=_OTHER_DEVICE, superseded_token="current")
+
+    async def rotate(uow: SqlAlchemyUnitOfWork) -> object:
+        return await _refresh(uow)(refresh_token=refreshed)
+
+    logout_outcome, refresh_outcome = await _interleave(engine, logout, rotate)
+
+    assert logout_outcome is None
+    assert isinstance(refresh_outcome, InvalidRefreshTokenError)
+    assert await _active_secrets(engine, user) == set()
