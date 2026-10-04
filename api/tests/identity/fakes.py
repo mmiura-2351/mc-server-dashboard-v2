@@ -70,8 +70,8 @@ class FakeClock(Clock):
 class FakeUserRepository(UserRepository):
     def __init__(self) -> None:
         self.by_id: dict[UserId, User] = {}
-        # Counts lock_active_platform_admins calls so guard tests can assert the
-        # FOR UPDATE lock is taken only on active-admin-reducing paths (#260).
+        # Counts lock_with_active_admins calls so guard tests can assert the lock
+        # is taken on every path that may reduce the active-admin set (#260).
         self.lock_calls = 0
 
     @staticmethod
@@ -203,11 +203,11 @@ class FakeUserRepository(UserRepository):
             1 for user in self.by_id.values() if user.is_platform_admin and user.active
         )
 
-    async def lock_active_platform_admins(self) -> int:
-        # No real lock in-memory; record the call and return the live count so
+    async def lock_with_active_admins(self, user_id: UserId) -> tuple[User | None, int]:
+        # No real lock in-memory; record the call and return the live state so
         # guard logic is exercised exactly as against the DB adapter (#260).
         self.lock_calls += 1
-        return await self.count_active_platform_admins()
+        return await self.get_by_id(user_id), await self.count_active_platform_admins()
 
 
 class FakeRefreshTokenRepository(RefreshTokenRepository):

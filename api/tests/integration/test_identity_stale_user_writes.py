@@ -4,8 +4,10 @@ Each test pauses one use case right after it reads the target user, commits a
 different use case on a second connection, then resumes the paused one. Every
 user write is operation-specific, so the resumed writer persists only the columns
 it owns: a profile edit cannot restore ``active``, ``is_platform_admin`` or the
-password hash it read before an administrator action committed, and a
-deactivation cannot revoke a grant it never saw. The password change additionally
+password hash it read before an administrator action committed, and a grant
+cannot reactivate an account deactivated after it read it. (A deactivation reads
+its target under lock, #3239, so a grant cannot commit between its read and its
+write.) The password change additionally
 compares the hash it verified against, so a stale change cannot replace a password
 that changed since.
 
@@ -228,12 +230,12 @@ async def test_stale_profile_edit_preserves_password_change(
     assert returned.password_hash == f"hashed::{_NEW}"
 
 
-async def test_stale_deactivation_preserves_concurrent_grant(
+async def test_stale_grant_preserves_concurrent_deactivation(
     engine: AsyncEngine,
 ) -> None:
     # Security operations must not overwrite each other's columns either: a
-    # deactivation that read the target before a grant committed leaves the
-    # grant in place.
+    # grant that read the target before a deactivation committed leaves the
+    # deactivation in place.
     factory = create_session_factory(engine)
     actor = make_user(
         username="actor", email="actor@example.com", is_platform_admin=True
@@ -242,15 +244,13 @@ async def test_stale_deactivation_preserves_concurrent_grant(
     await _seed(factory, actor, target)
 
     pause = _Pause()
-    deactivate = SetUserActive(
+    grant = SetPlatformAdmin(
         uow=_PausingUnitOfWork(factory, pause), clock=FakeClock(_NOW)
     )
-    stale = asyncio.create_task(
-        deactivate(actor_id=actor.id, target_id=target.id, active=False)
-    )
+    stale = asyncio.create_task(grant(target_id=target.id, grant=True))
     await pause.read_done.wait()
-    await SetPlatformAdmin(uow=SqlAlchemyUnitOfWork(factory), clock=FakeClock(_NOW))(
-        target_id=target.id, grant=True
+    await SetUserActive(uow=SqlAlchemyUnitOfWork(factory), clock=FakeClock(_NOW))(
+        actor_id=actor.id, target_id=target.id, active=False
     )
     pause.resume.set()
     await stale

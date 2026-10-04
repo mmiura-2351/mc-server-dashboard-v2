@@ -34,21 +34,24 @@ class SetPlatformAdmin:
 
     async def __call__(self, *, target_id: UserId, grant: bool) -> None:
         async with self.uow:
-            user = await self.uow.users.get_by_id(target_id)
-            if user is None:
-                raise UserNotFoundError(str(target_id.value))
-
-            # Revoking an active admin reduces the set, so take a FOR UPDATE lock
-            # so concurrent last-two-admin revokes serialize and exactly one wins
-            # (#260). A grant never reduces the set, so it stays lock-free (the
-            # short-circuit on ``not grant`` keeps the lock off the grant path).
-            if (
-                not grant
-                and user.is_platform_admin
-                and user.active
-                and await self.uow.users.lock_active_platform_admins() <= 1
-            ):
-                raise LastPlatformAdminError(str(target_id.value))
+            if grant:
+                # A grant never reduces the active-admin set, so it stays
+                # lock-free.
+                user = await self.uow.users.get_by_id(target_id)
+                if user is None:
+                    raise UserNotFoundError(str(target_id.value))
+            else:
+                # Decide from the target as locked with the active admins, so a
+                # concurrent grant, deactivation or removal either commits first
+                # and is seen, or waits for this revoke (#260, #3239). Revoking
+                # from an account deactivated meanwhile no longer reduces the set.
+                user, active_admins = await self.uow.users.lock_with_active_admins(
+                    target_id
+                )
+                if user is None:
+                    raise UserNotFoundError(str(target_id.value))
+                if user.is_platform_admin and user.active and active_admins <= 1:
+                    raise LastPlatformAdminError(str(target_id.value))
 
             await self.uow.users.set_platform_admin(
                 user.id, is_platform_admin=grant, updated_at=self.clock.now()

@@ -115,7 +115,7 @@ class _FakeUserRepository(UserRepository):
     async def count_active_platform_admins(self) -> int:
         raise NotImplementedError
 
-    async def lock_active_platform_admins(self) -> int:
+    async def lock_with_active_admins(self, user_id: UserId) -> tuple[User | None, int]:
         raise NotImplementedError
 
 

@@ -42,20 +42,22 @@ class SetUserActive:
             raise SelfTargetError(str(target_id.value))
 
         async with self.uow:
-            user = await self.uow.users.get_by_id(target_id)
-            if user is None:
-                raise UserNotFoundError(str(target_id.value))
-
-            if not active:
-                # Deactivating an active admin reduces the set, so take a FOR
-                # UPDATE lock so concurrent last-two-admin deactivations serialize
-                # and exactly one wins (#260). Reactivation never reaches here, so
-                # that hot path stays lock-free.
-                if (
-                    user.is_platform_admin
-                    and user.active
-                    and await self.uow.users.lock_active_platform_admins() <= 1
-                ):
+            if active:
+                # Reactivation never reduces the active-admin set, so it stays
+                # lock-free.
+                user = await self.uow.users.get_by_id(target_id)
+                if user is None:
+                    raise UserNotFoundError(str(target_id.value))
+            else:
+                # Decide from the target as locked with the active admins, so a
+                # concurrent grant or removal either commits first and is seen,
+                # or waits for this deactivation (#260, #3239).
+                user, active_admins = await self.uow.users.lock_with_active_admins(
+                    target_id
+                )
+                if user is None:
+                    raise UserNotFoundError(str(target_id.value))
+                if user.is_platform_admin and user.active and active_admins <= 1:
                     raise LastPlatformAdminError(str(target_id.value))
 
             await self.uow.users.set_active(
