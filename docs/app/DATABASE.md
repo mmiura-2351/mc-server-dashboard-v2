@@ -215,6 +215,16 @@ keyed by `chain_id` — a row lock cannot, because the successor is a new row th
 logout's `UPDATE` would not see — so a successor still being minted is revoked
 too.
 
+Tokens issued before the column existed carry no record of which token was
+rotated from which, so a rotated predecessor and its live successor look like two
+separate sign-ins. Migration `0040_refresh_token_chain` therefore puts each
+user's pre-upgrade tokens into one shared **legacy chain** (an id derived from
+`user_id`) rather than one chain per row, which would split a rotation spanning
+the upgrade and let its successor survive a logout. A logout of any legacy
+session thus revokes all of that user's legacy sessions — failing closed, and
+only until those tokens expire; sessions started after the upgrade have chains
+of their own.
+
 `revoked_reason` records the *cause* so the refresh-token reuse grace window
 (AUTH_API.md Section 4) can grace only a `rotated` predecessor (a legitimate
 concurrent refresh / lost-response retry): a `family`- or `logout`-revoked token

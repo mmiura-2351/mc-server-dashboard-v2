@@ -9,9 +9,14 @@ This migration adds ``chain_id``: login starts a chain and every rotation's
 successor inherits it, so logout can revoke the whole sign-in session, successors
 included, without touching the user's other sessions. Indexed for that revoke.
 
-Existing rows predate the chain, so each is backfilled as its own chain
-(``chain_id = id``): a session that rotates after the upgrade carries its current
-token's chain forward.
+Existing rows predate the chain, and the schema records no rotation lineage, so a
+rotated predecessor and its live successor cannot be told apart from two
+separate sign-ins. Giving each row its own chain would split a rotation that
+spans the upgrade, and a logout with the predecessor would leave the successor
+valid. Instead each user's pre-upgrade tokens share one *legacy chain*, derived
+from the user id: a logout of any legacy session revokes all of that user's
+legacy sessions. That fails closed, and only for users who log out before their
+legacy tokens expire; sessions started after the upgrade get chains of their own.
 
 Downgrade drops the index and the column.
 
@@ -41,7 +46,10 @@ def upgrade() -> None:
         "refresh_token",
         sa.Column("chain_id", postgresql.UUID(as_uuid=True), nullable=True),
     )
-    op.execute("UPDATE refresh_token SET chain_id = id")
+    op.execute(
+        "UPDATE refresh_token "
+        "SET chain_id = md5('mcsd-legacy-chain:' || user_id::text)::uuid"
+    )
     op.alter_column("refresh_token", "chain_id", nullable=False)
     op.create_index(_INDEX, "refresh_token", ["chain_id"])
 
