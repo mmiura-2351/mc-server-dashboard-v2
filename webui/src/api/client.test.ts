@@ -1,7 +1,12 @@
 // @vitest-environment node
 // DOM-free logic test; runs under Node to skip per-file jsdom setup (issue #1734).
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { clearAccessToken, setAccessToken } from "../auth/tokenStore.ts";
+import {
+  advanceAuthEpoch,
+  clearAccessToken,
+  getAuthEpoch,
+  setAccessToken,
+} from "../auth/tokenStore.ts";
 import {
   ApiError,
   api,
@@ -282,6 +287,45 @@ describe("transparent 401 refresh", () => {
     expect(error).toBeInstanceOf(ApiError);
     expect(error.status).toBe(401);
   });
+
+  // A 401 belongs to the session the request was sent under; the refresh and
+  // the retry must not act for a session that replaced it (#3224).
+  it("hands the refresher the epoch the request was sent in", async () => {
+    let respond: (r: Response) => void = () => {};
+    fetchMock.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          respond = resolve;
+        }),
+    );
+    const refresher = vi.fn(() => Promise.resolve(false));
+    setRefresher(refresher);
+    const sentEpoch = getAuthEpoch();
+
+    const pending = api.get("/api/communities").catch(() => {});
+    advanceAuthEpoch();
+    respond(jsonResponse(401, { reason: "x" }));
+    await pending;
+
+    expect(refresher).toHaveBeenCalledWith(sentEpoch);
+  });
+
+  it("does not retry when the session changes after the refresh succeeds", async () => {
+    fetchMock.mockResolvedValue(jsonResponse(401, { reason: "x" }));
+    setRefresher(
+      vi.fn(async () => {
+        // The session switches after the refresh result is computed but
+        // before the client acts on it.
+        queueMicrotask(advanceAuthEpoch);
+        return true;
+      }),
+    );
+
+    const error = await api.get("/api/communities").catch((e) => e);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(error.status).toBe(401);
+  });
 });
 
 // A minimal XMLHttpRequest test double: progress feedback needs the real upload
@@ -476,6 +520,41 @@ describe("postFormWithProgress", () => {
 
     const error = await promise;
     expect(error).toBeInstanceOf(ApiError);
+    expect(error.status).toBe(401);
+    expect(MockXHR.instances).toHaveLength(1);
+  });
+
+  it("hands the refresher the epoch the upload was sent in", async () => {
+    const refresher = vi.fn(() => Promise.resolve(false));
+    setRefresher(refresher);
+    const sentEpoch = getAuthEpoch();
+
+    const promise = postFormWithProgress(
+      "/api/resource-packs",
+      new FormData(),
+    ).catch(() => {});
+    advanceAuthEpoch();
+    MockXHR.last().respond(401, { reason: "x" });
+    await promise;
+
+    expect(refresher).toHaveBeenCalledWith(sentEpoch);
+  });
+
+  it("does not retry the upload when the session changes after the refresh succeeds", async () => {
+    setRefresher(
+      vi.fn(async () => {
+        queueMicrotask(advanceAuthEpoch);
+        return true;
+      }),
+    );
+
+    const promise = postFormWithProgress(
+      "/api/resource-packs",
+      new FormData(),
+    ).catch((e) => e);
+    MockXHR.last().respond(401, { reason: "x" });
+
+    const error = await promise;
     expect(error.status).toBe(401);
     expect(MockXHR.instances).toHaveLength(1);
   });

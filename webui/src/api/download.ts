@@ -27,7 +27,7 @@
  * {@link readCappedBlob}'s byte counter caps it instead.
  */
 
-import { getAccessToken } from "../auth/tokenStore.ts";
+import { getAccessToken, getAuthEpoch } from "../auth/tokenStore.ts";
 import { ApiError, getRefresher } from "./client.ts";
 
 /** Maximum download size (512 MiB), matching the upload limit. */
@@ -90,15 +90,17 @@ export async function fetchFileBlob(
   path: string,
   signal?: AbortSignal,
 ): Promise<Blob> {
+  const epoch = getAuthEpoch();
   let response = await fetchDownload(path, signal);
 
   // Transparent refresh: a 401 means the access token expired. Run the shared
   // single-flight refresh (registered by the session layer) and retry once,
-  // mirroring the JSON client's behaviour (client.ts:164-172).
+  // only while the download's session is still current — mirroring the JSON
+  // client's behaviour (`request` in client.ts).
   const currentRefresher = getRefresher();
   if (response.status === 401 && currentRefresher !== null) {
-    const refreshed = await currentRefresher();
-    if (refreshed) {
+    const refreshed = await currentRefresher(epoch);
+    if (refreshed && epoch === getAuthEpoch()) {
       response = await fetchDownload(path, signal);
     }
   }

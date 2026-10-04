@@ -631,7 +631,17 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   server's response is auth-definitive (401 or 403 — a genuinely expired /
   revoked session). Transient failures — network errors, proxy 5xx, or garbled
   bodies — do not end the session; the original request surfaces its own error
-  to the caller so the user can retry.
+  to the caller so the user can retry. Logout and sign-in each start a new
+  session epoch: a refresh or bootstrap result that crosses that boundary is
+  discarded wherever it would take effect — it stores no token, sets no session
+  status, and a rejection does not log out the newer session — a 401 retry
+  (REST, upload, download) happens only while the session the request was sent
+  under is still current, and the single-flight mutex is scoped to one epoch.
+  This is what the webui's JS guarantees: a stale response's access token is
+  never adopted, a stale rejection never logs the newer session out, and a
+  stale 401 is never retried as the newer user. The httpOnly refresh cookie a
+  late response sets is applied by the browser and is outside the webui's
+  control; that server-side gap is tracked in #3249.
 - WS connections carry the access token in the `Sec-WebSocket-Protocol`
   subprotocol header (`["access_token", "<jwt>"]`); on token
   rotation, sockets are reconnected (reconnect-on-rotate chosen). A socket

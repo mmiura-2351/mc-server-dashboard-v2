@@ -1,19 +1,24 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetForTesting as resetClientForTesting } from "../api/client.ts";
 import { SessionProvider, useSession } from "./SessionProvider.tsx";
 import {
+  hardLogout,
   refreshForRetry,
   resetForTesting as resetSessionForTesting,
 } from "./session.ts";
-import { clearAccessToken } from "./tokenStore.ts";
+import {
+  clearAccessToken,
+  getAccessToken,
+  getAuthEpoch,
+} from "./tokenStore.ts";
 
-function tokenResponse(): Response {
+function tokenResponse(accessToken = "fresh"): Response {
   return new Response(
     JSON.stringify({
-      access_token: "fresh",
+      access_token: accessToken,
       token_type: "bearer",
     }),
     { status: 200, headers: { "content-type": "application/json" } },
@@ -21,7 +26,7 @@ function tokenResponse(): Response {
 }
 
 function StatusProbe() {
-  const { status, logout } = useSession();
+  const { status, signIn, logout } = useSession();
   const location = useLocation();
   return (
     <div>
@@ -30,6 +35,9 @@ function StatusProbe() {
       <span data-testid="search">{location.search}</span>
       <button type="button" onClick={() => logout()}>
         logout
+      </button>
+      <button type="button" onClick={() => signIn("session-B")}>
+        sign in as B
       </button>
     </div>
   );
@@ -105,6 +113,126 @@ describe("SessionProvider bootstrap", () => {
   });
 });
 
+/**
+ * Hold every fetch pending and hand back its resolvers in call order, so a test
+ * can let an authentication response land after the session has changed.
+ */
+function holdFetches(): ((response: Response) => void)[] {
+  const resolvers: ((response: Response) => void)[] = [];
+  fetchMock.mockImplementation(
+    () =>
+      new Promise<Response>((resolve) => {
+        resolvers.push(resolve);
+      }),
+  );
+  return resolvers;
+}
+
+/** Let `n` microtasks run. */
+async function microtasks(n: number): Promise<void> {
+  for (let i = 0; i < n; i++) {
+    await Promise.resolve();
+  }
+}
+
+/**
+ * Every microtask count at which a session switch can land after the bootstrap
+ * response arrived: before its result is computed, between computing it and
+ * the provider applying it, and after.
+ */
+const SWITCH_POINTS = Array.from({ length: 12 }, (_, i) => i);
+
+// The bootstrap response arrives first and the session changes only afterwards,
+// while the computed result is still travelling to the provider (#3224 review).
+describe("SessionProvider bootstrap result consumed after the session changed", () => {
+  it.each(SWITCH_POINTS)(
+    "a signed-out result never overrides a sign-in made %i microtasks after it arrived",
+    async (n) => {
+      const pending = holdFetches();
+      renderSession();
+      pending[0](new Response("", { status: 401 }));
+
+      await microtasks(n);
+      act(() => screen.getByRole("button", { name: "sign in as B" }).click());
+      await act(async () => {});
+
+      expect(screen.getByTestId("status")).toHaveTextContent("signed-in");
+      expect(getAccessToken()).toBe("session-B");
+    },
+  );
+
+  it.each(SWITCH_POINTS)(
+    "a signed-in result never overrides a logout made %i microtasks after it arrived",
+    async (n) => {
+      const pending = holdFetches();
+      renderSession();
+      pending[0](tokenResponse("session-A"));
+
+      await microtasks(n);
+      act(() => hardLogout());
+      await act(async () => {});
+
+      expect(screen.getByTestId("status")).toHaveTextContent("signed-out");
+      expect(getAccessToken()).toBeNull();
+    },
+  );
+
+  it.each(SWITCH_POINTS)(
+    "a signed-in result keeps a sign-in made %i microtasks after it arrived",
+    async (n) => {
+      const pending = holdFetches();
+      renderSession();
+      pending[0](tokenResponse("session-A"));
+
+      await microtasks(n);
+      act(() => screen.getByRole("button", { name: "sign in as B" }).click());
+      await act(async () => {});
+
+      expect(screen.getByTestId("status")).toHaveTextContent("signed-in");
+      expect(getAccessToken()).toBe("session-B");
+    },
+  );
+});
+
+// A sign-in starts a new session; an authentication response still in flight
+// from before must not change what the provider reports or holds (#3224).
+describe("SessionProvider sign-in during an in-flight request", () => {
+  it("keeps the new sign-in when a bootstrap rejection lands late", async () => {
+    const pending = holdFetches();
+    renderSession();
+
+    act(() => screen.getByRole("button", { name: "sign in as B" }).click());
+    await act(async () => pending[0](new Response("", { status: 401 })));
+
+    expect(screen.getByTestId("status")).toHaveTextContent("signed-in");
+    expect(getAccessToken()).toBe("session-B");
+  });
+
+  it("keeps the new user's token when a bootstrap success lands late", async () => {
+    const pending = holdFetches();
+    renderSession();
+
+    act(() => screen.getByRole("button", { name: "sign in as B" }).click());
+    await act(async () => pending[0](tokenResponse("late-session-A")));
+
+    expect(screen.getByTestId("status")).toHaveTextContent("signed-in");
+    expect(getAccessToken()).toBe("session-B");
+  });
+
+  it("keeps the new user's token when an earlier refresh lands late", async () => {
+    const pending = holdFetches();
+    renderSession();
+    await act(async () => pending[0](tokenResponse("session-A")));
+    const retry = refreshForRetry(getAuthEpoch());
+
+    act(() => screen.getByRole("button", { name: "sign in as B" }).click());
+    await act(async () => pending[1](tokenResponse("late-session-A")));
+
+    expect(await retry).toBe(false);
+    expect(getAccessToken()).toBe("session-B");
+  });
+});
+
 describe("SessionProvider logout", () => {
   it("resets to signed-out and navigates to /login", async () => {
     fetchMock.mockResolvedValueOnce(tokenResponse());
@@ -159,7 +287,7 @@ describe("SessionProvider logout", () => {
     // A transparent refresh that 401s is involuntary: it should land on /login
     // carrying reason=expired and the return-to location as next.
     fetchMock.mockResolvedValueOnce(new Response("", { status: 401 }));
-    await refreshForRetry();
+    await refreshForRetry(getAuthEpoch());
 
     await waitFor(() =>
       expect(screen.getByTestId("path")).toHaveTextContent("/login"),
@@ -199,7 +327,7 @@ describe("SessionProvider logout", () => {
 
     // A transparent refresh that fails drives a hard logout (no API logout call).
     fetchMock.mockResolvedValueOnce(new Response("", { status: 401 }));
-    await refreshForRetry();
+    await refreshForRetry(getAuthEpoch());
 
     await waitFor(() =>
       expect(screen.getByTestId("status")).toHaveTextContent("signed-out"),

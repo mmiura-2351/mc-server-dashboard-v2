@@ -10,17 +10,19 @@ import {
   resetForTesting,
   restoreSession,
   setHardLogoutHandler,
+  signIn,
 } from "./session.ts";
 import {
   clearAccessToken,
   getAccessToken,
+  getAuthEpoch,
   setAccessToken,
 } from "./tokenStore.ts";
 
-function tokenResponse(): Response {
+function tokenResponse(accessToken = "fresh"): Response {
   return new Response(
     JSON.stringify({
-      access_token: "fresh",
+      access_token: accessToken,
       refresh_token: "ignored",
       token_type: "bearer",
     }),
@@ -129,9 +131,9 @@ describe("refreshSession", () => {
   });
 });
 
-function accessTokenResponse(): Response {
+function accessTokenResponse(accessToken = "fresh"): Response {
   return new Response(
-    JSON.stringify({ access_token: "fresh", token_type: "bearer" }),
+    JSON.stringify({ access_token: accessToken, token_type: "bearer" }),
     { status: 200, headers: { "content-type": "application/json" } },
   );
 }
@@ -140,9 +142,9 @@ describe("restoreSession", () => {
   it("posts /api/auth/session (the non-rotating bootstrap path)", async () => {
     fetchMock.mockResolvedValue(accessTokenResponse());
 
-    const ok = await restoreSession();
+    const result = await restoreSession();
 
-    expect(ok).toBe(true);
+    expect(result).toBe("signed-in");
     expect(getAccessToken()).toBe("fresh");
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe("/api/auth/session");
@@ -153,9 +155,9 @@ describe("restoreSession", () => {
   it("reports signed out on a 401 and stores no token", async () => {
     fetchMock.mockResolvedValue(new Response("", { status: 401 }));
 
-    const ok = await restoreSession();
+    const result = await restoreSession();
 
-    expect(ok).toBe(false);
+    expect(result).toBe("signed-out");
     expect(getAccessToken()).toBeNull();
   });
 
@@ -168,7 +170,7 @@ describe("restoreSession", () => {
     // the app must resolve signed-out silently and never surface it as an
     // application error (the browser's native "Failed to load resource ... 401"
     // line is separate and not suppressible from JS).
-    await expect(restoreSession()).resolves.toBe(false);
+    await expect(restoreSession()).resolves.toBe("signed-out");
     expect(errorSpy).not.toHaveBeenCalled();
     expect(warnSpy).not.toHaveBeenCalled();
 
@@ -179,17 +181,17 @@ describe("restoreSession", () => {
   it("reports signed out when the network call throws", async () => {
     fetchMock.mockRejectedValue(new Error("offline"));
 
-    const ok = await restoreSession();
+    const result = await restoreSession();
 
-    expect(ok).toBe(false);
+    expect(result).toBe("signed-out");
   });
 
   it("resolves signed out on a 200 with an invalid JSON body", async () => {
     fetchMock.mockResolvedValue(new Response("not json", { status: 200 }));
 
-    const ok = await restoreSession();
+    const result = await restoreSession();
 
-    expect(ok).toBe(false);
+    expect(result).toBe("signed-out");
     expect(getAccessToken()).toBeNull();
   });
 
@@ -213,7 +215,7 @@ describe("refreshForRetry", () => {
     setHardLogoutHandler(onLogout);
     setAccessToken("stale");
 
-    const ok = await refreshForRetry();
+    const ok = await refreshForRetry(getAuthEpoch());
 
     expect(ok).toBe(false);
     expect(getAccessToken()).toBeNull();
@@ -226,7 +228,7 @@ describe("refreshForRetry", () => {
     setHardLogoutHandler(onLogout);
     setAccessToken("stale");
 
-    const ok = await refreshForRetry();
+    const ok = await refreshForRetry(getAuthEpoch());
 
     expect(ok).toBe(false);
     expect(getAccessToken()).toBeNull();
@@ -239,7 +241,7 @@ describe("refreshForRetry", () => {
     setHardLogoutHandler(onLogout);
     setAccessToken("stale");
 
-    const ok = await refreshForRetry();
+    const ok = await refreshForRetry(getAuthEpoch());
 
     expect(ok).toBe(false);
     expect(onLogout).not.toHaveBeenCalled();
@@ -251,7 +253,7 @@ describe("refreshForRetry", () => {
     setHardLogoutHandler(onLogout);
     setAccessToken("stale");
 
-    const ok = await refreshForRetry();
+    const ok = await refreshForRetry(getAuthEpoch());
 
     expect(ok).toBe(false);
     expect(onLogout).not.toHaveBeenCalled();
@@ -263,7 +265,7 @@ describe("refreshForRetry", () => {
     setHardLogoutHandler(onLogout);
     setAccessToken("stale");
 
-    const ok = await refreshForRetry();
+    const ok = await refreshForRetry(getAuthEpoch());
 
     expect(ok).toBe(false);
     expect(onLogout).not.toHaveBeenCalled();
@@ -274,7 +276,7 @@ describe("refreshForRetry", () => {
     const onLogout = vi.fn();
     setHardLogoutHandler(onLogout);
 
-    const ok = await refreshForRetry();
+    const ok = await refreshForRetry(getAuthEpoch());
 
     expect(ok).toBe(true);
     expect(onLogout).not.toHaveBeenCalled();
@@ -320,4 +322,221 @@ describe("hardLogout", () => {
     expect(onLogout).toHaveBeenCalledTimes(1);
     expect(fetchMock).not.toHaveBeenCalled();
   });
+});
+
+describe("signIn", () => {
+  it("adopts the access token", () => {
+    signIn("session-B");
+
+    expect(getAccessToken()).toBe("session-B");
+  });
+});
+
+/**
+ * Hold every fetch pending and hand back its resolvers in call order, so a test
+ * can let an authentication response land after the session has changed.
+ */
+function holdFetches(): ((response: Response) => void)[] {
+  const resolvers: ((response: Response) => void)[] = [];
+  fetchMock.mockImplementation(
+    () =>
+      new Promise<Response>((resolve) => {
+        resolvers.push(resolve);
+      }),
+  );
+  return resolvers;
+}
+
+// A response begun under one session must never act on a later one: logout and
+// sign-in start a new session, and anything still in flight from before is
+// discarded on arrival (#3224).
+describe("late authentication responses", () => {
+  it("a refresh that lands after logout does not repopulate the token", async () => {
+    const pending = holdFetches();
+    setAccessToken("session-A");
+    const refresh = refreshSession();
+
+    hardLogout();
+    pending[0](tokenResponse("late-session-A"));
+
+    expect(await refresh).toEqual({ status: "superseded" });
+    expect(getAccessToken()).toBeNull();
+  });
+
+  it("a refresh that lands after another user signs in does not replace their token", async () => {
+    const pending = holdFetches();
+    setAccessToken("session-A");
+    const refresh = refreshSession();
+
+    hardLogout();
+    signIn("session-B");
+    pending[0](tokenResponse("late-session-A"));
+
+    expect(await refresh).toEqual({ status: "superseded" });
+    expect(getAccessToken()).toBe("session-B");
+  });
+
+  it("a bootstrap that lands after logout does not repopulate the token", async () => {
+    const pending = holdFetches();
+    const restore = restoreSession();
+
+    hardLogout();
+    pending[0](accessTokenResponse("late-session-A"));
+
+    expect(await restore).toBe("superseded");
+    expect(getAccessToken()).toBeNull();
+  });
+
+  it("a bootstrap that lands after a sign-in does not replace the new token", async () => {
+    const pending = holdFetches();
+    const restore = restoreSession();
+
+    signIn("session-B");
+    pending[0](accessTokenResponse("late-session-A"));
+
+    expect(await restore).toBe("superseded");
+    expect(getAccessToken()).toBe("session-B");
+  });
+
+  it("a rejected bootstrap that lands after a sign-in reports superseded, not signed-out", async () => {
+    const pending = holdFetches();
+    const restore = restoreSession();
+
+    signIn("session-B");
+    pending[0](new Response("", { status: 401 }));
+
+    expect(await restore).toBe("superseded");
+  });
+
+  it("a rejected refresh that lands after another user signs in does not log them out", async () => {
+    const pending = holdFetches();
+    const onLogout = vi.fn();
+    setHardLogoutHandler(onLogout);
+    setAccessToken("session-A");
+    const retry = refreshForRetry(getAuthEpoch());
+
+    hardLogout();
+    signIn("session-B");
+    onLogout.mockClear();
+    pending[0](new Response("", { status: 401 }));
+
+    expect(await retry).toBe(false);
+    expect(onLogout).not.toHaveBeenCalled();
+    expect(getAccessToken()).toBe("session-B");
+  });
+
+  it("a successful refresh that lands after another user signs in asks for no retry", async () => {
+    const pending = holdFetches();
+    setAccessToken("session-A");
+    const retry = refreshForRetry(getAuthEpoch());
+
+    hardLogout();
+    signIn("session-B");
+    pending[0](tokenResponse("late-session-A"));
+
+    // A retry would replay user A's request as user B.
+    expect(await retry).toBe(false);
+  });
+
+  it("a refresh in the new session does not join the old session's in-flight one", async () => {
+    const pending = holdFetches();
+    setAccessToken("session-A");
+    const stale = refreshSession();
+
+    hardLogout();
+    signIn("session-B");
+    const current = refreshSession();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    pending[1](tokenResponse("rotated-B"));
+    expect(await current).toEqual({ status: "ok" });
+    pending[0](tokenResponse("late-session-A"));
+    expect(await stale).toEqual({ status: "superseded" });
+    expect(getAccessToken()).toBe("rotated-B");
+  });
+
+  it("the old session's refresh settling keeps the new session single-flight", async () => {
+    const pending = holdFetches();
+    setAccessToken("session-A");
+    const stale = refreshSession();
+    hardLogout();
+    signIn("session-B");
+    const current = refreshSession();
+
+    pending[0](tokenResponse("late-session-A"));
+    await stale;
+    const joined = refreshSession();
+
+    expect(joined).toBe(current);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    pending[1](tokenResponse("rotated-B"));
+    await current;
+  });
+
+  it("a retry for a request sent under an ended session does not refresh at all", async () => {
+    const onLogout = vi.fn();
+    setHardLogoutHandler(onLogout);
+    signIn("session-A");
+    const requestEpoch = getAuthEpoch();
+    signIn("session-B");
+    onLogout.mockClear();
+
+    expect(await refreshForRetry(requestEpoch)).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(onLogout).not.toHaveBeenCalled();
+  });
+});
+
+/** Let `n` microtasks run. */
+async function microtasks(n: number): Promise<void> {
+  for (let i = 0; i < n; i++) {
+    await Promise.resolve();
+  }
+}
+
+/**
+ * Every microtask count at which a session switch can land after the response
+ * arrived: before the result is computed, between computing it and the caller
+ * consuming it, and after.
+ */
+const SWITCH_POINTS = Array.from({ length: 12 }, (_, i) => i);
+
+// The response arrives first and the session changes only afterwards, at each
+// point while the result is still travelling back to the caller (#3224 review).
+describe("results consumed after the session changed", () => {
+  it.each(SWITCH_POINTS)(
+    "a refresh rejection never logs out a sign-in made %i microtasks after it arrived",
+    async (n) => {
+      const pending = holdFetches();
+      const onLogout = vi.fn();
+      setHardLogoutHandler(onLogout);
+      signIn("session-A");
+      const retry = refreshForRetry(getAuthEpoch());
+      pending[0](new Response("", { status: 401 }));
+
+      await microtasks(n);
+      const logoutsBeforeSwitch = onLogout.mock.calls.length;
+      signIn("session-B");
+      await retry;
+
+      expect(onLogout).toHaveBeenCalledTimes(logoutsBeforeSwitch);
+      expect(getAccessToken()).toBe("session-B");
+    },
+  );
+
+  it.each(SWITCH_POINTS)(
+    "a refresh success never replaces a sign-in made %i microtasks after it arrived",
+    async (n) => {
+      const pending = holdFetches();
+      signIn("session-A");
+      const retry = refreshForRetry(getAuthEpoch());
+      pending[0](tokenResponse("rotated-A"));
+
+      await microtasks(n);
+      signIn("session-B");
+      await retry;
+
+      expect(getAccessToken()).toBe("session-B");
+    },
+  );
 });

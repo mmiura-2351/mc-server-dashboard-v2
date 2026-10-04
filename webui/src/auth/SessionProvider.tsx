@@ -28,8 +28,9 @@ import {
   refreshForRetry,
   restoreSession,
   setHardLogoutHandler,
+  signIn as signInSession,
 } from "./session.ts";
-import { setAccessToken } from "./tokenStore.ts";
+import { getAuthEpoch } from "./tokenStore.ts";
 
 export type SessionStatus = "bootstrapping" | "signed-in" | "signed-out";
 
@@ -90,12 +91,16 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   // NON-rotating /api/auth/session probe (issue #512), so a page load / F5 never
   // rotates the refresh token and can never leave a torn rotation in the jar.
   // Rotation stays on the in-session refresh path. The probe decides
-  // signed-in vs signed-out.
+  // signed-in vs signed-out — unless a sign-in or logout overtook it, in which
+  // case that already set the status and the probe's result is stale (#3224).
+  // The epoch is re-checked here, where the status is applied, because the
+  // session can change after the result was computed but before this runs.
   useEffect(() => {
     let active = true;
-    restoreSession().then((ok) => {
-      if (active) {
-        setStatus(ok ? "signed-in" : "signed-out");
+    const epoch = getAuthEpoch();
+    restoreSession().then((result) => {
+      if (active && result !== "superseded" && epoch === getAuthEpoch()) {
+        setStatus(result);
       }
     });
     return () => {
@@ -105,9 +110,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   // Login already authenticated against /auth/login and holds the issued access
   // token; adopt it and flip to signed-in. The refresh cookie is set by that
-  // same response, so a later reload re-bootstraps cleanly.
+  // same response, so a later reload re-bootstraps cleanly. Adopting it through
+  // the session core starts a new authentication epoch, so nothing still in
+  // flight from an earlier session can replace it (#3224).
   const signIn = useCallback((accessToken: string) => {
-    setAccessToken(accessToken);
+    signInSession(accessToken);
     setStatus("signed-in");
   }, []);
 
