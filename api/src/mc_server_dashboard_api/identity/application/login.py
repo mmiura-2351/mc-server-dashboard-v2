@@ -54,7 +54,10 @@ from mc_server_dashboard_api.identity.domain.password_hasher import PasswordHash
 from mc_server_dashboard_api.identity.domain.registration import RegistrationConfig
 from mc_server_dashboard_api.identity.domain.token_service import TokenService
 from mc_server_dashboard_api.identity.domain.unit_of_work import UnitOfWork
-from mc_server_dashboard_api.identity.domain.value_objects import Username
+from mc_server_dashboard_api.identity.domain.value_objects import (
+    RotationChainId,
+    Username,
+)
 
 # Failure reasons recorded on the ``login_attempt`` row (forensics only; never
 # surfaced — the caller always sees one uniform error).
@@ -130,6 +133,7 @@ class Login:
                 uow=self.uow,
                 tokens=self.tokens,
                 user_id=user.id,
+                chain_id=RotationChainId.new(),
                 now=now,
                 refresh_ttl=self.refresh_ttl,
             )

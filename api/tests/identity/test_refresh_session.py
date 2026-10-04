@@ -24,7 +24,11 @@ from mc_server_dashboard_api.identity.domain.errors import (
     InvalidRefreshTokenError,
     RefreshTokenReuseError,
 )
-from mc_server_dashboard_api.identity.domain.value_objects import RefreshTokenId, UserId
+from mc_server_dashboard_api.identity.domain.value_objects import (
+    RefreshTokenId,
+    RotationChainId,
+    UserId,
+)
 from tests.identity.fakes import FakeClock, FakeTokenService, FakeUnitOfWork
 
 _NOW = dt.datetime(2026, 6, 4, tzinfo=dt.timezone.utc)
@@ -60,6 +64,7 @@ def _seed_token(
         RefreshToken(
             id=RefreshTokenId.new(),
             user_id=_USER,
+            chain_id=RotationChainId.new(),
             token_hash=token_hash,
             issued_at=_NOW - dt.timedelta(days=1),
             expires_at=expires_at or (_NOW + _REFRESH_TTL),
@@ -87,6 +92,23 @@ async def test_rotation_revokes_old_and_issues_new_pair() -> None:
     assert new.user_id == _USER
     assert new.revoked_at is None
     assert uow.commits == 1
+
+
+@pytest.mark.parametrize(
+    "revoked_at", [None, _NOW - dt.timedelta(seconds=30)], ids=["active", "grace"]
+)
+async def test_successor_joins_the_presented_tokens_rotation_chain(
+    revoked_at: dt.datetime | None,
+) -> None:
+    # The successor stays in the presented token's sign-in session, so logout can
+    # reach it (issue #3249) -- for a grace-window reuse too.
+    uow = FakeUnitOfWork()
+    old_hash = _seed_token(uow, secret="old-secret", revoked_at=revoked_at)
+
+    await _refresh(uow, FakeClock(_NOW))(refresh_token="old-secret")
+
+    new = uow.refresh_tokens.by_hash["hash::refresh-secret-1"]
+    assert new.chain_id == uow.refresh_tokens.by_hash[old_hash].chain_id
 
 
 async def test_unknown_token_is_rejected() -> None:

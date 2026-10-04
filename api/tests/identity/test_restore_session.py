@@ -22,7 +22,11 @@ from mc_server_dashboard_api.identity.domain.entities import (
     RefreshToken,
 )
 from mc_server_dashboard_api.identity.domain.errors import InvalidRefreshTokenError
-from mc_server_dashboard_api.identity.domain.value_objects import RefreshTokenId, UserId
+from mc_server_dashboard_api.identity.domain.value_objects import (
+    RefreshTokenId,
+    RotationChainId,
+    UserId,
+)
 from tests.identity.fakes import FakeClock, FakeTokenService, FakeUnitOfWork
 
 _NOW = dt.datetime(2026, 6, 4, tzinfo=dt.timezone.utc)
@@ -49,6 +53,7 @@ def _seed_token(
         RefreshToken(
             id=RefreshTokenId.new(),
             user_id=_USER,
+            chain_id=RotationChainId.new(),
             token_hash=token_hash,
             issued_at=_NOW - dt.timedelta(days=1),
             expires_at=expires_at or (_NOW + _REFRESH_TTL),

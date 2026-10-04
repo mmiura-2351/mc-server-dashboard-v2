@@ -19,6 +19,7 @@ from mc_server_dashboard_api.identity.domain.repositories import (
 from mc_server_dashboard_api.identity.domain.value_objects import (
     EmailAddress,
     RefreshTokenId,
+    RotationChainId,
     UserId,
     Username,
 )
@@ -53,6 +54,7 @@ def _token(
     return RefreshToken(
         id=RefreshTokenId.new(),
         user_id=user_id or harness.user_id,
+        chain_id=RotationChainId.new(),
         token_hash=token_hash,
         issued_at=_NOW,
         expires_at=_NOW + dt.timedelta(days=30),

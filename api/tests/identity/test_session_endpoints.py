@@ -28,6 +28,7 @@ from mc_server_dashboard_api.dependencies import (
 from mc_server_dashboard_api.identity.domain.entities import RefreshToken
 from mc_server_dashboard_api.identity.domain.value_objects import (
     RefreshTokenId,
+    RotationChainId,
     UserId,
 )
 from tests.audit.fakes import RecordingAuditRecorder
@@ -84,6 +85,7 @@ def _session(user_id: UserId) -> RefreshToken:
     return RefreshToken(
         id=RefreshTokenId.new(),
         user_id=user_id,
+        chain_id=RotationChainId.new(),
         token_hash="hash::secret",
         issued_at=_NOW,
         expires_at=_NOW + dt.timedelta(days=14),

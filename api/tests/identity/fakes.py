@@ -317,6 +317,7 @@ def _with_revoked(
     return RefreshToken(
         id=token.id,
         user_id=token.user_id,
+        chain_id=token.chain_id,
         token_hash=token.token_hash,
         issued_at=token.issued_at,
         expires_at=token.expires_at,

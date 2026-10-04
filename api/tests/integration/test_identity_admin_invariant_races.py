@@ -65,6 +65,7 @@ from mc_server_dashboard_api.identity.domain.entities import (
 from mc_server_dashboard_api.identity.domain.errors import LastPlatformAdminError
 from mc_server_dashboard_api.identity.domain.value_objects import (
     RefreshTokenId,
+    RotationChainId,
     UserId,
 )
 from tests.identity.fakes import (
@@ -238,6 +239,7 @@ def _token(user_id: UserId, token_hash: str) -> RefreshToken:
     return RefreshToken(
         id=RefreshTokenId.new(),
         user_id=user_id,
+        chain_id=RotationChainId.new(),
         token_hash=token_hash,
         issued_at=_NOW,
         expires_at=_NOW + dt.timedelta(days=14),

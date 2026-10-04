@@ -117,6 +117,7 @@ class RefreshSession:
                 uow=self.uow,
                 tokens=self.tokens,
                 user_id=stored.user_id,
+                chain_id=stored.chain_id,
                 now=now,
                 refresh_ttl=self.refresh_ttl,
             )

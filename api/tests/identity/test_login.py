@@ -70,6 +70,21 @@ async def test_login_success_issues_pair_and_persists_refresh() -> None:
     assert delay.calls == 0
 
 
+async def test_each_login_starts_its_own_rotation_chain() -> None:
+    # Two sign-ins are two sessions: logging one out must not reach the other
+    # (issue #3249).
+    uow = FakeUnitOfWork()
+    uow.users.seed(make_user(password=_PASSWORD))
+    login = _login(uow, RecordingFailureDelay())
+
+    await login(username="alice", password=_PASSWORD)
+    await login(username="alice", password=_PASSWORD)
+
+    first = uow.refresh_tokens.by_hash["hash::refresh-secret-1"]
+    second = uow.refresh_tokens.by_hash["hash::refresh-secret-2"]
+    assert first.chain_id != second.chain_id
+
+
 async def test_login_wrong_password_is_uniform_failure() -> None:
     user = make_user(password=_PASSWORD)
     uow = FakeUnitOfWork()

@@ -6,6 +6,7 @@ from mc_server_dashboard_api.identity.domain.entities import RefreshToken, User
 from mc_server_dashboard_api.identity.domain.value_objects import (
     EmailAddress,
     RefreshTokenId,
+    RotationChainId,
     UserId,
     Username,
 )
@@ -29,6 +30,7 @@ def test_refresh_token_is_active_when_unexpired_and_unrevoked() -> None:
     token = RefreshToken(
         id=RefreshTokenId.new(),
         user_id=UserId.new(),
+        chain_id=RotationChainId.new(),
         token_hash="hashed",
         issued_at=_NOW,
         expires_at=_NOW + dt.timedelta(days=30),
@@ -40,6 +42,7 @@ def test_refresh_token_is_inactive_once_expired() -> None:
     token = RefreshToken(
         id=RefreshTokenId.new(),
         user_id=UserId.new(),
+        chain_id=RotationChainId.new(),
         token_hash="hashed",
         issued_at=_NOW,
         expires_at=_NOW,
@@ -51,6 +54,7 @@ def test_refresh_token_is_inactive_once_revoked() -> None:
     token = RefreshToken(
         id=RefreshTokenId.new(),
         user_id=UserId.new(),
+        chain_id=RotationChainId.new(),
         token_hash="hashed",
         issued_at=_NOW,
         expires_at=_NOW + dt.timedelta(days=30),

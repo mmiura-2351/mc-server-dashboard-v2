@@ -44,6 +44,7 @@ from mc_server_dashboard_api.identity.domain.repositories import (
 from mc_server_dashboard_api.identity.domain.value_objects import (
     EmailAddress,
     RefreshTokenId,
+    RotationChainId,
     UserId,
     Username,
 )
@@ -71,6 +72,7 @@ def _to_refresh_token(row: RefreshTokenModel) -> RefreshToken:
     return RefreshToken(
         id=RefreshTokenId(row.id),
         user_id=UserId(row.user_id),
+        chain_id=RotationChainId(row.chain_id),
         token_hash=row.token_hash,
         issued_at=row.issued_at,
         expires_at=row.expires_at,
@@ -280,6 +282,7 @@ class SqlAlchemyRefreshTokenRepository(RefreshTokenRepository):
             RefreshTokenModel(
                 id=token.id.value,
                 user_id=token.user_id.value,
+                chain_id=token.chain_id.value,
                 token_hash=token.token_hash,
                 issued_at=token.issued_at,
                 expires_at=token.expires_at,

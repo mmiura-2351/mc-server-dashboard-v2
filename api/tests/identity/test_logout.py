@@ -10,7 +10,11 @@ from mc_server_dashboard_api.identity.domain.entities import (
     REVOKED_SUPERSEDED,
     RefreshToken,
 )
-from mc_server_dashboard_api.identity.domain.value_objects import RefreshTokenId, UserId
+from mc_server_dashboard_api.identity.domain.value_objects import (
+    RefreshTokenId,
+    RotationChainId,
+    UserId,
+)
 from tests.identity.fakes import FakeClock, FakeTokenService, FakeUnitOfWork
 
 _NOW = dt.datetime(2026, 6, 4, tzinfo=dt.timezone.utc)
@@ -26,6 +30,7 @@ def _seed(uow: FakeUnitOfWork, *, secret: str) -> str:
         RefreshToken(
             id=RefreshTokenId.new(),
             user_id=UserId.new(),
+            chain_id=RotationChainId.new(),
             token_hash=token_hash,
             issued_at=_NOW,
             expires_at=_NOW + dt.timedelta(days=14),
@@ -40,6 +45,7 @@ async def test_logout_revokes_the_token() -> None:
         RefreshToken(
             id=RefreshTokenId.new(),
             user_id=UserId.new(),
+            chain_id=RotationChainId.new(),
             token_hash="hash::session",
             issued_at=_NOW,
             expires_at=_NOW + dt.timedelta(days=14),

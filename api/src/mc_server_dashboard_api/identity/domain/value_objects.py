@@ -45,6 +45,23 @@ class RefreshTokenId:
 
 
 @dataclass(frozen=True)
+class RotationChainId:
+    """The rotation chain a :class:`~.entities.RefreshToken` belongs to.
+
+    Login starts a chain; every refresh token rotated from it inherits the
+    chain, so the chain is one sign-in session across its rotations (#3249).
+    """
+
+    value: uuid.UUID
+
+    @classmethod
+    def new(cls) -> RotationChainId:
+        """Generate a fresh, random chain id."""
+
+        return cls(uuid.uuid4())
+
+
+@dataclass(frozen=True)
 class Username:
     """A user's login name.
 
