@@ -587,8 +587,11 @@ the caller's active sessions are revoked. This is the safe choice — it never
 revokes another user's sessions, and a presented token is the only trustworthy way
 to know which row is "current". A Web UI calling this should send its current
 refresh token in the body to stay logged in on the device it is using. Only that
-row is spared: if the current session is refreshed concurrently, its new token
-is a different row and is revoked too (Section 4).
+row is spared, and a concurrent refresh of the current session serializes with
+the revocation (Section 4). If the refresh rotates first, its new token is a
+different row and is revoked too. If the revocation runs first, the spared token
+is still active, so the refresh that waited rotates it and its new token stays
+valid.
 
 ## 8. Related documents
 
