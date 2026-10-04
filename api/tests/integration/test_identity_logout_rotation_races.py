@@ -7,11 +7,11 @@ the presented token's whole rotation chain, and a rotation and a logout of one
 chain serialize, so every successor -- committed, or still being minted -- dies
 with the session.
 
-Each test pauses one use case right before its write -- after it has read the
-token it acts on -- then starts the other on its own connection, waits until it
-has either committed or blocked on a lock, and only then resumes the paused one.
-The interleaving is therefore explicit, not timed. Afterwards no token of the
-chain may refresh, and the user's other session is untouched.
+Each test pauses one use case before it commits -- after it has read the token
+it acts on and written what it decided -- then starts the other on its own
+connection, waits until it has either committed or blocked on a lock, and only
+then resumes the paused one. The interleaving is therefore explicit, not timed.
+Afterwards no token of the chain may refresh.
 
 Runs only when ``MCD_TEST_DATABASE_URL`` is set (a real PostgreSQL); skipped
 otherwise (TESTING.md Section 5), mirroring
@@ -92,7 +92,7 @@ async def engine() -> AsyncIterator[AsyncEngine]:
 
 
 class _Pause:
-    """Holds a use case right before its first token write until released."""
+    """Holds a use case at its pause point until released."""
 
     def __init__(self) -> None:
         self.reached = asyncio.Event()
@@ -106,10 +106,10 @@ class _Pause:
 
 
 class _PausingRefreshTokenRepository(SqlAlchemyRefreshTokenRepository):
-    """Pauses a rotation before staging its successor, a logout before revoking.
+    """Pauses a rotation before staging its successor, a logout after revoking.
 
     A rotation reaches ``add`` after it has revoked the presented token (when
-    that token was still active), so the paused rotation holds every lock it
+    that token was still active), so either paused use case holds every lock it
     takes before it commits.
     """
 
@@ -124,8 +124,8 @@ class _PausingRefreshTokenRepository(SqlAlchemyRefreshTokenRepository):
     async def revoke_chain(
         self, chain_id: RotationChainId, *, revoked_at: dt.datetime, reason: str
     ) -> None:
-        await self._pause.hold()
         await super().revoke_chain(chain_id, revoked_at=revoked_at, reason=reason)
+        await self._pause.hold()
 
 
 class _PausingUnitOfWork(SqlAlchemyUnitOfWork):
@@ -245,7 +245,7 @@ _UseCase = Callable[[SqlAlchemyUnitOfWork], Coroutine[Any, Any, object]]
 async def _interleave(
     engine: AsyncEngine, paused: _UseCase, competitor: _UseCase
 ) -> tuple[object, object]:
-    """Pause ``paused`` before its write, settle ``competitor``, then resume.
+    """Pause ``paused`` before it commits, settle ``competitor``, then resume.
 
     Returns each use case's outcome (its result or the exception it raised),
     paused one first.
@@ -321,9 +321,9 @@ async def test_logout_racing_a_paused_rotation_revokes_its_successor(
 async def test_rotation_racing_a_paused_logout_mints_no_live_successor(
     engine: AsyncEngine, refreshed: str, logged_out: str
 ) -> None:
-    # The logout has read the presented token and is about to revoke its chain
-    # when the refresh starts. Whether the refresh is refused or commits first,
-    # the session ends with no live token.
+    # The logout has revoked the chain but not committed when the refresh starts.
+    # Had the refresh not waited for it, it would have read the presented token
+    # as still live and minted a successor the logout never saw.
     user = await _seed(engine)
 
     async def logout(uow: SqlAlchemyUnitOfWork) -> None:
@@ -332,7 +332,8 @@ async def test_rotation_racing_a_paused_logout_mints_no_live_successor(
     async def rotate(uow: SqlAlchemyUnitOfWork) -> object:
         return await _refresh(uow)(refresh_token=refreshed)
 
-    logout_outcome, _ = await _interleave(engine, logout, rotate)
+    logout_outcome, refresh_outcome = await _interleave(engine, logout, rotate)
 
     assert logout_outcome is None
+    assert isinstance(refresh_outcome, InvalidRefreshTokenError)
     assert await _active_secrets(engine, user) <= {_OTHER_DEVICE}

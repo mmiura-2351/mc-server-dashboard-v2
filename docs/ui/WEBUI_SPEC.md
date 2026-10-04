@@ -641,7 +641,10 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   never adopted, a stale rejection never logs the newer session out, and a
   stale 401 is never retried as the newer user. The httpOnly refresh cookie a
   late response sets is applied by the browser and is outside the webui's
-  control; that server-side gap is tracked in #3249.
+  control; the API makes it harmless instead: logout revokes the session's whole
+  rotation chain, so a successor delivered after logout is already dead and the
+  newer session is at worst signed out, never authenticated as the previous user
+  (AUTH_API.md Section 4).
 - WS connections carry the access token in the `Sec-WebSocket-Protocol`
   subprotocol header (`["access_token", "<jwt>"]`); on token
   rotation, sockets are reconnected (reconnect-on-rotate chosen). A socket

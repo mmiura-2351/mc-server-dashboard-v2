@@ -71,7 +71,10 @@ Notable contract points, each verifiable in the router:
   required field would otherwise produce. An
   unknown / expired / revoked token also returns `401`; the client cannot tell
   the cases apart.
-- **`POST /auth/logout`** with no token in either transport returns `204`, not
+- **`POST /auth/logout`** ends the presented token's whole sign-in session —
+  every token rotated from the same login, including a successor whose refresh
+  response has not reached the client yet — and leaves the user's other sessions
+  alone (Section 4). With no token in either transport it returns `204`, not
   `422`. Logout is idempotent: with nothing to revoke it is a clean `204` and
   emits no enumeration signal. A malformed body (e.g. a present-but-empty
   `refresh_token`, which violates `min_length=1`) does fail validation with
@@ -401,6 +404,24 @@ revoke (the theft response, or password change / deactivate / delete) or by logo
 is never graced — re-presenting it stays on the theft path regardless of how
 recent the revocation is. The grace-window predecessor is **not** re-revoked,
 so repeated reuse cannot roll the window forward and keep a leaked token alive.
+
+**Logout revokes the rotation chain.** Every refresh token belongs to the
+*rotation chain* its login started; a rotation's successor joins the presented
+token's chain. Logout revokes the presented token's whole chain as
+`logout`-revoked, re-stamping its rotated predecessors too, so neither a
+successor nor a grace-window predecessor of the logged-out session can refresh
+afterwards. This closes the in-flight refresh: a browser whose refresh was rotated
+but whose response is still in flight logs out with the *old* cookie, and the
+late response's `Set-Cookie` then installs the successor — over the cookie of
+whoever signs in next in that browser. The successor is already revoked, so the
+worst case is that the next user is signed out, never that they act as the
+logged-out user. Logout itself touches no other chain, so the user's other
+sessions stay signed in; re-presenting a token of the logged-out chain to
+`/auth/refresh` is a `logout`-revoked token in the table above, and that theft
+response does revoke them, while `/auth/session` answers it with a plain `401`.
+A rotation and a logout of the same chain serialize: a refresh that waited for a
+logout is refused, and a logout that waited for a refresh revokes the successor
+it minted.
 
 A *superseded* both-transports cookie token (Section 3) is treated differently:
 it was revoked because the body token won precedence, so no client holds it and it
