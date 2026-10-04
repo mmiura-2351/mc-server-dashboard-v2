@@ -514,39 +514,75 @@ async def test_rotation_racing_a_paused_bulk_revocation_mints_no_live_successor(
     assert await _active_secrets(engine, user) <= spared
 
 
+_STRANGER = "stranger"
+
+
+async def _seed_stranger(engine: AsyncEngine) -> None:
+    """Seed another user signed in with ``stranger``, say on a shared browser."""
+
+    user = make_user(username="bob", email="bob@example.com")
+    factory = create_session_factory(engine)
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.users.add(user)
+        await uow.commit()
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.refresh_tokens.add(
+            RefreshToken(
+                id=RefreshTokenId.new(),
+                user_id=user.id,
+                chain_id=RotationChainId.new(),
+                token_hash=f"hash::{_STRANGER}",
+                issued_at=_NOW - dt.timedelta(minutes=1),
+                expires_at=_NOW + _REFRESH_TTL,
+            )
+        )
+        await uow.commit()
+
+
+# (the logout's body token, the seeded user's sessions it leaves). The body token
+# is the user's own other session, or another user's whose sign-in overwrote the
+# user's cookie in a shared browser.
+_BODIES = [(_OTHER_DEVICE, set()), (_STRANGER, {_OTHER_DEVICE})]
+_BODY_IDS = ["own-body-token", "other-users-body-token"]
+
+
 @pytest.mark.parametrize("refreshed", _REFRESHED, ids=_REFRESHED_IDS)
+@pytest.mark.parametrize(("body", "spared"), _BODIES, ids=_BODY_IDS)
 async def test_both_transports_logout_racing_a_paused_rotation_of_the_cookie(
-    engine: AsyncEngine, refreshed: str
+    engine: AsyncEngine, body: str, spared: set[str], refreshed: str
 ) -> None:
     # The cookie's session is being rotated when a logout carrying another token
     # in its body supersedes the cookie. Revoking only the cookie token would
     # leave the successor of its chain alive (#3251).
     user = await _seed(engine)
+    await _seed_stranger(engine)
 
     async def rotate(uow: SqlAlchemyUnitOfWork) -> object:
         return await _refresh(uow)(refresh_token=refreshed)
 
     async def logout(uow: SqlAlchemyUnitOfWork) -> None:
-        await _logout(uow)(refresh_token=_OTHER_DEVICE, superseded_token=refreshed)
+        await _logout(uow)(refresh_token=body, superseded_token=refreshed)
 
     pair, logout_outcome = await _interleave(engine, rotate, logout)
 
     assert logout_outcome is None
-    assert await _active_secrets(engine, user) == set()
+    assert await _active_secrets(engine, user) == spared
     await _assert_refused(engine, pair)
 
 
 @pytest.mark.parametrize("refreshed", _REFRESHED, ids=_REFRESHED_IDS)
+@pytest.mark.parametrize(("body", "spared"), _BODIES, ids=_BODY_IDS)
 async def test_rotation_of_the_cookie_racing_a_paused_both_transports_logout(
-    engine: AsyncEngine, refreshed: str
+    engine: AsyncEngine, body: str, spared: set[str], refreshed: str
 ) -> None:
     # The logout has locked both sessions and revoked the body token's when the
     # cookie's session is refreshed. Had the refresh not waited for it, it would
     # have minted a successor of the superseded cookie's chain (#3251).
     user = await _seed(engine)
+    await _seed_stranger(engine)
 
     async def logout(uow: SqlAlchemyUnitOfWork) -> None:
-        await _logout(uow)(refresh_token=_OTHER_DEVICE, superseded_token="current")
+        await _logout(uow)(refresh_token=body, superseded_token="current")
 
     async def rotate(uow: SqlAlchemyUnitOfWork) -> object:
         return await _refresh(uow)(refresh_token=refreshed)
@@ -555,4 +591,4 @@ async def test_rotation_of_the_cookie_racing_a_paused_both_transports_logout(
 
     assert logout_outcome is None
     assert isinstance(refresh_outcome, InvalidRefreshTokenError)
-    assert await _active_secrets(engine, user) == set()
+    assert await _active_secrets(engine, user) == spared
