@@ -155,10 +155,9 @@ class UserRepository(abc.ABC):
         2. the target's dependent rows: its session lock and refresh tokens (in
            the order :class:`RefreshTokenRepository` documents), then, for a
            delete, the row itself (``FOR UPDATE``) and its ``ON DELETE CASCADE``
-           rows. A
-           guard that must also lock rows of another context for the same
-           decision (the target's community ownership, #3217) takes them here,
-           after step 1.
+           rows. A guard that must also lock rows of another context for the
+           same decision (the target's community ownership, #3217) takes them
+           here, after step 1.
 
         One statement, not "admin set, then target": the target can become an
         admin in between, and a competing guard that locked it (a lower id)
