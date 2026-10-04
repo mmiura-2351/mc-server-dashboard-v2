@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { clearAccessToken, setAccessToken } from "../auth/tokenStore.ts";
+import {
+  advanceAuthEpoch,
+  clearAccessToken,
+  getAuthEpoch,
+  setAccessToken,
+} from "../auth/tokenStore.ts";
 import { ApiError, resetForTesting, setRefresher } from "./client.ts";
 import {
   DownloadTooLargeError,
@@ -190,6 +195,56 @@ describe("downloadFile", () => {
       expect(refresher).toHaveBeenCalledTimes(1);
       expect(fetchMock).toHaveBeenCalledTimes(2);
       expect(error).toBeInstanceOf(ApiError);
+      expect(error.status).toBe(401);
+      expect(clicks).toHaveLength(0);
+    });
+
+    // A 401 belongs to the session the download was sent under; the refresh
+    // and the retry must not act for a session that replaced it (#3224).
+    it("hands the refresher the epoch the download was sent in", async () => {
+      let respond: (r: Response) => void = () => {};
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(
+          () =>
+            new Promise<Response>((resolve) => {
+              respond = resolve;
+            }),
+        ),
+      );
+      const refresher = vi.fn(() => Promise.resolve(false));
+      setRefresher(refresher);
+      const sentEpoch = getAuthEpoch();
+
+      const pending = downloadFile(
+        "/api/communities/c1/servers/s1/export",
+        "out.zip",
+      ).catch(() => {});
+      advanceAuthEpoch();
+      respond(new Response(null, { status: 401 }));
+      await pending;
+
+      expect(refresher).toHaveBeenCalledWith(sentEpoch);
+    });
+
+    it("does not retry when the session changes after the refresh succeeds", async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue(new Response(null, { status: 401 }));
+      vi.stubGlobal("fetch", fetchMock);
+      setRefresher(
+        vi.fn(async () => {
+          queueMicrotask(advanceAuthEpoch);
+          return true;
+        }),
+      );
+
+      const error = await downloadFile(
+        "/api/communities/c1/servers/s1/export",
+        "out.zip",
+      ).catch((e) => e);
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(error.status).toBe(401);
       expect(clicks).toHaveLength(0);
     });

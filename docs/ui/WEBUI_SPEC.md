@@ -632,11 +632,13 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   revoked session). Transient failures — network errors, proxy 5xx, or garbled
   bodies — do not end the session; the original request surfaces its own error
   to the caller so the user can retry. Logout and sign-in each start a new
-  session epoch: a refresh or bootstrap response still in flight across that
-  boundary is discarded on arrival — it stores no token, triggers no retry, and
-  a rejection does not log out the newer session — and the single-flight mutex
-  is scoped to one epoch, so a late response for one user can never revive a
-  logged-out session or replace the next user's.
+  session epoch: a refresh or bootstrap result that crosses that boundary is
+  discarded wherever it would take effect — it stores no token, sets no session
+  status, and a rejection does not log out the newer session — a 401 retry
+  (REST, upload, download) happens only while the session the request was sent
+  under is still current, and the single-flight mutex is scoped to one epoch, so
+  a late response for one user can never revive a logged-out session, replace
+  the next user's, or replay a request under the next user's credentials.
 - WS connections carry the access token in the `Sec-WebSocket-Protocol`
   subprotocol header (`["access_token", "<jwt>"]`); on token
   rotation, sockets are reconnected (reconnect-on-rotate chosen). A socket

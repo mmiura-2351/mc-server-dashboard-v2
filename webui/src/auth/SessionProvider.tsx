@@ -30,6 +30,7 @@ import {
   setHardLogoutHandler,
   signIn as signInSession,
 } from "./session.ts";
+import { getAuthEpoch } from "./tokenStore.ts";
 
 export type SessionStatus = "bootstrapping" | "signed-in" | "signed-out";
 
@@ -92,10 +93,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   // Rotation stays on the in-session refresh path. The probe decides
   // signed-in vs signed-out — unless a sign-in or logout overtook it, in which
   // case that already set the status and the probe's result is stale (#3224).
+  // The epoch is re-checked here, where the status is applied, because the
+  // session can change after the result was computed but before this runs.
   useEffect(() => {
     let active = true;
+    const epoch = getAuthEpoch();
     restoreSession().then((result) => {
-      if (active && result !== "superseded") {
+      if (active && result !== "superseded" && epoch === getAuthEpoch()) {
         setStatus(result);
       }
     });

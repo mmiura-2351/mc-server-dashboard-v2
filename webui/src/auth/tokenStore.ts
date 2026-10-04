@@ -44,3 +44,23 @@ export function setAccessToken(token: string): void {
 export function clearAccessToken(): void {
   accessToken = null;
 }
+
+/**
+ * The authentication epoch: which local session the token belongs to. The
+ * session core advances it on logout and sign-in (`session.ts`). Anything that
+ * acts on an authentication result across an `await` — a refresh adopting a
+ * token, a refresh rejection logging out, a 401 retry, the bootstrap setting
+ * status — records the epoch it started in and acts only if it is still
+ * current at that moment, so a late result for one session never touches the
+ * next one (#3224).
+ */
+let authEpoch = 0;
+
+export function getAuthEpoch(): number {
+  return authEpoch;
+}
+
+/** Start a new authentication epoch. Only the session core calls this. */
+export function advanceAuthEpoch(): void {
+  authEpoch += 1;
+}

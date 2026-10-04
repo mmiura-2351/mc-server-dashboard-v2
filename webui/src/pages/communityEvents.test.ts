@@ -12,6 +12,7 @@ import {
 import {
   clearAccessToken,
   getAccessToken,
+  getAuthEpoch,
   setAccessToken,
 } from "../auth/tokenStore.ts";
 import { installMockWebSocket, MockWebSocket } from "../test/mockWebSocket.ts";
@@ -457,6 +458,21 @@ describe("CommunityEventsClient", () => {
     expect(getAccessToken()).toBe("tok-B");
     const offered = MockWebSocket.instances.map((s) => s.protocols);
     expect(offered).not.toContainEqual(["access_token", "late-tok-1"]);
+    client.close();
+  });
+
+  it("hands the refresher the epoch of the session whose token expired", async () => {
+    const refresher = vi.fn(async () => false);
+    setRefresher(refresher);
+    signIn("tok-A");
+    const { client } = makeClient();
+    client.start();
+    MockWebSocket.last().open();
+
+    MockWebSocket.last().serverClose(4419);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(refresher).toHaveBeenCalledWith(getAuthEpoch());
     client.close();
   });
 

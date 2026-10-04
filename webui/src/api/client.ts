@@ -19,7 +19,7 @@
  * and registered here, so the client does not depend on it.
  */
 
-import { getAccessToken } from "../auth/tokenStore.ts";
+import { getAccessToken, getAuthEpoch } from "../auth/tokenStore.ts";
 import type { paths } from "./schema";
 
 /** Paths that declare the given HTTP method in the generated schema. */
@@ -98,12 +98,16 @@ export class ApiError extends Error {
 }
 
 /**
- * The session layer registers a single-flight refresh here. It resolves true
- * when the access token was re-established and false on a hard logout, so the
- * client can decide whether to retry. Kept as an injected hook to avoid a
- * client -> session import cycle.
+ * The session layer registers a single-flight refresh here. It takes the
+ * authentication epoch the failed request was sent in and resolves true when
+ * that session's access token was re-established, false otherwise (a hard
+ * logout, a transient failure, or a session that has since ended), so the
+ * client can decide whether to retry. A true result is only valid in that
+ * epoch: callers re-check `getAuthEpoch()` in the same synchronous step as the
+ * retry, since the session can change while the result is being delivered
+ * (#3224). Kept as an injected hook to avoid a client -> session import cycle.
  */
-type Refresher = () => Promise<boolean>;
+type Refresher = (requestEpoch: number) => Promise<boolean>;
 let refresher: Refresher | null = null;
 
 export function setRefresher(fn: Refresher): void {
@@ -171,15 +175,19 @@ async function request<P extends keyof paths, M extends string>(
   const httpMethod = method.toUpperCase();
   const url = path as string;
 
+  // The session the request is sent under (rawRequest reads its token in this
+  // same synchronous step).
+  const epoch = getAuthEpoch();
   let response = await rawRequest(httpMethod, url, init);
 
   // Transparent refresh: a 401 from a non-auth endpoint means the access token
   // expired. Run the shared single-flight refresh and retry once. The
   // /api/auth/* endpoints surface their own 401s untouched (no refresh on the
-  // refresh).
+  // refresh). The retry happens only while the request's session is still
+  // current, so a request never replays under a different user (#3224).
   if (response.status === 401 && refresher !== null && !isAuthPath(url)) {
-    const refreshed = await refresher();
-    if (refreshed) {
+    const refreshed = await refresher(epoch);
+    if (refreshed && epoch === getAuthEpoch()) {
       response = await rawRequest(httpMethod, url, init);
     }
     // A 401 on the retried request (post-refresh) is intentionally surfaced as a
@@ -296,13 +304,15 @@ export async function postFormWithProgress<P extends PathsWith<"post">>(
   signal?: AbortSignal,
 ): Promise<JsonResponse<Op<P, "post">>> {
   const url = path as string;
+  const epoch = getAuthEpoch();
   let xhr = await sendForm(url, body, onProgress, signal);
 
   // Transparent refresh, mirroring `request`: a 401 from a non-auth endpoint
-  // means the access token expired — refresh once and retry the upload.
+  // means the access token expired — refresh once and retry the upload, only
+  // while the upload's session is still current.
   if (xhr.status === 401 && refresher !== null && !isAuthPath(url)) {
-    const refreshed = await refresher();
-    if (refreshed) {
+    const refreshed = await refresher(epoch);
+    if (refreshed && epoch === getAuthEpoch()) {
       xhr = await sendForm(url, body, onProgress, signal);
     }
   }

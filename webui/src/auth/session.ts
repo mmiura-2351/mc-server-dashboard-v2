@@ -11,7 +11,12 @@
  * sends it to these endpoints, and only when `credentials` are included.
  */
 
-import { clearAccessToken, setAccessToken } from "./tokenStore.ts";
+import {
+  advanceAuthEpoch,
+  clearAccessToken,
+  getAuthEpoch,
+  setAccessToken,
+} from "./tokenStore.ts";
 
 interface TokenResponse {
   access_token: string;
@@ -59,25 +64,19 @@ export type RefreshResult = {
   status: "ok" | "auth-rejected" | "transient" | "superseded";
 };
 
-/**
- * The authentication epoch: bumped whenever the local session ends (logout) or
- * a new one begins (sign-in). Every token-adopting request records the epoch it
- * started in and discards its result if the epoch has moved on by the time it
- * lands, so a late response for user A can neither revive A after logout nor
- * overwrite user B's session, and a late rejection cannot log B out (#3224).
- */
-let authEpoch = 0;
-
 /** The shared in-flight refresh, or null when none is running. */
 let inFlightRefresh: Promise<RefreshResult> | null = null;
 
 /**
- * Start a new authentication epoch. The in-flight refresh belongs to the old
- * one, so it is dropped: a caller in the new session starts its own refresh
- * instead of joining one whose outcome will be discarded.
+ * Start a new authentication epoch (`tokenStore.getAuthEpoch`): logout and
+ * sign-in call this, so a late response for user A can neither revive A after
+ * logout nor overwrite user B's session, and a late rejection cannot log B out
+ * (#3224). The in-flight refresh belongs to the old epoch, so it is dropped: a
+ * caller in the new session starts its own refresh instead of joining one
+ * whose outcome will be discarded.
  */
 function beginEpoch(): void {
-  authEpoch += 1;
+  advanceAuthEpoch();
   inFlightRefresh = null;
 }
 
@@ -131,9 +130,9 @@ async function requestRefresh(): Promise<RefreshOutcome> {
  * unless the session changed while it was in flight.
  */
 async function doRefresh(): Promise<RefreshResult> {
-  const epoch = authEpoch;
+  const epoch = getAuthEpoch();
   const outcome = await requestRefresh();
-  if (epoch !== authEpoch) {
+  if (epoch !== getAuthEpoch()) {
     return { status: "superseded" };
   }
   if (outcome.status === "ok") {
@@ -163,9 +162,9 @@ async function doRefresh(): Promise<RefreshResult> {
 export async function restoreSession(): Promise<
   "signed-in" | "signed-out" | "superseded"
 > {
-  const epoch = authEpoch;
+  const epoch = getAuthEpoch();
   const accessToken = await requestSessionToken();
-  if (epoch !== authEpoch) {
+  if (epoch !== getAuthEpoch()) {
     return "superseded";
   }
   if (accessToken === null) {
@@ -229,13 +228,25 @@ export function refreshSession(): Promise<RefreshResult> {
  * rejection (401/403) it drives a hard logout and reports false. On a
  * transient failure (network error, 5xx) it reports false WITHOUT logging out,
  * so the original request surfaces its own error and the session survives for
- * a later retry. On success it reports true to trigger a request retry. A
- * superseded refresh reports false and does nothing else: the request that
- * triggered it belonged to a session that no longer exists, so it must neither
- * be retried as the new user nor log the new user out.
+ * a later retry. On success it reports true to trigger a request retry.
+ *
+ * `requestEpoch` is the authentication epoch the failed request was sent in.
+ * If that session has ended — before the refresh, or at any point until its
+ * result is acted on here — it reports false and does nothing else: the
+ * request belonged to a session that no longer exists, so it must neither be
+ * retried as the new user nor log the new user out. The epoch is re-checked in
+ * the same synchronous step as the logout, because the result crosses `await`
+ * boundaries on its way back from the shared refresh (#3224). A true result is
+ * only valid in that epoch: the caller re-checks it right before retrying.
  */
-export async function refreshForRetry(): Promise<boolean> {
+export async function refreshForRetry(requestEpoch: number): Promise<boolean> {
+  if (requestEpoch !== getAuthEpoch()) {
+    return false;
+  }
   const { status } = await refreshSession();
+  if (requestEpoch !== getAuthEpoch()) {
+    return false;
+  }
   if (status === "auth-rejected") {
     hardLogout("expired");
   }

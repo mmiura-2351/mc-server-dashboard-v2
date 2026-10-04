@@ -15,6 +15,7 @@ import {
 import {
   clearAccessToken,
   getAccessToken,
+  getAuthEpoch,
   setAccessToken,
 } from "./tokenStore.ts";
 
@@ -214,7 +215,7 @@ describe("refreshForRetry", () => {
     setHardLogoutHandler(onLogout);
     setAccessToken("stale");
 
-    const ok = await refreshForRetry();
+    const ok = await refreshForRetry(getAuthEpoch());
 
     expect(ok).toBe(false);
     expect(getAccessToken()).toBeNull();
@@ -227,7 +228,7 @@ describe("refreshForRetry", () => {
     setHardLogoutHandler(onLogout);
     setAccessToken("stale");
 
-    const ok = await refreshForRetry();
+    const ok = await refreshForRetry(getAuthEpoch());
 
     expect(ok).toBe(false);
     expect(getAccessToken()).toBeNull();
@@ -240,7 +241,7 @@ describe("refreshForRetry", () => {
     setHardLogoutHandler(onLogout);
     setAccessToken("stale");
 
-    const ok = await refreshForRetry();
+    const ok = await refreshForRetry(getAuthEpoch());
 
     expect(ok).toBe(false);
     expect(onLogout).not.toHaveBeenCalled();
@@ -252,7 +253,7 @@ describe("refreshForRetry", () => {
     setHardLogoutHandler(onLogout);
     setAccessToken("stale");
 
-    const ok = await refreshForRetry();
+    const ok = await refreshForRetry(getAuthEpoch());
 
     expect(ok).toBe(false);
     expect(onLogout).not.toHaveBeenCalled();
@@ -264,7 +265,7 @@ describe("refreshForRetry", () => {
     setHardLogoutHandler(onLogout);
     setAccessToken("stale");
 
-    const ok = await refreshForRetry();
+    const ok = await refreshForRetry(getAuthEpoch());
 
     expect(ok).toBe(false);
     expect(onLogout).not.toHaveBeenCalled();
@@ -275,7 +276,7 @@ describe("refreshForRetry", () => {
     const onLogout = vi.fn();
     setHardLogoutHandler(onLogout);
 
-    const ok = await refreshForRetry();
+    const ok = await refreshForRetry(getAuthEpoch());
 
     expect(ok).toBe(true);
     expect(onLogout).not.toHaveBeenCalled();
@@ -412,7 +413,7 @@ describe("late authentication responses", () => {
     const onLogout = vi.fn();
     setHardLogoutHandler(onLogout);
     setAccessToken("session-A");
-    const retry = refreshForRetry();
+    const retry = refreshForRetry(getAuthEpoch());
 
     hardLogout();
     signIn("session-B");
@@ -427,7 +428,7 @@ describe("late authentication responses", () => {
   it("a successful refresh that lands after another user signs in asks for no retry", async () => {
     const pending = holdFetches();
     setAccessToken("session-A");
-    const retry = refreshForRetry();
+    const retry = refreshForRetry(getAuthEpoch());
 
     hardLogout();
     signIn("session-B");
@@ -471,4 +472,71 @@ describe("late authentication responses", () => {
     pending[1](tokenResponse("rotated-B"));
     await current;
   });
+
+  it("a retry for a request sent under an ended session does not refresh at all", async () => {
+    const onLogout = vi.fn();
+    setHardLogoutHandler(onLogout);
+    signIn("session-A");
+    const requestEpoch = getAuthEpoch();
+    signIn("session-B");
+    onLogout.mockClear();
+
+    expect(await refreshForRetry(requestEpoch)).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(onLogout).not.toHaveBeenCalled();
+  });
+});
+
+/** Let `n` microtasks run. */
+async function microtasks(n: number): Promise<void> {
+  for (let i = 0; i < n; i++) {
+    await Promise.resolve();
+  }
+}
+
+/**
+ * Every microtask count at which a session switch can land after the response
+ * arrived: before the result is computed, between computing it and the caller
+ * consuming it, and after.
+ */
+const SWITCH_POINTS = Array.from({ length: 12 }, (_, i) => i);
+
+// The response arrives first and the session changes only afterwards, at each
+// point while the result is still travelling back to the caller (#3224 review).
+describe("results consumed after the session changed", () => {
+  it.each(SWITCH_POINTS)(
+    "a refresh rejection never logs out a sign-in made %i microtasks after it arrived",
+    async (n) => {
+      const pending = holdFetches();
+      const onLogout = vi.fn();
+      setHardLogoutHandler(onLogout);
+      signIn("session-A");
+      const retry = refreshForRetry(getAuthEpoch());
+      pending[0](new Response("", { status: 401 }));
+
+      await microtasks(n);
+      const logoutsBeforeSwitch = onLogout.mock.calls.length;
+      signIn("session-B");
+      await retry;
+
+      expect(onLogout).toHaveBeenCalledTimes(logoutsBeforeSwitch);
+      expect(getAccessToken()).toBe("session-B");
+    },
+  );
+
+  it.each(SWITCH_POINTS)(
+    "a refresh success never replaces a sign-in made %i microtasks after it arrived",
+    async (n) => {
+      const pending = holdFetches();
+      signIn("session-A");
+      const retry = refreshForRetry(getAuthEpoch());
+      pending[0](tokenResponse("rotated-A"));
+
+      await microtasks(n);
+      signIn("session-B");
+      await retry;
+
+      expect(getAccessToken()).toBe("session-B");
+    },
+  );
 });

@@ -22,7 +22,11 @@
  */
 
 import { getRefresher } from "../api/client.ts";
-import { getAccessToken, onAccessTokenRotation } from "../auth/tokenStore.ts";
+import {
+  getAccessToken,
+  getAuthEpoch,
+  onAccessTokenRotation,
+} from "../auth/tokenStore.ts";
 
 /**
  * The close code the API sends when the access token a socket was opened with
@@ -161,9 +165,13 @@ export class EventsSocketClient {
   // reconnect-on-rotate, usually before this resumes. One that fails retries on
   // the backoff (each attempt refreshes again, never offering the expired
   // token); an auth-definitive failure hard-logs-out, which closes this client.
+  // The refresh is scoped to the session the expired token belonged to, so one
+  // that session outlives never logs a newer session out (#3224). No epoch
+  // re-check is needed before reconnecting: `connect` reads the current token,
+  // which only the current session can have set.
   private async refreshThenReconnect(): Promise<void> {
     const refresh = getRefresher();
-    const refreshed = refresh !== null && (await refresh());
+    const refreshed = refresh !== null && (await refresh(getAuthEpoch()));
     if (this.stopped || this.socket !== null || this.timer !== null) {
       return;
     }
