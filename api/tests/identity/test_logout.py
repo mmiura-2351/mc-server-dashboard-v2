@@ -132,6 +132,37 @@ async def test_logout_unknown_superseded_token_is_idempotent() -> None:
     assert "hash::never-issued" not in uow.refresh_tokens.by_hash
 
 
+async def test_logout_superseding_a_rotated_cookie_revokes_its_successor() -> None:
+    # The cookie's session was rotated by a refresh whose response is still in
+    # flight; the cookie's whole chain ends, so that successor cannot revive the
+    # session the browser just replaced (issue #3251).
+    uow = FakeUnitOfWork()
+    chain = RotationChainId.new()
+    rotated_at = _NOW - dt.timedelta(seconds=5)
+    _seed(uow, secret="body-token")
+    cookie_hash = _seed(
+        uow,
+        secret="cookie-token",
+        chain_id=chain,
+        revoked_at=rotated_at,
+        revoked_reason=REVOKED_ROTATED,
+    )
+    successor_hash = _seed(uow, secret="successor", chain_id=chain)
+
+    await _logout(uow)(refresh_token="body-token", superseded_token="cookie-token")
+
+    successor = uow.refresh_tokens.by_hash[successor_hash]
+    assert (successor.revoked_at, successor.revoked_reason) == (
+        _NOW,
+        REVOKED_SUPERSEDED,
+    )
+    cookie = uow.refresh_tokens.by_hash[cookie_hash]
+    assert (cookie.revoked_at, cookie.revoked_reason) == (
+        rotated_at,
+        REVOKED_SUPERSEDED,
+    )
+
+
 async def test_logout_with_a_rotated_token_revokes_its_successor() -> None:
     # The refresh that rotated ``old`` is still in flight when the browser logs
     # out with ``old``: the successor it minted must die with the session, or its

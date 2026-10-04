@@ -184,11 +184,15 @@ router — the security posture, not knobs.
   are present, the body token is used, and the cookie-carried token (a different
   token) is **revoked as superseded** — the browser jar is overwritten with the
   body token's successor, so the cookie token is held by no client and would
-  otherwise dangle valid server-side until its TTL. It is a
-  *single-token* revoke (`revoked_reason = 'superseded'`, never graced), so a
-  same-family successor just issued by the rotation is untouched. If the cookie
-  carried the *same* token as the body, or one that is already revoked / expired /
-  unknown, the revoke is a no-op and the request still succeeds.
+  otherwise dangle valid server-side until its TTL. The revocation is stamped
+  `revoked_reason = 'superseded'` (never graced). On refresh it is a
+  *single-token* revoke, so a same-family successor just issued by the rotation
+  is untouched, and a cookie token that is already revoked / expired is left
+  alone. On logout the cookie token's whole rotation chain is revoked, as the
+  body token's is (Section 4), so a successor that a rotation of the cookie is
+  still minting cannot outlive the logout. A cookie that carried the *same*
+  token as the body, or an unknown one, revokes nothing more, and the request
+  still succeeds.
 - **Cookie emission follows cookie *presence*, not which token was used.**
   Refresh re-sets (rotates) the cookie, and logout clears it,
   **only when the request itself carried the cookie**. A body-only request
@@ -419,9 +423,11 @@ logged-out user. Logout itself touches no other chain, so the user's other
 sessions stay signed in; re-presenting a token of the logged-out chain to
 `/auth/refresh` is a `logout`-revoked token in the table above, and that theft
 response does revoke them, while `/auth/session` answers it with a plain `401`.
-A rotation and a logout of the same chain serialize: a refresh that waited for a
-logout is refused, and a logout that waited for a refresh revokes the successor
-it minted.
+A rotation serializes with logout and with every bulk revocation of the user's
+sessions (password change, deactivation, account deletion, the theft response,
+"revoke all other sessions"): a refresh that waited for one reads its token as
+revoked and is refused as in the table above, and a revocation that waited for a
+refresh revokes the successor it minted.
 
 A *superseded* both-transports cookie token (Section 3) is treated differently:
 it was revoked because the body token won precedence, so no client holds it and it
@@ -580,7 +586,9 @@ refresh token; in that case the current session cannot be identified, so **all**
 the caller's active sessions are revoked. This is the safe choice — it never
 revokes another user's sessions, and a presented token is the only trustworthy way
 to know which row is "current". A Web UI calling this should send its current
-refresh token in the body to stay logged in on the device it is using.
+refresh token in the body to stay logged in on the device it is using. Only that
+row is spared: if the current session is refreshed concurrently, its new token
+is a different row and is revoked too (Section 4).
 
 ## 8. Related documents
 
