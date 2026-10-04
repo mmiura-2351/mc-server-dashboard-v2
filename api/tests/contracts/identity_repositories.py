@@ -7,7 +7,13 @@ from dataclasses import dataclass
 
 import pytest
 
-from mc_server_dashboard_api.identity.domain.entities import RefreshToken, User
+from mc_server_dashboard_api.identity.domain.entities import (
+    REVOKED_FAMILY,
+    REVOKED_LOGOUT,
+    REVOKED_ROTATED,
+    RefreshToken,
+    User,
+)
 from mc_server_dashboard_api.identity.domain.errors import (
     EmailAlreadyExistsError,
     UsernameAlreadyExistsError,
@@ -19,6 +25,7 @@ from mc_server_dashboard_api.identity.domain.repositories import (
 from mc_server_dashboard_api.identity.domain.value_objects import (
     EmailAddress,
     RefreshTokenId,
+    RotationChainId,
     UserId,
     Username,
 )
@@ -49,10 +56,12 @@ def _token(
     token_hash: str = "hash-1",
     *,
     user_id: UserId | None = None,
+    chain_id: RotationChainId | None = None,
 ) -> RefreshToken:
     return RefreshToken(
         id=RefreshTokenId.new(),
         user_id=user_id or harness.user_id,
+        chain_id=chain_id or RotationChainId.new(),
         token_hash=token_hash,
         issued_at=_NOW,
         expires_at=_NOW + dt.timedelta(days=30),
@@ -372,3 +381,63 @@ class RefreshTokenRepositoryContract:
         assert [row.id for row in relisted] == [target.id]
         assert relisted[0].expires_at == _NOW + dt.timedelta(days=30)
         assert missing is None
+
+    async def test_lock_chain_by_token_hash_reads_the_token(
+        self, refresh_token_repository_harness: RefreshTokenRepositoryHarness
+    ) -> None:
+        token = _token(refresh_token_repository_harness)
+        async with refresh_token_repository_harness.open() as transaction:
+            await transaction.repository.add(token)
+            await transaction.commit()
+
+        async with refresh_token_repository_harness.open() as transaction:
+            locked = await transaction.repository.lock_chain_by_token_hash("hash-1")
+            missing = await transaction.repository.lock_chain_by_token_hash("missing")
+
+        assert locked == token
+        assert missing is None
+
+    async def test_revoke_chain_ends_only_the_live_and_rotated_tokens_of_the_chain(
+        self, refresh_token_repository_harness: RefreshTokenRepositoryHarness
+    ) -> None:
+        harness = refresh_token_repository_harness
+        chain = RotationChainId.new()
+        earlier = _NOW - dt.timedelta(minutes=5)
+        async with harness.open() as transaction:
+            for token_hash in ("live", "rotated", "dead"):
+                await transaction.repository.add(
+                    _token(harness, token_hash, chain_id=chain)
+                )
+            await transaction.repository.add(_token(harness, "other-session"))
+            await transaction.commit()
+        async with harness.open() as transaction:
+            await transaction.repository.revoke(
+                "rotated", revoked_at=earlier, reason=REVOKED_ROTATED
+            )
+            await transaction.repository.revoke(
+                "dead", revoked_at=earlier, reason=REVOKED_FAMILY
+            )
+            await transaction.commit()
+
+        async with harness.open() as transaction:
+            await transaction.repository.revoke_chain(
+                chain, revoked_at=_NOW, reason=REVOKED_LOGOUT
+            )
+            await transaction.commit()
+
+        async with harness.open() as transaction:
+            states = {
+                token_hash: await transaction.repository.get_by_token_hash(token_hash)
+                for token_hash in ("live", "rotated", "dead", "other-session")
+            }
+        revocations = {
+            token_hash: (token.revoked_at, token.revoked_reason)
+            for token_hash, token in states.items()
+            if token is not None
+        }
+        assert revocations == {
+            "live": (_NOW, REVOKED_LOGOUT),
+            "rotated": (earlier, REVOKED_LOGOUT),
+            "dead": (earlier, REVOKED_FAMILY),
+            "other-session": (None, None),
+        }

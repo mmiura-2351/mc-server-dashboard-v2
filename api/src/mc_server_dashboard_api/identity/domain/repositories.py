@@ -14,6 +14,7 @@ from mc_server_dashboard_api.identity.domain.entities import RefreshToken, User
 from mc_server_dashboard_api.identity.domain.value_objects import (
     EmailAddress,
     RefreshTokenId,
+    RotationChainId,
     UserId,
     Username,
 )
@@ -186,6 +187,17 @@ class RefreshTokenRepository(abc.ABC):
         """Return the token with ``token_hash``, or ``None`` if absent."""
 
     @abc.abstractmethod
+    async def lock_chain_by_token_hash(self, token_hash: str) -> RefreshToken | None:
+        """Lock the rotation chain of ``token_hash``, then return the token.
+
+        The lock is held until the transaction ends, so a rotation and a logout
+        of one chain serialize (issue #3249): whichever comes second waits for
+        the first to commit and then reads the token as the first left it -- a
+        rotation sees a logged-out token, a logout sees every successor the
+        rotation minted. ``None`` if no such token exists (nothing is locked).
+        """
+
+    @abc.abstractmethod
     async def revoke(
         self, token_hash: str, *, revoked_at: dt.datetime, reason: str
     ) -> None:
@@ -194,6 +206,20 @@ class RefreshTokenRepository(abc.ABC):
         ``reason`` records *why* (a ``REVOKED_*`` code) so the reuse grace window
         can grace only ``rotated`` predecessors (issue #369). A no-op if no such
         row exists; callers establish existence first.
+        """
+
+    @abc.abstractmethod
+    async def revoke_chain(
+        self, chain_id: RotationChainId, *, revoked_at: dt.datetime, reason: str
+    ) -> None:
+        """Revoke every still-active token of the rotation chain ``chain_id``.
+
+        Ends one sign-in session as a whole, including a successor minted by a
+        rotation whose response has not reached the client yet (issue #3249);
+        the user's other chains are untouched. Like :meth:`revoke_all_for_user`
+        it also re-stamps the chain's ``'rotated'`` predecessors to ``reason``,
+        preserving their ``revoked_at``, so none stays graceable in the reuse
+        window. Tokens revoked for another cause keep it.
         """
 
     @abc.abstractmethod

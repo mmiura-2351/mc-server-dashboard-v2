@@ -51,6 +51,7 @@ from mc_server_dashboard_api.identity.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.identity.domain.value_objects import (
     EmailAddress,
     RefreshTokenId,
+    RotationChainId,
     UserId,
     Username,
 )
@@ -231,6 +232,25 @@ class FakeRefreshTokenRepository(RefreshTokenRepository):
         token = self.by_hash.get(token_hash)
         return None if token is None else self._copy(token)
 
+    async def lock_chain_by_token_hash(self, token_hash: str) -> RefreshToken | None:
+        # Single-threaded in-memory state: there is no competitor to serialize
+        # with, so the lock is the read.
+        return await self.get_by_token_hash(token_hash)
+
+    async def revoke_chain(
+        self, chain_id: RotationChainId, *, revoked_at: dt.datetime, reason: str
+    ) -> None:
+        for token_hash, token in list(self.by_hash.items()):
+            if token.chain_id != chain_id:
+                continue
+            if token.revoked_at is None:
+                self.by_hash[token_hash] = _with_revoked(token, revoked_at, reason)
+            elif token.revoked_reason == REVOKED_ROTATED:
+                # COALESCE semantics: keep the rotation time, drop the grace.
+                self.by_hash[token_hash] = _with_revoked(
+                    token, token.revoked_at, reason
+                )
+
     async def revoke(
         self, token_hash: str, *, revoked_at: dt.datetime, reason: str
     ) -> None:
@@ -317,6 +337,7 @@ def _with_revoked(
     return RefreshToken(
         id=token.id,
         user_id=token.user_id,
+        chain_id=token.chain_id,
         token_hash=token.token_hash,
         issued_at=token.issued_at,
         expires_at=token.expires_at,

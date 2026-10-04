@@ -1,10 +1,17 @@
-"""Logout use case: revoke the presented refresh token (FR-AUTH-3).
+"""Logout use case: end the presented refresh token's session (FR-AUTH-3).
 
-Hashes the presented secret and revokes the matching row so the session can no
-longer be refreshed. Logout is idempotent and does not leak whether the token
-existed: an unknown or already-revoked token is accepted silently (no enumeration
-signal). Access tokens are short-lived and not persisted, so nothing else needs
-revoking here.
+Hashes the presented secret and revokes the matching token's whole rotation
+chain -- the sign-in session it belongs to -- so no token of that session can be
+refreshed any more. Revoking only the presented token left a successor valid when
+a refresh had rotated it but its response was still in flight: the late
+``Set-Cookie`` then installed a live session in a browser that had logged out,
+over the next user's cookie (issue #3249). The chain lock serializes logout with
+a rotation of the same chain, so a successor still being minted is revoked too.
+The user's other sessions (other chains) are untouched.
+
+Logout is idempotent and does not leak whether the token existed: an unknown or
+already-revoked token is accepted silently (no enumeration signal). Access tokens
+are short-lived and not persisted, so nothing else needs revoking here.
 """
 
 from __future__ import annotations
@@ -34,9 +41,11 @@ class Logout:
         now = self.clock.now()
         token_hash = self.tokens.hash_refresh_token(refresh_token)
         async with self.uow:
-            await self.uow.refresh_tokens.revoke(
-                token_hash, revoked_at=now, reason=REVOKED_LOGOUT
-            )
+            stored = await self.uow.refresh_tokens.lock_chain_by_token_hash(token_hash)
+            if stored is not None:
+                await self.uow.refresh_tokens.revoke_chain(
+                    stored.chain_id, revoked_at=now, reason=REVOKED_LOGOUT
+                )
             # Both-transports logout: the body token wins, but the cookie-carried
             # token must be revoked too, otherwise it stays valid server-side while
             # the browser jar already overwrote it -- a dangling session no client

@@ -35,6 +35,7 @@ from mc_server_dashboard_api.identity.domain.errors import (
 from mc_server_dashboard_api.identity.domain.value_objects import (
     EmailAddress,
     RefreshTokenId,
+    RotationChainId,
     UserId,
     Username,
 )
@@ -174,6 +175,7 @@ async def test_add_refresh_token_and_read_back(engine: AsyncEngine) -> None:
     token = RefreshToken(
         id=RefreshTokenId.new(),
         user_id=user.id,
+        chain_id=RotationChainId.new(),
         token_hash="hashed-token",
         issued_at=_NOW,
         expires_at=_NOW + dt.timedelta(days=30),
@@ -203,6 +205,7 @@ async def test_revoke_marks_token_revoked(engine: AsyncEngine) -> None:
     token = RefreshToken(
         id=RefreshTokenId.new(),
         user_id=user.id,
+        chain_id=RotationChainId.new(),
         token_hash="to-revoke",
         issued_at=_NOW,
         expires_at=_NOW + dt.timedelta(days=30),
@@ -240,6 +243,7 @@ async def test_revoke_all_for_user_revokes_only_active_tokens(
     active = RefreshToken(
         id=RefreshTokenId.new(),
         user_id=user.id,
+        chain_id=RotationChainId.new(),
         token_hash="active",
         issued_at=_NOW,
         expires_at=_NOW + dt.timedelta(days=30),
@@ -247,6 +251,7 @@ async def test_revoke_all_for_user_revokes_only_active_tokens(
     revoked = RefreshToken(
         id=RefreshTokenId.new(),
         user_id=user.id,
+        chain_id=RotationChainId.new(),
         token_hash="revoked",
         issued_at=_NOW,
         expires_at=_NOW + dt.timedelta(days=30),
@@ -287,6 +292,7 @@ async def test_revoke_all_for_user_restamps_rotated_preserving_revoked_at(
     active = RefreshToken(
         id=RefreshTokenId.new(),
         user_id=user.id,
+        chain_id=RotationChainId.new(),
         token_hash="active",
         issued_at=_NOW,
         expires_at=_NOW + dt.timedelta(days=30),
@@ -294,6 +300,7 @@ async def test_revoke_all_for_user_restamps_rotated_preserving_revoked_at(
     rotated = RefreshToken(
         id=RefreshTokenId.new(),
         user_id=user.id,
+        chain_id=RotationChainId.new(),
         token_hash="rotated",
         issued_at=_NOW,
         expires_at=_NOW + dt.timedelta(days=30),
@@ -301,6 +308,7 @@ async def test_revoke_all_for_user_restamps_rotated_preserving_revoked_at(
     superseded = RefreshToken(
         id=RefreshTokenId.new(),
         user_id=user.id,
+        chain_id=RotationChainId.new(),
         token_hash="superseded",
         issued_at=_NOW,
         expires_at=_NOW + dt.timedelta(days=30),
@@ -361,6 +369,7 @@ def _token(
     return RefreshToken(
         id=RefreshTokenId.new(),
         user_id=user_id,
+        chain_id=RotationChainId.new(),
         token_hash=token_hash,
         issued_at=issued_at,
         expires_at=expires_at or (_NOW + dt.timedelta(days=30)),
@@ -495,6 +504,7 @@ async def test_revoke_all_for_user_except_restamps_rotated_preserving_revoked_at
     kept = RefreshToken(
         id=RefreshTokenId.new(),
         user_id=alice.id,
+        chain_id=RotationChainId.new(),
         token_hash="kept",
         issued_at=_NOW,
         expires_at=_NOW + dt.timedelta(days=30),
@@ -502,6 +512,7 @@ async def test_revoke_all_for_user_except_restamps_rotated_preserving_revoked_at
     active_other = RefreshToken(
         id=RefreshTokenId.new(),
         user_id=alice.id,
+        chain_id=RotationChainId.new(),
         token_hash="active-other",
         issued_at=_NOW,
         expires_at=_NOW + dt.timedelta(days=30),
@@ -509,6 +520,7 @@ async def test_revoke_all_for_user_except_restamps_rotated_preserving_revoked_at
     rotated = RefreshToken(
         id=RefreshTokenId.new(),
         user_id=alice.id,
+        chain_id=RotationChainId.new(),
         token_hash="rotated",
         issued_at=_NOW,
         expires_at=_NOW + dt.timedelta(days=30),
@@ -516,6 +528,7 @@ async def test_revoke_all_for_user_except_restamps_rotated_preserving_revoked_at
     superseded = RefreshToken(
         id=RefreshTokenId.new(),
         user_id=alice.id,
+        chain_id=RotationChainId.new(),
         token_hash="superseded",
         issued_at=_NOW,
         expires_at=_NOW + dt.timedelta(days=30),
@@ -523,6 +536,7 @@ async def test_revoke_all_for_user_except_restamps_rotated_preserving_revoked_at
     bobs = RefreshToken(
         id=RefreshTokenId.new(),
         user_id=bob.id,
+        chain_id=RotationChainId.new(),
         token_hash="bobs",
         issued_at=_NOW,
         expires_at=_NOW + dt.timedelta(days=30),
@@ -592,6 +606,7 @@ async def test_deleting_user_cascades_to_refresh_tokens(
     token = RefreshToken(
         id=RefreshTokenId.new(),
         user_id=user.id,
+        chain_id=RotationChainId.new(),
         token_hash="hashed-token",
         issued_at=_NOW,
         expires_at=_NOW + dt.timedelta(days=30),
@@ -683,6 +698,7 @@ async def test_delete_cascades_to_membership_grant_and_token(
     token = RefreshToken(
         id=RefreshTokenId.new(),
         user_id=user.id,
+        chain_id=RotationChainId.new(),
         token_hash="hashed-token",
         issued_at=_NOW,
         expires_at=_NOW + dt.timedelta(days=30),

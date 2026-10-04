@@ -22,6 +22,7 @@ from mc_server_dashboard_api.identity.domain.errors import (
 )
 from mc_server_dashboard_api.identity.domain.value_objects import (
     RefreshTokenId,
+    RotationChainId,
     UserId,
 )
 from tests.identity.fakes import (
@@ -46,6 +47,7 @@ def _active_token(user_id: UserId) -> RefreshToken:
     return RefreshToken(
         id=RefreshTokenId.new(),
         user_id=user_id,
+        chain_id=RotationChainId.new(),
         token_hash=f"hash::{user_id.value}",
         issued_at=_NOW,
         expires_at=_NOW + dt.timedelta(days=14),

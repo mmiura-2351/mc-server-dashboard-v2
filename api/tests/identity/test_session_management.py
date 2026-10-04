@@ -30,6 +30,7 @@ from mc_server_dashboard_api.identity.domain.entities import (
 from mc_server_dashboard_api.identity.domain.errors import RefreshTokenReuseError
 from mc_server_dashboard_api.identity.domain.value_objects import (
     RefreshTokenId,
+    RotationChainId,
     UserId,
 )
 from tests.identity.fakes import FakeClock, FakeTokenService, FakeUnitOfWork
@@ -51,6 +52,7 @@ def _token(
     return RefreshToken(
         id=token_id or RefreshTokenId.new(),
         user_id=user_id,
+        chain_id=RotationChainId.new(),
         token_hash=f"hash::{secret}",
         issued_at=issued_at,
         expires_at=expires_at or (issued_at + _TTL),

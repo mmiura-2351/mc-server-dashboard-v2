@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from mc_server_dashboard_api.identity.domain.value_objects import (
     EmailAddress,
     RefreshTokenId,
+    RotationChainId,
     UserId,
     Username,
 )
@@ -80,10 +81,14 @@ class RefreshToken:
     unrevoked and unexpired; :meth:`is_active` encodes exactly that rule.
     ``revoked_reason`` records *why* a revoked token was revoked (one of the
     ``REVOKED_*`` codes); it is ``None`` exactly when ``revoked_at`` is ``None``.
+    ``chain_id`` names the sign-in session the token belongs to: login starts a
+    chain and every rotation's successor inherits it, so logout can end the whole
+    session, successors included (#3249).
     """
 
     id: RefreshTokenId
     user_id: UserId
+    chain_id: RotationChainId
     token_hash: str
     issued_at: dt.datetime
     expires_at: dt.datetime

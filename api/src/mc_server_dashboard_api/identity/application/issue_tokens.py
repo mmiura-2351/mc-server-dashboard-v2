@@ -16,6 +16,7 @@ from mc_server_dashboard_api.identity.domain.token_service import TokenService
 from mc_server_dashboard_api.identity.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.identity.domain.value_objects import (
     RefreshTokenId,
+    RotationChainId,
     UserId,
 )
 
@@ -25,10 +26,15 @@ async def issue_token_pair(
     uow: UnitOfWork,
     tokens: TokenService,
     user_id: UserId,
+    chain_id: RotationChainId,
     now: dt.datetime,
     refresh_ttl: dt.timedelta,
 ) -> TokenPair:
-    """Mint a pair, stage the refresh row in ``uow``, and return the plaintext."""
+    """Mint a pair, stage the refresh row in ``uow``, and return the plaintext.
+
+    ``chain_id`` is the rotation chain the new refresh token joins: a fresh one
+    for a login, the presented token's for a rotation.
+    """
 
     access = tokens.issue_access_token(user_id)
     issued = tokens.issue_refresh_token()
@@ -36,6 +42,7 @@ async def issue_token_pair(
         RefreshToken(
             id=RefreshTokenId.new(),
             user_id=user_id,
+            chain_id=chain_id,
             token_hash=issued.token_hash,
             issued_at=now,
             expires_at=now + refresh_ttl,

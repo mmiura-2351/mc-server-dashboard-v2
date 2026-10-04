@@ -195,15 +195,36 @@ revocation/expiry record.
 |---|---|---|
 | `id` | uuid PK | |
 | `user_id` | uuid FK → `user.id` | `ON DELETE CASCADE` |
+| `chain_id` | uuid | the **rotation chain** (one sign-in session): login starts a new chain, and every rotation's successor inherits the presented token's. Not a foreign key — the chain has no row of its own |
 | `token_hash` | text | the token is stored **hashed**, never in plaintext |
 | `issued_at` | timestamptz | |
 | `expires_at` | timestamptz | |
 | `revoked_at` | timestamptz nullable | set on logout; non-null ⇒ invalid |
 | `revoked_reason` | text nullable | why revoked (`rotated` / `family` / `logout` / `user_revoked` / `superseded`); null exactly when `revoked_at` is null. **No CHECK constraint** — unlike other enum-like columns (Section 2), this column is a plain `text` validated in application code, a bare `String` column. The null-exactly-when pairing is an application invariant, not a DB constraint |
 
-Constraints: `UNIQUE(token_hash)`. Index on `(user_id)` for "revoke all sessions"
-and a partial index on `expires_at` for expiry sweeps. A token is valid iff
-`revoked_at IS NULL AND expires_at > now()`.
+Constraints: `UNIQUE(token_hash)`. Index on `(user_id)` for "revoke all sessions",
+an index on `(chain_id)` for logout, and a partial index on `expires_at` for
+expiry sweeps. A token is valid iff `revoked_at IS NULL AND expires_at > now()`.
+
+Logout revokes the presented token's whole chain, not just that token: a refresh
+rotated while its response was still in flight would otherwise leave a valid
+successor whose late `Set-Cookie` revives the session in a browser that logged
+out (AUTH_API.md Section 4). The user's other chains are untouched. A rotation
+and a logout of the same chain serialize on a transaction-scoped advisory lock
+keyed by `chain_id` — a row lock cannot, because the successor is a new row the
+logout's `UPDATE` would not see — so a successor still being minted is revoked
+too.
+
+Tokens issued before the column existed carry no record of which token was
+rotated from which, so a rotated predecessor and its live successor look like two
+separate sign-ins. Migration `0040_refresh_token_chain` therefore puts each
+user's pre-upgrade tokens into one shared **legacy chain** (an id derived from
+`user_id`) rather than one chain per row, which would split a rotation spanning
+the upgrade and let its successor survive a logout. A logout of any legacy
+session thus revokes all of that user's legacy sessions — failing closed.
+Rotations inherit the legacy chain, so the coupling lasts until the user's legacy
+sessions end and they sign in afresh; sessions started after the upgrade have
+chains of their own.
 
 `revoked_reason` records the *cause* so the refresh-token reuse grace window
 (AUTH_API.md Section 4) can grace only a `rotated` predecessor (a legitimate

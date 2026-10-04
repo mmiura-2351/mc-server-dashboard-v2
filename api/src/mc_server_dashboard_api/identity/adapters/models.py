@@ -63,6 +63,8 @@ class RefreshTokenModel(Base):
     __table_args__ = (
         # "Revoke all sessions" for a user (DATABASE.md Section 4).
         Index("ix_refresh_token_user_id", "user_id"),
+        # Logout revokes the presented token's whole rotation chain (#3249).
+        Index("ix_refresh_token_chain_id", "chain_id"),
         # Expiry sweeps over still-live tokens (DATABASE.md Section 4).
         Index(
             "ix_refresh_token_expires_at",
@@ -77,6 +79,7 @@ class RefreshTokenModel(Base):
         ForeignKey("user.id", ondelete="CASCADE"),
         nullable=False,
     )
+    chain_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     token_hash: Mapped[str] = mapped_column(String, nullable=False, unique=True)
     issued_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False

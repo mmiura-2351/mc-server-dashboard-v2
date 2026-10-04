@@ -31,6 +31,7 @@ from mc_server_dashboard_api.identity.adapters.password_hasher import (
 from mc_server_dashboard_api.identity.adapters.token_service import JwtTokenService
 from mc_server_dashboard_api.identity.adapters.unit_of_work import SqlAlchemyUnitOfWork
 from mc_server_dashboard_api.identity.application.login import Login
+from mc_server_dashboard_api.identity.application.logout import Logout
 from mc_server_dashboard_api.identity.application.refresh_session import RefreshSession
 from mc_server_dashboard_api.identity.application.restore_session import RestoreSession
 from mc_server_dashboard_api.identity.domain.entities import User
@@ -153,6 +154,55 @@ async def test_login_then_rotate_then_reuse(engine: AsyncEngine) -> None:
     # attacker auto-refreshing within the window escaped the family revoke.
     with pytest.raises(InvalidRefreshTokenError):
         await refresh(refresh_token=rotated.refresh_token)
+
+
+async def test_logout_with_a_rotated_cookie_kills_the_undelivered_successor(
+    engine: AsyncEngine,
+) -> None:
+    # Issue #3249: a refresh rotated the session but its response is still in
+    # flight when the browser logs out with the old cookie. The successor that
+    # response carries must be dead on arrival -- its late Set-Cookie would
+    # otherwise sign the browser's next user in as this one -- while the user's
+    # other sign-in stays alive.
+    await _seed_user(engine)
+    factory = create_session_factory(engine)
+    login = Login(
+        uow=SqlAlchemyUnitOfWork(factory),
+        attempts=SqlAlchemyLoginAttemptStore(factory),
+        brute_force=make_brute_force_config(),
+        hasher=Argon2PasswordHasher(),
+        dummy_password_hash=_DUMMY_HASH,
+        tokens=_tokens(),
+        clock=SystemClock(),
+        failure_delay=FixedLoginFailureDelay(
+            delay=dt.timedelta(), sleeper=RecordingSleeper()
+        ),
+        refresh_ttl=_REFRESH_TTL,
+    )
+    browser = (await login(username="alice", password=_PASSWORD)).pair
+    other_device = (await login(username="alice", password=_PASSWORD)).pair
+    refresh = RefreshSession(
+        uow=SqlAlchemyUnitOfWork(factory),
+        tokens=_tokens(),
+        clock=SystemClock(),
+        refresh_ttl=_REFRESH_TTL,
+        reuse_grace=_REUSE_GRACE,
+    )
+    restore = RestoreSession(
+        uow=SqlAlchemyUnitOfWork(factory), tokens=_tokens(), clock=SystemClock()
+    )
+    logout = Logout(
+        uow=SqlAlchemyUnitOfWork(factory), tokens=_tokens(), clock=SystemClock()
+    )
+    in_flight = await refresh(refresh_token=browser.refresh_token)
+
+    await logout(refresh_token=browser.refresh_token)
+
+    with pytest.raises(InvalidRefreshTokenError):
+        await restore(refresh_token=in_flight.refresh_token)
+    await restore(refresh_token=other_device.refresh_token)
+    with pytest.raises(InvalidRefreshTokenError):
+        await refresh(refresh_token=in_flight.refresh_token)
 
 
 async def test_both_transports_refresh_revokes_superseded_cookie_token(
