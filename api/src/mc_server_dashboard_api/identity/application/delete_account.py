@@ -67,19 +67,16 @@ class DeleteAccount:
             raise CommunityOwnedError(str(user_id.value))
 
         async with self.uow:
-            user = await self.uow.users.get_by_id(user_id)
-            if user is None:
-                raise UserNotFoundError(str(user_id.value))
             # The invariant counts ACTIVE admins only (issue #278): a deactivated
             # admin cannot act, so it does not keep the platform administrable.
-            # The self-deleting user is itself active (it passed get_current_user),
-            # so a count of 1 means it is the last active admin. lock_active_*
-            # takes a FOR UPDATE lock so concurrent last-two-admin self-deletes
-            # serialize and exactly one wins (#260); only this admin path locks.
-            if (
-                user.is_platform_admin
-                and await self.uow.users.lock_active_platform_admins() <= 1
-            ):
+            # Decide from the account as locked with the active admins, so a
+            # concurrent grant, deactivation or removal either commits first and
+            # is seen, or waits for this delete (#260, #3239); an account
+            # deactivated since it authenticated no longer counts.
+            user, active_admins = await self.uow.users.lock_with_active_admins(user_id)
+            if user is None:
+                raise UserNotFoundError(str(user_id.value))
+            if user.is_platform_admin and user.active and active_admins <= 1:
                 raise LastPlatformAdminError(str(user_id.value))
 
             await self.uow.refresh_tokens.revoke_all_for_user(

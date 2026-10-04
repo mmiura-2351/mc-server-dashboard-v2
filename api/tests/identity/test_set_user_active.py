@@ -118,6 +118,20 @@ async def test_deactivate_admin_locks_active_admins() -> None:
     assert uow.users.lock_calls == 1
 
 
+async def test_deactivate_non_admin_locks_active_admins() -> None:
+    # The guard decides from the target as locked with the admin set (#3239):
+    # an unlocked read of "not an admin" may be stale by the time it writes.
+    admin = make_user(username="admin", is_platform_admin=True)
+    target = make_user(username="bob", email="bob@example.com")
+    uow = FakeUnitOfWork()
+    uow.users.seed(admin)
+    uow.users.seed(target)
+
+    await _use_case(uow)(actor_id=admin.id, target_id=target.id, active=False)
+
+    assert uow.users.lock_calls == 1
+
+
 async def test_reactivate_does_not_lock_active_admins() -> None:
     # Reactivation never reduces the active-admin set, so it stays lock-free (#260).
     admin = make_user(username="admin", is_platform_admin=True)

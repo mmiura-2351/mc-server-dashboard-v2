@@ -135,17 +135,42 @@ class UserRepository(abc.ABC):
         """
 
     @abc.abstractmethod
-    async def lock_active_platform_admins(self) -> int:
-        """Lock the active-admin rows ``FOR UPDATE`` and return their count (#260).
+    async def lock_with_active_admins(self, user_id: UserId) -> tuple[User | None, int]:
+        """Lock ``user_id``'s row with the active admins'; return it and their count.
 
-        Like :meth:`count_active_platform_admins`, but takes a row lock on the
-        matched ``user`` rows inside the caller's transaction. Concurrent guards
-        that reduce the active-admin set (last-admin self-delete / deactivate /
-        revoke) therefore serialize on the same rows: the second transaction
-        blocks until the first commits, then re-counts the now-decremented set
-        and refuses. Callers invoke it only on paths that reduce the set, so
-        non-reducing hot paths (grant, reactivate, non-admin delete) stay
-        lock-free.
+        Returns the target as locked (``None`` if absent) and the number of
+        active platform admins among the locked rows, the target included when
+        it is one. Every guard of the at-least-one-active-admin invariant (#260)
+        -- deactivate, revoke, admin delete, self delete -- decides from this
+        result, never from an earlier unlocked read: the target can be granted
+        admin, or deactivated, between such a read and the write (#3239).
+
+        Lock order, the same for every caller:
+
+        1. ``user`` rows: the active platform admins and the target, in one
+           statement, in ascending id order, ``FOR NO KEY UPDATE``, before any
+           other lock in the transaction;
+        2. the target's dependent rows: its refresh tokens, then, for a delete,
+           the row itself (``FOR UPDATE``) and its ``ON DELETE CASCADE`` rows. A
+           guard that must also lock rows of another context for the same
+           decision (the target's community ownership, #3217) takes them here,
+           after step 1.
+
+        One statement, not "admin set, then target": the target can become an
+        admin in between, and a competing guard that locked it (a lower id)
+        first would then wait on the admin rows held here while this waits on
+        the target. ``FOR NO KEY UPDATE`` serializes the guards with each other
+        and with every write of these rows (an UPDATE takes it, a DELETE takes
+        ``FOR UPDATE``), but not with the ``FOR KEY SHARE`` a foreign-key check
+        takes when a row referencing the user is inserted: such an insert does
+        not touch the invariant, and a token rotation that holds its old token
+        row would otherwise deadlock with the guard revoking that token.
+
+        Only the locked rows are counted, and each stays an active admin until
+        the caller's transaction ends; an admin granted while the statement
+        waited is not seen, which can only refuse, never allow, a removal.
+        Grant and reactivation never reduce the set and take no lock beyond
+        their own row's UPDATE, which waits for a guard holding that row.
         """
 
 

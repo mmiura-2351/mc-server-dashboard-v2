@@ -48,17 +48,15 @@ class AdminDeleteUser:
             raise CommunityOwnedError(str(target_id.value))
 
         async with self.uow:
-            user = await self.uow.users.get_by_id(target_id)
+            # Decide from the target as locked with the active admins, so a
+            # concurrent grant, deactivation or removal either commits first and
+            # is seen, or waits for this delete (#260, #3239).
+            user, active_admins = await self.uow.users.lock_with_active_admins(
+                target_id
+            )
             if user is None:
                 raise UserNotFoundError(str(target_id.value))
-            # Deleting an active admin reduces the set, so take a FOR UPDATE lock
-            # so concurrent last-two-admin deletes serialize and exactly one wins
-            # (#260); deleting a non-admin or inactive user stays lock-free.
-            if (
-                user.is_platform_admin
-                and user.active
-                and await self.uow.users.lock_active_platform_admins() <= 1
-            ):
+            if user.is_platform_admin and user.active and active_admins <= 1:
                 raise LastPlatformAdminError(str(target_id.value))
 
             await self.uow.refresh_tokens.revoke_all_for_user(

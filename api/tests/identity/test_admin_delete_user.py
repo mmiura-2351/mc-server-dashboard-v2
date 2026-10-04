@@ -145,9 +145,9 @@ async def test_delete_admin_locks_active_admins() -> None:
     assert uow.users.lock_calls == 1
 
 
-async def test_delete_non_admin_does_not_lock_active_admins() -> None:
-    # Deleting a non-admin never reduces the active-admin set, so it stays
-    # lock-free (#260).
+async def test_delete_non_admin_locks_active_admins() -> None:
+    # The guard decides from the target as locked with the admin set (#3239):
+    # an unlocked read of "not an admin" may be stale by the time it writes.
     admin = make_user(username="admin", is_platform_admin=True)
     target = make_user(username="bob", email="bob@example.com")
     uow = FakeUnitOfWork()
@@ -158,7 +158,7 @@ async def test_delete_non_admin_does_not_lock_active_admins() -> None:
         actor_id=admin.id, target_id=target.id
     )
 
-    assert uow.users.lock_calls == 0
+    assert uow.users.lock_calls == 1
 
 
 async def test_unknown_target_raises() -> None:
