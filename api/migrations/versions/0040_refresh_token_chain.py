@@ -15,8 +15,9 @@ separate sign-ins. Giving each row its own chain would split a rotation that
 spans the upgrade, and a logout with the predecessor would leave the successor
 valid. Instead each user's pre-upgrade tokens share one *legacy chain*, derived
 from the user id: a logout of any legacy session revokes all of that user's
-legacy sessions. That fails closed, and only for users who log out before their
-legacy tokens expire; sessions started after the upgrade get chains of their own.
+legacy sessions. That fails closed. Rotations inherit the legacy chain, so the
+coupling lasts until the user's legacy sessions end and they sign in afresh;
+sessions started after the upgrade get chains of their own.
 
 Downgrade drops the index and the column.
 

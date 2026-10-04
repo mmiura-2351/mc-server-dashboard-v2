@@ -221,9 +221,10 @@ separate sign-ins. Migration `0040_refresh_token_chain` therefore puts each
 user's pre-upgrade tokens into one shared **legacy chain** (an id derived from
 `user_id`) rather than one chain per row, which would split a rotation spanning
 the upgrade and let its successor survive a logout. A logout of any legacy
-session thus revokes all of that user's legacy sessions — failing closed, and
-only until those tokens expire; sessions started after the upgrade have chains
-of their own.
+session thus revokes all of that user's legacy sessions — failing closed.
+Rotations inherit the legacy chain, so the coupling lasts until the user's legacy
+sessions end and they sign in afresh; sessions started after the upgrade have
+chains of their own.
 
 `revoked_reason` records the *cause* so the refresh-token reuse grace window
 (AUTH_API.md Section 4) can grace only a `rotated` predecessor (a legitimate
