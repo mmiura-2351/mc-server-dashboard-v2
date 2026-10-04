@@ -9,6 +9,8 @@ framework-free domain entities here.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import uuid
 from typing import Any, cast
 
 from sqlalchemy import (
@@ -53,6 +55,20 @@ from mc_server_dashboard_api.identity.domain.value_objects import (
 # (not a hashed id) because there is a single global bootstrap, not one per
 # resource; an arbitrary but stable value distinct from other subsystems' keys.
 _BOOTSTRAP_LOCK_KEY = 0x6D63_7364_0001
+_CHAIN_LOCK_NAMESPACE = "mcsd:refresh-token-chain"
+
+
+def _chain_lock_key(chain_id: uuid.UUID) -> int:
+    """Fold a rotation chain id into a signed 64-bit advisory-lock key.
+
+    Same scheme as the server lifecycle lock: a collision only over-serializes
+    two unrelated chains, never skips the lock.
+    """
+
+    digest = hashlib.blake2b(
+        f"{_CHAIN_LOCK_NAMESPACE}:{chain_id}".encode(), digest_size=8
+    ).digest()
+    return int.from_bytes(digest, "big") - (1 << 63)
 
 
 def _to_user(row: UserModel) -> User:
@@ -297,6 +313,34 @@ class SqlAlchemyRefreshTokenRepository(RefreshTokenRepository):
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_refresh_token(row) if row is not None else None
 
+    async def lock_chain_by_token_hash(self, token_hash: str) -> RefreshToken | None:
+        chain_id = (
+            await self._session.execute(
+                select(RefreshTokenModel.chain_id).where(
+                    RefreshTokenModel.token_hash == token_hash
+                )
+            )
+        ).scalar_one_or_none()
+        if chain_id is None:
+            return None
+        # A row lock cannot serialize the chain: a rotation's successor is a new
+        # row, invisible to a logout whose revoke already chose its rows. Both
+        # take this transaction-scoped advisory lock instead (issue #3249).
+        await self._session.execute(
+            text("SELECT pg_advisory_xact_lock(:key)").bindparams(
+                key=_chain_lock_key(chain_id)
+            )
+        )
+        # Re-read under the lock: under READ COMMITTED this statement sees what a
+        # competitor that held the lock committed.
+        stmt = (
+            select(RefreshTokenModel)
+            .where(RefreshTokenModel.token_hash == token_hash)
+            .execution_options(populate_existing=True)
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_refresh_token(row) if row is not None else None
+
     async def revoke(
         self, token_hash: str, *, revoked_at: dt.datetime, reason: str
     ) -> None:
@@ -304,6 +348,23 @@ class SqlAlchemyRefreshTokenRepository(RefreshTokenRepository):
             update(RefreshTokenModel)
             .where(RefreshTokenModel.token_hash == token_hash)
             .values(revoked_at=revoked_at, revoked_reason=reason)
+        )
+        await self._session.execute(stmt)
+
+    async def revoke_chain(
+        self, chain_id: RotationChainId, *, revoked_at: dt.datetime, reason: str
+    ) -> None:
+        stmt = (
+            update(RefreshTokenModel)
+            .where(
+                RefreshTokenModel.chain_id == chain_id.value,
+                (RefreshTokenModel.revoked_at.is_(None))
+                | (RefreshTokenModel.revoked_reason == REVOKED_ROTATED),
+            )
+            .values(
+                revoked_at=func.coalesce(RefreshTokenModel.revoked_at, revoked_at),
+                revoked_reason=reason,
+            )
         )
         await self._session.execute(stmt)
 

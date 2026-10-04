@@ -32,6 +32,7 @@ from mc_server_dashboard_api.identity.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.identity.domain.value_objects import (
     EmailAddress,
     RefreshTokenId,
+    RotationChainId,
     UserId,
     Username,
 )
@@ -126,8 +127,16 @@ class _FakeRefreshTokenRepository(RefreshTokenRepository):
     async def get_by_token_hash(self, token_hash: str) -> RefreshToken | None:
         raise NotImplementedError
 
+    async def lock_chain_by_token_hash(self, token_hash: str) -> RefreshToken | None:
+        raise NotImplementedError
+
     async def revoke(
         self, token_hash: str, *, revoked_at: dt.datetime, reason: str
+    ) -> None:
+        raise NotImplementedError
+
+    async def revoke_chain(
+        self, chain_id: RotationChainId, *, revoked_at: dt.datetime, reason: str
     ) -> None:
         raise NotImplementedError
 

@@ -33,6 +33,11 @@ a pair (issue #369). The *predecessor* case (a token already revoked by rotation
 before the family revoke) is closed by ``revoke_all_for_user`` re-stamping
 ``'rotated'`` rows to ``'family'`` while preserving their ``revoked_at``
 (issue #1960).
+
+The presented token is read under its rotation chain's lock, so a rotation and a
+logout of the same session serialize (issue #3249): a rotation that waited for a
+logout reads the token as logged out and takes the theft path above, and a logout
+that waited for a rotation revokes the successor it minted.
 """
 
 from __future__ import annotations
@@ -71,7 +76,7 @@ class RefreshSession:
         token_hash = self.tokens.hash_refresh_token(refresh_token)
         now = self.clock.now()
         async with self.uow:
-            stored = await self.uow.refresh_tokens.get_by_token_hash(token_hash)
+            stored = await self.uow.refresh_tokens.lock_chain_by_token_hash(token_hash)
             if stored is None or stored.expires_at <= now:
                 raise InvalidRefreshTokenError
             if stored.revoked_reason == REVOKED_SUPERSEDED:
