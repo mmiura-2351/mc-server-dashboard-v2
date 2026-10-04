@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import pytest
 
@@ -343,6 +343,23 @@ class RefreshTokenRepositoryContract:
         assert loaded is not None
         assert loaded.expires_at == expected_expiry
         assert loaded.revoked_at is None
+
+    async def test_add_persists_a_revoked_tokens_revocation(
+        self, refresh_token_repository_harness: RefreshTokenRepositoryHarness
+    ) -> None:
+        token = replace(
+            _token(refresh_token_repository_harness),
+            revoked_at=_NOW,
+            revoked_reason=REVOKED_LOGOUT,
+        )
+        async with refresh_token_repository_harness.open() as transaction:
+            await transaction.repository.add(token)
+            await transaction.commit()
+
+        async with refresh_token_repository_harness.open() as transaction:
+            loaded = await transaction.repository.get_by_token_hash("hash-1")
+
+        assert loaded == token
 
     async def test_readers_return_detached_entities_and_scope_active_sessions(
         self, refresh_token_repository_harness: RefreshTokenRepositoryHarness

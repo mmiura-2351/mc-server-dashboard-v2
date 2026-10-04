@@ -303,6 +303,7 @@ class SqlAlchemyRefreshTokenRepository(RefreshTokenRepository):
                 issued_at=token.issued_at,
                 expires_at=token.expires_at,
                 revoked_at=token.revoked_at,
+                revoked_reason=token.revoked_reason,
             )
         )
 
