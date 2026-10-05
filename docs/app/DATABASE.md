@@ -211,15 +211,18 @@ rotated while its response was still in flight would otherwise leave a valid
 successor whose late `Set-Cookie` revives the session in a browser that logged
 out (AUTH_API.md Section 4). The user's other chains are untouched.
 
-Every revocation that must also end what a rotation is extending — logout, the
-superseded cookie of a both-transports logout (whose chain is revoked as
-`superseded`), and the bulk revocations of a password change, deactivation,
+Every revocation that must also end what a rotation is extending — logout, a
+single-session revoke (which revokes the chain as `user_revoked`), the
+superseded cookie of a both-transports logout or refresh (whose chain is revoked
+as `superseded`), and the bulk revocations of a password change, deactivation,
 account deletion, theft response or "revoke all other sessions" — serializes
 with rotation on the token owner's **session lock**: a transaction-scoped
 advisory lock keyed by `user_id`. A row lock cannot, because the successor is a
 new row the revocation's `UPDATE` would not see. Under the lock a revocation
 sees every successor committed before it, and a rotation that waited reads its
-token as revoked, so a successor still being minted is revoked too. The lock
+token as revoked, so a successor still being minted is revoked too. A login
+takes the lock as well, and stores its new chain only if the user re-read under
+it still has the password hash it verified and is still active. The lock
 order it takes part in — `user` rows, then session locks in ascending key
 order, then `refresh_token` rows — is defined in one place, the
 `RefreshTokenRepository` Port (`identity/domain/repositories.py`).
