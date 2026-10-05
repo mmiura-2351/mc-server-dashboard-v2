@@ -28,7 +28,6 @@ from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
-    create_async_engine,
 )
 
 from mc_server_dashboard_api.community.adapters.clock import SystemClock
@@ -60,7 +59,7 @@ from mc_server_dashboard_api.core.adapters.database import create_session_factor
 from mc_server_dashboard_api.identity.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork as IdentityUnitOfWork,
 )
-from tests.integration.migrate import downgrade_base, upgrade_head
+from tests.integration.races import await_settled, race_database
 
 _DB_URL = os.environ.get("MCD_TEST_DATABASE_URL")
 
@@ -72,22 +71,12 @@ _START = Permission("server:start")
 _STOP = Permission("server:stop")
 _DELETE = Permission("server:delete")
 
-# Upper bound on how long a competing edit may take to settle (commit, or block
-# on the paused edit's row lock) before the test fails instead of resuming.
-_SETTLE_TIMEOUT = 10.0
-
 
 @pytest.fixture
 async def engine() -> AsyncIterator[AsyncEngine]:
     assert _DB_URL is not None
-    await downgrade_base(_DB_URL)
-    await upgrade_head(_DB_URL)
-    eng = create_async_engine(_DB_URL)
-    try:
+    async with race_database(_DB_URL) as eng:
         yield eng
-    finally:
-        await eng.dispose()
-        await downgrade_base(_DB_URL)
 
 
 class _Pause:
@@ -146,30 +135,6 @@ class _PidRecordingUnitOfWork(SqlAlchemyUnitOfWork):
             await self._session.execute(text("SELECT pg_backend_pid()"))
         ).scalar_one()
         return self
-
-
-async def _await_settled(
-    engine: AsyncEngine, competitor: asyncio.Task[Role], uow: _PidRecordingUnitOfWork
-) -> None:
-    """Return once ``competitor`` has finished or is blocked on a row lock.
-
-    Resuming the paused edit only after this makes the interleaving explicit
-    rather than timed: an implementation that does not serialize the two edits
-    has let the competitor commit, and one that does has it waiting on the lock.
-    """
-
-    query = text(
-        "SELECT 1 FROM pg_stat_activity WHERE pid = :pid AND wait_event_type = 'Lock'"
-    )
-    deadline = asyncio.get_running_loop().time() + _SETTLE_TIMEOUT
-    while not competitor.done():
-        if uow.pid is not None:
-            async with engine.connect() as conn:
-                if (await conn.execute(query, {"pid": uow.pid})).first():
-                    return
-        if asyncio.get_running_loop().time() > deadline:
-            pytest.fail("competing edit neither committed nor blocked on the lock")
-        await asyncio.sleep(0.02)
 
 
 @dataclass(frozen=True)
@@ -309,7 +274,7 @@ async def test_stale_permission_edit_preserves_concurrent_rename(
             name="Operators",
         )
     )
-    await _await_settled(engine, rename, competitor)
+    await await_settled(engine, rename, lambda: competitor.pid)
     pause.resume.set()
     await asyncio.gather(removal, rename)
 
@@ -347,7 +312,7 @@ async def test_stale_permission_edit_cannot_reintroduce_a_removed_permission(
             permissions={_START},
         )
     )
-    await _await_settled(engine, removal, competitor)
+    await await_settled(engine, removal, lambda: competitor.pid)
     pause.resume.set()
     await asyncio.gather(stale, removal)
 

@@ -30,7 +30,6 @@ from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
-    create_async_engine,
 )
 
 from mc_server_dashboard_api.community.adapters.clock import SystemClock
@@ -94,7 +93,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId as ServersCommunityId,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
-from tests.integration.migrate import downgrade_base, upgrade_head
+from tests.integration.races import await_settled, race_database
 from tests.servers.fakes import FakeBackupArchiveStore
 
 _DB_URL = os.environ.get("MCD_TEST_DATABASE_URL")
@@ -109,22 +108,12 @@ _DELETE = Permission("server:delete")
 _ROLE_MANAGE = Permission("role:manage")
 _GRANT_MANAGE = Permission("grant:manage")
 
-# Upper bound on how long a competing transaction may take to settle (commit, or
-# block on the paused one's lock) before the test fails instead of resuming.
-_SETTLE_TIMEOUT = 10.0
-
 
 @pytest.fixture
 async def engine() -> AsyncIterator[AsyncEngine]:
     assert _DB_URL is not None
-    await downgrade_base(_DB_URL)
-    await upgrade_head(_DB_URL)
-    eng = create_async_engine(_DB_URL)
-    try:
+    async with race_database(_DB_URL) as eng:
         yield eng
-    finally:
-        await eng.dispose()
-        await downgrade_base(_DB_URL)
 
 
 # Where a paused use case stops: at its first write, after a role update's
@@ -272,24 +261,9 @@ class _PidUnitOfWork(SqlAlchemyUnitOfWork):
 async def _await_settled(
     engine: AsyncEngine, competitor: asyncio.Task[Any], pid: asyncio.Future[int]
 ) -> None:
-    """Return once ``competitor`` has finished or is blocked on a lock.
-
-    Resuming the paused transaction only after this makes the interleaving
-    explicit rather than timed.
-    """
-
-    query = text(
-        "SELECT 1 FROM pg_stat_activity WHERE pid = :pid AND wait_event_type = 'Lock'"
+    await await_settled(
+        engine, competitor, lambda: pid.result() if pid.done() else None
     )
-    deadline = asyncio.get_running_loop().time() + _SETTLE_TIMEOUT
-    while not competitor.done():
-        if pid.done():
-            async with engine.connect() as conn:
-                if (await conn.execute(query, {"pid": pid.result()})).first():
-                    return
-        if asyncio.get_running_loop().time() > deadline:
-            pytest.fail("competitor neither committed nor blocked on a lock")
-        await asyncio.sleep(0.02)
 
 
 @dataclass(frozen=True)
