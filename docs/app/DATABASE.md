@@ -500,7 +500,7 @@ would be, roughly:
 ### Player groups
 
 Reusable, Community-scoped player lists (OP / whitelist) attached to many servers
-and synced to a server's `ops.json` / `whitelist.json`. Three normalized tables
+and synced to a server's `ops.json` / `whitelist.json`. Four normalized tables
 (matching the relational model of the rest of this document, Section 2). The
 group tooling lives in a `groups` slice **inside the servers bounded context** —
 player groups are server-content tooling, not membership/authz, so the Community
@@ -554,11 +554,51 @@ player add/remove on an attached group — the API regenerates that server's
 defaulting to 4) or `whitelist.json` (kind `whitelist`; entries `{uuid, name}`)
 through the existing at-rest file write seam (versioned). The file is the
 **union-merge** of every attached group of that kind, ordered by uuid so it is
-byte-stable diff-to-diff. **Only at-rest servers are written**; a running or
-otherwise unsettled server is left pending and ships the updated authoritative
-copy on its next natural hydrate (hydrate always carries the authoritative working
-set). Pushing live changes to a running server via the Worker (EditFile + RCON
-reload) is deferred: not implemented.
+byte-stable diff-to-diff. **Only at-rest servers are written at the time of the
+change.** A running or otherwise unsettled server cannot be: the Worker's live
+working set, and the final snapshot taken from it at stop, would overwrite the
+authoritative copy, and a hydrate only ships whatever that copy holds. So every
+change also records, in its own transaction, a `server_group_sync_pending` row
+for each affected server, and the server's **next start** regenerates the owed
+file from the then-current union before it decides whether to hydrate:
+
+- The start does this under the per-server lifecycle lock and only for a stopped,
+  unassigned server, i.e. after the previous run's final snapshot has settled, so
+  no snapshot publishes over the regenerated file.
+- The write advances the working-set generation like any at-rest edit, so a
+  Worker still holding the previous run's scratch hydrates instead of booting the
+  pre-change file ([`CONTROL_PLANE.md`](CONTROL_PLANE.md) Section 5.1).
+- A file whose bytes already equal the union (the change was made at rest) is not
+  rewritten.
+- A storage failure fails the start with 503 `seed_failed` before anything is
+  launched, and the row stays for the next attempt.
+- The rows are cleared in the transaction that commits the start, each only if
+  its `token` is still the one the start read, so a change committed meanwhile
+  stays owed for the start after.
+
+Only an operator's (or a schedule's) start applies owed files. An in-place
+restart, and the reconciler's relaunch of a server that is already meant to be
+running, reuse the Worker's live working set and leave the row in place. Pushing
+live changes to a running server via the Worker (EditFile + RCON reload) is
+deferred: not implemented.
+
+The row is also what separates a file a group change made stale from one no
+group ever managed: a server with no row keeps its `ops.json` / `whitelist.json`
+exactly as the game and the operator left them, including changes made in-game
+(`/op`, `/whitelist add`). Detaching or deleting a server's last group of a kind
+records a row too, and its regeneration is the empty list.
+
+#### `server_group_sync_pending`
+
+One row per server and kind whose file is owed a regeneration.
+
+| Column | Type | Notes |
+|---|---|---|
+| `server_id` | uuid FK → `server.id` | `ON DELETE CASCADE` |
+| `kind` | text | `op` / `whitelist` (CHECK enum) |
+| `token` | uuid | replaced every time the row is recorded again; the start clears the row only while it still holds the token it read |
+
+Primary key: composite `(server_id, kind)`.
 
 ### Server plugins
 

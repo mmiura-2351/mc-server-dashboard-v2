@@ -15,6 +15,7 @@ from mc_server_dashboard_api.servers.domain.groups import (
     GroupId,
     GroupKind,
     GroupName,
+    PendingGroupSync,
     PlayerGroup,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
@@ -134,4 +135,30 @@ class GroupRepository(abc.ABC):
         The sync step merges these into the regenerated ops.json / whitelist.json;
         a stable order keeps :func:`merge_players`' first-wins tie-break
         deterministic (issue #276).
+        """
+
+    @abc.abstractmethod
+    async def mark_sync_pending(
+        self, server_ids: list[ServerId], kind: GroupKind
+    ) -> None:
+        """Record that each server's ``kind`` file is owed a regeneration (#3223).
+
+        One mark per ``(server, kind)``; marking again keeps the single mark and
+        gives it a fresh token, so :meth:`clear_sync_pending` called with a token
+        read earlier leaves it standing. A server that no longer exists is skipped
+        rather than refused: its file went with it.
+        """
+
+    @abc.abstractmethod
+    async def list_sync_pending(self, server_id: ServerId) -> list[PendingGroupSync]:
+        """Return the regenerations ``server_id`` is owed, ordered by kind."""
+
+    @abc.abstractmethod
+    async def clear_sync_pending(
+        self, server_id: ServerId, applied: list[PendingGroupSync]
+    ) -> None:
+        """Clear the marks in ``applied`` that still carry the token it names.
+
+        A mark recorded again since ``applied`` was read is left in place: the
+        change behind it may not be in the file the caller regenerated.
         """

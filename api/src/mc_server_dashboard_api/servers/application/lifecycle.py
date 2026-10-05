@@ -96,6 +96,9 @@ from mc_server_dashboard_api.servers.application.command_dispatch import (
 from mc_server_dashboard_api.servers.application.command_dispatch import (
     dispatch_failure as _dispatch_failure,
 )
+from mc_server_dashboard_api.servers.application.groups import (
+    regenerate_pending_group_files,
+)
 from mc_server_dashboard_api.servers.application.stop_dispatch_refusals import (
     StopDispatchRefusals,
 )
@@ -127,6 +130,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerNotRunningError,
 )
 from mc_server_dashboard_api.servers.domain.file_store import FileStore
+from mc_server_dashboard_api.servers.domain.groups import PendingGroupSync
 from mc_server_dashboard_api.servers.domain.jar_provisioner import (
     JarProvisioner,
     ProvisionedJar,
@@ -312,6 +316,30 @@ class StartServer:
                 )
             else:
                 await self._check_eula(community_id, server_id)
+            # Make the player-group file changes this server is owed (issue #3223):
+            # an OP / whitelist change made while it ran could not be written then,
+            # and nothing else applies it — a hydrate only ships what the store
+            # holds. This is the safe point. The lifecycle lock is held, and an
+            # unassigned stopped server has no final snapshot in flight (a stop
+            # keeps the assignment until its snapshot settles, issue #847), so the
+            # write lands on the settled working set and nothing publishes over
+            # it. It is also BEFORE the skip-hydrate decision below: the write
+            # advances the store generation (issue #889), so a Worker still holding
+            # the previous run's scratch reads as stale and hydrates instead of
+            # booting the pre-edit file. A storage failure raises here, before the
+            # flip, so the server is not started with a file known to be stale.
+            #
+            # Skipped while the assignment is still held: a write now would advance
+            # the generation under the final snapshot's upload, and this start is
+            # about to lose its compare-and-set anyway.
+            owed_group_files: list[PendingGroupSync] = []
+            if server.assigned_worker_id is None:
+                owed_group_files = await regenerate_pending_group_files(
+                    self.uow,
+                    self.file_store,
+                    community_id=community_id,
+                    server_id=server_id,
+                )
             # Ensure the resolved JAR is pooled BEFORE placement/dispatch (FR-VER-3):
             # a download/verify failure fails the start here, before a Worker is
             # placed or the desired state flipped. The ensure resolves the latest
@@ -349,6 +377,11 @@ class StartServer:
                     # running/assigned. Abort before dispatch or any committed count
                     # change so the lost race causes no double placement (FR-SRV-2).
                     raise LifecycleTransitionConflictError(str(server_id.value))
+                # Clear the owed regenerations made above in the commit that makes
+                # the start durable (issue #3223), so a start that fails before
+                # this point leaves them owed. Token-guarded: a group change that
+                # committed since they were read keeps its mark for the next start.
+                await self.uow.groups.clear_sync_pending(server_id, owed_group_files)
                 await self.uow.commit()
                 # Confirm the placement reservation as a committed assignment now the
                 # intent is durable (#778); a no-op if a reconnect rebuild already

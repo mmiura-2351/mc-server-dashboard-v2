@@ -9,22 +9,35 @@ community-scoped; a group of kind ``op`` feeds a server's ``ops.json`` and kind
 server's authoritative player file — attach, detach, a player add/remove on an
 attached group — regenerates that server's ``ops.json`` / ``whitelist.json``
 through the :class:`FileStore` at-rest write seam (versioned). Only **at-rest**
-servers are written; a running or otherwise unsettled server is left pending and
-picks up the updated authoritative copy on its next natural hydrate (which always
-ships the authoritative working set). The file is the union-merge of every
-attached group of that kind, deterministically ordered by uuid, so it is byte-
-stable diff-to-diff. The merge is total (no group of that kind attached → an
-empty list, which clears the file).
+servers are written there. The file is the union-merge of every attached group
+of that kind, deterministically ordered by uuid, so it is byte-stable
+diff-to-diff. The merge is total (no group of that kind attached → an empty
+list, which clears the file).
+
+**Deferred sync (issue #3223).** A running or otherwise unsettled server cannot
+be written: the Worker's live working set, and the final snapshot taken from it
+at stop, would overwrite the authoritative copy — and a hydrate only ships
+whatever that copy holds, so nothing would ever apply the change. Every change
+therefore records, in its own transaction, that each affected server's file is
+owed a regeneration (:meth:`GroupRepository.mark_sync_pending`), and
+``StartServer`` regenerates the owed files from the *current* union before it
+decides whether to hydrate (:func:`regenerate_pending_group_files`). That write
+advances the working-set generation like any at-rest edit, so a Worker still
+holding the pre-edit scratch hydrates instead of booting it. Only the operator's
+start does this: an in-place restart and the reconciler's relaunch of a server
+that is already meant to be running go on using the Worker's live copy.
+
+The mark is what tells a file a group change made stale from one no group ever
+managed. A server with no mark keeps its ``ops.json`` / ``whitelist.json``
+exactly as the game and the operator left them.
 
 **Partial-failure posture (PM ruling).** When a single group change touches
 *several* attached servers (delete a group, add/remove a player), the file
 fan-out runs after the DB commit and is **best-effort**: a per-server write
 failure is WARN-logged (server id + group id + error) and the loop continues, so
 one failing server does not strand the rest. The failed at-rest server is left
-stale; a *write* failure is **not** healed by the next hydrate (hydrate only
-covers servers that were not at-rest at sync time). The operator repair is to
-re-trigger the sync — re-attach the group to that server, or edit the group again
-— which reruns the fan-out.
+stale until its next start, which regenerates the file because the mark is still
+standing; re-attaching the group or editing it again reruns the fan-out sooner.
 
 Cross-community safety mirrors the servers use cases: a group or server whose
 ``community_id`` differs from the path community is reported not-found
@@ -44,13 +57,16 @@ from mc_server_dashboard_api.servers.domain.errors import (
     GroupNameAlreadyExistsError,
     GroupNotFoundError,
     InvalidGroupKindError,
+    ServerFileNotFoundError,
     ServerNotFoundError,
+    WorkingSetSeedFailedError,
 )
 from mc_server_dashboard_api.servers.domain.file_store import FileStore
 from mc_server_dashboard_api.servers.domain.groups import (
     GroupId,
     GroupKind,
     GroupName,
+    PendingGroupSync,
     Player,
     PlayerGroup,
     merge_players,
@@ -185,9 +201,10 @@ class DeleteGroup:
     """Delete a group and resync the servers it was attached to (group:manage).
 
     The attachments cascade away with the group row; before deleting, the use case
-    captures the attached at-rest servers and regenerates their files *without*
-    this group's players, so removing a group cleans up its contribution to
-    ops.json / whitelist.json on the at-rest servers it touched.
+    captures the attached servers and regenerates their files *without* this
+    group's players, so removing a group cleans up its contribution to ops.json /
+    whitelist.json — at once on the at-rest servers, and at its next start on a
+    running one (the owed regeneration is recorded with the delete).
     """
 
     uow: UnitOfWork
@@ -199,6 +216,7 @@ class DeleteGroup:
             group = await _load_group(self.uow, community_id, group_id)
             server_ids = await self.uow.groups.list_server_ids_for_group(group_id)
             await self.uow.groups.delete(group_id)
+            await self.uow.groups.mark_sync_pending(server_ids, group.kind)
             await self.uow.commit()
         # Resync each previously-attached server (the group is now gone, so the
         # merge excludes it). Done after commit so the file reflects the persisted
@@ -236,6 +254,7 @@ class AddPlayer:
             group.upsert_player(player)
             await self.uow.groups.save(group)
             server_ids = await self.uow.groups.list_server_ids_for_group(group_id)
+            await self.uow.groups.mark_sync_pending(server_ids, group.kind)
             await self.uow.commit()
         await _sync_servers_best_effort(
             self.uow,
@@ -269,6 +288,7 @@ class RemovePlayer:
             group.remove_player(player_uuid)
             await self.uow.groups.save(group)
             server_ids = await self.uow.groups.list_server_ids_for_group(group_id)
+            await self.uow.groups.mark_sync_pending(server_ids, group.kind)
             await self.uow.commit()
         await _sync_servers_best_effort(
             self.uow,
@@ -297,6 +317,7 @@ class AttachGroup:
             group = await _load_group(self.uow, community_id, group_id)
             await _require_server(self.uow, community_id, server_id)
             await self.uow.groups.attach(group_id, server_id)
+            await self.uow.groups.mark_sync_pending([server_id], group.kind)
             await self.uow.commit()
         await _sync_server_file(
             self.uow,
@@ -325,6 +346,7 @@ class DetachGroup:
             removed = await self.uow.groups.detach(group_id, server_id)
             if not removed:
                 raise GroupAttachmentNotFoundError(str(group_id.value))
+            await self.uow.groups.mark_sync_pending([server_id], group.kind)
             await self.uow.commit()
         await _sync_server_file(
             self.uow,
@@ -378,11 +400,10 @@ async def _sync_servers_best_effort(
     **Partial-failure posture (issue #276, PM ruling).** The DB change is already
     committed; this fan-out is best-effort. A per-server ``write_file`` failure is
     WARN-logged (server id + group id + error) and the loop continues, so one bad
-    server does not strand the others. The failed at-rest server is left stale —
-    a *write* failure is **not** healed by the next hydrate (hydrate only covers
-    servers that were not at-rest at sync time). The operator repair is to
-    re-trigger the sync: re-attach the group to that server, or edit the group
-    again, which runs this fan-out afresh.
+    server does not strand the others. The failed at-rest server is left stale
+    until its next start, which regenerates the file because the regeneration is
+    still recorded as owed (issue #3223). Re-attaching the group to that server,
+    or editing the group again, runs this fan-out afresh and repairs it sooner.
     """
 
     for server_id in server_ids:
@@ -393,8 +414,8 @@ async def _sync_servers_best_effort(
         except Exception:
             _logger.warning(
                 "group file sync failed for one attached server; other servers "
-                "still synced, this one is left stale until the sync is "
-                "re-triggered (re-attach or edit the group)",
+                "still synced, this one is left stale until its next start or "
+                "until the sync is re-triggered (re-attach or edit the group)",
                 extra={
                     "server_id": str(server_id.value),
                     "group_id": str(group_id.value),
@@ -414,8 +435,13 @@ async def _sync_server_file(
     """Regenerate one server's ops.json / whitelist.json from its attached groups.
 
     Only at-rest servers are written (issue #276 posture a): a running/unsettled
-    server is skipped and ships the authoritative copy on its next hydrate. The
-    file is the union-merge of every attached group of ``kind``, ordered by uuid.
+    server is skipped here, and the regeneration its change recorded as owed is
+    made by the server's next start (:func:`regenerate_pending_group_files`,
+    issue #3223). The file is the union-merge of every attached group of
+    ``kind``, ordered by uuid.
+
+    A successful write leaves the mark standing: the start is the one place that
+    clears it, and it writes nothing when it finds the file already current.
 
     The per-server lifecycle lock is held across the at-rest check and the Storage
     write (issue #1222), matching every other at-rest write path, so a concurrent
@@ -438,3 +464,66 @@ async def _sync_server_file(
             rel_path=kind.target_file,
             content=_render(kind, players),
         )
+
+
+async def regenerate_pending_group_files(
+    uow: UnitOfWork,
+    file_store: FileStore,
+    *,
+    community_id: CommunityId,
+    server_id: ServerId,
+) -> list[PendingGroupSync]:
+    """Regenerate the files ``server_id`` is owed; return the marks applied (#3223).
+
+    The start-time half of the deferred sync. ``StartServer`` calls it inside its
+    own transaction, under the lifecycle lock, for a stopped and unassigned
+    server: the final snapshot of the previous run has settled by then, so the
+    write lands on the working set the launch will hydrate and nothing publishes
+    over it afterwards. The caller clears the returned marks in the transaction
+    that commits the start.
+
+    The marks are read BEFORE the groups. A change that commits after that read
+    re-records its mark with a new token, so the caller's clear leaves it standing
+    whether or not this pass happened to see the change; reading the groups first
+    would let a change slip in between and be cleared unapplied.
+
+    A file whose bytes are already the current union is not rewritten: an edit
+    made at rest was written then, and a second identical write would advance the
+    generation and retain a duplicate version for nothing.
+
+    A storage failure raises :class:`WorkingSetSeedFailedError`, so the start
+    fails rather than launching with a file known to be stale.
+    """
+
+    pending = await uow.groups.list_sync_pending(server_id)
+    for owed in pending:
+        groups = await uow.groups.list_groups_for_server_kind(server_id, owed.kind)
+        content = _render(owed.kind, merge_players(groups))
+        try:
+            try:
+                current: bytes | None = await file_store.read_file(
+                    community_id=community_id,
+                    server_id=server_id,
+                    rel_path=owed.kind.target_file,
+                )
+            except ServerFileNotFoundError:
+                current = None
+            if current != content:
+                await file_store.write_file(
+                    community_id=community_id,
+                    server_id=server_id,
+                    rel_path=owed.kind.target_file,
+                    content=content,
+                )
+        except Exception as exc:
+            _logger.warning(
+                "regenerating a group-derived player file before start failed; "
+                "the start is refused rather than launched with a stale file",
+                extra={
+                    "server_id": str(server_id.value),
+                    "file": owed.kind.target_file,
+                },
+                exc_info=True,
+            )
+            raise WorkingSetSeedFailedError(str(server_id.value)) from exc
+    return pending

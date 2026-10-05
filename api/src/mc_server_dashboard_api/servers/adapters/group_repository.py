@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, literal, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,16 +20,19 @@ from mc_server_dashboard_api.servers.adapters.group_models import (
     GroupPlayerModel,
     PlayerGroupModel,
     ServerGroupModel,
+    ServerGroupSyncPendingModel,
 )
 from mc_server_dashboard_api.servers.adapters.integrity import (
     translate_integrity_error,
 )
+from mc_server_dashboard_api.servers.adapters.models import ServerModel
 from mc_server_dashboard_api.servers.domain.errors import GroupNotFoundError
 from mc_server_dashboard_api.servers.domain.group_repository import GroupRepository
 from mc_server_dashboard_api.servers.domain.groups import (
     GroupId,
     GroupKind,
     GroupName,
+    PendingGroupSync,
     Player,
     PlayerGroup,
 )
@@ -205,6 +208,59 @@ class SqlAlchemyGroupRepository(GroupRepository):
     ) -> list[PlayerGroup]:
         rows = await self._attached_group_rows(server_id, kind=kind)
         return [await self._hydrate(row) for row in rows]
+
+    async def mark_sync_pending(
+        self, server_ids: list[ServerId], kind: GroupKind
+    ) -> None:
+        if not server_ids:
+            return
+        # Insert from the server rows themselves, key-share locked, rather than
+        # from the ids: a server deleted since the caller listed its attachments
+        # is then skipped instead of violating the FK, and one that exists cannot
+        # be deleted under the INSERT.
+        #
+        # DO UPDATE, not DO NOTHING: recording the mark again must change its
+        # token, which is what lets the start that read the old one tell that a
+        # newer change may be missing from the file it regenerated.
+        servers = (
+            select(
+                ServerModel.id,
+                literal(kind.value).label("kind"),
+                literal(uuid.uuid4()).label("token"),
+            )
+            .where(ServerModel.id.in_([s.value for s in server_ids]))
+            .with_for_update(key_share=True)
+        )
+        stmt = pg_insert(ServerGroupSyncPendingModel).from_select(
+            ["server_id", "kind", "token"], servers
+        )
+        await self._session.execute(
+            stmt.on_conflict_do_update(
+                constraint="pk_server_group_sync_pending",
+                set_={"token": stmt.excluded.token},
+            )
+        )
+
+    async def list_sync_pending(self, server_id: ServerId) -> list[PendingGroupSync]:
+        stmt = (
+            select(ServerGroupSyncPendingModel.kind, ServerGroupSyncPendingModel.token)
+            .where(ServerGroupSyncPendingModel.server_id == server_id.value)
+            .order_by(ServerGroupSyncPendingModel.kind)
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return [PendingGroupSync(kind=GroupKind(k), token=t) for k, t in rows]
+
+    async def clear_sync_pending(
+        self, server_id: ServerId, applied: list[PendingGroupSync]
+    ) -> None:
+        for pending in applied:
+            await self._session.execute(
+                delete(ServerGroupSyncPendingModel).where(
+                    ServerGroupSyncPendingModel.server_id == server_id.value,
+                    ServerGroupSyncPendingModel.kind == pending.kind.value,
+                    ServerGroupSyncPendingModel.token == pending.token,
+                )
+            )
 
     async def _attached_group_rows(
         self, server_id: ServerId, *, kind: GroupKind | None = None

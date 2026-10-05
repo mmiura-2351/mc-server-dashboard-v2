@@ -96,6 +96,10 @@ class WorkingSetSeedFailedError(ServerError):
     repairable state, since the operator can write the missing files via the files
     API -- and the failure is surfaced as a mapped 503 ``seed_failed`` rather than
     an unmapped 500. The edge logs a WARN at the create route.
+
+    A start raises it too, when it cannot regenerate a player file a group change
+    left stale (issue #3223). Nothing has committed there: the start is refused
+    before its desired-state flip, and retrying it makes the write again.
     """
 
 

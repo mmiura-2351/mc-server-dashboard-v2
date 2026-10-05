@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime as dt
 import io
+import uuid
 import zipfile
 from collections.abc import AsyncIterator, Callable, Iterable
 from contextlib import asynccontextmanager
@@ -74,6 +75,7 @@ from mc_server_dashboard_api.servers.domain.groups import (
     GroupId,
     GroupKind,
     GroupName,
+    PendingGroupSync,
     PlayerGroup,
 )
 from mc_server_dashboard_api.servers.domain.jar_provisioner import (
@@ -1164,6 +1166,7 @@ class FakeGroupRepository(GroupRepository):
     def __init__(self) -> None:
         self.by_id: dict[GroupId, PlayerGroup] = {}
         self.attachments: set[tuple[GroupId, ServerId]] = set()
+        self.sync_pending: dict[tuple[ServerId, GroupKind], uuid.UUID] = {}
 
     def seed(self, group: PlayerGroup) -> None:
         self.by_id[group.id] = self._copy(group)
@@ -1309,6 +1312,32 @@ class FakeGroupRepository(GroupRepository):
         return [
             g for g in await self.list_groups_for_server(server_id) if g.kind is kind
         ]
+
+    async def mark_sync_pending(
+        self, server_ids: list[ServerId], kind: GroupKind
+    ) -> None:
+        # The adapter skips a server whose row is gone; that is NOT modelled, for
+        # the reason ``attach`` gives: the server rows live in
+        # FakeServerRepository, which this fake cannot see.
+        for server_id in server_ids:
+            self.sync_pending[(server_id, kind)] = uuid.uuid4()
+
+    async def list_sync_pending(self, server_id: ServerId) -> list[PendingGroupSync]:
+        return sorted(
+            (
+                PendingGroupSync(kind=kind, token=token)
+                for (marked, kind), token in self.sync_pending.items()
+                if marked == server_id
+            ),
+            key=lambda pending: pending.kind.value,
+        )
+
+    async def clear_sync_pending(
+        self, server_id: ServerId, applied: list[PendingGroupSync]
+    ) -> None:
+        for pending in applied:
+            if self.sync_pending.get((server_id, pending.kind)) == pending.token:
+                del self.sync_pending[(server_id, pending.kind)]
 
 
 class FakePluginRepository(PluginRepository):
