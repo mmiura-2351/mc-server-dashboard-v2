@@ -7,14 +7,26 @@ reconciled against the restored working set:
 - Ghost files (file on disk but no DB row) are ingested with manifest parsing.
 - Shifted records (file exists but checksum changed) are updated.
 - A server with no plugins (or an unsupported server type) is a no-op.
+- A content directory that could not be LISTED proves nothing about its jars:
+  the rows are left alone and the restore reports the reconciliation incomplete
+  (issue #3221). Only the typed miss means "no such directory".
+- A forced restore of a corrupt backup reconciles like any other (issue #3222).
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import errno
 import hashlib
 import uuid
+from collections.abc import Callable
+from pathlib import Path
 
+import pytest
+
+from mc_server_dashboard_api.servers.adapters.file_store import (
+    StorageFileStoreAdapter,
+)
 from mc_server_dashboard_api.servers.application.backups import RestoreBackup
 from mc_server_dashboard_api.servers.domain.backup import (
     Backup,
@@ -23,6 +35,11 @@ from mc_server_dashboard_api.servers.domain.backup import (
     BackupSource,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
+from mc_server_dashboard_api.servers.domain.errors import (
+    BackupCorruptError,
+    PluginReconcileIncompleteError,
+)
+from mc_server_dashboard_api.servers.domain.file_store import FileEntry, FileStore
 from mc_server_dashboard_api.servers.domain.plugin import (
     LoaderType,
     PluginId,
@@ -37,6 +54,17 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerName,
     ServerType,
 )
+from mc_server_dashboard_api.storage.adapters import fs as fs_adapter
+from mc_server_dashboard_api.storage.adapters.fs import FsStorage
+from mc_server_dashboard_api.storage.adapters.object_store import ObjectStorage
+from mc_server_dashboard_api.storage.domain.errors import ObjectStoreUnavailableError
+from mc_server_dashboard_api.storage.domain.port import Storage
+from mc_server_dashboard_api.storage.domain.value_objects import (
+    CommunityId as StorageCommunityId,
+)
+from mc_server_dashboard_api.storage.domain.value_objects import (
+    ServerId as StorageServerId,
+)
 from tests.servers.fakes import (
     FakeBackupArchiveStore,
     FakeBackupRepository,
@@ -47,6 +75,8 @@ from tests.servers.fakes import (
     FakeServerRepository,
     FakeUnitOfWork,
 )
+from tests.storage.fake_s3 import FakeS3Client, FakeS3Store, fake_s3_factory
+from tests.storage.helpers import tar_stream
 
 _NOW = dt.datetime(2026, 6, 20, 12, 0, tzinfo=dt.timezone.utc)
 _COMMUNITY = CommunityId(uuid.uuid4())
@@ -121,7 +151,7 @@ def _plugin(
 def _make_restore(
     uow: FakeUnitOfWork,
     archive: FakeBackupArchiveStore,
-    file_store: FakeFileStore | None = None,
+    file_store: FileStore | None = None,
     cache: FakePluginCacheStore | None = None,
     clock: FakeClock | None = None,
 ) -> RestoreBackup:
@@ -445,6 +475,210 @@ async def test_restore_updates_shifted_plugin_checksum() -> None:
     assert len(rows) == 1
     assert rows[0].id == existing.id
     assert rows[0].checksum_sha512 == hashlib.sha512(new_jar).hexdigest()
+
+
+# --- a listing that could not be read (issue #3221) --------------------------
+
+
+class _UnlistableContentDir(FakeFileStore):
+    """A file store whose ``mods`` listing fails the way a store outage does."""
+
+    async def list_dir(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> list[FileEntry]:
+        if rel_path == "mods":
+            raise OSError(errno.EIO, "temporary directory listing failure")
+        return await super().list_dir(
+            community_id=community_id, server_id=server_id, rel_path=rel_path
+        )
+
+
+async def test_restore_keeps_plugin_rows_when_the_listing_fails() -> None:
+    """A failed listing is not an empty directory: nothing is deleted."""
+    server = _server()
+    repo, backups, backup, archive = _seed_restore_fixture(server)
+    plugins = FakePluginRepository()
+    jar = _minimal_jar(b"present")
+    tracked = _plugin(
+        server_id=server.id,
+        rel_path="mods/present.jar",
+        filename="present.jar",
+        checksum_sha512=hashlib.sha512(jar).hexdigest(),
+    )
+    plugins.seed(tracked)
+    file_store = _UnlistableContentDir()
+    file_store.files["mods/present.jar"] = jar
+    uow = FakeUnitOfWork(servers=repo, backups=backups, plugins=plugins)
+
+    with pytest.raises(PluginReconcileIncompleteError):
+        await _make_restore(uow, archive, file_store=file_store)(
+            community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id
+        )
+
+    assert await plugins.list_for_server(server.id) == [tracked]
+
+
+# The same two outcomes at the real seam, on both backends: what the application
+# sees is whatever StorageFileStoreAdapter hands back from a real Storage adapter,
+# so these pin that "no such directory" arrives as the typed miss and a store
+# fault arrives as anything else.
+
+_BuildStorage = Callable[[Path, pytest.MonkeyPatch], tuple[Storage, Callable[[], None]]]
+
+
+def _fs_storage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Storage, Callable[[], None]]:
+    def _break_listing() -> None:
+        real = fs_adapter._list_children
+
+        def _failing(target: Path, not_found: str) -> list[Path]:
+            if target.name == "mods":
+                raise OSError(errno.EIO, "Input/output error")
+            return real(target, not_found)
+
+        monkeypatch.setattr(fs_adapter, "_list_children", _failing)
+
+    return FsStorage(tmp_path), _break_listing
+
+
+def _object_storage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Storage, Callable[[], None]]:
+    def _break_listing() -> None:
+        real = FakeS3Client.list_objects
+
+        async def _failing(self: FakeS3Client, prefix: str) -> object:
+            if prefix.endswith("/mods/"):
+                raise ObjectStoreUnavailableError("object store list failed")
+            return await real(self, prefix)
+
+        monkeypatch.setattr(FakeS3Client, "list_objects", _failing)
+
+    return ObjectStorage(fake_s3_factory(FakeS3Store())), _break_listing
+
+
+_REAL_BACKENDS = pytest.mark.parametrize("build", [_fs_storage, _object_storage])
+
+
+async def _publish(storage: Storage, server: Server, files: dict[str, bytes]) -> None:
+    handle = await storage.begin_snapshot(
+        StorageCommunityId(_COMMUNITY.value), StorageServerId(server.id.value)
+    )
+    await storage.write_snapshot(handle, tar_stream(files))
+    await storage.commit_snapshot(handle)
+
+
+@_REAL_BACKENDS
+async def test_a_store_fault_listing_the_content_dir_keeps_plugin_rows(
+    build: _BuildStorage, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = _server()
+    repo, backups, backup, archive = _seed_restore_fixture(server)
+    storage, break_listing = build(tmp_path, monkeypatch)
+    jar = _minimal_jar(b"present")
+    await _publish(storage, server, {"mods/present.jar": jar})
+    plugins = FakePluginRepository()
+    tracked = _plugin(
+        server_id=server.id,
+        rel_path="mods/present.jar",
+        filename="present.jar",
+        checksum_sha512=hashlib.sha512(jar).hexdigest(),
+    )
+    plugins.seed(tracked)
+    uow = FakeUnitOfWork(servers=repo, backups=backups, plugins=plugins)
+    file_store = StorageFileStoreAdapter(storage=storage)
+    break_listing()
+
+    with pytest.raises(PluginReconcileIncompleteError):
+        await _make_restore(uow, archive, file_store=file_store)(
+            community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id
+        )
+
+    assert await plugins.list_for_server(server.id) == [tracked]
+
+
+@_REAL_BACKENDS
+async def test_an_absent_content_dir_still_removes_orphan_rows(
+    build: _BuildStorage, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = _server()
+    repo, backups, backup, archive = _seed_restore_fixture(server)
+    storage, _ = build(tmp_path, monkeypatch)
+    # A published working set with no ``mods`` directory in it.
+    await _publish(storage, server, {"eula.txt": b"eula=true\n"})
+    plugins = FakePluginRepository()
+    plugins.seed(
+        _plugin(server_id=server.id, rel_path="mods/gone.jar", filename="gone.jar")
+    )
+    uow = FakeUnitOfWork(servers=repo, backups=backups, plugins=plugins)
+
+    await _make_restore(
+        uow, archive, file_store=StorageFileStoreAdapter(storage=storage)
+    )(community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id)
+
+    assert await plugins.list_for_server(server.id) == []
+
+
+# --- forced restore of a corrupt backup (issue #3222) -----------------------
+
+
+async def test_forced_corrupt_restore_reconciles_plugins() -> None:
+    """A corrupt world region does not stop the readable jars being reconciled."""
+    server = _server()
+    repo, backups, backup, archive = _seed_restore_fixture(server)
+    archive.corrupt_refs.add("ref")
+    archive.corrupt_count = 2
+    plugins = FakePluginRepository()
+    old_jar = _minimal_jar(b"old-content")
+    new_jar = _minimal_jar(b"new-content")
+    orphan = _plugin(server_id=server.id, rel_path="mods/gone.jar", filename="gone.jar")
+    shifted = _plugin(
+        server_id=server.id,
+        rel_path="mods/mod.jar",
+        filename="mod.jar",
+        checksum_sha512=hashlib.sha512(old_jar).hexdigest(),
+    )
+    plugins.seed(orphan)
+    plugins.seed(shifted)
+    file_store = FakeFileStore()
+    file_store.files["mods/mod.jar"] = new_jar
+    file_store.files["mods/ghost.jar"] = _minimal_jar(b"ghost")
+    uow = FakeUnitOfWork(servers=repo, backups=backups, plugins=plugins)
+
+    result = await _make_restore(uow, archive, file_store=file_store)(
+        community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id, force=True
+    )
+
+    rows = {row.rel_path: row for row in await plugins.list_for_server(server.id)}
+    assert sorted(rows) == ["mods/ghost.jar", "mods/mod.jar"]
+    assert rows["mods/mod.jar"].id == shifted.id
+    assert rows["mods/mod.jar"].checksum_sha512 == hashlib.sha512(new_jar).hexdigest()
+    # The forced-corruption outcome is reported exactly as before.
+    assert (result.forced_corrupt, result.corrupt_count) == (True, 2)
+    persisted = await backups.get_by_id(backup.id)
+    assert persisted is not None
+    assert persisted.health is BackupHealth.QUARANTINED
+
+
+async def test_refused_corrupt_restore_leaves_plugin_rows_unchanged() -> None:
+    """Without ``force`` nothing was published, so nothing is reconciled."""
+    server = _server()
+    repo, backups, backup, archive = _seed_restore_fixture(server)
+    archive.corrupt_refs.add("ref")
+    plugins = FakePluginRepository()
+    tracked = _plugin(
+        server_id=server.id, rel_path="mods/gone.jar", filename="gone.jar"
+    )
+    plugins.seed(tracked)
+    uow = FakeUnitOfWork(servers=repo, backups=backups, plugins=plugins)
+
+    with pytest.raises(BackupCorruptError):
+        await _make_restore(uow, archive)(
+            community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id
+        )
+
+    assert await plugins.list_for_server(server.id) == [tracked]
 
 
 # --- helpers ----------------------------------------------------------------
