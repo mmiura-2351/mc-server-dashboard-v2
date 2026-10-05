@@ -46,26 +46,28 @@ async def race_database(url: str) -> AsyncIterator[AsyncEngine]:
     try:
         yield engine
     finally:
-        await end_leftover_transactions(engine)
+        await _end_leftover_transactions(engine)
         await engine.dispose()
         await downgrade_base(url)
 
 
-async def end_leftover_transactions(engine: AsyncEngine) -> None:
+async def _end_leftover_transactions(engine: AsyncEngine) -> None:
     """Terminate every other transaction open on the engine's database.
 
     A test that fails before resuming its paused transaction leaves it open with
     its locks held, and the downgrade would wait for them forever instead of
-    letting the failure be reported.
+    letting the failure be reported. Each termination is waited for, so no lock
+    of a leftover is still held when the downgrade starts.
     """
 
     async with engine.connect() as conn:
         await conn.execute(
             text(
-                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity"
+                "SELECT pg_terminate_backend(pid, :wait_ms) FROM pg_stat_activity"
                 " WHERE datname = current_database()"
                 " AND pid <> pg_backend_pid() AND xact_start IS NOT NULL"
-            )
+            ),
+            {"wait_ms": int(SETTLE_TIMEOUT * 1000)},
         )
 
 
