@@ -133,6 +133,9 @@ class _FakeRefreshTokenRepository(RefreshTokenRepository):
     ) -> dict[str, RefreshToken]:
         raise NotImplementedError
 
+    async def lock_sessions(self, user_id: UserId) -> None:
+        raise NotImplementedError
+
     async def revoke(
         self, token_hash: str, *, revoked_at: dt.datetime, reason: str
     ) -> None:

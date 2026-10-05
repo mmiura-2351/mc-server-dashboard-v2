@@ -18,6 +18,7 @@ from sqlalchemy import (
     CursorResult,
     and_,
     delete,
+    exists,
     func,
     or_,
     select,
@@ -26,6 +27,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from mc_server_dashboard_api.identity.adapters.integrity import (
     translate_integrity_error,
@@ -354,6 +356,9 @@ class SqlAlchemyRefreshTokenRepository(RefreshTokenRepository):
         rows = (await self._session.execute(stmt)).scalars().all()
         return {row.token_hash: _to_refresh_token(row) for row in rows}
 
+    async def lock_sessions(self, user_id: UserId) -> None:
+        await self._lock_sessions([user_id.value])
+
     async def revoke(
         self, token_hash: str, *, revoked_at: dt.datetime, reason: str
     ) -> None:
@@ -422,20 +427,27 @@ class SqlAlchemyRefreshTokenRepository(RefreshTokenRepository):
         revoked_at: dt.datetime,
         reason: str,
     ) -> bool:
-        # Scope the UPDATE to (id, user_id) and still-active so a caller can only
-        # revoke their own live session; rowcount tells the caller whether a row
-        # matched (else 404, no existence leak).
-        stmt = (
-            update(RefreshTokenModel)
-            .where(
-                RefreshTokenModel.id == token_id.value,
-                RefreshTokenModel.user_id == user_id.value,
-                RefreshTokenModel.revoked_at.is_(None),
-            )
-            .values(revoked_at=revoked_at, revoked_reason=reason)
+        # Under the lock no rotation of the chain is in flight, so the chain read
+        # here is the session as it is. Scoped to (id, user_id) so a caller can
+        # only end their own session; a chain with no unrevoked token left is a
+        # miss (else 404, no existence leak).
+        await self._lock_sessions([user_id.value])
+        unrevoked = aliased(RefreshTokenModel)
+        stmt = select(RefreshTokenModel.chain_id).where(
+            RefreshTokenModel.id == token_id.value,
+            RefreshTokenModel.user_id == user_id.value,
+            exists().where(
+                unrevoked.chain_id == RefreshTokenModel.chain_id,
+                unrevoked.revoked_at.is_(None),
+            ),
         )
-        result = cast(CursorResult[Any], await self._session.execute(stmt))
-        return result.rowcount > 0
+        chain_id = (await self._session.execute(stmt)).scalar_one_or_none()
+        if chain_id is None:
+            return False
+        await self.revoke_chain(
+            RotationChainId(chain_id), revoked_at=revoked_at, reason=reason
+        )
+        return True
 
     async def revoke_all_for_user_except(
         self,

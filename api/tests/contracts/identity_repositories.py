@@ -11,6 +11,7 @@ from mc_server_dashboard_api.identity.domain.entities import (
     REVOKED_FAMILY,
     REVOKED_LOGOUT,
     REVOKED_ROTATED,
+    REVOKED_USER,
     RefreshToken,
     User,
 )
@@ -464,4 +465,55 @@ class RefreshTokenRepositoryContract:
             "rotated": (earlier, REVOKED_LOGOUT),
             "dead": (earlier, REVOKED_FAMILY),
             "other-session": (None, None),
+        }
+
+    async def test_revoke_by_id_ends_the_whole_session_of_a_replaced_token(
+        self, refresh_token_repository_harness: RefreshTokenRepositoryHarness
+    ) -> None:
+        # The listed id may be a token a rotation has replaced since: its
+        # session lives on in the successor, which must end with it (#3254).
+        harness = refresh_token_repository_harness
+        chain = RotationChainId.new()
+        earlier = _NOW - dt.timedelta(minutes=5)
+        replaced = _token(harness, "replaced", chain_id=chain)
+        successor = _token(harness, "successor", chain_id=chain)
+        strangers = _token(harness, "strangers", user_id=harness.other_user_id)
+        async with harness.open() as transaction:
+            for token in (replaced, successor, strangers, _token(harness, "other")):
+                await transaction.repository.add(token)
+            await transaction.commit()
+        async with harness.open() as transaction:
+            await transaction.repository.revoke(
+                "replaced", revoked_at=earlier, reason=REVOKED_ROTATED
+            )
+            await transaction.commit()
+
+        async with harness.open() as transaction:
+            ended = await transaction.repository.revoke_by_id(
+                replaced.id, harness.user_id, revoked_at=_NOW, reason=REVOKED_USER
+            )
+            foreign = await transaction.repository.revoke_by_id(
+                strangers.id, harness.user_id, revoked_at=_NOW, reason=REVOKED_USER
+            )
+            await transaction.commit()
+        async with harness.open() as transaction:
+            again = await transaction.repository.revoke_by_id(
+                successor.id, harness.user_id, revoked_at=_NOW, reason=REVOKED_USER
+            )
+            states = {
+                token_hash: await transaction.repository.get_by_token_hash(token_hash)
+                for token_hash in ("replaced", "successor", "strangers", "other")
+            }
+
+        assert (ended, foreign, again) == (True, False, False)
+        revocations = {
+            token_hash: (token.revoked_at, token.revoked_reason)
+            for token_hash, token in states.items()
+            if token is not None
+        }
+        assert revocations == {
+            "replaced": (earlier, REVOKED_USER),
+            "successor": (_NOW, REVOKED_USER),
+            "strangers": (None, None),
+            "other": (None, None),
         }
