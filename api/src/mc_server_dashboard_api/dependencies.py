@@ -1815,14 +1815,22 @@ def get_stop_server(
 def get_restart_server(
     request: Request,
     control_plane: Annotated[ServersControlPlane, Depends(get_servers_control_plane)],
+    stop_server: Annotated[StopServer, Depends(get_stop_server)],
+    start_server: Annotated[StartServer, Depends(get_start_server)],
 ) -> RestartServer:
-    """Assemble the :class:`RestartServer` use case (server:restart)."""
+    """Assemble the :class:`RestartServer` use case (server:restart).
+
+    It carries the stop and start use cases for the restart of a server that is
+    owed a player-group file change, which is not done in place (issue #3223).
+    """
 
     session_factory = create_session_factory(get_engine(request))
     return RestartServer(
         uow=ServersUnitOfWork(session_factory),
         control_plane=control_plane,
         clock=ServersSystemClock(),
+        stop_server=stop_server,
+        start_server=start_server,
     )
 
 

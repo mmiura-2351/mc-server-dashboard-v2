@@ -189,6 +189,8 @@ def _restart_server_use_case(
         uow=ServersUnitOfWork(create_session_factory(engine)),
         control_plane=control_plane,
         clock=clock,
+        stop_server=_stop_server_use_case(engine, control_plane, clock),
+        start_server=_start_server_use_case(engine, control_plane, clock),
     )
 
 

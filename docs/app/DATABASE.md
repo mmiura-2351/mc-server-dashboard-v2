@@ -564,7 +564,12 @@ file from the then-current union before it decides whether to hydrate:
 
 - The start does this under the per-server lifecycle lock and only for a stopped,
   unassigned server, i.e. after the previous run's final snapshot has settled, so
-  no snapshot publishes over the regenerated file.
+  no snapshot publishes over the regenerated file. A start that finds the
+  assignment still held by that snapshot is refused at once with 409
+  `transition_conflict`, so it cannot go on to launch once the hold is released.
+- A change to a group itself (player add/remove, delete) locks the group row
+  before it lists the attached servers, so a concurrent attach either is in that
+  list or waits for the change; no attached server is left without a row.
 - The write advances the working-set generation like any at-rest edit, so a
   Worker still holding the previous run's scratch hydrates instead of booting the
   pre-change file ([`CONTROL_PLANE.md`](CONTROL_PLANE.md) Section 5.1).
@@ -576,11 +581,17 @@ file from the then-current union before it decides whether to hydrate:
   its `token` is still the one the start read, so a change committed meanwhile
   stays owed for the start after.
 
-Only an operator's (or a schedule's) start applies owed files. An in-place
-restart, and the reconciler's relaunch of a server that is already meant to be
-running, reuse the Worker's live working set and leave the row in place. Pushing
-live changes to a running server via the Worker (EditFile + RCON reload) is
-deferred: not implemented.
+Which launches apply owed files:
+
+| Launch | Owed files |
+|---|---|
+| Start (operator or schedule) | Applied, as above. |
+| Restart (operator or schedule) | Applied. A restart of a server with a row is not dispatched in place, because the Worker would relaunch its own stale copy: it runs as a stop (with its final snapshot, so nothing the Worker holds is lost) followed by a start. Each step fails as it does on its own, and the stop is not reverted, so a failure part-way leaves the server stopped with that step's error. With no row the restart is the in-place dispatch. |
+| Reconciler placement of an unassigned server | Applied before placing; this launch always hydrates from the store. |
+| Reconciler re-dispatch onto the Worker that still holds the server (typically after a crash) | **Not applied; the row stays.** The Worker's retained scratch may be newer than the store, and applying the change means forcing a hydrate from the last published snapshot over it. Until the next launch of one of the kinds above, a removed operator is still in the launched file. Whether to trade that world progression for the revocation is tracked in issue #3271. |
+
+Pushing live changes to a running server via the Worker (EditFile + RCON reload)
+is deferred: not implemented.
 
 The row is also what separates a file a group change made stale from one no
 group ever managed: a server with no row keeps its `ops.json` / `whitelist.json`

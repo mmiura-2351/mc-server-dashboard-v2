@@ -130,7 +130,6 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerNotRunningError,
 )
 from mc_server_dashboard_api.servers.domain.file_store import FileStore
-from mc_server_dashboard_api.servers.domain.groups import PendingGroupSync
 from mc_server_dashboard_api.servers.domain.jar_provisioner import (
     JarProvisioner,
     ProvisionedJar,
@@ -305,6 +304,16 @@ class StartServer:
             server = await _load(self.uow, community_id, server_id)
             if server.desired_state is DesiredState.RUNNING:
                 raise InvalidLifecycleTransitionError(str(server_id.value))
+            if server.assigned_worker_id is not None:
+                # A stop still holds the assignment for its final snapshot (issue
+                # #847). Refuse now, with the conflict the ``require_unassigned``
+                # compare-and-set below would answer, instead of carrying on to
+                # it: the snapshot's deferred clear takes no lifecycle lock, so it
+                # can release the row while this start provisions its JAR, and the
+                # compare-and-set would then succeed for a start that skipped the
+                # owed player-file regeneration below — launching the stale file
+                # (issue #3223).
+                raise LifecycleTransitionConflictError(str(server_id.value))
             # EULA gate: starting without acceptance would crash the Minecraft
             # process immediately ("You need to agree to the EULA").
             if accept_eula:
@@ -319,27 +328,22 @@ class StartServer:
             # Make the player-group file changes this server is owed (issue #3223):
             # an OP / whitelist change made while it ran could not be written then,
             # and nothing else applies it — a hydrate only ships what the store
-            # holds. This is the safe point. The lifecycle lock is held, and an
-            # unassigned stopped server has no final snapshot in flight (a stop
-            # keeps the assignment until its snapshot settles, issue #847), so the
-            # write lands on the settled working set and nothing publishes over
-            # it. It is also BEFORE the skip-hydrate decision below: the write
-            # advances the store generation (issue #889), so a Worker still holding
-            # the previous run's scratch reads as stale and hydrates instead of
-            # booting the pre-edit file. A storage failure raises here, before the
-            # flip, so the server is not started with a file known to be stale.
-            #
-            # Skipped while the assignment is still held: a write now would advance
-            # the generation under the final snapshot's upload, and this start is
-            # about to lose its compare-and-set anyway.
-            owed_group_files: list[PendingGroupSync] = []
-            if server.assigned_worker_id is None:
-                owed_group_files = await regenerate_pending_group_files(
-                    self.uow,
-                    self.file_store,
-                    community_id=community_id,
-                    server_id=server_id,
-                )
+            # holds. This is the safe point. The lifecycle lock is held, and the
+            # server was read unassigned above, so no final snapshot is in flight
+            # (a stop keeps the assignment until its snapshot settles, issue
+            # #847): the write lands on the settled working set and nothing
+            # publishes over it. It is also BEFORE the skip-hydrate decision
+            # below: the write advances the store generation (issue #889), so a
+            # Worker still holding the previous run's scratch reads as stale and
+            # hydrates instead of booting the pre-edit file. A storage failure
+            # raises here, before the flip, so the server is not started with a
+            # file known to be stale.
+            owed_group_files = await regenerate_pending_group_files(
+                self.uow,
+                self.file_store,
+                community_id=community_id,
+                server_id=server_id,
+            )
             # Ensure the resolved JAR is pooled BEFORE placement/dispatch (FR-VER-3):
             # a download/verify failure fails the start here, before a Worker is
             # placed or the desired state flipped. The ensure resolves the latest
@@ -568,7 +572,7 @@ class StartServer:
           instances of one server.
         """
 
-        async with self.uow:
+        async with self.lifecycle_lock.hold(server_id), self.uow:
             server = await _load(self.uow, community_id, server_id)
             if (
                 server.desired_state is not DesiredState.RUNNING
@@ -577,6 +581,18 @@ class StartServer:
                 # Not an orphan (already assigned, or no longer desired-running):
                 # nothing for this path to reconcile.
                 raise InvalidLifecycleTransitionError(str(server_id.value))
+            # Make the owed player-group file changes first, as ``__call__`` does
+            # (issue #3223): this path always hydrates, so the store is what gets
+            # launched. No Worker holds an unassigned server, so no snapshot can
+            # publish over the write; the lifecycle lock, which this path takes
+            # for it, keeps a second placement of the same orphan from
+            # interleaving. A storage failure raises before a Worker is placed.
+            owed_group_files = await regenerate_pending_group_files(
+                self.uow,
+                self.file_store,
+                community_id=community_id,
+                server_id=server_id,
+            )
             provisioned = await self._ensure_jar(server)
             worker_id = await self._place(server)
             if worker_id is None:
@@ -605,6 +621,7 @@ class StartServer:
                     # won the compare-and-set; abort before dispatch or any committed
                     # count change so the lost race causes no double placement.
                     raise LifecycleTransitionConflictError(str(server_id.value))
+                await self.uow.groups.clear_sync_pending(server_id, owed_group_files)
                 await self.uow.commit()
                 # Confirm the placement reservation as a committed assignment now the
                 # intent is durable (#778); a no-op if a reconnect rebuild already
@@ -2097,15 +2114,37 @@ class RestartServer:
     still running — and ``desired_state=running`` remains the correct intent
     whatever the Worker did, including the case where it stopped the server and
     failed to relaunch it. The reconciler converges that from the same row.
+
+    A restart of a server that is owed a player-group file change is not done in
+    place (issue #3223). The in-place restart relaunches the Worker's own working
+    set, where the change cannot be written, so a removed operator would come back
+    with level 4. It runs the stop and the start instead: :class:`StopServer`
+    takes the final snapshot, so nothing the Worker holds is lost, and
+    :class:`StartServer` regenerates the owed files at rest and hydrates them.
+    Those two own their failures exactly as when an operator calls them — the
+    stop's intent is not reverted — so a failure part-way leaves the server
+    stopped, with the error of the step that failed, rather than running with the
+    stale file. With nothing owed the restart is the in-place dispatch, unchanged.
     """
 
     uow: UnitOfWork
     control_plane: ControlPlane
     clock: Clock
+    stop_server: StopServer
+    start_server: StartServer
 
     async def __call__(
         self, *, community_id: CommunityId, server_id: ServerId
     ) -> Server:
+        async with self.uow:
+            owed_group_files = await self.uow.groups.list_sync_pending(server_id)
+        if owed_group_files:
+            # The stop validates the server exactly as the block below does (not
+            # found, not running, unassigned), so nothing is checked twice here.
+            await self.stop_server(community_id=community_id, server_id=server_id)
+            return await self.start_server(
+                community_id=community_id, server_id=server_id
+            )
         async with self.uow:
             server = await _load(self.uow, community_id, server_id)
             if (

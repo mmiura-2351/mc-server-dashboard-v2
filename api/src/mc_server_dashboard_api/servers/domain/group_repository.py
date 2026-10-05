@@ -119,6 +119,17 @@ class GroupRepository(abc.ABC):
         """Return whether ``group_id`` is currently attached to ``server_id``."""
 
     @abc.abstractmethod
+    async def lock_against_attach(self, group_id: GroupId) -> None:
+        """Hold off every attach of ``group_id`` until this transaction ends.
+
+        A change that lists the group's servers in order to mark them
+        (:meth:`mark_sync_pending`) takes this first, so the list cannot go stale
+        under it (issue #3223): an attach that committed earlier is in the list,
+        and a later one waits for the change — then sees it, or finds the group
+        deleted. A group that does not exist locks nothing.
+        """
+
+    @abc.abstractmethod
     async def list_server_ids_for_group(self, group_id: GroupId) -> list[ServerId]:
         """Return the ids of every server ``group_id`` is attached to."""
 

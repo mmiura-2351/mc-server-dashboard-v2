@@ -190,6 +190,16 @@ class SqlAlchemyGroupRepository(GroupRepository):
         )
         return row is not None
 
+    async def lock_against_attach(self, group_id: GroupId) -> None:
+        # FOR UPDATE, the one row lock that conflicts with the FOR KEY SHARE an
+        # attach's fk_server_group_group_id_player_group check takes on this row.
+        # A weaker lock would let the attach's INSERT through.
+        await self._session.execute(
+            select(PlayerGroupModel.id)
+            .where(PlayerGroupModel.id == group_id.value)
+            .with_for_update()
+        )
+
     async def list_server_ids_for_group(self, group_id: GroupId) -> list[ServerId]:
         stmt = (
             select(ServerGroupModel.server_id)
@@ -229,6 +239,9 @@ class SqlAlchemyGroupRepository(GroupRepository):
                 literal(uuid.uuid4()).label("token"),
             )
             .where(ServerModel.id.in_([s.value for s in server_ids]))
+            # One lock order for every caller, so two changes marking the same
+            # servers cannot deadlock on each other's rows.
+            .order_by(ServerModel.id)
             .with_for_update(key_share=True)
         )
         stmt = pg_insert(ServerGroupSyncPendingModel).from_select(

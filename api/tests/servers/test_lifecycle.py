@@ -164,6 +164,26 @@ def _server(
     )
 
 
+def _restart_use_case(uow: FakeUnitOfWork, cp: FakeControlPlane) -> RestartServer:
+    """A RestartServer wired with the stop and start it falls back to (#3223)."""
+
+    clock = FakeClock(_NOW)
+    return RestartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=clock,
+        stop_server=StopServer(uow=uow, control_plane=cp, clock=clock),
+        start_server=StartServer(
+            uow=uow,
+            control_plane=cp,
+            clock=clock,
+            jar_provisioner=FakeJarProvisioner(),
+            store_generation=FakeStoreGenerationReader(),
+            file_store=FakeFileStore(seed_eula=True),
+        ),
+    )
+
+
 def _ids() -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
     return uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
 
@@ -3275,7 +3295,7 @@ async def test_restart_dispatches_and_keeps_running() -> None:
         )
     )
     cp = FakeControlPlane()
-    use_case = RestartServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+    use_case = _restart_use_case(uow, cp)
 
     result = await use_case(
         community_id=CommunityId(community), server_id=ServerId(server_id)
@@ -3308,7 +3328,7 @@ async def test_restart_lost_race_is_conflict_without_dispatch() -> None:
         )
     )
     cp = FakeControlPlane()
-    use_case = RestartServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+    use_case = _restart_use_case(uow, cp)
 
     with pytest.raises(LifecycleTransitionConflictError):
         await use_case(
@@ -3336,7 +3356,7 @@ async def test_restart_of_not_running_server_is_not_running() -> None:
         )
     )
     cp = FakeControlPlane(outcome=CommandOutcome(status=CommandStatus.SERVER_NOT_FOUND))
-    use_case = RestartServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+    use_case = _restart_use_case(uow, cp)
 
     with pytest.raises(ServerNotRunningError):
         await use_case(
@@ -3374,7 +3394,7 @@ async def test_restart_over_a_destroyed_working_set_is_not_reported_as_not_runni
             message=_WORKING_SET_ABSENT_LAUNCH_MESSAGE,
         )
     )
-    use_case = RestartServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+    use_case = _restart_use_case(uow, cp)
 
     with (
         caplog.at_level(logging.WARNING),
@@ -3426,7 +3446,7 @@ async def test_restart_over_failed_stop_orphan_names_the_orphan() -> None:
             ),
         )
     )
-    use_case = RestartServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+    use_case = _restart_use_case(uow, cp)
 
     with pytest.raises(CommandDispatchError) as excinfo:
         await use_case(
@@ -3472,9 +3492,7 @@ async def test_restart_when_stopped_is_conflict() -> None:
     community, server_id, _ = _ids()
     uow = FakeUnitOfWork()
     uow.servers.seed(_server(community_id=community, server_id=server_id))
-    use_case = RestartServer(
-        uow=uow, control_plane=FakeControlPlane(), clock=FakeClock(_NOW)
-    )
+    use_case = _restart_use_case(uow, FakeControlPlane())
     with pytest.raises(InvalidLifecycleTransitionError):
         await use_case(
             community_id=CommunityId(community), server_id=ServerId(server_id)

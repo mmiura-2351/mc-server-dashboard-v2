@@ -1293,6 +1293,11 @@ class FakeGroupRepository(GroupRepository):
     async def is_attached(self, group_id: GroupId, server_id: ServerId) -> bool:
         return (group_id, server_id) in self.attachments
 
+    async def lock_against_attach(self, group_id: GroupId) -> None:
+        # Nothing to hold: this fake has no second transaction to hold off. The
+        # interleaving is pinned in tests/integration/test_group_attach_races.py.
+        return None
+
     async def list_server_ids_for_group(self, group_id: GroupId) -> list[ServerId]:
         return sorted(
             (s for g, s in self.attachments if g == group_id),
