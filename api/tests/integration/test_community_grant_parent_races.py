@@ -29,7 +29,6 @@ from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
-    create_async_engine,
 )
 
 from mc_server_dashboard_api.community.adapters.clock import SystemClock
@@ -78,7 +77,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId as ServersCommunityId,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
-from tests.integration.migrate import downgrade_base, upgrade_head
+from tests.integration.races import await_settled, race_database
 from tests.servers.fakes import FakeBackupArchiveStore
 
 _DB_URL = os.environ.get("MCD_TEST_DATABASE_URL")
@@ -89,22 +88,12 @@ pytestmark = pytest.mark.skipif(
 
 _START = Permission("server:start")
 
-# Upper bound on how long the competing deletion may take to settle (commit, or
-# block on the paused creation's lock) before the test fails instead of resuming.
-_SETTLE_TIMEOUT = 10.0
-
 
 @pytest.fixture
 async def engine() -> AsyncIterator[AsyncEngine]:
     assert _DB_URL is not None
-    await downgrade_base(_DB_URL)
-    await upgrade_head(_DB_URL)
-    eng = create_async_engine(_DB_URL)
-    try:
+    async with race_database(_DB_URL) as eng:
         yield eng
-    finally:
-        await eng.dispose()
-        await downgrade_base(_DB_URL)
 
 
 class _Pause:
@@ -148,26 +137,11 @@ class _PausingUnitOfWork(SqlAlchemyUnitOfWork):
 async def _await_settled(
     engine: AsyncEngine, competitor: asyncio.Task[Any], pid: asyncio.Future[int]
 ) -> None:
-    """Return once ``competitor`` has finished or is blocked on a lock.
-
-    Resuming the paused creation only after this makes the interleaving explicit
-    rather than timed: an implementation that does not serialize the two lets the
-    deletion commit, and one that does has it waiting on the creation's lock.
-    """
-
-    query = text(
-        "SELECT 1 FROM pg_stat_activity WHERE pid = :pid AND wait_event_type = 'Lock'"
+    await await_settled(
+        engine, competitor, lambda: pid.result() if pid.done() else None
     )
-    deadline = asyncio.get_running_loop().time() + _SETTLE_TIMEOUT
-    while not competitor.done():
-        if pid.done():
-            async with engine.connect() as conn:
-                if (await conn.execute(query, {"pid": pid.result()})).first():
-                    return
-        if asyncio.get_running_loop().time() > deadline:
-            pytest.fail("competing deletion neither committed nor blocked on a lock")
-        await asyncio.sleep(0.02)
-    competitor.result()
+    if competitor.done():
+        competitor.result()
 
 
 @dataclass(frozen=True)

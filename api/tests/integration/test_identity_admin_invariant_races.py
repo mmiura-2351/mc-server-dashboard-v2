@@ -36,7 +36,6 @@ from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
-    create_async_engine,
 )
 
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
@@ -74,7 +73,7 @@ from tests.identity.fakes import (
     StubHasher,
     make_user,
 )
-from tests.integration.migrate import downgrade_base, upgrade_head
+from tests.integration.races import SETTLE_TIMEOUT, await_settled, race_database
 
 _DB_URL = os.environ.get("MCD_TEST_DATABASE_URL")
 
@@ -85,23 +84,12 @@ pytestmark = pytest.mark.skipif(
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 _PASSWORD = "Wm7!qz#Lp2vT"
 
-# Upper bound on how long a transaction may take to reach its pause point, or a
-# competitor to settle (commit, or block on a lock), before the test fails
-# instead of hanging.
-_SETTLE_TIMEOUT = 10.0
-
 
 @pytest.fixture
 async def engine() -> AsyncIterator[AsyncEngine]:
     assert _DB_URL is not None
-    await downgrade_base(_DB_URL)
-    await upgrade_head(_DB_URL)
-    eng = create_async_engine(_DB_URL)
-    try:
+    async with race_database(_DB_URL) as eng:
         yield eng
-    finally:
-        await eng.dispose()
-        await downgrade_base(_DB_URL)
 
 
 class _Pause:
@@ -178,25 +166,6 @@ class _TrackedUnitOfWork(SqlAlchemyUnitOfWork):
             await self._session.execute(text("SELECT pg_backend_pid()"))
         ).scalar_one()
         return self
-
-
-async def _await_settled(
-    engine: AsyncEngine, competitor: asyncio.Task[None], backend: _Backend
-) -> None:
-    """Return once ``competitor`` has finished or is blocked on a lock."""
-
-    query = text(
-        "SELECT 1 FROM pg_stat_activity WHERE pid = :pid AND wait_event_type = 'Lock'"
-    )
-    deadline = asyncio.get_running_loop().time() + _SETTLE_TIMEOUT
-    while not competitor.done():
-        if backend.pid is not None:
-            async with engine.connect() as conn:
-                if (await conn.execute(query, {"pid": backend.pid})).first():
-                    return
-        if asyncio.get_running_loop().time() > deadline:
-            pytest.fail("competitor neither committed nor blocked on a lock")
-        await asyncio.sleep(0.02)
 
 
 _Op = Callable[[SqlAlchemyUnitOfWork, UserId], Coroutine[Any, Any, None]]
@@ -287,7 +256,7 @@ async def _interleave(
     first = asyncio.create_task(
         paused.op(_PausingUnitOfWork(factory, pause), paused.target)
     )
-    await asyncio.wait_for(pause.reached.wait(), _SETTLE_TIMEOUT)
+    await asyncio.wait_for(pause.reached.wait(), SETTLE_TIMEOUT)
 
     tasks = []
     for step in competitors:
@@ -295,12 +264,12 @@ async def _interleave(
         task = asyncio.create_task(
             step.op(_TrackedUnitOfWork(factory, backend), step.target)
         )
-        await _await_settled(engine, task, backend)
+        await await_settled(engine, task, lambda: backend.pid)
         tasks.append(task)
 
     pause.resume.set()
     outcomes = await asyncio.wait_for(
-        asyncio.gather(first, *tasks, return_exceptions=True), _SETTLE_TIMEOUT
+        asyncio.gather(first, *tasks, return_exceptions=True), SETTLE_TIMEOUT
     )
     # A refusal is the only acceptable failure: anything else (a deadlock, a
     # serialization error) is a bug in the lock order.
