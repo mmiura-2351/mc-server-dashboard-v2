@@ -244,6 +244,10 @@ class FakeRefreshTokenRepository(RefreshTokenRepository):
             if token_hash in self.by_hash
         }
 
+    async def lock_sessions(self, user_id: UserId) -> None:
+        # No competitor to serialize with in-memory (see above).
+        return None
+
     async def revoke_chain(
         self, chain_id: RotationChainId, *, revoked_at: dt.datetime, reason: str
     ) -> None:
@@ -301,15 +305,21 @@ class FakeRefreshTokenRepository(RefreshTokenRepository):
         revoked_at: dt.datetime,
         reason: str,
     ) -> bool:
-        for token_hash, token in list(self.by_hash.items()):
-            if (
-                token.id == token_id
-                and token.user_id == user_id
-                and token.revoked_at is None
-            ):
-                self.by_hash[token_hash] = _with_revoked(token, revoked_at, reason)
-                return True
-        return False
+        target = next(
+            (
+                token
+                for token in self.by_hash.values()
+                if token.id == token_id and token.user_id == user_id
+            ),
+            None,
+        )
+        if target is None or not any(
+            token.chain_id == target.chain_id and token.revoked_at is None
+            for token in self.by_hash.values()
+        ):
+            return False
+        await self.revoke_chain(target.chain_id, revoked_at=revoked_at, reason=reason)
+        return True
 
     async def revoke_all_for_user_except(
         self,
