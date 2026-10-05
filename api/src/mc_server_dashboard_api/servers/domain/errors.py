@@ -609,6 +609,19 @@ class InvalidPluginSideError(ServerError):
     """
 
 
+class PluginReconcileIncompleteError(ServerError):
+    """A restore published, but its plugin rows could not be reconciled (#3221).
+
+    The restored plugin content directory could not be listed — a store outage, a
+    permission or I/O error, anything other than the typed "no such directory" —
+    so there is no evidence of which jars the restored working set holds. The rows
+    are left exactly as they were rather than deleted as orphans on the strength
+    of a read that never happened; they may now describe the pre-restore working
+    set. The edge maps this to 503 ``plugin_reconcile_incomplete``: the
+    reconciliation is idempotent, so re-running the restore completes it.
+    """
+
+
 class PluginCacheBlobNotFoundError(ServerError):
     """A cached jar blob is absent from the content-addressed cache (issue #2338).
 

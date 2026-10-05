@@ -916,6 +916,12 @@ export interface paths {
          *     create-direction gate (#749) has no such override. An ``unreadable`` backup
          *     (#2374) is refused with 409 ``backup_unreadable`` whatever ``force`` says: its
          *     archive could not be read back, so there is nothing to restore.
+         *
+         *     Two steps follow the publish, and a failure in either is a 503 over a working
+         *     set that IS restored — retrying the restore heals both: ``seed_failed`` when
+         *     the platform-managed ``server.properties`` keys could not be re-applied
+         *     (#2621), ``plugin_reconcile_incomplete`` when the restored plugin directory
+         *     could not be read, leaving the plugin rows unreconciled (#3221).
          */
         post: operations["restore_backup_api_communities__community_id__servers__server_id__backups__backup_id__restore_post"];
         delete?: never;
