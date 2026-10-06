@@ -274,7 +274,7 @@ class TestUploadEndpoint:
 
     def test_upload_storage_outage_is_503(self) -> None:
         # The blob goes to the store before the row is inserted, so an outage there
-        # leaves nothing behind and the upload is safe to send again (issue #2458):
+        # creates no pack and the upload is safe to send again (issue #2458):
         # 503 ``storage_unavailable``, not a generic 500 -- and nothing audited,
         # because no pack was created.
         uc = _FakeUseCase(error=ResourcePackStorageUnavailableError("down"))
@@ -1009,7 +1009,7 @@ class TestAssignEndpoint:
 
     def test_assign_properties_write_failure_is_503(self) -> None:
         # The server.properties write failed before the assignment committed, so
-        # nothing was left behind and assigning again is safe (issue #2458): the
+        # no assignment row was left and assigning again is safe (issue #2458): the
         # 503 the other working-set writes answer, not a generic 500.
         uc = _FakeUseCase(error=WorkingSetSeedFailedError("nope"))
         recorder = RecordingAuditRecorder()

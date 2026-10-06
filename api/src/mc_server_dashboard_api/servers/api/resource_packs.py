@@ -171,9 +171,10 @@ async def upload_resource_pack(
     except FileTooLargeError as exc:
         raise _too_large() from exc
     except ResourcePackStorageUnavailableError as exc:
-        # The store refused the blob, which is written before the row: nothing was
-        # stored and no pack was created, so sending the upload again is safe and
-        # 503 says so, where a generic 500 would not (issue #2458).
+        # The store failed the blob, which is written before the row: no pack was
+        # created, and a retry uploads under a fresh id, so sending the upload
+        # again is safe and 503 says so, where a generic 500 would not (issue
+        # #2458). The failed attempt may leave an unreferenced blob (issue #3277).
         raise _service_unavailable("storage_unavailable") from exc
 
     await recorder.record(
@@ -595,8 +596,9 @@ async def assign_resource_pack(
         raise _conflict("server_busy") from exc
     except WorkingSetSeedFailedError as exc:
         # Writing server.properties failed before the assignment committed, so the
-        # row rolled back and the file is as it was (issue #2458): a mapped 503 the
-        # caller retries, as for the other working-set writes, not an unmapped 500.
+        # row rolled back (issue #2458): a mapped 503 the caller retries, as for
+        # the other working-set writes, not an unmapped 500. Only the row is known
+        # to be undone -- the storage write may have replaced the file first.
         raise _service_unavailable("seed_failed") from exc
 
     await recorder.record(

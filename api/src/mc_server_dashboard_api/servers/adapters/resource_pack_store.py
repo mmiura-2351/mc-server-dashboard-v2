@@ -28,11 +28,15 @@ The write paths — :meth:`put` and :meth:`delete` — translate the same way (i
 #2458), and what their callers do with it follows from what a failure leaves
 behind:
 
-- An interrupted :meth:`put` leaves no blob. The object client aborts the
-  multipart upload before it reports the outage, an incomplete upload is never an
-  object, and the pack row is inserted only after ``put`` returns. Every upload
-  mints a fresh pack id, so a retry shares no key with the failed attempt: the
-  upload route answers 503 ``storage_unavailable``.
+- An interrupted :meth:`put` leaves no pack row: the row is inserted only after
+  ``put`` returns. It usually leaves no blob either — the object client aborts
+  the multipart upload before it reports the outage, and an incomplete upload is
+  never an object — but not always: when the store completes the upload and the
+  response is lost, the abort finds nothing to undo and the completed blob
+  stays, referenced by no row and therefore never served. Reclaiming it is
+  issue #3277. Every upload mints a fresh pack id, so a retry shares no key with
+  the failed attempt either way: the upload route answers 503
+  ``storage_unavailable``.
 - An interrupted :meth:`delete` may have removed some of the pack's objects. It
   is idempotent — it re-lists the prefix, and the store treats deleting an absent
   key as success — so re-running it finishes the job. Its one caller commits the
@@ -78,8 +82,10 @@ class ObjectResourcePackStore(ResourcePackStore):
             async with self._client_factory() as client:
                 await client.upload_multipart(key, stream)
         except ObjectStoreUnavailableError as exc:
-            # The client has already aborted the multipart upload, so nothing was
-            # published under this key (issue #2458).
+            # The client has already tried to abort the multipart upload. A blob
+            # can still be left under this key -- a completion whose response was
+            # lost cannot be aborted -- but no row will name it (issues #2458,
+            # #3277).
             raise ResourcePackStorageUnavailableError(key) from exc
 
     def open(self, pack_id: ResourcePackId, filename: str) -> AsyncIterator[bytes]:

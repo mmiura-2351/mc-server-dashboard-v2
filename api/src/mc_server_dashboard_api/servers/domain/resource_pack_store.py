@@ -25,8 +25,10 @@ class ResourcePackStore(abc.ABC):
         """Store a resource pack blob.
 
         Raises ``ResourcePackStorageUnavailableError`` when the store could not
-        take the upload (issue #2458). Nothing is stored in that case, so the
-        caller may simply try again.
+        take the upload (issue #2458). The blob is then normally absent, but
+        that is not guaranteed: a store that completed the upload and lost the
+        response leaves it behind (reclaiming it is issue #3277). The caller must
+        not record the pack, and may try again under a fresh pack id.
         """
 
     @abc.abstractmethod

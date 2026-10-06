@@ -30,15 +30,23 @@ assertions sit outside the parametrization, against the adapter directly.
 
 from __future__ import annotations
 
+import datetime as dt
+import io
+import json
 import os
 import uuid
+import zipfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import pytest
+from botocore.exceptions import ClientError, ReadTimeoutError
 
 from mc_server_dashboard_api.servers.adapters.resource_pack_store import (
     ObjectResourcePackStore,
+)
+from mc_server_dashboard_api.servers.application.resource_packs import (
+    UploadResourcePack,
 )
 from mc_server_dashboard_api.servers.domain.errors import (
     ResourcePackNotFoundError,
@@ -49,6 +57,7 @@ from mc_server_dashboard_api.servers.domain.resource_pack_store import (
     ResourcePackStore,
 )
 from mc_server_dashboard_api.storage.adapters.object_client import (
+    _Aioboto3S3Client,
     make_s3_client_factory,
 )
 from mc_server_dashboard_api.storage.adapters.object_store import (
@@ -56,7 +65,7 @@ from mc_server_dashboard_api.storage.adapters.object_store import (
     S3Object,
 )
 from mc_server_dashboard_api.storage.domain.errors import ObjectStoreUnavailableError
-from tests.servers.fakes import FakeResourcePackStore
+from tests.servers.fakes import FakeClock, FakeResourcePackStore, FakeUnitOfWork
 from tests.storage.fake_s3 import (
     FakeS3Client,
     FakeS3Store,
@@ -337,9 +346,9 @@ def _write_fault_factory(store: FakeS3Store, **faults: object) -> S3ClientFactor
 
 
 async def test_put_backend_failure_translates_and_leaves_no_blob() -> None:
-    """An interrupted upload crosses the seam as the servers type the edge maps
-    to 503, and leaves nothing a later read could find: the pack id never gained
-    a blob, so re-uploading (under a fresh id) starts from a clean slate."""
+    """An upload interrupted before the store published it crosses the seam as
+    the servers type the edge maps to 503, and leaves no blob. (A fault AFTER
+    publication is the other aftermath -- see the lost-completion test below.)"""
 
     backing = FakeS3Store()
     store = ObjectResourcePackStore(
@@ -397,3 +406,96 @@ async def test_delete_interrupted_partway_translates_and_a_retry_finishes_it() -
     await healthy.delete(pack_id)
 
     assert backing.objects == {}
+
+
+# --- an upload the store completed but could not acknowledge (issue #2458) --
+
+
+class _LostCompletionS3:
+    """A raw aioboto3-client double whose first ``CompleteMultipartUpload``
+    succeeds at the store while its response is lost.
+
+    The object is published and the call then raises the read timeout the caller
+    sees. The cleanup abort gets ``NoSuchUpload``, as real S3 answers for an upload
+    id that has already completed -- an abort cannot undo a completed object.
+    """
+
+    def __init__(self) -> None:
+        self.objects: dict[str, bytes] = {}
+        self._parts: dict[str, bytearray] = {}
+        self._lose_next_completion = True
+        self.abort_calls = 0
+
+    async def create_multipart_upload(self, **kwargs: str) -> dict[str, object]:
+        self._parts[kwargs["Key"]] = bytearray()
+        return {"UploadId": "upload"}
+
+    async def upload_part(self, **kwargs: object) -> dict[str, object]:
+        body = kwargs["Body"]
+        assert isinstance(body, bytes)
+        self._parts[str(kwargs["Key"])].extend(body)
+        return {"ETag": "etag"}
+
+    async def complete_multipart_upload(self, **kwargs: object) -> None:
+        key = str(kwargs["Key"])
+        self.objects[key] = bytes(self._parts.pop(key))
+        if self._lose_next_completion:
+            self._lose_next_completion = False
+            raise ReadTimeoutError(endpoint_url="http://store:8333")
+
+    async def abort_multipart_upload(self, **_kwargs: object) -> None:
+        self.abort_calls += 1
+        raise ClientError({"Error": {"Code": "NoSuchUpload"}}, "AbortMultipartUpload")
+
+
+def _valid_pack_zip() -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("pack.mcmeta", json.dumps({"pack": {"pack_format": 15}}))
+    return buf.getvalue()
+
+
+async def test_upload_completed_but_unacknowledged_leaves_a_blob_and_no_row() -> None:
+    """The aftermath a pre-publication fault does not show, driven through the
+    real object client and the adapter: the store completed the upload, the
+    response was lost, and the abort had nothing left to undo. The outage still
+    crosses the seam as the servers type, the completed blob SURVIVES, and no row
+    names it -- so it is unreferenced, never served, and left for issue #3277 to
+    reclaim. The retry is independent of it: a fresh pack id, hence a fresh key."""
+
+    raw = _LostCompletionS3()
+
+    @asynccontextmanager
+    async def _factory() -> AsyncIterator[_Aioboto3S3Client]:
+        yield _Aioboto3S3Client(raw, "bucket")
+
+    uow = FakeUnitOfWork()
+    upload = UploadResourcePack(
+        uow=uow,
+        store=ObjectResourcePackStore(_factory),
+        clock=FakeClock(dt.datetime(2026, 6, 16, tzinfo=dt.UTC)),
+    )
+
+    with pytest.raises(ResourcePackStorageUnavailableError):
+        await upload(
+            filename=_FILENAME,
+            display_name="Pack",
+            content=_valid_pack_zip(),
+            uploaded_by=uuid.uuid4(),
+        )
+
+    assert raw.abort_calls == 1
+    (orphan_key,) = raw.objects
+    assert uow.resource_packs.packs == {}
+
+    pack = await upload(
+        filename=_FILENAME,
+        display_name="Pack",
+        content=_valid_pack_zip(),
+        uploaded_by=uuid.uuid4(),
+    )
+
+    retry_key = f"resource-packs/{pack.id.value}/{_FILENAME}"
+    assert retry_key != orphan_key
+    assert set(raw.objects) == {orphan_key, retry_key}
+    assert list(uow.resource_packs.packs) == [pack.id]

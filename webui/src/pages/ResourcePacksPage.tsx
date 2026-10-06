@@ -35,9 +35,9 @@ const PACKS_KEY = ["resource-packs"] as const;
 
 /**
  * True for the 503 `storage_unavailable` an upload or a download answers while
- * the object store is down (issues #2455, #2458). Neither leaves anything
- * behind, so the operator's move is to try again — which the generic "could
- * not…" toast does not say. A delete never answers it: the API removes the pack
+ * the object store is down (issues #2455, #2458). Neither creates a pack, so
+ * the operator's move is to try again — which the generic "could not…" toast
+ * does not say. A delete never answers it: the API removes the pack
  * first and treats the stored file's cleanup as best-effort.
  */
 function isStorageUnavailable(error: unknown): boolean {

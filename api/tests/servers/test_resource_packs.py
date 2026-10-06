@@ -183,8 +183,8 @@ class TestUploadResourcePack:
         self,
     ) -> None:
         # The blob is stored before the row is inserted, so an upload the store
-        # refuses leaves neither (issue #2458): there is no row naming a blob that
-        # is not there, and nothing for the retry to collide with.
+        # refuses leaves no row (issue #2458): nothing names a blob that is not
+        # there, and nothing for the retry to collide with.
         uow = FakeUnitOfWork()
         store = FakeResourcePackStore()
         healthy_put = store.put

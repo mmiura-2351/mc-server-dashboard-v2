@@ -127,8 +127,9 @@ class UploadResourcePack:
         )
 
         # Blob first, row second: a store outage raises out of here as
-        # ``ResourcePackStorageUnavailableError`` with nothing stored and no row
-        # inserted, and the next attempt mints a fresh id (issue #2458).
+        # ``ResourcePackStorageUnavailableError`` with no row inserted, and the
+        # next attempt mints a fresh id (issue #2458). At worst the failed attempt
+        # leaves a blob under its own id that no row names (issue #3277).
         await self.store.put(pack_id, filename, _bytes_stream(content))
 
         async with self.uow:
@@ -271,8 +272,10 @@ class AssignResourcePack:
     row, so a concurrent delete waits for the commit and then finds the pack in use.
 
     That failed write surfaces as :class:`WorkingSetSeedFailedError` (mapped to
-    503) rather than as whatever the storage layer raised (issue #2458): nothing
-    was committed, so assigning again is all the caller has to do.
+    503) rather than as whatever the storage layer raised (issue #2458): the
+    assignment row was not committed, so assigning again is all the caller has to
+    do. Nothing is promised about the file -- the storage write is not rolled back
+    with the row, and may have replaced it before failing.
 
     An assignment with no prompt removes any ``resource-pack-prompt`` line the
     previous assignment left behind (issue #2792): the row now says "no prompt", and
