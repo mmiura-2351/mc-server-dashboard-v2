@@ -15,6 +15,7 @@ from mc_server_dashboard_api.servers.domain.groups import (
     GroupId,
     GroupKind,
     GroupName,
+    PendingGroupSync,
     PlayerGroup,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
@@ -118,6 +119,17 @@ class GroupRepository(abc.ABC):
         """Return whether ``group_id`` is currently attached to ``server_id``."""
 
     @abc.abstractmethod
+    async def lock_against_attach(self, group_id: GroupId) -> None:
+        """Hold off every attach of ``group_id`` until this transaction ends.
+
+        A change that lists the group's servers in order to mark them
+        (:meth:`mark_sync_pending`) takes this first, so the list cannot go stale
+        under it (issue #3223): an attach that committed earlier is in the list,
+        and a later one waits for the change — then sees it, or finds the group
+        deleted. A group that does not exist locks nothing.
+        """
+
+    @abc.abstractmethod
     async def list_server_ids_for_group(self, group_id: GroupId) -> list[ServerId]:
         """Return the ids of every server ``group_id`` is attached to."""
 
@@ -134,4 +146,30 @@ class GroupRepository(abc.ABC):
         The sync step merges these into the regenerated ops.json / whitelist.json;
         a stable order keeps :func:`merge_players`' first-wins tie-break
         deterministic (issue #276).
+        """
+
+    @abc.abstractmethod
+    async def mark_sync_pending(
+        self, server_ids: list[ServerId], kind: GroupKind
+    ) -> None:
+        """Record that each server's ``kind`` file is owed a regeneration (#3223).
+
+        One mark per ``(server, kind)``; marking again keeps the single mark and
+        gives it a fresh token, so :meth:`clear_sync_pending` called with a token
+        read earlier leaves it standing. A server that no longer exists is skipped
+        rather than refused: its file went with it.
+        """
+
+    @abc.abstractmethod
+    async def list_sync_pending(self, server_id: ServerId) -> list[PendingGroupSync]:
+        """Return the regenerations ``server_id`` is owed, ordered by kind."""
+
+    @abc.abstractmethod
+    async def clear_sync_pending(
+        self, server_id: ServerId, applied: list[PendingGroupSync]
+    ) -> None:
+        """Clear the marks in ``applied`` that still carry the token it names.
+
+        A mark recorded again since ``applied`` was read is left in place: the
+        change behind it may not be in the file the caller regenerated.
         """

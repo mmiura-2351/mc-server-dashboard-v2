@@ -1,6 +1,6 @@
 """SQLAlchemy ORM models for player groups (issue #276; DATABASE.md Section 7).
 
-Three tables, normalized to match the existing relational model (DATABASE.md
+Four tables, normalized to match the existing relational model (DATABASE.md
 Section 2):
 
 - ``player_group`` — the community-scoped group of one ``kind`` (op / whitelist),
@@ -9,6 +9,9 @@ Section 2):
   (the upsert key); deleted with its group (``ON DELETE CASCADE``).
 - ``server_group`` — the many-to-many attachment join (group <-> server), a
   composite PK; rows cascade when either side is deleted.
+- ``server_group_sync_pending`` — one row per ``(server, kind)`` whose file is
+  owed a regeneration at the server's next start (issue #3223); deleted with its
+  server.
 
 The framework-free domain entity is translated to/from these models in the
 repository. The ``community_id`` / ``server_id`` FKs cascade so deleting a
@@ -92,3 +95,23 @@ class ServerGroupModel(Base):
         ForeignKey("server.id", ondelete="CASCADE"),
         primary_key=True,
     )
+
+
+class ServerGroupSyncPendingModel(Base):
+    """Row of ``server_group_sync_pending``: a file owed a regeneration (#3223)."""
+
+    __tablename__ = "server_group_sync_pending"
+    __table_args__ = (
+        CheckConstraint(
+            f"kind IN ({', '.join(repr(v) for v in _GROUP_KINDS)})",
+            name="ck_server_group_sync_pending_kind",
+        ),
+    )
+
+    server_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("server.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    kind: Mapped[str] = mapped_column(String, primary_key=True)
+    token: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
