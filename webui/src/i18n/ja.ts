@@ -1329,17 +1329,19 @@ export const ja: Record<TranslationKey, string> = {
   "communitySettings.general.dangerHeading": "危険な操作",
   "communitySettings.general.deleteTitle": "コミュニティを削除",
   "communitySettings.general.deleteDesc":
-    "このコミュニティのすべてのサーバー、バックアップ、ロール、メンバーシップを削除します。",
+    "このコミュニティと、そのロール、メンバーシップ、プレイヤーグループを削除します。サーバーは先に削除しておく必要があります。",
   "communitySettings.general.deleteButton": "削除…",
   "communitySettings.general.deleteDialogTitle": "コミュニティを削除",
   "communitySettings.general.deleteDialogBody":
-    "コミュニティとその中のすべてを完全に削除します。この操作は元に戻せません。",
+    "コミュニティと、そのロール、メンバーシップ、プレイヤーグループを完全に削除します。この操作は元に戻せません。サーバーが残っているコミュニティは削除されません。",
   "communitySettings.general.deleteConfirm": "コミュニティを削除",
   "communitySettings.general.deletePrompt":
     "削除を有効にするにはコミュニティ名を入力",
   "communitySettings.general.deleted": "コミュニティを削除しました。",
   "communitySettings.general.deleteError":
     "コミュニティを削除できませんでした。もう一度お試しください。",
+  "communitySettings.general.deleteHasServers":
+    "このコミュニティにはサーバーが残っています。先にこのコミュニティのサーバーを削除してください。",
 
   // Community settings — Groups tab (WEBUI_SPEC.md 6.10, issue #464)
   "communitySettings.groups.heading": "プレイヤーグループ",
@@ -1471,12 +1473,14 @@ export const ja: Record<TranslationKey, string> = {
   "admin.communities.delete": "削除",
   "admin.communities.deleteTitle": "コミュニティを削除",
   "admin.communities.deleteBody":
-    "コミュニティとその中のすべて（メンバー、ロール、サーバー）を完全に削除します。この操作は元に戻せません。",
+    "コミュニティと、そのメンバー、ロール、プレイヤーグループを完全に削除します。この操作は元に戻せません。サーバーが残っているコミュニティは削除されません。",
   "admin.communities.deletePrompt":
     "確認のためコミュニティ名を入力してください:",
   "admin.communities.deleteConfirm": "コミュニティを削除",
   "admin.communities.deleted": "コミュニティを削除しました。",
   "admin.communities.deleteError": "コミュニティを削除できませんでした。",
+  "admin.communities.deleteHasServers":
+    "このコミュニティにはサーバーが残っています。先にサーバーを削除する必要があります。",
   "admin.communities.prev": "前へ",
   "admin.communities.next": "次へ",
   "admin.communities.range": "{total} 件中 {from}–{to}",

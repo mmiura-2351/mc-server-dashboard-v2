@@ -73,7 +73,7 @@ Complete endpoint list (generated from the FastAPI OpenAPI schema).
 | GET | `/communities` | Communities the caller belongs to (membership-scoped; the admin axis does not pierce isolation). |
 | GET | `/admin/communities` `[A]` | All communities with `member_count`/`server_count` (`limit`/`offset`, returns `total`); the platform-axis listing. |
 | POST | `/communities` `[A]` | Provision a community + initial owner. |
-| GET / PATCH / DELETE | `/communities/{cid}` | Read / rename / delete. Delete also allows a platform admin to remove any community (orphan cleanup); read/rename stay membership-scoped. |
+| GET / PATCH / DELETE | `/communities/{cid}` | Read / rename / delete. Delete also allows a platform admin to remove any community (orphan cleanup); read/rename stay membership-scoped. Delete answers 409 `community_has_servers` while the community holds any server: its servers are deleted first. |
 | GET / POST | `/communities/{cid}/members` | List (with `username`, `role_names`) / add an existing user by exactly one of `user_id` or exact `username`. |
 | GET | `/communities/{cid}/me/permissions` | Caller's own effective set: community-wide codes + per-resource grants. Membership-gated only (Layer-1). |
 | DELETE | `/communities/{cid}/members/{uid}` | Remove member (revokes roles & grants). |
@@ -507,7 +507,10 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 - **Groups**: op/whitelist groups; player list (uuid + name) with add/remove;
   attached-servers list with attach/detach.
 - **Audit**: filterable table (operation, actor, since/until, paging).
-- **General**: rename; delete (typed confirm; admin/owner only).
+- **General**: rename; delete (typed confirm; admin/owner only). A delete
+  refused with 409 `community_has_servers` shows "delete this community's
+  servers first" rather than the generic error (the admin Communities page
+  does the same).
 
 ### 6.11 Account
 - Profile (username/email) edit, password change (current + new + confirm),

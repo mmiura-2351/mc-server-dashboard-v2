@@ -381,7 +381,7 @@ assigned Worker.
 | Column | Type | Notes |
 |---|---|---|
 | `id` | uuid PK | |
-| `community_id` | uuid FK → `community.id` | `ON DELETE CASCADE` |
+| `community_id` | uuid FK → `community.id` | `ON DELETE RESTRICT` — a Community that holds a server cannot be deleted (Section 10) |
 | `name` | text | unique within the Community |
 | `mc_edition` | text | e.g. `java` |
 | `mc_version` | text | e.g. `1.21.1` (FR-SRV-1) |
@@ -902,10 +902,22 @@ reachable from `community.id` through `ON DELETE CASCADE` foreign keys.
 Rather than enumerate the full transitive set here (where it drifts each time a
 table is added), each table definition in Sections 5–8 documents its own FK and
 cascade behavior — the cascade column in any table that carries
-`ON DELETE CASCADE` from `community` (directly or transitively through `server`,
-`player_group`, or `schedule`) is the authoritative source. `audit_log` is the
-deliberate exception: its references are soft (no FK), so its rows survive the
-deletion (Section 9).
+`ON DELETE CASCADE` from `community` (directly or transitively through
+`membership`, `role`, or `player_group`) is the authoritative source. `audit_log`
+is the deliberate exception: its references are soft (no FK), so its rows survive
+the deletion (Section 9).
+
+**Servers are not part of that cascade.** `server.community_id` is
+`ON DELETE RESTRICT`: a Community that still holds a server, in any state, is not
+deleted (`DELETE /communities/{cid}` answers 409 `community_has_servers`), and
+nothing it would have cascaded to is removed either. A row delete cannot do what
+deleting a server requires — the at-rest check, the lifecycle lock, and the
+storage retention of STORAGE.md Section 2.1 — so each server is deleted through
+its own deletion first. The foreign key also orders the deletion against a
+concurrent server creation: the creation's INSERT holds the `community` row
+`FOR KEY SHARE` until it commits, so a Community deletion either waits for it and
+is then refused, or commits first and the creation fails as "community not
+found".
 
 Also distinct, **deleting a single server** (without deleting its Community)
 removes the `resource_grant` rows that point at it, `ON DELETE CASCADE` through

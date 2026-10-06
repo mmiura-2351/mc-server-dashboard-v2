@@ -75,10 +75,14 @@ asked which it was.
 
 The FK-to-``community`` family is now swept whole, so it does not come back a
 third time. The schema has exactly five foreign keys onto ``community.id``, all
-``ON DELETE CASCADE`` and all named ``*_community_id_community``:
+named ``*_community_id_community`` and all ``ON DELETE CASCADE`` but the
+server's, which is ``ON DELETE RESTRICT`` (migration 0042, issue #3218):
 ``fk_player_group_community_id_community`` (0012) and
 ``fk_server_community_id_community`` (0005) are the two in this context, both
-mapped above; ``fk_membership_community_id_community``,
+mapped above in their INSERT direction (the DELETE direction of the server's --
+a community deletion refused because it still holds a server -- is a statement
+of the community context and is mapped there);
+``fk_membership_community_id_community``,
 ``fk_role_community_id_community`` and ``fk_resource_grant_community_id_community``
 (all 0004) belong to the *community* context and stay unmapped, named with their
 reason in ``community/adapters/integrity.py``'s own partial-map note -- each
@@ -100,8 +104,9 @@ autoflush the caller happens to trigger next, so the violation surfaces at those
 try/translate. ``attach`` executes its INSERT for the same reason.
 
 A DELETE is the third shape, and the one a map entry alone does not cover
-(issue #2612): ``fk_srv_rp_assignments_resource_pack_id_resource_packs`` is the
-schema's only non-``ON DELETE CASCADE`` FK and is not ``DEFERRABLE``, so
+(issue #2612): ``fk_srv_rp_assignments_resource_pack_id_resource_packs`` is
+this context's only non-``ON DELETE CASCADE`` FK whose parent it deletes, and is
+not ``DEFERRABLE``, so
 PostgreSQL refuses ``SqlAlchemyResourcePackRepository.delete`` at *statement*
 end -- before the translating ``commit`` ever runs. Being in the map below is
 therefore not evidence that a constraint is handled; the wrap has to sit on the
