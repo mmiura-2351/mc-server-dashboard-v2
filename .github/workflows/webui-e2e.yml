@@ -49,6 +49,15 @@ jobs:
           POSTGRES_USER: mcsd
           POSTGRES_PASSWORD: mcsd
           POSTGRES_DB: mcsd_e2e
+          # A throwaway cluster needs no durability, and durability is what
+          # makes test time depend on the runner's disk: every COMMIT waits for
+          # its WAL fsync (#3257). A service container takes no command
+          # arguments, so the settings go in through initdb, which writes them
+          # to postgresql.conf. Never for a database whose data matters.
+          POSTGRES_INITDB_ARGS: >-
+            -c synchronous_commit=off
+            -c fsync=off
+            -c full_page_writes=off
         ports:
           - 5432:5432
         options: >-

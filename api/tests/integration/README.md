@@ -47,7 +47,8 @@ Point at a *scratch* Postgres — never the live deployment database. For exampl
 ```sh
 docker run --rm -d --name mcd-test-pg --network host -e PGPORT=5544 \
   -e POSTGRES_USER=mcsd -e POSTGRES_PASSWORD=mcsd -e POSTGRES_DB=mcsd_test \
-  postgres:18.6 -c listen_addresses=127.0.0.1
+  postgres:18.6 -c listen_addresses=127.0.0.1 \
+  -c synchronous_commit=off -c fsync=off -c full_page_writes=off
 
 cd api
 MCD_TEST_DATABASE_URL="postgresql+asyncpg://mcsd:mcsd@127.0.0.1:5544/mcsd_test" \
@@ -67,13 +68,35 @@ network Postgres listens on the host loopback directly, so no proxy is involved.
 already on the host. `listen_addresses` keeps the fixed-password server off the
 host's external interfaces.
 
+The three durability settings are off because nothing in a scratch cluster has
+to survive a crash, and durability is what makes the suite's speed depend on the
+host's disk (issue #3257). Every DB-gated fixture runs the Alembic chain in its
+setup, and with `synchronous_commit` on each COMMIT waits for its WAL fsync. On a
+host under writeback pressure -- several gates running at once -- that fsync
+queues behind every other process's dirty pages: single commits were measured
+waiting 11-22 s, so one fixture's setup could approach the 120 s per-test
+timeout. `synchronous_commit=off` stops a commit waiting for the flush,
+`fsync=off` stops the cluster forcing its writes (WAL, checkpoints,
+`CREATE` / `DROP DATABASE`) to disk at all, and `full_page_writes=off` drops the
+torn-page protection that only matters for crash recovery. **Never** copy these
+flags to a database whose data matters; a crash can corrupt the cluster.
+
+The suite also turns `synchronous_commit` off on the per-run database it creates
+(`scratch_db.py`), which helps a cluster started without these flags but does
+not replace them: a commit that drops a relation's files -- every `downgrade`
+-- flushes synchronously whatever that setting says, and under the same load
+such a cluster still ran into the per-test timeout. `fsync=off` is the flag that
+removes the dependency on the disk, and it can only be set at server start. If
+your scratch container predates this recipe, restart it with the flags.
+
 Where Docker's host network is not your machine's own (Docker Desktop without
 host networking enabled), publish the port instead and accept the proxy:
 
 ```sh
 docker run --rm -d --name mcd-test-pg -p 127.0.0.1:5544:5432 \
   -e POSTGRES_USER=mcsd -e POSTGRES_PASSWORD=mcsd -e POSTGRES_DB=mcsd_test \
-  postgres:18.6
+  postgres:18.6 \
+  -c synchronous_commit=off -c fsync=off -c full_page_writes=off
 ```
 
 The `MCD_TEST_DATABASE_URL` is the same. Leave `PGPORT` and `listen_addresses`
