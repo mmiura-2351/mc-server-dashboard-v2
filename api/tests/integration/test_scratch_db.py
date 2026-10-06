@@ -41,14 +41,23 @@ def test_derive_scratch_url_distinct_tokens_yield_distinct_names() -> None:
 @pytest.mark.skipif(
     _DB_URL is None, reason="MCD_TEST_DATABASE_URL not set (no real database)"
 )
-async def test_scratch_database_sessions_do_not_wait_for_the_wal_flush() -> None:
-    # A plain engine with no per-connection settings, as the fixtures and the
-    # Alembic environment build theirs: the setting must come from the database.
+async def test_scratch_database_carries_its_own_synchronous_commit_off() -> None:
+    # Read the database's own setting, not the session's effective one: ``SHOW``
+    # also reports ``off`` when the cluster default is off, as it is in CI and
+    # with the README recipe, and would pass without the database-level setting.
     assert _DB_URL is not None
     engine = create_async_engine(_DB_URL)
     try:
         async with engine.connect() as conn:
-            setting = (await conn.execute(text("SHOW synchronous_commit"))).scalar()
+            settings = (
+                await conn.execute(
+                    text(
+                        "SELECT s.setconfig FROM pg_db_role_setting s"
+                        " JOIN pg_database d ON d.oid = s.setdatabase"
+                        " WHERE d.datname = current_database() AND s.setrole = 0"
+                    )
+                )
+            ).scalar()
     finally:
         await engine.dispose()
-    assert setting == "off"
+    assert settings == ["synchronous_commit=off"]

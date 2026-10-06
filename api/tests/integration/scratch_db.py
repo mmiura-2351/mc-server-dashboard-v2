@@ -29,8 +29,9 @@ engine and each test's own -- whatever flags the cluster was started with.
 This is the part the suite can do for itself, and it is partial: a commit that
 drops a relation's files (every ``downgrade``, any table rewrite) flushes
 synchronously regardless of the setting, and the cluster's own fsyncs still
-hold the WAL lock that other commits queue on. Only ``fsync=off`` at server
-start removes those, which is why the README recipe and CI's service carry it.
+hold the WAL lock that other commits queue on. Only ``fsync=off`` removes those,
+and it is a server-wide setting that no database or session can change for
+itself, which is why the README recipe and CI's service carry it.
 """
 
 from __future__ import annotations

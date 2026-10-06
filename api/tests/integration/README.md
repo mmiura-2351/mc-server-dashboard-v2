@@ -86,8 +86,9 @@ The suite also turns `synchronous_commit` off on the per-run database it creates
 not replace them: a commit that drops a relation's files -- every `downgrade`
 -- flushes synchronously whatever that setting says, and under the same load
 such a cluster still ran into the per-test timeout. `fsync=off` is the flag that
-removes the dependency on the disk, and it can only be set at server start. If
-your scratch container predates this recipe, restart it with the flags.
+removes the dependency on the disk, and it is a server-wide setting: no
+database or session can turn it off for itself. If your scratch container
+predates this recipe, recreate it with the flags.
 
 Where Docker's host network is not your machine's own (Docker Desktop without
 host networking enabled), publish the port instead and accept the proxy:
