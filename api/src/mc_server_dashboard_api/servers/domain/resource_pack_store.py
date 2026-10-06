@@ -22,7 +22,12 @@ class ResourcePackStore(abc.ABC):
     async def put(
         self, pack_id: ResourcePackId, filename: str, stream: ByteStream
     ) -> None:
-        """Store a resource pack blob."""
+        """Store a resource pack blob.
+
+        Raises ``ResourcePackStorageUnavailableError`` when the store could not
+        take the upload (issue #2458). Nothing is stored in that case, so the
+        caller may simply try again.
+        """
 
     @abc.abstractmethod
     def open(self, pack_id: ResourcePackId, filename: str) -> ByteStream:
@@ -37,7 +42,13 @@ class ResourcePackStore(abc.ABC):
 
     @abc.abstractmethod
     async def delete(self, pack_id: ResourcePackId) -> None:
-        """Delete a resource pack's blob data."""
+        """Delete a resource pack's blob data.
+
+        Idempotent: a pack with nothing stored is a no-op. Raises
+        ``ResourcePackStorageUnavailableError`` when the store could not finish
+        (issue #2458), possibly after removing part of the data; calling again
+        removes the rest.
+        """
 
     @abc.abstractmethod
     async def size(self, pack_id: ResourcePackId, filename: str) -> int:

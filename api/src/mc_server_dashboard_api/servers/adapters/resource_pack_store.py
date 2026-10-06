@@ -23,9 +23,22 @@ count (issue #2337).
 That holds only because the layer below produces the typed error in the first
 place: the object client translates a backend 5xx / transport failure on
 ``head_object`` and ``get_object``, not just on the writes (issues #2376, #2378).
-The write paths here — :meth:`put` and :meth:`delete` — are left as they were:
-their routes answer 500 for an outage today, and translating without deciding
-their status would only rename the error on the way to the same 500.
+
+The write paths — :meth:`put` and :meth:`delete` — translate the same way (issue
+#2458), and what their callers do with it follows from what a failure leaves
+behind:
+
+- An interrupted :meth:`put` leaves no blob. The object client aborts the
+  multipart upload before it reports the outage, an incomplete upload is never an
+  object, and the pack row is inserted only after ``put`` returns. Every upload
+  mints a fresh pack id, so a retry shares no key with the failed attempt: the
+  upload route answers 503 ``storage_unavailable``.
+- An interrupted :meth:`delete` may have removed some of the pack's objects. It
+  is idempotent — it re-lists the prefix, and the store treats deleting an absent
+  key as success — so re-running it finishes the job. Its one caller commits the
+  row's delete first and treats this as best-effort cleanup, so the outage is
+  logged there rather than answered: the pack is already gone, and a 503 would
+  invite a retry that can only find a 404.
 """
 
 from __future__ import annotations
@@ -61,8 +74,13 @@ class ObjectResourcePackStore(ResourcePackStore):
         self, pack_id: ResourcePackId, filename: str, stream: AsyncIterator[bytes]
     ) -> None:
         key = _key(pack_id, filename)
-        async with self._client_factory() as client:
-            await client.upload_multipart(key, stream)
+        try:
+            async with self._client_factory() as client:
+                await client.upload_multipart(key, stream)
+        except ObjectStoreUnavailableError as exc:
+            # The client has already aborted the multipart upload, so nothing was
+            # published under this key (issue #2458).
+            raise ResourcePackStorageUnavailableError(key) from exc
 
     def open(self, pack_id: ResourcePackId, filename: str) -> AsyncIterator[bytes]:
         return self._open_gen(pack_id, filename)
@@ -92,10 +110,15 @@ class ObjectResourcePackStore(ResourcePackStore):
 
     async def delete(self, pack_id: ResourcePackId) -> None:
         prefix = f"resource-packs/{pack_id.value}/"
-        async with self._client_factory() as client:
-            objects = await client.list_objects(prefix)
-            for obj in objects:
-                await client.delete_object(obj.key)
+        try:
+            async with self._client_factory() as client:
+                objects = await client.list_objects(prefix)
+                for obj in objects:
+                    await client.delete_object(obj.key)
+        except ObjectStoreUnavailableError as exc:
+            # Possibly partway through the prefix. Re-running lists only what is
+            # left, so the objects already removed are not an error (issue #2458).
+            raise ResourcePackStorageUnavailableError(prefix) from exc
 
     async def size(self, pack_id: ResourcePackId, filename: str) -> int:
         key = _key(pack_id, filename)

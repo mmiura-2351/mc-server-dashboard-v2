@@ -2398,6 +2398,11 @@ export interface paths {
         /**
          * Delete Resource Pack
          * @description Delete a resource pack (uploader or platform admin, issue #1176).
+         *
+         *     A store outage does not fail this route (issue #2458): the pack row is deleted
+         *     and committed before the blob is touched, so the pack is gone either way and
+         *     the blob cleanup is best-effort. A 503 here would ask for a retry that could
+         *     only be answered 404.
          */
         delete: operations["delete_resource_pack_api_resource_packs__resource_pack_id__delete"];
         options?: never;

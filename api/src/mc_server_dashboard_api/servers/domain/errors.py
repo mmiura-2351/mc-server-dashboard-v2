@@ -732,6 +732,11 @@ class ResourcePackStorageUnavailableError(ServerError):
     edge answer 503 ``storage_unavailable`` — a transient condition worth retrying
     unchanged, and distinct from :class:`ResourcePackNotFoundError`, which says the
     pack is gone and asking again is pointless.
+
+    The store's writes raise it too (issue #2458). An upload that hits it stored
+    nothing and inserted no row, so the upload route answers the same 503. A blob
+    delete that hits it is logged by the delete use case instead of answered: the
+    row is already gone by then, so there is nothing left for a retry to do.
     """
 
 

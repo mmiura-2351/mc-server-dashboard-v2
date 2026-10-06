@@ -33,6 +33,17 @@ type ResourcePackResponse = components["schemas"]["ResourcePackResponse"];
 
 const PACKS_KEY = ["resource-packs"] as const;
 
+/**
+ * True for the 503 `storage_unavailable` an upload or a download answers while
+ * the object store is down (issues #2455, #2458). Neither leaves anything
+ * behind, so the operator's move is to try again — which the generic "could
+ * not…" toast does not say. A delete never answers it: the API removes the pack
+ * first and treats the stored file's cleanup as best-effort.
+ */
+function isStorageUnavailable(error: unknown): boolean {
+  return error instanceof ApiError && error.reason === "storage_unavailable";
+}
+
 export function ResourcePacksPage() {
   const { showToast } = useToast();
   const queryClient = useQueryClient();
@@ -90,7 +101,14 @@ export function ResourcePacksPage() {
       ),
     onError: (error) => {
       if (onForbidden(error)) return;
-      showToast(t("resourcePacks.error.downloadFailed"), "error");
+      showToast(
+        t(
+          isStorageUnavailable(error)
+            ? "resourcePacks.error.storageUnavailable"
+            : "resourcePacks.error.downloadFailed",
+        ),
+        "error",
+      );
     },
   });
 
@@ -247,7 +265,14 @@ function UploadDialog({
       progress.reset();
       if (isUploadAbortError(error)) return;
       if (onForbidden(error)) return;
-      showToast(t("resourcePacks.error.uploadFailed"), "error");
+      showToast(
+        t(
+          isStorageUnavailable(error)
+            ? "resourcePacks.error.storageUnavailable"
+            : "resourcePacks.error.uploadFailed",
+        ),
+        "error",
+      );
     },
   });
 

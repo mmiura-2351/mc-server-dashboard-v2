@@ -177,12 +177,12 @@ Global resource pack library (not community-scoped) and per-server assignment.
 
 | Method | Path | Notes |
 |---|---|---|
-| POST | `/resource-packs` | Upload a resource pack (multipart; requires `server:update` in at least one community). |
+| POST | `/resource-packs` | Upload a resource pack (multipart; requires `server:update` in at least one community). An object-store outage answers 503 `storage_unavailable`: the file is stored before the pack row is inserted, so nothing was created and the upload is safe to send again. |
 | GET | `/resource-packs` | List all resource packs (authenticated). |
-| DELETE | `/resource-packs/{id}` | Delete a resource pack (uploader or platform admin; 409 when still assigned to a server). |
+| DELETE | `/resource-packs/{id}` | Delete a resource pack (uploader or platform admin; 409 when still assigned to a server). The pack row is deleted first and the stored file's removal is best-effort, so an object-store outage still answers 204 — the pack is gone and a repeat is a 404 — and leaves an orphaned file that is logged, never served. |
 | GET / HEAD | `/resource-packs/{id}/download` | Download (authenticated). The response declares `Cache-Control: no-store`. `HEAD` is the metadata probe: the same gate and the same headers with no body, so a client learns the `Content-Length` without starting a transfer; it never opens the blob nor records a `resource_pack:download` audit event. |
 | GET / HEAD | `/public/resource-packs/{id}/{filename}` | Public download (no auth) — the URL Minecraft clients fetch. Validates `filename` matches. The two statuses declare different caching policies, because the URL ends in the stored filename and an undeclared policy is decided by the edge's extension heuristic instead: the `200` declares `Cache-Control: public, max-age=3600, immutable` — a pack is immutable and the game client verifies it against `resource-pack-sha1`, so the max-age bounds only how long a deleted pack stays fetchable from a cache — and the `404` declares `Cache-Control: no-store`, since a pack's id and filename are both fixed at creation and a URL that 404s can never later become a `200`. `HEAD` is the metadata probe: this is the unauthenticated URL a resumable-download client probes before a transfer, and it declares a `Content-Length`, so it has a real reason to. The probe answers each status with the `GET`'s headers — the same `Cache-Control` per status — and no body, so an edge does not cache a probe differently from the download; it never opens the blob. |
-| POST | `…/{sid}/resource-pack` | Assign a resource pack to a server (`server:update`). Body: `{resource_pack_id, require_resource_pack, resource_pack_prompt}`. |
+| POST | `…/{sid}/resource-pack` | Assign a resource pack to a server (`server:update`). Body: `{resource_pack_id, require_resource_pack, resource_pack_prompt}`. A storage failure writing `server.properties` answers 503 `seed_failed`: the assignment is not committed and the file is unchanged, so assigning again is safe. |
 | DELETE | `…/{sid}/resource-pack` | Unassign (`server:update`). |
 | GET | `…/{sid}/resource-pack` | Get the current assignment (`server:read`). |
 

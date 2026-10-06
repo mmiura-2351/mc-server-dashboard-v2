@@ -12,6 +12,7 @@ import json
 import logging
 import uuid
 import zipfile
+from collections.abc import AsyncIterator
 
 import pytest
 
@@ -32,8 +33,10 @@ from mc_server_dashboard_api.servers.domain.errors import (
     PermissionDeniedError,
     ResourcePackInUseError,
     ResourcePackNotFoundError,
+    ResourcePackStorageUnavailableError,
     ServerFilesUnsettledError,
     ServerNotFoundError,
+    WorkingSetSeedFailedError,
 )
 from mc_server_dashboard_api.servers.domain.resource_pack import (
     ResourcePack,
@@ -175,6 +178,48 @@ class TestUploadResourcePack:
         # The normalized zip should have pack.mcmeta at root.
         with zipfile.ZipFile(io.BytesIO(stored_blob)) as zf:
             assert "pack.mcmeta" in zf.namelist()
+
+    async def test_upload_storage_outage_inserts_no_row_and_a_retry_succeeds(
+        self,
+    ) -> None:
+        # The blob is stored before the row is inserted, so an upload the store
+        # refuses leaves neither (issue #2458): there is no row naming a blob that
+        # is not there, and nothing for the retry to collide with.
+        uow = FakeUnitOfWork()
+        store = FakeResourcePackStore()
+        healthy_put = store.put
+
+        async def _failing_put(
+            pack_id: ResourcePackId, filename: str, stream: AsyncIterator[bytes]
+        ) -> None:
+            raise ResourcePackStorageUnavailableError("down")
+
+        store.put = _failing_put  # type: ignore[method-assign]
+        uc = _make_upload(uow=uow, store=store)
+
+        with pytest.raises(ResourcePackStorageUnavailableError):
+            await uc(
+                filename="my-pack.zip",
+                display_name="My Pack",
+                content=_ZIP_CONTENT,
+                uploaded_by=uuid.uuid4(),
+            )
+
+        assert uow.commits == 0
+        assert uow.resource_packs.packs == {}
+        assert store.blobs == {}
+
+        # The store is back: the same request, sent again, simply succeeds.
+        store.put = healthy_put  # type: ignore[method-assign]
+        pack = await uc(
+            filename="my-pack.zip",
+            display_name="My Pack",
+            content=_ZIP_CONTENT,
+            uploaded_by=uuid.uuid4(),
+        )
+
+        assert list(uow.resource_packs.packs) == [pack.id]
+        assert list(store.blobs) == [(pack.id, pack.filename)]
 
 
 class TestListResourcePacks:
@@ -411,6 +456,41 @@ class TestDeleteResourcePack:
         assert record.exc_info is not None
         assert isinstance(record.exc_info[1], RuntimeError)
         assert "S3 unavailable" in str(record.exc_info[1])
+
+    async def test_delete_whose_blob_delete_hit_an_outage_is_final(self) -> None:
+        # The row is the source of truth and it goes first (issue #1962), so a
+        # store outage on the blob cleanup does not fail the delete (issue #2458):
+        # the pack is gone, and asking again says so rather than reaching the
+        # store a second time. The blob it left is orphaned, never served.
+        uow = FakeUnitOfWork()
+        store = FakeResourcePackStore()
+        user_id = uuid.uuid4()
+        pack = await _make_upload(uow=uow, store=store)(
+            filename="outage.zip",
+            display_name="Outage",
+            content=_ZIP_CONTENT,
+            uploaded_by=user_id,
+        )
+
+        async def _failing_delete(pack_id: ResourcePackId) -> None:
+            store.calls.append("delete")
+            raise ResourcePackStorageUnavailableError("down")
+
+        store.delete = _failing_delete  # type: ignore[method-assign]
+        delete_uc = DeleteResourcePack(uow=uow, store=store)
+
+        await delete_uc(
+            resource_pack_id=pack.id, caller_id=user_id, is_platform_admin=False
+        )
+
+        assert pack.id not in uow.resource_packs.packs
+        assert (pack.id, pack.filename) in store.blobs
+
+        with pytest.raises(ResourcePackNotFoundError):
+            await delete_uc(
+                resource_pack_id=pack.id, caller_id=user_id, is_platform_admin=False
+            )
+        assert store.calls.count("delete") == 1
 
 
 class TestDownloadResourcePack:
@@ -932,7 +1012,8 @@ class TestAssignResourcePack:
     ) -> None:
         # The file write runs before the commit, so a storage failure leaves the
         # staged row to roll back rather than committing an assignment the file
-        # does not carry (issue #2853).
+        # does not carry (issue #2853). It surfaces as the typed error the edge
+        # maps to 503, not as whatever the storage layer raised (issue #2458).
         server = _at_rest_server()
         servers = FakeServerRepository()
         servers.seed(server)
@@ -942,7 +1023,7 @@ class TestAssignResourcePack:
         file_store.files["server.properties"] = b"motd=hi\n"
 
         uc = AssignResourcePack(uow=uow, file_store=file_store, clock=FakeClock(_NOW))
-        with pytest.raises(RuntimeError):
+        with pytest.raises(WorkingSetSeedFailedError):
             await uc(
                 community_id=_COMMUNITY_ID,
                 server_id=server.id,

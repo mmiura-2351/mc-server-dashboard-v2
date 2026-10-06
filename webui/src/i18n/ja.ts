@@ -1801,6 +1801,8 @@ export const ja: Record<TranslationKey, string> = {
     "このリソースパックは1つ以上のサーバーに割り当てられているため、削除できません。",
   "resourcePacks.error.downloadFailed":
     "リソースパックをダウンロードできませんでした。",
+  "resourcePacks.error.storageUnavailable":
+    "現在、リソースパックのストレージを利用できません。しばらくしてから再度お試しください。",
 
   // Server resource pack assignment (issue #1179).
   "serverDetail.resourcePack.heading": "リソースパック",

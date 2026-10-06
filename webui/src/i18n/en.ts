@@ -1873,6 +1873,8 @@ export const en = {
   "resourcePacks.error.inUse":
     "This resource pack is assigned to one or more servers and cannot be deleted.",
   "resourcePacks.error.downloadFailed": "Could not download the resource pack.",
+  "resourcePacks.error.storageUnavailable":
+    "Resource pack storage is unavailable right now. Please try again shortly.",
 
   // Server resource pack assignment (issue #1179). Displayed as a card in the
   // server detail Settings tab.
