@@ -1386,17 +1386,19 @@ export const en = {
   "communitySettings.general.dangerHeading": "Danger zone",
   "communitySettings.general.deleteTitle": "Delete community",
   "communitySettings.general.deleteDesc":
-    "Deletes all servers, backups, roles and memberships of this community.",
+    "Deletes this community with its roles, memberships and player groups. Its servers must be deleted first.",
   "communitySettings.general.deleteButton": "Delete…",
   "communitySettings.general.deleteDialogTitle": "Delete community",
   "communitySettings.general.deleteDialogBody":
-    "This permanently deletes the community and everything in it. This cannot be undone.",
+    "This permanently deletes the community with its roles, memberships and player groups. This cannot be undone. A community that still has servers is not deleted.",
   "communitySettings.general.deleteConfirm": "Delete community",
   "communitySettings.general.deletePrompt":
     "Type the community name to enable deletion",
   "communitySettings.general.deleted": "Community deleted.",
   "communitySettings.general.deleteError":
     "Could not delete the community. Please try again.",
+  "communitySettings.general.deleteHasServers":
+    "This community still has servers. Delete this community's servers first.",
 
   // Community settings — Groups tab (WEBUI_SPEC.md 6.10, issue #464)
   "communitySettings.groups.heading": "Player groups",
@@ -1524,11 +1526,13 @@ export const en = {
   "admin.communities.delete": "Delete",
   "admin.communities.deleteTitle": "Delete community",
   "admin.communities.deleteBody":
-    "This permanently deletes the community and everything in it (members, roles, servers). This cannot be undone.",
+    "This permanently deletes the community with its members, roles and player groups. This cannot be undone. A community that still has servers is not deleted.",
   "admin.communities.deletePrompt": "Type the community name to confirm:",
   "admin.communities.deleteConfirm": "Delete community",
   "admin.communities.deleted": "Community deleted.",
   "admin.communities.deleteError": "Could not delete the community.",
+  "admin.communities.deleteHasServers":
+    "This community still has servers. Its servers must be deleted first.",
   "admin.communities.prev": "Previous",
   "admin.communities.next": "Next",
   "admin.communities.range": "{from}–{to} of {total}",

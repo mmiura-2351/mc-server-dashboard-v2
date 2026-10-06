@@ -90,7 +90,16 @@ export function CommunityGeneralTab({
       if (onForbidden(error)) {
         return;
       }
-      showToast(t("communitySettings.general.deleteError"), "error");
+      // 409 community_has_servers: the API never deletes a community that still
+      // holds servers (#3218), so say what to do instead of "try again".
+      showToast(
+        t(
+          error instanceof ApiError && error.reason === "community_has_servers"
+            ? "communitySettings.general.deleteHasServers"
+            : "communitySettings.general.deleteError",
+        ),
+        "error",
+      );
     },
   });
 

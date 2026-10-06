@@ -51,6 +51,18 @@ surfaces as the same typed error the use case's own pre-check raises
 the route already maps to 404. The INSERT is staged via ``session.add``, so it
 violates inside the unit of work's ``commit`` wrap.
 
+**A third is mapped in its DELETE direction: the servers of a community**
+(migration 0042, issue #3218). ``fk_server_community_id_community`` is
+``ON DELETE RESTRICT``, so PostgreSQL refuses the community DELETE while a
+``server`` row references the community, and that refusal *is* the rule that a
+community's servers are deleted first: it surfaces as
+:class:`CommunityHasServersError` (409). It is refused at the DELETE statement,
+before any commit, so ``SqlAlchemyCommunityRepository.delete`` translates at its
+own execute site. The same constraint fires in the other direction on a server
+INSERT whose community is gone; that statement belongs to the servers context,
+which maps it to its own not-found in ``servers/adapters/integrity.py``. No
+statement of this context inserts a server, so the entry here has one meaning.
+
 **The other foreign keys are deliberately absent, and their absence is not a
 claim that they are unreachable.** Every FK in migration 0004 --
 ``fk_role_community_id_community``, ``fk_membership_user_id_user``,
@@ -77,6 +89,7 @@ from sqlalchemy.exc import IntegrityError
 
 from mc_server_dashboard_api.community.domain.errors import (
     CommunityAlreadyExistsError,
+    CommunityHasServersError,
     GrantResourceNotFoundError,
     GrantTargetNotMemberError,
     MembershipAlreadyExistsError,
@@ -92,6 +105,7 @@ _GRANT_MEMBERSHIP_CONSTRAINTS = frozenset(
     {"fk_resource_grant_membership_id_membership"}
 )
 _GRANT_RESOURCE_CONSTRAINTS = frozenset({"fk_resource_grant_resource_id_server"})
+_COMMUNITY_SERVERS_CONSTRAINTS = frozenset({"fk_server_community_id_community"})
 
 
 def translate_integrity_error(exc: IntegrityError) -> None:
@@ -113,6 +127,8 @@ def translate_integrity_error(exc: IntegrityError) -> None:
         raise GrantTargetNotMemberError(str(constraint)) from exc
     if constraint in _GRANT_RESOURCE_CONSTRAINTS:
         raise GrantResourceNotFoundError(str(constraint)) from exc
+    if constraint in _COMMUNITY_SERVERS_CONSTRAINTS:
+        raise CommunityHasServersError(str(constraint)) from exc
 
 
 def _constraint_name(exc: IntegrityError) -> str | None:

@@ -76,7 +76,11 @@ class CommunityRepository(abc.ABC):
 
     @abc.abstractmethod
     async def delete(self, community_id: CommunityId) -> None:
-        """Delete the community, cascading to its dependent rows (Section 10)."""
+        """Delete the community, cascading to its dependent rows (Section 10).
+
+        Servers are not among them: a community that still holds one raises
+        :class:`CommunityHasServersError` and nothing is deleted (issue #3218).
+        """
 
 
 class MembershipRepository(abc.ABC):

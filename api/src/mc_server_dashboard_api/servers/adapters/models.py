@@ -4,7 +4,8 @@ Maps the ``server`` table. An adapter detail: the domain entity
 (:class:`~mc_server_dashboard_api.servers.domain.entities.Server`) is
 framework-free and is translated to/from this model in the repository. The
 ``community_id`` column FKs the community ``community`` table at the persistence
-layer (``ON DELETE CASCADE``); ``assigned_worker_id`` is a plain nullable UUID —
+layer (``ON DELETE RESTRICT``: a community is not deleted while it holds a
+server, issue #3218); ``assigned_worker_id`` is a plain nullable UUID —
 the ``worker`` table is not yet a persisted relation (the fleet registry is
 in-memory), so DATABASE.md's ``ON DELETE SET NULL`` FK to ``worker.id`` lands
 when that table does. The CHECK constraints mirror DATABASE.md's enum columns.
@@ -80,7 +81,7 @@ class ServerModel(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
     community_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("community.id", ondelete="CASCADE"),
+        ForeignKey("community.id", ondelete="RESTRICT"),
         nullable=False,
     )
     name: Mapped[str] = mapped_column(String, nullable=False)
