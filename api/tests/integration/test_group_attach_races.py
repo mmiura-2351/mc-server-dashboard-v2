@@ -65,11 +65,16 @@ async def engine() -> AsyncIterator[AsyncEngine]:
 
 
 class _Pause:
-    """Holds a change right after it listed the attached servers."""
+    """Holds a change after it listed the attached servers, or after its save."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, after_save: bool = False) -> None:
+        self.after_save = after_save
         self.reached = asyncio.Event()
         self.resume = asyncio.Event()
+
+    async def hold(self) -> None:
+        self.reached.set()
+        await self.resume.wait()
 
 
 class _PausingGroupRepository(SqlAlchemyGroupRepository):
@@ -79,9 +84,14 @@ class _PausingGroupRepository(SqlAlchemyGroupRepository):
 
     async def list_server_ids_for_group(self, group_id: GroupId) -> list[ServerId]:
         listed = await super().list_server_ids_for_group(group_id)
-        self._pause.reached.set()
-        await self._pause.resume.wait()
+        if not self._pause.after_save:
+            await self._pause.hold()
         return listed
+
+    async def save(self, group: PlayerGroup) -> None:
+        await super().save(group)
+        if self._pause.after_save:
+            await self._pause.hold()
 
 
 class _PausingUnitOfWork(ServersUnitOfWork):
@@ -244,3 +254,40 @@ async def test_attach_racing_a_player_removal_lands_after_it(
     assert outcome is None
     assert await world.count("server_group") == 1
     assert await world.count("server_group_sync_pending") == 1
+
+
+async def test_player_removal_and_group_delete_do_not_deadlock(
+    engine: AsyncEngine,
+) -> None:
+    # The removal has deleted the player row and the delete wants the group row.
+    # Were the removal to take the group row only now, each would wait on the row
+    # the other holds and PostgreSQL would abort one of them as a deadlock.
+    world = _World(engine)
+    await world.seed()
+    pause = _Pause(after_save=True)
+    removal = asyncio.create_task(
+        RemovePlayer(
+            uow=_PausingUnitOfWork(world.factory, pause), file_store=FakeFileStore()
+        )(
+            community_id=world.community_id,
+            group_id=world.group.id,
+            player_uuid=world.player,
+        )
+    )
+    await pause.reached.wait()
+    pid: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+    deletion = asyncio.create_task(
+        DeleteGroup(uow=_PidUnitOfWork(world.factory, pid), file_store=FakeFileStore())(
+            community_id=world.community_id, group_id=world.group.id
+        )
+    )
+    await await_settled(
+        world.engine, deletion, lambda: pid.result() if pid.done() else None
+    )
+    pause.resume.set()
+
+    # Both complete, in that order: the removal commits, then the delete it held
+    # off removes the group.
+    await removal
+    await deletion
+    assert await world.count("player_group") == 0

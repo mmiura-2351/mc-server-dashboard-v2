@@ -180,27 +180,19 @@ def _env(
     store = backup_store or FakeBackupArchiveStore()
 
     def make_execute() -> ExecuteScheduleAction:
-        start_server = StartServer(
-            uow=uow,
-            control_plane=cp,
-            clock=the_clock,
-            jar_provisioner=FakeJarProvisioner(),
-            store_generation=FakeStoreGenerationReader(),
-            file_store=FakeFileStore(),
-        )
-        stop_server = StopServer(uow=uow, control_plane=cp, clock=the_clock)
         return ExecuteScheduleAction(
             uow=uow,
             send_command=SendServerCommand(uow=uow, control_plane=cp),
-            start_server=start_server,
-            stop_server=stop_server,
-            restart_server=RestartServer(
+            start_server=StartServer(
                 uow=uow,
                 control_plane=cp,
                 clock=the_clock,
-                stop_server=stop_server,
-                start_server=start_server,
+                jar_provisioner=FakeJarProvisioner(),
+                store_generation=FakeStoreGenerationReader(),
+                file_store=FakeFileStore(),
             ),
+            stop_server=StopServer(uow=uow, control_plane=cp, clock=the_clock),
+            restart_server=RestartServer(uow=uow, control_plane=cp, clock=the_clock),
             create_backup=CreateBackup(
                 uow=uow,
                 backup_store=store,

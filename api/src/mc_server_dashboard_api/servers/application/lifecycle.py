@@ -2115,36 +2115,19 @@ class RestartServer:
     whatever the Worker did, including the case where it stopped the server and
     failed to relaunch it. The reconciler converges that from the same row.
 
-    A restart of a server that is owed a player-group file change is not done in
-    place (issue #3223). The in-place restart relaunches the Worker's own working
-    set, where the change cannot be written, so a removed operator would come back
-    with level 4. It runs the stop and the start instead: :class:`StopServer`
-    takes the final snapshot, so nothing the Worker holds is lost, and
-    :class:`StartServer` regenerates the owed files at rest and hydrates them.
-    Those two own their failures exactly as when an operator calls them — the
-    stop's intent is not reverted — so a failure part-way leaves the server
-    stopped, with the error of the step that failed, rather than running with the
-    stale file. With nothing owed the restart is the in-place dispatch, unchanged.
+    A player-group file change the server is owed is NOT applied here (issue
+    #3223): the Worker relaunches its own working set, where the change cannot be
+    written, and the mark stays for the next clean stop and start. Whether a
+    restart should apply it is tracked in issue #3271.
     """
 
     uow: UnitOfWork
     control_plane: ControlPlane
     clock: Clock
-    stop_server: StopServer
-    start_server: StartServer
 
     async def __call__(
         self, *, community_id: CommunityId, server_id: ServerId
     ) -> Server:
-        async with self.uow:
-            owed_group_files = await self.uow.groups.list_sync_pending(server_id)
-        if owed_group_files:
-            # The stop validates the server exactly as the block below does (not
-            # found, not running, unassigned), so nothing is checked twice here.
-            await self.stop_server(community_id=community_id, server_id=server_id)
-            return await self.start_server(
-                community_id=community_id, server_id=server_id
-            )
         async with self.uow:
             server = await _load(self.uow, community_id, server_id)
             if (

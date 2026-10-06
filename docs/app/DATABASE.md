@@ -568,8 +568,10 @@ file from the then-current union before it decides whether to hydrate:
   assignment still held by that snapshot is refused at once with 409
   `transition_conflict`, so it cannot go on to launch once the hold is released.
 - A change to a group itself (player add/remove, delete) locks the group row
-  before it lists the attached servers, so a concurrent attach either is in that
-  list or waits for the change; no attached server is left without a row.
+  before it writes anything and before it lists the attached servers, so a
+  concurrent attach either is in that list or waits for the change; no attached
+  server is left without a row. Taking the lock before the player rows are
+  written keeps a player edit and a group delete on one lock order.
 - The write advances the working-set generation like any at-rest edit, so a
   Worker still holding the previous run's scratch hydrates instead of booting the
   pre-change file ([`CONTROL_PLANE.md`](CONTROL_PLANE.md) Section 5.1).
@@ -586,9 +588,9 @@ Which launches apply owed files:
 | Launch | Owed files |
 |---|---|
 | Start (operator or schedule) | Applied, as above. |
-| Restart (operator or schedule) | Applied. A restart of a server with a row is not dispatched in place, because the Worker would relaunch its own stale copy: it runs as a stop (with its final snapshot, so nothing the Worker holds is lost) followed by a start. Each step fails as it does on its own, and the stop is not reverted, so a failure part-way leaves the server stopped with that step's error. With no row the restart is the in-place dispatch. |
 | Reconciler placement of an unassigned server | Applied before placing; this launch always hydrates from the store. |
-| Reconciler re-dispatch onto the Worker that still holds the server (typically after a crash) | **Not applied; the row stays.** The Worker's retained scratch may be newer than the store, and applying the change means forcing a hydrate from the last published snapshot over it. Until the next launch of one of the kinds above, a removed operator is still in the launched file. Whether to trade that world progression for the revocation is tracked in issue #3271. |
+| Restart (operator or schedule) | **Not applied; the row stays.** The restart is dispatched in place and the Worker relaunches its own working set, where the change cannot be written. A removed operator is still in the launched file until the next clean stop and start. Tracked in issue #3271. |
+| Reconciler re-dispatch onto the Worker that still holds the server (typically after a crash) | **Not applied; the row stays.** The Worker's retained scratch may be newer than the store, and applying the change means forcing a hydrate from the last published snapshot over it. Until the next clean stop and start, a removed operator is still in the launched file. Whether to trade that world progression for the revocation is tracked in issue #3271. |
 
 Pushing live changes to a running server via the Worker (EditFile + RCON reload)
 is deferred: not implemented.

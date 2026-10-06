@@ -20,9 +20,12 @@ at stop, would overwrite the authoritative copy — and a hydrate only ships
 whatever that copy holds, so nothing would ever apply the change. Every change
 therefore records, in its own transaction, that each affected server's file is
 owed a regeneration (:meth:`GroupRepository.mark_sync_pending`). A change to a
-group itself first holds off attaches of that group
+group itself holds off attaches of that group
 (:meth:`GroupRepository.lock_against_attach`), so the servers it lists are all
-the servers it affects.
+the servers it affects. It takes that lock BEFORE it writes anything of the
+group: a player edit that locked the group row only after writing its player
+rows would deadlock with a delete, which holds the group row and waits on those
+rows to cascade.
 
 ``StartServer`` then regenerates the owed files from the *current* union before
 it decides whether to hydrate (:func:`regenerate_pending_group_files`). That
@@ -31,15 +34,14 @@ still holding the pre-edit scratch hydrates instead of booting it. The launch
 paths:
 
 - a start (operator or schedule) applies the owed files;
-- a restart of a server with owed files is run as a stop and a start rather than
-  in place, so it applies them too (``RestartServer``);
 - the reconciler's placement of an unassigned server (``place_and_start``)
   always hydrates from the store, so it applies them first;
-- the reconciler's re-dispatch onto the Worker that still holds the server
-  (``redispatch_start``, typically after a crash) does **not**: applying them
-  there means forcing a hydrate from the last published snapshot over a scratch
-  that may be newer. The change stays owed until the next of the paths above
-  (decision tracked in issue #3271).
+- an in-place restart (``RestartServer``) and the reconciler's re-dispatch onto
+  the Worker that still holds the server (``redispatch_start``, typically
+  after a crash) do **not**: both relaunch the Worker's own working set, and
+  applying the change there means forcing a hydrate from the last published
+  snapshot over a scratch that may be newer. The change stays owed until the
+  next clean stop and start (decision tracked in issue #3271).
 
 The mark is what tells a file a group change made stale from one no group ever
 managed. A server with no mark keeps its ``ops.json`` / ``whitelist.json``
@@ -266,9 +268,9 @@ class AddPlayer:
         player = Player(player_uuid, username)
         async with self.uow:
             group = await _load_group(self.uow, community_id, group_id)
+            await self.uow.groups.lock_against_attach(group_id)
             group.upsert_player(player)
             await self.uow.groups.save(group)
-            await self.uow.groups.lock_against_attach(group_id)
             server_ids = await self.uow.groups.list_server_ids_for_group(group_id)
             await self.uow.groups.mark_sync_pending(server_ids, group.kind)
             await self.uow.commit()
@@ -301,9 +303,9 @@ class RemovePlayer:
     ) -> PlayerGroup:
         async with self.uow:
             group = await _load_group(self.uow, community_id, group_id)
+            await self.uow.groups.lock_against_attach(group_id)
             group.remove_player(player_uuid)
             await self.uow.groups.save(group)
-            await self.uow.groups.lock_against_attach(group_id)
             server_ids = await self.uow.groups.list_server_ids_for_group(group_id)
             await self.uow.groups.mark_sync_pending(server_ids, group.kind)
             await self.uow.commit()

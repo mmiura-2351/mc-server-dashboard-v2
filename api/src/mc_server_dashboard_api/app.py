@@ -973,33 +973,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 restart_timeout_seconds=settings.control.restart_timeout_seconds,
             )
 
-            def _make_schedule_start() -> StartServer:
-                return StartServer(
-                    uow=ServersUnitOfWork(create_session_factory(engine)),
-                    control_plane=schedule_control_plane,
-                    clock=ServersSystemClock(),
-                    jar_provisioner=CatalogJarProvisioner(
-                        ensure_jar=EnsureJar(
-                            catalog=version_catalog,
-                            fetcher=HttpxJarFetcher(),
-                            pool=StorageJarPool(jars=storage),
-                        )
-                    ),
-                    store_generation=StorageGenerationReader(storage=storage),
-                    file_store=StorageFileStoreAdapter(storage=storage),
-                    lifecycle_lock=PgLifecycleLock(engine=engine),
-                    bedrock_tunnel_sync=bedrock_tunnel_syncer,
-                )
-
-            def _make_schedule_stop() -> StopServer:
-                return StopServer(
-                    uow=ServersUnitOfWork(create_session_factory(engine)),
-                    control_plane=schedule_control_plane,
-                    clock=ServersSystemClock(),
-                    bedrock_tunnel_sync=bedrock_tunnel_syncer,
-                    stop_refusals=app.state.stop_dispatch_refusals,
-                )
-
             def _make_schedule_execute() -> ExecuteScheduleAction:
                 return ExecuteScheduleAction(
                     uow=ServersUnitOfWork(create_session_factory(engine)),
@@ -1007,16 +980,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         uow=ServersUnitOfWork(create_session_factory(engine)),
                         control_plane=schedule_control_plane,
                     ),
-                    start_server=_make_schedule_start(),
-                    stop_server=_make_schedule_stop(),
+                    start_server=StartServer(
+                        uow=ServersUnitOfWork(create_session_factory(engine)),
+                        control_plane=schedule_control_plane,
+                        clock=ServersSystemClock(),
+                        jar_provisioner=CatalogJarProvisioner(
+                            ensure_jar=EnsureJar(
+                                catalog=version_catalog,
+                                fetcher=HttpxJarFetcher(),
+                                pool=StorageJarPool(jars=storage),
+                            )
+                        ),
+                        store_generation=StorageGenerationReader(storage=storage),
+                        file_store=StorageFileStoreAdapter(storage=storage),
+                        lifecycle_lock=PgLifecycleLock(engine=engine),
+                        bedrock_tunnel_sync=bedrock_tunnel_syncer,
+                    ),
+                    stop_server=StopServer(
+                        uow=ServersUnitOfWork(create_session_factory(engine)),
+                        control_plane=schedule_control_plane,
+                        clock=ServersSystemClock(),
+                        bedrock_tunnel_sync=bedrock_tunnel_syncer,
+                        stop_refusals=app.state.stop_dispatch_refusals,
+                    ),
                     restart_server=RestartServer(
                         uow=ServersUnitOfWork(create_session_factory(engine)),
                         control_plane=schedule_control_plane,
                         clock=ServersSystemClock(),
-                        # Its own stop and start, for the restart of a server that
-                        # is owed a player-group file change (issue #3223).
-                        stop_server=_make_schedule_stop(),
-                        start_server=_make_schedule_start(),
                     ),
                     create_backup=CreateBackup(
                         uow=ServersUnitOfWork(create_session_factory(engine)),

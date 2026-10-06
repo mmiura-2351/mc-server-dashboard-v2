@@ -19,7 +19,6 @@ from mc_server_dashboard_api.servers.application.groups import RemovePlayer
 from mc_server_dashboard_api.servers.application.lifecycle import (
     RestartServer,
     StartServer,
-    StopServer,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
@@ -338,60 +337,23 @@ async def test_place_and_start_does_not_place_when_the_owed_write_fails() -> Non
 # --- restart -----------------------------------------------------------------
 
 
-async def _running_server(uow: FakeUnitOfWork, *, owed: bool) -> Server:
+async def test_restart_stays_in_place_and_leaves_the_change_owed() -> None:
+    # An in-place restart relaunches the Worker's own working set, so it cannot
+    # apply the change; it must not consume the mark either, or the next clean
+    # start would have nothing left to apply (issue #3271).
+    uow = FakeUnitOfWork()
     server = _server(worker=_WORKER)
-    if owed:
-        await _operator_removed_while_running(uow, server)
+    await _operator_removed_while_running(uow, server)
     server.desired_state = DesiredState.RUNNING
     server.observed_state = ObservedState.RUNNING
     uow.servers.seed(server)
-    return server
+    cp = FakeControlPlane(place_to=_WORKER)
 
-
-def _restart(
-    uow: FakeUnitOfWork, store: _VersionedFileStore, cp: FakeControlPlane
-) -> RestartServer:
-    return RestartServer(
-        uow=uow,
-        control_plane=cp,
-        clock=FakeClock(_NOW),
-        stop_server=StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW)),
-        start_server=_start(uow, store, cp),
-    )
-
-
-async def test_restart_with_owed_files_stops_regenerates_and_starts() -> None:
-    uow = FakeUnitOfWork()
-    server = await _running_server(uow, owed=True)
-    store = _VersionedFileStore()
-    cp = FakeControlPlane(place_to=_WORKER, held={(_WORKER, server.id): _GENERATION})
-
-    result = await _restart(uow, store, cp)(
+    await RestartServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))(
         community_id=_COMMUNITY, server_id=server.id
     )
 
-    assert json.loads(store.files["ops.json"]) == []
-    # A clean stop with its final snapshot, so nothing the Worker holds is lost
-    # to the hydrate the regenerated file then forces; never the in-place restart,
-    # which relaunches the Worker's stale copy.
-    assert cp.dispatched == [
-        ("stop", _WORKER, server.id),
-        ("snapshot", _WORKER, server.id),
-        ("hydrate", _WORKER, server.id),
-        ("start", _WORKER, server.id),
-    ]
-    assert result.desired_state is DesiredState.RUNNING
-    assert result.assigned_worker_id == _WORKER
-    assert await uow.groups.list_sync_pending(server.id) == []
-
-
-async def test_restart_with_nothing_owed_stays_in_place() -> None:
-    uow = FakeUnitOfWork()
-    server = await _running_server(uow, owed=False)
-    store = _VersionedFileStore()
-    cp = FakeControlPlane(place_to=_WORKER)
-
-    await _restart(uow, store, cp)(community_id=_COMMUNITY, server_id=server.id)
-
     assert cp.dispatched == [("restart", _WORKER, server.id)]
-    assert store.files["ops.json"] == _STALE_OPS.encode()
+    assert [p.kind for p in await uow.groups.list_sync_pending(server.id)] == [
+        GroupKind.OP
+    ]
