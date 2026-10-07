@@ -27,7 +27,7 @@ describe("parseServerFrame", () => {
   it("parses a status frame with state + detail", () => {
     expect(
       parseServerFrame(frame("status", { state: "running", detail: "ok" })),
-    ).toEqual({ kind: "status", state: "running", detail: "ok" });
+    ).toEqual({ kind: "status", state: "running", detail: "ok", reason: "" });
   });
 
   it("defaults a missing status detail to empty", () => {
@@ -35,7 +35,31 @@ describe("parseServerFrame", () => {
       kind: "status",
       state: "running",
       detail: "",
+      reason: "",
     });
+  });
+
+  it("parses the crash reason a status frame carries", () => {
+    expect(
+      parseServerFrame(
+        frame("status", {
+          state: "crashed",
+          detail: "boom",
+          reason: "forge_install_out_of_memory",
+        }),
+      ),
+    ).toEqual({
+      kind: "status",
+      state: "crashed",
+      detail: "boom",
+      reason: "forge_install_out_of_memory",
+    });
+  });
+
+  it("reads a non-string crash reason as unclassified", () => {
+    expect(
+      parseServerFrame(frame("status", { state: "crashed", reason: 2 })),
+    ).toMatchObject({ reason: "" });
   });
 
   it("parses a log frame and its std stream", () => {

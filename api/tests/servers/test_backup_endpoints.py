@@ -95,6 +95,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidBackupArchiveError,
     InvalidFilePathError,
     InvalidRetentionPolicyError,
+    PluginReconcileIncompleteError,
     ServerNotFoundError,
     ServerNotStoppedError,
     WorkingSetSeedFailedError,
@@ -610,6 +611,23 @@ def test_restore_seed_failure_is_503_with_reason() -> None:
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/restore"))
     assert resp.status_code == 503
     assert resp.json()["reason"] == "seed_failed"
+    assert [e.operation for e in recorder.events] == [ops.BACKUP_RESTORE]
+    assert recorder.events[0].outcome is Outcome.ERROR
+    assert recorder.events[0].target_type == ops.TARGET_BACKUP
+
+
+def test_restore_incomplete_plugin_reconcile_is_503_with_reason() -> None:
+    # The archive published but the restored plugin directory could not be read,
+    # so the plugin rows were left as they were (issue #3221). Same posture as the
+    # seed failure above: a 503 the caller retries, never a 204 claiming the rows
+    # describe the restored working set.
+    use_case = _FakeUseCase(error=PluginReconcileIncompleteError("x"))
+    recorder = RecordingAuditRecorder()
+    app = _app(member=True, allow=True, restore=use_case, recorder=recorder)
+    client = _client(app)
+    resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/restore"))
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "plugin_reconcile_incomplete"
     assert [e.operation for e in recorder.events] == [ops.BACKUP_RESTORE]
     assert recorder.events[0].outcome is Outcome.ERROR
     assert recorder.events[0].target_type == ops.TARGET_BACKUP

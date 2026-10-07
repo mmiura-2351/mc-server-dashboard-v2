@@ -21,11 +21,16 @@ import { EventsSocketClient, wsOrigin } from "./eventsSocket.ts";
 /** The subscribable streams (the GAP marker is always delivered, never asked). */
 export type Stream = "status" | "log" | "metrics";
 
-/** A parsed status frame: the latest observed state + optional crash detail. */
+/**
+ * A parsed status frame: the latest observed state + optional crash detail.
+ * `reason` names a crash the Worker classified (e.g. `forge_install_failed`,
+ * issue #1093); it is empty for an unclassified crash and for every other state.
+ */
 export interface StatusFrame {
   kind: "status";
   state: string;
   detail: string;
+  reason: string;
 }
 
 /** A parsed log line: the text and which std stream it came from. */
@@ -46,8 +51,8 @@ export interface MetricsFrame {
 /**
  * The status snapshot the API sends on subscribe and after every gap that
  * dropped status frames (#1795):
- * the server's persisted observed state. No `detail` — it rides only a live
- * status transition and is not persisted.
+ * the server's persisted observed state. No `detail` or `reason` — they ride
+ * only a live status transition and are not persisted.
  */
 export interface SnapshotFrame {
   kind: "snapshot";
@@ -112,7 +117,11 @@ export function parseServerFrame(raw: string): ServerFrame | null {
     return null;
   }
   if (stream === "status") {
-    const { state, detail } = payload as { state?: unknown; detail?: unknown };
+    const { state, detail, reason } = payload as {
+      state?: unknown;
+      detail?: unknown;
+      reason?: unknown;
+    };
     if (typeof state !== "string") {
       return null;
     }
@@ -120,6 +129,7 @@ export function parseServerFrame(raw: string): ServerFrame | null {
       kind: "status",
       state,
       detail: typeof detail === "string" ? detail : "",
+      reason: typeof reason === "string" ? reason : "",
     };
   }
   if (stream === "snapshot") {

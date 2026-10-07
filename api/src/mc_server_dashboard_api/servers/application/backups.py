@@ -100,6 +100,8 @@ from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
     InvalidBackupArchiveError,
     InvalidRetentionPolicyError,
+    PluginReconcileIncompleteError,
+    ServerFileNotFoundError,
     ServerNotFoundError,
     ServerNotStoppedError,
     UnsupportedPluginServerTypeError,
@@ -381,6 +383,11 @@ class RestoreBackup:
     ``cache``, and ``clock``; when not provided (``None``) it is skipped so existing
     callers without plugin support are unaffected. ``file_store`` also gates the
     properties re-apply, for the same reason.
+
+    Both post-publication steps run for EVERY restore that published, a forced
+    corrupt one included (issue #3222): a corrupt world region says nothing about
+    the jars beside it. A restored plugin directory that cannot be listed raises
+    :class:`PluginReconcileIncompleteError` with the rows untouched (issue #3221).
     """
 
     uow: UnitOfWork
@@ -447,10 +454,6 @@ class RestoreBackup:
                 # corrupt restore. Quarantine BEFORE the properties re-apply, so a
                 # failure there cannot leave a known-corrupt backup unmarked.
                 await self._mark_health(backup_id, BackupHealth.QUARANTINED)
-                await self._reapply_platform_properties(
-                    community_id=community_id, server_id=server_id, server=server
-                )
-                return RestoreResult(forced_corrupt=True, corrupt_count=corrupt_count)
             await self._reapply_platform_properties(
                 community_id=community_id, server_id=server_id, server=server
             )
@@ -465,7 +468,9 @@ class RestoreBackup:
                     server_id=server_id,
                     server=server,
                 )
-            return RestoreResult(forced_corrupt=False, corrupt_count=0)
+            return RestoreResult(
+                forced_corrupt=corrupt_count > 0, corrupt_count=corrupt_count
+            )
 
     async def _mark_health(self, backup_id: BackupId, health: BackupHealth) -> None:
         async with self.uow:
@@ -548,6 +553,13 @@ async def _reconcile_plugins(
 
     Errors during ghost ingestion or manifest parsing for a single file are
     logged and skipped (the restore must not fail for a bad jar).
+
+    The listing of the content directory is the evidence every step above rests
+    on, so only the typed miss (:class:`ServerFileNotFoundError`) reads as "no
+    jars". Any other failure to list it — a store outage, an I/O or permission
+    error — raises :class:`PluginReconcileIncompleteError` before a single row is
+    touched (issue #3221): treating an unread directory as an empty one deleted
+    every tracked row, provenance included, while the jars were still there.
     """
 
     try:
@@ -569,8 +581,16 @@ async def _reconcile_plugins(
             entries = await file_store.list_dir(
                 community_id=community_id, server_id=server_id, rel_path=content_dir
             )
-        except Exception:  # noqa: BLE001 - content dir may not exist
-            entries = []
+        except ServerFileNotFoundError:
+            entries = []  # No content directory in the restored working set.
+        except Exception as exc:
+            _LOG.warning(
+                "plugin reconcile: could not list %s after a restore; plugin rows "
+                "left unreconciled",
+                content_dir,
+                extra={"server_id": str(server_id.value)},
+            )
+            raise PluginReconcileIncompleteError(str(server_id.value)) from exc
 
         disk_jars: set[str] = set()
         for entry in entries:

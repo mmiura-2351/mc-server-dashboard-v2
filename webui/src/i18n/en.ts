@@ -340,6 +340,25 @@ export const en = {
   "serverDetail.crashBanner.guidance":
     "The server has crashed. Click Restart to try again, or check the console for details.",
   "serverDetail.crashBanner.viewConsole": "View Console",
+  // Forge install diagnostics (#1093): the explanation of a crash the Worker
+  // classified, and the install-log viewer the crash banner offers for it.
+  "serverDetail.crashReason.forgeInstallOutOfMemory":
+    "The Forge installer ran out of memory. Stop the server, raise its memory limit in Settings, then start it again.",
+  "serverDetail.crashReason.forgeInstallJavaIncompatible":
+    "The Forge installer cannot run on the Java version this server's Minecraft version selects: it is older than this Forge build needs. Restarting will not help. Ask a platform administrator to check the Java image configured for this Minecraft version, or recreate the server with a different Minecraft or Forge version.",
+  "serverDetail.installLog.view": "View install log",
+  "serverDetail.installLog.hide": "Hide install log",
+  "serverDetail.installLog.label": "Forge install log",
+  "serverDetail.installLog.loading": "Loading the install log…",
+  "serverDetail.installLog.truncated":
+    "Showing the last {count} lines. The full log is logs/forge-install.log in the Files tab.",
+  "serverDetail.installLog.missing":
+    "No install log was found (logs/forge-install.log).",
+  "serverDetail.installLog.unsettled":
+    "The install log can be read once the server is stopped. Stop the server, then open it again.",
+  "serverDetail.installLog.tooLarge":
+    "The install log is too large to show here. Download logs/forge-install.log from the Files tab.",
+  "serverDetail.installLog.error": "Could not load the install log.",
   "serverDetail.converging": "applying…",
   "serverDetail.noWorker": "no host assigned",
   "serverDetail.worker": "Host",
@@ -1386,17 +1405,19 @@ export const en = {
   "communitySettings.general.dangerHeading": "Danger zone",
   "communitySettings.general.deleteTitle": "Delete community",
   "communitySettings.general.deleteDesc":
-    "Deletes all servers, backups, roles and memberships of this community.",
+    "Deletes this community with its roles, memberships and player groups. Its servers must be deleted first.",
   "communitySettings.general.deleteButton": "Delete…",
   "communitySettings.general.deleteDialogTitle": "Delete community",
   "communitySettings.general.deleteDialogBody":
-    "This permanently deletes the community and everything in it. This cannot be undone.",
+    "This permanently deletes the community with its roles, memberships and player groups. This cannot be undone. A community that still has servers is not deleted.",
   "communitySettings.general.deleteConfirm": "Delete community",
   "communitySettings.general.deletePrompt":
     "Type the community name to enable deletion",
   "communitySettings.general.deleted": "Community deleted.",
   "communitySettings.general.deleteError":
     "Could not delete the community. Please try again.",
+  "communitySettings.general.deleteHasServers":
+    "This community still has servers. Delete this community's servers first.",
 
   // Community settings — Groups tab (WEBUI_SPEC.md 6.10, issue #464)
   "communitySettings.groups.heading": "Player groups",
@@ -1524,11 +1545,13 @@ export const en = {
   "admin.communities.delete": "Delete",
   "admin.communities.deleteTitle": "Delete community",
   "admin.communities.deleteBody":
-    "This permanently deletes the community and everything in it (members, roles, servers). This cannot be undone.",
+    "This permanently deletes the community with its members, roles and player groups. This cannot be undone. A community that still has servers is not deleted.",
   "admin.communities.deletePrompt": "Type the community name to confirm:",
   "admin.communities.deleteConfirm": "Delete community",
   "admin.communities.deleted": "Community deleted.",
   "admin.communities.deleteError": "Could not delete the community.",
+  "admin.communities.deleteHasServers":
+    "This community still has servers. Its servers must be deleted first.",
   "admin.communities.prev": "Previous",
   "admin.communities.next": "Next",
   "admin.communities.range": "{from}–{to} of {total}",
@@ -1869,6 +1892,8 @@ export const en = {
   "resourcePacks.error.inUse":
     "This resource pack is assigned to one or more servers and cannot be deleted.",
   "resourcePacks.error.downloadFailed": "Could not download the resource pack.",
+  "resourcePacks.error.storageUnavailable":
+    "Resource pack storage is unavailable right now. Please try again shortly.",
 
   // Server resource pack assignment (issue #1179). Displayed as a card in the
   // server detail Settings tab.

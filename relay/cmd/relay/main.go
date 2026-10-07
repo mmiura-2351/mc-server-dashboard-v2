@@ -59,10 +59,27 @@ func (f *firstFailure) get() error {
 const tokenTTL = 10 * time.Second
 
 // drainTimeout bounds how long the shutdown sequence waits for in-flight
-// handle goroutines (active splices) to finish before proceeding. After this
-// deadline the reporter shuts down and may miss End events for sessions
-// that were still splicing (issue #1051).
-const drainTimeout = 30 * time.Second
+// handlers to finish their TEARDOWN before the reporter is stopped (issues
+// #1051, #3169). It is not a window for sessions to end by themselves: the
+// shutdown signal ends every established session at once (game.Listener.Serve
+// cancels its handlers' context, which closes each splice; a Bedrock tunnel
+// tears down on the same signal), and each records its End on the way out. The
+// timeout is sized to the slowest handlers that are still bounded, both 15 s
+// and neither holding a session: a Java login that has not spliced (the 5 s
+// pre-route read plus the 10 s Login Disconnect write, game.preRouteDeadline +
+// game.disconnectWriteTimeout) and a Bedrock dial-out still in its handshake
+// (hello read, rejecting ack write and peer-close wait, each one
+// bedrock.handshakeDeadline of 5 s). The handlers that do hold a session are
+// faster: closing an established splice takes at most the 5 s crypto/tls allows
+// a close_notify, and a Bedrock tunnel's teardown does no network waiting.
+// 20 s is that 15 s plus margin, so a timeout means a handler is genuinely
+// stuck rather than one that lost a race with its own deadline. A session
+// whose handler does outlive it loses its End and is healed by the next
+// Register's active_session_ids instead (RELAY.md Sections 6 and 10).
+//
+// compose.yaml's stop_grace_period on the relay service is sized from this
+// constant plus session.DefaultShutdownTimeout; change them together.
+const drainTimeout = 20 * time.Second
 
 // version is the relay build string logged at startup. Overridden at build
 // time via -ldflags "-X main.version=<tag>" (see relay/Dockerfile).
@@ -232,9 +249,10 @@ func run(ctx context.Context) error {
 			stop()
 		}
 
-		// The listener is closed; wait for in-flight handle goroutines
-		// (including active splices) to finish so their session End events
-		// reach the reporter before it shuts down (issue #1051).
+		// The listener is closed and Serve's return has ended every established
+		// session; wait for the handlers to finish tearing down so their session
+		// End events reach the reporter before it shuts down (issues #1051,
+		// #3169).
 		if !gameLn.Drain(drainTimeout) {
 			logger.Warn("drain timeout; some sessions may not report End events", "timeout", drainTimeout)
 		}

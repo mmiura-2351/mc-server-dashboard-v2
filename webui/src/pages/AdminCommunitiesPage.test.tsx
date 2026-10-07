@@ -252,6 +252,48 @@ describe("admin communities delete", () => {
       screen.queryByText(t("admin.communities.deleteError")),
     ).not.toBeInTheDocument();
   });
+
+  it("explains a delete refused because the community still has servers", async () => {
+    fetchMock.mockImplementation(
+      (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const m = method(input, init);
+        if (url.startsWith("/api/admin/communities")) {
+          return Promise.resolve(jsonResponse(ADMIN_COMMUNITIES));
+        }
+        if (url.startsWith("/api/communities/") && m === "DELETE") {
+          return Promise.resolve(problemResponse("community_has_servers", 409));
+        }
+        return Promise.resolve(baseRoute(url) ?? tokenResponse());
+      },
+    );
+
+    renderApp({ path: "/admin/communities" });
+
+    const table = await screen.findByRole("table");
+    const row = within(table).getByText("Sakura SMP").closest("tr");
+    if (row === null) throw new Error("row not found");
+    fireEvent.click(
+      within(row).getByRole("button", { name: t("admin.communities.delete") }),
+    );
+
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByRole("textbox"), {
+      target: { value: "Sakura SMP" },
+    });
+    fireEvent.click(
+      within(dialog).getByRole("button", {
+        name: t("admin.communities.deleteConfirm"),
+      }),
+    );
+
+    expect(
+      await screen.findByText(t("admin.communities.deleteHasServers")),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("admin.communities.deleteError")),
+    ).not.toBeInTheDocument();
+  });
 });
 
 describe("admin communities owner picker", () => {

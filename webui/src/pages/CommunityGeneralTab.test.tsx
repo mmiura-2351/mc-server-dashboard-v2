@@ -168,6 +168,39 @@ describe("CommunityGeneralTab", () => {
     await waitFor(() => expect(lastPath).toBe("/"));
   });
 
+  it("explains a delete refused because the community still has servers", async () => {
+    routeGet();
+    mockApi.delete.mockRejectedValue(
+      new ApiError(409, { reason: "community_has_servers" }),
+    );
+    renderPage();
+    await openGeneral();
+
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: t("communitySettings.general.deleteButton"),
+      }),
+    );
+    fireEvent.change(screen.getByPlaceholderText("Sakura"), {
+      target: { value: "Sakura" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: t("communitySettings.general.deleteConfirm"),
+      }),
+    );
+
+    expect(
+      await screen.findByText(t("communitySettings.general.deleteHasServers")),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("communitySettings.general.deleteError")),
+    ).not.toBeInTheDocument();
+    // Nothing was deleted, so the community stays active and the page stays put.
+    expect(setCommunityId).not.toHaveBeenCalled();
+    expect(lastPath).toBe(`/communities/${CID}/settings`);
+  });
+
   it("hides the danger zone without community:delete", async () => {
     mockCan = (code: string) => code !== "community:delete";
     routeGet();

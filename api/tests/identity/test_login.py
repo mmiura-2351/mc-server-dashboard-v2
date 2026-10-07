@@ -8,6 +8,8 @@ both run the artificial-delay hook, and neither commits a token row.
 from __future__ import annotations
 
 import datetime as dt
+from collections.abc import Callable
+from dataclasses import replace
 
 import pytest
 
@@ -36,12 +38,13 @@ def _login(
     attempts: FakeLoginAttemptStore | None = None,
     *,
     now: dt.datetime = _NOW,
+    hasher: StubHasher | None = None,
 ) -> Login:
     return Login(
         uow=uow,
         attempts=attempts or FakeLoginAttemptStore(),
         brute_force=make_brute_force_config(),
-        hasher=StubHasher(),
+        hasher=hasher or StubHasher(),
         dummy_password_hash="hashed::__dummy__",
         tokens=FakeTokenService(),
         clock=FakeClock(now),
@@ -142,6 +145,61 @@ async def test_login_deactivated_failure_records_deactivated_reason() -> None:
         await _login(uow, delay, attempts)(username="alice", password=_PASSWORD)
 
     assert [a[3] for a in attempts.attempts] == ["deactivated"]
+
+
+class _ChangingHasher(StubHasher):
+    """Lets a concurrent change of the user commit while the password verifies."""
+
+    def __init__(self, change: Callable[[], None]) -> None:
+        super().__init__()
+        self._change = change
+
+    async def verify(self, plaintext: str, password_hash: str) -> bool:
+        verified = await super().verify(plaintext, password_hash)
+        self._change()
+        return verified
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        ("password", "wrong_password"),
+        ("deactivate", "deactivated"),
+        ("delete", "unknown_user"),
+    ],
+)
+async def test_credentials_changed_while_verifying_refuse_the_login(
+    change: str, reason: str
+) -> None:
+    # A password change, deactivation or deletion that commits after the
+    # password verified, but before the session is stored, has already revoked
+    # the user's sessions; the login re-checks under the session lock and must
+    # not store one the revocation never saw (issue #3254).
+    user = make_user(password=_PASSWORD)
+    uow = FakeUnitOfWork()
+    uow.users.seed(user)
+    attempts = FakeLoginAttemptStore()
+
+    def concurrent_change() -> None:
+        if change == "password":
+            uow.users.seed(replace(user, password_hash="hashed::Np4@xZ#Lq9wR"))
+        elif change == "deactivate":
+            uow.users.seed(replace(user, active=False))
+        else:
+            del uow.users.by_id[user.id]
+
+    login = _login(
+        uow,
+        RecordingFailureDelay(),
+        attempts,
+        hasher=_ChangingHasher(concurrent_change),
+    )
+    with pytest.raises(InvalidCredentialsError):
+        await login(username="alice", password=_PASSWORD)
+
+    assert uow.refresh_tokens.by_hash == {}
+    assert uow.commits == 0
+    assert [a[3] for a in attempts.attempts] == [reason]
 
 
 async def test_failure_records_attempt_with_username_and_ip() -> None:
