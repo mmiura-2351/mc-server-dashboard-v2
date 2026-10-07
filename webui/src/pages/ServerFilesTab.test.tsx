@@ -191,17 +191,12 @@ function renderFilesTab(
 // Install the mock socket in every describe that renders the detail page: the
 // events client opens a WS, and a missing mock has caused CI flakes (it would
 // fire onDown -> invalidate and refetch out from under the test).
-// jsdom lacks URL.createObjectURL/revokeObjectURL; stub them so the ZIP
-// download path in bulkDownload() doesn't throw.
-if (typeof URL.createObjectURL !== "function") {
-  URL.createObjectURL = vi.fn(() => "blob:fake");
-}
-if (typeof URL.revokeObjectURL !== "function") {
-  URL.revokeObjectURL = vi.fn();
-}
-
 let restoreWs: () => void;
 beforeEach(() => {
+  // Vitest's object-URL adapter relies on jsdom Blob internals that changed
+  // in jsdom 30.1. These tests inspect ZIP bytes without browser downloads.
+  vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:fake");
+  vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
   restoreWs = installMockWebSocket();
   setAccessToken("tok-1");
   mockApi.get.mockReset();
@@ -218,6 +213,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   restoreWs();
+  vi.restoreAllMocks();
   vi.clearAllMocks();
 });
 
@@ -1948,6 +1944,11 @@ describe("ServerFilesTab bulk operations", () => {
         { name: "b.txt", is_dir: false },
       ]),
     });
+    mockDownload.fetchFileBlob.mockImplementation((path: string) =>
+      Promise.resolve(new Blob([path.endsWith("a.txt") ? "A" : "B"])),
+    );
+    const createObjectURL = vi.spyOn(URL, "createObjectURL");
+    const revokeObjectURL = vi.spyOn(URL, "revokeObjectURL");
     renderPage();
     await openFiles();
     await screen.findByText(/a\.txt/);
@@ -1963,6 +1964,7 @@ describe("ServerFilesTab bulk operations", () => {
       screen.getByRole("button", { name: t("files.bulk.download") }),
     );
 
+    await screen.findByText(t("files.bulk.download.done", { done: 2 }));
     // Multiple files use fetchFileBlob (not downloadFile) to build a ZIP.
     await waitFor(() =>
       expect(mockDownload.fetchFileBlob).toHaveBeenCalledTimes(2),
@@ -1977,6 +1979,18 @@ describe("ServerFilesTab bulk operations", () => {
     );
     // downloadFile should NOT have been called (ZIP handles both files).
     expect(mockDownload.downloadFile).not.toHaveBeenCalled();
+    expect(createObjectURL).toHaveBeenCalledTimes(1);
+    const blob = createObjectURL.mock.calls[0][0] as Blob;
+    expect(blob.type).toBe("application/zip");
+    const archive = unzipSync(new Uint8Array(await blob.arrayBuffer()));
+    expect(Object.keys(archive).sort()).toEqual(["a.txt", "b.txt"]);
+    expect(new TextDecoder().decode(archive["a.txt"])).toBe("A");
+    expect(new TextDecoder().decode(archive["b.txt"])).toBe("B");
+    await waitFor(() =>
+      expect(revokeObjectURL).toHaveBeenCalledWith("blob:fake"),
+    );
+    createObjectURL.mockRestore();
+    revokeObjectURL.mockRestore();
   });
 
   it("aborts the bulk ZIP once the running byte total passes the aggregate cap (#2063)", async () => {
