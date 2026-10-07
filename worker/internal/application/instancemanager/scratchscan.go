@@ -151,6 +151,18 @@ func ScanHeldServers(scratchDir string, quiesced bool, log *slog.Logger) []sessi
 // writeGeneration.
 var rewriteTornMarker = writeGeneration
 
+// persistTornVerdict rewrites a torn set's marker to 0 (issue #3178), the one place both
+// judges — the boot scan (heldGeneration) and the launch fsck (tornAtLaunch, issue #3201)
+// — persist a torn verdict. gen is the marker's current reading, and the write is skipped
+// when it is already 0, which covers an absent marker: creating one would drop the launch
+// guard's refusal (issue #2802).
+func persistTornVerdict(workingDir string, gen uint64) error {
+	if gen == 0 {
+		return nil
+	}
+	return rewriteTornMarker(workingDir, 0)
+}
+
 // heldGeneration returns the generation to advertise for a held working set: the
 // recorded marker generation when the set is structurally sound, or 0 when a region
 // fsck finds it torn (issue #834) — a 0 forces the API to hydrate, recovering the
@@ -191,10 +203,7 @@ func heldGeneration(workingDir, serverID string, quiesced bool, log *slog.Logger
 		return gen
 	}
 	if !report.Healthy() {
-		var rewriteErr error
-		if gen != 0 {
-			rewriteErr = rewriteTornMarker(workingDir, 0)
-		}
+		rewriteErr := persistTornVerdict(workingDir, gen)
 		if log != nil {
 			first := report.Corrupt[0]
 			attrs := []any{"server_id", serverID, "recorded_generation", gen,
@@ -223,9 +232,9 @@ func heldGeneration(workingDir, serverID string, quiesced bool, log *slog.Logger
 // ScanHeldServers, what the API is told.
 //
 // It runs no region fsck, and it does not need one: the torn-region verdict (issue
-// #834) is reached once, by the quiesced boot scan, and persisted in the very marker
-// read here (issue #3178), so a torn set reads 0 until a hydrate replaces the tree and
-// rewrites the marker. Re-judging here would pay a region walk per held world on every
+// #834) is reached by the quiesced boot scan or by a launch's fsck (issue #3201), and
+// persisted in the very marker read here (issue #3178), so a torn set reads 0 until a
+// hydrate replaces the tree and rewrites the marker. Re-judging here would pay a region walk per held world on every
 // reconnect and, worse, read worlds this Worker is running mid-write.
 func (m *Manager) HeldServers() []session.HeldServer {
 	entries, err := os.ReadDir(m.scratchDir)

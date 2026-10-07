@@ -227,8 +227,10 @@ func run(ctx context.Context) error {
 // into a scratch tree. It is false when a sweep failed — which stays non-fatal — and every
 // boot step that rests on that premise is gated on it: the two scratch reclaims, which
 // delete trees (PR #3170 review round 2), and the held-set scan's region fsck, which judges
-// them (issue #3171). Both gates are in run(). It is true when no container driver was
-// built, because then this Worker has started no containers at all.
+// them (issue #3171). Both gates are in run(). The manager is handed it as well, for the
+// launch fsck that judges a held set at every launch no hydrate preceded (issue #3201). It
+// is true when no container driver was built, because then this Worker has started no
+// containers at all.
 func buildInstanceManager(ctx context.Context, cfg config.Config, logger *slog.Logger) (*instancemanager.Manager, bool, error) {
 	wc := cfg.Worker
 	quiesced := true
@@ -314,7 +316,8 @@ func buildInstanceManager(ctx context.Context, cfg config.Config, logger *slog.L
 		WithLogger(logger).
 		WithWorkerID(wc.ID).
 		WithTunnelDialer(tunnelDialerAdapter{tunnelDialer}).
-		WithBedrockTunneler(bedrockTunnelerAdapter{bedrockTunnel}), quiesced, nil
+		WithBedrockTunneler(bedrockTunnelerAdapter{bedrockTunnel}).
+		WithQuiesced(quiesced), quiesced, nil
 }
 
 // tunnelDialerAdapter adapts a tunnel.Dialer to instancemanager.TunnelDialer,

@@ -793,7 +793,8 @@ WARN  displaced recovery tree for unknown/unassigned server found at boot; manua
    the boot region fsck judged it **torn** carries a `.mcsd_generation` marker of `0`:
    the Worker rewrote it so the verdict reached the API, and the generation the tree was
    actually at survives only as `recorded_generation` in that boot's `held set has a
-   corrupt region` `WARN` for the server id. Grep the Worker log for it before judging
+   corrupt region` `WARN` for the server id — or, when a launch judged it torn instead,
+   in the `launch refused: held working set has a corrupt region` `WARN`. Grep the Worker log for it before judging
    how old the tree is. `level.dat` and
    region dirs live under `world/` inside the displaced tree (e.g.
    `.displaced-<id>/world/level.dat`, `.displaced-<id>/world/region/`). Inspect

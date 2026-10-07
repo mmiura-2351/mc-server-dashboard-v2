@@ -376,6 +376,22 @@ type Manager struct {
 	// files and take no reservation.
 	reserved map[string]bool
 
+	// quiesced is the boot's statement that no container this Worker started before
+	// this process is still running, so none can be writing into a scratch tree — what
+	// the container orphan sweep establishes and nothing else does (issue #3171). The
+	// launch fsck judges a world only when it is true (launchReserved, issue #3201).
+	// False until WithQuiesced says otherwise: judging needs the proof.
+	quiesced bool
+
+	// hydratedUnlaunched marks a server id whose working set is exactly what a
+	// SUCCESSFUL hydrate left, with no launch since (issue #3201). handleHydrate sets
+	// it and launchReserved consumes it, both under the id's reservation. It is how a
+	// launch knows the hydrate was NOT skipped: such a tree is the store's copy, and
+	// the launch fsck exempts it (see launchReserved for why judging it would be
+	// wrong). In-memory on purpose: a Worker restart forgets it, which only costs the
+	// next launch a fsck.
+	hydratedUnlaunched map[string]bool
+
 	// sweepingSlot marks a server id whose .displaced-<id> slot a displaced sweep is
 	// currently deciding about — from the Lstat that finds the tree through the rename
 	// out of the slot to the put-back or the commit to remove (issue #3118, PR #3121
@@ -443,6 +459,7 @@ func New(drivers map[string]execution.ExecutionDriver, scratchDir string, openCo
 		startCmds:          map[string]session.Command{},
 		orphans:            map[string]orphanEntry{},
 		reserved:           map[string]bool{},
+		hydratedUnlaunched: map[string]bool{},
 		sweepingSlot:       map[string]bool{},
 		events:             make(chan session.StatusEvent, 32),
 		logs:               make(chan session.LogEvent, 256),
@@ -654,6 +671,14 @@ func (m *Manager) WithLogger(l *slog.Logger) *Manager {
 	return m
 }
 
+// WithQuiesced records whether the boot's container orphan sweep established
+// quiescence (cmd/worker buildInstanceManager), which the launch fsck requires
+// (issue #3201). Without it the manager assumes it did not.
+func (m *Manager) WithQuiesced(quiesced bool) *Manager {
+	m.quiesced = quiesced
+	return m
+}
+
 // WithTransfer wires the data-plane Transfer client used by HydrateTrigger /
 // SnapshotTrigger. Without it, those commands fail with a transfer error.
 func (m *Manager) WithTransfer(t Transfer) *Manager {
@@ -792,6 +817,15 @@ func (m *Manager) handleHydrate(ctx context.Context, cmd session.Command) sessio
 	transferCtx, cancel := m.transferContext(ctx)
 	defer cancel()
 	gen, err := m.transfer.Hydrate(transferCtx, cmd.TransferURL, cmd.TransferToken, workingDir)
+	// Tell the next launch whether the tree is now the store's copy (issue #3201): only
+	// a hydrate that succeeded replaced it, so a failed one exempts nothing.
+	m.mu.Lock()
+	if err == nil {
+		m.hydratedUnlaunched[cmd.ServerID] = true
+	} else {
+		delete(m.hydratedUnlaunched, cmd.ServerID)
+	}
+	m.mu.Unlock()
 	if err != nil {
 		return fail(cmd.CommandID, session.CommandErrorTransferFailed,
 			fmt.Sprintf("instancemanager: hydrate: %v", err))
@@ -2075,6 +2109,57 @@ func (m *Manager) launchReserved(ctx context.Context, cmd session.Command, drive
 				"skipped for a working set this Worker does not hold", workingDir))
 	}
 
+	// Refuse a launch whose held working set is TORN (issue #3201). The marker check
+	// above proves only that the set is held, not that it is sound, and nothing between
+	// two boots judges it: a stopped server whose final snapshot the pre-pack fsck
+	// refused keeps its torn scratch (issue #845), while the API's held inventory still
+	// carries the generation the Worker last declared on a publish (issue #2481), so the
+	// next start skips the hydrate and would boot the torn world — the outcome the boot
+	// scan's verdict exists to prevent (issues #834, #3178), reached without a boot. So
+	// the launch runs the same structural region fsck the boot scan does.
+	//
+	// It judges only a launch the hydrate did NOT precede — a start the API skipped it
+	// for, and a restart's relaunch — which are exactly the launches that can boot a tree
+	// nothing has just replaced. A tree a successful hydrate left is the store's copy, and
+	// judging it would be wrong, not merely wasted: it can be torn only when an operator
+	// force-restored a corrupt backup (restore_backup force=True) or when a 204 "nothing
+	// published" hydrate left the held tree as the only copy there is, and in both a
+	// refusal has no replay to recover through, so the server could never start again.
+	// The exemption is consumed here, whatever this launch's outcome, so it covers one
+	// launch and never a tree a process has run on since.
+	//
+	// A torn verdict is persisted as the boot scan persists it, by rewriting the marker to
+	// 0 (persistTornVerdict), so every later registration advertises the generation the
+	// refusal implies instead of the one it contradicts. The refusal itself is what
+	// recovers: SERVER_NOT_FOUND with the "working set torn" phrase, which the API keys
+	// on (_WORKING_SET_TORN_MARKER, lifecycle.py) to replay a start WITH the hydrate it
+	// skipped, as for the absent set above. Its own phrase rather than that one, because
+	// the API reports that one as a scratch destroyed out of band. A restart's refused
+	// relaunch leaves the server down for the reconciler's re-launch, which meets this
+	// guard again and takes the same replay. The message is declared as
+	// "working_set_torn.launch" in proto/contract/command_error_contract.json.
+	//
+	// It needs quiescence (regionfsck's contract, issue #3171). The reservation is held,
+	// and reserve() has already refused a tracked instance or a failed-stop orphan, so no
+	// container this process started can be writing the world. One started by an earlier
+	// process can, when the boot orphan sweep failed: nothing re-adopts it, and a torn
+	// read of its live world would send the replay hydrate over it, where an unjudged
+	// launch only fails at driver.Start, which declines a running container holding the
+	// name. So nothing is judged unless the sweep established quiescence (m.quiesced).
+	//
+	// Cost: one region-header walk per judged launch (~150 ms warm, ~1.3 s cold on a
+	// 300-region world).
+	m.mu.Lock()
+	hydrated := m.hydratedUnlaunched[cmd.ServerID]
+	delete(m.hydratedUnlaunched, cmd.ServerID)
+	m.mu.Unlock()
+	if !hydrated && m.tornAtLaunch(cmd.ServerID, workingDir) {
+		m.release(cmd.ServerID)
+		return fail(cmd.CommandID, session.CommandErrorServerNotFound,
+			fmt.Sprintf("instancemanager: start refused: working set torn (%s): the hydrate was "+
+				"skipped for a held working set with a structurally corrupt region", workingDir))
+	}
+
 	inst, err := driver.Start(ctx, execution.InstanceSpec{
 		ServerID:         cmd.ServerID,
 		WorkingDir:       workingDir,
@@ -2107,6 +2192,44 @@ func (m *Manager) launchReserved(ctx context.Context, cmd session.Command, drive
 	m.startPumps(cmd.ServerID, inst)
 
 	return session.CommandResult{CommandID: cmd.CommandID, Success: true}
+}
+
+// tornAtLaunch reports whether launchReserved must refuse workingDir as torn (issue
+// #3201), persisting the verdict in the marker when it is. Without quiescence it judges
+// nothing, and a fsck I/O error is best-effort (logged, the launch proceeds), as at the
+// boot scan: neither may wedge a start.
+func (m *Manager) tornAtLaunch(serverID, workingDir string) bool {
+	if !m.quiesced {
+		m.logger.Warn("skipping the launch region fsck: the container orphan sweep did not "+
+			"establish that no container is still writing, so a torn-looking region here may be "+
+			"a running orphan's live world read mid-write (issues #3171, #3201)",
+			"server_id", serverID)
+		return false
+	}
+	report, err := regionfsck.CheckWorkingSet(workingDir)
+	if err != nil {
+		m.logger.Warn("launch region fsck failed; launching without it",
+			"server_id", serverID, "error", err)
+		return false
+	}
+	if report.Healthy() {
+		return false
+	}
+	gen := readGeneration(workingDir)
+	first := report.Corrupt[0]
+	attrs := []any{"server_id", serverID, "recorded_generation", gen,
+		"corrupt", len(report.Corrupt), "scanned", report.Scanned,
+		"example", filepath.Base(first.Path), "reason", first.Reason.String()}
+	if err := persistTornVerdict(workingDir, gen); err != nil {
+		m.logger.Warn("launch refused: held working set has a corrupt region, but its generation "+
+			"marker could not be rewritten to 0; registrations advertise the recorded generation "+
+			"until a hydrate rewrites the marker", append(attrs, "error", err)...)
+	} else {
+		m.logger.Warn("launch refused: held working set has a corrupt region; its generation marker "+
+			"now reads 0 and the set needs a hydrate before it can launch (recorded_generation is "+
+			"the only surviving record of the original, see STORAGE.md Section 4.6)", attrs...)
+	}
+	return true
 }
 
 // startPumps launches the per-instance fan-in goroutines for an instance:
