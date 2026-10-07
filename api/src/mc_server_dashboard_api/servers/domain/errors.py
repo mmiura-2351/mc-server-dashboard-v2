@@ -96,6 +96,10 @@ class WorkingSetSeedFailedError(ServerError):
     repairable state, since the operator can write the missing files via the files
     API -- and the failure is surfaced as a mapped 503 ``seed_failed`` rather than
     an unmapped 500. The edge logs a WARN at the create route.
+
+    A start raises it too, when it cannot regenerate a player file a group change
+    left stale (issue #3223). Nothing has committed there: the start is refused
+    before its desired-state flip, and retrying it makes the write again.
     """
 
 
@@ -609,6 +613,19 @@ class InvalidPluginSideError(ServerError):
     """
 
 
+class PluginReconcileIncompleteError(ServerError):
+    """A restore published, but its plugin rows could not be reconciled (#3221).
+
+    The restored plugin content directory could not be listed — a store outage, a
+    permission or I/O error, anything other than the typed "no such directory" —
+    so there is no evidence of which jars the restored working set holds. The rows
+    are left exactly as they were rather than deleted as orphans on the strength
+    of a read that never happened; they may now describe the pre-restore working
+    set. The edge maps this to 503 ``plugin_reconcile_incomplete``: the
+    reconciliation is idempotent, so re-running the restore completes it.
+    """
+
+
 class PluginCacheBlobNotFoundError(ServerError):
     """A cached jar blob is absent from the content-addressed cache (issue #2338).
 
@@ -715,6 +732,12 @@ class ResourcePackStorageUnavailableError(ServerError):
     edge answer 503 ``storage_unavailable`` — a transient condition worth retrying
     unchanged, and distinct from :class:`ResourcePackNotFoundError`, which says the
     pack is gone and asking again is pointless.
+
+    The store's writes raise it too (issue #2458). An upload that hits it inserted
+    no row -- at most it left a blob no row names (issue #3277) -- and a retry
+    uploads under a fresh id, so the upload route answers the same 503. A blob
+    delete that hits it is logged by the delete use case instead of answered: the
+    row is already gone by then, so there is nothing left for a retry to do.
     """
 
 

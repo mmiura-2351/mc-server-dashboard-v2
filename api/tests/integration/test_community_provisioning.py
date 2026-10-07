@@ -42,6 +42,7 @@ from mc_server_dashboard_api.community.application.provision_community import (
 )
 from mc_server_dashboard_api.community.domain.entities import Community
 from mc_server_dashboard_api.community.domain.errors import (
+    CommunityHasServersError,
     CommunityNotFoundError,
     OwnerUserNotFoundError,
 )
@@ -166,6 +167,87 @@ async def test_delete_community_cascades_to_dependents(engine: AsyncEngine) -> N
             )
         ).scalar_one()
     assert count == 1
+
+
+# --- a community that still holds a server (issue #3218) ----------------------
+
+
+async def _insert_server(
+    engine: AsyncEngine, community_id: CommunityId, *, running: bool
+) -> uuid.UUID:
+    server_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO server "
+                "(id, community_id, name, mc_edition, mc_version, server_type, "
+                "config, slug, desired_state, observed_state, assigned_worker_id, "
+                "created_at, updated_at) VALUES "
+                "(:id, :cid, 'survival', 'java', '1.21', 'vanilla', "
+                "'{}'::jsonb, 'survival', :state, :state, :worker, now(), now())"
+            ),
+            {
+                "id": server_id,
+                "cid": community_id.value,
+                "state": "running" if running else "stopped",
+                "worker": uuid.uuid4() if running else None,
+            },
+        )
+    return server_id
+
+
+@pytest.mark.parametrize("running", [True, False], ids=["running", "at-rest"])
+async def test_delete_community_holding_a_server_is_refused(
+    engine: AsyncEngine, running: bool
+) -> None:
+    # A community delete has no way to stop a server or apply DeleteServer's
+    # storage retention, so it must not remove a server row -- whatever state
+    # the server is in. Refused whole: the dependents it would otherwise have
+    # cascaded to (the owner's membership, the Owner role) are still there.
+    owner_id = uuid.uuid4()
+    await _insert_user(engine, owner_id, "alice")
+    community = await _provision(engine)(name="guild", owner_user_id=UserId(owner_id))
+    server_id = await _insert_server(engine, community.id, running=running)
+
+    factory = create_session_factory(engine)
+    with pytest.raises(CommunityHasServersError):
+        await DeleteCommunity(uow=SqlAlchemyUnitOfWork(factory))(
+            community_id=community.id
+        )
+
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        assert await uow.communities.get_by_id(community.id) is not None
+        assert (
+            await uow.memberships.get_by_user_and_community(
+                UserId(owner_id), community.id
+            )
+            is not None
+        )
+        assert len(await uow.roles.list_for_community(community.id)) == 1
+    async with engine.connect() as conn:
+        servers = (
+            await conn.execute(
+                text("SELECT count(*) FROM server WHERE id = :id"), {"id": server_id}
+            )
+        ).scalar_one()
+    assert servers == 1
+
+
+async def test_delete_community_succeeds_once_its_servers_are_gone(
+    engine: AsyncEngine,
+) -> None:
+    owner_id = uuid.uuid4()
+    await _insert_user(engine, owner_id, "alice")
+    community = await _provision(engine)(name="guild", owner_user_id=UserId(owner_id))
+    server_id = await _insert_server(engine, community.id, running=False)
+    async with engine.begin() as conn:
+        await conn.execute(text("DELETE FROM server WHERE id = :id"), {"id": server_id})
+
+    factory = create_session_factory(engine)
+    await DeleteCommunity(uow=SqlAlchemyUnitOfWork(factory))(community_id=community.id)
+
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        assert await uow.communities.get_by_id(community.id) is None
 
 
 # --- a write on a community a racer deleted (issue #2613) ---------------------

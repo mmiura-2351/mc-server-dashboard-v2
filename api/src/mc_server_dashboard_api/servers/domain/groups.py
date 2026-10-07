@@ -144,6 +144,25 @@ class PlayerGroup:
         return False
 
 
+@dataclass(frozen=True)
+class PendingGroupSync:
+    """A server's ``kind`` file is owed a regeneration from its attached groups.
+
+    Recorded in the transaction of every group change that affects the server's
+    file (issue #3223) and applied by the server's next start, because a change
+    made while the server runs cannot be written to the authoritative copy: the
+    Worker's live working set, and the final snapshot taken from it at stop,
+    would overwrite it.
+
+    ``token`` changes every time the mark is recorded again, so whoever applied
+    the mark clears exactly the one it read: a change committed after that read
+    keeps its own mark for the start after this one.
+    """
+
+    kind: GroupKind
+    token: uuid.UUID
+
+
 def merge_players(groups: list[PlayerGroup]) -> list[Player]:
     """Union-merge the players of ``groups``, deterministically ordered by uuid.
 

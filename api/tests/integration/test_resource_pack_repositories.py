@@ -60,6 +60,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ResourcePackInUseError,
     ResourcePackNotFoundError,
     ServerNotFoundError,
+    WorkingSetSeedFailedError,
 )
 from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.resource_pack import (
@@ -367,7 +368,7 @@ async def test_assign_whose_properties_write_fails_leaves_no_assignment(
         file_store=file_store,
         clock=FakeClock(_NOW),
     )
-    with pytest.raises(RuntimeError):
+    with pytest.raises(WorkingSetSeedFailedError):
         await use_case(
             community_id=server.community_id,
             server_id=server.id,

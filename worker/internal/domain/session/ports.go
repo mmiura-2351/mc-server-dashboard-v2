@@ -299,10 +299,13 @@ func (r FileAccessReason) String() string {
 // StatusEvent is an observed server-state transition the session emits as a
 // StatusChange event (CONTROL_PLANE.md Section 6). State is the wire state name
 // (e.g. "running"); the adapter maps it to the generated ServerState enum.
+// CrashReason is likewise the wire crash-reason name (e.g.
+// "forge_install_failed"), empty for an unclassified transition.
 type StatusEvent struct {
-	ServerID string
-	State    string
-	Detail   string
+	ServerID    string
+	State       string
+	Detail      string
+	CrashReason string
 }
 
 // LogStream identifies which output stream a LogEvent came from; the adapter

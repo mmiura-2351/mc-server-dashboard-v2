@@ -321,6 +321,23 @@ export const ja: Record<TranslationKey, string> = {
   "serverDetail.crashBanner.guidance":
     "サーバーがクラッシュしました。再起動をクリックして再試行するか、コンソールで詳細を確認してください。",
   "serverDetail.crashBanner.viewConsole": "コンソールを表示",
+  "serverDetail.crashReason.forgeInstallOutOfMemory":
+    "Forge インストーラーがメモリ不足で終了しました。サーバーを停止し、設定でメモリ上限を引き上げてから、もう一度起動してください。",
+  "serverDetail.crashReason.forgeInstallJavaIncompatible":
+    "このサーバーの Minecraft バージョンに対して選択される Java では Forge インストーラーを実行できません（この Forge ビルドが必要とするバージョンより古い Java です）。再起動しても解決しません。プラットフォーム管理者に、この Minecraft バージョン用の Java イメージ設定の確認を依頼するか、別の Minecraft / Forge バージョンでサーバーを作り直してください。",
+  "serverDetail.installLog.view": "インストールログを表示",
+  "serverDetail.installLog.hide": "インストールログを隠す",
+  "serverDetail.installLog.label": "Forge インストールログ",
+  "serverDetail.installLog.loading": "インストールログを読み込み中…",
+  "serverDetail.installLog.truncated":
+    "末尾の {count} 行を表示しています。ログ全体は「ファイル」タブの logs/forge-install.log で確認できます。",
+  "serverDetail.installLog.missing":
+    "インストールログ（logs/forge-install.log）が見つかりません。",
+  "serverDetail.installLog.unsettled":
+    "インストールログはサーバーを停止すると読めるようになります。サーバーを停止してから、もう一度開いてください。",
+  "serverDetail.installLog.tooLarge":
+    "インストールログが大きすぎるため、ここには表示できません。「ファイル」タブから logs/forge-install.log をダウンロードしてください。",
+  "serverDetail.installLog.error": "インストールログを読み込めませんでした。",
   "serverDetail.converging": "反映中…",
   "serverDetail.noWorker": "ホスト未割り当て",
   "serverDetail.worker": "ホスト",
@@ -1329,17 +1346,19 @@ export const ja: Record<TranslationKey, string> = {
   "communitySettings.general.dangerHeading": "危険な操作",
   "communitySettings.general.deleteTitle": "コミュニティを削除",
   "communitySettings.general.deleteDesc":
-    "このコミュニティのすべてのサーバー、バックアップ、ロール、メンバーシップを削除します。",
+    "このコミュニティと、そのロール、メンバーシップ、プレイヤーグループを削除します。サーバーは先に削除しておく必要があります。",
   "communitySettings.general.deleteButton": "削除…",
   "communitySettings.general.deleteDialogTitle": "コミュニティを削除",
   "communitySettings.general.deleteDialogBody":
-    "コミュニティとその中のすべてを完全に削除します。この操作は元に戻せません。",
+    "コミュニティと、そのロール、メンバーシップ、プレイヤーグループを完全に削除します。この操作は元に戻せません。サーバーが残っているコミュニティは削除されません。",
   "communitySettings.general.deleteConfirm": "コミュニティを削除",
   "communitySettings.general.deletePrompt":
     "削除を有効にするにはコミュニティ名を入力",
   "communitySettings.general.deleted": "コミュニティを削除しました。",
   "communitySettings.general.deleteError":
     "コミュニティを削除できませんでした。もう一度お試しください。",
+  "communitySettings.general.deleteHasServers":
+    "このコミュニティにはサーバーが残っています。先にこのコミュニティのサーバーを削除してください。",
 
   // Community settings — Groups tab (WEBUI_SPEC.md 6.10, issue #464)
   "communitySettings.groups.heading": "プレイヤーグループ",
@@ -1471,12 +1490,14 @@ export const ja: Record<TranslationKey, string> = {
   "admin.communities.delete": "削除",
   "admin.communities.deleteTitle": "コミュニティを削除",
   "admin.communities.deleteBody":
-    "コミュニティとその中のすべて（メンバー、ロール、サーバー）を完全に削除します。この操作は元に戻せません。",
+    "コミュニティと、そのメンバー、ロール、プレイヤーグループを完全に削除します。この操作は元に戻せません。サーバーが残っているコミュニティは削除されません。",
   "admin.communities.deletePrompt":
     "確認のためコミュニティ名を入力してください:",
   "admin.communities.deleteConfirm": "コミュニティを削除",
   "admin.communities.deleted": "コミュニティを削除しました。",
   "admin.communities.deleteError": "コミュニティを削除できませんでした。",
+  "admin.communities.deleteHasServers":
+    "このコミュニティにはサーバーが残っています。先にサーバーを削除する必要があります。",
   "admin.communities.prev": "前へ",
   "admin.communities.next": "次へ",
   "admin.communities.range": "{total} 件中 {from}–{to}",
@@ -1797,6 +1818,8 @@ export const ja: Record<TranslationKey, string> = {
     "このリソースパックは1つ以上のサーバーに割り当てられているため、削除できません。",
   "resourcePacks.error.downloadFailed":
     "リソースパックをダウンロードできませんでした。",
+  "resourcePacks.error.storageUnavailable":
+    "現在、リソースパックのストレージを利用できません。しばらくしてから再度お試しください。",
 
   // Server resource pack assignment (issue #1179).
   "serverDetail.resourcePack.heading": "リソースパック",

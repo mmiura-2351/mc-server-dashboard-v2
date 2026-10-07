@@ -254,8 +254,9 @@ func (t *transport) SendStatusChange(_ context.Context, event session.StatusEven
 				ServerId: event.ServerID,
 				Event: &controlplanev1.Event_StatusChange{
 					StatusChange: &controlplanev1.StatusChange{
-						State:  mapServerState(event.State),
-						Detail: event.Detail,
+						State:       mapServerState(event.State),
+						Detail:      event.Detail,
+						CrashReason: mapCrashReason(event.CrashReason),
 					},
 				},
 			},
@@ -499,6 +500,22 @@ func mapServerState(state string) controlplanev1.ServerState {
 		return controlplanev1.ServerState_SERVER_STATE_UNKNOWN
 	default:
 		return controlplanev1.ServerState_SERVER_STATE_UNSPECIFIED
+	}
+}
+
+// mapCrashReason translates a domain crash-reason name to the wire CrashReason
+// enum (CONTROL_PLANE.md Section 6). The empty name — an unclassified transition
+// — and any unrecognized one are UNSPECIFIED.
+func mapCrashReason(reason string) controlplanev1.CrashReason {
+	switch reason {
+	case "forge_install_failed":
+		return controlplanev1.CrashReason_CRASH_REASON_FORGE_INSTALL_FAILED
+	case "forge_install_out_of_memory":
+		return controlplanev1.CrashReason_CRASH_REASON_FORGE_INSTALL_OUT_OF_MEMORY
+	case "forge_install_java_incompatible":
+		return controlplanev1.CrashReason_CRASH_REASON_FORGE_INSTALL_JAVA_INCOMPATIBLE
+	default:
+		return controlplanev1.CrashReason_CRASH_REASON_UNSPECIFIED
 	}
 }
 

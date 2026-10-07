@@ -1,14 +1,23 @@
 """Unit tests for the per-run scratch-database helpers (issue #379).
 
-These do not touch a real database; they pin the pure URL-derivation logic that
-makes the integration fixture concurrency-safe. The create/drop round-trip
+The URL-derivation tests do not touch a real database; they pin the pure logic
+that makes the integration fixture concurrency-safe. The create/drop round-trip
 against a live Postgres is exercised implicitly by every DB-gated integration
-test under this package.
+test under this package; the one property of the created database pinned here is
+that its sessions do not wait for the WAL flush on commit (issue #3257).
 """
 
 from __future__ import annotations
 
+import os
+
+import pytest
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine
+
 from tests.integration.scratch_db import derive_scratch_url
+
+_DB_URL = os.environ.get("MCD_TEST_DATABASE_URL")
 
 
 def test_derive_scratch_url_suffixes_the_database_name() -> None:
@@ -27,3 +36,28 @@ def test_derive_scratch_url_preserves_driver_and_credentials() -> None:
 def test_derive_scratch_url_distinct_tokens_yield_distinct_names() -> None:
     base = "postgresql+asyncpg://mcsd:mcsd@localhost/mcsd_test"
     assert derive_scratch_url(base, "aaa") != derive_scratch_url(base, "bbb")
+
+
+@pytest.mark.skipif(
+    _DB_URL is None, reason="MCD_TEST_DATABASE_URL not set (no real database)"
+)
+async def test_scratch_database_carries_its_own_synchronous_commit_off() -> None:
+    # Read the database's own setting, not the session's effective one: ``SHOW``
+    # also reports ``off`` when the cluster default is off, as it is in CI and
+    # with the README recipe, and would pass without the database-level setting.
+    assert _DB_URL is not None
+    engine = create_async_engine(_DB_URL)
+    try:
+        async with engine.connect() as conn:
+            settings = (
+                await conn.execute(
+                    text(
+                        "SELECT s.setconfig FROM pg_db_role_setting s"
+                        " JOIN pg_database d ON d.oid = s.setdatabase"
+                        " WHERE d.datname = current_database() AND s.setrole = 0"
+                    )
+                )
+            ).scalar()
+    finally:
+        await engine.dispose()
+    assert settings == ["synchronous_commit=off"]

@@ -34,6 +34,7 @@ from mc_server_dashboard_api.community.adapters.unit_of_work import (
 from mc_server_dashboard_api.community.domain.entities import Community
 from mc_server_dashboard_api.community.domain.errors import (
     CommunityAlreadyExistsError,
+    CommunityHasServersError,
     MembershipAlreadyExistsError,
     RoleAlreadyExistsError,
 )
@@ -164,3 +165,20 @@ async def test_community_update_reraises_unknown_violation_untranslated() -> Non
     repo = SqlAlchemyCommunityRepository(session)  # type: ignore[arg-type]
     with pytest.raises(IntegrityError):
         await repo.update(_community())
+
+
+# --- the community DELETE, refused at its own execute (issue #3218) ----------
+
+
+async def test_community_delete_translates_the_server_foreign_key() -> None:
+    session = _FakeExecuteSession(_integrity_error("fk_server_community_id_community"))
+    repo = SqlAlchemyCommunityRepository(session)  # type: ignore[arg-type]
+    with pytest.raises(CommunityHasServersError):
+        await repo.delete(CommunityId.new())
+
+
+async def test_community_delete_reraises_unknown_violation_untranslated() -> None:
+    session = _FakeExecuteSession(_integrity_error("fk_some_other_constraint"))
+    repo = SqlAlchemyCommunityRepository(session)  # type: ignore[arg-type]
+    with pytest.raises(IntegrityError):
+        await repo.delete(CommunityId.new())

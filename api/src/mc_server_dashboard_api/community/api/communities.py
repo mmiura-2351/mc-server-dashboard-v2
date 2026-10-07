@@ -15,7 +15,9 @@ not here:
 - ``DELETE /communities/{community_id}`` is the one exception: it passes
   ``allow_platform_admin=True``, so a platform admin can delete *any* community
   (member or not) to clean up an orphan, while a non-admin still goes through the
-  two-layer check (issue #489; WEBUI_SPEC.md Section 3).
+  two-layer check (issue #489; WEBUI_SPEC.md Section 3). Whoever asks, a
+  community that still holds a server is not deleted: 409
+  ``community_has_servers``, the servers are deleted first (issue #3218).
 - ``GET /communities`` lists only the requesting user's communities (FR-MEM-4);
   the platform-admin all-communities listing is ``GET /admin/communities``
   (``admin_communities.py``).
@@ -48,6 +50,7 @@ from mc_server_dashboard_api.community.application.provision_community import (
 from mc_server_dashboard_api.community.domain.entities import Community
 from mc_server_dashboard_api.community.domain.errors import (
     CommunityAlreadyExistsError,
+    CommunityHasServersError,
     CommunityNotFoundError,
     InvalidCommunityNameError,
     OwnerUserNotFoundError,
@@ -210,6 +213,8 @@ async def delete_community(
         await use_case(community_id=CommunityId(community_id))
     except CommunityNotFoundError as exc:
         raise _not_found() from exc
+    except CommunityHasServersError as exc:
+        raise problem(status.HTTP_409_CONFLICT, "community_has_servers") from exc
     await recorder.record(
         AuditEvent(
             operation=ops.COMMUNITY_DELETE,

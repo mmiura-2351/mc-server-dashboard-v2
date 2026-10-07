@@ -75,6 +75,16 @@ class CommunityNotFoundError(CommunityError):
     """The targeted community does not exist (read/update/delete on a missing id)."""
 
 
+class CommunityHasServersError(CommunityError):
+    """The community cannot be deleted while it still holds a server.
+
+    A community deletion only removes database rows: it cannot stop a server or
+    apply the storage retention a server deletion performs. Its servers are
+    therefore deleted first, one by one, through the server deletion (issue
+    #3218).
+    """
+
+
 class MembershipNotFoundError(CommunityError):
     """The targeted user is not a member of the community.
 
