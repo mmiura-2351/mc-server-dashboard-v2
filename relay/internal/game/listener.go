@@ -100,9 +100,19 @@ func NewListener(addr string, resolver Resolver, tokens *tunnel.TokenTable, cach
 func (l *Listener) Addr() net.Addr { return l.ln.Addr() }
 
 // Drain blocks until all in-flight handle goroutines finish or the timeout
-// elapses. Call after Serve returns to let active splices complete before
-// shutting down downstream services (e.g. the session reporter). It returns
-// true if all goroutines drained within the deadline, false on timeout.
+// elapses. Call after Serve returns, before shutting down downstream services
+// (e.g. the session reporter), so every handler's session End is recorded
+// first. It returns true if all goroutines drained within the deadline, false
+// on timeout.
+//
+// Drain waits; it does not end anything itself. What makes the wait
+// satisfiable is that Serve cancels its handlers' context as it returns: an
+// established splice is closed at that moment (splice.Splice) and its handler
+// returns through its normal path, recording the session End, while a handler
+// that has not spliced yet gives up its ctx-bound waits (ResolveJoin, the
+// dial-back) and is left to finish its bounded I/O — the pre-route read and
+// the Login Disconnect write. The timeout bounds that teardown; it is not a
+// window in which an established session is kept alive (issue #3169).
 func (l *Listener) Drain(timeout time.Duration) bool {
 	done := make(chan struct{})
 	go func() {
@@ -118,8 +128,11 @@ func (l *Listener) Drain(timeout time.Duration) bool {
 }
 
 // Serve accepts player connections until ctx is cancelled or the listener
-// closes.
+// closes. However it returns, its handlers' context is cancelled with it, which
+// ends every established session (see Drain).
 func (l *Listener) Serve(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	go func() {
 		<-ctx.Done()
 		_ = l.ln.Close()
@@ -421,7 +434,7 @@ func (l *Listener) spliceLogin(ctx context.Context, conn net.Conn, r *bufio.Read
 	l.metrics.GameActiveSessionBegin()
 	defer l.metrics.GameActiveSessionEnd()
 
-	splice.Splice(conn, tconn)
+	splice.Splice(ctx, conn, tconn)
 }
 
 // awaitTunnel registers a waiter for token and blocks until the Worker dials
