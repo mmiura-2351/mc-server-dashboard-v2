@@ -254,8 +254,9 @@ func (c *EngineClient) Inspect(ctx context.Context, name string) (ContainerInfo,
 	var resp struct {
 		ID    string `json:"Id"`
 		State struct {
-			Running   bool `json:"Running"`
-			OOMKilled bool `json:"OOMKilled"`
+			Running   bool  `json:"Running"`
+			OOMKilled bool  `json:"OOMKilled"`
+			ExitCode  int64 `json:"ExitCode"`
 		} `json:"State"`
 		Config struct {
 			Labels map[string]string `json:"Labels"`
@@ -272,7 +273,7 @@ func (c *EngineClient) Inspect(ctx context.Context, name string) (ContainerInfo,
 	}
 	return ContainerInfo{
 		ID: resp.ID, Labels: resp.Config.Labels,
-		Running: resp.State.Running, OOMKilled: resp.State.OOMKilled,
+		Running: resp.State.Running, OOMKilled: resp.State.OOMKilled, ExitCode: resp.State.ExitCode,
 	}, nil
 }
 

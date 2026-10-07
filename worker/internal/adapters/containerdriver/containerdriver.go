@@ -1026,6 +1026,14 @@ func (i *instance) superviseInstall(installID string) {
 
 		// Re-attach on transport errors the same way supervise does: a daemon
 		// blip does not mean the install container died (issue #881).
+		//
+		// recovered is the exited container's own record when the Wait result was
+		// lost to such a blip: Wait then returned no exit status at all, so the one
+		// the daemon kept on the container stands in for it and the attempt is
+		// judged like any other (issue #1093). A container already gone has no
+		// record; its exit status stays unknown, the stale transport error is
+		// dropped, and the re-plan's artifact check decides (issue #895).
+		var recovered *ContainerInfo
 		for {
 			exitCode, waitErr = i.docker.Wait(context.Background(), installID)
 			if waitErr == nil {
@@ -1034,8 +1042,11 @@ func (i *instance) superviseInstall(installID string) {
 			if !isTransportError(waitErr) {
 				break
 			}
-			if i.exitedAfterTransportError(installID) {
-				waitErr = nil // container exited; fall through to re-plan (issue #895)
+			if exited, info, found := i.exitAfterTransportError(installID); exited {
+				exitCode, waitErr = 0, nil
+				if found {
+					exitCode, recovered = info.ExitCode, &info
+				}
 				break
 			}
 			time.Sleep(waitTransportProbeInterval)
@@ -1068,8 +1079,15 @@ func (i *instance) superviseInstall(installID string) {
 		// Install failed. A failure the Worker can explain is deterministic — the
 		// same memory limit or Java runtime fails the next attempt the same way —
 		// so it is reported at once instead of being retried (issue #1093). The
-		// container is inspected before it is removed.
-		reason, detail, explained := i.explainInstallFailure(installID, scan)
+		// container is inspected before it is removed, unless the recovery above
+		// already did.
+		oomKilled := false
+		if recovered != nil {
+			oomKilled = recovered.OOMKilled
+		} else {
+			oomKilled = i.oomKilled(installID)
+		}
+		reason, detail, explained := i.explainInstallFailure(scan, oomKilled)
 		_ = i.docker.Remove(context.Background(), installID)
 		if explained {
 			i.finishInstallCrash(reason, detail)
@@ -1383,15 +1401,15 @@ func (s *installOutputScan) Write(p []byte) (int, error) {
 }
 
 // explainInstallFailure reports the specific reason a FAILED install attempt
-// failed, when the Worker can tell (issue #1093). It must run before the install
-// container is removed: the kernel's OOM kill is recorded only on the container.
-// Out of memory is either that record (the installer never gets to print
-// anything; exit 137 alone is not enough, since any SIGKILL exits 137) or the
-// JVM's own heap error in the output. ok is false for every other failure, which
+// failed, when the Worker can tell (issue #1093). oomKilled is the daemon's
+// record of a kernel OOM kill, read off the install container before it is
+// removed. Out of memory is either that record (the installer never gets to
+// print anything; exit 137 alone is not enough, since any SIGKILL exits 137) or
+// the JVM's own heap error in the output. ok is false for every other failure, which
 // stays a generic, retryable one — a missed explanation costs a vaguer message,
 // a wrong one sends the operator after the wrong fix.
-func (i *instance) explainInstallFailure(installID string, scan *installOutputScan) (reason execution.CrashReason, detail string, ok bool) {
-	if scan.outOfMemory || i.oomKilled(installID) {
+func (i *instance) explainInstallFailure(scan *installOutputScan, oomKilled bool) (reason execution.CrashReason, detail string, ok bool) {
+	if scan.outOfMemory || oomKilled {
 		detail = "forge install ran out of memory: no memory limit is set for this server, " +
 			"so the host or the JVM's default heap was exhausted"
 		if i.spec.MemoryLimitMB > 0 {
@@ -1947,19 +1965,26 @@ func isTransportError(err error) bool {
 
 // inspectAlive classifies ONE Inspect of container id into the driver's liveness
 // decision table, shared by the single-shot ProbeAlive and the bounded re-inspect
-// loop (exitedAfterTransportError) so the two cannot drift. errNotFound (a 404)
+// loop (exitAfterTransportError) so the two cannot drift. errNotFound (a 404)
 // is not an error: a container the daemon does not know is definitively not
 // alive. Any other Inspect error means the daemon is unreachable and the answer
 // is genuinely unavailable — never a guessed false.
 func (i *instance) inspectAlive(ctx context.Context, id string) (bool, error) {
-	info, err := i.docker.Inspect(ctx, id)
+	info, _, err := i.inspectState(ctx, id)
+	return info.Running, err
+}
+
+// inspectState is the Inspect behind inspectAlive, keeping what the daemon said:
+// found is false, with a zero info, for a container it does not know (a 404).
+func (i *instance) inspectState(ctx context.Context, id string) (info ContainerInfo, found bool, err error) {
+	info, err = i.docker.Inspect(ctx, id)
 	switch {
 	case errors.Is(err, errNotFound):
-		return false, nil
+		return ContainerInfo{}, false, nil
 	case err != nil:
-		return false, err
+		return ContainerInfo{}, false, err
 	default:
-		return info.Running, nil
+		return info, true, nil
 	}
 }
 
@@ -1974,18 +1999,26 @@ func (i *instance) inspectAlive(ctx context.Context, id string) (bool, error) {
 // derived from the probe deadline so a wedged-but-connected daemon cannot hold a
 // single Inspect call past the bound (issue #881).
 func (i *instance) exitedAfterTransportError(id string) bool {
+	exited, _, _ := i.exitAfterTransportError(id)
+	return exited
+}
+
+// exitAfterTransportError is exitedAfterTransportError keeping the inspection
+// that confirmed the exit: found is true, with the exited container's info, when
+// the container still exists, and false when it is already gone (issue #1093).
+func (i *instance) exitAfterTransportError(id string) (exited bool, info ContainerInfo, found bool) {
 	deadline := time.Now().Add(waitTransportProbeDeadline)
 	for {
 		ctx, cancel := context.WithDeadline(context.Background(), deadline)
-		alive, err := i.inspectAlive(ctx, id)
+		info, found, err := i.inspectState(ctx, id)
 		cancel()
 		if err == nil {
-			return !alive
+			return !info.Running, info, found
 		}
 		// Daemon still unreachable: retry until the deadline, then re-attach a
 		// waiter rather than guess a terminal.
 		if time.Now().After(deadline) {
-			return false
+			return false, ContainerInfo{}, false
 		}
 		time.Sleep(waitTransportProbeInterval)
 	}

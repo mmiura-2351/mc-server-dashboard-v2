@@ -565,8 +565,9 @@ func TestEngineClientInspectDecodesLabelsAndState(t *testing.T) {
 	}
 }
 
-// Inspect decodes the daemon's OOMKilled flag, which the install supervisor reads
-// to tell a memory-limit kill from any other failure (issue #1093).
+// Inspect decodes the daemon's OOMKilled flag and exit code, which the install
+// supervisor reads to tell a memory-limit kill from any other failure and to
+// recover the exit status of an install whose Wait result was lost (issue #1093).
 func TestEngineClientInspectDecodesOOMKilled(t *testing.T) {
 	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"Id": "abc123", "State": {"Running": false, "OOMKilled": true, "ExitCode": 137}}`))
@@ -577,8 +578,8 @@ func TestEngineClientInspectDecodesOOMKilled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Inspect: %v", err)
 	}
-	if !info.OOMKilled {
-		t.Fatalf("info = %+v, want OOMKilled", info)
+	if !info.OOMKilled || info.ExitCode != 137 {
+		t.Fatalf("info = %+v, want OOMKilled with exit code 137", info)
 	}
 }
 
