@@ -31,9 +31,11 @@
 package containerdriver
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -990,14 +992,16 @@ func (i *instance) awaitReady() {
 	if i.beforeReadyPublish != nil {
 		i.beforeReadyPublish()
 	}
-	i.emitLocked(execution.StateRunning, "")
+	i.emitLocked(execution.StateRunning, "", execution.CrashReasonUnspecified)
 }
 
 // superviseInstall waits for the supervised install container to exit, captures
 // its output to logs/forge-install.log, then creates+starts the launch container
 // as the SAME instance (issue #305). On a non-zero install exit the instance goes
 // crashed and no launch container is created; a Stop that terminated the install
-// container reports stopped. The install container is removed once its fate is
+// container reports stopped. Every crash of the install itself carries a
+// CrashReason, so a client can tell it from a runtime crash and point at the
+// install log (issue #1093). The install container is removed once its fate is
 // decided (in every terminal branch, and after the launch is published): keeping
 // it as the current container until then gives a concurrent Stop a valid target
 // through the install-exit→launch handoff window (issue #306). Its distinct name
@@ -1013,14 +1017,17 @@ func (i *instance) superviseInstall(installID string) {
 	// Retry loop: on a non-zero install exit, clean artifacts and re-run the
 	// install container up to maxInstallRetries additional times before giving
 	// up (issue #1128). Transport-error re-attach is per-attempt (issue #881).
-	var waitErr error
+	var (
+		exitCode int64
+		waitErr  error
+	)
 	for attempt := 0; ; attempt++ {
-		i.captureInstallOutput(installID)
+		scan := i.captureInstallOutput(installID)
 
 		// Re-attach on transport errors the same way supervise does: a daemon
 		// blip does not mean the install container died (issue #881).
 		for {
-			_, waitErr = i.docker.Wait(context.Background(), installID)
+			exitCode, waitErr = i.docker.Wait(context.Background(), installID)
 			if waitErr == nil {
 				break
 			}
@@ -1051,15 +1058,32 @@ func (i *instance) superviseInstall(installID string) {
 			return
 		}
 
-		if waitErr == nil {
+		// A Wait that returned cleanly reports the installer's own exit code, and
+		// only exit 0 is a successful install: the daemon answers a non-zero exit
+		// with a nil error too (issue #1093).
+		if waitErr == nil && exitCode == 0 {
 			break // install succeeded, proceed to re-plan
 		}
 
-		// Install failed. Can we retry?
+		// Install failed. A failure the Worker can explain is deterministic — the
+		// same memory limit or Java runtime fails the next attempt the same way —
+		// so it is reported at once instead of being retried (issue #1093). The
+		// container is inspected before it is removed.
+		reason, detail, explained := i.explainInstallFailure(installID, scan)
 		_ = i.docker.Remove(context.Background(), installID)
+		if explained {
+			i.finishInstallCrash(reason, detail)
+			return
+		}
+
+		// Anything else may be transient. Can we retry?
 		if attempt >= maxInstallRetries {
-			i.finishTerminal(execution.StateCrashed,
-				fmt.Sprintf("forge install failed after %d attempts: %s", attempt+1, waitErr))
+			failure := fmt.Sprintf("installer exited with code %d", exitCode)
+			if waitErr != nil {
+				failure = waitErr.Error()
+			}
+			i.finishInstallCrash(execution.CrashReasonForgeInstallFailed,
+				fmt.Sprintf("forge install failed after %d attempts: %s", attempt+1, failure))
 			return
 		}
 
@@ -1093,7 +1117,7 @@ func (i *instance) superviseInstall(installID string) {
 		_ = execution.CleanForgeInstallArtifacts(i.spec.WorkingDir)
 		newID, err := i.createInstallRetryContainer()
 		if err != nil {
-			i.finishTerminal(execution.StateCrashed, "forge install retry failed: "+err.Error())
+			i.finishInstallCrash(execution.CrashReasonForgeInstallFailed, "forge install retry failed: "+err.Error())
 			return
 		}
 		if i.beforeRetryStart != nil {
@@ -1109,7 +1133,7 @@ func (i *instance) superviseInstall(installID string) {
 		if err := i.docker.Start(context.Background(), newID); err != nil {
 			i.mu.Unlock()
 			_ = i.docker.Remove(context.Background(), newID)
-			i.finishTerminal(execution.StateCrashed, "forge install retry failed: "+err.Error())
+			i.finishInstallCrash(execution.CrashReasonForgeInstallFailed, "forge install retry failed: "+err.Error())
 			return
 		}
 		i.containerID = newID
@@ -1133,7 +1157,7 @@ func (i *instance) superviseInstall(installID string) {
 	plan, err := execution.BuildLaunchPlan(i.spec, i.spec.WorkingDir, containerPathResolver(i.spec.WorkingDir))
 	if err != nil {
 		_ = i.docker.Remove(context.Background(), installID)
-		i.finishTerminal(execution.StateCrashed, "forge re-plan after install failed: "+err.Error())
+		i.finishInstallCrash(execution.CrashReasonForgeInstallFailed, "forge re-plan after install failed: "+err.Error())
 		return
 	}
 	if plan.NeedsInstall {
@@ -1146,7 +1170,7 @@ func (i *instance) superviseInstall(installID string) {
 			if legacyErr != nil {
 				detail = "forge legacy jar resolve failed: " + legacyErr.Error()
 			}
-			i.finishTerminal(execution.StateCrashed, detail)
+			i.finishInstallCrash(execution.CrashReasonForgeInstallFailed, detail)
 			return
 		}
 		jarPath := containerWorkDir + "/" + rel
@@ -1295,31 +1319,125 @@ func (i *instance) createInstallRetryContainer() (string, error) {
 // diagnostics via the files API (issue #305). It is best-effort: a failure to open
 // the stream or the log file leaves the file empty/absent rather than failing the
 // install (the install's own exit code is the authority on success).
-func (i *instance) captureInstallOutput(installID string) {
+//
+// It returns what this attempt's output said about why it might have failed. The
+// log file is appended to across attempts and starts, so the stream — not the
+// file — is what gets scanned (issue #1093).
+func (i *instance) captureInstallOutput(installID string) *installOutputScan {
+	scan := &installOutputScan{}
 	rc, err := i.docker.Logs(context.Background(), installID)
 	if err != nil {
-		return
+		return scan
 	}
 	defer func() { _ = rc.Close() }()
 
 	logPath := filepath.Join(i.spec.WorkingDir, filepath.FromSlash(execution.ForgeInstallLogRelpath))
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o750); err != nil {
-		return
+		return scan
 	}
 	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o640) //nolint:gosec // logPath is the server's own working dir, not user-controlled.
 	if err != nil {
-		return
+		return scan
 	}
 	defer func() { _ = f.Close() }()
-	demuxLogsTo(rc, f)
+	demuxLogsTo(rc, io.MultiWriter(scan, f))
+	return scan
+}
+
+// The strings a failed Forge installer leaves in its output for the two failures
+// the Worker explains (issue #1093). Both are the JVM's own fully qualified error
+// names, so they appear only when that error was actually thrown: the installer's
+// class listings spell classes with slashes ("java/lang/OutOfMemoryError").
+//
+//   - An installer whose heap is too small dies in a processor with
+//     "java.lang.OutOfMemoryError: Java heap space" and exit 1.
+//   - An installer the runtime is too old to load dies at once with
+//     "java.lang.UnsupportedClassVersionError: ... Unsupported major.minor
+//     version N" (or "... compiled by a more recent version of the Java Runtime")
+//     and exit 1.
+var (
+	installOutOfMemoryMarker      = []byte("java.lang.OutOfMemoryError")
+	installJavaIncompatibleMarker = []byte("java.lang.UnsupportedClassVersionError")
+)
+
+// installOutputScan is the io.Writer one install attempt's output is teed
+// through: it records whether either failure marker appeared, holding back only
+// enough of the stream to find a marker split across two writes.
+type installOutputScan struct {
+	outOfMemory      bool
+	javaIncompatible bool
+	tail             []byte
+}
+
+func (s *installOutputScan) Write(p []byte) (int, error) {
+	buf := append(s.tail, p...)
+	s.outOfMemory = s.outOfMemory || bytes.Contains(buf, installOutOfMemoryMarker)
+	s.javaIncompatible = s.javaIncompatible || bytes.Contains(buf, installJavaIncompatibleMarker)
+	// One byte short of the longer marker: a marker cut by the write boundary is
+	// whole in the next buf, and nothing already searched is kept beyond that.
+	if keep := len(installJavaIncompatibleMarker) - 1; len(buf) > keep {
+		buf = buf[len(buf)-keep:]
+	}
+	s.tail = append(s.tail[:0], buf...)
+	return len(p), nil
+}
+
+// explainInstallFailure reports the specific reason a FAILED install attempt
+// failed, when the Worker can tell (issue #1093). It must run before the install
+// container is removed: the kernel's OOM kill is recorded only on the container.
+// Out of memory is either that record (the installer never gets to print
+// anything; exit 137 alone is not enough, since any SIGKILL exits 137) or the
+// JVM's own heap error in the output. ok is false for every other failure, which
+// stays a generic, retryable one — a missed explanation costs a vaguer message,
+// a wrong one sends the operator after the wrong fix.
+func (i *instance) explainInstallFailure(installID string, scan *installOutputScan) (reason execution.CrashReason, detail string, ok bool) {
+	if scan.outOfMemory || i.oomKilled(installID) {
+		detail = "forge install ran out of memory: no memory limit is set for this server, " +
+			"so the host or the JVM's default heap was exhausted"
+		if i.spec.MemoryLimitMB > 0 {
+			detail = fmt.Sprintf("forge install ran out of memory: the installer did not fit in the server's "+
+				"%d MiB memory limit; raise the limit and start the server again", i.spec.MemoryLimitMB)
+		}
+		return execution.CrashReasonForgeInstallOutOfMemory, detail, true
+	}
+	if scan.javaIncompatible {
+		return execution.CrashReasonForgeInstallJavaIncompatible, fmt.Sprintf(
+			"forge install failed: the installer cannot run on the Java runtime selected for Minecraft %s "+
+				"(image %s): java.lang.UnsupportedClassVersionError, the runtime is older than this Forge version needs",
+			i.spec.MinecraftVersion, i.image), true
+	}
+	return execution.CrashReasonUnspecified, "", false
+}
+
+// oomKilled reports whether the daemon recorded an OOM kill for the exited
+// container. It is best-effort and bounded like the other post-exit probes: an
+// unreachable daemon or an already-gone container is "not known to be", never a
+// guess.
+func (i *instance) oomKilled(id string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), waitTransportProbeDeadline)
+	defer cancel()
+	info, err := i.docker.Inspect(ctx, id)
+	return err == nil && info.OOMKilled
 }
 
 // finishTerminal records a terminal state reached during the install phase (no
 // launch container started), emits it, and closes the event/exited channels so
 // the manager's pump and any in-flight Stop wait observe the end (issue #305).
 func (i *instance) finishTerminal(state execution.ServerState, detail string) {
+	i.finish(state, detail, execution.CrashReasonUnspecified)
+}
+
+// finishInstallCrash is finishTerminal for a crash of the install itself, tagged
+// with why so a client can tell it from a runtime crash (issue #1093).
+func (i *instance) finishInstallCrash(reason execution.CrashReason, detail string) {
+	i.finish(execution.StateCrashed, detail, reason)
+}
+
+func (i *instance) finish(state execution.ServerState, detail string, reason execution.CrashReason) {
 	i.set(state)
-	i.emit(state, detail)
+	i.mu.Lock()
+	i.emitLocked(state, detail, reason)
+	i.mu.Unlock()
 	close(i.exited)
 	i.logPump.Close()
 	i.mu.Lock()
@@ -1893,11 +2011,12 @@ func (i *instance) set(s execution.ServerState) {
 func (i *instance) emit(state execution.ServerState, detail string) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	i.emitLocked(state, detail)
+	i.emitLocked(state, detail, execution.CrashReasonUnspecified)
 }
 
-// emitLocked is the lock-free core of emit. Caller must hold i.mu.
-func (i *instance) emitLocked(state execution.ServerState, detail string) {
+// emitLocked is the lock-free core of emit. Caller must hold i.mu. reason
+// classifies a crashed state the driver can explain (issue #1093).
+func (i *instance) emitLocked(state execution.ServerState, detail string, reason execution.CrashReason) {
 	if i.closed {
 		return
 	}
@@ -1907,7 +2026,7 @@ func (i *instance) emitLocked(state execution.ServerState, detail string) {
 	if isTerminal(state) {
 		i.terminalLatched = true
 	}
-	ev := execution.StatusEvent{ServerID: i.spec.ServerID, State: state, Detail: detail}
+	ev := execution.StatusEvent{ServerID: i.spec.ServerID, State: state, Detail: detail, CrashReason: reason}
 	for {
 		select {
 		case i.events <- ev:

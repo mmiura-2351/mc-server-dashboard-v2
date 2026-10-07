@@ -340,6 +340,25 @@ export const en = {
   "serverDetail.crashBanner.guidance":
     "The server has crashed. Click Restart to try again, or check the console for details.",
   "serverDetail.crashBanner.viewConsole": "View Console",
+  // Forge install diagnostics (#1093): the explanation of a crash the Worker
+  // classified, and the install-log viewer the crash banner offers for it.
+  "serverDetail.crashReason.forgeInstallOutOfMemory":
+    "The Forge installer ran out of memory. Stop the server, raise its memory limit in Settings, then start it again.",
+  "serverDetail.crashReason.forgeInstallJavaIncompatible":
+    "The Forge installer cannot run on the Java version this server's Minecraft version selects: it is older than this Forge build needs. Restarting will not help. Ask a platform administrator to check the Java image configured for this Minecraft version, or recreate the server with a different Minecraft or Forge version.",
+  "serverDetail.installLog.view": "View install log",
+  "serverDetail.installLog.hide": "Hide install log",
+  "serverDetail.installLog.label": "Forge install log",
+  "serverDetail.installLog.loading": "Loading the install log…",
+  "serverDetail.installLog.truncated":
+    "Showing the last {count} lines. The full log is logs/forge-install.log in the Files tab.",
+  "serverDetail.installLog.missing":
+    "No install log was found (logs/forge-install.log).",
+  "serverDetail.installLog.unsettled":
+    "The install log can be read once the server is stopped. Stop the server, then open it again.",
+  "serverDetail.installLog.tooLarge":
+    "The install log is too large to show here. Download logs/forge-install.log from the Files tab.",
+  "serverDetail.installLog.error": "Could not load the install log.",
   "serverDetail.converging": "applying…",
   "serverDetail.noWorker": "no host assigned",
   "serverDetail.worker": "Host",

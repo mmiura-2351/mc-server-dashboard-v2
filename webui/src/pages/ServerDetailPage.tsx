@@ -22,6 +22,7 @@ import { type Can, useCan } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
 import { classifyQueryResult } from "../queryState.ts";
 import { dashboardPath } from "../routes.ts";
+import { ForgeInstallLog } from "./ForgeInstallLog.tsx";
 import { isEulaNotAccepted, lifecycleErrorMessage } from "./lifecycleErrors.ts";
 import { stripMinecraftCodes } from "./mcFormat.ts";
 import { stampedQueryFn } from "./restReads.ts";
@@ -211,6 +212,7 @@ function Loaded({
         can={can}
         degraded={events.degraded}
         statusDetail={events.statusDetail}
+        statusReason={events.statusReason}
         onOpenConsole={() => setTab("console")}
       />
       <div className="tabs" role="tablist">
@@ -308,12 +310,33 @@ function Loaded({
 
 // ── Overview header + lifecycle controls ────────────────────────────────────
 
+/**
+ * The crash reasons a status frame can name (CONTROL_PLANE.md Section 6, issue
+ * #1093): each is a crash of the supervised Forge install, whose output is in
+ * the install log. An empty or unknown reason is an unclassified crash.
+ */
+const FORGE_INSTALL_CRASH_REASONS: ReadonlySet<string> = new Set([
+  "forge_install_failed",
+  "forge_install_out_of_memory",
+  "forge_install_java_incompatible",
+]);
+
+/** The reasons specific enough to say what the operator should do. */
+const CRASH_REASON_MESSAGE = {
+  forge_install_out_of_memory:
+    "serverDetail.crashReason.forgeInstallOutOfMemory",
+  forge_install_java_incompatible:
+    "serverDetail.crashReason.forgeInstallJavaIncompatible",
+} as const satisfies Record<string, TranslationKey>;
+type SpecificCrashReason = keyof typeof CRASH_REASON_MESSAGE;
+
 function Header({
   server,
   communityId,
   can,
   degraded,
   statusDetail,
+  statusReason,
   onOpenConsole,
 }: {
   server: ServerResponse;
@@ -321,6 +344,7 @@ function Header({
   can: Can;
   degraded: boolean;
   statusDetail: string;
+  statusReason: string;
   onOpenConsole: () => void;
 }) {
   const state = normalizeState(server.observed_state);
@@ -366,12 +390,24 @@ function Header({
                 {statusDetail}
               </div>
             )}
+            {statusReason in CRASH_REASON_MESSAGE && (
+              <div>
+                {t(CRASH_REASON_MESSAGE[statusReason as SpecificCrashReason])}
+              </div>
+            )}
             <div>
               {t("serverDetail.crashBanner.guidance")}{" "}
               <button type="button" className="link" onClick={onOpenConsole}>
                 {t("serverDetail.crashBanner.viewConsole")}
               </button>
             </div>
+            {FORGE_INSTALL_CRASH_REASONS.has(statusReason) &&
+              can("file:read", { serverId: server.id }) && (
+                <ForgeInstallLog
+                  communityId={communityId}
+                  serverId={server.id}
+                />
+              )}
           </div>
         )}
         {state === "unknown" && statusDetail.length > 0 && (

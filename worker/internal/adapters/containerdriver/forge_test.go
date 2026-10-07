@@ -39,6 +39,9 @@ type forgeFakeDocker struct {
 	waitGates map[string]chan waitResult
 	// inspectGate, when non-nil, scripts Inspect calls result-by-result.
 	inspectGate chan inspectStep
+	// oomKilled names the containers Inspect reports as OOM-killed (exited, with
+	// the daemon's OOMKilled flag set) when no inspectGate is scripting it.
+	oomKilled map[string]bool
 	// onCreateHook, when non-nil, is called with the spec after a Create
 	// succeeds. Tests use it to inject side effects (e.g., writing files) when
 	// a specific container is created.
@@ -130,13 +133,17 @@ func (f *forgeFakeDocker) Remove(_ context.Context, id string) error {
 	return nil
 }
 
-func (f *forgeFakeDocker) Inspect(_ context.Context, _ string) (ContainerInfo, error) {
+func (f *forgeFakeDocker) Inspect(_ context.Context, name string) (ContainerInfo, error) {
 	f.mu.Lock()
 	gate := f.inspectGate
+	oomKilled := f.oomKilled[name]
 	f.mu.Unlock()
 	if gate != nil {
 		step := <-gate
 		return step.info, step.err
+	}
+	if oomKilled {
+		return ContainerInfo{ID: name, OOMKilled: true}, nil
 	}
 	return ContainerInfo{}, errNotFound
 }

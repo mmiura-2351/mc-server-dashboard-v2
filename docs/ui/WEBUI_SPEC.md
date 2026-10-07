@@ -190,7 +190,7 @@ Global resource pack library (not community-scoped) and per-server assignment.
 
 | Path | Notes |
 |---|---|
-| `WS /communities/{cid}/servers/{sid}/events?streams=status,log,metrics,notification` | Typed frames `{stream, ts, payload}`. `status`: `{state, detail}` · `log`: `{line, stream}` · `metrics`: `{cpu_millis, memory_bytes, player_count}` · `notification`: `{kind, title, detail}` (operator notice) · `gap`: client fell behind (always delivered) · `snapshot`: `{state}` (see below). |
+| `WS /communities/{cid}/servers/{sid}/events?streams=status,log,metrics,notification` | Typed frames `{stream, ts, payload}`. `status`: `{state, detail, reason}` (`reason`: the crash reason the Worker classified — `forge_install_failed` / `forge_install_out_of_memory` / `forge_install_java_incompatible` — or `""`; CONTROL_PLANE.md Section 6) · `log`: `{line, stream}` · `metrics`: `{cpu_millis, memory_bytes, player_count}` · `notification`: `{kind, title, detail}` (operator notice) · `gap`: client fell behind (always delivered) · `snapshot`: `{state}` (see below). |
 | `WS /communities/{cid}/events` | Community-wide **status + notification** firehose; frames carry `server_id`. `snapshot`: `{servers: [{server_id, state}]}` with `server_id: null` (see below). |
 
 Missed frames are never replayed (delivery is best-effort), so a connection
@@ -201,8 +201,8 @@ followed by one; neither is a gap whose status losses happened while the
 previous gap was being delivered, since that gap's snapshot already covers
 them): the persisted observed state of the stream's scope — the server for the per-server stream (only when `status` is among the
 subscribed streams), every server of the community for the community stream.
-Its `ts` is the time the snapshot was read. It has no `detail`, which only a
-live `status` transition carries. A client applies it like status frames, and
+Its `ts` is the time the snapshot was read. It has no `detail` or `reason`, which
+only a live `status` transition carries. A client applies it like status frames, and
 on the community stream it is the complete server set, so a server missing from
 the client's list (or absent from the snapshot) means the set changed. A
 server deleted before its per-server snapshot can be read closes the socket
@@ -416,6 +416,19 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 - Header: name, state pill (+ `detail` from last status event, e.g. crash
   category), desired-vs-observed mismatch hint ("starting…" spinner while
   reconciler converges), worker id, port.
+- Crash banner: while crashed, the `detail`, a guidance line with a link to the
+  Console tab, and — keyed on the status event's `reason` — the Forge install
+  diagnostics. `forge_install_out_of_memory` and
+  `forge_install_java_incompatible` each add a specific, localised explanation
+  of what to change. Any `forge_install_*` reason adds a **View install log**
+  toggle (hidden without `file:read`) that reads `logs/forge-install.log`
+  through the files API on demand and shows its last 200 lines. The files API
+  serves a server only at rest or running (REQUIREMENTS.md Section 6.9), and a server that crashed
+  under a running intent is neither, so until it is stopped the viewer says to
+  stop it first (409 `server_unsettled`); a log that was never written (404)
+  and one past the read cap (413) get their own line too. `detail` and `reason`
+  are not persisted, so the banner's diagnostics exist only on a page that was
+  open when the crash was reported.
 - Controls: Start / Stop (dropdown: graceful · force) / Restart / Export /
   Delete — each disabled by state machine (e.g. Start hidden while running)
   and permission.

@@ -489,10 +489,27 @@ events such as a heartbeat).
 
 | Event | Meaning | Req. ref |
 |---|---|---|
-| `StatusChange` | Observed server-state transition; the Worker reports observed state, the API holds desired state. | FR-SRV-4, FR-MON-1 |
+| `StatusChange` | Observed server-state transition; the Worker reports observed state, the API holds desired state. Carries a free-text `detail` and, for a crash the Worker can explain, a typed `crash_reason` (below). | FR-SRV-4, FR-MON-1 |
 | `LogLine` | One line of server console output (stdout/stderr). | FR-MON-2 |
 | `Metrics` | Basic runtime metrics (CPU, memory, player count; best-effort). | FR-MON-3 |
 | `Heartbeat` | Periodic liveness signal. | FR-WRK-2 |
+
+`CrashReason` classifies a `CRASHED` transition, so a client can show a specific
+message and offer the matching diagnostics without parsing `detail`. It is
+`UNSPECIFIED` for every other state and for a crash the Worker does not classify
+(a runtime crash of the server process); every other value is a crash of the
+supervised Forge install, whose output is in `logs/forge-install.log`:
+
+| `CrashReason` | When the Worker reports it | Retried by the Worker |
+|---|---|---|
+| `FORGE_INSTALL_FAILED` | The installer kept exiting non-zero, or the install left nothing launchable (no args file, no legacy jar). | Yes — a non-zero exit is retried twice before the crash is reported, since it may be a transient download failure. |
+| `FORGE_INSTALL_OUT_OF_MEMORY` | The daemon recorded an OOM kill of the install container (`State.OOMKilled`; exit 137 alone is not enough), or the installer's output carries `java.lang.OutOfMemoryError`. | No — the same memory limit fails the next attempt the same way. |
+| `FORGE_INSTALL_JAVA_INCOMPATIBLE` | The installer's output carries `java.lang.UnsupportedClassVersionError`: the Java runtime selected for the Minecraft version (FR-EXE-5) is older than the installer needs. | No — the same runtime refuses the same classes. |
+
+The two specific reasons are reported only for a **failed** install, and only on
+those signals: a failure the Worker cannot attribute stays
+`FORGE_INSTALL_FAILED`. The reason, like `detail`, rides only the live event —
+the API relays it to subscribers and does not persist it.
 
 `ServerState` enumerates the observed states. REQUIREMENTS.md FR-SRV-4 names
 running / stopped / starting / crashed; the contract adds the transient

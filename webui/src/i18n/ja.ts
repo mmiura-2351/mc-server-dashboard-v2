@@ -321,6 +321,23 @@ export const ja: Record<TranslationKey, string> = {
   "serverDetail.crashBanner.guidance":
     "サーバーがクラッシュしました。再起動をクリックして再試行するか、コンソールで詳細を確認してください。",
   "serverDetail.crashBanner.viewConsole": "コンソールを表示",
+  "serverDetail.crashReason.forgeInstallOutOfMemory":
+    "Forge インストーラーがメモリ不足で終了しました。サーバーを停止し、設定でメモリ上限を引き上げてから、もう一度起動してください。",
+  "serverDetail.crashReason.forgeInstallJavaIncompatible":
+    "このサーバーの Minecraft バージョンに対して選択される Java では Forge インストーラーを実行できません（この Forge ビルドが必要とするバージョンより古い Java です）。再起動しても解決しません。プラットフォーム管理者に、この Minecraft バージョン用の Java イメージ設定の確認を依頼するか、別の Minecraft / Forge バージョンでサーバーを作り直してください。",
+  "serverDetail.installLog.view": "インストールログを表示",
+  "serverDetail.installLog.hide": "インストールログを隠す",
+  "serverDetail.installLog.label": "Forge インストールログ",
+  "serverDetail.installLog.loading": "インストールログを読み込み中…",
+  "serverDetail.installLog.truncated":
+    "末尾の {count} 行を表示しています。ログ全体は「ファイル」タブの logs/forge-install.log で確認できます。",
+  "serverDetail.installLog.missing":
+    "インストールログ（logs/forge-install.log）が見つかりません。",
+  "serverDetail.installLog.unsettled":
+    "インストールログはサーバーを停止すると読めるようになります。サーバーを停止してから、もう一度開いてください。",
+  "serverDetail.installLog.tooLarge":
+    "インストールログが大きすぎるため、ここには表示できません。「ファイル」タブから logs/forge-install.log をダウンロードしてください。",
+  "serverDetail.installLog.error": "インストールログを読み込めませんでした。",
   "serverDetail.converging": "反映中…",
   "serverDetail.noWorker": "ホスト未割り当て",
   "serverDetail.worker": "ホスト",

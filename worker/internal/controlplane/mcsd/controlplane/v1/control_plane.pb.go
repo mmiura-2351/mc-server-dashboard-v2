@@ -303,6 +303,73 @@ func (CommandErrorCode) EnumDescriptor() ([]byte, []int) {
 	return file_mcsd_controlplane_v1_control_plane_proto_rawDescGZIP(), []int{3}
 }
 
+// CrashReason classifies a SERVER_STATE_CRASHED transition (issue #1093). Every
+// value except UNSPECIFIED is a crash of the supervised Forge install phase —
+// the launch never started, and the installer's output is in
+// logs/forge-install.log in the working set.
+type CrashReason int32
+
+const (
+	// Unspecified is every crash the Worker does not classify (a runtime crash of
+	// the server process, or a crash reported by an older Worker).
+	CrashReason_CRASH_REASON_UNSPECIFIED CrashReason = 0
+	// The Forge install phase failed for a reason the Worker does not single out
+	// (the installer kept exiting non-zero across the retries, or it produced
+	// nothing launchable).
+	CrashReason_CRASH_REASON_FORGE_INSTALL_FAILED CrashReason = 1
+	// The Forge installer ran out of memory: the kernel OOM-killed the install
+	// container at the server's memory limit, or the installer's JVM exhausted the
+	// heap derived from that limit. Not retried — it recurs until the limit is
+	// raised.
+	CrashReason_CRASH_REASON_FORGE_INSTALL_OUT_OF_MEMORY CrashReason = 2
+	// The Forge installer cannot run on the Java runtime selected for the server's
+	// Minecraft version (FR-EXE-5). Not retried — it recurs on the same runtime.
+	CrashReason_CRASH_REASON_FORGE_INSTALL_JAVA_INCOMPATIBLE CrashReason = 3
+)
+
+// Enum value maps for CrashReason.
+var (
+	CrashReason_name = map[int32]string{
+		0: "CRASH_REASON_UNSPECIFIED",
+		1: "CRASH_REASON_FORGE_INSTALL_FAILED",
+		2: "CRASH_REASON_FORGE_INSTALL_OUT_OF_MEMORY",
+		3: "CRASH_REASON_FORGE_INSTALL_JAVA_INCOMPATIBLE",
+	}
+	CrashReason_value = map[string]int32{
+		"CRASH_REASON_UNSPECIFIED":                     0,
+		"CRASH_REASON_FORGE_INSTALL_FAILED":            1,
+		"CRASH_REASON_FORGE_INSTALL_OUT_OF_MEMORY":     2,
+		"CRASH_REASON_FORGE_INSTALL_JAVA_INCOMPATIBLE": 3,
+	}
+)
+
+func (x CrashReason) Enum() *CrashReason {
+	p := new(CrashReason)
+	*p = x
+	return p
+}
+
+func (x CrashReason) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (CrashReason) Descriptor() protoreflect.EnumDescriptor {
+	return file_mcsd_controlplane_v1_control_plane_proto_enumTypes[4].Descriptor()
+}
+
+func (CrashReason) Type() protoreflect.EnumType {
+	return &file_mcsd_controlplane_v1_control_plane_proto_enumTypes[4]
+}
+
+func (x CrashReason) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use CrashReason.Descriptor instead.
+func (CrashReason) EnumDescriptor() ([]byte, []int) {
+	return file_mcsd_controlplane_v1_control_plane_proto_rawDescGZIP(), []int{4}
+}
+
 // ServerState is the observed runtime state of a server (FR-SRV-4:
 // running / stopped / starting / crashed, plus the in-between transitions and a
 // restarting state the lifecycle commands produce). This is the full set of
@@ -361,11 +428,11 @@ func (x ServerState) String() string {
 }
 
 func (ServerState) Descriptor() protoreflect.EnumDescriptor {
-	return file_mcsd_controlplane_v1_control_plane_proto_enumTypes[4].Descriptor()
+	return file_mcsd_controlplane_v1_control_plane_proto_enumTypes[5].Descriptor()
 }
 
 func (ServerState) Type() protoreflect.EnumType {
-	return &file_mcsd_controlplane_v1_control_plane_proto_enumTypes[4]
+	return &file_mcsd_controlplane_v1_control_plane_proto_enumTypes[5]
 }
 
 func (x ServerState) Number() protoreflect.EnumNumber {
@@ -374,7 +441,7 @@ func (x ServerState) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ServerState.Descriptor instead.
 func (ServerState) EnumDescriptor() ([]byte, []int) {
-	return file_mcsd_controlplane_v1_control_plane_proto_rawDescGZIP(), []int{4}
+	return file_mcsd_controlplane_v1_control_plane_proto_rawDescGZIP(), []int{5}
 }
 
 // LogStream identifies which output stream a LogLine came from.
@@ -411,11 +478,11 @@ func (x LogStream) String() string {
 }
 
 func (LogStream) Descriptor() protoreflect.EnumDescriptor {
-	return file_mcsd_controlplane_v1_control_plane_proto_enumTypes[5].Descriptor()
+	return file_mcsd_controlplane_v1_control_plane_proto_enumTypes[6].Descriptor()
 }
 
 func (LogStream) Type() protoreflect.EnumType {
-	return &file_mcsd_controlplane_v1_control_plane_proto_enumTypes[5]
+	return &file_mcsd_controlplane_v1_control_plane_proto_enumTypes[6]
 }
 
 func (x LogStream) Number() protoreflect.EnumNumber {
@@ -424,7 +491,7 @@ func (x LogStream) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use LogStream.Descriptor instead.
 func (LogStream) EnumDescriptor() ([]byte, []int) {
-	return file_mcsd_controlplane_v1_control_plane_proto_rawDescGZIP(), []int{5}
+	return file_mcsd_controlplane_v1_control_plane_proto_rawDescGZIP(), []int{6}
 }
 
 // WorkerMessage is every message a Worker sends to the API over the stream.
@@ -2527,7 +2594,14 @@ type StatusChange struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	State ServerState            `protobuf:"varint,1,opt,name=state,proto3,enum=mcsd.controlplane.v1.ServerState" json:"state,omitempty"`
 	// detail optionally explains the transition (e.g. a crash reason).
-	Detail        string `protobuf:"bytes,2,opt,name=detail,proto3" json:"detail,omitempty"`
+	Detail string `protobuf:"bytes,2,opt,name=detail,proto3" json:"detail,omitempty"`
+	// crash_reason classifies a crash the Worker can explain, so a client can show
+	// a specific, localisable message and offer the matching diagnostics instead
+	// of parsing the free-text detail (issue #1093). It is only meaningful when
+	// state is SERVER_STATE_CRASHED; for every other state, and for a crash the
+	// Worker cannot classify, it is UNSPECIFIED. The field is additive: an older
+	// Worker that never sets it reports every crash as unclassified.
+	CrashReason   CrashReason `protobuf:"varint,3,opt,name=crash_reason,json=crashReason,proto3,enum=mcsd.controlplane.v1.CrashReason" json:"crash_reason,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2574,6 +2648,13 @@ func (x *StatusChange) GetDetail() string {
 		return x.Detail
 	}
 	return ""
+}
+
+func (x *StatusChange) GetCrashReason() CrashReason {
+	if x != nil {
+		return x.CrashReason
+	}
+	return CrashReason_CRASH_REASON_UNSPECIFIED
 }
 
 // LogLine is a single line of a server's console output (FR-MON-2).
@@ -2870,10 +2951,11 @@ const file_mcsd_controlplane_v1_control_plane_proto_rawDesc = "" +
 	"\blog_line\x18\x03 \x01(\v2\x1d.mcsd.controlplane.v1.LogLineH\x00R\alogLine\x129\n" +
 	"\ametrics\x18\x04 \x01(\v2\x1d.mcsd.controlplane.v1.MetricsH\x00R\ametrics\x12?\n" +
 	"\theartbeat\x18\x05 \x01(\v2\x1f.mcsd.controlplane.v1.HeartbeatH\x00R\theartbeatB\a\n" +
-	"\x05event\"_\n" +
+	"\x05event\"\xa5\x01\n" +
 	"\fStatusChange\x127\n" +
 	"\x05state\x18\x01 \x01(\x0e2!.mcsd.controlplane.v1.ServerStateR\x05state\x12\x16\n" +
-	"\x06detail\x18\x02 \x01(\tR\x06detail\"V\n" +
+	"\x06detail\x18\x02 \x01(\tR\x06detail\x12D\n" +
+	"\fcrash_reason\x18\x03 \x01(\x0e2!.mcsd.controlplane.v1.CrashReasonR\vcrashReason\"V\n" +
 	"\aLogLine\x12\x12\n" +
 	"\x04line\x18\x01 \x01(\tR\x04line\x127\n" +
 	"\x06stream\x18\x02 \x01(\x0e2\x1f.mcsd.controlplane.v1.LogStreamR\x06stream\"n\n" +
@@ -2907,7 +2989,12 @@ const file_mcsd_controlplane_v1_control_plane_proto_rawDesc = "" +
 	"\x1bCOMMAND_ERROR_CODE_INTERNAL\x10\x06\x12$\n" +
 	" COMMAND_ERROR_CODE_PORT_CONFLICT\x10\a\x12$\n" +
 	" COMMAND_ERROR_CODE_IMAGE_MISSING\x10\b\x12\x1b\n" +
-	"\x17COMMAND_ERROR_CODE_BUSY\x10\t*\xe6\x01\n" +
+	"\x17COMMAND_ERROR_CODE_BUSY\x10\t*\xb2\x01\n" +
+	"\vCrashReason\x12\x1c\n" +
+	"\x18CRASH_REASON_UNSPECIFIED\x10\x00\x12%\n" +
+	"!CRASH_REASON_FORGE_INSTALL_FAILED\x10\x01\x12,\n" +
+	"(CRASH_REASON_FORGE_INSTALL_OUT_OF_MEMORY\x10\x02\x120\n" +
+	",CRASH_REASON_FORGE_INSTALL_JAVA_INCOMPATIBLE\x10\x03*\xe6\x01\n" +
 	"\vServerState\x12\x1c\n" +
 	"\x18SERVER_STATE_UNSPECIFIED\x10\x00\x12\x19\n" +
 	"\x15SERVER_STATE_STARTING\x10\x01\x12\x18\n" +
@@ -2937,93 +3024,95 @@ func file_mcsd_controlplane_v1_control_plane_proto_rawDescGZIP() []byte {
 	return file_mcsd_controlplane_v1_control_plane_proto_rawDescData
 }
 
-var file_mcsd_controlplane_v1_control_plane_proto_enumTypes = make([]protoimpl.EnumInfo, 6)
+var file_mcsd_controlplane_v1_control_plane_proto_enumTypes = make([]protoimpl.EnumInfo, 7)
 var file_mcsd_controlplane_v1_control_plane_proto_msgTypes = make([]protoimpl.MessageInfo, 29)
 var file_mcsd_controlplane_v1_control_plane_proto_goTypes = []any{
 	(ExecutionDriverKind)(0),      // 0: mcsd.controlplane.v1.ExecutionDriverKind
 	(LaunchMode)(0),               // 1: mcsd.controlplane.v1.LaunchMode
 	(FileAccessReason)(0),         // 2: mcsd.controlplane.v1.FileAccessReason
 	(CommandErrorCode)(0),         // 3: mcsd.controlplane.v1.CommandErrorCode
-	(ServerState)(0),              // 4: mcsd.controlplane.v1.ServerState
-	(LogStream)(0),                // 5: mcsd.controlplane.v1.LogStream
-	(*WorkerMessage)(nil),         // 6: mcsd.controlplane.v1.WorkerMessage
-	(*ApiMessage)(nil),            // 7: mcsd.controlplane.v1.ApiMessage
-	(*Register)(nil),              // 8: mcsd.controlplane.v1.Register
-	(*HeldServer)(nil),            // 9: mcsd.controlplane.v1.HeldServer
-	(*WorkerCapabilities)(nil),    // 10: mcsd.controlplane.v1.WorkerCapabilities
-	(*HostResources)(nil),         // 11: mcsd.controlplane.v1.HostResources
-	(*RegisterAck)(nil),           // 12: mcsd.controlplane.v1.RegisterAck
-	(*ApiCommand)(nil),            // 13: mcsd.controlplane.v1.ApiCommand
-	(*StartServer)(nil),           // 14: mcsd.controlplane.v1.StartServer
-	(*StopServer)(nil),            // 15: mcsd.controlplane.v1.StopServer
-	(*RestartServer)(nil),         // 16: mcsd.controlplane.v1.RestartServer
-	(*ServerCommand)(nil),         // 17: mcsd.controlplane.v1.ServerCommand
-	(*HydrateTrigger)(nil),        // 18: mcsd.controlplane.v1.HydrateTrigger
-	(*SnapshotTrigger)(nil),       // 19: mcsd.controlplane.v1.SnapshotTrigger
-	(*ReadFile)(nil),              // 20: mcsd.controlplane.v1.ReadFile
-	(*EditFile)(nil),              // 21: mcsd.controlplane.v1.EditFile
-	(*ListFiles)(nil),             // 22: mcsd.controlplane.v1.ListFiles
-	(*TunnelDial)(nil),            // 23: mcsd.controlplane.v1.TunnelDial
-	(*OpenBedrockTunnel)(nil),     // 24: mcsd.controlplane.v1.OpenBedrockTunnel
-	(*CloseBedrockTunnel)(nil),    // 25: mcsd.controlplane.v1.CloseBedrockTunnel
-	(*CommandResult)(nil),         // 26: mcsd.controlplane.v1.CommandResult
-	(*FileListing)(nil),           // 27: mcsd.controlplane.v1.FileListing
-	(*FileEntry)(nil),             // 28: mcsd.controlplane.v1.FileEntry
-	(*CommandError)(nil),          // 29: mcsd.controlplane.v1.CommandError
-	(*Event)(nil),                 // 30: mcsd.controlplane.v1.Event
-	(*StatusChange)(nil),          // 31: mcsd.controlplane.v1.StatusChange
-	(*LogLine)(nil),               // 32: mcsd.controlplane.v1.LogLine
-	(*Metrics)(nil),               // 33: mcsd.controlplane.v1.Metrics
-	(*Heartbeat)(nil),             // 34: mcsd.controlplane.v1.Heartbeat
-	(*timestamppb.Timestamp)(nil), // 35: google.protobuf.Timestamp
-	(*durationpb.Duration)(nil),   // 36: google.protobuf.Duration
+	(CrashReason)(0),              // 4: mcsd.controlplane.v1.CrashReason
+	(ServerState)(0),              // 5: mcsd.controlplane.v1.ServerState
+	(LogStream)(0),                // 6: mcsd.controlplane.v1.LogStream
+	(*WorkerMessage)(nil),         // 7: mcsd.controlplane.v1.WorkerMessage
+	(*ApiMessage)(nil),            // 8: mcsd.controlplane.v1.ApiMessage
+	(*Register)(nil),              // 9: mcsd.controlplane.v1.Register
+	(*HeldServer)(nil),            // 10: mcsd.controlplane.v1.HeldServer
+	(*WorkerCapabilities)(nil),    // 11: mcsd.controlplane.v1.WorkerCapabilities
+	(*HostResources)(nil),         // 12: mcsd.controlplane.v1.HostResources
+	(*RegisterAck)(nil),           // 13: mcsd.controlplane.v1.RegisterAck
+	(*ApiCommand)(nil),            // 14: mcsd.controlplane.v1.ApiCommand
+	(*StartServer)(nil),           // 15: mcsd.controlplane.v1.StartServer
+	(*StopServer)(nil),            // 16: mcsd.controlplane.v1.StopServer
+	(*RestartServer)(nil),         // 17: mcsd.controlplane.v1.RestartServer
+	(*ServerCommand)(nil),         // 18: mcsd.controlplane.v1.ServerCommand
+	(*HydrateTrigger)(nil),        // 19: mcsd.controlplane.v1.HydrateTrigger
+	(*SnapshotTrigger)(nil),       // 20: mcsd.controlplane.v1.SnapshotTrigger
+	(*ReadFile)(nil),              // 21: mcsd.controlplane.v1.ReadFile
+	(*EditFile)(nil),              // 22: mcsd.controlplane.v1.EditFile
+	(*ListFiles)(nil),             // 23: mcsd.controlplane.v1.ListFiles
+	(*TunnelDial)(nil),            // 24: mcsd.controlplane.v1.TunnelDial
+	(*OpenBedrockTunnel)(nil),     // 25: mcsd.controlplane.v1.OpenBedrockTunnel
+	(*CloseBedrockTunnel)(nil),    // 26: mcsd.controlplane.v1.CloseBedrockTunnel
+	(*CommandResult)(nil),         // 27: mcsd.controlplane.v1.CommandResult
+	(*FileListing)(nil),           // 28: mcsd.controlplane.v1.FileListing
+	(*FileEntry)(nil),             // 29: mcsd.controlplane.v1.FileEntry
+	(*CommandError)(nil),          // 30: mcsd.controlplane.v1.CommandError
+	(*Event)(nil),                 // 31: mcsd.controlplane.v1.Event
+	(*StatusChange)(nil),          // 32: mcsd.controlplane.v1.StatusChange
+	(*LogLine)(nil),               // 33: mcsd.controlplane.v1.LogLine
+	(*Metrics)(nil),               // 34: mcsd.controlplane.v1.Metrics
+	(*Heartbeat)(nil),             // 35: mcsd.controlplane.v1.Heartbeat
+	(*timestamppb.Timestamp)(nil), // 36: google.protobuf.Timestamp
+	(*durationpb.Duration)(nil),   // 37: google.protobuf.Duration
 }
 var file_mcsd_controlplane_v1_control_plane_proto_depIdxs = []int32{
-	35, // 0: mcsd.controlplane.v1.WorkerMessage.emitted_at:type_name -> google.protobuf.Timestamp
-	8,  // 1: mcsd.controlplane.v1.WorkerMessage.register:type_name -> mcsd.controlplane.v1.Register
-	26, // 2: mcsd.controlplane.v1.WorkerMessage.command_result:type_name -> mcsd.controlplane.v1.CommandResult
-	30, // 3: mcsd.controlplane.v1.WorkerMessage.event:type_name -> mcsd.controlplane.v1.Event
-	35, // 4: mcsd.controlplane.v1.ApiMessage.sent_at:type_name -> google.protobuf.Timestamp
-	12, // 5: mcsd.controlplane.v1.ApiMessage.register_ack:type_name -> mcsd.controlplane.v1.RegisterAck
-	13, // 6: mcsd.controlplane.v1.ApiMessage.api_command:type_name -> mcsd.controlplane.v1.ApiCommand
-	10, // 7: mcsd.controlplane.v1.Register.capabilities:type_name -> mcsd.controlplane.v1.WorkerCapabilities
-	9,  // 8: mcsd.controlplane.v1.Register.held_servers:type_name -> mcsd.controlplane.v1.HeldServer
+	36, // 0: mcsd.controlplane.v1.WorkerMessage.emitted_at:type_name -> google.protobuf.Timestamp
+	9,  // 1: mcsd.controlplane.v1.WorkerMessage.register:type_name -> mcsd.controlplane.v1.Register
+	27, // 2: mcsd.controlplane.v1.WorkerMessage.command_result:type_name -> mcsd.controlplane.v1.CommandResult
+	31, // 3: mcsd.controlplane.v1.WorkerMessage.event:type_name -> mcsd.controlplane.v1.Event
+	36, // 4: mcsd.controlplane.v1.ApiMessage.sent_at:type_name -> google.protobuf.Timestamp
+	13, // 5: mcsd.controlplane.v1.ApiMessage.register_ack:type_name -> mcsd.controlplane.v1.RegisterAck
+	14, // 6: mcsd.controlplane.v1.ApiMessage.api_command:type_name -> mcsd.controlplane.v1.ApiCommand
+	11, // 7: mcsd.controlplane.v1.Register.capabilities:type_name -> mcsd.controlplane.v1.WorkerCapabilities
+	10, // 8: mcsd.controlplane.v1.Register.held_servers:type_name -> mcsd.controlplane.v1.HeldServer
 	0,  // 9: mcsd.controlplane.v1.WorkerCapabilities.drivers:type_name -> mcsd.controlplane.v1.ExecutionDriverKind
-	11, // 10: mcsd.controlplane.v1.WorkerCapabilities.resources:type_name -> mcsd.controlplane.v1.HostResources
-	36, // 11: mcsd.controlplane.v1.RegisterAck.heartbeat_interval:type_name -> google.protobuf.Duration
-	36, // 12: mcsd.controlplane.v1.RegisterAck.transfer_deadline:type_name -> google.protobuf.Duration
-	14, // 13: mcsd.controlplane.v1.ApiCommand.start:type_name -> mcsd.controlplane.v1.StartServer
-	15, // 14: mcsd.controlplane.v1.ApiCommand.stop:type_name -> mcsd.controlplane.v1.StopServer
-	16, // 15: mcsd.controlplane.v1.ApiCommand.restart:type_name -> mcsd.controlplane.v1.RestartServer
-	17, // 16: mcsd.controlplane.v1.ApiCommand.server_command:type_name -> mcsd.controlplane.v1.ServerCommand
-	18, // 17: mcsd.controlplane.v1.ApiCommand.hydrate:type_name -> mcsd.controlplane.v1.HydrateTrigger
-	19, // 18: mcsd.controlplane.v1.ApiCommand.snapshot:type_name -> mcsd.controlplane.v1.SnapshotTrigger
-	20, // 19: mcsd.controlplane.v1.ApiCommand.read_file:type_name -> mcsd.controlplane.v1.ReadFile
-	21, // 20: mcsd.controlplane.v1.ApiCommand.edit_file:type_name -> mcsd.controlplane.v1.EditFile
-	22, // 21: mcsd.controlplane.v1.ApiCommand.list_files:type_name -> mcsd.controlplane.v1.ListFiles
-	23, // 22: mcsd.controlplane.v1.ApiCommand.tunnel_dial:type_name -> mcsd.controlplane.v1.TunnelDial
-	24, // 23: mcsd.controlplane.v1.ApiCommand.open_bedrock_tunnel:type_name -> mcsd.controlplane.v1.OpenBedrockTunnel
-	25, // 24: mcsd.controlplane.v1.ApiCommand.close_bedrock_tunnel:type_name -> mcsd.controlplane.v1.CloseBedrockTunnel
+	12, // 10: mcsd.controlplane.v1.WorkerCapabilities.resources:type_name -> mcsd.controlplane.v1.HostResources
+	37, // 11: mcsd.controlplane.v1.RegisterAck.heartbeat_interval:type_name -> google.protobuf.Duration
+	37, // 12: mcsd.controlplane.v1.RegisterAck.transfer_deadline:type_name -> google.protobuf.Duration
+	15, // 13: mcsd.controlplane.v1.ApiCommand.start:type_name -> mcsd.controlplane.v1.StartServer
+	16, // 14: mcsd.controlplane.v1.ApiCommand.stop:type_name -> mcsd.controlplane.v1.StopServer
+	17, // 15: mcsd.controlplane.v1.ApiCommand.restart:type_name -> mcsd.controlplane.v1.RestartServer
+	18, // 16: mcsd.controlplane.v1.ApiCommand.server_command:type_name -> mcsd.controlplane.v1.ServerCommand
+	19, // 17: mcsd.controlplane.v1.ApiCommand.hydrate:type_name -> mcsd.controlplane.v1.HydrateTrigger
+	20, // 18: mcsd.controlplane.v1.ApiCommand.snapshot:type_name -> mcsd.controlplane.v1.SnapshotTrigger
+	21, // 19: mcsd.controlplane.v1.ApiCommand.read_file:type_name -> mcsd.controlplane.v1.ReadFile
+	22, // 20: mcsd.controlplane.v1.ApiCommand.edit_file:type_name -> mcsd.controlplane.v1.EditFile
+	23, // 21: mcsd.controlplane.v1.ApiCommand.list_files:type_name -> mcsd.controlplane.v1.ListFiles
+	24, // 22: mcsd.controlplane.v1.ApiCommand.tunnel_dial:type_name -> mcsd.controlplane.v1.TunnelDial
+	25, // 23: mcsd.controlplane.v1.ApiCommand.open_bedrock_tunnel:type_name -> mcsd.controlplane.v1.OpenBedrockTunnel
+	26, // 24: mcsd.controlplane.v1.ApiCommand.close_bedrock_tunnel:type_name -> mcsd.controlplane.v1.CloseBedrockTunnel
 	0,  // 25: mcsd.controlplane.v1.StartServer.driver:type_name -> mcsd.controlplane.v1.ExecutionDriverKind
 	1,  // 26: mcsd.controlplane.v1.StartServer.launch_mode:type_name -> mcsd.controlplane.v1.LaunchMode
-	29, // 27: mcsd.controlplane.v1.CommandResult.error:type_name -> mcsd.controlplane.v1.CommandError
-	27, // 28: mcsd.controlplane.v1.CommandResult.file_listing:type_name -> mcsd.controlplane.v1.FileListing
-	28, // 29: mcsd.controlplane.v1.FileListing.entries:type_name -> mcsd.controlplane.v1.FileEntry
+	30, // 27: mcsd.controlplane.v1.CommandResult.error:type_name -> mcsd.controlplane.v1.CommandError
+	28, // 28: mcsd.controlplane.v1.CommandResult.file_listing:type_name -> mcsd.controlplane.v1.FileListing
+	29, // 29: mcsd.controlplane.v1.FileListing.entries:type_name -> mcsd.controlplane.v1.FileEntry
 	3,  // 30: mcsd.controlplane.v1.CommandError.code:type_name -> mcsd.controlplane.v1.CommandErrorCode
 	2,  // 31: mcsd.controlplane.v1.CommandError.file_access_reason:type_name -> mcsd.controlplane.v1.FileAccessReason
-	31, // 32: mcsd.controlplane.v1.Event.status_change:type_name -> mcsd.controlplane.v1.StatusChange
-	32, // 33: mcsd.controlplane.v1.Event.log_line:type_name -> mcsd.controlplane.v1.LogLine
-	33, // 34: mcsd.controlplane.v1.Event.metrics:type_name -> mcsd.controlplane.v1.Metrics
-	34, // 35: mcsd.controlplane.v1.Event.heartbeat:type_name -> mcsd.controlplane.v1.Heartbeat
-	4,  // 36: mcsd.controlplane.v1.StatusChange.state:type_name -> mcsd.controlplane.v1.ServerState
-	5,  // 37: mcsd.controlplane.v1.LogLine.stream:type_name -> mcsd.controlplane.v1.LogStream
-	6,  // 38: mcsd.controlplane.v1.WorkerService.Session:input_type -> mcsd.controlplane.v1.WorkerMessage
-	7,  // 39: mcsd.controlplane.v1.WorkerService.Session:output_type -> mcsd.controlplane.v1.ApiMessage
-	39, // [39:40] is the sub-list for method output_type
-	38, // [38:39] is the sub-list for method input_type
-	38, // [38:38] is the sub-list for extension type_name
-	38, // [38:38] is the sub-list for extension extendee
-	0,  // [0:38] is the sub-list for field type_name
+	32, // 32: mcsd.controlplane.v1.Event.status_change:type_name -> mcsd.controlplane.v1.StatusChange
+	33, // 33: mcsd.controlplane.v1.Event.log_line:type_name -> mcsd.controlplane.v1.LogLine
+	34, // 34: mcsd.controlplane.v1.Event.metrics:type_name -> mcsd.controlplane.v1.Metrics
+	35, // 35: mcsd.controlplane.v1.Event.heartbeat:type_name -> mcsd.controlplane.v1.Heartbeat
+	5,  // 36: mcsd.controlplane.v1.StatusChange.state:type_name -> mcsd.controlplane.v1.ServerState
+	4,  // 37: mcsd.controlplane.v1.StatusChange.crash_reason:type_name -> mcsd.controlplane.v1.CrashReason
+	6,  // 38: mcsd.controlplane.v1.LogLine.stream:type_name -> mcsd.controlplane.v1.LogStream
+	7,  // 39: mcsd.controlplane.v1.WorkerService.Session:input_type -> mcsd.controlplane.v1.WorkerMessage
+	8,  // 40: mcsd.controlplane.v1.WorkerService.Session:output_type -> mcsd.controlplane.v1.ApiMessage
+	40, // [40:41] is the sub-list for method output_type
+	39, // [39:40] is the sub-list for method input_type
+	39, // [39:39] is the sub-list for extension type_name
+	39, // [39:39] is the sub-list for extension extendee
+	0,  // [0:39] is the sub-list for field type_name
 }
 
 func init() { file_mcsd_controlplane_v1_control_plane_proto_init() }
@@ -3070,7 +3159,7 @@ func file_mcsd_controlplane_v1_control_plane_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_mcsd_controlplane_v1_control_plane_proto_rawDesc), len(file_mcsd_controlplane_v1_control_plane_proto_rawDesc)),
-			NumEnums:      6,
+			NumEnums:      7,
 			NumMessages:   29,
 			NumExtensions: 0,
 			NumServices:   1,

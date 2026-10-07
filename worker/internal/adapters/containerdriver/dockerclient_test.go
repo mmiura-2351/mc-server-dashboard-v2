@@ -565,6 +565,23 @@ func TestEngineClientInspectDecodesLabelsAndState(t *testing.T) {
 	}
 }
 
+// Inspect decodes the daemon's OOMKilled flag, which the install supervisor reads
+// to tell a memory-limit kill from any other failure (issue #1093).
+func TestEngineClientInspectDecodesOOMKilled(t *testing.T) {
+	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"Id": "abc123", "State": {"Running": false, "OOMKilled": true, "ExitCode": 137}}`))
+	})
+	c := d.client(t)
+
+	info, err := c.Inspect(context.Background(), "mcsd-s1-install")
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if !info.OOMKilled {
+		t.Fatalf("info = %+v, want OOMKilled", info)
+	}
+}
+
 // A 404 from Inspect is surfaced as errNotFound so the driver treats the
 // conflict as already resolved and retries the create (issue #229).
 func TestEngineClientInspectNotFoundIsTyped(t *testing.T) {
