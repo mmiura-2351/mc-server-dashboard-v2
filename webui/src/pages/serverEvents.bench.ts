@@ -2,10 +2,11 @@
  * Benchmark: server-events frame parsing (issue #1122).
  *
  * Measures parseServerFrame, the JSON parse + type-switch on every inbound
- * WebSocket frame. To add a new data-path benchmark, add a bench() call.
+ * WebSocket frame. To add a new data-path benchmark, add a test with an
+ * awaited bench().run().
  */
 
-import { bench, describe } from "vitest";
+import { describe, test } from "vitest";
 import { parseServerFrame } from "./serverEvents.ts";
 
 const STATUS_FRAME = JSON.stringify({
@@ -27,15 +28,21 @@ const METRICS_FRAME = JSON.stringify({
 });
 
 describe("parseServerFrame", () => {
-  bench("status frame", () => {
-    parseServerFrame(STATUS_FRAME);
+  test("status frame", async ({ bench }) => {
+    await bench("status frame", () => {
+      parseServerFrame(STATUS_FRAME);
+    }).run();
   });
 
-  bench("log frame", () => {
-    parseServerFrame(LOG_FRAME);
+  test("log frame", async ({ bench }) => {
+    await bench("log frame", () => {
+      parseServerFrame(LOG_FRAME);
+    }).run();
   });
 
-  bench("metrics frame", () => {
-    parseServerFrame(METRICS_FRAME);
+  test("metrics frame", async ({ bench }) => {
+    await bench("metrics frame", () => {
+      parseServerFrame(METRICS_FRAME);
+    }).run();
   });
 });

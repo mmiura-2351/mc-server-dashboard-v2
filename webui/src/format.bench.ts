@@ -2,29 +2,38 @@
  * Benchmark: formatting utilities (issue #1122).
  *
  * Measures the shared formatting helpers used across pages. To add a new
- * format benchmark, add a bench() call inside the describe block.
+ * format benchmark, add a test with an awaited bench().run() inside the
+ * describe block.
  */
 
-import { bench, describe } from "vitest";
+import { describe, test } from "vitest";
 import { heartbeatAge, humanizeBytes, shortId, statusPill } from "./format.ts";
 import { t } from "./i18n/index.ts";
 
 describe("format", () => {
-  bench("humanizeBytes", () => {
-    humanizeBytes(1610612736);
+  test("humanizeBytes", async ({ bench }) => {
+    await bench("humanizeBytes", () => {
+      humanizeBytes(1610612736);
+    }).run();
   });
 
-  bench("shortId", () => {
-    shortId("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+  test("shortId", async ({ bench }) => {
+    await bench("shortId", () => {
+      shortId("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+    }).run();
   });
 
-  bench("statusPill", () => {
-    statusPill("online");
-    statusPill("draining");
-    statusPill("offline");
+  test("statusPill", async ({ bench }) => {
+    await bench("statusPill", () => {
+      statusPill("online");
+      statusPill("draining");
+      statusPill("offline");
+    }).run();
   });
 
-  bench("heartbeatAge", () => {
-    heartbeatAge(new Date(Date.now() - 45000).toISOString(), t);
+  test("heartbeatAge", async ({ bench }) => {
+    await bench("heartbeatAge", () => {
+      heartbeatAge(new Date(Date.now() - 45000).toISOString(), t);
+    }).run();
   });
 });
