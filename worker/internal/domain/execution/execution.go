@@ -50,6 +50,42 @@ func (s ServerState) String() string {
 	}
 }
 
+// CrashReason classifies a StateCrashed transition a driver can explain (issue
+// #1093). It mirrors the wire CrashReason (CONTROL_PLANE.md Section 6) and rides
+// the StatusEvent beside the free-text Detail, so a client can show a specific
+// message without parsing that text. The zero value is every crash a driver does
+// not classify.
+type CrashReason int
+
+const (
+	// CrashReasonUnspecified is an unclassified crash (a runtime crash of the
+	// server process).
+	CrashReasonUnspecified CrashReason = iota
+	// CrashReasonForgeInstallFailed is a failed supervised Forge install that is
+	// not one of the specific reasons below.
+	CrashReasonForgeInstallFailed
+	// CrashReasonForgeInstallOutOfMemory is a Forge install that ran out of
+	// memory: OOM-killed at the memory limit, or out of Java heap.
+	CrashReasonForgeInstallOutOfMemory
+	// CrashReasonForgeInstallJavaIncompatible is a Forge installer that cannot run
+	// on the Java runtime selected for the server (FR-EXE-5).
+	CrashReasonForgeInstallJavaIncompatible
+)
+
+// String renders a CrashReason as its wire name; unspecified is the empty string.
+func (r CrashReason) String() string {
+	switch r {
+	case CrashReasonForgeInstallFailed:
+		return "forge_install_failed"
+	case CrashReasonForgeInstallOutOfMemory:
+		return "forge_install_out_of_memory"
+	case CrashReasonForgeInstallJavaIncompatible:
+		return "forge_install_java_incompatible"
+	default:
+		return ""
+	}
+}
+
 // LaunchMode selects how a driver builds a server's launch command (issue #305).
 // It is carried explicitly on the start command, never inferred from the
 // working-set contents. The zero value (LaunchModeJar) is the historical
@@ -115,6 +151,9 @@ type StatusEvent struct {
 	// Detail optionally explains the transition (e.g. a crash reason); maps to
 	// StatusChange.detail.
 	Detail string
+	// CrashReason classifies a StateCrashed transition the driver can explain;
+	// maps to StatusChange.crash_reason. Zero for every other transition.
+	CrashReason CrashReason
 }
 
 // LogStream identifies which output stream a LogLine came from (mirrors the wire

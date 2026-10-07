@@ -471,7 +471,7 @@ see `docs/dev/DEPLOYMENT.md`
 
 | Failure | Effect | Recovery |
 |---|---|---|
-| **Relay restart/crash** | All active player sessions drop (every session's splice lives in the relay). Worst blast radius in the design — accepted for one relay; multiple relays are not provided (Section 17). | Players reconnect; tunnels re-establish per session. Orphaned open `game_session` rows are closed at the next `Register`. |
+| **Relay restart/crash** | All active player sessions drop (every session's splice lives in the relay). Worst blast radius in the design — accepted for one relay; multiple relays are not provided (Section 17). | Players reconnect; tunnels re-establish per session. An orderly stop reports each dropped session's `End` before exiting (Section 17); after a crash, orphaned open `game_session` rows are closed at the next `Register`. |
 | **API down** | Existing sessions unaffected (splices are relay↔worker, no API in the data path). New joins fail: relay disconnects with an in-protocol "try again shortly" reason. Status answered from cache while it lasts; cache-miss pings get the stopped-style response with a "dashboard unavailable" MOTD. | Relay retries gRPC with backoff; service resumes when API returns. |
 | **Worker process dies mid-session** | Its tunnel connections die with it, so its players drop — even though the MC containers keep running (tunnel sockets are owned by the Worker process). Same blast-radius class as a Worker restart. | Players rejoin after the Worker reconnects and the orphan sweep settles. |
 | **Worker never dials back** (crashed between command and dial, token expired) | Relay times out at 10 s, player gets Login Disconnect "could not reach the server". The Worker's `CommandResult` error (if any) is logged API-side. | Player retries. |
@@ -702,9 +702,17 @@ for *new* joins); relay-mediated status pings with a 5 s cache (Section 7).
   per-client-IP/source-address label.
 - **Graceful drain on shutdown** — restart drops in-flight *player* sessions
   rather than draining them: connections are not held open, migrated, or given
-  a window to finish. What the process does wait for is the **session-record**
-  drain — `gameLn.Drain` (30 s) for the in-flight handlers, then the reporter's
-  final flush (10 s) — so a session that closes during shutdown still reports
-  its real `End` instead of being healed approximately by `close_absent`
-  (Sections 6 and 10). `compose.yaml` budgets that wait with
-  `stop_grace_period: 45s` on the `relay` service (issue #2934).
+  a window to finish. The drop is deliberate and immediate: on SIGTERM the
+  relay stops accepting and closes both ends of every established splice (the
+  splice is cancelled through its context), so each session's handler returns
+  through its normal path and records its real `End` at the moment of the
+  drop. A handler that has not spliced yet is not cut off; it finishes its
+  bounded handshake I/O, and a login it was still resolving is answered with a
+  Login Disconnect. What the process waits for is the **session-record**
+  drain — `gameLn.Drain` (at most 20 s, sized to the slowest unspliced
+  handler's teardown; an ordinary stop takes well under a second) for the
+  handlers to finish, then the reporter's final flush (at most 10 s) — so
+  those `End`s reach the API instead of the rows being healed approximately
+  by `close_absent` (Sections 6 and 10), which remains the backstop for a
+  hard kill. `compose.yaml` budgets that wait with `stop_grace_period: 35s`
+  on the `relay` service (issues #2934, #3169).

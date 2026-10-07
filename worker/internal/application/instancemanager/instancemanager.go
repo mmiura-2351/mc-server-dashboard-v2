@@ -3513,7 +3513,10 @@ func (m *Manager) pump(serverID string, inst execution.Instance, done chan struc
 			if ev.State == execution.StateCrashed {
 				m.forgetIf(serverID, inst)
 			}
-			m.sendStatus(session.StatusEvent{ServerID: ev.ServerID, State: ev.State.String(), Detail: ev.Detail})
+			m.sendStatus(session.StatusEvent{
+				ServerID: ev.ServerID, State: ev.State.String(), Detail: ev.Detail,
+				CrashReason: ev.CrashReason.String(),
+			})
 		case <-m.shutdown.Done():
 			// Close. A status the instance has already queued is DROPPED: nothing
 			// drains the merged stream by then (Close runs after the session runner

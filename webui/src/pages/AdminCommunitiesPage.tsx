@@ -75,15 +75,21 @@ export function AdminCommunitiesPage() {
     },
     onError: (err) => {
       const reason = err instanceof ApiError ? err.reason : undefined;
-      showToast(
-        reason === "not_found"
-          ? t("admin.communities.deleted")
-          : t("admin.communities.deleteError"),
-        reason === "not_found" ? "success" : "error",
-      );
       if (reason === "not_found") {
+        showToast(t("admin.communities.deleted"), "success");
         invalidate();
+        return;
       }
+      // 409 community_has_servers: the API never deletes a community that still
+      // holds servers (#3218), so say what has to happen first.
+      showToast(
+        t(
+          reason === "community_has_servers"
+            ? "admin.communities.deleteHasServers"
+            : "admin.communities.deleteError",
+        ),
+        "error",
+      );
     },
   });
 

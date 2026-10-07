@@ -666,6 +666,50 @@ class GroupRepositoryContract:
         async with group_repository_harness.open() as tx:
             assert not await tx.repository.is_attached(missing_id, contract_server_id)
 
+    async def test_pending_sync_is_marked_once_per_kind_and_cleared(
+        self,
+        group_repository_harness: RepositoryHarness[GroupRepository],
+        contract_server_id: ServerId,
+    ) -> None:
+        async with group_repository_harness.open() as tx:
+            await tx.repository.mark_sync_pending(
+                [contract_server_id], GroupKind.WHITELIST
+            )
+            await tx.repository.mark_sync_pending([contract_server_id], GroupKind.OP)
+            await tx.repository.mark_sync_pending([contract_server_id], GroupKind.OP)
+            await tx.commit()
+        async with group_repository_harness.open() as tx:
+            pending = await tx.repository.list_sync_pending(contract_server_id)
+            other = await tx.repository.list_sync_pending(ServerId(uuid.uuid4()))
+        assert [p.kind for p in pending] == [GroupKind.OP, GroupKind.WHITELIST]
+        assert other == []
+        async with group_repository_harness.open() as tx:
+            await tx.repository.clear_sync_pending(contract_server_id, pending)
+            await tx.commit()
+        async with group_repository_harness.open() as tx:
+            assert await tx.repository.list_sync_pending(contract_server_id) == []
+
+    async def test_clear_leaves_a_mark_recorded_again_since_it_was_read(
+        self,
+        group_repository_harness: RepositoryHarness[GroupRepository],
+        contract_server_id: ServerId,
+    ) -> None:
+        async with group_repository_harness.open() as tx:
+            await tx.repository.mark_sync_pending([contract_server_id], GroupKind.OP)
+            await tx.commit()
+        async with group_repository_harness.open() as tx:
+            read = await tx.repository.list_sync_pending(contract_server_id)
+        async with group_repository_harness.open() as tx:
+            await tx.repository.mark_sync_pending([contract_server_id], GroupKind.OP)
+            await tx.commit()
+        async with group_repository_harness.open() as tx:
+            await tx.repository.clear_sync_pending(contract_server_id, read)
+            await tx.commit()
+        async with group_repository_harness.open() as tx:
+            remaining = await tx.repository.list_sync_pending(contract_server_id)
+        assert [p.kind for p in remaining] == [GroupKind.OP]
+        assert remaining != read
+
 
 class ScheduleRepositoryContract:
     async def test_add_update_and_readers_detach_rows(

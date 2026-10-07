@@ -4,8 +4,9 @@ These run *after* the route's two-layer authorization dependency has admitted th
 caller (non-member -> 404, member-without-permission -> 403; Section 6.4), so they
 assume an authorized member and only do the data work. ``RenameCommunity`` is the
 M1 "update" — only the name is mutable; the quota fields stay unwritten (decision
-#9). ``DeleteCommunity`` removes the row and the database cascades to every
-dependent (DATABASE.md Section 10).
+#9). ``DeleteCommunity`` removes the row and the database cascades to its
+memberships, roles, grants and player groups (DATABASE.md Section 10) -- but not
+to its servers, which have to be deleted first (issue #3218).
 """
 
 from __future__ import annotations
@@ -64,7 +65,22 @@ class RenameCommunity:
 
 @dataclass(frozen=True)
 class DeleteCommunity:
-    """Delete an existing community, cascading to its dependents (Section 10)."""
+    """Delete an existing community, cascading to its dependents (Section 10).
+
+    Refused with :class:`CommunityHasServersError` while the community holds a
+    server, in any state (issue #3218). Deleting a row cannot stop a server or
+    retain its storage, so each server goes through ``DeleteServer`` first.
+
+    The refusal is the ``server`` -> ``community`` foreign key
+    (``ON DELETE RESTRICT``), not a pre-read, and the same key serializes this
+    with a concurrent server creation. The DELETE locks the community row first
+    and a server INSERT's foreign-key check takes that row ``FOR KEY SHARE``, so
+    one waits for the other: a creation that inserted first makes the DELETE wait
+    and then refuses it; a DELETE that ran first makes the INSERT wait and then
+    fail as "community not found". This transaction's locks are those of the
+    DELETE statement alone -- the community row, then the rows it cascades to --
+    as before, so it stays outside the lock order in ``permission_ceiling``.
+    """
 
     uow: UnitOfWork
 

@@ -99,6 +99,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidBackupArchiveError,
     InvalidFilePathError,
     InvalidRetentionPolicyError,
+    PluginReconcileIncompleteError,
     ServerBusyError,
     ServerNotFoundError,
     ServerNotStoppedError,
@@ -540,6 +541,12 @@ async def restore_backup(
     create-direction gate (#749) has no such override. An ``unreadable`` backup
     (#2374) is refused with 409 ``backup_unreadable`` whatever ``force`` says: its
     archive could not be read back, so there is nothing to restore.
+
+    Two steps follow the publish, and a failure in either is a 503 over a working
+    set that IS restored — retrying the restore heals both: ``seed_failed`` when
+    the platform-managed ``server.properties`` keys could not be re-applied
+    (#2621), ``plugin_reconcile_incomplete`` when the restored plugin directory
+    could not be read, leaving the plugin rows unreconciled (#3221).
     """
 
     try:
@@ -648,6 +655,24 @@ async def restore_backup(
             target_type=ops.TARGET_BACKUP,
         )
         raise _service_unavailable("seed_failed") from exc
+    except PluginReconcileIncompleteError as exc:
+        # The archive published, but the restored plugin directory could not be
+        # listed, so the plugin rows were left as they were instead of being
+        # reconciled against it (issue #3221). The same post-publication posture
+        # as the seed failure above: answering 204 would claim rows that may
+        # describe the pre-restore working set are current, so it is a mapped 503
+        # the caller retries (the reconciliation is idempotent; re-running the
+        # restore completes it).
+        await _record_failure(
+            recorder,
+            ops.BACKUP_RESTORE,
+            Outcome.ERROR,
+            authorized,
+            community_id,
+            backup_id,
+            target_type=ops.TARGET_BACKUP,
+        )
+        raise _service_unavailable("plugin_reconcile_incomplete") from exc
     if result.forced_corrupt:
         # An operator forced the restore of a known-corrupt backup over the gate
         # (#703): it published. Log and audit the deliberate corrupt restore under a

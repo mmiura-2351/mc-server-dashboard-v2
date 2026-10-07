@@ -95,6 +95,8 @@ interface MockOverrides {
   packs?: typeof PACKS | typeof EMPTY_PACKS;
   listError?: boolean;
   uploadError?: boolean;
+  uploadStorageUnavailable?: boolean;
+  downloadStorageUnavailable?: boolean;
   deleteError?: boolean;
   deleteInUse?: boolean;
 }
@@ -122,6 +124,9 @@ function signedIn(overrides: MockOverrides = {}) {
       }
 
       if (url === "/api/resource-packs" && method === "POST") {
+        if (overrides.uploadStorageUnavailable) {
+          return Promise.resolve(errorResponse(503, "storage_unavailable"));
+        }
         return Promise.resolve(
           overrides.uploadError
             ? errorResponse(500)
@@ -155,6 +160,9 @@ function signedIn(overrides: MockOverrides = {}) {
 
       // Download endpoint — return a blob-like response.
       if (url.match(/\/api\/resource-packs\/[^/]+\/download/)) {
+        if (overrides.downloadStorageUnavailable) {
+          return Promise.resolve(errorResponse(503, "storage_unavailable"));
+        }
         return Promise.resolve(
           new Response(new Blob(["fake-zip"]), {
             status: 200,
@@ -341,6 +349,60 @@ describe("resource packs library", () => {
     expect(
       await screen.findByText(t("resourcePacks.error.uploadFailed")),
     ).toBeInTheDocument();
+  });
+
+  it("names the storage outage when an upload answers 503 storage_unavailable", async () => {
+    // Nothing was stored and no pack was created, so the upload is worth
+    // sending again — which the generic toast would not say (issue #2458).
+    signedIn({ uploadStorageUnavailable: true });
+
+    renderApp({ path: "/resource-packs" });
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: t("resourcePacks.upload") }),
+    );
+
+    const nameInput = await screen.findByRole("textbox");
+    fireEvent.change(nameInput, { target: { value: "My Pack" } });
+
+    const fileInput = screen.getByLabelText(
+      t("common.chooseFile"),
+    ) as HTMLInputElement;
+    const file = new File(["content"], "pack.zip", {
+      type: "application/zip",
+    });
+    fireEvent.change(fileInput, { target: { files: [file] } });
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: t("resourcePacks.uploadDialog.submit"),
+      }),
+    );
+
+    expect(
+      await screen.findByText(t("resourcePacks.error.storageUnavailable")),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("resourcePacks.error.uploadFailed")),
+    ).not.toBeInTheDocument();
+  });
+
+  it("names the storage outage when a download answers 503 storage_unavailable", async () => {
+    signedIn({ downloadStorageUnavailable: true });
+
+    renderApp({ path: "/resource-packs" });
+
+    await screen.findByText("Faithful");
+    fireEvent.click(
+      screen.getAllByRole("button", { name: t("resourcePacks.download") })[0],
+    );
+
+    expect(
+      await screen.findByText(t("resourcePacks.error.storageUnavailable")),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("resourcePacks.error.downloadFailed")),
+    ).not.toBeInTheDocument();
   });
 
   it("deletes a resource pack after typed confirmation", async () => {

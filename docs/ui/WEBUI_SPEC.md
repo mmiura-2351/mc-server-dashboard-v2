@@ -73,7 +73,7 @@ Complete endpoint list (generated from the FastAPI OpenAPI schema).
 | GET | `/communities` | Communities the caller belongs to (membership-scoped; the admin axis does not pierce isolation). |
 | GET | `/admin/communities` `[A]` | All communities with `member_count`/`server_count` (`limit`/`offset`, returns `total`); the platform-axis listing. |
 | POST | `/communities` `[A]` | Provision a community + initial owner. |
-| GET / PATCH / DELETE | `/communities/{cid}` | Read / rename / delete. Delete also allows a platform admin to remove any community (orphan cleanup); read/rename stay membership-scoped. |
+| GET / PATCH / DELETE | `/communities/{cid}` | Read / rename / delete. Delete also allows a platform admin to remove any community (orphan cleanup); read/rename stay membership-scoped. Delete answers 409 `community_has_servers` while the community holds any server: its servers are deleted first. |
 | GET / POST | `/communities/{cid}/members` | List (with `username`, `role_names`) / add an existing user by exactly one of `user_id` or exact `username`. |
 | GET | `/communities/{cid}/me/permissions` | Caller's own effective set: community-wide codes + per-resource grants. Membership-gated only (Layer-1). |
 | DELETE | `/communities/{cid}/members/{uid}` | Remove member (revokes roles & grants). |
@@ -177,12 +177,12 @@ Global resource pack library (not community-scoped) and per-server assignment.
 
 | Method | Path | Notes |
 |---|---|---|
-| POST | `/resource-packs` | Upload a resource pack (multipart; requires `server:update` in at least one community). |
+| POST | `/resource-packs` | Upload a resource pack (multipart; requires `server:update` in at least one community). An object-store outage answers 503 `storage_unavailable`: the file is stored before the pack row is inserted, so no pack was created and the upload is safe to send again (each attempt uses a fresh id). The failed attempt can leave a stored file no pack references — never served; reclaiming it is issue #3277. |
 | GET | `/resource-packs` | List all resource packs (authenticated). |
-| DELETE | `/resource-packs/{id}` | Delete a resource pack (uploader or platform admin; 409 when still assigned to a server). |
+| DELETE | `/resource-packs/{id}` | Delete a resource pack (uploader or platform admin; 409 when still assigned to a server). The pack row is deleted first and the stored file's removal is best-effort, so an object-store outage still answers 204 — the pack is gone and a repeat is a 404 — and leaves an orphaned file that is logged, never served. |
 | GET / HEAD | `/resource-packs/{id}/download` | Download (authenticated). The response declares `Cache-Control: no-store`. `HEAD` is the metadata probe: the same gate and the same headers with no body, so a client learns the `Content-Length` without starting a transfer; it never opens the blob nor records a `resource_pack:download` audit event. |
 | GET / HEAD | `/public/resource-packs/{id}/{filename}` | Public download (no auth) — the URL Minecraft clients fetch. Validates `filename` matches. The two statuses declare different caching policies, because the URL ends in the stored filename and an undeclared policy is decided by the edge's extension heuristic instead: the `200` declares `Cache-Control: public, max-age=3600, immutable` — a pack is immutable and the game client verifies it against `resource-pack-sha1`, so the max-age bounds only how long a deleted pack stays fetchable from a cache — and the `404` declares `Cache-Control: no-store`, since a pack's id and filename are both fixed at creation and a URL that 404s can never later become a `200`. `HEAD` is the metadata probe: this is the unauthenticated URL a resumable-download client probes before a transfer, and it declares a `Content-Length`, so it has a real reason to. The probe answers each status with the `GET`'s headers — the same `Cache-Control` per status — and no body, so an edge does not cache a probe differently from the download; it never opens the blob. |
-| POST | `…/{sid}/resource-pack` | Assign a resource pack to a server (`server:update`). Body: `{resource_pack_id, require_resource_pack, resource_pack_prompt}`. |
+| POST | `…/{sid}/resource-pack` | Assign a resource pack to a server (`server:update`). Body: `{resource_pack_id, require_resource_pack, resource_pack_prompt}`. A storage failure writing `server.properties` answers 503 `seed_failed`: the assignment is not committed, so assigning again is safe. The file is not rolled back with it and may already carry the new pack keys. |
 | DELETE | `…/{sid}/resource-pack` | Unassign (`server:update`). |
 | GET | `…/{sid}/resource-pack` | Get the current assignment (`server:read`). |
 
@@ -190,7 +190,7 @@ Global resource pack library (not community-scoped) and per-server assignment.
 
 | Path | Notes |
 |---|---|
-| `WS /communities/{cid}/servers/{sid}/events?streams=status,log,metrics,notification` | Typed frames `{stream, ts, payload}`. `status`: `{state, detail}` · `log`: `{line, stream}` · `metrics`: `{cpu_millis, memory_bytes, player_count}` · `notification`: `{kind, title, detail}` (operator notice) · `gap`: client fell behind (always delivered) · `snapshot`: `{state}` (see below). |
+| `WS /communities/{cid}/servers/{sid}/events?streams=status,log,metrics,notification` | Typed frames `{stream, ts, payload}`. `status`: `{state, detail, reason}` (`reason`: the crash reason the Worker classified — `forge_install_failed` / `forge_install_out_of_memory` / `forge_install_java_incompatible` — or `""`; CONTROL_PLANE.md Section 6) · `log`: `{line, stream}` · `metrics`: `{cpu_millis, memory_bytes, player_count}` · `notification`: `{kind, title, detail}` (operator notice) · `gap`: client fell behind (always delivered) · `snapshot`: `{state}` (see below). |
 | `WS /communities/{cid}/events` | Community-wide **status + notification** firehose; frames carry `server_id`. `snapshot`: `{servers: [{server_id, state}]}` with `server_id: null` (see below). |
 
 Missed frames are never replayed (delivery is best-effort), so a connection
@@ -201,8 +201,8 @@ followed by one; neither is a gap whose status losses happened while the
 previous gap was being delivered, since that gap's snapshot already covers
 them): the persisted observed state of the stream's scope — the server for the per-server stream (only when `status` is among the
 subscribed streams), every server of the community for the community stream.
-Its `ts` is the time the snapshot was read. It has no `detail`, which only a
-live `status` transition carries. A client applies it like status frames, and
+Its `ts` is the time the snapshot was read. It has no `detail` or `reason`, which
+only a live `status` transition carries. A client applies it like status frames, and
 on the community stream it is the complete server set, so a server missing from
 the client's list (or absent from the snapshot) means the set changed. A
 server deleted before its per-server snapshot can be read closes the socket
@@ -416,6 +416,19 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 - Header: name, state pill (+ `detail` from last status event, e.g. crash
   category), desired-vs-observed mismatch hint ("starting…" spinner while
   reconciler converges), worker id, port.
+- Crash banner: while crashed, the `detail`, a guidance line with a link to the
+  Console tab, and — keyed on the status event's `reason` — the Forge install
+  diagnostics. `forge_install_out_of_memory` and
+  `forge_install_java_incompatible` each add a specific, localised explanation
+  of what to change. Any `forge_install_*` reason adds a **View install log**
+  toggle (hidden without `file:read`) that reads `logs/forge-install.log`
+  through the files API on demand and shows its last 200 lines. The files API
+  serves a server only at rest or running (REQUIREMENTS.md Section 6.9), and a server that crashed
+  under a running intent is neither, so until it is stopped the viewer says to
+  stop it first (409 `server_unsettled`); a log that was never written (404)
+  and one past the read cap (413) get their own line too. `detail` and `reason`
+  are not persisted, so the banner's diagnostics exist only on a page that was
+  open when the crash was reported.
 - Controls: Start / Stop (dropdown: graceful · force) / Restart / Export /
   Delete — each disabled by state machine (e.g. Start hidden while running)
   and permission.
@@ -507,7 +520,10 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 - **Groups**: op/whitelist groups; player list (uuid + name) with add/remove;
   attached-servers list with attach/detach.
 - **Audit**: filterable table (operation, actor, since/until, paging).
-- **General**: rename; delete (typed confirm; admin/owner only).
+- **General**: rename; delete (typed confirm; admin/owner only). A delete
+  refused with 409 `community_has_servers` shows "delete this community's
+  servers first" rather than the generic error (the admin Communities page
+  does the same).
 
 ### 6.11 Account
 - Profile (username/email) edit, password change (current + new + confirm),
