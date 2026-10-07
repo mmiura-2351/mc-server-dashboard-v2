@@ -37,6 +37,7 @@ from mc_server_dashboard_api.dependencies import (
 )
 from mc_server_dashboard_api.http_streaming import ShortResponseBodyError
 from mc_server_dashboard_api.servers.application.resource_packs import (
+    DeleteResourcePack,
     DownloadResourcePack,
 )
 from mc_server_dashboard_api.servers.domain.errors import (
@@ -48,6 +49,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerBusyError,
     ServerFilesUnsettledError,
     ServerNotFoundError,
+    WorkingSetSeedFailedError,
 )
 from mc_server_dashboard_api.servers.domain.resource_pack import (
     ResourcePack,
@@ -174,7 +176,7 @@ def _app(
     *,
     upload: _FakeUseCase | None = None,
     list_: _FakeUseCase | None = None,
-    delete: _FakeUseCase | None = None,
+    delete: _FakeUseCase | DeleteResourcePack | None = None,
     download: _FakeDownloadUseCase | DownloadResourcePack | None = None,
     recorder: RecordingAuditRecorder | None = None,
     is_admin: bool = False,
@@ -270,6 +272,30 @@ class TestUploadEndpoint:
             )
         assert resp.status_code == 413
 
+    def test_upload_storage_outage_is_503(self) -> None:
+        # The blob goes to the store before the row is inserted, so an outage there
+        # creates no pack and the upload is safe to send again (issue #2458):
+        # 503 ``storage_unavailable``, not a generic 500 -- and nothing audited,
+        # because no pack was created.
+        uc = _FakeUseCase(error=ResourcePackStorageUnavailableError("down"))
+        recorder = RecordingAuditRecorder()
+        app = _app(upload=uc, recorder=recorder)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.post(
+                "/api/resource-packs",
+                data={"display_name": "My Pack"},
+                files={
+                    "file": (
+                        "my-pack.zip",
+                        io.BytesIO(b"PK\x03\x04"),
+                        "application/zip",
+                    )
+                },
+            )
+        assert resp.status_code == 503
+        assert resp.json()["reason"] == "storage_unavailable"
+        assert recorder.events == []
+
     def test_upload_denied_403(self) -> None:
         uc = _FakeUseCase()
         app = _app(upload=uc, require_upload_perm=False)
@@ -336,6 +362,33 @@ class TestDeleteEndpoint:
         with TestClient(app) as client:  # type: ignore[arg-type]
             resp = client.delete(f"/api/resource-packs/{uuid.uuid4()}")
         assert resp.status_code == 409
+
+    def test_delete_whose_blob_cleanup_hit_a_storage_outage_is_204_then_404(
+        self,
+    ) -> None:
+        # The real use case over a store that is down (issue #2458). The row is
+        # deleted and committed before the blob is touched, so the outage cannot
+        # fail the delete: 204, and a repeat is the plain 404 of a pack that is
+        # gone. Answering 503 instead would promise a retry that can only 404.
+        p = _pack()
+        uow = FakeUnitOfWork()
+        uow.resource_packs.packs[p.id] = p
+        store = FakeResourcePackStore()
+
+        async def _failing_delete(pack_id: ResourcePackId) -> None:
+            raise ResourcePackStorageUnavailableError("down")
+
+        store.delete = _failing_delete  # type: ignore[method-assign]
+        app = _app(
+            delete=DeleteResourcePack(uow=uow, store=store),
+            recorder=RecordingAuditRecorder(),
+            is_admin=True,
+        )
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            first = client.delete(f"/api/resource-packs/{p.id.value}")
+            second = client.delete(f"/api/resource-packs/{p.id.value}")
+        assert first.status_code == 204
+        assert second.status_code == 404
 
 
 class TestDownloadEndpoint:
@@ -953,6 +1006,22 @@ class TestAssignEndpoint:
                 json={"resource_pack_id": str(uuid.uuid4())},
             )
         assert resp.status_code == 409
+
+    def test_assign_properties_write_failure_is_503(self) -> None:
+        # The server.properties write failed before the assignment committed, so
+        # no assignment row was left and assigning again is safe (issue #2458): the
+        # 503 the other working-set writes answer, not a generic 500.
+        uc = _FakeUseCase(error=WorkingSetSeedFailedError("nope"))
+        recorder = RecordingAuditRecorder()
+        app = _assignment_app(assign=uc, recorder=recorder)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.post(
+                _ASSIGN_PATH,
+                json={"resource_pack_id": str(uuid.uuid4())},
+            )
+        assert resp.status_code == 503
+        assert resp.json()["reason"] == "seed_failed"
+        assert recorder.events == []
 
 
 class TestUnassignEndpoint:
