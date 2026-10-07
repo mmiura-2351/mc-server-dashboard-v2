@@ -487,6 +487,13 @@ async def test_deleting_community_cascades_to_all_dependents(
         await uow.memberships.assign_role(membership.id, role.id)
         await uow.commit()
 
+    # A community is deleted only once its servers are gone (issue #3218), and
+    # the grant on a server goes with that server.
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("DELETE FROM server WHERE id = :id"), {"id": resource_id}
+        )
+
     async with SqlAlchemyUnitOfWork(factory) as uow:
         await uow.communities.delete(community.id)
         await uow.commit()

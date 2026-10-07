@@ -214,7 +214,16 @@ class SqlAlchemyCommunityRepository(CommunityRepository):
 
     async def delete(self, community_id: CommunityId) -> None:
         stmt = delete(CommunityModel).where(CommunityModel.id == community_id.value)
-        await self._session.execute(stmt)
+        try:
+            await self._session.execute(stmt)
+        except IntegrityError as exc:
+            # fk_server_community_id_community is ON DELETE RESTRICT: PostgreSQL
+            # refuses this statement while a server references the community,
+            # including one a concurrent creation committed while this DELETE
+            # waited for the community row (issue #3218). The enclosing
+            # UnitOfWork rolls back, so nothing the statement cascaded to is lost.
+            translate_integrity_error(exc)
+            raise
 
 
 class SqlAlchemyMembershipRepository(MembershipRepository):

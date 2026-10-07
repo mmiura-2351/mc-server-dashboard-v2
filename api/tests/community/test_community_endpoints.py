@@ -30,6 +30,7 @@ from mc_server_dashboard_api.community.domain.entities import (
 )
 from mc_server_dashboard_api.community.domain.errors import (
     CommunityAlreadyExistsError,
+    CommunityHasServersError,
     CommunityNotFoundError,
     OwnerUserNotFoundError,
 )
@@ -304,6 +305,20 @@ def test_delete_204_carries_no_content_type() -> None:
     assert resp.status_code == 204
     assert "content-type" not in resp.headers
     assert "content-length" not in resp.headers
+
+
+def test_delete_community_holding_servers_gets_409() -> None:
+    # A community that still holds servers is not deleted (issue #3218); the
+    # reason tells the client that the servers have to be deleted first.
+    app = _managed_app(
+        member=True,
+        allow=True,
+        delete_uc=_FakeUseCase(error=CommunityHasServersError("c")),
+    )
+    client = _client(app)
+    resp = client.delete(f"/api/communities/{uuid.uuid4()}")
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "community_has_servers"
 
 
 def test_delete_non_member_gets_404() -> None:

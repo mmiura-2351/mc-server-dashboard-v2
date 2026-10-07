@@ -9,6 +9,7 @@
 package splice
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net"
@@ -39,7 +40,19 @@ type halfCloser interface {
 // Splice copies a↔b until both directions reach EOF, propagating each
 // direction's close as a write half-close on the other side and fully closing
 // both connections on return. It blocks until the session ends.
-func Splice(a, b net.Conn) {
+//
+// Cancelling ctx ends the session: both connections are closed, which fails
+// each direction's blocked read or write, so the copies return the same way
+// they do on a peer reset. Without it an established session ends only when a
+// peer closes or idleTimeout fires, so a relay shutdown could not end one
+// (issue #3169).
+func Splice(ctx context.Context, a, b net.Conn) {
+	stop := context.AfterFunc(ctx, func() {
+		_ = a.Close()
+		_ = b.Close()
+	})
+	defer stop()
+
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go copyHalf(a, b, &wg)

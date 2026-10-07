@@ -185,12 +185,13 @@ router — the security posture, not knobs.
   token) is **revoked as superseded** — the browser jar is overwritten with the
   body token's successor, so the cookie token is held by no client and would
   otherwise dangle valid server-side until its TTL. The revocation is stamped
-  `revoked_reason = 'superseded'` (never graced). On refresh it is a
-  *single-token* revoke, so a same-family successor just issued by the rotation
-  is untouched, and a cookie token that is already revoked / expired is left
-  alone. On logout the cookie token's whole rotation chain is revoked, as the
-  body token's is (Section 4), so a successor that a rotation of the cookie is
-  still minting cannot outlive the logout. A cookie that carried the *same*
+  `revoked_reason = 'superseded'` (never graced). On refresh and on logout
+  alike the cookie token's whole rotation chain is revoked (Section 4), so a
+  successor that a rotation of the cookie minted — or is still minting — cannot
+  outlive the request; tokens of that chain already revoked for another cause
+  keep it. The one exception is a refresh whose cookie token belongs to the
+  *body* token's own chain: that session goes on in the successor just issued,
+  so only the cookie token itself is retired. A cookie that carried the *same*
   token as the body, or an unknown one, revokes nothing more, and the request
   still succeeds.
 - **Cookie emission follows cookie *presence*, not which token was used.**
@@ -399,14 +400,15 @@ window** disambiguates (`auth.token.refresh_reuse_grace_seconds`, default
 | Presented token | Within grace window | Outside window / any time |
 |---|---|---|
 | rotated predecessor (revoked by rotation) | `200` + fresh pair, **family intact** | `401`, **whole family revoked** + `auth:refresh_reuse` DENIED audit event |
-| family- / logout-revoked token | `401`, whole family revoked + DENIED audit event | same |
+| family- / logout- / `user_revoked`-revoked token | `401`, whole family revoked + DENIED audit event | same |
 | superseded-revoked token | `401` (no family action, not audited) | same |
 | unknown / expired token | `401` (no family action, not audited) | same |
 
 Only a *rotation*-revoked predecessor is ever graced. A token revoked by a family
-revoke (the theft response, or password change / deactivate / delete) or by logout
-is never graced — re-presenting it stays on the theft path regardless of how
-recent the revocation is. The grace-window predecessor is **not** re-revoked,
+revoke (the theft response, or password change / deactivate / delete), by logout
+or by a session revoke (`user_revoked`, Section 7) is never graced —
+re-presenting it stays on the theft path regardless of how recent the revocation
+is. The grace-window predecessor is **not** re-revoked,
 so repeated reuse cannot roll the window forward and keep a leaked token alive.
 
 **Logout revokes the rotation chain.** Every refresh token belongs to the
@@ -423,11 +425,19 @@ logged-out user. Logout itself touches no other chain, so the user's other
 sessions stay signed in; re-presenting a token of the logged-out chain to
 `/auth/refresh` is a `logout`-revoked token in the table above, and that theft
 response does revoke them, while `/auth/session` answers it with a plain `401`.
-A rotation serializes with logout and with every bulk revocation of the user's
-sessions (password change, deactivation, account deletion, the theft response,
-"revoke all other sessions"): a refresh that waited for one reads its token as
-revoked and is refused as in the table above, and a revocation that waited for a
-refresh revokes the successor it minted.
+A rotation serializes with logout, with a single-session revoke (Section 7) and
+with every bulk revocation of the user's sessions (password change,
+deactivation, account deletion, the theft response, "revoke all other
+sessions"): a refresh that waited for one reads its token as revoked and is
+refused as in the table above, and a revocation that waited for a refresh
+revokes the successor it minted.
+
+A login serializes with them too. It verifies the password first, then stores
+the new session only if the user — re-read once no revocation of that user's
+sessions is in flight — still has the verified password hash and is still
+active. A login racing a password change, deactivation or deletion is therefore
+either refused with the uniform `401`, or its new session is revoked along with
+the others; it never leaves a session behind that the revocation did not see.
 
 A *superseded* both-transports cookie token (Section 3) is treated differently:
 it was revoked because the body token won precedence, so no client holds it and it
@@ -568,10 +578,15 @@ The raw refresh-token secret and its stored hash are **never** exposed. There is
 no client-hint field because no such metadata is stored on the row.
 
 **Revoke one** (`DELETE /users/me/sessions/{id}`) revokes a single session the
-caller owns, stamping `revoked_reason = 'user_revoked'`. The operation is scoped
+caller owns, stamping `revoked_reason = 'user_revoked'`. The session is the
+listed token's whole rotation chain (Section 4), and the revoke serializes with
+a refresh of it: a session whose token was rotated after it was listed — so the
+id now names a replaced row — is still found and ended, successor included,
+rather than answered with a `404` while it lives on. The operation is scoped
 to the caller's user id, so an id that is unknown, malformed, **or** owned by
 another user all return the same `404 session_not_found` — never `403` — so the
-endpoint leaks neither the session's existence nor its owner. A revoked session
+endpoint leaks neither the session's existence nor its owner; a session that
+has already ended is a `404` too. A revoked session
 cannot refresh (a `user_revoked` token is never graced in the reuse window;
 Section 4).
 

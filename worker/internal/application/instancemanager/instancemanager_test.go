@@ -1016,6 +1016,30 @@ func TestStatusEventsAreForwarded(t *testing.T) {
 	}
 }
 
+// A crash the driver classified reaches the session with its reason's wire name
+// beside the detail (issue #1093).
+func TestCrashReasonIsForwarded(t *testing.T) {
+	d := &fakeDriver{}
+	m := newManager(t, d, nil)
+	seedScratch(t, m, "s1")
+	_ = m.Handle(context.Background(), startCmd())
+	<-m.Events() // the seeded running event
+
+	d.inst.events <- execution.StatusEvent{
+		ServerID: "s1", State: execution.StateCrashed, Detail: "boom",
+		CrashReason: execution.CrashReasonForgeInstallJavaIncompatible,
+	}
+
+	select {
+	case ev := <-m.Events():
+		if ev.State != "crashed" || ev.Detail != "boom" || ev.CrashReason != "forge_install_java_incompatible" {
+			t.Fatalf("forwarded event = %+v, want crashed/boom/forge_install_java_incompatible", ev)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no status event forwarded")
+	}
+}
+
 func TestRestartStopsAndStarts(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)

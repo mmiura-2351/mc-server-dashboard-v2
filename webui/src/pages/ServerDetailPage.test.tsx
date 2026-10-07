@@ -2509,6 +2509,74 @@ describe("ServerDetailPage Overview live streams", () => {
     ).toBeInTheDocument();
   });
 
+  // Forge install diagnostics (issue #1093): the crash reason a status frame
+  // carries selects a specific message and gates the install-log affordance.
+  async function crashWithReason(reason: string | undefined) {
+    mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
+    renderPage();
+    await screen.findByText("survival");
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        serverFrame("status", { state: "crashed", detail: "boom", reason }),
+      );
+    });
+  }
+
+  it.each([
+    [
+      "forge_install_out_of_memory",
+      "serverDetail.crashReason.forgeInstallOutOfMemory",
+    ],
+    [
+      "forge_install_java_incompatible",
+      "serverDetail.crashReason.forgeInstallJavaIncompatible",
+    ],
+  ] as const)("explains a %s crash", async (reason, key) => {
+    await crashWithReason(reason);
+
+    expect(screen.getByText(t(key))).toBeInTheDocument();
+    // The Worker's own detail stays visible beside the explanation.
+    expect(screen.getByText("boom")).toBeInTheDocument();
+  });
+
+  it.each([
+    "forge_install_failed",
+    "forge_install_out_of_memory",
+    "forge_install_java_incompatible",
+  ])("offers the install log for a %s crash", async (reason) => {
+    await crashWithReason(reason);
+
+    expect(
+      screen.getByRole("button", { name: t("serverDetail.installLog.view") }),
+    ).toBeInTheDocument();
+  });
+
+  it.each([undefined, "", "a_reason_this_client_does_not_know"])(
+    "does not offer the install log for a crash with reason %s",
+    async (reason) => {
+      await crashWithReason(reason);
+
+      expect(
+        screen.getByText(t("serverDetail.crashBanner.guidance")),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", {
+          name: t("serverDetail.installLog.view"),
+        }),
+      ).not.toBeInTheDocument();
+    },
+  );
+
+  it("does not offer the install log without file:read", async () => {
+    mockCan = (code) => code !== "file:read";
+    await crashWithReason("forge_install_failed");
+
+    expect(
+      screen.queryByRole("button", { name: t("serverDetail.installLog.view") }),
+    ).not.toBeInTheDocument();
+  });
+
   it("labels the Start button as Restart when the server is crashed", async () => {
     mockApi.get.mockResolvedValue(
       server({

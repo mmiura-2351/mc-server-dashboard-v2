@@ -81,9 +81,13 @@ else
   fi
   echo "==> starting Postgres ($PG_CONTAINER on :$PG_PORT)"
   docker rm -f "$PG_CONTAINER" >/dev/null 2>&1 || true
+  # The durability settings are off because this cluster is thrown away with
+  # the run, and with them on every COMMIT waits for a WAL fsync that queues
+  # behind the host's other writers (#3257). Never for data that matters.
   docker run -d --name "$PG_CONTAINER" \
     -e POSTGRES_USER=mcsd -e POSTGRES_PASSWORD=mcsd -e POSTGRES_DB=mcsd_e2e \
-    -p "${PG_PORT}:5432" "$PG_IMAGE" >/dev/null
+    -p "${PG_PORT}:5432" "$PG_IMAGE" \
+    -c synchronous_commit=off -c fsync=off -c full_page_writes=off >/dev/null
   started_pg=1
   DB_URL="postgresql+asyncpg://mcsd:mcsd@127.0.0.1:${PG_PORT}/mcsd_e2e"
   echo "==> waiting for Postgres"

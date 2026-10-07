@@ -40,8 +40,10 @@ Against the deleters:
 - a role unassignment locks only assignments (the Owner ones first, under the
   last-owner guard).
 
-A community deletion cascades through every table and is not ordered with
-these; a deadlock there is detected by PostgreSQL and aborts one side.
+A community deletion cascades through every one of these tables (never to a
+server: it is refused while the community holds one, issue #3218) and is not
+ordered with these; a deadlock there is detected by PostgreSQL and aborts one
+side.
 """
 
 from __future__ import annotations

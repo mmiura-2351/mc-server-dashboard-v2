@@ -237,7 +237,10 @@ Each one succeeds, or appears to; the damage surfaces later.
   `MCD_TEST_DATABASE_URL` is exported (skipped otherwise). Start the scratch
   Postgres with the host-network recipe in
   [`api/tests/integration/README.md`](../../api/tests/integration/README.md):
-  a `-p` published port puts all the gate's DB traffic through `docker-proxy`.
+  a `-p` published port puts all the gate's DB traffic through `docker-proxy`,
+  and a container started without the recipe's durability flags (`fsync=off`
+  and the two beside it) makes every fixture's migrations wait on the host's
+  disk — restart an older one rather than reuse it.
 - `proto/` changed → one atomic change set: `make proto-gen`, update `api/`
   **and** `worker/` together; an intentional contract break carries the
   `breaking` label (CONTRIBUTING.md Section 5).
