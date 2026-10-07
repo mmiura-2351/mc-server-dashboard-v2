@@ -36,6 +36,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ResourcePackNotFoundError,
     ServerFilesUnsettledError,
     ServerNotFoundError,
+    WorkingSetSeedFailedError,
 )
 from mc_server_dashboard_api.servers.domain.file_store import FileStore
 from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
@@ -125,6 +126,10 @@ class UploadResourcePack:
             updated_at=now,
         )
 
+        # Blob first, row second: a store outage raises out of here as
+        # ``ResourcePackStorageUnavailableError`` with no row inserted, and the
+        # next attempt mints a fresh id (issue #2458). At worst the failed attempt
+        # leaves a blob under its own id that no row names (issue #3277).
         await self.store.put(pack_id, filename, _bytes_stream(content))
 
         async with self.uow:
@@ -181,7 +186,9 @@ class DeleteResourcePack:
             await self.uow.commit()
 
         # Best-effort blob removal — the DB row is already gone, so a failure
-        # here leaves an orphaned blob which is harmless.
+        # here leaves an orphaned blob which is harmless. A store outage is
+        # therefore logged, not raised (issue #2458): the delete the caller asked
+        # for has happened, and a retry would find no row to act on.
         try:
             await self.store.delete(resource_pack_id)
         except Exception:
@@ -263,6 +270,12 @@ class AssignResourcePack:
     rolls the uncommitted row back, so neither failure leaves the row and the file
     disagreeing. From the flush on, the INSERT's foreign-key check holds the pack
     row, so a concurrent delete waits for the commit and then finds the pack in use.
+
+    That failed write surfaces as :class:`WorkingSetSeedFailedError` (mapped to
+    503) rather than as whatever the storage layer raised (issue #2458): the
+    assignment row was not committed, so assigning again is all the caller has to
+    do. Nothing is promised about the file -- the storage write is not rolled back
+    with the row, and may have replaced it before failing.
 
     An assignment with no prompt removes any ``resource-pack-prompt`` line the
     previous assignment left behind (issue #2792): the row now says "no prompt", and
@@ -356,12 +369,15 @@ class AssignResourcePack:
                 await self.uow.resource_packs.add_assignment(assignment)
                 # Between the flush and the commit: a failed write rolls the row
                 # back rather than committing one the file does not carry.
-                await self.file_store.write_file(
-                    community_id=community_id,
-                    server_id=server_id,
-                    rel_path="server.properties",
-                    content=new_props,
-                )
+                try:
+                    await self.file_store.write_file(
+                        community_id=community_id,
+                        server_id=server_id,
+                        rel_path="server.properties",
+                        content=new_props,
+                    )
+                except Exception as exc:
+                    raise WorkingSetSeedFailedError(str(server_id.value)) from exc
                 await self.uow.commit()
 
         return assignment, pack

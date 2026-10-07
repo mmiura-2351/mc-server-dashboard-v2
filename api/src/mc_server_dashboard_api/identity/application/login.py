@@ -23,6 +23,18 @@ the wrong-password path and cannot be told apart by timing.
 
 The per-failure reason is recorded on the ``login_attempt`` row for forensics
 only; it is never surfaced to the caller.
+
+**Session lock.** The credentials are checked without any lock, so the slow hash
+verification blocks no one; the session is then stored in a second transaction
+under the user's session lock, and only if the user re-read under that lock still
+has the verified hash and is still active -- a compare-and-set (issue #3254).
+A password change, deactivation or deletion takes the same lock before it
+revokes the user's sessions, so it either committed first, and the re-check
+refuses the login, or waits for the login and revokes or deletes its new session
+too. The re-read is a plain ``SELECT`` taken after the session lock: it waits for
+no row lock, so a password change or deactivation holding the user row (the lock
+order's first step, see :class:`RefreshTokenRepository`) while it waits for the
+session lock cannot deadlock with the login holding the session lock.
 """
 
 from __future__ import annotations
@@ -43,6 +55,7 @@ from mc_server_dashboard_api.identity.domain.brute_force import (
     prune_horizon,
 )
 from mc_server_dashboard_api.identity.domain.clock import Clock
+from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.identity.domain.errors import InvalidCredentialsError
 from mc_server_dashboard_api.identity.domain.login_attempt_store import (
     LoginAttemptStore,
@@ -129,16 +142,24 @@ class Login:
             # password" (enumeration posture, issue #278).
             if not user.active:
                 await self._fail(key, ip, REASON_DEACTIVATED, now=now)
-            pair = await issue_token_pair(
-                uow=self.uow,
-                tokens=self.tokens,
-                user_id=user.id,
-                chain_id=RotationChainId.new(),
-                now=now,
-                refresh_ttl=self.refresh_ttl,
-            )
-            user_id = user.id.value
-            await self.uow.commit()
+
+        async with self.uow:
+            await self.uow.refresh_tokens.lock_sessions(user.id)
+            refusal = _refusal(user, await self.uow.users.get_by_id(user.id))
+            if refusal is None:
+                pair = await issue_token_pair(
+                    uow=self.uow,
+                    tokens=self.tokens,
+                    user_id=user.id,
+                    chain_id=RotationChainId.new(),
+                    now=now,
+                    refresh_ttl=self.refresh_ttl,
+                )
+                await self.uow.commit()
+        if refusal is not None:
+            # Failed outside the transaction, so the failure delay does not hold
+            # the session lock.
+            await self._fail(key, ip, refusal, now=now)
 
         if self.brute_force.enabled:
             await self.attempts.record_attempt(
@@ -146,7 +167,7 @@ class Login:
             )
             await self.attempts.clear_lockout(key)
             await self._prune(now=now)
-        return LoginResult(pair=pair, user_id=user_id)
+        return LoginResult(pair=pair, user_id=user.id.value)
 
     async def _blocked_reason(
         self, username: str, ip: str | None, *, now: dt.datetime
@@ -238,3 +259,19 @@ class Login:
         await self.attempts.prune_attempts(
             older_than=now - prune_horizon(self.brute_force, self.registration)
         )
+
+
+def _refusal(checked: User, current: User | None) -> str | None:
+    """Why the credentials checked as ``checked`` no longer hold, or ``None``.
+
+    ``current`` is the user as re-read under the session lock: deleted, given
+    another password hash, or deactivated since the check.
+    """
+
+    if current is None:
+        return REASON_UNKNOWN_USER
+    if current.password_hash != checked.password_hash:
+        return REASON_WRONG_PASSWORD
+    if not current.active:
+        return REASON_DEACTIVATED
+    return None

@@ -1,6 +1,8 @@
 package splice
 
 import (
+	"context"
+	"errors"
 	"io"
 	"net"
 	"sync"
@@ -43,7 +45,7 @@ func TestSpliceBidirectional(t *testing.T) {
 	playerOut, playerIn := tcpPair(t) // playerIn is the relay's view of the player
 	serverIn, serverOut := tcpPair(t) // serverIn is the relay's view of the server
 
-	go Splice(playerIn, serverIn)
+	go Splice(context.Background(), playerIn, serverIn)
 
 	if _, err := playerOut.Write([]byte("hello")); err != nil {
 		t.Fatal(err)
@@ -65,7 +67,7 @@ func TestSpliceBidirectional(t *testing.T) {
 func TestSpliceHalfClosePropagation(t *testing.T) {
 	playerOut, playerIn := tcpPair(t)
 	serverIn, serverOut := tcpPair(t)
-	go Splice(playerIn, serverIn)
+	go Splice(context.Background(), playerIn, serverIn)
 
 	// Server pre-sends a reply that must survive the player's half-close.
 	if _, err := serverOut.Write([]byte("reply")); err != nil {
@@ -127,7 +129,7 @@ func TestSpliceIdleSilentPeerUnblocks(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		Splice(a, b)
+		Splice(context.Background(), a, b)
 		close(done)
 	}()
 
@@ -150,7 +152,7 @@ func TestSpliceWriteStallUnblocks(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		Splice(a, b)
+		Splice(context.Background(), a, b)
 		close(done)
 	}()
 
@@ -185,7 +187,7 @@ func TestSpliceActivityRefreshesIdleDeadline(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		Splice(playerIn, serverIn)
+		Splice(context.Background(), playerIn, serverIn)
 		close(done)
 	}()
 
@@ -262,4 +264,72 @@ func TestSpliceActivityRefreshesIdleDeadline(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Splice did not return after closing both sides")
 	}
+}
+
+// TestSpliceContextCancelEndsEstablishedSession verifies that cancelling ctx
+// ends a splice whose peers are both alive and would otherwise keep it open
+// (issue #3169): Splice returns promptly and both peers see their connection
+// closed.
+func TestSpliceContextCancelEndsEstablishedSession(t *testing.T) {
+	playerOut, playerIn := tcpPair(t)
+	serverIn, serverOut := tcpPair(t)
+	defer func() { _ = playerOut.Close() }()
+	defer func() { _ = serverOut.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		Splice(ctx, playerIn, serverIn)
+		close(done)
+	}()
+
+	// The session is established: bytes cross it.
+	if _, err := playerOut.Write([]byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	assertRead(t, serverOut, "hello")
+
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Splice did not return within 2s of ctx cancellation")
+	}
+	for name, peer := range map[string]net.Conn{"player": playerOut, "server": serverOut} {
+		_ = peer.SetReadDeadline(time.Now().Add(2 * time.Second))
+		if _, err := peer.Read(make([]byte, 1)); err == nil || isTimeout(err) {
+			t.Errorf("%s peer should see its connection closed after cancellation, got %v", name, err)
+		}
+	}
+}
+
+// TestSpliceCancelledContextReturnsImmediately verifies that a splice started
+// under an already-cancelled ctx (a login that reached the splice after
+// shutdown began) ends at once instead of holding the session open.
+func TestSpliceCancelledContextReturnsImmediately(t *testing.T) {
+	playerOut, playerIn := tcpPair(t)
+	serverIn, serverOut := tcpPair(t)
+	defer func() { _ = playerOut.Close() }()
+	defer func() { _ = serverOut.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan struct{})
+	go func() {
+		Splice(ctx, playerIn, serverIn)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Splice did not return within 2s under an already-cancelled ctx")
+	}
+}
+
+func isTimeout(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
 }

@@ -87,6 +87,17 @@ _STATE_BY_PROTO: dict[int, str] = {
     pb.SERVER_STATE_UNKNOWN: "unknown",
 }
 
+# Map the wire crash reason onto the name the status frame carries (CONTROL_PLANE.md
+# Section 6, issue #1093). UNSPECIFIED — an unclassified crash, any other state, or
+# a value from a newer Worker this API does not know — is the empty string.
+_CRASH_REASON_BY_PROTO: dict[int, str] = {
+    pb.CRASH_REASON_FORGE_INSTALL_FAILED: "forge_install_failed",
+    pb.CRASH_REASON_FORGE_INSTALL_OUT_OF_MEMORY: "forge_install_out_of_memory",
+    pb.CRASH_REASON_FORGE_INSTALL_JAVA_INCOMPATIBLE: (
+        "forge_install_java_incompatible"
+    ),
+}
+
 # Metadata key carrying the shared Worker credential (NFR-SEC-1). gRPC lowercases
 # metadata keys; the value is "Bearer <credential>" by convention.
 _AUTH_METADATA_KEY = "authorization"
@@ -662,7 +673,13 @@ class WorkerSessionServicer(WorkerServiceServicer):
             server_id=event.server_id,
             event=RealTimeEvent(
                 stream=EventStream.STATUS,
-                payload={"state": state, "detail": event.status_change.detail},
+                payload={
+                    "state": state,
+                    "detail": event.status_change.detail,
+                    "reason": _CRASH_REASON_BY_PROTO.get(
+                        event.status_change.crash_reason, ""
+                    ),
+                },
                 emitted_at=emitted_at,
             ),
         )

@@ -54,6 +54,7 @@ def _seed_token(
     expires_at: dt.datetime | None = None,
     revoked_at: dt.datetime | None = None,
     revoked_reason: str | None = None,
+    chain_id: RotationChainId | None = None,
 ) -> str:
     # A revoked seed defaults to ``rotated`` (the graceable cause) unless the test
     # overrides it; an unrevoked seed has no reason.
@@ -64,7 +65,7 @@ def _seed_token(
         RefreshToken(
             id=RefreshTokenId.new(),
             user_id=_USER,
-            chain_id=RotationChainId.new(),
+            chain_id=chain_id or RotationChainId.new(),
             token_hash=token_hash,
             issued_at=_NOW - dt.timedelta(days=1),
             expires_at=expires_at or (_NOW + _REFRESH_TTL),
@@ -324,6 +325,62 @@ async def test_superseded_revoke_is_single_token_not_family() -> None:
     )
 
     assert uow.refresh_tokens.by_hash[sibling_hash].revoked_at is None
+
+
+async def test_superseded_cookies_whole_session_is_revoked() -> None:
+    # The cookie token was rotated already -- its successor's response perhaps
+    # still in flight -- so its session lives on in that successor, which must
+    # end with it, as on logout (issue #3254).
+    uow = FakeUnitOfWork()
+    _seed_token(uow, secret="body-token")
+    cookie_chain = RotationChainId.new()
+    cookie_hash = _seed_token(
+        uow,
+        secret="cookie-token",
+        revoked_at=_NOW - dt.timedelta(seconds=5),
+        chain_id=cookie_chain,
+    )
+    successor_hash = _seed_token(uow, secret="cookie-successor", chain_id=cookie_chain)
+    clock = FakeClock(_NOW)
+
+    pair = await _refresh(uow, clock)(
+        refresh_token="body-token", superseded_token="cookie-token"
+    )
+
+    successor = uow.refresh_tokens.by_hash[successor_hash]
+    assert (successor.revoked_at, successor.revoked_reason) == (
+        _NOW,
+        REVOKED_SUPERSEDED,
+    )
+    # The rotated cookie is no longer graceable either.
+    assert uow.refresh_tokens.by_hash[cookie_hash].revoked_reason == REVOKED_SUPERSEDED
+    assert uow.refresh_tokens.by_hash[f"hash::{pair.refresh_token}"].revoked_at is None
+
+
+async def test_superseded_cookie_of_the_body_tokens_session_spares_the_successor() -> (
+    None
+):
+    # The body token is a graced predecessor of the cookie token: both belong to
+    # one session, which goes on in the successor just issued. Only the cookie
+    # token is retired; revoking the chain would end the session being refreshed.
+    uow = FakeUnitOfWork()
+    chain = RotationChainId.new()
+    body_hash = _seed_token(
+        uow,
+        secret="body-token",
+        revoked_at=_NOW - dt.timedelta(seconds=5),
+        chain_id=chain,
+    )
+    cookie_hash = _seed_token(uow, secret="cookie-token", chain_id=chain)
+    clock = FakeClock(_NOW)
+
+    pair = await _refresh(uow, clock)(
+        refresh_token="body-token", superseded_token="cookie-token"
+    )
+
+    assert uow.refresh_tokens.by_hash[cookie_hash].revoked_reason == REVOKED_SUPERSEDED
+    assert uow.refresh_tokens.by_hash[body_hash].revoked_reason == REVOKED_ROTATED
+    assert uow.refresh_tokens.by_hash[f"hash::{pair.refresh_token}"].revoked_at is None
 
 
 async def test_superseded_equal_to_body_token_is_not_double_revoked() -> None:

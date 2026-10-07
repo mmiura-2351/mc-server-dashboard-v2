@@ -631,9 +631,9 @@ def _server_entity(community_id: uuid.UUID) -> Server:
 async def test_commit_after_concurrent_community_delete_reports_not_found(
     engine: AsyncEngine,
 ) -> None:
-    # fk_server_community_id_community is ON DELETE CASCADE, so it is violable
-    # only by a racer deleting the community between the request's read of it and
-    # this INSERT. The row is staged with ``session.add``, so -- unlike the group
+    # On the INSERT side fk_server_community_id_community is violable only by a
+    # racer deleting the (server-less) community between the request's read of it
+    # and this INSERT. The row is staged with ``session.add``, so -- unlike the group
     # create's explicit flush (#2924) -- the statement that emits it is the unit
     # of work's ``commit``, and that is the wrap the translation has to be reached
     # through. Live FK, so this pins the real constraint name and the real site

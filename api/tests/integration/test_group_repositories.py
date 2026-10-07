@@ -290,6 +290,49 @@ async def test_deleting_server_cascades_attachment(engine: AsyncEngine) -> None:
         assert await uow.groups.get_by_id(group.id) is not None
 
 
+# --- owed file regenerations (issue #3223) ------------------------------------
+
+
+async def test_mark_sync_pending_skips_a_server_deleted_since_it_was_listed(
+    engine: AsyncEngine,
+) -> None:
+    # A group change lists its attached servers and then marks them; one deleted
+    # in between must not fail the change on the mark's FK.
+    community_id = await _seed_community(engine)
+    kept = ServerId(await _seed_server(engine, community_id))
+    gone = ServerId(uuid.uuid4())
+    factory = create_session_factory(engine)
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.groups.mark_sync_pending([gone, kept], GroupKind.OP)
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        assert [p.kind for p in await uow.groups.list_sync_pending(kept)] == [
+            GroupKind.OP
+        ]
+        assert await uow.groups.list_sync_pending(gone) == []
+
+
+async def test_deleting_server_cascades_pending_sync(engine: AsyncEngine) -> None:
+    community_id = await _seed_community(engine)
+    server_id = await _seed_server(engine, community_id)
+    factory = create_session_factory(engine)
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.groups.mark_sync_pending([ServerId(server_id)], GroupKind.OP)
+        await uow.commit()
+
+    async with engine.begin() as conn:
+        await conn.execute(text("DELETE FROM server WHERE id = :id"), {"id": server_id})
+
+    async with engine.connect() as conn:
+        pending = (
+            await conn.execute(text("SELECT count(*) FROM server_group_sync_pending"))
+        ).scalar_one()
+    assert pending == 0
+
+
 # --- concurrent group delete during a player edit (issue #2583) ---------------
 
 

@@ -26,6 +26,7 @@ from mc_server_dashboard_api.servers.application.groups import (
     ReadGroup,
     RemovePlayer,
     RenameGroup,
+    regenerate_pending_group_files,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
@@ -34,6 +35,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     GroupNotFoundError,
     InvalidGroupKindError,
     ServerNotFoundError,
+    WorkingSetSeedFailedError,
 )
 from mc_server_dashboard_api.servers.domain.groups import (
     DEFAULT_OP_LEVEL,
@@ -253,8 +255,184 @@ async def test_running_server_is_left_pending() -> None:
     await AttachGroup(uow=uow, file_store=fs)(
         community_id=_COMMUNITY, group_id=group.id, server_id=server.id
     )
-    # No at-rest write: the running server picks up the copy on its next hydrate.
+    # No at-rest write: the Worker's live copy, and the final snapshot taken from
+    # it, would overwrite one. The regeneration is recorded as owed instead and
+    # the server's next start makes it (issue #3223).
     assert fs.files == {}
+    assert [p.kind for p in await uow.groups.list_sync_pending(server.id)] == [
+        GroupKind.OP
+    ]
+
+
+async def _running_server_with_op(
+    uow: FakeUnitOfWork, pid: uuid.UUID
+) -> tuple[PlayerGroup, Server]:
+    """An OP group holding ``pid``, attached to a running server, nothing owed."""
+
+    group = _seed_group(uow, kind=GroupKind.OP, players=[Player(pid, "alice")])
+    server = _server(desired=DesiredState.RUNNING, observed=ObservedState.RUNNING)
+    uow.servers.seed(server)
+    await uow.groups.attach(group.id, server.id)
+    return group, server
+
+
+async def test_remove_player_on_a_running_server_is_recorded_as_owed() -> None:
+    uow = FakeUnitOfWork()
+    pid = uuid.uuid4()
+    group, server = await _running_server_with_op(uow, pid)
+    await RemovePlayer(uow=uow, file_store=FakeFileStore())(
+        community_id=_COMMUNITY, group_id=group.id, player_uuid=pid
+    )
+    assert [p.kind for p in await uow.groups.list_sync_pending(server.id)] == [
+        GroupKind.OP
+    ]
+
+
+async def test_add_player_on_a_running_server_is_recorded_as_owed() -> None:
+    uow = FakeUnitOfWork()
+    group, server = await _running_server_with_op(uow, uuid.uuid4())
+    await AddPlayer(uow=uow, file_store=FakeFileStore())(
+        community_id=_COMMUNITY,
+        group_id=group.id,
+        player_uuid=uuid.uuid4(),
+        username="bob",
+    )
+    assert [p.kind for p in await uow.groups.list_sync_pending(server.id)] == [
+        GroupKind.OP
+    ]
+
+
+async def test_detach_from_a_running_server_is_recorded_as_owed() -> None:
+    uow = FakeUnitOfWork()
+    group, server = await _running_server_with_op(uow, uuid.uuid4())
+    await DetachGroup(uow=uow, file_store=FakeFileStore())(
+        community_id=_COMMUNITY, group_id=group.id, server_id=server.id
+    )
+    assert [p.kind for p in await uow.groups.list_sync_pending(server.id)] == [
+        GroupKind.OP
+    ]
+
+
+async def test_delete_group_on_a_running_server_is_recorded_as_owed() -> None:
+    uow = FakeUnitOfWork()
+    group, server = await _running_server_with_op(uow, uuid.uuid4())
+    await DeleteGroup(uow=uow, file_store=FakeFileStore())(
+        community_id=_COMMUNITY, group_id=group.id
+    )
+    assert [p.kind for p in await uow.groups.list_sync_pending(server.id)] == [
+        GroupKind.OP
+    ]
+
+
+async def test_failed_at_rest_write_stays_owed() -> None:
+    # The at-rest write is best-effort across servers; the mark is what makes the
+    # one that failed converge at that server's next start anyway.
+    uow = FakeUnitOfWork()
+    group = _seed_group(uow, kind=GroupKind.OP)
+    server = _server()
+    uow.servers.seed(server)
+    await uow.groups.attach(group.id, server.id)
+    await AddPlayer(uow=uow, file_store=FakeFileStore(fail_write=True))(
+        community_id=_COMMUNITY,
+        group_id=group.id,
+        player_uuid=uuid.uuid4(),
+        username="alice",
+    )
+    assert [p.kind for p in await uow.groups.list_sync_pending(server.id)] == [
+        GroupKind.OP
+    ]
+
+
+# --- regenerating the owed files (the start-time half, issue #3223) ----------
+
+
+async def test_regenerate_writes_the_current_union_of_each_owed_kind() -> None:
+    uow = FakeUnitOfWork()
+    pid = uuid.uuid4()
+    group, server = await _running_server_with_op(uow, pid)
+    fs = FakeFileStore()
+    fs.files["ops.json"] = b'[{"uuid": "stale"}]'
+    fs.files["whitelist.json"] = b'[{"uuid": "hand-managed"}]'
+    await RemovePlayer(uow=uow, file_store=fs)(
+        community_id=_COMMUNITY, group_id=group.id, player_uuid=pid
+    )
+
+    applied = await regenerate_pending_group_files(
+        uow, fs, community_id=_COMMUNITY, server_id=server.id
+    )
+
+    assert json.loads(fs.files["ops.json"]) == []
+    # Nothing is owed for the whitelist, so the file nobody manages through a
+    # group is left exactly as it is.
+    assert fs.files["whitelist.json"] == b'[{"uuid": "hand-managed"}]'
+    assert applied == await uow.groups.list_sync_pending(server.id)
+
+
+async def test_regenerate_covers_a_group_deleted_while_running() -> None:
+    uow = FakeUnitOfWork()
+    group, server = await _running_server_with_op(uow, uuid.uuid4())
+    fs = FakeFileStore()
+    fs.files["ops.json"] = b'[{"uuid": "stale"}]'
+    await DeleteGroup(uow=uow, file_store=fs)(
+        community_id=_COMMUNITY, group_id=group.id
+    )
+
+    await regenerate_pending_group_files(
+        uow, fs, community_id=_COMMUNITY, server_id=server.id
+    )
+
+    assert json.loads(fs.files["ops.json"]) == []
+
+
+async def test_regenerate_skips_the_write_when_the_file_is_already_current() -> None:
+    # An edit made at rest was written then; rewriting the same bytes at start
+    # would advance the generation and retain a duplicate version for nothing.
+    uow = FakeUnitOfWork()
+    group = _seed_group(uow, players=[Player(uuid.uuid4(), "alice")])
+    server = _server()
+    uow.servers.seed(server)
+    fs = FakeFileStore()
+    await AttachGroup(uow=uow, file_store=fs)(
+        community_id=_COMMUNITY, group_id=group.id, server_id=server.id
+    )
+    fs.writes.clear()
+
+    await regenerate_pending_group_files(
+        uow, fs, community_id=_COMMUNITY, server_id=server.id
+    )
+
+    assert fs.writes == []
+
+
+async def test_regenerate_with_nothing_owed_touches_no_file() -> None:
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    fs = FakeFileStore()
+
+    applied = await regenerate_pending_group_files(
+        uow, fs, community_id=_COMMUNITY, server_id=server.id
+    )
+
+    assert applied == []
+    assert fs.files == {}
+
+
+async def test_regenerate_reports_a_storage_failure_as_a_seed_failure() -> None:
+    uow = FakeUnitOfWork()
+    pid = uuid.uuid4()
+    group, server = await _running_server_with_op(uow, pid)
+    await RemovePlayer(uow=uow, file_store=FakeFileStore())(
+        community_id=_COMMUNITY, group_id=group.id, player_uuid=pid
+    )
+
+    with pytest.raises(WorkingSetSeedFailedError):
+        await regenerate_pending_group_files(
+            uow,
+            FakeFileStore(fail_write=True),
+            community_id=_COMMUNITY,
+            server_id=server.id,
+        )
 
 
 async def test_two_attached_op_groups_union_merge_by_uuid() -> None:

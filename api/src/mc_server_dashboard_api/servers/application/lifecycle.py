@@ -96,6 +96,9 @@ from mc_server_dashboard_api.servers.application.command_dispatch import (
 from mc_server_dashboard_api.servers.application.command_dispatch import (
     dispatch_failure as _dispatch_failure,
 )
+from mc_server_dashboard_api.servers.application.groups import (
+    regenerate_pending_group_files,
+)
 from mc_server_dashboard_api.servers.application.stop_dispatch_refusals import (
     StopDispatchRefusals,
 )
@@ -301,6 +304,16 @@ class StartServer:
             server = await _load(self.uow, community_id, server_id)
             if server.desired_state is DesiredState.RUNNING:
                 raise InvalidLifecycleTransitionError(str(server_id.value))
+            if server.assigned_worker_id is not None:
+                # A stop still holds the assignment for its final snapshot (issue
+                # #847). Refuse now, with the conflict the ``require_unassigned``
+                # compare-and-set below would answer, instead of carrying on to
+                # it: the snapshot's deferred clear takes no lifecycle lock, so it
+                # can release the row while this start provisions its JAR, and the
+                # compare-and-set would then succeed for a start that skipped the
+                # owed player-file regeneration below — launching the stale file
+                # (issue #3223).
+                raise LifecycleTransitionConflictError(str(server_id.value))
             # EULA gate: starting without acceptance would crash the Minecraft
             # process immediately ("You need to agree to the EULA").
             if accept_eula:
@@ -312,6 +325,25 @@ class StartServer:
                 )
             else:
                 await self._check_eula(community_id, server_id)
+            # Make the player-group file changes this server is owed (issue #3223):
+            # an OP / whitelist change made while it ran could not be written then,
+            # and nothing else applies it — a hydrate only ships what the store
+            # holds. This is the safe point. The lifecycle lock is held, and the
+            # server was read unassigned above, so no final snapshot is in flight
+            # (a stop keeps the assignment until its snapshot settles, issue
+            # #847): the write lands on the settled working set and nothing
+            # publishes over it. It is also BEFORE the skip-hydrate decision
+            # below: the write advances the store generation (issue #889), so a
+            # Worker still holding the previous run's scratch reads as stale and
+            # hydrates instead of booting the pre-edit file. A storage failure
+            # raises here, before the flip, so the server is not started with a
+            # file known to be stale.
+            owed_group_files = await regenerate_pending_group_files(
+                self.uow,
+                self.file_store,
+                community_id=community_id,
+                server_id=server_id,
+            )
             # Ensure the resolved JAR is pooled BEFORE placement/dispatch (FR-VER-3):
             # a download/verify failure fails the start here, before a Worker is
             # placed or the desired state flipped. The ensure resolves the latest
@@ -349,6 +381,11 @@ class StartServer:
                     # running/assigned. Abort before dispatch or any committed count
                     # change so the lost race causes no double placement (FR-SRV-2).
                     raise LifecycleTransitionConflictError(str(server_id.value))
+                # Clear the owed regenerations made above in the commit that makes
+                # the start durable (issue #3223), so a start that fails before
+                # this point leaves them owed. Token-guarded: a group change that
+                # committed since they were read keeps its mark for the next start.
+                await self.uow.groups.clear_sync_pending(server_id, owed_group_files)
                 await self.uow.commit()
                 # Confirm the placement reservation as a committed assignment now the
                 # intent is durable (#778); a no-op if a reconnect rebuild already
@@ -535,7 +572,7 @@ class StartServer:
           instances of one server.
         """
 
-        async with self.uow:
+        async with self.lifecycle_lock.hold(server_id), self.uow:
             server = await _load(self.uow, community_id, server_id)
             if (
                 server.desired_state is not DesiredState.RUNNING
@@ -544,6 +581,18 @@ class StartServer:
                 # Not an orphan (already assigned, or no longer desired-running):
                 # nothing for this path to reconcile.
                 raise InvalidLifecycleTransitionError(str(server_id.value))
+            # Make the owed player-group file changes first, as ``__call__`` does
+            # (issue #3223): this path always hydrates, so the store is what gets
+            # launched. No Worker holds an unassigned server, so no snapshot can
+            # publish over the write; the lifecycle lock, which this path takes
+            # for it, keeps a second placement of the same orphan from
+            # interleaving. A storage failure raises before a Worker is placed.
+            owed_group_files = await regenerate_pending_group_files(
+                self.uow,
+                self.file_store,
+                community_id=community_id,
+                server_id=server_id,
+            )
             provisioned = await self._ensure_jar(server)
             worker_id = await self._place(server)
             if worker_id is None:
@@ -572,6 +621,7 @@ class StartServer:
                     # won the compare-and-set; abort before dispatch or any committed
                     # count change so the lost race causes no double placement.
                     raise LifecycleTransitionConflictError(str(server_id.value))
+                await self.uow.groups.clear_sync_pending(server_id, owed_group_files)
                 await self.uow.commit()
                 # Confirm the placement reservation as a committed assignment now the
                 # intent is durable (#778); a no-op if a reconnect rebuild already
@@ -2064,6 +2114,11 @@ class RestartServer:
     still running — and ``desired_state=running`` remains the correct intent
     whatever the Worker did, including the case where it stopped the server and
     failed to relaunch it. The reconciler converges that from the same row.
+
+    A player-group file change the server is owed is NOT applied here (issue
+    #3223): the Worker relaunches its own working set, where the change cannot be
+    written, and the mark stays for the next clean stop and start. Whether a
+    restart should apply it is tracked in issue #3271.
     """
 
     uow: UnitOfWork
