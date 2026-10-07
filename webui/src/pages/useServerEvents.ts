@@ -181,6 +181,8 @@ export interface ServerEventsState {
   degraded: boolean;
   /** The detail string from the latest status frame (crash reason, etc.). */
   statusDetail: string;
+  /** The crash reason name that frame carried; kept and dropped with the detail. */
+  statusReason: string;
   /** Append locally-echoed RCON lines (command + output) into the stream. */
   appendLocal: (entries: LocalEcho[]) => void;
 }
@@ -202,6 +204,7 @@ export function useServerEvents(
   const [metrics, setMetrics] = useState<MetricsSample[]>([]);
   const [degraded, setDegraded] = useState(false);
   const [statusDetail, setStatusDetail] = useState("");
+  const [statusReason, setStatusReason] = useState("");
 
   const appendLocal = useCallback(
     (entries: LocalEcho[]) => {
@@ -215,6 +218,7 @@ export function useServerEvents(
     setMetrics([]);
     setDegraded(false);
     setStatusDetail("");
+    setStatusReason("");
     const key = serverKey(communityId, serverId);
 
     // The live state not yet superseded by a REST read, stamped with when it
@@ -267,6 +271,7 @@ export function useServerEvents(
       if (frame.kind === "status") {
         applyState(frame.state);
         setStatusDetail(frame.detail);
+        setStatusReason(frame.reason);
         detailState = frame.state;
         return;
       }
@@ -274,6 +279,7 @@ export function useServerEvents(
         applyState(frame.state);
         if (frame.state !== detailState) {
           setStatusDetail("");
+          setStatusReason("");
           detailState = frame.state;
         }
         return;
@@ -353,6 +359,7 @@ export function useServerEvents(
     metrics,
     degraded,
     statusDetail,
+    statusReason,
     appendLocal,
   };
 }
