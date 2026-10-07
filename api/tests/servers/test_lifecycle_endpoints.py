@@ -46,6 +46,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     NoEligibleWorkerError,
     ServerNotFoundError,
     ServerNotRunningError,
+    WorkingSetSeedFailedError,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId as ServersCommunityId,
@@ -242,6 +243,20 @@ def test_start_no_eligible_worker_is_503() -> None:
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "start"))
     assert resp.status_code == 503
     assert resp.json()["reason"] == "no_eligible_worker"
+
+
+def test_start_owed_player_file_write_failure_is_503() -> None:
+    # StartServer could not regenerate an ops.json / whitelist.json a group change
+    # left stale (issue #3223); nothing was started, so the caller retries.
+    app = _app(
+        member=True,
+        allow=True,
+        start=_FakeUseCase(error=WorkingSetSeedFailedError("x")),
+    )
+    client = _client(app)
+    resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "start"))
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "seed_failed"
 
 
 def test_start_worker_unavailable_is_503() -> None:

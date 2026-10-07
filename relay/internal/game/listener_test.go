@@ -13,9 +13,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/adapters/apiclient"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/ipcaps"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/mc"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/metrics"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/tunnel"
 )
 
@@ -714,5 +717,90 @@ func TestServeTransientRetryStopsOnCancel(t *testing.T) {
 	err := l.Serve(ctx)
 	if err != nil {
 		t.Errorf("Serve returned %v on ctx cancel, want nil", err)
+	}
+}
+
+// TestServeReturnEndsEstablishedSession pins the shutdown contract Drain relies
+// on (issue #3169): once Serve has returned — here on a fatal accept error, with
+// the caller's ctx never cancelled — an established spliced session whose peers
+// are both still connected is ended, so Drain completes promptly and the
+// session's End is recorded through the handler's normal return path.
+func TestServeReturnEndsEstablishedSession(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	tokens := tunnel.NewTokenTable(10*time.Second, time.Now)
+	sessions := &fakeSessionRecorder{}
+
+	playerSide, relaySide := net.Pipe()  // conn (player)
+	workerSide, tunnelSide := net.Pipe() // tconn (worker dial-back)
+	defer func() { _ = playerSide.Close() }()
+	defer func() { _ = workerSide.Close() }()
+
+	sl := &scriptedListener{
+		results: []acceptResult{{relaySide, nil}},
+		done:    make(chan struct{}),
+	}
+	l := &Listener{
+		ln: sl,
+		resolver: &fakeResolver{
+			result: apiclient.ResolveResult{Decision: apiclient.DecisionTunnel, Token: "tok", ServerID: "srv"},
+			domain: "mc.example.com",
+		},
+		tokens:   tokens,
+		caps:     ipcaps.NewIPCaps(32, 10, 0, time.Now, nil),
+		sessions: sessions,
+		metrics:  metrics.New(reg, "test"),
+		logger:   nopLogger(),
+	}
+
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- l.Serve(context.Background()) }()
+
+	// Player logs in; the worker dials back and then holds its connection open,
+	// as a live Minecraft session does.
+	hs := handshakePacket(765, "amber.mc.example.com", 25565, 2)
+	login := loginStartPacket("Steve")
+	if _, err := playerSide.Write(append(hs, login...)); err != nil {
+		t.Fatalf("player write: %v", err)
+	}
+	go func() {
+		for !tokens.Deliver("tok", tunnelSide) {
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+	replayed := make([]byte, 3+len(hs)+len(login))
+	if _, err := io.ReadFull(workerSide, replayed); err != nil {
+		t.Fatalf("worker read replay: %v", err)
+	}
+	waitSeries(t, reg, "relay_game_active_sessions", nil, 1, 2*time.Second)
+
+	// The listener fails: Serve returns without the caller cancelling anything.
+	_ = sl.Close()
+	select {
+	case err := <-serveErr:
+		if err == nil {
+			t.Fatal("Serve should return the accept error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Serve did not return after the listener closed")
+	}
+
+	start := time.Now()
+	if !l.Drain(5 * time.Second) {
+		t.Fatal("Drain timed out: the established session was not ended when Serve returned")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("Drain took %v; ending an established session must not wait on its peers", elapsed)
+	}
+	if sessions.started != 1 || sessions.ended != 1 {
+		t.Errorf("sessions started=%d ended=%d, want 1 and 1", sessions.started, sessions.ended)
+	}
+	waitSeries(t, reg, "relay_game_active_sessions", nil, 0, 2*time.Second)
+
+	// Both peers see their connection closed by the relay.
+	for name, peer := range map[string]net.Conn{"player": playerSide, "worker": workerSide} {
+		_ = peer.SetReadDeadline(time.Now().Add(2 * time.Second))
+		if _, err := peer.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+			t.Errorf("%s peer read = %v, want EOF", name, err)
+		}
 	}
 }

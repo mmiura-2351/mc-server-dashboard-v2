@@ -39,7 +39,9 @@ serializes with a logout and with every bulk revocation of the user's sessions
 (issues #3249, #3251): a rotation that waited for one reads the token as revoked
 and takes the theft path above, and a revocation that waited for a rotation
 revokes the successor it minted. A both-transports request also locks the
-cookie token's owner, in the repository's lock order.
+cookie token's owner, in the repository's lock order, and ends the superseded
+cookie's session as logout does: its whole rotation chain, so a successor that a
+rotation of the cookie minted dies with it (issue #3254).
 """
 
 from __future__ import annotations
@@ -53,6 +55,7 @@ from mc_server_dashboard_api.identity.domain.clock import Clock
 from mc_server_dashboard_api.identity.domain.entities import (
     REVOKED_ROTATED,
     REVOKED_SUPERSEDED,
+    RefreshToken,
 )
 from mc_server_dashboard_api.identity.domain.errors import (
     InvalidRefreshTokenError,
@@ -76,9 +79,14 @@ class RefreshSession:
         self, *, refresh_token: str, superseded_token: str | None = None
     ) -> TokenPair:
         token_hash = self.tokens.hash_refresh_token(refresh_token)
+        superseded_hash = (
+            self.tokens.hash_refresh_token(superseded_token)
+            if superseded_token is not None
+            else None
+        )
         locked_hashes = [token_hash]
-        if superseded_token is not None:
-            locked_hashes.append(self.tokens.hash_refresh_token(superseded_token))
+        if superseded_hash is not None:
+            locked_hashes.append(superseded_hash)
         now = self.clock.now()
         async with self.uow:
             locked = await self.uow.refresh_tokens.lock_sessions_by_token_hashes(
@@ -136,25 +144,35 @@ class RefreshSession:
             )
             # Both-transports refresh: the cookie-carried token lost precedence to
             # the body token and was overwritten in the browser jar, so no client
-            # holds it any more. Revoke it as a benign *superseded* token -- a
-            # single-token revoke, never the reuse/family path -- so it can no
-            # longer refresh while the successor just issued above (possibly in the
-            # same family) stays active (issue #384).
-            await self._revoke_superseded(superseded_token, token_hash, now)
+            # holds it any more. End its session as a benign *superseded* one --
+            # never the reuse/family path -- so it can no longer refresh while the
+            # successor just issued above stays active (issue #384). An unknown
+            # cookie revokes nothing.
+            superseded = (
+                locked.get(superseded_hash) if superseded_hash is not None else None
+            )
+            if superseded is not None:
+                await self._revoke_superseded(superseded, stored, now)
             await self.uow.commit()
         return pair
 
     async def _revoke_superseded(
-        self, superseded_token: str | None, used_hash: str, now: dt.datetime
+        self, superseded: RefreshToken, used: RefreshToken, now: dt.datetime
     ) -> None:
-        if superseded_token is None:
-            return
-        superseded_hash = self.tokens.hash_refresh_token(superseded_token)
-        if superseded_hash == used_hash:
+        if superseded.token_hash == used.token_hash:
             return  # Same token in both transports: already rotated above, no-op.
-        stored = await self.uow.refresh_tokens.get_by_token_hash(superseded_hash)
-        if stored is None or not stored.is_active(now=now):
-            return  # Unknown / already revoked / expired: ignore gracefully.
-        await self.uow.refresh_tokens.revoke(
-            superseded_hash, revoked_at=now, reason=REVOKED_SUPERSEDED
+        if superseded.chain_id == used.chain_id:
+            # The cookie belongs to the body token's own session, which goes on
+            # in the successor just issued: retire the cookie token alone.
+            if superseded.is_active(now=now):
+                await self.uow.refresh_tokens.revoke(
+                    superseded.token_hash, revoked_at=now, reason=REVOKED_SUPERSEDED
+                )
+            return
+        # Another session: revoke its whole chain, as logout does, so a successor
+        # that a rotation of the cookie minted -- its response perhaps still in
+        # flight -- dies with it (issue #3254). Tokens revoked for another cause
+        # keep it.
+        await self.uow.refresh_tokens.revoke_chain(
+            superseded.chain_id, revoked_at=now, reason=REVOKED_SUPERSEDED
         )

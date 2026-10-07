@@ -211,15 +211,18 @@ rotated while its response was still in flight would otherwise leave a valid
 successor whose late `Set-Cookie` revives the session in a browser that logged
 out (AUTH_API.md Section 4). The user's other chains are untouched.
 
-Every revocation that must also end what a rotation is extending — logout, the
-superseded cookie of a both-transports logout (whose chain is revoked as
-`superseded`), and the bulk revocations of a password change, deactivation,
+Every revocation that must also end what a rotation is extending — logout, a
+single-session revoke (which revokes the chain as `user_revoked`), the
+superseded cookie of a both-transports logout or refresh (whose chain is revoked
+as `superseded`), and the bulk revocations of a password change, deactivation,
 account deletion, theft response or "revoke all other sessions" — serializes
 with rotation on the token owner's **session lock**: a transaction-scoped
 advisory lock keyed by `user_id`. A row lock cannot, because the successor is a
 new row the revocation's `UPDATE` would not see. Under the lock a revocation
 sees every successor committed before it, and a rotation that waited reads its
-token as revoked, so a successor still being minted is revoked too. The lock
+token as revoked, so a successor still being minted is revoked too. A login
+takes the lock as well, and stores its new chain only if the user re-read under
+it still has the password hash it verified and is still active. The lock
 order it takes part in — `user` rows, then session locks in ascending key
 order, then `refresh_token` rows — is defined in one place, the
 `RefreshTokenRepository` Port (`identity/domain/repositories.py`).
@@ -378,7 +381,7 @@ assigned Worker.
 | Column | Type | Notes |
 |---|---|---|
 | `id` | uuid PK | |
-| `community_id` | uuid FK → `community.id` | `ON DELETE CASCADE` |
+| `community_id` | uuid FK → `community.id` | `ON DELETE RESTRICT` — a Community that holds a server cannot be deleted (Section 10) |
 | `name` | text | unique within the Community |
 | `mc_edition` | text | e.g. `java` |
 | `mc_version` | text | e.g. `1.21.1` (FR-SRV-1) |
@@ -497,7 +500,7 @@ would be, roughly:
 ### Player groups
 
 Reusable, Community-scoped player lists (OP / whitelist) attached to many servers
-and synced to a server's `ops.json` / `whitelist.json`. Three normalized tables
+and synced to a server's `ops.json` / `whitelist.json`. Four normalized tables
 (matching the relational model of the rest of this document, Section 2). The
 group tooling lives in a `groups` slice **inside the servers bounded context** —
 player groups are server-content tooling, not membership/authz, so the Community
@@ -551,11 +554,64 @@ player add/remove on an attached group — the API regenerates that server's
 defaulting to 4) or `whitelist.json` (kind `whitelist`; entries `{uuid, name}`)
 through the existing at-rest file write seam (versioned). The file is the
 **union-merge** of every attached group of that kind, ordered by uuid so it is
-byte-stable diff-to-diff. **Only at-rest servers are written**; a running or
-otherwise unsettled server is left pending and ships the updated authoritative
-copy on its next natural hydrate (hydrate always carries the authoritative working
-set). Pushing live changes to a running server via the Worker (EditFile + RCON
-reload) is deferred: not implemented.
+byte-stable diff-to-diff. **Only at-rest servers are written at the time of the
+change.** A running or otherwise unsettled server cannot be: the Worker's live
+working set, and the final snapshot taken from it at stop, would overwrite the
+authoritative copy, and a hydrate only ships whatever that copy holds. So every
+change also records, in its own transaction, a `server_group_sync_pending` row
+for each affected server, and the server's **next start** regenerates the owed
+file from the then-current union before it decides whether to hydrate:
+
+- The start does this under the per-server lifecycle lock and only for a stopped,
+  unassigned server, i.e. after the previous run's final snapshot has settled, so
+  no snapshot publishes over the regenerated file. A start that finds the
+  assignment still held by that snapshot is refused at once with 409
+  `transition_conflict`, so it cannot go on to launch once the hold is released.
+- A change to a group itself (player add/remove, delete) locks the group row
+  before it writes anything and before it lists the attached servers, so a
+  concurrent attach either is in that list or waits for the change; no attached
+  server is left without a row. Taking the lock before the player rows are
+  written keeps a player edit and a group delete on one lock order.
+- The write advances the working-set generation like any at-rest edit, so a
+  Worker still holding the previous run's scratch hydrates instead of booting the
+  pre-change file ([`CONTROL_PLANE.md`](CONTROL_PLANE.md) Section 5.1).
+- A file whose bytes already equal the union (the change was made at rest) is not
+  rewritten.
+- A storage failure fails the start with 503 `seed_failed` before anything is
+  launched, and the row stays for the next attempt.
+- The rows are cleared in the transaction that commits the start, each only if
+  its `token` is still the one the start read, so a change committed meanwhile
+  stays owed for the start after.
+
+Which launches apply owed files:
+
+| Launch | Owed files |
+|---|---|
+| Start (operator or schedule) | Applied, as above. |
+| Reconciler placement of an unassigned server | Applied before placing; this launch always hydrates from the store. |
+| Restart (operator or schedule) | **Not applied; the row stays.** The restart is dispatched in place and the Worker relaunches its own working set, where the change cannot be written. A removed operator is still in the launched file until the next clean stop and start. Tracked in issue #3271. |
+| Reconciler re-dispatch onto the Worker that still holds the server (typically after a crash) | **Not applied; the row stays.** The Worker's retained scratch may be newer than the store, and applying the change means forcing a hydrate from the last published snapshot over it. Until the next clean stop and start, a removed operator is still in the launched file. Whether to trade that world progression for the revocation is tracked in issue #3271. |
+
+Pushing live changes to a running server via the Worker (EditFile + RCON reload)
+is deferred: not implemented.
+
+The row is also what separates a file a group change made stale from one no
+group ever managed: a server with no row keeps its `ops.json` / `whitelist.json`
+exactly as the game and the operator left them, including changes made in-game
+(`/op`, `/whitelist add`). Detaching or deleting a server's last group of a kind
+records a row too, and its regeneration is the empty list.
+
+#### `server_group_sync_pending`
+
+One row per server and kind whose file is owed a regeneration.
+
+| Column | Type | Notes |
+|---|---|---|
+| `server_id` | uuid FK → `server.id` | `ON DELETE CASCADE` |
+| `kind` | text | `op` / `whitelist` (CHECK enum) |
+| `token` | uuid | replaced every time the row is recorded again; the start clears the row only while it still holds the token it read |
+
+Primary key: composite `(server_id, kind)`.
 
 ### Server plugins
 
@@ -846,10 +902,22 @@ reachable from `community.id` through `ON DELETE CASCADE` foreign keys.
 Rather than enumerate the full transitive set here (where it drifts each time a
 table is added), each table definition in Sections 5–8 documents its own FK and
 cascade behavior — the cascade column in any table that carries
-`ON DELETE CASCADE` from `community` (directly or transitively through `server`,
-`player_group`, or `schedule`) is the authoritative source. `audit_log` is the
-deliberate exception: its references are soft (no FK), so its rows survive the
-deletion (Section 9).
+`ON DELETE CASCADE` from `community` (directly or transitively through
+`membership`, `role`, or `player_group`) is the authoritative source. `audit_log`
+is the deliberate exception: its references are soft (no FK), so its rows survive
+the deletion (Section 9).
+
+**Servers are not part of that cascade.** `server.community_id` is
+`ON DELETE RESTRICT`: a Community that still holds a server, in any state, is not
+deleted (`DELETE /communities/{cid}` answers 409 `community_has_servers`), and
+nothing it would have cascaded to is removed either. A row delete cannot do what
+deleting a server requires — the at-rest check, the lifecycle lock, and the
+storage retention of STORAGE.md Section 2.1 — so each server is deleted through
+its own deletion first. The foreign key also orders the deletion against a
+concurrent server creation: the creation's INSERT holds the `community` row
+`FOR KEY SHARE` until it commits, so a Community deletion either waits for it and
+is then refused, or commits first and the creation fails as "community not
+found".
 
 Also distinct, **deleting a single server** (without deleting its Community)
 removes the `resource_grant` rows that point at it, `ON DELETE CASCADE` through

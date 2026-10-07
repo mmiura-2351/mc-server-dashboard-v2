@@ -633,6 +633,27 @@ the installer downloads Forge's libraries. The installer's combined output is
 written to `logs/forge-install.log` in the server's working set, readable through
 the file API — check it if a Forge first start fails or stalls.
 
+If the install fails, the server goes `crashed` with a reason. An installer that
+exits non-zero is retried twice (the usual cause is a failed download) before the
+crash is reported. Two failures are recognised and reported at once, without a
+retry, because a retry cannot fix them:
+
+- **Out of memory** — the install container was OOM-killed at the server's memory
+  limit, or the installer's JVM ran out of the heap derived from it
+  (`java.lang.OutOfMemoryError` in the install log). Stop the server, raise its
+  memory limit, and start it again.
+- **Java incompatible** — the installer died on
+  `java.lang.UnsupportedClassVersionError`: the image configured for the Java
+  major this Minecraft version selects
+  (`driver.container.images`) provides an older Java than the
+  installer needs. Fix the image mapping.
+
+The server detail page shows these explanations in its crash banner and offers
+**View install log** there, which shows the tail of `logs/forge-install.log`.
+The file API serves a server's files only while it is running or at rest, so a
+server that crashed while its desired state is still `running` has to be
+stopped before the log can be read.
+
 The Forge installer forks Java grandchild processes that can outlive their parent
 and re-parent to the worker. In the `compose.yaml` deployment this is handled by
 `init: true` on the worker service (Docker injects tini as PID 1). If you run the

@@ -180,14 +180,15 @@ class UserRepository(abc.ABC):
 class RefreshTokenRepository(abc.ABC):
     """Port: persistence for :class:`RefreshToken` session records.
 
-    **Session lock.** Every write that must also cover the successors of a
-    session -- a rotation, a logout, a bulk revocation -- first takes the
-    *session lock* of the token's owner: one transaction-scoped lock per user,
-    held until the transaction ends (issues #3249, #3251). A row lock cannot do
-    this, because a rotation's successor is a new row that an ``UPDATE`` which
-    already chose its rows never sees. Under the lock a rotation reads its token
-    as the previous holder committed it, and a revocation sees every successor
-    committed before it.
+    **Session lock.** Every write that creates a session or must also cover the
+    successors of one -- a login, a rotation, a logout, a single-session or bulk
+    revocation -- first takes the *session lock* of the token's owner: one
+    transaction-scoped lock per user, held until the transaction ends (issues
+    #3249, #3251, #3254). A row lock cannot do this, because a login's token and
+    a rotation's successor are new rows that an ``UPDATE`` which already chose
+    its rows never sees. Under the lock a rotation reads its token as the
+    previous holder committed it, a login reads its user as the previous holder
+    committed it, and a revocation sees every session committed before it.
 
     The one lock order of the identity context; a transaction that takes more
     than one of these takes them in this order:
@@ -196,16 +197,19 @@ class RefreshTokenRepository(abc.ABC):
        (:meth:`UserRepository.lock_with_active_admins`), or the ``UPDATE`` of the
        user row itself (password change, deactivation);
     2. session locks, in ascending lock-key order when there are several
-       (:meth:`lock_sessions_by_token_hashes`; :meth:`revoke_all_for_user` and
+       (:meth:`lock_sessions_by_token_hashes`, :meth:`lock_sessions`;
+       :meth:`revoke_by_id`, :meth:`revoke_all_for_user` and
        :meth:`revoke_all_for_user_except` take their user's themselves);
     3. ``refresh_token`` rows (the revoking and rotating ``UPDATE`` statements),
        then a user ``DELETE`` and its ``ON DELETE CASCADE`` rows.
 
-    A rotation's successor ``INSERT`` takes ``FOR KEY SHARE`` on its user row
-    after step 2. That conflicts only with ``FOR UPDATE``, which a guard does
-    not take and a user ``DELETE`` takes only in step 3, under that user's
-    session lock -- so it cannot close a wait cycle. Taking a session lock the
-    transaction already holds (a rotation's theft response) does not block.
+    A login's or a rotation's token ``INSERT`` takes ``FOR KEY SHARE`` on its
+    user row after step 2. That conflicts only with ``FOR UPDATE``, which a
+    guard does not take and a user ``DELETE`` takes only in step 3, under that
+    user's session lock -- so it cannot close a wait cycle. A login reads its
+    user row after step 2 with a plain ``SELECT``, which takes no row lock and
+    so waits for no step-1 holder. Taking a session lock the transaction
+    already holds (a rotation's theft response) does not block.
     """
 
     @abc.abstractmethod
@@ -229,6 +233,16 @@ class RefreshTokenRepository(abc.ABC):
         hash is absent from the result and locks nothing. Several owners (a
         both-transports request whose two tokens belong to different users) are
         locked in the class's order, so no two such requests can deadlock.
+        """
+
+    @abc.abstractmethod
+    async def lock_sessions(self, user_id: UserId) -> None:
+        """Take ``user_id``'s session lock (a login, issue #3254).
+
+        A login takes it before it re-reads its user and stores the new session,
+        so a password change, deactivation or deletion of the user either
+        committed first -- and the login, re-reading the user, refuses -- or
+        waits for the login and then revokes or deletes its session too.
         """
 
     @abc.abstractmethod
@@ -294,12 +308,18 @@ class RefreshTokenRepository(abc.ABC):
         revoked_at: dt.datetime,
         reason: str,
     ) -> bool:
-        """Revoke ``user_id``'s active token ``token_id`` (issue #387).
+        """End the session of ``user_id``'s token ``token_id`` (issues #387, #3254).
+
+        The session is the token's whole rotation chain, revoked as
+        :meth:`revoke_chain` does, under ``user_id``'s session lock: the id a
+        caller holds may belong to a token a rotation has replaced since it was
+        listed, or is replacing now, and the session lives on in the successor.
 
         Scoped to ``user_id`` so a caller can only revoke their own session: a
-        ``token_id`` owned by another user matches no row. Returns whether an
-        active row was revoked, so the caller maps a miss to 404 (the id is
-        unknown *or* belongs to someone else — no existence leak).
+        ``token_id`` owned by another user matches no row. Returns whether the
+        chain still had an unrevoked token, so the caller maps a miss to 404 (the
+        id is unknown, belongs to someone else, or its session already ended —
+        no existence leak).
         """
 
     @abc.abstractmethod

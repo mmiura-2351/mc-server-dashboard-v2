@@ -16,6 +16,22 @@ talk to the cluster's ``postgres`` maintenance database over a raw ``asyncpg``
 connection (which autocommits each statement). These helpers are driven from the
 synchronous pytest session hooks, where no event loop is running, so they wrap
 the asyncpg coroutines in ``asyncio.run``.
+
+The scratch database is created with ``synchronous_commit`` off (issue #3257).
+Every fixture runs the Alembic chain in its setup, and a COMMIT normally waits
+for its WAL flush; on a host under writeback pressure that fsync queues behind
+every other process's dirty pages, so a setup of a few dozen commits could
+approach the per-test timeout. Nothing in a database that is dropped at the end
+of the run needs to survive a crash. Setting it on the database, not on an
+engine, covers every session that connects to it -- the Alembic environment's
+engine and each test's own -- whatever flags the cluster was started with.
+
+This is the part the suite can do for itself, and it is partial: a commit that
+drops a relation's files (every ``downgrade``, any table rewrite) flushes
+synchronously regardless of the setting, and the cluster's own fsyncs still
+hold the WAL lock that other commits queue on. Only ``fsync=off`` removes those,
+and it is a server-wide setting that no database or session can change for
+itself, which is why the README recipe and CI's service carry it.
 """
 
 from __future__ import annotations
@@ -44,6 +60,7 @@ async def _create(base_url: str, name: str) -> None:
     conn = await asyncpg.connect(_asyncpg_dsn(base_url, database="postgres"))
     try:
         await conn.execute(f'CREATE DATABASE "{name}"')
+        await conn.execute(f'ALTER DATABASE "{name}" SET synchronous_commit = off')
     finally:
         await conn.close()
 

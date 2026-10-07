@@ -890,6 +890,10 @@ body.col-resizing {
 .crash-detail-label {
   font-weight: 600;
 }
+.install-log-view {
+  margin: 4px 0 0;
+  color: var(--text);
+}
 button.link {
   all: unset;
   cursor: pointer;

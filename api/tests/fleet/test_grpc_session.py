@@ -819,6 +819,53 @@ async def test_status_change_is_published_to_real_time_events(
     await call.done_writing()
 
 
+@pytest.mark.parametrize(
+    ("crash_reason", "expected"),
+    [
+        (pb.CRASH_REASON_UNSPECIFIED, ""),
+        (pb.CRASH_REASON_FORGE_INSTALL_FAILED, "forge_install_failed"),
+        (
+            pb.CRASH_REASON_FORGE_INSTALL_OUT_OF_MEMORY,
+            "forge_install_out_of_memory",
+        ),
+        (
+            pb.CRASH_REASON_FORGE_INSTALL_JAVA_INCOMPATIBLE,
+            "forge_install_java_incompatible",
+        ),
+    ],
+)
+async def test_crash_reason_is_published_beside_the_detail(
+    harness: _Harness, crash_reason: "pb.CrashReason.ValueType", expected: str
+) -> None:
+    """A crash the Worker classified reaches subscribers by name (issue #1093).
+
+    The reason rides the live status frame exactly as the detail does; an
+    unclassified crash publishes the empty string, never a missing key.
+    """
+    stub = await harness.start()
+    call = stub.Session(metadata=_auth(_CREDENTIAL))
+    await call.write(_register_message())
+    await call.read()  # ack
+
+    await call.write(
+        pb.WorkerMessage(
+            event=pb.Event(
+                server_id=_SERVER_ID,
+                status_change=pb.StatusChange(
+                    state=pb.SERVER_STATE_CRASHED,
+                    detail="boom",
+                    crash_reason=crash_reason,
+                ),
+            )
+        )
+    )
+    await _wait_for_published(harness, 1)
+
+    _, event = harness.real_time_events.published[0]
+    assert event.payload == {"state": "crashed", "detail": "boom", "reason": expected}
+    await call.done_writing()
+
+
 async def test_dropped_status_change_is_not_published() -> None:
     """A StatusChange whose sink write is rejected (applied=False) must NOT be
     relayed to real-time subscribers (issue #1957)."""

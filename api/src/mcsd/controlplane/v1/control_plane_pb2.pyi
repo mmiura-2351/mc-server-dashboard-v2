@@ -226,6 +226,60 @@ keeps the assignment/intent and retries on a later reconcile tick.
 """
 Global___CommandErrorCode: _TypeAlias = CommandErrorCode  # noqa: Y015
 
+class _CrashReason:
+    ValueType = _typing.NewType("ValueType", _builtins.int)
+    V: _TypeAlias = ValueType  # noqa: Y015
+
+class _CrashReasonEnumTypeWrapper(_enum_type_wrapper._EnumTypeWrapper[_CrashReason.ValueType], _builtins.type):
+    DESCRIPTOR: _descriptor.EnumDescriptor
+    CRASH_REASON_UNSPECIFIED: _CrashReason.ValueType  # 0
+    """Unspecified is every crash the Worker does not classify (a runtime crash of
+    the server process, or a crash reported by an older Worker).
+    """
+    CRASH_REASON_FORGE_INSTALL_FAILED: _CrashReason.ValueType  # 1
+    """The Forge install phase failed for a reason the Worker does not single out
+    (the installer kept exiting non-zero across the retries, or it produced
+    nothing launchable).
+    """
+    CRASH_REASON_FORGE_INSTALL_OUT_OF_MEMORY: _CrashReason.ValueType  # 2
+    """The Forge installer ran out of memory: the kernel OOM-killed the install
+    container at the server's memory limit, or the installer's JVM exhausted the
+    heap derived from that limit. Not retried — it recurs until the limit is
+    raised.
+    """
+    CRASH_REASON_FORGE_INSTALL_JAVA_INCOMPATIBLE: _CrashReason.ValueType  # 3
+    """The Forge installer cannot run on the Java runtime selected for the server's
+    Minecraft version (FR-EXE-5). Not retried — it recurs on the same runtime.
+    """
+
+class CrashReason(_CrashReason, metaclass=_CrashReasonEnumTypeWrapper):
+    """CrashReason classifies a SERVER_STATE_CRASHED transition (issue #1093). Every
+    value except UNSPECIFIED is a crash of the supervised Forge install phase —
+    the launch never started, and the installer's output is in
+    logs/forge-install.log in the working set.
+    """
+
+CRASH_REASON_UNSPECIFIED: CrashReason.ValueType  # 0
+"""Unspecified is every crash the Worker does not classify (a runtime crash of
+the server process, or a crash reported by an older Worker).
+"""
+CRASH_REASON_FORGE_INSTALL_FAILED: CrashReason.ValueType  # 1
+"""The Forge install phase failed for a reason the Worker does not single out
+(the installer kept exiting non-zero across the retries, or it produced
+nothing launchable).
+"""
+CRASH_REASON_FORGE_INSTALL_OUT_OF_MEMORY: CrashReason.ValueType  # 2
+"""The Forge installer ran out of memory: the kernel OOM-killed the install
+container at the server's memory limit, or the installer's JVM exhausted the
+heap derived from that limit. Not retried — it recurs until the limit is
+raised.
+"""
+CRASH_REASON_FORGE_INSTALL_JAVA_INCOMPATIBLE: CrashReason.ValueType  # 3
+"""The Forge installer cannot run on the Java runtime selected for the server's
+Minecraft version (FR-EXE-5). Not retried — it recurs on the same runtime.
+"""
+Global___CrashReason: _TypeAlias = CrashReason  # noqa: Y015
+
 class _ServerState:
     ValueType = _typing.NewType("ValueType", _builtins.int)
     V: _TypeAlias = ValueType  # noqa: Y015
@@ -1401,18 +1455,28 @@ class StatusChange(_message.Message):
 
     STATE_FIELD_NUMBER: _builtins.int
     DETAIL_FIELD_NUMBER: _builtins.int
+    CRASH_REASON_FIELD_NUMBER: _builtins.int
     state: Global___ServerState.ValueType
     detail: _builtins.str
     """detail optionally explains the transition (e.g. a crash reason)."""
+    crash_reason: Global___CrashReason.ValueType
+    """crash_reason classifies a crash the Worker can explain, so a client can show
+    a specific, localisable message and offer the matching diagnostics instead
+    of parsing the free-text detail (issue #1093). It is only meaningful when
+    state is SERVER_STATE_CRASHED; for every other state, and for a crash the
+    Worker cannot classify, it is UNSPECIFIED. The field is additive: an older
+    Worker that never sets it reports every crash as unclassified.
+    """
     def __init__(
         self,
         *,
         state: Global___ServerState.ValueType = ...,
         detail: _builtins.str = ...,
+        crash_reason: Global___CrashReason.ValueType = ...,
     ) -> None: ...
     _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["detail", b"detail", "state", b"state"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["crash_reason", b"crash_reason", "detail", b"detail", "state", b"state"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
     def WhichOneof(self, oneof_group: _Never) -> None: ...
 

@@ -331,6 +331,34 @@ describe("useServerEvents", () => {
     expect(state.statusDetail).toBe("exit 1");
   });
 
+  it("carries the crash reason with the detail, and drops both together", () => {
+    setup();
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        frame("status", {
+          state: "crashed",
+          detail: "exit 1",
+          reason: "forge_install_failed",
+        }),
+      );
+      MockWebSocket.last().message(frame("snapshot", { state: "crashed" }));
+    });
+    expect(state.statusReason).toBe("forge_install_failed");
+
+    act(() => {
+      MockWebSocket.last().message(frame("snapshot", { state: "starting" }));
+    });
+    expect(state.statusReason).toBe("");
+
+    act(() => {
+      MockWebSocket.last().message(
+        frame("status", { state: "crashed", detail: "exit 1" }),
+      );
+    });
+    expect(state.statusReason).toBe("");
+  });
+
   it("drops the status detail when a snapshot shows a different state", () => {
     setup();
     act(() => {

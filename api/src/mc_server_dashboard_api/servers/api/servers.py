@@ -1363,6 +1363,10 @@ _LIFECYCLE_CLASSIFICATION: dict[type[Exception], tuple[Outcome, str]] = {
     NoEligibleWorkerError: (Outcome.ERROR, "no_eligible_worker"),
     WorkerUnavailableError: (Outcome.ERROR, "worker_unavailable"),
     JarProvisioningError: (Outcome.ERROR, "jar_unavailable"),
+    # StartServer could not regenerate a player file a group change left stale
+    # (issue #3223). Raised before the desired-state flip, so nothing started; a
+    # storage failure is transient, and the retry makes the write again.
+    WorkingSetSeedFailedError: (Outcome.ERROR, "seed_failed"),
 }
 _LIFECYCLE_FAILURES = tuple(_LIFECYCLE_CLASSIFICATION)
 # The transient (ERROR) reasons render as 503; the refusals (DENIED) as 409.
@@ -1370,6 +1374,7 @@ _SERVICE_UNAVAILABLE_REASONS = {
     "no_eligible_worker",
     "worker_unavailable",
     "jar_unavailable",
+    "seed_failed",
 }
 
 

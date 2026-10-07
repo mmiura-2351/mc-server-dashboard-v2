@@ -170,11 +170,16 @@ type Container struct {
 
 // ContainerInfo is the subset of a container inspection the driver needs to
 // resolve a create name conflict (issue #226): the id to remove it, the labels
-// to confirm it is this Worker's, and whether it is running.
+// to confirm it is this Worker's, and whether it is running. OOMKilled is the
+// daemon's record that the kernel OOM-killed a process in the container, and
+// ExitCode the exit status of an exited one; the install supervisor reads both to
+// explain a failed Forge install (issue #1093).
 type ContainerInfo struct {
-	ID      string
-	Labels  map[string]string
-	Running bool
+	ID        string
+	Labels    map[string]string
+	Running   bool
+	OOMKilled bool
+	ExitCode  int64
 }
 
 // readProperties reads and parses the server.properties at path with the shared

@@ -561,26 +561,29 @@ services:
     build: ./relay
     image: mcsd-relay:dev
     restart: unless-stopped
-    # Covers the relay's own ~40 s shutdown bound (issue #2934, owner decision
-    # 2026-09-23): gameLn.Drain(drainTimeout) waits up to 30 s for in-flight
-    # handle goroutines, and only THEN does svcStop() release Reporter.Run into
-    # its separate DefaultShutdownTimeout (10 s) final flush — the two are
-    # sequential, so they add (relay/cmd/relay/main.go,
-    # relay/internal/session/reporter.go). The metrics server's own 5 s Shutdown
-    # runs concurrently and adds nothing. 45s is 40 s plus headroom.
+    # Covers the relay's own 30 s shutdown bound (issues #2934, #3169):
+    # gameLn.Drain(drainTimeout) waits up to 20 s for in-flight handlers to tear
+    # down, and only THEN does svcStop() release Reporter.Run into its separate
+    # DefaultShutdownTimeout (10 s) final flush — the two are sequential, so they
+    # add (relay/cmd/relay/main.go, relay/internal/session/reporter.go). The
+    # Bedrock listener's drain and the metrics server's 5 s Shutdown run
+    # concurrently with the game drain and add nothing. 35s is 30 s plus headroom.
     #
-    # WHAT IT BUYS is a session's REAL End. splice.Splice takes no context, so an
-    # established player session ends when its peer closes — which can happen at
-    # any point in the drain, not only in its first seconds — and the reporter's
-    # 5 s flush tick leaves an End produced after roughly T+5 s still buffered.
-    # Under the 10 s default that End died with the process and the row was healed
+    # WHAT IT BUYS is a session's REAL End. SIGTERM ends every established player
+    # session at once — the relay closes both ends of each splice — so the 20 s is
+    # not spent waiting for players to leave: it is the worst-case teardown of a
+    # handler that has NOT spliced (a stalled login, 15 s; derivation next to
+    # drainTimeout), and an ordinary stop finishes in well under a second plus one
+    # ReportSessions RPC. What must not be cut short is the order: every handler's
+    # End is buffered before the reporter's final flush carries it to the API.
+    # Under the 10 s default that could be killed mid-way, and the row was healed
     # approximately instead: the relay's next Register carries active_session_ids
     # and the API closes every open game_session row absent from it (close_absent
     # — "orphan healing after a relay crash", proto/mcsd/relay/v1/relay.proto,
     # RELAY.md Sections 6 and 10), stamping ended_at at REGISTRATION time rather
     # than at the true close. The heal stays the backstop for an actual crash;
     # this timer keeps an orderly stop from needing it.
-    stop_grace_period: 45s
+    stop_grace_period: 35s
     # Gated behind the `relay` compose profile so default bring-up is unchanged
     # (issue #960, epic #659). Add `relay` to COMPOSE_PROFILES in .env to enable
     # it, then configure the required relay keys in .env (see .env.example and
