@@ -471,7 +471,7 @@ func TestJarContainerCmdParity(t *testing.T) {
 	}
 	drainTo(t, inst.Events(), execution.StateRunning)
 
-	want := []string{"java", "-jar", "/data/server.jar", "nogui"}
+	want := []string{"java", "-Duser.home=/tmp", "-jar", "/data/server.jar", "nogui"}
 	got := docker.createSpecs[0].Cmd
 	if len(got) != len(want) {
 		t.Fatalf("Cmd = %v, want %v", got, want)

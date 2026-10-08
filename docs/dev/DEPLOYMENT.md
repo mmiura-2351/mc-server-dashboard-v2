@@ -1305,6 +1305,25 @@ container was replaced, so the existing stamp still describes what is running.
 > `RELAY_CONTROL_BIND_IP` and `MCD_RELAY_TUNNEL_PUBLIC_ENDPOINT` to an address
 > that worker can reach ([Section 8](#8-tls-guidance)).
 
+> **Caveat — Minecraft containers run unprivileged (issue #2600).** From this
+> revision the worker creates every Minecraft server container as an
+> unprivileged user (`driver.container.user`, `25565:25565` under the shipped
+> root worker — CONFIGURATION.md Section 6.3) and without `CAP_NET_RAW`
+> ([`../app/SECURITY.md`](../app/SECURITY.md) Section 6). **The compose
+> deployment needs no action**: before each container create the worker hands
+> the server's working set under `MCSD_SCRATCH_DIR` to that user, including the
+> root-owned files a server wrote before the upgrade, so working sets there
+> become owned by `25565:25565`. Servers running at the upgrade are stopped by
+> the worker restart, as in any worker update, and start hardened. What can
+> change for a server: a plugin or mod that needs root in the container or a raw
+> socket no longer has either, and the JVM's `user.home` is `/tmp`, not `/root`.
+>
+> **A worker run as an unprivileged host process** (not the compose service)
+> runs the containers as its own `uid:gid` and cannot take over files it does
+> not own. Working sets left in its scratch dir by a container that ran as root
+> fail the next start naming the first such file; give them back once, with
+> the worker stopped: `sudo chown -R "$(id -u):$(id -g)" <worker.scratch_dir>`.
+
 > **Caveat — PostgreSQL major upgrades; `db-data` mounts at
 > `/var/lib/postgresql`.** `compose.yaml` runs PostgreSQL 18, whose image keeps
 > `PGDATA` at `/var/lib/postgresql/<major>/docker` and declares its volume at

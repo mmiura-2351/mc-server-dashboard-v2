@@ -569,29 +569,74 @@ ports. Two cases:
 If you publish anything off loopback, firewall it at the host or accept that
 plugins can reach it.
 
+### Container hardening
+
+Independently of the topology, the worker creates every container that runs
+server-controlled code — the launch container and the supervised Forge install
+container — with two restrictions (issue #2600):
+
+- **No `CAP_NET_RAW`** (`CapDrop: ["NET_RAW"]`). The capability is gone from the
+  container's bounding set, so no process in it can open a raw or packet socket,
+  whatever uid it reaches. That removes ARP spoofing and sniffing on
+  `mcsd-servers`.
+- **An unprivileged user**, never root in the container: `driver.container.user`
+  ([`CONFIGURATION.md`](CONFIGURATION.md) Section 6.3), `25565:25565` under the
+  shipped root worker. The process holds no effective capabilities at all.
+
+The worker hands the bind-mounted working set to that user before each
+container create, and still reads, snapshots and deletes everything in it
+afterwards — as root in the shipped topology, or as the very same user when it
+runs unprivileged.
+
+Measured 2026-10-08 on a probe stack (its own compose project and networks),
+inside a booted Paper 1.21.4 container and a Forge 1.20.1 install and launch
+container:
+
+```text
+id -u: 25565
+CapEff: 0000000000000000
+CapBnd: 00000000a80405fb      # bit 13 (CAP_NET_RAW) clear; a80425fb before the change
+socket(AF_PACKET, SOCK_RAW)        operation not permitted
+socket(AF_INET, SOCK_RAW, ICMP)    operation not permitted
+```
+
+The two socket calls fail the same way from a `docker exec --user 0` into the
+same container: the bounding set denies them, not just the uid. From one of
+those containers a TCP connect to the other's RCON port still succeeds — the
+residual stated below.
+
 ### What this deliberately does not close
 
 Segmentation removes a class of lateral reach. It is not a complete container
 security model, and the following remain true:
 
 - **MC container to MC container.** Inter-container communication is on within
-  `mcsd-servers` and the containers keep `CAP_NET_RAW`, so one server's hostile
-  plugin can reach another server's RCON port and game port, and can spoof
-  traffic on that segment. Impact is bounded to other Minecraft servers rather
-  than the object store or the worker credential, but it is not zero. Closing it
-  needs a per-server network, or `enable_icc=false` on `mcsd-servers` plus
-  dropping `NET_RAW`; neither is implemented — both belong with the rest of the
-  container hardening (next item).
+  `mcsd-servers`, so one server's hostile plugin keeps plain TCP to another
+  server's RCON port and game port. What it has lost is the raw-socket
+  primitive: the worker creates every MC container without `CAP_NET_RAW` (see
+  "Container hardening" above), so it can no longer ARP-spoof or sniff that
+  segment to read another server's RCON password off the wire — it has to guess
+  it. Impact is bounded to other Minecraft servers rather than the object store
+  or the worker credential, but it is not zero. Closing it needs a per-server
+  network or `enable_icc=false` on `mcsd-servers`; neither is implemented.
 - **Outbound internet is unrestricted, on purpose.** `mcsd-servers` is a normal
   bridge, not `internal: true`: Minecraft servers need egress for Mojang
   online-mode authentication and for plugin and mod downloads. A hostile plugin
   can therefore still exfiltrate anything it can read inside its own container
   and fetch a second stage.
-- **The host, not the network.** MC containers run as root with the default
-  capability set, and the worker holds the Docker socket. Container-level
-  hardening — dropping capabilities, non-root execution, TLS on the control and
-  data planes — is defence in depth underneath this boundary, not part of it,
-  and is not implemented.
+- **The host, not the network.** The worker holds the Docker socket, and
+  container-level hardening is defence in depth underneath this boundary, not
+  part of it. Two items of it are in place (issue #2600, "Container hardening"
+  above): MC containers run as an unprivileged user and without `CAP_NET_RAW`.
+  The rest is not implemented — the other default capabilities stay in the
+  bounding set, and there is no `no-new-privileges`, read-only root filesystem,
+  custom seccomp profile or user namespace.
+  **TLS on the control and data planes is deferred** (owner decision on issue
+  #2600): with MC containers off `mcsd`, the remaining observers of those
+  plaintext planes are the first-party services and the host itself, and a
+  compromised host-level observer is outside this trust model. Revisit it if a
+  worker is ever deployed across an untrusted network
+  ([`../dev/DEPLOYMENT.md`](../dev/DEPLOYMENT.md) Section 8).
   Neither is a substitute for the other: hardening is a checklist where every
   item must land, segmentation removes the class in one topology choice.
 - **`mcsd` itself is not hardened; that is an accepted residual.** Everything

@@ -114,7 +114,30 @@ type ContainerConfig struct {
 	// network's container-name DNS resolves it). The game-port publication is
 	// unchanged either way.
 	Network string
+	// User is the uid:gid the driver runs each MC container as and hands the
+	// server's working set to (issue #2600). After Load it is always set and never
+	// root: an unset key resolves to defaultContainerUser for a Worker running as
+	// root, and to the Worker's own uid:gid otherwise (see resolveContainerUser).
+	User ContainerUser
 }
+
+// ContainerUser is a numeric uid:gid. The zero value means "unset": uid 0 is
+// never a valid setting.
+type ContainerUser struct {
+	UID int
+	GID int
+}
+
+func (u ContainerUser) String() string {
+	return fmt.Sprintf("%d:%d", u.UID, u.GID)
+}
+
+// defaultContainerUser is the uid:gid MC containers run as under a Worker that
+// runs as root (the shipped compose topology). It is a fixed id with no account
+// behind it on the host or in the Java images, and deliberately not the 10001 the
+// api and relay images run as: the working sets of untrusted server code must not
+// share an owner with the API's storage volume.
+var defaultContainerUser = ContainerUser{UID: 25565, GID: 25565}
 
 // LogConfig is the observability surface (CONFIGURATION.md Section 6.4).
 type LogConfig struct {
@@ -148,6 +171,7 @@ type fileConfig struct {
 			DockerHost *string `toml:"docker_host"`
 			GameBindIP *string `toml:"game_bind_ip"`
 			Network    *string `toml:"network"`
+			User       *string `toml:"user"`
 			// Images maps a Java major (string key, e.g. "21") to the base image
 			// ref. TOML table keys are strings; they are parsed to ints.
 			Images map[string]string `toml:"images"`
@@ -216,6 +240,12 @@ func Load(path string, getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 
+	user, err := resolveContainerUser(cfg.Driver.Container.User, os.Geteuid(), os.Getegid())
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.Driver.Container.User = user
+
 	// Resolve worker.id after validate so worker.scratch_dir is guaranteed set:
 	// an unset id is persisted under it (see resolveWorkerID).
 	if err := resolveWorkerID(&cfg); err != nil {
@@ -260,6 +290,13 @@ func applyFile(cfg *Config, path string) error {
 	setString(&cfg.Driver.Container.DockerHost, fc.Driver.Container.DockerHost)
 	setString(&cfg.Driver.Container.GameBindIP, fc.Driver.Container.GameBindIP)
 	setString(&cfg.Driver.Container.Network, fc.Driver.Container.Network)
+	if fc.Driver.Container.User != nil {
+		user, err := parseContainerUser(*fc.Driver.Container.User)
+		if err != nil {
+			return fmt.Errorf("config: driver.container.user: %w", err)
+		}
+		cfg.Driver.Container.User = user
+	}
 	if fc.Driver.Container.Images != nil {
 		images, err := parseMajorMap("driver.container.images", fc.Driver.Container.Images)
 		if err != nil {
@@ -314,6 +351,13 @@ func applyEnv(cfg *Config, getenv func(string) string) error {
 	setEnvString(&cfg.Driver.Container.DockerHost, getenv, "DRIVER_CONTAINER_DOCKER_HOST")
 	setEnvString(&cfg.Driver.Container.GameBindIP, getenv, "DRIVER_CONTAINER_GAME_BIND_IP")
 	setEnvString(&cfg.Driver.Container.Network, getenv, "DRIVER_CONTAINER_NETWORK")
+	if v := getenv(EnvPrefix + "DRIVER_CONTAINER_USER"); v != "" {
+		user, err := parseContainerUser(v)
+		if err != nil {
+			return fmt.Errorf("config: driver.container.user: %sDRIVER_CONTAINER_USER: %w", EnvPrefix, err)
+		}
+		cfg.Driver.Container.User = user
+	}
 
 	// DRIVER_CONTAINER_IMAGES is a comma-separated list of major=image pairs, e.g.
 	// "17=eclipse-temurin:17-jre,21=eclipse-temurin:21-jre".
@@ -362,6 +406,54 @@ func parseRuntimePairs(v string) (map[int]string, error) {
 		out[major] = strings.TrimSpace(path)
 	}
 	return out, nil
+}
+
+// parseContainerUser parses a driver.container.user value. It takes numeric ids
+// only — a name would be looked up in each Java image's own passwd file, and the
+// Worker hands the working set over by number — and refuses uid 0, which would
+// put the server back in the container as root.
+func parseContainerUser(v string) (ContainerUser, error) {
+	uidText, gidText, ok := strings.Cut(v, ":")
+	if !ok {
+		return ContainerUser{}, fmt.Errorf("%q is not in numeric uid:gid form", v)
+	}
+	uid, uidErr := strconv.ParseUint(uidText, 10, 31)
+	gid, gidErr := strconv.ParseUint(gidText, 10, 31)
+	if uidErr != nil || gidErr != nil {
+		return ContainerUser{}, fmt.Errorf("%q is not in numeric uid:gid form", v)
+	}
+	if uid == 0 {
+		return ContainerUser{}, fmt.Errorf("%q runs the server as root (uid 0); use an unprivileged uid", v)
+	}
+	return ContainerUser{UID: int(uid), GID: int(gid)}, nil
+}
+
+// resolveContainerUser settles the uid:gid MC containers run as, given the
+// configured value (zero when unset) and the Worker process's own effective ids.
+//
+// The server and the Worker both work on the bind-mounted working set, so the
+// answer depends on who the Worker is. Running as root — the shipped compose
+// topology, where it needs the Docker socket — it can read, snapshot and delete
+// whatever any uid wrote and can hand the tree to any uid, so the containers get
+// the configured user, defaultContainerUser when none is set. Running
+// unprivileged it can do neither, so the containers must run as the Worker's own
+// uid:gid; a configured user that says otherwise is an error rather than a
+// server that cannot write its world.
+func resolveContainerUser(configured ContainerUser, euid, egid int) (ContainerUser, error) {
+	unset := configured == ContainerUser{}
+	if euid == 0 {
+		if unset {
+			return defaultContainerUser, nil
+		}
+		return configured, nil
+	}
+	own := ContainerUser{UID: euid, GID: egid}
+	if !unset && configured != own {
+		return ContainerUser{}, fmt.Errorf(
+			"config: driver.container.user: %s differs from the worker's own %s, and only a worker running as root can run servers as another user (leave the key unset)",
+			configured, own)
+	}
+	return own, nil
 }
 
 // validate enforces the required keys with no default (CONFIGURATION.md Section

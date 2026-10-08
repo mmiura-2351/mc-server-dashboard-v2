@@ -89,6 +89,7 @@ func unixSocketPath(host string) (string, bool) {
 type createBody struct {
 	Image            string              `json:"Image"`
 	Cmd              []string            `json:"Cmd"`
+	User             string              `json:"User,omitempty"`
 	WorkingDir       string              `json:"WorkingDir"`
 	Labels           map[string]string   `json:"Labels,omitempty"`
 	ExposedPorts     map[string]struct{} `json:"ExposedPorts,omitempty"`
@@ -108,6 +109,9 @@ type hostConfig struct {
 	// translates it to memory.max on cgroup v2; the kernel OOM-kills the container
 	// when it exceeds this. Zero (omitted) leaves the container unconstrained.
 	Memory int64 `json:"Memory,omitempty"`
+	// CapDrop lists the capabilities removed from the container's default set
+	// (issue #2600).
+	CapDrop []string `json:"CapDrop,omitempty"`
 }
 
 type portBinding struct {
@@ -128,9 +132,10 @@ func (c *EngineClient) Create(ctx context.Context, spec CreateSpec) (string, err
 	body := createBody{
 		Image:      spec.Image,
 		Cmd:        spec.Cmd,
+		User:       spec.User,
 		WorkingDir: spec.WorkingDir,
 		Labels:     spec.Labels,
-		HostConfig: hostConfig{Binds: spec.Binds, CPUShares: spec.CPUShares, Memory: spec.MemoryLimitBytes},
+		HostConfig: hostConfig{Binds: spec.Binds, CPUShares: spec.CPUShares, Memory: spec.MemoryLimitBytes, CapDrop: spec.CapDrop},
 	}
 	if len(spec.Ports) > 0 {
 		body.ExposedPorts = map[string]struct{}{}

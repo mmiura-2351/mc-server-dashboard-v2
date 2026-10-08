@@ -21,13 +21,6 @@ for arg in "$@"; do
 		dir="libraries/net/minecraftforge/forge/0.0.0-stub"
 		mkdir -p "$dir"
 		printf 'stub forge args file\n' >"$dir/unix_args.txt"
-		# The container runs as root, so the artifact and its parent dirs land
-		# root-owned in the bind-mounted working set. The harness runs as a non-root
-		# user and its t.TempDir cleanup must be able to unlink them, which needs
-		# write on the parent dirs; make the created tree world-writable so the
-		# cleanup never fails on a permission-denied (it would otherwise fail the
-		# Go test).
-		chmod -R 0777 libraries
 		echo "stub forge installer: wrote $dir/unix_args.txt"
 		exit 0
 	fi
