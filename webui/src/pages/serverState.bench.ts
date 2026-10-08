@@ -2,10 +2,11 @@
  * Benchmark: server observed-state logic (issue #1122).
  *
  * Measures the state-presentation functions that run on every render of the
- * server detail page. To add a new state benchmark, add a bench() call.
+ * server detail page. To add a new state benchmark, add a test with an
+ * awaited bench().run().
  */
 
-import { bench, describe } from "vitest";
+import { describe, test } from "vitest";
 import {
   actionApplies,
   isTransitional,
@@ -14,22 +15,28 @@ import {
 } from "./serverState.ts";
 
 describe("serverState", () => {
-  bench("normalizeState", () => {
-    normalizeState("running");
-    normalizeState("bogus");
+  test("normalizeState", async ({ bench }) => {
+    await bench("normalizeState", () => {
+      normalizeState("running");
+      normalizeState("bogus");
+    }).run();
   });
 
-  bench("statePill", () => {
-    statePill("running");
-    statePill("starting");
-    statePill("crashed");
+  test("statePill", async ({ bench }) => {
+    await bench("statePill", () => {
+      statePill("running");
+      statePill("starting");
+      statePill("crashed");
+    }).run();
   });
 
-  bench("isTransitional + actionApplies", () => {
-    isTransitional("starting");
-    isTransitional("running");
-    actionApplies("start", "stopped");
-    actionApplies("stop", "running");
-    actionApplies("restart", "starting");
+  test("isTransitional + actionApplies", async ({ bench }) => {
+    await bench("isTransitional + actionApplies", () => {
+      isTransitional("starting");
+      isTransitional("running");
+      actionApplies("start", "stopped");
+      actionApplies("stop", "running");
+      actionApplies("restart", "starting");
+    }).run();
   });
 });
