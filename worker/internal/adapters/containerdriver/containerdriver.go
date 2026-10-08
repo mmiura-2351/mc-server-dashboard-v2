@@ -36,14 +36,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
@@ -184,7 +182,7 @@ type Options struct {
 	// as, and the owner it hands the working set to before each create (issue
 	// #2600). The Worker's wiring always sets them from driver.container.user, which
 	// never resolves to root. A zero RunAsUID (unset) uses the Worker process's own
-	// uid:gid.
+	// uid:gid, or DefaultRunAsUID:DefaultRunAsGID when the Worker is root.
 	RunAsUID int
 	RunAsGID int
 	// Logger records the lazy base-image pull (image name, duration) at INFO (issue
@@ -204,12 +202,12 @@ type Driver struct {
 	gameBindIP   string
 	network      string
 	scratchDir   string
-	// runAsUID and runAsGID are the uid:gid server containers run as, and lchown the
-	// call that hands a working-set entry to them (os.Lchown; a test seam, since
-	// only root can give a file away) (issue #2600).
+	// runAsUID and runAsGID are the uid:gid server containers run as, and chownAt
+	// the call that hands a working-set entry to them (chownAtNoFollow; a test
+	// seam, since only root can give a file away) (issue #2600).
 	runAsUID int
 	runAsGID int
-	lchown   func(path string, uid, gid int) error
+	chownAt  func(dirFd int, name string, uid, gid int) error
 	// conflictPoll and conflictDeadline bound the wait-for-name-free loop (#233).
 	conflictPoll     time.Duration
 	conflictDeadline time.Duration
@@ -259,10 +257,7 @@ func New(docker dockerAPI, images *ImageSelector, openControl controlFunc, opts 
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
-	runAsUID, runAsGID := opts.RunAsUID, opts.RunAsGID
-	if runAsUID == 0 {
-		runAsUID, runAsGID = os.Getuid(), os.Getgid()
-	}
+	runAsUID, runAsGID := resolveRunAs(opts.RunAsUID, opts.RunAsGID, os.Getuid(), os.Getgid())
 	return &Driver{
 		docker:           docker,
 		images:           images,
@@ -275,7 +270,7 @@ func New(docker dockerAPI, images *ImageSelector, openControl controlFunc, opts 
 		scratchDir:       opts.ScratchDir,
 		runAsUID:         runAsUID,
 		runAsGID:         runAsGID,
-		lchown:           os.Lchown,
+		chownAt:          chownAtNoFollow,
 		conflictPoll:     conflictPoll,
 		conflictDeadline: conflictDeadline,
 		readinessTimeout: readinessTimeout,
@@ -435,7 +430,7 @@ func (d *Driver) launchContainer(ctx context.Context, spec execution.InstanceSpe
 		CPUShares:        cpuShares(spec.CPUMillis),
 	}
 
-	id, err := d.createServerContainer(ctx, spec.WorkingDir, create)
+	id, err := d.createServerContainer(ctx, spec, create)
 	if err != nil {
 		return "", err
 	}
@@ -490,7 +485,7 @@ func (d *Driver) runInstallContainer(ctx context.Context, spec execution.Instanc
 	// loop self-heals the rare case where a prior install container under the same
 	// name has not finished tearing down yet. Do not "simplify" this to a bare
 	// docker.Create — that would lose the stale-install-container self-healing.
-	id, err := d.createServerContainer(ctx, spec.WorkingDir, create)
+	id, err := d.createServerContainer(ctx, spec, create)
 	if err != nil {
 		return "", err
 	}
@@ -500,6 +495,31 @@ func (d *Driver) runInstallContainer(ctx context.Context, spec execution.Instanc
 		return "", err
 	}
 	return id, nil
+}
+
+// DefaultRunAsUID and DefaultRunAsGID are the uid:gid server containers run as
+// under a Worker that runs as root (the shipped compose topology) when none is
+// configured. It is a fixed id with no account behind it on the host or in the
+// Java images, and deliberately not the 10001 the api and relay images run as:
+// the working sets of untrusted server code must not share an owner with the
+// API's storage volume.
+const (
+	DefaultRunAsUID = 25565
+	DefaultRunAsGID = 25565
+)
+
+// resolveRunAs settles the uid:gid the driver runs containers as. No container
+// it creates runs as root, whatever its caller left unset: an unset user (uid 0)
+// is the Worker's own (ownUID:ownGID), and the fixed unprivileged default when
+// the Worker itself is root.
+func resolveRunAs(uid, gid, ownUID, ownGID int) (int, int) {
+	if uid != 0 {
+		return uid, gid
+	}
+	if ownUID != 0 {
+		return ownUID, ownGID
+	}
+	return DefaultRunAsUID, DefaultRunAsGID
 }
 
 // droppedCapabilities are the capabilities removed from every container the
@@ -519,49 +539,23 @@ var droppedCapabilities = []string{"NET_RAW"}
 // working set gains Worker-owned entries in between: a hydrate or restore writes
 // the tree as the Worker's user, the install supervisor creates
 // logs/forge-install.log, and a working set from before this change holds
-// root-owned files from the days the server itself ran as root.
-func (d *Driver) createServerContainer(ctx context.Context, workingDir string, create CreateSpec) (string, error) {
-	if err := d.handOverWorkingSet(workingDir); err != nil {
-		return "", err
+// root-owned files from the days the server itself ran as root. The walk itself,
+// and the check that nothing is running against the tree, are in handover.go.
+func (d *Driver) createServerContainer(ctx context.Context, spec execution.InstanceSpec, create CreateSpec) (string, error) {
+	if err := d.awaitQuiescent(ctx, spec.ServerID); err != nil {
+		return "", fmt.Errorf("containerdriver: not handing over the working set: %w", err)
 	}
+	start := time.Now()
+	stats, err := d.handOverWorkingSet(ctx, spec.WorkingDir)
+	if err != nil {
+		return "", fmt.Errorf("containerdriver: hand working set to uid:gid %d:%d: %w", d.runAsUID, d.runAsGID, err)
+	}
+	d.logger.Info("working set handed to the run-as user",
+		"server_id", spec.ServerID, "container", create.Name,
+		"entries", stats.entries, "changed", stats.changed, "duration", time.Since(start))
 	create.User = fmt.Sprintf("%d:%d", d.runAsUID, d.runAsGID)
 	create.CapDrop = droppedCapabilities
 	return d.createContainer(ctx, create)
-}
-
-// handOverWorkingSet makes the run-as user the owner of every entry under
-// workingDir that it does not already own. It never follows a symlink (WalkDir
-// does not descend through one, and Lchown re-owns the link itself), so a link a
-// server planted in its working set cannot redirect the change outside it. No
-// server process is running against the tree while it walks: every caller is
-// about to create the container.
-//
-// Entries already owned are left untouched, so a Worker that runs as the run-as
-// user itself (a non-root host process) makes no chown call at all. Such a Worker
-// cannot give away a file it does not own; one it meets — left by a container
-// that ran as root before this change — fails the start with the path, rather
-// than booting a server that cannot save its world.
-//
-// An absent working dir has nothing to hand over; the Manager's working-set guard
-// refuses a start without one long before the driver is reached.
-func (d *Driver) handOverWorkingSet(workingDir string) error {
-	err := filepath.WalkDir(workingDir, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		info, err := entry.Info()
-		if err != nil {
-			return err
-		}
-		if st, ok := info.Sys().(*syscall.Stat_t); ok && int(st.Uid) == d.runAsUID && int(st.Gid) == d.runAsGID {
-			return nil
-		}
-		return d.lchown(path, d.runAsUID, d.runAsGID)
-	})
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("containerdriver: hand working set to uid:gid %d:%d: %w", d.runAsUID, d.runAsGID, err)
-	}
-	return nil
 }
 
 // classifyStartError wraps a create/start failure with a sanitized execution
@@ -926,7 +920,7 @@ type instance struct {
 	network     string
 	gameBindIP  string
 	labels      map[string]string
-	createFn    func(ctx context.Context, workingDir string, create CreateSpec) (string, error)
+	createFn    func(ctx context.Context, spec execution.InstanceSpec, create CreateSpec) (string, error)
 	openControl controlFunc
 	// rconHost is the host the graceful-stop RCON connection dials: empty for the
 	// host loopback, the container name when a user-defined network is configured.
@@ -1372,7 +1366,7 @@ func (i *instance) createLaunchContainer(launchArgs []string) (string, error) {
 		MemoryLimitBytes: memoryLimitBytes(i.spec.MemoryLimitMB),
 		CPUShares:        cpuShares(i.spec.CPUMillis),
 	}
-	return i.createFn(context.Background(), i.spec.WorkingDir, create)
+	return i.createFn(context.Background(), i.spec, create)
 }
 
 // installBackoffOrStopping sleeps for d in small increments, checking the
@@ -1423,7 +1417,7 @@ func (i *instance) createInstallRetryContainer() (string, error) {
 		MemoryLimitBytes: memoryLimitBytes(i.spec.MemoryLimitMB),
 		CPUShares:        cpuShares(i.spec.CPUMillis),
 	}
-	return i.createFn(context.Background(), i.spec.WorkingDir, create)
+	return i.createFn(context.Background(), i.spec, create)
 }
 
 // captureInstallOutput follows the install container's log stream and writes it to

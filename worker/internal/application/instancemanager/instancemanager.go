@@ -3377,6 +3377,12 @@ func atomicWriteAt(parentFd int, leaf string, data []byte) error {
 		_ = unix.Unlinkat(parentFd, tmpName, 0)
 	}()
 
+	// The replacement is the Worker's creation; give it the directory's owner
+	// before it is published, so a server running as another user can still read
+	// and rewrite its own file (issue #2600).
+	if err := inheritOwner(parentFd, fd); err != nil {
+		return fmt.Errorf("setting owner: %w", err)
+	}
 	if _, err := tmp.Write(data); err != nil {
 		return err
 	}

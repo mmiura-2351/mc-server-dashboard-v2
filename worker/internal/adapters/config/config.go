@@ -22,6 +22,8 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/containerdriver"
 )
 
 // EnvPrefix is the environment-variable prefix for every Worker key
@@ -133,11 +135,8 @@ func (u ContainerUser) String() string {
 }
 
 // defaultContainerUser is the uid:gid MC containers run as under a Worker that
-// runs as root (the shipped compose topology). It is a fixed id with no account
-// behind it on the host or in the Java images, and deliberately not the 10001 the
-// api and relay images run as: the working sets of untrusted server code must not
-// share an owner with the API's storage volume.
-var defaultContainerUser = ContainerUser{UID: 25565, GID: 25565}
+// runs as root; the driver owns the value and the reasoning.
+var defaultContainerUser = ContainerUser{UID: containerdriver.DefaultRunAsUID, GID: containerdriver.DefaultRunAsGID}
 
 // LogConfig is the observability surface (CONFIGURATION.md Section 6.4).
 type LogConfig struct {

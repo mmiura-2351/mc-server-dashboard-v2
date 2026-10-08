@@ -8,9 +8,12 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 )
@@ -24,33 +27,47 @@ var (
 	wantRunAs    = fmt.Sprintf("%d:%d", testRunAsUID, testRunAsGID)
 )
 
-// lchownRecorder stands in for os.Lchown, which only root may use to give a file
-// away. It records each call instead.
-type lchownRecorder struct {
-	mu    sync.Mutex
-	paths []string
-	err   error
+// chownRecorder stands in for chownAtNoFollow, which only root may use to give a
+// file away. It records the entry each call names — resolved from the directory
+// descriptor the call was made against, which is the point: that is where the
+// kernel would have applied it — and optionally runs a hook first.
+type chownRecorder struct {
+	mu     sync.Mutex
+	paths  []string
+	err    error
+	before func(path string)
 }
 
-func (r *lchownRecorder) lchown(path string, uid, gid int) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+func (r *chownRecorder) chownAt(dirFd int, name string, uid, gid int) error {
 	if uid != testRunAsUID || gid != testRunAsGID {
-		return errors.New("lchown called with an identity other than the run-as user")
+		return errors.New("chown called with an identity other than the run-as user")
 	}
+	dir, err := os.Readlink(fmt.Sprintf("/proc/self/fd/%d", dirFd))
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(dir, name)
+	r.mu.Lock()
 	r.paths = append(r.paths, path)
-	return r.err
+	hook, result := r.before, r.err
+	r.mu.Unlock()
+	if hook != nil {
+		hook(path)
+	}
+	return result
 }
 
-func (r *lchownRecorder) seen() []string {
+func (r *chownRecorder) seen() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return slices.Clone(r.paths)
+	out := slices.Clone(r.paths)
+	slices.Sort(out)
+	return out
 }
 
 // hardenedDriver builds a driver that runs its containers as the test run-as
 // user and records the hand-over instead of performing it.
-func hardenedDriver(docker dockerAPI) (*Driver, *lchownRecorder) {
+func hardenedDriver(docker dockerAPI) (*Driver, *chownRecorder) {
 	d := New(docker, images(), func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
 		return nil, errors.New("no rcon")
 	}, Options{
@@ -62,9 +79,45 @@ func hardenedDriver(docker dockerAPI) (*Driver, *lchownRecorder) {
 		RunAsUID:             testRunAsUID,
 		RunAsGID:             testRunAsGID,
 	})
-	rec := &lchownRecorder{}
-	d.lchown = rec.lchown
+	rec := &chownRecorder{}
+	d.chownAt = rec.chownAt
 	return d, rec
+}
+
+// specIn is the default spec with its working set at dir.
+func specIn(dir string) execution.InstanceSpec {
+	s := spec()
+	s.WorkingDir = dir
+	return s
+}
+
+// workingSet builds a small working set — a nested world file and a symlink
+// pointing at a file outside the tree — and returns its root and that outside
+// file.
+func workingSet(t *testing.T) (dir, outside string) {
+	t.Helper()
+	// Resolve symlinks so recorded paths (read back from /proc) compare equal.
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	outsideDir := filepath.Join(base, "outside")
+	dir = filepath.Join(base, "s1")
+	for _, p := range []string{outsideDir, filepath.Join(dir, "world", "region")} {
+		if err := os.MkdirAll(p, 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	outside = filepath.Join(outsideDir, "secret")
+	for _, p := range []string{outside, filepath.Join(dir, "world", "region", "r.0.0.mca")} {
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "link")); err != nil {
+		t.Fatal(err)
+	}
+	return dir, outside
 }
 
 func assertHardened(t *testing.T, got CreateSpec) {
@@ -94,9 +147,35 @@ func TestLaunchContainerRunsNonRootWithoutNetRaw(t *testing.T) {
 	assertHardened(t, docker.createSpec)
 }
 
-// With no run-as user configured the driver falls back to the Worker process's
-// own uid:gid, never to the image's default user (issue #2600).
-func TestRunAsDefaultsToTheWorkersOwnUser(t *testing.T) {
+// The driver never resolves its run-as user to root, whatever its caller left
+// unset: a configured user wins, an unset one is the Worker's own, and a root
+// Worker gets the fixed unprivileged default (issue #2600).
+func TestResolveRunAsNeverYieldsRoot(t *testing.T) {
+	tests := []struct {
+		name                string
+		uid, gid, own, ownG int
+		wantUID, wantGID    int
+	}{
+		{name: "configured", uid: 2000, gid: 3000, own: 0, ownG: 0, wantUID: 2000, wantGID: 3000},
+		{name: "unset, unprivileged worker", own: 1000, ownG: 988, wantUID: 1000, wantGID: 988},
+		{name: "unset, root worker", own: 0, ownG: 0, wantUID: DefaultRunAsUID, wantGID: DefaultRunAsGID},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			uid, gid := resolveRunAs(tc.uid, tc.gid, tc.own, tc.ownG)
+			if uid != tc.wantUID || gid != tc.wantGID {
+				t.Fatalf("resolveRunAs = %d:%d, want %d:%d", uid, gid, tc.wantUID, tc.wantGID)
+			}
+			if uid == 0 {
+				t.Fatal("resolveRunAs yielded root")
+			}
+		})
+	}
+}
+
+// A driver built with no run-as user still sets a non-root User on the container
+// rather than leaving the image's default (issue #2600).
+func TestRunAsUnsetStillRunsNonRoot(t *testing.T) {
 	docker := newFakeDocker()
 	d := newTestDriver(docker, nil, errors.New("no rcon"))
 
@@ -104,9 +183,9 @@ func TestRunAsDefaultsToTheWorkersOwnUser(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	want := fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())
-	if got := docker.createSpec.User; got != want {
-		t.Fatalf("User = %q, want the Worker's own %q", got, want)
+	uid, gid := resolveRunAs(0, 0, os.Getuid(), os.Getgid())
+	if got, want := docker.createSpec.User, fmt.Sprintf("%d:%d", uid, gid); got != want || uid == 0 {
+		t.Fatalf("User = %q, want the non-root %q", got, want)
 	}
 }
 
@@ -159,29 +238,13 @@ func TestForgeInstallRetryAndLaunchContainersAreHardened(t *testing.T) {
 // which writes the tree as the Worker's own user. A symlink is re-owned itself and
 // never followed (issue #2600).
 func TestStartHandsWorkingSetToRunAsUserBeforeCreate(t *testing.T) {
-	outside := filepath.Join(t.TempDir(), "outside.txt")
-	if err := os.WriteFile(outside, []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, "world", "region"), 0o750); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "world", "region", "r.0.0.mca"), []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(outside, filepath.Join(dir, "link")); err != nil {
-		t.Fatal(err)
-	}
-
+	dir, outside := workingSet(t)
 	docker := newForgeFakeDocker()
 	d, rec := hardenedDriver(docker)
 	var seenAtCreate []string
 	docker.onCreateHook = func(CreateSpec) { seenAtCreate = rec.seen() }
 
-	s := spec()
-	s.WorkingDir = dir
-	if _, err := d.Start(context.Background(), s); err != nil {
+	if _, err := d.Start(context.Background(), specIn(dir)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -195,44 +258,40 @@ func TestStartHandsWorkingSetToRunAsUserBeforeCreate(t *testing.T) {
 	if !reflect.DeepEqual(seenAtCreate, want) {
 		t.Fatalf("handed over before create = %v, want %v", seenAtCreate, want)
 	}
+	if slices.Contains(seenAtCreate, outside) {
+		t.Fatalf("the symlink's target %s was re-owned", outside)
+	}
 }
 
 // Entries the run-as user already owns are left alone: a Worker that runs as the
-// run-as user itself (a non-root host process) makes no chown call (issue #2600).
+// run-as user itself (an unprivileged host process) makes no chown call (issue
+// #2600).
 func TestStartLeavesAnAlreadyOwnedWorkingSetAlone(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "server.jar"), []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	dir, _ := workingSet(t)
 	docker := newFakeDocker()
-	d := newTestDriver(docker, nil, errors.New("no rcon"))
-	rec := &lchownRecorder{}
-	d.lchown = rec.lchown
+	d, rec := hardenedDriver(docker)
+	d.runAsUID, d.runAsGID = os.Getuid(), os.Getgid()
 
-	s := spec()
-	s.WorkingDir = dir
-	if _, err := d.Start(context.Background(), s); err != nil {
+	if _, err := d.Start(context.Background(), specIn(dir)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
 	if got := rec.seen(); len(got) != 0 {
-		t.Fatalf("lchown called for %v, want no call for an already-owned working set", got)
+		t.Fatalf("chown called for %v, want no call for an already-owned working set", got)
 	}
 }
 
 // A working set that cannot be handed over fails the start before any container
 // is created: a server that cannot write its world must not boot (issue #2600).
 func TestStartFailsWhenWorkingSetCannotBeHandedOver(t *testing.T) {
-	dir := t.TempDir()
+	dir, _ := workingSet(t)
 	docker := newFakeDocker()
 	d, rec := hardenedDriver(docker)
-	rec.err = os.ErrPermission
+	rec.err = unix.EPERM
 
-	s := spec()
-	s.WorkingDir = dir
-	_, err := d.Start(context.Background(), s)
+	_, err := d.Start(context.Background(), specIn(dir))
 
-	if !errors.Is(err, os.ErrPermission) {
+	if !errors.Is(err, unix.EPERM) {
 		t.Fatalf("Start error = %v, want the hand-over's permission error", err)
 	}
 	if docker.createCalls != 0 {
@@ -245,7 +304,10 @@ func TestStartFailsWhenWorkingSetCannotBeHandedOver(t *testing.T) {
 // writes, as its own user — reach the run-as user before the server starts
 // (issue #2600).
 func TestForgeLaunchHandsOverEntriesCreatedDuringInstall(t *testing.T) {
-	dir := t.TempDir()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	docker := newForgeFakeDocker()
 	d, rec := hardenedDriver(docker)
 
@@ -263,4 +325,235 @@ func TestForgeLaunchHandsOverEntriesCreatedDuringInstall(t *testing.T) {
 
 	docker.exit("mcsd-s1", 0, nil)
 	drainClosed(inst.Events())
+}
+
+// A container of the server that is, or may be, alive holds the working set: the
+// start is refused with no ownership change and no create. That covers an orphan
+// the startup sweep failed to stop, which the Manager has no record of, and every
+// state the driver cannot vouch for (issue #2600).
+func TestStartRefusesHandOverWhileAContainerOfTheServerMayBeAlive(t *testing.T) {
+	for _, state := range []string{"running", "paused", "restarting", "something-new", ""} {
+		t.Run("state "+state, func(t *testing.T) {
+			dir, _ := workingSet(t)
+			docker := newFakeDocker()
+			docker.listResult = []Container{
+				{ID: "old-install", Name: "/mcsd-s1-install", State: "exited"},
+				{ID: "orphan", Name: "/mcsd-s1", State: state},
+			}
+			d, rec := hardenedDriver(docker)
+
+			_, err := d.Start(context.Background(), specIn(dir))
+
+			if err == nil || !strings.Contains(err.Error(), "/mcsd-s1") {
+				t.Fatalf("Start error = %v, want a refusal naming the live container", err)
+			}
+			if got := rec.seen(); len(got) != 0 {
+				t.Fatalf("ownership changed for %v, want none while a container may be alive", got)
+			}
+			if docker.createCalls != 0 {
+				t.Fatalf("createCalls = %d, want no container created", docker.createCalls)
+			}
+		})
+	}
+}
+
+// When the daemon cannot say which containers exist, liveness is unknown and the
+// start is refused the same way (issue #2600).
+func TestStartRefusesHandOverWhenLivenessIsUnknown(t *testing.T) {
+	dir, _ := workingSet(t)
+	docker := newFakeDocker()
+	docker.listErr = errors.New("containerdriver: GET /containers/json: connection refused")
+	d, rec := hardenedDriver(docker)
+
+	_, err := d.Start(context.Background(), specIn(dir))
+
+	if !errors.Is(err, docker.listErr) {
+		t.Fatalf("Start error = %v, want the list failure", err)
+	}
+	if got := rec.seen(); len(got) != 0 || docker.createCalls != 0 {
+		t.Fatalf("chowned %v, createCalls %d; want neither", got, docker.createCalls)
+	}
+}
+
+// listScript is a dockerAPI whose List answers follow a script (the last answer
+// repeats), over an otherwise ordinary fake.
+type listScript struct {
+	*fakeDocker
+	mu      sync.Mutex
+	answers [][]Container
+}
+
+func (l *listScript) List(context.Context, string, string) ([]Container, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	answer := l.answers[0]
+	if len(l.answers) > 1 {
+		l.answers = l.answers[1:]
+	}
+	return answer, nil
+}
+
+// A container whose removal is in flight — the previous container of a restart,
+// being reaped by the exit-watcher — is waited out, then the start proceeds; one
+// that never goes away is refused (issue #2600).
+func TestStartWaitsOutAContainerBeingRemoved(t *testing.T) {
+	removing := []Container{{ID: "old", Name: "/mcsd-s1", State: "removing"}}
+
+	t.Run("removal completes", func(t *testing.T) {
+		dir, _ := workingSet(t)
+		docker := &listScript{fakeDocker: newFakeDocker(), answers: [][]Container{removing, removing, nil}}
+		d, rec := hardenedDriver(docker)
+
+		if _, err := d.Start(context.Background(), specIn(dir)); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		if len(rec.seen()) == 0 || docker.createCalls != 1 {
+			t.Fatalf("chowned %v, createCalls %d; want the hand-over and one create", rec.seen(), docker.createCalls)
+		}
+	})
+
+	t.Run("removal never completes", func(t *testing.T) {
+		dir, _ := workingSet(t)
+		docker := &listScript{fakeDocker: newFakeDocker(), answers: [][]Container{removing}}
+		d, rec := hardenedDriver(docker)
+
+		_, err := d.Start(context.Background(), specIn(dir))
+
+		if err == nil || !strings.Contains(err.Error(), "still being removed") {
+			t.Fatalf("Start error = %v, want a refusal for the container still being removed", err)
+		}
+		if got := rec.seen(); len(got) != 0 || docker.createCalls != 0 {
+			t.Fatalf("chowned %v, createCalls %d; want neither", got, docker.createCalls)
+		}
+	})
+}
+
+// A directory swapped for a symlink in the middle of the walk cannot lead it out
+// of the working set: the walk descends by descriptor and refuses the link. The
+// swap happens at the worst moment — right after the directory itself was
+// re-owned, before the walk enters it (issue #2600).
+func TestHandOverCannotBeRedirectedBySwappingADirectoryForASymlink(t *testing.T) {
+	dir, outside := workingSet(t)
+	world := filepath.Join(dir, "world")
+	d, rec := hardenedDriver(newFakeDocker())
+	rec.before = func(path string) {
+		if path != world {
+			return
+		}
+		if err := os.Rename(world, world+".real"); err != nil {
+			t.Error(err)
+		}
+		if err := os.Symlink(filepath.Dir(outside), world); err != nil {
+			t.Error(err)
+		}
+	}
+
+	_, err := d.handOverWorkingSet(context.Background(), dir)
+
+	if err == nil {
+		t.Fatal("hand-over succeeded across a swapped directory, want an error")
+	}
+	for _, p := range rec.seen() {
+		if !strings.HasPrefix(p, dir+string(os.PathSeparator)) && p != dir {
+			t.Fatalf("re-owned %s, outside the working set %s", p, dir)
+		}
+	}
+}
+
+// Once the walk is inside a directory, moving that directory aside and putting a
+// symlink in its place changes nothing: its entries are still re-owned where they
+// are, relative to the open descriptor, and nothing behind the link is touched
+// (issue #2600).
+func TestHandOverStaysInAnOpenedDirectoryThatIsSwappedBehindIt(t *testing.T) {
+	dir, outside := workingSet(t)
+	world := filepath.Join(dir, "world")
+	d, rec := hardenedDriver(newFakeDocker())
+	rec.before = func(path string) {
+		if path != filepath.Join(world, "region") {
+			return
+		}
+		if err := os.Rename(world, world+".real"); err != nil {
+			t.Error(err)
+		}
+		if err := os.Symlink(filepath.Dir(outside), world); err != nil {
+			t.Error(err)
+		}
+	}
+
+	if _, err := d.handOverWorkingSet(context.Background(), dir); err != nil {
+		t.Fatalf("hand-over: %v", err)
+	}
+
+	seen := rec.seen()
+	if !slices.Contains(seen, filepath.Join(world+".real", "region", "r.0.0.mca")) {
+		t.Fatalf("re-owned %v, want the moved directory's own file among them", seen)
+	}
+	if slices.Contains(seen, outside) || slices.Contains(seen, filepath.Dir(outside)) {
+		t.Fatalf("re-owned %v, which reaches behind the planted symlink", seen)
+	}
+}
+
+// Only a working dir that is absent from the start is tolerated. An entry that
+// vanishes once the walk has begun leaves the tree partly handed over, and that
+// is reported, not swallowed (issue #2600).
+func TestHandOverReportsAnIncompleteWalk(t *testing.T) {
+	t.Run("absent working dir", func(t *testing.T) {
+		d, _ := hardenedDriver(newFakeDocker())
+		stats, err := d.handOverWorkingSet(context.Background(), filepath.Join(t.TempDir(), "absent"))
+		if err != nil || stats.entries != 0 {
+			t.Fatalf("hand-over = %+v, %v; want nothing done and no error", stats, err)
+		}
+	})
+
+	t.Run("entry vanishes mid-walk", func(t *testing.T) {
+		dir, _ := workingSet(t)
+		d, rec := hardenedDriver(newFakeDocker())
+		// The root's two entries are listed before either is visited; while the
+		// first is being re-owned, the other one disappears.
+		rec.before = func(path string) {
+			switch path {
+			case filepath.Join(dir, "link"):
+				_ = os.RemoveAll(filepath.Join(dir, "world"))
+			case filepath.Join(dir, "world"):
+				_ = os.Remove(filepath.Join(dir, "link"))
+			}
+		}
+
+		_, err := d.handOverWorkingSet(context.Background(), dir)
+
+		if !errors.Is(err, unix.ENOENT) {
+			t.Fatalf("hand-over error = %v, want the vanished entry reported", err)
+		}
+	})
+}
+
+// The walk stops when the start is cancelled (issue #2600).
+func TestHandOverStopsWhenCancelled(t *testing.T) {
+	dir, _ := workingSet(t)
+	d, rec := hardenedDriver(newFakeDocker())
+	ctx, cancel := context.WithCancel(context.Background())
+	rec.before = func(string) { cancel() } // cancelled while the root is being re-owned
+
+	_, err := d.handOverWorkingSet(ctx, dir)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("hand-over error = %v, want context.Canceled", err)
+	}
+	if got := rec.seen(); !reflect.DeepEqual(got, []string{dir}) {
+		t.Fatalf("re-owned %v, want the walk to stop after the root", got)
+	}
+}
+
+// The hand-over reports how much it visited and changed, which the driver logs
+// with its duration (issue #2600).
+func TestHandOverCountsEntries(t *testing.T) {
+	dir, _ := workingSet(t)
+	d, _ := hardenedDriver(newFakeDocker())
+
+	stats, err := d.handOverWorkingSet(context.Background(), dir)
+
+	// root, link, world, world/region, world/region/r.0.0.mca
+	if err != nil || stats.entries != 5 || stats.changed != 5 {
+		t.Fatalf("hand-over = %+v, %v; want 5 entries, 5 changed", stats, err)
+	}
 }

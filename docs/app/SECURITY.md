@@ -586,7 +586,14 @@ container — with two restrictions (issue #2600):
 The worker hands the bind-mounted working set to that user before each
 container create, and still reads, snapshots and deletes everything in it
 afterwards — as root in the shipped topology, or as the very same user when it
-runs unprivileged.
+runs unprivileged. Because that hand-over is root re-owning a tree hostile code
+wrote, it is done only once no container of that server — launch or install —
+is alive (a live or unaccounted-for one refuses the start, with no ownership
+change), and it walks the tree by directory descriptor without following
+links, so a directory swapped for a symlink cannot lead it outside the working
+set. A file the worker writes into a running server's working set (a file edit
+through the API, and any parent directory it has to create) is given its
+directory's owner on the open descriptor, so the server keeps access to it.
 
 Measured 2026-10-08 on a probe stack (its own compose project and networks),
 inside a booted Paper 1.21.4 container and a Forge 1.20.1 install and launch
