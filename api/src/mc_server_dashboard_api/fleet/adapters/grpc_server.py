@@ -18,9 +18,11 @@ CONTROL_PLANE.md Section 4:
    ``Event{StatusChange}`` reconciles the server's observed state through the
    :class:`ServerStateSink` (FR-SRV-4); ``CommandResult`` resolves the pending
    correlation so a dispatched command's awaiter unblocks (CONTROL_PLANE.md
-   Sections 3, 5). ``StatusChange`` / ``LogLine`` / ``Metrics`` are relayed to
-   subscribed clients through the :class:`RealTimeEvents` Port (FR-MON-1..3); the
-   publish is non-blocking, so a slow subscriber never back-pressures the stream.
+   Sections 3, 5). ``LogLine`` / ``Metrics`` are relayed to subscribed clients
+   through the :class:`RealTimeEvents` Port (FR-MON-2..3); the publish is
+   non-blocking, so a slow subscriber never back-pressures the stream. An
+   applied ``StatusChange`` is relayed on the same bus by the sink, after its
+   commit (FR-MON-1).
    The API may also push ``ApiCommand`` messages on this stream: they ride the
    Worker's outbound queue, drained by the ``Session`` generator.
 4. **Disconnect.** When the stream ends (clean close or transport error) the
@@ -661,27 +663,17 @@ class WorkerSessionServicer(WorkerServiceServicer):
         state = _STATE_BY_PROTO.get(event.status_change.state)
         if state is None or not event.server_id:
             return
-        applied = await self._state_sink.record_observed_state(
-            server_id=event.server_id, worker_id=worker_id.value, state=state
-        )
-        if not applied:
-            return
-        # Relay the observed transition to subscribed clients (FR-MON-1). The
-        # publish is synchronous and best-effort: it never awaits subscriber
-        # consumption, so a slow client cannot back-pressure this session path.
-        self._real_time_events.publish(
+        # The sink also relays the applied transition to subscribed clients
+        # (FR-MON-1), right after its commit: every observed-state write
+        # publishes through that one seam (issue #3212), so the live frame's
+        # detail, crash reason and event time are handed over with the state.
+        await self._state_sink.record_observed_state(
             server_id=event.server_id,
-            event=RealTimeEvent(
-                stream=EventStream.STATUS,
-                payload={
-                    "state": state,
-                    "detail": event.status_change.detail,
-                    "reason": _CRASH_REASON_BY_PROTO.get(
-                        event.status_change.crash_reason, ""
-                    ),
-                },
-                emitted_at=emitted_at,
-            ),
+            worker_id=worker_id.value,
+            state=state,
+            detail=event.status_change.detail,
+            reason=_CRASH_REASON_BY_PROTO.get(event.status_change.crash_reason, ""),
+            emitted_at=emitted_at,
         )
 
     def _relay_log(self, event: pb.Event, emitted_at: dt.datetime | None) -> None:

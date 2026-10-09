@@ -1780,7 +1780,7 @@ def get_start_server(
 
     session_factory = create_session_factory(get_engine(request))
     return StartServer(
-        uow=ServersUnitOfWork(session_factory),
+        uow=ServersUnitOfWork(session_factory, request.app.state.real_time_events),
         control_plane=control_plane,
         clock=ServersSystemClock(),
         jar_provisioner=CatalogJarProvisioner(ensure_jar=ensure_jar),
@@ -1804,7 +1804,7 @@ def get_stop_server(
 
     session_factory = create_session_factory(get_engine(request))
     return StopServer(
-        uow=ServersUnitOfWork(session_factory),
+        uow=ServersUnitOfWork(session_factory, request.app.state.real_time_events),
         control_plane=control_plane,
         clock=ServersSystemClock(),
         bedrock_tunnel_sync=get_bedrock_tunnel_sync(request),

@@ -208,26 +208,26 @@ the client's list (or absent from the snapshot) means the set changed. A
 server deleted before its per-server snapshot can be read closes the socket
 with 4404.
 
+Every change of a server's observed state publishes a `status` frame, after
+the write that made it commits: a Worker-reported transition, and equally the
+states the API records on its own — `unknown` for each server of a Worker whose
+session drops and for each in-flight server at API startup, and the state a
+lifecycle operation converges from a command's outcome (CONTROL_PLANE.md
+Section 6). Those API-originated frames have an empty `detail` and `reason`. A
+write that leaves the state as it was publishes nothing.
+
 Ordering: the subscription is registered before the snapshot is read, so every
 status transition published from then on reaches the subscriber's buffer.
 Right before each snapshot read, the status frames still buffered are
 discarded: each was published, hence committed, before the read, so the
-snapshot already shows it or a newer state. Delivering one after the snapshot
-could only roll the client back, and not every persisted change publishes a
-correcting frame (a worker disconnect commits `unknown` silently). A status
-frame published after the discard is delivered after the snapshot, in order;
-one that raced the read may repeat what the snapshot showed, which is harmless
-because status frames are idempotent sets.
-
-Residual (until #3212): this argument holds only for writes that publish a
-status frame after they commit. A write that commits without publishing —
-today the worker-disconnect `unknown` write and the `lifecycle.py`
-observed-state writes — can be overridden by a status frame published before
-it: if that frame reaches the buffer while the snapshot read is in flight and
-the silent write commits before the read, the snapshot shows the silent write
-and the older frame is delivered after it. Without a later frame or snapshot,
-the client keeps the older state. #3212 makes every observed-state write
-publish, which closes this.
+snapshot already shows it or a newer state, and delivering one after the
+snapshot could only roll the client back. A status frame published after the
+discard is delivered after the snapshot, in order; one that raced the read may
+repeat what the snapshot showed, which is harmless because status frames are
+idempotent sets. It may also be older than the snapshot — published while the
+read was in flight, then overtaken by a write the read saw — but that newer
+write publishes its own frame after it, so the client still ends on the newer
+state.
 
 Auth: browsers pass the access token via `Sec-WebSocket-Protocol` as two
 subprotocols `["access_token", "<jwt>"]`; the server echoes `access_token` as

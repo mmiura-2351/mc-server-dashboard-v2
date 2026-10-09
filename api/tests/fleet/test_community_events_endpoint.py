@@ -469,10 +469,11 @@ def test_gap_is_followed_by_a_fresh_snapshot() -> None:
 def test_buffered_status_older_than_the_post_gap_snapshot_is_discarded() -> None:
     """A retained status frame must not undo the snapshot that superseded it.
 
-    ``running`` is published and still buffered when the worker disconnects:
-    that write commits ``unknown`` without publishing anything. The overflow's
-    post-gap snapshot reads ``unknown``; delivering the older buffered
-    ``running`` after it would leave the client on ``running`` indefinitely.
+    ``running`` is published and still buffered when a later write persists
+    ``unknown``. The overflow's post-gap snapshot reads ``unknown``; delivering
+    the older buffered ``running`` after it would roll the client back to a
+    state the snapshot had already superseded. The later write's own frame is
+    left out so that the discard alone decides the outcome.
     """
 
     bus = InProcessRealTimeEvents(max_queue=2)
@@ -491,7 +492,7 @@ def test_buffered_status_older_than_the_post_gap_snapshot_is_discarded() -> None
                     stream=EventStream.STATUS, payload={"state": "running"}
                 ),
             )
-        # The worker-disconnect write: persisted, never published.
+        # The later write, as the snapshot read will see it.
         servers.servers = [
             _FakeServer(id=ServerId(server), observed_state=ObservedState.UNKNOWN)
         ]

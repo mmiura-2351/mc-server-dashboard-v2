@@ -11,10 +11,15 @@ from __future__ import annotations
 import datetime as dt
 from typing import Any, cast
 
-from sqlalchemy import CursorResult, and_, delete, or_, select, update
+from sqlalchemy import ColumnElement, CursorResult, and_, delete, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from mc_server_dashboard_api.fleet.domain.real_time_events import (
+    EventStream,
+    RealTimeEvent,
+    RealTimeEvents,
+)
 from mc_server_dashboard_api.servers.adapters.integrity import (
     translate_integrity_error,
 )
@@ -59,11 +64,36 @@ def _to_server(row: ServerModel) -> Server:
     )
 
 
+def publish_status_events(
+    repository: SqlAlchemyServerRepository, real_time_events: RealTimeEvents | None
+) -> None:
+    """Publish the status events of ``repository``'s committed observed-state writes.
+
+    Called right after the commit of the session ``repository`` writes through,
+    by every owner of such a commit: the unit of work and the control-plane
+    state sink. That is the publish-after-commit ordering the events relay's
+    snapshot argument rests on (WEBUI_SPEC.md Section 2.6) — a status event
+    still buffered when a snapshot is read was committed before the read.
+    ``publish`` neither blocks nor awaits a subscriber, so no transaction and
+    no caller is held up by it. With no bus wired (``None``) the events are
+    dropped.
+    """
+
+    for server_id, event in repository.take_staged_status_events():
+        if real_time_events is not None:
+            real_time_events.publish(server_id=server_id, event=event)
+
+
 class SqlAlchemyServerRepository(ServerRepository):
     """:class:`ServerRepository` adapter over an ``AsyncSession``."""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+        # The status events of the observed-state writes this repository has
+        # executed and its session has not committed yet, as (server id, event).
+        # Whoever commits the session hands them to :func:`publish_status_events`
+        # afterwards; a rollback hands them to nobody (issue #3212).
+        self._staged_status_events: list[tuple[str, RealTimeEvent]] = []
 
     async def add(self, server: Server) -> None:
         self._session.add(
@@ -232,11 +262,11 @@ class SqlAlchemyServerRepository(ServerRepository):
         *,
         unassign: bool = False,
         expected_worker: WorkerId | None = None,
+        detail: str = "",
+        reason: str = "",
+        emitted_at: dt.datetime | None = None,
     ) -> bool:
-        values: dict[str, Any] = {
-            "observed_state": observed_state.value,
-            "observed_at": observed_at,
-        }
+        values: dict[str, Any] = {}
         # On a CONFIRMED stop, clear the assignment in the same write so a later
         # start can re-place under require_unassigned (issue #206).
         if unassign:
@@ -267,13 +297,97 @@ class SqlAlchemyServerRepository(ServerRepository):
         # check alone cannot.
         if expected_worker is not None:
             conditions.append(ServerModel.assigned_worker_id == expected_worker.value)
-        stmt = update(ServerModel).where(*conditions).values(**values)
-        result = await self._session.execute(stmt)
-        # Report whether the guard accepted the write (rowcount == 1) so a
+        written = await self._write_observed_state(
+            conditions,
+            observed_state,
+            observed_at,
+            values,
+            detail=detail,
+            reason=reason,
+            emitted_at=emitted_at,
+        )
+        # Report whether the guard accepted the write (one row written) so a
         # convergence caller can keep its returned entity honest (issue #292):
         # when the guard drops the write (0 rows; a same-instant or fresher write
         # already landed) the caller must not optimistically mutate the entity.
-        return cast("CursorResult[Any]", result).rowcount == 1
+        return written == 1
+
+    async def _write_observed_state(
+        self,
+        conditions: list[ColumnElement[bool]],
+        observed_state: ObservedState,
+        observed_at: dt.datetime,
+        values: dict[str, Any] | None = None,
+        *,
+        detail: str = "",
+        reason: str = "",
+        emitted_at: dt.datetime | None = None,
+    ) -> int:
+        """Write ``observed_state`` to the rows matching ``conditions``; stage frames.
+
+        The one place the column is updated (issue #3212), so that every change
+        of it reaches live subscribers: each written row whose state changed
+        stages a status event, published by whoever commits the session
+        (:func:`publish_status_events`). ``values`` are further columns set in
+        the same UPDATE. Returns the number of rows written.
+
+        The rows are locked and read first because the previous state decides
+        whether there is anything to announce, and an UPDATE cannot return it.
+        ``FOR UPDATE`` re-evaluates ``conditions`` against the latest committed
+        row version once the lock is granted, so the guards a caller passes are
+        as atomic as they were inside a single UPDATE, and the row cannot move
+        between the read and the write.
+
+        A row already at ``observed_state`` stages nothing unless the write
+        carries a ``detail`` or ``reason``: the frame would tell a subscriber
+        nothing it does not hold. That keeps the bulk invalidations quiet for
+        rows they do not change, while a Worker report that explains itself is
+        always relayed.
+        """
+
+        locked = (
+            await self._session.execute(
+                select(ServerModel.id, ServerModel.observed_state)
+                .where(*conditions)
+                .with_for_update()
+            )
+        ).all()
+        if not locked:
+            return 0
+        await self._session.execute(
+            update(ServerModel)
+            .where(ServerModel.id.in_([row.id for row in locked]))
+            .values(
+                observed_state=observed_state.value,
+                observed_at=observed_at,
+                **(values or {}),
+            )
+        )
+        for row in locked:
+            if row.observed_state == observed_state.value and not (detail or reason):
+                continue
+            self._staged_status_events.append(
+                (
+                    str(row.id),
+                    RealTimeEvent(
+                        stream=EventStream.STATUS,
+                        payload={
+                            "state": observed_state.value,
+                            "detail": detail,
+                            "reason": reason,
+                        },
+                        emitted_at=emitted_at,
+                    ),
+                )
+            )
+        return len(locked)
+
+    def take_staged_status_events(self) -> list[tuple[str, RealTimeEvent]]:
+        """Return and forget the status events staged by the writes so far."""
+
+        staged = self._staged_status_events
+        self._staged_status_events = []
+        return staged
 
     async def clear_assignment_after_final_snapshot(
         self, server_id: ServerId, worker_id: WorkerId
@@ -303,15 +417,11 @@ class SqlAlchemyServerRepository(ServerRepository):
         # even against a row with a newer observed_at — that fresher report came from
         # the now-disconnected worker and is exactly the untrustworthy data this
         # write exists to invalidate.
-        stmt = (
-            update(ServerModel)
-            .where(ServerModel.assigned_worker_id == worker_id.value)
-            .values(
-                observed_state=ObservedState.UNKNOWN.value,
-                observed_at=observed_at,
-            )
+        await self._write_observed_state(
+            [ServerModel.assigned_worker_id == worker_id.value],
+            ObservedState.UNKNOWN,
+            observed_at,
         )
-        await self._session.execute(stmt)
 
     async def reset_unverifiable_observed_states(self, observed_at: dt.datetime) -> int:
         # Assigned rows whose observed state is non-terminal (an in-flight cache
@@ -320,9 +430,8 @@ class SqlAlchemyServerRepository(ServerRepository):
         # No monotonic guard (issue #216): like mark_worker_servers_unknown this is a
         # bulk cache-invalidation marking state LESS certain (-> unknown) on API
         # restart, and must always win regardless of the row's observed_at.
-        stmt = (
-            update(ServerModel)
-            .where(
+        return await self._write_observed_state(
+            [
                 ServerModel.assigned_worker_id.is_not(None),
                 ServerModel.observed_state.in_(
                     [
@@ -332,14 +441,10 @@ class SqlAlchemyServerRepository(ServerRepository):
                         ObservedState.RESTARTING.value,
                     ]
                 ),
-            )
-            .values(
-                observed_state=ObservedState.UNKNOWN.value,
-                observed_at=observed_at,
-            )
+            ],
+            ObservedState.UNKNOWN,
+            observed_at,
         )
-        result = await self._session.execute(stmt)
-        return cast("CursorResult[Any]", result).rowcount
 
     async def running_assignment_ids_for_worker(
         self, worker_id: WorkerId

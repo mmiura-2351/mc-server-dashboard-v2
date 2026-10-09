@@ -4,6 +4,11 @@ Opens a session from the factory on ``__aenter__`` and binds the repositories to
 it; ``commit`` commits the transaction, while leaving the block without
 committing rolls back (the session is closed either way). This gives use cases
 the all-or-nothing transaction the Port promises (DATABASE.md Section 1).
+
+A commit also publishes the status events of the observed-state writes it made
+durable, and a rollback discards them (issue #3212): the servers repository
+stages one per changed row, so a use case that writes ``observed_state`` cannot
+forget the live frame, and no frame precedes its commit.
 """
 
 from __future__ import annotations
@@ -15,6 +20,7 @@ from types import TracebackType
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from mc_server_dashboard_api.fleet.domain.real_time_events import RealTimeEvents
 from mc_server_dashboard_api.servers.adapters.backup_repository import (
     SqlAlchemyBackupRepository,
 )
@@ -32,6 +38,7 @@ from mc_server_dashboard_api.servers.adapters.plugin_repository import (
 )
 from mc_server_dashboard_api.servers.adapters.repositories import (
     SqlAlchemyServerRepository,
+    publish_status_events,
 )
 from mc_server_dashboard_api.servers.adapters.resource_pack_repository import (
     SqlAlchemyResourcePackRepository,
@@ -46,9 +53,19 @@ from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 class SqlAlchemyUnitOfWork(UnitOfWork):
     """:class:`UnitOfWork` adapter over an async-SQLAlchemy session."""
 
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    servers: SqlAlchemyServerRepository
+
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        real_time_events: RealTimeEvents | None = None,
+    ) -> None:
         self._session_factory = session_factory
         self._session: AsyncSession | None = None
+        # The bus a commit publishes its observed-state writes on. Wired for
+        # every unit of work that can write ``observed_state``; ``None`` (a
+        # tool with no live subscribers) drops the events.
+        self._real_time_events = real_time_events
 
     async def __aenter__(self) -> SqlAlchemyUnitOfWork:
         self._session = self._session_factory()
@@ -85,10 +102,12 @@ class SqlAlchemyUnitOfWork(UnitOfWork):
             # commit) into the typed domain error; see adapters/integrity.py.
             translate_integrity_error(exc)
             raise
+        publish_status_events(self.servers, self._real_time_events)
 
     async def rollback(self) -> None:
         assert self._session is not None
         await self._session.rollback()
+        self.servers.take_staged_status_events()
 
     @contextlib.asynccontextmanager
     async def savepoint(self) -> AsyncIterator[None]:
