@@ -393,9 +393,18 @@ async def _relay(
       snapshot, in order. One that raced the read may repeat what the snapshot
       showed, which is harmless: status frames are idempotent sets. It may also
       be older than the snapshot — published during the read, then overtaken
-      by a write the read saw — but every observed-state change publishes
-      (#3212), so that newer write's own event follows it and the client ends
-      on the newer state.
+      by a write the read saw. Every observed-state change publishes (#3212),
+      so when the two writes are sequential (a worker reports ``running``,
+      then its session drops) the newer write's own event follows and the
+      client ends on the newer state.
+
+    Residual (#3307): that holds for sequential writes only. A write publishes
+    when its own commit returns, so two writers on different connections
+    publish in the order their commit acknowledgements reach the event loop,
+    which can differ from commit order. The earlier commit's event can then be
+    published last, leaving the client on the older state until the next
+    status event, status-dropping gap or reconnect. Closing it needs
+    per-server sequencing of status events (#3307).
 
     No event is held outside the buffer while a snapshot is read: the next one
     is requested only after the previous delivery (and its post-gap snapshot)

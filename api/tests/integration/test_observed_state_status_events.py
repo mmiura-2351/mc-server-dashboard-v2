@@ -28,7 +28,12 @@ from dataclasses import dataclass, field
 
 import pytest
 from sqlalchemy import event as sa_event
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
 from mc_server_dashboard_api.fleet.adapters.real_time_events import (
@@ -38,6 +43,9 @@ from mc_server_dashboard_api.fleet.domain.real_time_events import (
     EventStream,
     EventSubscription,
     RealTimeEvent,
+)
+from mc_server_dashboard_api.servers.adapters.repositories import (
+    StatusEventsNotWiredError,
 )
 from mc_server_dashboard_api.servers.adapters.server_state_sink import (
     ServersServerStateSink,
@@ -110,6 +118,8 @@ class _World:
     engine: AsyncEngine
     community: CommunityId
     journal: list[str]
+    # The row-locking reads the observed-state writes issued, as emitted.
+    locking_selects: list[str]
     bus: _JournalingBus
     clock: _AdvancingClock = field(default_factory=lambda: _AdvancingClock(_NOW))
 
@@ -213,10 +223,13 @@ async def world() -> AsyncIterator[_World]:
     await upgrade_head(_DB_URL)
     engine = create_async_engine(_DB_URL)
     journal: list[str] = []
+    locking_selects: list[str] = []
 
     def _on_execute(_conn: object, _cursor: object, statement: str, *_: object) -> None:
         if statement.startswith("UPDATE") and "observed_state=" in statement:
             journal.append("write")
+        if statement.startswith("SELECT") and "FOR UPDATE" in statement:
+            locking_selects.append(statement)
 
     def _on_commit(_conn: object) -> None:
         journal.append("commit")
@@ -229,6 +242,7 @@ async def world() -> AsyncIterator[_World]:
             engine=engine,
             community=community,
             journal=journal,
+            locking_selects=locking_selects,
             bus=_JournalingBus(journal),
         )
     finally:
@@ -603,3 +617,150 @@ async def test_write_rolled_back_before_a_later_commit_publishes_nothing(
 
     assert await _received(watching) == []
     assert await world.observed(server) is ObservedState.STOPPED
+
+
+async def test_savepoint_rollback_discards_only_the_frames_staged_inside_it(
+    world: _World,
+) -> None:
+    """A rolled-back savepoint takes its own frame with it, and no other."""
+
+    worker = uuid.uuid4()
+    kept = await world.server("kept", worker=worker)
+    undone = await world.server("undone", worker=worker)
+    watching = world.watch_all()
+
+    uow = world.uow()
+    async with uow:
+        await uow.servers.record_observed_state(
+            kept.id, ObservedState.STARTING, world.clock.now()
+        )
+        with pytest.raises(RuntimeError, match="refused"):
+            async with uow.savepoint():
+                await uow.servers.record_observed_state(
+                    undone.id, ObservedState.RUNNING, world.clock.now()
+                )
+                raise RuntimeError("refused")
+        await uow.commit()
+
+    assert await _states(watching) == [(str(kept.id.value), "starting")]
+    assert await world.observed(undone) is ObservedState.STOPPED
+
+
+# --- A commit owner built without the bus fails loudly ----------------------
+
+
+async def test_unit_of_work_without_the_bus_refuses_to_commit_an_observed_write(
+    world: _World,
+) -> None:
+    """Missing wiring is a programming error, not a silently dropped frame."""
+
+    server = await world.server("survival", worker=uuid.uuid4())
+
+    uow = ServersUnitOfWork(create_session_factory(world.engine))
+    with pytest.raises(StatusEventsNotWiredError):
+        async with uow:
+            await uow.servers.record_observed_state(
+                server.id, ObservedState.RUNNING, world.clock.now()
+            )
+            await uow.commit()
+
+    # Refused before the commit: the write did not land silently either.
+    assert await world.observed(server) is ObservedState.STOPPED
+
+
+async def test_state_sink_without_the_bus_refuses_to_commit_an_observed_write(
+    world: _World,
+) -> None:
+    worker = uuid.uuid4()
+    server = await world.server("survival", worker=worker)
+    unwired = ServersServerStateSink(
+        create_session_factory(world.engine), clock=world.clock
+    )
+
+    with pytest.raises(StatusEventsNotWiredError):
+        await unwired.record_observed_state(
+            server_id=str(server.id.value), worker_id=str(worker), state="running"
+        )
+    with pytest.raises(StatusEventsNotWiredError):
+        await unwired.mark_worker_servers_unknown(worker_id=str(worker))
+
+    assert await world.observed(server) is ObservedState.STOPPED
+
+
+# --- Lock order ---------------------------------------------------------------
+
+
+async def test_observed_state_writes_lock_server_rows_in_id_order(
+    world: _World,
+) -> None:
+    """One lock order for every writer, so overlapping bulk writes cannot deadlock."""
+
+    worker = uuid.uuid4()
+    await world.server("a", worker=worker, reported="running")
+    await world.server("b", worker=worker, reported="running")
+    world.locking_selects.clear()
+
+    await world.sink().mark_worker_servers_unknown(worker_id=str(worker))
+    await ResetUnverifiableObservedStates(uow=world.uow(), clock=world.clock)()
+
+    assert len(world.locking_selects) == 2
+    for statement in world.locking_selects:
+        assert "ORDER BY server.id" in statement
+        assert statement.rstrip().endswith("FOR UPDATE")
+
+
+# --- Known residual: publish order across connections (issue #3307) ---------
+
+
+async def test_publish_order_follows_commit_completion_not_commit_order(
+    world: _World,
+) -> None:
+    """DOCUMENTS CURRENT BEHAVIOUR, not the desired one (issue #3307).
+
+    Each write publishes right after its own commit returns, so two writers on
+    different connections publish in the order their commit acknowledgements
+    reach the event loop -- which can differ from the order the database
+    committed them in. Here the worker's ``running`` report commits first but
+    its commit is slow to return; the disconnect's ``unknown`` commits and
+    publishes in the meantime; ``running`` is then published last. The row
+    reads ``unknown`` and a subscriber is left on ``running`` until the next
+    frame, gap or snapshot (WEBUI_SPEC.md Section 2.6).
+
+    Closing this needs per-server sequencing of status frames (issue #3307).
+    When that lands, the final assertion flips: the last state a subscriber
+    holds must be ``unknown``.
+    """
+
+    worker = uuid.uuid4()
+    server = await world.server("survival", worker=worker)
+    committed, release = asyncio.Event(), asyncio.Event()
+
+    class _SlowToAcknowledgeSession(AsyncSession):
+        async def commit(self) -> None:
+            await super().commit()
+            committed.set()
+            await release.wait()
+
+    slow_report = ServersServerStateSink(
+        async_sessionmaker(
+            world.engine, expire_on_commit=False, class_=_SlowToAcknowledgeSession
+        ),
+        clock=world.clock,
+        real_time_events=world.bus,
+    )
+    watching = world.watch(server)
+
+    report = asyncio.create_task(
+        slow_report.record_observed_state(
+            server_id=str(server.id.value), worker_id=str(worker), state="running"
+        )
+    )
+    await committed.wait()
+    await world.sink().mark_worker_servers_unknown(worker_id=str(worker))
+    release.set()
+    assert await report
+
+    assert await world.observed(server) is ObservedState.UNKNOWN
+    states = [event.payload["state"] for event in await _received(watching)]
+    # Stale: the database committed running, then unknown.
+    assert states == ["unknown", "running"]

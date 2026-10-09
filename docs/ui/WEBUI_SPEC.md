@@ -225,9 +225,20 @@ snapshot could only roll the client back. A status frame published after the
 discard is delivered after the snapshot, in order; one that raced the read may
 repeat what the snapshot showed, which is harmless because status frames are
 idempotent sets. It may also be older than the snapshot — published while the
-read was in flight, then overtaken by a write the read saw — but that newer
-write publishes its own frame after it, so the client still ends on the newer
-state.
+read was in flight, then overtaken by a write the read saw. When the two writes
+happen one after the other — a Worker reports `running`, then its session
+drops — the newer write publishes its own frame after the older one, so the
+client still ends on the newer state.
+
+Residual (#3307): that last step holds for sequential writes only. Each write
+publishes when its own commit returns, so two writes of one server's state made
+on different database connections publish in the order their commit
+acknowledgements reach the API's event loop, which can differ from the order
+the database committed them in. The frame of the earlier commit can then be
+published last, and a client is left on that older state until the next status
+frame for the server, or until the snapshot that follows a reconnect or a `gap`
+that dropped status. Closing this needs per-server sequencing of status frames,
+tracked separately in #3307.
 
 Auth: browsers pass the access token via `Sec-WebSocket-Protocol` as two
 subprotocols `["access_token", "<jwt>"]`; the server echoes `access_token` as

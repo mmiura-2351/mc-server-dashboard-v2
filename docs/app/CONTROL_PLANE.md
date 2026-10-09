@@ -534,7 +534,8 @@ The ingest maps every value in this enum onto the persisted state; only
 
 Every change of `observed_state` is relayed to subscribed clients as a live
 `status` frame, published after the write that made it commits
-([`WEBUI_SPEC.md`](../ui/WEBUI_SPEC.md) Section 2.6). That covers an applied
+([`WEBUI_SPEC.md`](../ui/WEBUI_SPEC.md) Section 2.6, which also states the
+one ordering case this does not yet cover). That covers an applied
 `StatusChange`, whose frame carries its `detail`, crash reason and event time,
 and equally the writes the API makes without one, whose frames carry an empty
 `detail` and reason:

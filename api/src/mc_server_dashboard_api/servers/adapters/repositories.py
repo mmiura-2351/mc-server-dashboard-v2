@@ -64,6 +64,34 @@ def _to_server(row: ServerModel) -> Server:
     )
 
 
+class StatusEventsNotWiredError(RuntimeError):
+    """An observed-state write is about to commit with no bus to publish it on.
+
+    A programming error at the composition root, not a runtime condition: the
+    owner of the commit was built without the real-time event bus, so the
+    write would land and leave every connected client on the old state (issue
+    #3212). Raised before the commit, so nothing is made durable silently.
+    """
+
+
+def require_status_events_wired(
+    repository: SqlAlchemyServerRepository, real_time_events: RealTimeEvents | None
+) -> None:
+    """Refuse to commit staged status events that nobody could publish.
+
+    Called right before the commit by every owner of one. An owner that writes
+    no observed state stages nothing and needs no bus; one that does must have
+    been given a bus — a real one with no subscribers where none are wanted.
+    """
+
+    if real_time_events is None and repository.staged_status_event_count():
+        raise StatusEventsNotWiredError(
+            "an observed-state write is being committed by a unit of work or "
+            "state sink built without the real-time event bus; pass it the bus "
+            "so the status frame is published"
+        )
+
+
 def publish_status_events(
     repository: SqlAlchemyServerRepository, real_time_events: RealTimeEvents | None
 ) -> None:
@@ -75,13 +103,13 @@ def publish_status_events(
     snapshot argument rests on (WEBUI_SPEC.md Section 2.6) — a status event
     still buffered when a snapshot is read was committed before the read.
     ``publish`` neither blocks nor awaits a subscriber, so no transaction and
-    no caller is held up by it. With no bus wired (``None``) the events are
-    dropped.
+    no caller is held up by it. :func:`require_status_events_wired` has already
+    refused the commit if events were staged with no bus.
     """
 
     for server_id, event in repository.take_staged_status_events():
-        if real_time_events is not None:
-            real_time_events.publish(server_id=server_id, event=event)
+        assert real_time_events is not None
+        real_time_events.publish(server_id=server_id, event=event)
 
 
 class SqlAlchemyServerRepository(ServerRepository):
@@ -349,6 +377,9 @@ class SqlAlchemyServerRepository(ServerRepository):
             await self._session.execute(
                 select(ServerModel.id, ServerModel.observed_state)
                 .where(*conditions)
+                # One lock order for every caller, so two bulk writes over
+                # overlapping servers cannot deadlock on each other's rows.
+                .order_by(ServerModel.id)
                 .with_for_update()
             )
         ).all()
@@ -388,6 +419,20 @@ class SqlAlchemyServerRepository(ServerRepository):
         staged = self._staged_status_events
         self._staged_status_events = []
         return staged
+
+    def staged_status_event_count(self) -> int:
+        """How many status events are staged; also a mark to roll back to."""
+
+        return len(self._staged_status_events)
+
+    def discard_status_events_staged_since(self, mark: int) -> None:
+        """Forget the status events staged after ``mark`` (a savepoint rollback).
+
+        ``mark`` is the :meth:`staged_status_event_count` taken when the
+        savepoint opened: its writes were undone, so only their events go.
+        """
+
+        del self._staged_status_events[mark:]
 
     async def clear_assignment_after_final_snapshot(
         self, server_id: ServerId, worker_id: WorkerId

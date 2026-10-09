@@ -49,6 +49,7 @@ from mc_server_dashboard_api.servers.adapters.bedrock_tunnel_sync import (
 from mc_server_dashboard_api.servers.adapters.repositories import (
     SqlAlchemyServerRepository,
     publish_status_events,
+    require_status_events_wired,
 )
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.value_objects import (
@@ -96,8 +97,9 @@ class ServersServerStateSink(ServerStateSink):
     ) -> None:
         self._session_factory = session_factory
         self._clock = clock
-        # The bus the committed writes are published on. Optional like the
-        # Bedrock dependencies below: left unset, the status events are dropped.
+        # The bus the committed writes are published on. Optional only for a
+        # caller that never lands a write (the parse-failure guards): a write
+        # that would commit without it raises ``StatusEventsNotWiredError``.
         self._real_time_events = real_time_events
         # Bedrock tunnel dispatch dependencies (issue #1544). Optional so a
         # caller that does not care about the Bedrock relay path (e.g. a unit
@@ -187,6 +189,7 @@ class ServersServerStateSink(ServerStateSink):
                 reason=reason,
                 emitted_at=emitted_at,
             )
+            require_status_events_wired(repo, self._real_time_events)
             await session.commit()
             # Relay the observed transition to subscribed clients (FR-MON-1),
             # before the Bedrock dispatch below: that one crosses the network.
@@ -216,6 +219,7 @@ class ServersServerStateSink(ServerStateSink):
         async with self._session_factory() as session:
             repo = SqlAlchemyServerRepository(session)
             await repo.mark_worker_servers_unknown(WorkerId(parsed), self._clock.now())
+            require_status_events_wired(repo, self._real_time_events)
             await session.commit()
             publish_status_events(repo, self._real_time_events)
 

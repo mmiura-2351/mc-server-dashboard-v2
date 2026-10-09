@@ -156,6 +156,8 @@ def _uow_with_commit_error(
     session = _FakeSession(_integrity_error(constraint))
     uow = SqlAlchemyUnitOfWork(_FakeFactory(session))  # type: ignore[arg-type]
     uow._session = session  # type: ignore[assignment]
+    # The commit consults the servers repository for staged status events.
+    uow.servers = SqlAlchemyServerRepository(session)  # type: ignore[arg-type]
     return uow, session
 
 

@@ -1,16 +1,21 @@
-"""Regression guard: observed-state writers are wired to the event bus (issue #3212).
+"""Early warning: the composition root wires observed-state writers to the bus.
 
 Every ``observed_state`` write stages its status event in the servers
 repository, and the unit of work publishes it after the commit -- on the bus it
-was built with. A unit of work built without one drops the event, which is
-right for a tool with no subscribers and wrong, silently, for a use case that
-writes observed state: its commit would again leave connected clients on the
-old state until their next snapshot.
+was built with (issue #3212). The guarantee is enforced at runtime: a unit of
+work built without the bus refuses to commit such a write
+(``StatusEventsNotWiredError``, pinned in
+``tests/integration/test_observed_state_status_events.py``).
 
-So every construction, under ``api/src``, of a use case that writes
-``observed_state`` must hand its unit of work the bus. The scan is syntactic:
-the ``uow=`` argument is a unit-of-work construction with the bus as its second
-argument. A new use case that writes observed state belongs in ``_WRITERS``.
+This scan adds only what that check cannot give: the composition root's
+constructions (``app.py``'s lifespan closures above all) are never committed
+through by a test, so an unwired one there would first fail in a running API,
+on the first convergence write. The scan reports it at test time instead. It is
+syntactic and deliberately modest -- the ``uow=`` argument of the known writers
+must be a unit-of-work construction with a second argument that is not a
+literal ``None`` -- so it is a convenience over the runtime check, not a
+substitute for it: an alias, or a writer missing from ``_WRITERS``, escapes it
+and is caught at runtime.
 """
 
 from __future__ import annotations
@@ -41,7 +46,8 @@ def _unwired_constructions(path: Path) -> list[str]:
             isinstance(uow, ast.Call)
             and isinstance(uow.func, ast.Name)
             and uow.func.id in _UNITS_OF_WORK
-            and len(uow.args) + len(uow.keywords) >= 2
+            and len(bus := [*uow.args, *(kw.value for kw in uow.keywords)]) >= 2
+            and not (isinstance(bus[1], ast.Constant) and bus[1].value is None)
         )
         if not wired:
             offenders.append(
