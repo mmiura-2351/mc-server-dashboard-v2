@@ -164,9 +164,12 @@ settles into a ``stopped`` or ``unknown`` report — a different observed state,
 the ordinary grace applies again. A plain stop is not a source (it commits
 ``desired=stopped`` and is never reverted), and neither is a Worker that died or
 dropped its session mid-restart: the disconnect and the API-restart reset both
-rewrite the row to ``unknown``. Past the budget with no fresh report nothing
-legitimate is still in flight, the row is genuinely stuck, and the start is
-re-dispatched as before.
+rewrite the row to ``unknown``. Past the budget with no fresh report the start is
+re-dispatched as before. The lapse is permission to retry, not proof that the
+Worker finished: its stop is detached from the caller and runs on its own
+deadlines, so the API's budget says nothing about it. What keeps that retry safe
+is unchanged — the Worker's reservation and orphan guards still refuse the start
+``BUSY`` while either holds the id.
 
 Per-server exponential backoff — a failed action is not retried until a growing
 window (``backoff_base_seconds`` doubled per consecutive failure, capped at
@@ -416,7 +419,9 @@ class RunReconcilerTick:
         # ``observed=stopping`` under a running intent is a stop leg the Worker is
         # still driving — a restart's, or its converger's retry of one that failed —
         # and the id stays refused BUSY for all of it, so the start waits at least
-        # the restart budget, whichever grace it takes below (issue #3209).
+        # the restart budget, whichever grace it takes below (issue #3209). The
+        # lapse only permits a retry; it does not establish that the Worker
+        # finished, and its reservation/orphan guard is what still refuses BUSY.
         floor = (
             self.restart_timeout_seconds
             if server.observed_state is ObservedState.STOPPING

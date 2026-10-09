@@ -572,9 +572,10 @@ async def test_restart_stop_leg_is_held_back_for_the_budget_not_the_full_grace()
 
 
 async def test_stuck_stopping_is_redispatched_once_the_restart_budget_lapses() -> None:
-    # No restart is still in flight past its own budget, so a row still reading
-    # (running, stopping) then is genuinely stuck — a stop leg that failed without
-    # a terminal report — and the reconciler recovers it exactly as before.
+    # The budget lapsing is permission to retry, not proof the Worker finished
+    # (its stop runs detached, on its own deadlines): a row still reading
+    # (running, stopping) then is re-dispatched exactly as before, and the Worker's
+    # reservation/orphan guard still refuses BUSY if it does hold the id.
     uow = FakeUnitOfWork()
     aged = _NOW - dt.timedelta(seconds=_RESTART_BUDGET + 1)
     server = _server(
