@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from mc_server_dashboard_api.fleet.domain.late_snapshot_sink import (
     LateSnapshotResultSink,
 )
+from mc_server_dashboard_api.fleet.domain.real_time_events import RealTimeEvents
 from mc_server_dashboard_api.servers.adapters.unit_of_work import SqlAlchemyUnitOfWork
 from mc_server_dashboard_api.servers.application.lifecycle import StopServer
 from mc_server_dashboard_api.servers.domain.clock import Clock
@@ -66,6 +67,7 @@ class ServersLateSnapshotResultSink(LateSnapshotResultSink):
         *,
         control_plane: ControlPlane,
         clock: Clock,
+        real_time_events: RealTimeEvents | None = None,
     ) -> None:
         # A fresh UnitOfWork is built per call so the servicer (no request UoW) never
         # shares a session across concurrent results. The control plane and clock are
@@ -75,6 +77,10 @@ class ServersLateSnapshotResultSink(LateSnapshotResultSink):
         self._session_factory = session_factory
         self._control_plane = control_plane
         self._clock = clock
+        # Handed to the StopServer's unit of work like every other one built for
+        # that use case (issue #3212), so an observed-state write it makes is
+        # published; the clear this sink runs today writes none.
+        self._real_time_events = real_time_events
 
     async def clear_held_assignment_on_late_snapshot(
         self, *, server_id: str, worker_id: str, succeeded: bool, message: str | None
@@ -84,7 +90,7 @@ class ServersLateSnapshotResultSink(LateSnapshotResultSink):
         if parsed is None or parsed_worker is None:
             return
         stop_server = StopServer(
-            uow=SqlAlchemyUnitOfWork(self._session_factory),
+            uow=SqlAlchemyUnitOfWork(self._session_factory, self._real_time_events),
             control_plane=self._control_plane,
             clock=self._clock,
         )

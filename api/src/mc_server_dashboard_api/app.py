@@ -825,6 +825,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     control_plane=app.state.control_plane,
                 ),
                 clock=ServersSystemClock(),
+                real_time_events=real_time_events,
             )
         )
         logging.getLogger(__name__).info(
