@@ -88,6 +88,15 @@ func openParentBeneath(root, target string, mkdir bool) (parentFd int, leaf stri
 				}
 				next, oerr = unix.Openat(cur, comp,
 					unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+				if oerr == nil {
+					// The directory is the Worker's creation; give it its parent's
+					// owner so the server can traverse it (issue #2600).
+					if ownErr := inheritOwner(cur, next); ownErr != nil {
+						_ = unix.Close(next)
+						_ = unix.Close(cur)
+						return -1, "", fmt.Errorf("setting owner of %q: %w", comp, ownErr)
+					}
+				}
 			}
 			if oerr != nil {
 				_ = unix.Close(cur)
@@ -98,4 +107,40 @@ func openParentBeneath(root, target string, mkdir bool) (parentFd int, leaf stri
 		cur = next
 	}
 	return cur, leaf, nil
+}
+
+// dirOwner reports the uid:gid owning the directory behind dirFd, and fchownFd
+// re-owns the file or directory behind fd. Both act on descriptors only; they are
+// variables so a test can give the working set an owner other than the test
+// process (only root can give a file away).
+var (
+	dirOwner = func(dirFd int) (uid, gid int, err error) {
+		var st unix.Stat_t
+		if err := unix.Fstat(dirFd, &st); err != nil {
+			return 0, 0, err
+		}
+		return int(st.Uid), int(st.Gid), nil
+	}
+	fchownFd = unix.Fchown
+)
+
+// inheritOwner gives the entry the Worker just created behind fd the owner of the
+// directory it was created in (parentFd).
+//
+// A server's working set belongs to the user its container runs as, which is not
+// the Worker's own under a root Worker (issue #2600). An entry the Worker creates
+// while the server is up — an edited file's replacement, a missing parent
+// directory — would otherwise be the Worker's, mode 0640 / 0750, and the server
+// could no longer read, overwrite or traverse it. The directory's owner is the
+// run-as user once the driver has handed the working set over, and the Worker
+// itself before that, so this needs no knowledge of who that user is.
+//
+// Both ends are descriptors already resolved beneath the working-set root, so no
+// path is looked up again and a swapped symlink cannot redirect the change.
+func inheritOwner(parentFd, fd int) error {
+	uid, gid, err := dirOwner(parentFd)
+	if err != nil {
+		return err
+	}
+	return fchownFd(fd, uid, gid)
 }

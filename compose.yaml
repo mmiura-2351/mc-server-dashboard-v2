@@ -510,6 +510,10 @@ services:
       # #2609). A second stack's worker then attaches its MC containers to that
       # stack's `servers` network, not to this one's.
       MCD_WORKER_DRIVER_CONTAINER_NETWORK: ${COMPOSE_PROJECT_NAME:-mcsd}-servers
+      # The uid:gid the MC containers run as (CONFIGURATION.md Section 6.3). Empty
+      # keeps the worker's default for a root worker, 25565:25565; the worker
+      # hands each working set under MCSD_SCRATCH_DIR to that user itself.
+      MCD_WORKER_DRIVER_CONTAINER_USER: "${MCD_WORKER_DRIVER_CONTAINER_USER:-}"
       # Log verbosity and format (CONFIGURATION.md Section 6.4) — the same
       # forwarding gap the api had, fixed the same way (issue #2794). The Go
       # services' keys are FLAT, so these read LOG_LEVEL where the api's nested
@@ -540,7 +544,7 @@ services:
     # which a rename of either network could silently flip. It has to be
     # `default`: everything the worker sends off-subnet (a cross-host api or
     # relay) would otherwise egress through the bridge that hostile MC containers
-    # sit on, where they hold CAP_NET_RAW and can spoof (SECURITY.md Section 6).
+    # sit on (SECURITY.md Section 6).
     # Verified 2026-08-02: default route via 172.19.0.1, the mcsd gateway, and
     # moving the priority to the other attachment moves the route with it.
     # Needs Engine 28.0+ / Compose 2.34.0+ (DEPLOYMENT.md Section 2 tables what

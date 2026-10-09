@@ -178,6 +178,13 @@ type Options struct {
 	// stopping without restore would leave the server permanently save-off. Empty
 	// skips the save-on (the pre-fix behavior).
 	ScratchDir string
+	// RunAsUID and RunAsGID are the uid:gid every container the driver creates runs
+	// as, and the owner it hands the working set to before each create (issue
+	// #2600). The Worker's wiring always sets them from driver.container.user, which
+	// never resolves to root. A zero RunAsUID (unset) uses the Worker process's own
+	// uid:gid, or DefaultRunAsUID:DefaultRunAsGID when the Worker is root.
+	RunAsUID int
+	RunAsGID int
 	// Logger records the lazy base-image pull (image name, duration) at INFO (issue
 	// #904). Nil uses a discard logger.
 	Logger *slog.Logger
@@ -195,6 +202,12 @@ type Driver struct {
 	gameBindIP   string
 	network      string
 	scratchDir   string
+	// runAsUID and runAsGID are the uid:gid server containers run as, and chownAt
+	// the call that hands a working-set entry to them (chownAtNoFollow; a test
+	// seam, since only root can give a file away) (issue #2600).
+	runAsUID int
+	runAsGID int
+	chownAt  func(dirFd int, name string, uid, gid int) error
 	// conflictPoll and conflictDeadline bound the wait-for-name-free loop (#233).
 	conflictPoll     time.Duration
 	conflictDeadline time.Duration
@@ -244,6 +257,7 @@ func New(docker dockerAPI, images *ImageSelector, openControl controlFunc, opts 
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
+	runAsUID, runAsGID := resolveRunAs(opts.RunAsUID, opts.RunAsGID, os.Getuid(), os.Getgid())
 	return &Driver{
 		docker:           docker,
 		images:           images,
@@ -254,6 +268,9 @@ func New(docker dockerAPI, images *ImageSelector, openControl controlFunc, opts 
 		gameBindIP:       gameBindIP,
 		network:          opts.Network,
 		scratchDir:       opts.ScratchDir,
+		runAsUID:         runAsUID,
+		runAsGID:         runAsGID,
+		chownAt:          chownAtNoFollow,
 		conflictPoll:     conflictPoll,
 		conflictDeadline: conflictDeadline,
 		readinessTimeout: readinessTimeout,
@@ -322,7 +339,7 @@ func (d *Driver) Start(ctx context.Context, spec execution.InstanceSpec) (execut
 		network:          d.network,
 		gameBindIP:       d.gameBindIP,
 		labels:           d.labels(spec.ServerID, spec.MinecraftVersion),
-		createFn:         d.createContainer,
+		createFn:         d.createServerContainer,
 		openControl:      d.openControl,
 		rconHost:         d.RconHost(spec.ServerID),
 		stopTimeout:      d.stopTimeout,
@@ -413,7 +430,7 @@ func (d *Driver) launchContainer(ctx context.Context, spec execution.InstanceSpe
 		CPUShares:        cpuShares(spec.CPUMillis),
 	}
 
-	id, err := d.createContainer(ctx, create)
+	id, err := d.createServerContainer(ctx, spec, create)
 	if err != nil {
 		return "", err
 	}
@@ -468,7 +485,7 @@ func (d *Driver) runInstallContainer(ctx context.Context, spec execution.Instanc
 	// loop self-heals the rare case where a prior install container under the same
 	// name has not finished tearing down yet. Do not "simplify" this to a bare
 	// docker.Create — that would lose the stale-install-container self-healing.
-	id, err := d.createContainer(ctx, create)
+	id, err := d.createServerContainer(ctx, spec, create)
 	if err != nil {
 		return "", err
 	}
@@ -478,6 +495,69 @@ func (d *Driver) runInstallContainer(ctx context.Context, spec execution.Instanc
 		return "", err
 	}
 	return id, nil
+}
+
+// DefaultRunAsUID and DefaultRunAsGID are the uid:gid server containers run as
+// under a Worker that runs as root (the shipped compose topology) when none is
+// configured. It is a fixed id with no account behind it on the host or in the
+// Java images, and deliberately not the 10001 the api and relay images run as:
+// the working sets of untrusted server code must not share an owner with the
+// API's storage volume.
+const (
+	DefaultRunAsUID = 25565
+	DefaultRunAsGID = 25565
+)
+
+// resolveRunAs settles the uid:gid the driver runs containers as. No container
+// it creates runs as root, whatever its caller left unset: an unset user (uid 0)
+// is the Worker's own (ownUID:ownGID), and the fixed unprivileged default when
+// the Worker itself is root.
+func resolveRunAs(uid, gid, ownUID, ownGID int) (int, int) {
+	if uid != 0 {
+		return uid, gid
+	}
+	if ownUID != 0 {
+		return ownUID, ownGID
+	}
+	return DefaultRunAsUID, DefaultRunAsGID
+}
+
+// droppedCapabilities are the capabilities removed from every container the
+// driver creates. NET_RAW is what opens raw and packet sockets, the primitive
+// behind ARP spoofing and sniffing on the shared servers bridge; a Minecraft
+// server needs neither (issue #2600).
+var droppedCapabilities = []string{"NET_RAW"}
+
+// createServerContainer is the one path every container that runs
+// server-controlled code is created through — the launch container and the Forge
+// install container, first attempt or retry. It makes the container run as the
+// unprivileged run-as user without NET_RAW, and first hands the bind-mounted
+// working set to that user, so the server can write its world, logs and config
+// (issue #2600). It then creates through createContainer.
+//
+// The hand-over runs before EVERY create rather than once at hydrate because the
+// working set gains Worker-owned entries in between: a hydrate or restore writes
+// the tree as the Worker's user, the install supervisor creates
+// logs/forge-install.log, and a working set from before this change holds
+// root-owned files from the days the server itself ran as root. The walk itself,
+// and the check that nothing is running against the tree, are in handover.go.
+func (d *Driver) createServerContainer(ctx context.Context, spec execution.InstanceSpec, create CreateSpec) (string, error) {
+	begin := time.Now()
+	if err := d.awaitQuiescent(ctx, spec.ServerID); err != nil {
+		return "", fmt.Errorf("containerdriver: not handing over the working set: %w", err)
+	}
+	walk := time.Now()
+	stats, err := d.handOverWorkingSet(ctx, spec.WorkingDir)
+	if err != nil {
+		return "", fmt.Errorf("containerdriver: hand working set to uid:gid %d:%d: %w", d.runAsUID, d.runAsGID, err)
+	}
+	d.logger.Info("working set handed to the run-as user",
+		"server_id", spec.ServerID, "container", create.Name,
+		"entries", stats.entries, "changed", stats.changed,
+		"quiescence_wait", walk.Sub(begin), "duration", time.Since(walk))
+	create.User = fmt.Sprintf("%d:%d", d.runAsUID, d.runAsGID)
+	create.CapDrop = droppedCapabilities
+	return d.createContainer(ctx, create)
 }
 
 // classifyStartError wraps a create/start failure with a sanitized execution
@@ -794,9 +874,19 @@ const containerWorkDir = "/data"
 // the base image provides the `java` binary, so the command is `java` followed by
 // the resolved JVM arguments. The argv is built by execution.BuildLaunchPlan
 // against the in-container path resolver, so paths are already /data-relative.
+//
+// It also gives the JVM a home. The run-as uid has no passwd entry in the Java
+// images, and a JVM up to 17 then reports user.home as the literal "?" — which
+// libraries resolve against the working dir, leaving a "?" directory (the Forge
+// installer's JNA cache, measured) in the working set and so in every snapshot.
+// /tmp is in the container's own filesystem: writable by any uid and discarded
+// with the container, as /root was while the server ran as root (issue #2600).
 func containerCmd(args []string) []string {
-	return append([]string{"java"}, args...)
+	return append([]string{"java", "-Duser.home=" + containerHomeDir}, args...)
 }
+
+// containerHomeDir is the user.home every server JVM is launched with.
+const containerHomeDir = "/tmp"
 
 // memoryLimitBytes converts the per-server memory ceiling from mebibytes (the
 // InstanceSpec unit, issue #706) to bytes for the Docker host-config Memory
@@ -832,7 +922,7 @@ type instance struct {
 	network     string
 	gameBindIP  string
 	labels      map[string]string
-	createFn    func(ctx context.Context, create CreateSpec) (string, error)
+	createFn    func(ctx context.Context, spec execution.InstanceSpec, create CreateSpec) (string, error)
 	openControl controlFunc
 	// rconHost is the host the graceful-stop RCON connection dials: empty for the
 	// host loopback, the container name when a user-defined network is configured.
@@ -1278,7 +1368,7 @@ func (i *instance) createLaunchContainer(launchArgs []string) (string, error) {
 		MemoryLimitBytes: memoryLimitBytes(i.spec.MemoryLimitMB),
 		CPUShares:        cpuShares(i.spec.CPUMillis),
 	}
-	return i.createFn(context.Background(), create)
+	return i.createFn(context.Background(), i.spec, create)
 }
 
 // installBackoffOrStopping sleeps for d in small increments, checking the
@@ -1329,7 +1419,7 @@ func (i *instance) createInstallRetryContainer() (string, error) {
 		MemoryLimitBytes: memoryLimitBytes(i.spec.MemoryLimitMB),
 		CPUShares:        cpuShares(i.spec.CPUMillis),
 	}
-	return i.createFn(context.Background(), create)
+	return i.createFn(context.Background(), i.spec, create)
 }
 
 // captureInstallOutput follows the install container's log stream and writes it to

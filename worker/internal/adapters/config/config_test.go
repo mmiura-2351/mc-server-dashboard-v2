@@ -220,6 +220,9 @@ func TestLoadRejectsInvalidValue(t *testing.T) {
 		{name: "malformed max_servers", env: map[string]string{"MCD_WORKER_WORKER_MAX_SERVERS": "not-a-number"}, wantKeys: []string{"WORKER_MAX_SERVERS"}},
 		{name: "malformed metrics_interval_seconds", env: map[string]string{"MCD_WORKER_WORKER_METRICS_INTERVAL_SECONDS": "not-a-number"}, wantKeys: []string{"WORKER_METRICS_INTERVAL_SECONDS"}},
 		{name: "malformed game_bind_ip", env: map[string]string{"MCD_WORKER_DRIVER_CONTAINER_GAME_BIND_IP": "not-an-ip"}, wantKeys: []string{"driver.container.game_bind_ip"}},
+		{name: "root container user", env: map[string]string{"MCD_WORKER_DRIVER_CONTAINER_USER": "0:0"}, wantKeys: []string{"driver.container.user", "root"}},
+		{name: "named container user", env: map[string]string{"MCD_WORKER_DRIVER_CONTAINER_USER": "minecraft:minecraft"}, wantKeys: []string{"driver.container.user", "uid:gid"}},
+		{name: "container user without gid", env: map[string]string{"MCD_WORKER_DRIVER_CONTAINER_USER": "1000"}, wantKeys: []string{"driver.container.user", "uid:gid"}},
 		{name: "unknown log level", env: map[string]string{"MCD_WORKER_LOG_LEVEL": "trace"}, wantKeys: []string{"log.level"}},
 		{name: "log level typo", env: map[string]string{"MCD_WORKER_LOG_LEVEL": "debgu"}, wantKeys: []string{"log.level"}},
 	}
@@ -487,6 +490,7 @@ func TestLoadContainerSettingFromFileOrEnv(t *testing.T) {
 	}{
 		{"game_bind_ip", "MCD_WORKER_DRIVER_CONTAINER_GAME_BIND_IP", "0.0.0.0", func(c Config) string { return c.Driver.Container.GameBindIP }},
 		{"network", "MCD_WORKER_DRIVER_CONTAINER_NETWORK", "mcsd", func(c Config) string { return c.Driver.Container.Network }},
+		{"user", "MCD_WORKER_DRIVER_CONTAINER_USER", loadableContainerUser(), func(c Config) string { return c.Driver.Container.User.String() }},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name+" from file", func(t *testing.T) {
@@ -539,4 +543,67 @@ drivers = ["container"]
 
 func contains(s, sub string) bool {
 	return strings.Contains(s, sub)
+}
+
+// loadableContainerUser is a driver.container.user value Load accepts whoever
+// runs the tests: an unprivileged process may only name its own uid:gid, and root
+// may name any unprivileged one.
+func loadableContainerUser() string {
+	if os.Geteuid() == 0 {
+		return "1234:5678"
+	}
+	return ContainerUser{UID: os.Geteuid(), GID: os.Getegid()}.String()
+}
+
+// The uid:gid MC containers run as follows from who the Worker is: root can serve
+// any unprivileged user and defaults to a fixed one, an unprivileged Worker can
+// only run servers as itself (issue #2600).
+func TestResolveContainerUser(t *testing.T) {
+	tests := []struct {
+		name       string
+		configured ContainerUser
+		euid, egid int
+		want       ContainerUser
+		wantErr    bool
+	}{
+		{name: "root worker, unset: the fixed unprivileged default", euid: 0, egid: 0, want: ContainerUser{UID: 25565, GID: 25565}},
+		{name: "root worker, configured: the configured user", configured: ContainerUser{UID: 2000, GID: 3000}, euid: 0, egid: 0, want: ContainerUser{UID: 2000, GID: 3000}},
+		{name: "unprivileged worker, unset: the worker's own user", euid: 1000, egid: 988, want: ContainerUser{UID: 1000, GID: 988}},
+		{name: "unprivileged worker, configured as itself", configured: ContainerUser{UID: 1000, GID: 988}, euid: 1000, egid: 988, want: ContainerUser{UID: 1000, GID: 988}},
+		{name: "unprivileged worker, configured as someone else", configured: ContainerUser{UID: 25565, GID: 25565}, euid: 1000, egid: 988, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := resolveContainerUser(tc.configured, tc.euid, tc.egid)
+			if tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "driver.container.user") {
+					t.Fatalf("error = %v, want one naming driver.container.user", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveContainerUser: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("user = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// With driver.container.user unset, Load still resolves a concrete, non-root
+// user, so the driver never falls back to the image's default (root).
+func TestLoadResolvesContainerUserWhenUnset(t *testing.T) {
+	cfg, err := Load("", mapEnv(baseEnv(t.TempDir())))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	want, err := resolveContainerUser(ContainerUser{}, os.Geteuid(), os.Getegid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Driver.Container.User; got != want || got.UID == 0 {
+		t.Fatalf("Driver.Container.User = %s, want the non-root %s", got, want)
+	}
 }

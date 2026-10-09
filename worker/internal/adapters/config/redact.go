@@ -37,6 +37,7 @@ func (c Config) LogValue() slog.Value {
 				slog.Any("images", c.Driver.Container.Images),
 				slog.String("game_bind_ip", c.Driver.Container.GameBindIP),
 				slog.String("network", c.Driver.Container.Network),
+				slog.String("user", c.Driver.Container.User.String()),
 			),
 		),
 		slog.Group("log",
