@@ -85,6 +85,9 @@ _HELD_GRACE = 10
 # The short refused-stop grace (issue #2478): below both of the above so a test can
 # pin a divergence age between it and the full grace and prove it was applied.
 _REFUSED_GRACE = 5
+# The restart budget (issue #3209): ABOVE the full grace so a test can pin a
+# divergence age between them and prove the budget, not a grace, held the start back.
+_RESTART_BUDGET = 120
 _PAST_GRACE = _NOW - dt.timedelta(seconds=_GRACE + 1)
 
 
@@ -177,6 +180,7 @@ def _reconciler(
         grace_seconds=_GRACE,
         held_start_grace_seconds=_HELD_GRACE,
         refused_stop_grace_seconds=_REFUSED_GRACE,
+        restart_timeout_seconds=_RESTART_BUDGET,
         backoff_base_seconds=30,
         backoff_max_seconds=3600,
     )
@@ -517,6 +521,104 @@ async def test_stale_held_redispatch_start_still_waits_full_grace() -> None:
     clock = FakeClock(_NOW)
     await _reconciler(uow, cp, clock, store_generation=2).tick()
     assert cp.dispatched == []
+
+
+# --- in-flight restart stop leg (issue #3209) -------------------------------
+
+
+async def test_restart_stop_leg_outlasting_held_grace_is_not_redispatched() -> None:
+    # A restart keeps desired=running and its stop leg reports ``stopping``, so the
+    # row reads (running, stopping) for as long as the flush and the docker-stop
+    # escalation take — which outlasts the short held-start grace. The Worker holds
+    # the id reserved across the whole restart and would refuse the start BUSY, so
+    # the reconciler stands back for the restart budget instead of dispatching it.
+    uow = FakeUnitOfWork()
+    aged = _NOW - dt.timedelta(seconds=_HELD_GRACE + 1)
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.STOPPING,
+        worker=_WORKER,
+        observed_at=aged,
+        updated_at=aged,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane(held={(_WORKER, server.id): 2})
+    clock = FakeClock(_NOW)
+    await _reconciler(uow, cp, clock, store_generation=2).tick()
+    assert cp.dispatched == []
+
+
+async def test_restart_stop_leg_is_held_back_for_the_budget_not_the_full_grace() -> (
+    None
+):
+    # The stand-back is the restart budget itself, not whichever grace the start
+    # would otherwise take: a non-held row past the FULL grace but still inside the
+    # budget is left alone too (an operator may run grace below stop + command).
+    uow = FakeUnitOfWork()
+    aged = _NOW - dt.timedelta(seconds=_RESTART_BUDGET - 1)
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.STOPPING,
+        worker=_WORKER,
+        observed_at=aged,
+        updated_at=aged,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()  # nothing held -> full grace, already lapsed
+    clock = FakeClock(_NOW)
+    assert (_NOW - aged) > dt.timedelta(seconds=_GRACE)
+    await _reconciler(uow, cp, clock).tick()
+    assert cp.dispatched == []
+
+
+async def test_stuck_stopping_is_redispatched_once_the_restart_budget_lapses() -> None:
+    # No restart is still in flight past its own budget, so a row still reading
+    # (running, stopping) then is genuinely stuck — a stop leg that failed without
+    # a terminal report — and the reconciler recovers it exactly as before.
+    uow = FakeUnitOfWork()
+    aged = _NOW - dt.timedelta(seconds=_RESTART_BUDGET + 1)
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.STOPPING,
+        worker=_WORKER,
+        observed_at=aged,
+        updated_at=aged,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane(held={(_WORKER, server.id): 2})
+    clock = FakeClock(_NOW)
+    await _reconciler(uow, cp, clock, store_generation=2).tick()
+    assert [k for k, _, _ in cp.dispatched] == ["start"]
+
+
+@pytest.mark.parametrize(
+    "observed",
+    [
+        ObservedState.STOPPED,
+        ObservedState.RESTARTING,
+        ObservedState.CRASHED,
+        ObservedState.UNKNOWN,
+    ],
+)
+async def test_restart_budget_applies_to_no_other_observed_state(
+    observed: ObservedState,
+) -> None:
+    # Only ``stopping`` marks a stop leg in flight. Every other not-running state
+    # under a running intent keeps the short held-start grace it had.
+    uow = FakeUnitOfWork()
+    aged = _NOW - dt.timedelta(seconds=_HELD_GRACE + 1)
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=observed,
+        worker=_WORKER,
+        observed_at=aged,
+        updated_at=aged,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane(held={(_WORKER, server.id): 2})
+    clock = FakeClock(_NOW)
+    await _reconciler(uow, cp, clock, store_generation=2).tick()
+    assert [k for k, _, _ in cp.dispatched] == ["start"]
 
 
 class _BumpingStoreGenerationReader(StoreGenerationReader):
@@ -964,6 +1066,59 @@ async def test_failed_action_backs_off_then_retries() -> None:
     assert len(cp.dispatched) == 2
 
 
+async def test_busy_start_refusal_does_not_feed_backoff() -> None:
+    # BUSY is the Worker saying the id is not free YET — a command still in flight,
+    # or a failed-stop orphan it is converging — and that this same start will be
+    # accepted once it settles (issue #3209). Nothing failed, so it must not arm a
+    # backoff that outlives the busy window and delays the recovery afterwards: the
+    # next tick retries.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.UNKNOWN,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane(
+        outcomes={"start": CommandOutcome(status=CommandStatus.BUSY)},
+        held={(_WORKER, server.id): 2},
+    )
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock, store_generation=2)
+    await reconciler.tick()  # refused BUSY
+    assert [k for k, _, _ in cp.dispatched] == ["start"]
+    clock.set(_NOW + dt.timedelta(seconds=1))
+    await reconciler.tick()  # well inside what the 30s base backoff would have been
+    assert [k for k, _, _ in cp.dispatched] == ["start", "start"]
+
+
+async def test_busy_start_refusal_keeps_an_existing_backoff() -> None:
+    # Not counting a BUSY refusal is not the same as clearing: a crash-looping
+    # server's damping (#343) must survive a busy window.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.CRASHED,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane(held={(_WORKER, server.id): 2})
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock, store_generation=2)
+    await reconciler.tick()  # crash counted -> 30s backoff
+    cp._outcomes["start"] = CommandOutcome(status=CommandStatus.BUSY)
+    clock.set(_NOW + dt.timedelta(seconds=31))
+    await reconciler.tick()  # past the backoff -> retried, refused BUSY
+    assert len(cp.dispatched) == 2
+    del cp._outcomes["start"]
+    clock.set(_NOW + dt.timedelta(seconds=62))
+    await reconciler.tick()  # crash counted as the SECOND failure -> 60s backoff
+    assert len(cp.dispatched) == 3
+    clock.set(_NOW + dt.timedelta(seconds=62 + 31))
+    await reconciler.tick()  # inside the 60s window -> skipped
+    assert len(cp.dispatched) == 3
+
+
 async def test_backoff_grows_exponentially() -> None:
     uow = FakeUnitOfWork()
     server = _server(
@@ -1298,6 +1453,7 @@ def _concurrent_reconciler(
         grace_seconds=_GRACE,
         held_start_grace_seconds=_HELD_GRACE,
         refused_stop_grace_seconds=_REFUSED_GRACE,
+        restart_timeout_seconds=_RESTART_BUDGET,
         backoff_base_seconds=30,
         backoff_max_seconds=3600,
     )
@@ -1415,6 +1571,7 @@ async def test_failure_in_one_action_does_not_poison_others() -> None:
         grace_seconds=_GRACE,
         held_start_grace_seconds=_HELD_GRACE,
         refused_stop_grace_seconds=_REFUSED_GRACE,
+        restart_timeout_seconds=_RESTART_BUDGET,
         backoff_base_seconds=30,
         backoff_max_seconds=3600,
     )

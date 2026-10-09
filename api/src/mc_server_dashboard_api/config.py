@@ -240,7 +240,9 @@ class ControlSettings(_Section):
         derived rather than a separate knob, so it can never drift below either leg.
         Not a term of the reconciler grace floor: the reconciler never replays a
         restart, and the start it may re-dispatch meanwhile is refused BUSY by the
-        Worker's reservation held across the whole restart.
+        Worker's reservation held across the whole restart. The reconciler reads
+        this budget for a different purpose (issue #3209): it is how long it holds
+        that start back while the row still reports the stop leg.
         """
         return self.stop_timeout_seconds + self.command_timeout_seconds
 

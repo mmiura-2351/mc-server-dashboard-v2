@@ -142,6 +142,32 @@ below bounds it. The #847 stale-snapshot floor
 belongs to the stop side and to ``place_and_start``, neither of which can take the
 short grace.
 
+A restart's stop leg is the one divergence neither start grace was sized for (issue
+#3209). ``RestartServer`` commits no desired-state change, so for as long as its
+stop leg runs — the pre-stop flush plus the docker-stop escalation, ~250s worst case
+— the row reads ``desired=running`` / ``observed=stopping``, which is a
+``redispatch_start`` candidate, and the short held-start grace (sized for a start
+command) lapses well inside it. The Worker holds the id reserved from the restart's
+first step to its relaunch and refuses that start ``BUSY``, so nothing is
+double-started; the dispatch is simply pointless. A ``redispatch_start`` at a row
+observed ``stopping`` therefore waits at least ``restart_timeout_seconds`` — the
+budget the restart dispatch itself runs under (#2774) — whichever grace it would
+otherwise take. It is measured like every grace, from the row's last report or
+intent commit, which for this row is the ``stopping`` report the Worker emits once
+on entry to each stop attempt, so the wait starts when the stop leg does. Standing
+back that long is safe because a row reads ``(running, stopping)`` only while the
+Worker is itself still driving a stop. Besides the in-flight restart there is one
+other source: a restart whose stop could not confirm termination, which leaves a
+failed-stop orphan the Worker's converger keeps retrying. Each retry re-emits
+``stopping`` and the start stays refused ``BUSY`` throughout, until the orphan
+settles into a ``stopped`` or ``unknown`` report — a different observed state, so
+the ordinary grace applies again. A plain stop is not a source (it commits
+``desired=stopped`` and is never reverted), and neither is a Worker that died or
+dropped its session mid-restart: the disconnect and the API-restart reset both
+rewrite the row to ``unknown``. Past the budget with no fresh report nothing
+legitimate is still in flight, the row is genuinely stuck, and the start is
+re-dispatched as before.
+
 Per-server exponential backoff — a failed action is not retried until a growing
 window (``backoff_base_seconds`` doubled per consecutive failure, capped at
 ``backoff_max_seconds``) has lapsed, so a persistently failing server does not
@@ -162,6 +188,21 @@ only once ``now`` is past ``next_eligible_at`` by ``backoff_max_seconds`` of sla
 while a still-flapping server re-arrives and refreshes ``next_eligible_at`` long
 before then, so its backoff keeps growing up to ``backoff_max_seconds``. The map
 still does not grow without bound.
+
+A start the Worker refuses ``BUSY`` is neither a failure nor a success for this
+purpose (issue #3209): the entry is left exactly as it was. ``BUSY`` says the id is
+not free YET — a command still in flight, or a failed-stop orphan the Worker is
+converging — and that this same start will be accepted once it settles, so there is
+nothing to damp, and counting it arms a window that outlives the busy one: the
+server then stays down for the rest of a backoff earned while the Worker was only
+busy. The restart rule above removes the common source, but two remain that the row
+cannot identify: a session interruption during a restart's stop leg (the row is
+rewritten to ``unknown`` while the Worker finishes the stop detached, and its status
+resync does not report an id it holds only as a reservation), and an orphan whose
+fate the Worker cannot determine (reported ``unknown``, probed indefinitely). The
+retry cadence for both is the tick interval. Scoped to the start actions: a stop
+refused ``BUSY`` keeps its backoff, its cadence being the Worker converger's (see
+the refused-stop grace above).
 
 Loud structured logs accompany every action and every failure so an operator can
 see the reconciler working (NFR-OBS-1). One bad action is logged and left for a
@@ -188,6 +229,9 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from mc_server_dashboard_api.servers.application.command_dispatch import (
+    WORKER_BUSY_REASON,
+)
 from mc_server_dashboard_api.servers.application.lifecycle import (
     StartServer,
     StopServer,
@@ -198,6 +242,7 @@ from mc_server_dashboard_api.servers.application.stop_dispatch_refusals import (
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.control_plane import ControlPlane
 from mc_server_dashboard_api.servers.domain.entities import Server
+from mc_server_dashboard_api.servers.domain.errors import CommandDispatchError
 from mc_server_dashboard_api.servers.domain.store_generation import (
     StoreGenerationReader,
 )
@@ -272,6 +317,7 @@ class RunReconcilerTick:
     grace_seconds: int
     held_start_grace_seconds: int
     refused_stop_grace_seconds: int
+    restart_timeout_seconds: int
     backoff_base_seconds: int
     backoff_max_seconds: int
     _attempts: dict[ServerId, _Backoff] = field(default_factory=dict)
@@ -367,6 +413,15 @@ class RunReconcilerTick:
         # keeps the full grace, preserving the #822/#847 safety floors.
         if action != "redispatch_start" or server.assigned_worker_id is None:
             return _GraceDecision(self.grace_seconds)
+        # ``observed=stopping`` under a running intent is a stop leg the Worker is
+        # still driving — a restart's, or its converger's retry of one that failed —
+        # and the id stays refused BUSY for all of it, so the start waits at least
+        # the restart budget, whichever grace it takes below (issue #3209).
+        floor = (
+            self.restart_timeout_seconds
+            if server.observed_state is ObservedState.STOPPING
+            else 0
+        )
         # Read the authoritative generation ONCE here and carry it in the decision:
         # ``_run`` hands it to ``redispatch_start`` so that use case's own
         # skip-hydrate check is made from this exact generation, not a second read a
@@ -380,13 +435,15 @@ class RunReconcilerTick:
             server_id=server.id,
             store_generation=store_generation,
         ):
-            return _GraceDecision(self.held_start_grace_seconds, store_generation)
+            return _GraceDecision(
+                max(self.held_start_grace_seconds, floor), store_generation
+            )
         # Non-held: the full grace runs and the redispatch WILL hydrate, which is
         # always affordable, so there is nothing to confine — do NOT carry the
         # generation. Carrying a possibly-lower value here could only nudge
         # ``redispatch_start`` toward skip_hydrate (the #696-unsafe direction) for no
         # benefit; ``None`` makes it re-read Storage itself exactly as it did before.
-        return _GraceDecision(self.grace_seconds)
+        return _GraceDecision(max(self.grace_seconds, floor))
 
     def _previous_stop_refused(self, server: Server) -> bool:
         # True when the last stop dispatch was refused by the Worker AND that
@@ -488,6 +545,22 @@ class RunReconcilerTick:
         try:
             dispatched = await self._dispatch(server, action, store_generation)
         except Exception as exc:  # noqa: BLE001 - never abort the tick
+            if (
+                action in ("place_and_start", "redispatch_start")
+                and isinstance(exc, CommandDispatchError)
+                and exc.reason == WORKER_BUSY_REASON
+            ):
+                # The Worker refused the start BUSY: the id is not free yet and this
+                # same start will be accepted once it settles. Nothing failed, so the
+                # backoff entry is left untouched — neither counted nor cleared — and
+                # the next tick retries (issue #3209).
+                _LOG.info(
+                    "reconcile action %s refused busy for server %s; "
+                    "retrying next tick",
+                    action,
+                    server.id.value,
+                )
+                return
             self._record_failure(server.id, now)
             _LOG.warning(
                 "reconcile action %s failed for server %s: %r; backing off",

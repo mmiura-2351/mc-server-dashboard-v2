@@ -405,6 +405,7 @@ async def test_drain_converges_through_reconciler_with_final_snapshot() -> None:
         grace_seconds=60,
         held_start_grace_seconds=90,
         refused_stop_grace_seconds=30,
+        restart_timeout_seconds=630,
         backoff_base_seconds=30,
         backoff_max_seconds=3600,
     )

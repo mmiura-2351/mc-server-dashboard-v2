@@ -1128,6 +1128,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 refused_stop_grace_seconds=(
                     settings.reconciler.refused_stop_grace_seconds
                 ),
+                restart_timeout_seconds=settings.control.restart_timeout_seconds,
                 backoff_base_seconds=settings.reconciler.backoff_base_seconds,
                 backoff_max_seconds=settings.reconciler.backoff_max_seconds,
             )

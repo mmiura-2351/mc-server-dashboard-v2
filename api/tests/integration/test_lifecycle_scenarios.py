@@ -224,6 +224,7 @@ async def _reconciler_tick(
         grace_seconds=0,
         held_start_grace_seconds=0,
         refused_stop_grace_seconds=0,
+        restart_timeout_seconds=0,
         backoff_base_seconds=30,
         backoff_max_seconds=3600,
     ).tick()
