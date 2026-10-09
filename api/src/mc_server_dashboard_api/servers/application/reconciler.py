@@ -147,9 +147,15 @@ A restart's stop leg is the one divergence neither start grace was sized for (is
 stop leg runs — the pre-stop flush plus the docker-stop escalation, ~250s worst case
 — the row reads ``desired=running`` / ``observed=stopping``, which is a
 ``redispatch_start`` candidate, and the short held-start grace (sized for a start
-command) lapses well inside it. The Worker holds the id reserved from the restart's
-first step to its relaunch and refuses that start ``BUSY``, so nothing is
-double-started; the dispatch is simply pointless. A ``redispatch_start`` at a row
+command) lapses well inside it. Nothing is double-started by a start sent then,
+but it cannot succeed either. On the session the restart arrived on, the Worker
+runs one server's commands serially (its per-server lane), so the start queues
+behind the restart: the API's dispatch times out after ``command_timeout_seconds``
+— a failure that counts toward the backoff below — and the queued start is only
+answered, ``INVALID_STATE`` "already running", once the relaunch is done. On a new
+session (after a reconnect) there is no queue to join, and the start meets the
+reservation the restart holds from its first step to its relaunch and is refused
+``BUSY``. Either way the dispatch is pointless. A ``redispatch_start`` at a row
 observed ``stopping`` therefore waits at least ``restart_timeout_seconds`` — the
 budget the restart dispatch itself runs under (#2774) — whichever grace it would
 otherwise take. It is measured like every grace, from the row's last report or
@@ -159,8 +165,8 @@ back that long is safe because a row reads ``(running, stopping)`` only while th
 Worker is itself still driving a stop. Besides the in-flight restart there is one
 other source: a restart whose stop could not confirm termination, which leaves a
 failed-stop orphan the Worker's converger keeps retrying. Each retry re-emits
-``stopping`` and the start stays refused ``BUSY`` throughout, until the orphan
-settles into a ``stopped`` or ``unknown`` report — a different observed state, so
+``stopping`` and the orphan guard refuses the start ``BUSY`` throughout, until the
+orphan settles into a ``stopped`` or ``unknown`` report — a different observed state, so
 the ordinary grace applies again. A plain stop is not a source (it commits
 ``desired=stopped`` and is never reverted), and neither is a Worker that died or
 dropped its session mid-restart: the disconnect and the API-restart reset both
@@ -168,8 +174,9 @@ rewrite the row to ``unknown``. Past the budget with no fresh report the start i
 re-dispatched as before. The lapse is permission to retry, not proof that the
 Worker finished: its stop is detached from the caller and runs on its own
 deadlines, so the API's budget says nothing about it. What keeps that retry safe
-is unchanged — the Worker's reservation and orphan guards still refuse the start
-``BUSY`` while either holds the id.
+is unchanged and is all on the Worker: the per-server lane serialises it behind a
+restart still running on the same session, and the reservation and orphan guards
+refuse it ``BUSY`` while either holds the id.
 
 Per-server exponential backoff — a failed action is not retried until a growing
 window (``backoff_base_seconds`` doubled per consecutive failure, capped at
@@ -198,14 +205,18 @@ not free YET — a command still in flight, or a failed-stop orphan the Worker i
 converging — and that this same start will be accepted once it settles, so there is
 nothing to damp, and counting it arms a window that outlives the busy one: the
 server then stays down for the rest of a backoff earned while the Worker was only
-busy. The restart rule above removes the common source, but two remain that the row
-cannot identify: a session interruption during a restart's stop leg (the row is
-rewritten to ``unknown`` while the Worker finishes the stop detached, and its status
-resync does not report an id it holds only as a reservation), and an orphan whose
-fate the Worker cannot determine (reported ``unknown``, probed indefinitely). The
-retry cadence for both is the tick interval. Scoped to the start actions: a stop
-refused ``BUSY`` keeps its backoff, its cadence being the Worker converger's (see
-the refused-stop grace above).
+busy. Two sources reach the reconciler, and the row identifies neither: a session
+interruption during a restart's stop leg (the row is rewritten to ``unknown`` while
+the Worker finishes the stop detached, its status resync does not report an id it
+holds only as a reservation, and on the new session the start meets that
+reservation instead of queueing), and an orphan whose fate the Worker cannot
+determine (reported ``unknown``, probed indefinitely). The retry cadence for both
+is the tick interval. This is NOT what a start sent mid-restart on the restart's
+own session meets: that one queues in the Worker's per-server lane and times out,
+which is an ordinary failure and backs off — the restart rule above is what keeps
+the reconciler from sending it. Scoped to the start actions: a stop refused
+``BUSY`` keeps its backoff, its cadence being the Worker converger's (see the
+refused-stop grace above).
 
 Loud structured logs accompany every action and every failure so an operator can
 see the reconciler working (NFR-OBS-1). One bad action is logged and left for a
@@ -418,10 +429,12 @@ class RunReconcilerTick:
             return _GraceDecision(self.grace_seconds)
         # ``observed=stopping`` under a running intent is a stop leg the Worker is
         # still driving — a restart's, or its converger's retry of one that failed —
-        # and the id stays refused BUSY for all of it, so the start waits at least
-        # the restart budget, whichever grace it takes below (issue #3209). The
-        # lapse only permits a retry; it does not establish that the Worker
-        # finished, and its reservation/orphan guard is what still refuses BUSY.
+        # and a start cannot succeed for any of it: it queues behind the restart in
+        # the Worker's per-server lane and times out, or (new session, orphan) is
+        # refused BUSY. So the start waits at least the restart budget, whichever
+        # grace it takes below (issue #3209). The lapse only permits a retry; it
+        # does not establish that the Worker finished, and the lane plus the
+        # reservation/orphan guards are what keep that retry safe.
         floor = (
             self.restart_timeout_seconds
             if server.observed_state is ObservedState.STOPPING

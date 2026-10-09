@@ -529,9 +529,11 @@ async def test_stale_held_redispatch_start_still_waits_full_grace() -> None:
 async def test_restart_stop_leg_outlasting_held_grace_is_not_redispatched() -> None:
     # A restart keeps desired=running and its stop leg reports ``stopping``, so the
     # row reads (running, stopping) for as long as the flush and the docker-stop
-    # escalation take — which outlasts the short held-start grace. The Worker holds
-    # the id reserved across the whole restart and would refuse the start BUSY, so
-    # the reconciler stands back for the restart budget instead of dispatching it.
+    # escalation take — which outlasts the short held-start grace. A start sent
+    # then cannot succeed: it queues behind the restart in the Worker's per-server
+    # lane until the dispatch times out (or, on a new session, is refused BUSY by
+    # the restart's reservation). So the reconciler stands back for the restart
+    # budget instead of dispatching it.
     uow = FakeUnitOfWork()
     aged = _NOW - dt.timedelta(seconds=_HELD_GRACE + 1)
     server = _server(
@@ -574,8 +576,9 @@ async def test_restart_stop_leg_is_held_back_for_the_budget_not_the_full_grace()
 async def test_stuck_stopping_is_redispatched_once_the_restart_budget_lapses() -> None:
     # The budget lapsing is permission to retry, not proof the Worker finished
     # (its stop runs detached, on its own deadlines): a row still reading
-    # (running, stopping) then is re-dispatched exactly as before, and the Worker's
-    # reservation/orphan guard still refuses BUSY if it does hold the id.
+    # (running, stopping) then is re-dispatched exactly as before. The Worker keeps
+    # that safe: its per-server lane serialises the start behind a restart still
+    # running on the session, and its reservation/orphan guards refuse it BUSY.
     uow = FakeUnitOfWork()
     aged = _NOW - dt.timedelta(seconds=_RESTART_BUDGET + 1)
     server = _server(
@@ -1068,8 +1071,10 @@ async def test_failed_action_backs_off_then_retries() -> None:
 
 
 async def test_busy_start_refusal_does_not_feed_backoff() -> None:
-    # BUSY is the Worker saying the id is not free YET — a command still in flight,
-    # or a failed-stop orphan it is converging — and that this same start will be
+    # BUSY is the Worker saying the id is not free YET — a reservation held by a
+    # command from before a reconnect, or a failed-stop orphan it is converging
+    # (a start on the in-flight command's own session queues and times out
+    # instead, and that does back off) — and that this same start will be
     # accepted once it settles (issue #3209). Nothing failed, so it must not arm a
     # backoff that outlives the busy window and delays the recovery afterwards: the
     # next tick retries.
