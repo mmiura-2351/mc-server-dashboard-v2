@@ -542,17 +542,19 @@ var droppedCapabilities = []string{"NET_RAW"}
 // root-owned files from the days the server itself ran as root. The walk itself,
 // and the check that nothing is running against the tree, are in handover.go.
 func (d *Driver) createServerContainer(ctx context.Context, spec execution.InstanceSpec, create CreateSpec) (string, error) {
+	begin := time.Now()
 	if err := d.awaitQuiescent(ctx, spec.ServerID); err != nil {
 		return "", fmt.Errorf("containerdriver: not handing over the working set: %w", err)
 	}
-	start := time.Now()
+	walk := time.Now()
 	stats, err := d.handOverWorkingSet(ctx, spec.WorkingDir)
 	if err != nil {
 		return "", fmt.Errorf("containerdriver: hand working set to uid:gid %d:%d: %w", d.runAsUID, d.runAsGID, err)
 	}
 	d.logger.Info("working set handed to the run-as user",
 		"server_id", spec.ServerID, "container", create.Name,
-		"entries", stats.entries, "changed", stats.changed, "duration", time.Since(start))
+		"entries", stats.entries, "changed", stats.changed,
+		"quiescence_wait", walk.Sub(begin), "duration", time.Since(walk))
 	create.User = fmt.Sprintf("%d:%d", d.runAsUID, d.runAsGID)
 	create.CapDrop = droppedCapabilities
 	return d.createContainer(ctx, create)

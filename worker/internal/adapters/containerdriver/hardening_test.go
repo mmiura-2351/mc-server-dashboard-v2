@@ -327,12 +327,13 @@ func TestForgeLaunchHandsOverEntriesCreatedDuringInstall(t *testing.T) {
 	drainClosed(inst.Events())
 }
 
-// A container of the server that is, or may be, alive holds the working set: the
-// start is refused with no ownership change and no create. That covers an orphan
-// the startup sweep failed to stop, which the Manager has no record of, and every
-// state the driver cannot vouch for (issue #2600).
+// A container of the server that is, or may be, alive holds the working set: once
+// it has outlasted the wait, the start is refused with no ownership change and no
+// create. That covers an orphan the startup sweep failed to stop, which the
+// Manager has no record of, and every state the driver cannot vouch for (issue
+// #2600).
 func TestStartRefusesHandOverWhileAContainerOfTheServerMayBeAlive(t *testing.T) {
-	for _, state := range []string{"running", "paused", "restarting", "something-new", ""} {
+	for _, state := range []string{"running", "paused", "restarting", "removing", "something-new", ""} {
 		t.Run("state "+state, func(t *testing.T) {
 			dir, _ := workingSet(t)
 			docker := newFakeDocker()
@@ -381,11 +382,16 @@ type listScript struct {
 	*fakeDocker
 	mu      sync.Mutex
 	answers [][]Container
+	// onList, when set, runs on each List with the number of answers still queued.
+	onList func(answersLeft int)
 }
 
 func (l *listScript) List(context.Context, string, string) ([]Container, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.onList != nil {
+		l.onList(len(l.answers))
+	}
 	answer := l.answers[0]
 	if len(l.answers) > 1 {
 		l.answers = l.answers[1:]
@@ -393,39 +399,35 @@ func (l *listScript) List(context.Context, string, string) ([]Container, error) 
 	return answer, nil
 }
 
-// A container whose removal is in flight — the previous container of a restart,
-// being reaped by the exit-watcher — is waited out, then the start proceeds; one
-// that never goes away is refused (issue #2600).
-func TestStartWaitsOutAContainerBeingRemoved(t *testing.T) {
-	removing := []Container{{ID: "old", Name: "/mcsd-s1", State: "removing"}}
-
-	t.Run("removal completes", func(t *testing.T) {
-		dir, _ := workingSet(t)
-		docker := &listScript{fakeDocker: newFakeDocker(), answers: [][]Container{removing, removing, nil}}
-		d, rec := hardenedDriver(docker)
-
-		if _, err := d.Start(context.Background(), specIn(dir)); err != nil {
-			t.Fatalf("Start: %v", err)
+// The previous container of a restart is waited out rather than refused: the
+// daemon still lists it as running for a moment after its exit, then as removing
+// while the exit-watcher reaps it. Nothing is handed over until it is gone
+// (issue #2600).
+func TestStartWaitsOutThePreviousContainerOfARestart(t *testing.T) {
+	dir, _ := workingSet(t)
+	docker := &listScript{fakeDocker: newFakeDocker(), answers: [][]Container{
+		{{ID: "old", Name: "/mcsd-s1", State: "running"}},
+		{{ID: "old", Name: "/mcsd-s1", State: "removing"}},
+		nil,
+	}}
+	d, rec := hardenedDriver(docker)
+	var chownedWhileAlive []string
+	docker.onList = func(answersLeft int) {
+		if answersLeft > 1 {
+			chownedWhileAlive = append(chownedWhileAlive, rec.seen()...)
 		}
-		if len(rec.seen()) == 0 || docker.createCalls != 1 {
-			t.Fatalf("chowned %v, createCalls %d; want the hand-over and one create", rec.seen(), docker.createCalls)
-		}
-	})
+	}
 
-	t.Run("removal never completes", func(t *testing.T) {
-		dir, _ := workingSet(t)
-		docker := &listScript{fakeDocker: newFakeDocker(), answers: [][]Container{removing}}
-		d, rec := hardenedDriver(docker)
+	if _, err := d.Start(context.Background(), specIn(dir)); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
 
-		_, err := d.Start(context.Background(), specIn(dir))
-
-		if err == nil || !strings.Contains(err.Error(), "still being removed") {
-			t.Fatalf("Start error = %v, want a refusal for the container still being removed", err)
-		}
-		if got := rec.seen(); len(got) != 0 || docker.createCalls != 0 {
-			t.Fatalf("chowned %v, createCalls %d; want neither", got, docker.createCalls)
-		}
-	})
+	if len(chownedWhileAlive) != 0 {
+		t.Fatalf("re-owned %v while the previous container was still listed alive", chownedWhileAlive)
+	}
+	if len(rec.seen()) == 0 || docker.createCalls != 1 {
+		t.Fatalf("chowned %v, createCalls %d; want the hand-over and one create", rec.seen(), docker.createCalls)
+	}
 }
 
 // A directory swapped for a symlink in the middle of the walk cannot lead it out

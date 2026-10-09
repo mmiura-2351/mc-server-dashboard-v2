@@ -30,22 +30,21 @@ import (
 //     followed.
 
 // quiescentStates are the Engine container states in which no process of the
-// container exists. Every other state — running, paused, restarting, and
-// anything this code does not know — counts as possibly alive.
+// container exists. Every other state — running, paused, restarting, removing,
+// and anything this code does not know — counts as possibly alive.
 var quiescentStates = map[string]bool{"created": true, "exited": true, "dead": true}
-
-// containerStateRemoving is the state of a container whose removal is in flight.
-// Its processes may not be gone yet, so it is waited out rather than trusted.
-const containerStateRemoving = "removing"
 
 // awaitQuiescent returns nil once no container of serverID — launch or install,
 // whoever created it — can be running against the working set. It fails closed:
-// a container that is or may be alive, and a daemon that cannot say, both refuse.
+// while one is or may be alive nothing is handed over, and a daemon that cannot
+// say refuses outright.
 //
-// A container still being removed is the one state worth waiting for: a restart
-// races the exit-watcher's asynchronous removal of the previous container (issue
-// #226), which finishes within the same window the create's own name-conflict
-// loop already allows (issue #233).
+// A live-looking container is waited for, up to the same window the create's own
+// name-conflict loop allows (issue #233), before the start is refused. A restart
+// needs that: the daemon's container list still reports the previous container
+// as running for a moment after its exit was observed, and then as removing
+// while the exit-watcher reaps it (issue #226). An orphan that really is alive
+// simply outlasts the window.
 func (d *Driver) awaitQuiescent(ctx context.Context, serverID string) error {
 	deadline := time.NewTimer(d.conflictDeadline)
 	defer deadline.Stop()
@@ -54,17 +53,14 @@ func (d *Driver) awaitQuiescent(ctx context.Context, serverID string) error {
 		if err != nil {
 			return fmt.Errorf("cannot establish that no container of the server is running: %w", err)
 		}
-		removing := ""
-		for _, c := range containers {
-			switch {
-			case quiescentStates[c.State]:
-			case c.State == containerStateRemoving:
-				removing = c.Name
-			default:
-				return fmt.Errorf("container %s of the server is %q; its working set is in use", c.Name, c.State)
+		var alive *Container
+		for i := range containers {
+			if !quiescentStates[containers[i].State] {
+				alive = &containers[i]
+				break
 			}
 		}
-		if removing == "" {
+		if alive == nil {
 			return nil
 		}
 		poll := time.NewTimer(d.conflictPoll)
@@ -74,7 +70,7 @@ func (d *Driver) awaitQuiescent(ctx context.Context, serverID string) error {
 			return ctx.Err()
 		case <-deadline.C:
 			poll.Stop()
-			return fmt.Errorf("container %s of the server is still being removed; its working set may be in use", removing)
+			return fmt.Errorf("container %s of the server is %q; its working set is in use", alive.Name, alive.State)
 		case <-poll.C:
 		}
 	}
