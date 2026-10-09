@@ -800,8 +800,9 @@ class StartServer:
             # observed=running would stick (the reconciler never re-selects it).
             # Raise instead, changing no row; the assignment and running intent
             # stand, so a later reconcile tick retries the redispatch once the Worker
-            # settles. The row sits honestly diverged meanwhile — backoff-bounded
-            # WARN noise, which is the deliberate trade for never lying about it.
+            # settles. The row sits honestly diverged meanwhile — WARN noise at the
+            # reconciler's tick cadence (a BUSY start is not counted toward its
+            # backoff, issue #3209), the deliberate trade for never lying about it.
             raise _dispatch_failure(
                 server_id=server_id, kind="StartServer", outcome=outcome
             )
