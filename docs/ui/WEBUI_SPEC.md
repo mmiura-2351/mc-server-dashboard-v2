@@ -143,18 +143,24 @@ unchanged:
   `…/files/version`, `…/files/search`, `…/files/download` and its
   `download-grant`;
 - the writes a repeat converges for: `PUT …/files`, `…/files/upload` (archive
-  extract included — the repeat rewrites every member), `…/files/rollback` and
+  extract included — the repeat rewrites every member) and
   `…/files/directories`. The interrupted attempt may already have applied the
   change (a file can be replaced before its write reports the outage);
-  repeating it completes it;
+  repeating it completes it. Each attempt that got as far as replacing a file
+  retained the content it replaced, so a repeat can use up one more slot of
+  that file's bounded version history than a first-time success would;
 - `POST …/start`: the EULA check, and the `accept_eula` write, both run before
   anything is started.
 
-`DELETE …/files` and `…/files/rename` are **not** in that set and answer the
-generic **500**: interrupted after the mutation itself, a repeat finds the
-source already gone (404) or the destination already occupied (409), so a 503
-would promise a retry that cannot finish the job. Reload the listing to see
-what the failed request left. The same holds for `PATCH …/{sid}` when the store
+`DELETE …/files`, `…/files/rename` and `…/files/rollback` are **not** in that
+set and answer the generic **500**: interrupted after the mutation itself, a
+repeat finds the source already gone (404) or the destination already occupied
+(409), so a 503 would promise a retry that cannot finish the job. For a
+rollback the thing that can be gone is the version: restoring it retains the
+file it replaces, and when the file's version history is full that evicts the
+oldest version — possibly the one being rolled back to — so the file may
+already hold the restored content while the same rollback again is a 404.
+Reload the listing to see what the failed request left. The same holds for `PATCH …/{sid}` when the store
 fails while it reads `server.properties`. These statuses describe the object
 storage backend, which reports an outage as such; the filesystem backend
 reports a device fault on these routes as a 500.

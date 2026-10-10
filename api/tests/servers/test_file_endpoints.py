@@ -3016,9 +3016,11 @@ async def test_store_failing_between_the_probe_and_the_open_is_a_clean_503() -> 
 
 
 async def test_download_releases_the_store_when_the_audit_write_fails() -> None:
-    """The same exit, through the production adapters: once the route has failed,
-    the begun stream holds no reader lease and no store client — at once, not
-    when a finalizer gets round to it."""
+    """The same exit end to end, over the production adapters: after the failed
+    request the store holds no reader lease and no open client. (That the close
+    is immediate rather than a finalizer's doing is pinned at the seam, in
+    ``test_file_store_storage_unavailable.py`` — by the time a test client has
+    its response back, finalizers have had their turn too.)"""
 
     community, server = uuid.uuid4(), uuid.uuid4()
     app, file_store, faults = _real_download_app(community, server, _FailingRecorder())
