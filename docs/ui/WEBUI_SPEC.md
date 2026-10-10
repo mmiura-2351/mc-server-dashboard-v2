@@ -264,11 +264,17 @@ the code the handshake would have used:
 Lifetime: a socket's only credential is the access token it was opened with,
 so it lives no longer than that token. At the instant that token
 expires the server closes it with **4419** (token expired); nothing is
-delivered after that, however busy the stream. The code is distinct from 4401
-because the remedy differs: the client refreshes its session before
-reconnecting (Section 7.1) instead of retrying with the token it has. (A
-browser never observes the handshake's 4401: a close before accept reaches it
-as a failed handshake. The only 4401 it sees is the mid-stream one above.)
+delivered after that, however busy the stream. 4419 and the mid-stream 4401
+name different causes — the token lapsed, or the re-check no longer accepts it
+— and share one remedy: the client refreshes its session before reconnecting
+(Section 7.1) instead of retrying with the token it has. A session that is
+still good gets a fresh token and reconnects; one that is over is signed out.
+The two can swap at the boundary: the re-check verifies the token's expiry
+too, so one that runs just as the token lapses can win the race against the
+expiry timer and close 4401 instead of 4419, which the shared remedy makes
+harmless. The remedy differs only for a rejection at the handshake, which a
+browser never observes as a close code at all (a close before accept reaches
+it as a failed handshake) and retries on the reconnect backoff.
 Consequence: a dashboard left open sees its sockets cut and
 re-established once per access-token lifetime; the `snapshot` frame on
 reconnect is what keeps that seamless.
