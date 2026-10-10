@@ -17,6 +17,11 @@ via DI, runs them, and maps the servers file errors to HTTP codes (404 keeps the
 no-existence-signal posture; a traversal-unsafe path is 422; an oversized edit /
 upload is 413; a transitional server is 409; a disconnected worker is 503).
 
+A store outage is 503 ``storage_unavailable`` on every read and on the writes a
+repeat converges for (write, upload, rollback, make-dir); the rename and the
+delete, which a repeat cannot finish once their mutation has landed, keep the
+generic 500 (issue #3233, see ``_storage_unavailable``).
+
 Running-server file failures carry a refined reason (issue #548): the Worker
 emits one umbrella ``FILE_ACCESS_DENIED`` for several distinct conditions, so the
 read/list/write routes surface an honest 422 ``reason`` instead of collapsing
@@ -724,6 +729,12 @@ async def download_file(
     none at all for the incrementally built directory zip, exactly as the ``GET``
     declares them. It is the same endpoint behind the same gate; only the bytes
     and the audit record are skipped.
+
+    **Status before bytes** (issue #3234): the ``GET`` begins its stream before
+    the response headers are written, so a path that went away after the
+    file/directory dispatch is a 404 and a storage outage a 503
+    ``storage_unavailable``, not a 200 whose body never arrives. Only a failure
+    once the body is flowing still aborts the transfer.
     """
 
     probing = request.method == "HEAD"

@@ -99,6 +99,16 @@ describe("fileOperationErrorPresentation", () => {
       { key: "files.error.workerUnavailable" },
     ],
     [
+      "maps a reason-less 503 to the unavailable worker",
+      new ApiError(503, {}),
+      { key: "files.error.workerUnavailable" },
+    ],
+    [
+      "maps unavailable storage apart from the unavailable worker",
+      new ApiError(503, { reason: "storage_unavailable" }),
+      { key: "files.error.storageUnavailable" },
+    ],
+    [
       "falls back for an unknown API status",
       new ApiError(500, { reason: "internal_error" }),
       { key: "files.error.generic" },

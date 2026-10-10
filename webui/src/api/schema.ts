@@ -1301,6 +1301,12 @@ export interface paths {
          *     none at all for the incrementally built directory zip, exactly as the ``GET``
          *     declares them. It is the same endpoint behind the same gate; only the bytes
          *     and the audit record are skipped.
+         *
+         *     **Status before bytes** (issue #3234): the ``GET`` begins its stream before
+         *     the response headers are written, so a path that went away after the
+         *     file/directory dispatch is a 404 and a storage outage a 503
+         *     ``storage_unavailable``, not a 200 whose body never arrives. Only a failure
+         *     once the body is flowing still aborts the transfer.
          */
         get: operations["download_file_api_communities__community_id__servers__server_id__files_download_get"];
         put?: never;
@@ -1329,6 +1335,12 @@ export interface paths {
          *     none at all for the incrementally built directory zip, exactly as the ``GET``
          *     declares them. It is the same endpoint behind the same gate; only the bytes
          *     and the audit record are skipped.
+         *
+         *     **Status before bytes** (issue #3234): the ``GET`` begins its stream before
+         *     the response headers are written, so a path that went away after the
+         *     file/directory dispatch is a 404 and a storage outage a 503
+         *     ``storage_unavailable``, not a 200 whose body never arrives. Only a failure
+         *     once the body is flowing still aborts the transfer.
          */
         head: operations["download_file_api_communities__community_id__servers__server_id__files_download_head"];
         patch?: never;

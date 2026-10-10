@@ -110,7 +110,7 @@ Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 | GET | `…/{sid}/files?path=&list=` | Read file (base64) or list directory (entries + `truncated`). |
 | PUT / DELETE | `…/{sid}/files?path=` | Write (base64, versioned) / delete. The root `server.properties` is guarded on **every** files-API write path — `PUT`, `DELETE`, either end of a rename, an upload (direct or archive member), and a rollback: an operation that would change or drop a platform-managed key — `server-port`, the RCON triple, the resource-pack keys — is a `422` (`platform_managed_key`) naming it in the `key` member. The guard is over the keys, not the filename: editing the file's other keys is unaffected, and a root `server.properties` that carries none of those keys still deletes and still renames away. A `PUT` to a path **under** that name is a `422` (`platform_managed_path`) instead — the write creates the name as a directory, which the key guard cannot see and the platform's writes cannot survive. |
 | POST | `…/{sid}/files/directories?path=` | mkdir. The root `server.properties` path — and anything under it, whose missing parents are created — is a `422` (`platform_managed_path`): the platform's own writes publish a file there, so no directory may stand in its place. |
-| GET / HEAD | `…/{sid}/files/download?path=` | Raw download (file bytes, or a streamed ZIP for a directory). Accepts the Bearer access token, or a `?grant=` download grant so the browser can stream a multi-GB directory straight to disk, or the `HttpOnly` download cookie a redemption sets so an interrupted transfer can be retried. The response declares `Cache-Control: no-store` under every credential. `HEAD` is the metadata probe: the same gate and the same headers with no body — a file's `Content-Length` when it is known, none for the incrementally built directory ZIP — and it neither opens the download stream (no directory ZIP is built, no file bytes are streamed) nor records a `file:download` audit event. The file/directory dispatch itself is the `GET`'s, unchanged: resolving which branch a path takes reads the parent listing and, for a file, pulls one chunk to confirm it is readable. |
+| GET / HEAD | `…/{sid}/files/download?path=` | Raw download (file bytes, or a streamed ZIP for a directory). Accepts the Bearer access token, or a `?grant=` download grant so the browser can stream a multi-GB directory straight to disk, or the `HttpOnly` download cookie a redemption sets so an interrupted transfer can be retried. The response declares `Cache-Control: no-store` under every credential. `HEAD` is the metadata probe: the same gate and the same headers with no body — a file's `Content-Length` when it is known, none for the incrementally built directory ZIP — and it neither opens the download stream (no directory ZIP is built, no file bytes are streamed) nor records a `file:download` audit event. The file/directory dispatch itself is the `GET`'s, unchanged: resolving which branch a path takes reads the parent listing and, for a file, pulls one chunk to confirm it is readable. The `GET` then begins its stream **before** the response headers, so a path that went away after that dispatch is a `404` and a storage outage a `503` (`storage_unavailable`) rather than a `200` whose body never arrives; only a failure once the body is flowing still aborts the transfer. |
 | POST | `…/{sid}/files/download-grant?path=` | Mint that grant: `{download_url, expires_at}`, `Cache-Control: no-store`. Same `file:read` gate as the download, and the same pre-flight — missing path 404, traversal 422 `invalid_path`, running server 409 `server_unsettled`. `path` is a **query** parameter so mint and redemption bind the identical string; `auth.token.download_grant_ttl_seconds`, 30 s by default (AUTH_API.md Section 3). |
 | POST | `…/{sid}/files/upload?path=&extract=` | Multipart upload, optional ZIP extract. An upload landing on the root `server.properties` — directly or as an archive member — that changes a platform-managed key is a `422` (`platform_managed_key`); an offending archive member is caught before any write, so the whole extract is refused with nothing written. An upload landing **under** that name — `path` naming it, or a member named `server.properties/…` — is a `422` (`platform_managed_path`), caught in the same pre-write scan; the check is on the resulting path, so the same member under a subdirectory is ordinary user data. |
 | POST | `…/{sid}/files/rename` | `{from, to}`. Both ends are guarded against the root `server.properties`: renaming it away is refused when it holds a platform-managed key, and renaming another file onto that name is refused when that file carries one — either is a `422` (`platform_managed_key`) naming the key. A rename **onto** that name whose source exceeds the edit cap is a `413`, since the guard compares the source bytes rather than scanning an unbounded body. Renaming a **directory** onto that name, or anything — a file included — to a path **under** it, is a `422` (`platform_managed_path`) — a directory there breaks the platform's writes; moving one already standing there away still works. |
@@ -133,6 +133,31 @@ Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 | GET / POST | `…/{sid}/schedules` | List / create a per-server schedule (`name`, `action` ∈ command\|start\|stop\|restart\|backup, `cron` XOR `interval_seconds`, `timezone`, `enabled`, `command` for `command`, `warning_steps` for stop/restart, `only_when_running` for backup — defaults to `true`, skipping an occurrence that finds the server stopped; rejected on any other action). Reads need `schedule:read`; writes need `schedule:manage` **and** the action's own permission (`command`→`server:command`, `start/stop/restart`→`server:{start,stop,restart}`, `backup`→`backup:schedule`) — anti-escalation. Authorization is write-time only: the runner executes as the system, so revoking a permission does not stop existing schedules. `next_run_at` is null while disabled, recomputed on enable. |
 | GET / PATCH / DELETE | `…/{sid}/schedules/{scid}` | Read / edit (partial; action immutable) / delete a schedule. |
 | GET | `…/{sid}/schedules/{scid}/runs` | Execution history newest-first (`schedule:read`). |
+
+**Storage outages on the working-set routes.** When the store holding a
+server's working set cannot serve the request, the routes whose failure is safe
+to retry answer **503 `storage_unavailable`** — retry the same request
+unchanged:
+
+- every read: `GET …/files` (read and list), `…/files/history`,
+  `…/files/version`, `…/files/search`, `…/files/download` and its
+  `download-grant`;
+- the writes a repeat converges for: `PUT …/files`, `…/files/upload` (archive
+  extract included — the repeat rewrites every member), `…/files/rollback` and
+  `…/files/directories`. The interrupted attempt may already have applied the
+  change (a file can be replaced before its write reports the outage);
+  repeating it completes it;
+- `POST …/start`: the EULA check, and the `accept_eula` write, both run before
+  anything is started.
+
+`DELETE …/files` and `…/files/rename` are **not** in that set and answer the
+generic **500**: interrupted after the mutation itself, a repeat finds the
+source already gone (404) or the destination already occupied (409), so a 503
+would promise a retry that cannot finish the job. Reload the listing to see
+what the failed request left. The same holds for `PATCH …/{sid}` when the store
+fails while it reads `server.properties`. These statuses describe the object
+storage backend, which reports an outage as such; the filesystem backend
+reports a device fault on these routes as a 500.
 
 Server response fields: `id`, `community_id`, `name`, `mc_edition`,
 `mc_version`, `server_type`, `config` (full blob),
@@ -182,8 +207,8 @@ Global resource pack library (not community-scoped) and per-server assignment.
 | DELETE | `/resource-packs/{id}` | Delete a resource pack (uploader or platform admin; 409 when still assigned to a server). The pack row is deleted first and the stored file's removal is best-effort, so an object-store outage still answers 204 — the pack is gone and a repeat is a 404 — and leaves an orphaned file that is logged, never served. |
 | GET / HEAD | `/resource-packs/{id}/download` | Download (authenticated). The response declares `Cache-Control: no-store`. `HEAD` is the metadata probe: the same gate and the same headers with no body, so a client learns the `Content-Length` without starting a transfer; it never opens the blob nor records a `resource_pack:download` audit event. |
 | GET / HEAD | `/public/resource-packs/{id}/{filename}` | Public download (no auth) — the URL Minecraft clients fetch. Validates `filename` matches. The two statuses declare different caching policies, because the URL ends in the stored filename and an undeclared policy is decided by the edge's extension heuristic instead: the `200` declares `Cache-Control: public, max-age=3600, immutable` — a pack is immutable and the game client verifies it against `resource-pack-sha1`, so the max-age bounds only how long a deleted pack stays fetchable from a cache — and the `404` declares `Cache-Control: no-store`, since a pack's id and filename are both fixed at creation and a URL that 404s can never later become a `200`. `HEAD` is the metadata probe: this is the unauthenticated URL a resumable-download client probes before a transfer, and it declares a `Content-Length`, so it has a real reason to. The probe answers each status with the `GET`'s headers — the same `Cache-Control` per status — and no body, so an edge does not cache a probe differently from the download; it never opens the blob. |
-| POST | `…/{sid}/resource-pack` | Assign a resource pack to a server (`server:update`). Body: `{resource_pack_id, require_resource_pack, resource_pack_prompt}`. A storage failure writing `server.properties` answers 503 `seed_failed`: the assignment is not committed, so assigning again is safe. The file is not rolled back with it and may already carry the new pack keys. |
-| DELETE | `…/{sid}/resource-pack` | Unassign (`server:update`). |
+| POST | `…/{sid}/resource-pack` | Assign a resource pack to a server (`server:update`). Body: `{resource_pack_id, require_resource_pack, resource_pack_prompt}`. A storage failure writing `server.properties` answers 503 `seed_failed`: the assignment is not committed, so assigning again is safe. The file is not rolled back with it and may already carry the new pack keys. A storage outage while **reading** `server.properties` answers 503 `storage_unavailable`; that read precedes the assignment, so nothing changed. |
+| DELETE | `…/{sid}/resource-pack` | Unassign (`server:update`). A storage outage reading or rewriting `server.properties` answers 503 `storage_unavailable`: both precede the removal of the assignment, so it still stands and unassigning again is safe. The file may already have had its pack keys cleared. |
 | GET | `…/{sid}/resource-pack` | Get the current assignment (`server:read`). |
 
 ### 2.6 Real-time (WebSocket)
@@ -311,6 +336,20 @@ family is unsupported on `vanilla` servers (422 `unsupported_server_type`).
 | GET | `…/{sid}/catalog/search` | Search the Modrinth catalog with auto-applied server facets (`plugin:read`): `q` query + `limit` (1–100, default 20) / `offset` paging. Catalog upstream failure is 502 `catalog_upstream_failed`. |
 | GET | `…/{sid}/catalog/projects/{id_or_slug}` | Fetch a catalog project's detail + its server-compatible versions (`plugin:read`); an unknown project is 404 `catalog_project_not_found`, catalog upstream failure 502 `catalog_upstream_failed`. |
 | POST | `…/{sid}/catalog/install` | Install a plugin/mod from the catalog by `project_id` + `version_id` (`plugin:manage`). Returns `201`; a missing project is 404 `catalog_project_not_found`, checksum drift 502 `checksum_mismatch`, and a duplicate 409 `plugin_already_exists`. |
+
+**Storage outages.** A plugin's jar is first resolved through the
+content-addressed jar cache, then recorded, then written into the working set.
+An outage of the cache answers **503 `storage_unavailable`** on the routes that
+reach it before anything is recorded — `POST …/plugins`,
+`POST …/catalog/install` and `POST …/plugins/{pid}/update` — and on
+`GET …/client-mods/download`, which begins its stream before the response
+headers (an outage on a later jar still aborts the transfer). Nothing was
+installed or changed, so the request is safe to send again. An outage that
+strikes the working-set step **after** the plugin was recorded is not a 503 on
+any of these routes, nor on remove / enable / disable / side: the record is
+already committed, a repeat would answer 409 or 404 instead of finishing, and
+the routes answer the generic 500. The plugin list then shows the recorded
+state; the jar in the working set may not match it.
 
 The `…/{sid}/catalog/*` rows are a separate route family (`catalog.py`) —
 the Modrinth browse/install that backs the same `#plugins` tab — folded in here
@@ -496,6 +535,8 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   | 422 | `not_a_directory` | List targeted a regular file. |
   | 422 | `symlink_refused` | Path contains or resolves to a symlink (escape-vector defence). |
   | 413 | `file_too_large` | Read result or edit payload exceeds the file size cap. |
+  | 503 | `worker_unavailable` | The Worker hosting a running server did not answer. |
+  | 503 | `storage_unavailable` | The store holding the server's files did not answer (Section 2.3). Shown as its own message, distinct from the Worker one: retrying is the remedy, and nothing about the server's Worker is wrong. |
 
 ### 6.7 Server detail — Backups
 - Stats header (count, total size, newest/oldest).

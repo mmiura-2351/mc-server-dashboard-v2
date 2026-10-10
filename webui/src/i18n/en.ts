@@ -866,6 +866,8 @@ export const en = {
   "files.error.invalidInput": "The request was invalid.",
   "files.error.workerUnavailable":
     "The server agent is disconnected. Please try again later.",
+  "files.error.storageUnavailable":
+    "File storage is unavailable right now. Please try again shortly.",
   "files.error.serverBusy": "Another operation is in progress. Please wait.",
   "files.error.conflict":
     "The operation could not be completed due to a conflict.",
@@ -1806,6 +1808,8 @@ export const en = {
   "plugins.error.notFound": "{Noun} not found. It may have been removed.",
   "plugins.error.workerUnavailable":
     "The server agent is disconnected. Please try again later.",
+  "plugins.error.storageUnavailable":
+    "Storage is unavailable right now, so nothing was changed. Please try again shortly.",
   "plugins.error.downloadTooLarge":
     "The client modpack is too large to download in the browser ({size}). The limit is 512 MiB.",
   "plugins.error.generic": "Something went wrong. Please try again.",

@@ -82,6 +82,11 @@ describe("pluginErrorPresentation", () => {
       "plugins.error.tooLarge",
     ],
     [
+      "maps storage_unavailable apart from the unavailable worker",
+      new ApiError(503, { reason: "storage_unavailable" }),
+      "plugins.error.storageUnavailable",
+    ],
+    [
       "maps a reason-less 503 by status",
       new ApiError(503, {}),
       "plugins.error.workerUnavailable",
