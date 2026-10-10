@@ -245,17 +245,37 @@ subprotocols `["access_token", "<jwt>"]`; the server echoes `access_token` as
 the accepted subprotocol (RFC 6455). The `Authorization: Bearer` header is also
 honored for non-browser clients. Close codes mirror REST: 4400 bad `streams`,
 4401 unauthenticated, 4403 forbidden, 4404 not found / not a member.
-Authorization is re-checked every 60 s mid-stream. Delivery is best-effort;
-REST keeps working if the socket dies (FR-MON-4).
+Delivery is best-effort; REST keeps working if the socket dies (FR-MON-4).
 
-Lifetime: a socket is authenticated once, at the handshake, so it lives no
-longer than the access token it was opened with. At the instant that token
+Re-check: every 60 s mid-stream the server repeats, for the token the socket
+was opened with, what REST does on every request, and closes the socket with
+the code the handshake would have used:
+
+- It re-authenticates: the token is verified again and its user loaded again,
+  so an account deactivated or deleted since the handshake is closed with
+  **4401**, as its next REST call would be answered 401. These are all the
+  per-request conditions REST has: an access token is not bound to a session,
+  so a logout, a revoked session or a password change ends the refresh token
+  only, and the access token (and with it the socket) stays valid until it
+  expires, on REST and here alike.
+- It re-authorizes the user as just loaded: a member removed (4404), a
+  permission or grant revoked (4403), a deleted server (4404).
+
+Lifetime: a socket's only credential is the access token it was opened with,
+so it lives no longer than that token. At the instant that token
 expires the server closes it with **4419** (token expired); nothing is
-delivered after that, however busy the stream. The code is distinct from 4401
-because the remedy differs: the client refreshes its session before
-reconnecting (Section 7.1) instead of retrying with the token it has. (A
-browser never observes 4401 at all: a close before accept reaches it as a
-failed handshake.) Consequence: a dashboard left open sees its sockets cut and
+delivered after that, however busy the stream. 4419 and the mid-stream 4401
+name different causes — the token lapsed, or the re-check no longer accepts it
+— and share one remedy: the client refreshes its session before reconnecting
+(Section 7.1) instead of retrying with the token it has. A session that is
+still good gets a fresh token and reconnects; one that is over is signed out.
+The two can swap at the boundary: the re-check verifies the token's expiry
+too, so one that runs just as the token lapses can win the race against the
+expiry timer and close 4401 instead of 4419, which the shared remedy makes
+harmless. The remedy differs only for a rejection at the handshake, which a
+browser never observes as a close code at all (a close before accept reaches
+it as a failed handshake) and retries on the reconnect backoff.
+Consequence: a dashboard left open sees its sockets cut and
 re-established once per access-token lifetime; the `snapshot` frame on
 reconnect is what keeps that seamless.
 
@@ -675,11 +695,13 @@ backend support; the tab body also self-guards with an "unsupported" notice).
 - WS connections carry the access token in the `Sec-WebSocket-Protocol`
   subprotocol header (`["access_token", "<jwt>"]`); on token
   rotation, sockets are reconnected (reconnect-on-rotate chosen). A socket
-  closed with 4419 (its token expired, Section 2.6) is not retried with that
-  token: the client refreshes through the same single-flight refresh the 401
-  retry uses, and the rotation reconnects it. A transient refresh failure
-  retries the refresh on the reconnect backoff; an auth-definitive one
-  hard-logs-out, exactly as for REST.
+  closed with 4419 (its token expired, Section 2.6) or 4401 (its token is no
+  longer accepted mid-stream, Section 2.6) is not retried with that token: the
+  client refreshes through the same single-flight refresh the 401 retry uses,
+  and the rotation reconnects it. A transient refresh failure retries the
+  refresh on the reconnect backoff; an auth-definitive one hard-logs-out,
+  exactly as for REST — which is how a deactivated or deleted user with an
+  open dashboard ends up signed out rather than reconnecting forever.
 - **Authenticated downloads.** An in-memory access token cannot ride a plain
   `<a href>`, so single-file / resource-pack / plugin downloads fetch the URL
   with the Authorization header and buffer the response as a Blob, capped at

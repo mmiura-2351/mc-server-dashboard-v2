@@ -26,12 +26,14 @@ from __future__ import annotations
 
 import datetime as dt
 import os
+import time
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 from starlette.websockets import WebSocketDisconnect
 
@@ -57,6 +59,7 @@ from mc_server_dashboard_api.community.domain.value_objects import (
 )
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
 from mc_server_dashboard_api.dependencies import (
+    _build_token_service,
     get_current_user_ws,
     get_list_servers,
     get_read_server,
@@ -66,11 +69,13 @@ from mc_server_dashboard_api.dependencies import (
 from mc_server_dashboard_api.fleet.adapters.real_time_events import (
     InProcessRealTimeEvents,
 )
+from mc_server_dashboard_api.fleet.api import events as events_module
 from mc_server_dashboard_api.fleet.domain.real_time_events import (
     EventStream,
     RealTimeEvent,
     notification_event,
 )
+from mc_server_dashboard_api.identity.adapters.clock import SystemClock
 from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.servers.adapters.server_state_sink import (
     ServersServerStateSink,
@@ -133,9 +138,6 @@ async def _database(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[str]:
 
 async def _seed_member(db_url: str, user_id: uuid.UUID) -> CommunityId:
     """Insert a community and make ``user_id`` a member with ``server:read``."""
-
-    from sqlalchemy import text
-    from sqlalchemy.ext.asyncio import create_async_engine
 
     engine = create_async_engine(db_url)
     try:
@@ -432,3 +434,64 @@ async def test_community_stream_converges_when_the_worker_drops_mid_snapshot_rea
     with _client(app).websocket_connect(url) as ws:
         states = _states_until_race_over(ws, server)
     assert states == ["unknown", "running", "unknown"]
+
+
+# --- mid-stream re-authentication over the real graph (issue #3227) ----------
+
+
+async def _deactivate(db_url: str, user_id: uuid.UUID) -> None:
+    engine = create_async_engine(db_url)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text('UPDATE "user" SET active = false WHERE id = :id'),
+                {"id": user_id},
+            )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("stream", ["community", "server"])
+async def test_deactivated_user_is_closed_4401_at_the_next_reauthorization(
+    _database: str, monkeypatch: pytest.MonkeyPatch, stream: str
+) -> None:
+    """A real token's socket ends once its account is deactivated.
+
+    Nothing about authentication is faked: the handshake and every
+    re-authorization verify the token and load the user row, as REST does per
+    request. The socket survives re-authorizations while the account is active
+    and closes ``4401`` at the first one after the deactivation commits.
+    """
+
+    monkeypatch.setattr(events_module, "_REAUTHZ_INTERVAL_SECONDS", 0.2)
+    user = make_user()
+    community = await _seed_member(_database, user.id.value)
+    server = await _seed_started_server(_database, community, uuid.uuid4())
+    bus = InProcessRealTimeEvents()
+    app = _app(user, bus, lookup={str(server): community.value})
+    del app.dependency_overrides[get_current_user_ws]  # type: ignore[attr-defined]
+    client = _client(app)
+    token = _build_token_service(
+        app.state.settings.auth.token,  # type: ignore[attr-defined]
+        SystemClock(),
+    ).issue_access_token(user.id)
+    url = f"/api/communities/{community.value}/events"
+    if stream == "server":
+        url = f"/api/communities/{community.value}/servers/{server}/events"
+
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect(
+            url, headers={"Authorization": f"Bearer {token}"}
+        ) as ws:
+            assert ws.receive_json()["stream"] == "snapshot"
+            time.sleep(0.6)  # several re-authorizations of the active account
+            bus.publish(
+                server_id=str(server),
+                event=RealTimeEvent(
+                    stream=EventStream.STATUS, payload={"state": "running"}
+                ),
+            )
+            assert ws.receive_json()["payload"] == {"state": "running"}
+            await _deactivate(_database, user.id.value)
+            ws.receive_json()
+    assert exc.value.code == 4401

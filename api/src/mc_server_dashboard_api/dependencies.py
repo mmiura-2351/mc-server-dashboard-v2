@@ -12,7 +12,7 @@ import asyncio
 import datetime as dt
 import uuid
 from collections.abc import Awaitable, Callable
-from functools import lru_cache
+from functools import lru_cache, partial
 from typing import Annotated, NamedTuple
 
 from fastapi import Depends, Request, WebSocket, status
@@ -1208,6 +1208,21 @@ async def get_current_user_ws(websocket: WebSocket) -> Authentication | None:
         return await use_case(access_token=token)
     except InvalidAccessTokenError:
         return None
+
+
+WsReauthentication = Callable[[], Awaitable[Authentication | None]]
+
+
+def get_ws_reauthentication(websocket: WebSocket) -> WsReauthentication:
+    """Provide a re-run of the handshake's authentication, for mid-stream use.
+
+    REST authenticates every request, so a deactivated or deleted account is
+    rejected on its next call; an events WebSocket outlives its handshake, so
+    it calls this on every re-authorization to apply the very same check to
+    the token it was opened with (#3227). ``None`` is REST's 401.
+    """
+
+    return partial(get_current_user_ws, websocket)
 
 
 # --- authorization (community context, Section 6.4) ------------------------

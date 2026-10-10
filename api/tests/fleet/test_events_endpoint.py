@@ -11,6 +11,7 @@ and that a client disconnect cleans up its subscription (no leak).
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import datetime as dt
 import json
 import time
@@ -40,6 +41,7 @@ from mc_server_dashboard_api.dependencies import (
     get_permission_checker,
     get_read_server,
     get_real_time_events,
+    get_ws_reauthentication,
 )
 from mc_server_dashboard_api.fleet.adapters.real_time_events import (
     InProcessRealTimeEvents,
@@ -50,6 +52,10 @@ from mc_server_dashboard_api.fleet.domain.real_time_events import (
     RealTimeEvents,
     notification_event,
 )
+from mc_server_dashboard_api.identity.application.authenticate_request import (
+    Authentication,
+)
+from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.servers.domain.errors import ServerNotFoundError
 from mc_server_dashboard_api.servers.domain.value_objects import ObservedState
 from tests.client_utils import enter_client
@@ -101,6 +107,23 @@ class _FakeReadServer:
         return _FakeServer(observed_state=self.state)
 
 
+class _Account:
+    """The account behind a socket, as each re-authentication finds it (#3227).
+
+    Stands in for the per-request user load REST performs: ``None`` once the
+    account is deactivated, else the account's current row.
+    """
+
+    def __init__(self, user: User) -> None:
+        self.user: User | None = user
+
+    def deactivate(self) -> None:
+        self.user = None
+
+    async def __call__(self) -> Authentication | None:
+        return None if self.user is None else make_authentication(self.user)
+
+
 _shared_app: FastAPI
 
 
@@ -132,6 +155,7 @@ def _app(
         return make_authentication(user, expires_in=expires_in)
 
     app.dependency_overrides[get_current_user_ws] = _user_or_none
+    app.dependency_overrides[get_ws_reauthentication] = lambda: _Account(user)
     app.dependency_overrides[get_membership_visibility] = lambda: _FakeVisibility(
         member=member
     )
@@ -754,6 +778,7 @@ def test_mid_stream_revocation_closes_with_policy_code(
     app.dependency_overrides.clear()
     user = make_user()
     app.dependency_overrides[get_current_user_ws] = lambda: make_authentication(user)
+    app.dependency_overrides[get_ws_reauthentication] = lambda: _Account(user)
     app.dependency_overrides[get_membership_visibility] = lambda: _FakeVisibility(
         member=True
     )
@@ -802,6 +827,7 @@ def test_mid_stream_revocation_closes_despite_busy_stream(
     app.dependency_overrides.clear()
     user = make_user()
     app.dependency_overrides[get_current_user_ws] = lambda: make_authentication(user)
+    app.dependency_overrides[get_ws_reauthentication] = lambda: _Account(user)
     app.dependency_overrides[get_membership_visibility] = lambda: _FakeVisibility(
         member=True
     )
@@ -829,6 +855,70 @@ def test_mid_stream_revocation_closes_despite_busy_stream(
                 ws.receive_json()
             # If we get here the socket was never closed — fail explicitly.
             pytest.fail("socket was not closed despite revocation")
+    assert exc.value.code == 4403
+
+
+def test_deactivated_user_is_closed_4401_at_the_next_reauthorization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deactivated account loses its open socket like its next REST call (#3227)."""
+
+    from mc_server_dashboard_api.fleet.api import events as events_module
+
+    monkeypatch.setattr(events_module, "_REAUTHZ_INTERVAL_SECONDS", 0.05)
+
+    bus = InProcessRealTimeEvents()
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(bus=bus)
+    account = _Account(make_user())
+    app.dependency_overrides[get_ws_reauthentication] = lambda: account  # type: ignore[attr-defined]
+    client = _client(app)
+
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect(_url(community, server)) as ws:
+            _skip_snapshot(ws)
+            # Several re-authorizations pass while the account is active.
+            time.sleep(0.2)
+            bus.publish(
+                server_id=str(server),
+                event=RealTimeEvent(
+                    stream=EventStream.STATUS, payload={"state": "running"}
+                ),
+            )
+            assert ws.receive_json()["payload"] == {"state": "running"}
+            account.deactivate()
+            ws.receive_json()
+    assert exc.value.code == 4401
+
+
+def test_reauthorization_gates_on_the_users_current_admin_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gate re-runs for the user as re-read, not as the handshake saw it."""
+
+    from mc_server_dashboard_api.fleet.api import events as events_module
+
+    monkeypatch.setattr(events_module, "_REAUTHZ_INTERVAL_SECONDS", 0.05)
+
+    class _AdminOnlyChecker(PermissionChecker):
+        async def can(
+            self, *, user: AuthUser, operation: Permission, resource: ResourceRef
+        ) -> bool:
+            return user.is_platform_admin
+
+    admin = make_user(is_platform_admin=True)
+    account = _Account(admin)
+    app = _app()
+    app.dependency_overrides[get_current_user_ws] = lambda: make_authentication(admin)  # type: ignore[attr-defined]
+    app.dependency_overrides[get_ws_reauthentication] = lambda: account  # type: ignore[attr-defined]
+    app.dependency_overrides[get_permission_checker] = _AdminOnlyChecker  # type: ignore[attr-defined]
+    client = _client(app)
+
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect(_url(uuid.uuid4(), uuid.uuid4())) as ws:
+            _skip_snapshot(ws)
+            account.user = dataclasses.replace(admin, is_platform_admin=False)
+            ws.receive_json()
     assert exc.value.code == 4403
 
 
@@ -986,6 +1076,7 @@ def test_no_reauthz_queries_after_disconnect_on_quiet_topic(
     app.dependency_overrides.clear()
     user = make_user()
     app.dependency_overrides[get_current_user_ws] = lambda: make_authentication(user)
+    app.dependency_overrides[get_ws_reauthentication] = lambda: _Account(user)
     app.dependency_overrides[get_membership_visibility] = lambda: _FakeVisibility(
         member=True
     )
@@ -1069,14 +1160,14 @@ async def test_client_gone_during_the_snapshot_read_ends_the_relay_quietly(
     async def _reauthorize() -> int | None:
         return None
 
-    async def _deliver(event: RealTimeEvent) -> None:
+    async def _encode(event: RealTimeEvent) -> str | None:
         raise AssertionError("no events are published in this test")
 
     await events_module._relay(
         socket,  # type: ignore[arg-type]
         subscription,
         reauthorize=_reauthorize,
-        deliver=_deliver,
+        encode=_encode,
         snapshot=_snapshot,
         expires_at=make_authentication().expires_at,
     )
@@ -1103,7 +1194,7 @@ async def test_client_gone_during_work_cancelled_by_expiry_ends_quietly() -> Non
     async def _reauthorize() -> int | None:
         return None
 
-    async def _deliver(event: RealTimeEvent) -> None:
+    async def _encode(event: RealTimeEvent) -> str | None:
         raise AssertionError("no events are published in this test")
 
     await asyncio.wait_for(
@@ -1111,7 +1202,7 @@ async def test_client_gone_during_work_cancelled_by_expiry_ends_quietly() -> Non
             socket,  # type: ignore[arg-type]
             subscription,
             reauthorize=_reauthorize,
-            deliver=_deliver,
+            encode=_encode,
             snapshot=_snapshot,
             expires_at=make_authentication(
                 expires_in=dt.timedelta(seconds=0.1)
@@ -1162,7 +1253,7 @@ async def _relay_with_slow_close(
     bus = InProcessRealTimeEvents()
     subscription = bus.subscribe(server_id="s", streams=frozenset({EventStream.STATUS}))
 
-    async def _deliver(event: RealTimeEvent) -> None:
+    async def _encode(event: RealTimeEvent) -> str | None:
         raise AssertionError("no events are published in this test")
 
     await asyncio.wait_for(
@@ -1170,7 +1261,7 @@ async def _relay_with_slow_close(
             socket,  # type: ignore[arg-type]
             subscription,
             reauthorize=reauthorize,
-            deliver=_deliver,
+            encode=_encode,
             snapshot=snapshot,
             expires_at=make_authentication(
                 expires_in=dt.timedelta(seconds=0.2)
@@ -1237,7 +1328,7 @@ async def test_cancellation_while_parked_leaves_no_orphan_tasks() -> None:
     async def _reauthorize() -> int | None:
         return None
 
-    async def _deliver(event: RealTimeEvent) -> None:
+    async def _encode(event: RealTimeEvent) -> str | None:
         raise AssertionError("no events are published in this test")
 
     task = asyncio.create_task(
@@ -1245,7 +1336,7 @@ async def test_cancellation_while_parked_leaves_no_orphan_tasks() -> None:
             _ParkedSocket(),  # type: ignore[arg-type]
             subscription,
             reauthorize=_reauthorize,
-            deliver=_deliver,
+            encode=_encode,
             snapshot=None,
             expires_at=make_authentication().expires_at,
         )

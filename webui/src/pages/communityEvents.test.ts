@@ -395,6 +395,24 @@ describe("CommunityEventsClient", () => {
     client.close();
   });
 
+  // A mid-stream 4401 means the token is no longer accepted (its account was
+  // deactivated or deleted, #3227): the refresh is what ends the session,
+  // where a plain reconnect would fail its handshake forever.
+  it("refreshes the session on a 4401 close instead of reconnecting with the rejected token", async () => {
+    const refresher = vi.fn(async () => false); // the session is over
+    setRefresher(refresher);
+    const { client } = makeClient();
+    client.start();
+    MockWebSocket.last().open();
+
+    MockWebSocket.last().serverClose(4401);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(refresher).toHaveBeenCalledTimes(1);
+    expect(MockWebSocket.instances).toHaveLength(1);
+    client.close();
+  });
+
   it("never reconnects with the expired token when the refresh fails", async () => {
     const refresher = vi.fn(async () => false); // transient: token unchanged
     setRefresher(refresher);

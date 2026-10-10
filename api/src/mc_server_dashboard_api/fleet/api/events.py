@@ -15,25 +15,30 @@ same condition would produce:
   stream (the REST 422-equivalent). An *omitted/blank* ``streams`` still means
   "all subscribable streams"; only a present-but-invalid token is rejected, so a
   typo fails loudly instead of silently subscribing to everything;
-- ``4401`` — unauthenticated (missing / invalid / expired token);
+- ``4401`` — unauthenticated (missing / invalid / expired token, or — mid-stream —
+  an account deactivated or deleted since the handshake);
 - ``4403`` — authenticated member without ``server:read`` on the resource;
 - ``4404`` — not a member, or the server does not exist in this community;
 - ``4419`` — the access token the socket was opened with has expired (mid-stream
   only; see below).
 
-The socket lives no longer than the access token it was opened with (#1862): it
-is authenticated once, at the handshake, so at the instant that token would stop
+The socket lives no longer than the access token it was opened with (#1862):
+that token is its only credential, so at the instant it would stop
 verifying the socket closes with ``4419`` — distinct from the handshake's
 ``4401`` so a client knows to refresh its session before reconnecting rather
-than retrying with the token it has. A browser never sees ``4401`` anyway: a
-close before accept reaches it as a failed handshake, not as a close code.
-Nothing is delivered after the expiry, however busy the stream.
+than retrying with the token it has. A browser never sees the handshake's
+``4401``: a close before accept reaches it as a failed handshake, not as a
+close code. Nothing is delivered after the expiry, however busy the stream.
 
-Authorization is re-checked mid-stream: the two-layer gate is re-run every
-:data:`_REAUTHZ_INTERVAL_SECONDS` of wall-clock time, so a member removed or a
-grant revoked after accept stops receiving within one interval regardless of
-stream traffic. The re-check is two indexed queries; on failure the socket closes
-with the same code the accept-time gate would have used.
+Authentication and authorization are re-checked mid-stream, every
+:data:`_REAUTHZ_INTERVAL_SECONDS` of wall-clock time and regardless of stream
+traffic (#3227). The re-check first re-runs the handshake's authentication —
+the check REST applies to every request — so an account deactivated or deleted
+after accept is closed ``4401`` within one interval, as its next REST call
+would be rejected 401. It then re-runs the two-layer gate for the user as just
+re-read, so a member removed or a grant revoked stops receiving within the same
+interval, closed with the code the accept-time gate would have used. The
+re-check is a user load plus two indexed queries.
 
 Delivery is best-effort and decoupled from REST (FR-MON-4): if no event ever
 arrives, the socket simply stays quiet; a slow client that overflows its buffer
@@ -83,6 +88,7 @@ from mc_server_dashboard_api.community.domain.value_objects import (
 )
 from mc_server_dashboard_api.dependencies import (
     ServerCommunityLookup,
+    WsReauthentication,
     get_current_user_ws,
     get_list_servers,
     get_membership_visibility,
@@ -90,6 +96,7 @@ from mc_server_dashboard_api.dependencies import (
     get_read_server,
     get_real_time_events,
     get_server_community_lookup,
+    get_ws_reauthentication,
     ws_accept_subprotocol,
 )
 from mc_server_dashboard_api.fleet.domain.real_time_events import (
@@ -124,10 +131,11 @@ _CLOSE_NOT_FOUND = 4404
 # HTTP 419 "Authentication Timeout": a previously valid credential has lapsed.
 _CLOSE_TOKEN_EXPIRED = 4419
 
-# How often the two-layer authorization gate is re-run (wall-clock deadline).
-# A constant, not a config knob: the check is two indexed queries, and a minute
-# is a tight-enough bound on how long a removed member can keep receiving without
-# adding query load.
+# How often authentication and the two-layer authorization gate are re-run
+# (wall-clock deadline). A constant, not a config knob: the check is a user load
+# and two indexed queries, and a minute is a tight-enough bound on how long a
+# deactivated account or a removed member can keep receiving without adding
+# query load.
 _REAUTHZ_INTERVAL_SECONDS = 60.0
 
 # The ``stream`` of the status snapshot frame (#1795). Synthesised by this
@@ -178,6 +186,7 @@ async def server_events(
     community_id: uuid.UUID,
     server_id: uuid.UUID,
     authentication: Annotated[Authentication | None, Depends(get_current_user_ws)],
+    reauthenticate: Annotated[WsReauthentication, Depends(get_ws_reauthentication)],
     visibility: Annotated[MembershipVisibility, Depends(get_membership_visibility)],
     checker: Annotated[PermissionChecker, Depends(get_permission_checker)],
     read_server: Annotated[ReadServer, Depends(get_read_server)],
@@ -186,27 +195,19 @@ async def server_events(
     if authentication is None:
         await websocket.close(code=_CLOSE_UNAUTHENTICATED)
         return
-    user = authentication.user
-
-    community = CommunityId(community_id)
-    auth_user = AuthUser(
-        user_id=CommunityUserId(user.id.value),
-        is_platform_admin=user.is_platform_admin,
-    )
 
     # The two-layer gate, applied before accept; re-applied mid-stream by the
-    # relay loop every idle re-authz interval.
-    recheck = functools.partial(
+    # relay loop every re-authz interval, after re-authenticating.
+    authorize = functools.partial(
         _authorize,
-        auth_user=auth_user,
-        community=community,
+        community=CommunityId(community_id),
         community_id=community_id,
         server_id=server_id,
         visibility=visibility,
         checker=checker,
         read_server=read_server,
     )
-    denied = await recheck()
+    denied = await authorize(auth_user=_auth_user(authentication))
     if denied is not None:
         await websocket.close(code=denied)
         return
@@ -224,8 +225,8 @@ async def server_events(
     # form, as it arrives on the control-plane stream).
     subscription = bus.subscribe(server_id=str(server_id), streams=streams)
 
-    async def _deliver(event: RealTimeEvent) -> None:
-        await websocket.send_text(_encoded(event, _FRAME_SLOT, _frame))
+    async def _encode(event: RealTimeEvent) -> str:
+        return _encoded(event, _FRAME_SLOT, _frame)
 
     # Only a STATUS subscriber gets the status snapshot: a log-only client never
     # asked for status and receives none.
@@ -243,8 +244,10 @@ async def server_events(
         await _relay(
             websocket,
             subscription,
-            reauthorize=recheck,
-            deliver=_deliver,
+            reauthorize=functools.partial(
+                _reauthorize, reauthenticate=reauthenticate, authorize=authorize
+            ),
+            encode=_encode,
             snapshot=snapshot,
             expires_at=authentication.expires_at,
         )
@@ -257,6 +260,7 @@ async def community_events(
     websocket: WebSocket,
     community_id: uuid.UUID,
     authentication: Annotated[Authentication | None, Depends(get_current_user_ws)],
+    reauthenticate: Annotated[WsReauthentication, Depends(get_ws_reauthentication)],
     visibility: Annotated[MembershipVisibility, Depends(get_membership_visibility)],
     checker: Annotated[PermissionChecker, Depends(get_permission_checker)],
     lookup: Annotated[ServerCommunityLookup, Depends(get_server_community_lookup)],
@@ -287,22 +291,14 @@ async def community_events(
     if authentication is None:
         await websocket.close(code=_CLOSE_UNAUTHENTICATED)
         return
-    user = authentication.user
 
-    community = CommunityId(community_id)
-    auth_user = AuthUser(
-        user_id=CommunityUserId(user.id.value),
-        is_platform_admin=user.is_platform_admin,
-    )
-
-    recheck = functools.partial(
+    authorize = functools.partial(
         _authorize_community,
-        auth_user=auth_user,
-        community=community,
+        community=CommunityId(community_id),
         visibility=visibility,
         checker=checker,
     )
-    denied = await recheck()
+    denied = await authorize(auth_user=_auth_user(authentication))
     if denied is not None:
         await websocket.close(code=denied)
         return
@@ -315,7 +311,7 @@ async def community_events(
     # once, bounding queries while the firehose may carry many servers' events.
     membership: dict[str, bool] = {}
 
-    async def _deliver(event: RealTimeEvent) -> None:
+    async def _encode(event: RealTimeEvent) -> str | None:
         # The GAP marker has no server; it is forwarded as-is so the client
         # still learns it fell behind (best-effort delivery, FR-MON-4).
         if event.stream is not EventStream.GAP and not await _in_community(
@@ -324,17 +320,17 @@ async def community_events(
             lookup=lookup,
             membership=membership,
         ):
-            return
-        await websocket.send_text(
-            _encoded(event, _COMMUNITY_FRAME_SLOT, _community_frame)
-        )
+            return None
+        return _encoded(event, _COMMUNITY_FRAME_SLOT, _community_frame)
 
     try:
         await _relay(
             websocket,
             subscription,
-            reauthorize=recheck,
-            deliver=_deliver,
+            reauthorize=functools.partial(
+                _reauthorize, reauthenticate=reauthenticate, authorize=authorize
+            ),
+            encode=_encode,
             snapshot=functools.partial(
                 _community_snapshot,
                 list_servers=list_servers,
@@ -365,7 +361,7 @@ async def _relay(
     subscription: EventSubscription,
     *,
     reauthorize: Callable[[], Awaitable[int | None]],
-    deliver: Callable[[RealTimeEvent], Awaitable[None]],
+    encode: Callable[[RealTimeEvent], Awaitable[str | None]],
     snapshot: Callable[[], Awaitable[str | None]] | None,
     expires_at: dt.datetime,
 ) -> None:
@@ -413,9 +409,15 @@ async def _relay(
     client gone during the read (its disconnect consumed by the reader task)
     ends the relay without a send: the server rejects any send after it.
 
-    Each turn of the loop races four outcomes: the next buffered event (handed
-    to ``deliver``), the wall-clock re-authz deadline expiring (``reauthorize``
-    re-runs the accept-time gate; a denial closes the socket with its code), the
+    ``encode`` returns an event's frame text, or ``None`` for an event this
+    subscriber must not receive (the community stream's membership lookup,
+    which may await). The same rule applies to it: a client gone while it was
+    awaited is sent nothing (#3225).
+
+    Each turn of the loop races four outcomes: the next buffered event (encoded
+    and sent), the wall-clock re-authz deadline expiring (``reauthorize``
+    re-authenticates and re-runs the accept-time gate; a denial closes the
+    socket with its code), the
     access token reaching ``expires_at`` (the socket closes ``4419`` before any
     further delivery, #1862), and the client disconnecting. Both deadlines are
     absolute wall-clock time so a busy stream cannot postpone either. The expiry
@@ -458,6 +460,16 @@ async def _relay(
         await websocket.send_text(text)
         return None
 
+    async def _send_event(event: RealTimeEvent) -> None:
+        """Send ``event``'s frame, unless filtered out or the client is gone."""
+
+        text = await encode(event)
+        if text is None or disconnected.done():
+            # Not this subscriber's event, or the client left during the
+            # encoding's lookup: nothing may be sent any more.
+            return
+        await websocket.send_text(text)
+
     async def _run() -> int | None:
         """Relay until the relay must end; return the close code, if any.
 
@@ -488,7 +500,7 @@ async def _relay(
                     event = next_event.result()
                 except StopAsyncIteration:
                     return None
-                await deliver(event)
+                await _send_event(event)
                 if (
                     event.stream is EventStream.GAP
                     and EventStream.STATUS in subscription.take_dropped()
@@ -572,6 +584,35 @@ async def _in_community(
         cached = owner == community_id
         membership[server_id] = cached
     return cached
+
+
+def _auth_user(authentication: Authentication) -> AuthUser:
+    """The authorization subject for an authenticated user."""
+
+    user = authentication.user
+    return AuthUser(
+        user_id=CommunityUserId(user.id.value),
+        is_platform_admin=user.is_platform_admin,
+    )
+
+
+async def _reauthorize(
+    *,
+    reauthenticate: WsReauthentication,
+    authorize: Callable[..., Awaitable[int | None]],
+) -> int | None:
+    """The mid-stream re-check: re-authenticate, then re-run the gate (#3227).
+
+    Authentication is re-run exactly as REST runs it per request, so whatever
+    makes the next REST call a 401 — today a deactivated or deleted account —
+    closes the socket ``4401``. The gate then runs for the user as re-read,
+    as it does on REST, not as the handshake saw them.
+    """
+
+    authentication = await reauthenticate()
+    if authentication is None:
+        return _CLOSE_UNAUTHENTICATED
+    return await authorize(auth_user=_auth_user(authentication))
 
 
 async def _authorize_community(
