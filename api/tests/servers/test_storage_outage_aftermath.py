@@ -36,6 +36,9 @@ from mc_server_dashboard_api.servers.adapters.plugin_cache_store import (
 from mc_server_dashboard_api.servers.adapters.store_generation import (
     StorageGenerationReader,
 )
+from mc_server_dashboard_api.servers.application.client_modpack import (
+    DownloadClientModpack,
+)
 from mc_server_dashboard_api.servers.application.files import (
     DeleteFile,
     RenameFile,
@@ -457,3 +460,108 @@ async def test_remove_whose_working_set_delete_hits_an_outage_cannot_be_repeated
     with pytest.raises(PluginNotFoundError):
         await remove(**rig.scope, plugin_id=plugin.id)
     assert await rig.read(plugin.rel_path) == b"jar-bytes"
+
+
+# --- the same writes with the file's version ring full ----------------------
+
+# The adapter's default retention. A full ring evicts its oldest entry on every
+# further capture — the state the rollback's repeat does not survive (pinned at
+# the seam), re-examined here for each write whose route answers 503.
+_RING = 10
+
+
+async def _fill_ring(rig: _Rig, rel_path: str) -> None:
+    for n in range(_RING + 1):
+        await rig.files.write_file(
+            **rig.scope, rel_path=rel_path, content=b"old-%d" % n
+        )
+    assert len(await rig.files.list_versions(**rig.scope, rel_path=rel_path)) == _RING
+
+
+async def test_archive_extract_over_full_rings_is_still_finished_by_a_repeat() -> None:
+    """An upload's bytes come from the request, so no eviction can take them
+    away: the repeat converges with every member's ring full."""
+
+    rig = _Rig()
+    await _fill_ring(rig, "config/a.txt")
+    await _fill_ring(rig, "config/b.txt")
+    before = await rig.generation()
+    upload = UploadFile(uow=rig.uow, file_store=rig.files)
+    archive = _zip({"a.txt": b"first", "b.txt": b"second"})
+
+    async def _extract() -> None:
+        await upload(
+            **rig.scope,
+            dir_path="config",
+            filename="pack.zip",
+            content=archive,
+            extract=True,
+        )
+
+    # The first member lands whole; the second is replaced but its generation
+    # bump is not made.
+    bumps = 0
+
+    def _second_bump(op: str, key: str) -> bool:
+        nonlocal bumps
+        if _generation_bump(op, key):
+            bumps += 1
+            return bumps == 2
+        return False
+
+    rig.faults.when = _second_bump
+
+    with pytest.raises(ServerFileStorageUnavailableError):
+        await _extract()
+
+    rig.faults.clear()
+    await _extract()
+
+    assert await rig.read("config/a.txt") == b"first"
+    assert await rig.read("config/b.txt") == b"second"
+    # One bump from the interrupted attempt's first member, two from the repeat.
+    assert await rig.generation() == before + 3
+
+
+async def test_start_eula_write_over_a_full_ring_is_still_finished_by_a_repeat() -> (
+    None
+):
+    rig = _Rig()
+    await rig.seed({"server.properties": b"motd=hi\n"})
+    await _fill_ring(rig, "eula.txt")
+    worker = WorkerId(uuid.uuid4())
+    control_plane = FakeControlPlane(place_to=worker)
+    rig.faults.when = _generation_bump
+
+    with pytest.raises(ServerFileStorageUnavailableError):
+        await _start(rig, control_plane)(**rig.scope, accept_eula=True)
+
+    rig.faults.clear()
+    await _assert_not_started(rig, control_plane)
+
+    await _start(rig, control_plane)(**rig.scope, accept_eula=True)
+
+    assert await rig.read("eula.txt") == b"eula=true\n"
+    assert control_plane.dispatched[-1] == ("start", worker, rig.server.id)
+
+
+# --- a closed client-mods download holds nothing (issue #3234) --------------
+
+
+async def test_closing_a_begun_client_modpack_releases_the_cache_client() -> None:
+    """Closed while a jar is open: the zip closes that jar's cache stream, so no
+    store client stays open behind it."""
+
+    rig = _Rig(server_type=ServerType.FABRIC)
+    await rig.seed({"eula.txt": b"eula=true\n"})
+    plugin = await _install_mod(rig)
+    plugin.side = "client"
+    await rig.uow.plugins.update(plugin)
+    download = DownloadClientModpack(uow=rig.uow, cache=rig.cache)
+    stream = await download(**rig.scope)
+    await anext(stream)
+    assert rig.faults.open_clients == 1
+
+    await stream.aclose()  # type: ignore[attr-defined]
+
+    assert rig.faults.open_clients == 0

@@ -52,6 +52,9 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 
+from fastapi.responses import StreamingResponse
+from starlette.types import Receive, Scope, Send
+
 _logger = logging.getLogger(__name__)
 
 
@@ -95,12 +98,50 @@ async def started(source: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
 async def _replaying(
     first: bytes | None, rest: AsyncIterator[bytes]
 ) -> AsyncIterator[bytes]:
-    """Yield the already-pulled ``first`` chunk, then the remainder of the source."""
+    """Yield the already-pulled ``first`` chunk, then the remainder of the source.
 
-    if first is not None:
-        yield first
-    async for chunk in rest:
-        yield chunk
+    Closing this stream closes ``rest`` with it (issue #3234): ``async for`` does
+    not forward a close, so without the ``finally`` the begun source would keep
+    what it opened until it was garbage-collected.
+    """
+
+    try:
+        if first is not None:
+            yield first
+        async for chunk in rest:
+            yield chunk
+    finally:
+        await aclose_stream(rest)
+
+
+async def aclose_stream(stream: object) -> None:
+    """Close ``stream`` now if it can be closed; a no-op for ``None``.
+
+    For a begun stream that nothing is going to consume. A begun store stream
+    holds what it opened — a descriptor, a client, a snapshot's reader lease —
+    and releases it only when it is exhausted or closed.
+    """
+
+    aclose = getattr(stream, "aclose", None)
+    if aclose is not None:
+        await aclose()
+
+
+class ClosingStreamingResponse(StreamingResponse):
+    """A :class:`StreamingResponse` that closes its body stream when it is done.
+
+    Starlette iterates the body and, when the client goes away mid-transfer,
+    simply stops: the generator is left suspended at its ``yield``, and whatever
+    it holds stays held until the interpreter finalizes it. Closing the iterator
+    on every way out of the response — completion, disconnect, a failure in the
+    body — releases it at once instead (issue #3234).
+    """
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await aclose_stream(self.body_iterator)
 
 
 async def counted(source: AsyncIterator[bytes], declared: int) -> AsyncIterator[bytes]:

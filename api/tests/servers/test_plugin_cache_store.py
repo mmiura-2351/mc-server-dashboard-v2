@@ -200,3 +200,19 @@ async def test_put_interrupted_during_the_upload_is_finished_by_a_repeat() -> No
     await cache.put(sha256, _stream(content))
 
     assert b"".join([chunk async for chunk in cache.open(sha256)]) == content
+
+
+async def test_closing_a_begun_open_releases_the_client_at_once() -> None:
+    store = FakeS3Store()
+    faults = Faults()
+    cache = ObjectPluginCacheStore(faulty_s3_factory(store, faults))
+    content = b"jar-bytes"
+    sha256 = hashlib.sha256(content).hexdigest()
+    await cache.put(sha256, _stream(content))
+    stream = cache.open(sha256)
+    await anext(stream)
+    assert faults.open_clients == 1
+
+    await stream.aclose()  # type: ignore[attr-defined]
+
+    assert faults.open_clients == 0

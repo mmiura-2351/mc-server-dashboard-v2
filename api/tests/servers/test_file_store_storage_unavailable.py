@@ -13,13 +13,16 @@ the in-memory S3 stub with an outage injected at a chosen call:
    success would have produced. The tests below pin, per operation, the
    aftermath that decision rests on:
 
-   - ``write_file`` / ``rollback`` / ``make_dir`` / ``retain_if_changed``
-     converge: the repeat finishes the job, generation bump included. Their
-     routes answer 503.
+   - ``write_file`` / ``make_dir`` / ``retain_if_changed`` converge: the repeat
+     finishes the job, generation bump included — with the file's version ring
+     full as well as empty. Their routes answer 503.
    - ``delete_file`` / ``delete_dir`` / ``rename_file`` / ``rename_dir`` do NOT
      once the mutation itself has landed: the repeat finds the source gone (a
      miss) or the destination occupied, and the generation the interrupted
      attempt never bumped stays unbumped. Their routes keep the 500.
+   - ``rollback`` does NOT either, once the ring is full: capturing the file it
+     replaces evicts the oldest version, which may be the one being rolled back
+     to, so the repeat is a miss. Its route keeps the 500.
 
 The ``write_file`` case where the file is replaced but the generation is not
 bumped is the window issue #3279 describes. It is pinned here as the aftermath
@@ -37,7 +40,10 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 import pytest
+from starlette.requests import ClientDisconnect
+from starlette.types import Message
 
+from mc_server_dashboard_api.http_streaming import ClosingStreamingResponse, started
 from mc_server_dashboard_api.servers.adapters.file_store import (
     StorageFileStoreAdapter,
 )
@@ -253,32 +259,6 @@ async def test_first_write_of_an_unpublished_server_is_finished_by_a_repeat() ->
     assert await rig.generation() == 1
 
 
-async def test_rollback_interrupted_at_its_generation_bump_is_finished_by_repeat() -> (
-    None
-):
-    rig = await _published()
-    await _CALLS["write_file"](rig)
-    [version_id] = await rig.seam.list_versions(
-        **rig.scope, rel_path="server.properties"
-    )
-    before = await rig.generation()
-    rig.faults.when = _generation_bump
-
-    async def _rollback() -> None:
-        await rig.seam.rollback(
-            **rig.scope, rel_path="server.properties", version_id=version_id
-        )
-
-    with pytest.raises(ServerFileStorageUnavailableError):
-        await _rollback()
-
-    rig.faults.clear()
-    await _rollback()
-
-    assert await rig.read("server.properties") == b"motd=old\n"
-    assert await rig.generation() == before + 1
-
-
 async def test_make_dir_interrupted_at_its_generation_bump_is_finished_by_repeat() -> (
     None
 ):
@@ -410,3 +390,206 @@ async def test_rename_dir_interrupted_between_copy_and_delete_leaves_both_trees(
     rig.faults.clear()
     assert await rig.names("world") == {"level.dat", "session.lock"}
     assert await rig.names("world2") == {"level.dat", "session.lock"}
+
+
+# --- 2c. the same writes with the file's version ring full -------------------
+
+# The adapter's default retention: a full ring evicts its oldest entry on every
+# further capture, which is the state-dependent half of each write's aftermath.
+_RING = 10
+
+
+async def _with_a_full_ring() -> tuple[_Rig, list[str]]:
+    """A published server whose ``server.properties`` ring is full, newest first."""
+
+    rig = await _published()
+    for n in range(_RING):
+        await rig.seam.write_file(
+            **rig.scope, rel_path="server.properties", content=b"motd=%d\n" % n
+        )
+    versions = await rig.seam.list_versions(**rig.scope, rel_path="server.properties")
+    assert len(versions) == _RING
+    return rig, versions
+
+
+async def test_write_with_a_full_ring_is_still_finished_by_a_repeat() -> None:
+    """The file converges whatever the ring holds: the bytes come from the
+    request, not from a retained version. What the repeat costs is history — its
+    own capture retains the already-written bytes and evicts one more of the
+    oldest versions than a first-time success would have."""
+
+    rig, versions = await _with_a_full_ring()
+    before = await rig.generation()
+    rig.faults.when = _generation_bump
+
+    with pytest.raises(ServerFileStorageUnavailableError):
+        await _CALLS["write_file"](rig)
+
+    rig.faults.clear()
+    await _CALLS["write_file"](rig)
+
+    assert await rig.read("server.properties") == b"motd=new\n"
+    assert await rig.generation() == before + 1
+    after = await rig.seam.list_versions(**rig.scope, rel_path="server.properties")
+    assert len(after) == _RING
+    # Two captures for one logical write: the two oldest versions are gone.
+    assert set(versions[-2:]).isdisjoint(after)
+    assert set(versions[:-2]) <= set(after)
+
+
+async def test_retain_with_a_full_ring_is_still_a_no_op_on_repeat() -> None:
+    """The running-edit snapshot with a full ring: the interrupted attempt has
+    captured the file, and the repeat's dedup finds that capture, so nothing
+    more is retained and nothing more is evicted."""
+
+    rig, versions = await _with_a_full_ring()
+    captured = False
+
+    def _after_capture(op: str, key: str) -> bool:
+        nonlocal captured
+        if op == "copy_object":
+            captured = True
+            return False
+        return captured and op == "list_objects" and "/versions/" in key
+
+    rig.faults.when = _after_capture
+
+    with pytest.raises(ServerFileStorageUnavailableError):
+        await _CALLS["retain_if_changed"](rig)
+
+    rig.faults.clear()
+    interrupted = await rig.seam.list_versions(
+        **rig.scope, rel_path="server.properties"
+    )
+    await _CALLS["retain_if_changed"](rig)
+
+    assert (
+        await rig.seam.list_versions(**rig.scope, rel_path="server.properties")
+        == interrupted
+    )
+    assert set(versions) <= set(interrupted)
+
+
+async def test_rollback_to_the_oldest_version_of_a_full_ring_is_a_miss_on_repeat() -> (
+    None
+):
+    """Why the rollback keeps its 500. It reads the target version, then writes
+    it — and that write first captures the current file, which with a full ring
+    evicts the oldest version: the target. Interrupted at the generation bump,
+    the restored bytes are readable, the generation is unchanged, and the same
+    rollback again finds no such version."""
+
+    rig, versions = await _with_a_full_ring()
+    oldest = versions[-1]
+    restored = await rig.seam.read_version(
+        **rig.scope, rel_path="server.properties", version_id=oldest
+    )
+    before = await rig.generation()
+    rig.faults.when = _generation_bump
+
+    async def _rollback() -> None:
+        await rig.seam.rollback(
+            **rig.scope, rel_path="server.properties", version_id=oldest
+        )
+
+    with pytest.raises(ServerFileStorageUnavailableError):
+        await _rollback()
+
+    rig.faults.clear()
+    assert await rig.read("server.properties") == restored
+    assert await rig.generation() == before
+
+    with pytest.raises(ServerFileNotFoundError):
+        await _rollback()
+    assert await rig.generation() == before
+
+
+# --- 3. a closed stream holds nothing (issue #3234) --------------------------
+
+
+def _holds_nothing(rig: _Rig) -> bool:
+    """No reader lease and no store client is still open behind the seam."""
+
+    return rig.storage._leases == {} and rig.faults.open_clients == 0
+
+
+async def test_closing_a_begun_file_stream_releases_its_lease_at_once() -> None:
+    """The seam's stream wraps Storage's. Closing the outer one must close the
+    inner one with it — ``async for`` does not — or the reader lease and the
+    client stay held until the interpreter finalizes the abandoned generator."""
+
+    rig = await _published()
+    stream = rig.seam.open_file_stream(**rig.scope, rel_path="server.properties")
+    await anext(stream)
+    assert not _holds_nothing(rig)
+
+    await stream.aclose()  # type: ignore[attr-defined]
+
+    assert _holds_nothing(rig)
+
+
+async def test_closing_a_begun_dir_zip_releases_its_view_and_its_open_member() -> None:
+    """Closed while a member is open: the view's lease AND that member's client
+    are released at once."""
+
+    rig = await _published()
+    stream = rig.seam.download_dir(**rig.scope, rel_path="world")
+    await anext(stream)
+    assert not _holds_nothing(rig)
+
+    await stream.aclose()  # type: ignore[attr-defined]
+
+    assert _holds_nothing(rig)
+
+
+async def test_a_dir_zip_that_fails_mid_walk_holds_nothing_afterwards() -> None:
+    rig = await _published()
+    rig.faults.when = lambda op, key: (
+        op == "get_object" and key.endswith("/world/session.lock")
+    )
+
+    with pytest.raises(ServerFileStorageUnavailableError):
+        await drain(rig.seam.download_dir(**rig.scope, rel_path="world"))
+
+    assert _holds_nothing(rig)
+
+
+async def test_a_completed_dir_zip_holds_nothing_afterwards() -> None:
+    rig = await _published()
+
+    await drain(rig.seam.download_dir(**rig.scope, rel_path="."))
+
+    assert _holds_nothing(rig)
+
+
+@pytest.mark.parametrize("target", ["file", "directory"])
+async def test_a_download_whose_client_disconnects_holds_nothing_afterwards(
+    target: str,
+) -> None:
+    """The route's own composition — the seam's stream, begun, in the closing
+    response — with the client gone after the first body chunk. Starlette stops
+    there and leaves the body suspended; the response closes it, and the close
+    reaches Storage."""
+
+    rig = await _published()
+    source = (
+        rig.seam.open_file_stream(**rig.scope, rel_path="world/level.dat")
+        if target == "file"
+        else rig.seam.download_dir(**rig.scope, rel_path="world")
+    )
+    response = ClosingStreamingResponse(await started(source))
+    assert not _holds_nothing(rig)
+
+    async def _receive() -> Message:
+        return {"type": "http.disconnect"}
+
+    async def _send(message: Message) -> None:
+        if message["type"] == "http.response.body":
+            raise OSError("client went away")
+
+    with pytest.raises(ClientDisconnect):
+        await response(
+            {"type": "http", "asgi": {"spec_version": "2.4"}}, _receive, _send
+        )
+
+    assert _holds_nothing(rig)

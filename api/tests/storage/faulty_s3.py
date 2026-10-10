@@ -29,6 +29,9 @@ class Faults:
 
     def __init__(self) -> None:
         self.when: Fault = lambda op, key: False
+        # Clients currently inside their ``async with``: what a stream that was
+        # opened and not yet closed is still holding.
+        self.open_clients = 0
 
     def always(self) -> None:
         self.when = lambda op, key: True
@@ -61,6 +64,10 @@ def faulty_s3_factory(backing: FakeS3Store, faults: Faults) -> S3ClientFactory:
     @asynccontextmanager
     async def _factory() -> AsyncIterator[S3Client]:
         async with inner() as client:
-            yield _FaultyClient(client, faults)  # type: ignore[misc]
+            faults.open_clients += 1
+            try:
+                yield _FaultyClient(client, faults)  # type: ignore[misc]
+            finally:
+                faults.open_clients -= 1
 
     return _factory

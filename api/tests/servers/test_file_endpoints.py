@@ -2708,10 +2708,6 @@ _OUTAGE_503_ROUTES: dict[str, tuple[str, _Request]] = {
         "version",
         ("GET", "/version", {"params": {"path": "f", "version_id": "v1"}}),
     ),
-    "rollback": (
-        "rollback",
-        ("POST", "/rollback", {"params": {"path": "f"}, "json": {"version_id": "v1"}}),
-    ),
     "mkdir": ("mkdir", ("POST", "/directories", {"params": {"path": "d"}})),
     "search": ("search", ("POST", "/search", {"json": {"query": "x"}})),
 }
@@ -2789,13 +2785,21 @@ def test_download_probe_store_outage_is_503_storage_unavailable(method: str) -> 
     [
         ("rename", ("POST", "/rename", {"json": {"from": "a", "to": "b"}})),
         ("delete", ("DELETE", "", {"params": {"path": "f"}})),
+        (
+            "rollback",
+            (
+                "POST",
+                "/rollback",
+                {"params": {"path": "f"}, "json": {"version_id": "v1"}},
+            ),
+        ),
     ],
 )
 def test_store_outage_on_a_non_convergent_write_stays_500(
     keyword: str, request_: _Request
 ) -> None:
-    """A rename or a delete interrupted after its mutation answers a repeat with
-    a 409 or a 404 (pinned at the seam in
+    """A rename, a delete or a rollback interrupted after its mutation can
+    answer a repeat with a 409 or a 404 (pinned at the seam in
     ``test_file_store_storage_unavailable.py``), so the outage is deliberately
     not the 503 that would invite one. It reaches the edge as the servers type
     and is reported as the 500 it always was."""
@@ -3009,3 +3013,27 @@ async def test_store_failing_between_the_probe_and_the_open_is_a_clean_503() -> 
     assert resp.status_code == 503
     assert resp.json()["reason"] == "storage_unavailable"
     assert recorder.events == []
+
+
+async def test_download_releases_the_store_when_the_audit_write_fails() -> None:
+    """The same exit, through the production adapters: once the route has failed,
+    the begun stream holds no reader lease and no store client — at once, not
+    when a finalizer gets round to it."""
+
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app, file_store, faults = _real_download_app(community, server, _FailingRecorder())
+    await _seed_level_dat(file_store, community, server)
+    storage = file_store._storage
+    assert isinstance(storage, ObjectStorage)
+    client = _client(app)
+
+    for path in ("world/level.dat", "world"):
+        resp = client.get(
+            _url(community, server, "/download"),
+            params={"path": path},
+            headers=_bearer(),
+        )
+
+        assert resp.status_code == 500
+        assert storage._leases == {}
+        assert faults.open_clients == 0

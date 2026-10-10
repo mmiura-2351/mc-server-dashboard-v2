@@ -47,7 +47,10 @@ from mc_server_dashboard_api.dependencies import (
 from mc_server_dashboard_api.http_datetime import UtcDatetime
 from mc_server_dashboard_api.http_head import head_response
 from mc_server_dashboard_api.http_problem import ProblemException, problem
-from mc_server_dashboard_api.http_streaming import started
+from mc_server_dashboard_api.http_streaming import (
+    ClosingStreamingResponse,
+    started,
+)
 from mc_server_dashboard_api.servers.application.catalog import (
     CheckPluginUpdate,
     CheckUpdates,
@@ -1236,7 +1239,9 @@ async def download_client_modpack(
         return head_response(
             media_type="application/zip", headers=_client_modpack_headers()
         )
-    return StreamingResponse(
+    # Closes the stream — and the cache blob it has open — on every way out,
+    # a client that disconnects mid-download included (issue #3234).
+    return ClosingStreamingResponse(
         stream,
         media_type="application/zip",
         headers=_client_modpack_headers(),

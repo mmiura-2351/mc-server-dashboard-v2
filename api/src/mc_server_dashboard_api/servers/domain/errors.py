@@ -365,7 +365,7 @@ class ServerFileStorageUnavailableError(ServerError):
     operation, by what the failure leaves behind. A read leaves nothing, so every
     read answers 503. A write answers 503 only where repeating the request
     converges on the state a first-time success would have produced (a file write,
-    an upload, a make-dir, a rollback); where it does not -- a delete or a rename
+    an upload, a make-dir); where it does not -- a delete, a rename or a rollback
     interrupted after its mutation, a write that follows an already-committed row
     -- no route maps it and the edge reports the 500 it always did.
     """

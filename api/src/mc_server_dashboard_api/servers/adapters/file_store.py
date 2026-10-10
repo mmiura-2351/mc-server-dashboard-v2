@@ -27,6 +27,7 @@ which :class:`ServerFileStorageUnavailableError` describes.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import zipfile
 from collections.abc import AsyncGenerator, AsyncIterator
@@ -96,6 +97,21 @@ def _refused(rel_path: str, exc: Exception) -> InvalidFilePathError:
     return InvalidFilePathError(rel_path)
 
 
+async def _aclose(stream: AsyncIterator[object]) -> None:
+    """Close a stream this seam opened, now rather than at garbage collection.
+
+    ``async for`` does not forward a close to the iterator it drives, so a seam
+    generator that merely delegates leaves the Storage stream underneath it —
+    and the reader lease and client that stream holds — alive until the
+    interpreter finalizes it (issue #3234). Every delegating generator below
+    closes what it opened in a ``finally`` through this.
+    """
+
+    aclose = getattr(stream, "aclose", None)
+    if aclose is not None:
+        await aclose()
+
+
 def _scope(
     community_id: CommunityId, server_id: ServerId
 ) -> tuple[StorageCommunityId, StorageServerId]:
@@ -162,10 +178,12 @@ class StorageFileStoreAdapter(FileStore):
         self, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> AsyncIterator[bytes]:
         community, server = _scope(community_id, server_id)
+        stream: AsyncIterator[bytes] | None = None
         try:
-            async for chunk in self._storage.open_file_stream(
+            stream = self._storage.open_file_stream(
                 community, server, _rel_path(rel_path)
-            ):
+            )
+            async for chunk in stream:
                 yield chunk
         except StorageUnavailableError as exc:
             raise ServerFileStorageUnavailableError(str(server_id.value)) from exc
@@ -173,6 +191,9 @@ class StorageFileStoreAdapter(FileStore):
             raise _refused(rel_path, exc) from exc
         except NotFoundError as exc:
             raise ServerFileNotFoundError(str(server_id.value)) from exc
+        finally:
+            if stream is not None:
+                await _aclose(stream)
 
     async def list_dir(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
@@ -361,16 +382,24 @@ class StorageFileStoreAdapter(FileStore):
         # read — is translated here, once, so no storage type crosses the seam
         # (issue #3233). It still ends the stream: an outage is not the vanished or
         # refused member the walk skips, and a zip silently missing a file would
-        # pass for a complete one. The inner generator is closed explicitly so the
-        # view's lease is released when this one is, not whenever it is collected.
-        zip_stream = self._zip_dir_gen(community_id, server_id, rel_path, extra=extra)
-        try:
-            async for chunk in zip_stream:
-                yield chunk
-        except StorageUnavailableError as exc:
-            raise ServerFileStorageUnavailableError(str(server_id.value)) from exc
-        finally:
-            await zip_stream.aclose()
+        # pass for a complete one.
+        #
+        # Everything the zip opened is closed here, on every way out — exhausted,
+        # failed, or closed by the caller mid-member (issue #3234). ``async for``
+        # does not forward a close, so the zip generator is closed explicitly
+        # (releasing the view's lease), and then ``owned`` closes the member walk
+        # it registered, which closes the member stream that was open.
+        async with contextlib.AsyncExitStack() as owned:
+            zip_stream = self._zip_dir_gen(
+                community_id, server_id, rel_path, extra=extra, owned=owned
+            )
+            try:
+                async for chunk in zip_stream:
+                    yield chunk
+            except StorageUnavailableError as exc:
+                raise ServerFileStorageUnavailableError(str(server_id.value)) from exc
+            finally:
+                await zip_stream.aclose()
 
     async def _zip_dir_gen(
         self,
@@ -379,6 +408,7 @@ class StorageFileStoreAdapter(FileStore):
         rel_path: str,
         *,
         extra: list[tuple[str, bytes]] | None = None,
+        owned: contextlib.AsyncExitStack,
     ) -> AsyncGenerator[bytes, None]:
         community, server = _scope(community_id, server_id)
         sink = _ZipStreamSink()
@@ -403,9 +433,11 @@ class StorageFileStoreAdapter(FileStore):
             with zipfile.ZipFile(
                 sink, mode="w", compression=zipfile.ZIP_DEFLATED
             ) as zf:
-                async for arcname, member_stream in self._walk_files(
-                    view, server_id, rel_path
-                ):
+                members = self._closing_members(
+                    self._walk_files(view, server_id, rel_path)
+                )
+                owned.push_async_callback(_aclose, members)
+                async for arcname, member_stream in members:
                     # A listing describes every dirent, including ones that name
                     # no readable file: a member deleted between the listing and
                     # its read is a miss. Skip that member rather than aborting
@@ -458,6 +490,27 @@ class StorageFileStoreAdapter(FileStore):
                         yield out
             for out in sink.drain():
                 yield out
+
+    async def _closing_members(
+        self, walk: AsyncIterator[tuple[str, AsyncIterator[bytes]]]
+    ) -> AsyncIterator[tuple[str, AsyncIterator[bytes]]]:
+        """Yield the walk's members, closing each one's stream when it is done with.
+
+        The zip loop reads a member through a stream it may leave early — a
+        skipped member, a failure, or the whole download being closed while one
+        is open. When the loop moves on to the next member, or this generator is
+        closed, the member's stream (and the client it holds) is closed, and so
+        is the walk itself (issue #3234).
+        """
+
+        try:
+            async for arcname, member_stream in walk:
+                try:
+                    yield arcname, member_stream
+                finally:
+                    await _aclose(member_stream)
+        finally:
+            await _aclose(walk)
 
     async def _walk_files(
         self, view: WorkingSetView, server_id: ServerId, rel_path: str
@@ -521,13 +574,18 @@ class StorageFileStoreAdapter(FileStore):
     async def _view_file_stream_gen(
         self, view: WorkingSetView, rel_path: str
     ) -> AsyncIterator[bytes]:
+        stream: AsyncIterator[bytes] | None = None
         try:
-            async for chunk in view.open_file_stream(_rel_path(rel_path)):
+            stream = view.open_file_stream(_rel_path(rel_path))
+            async for chunk in stream:
                 yield chunk
         except _PATH_REFUSED as exc:
             raise _refused(rel_path, exc) from exc
         except NotFoundError as exc:
             raise ServerFileNotFoundError(str(rel_path)) from exc
+        finally:
+            if stream is not None:
+                await _aclose(stream)
 
     async def list_versions(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str

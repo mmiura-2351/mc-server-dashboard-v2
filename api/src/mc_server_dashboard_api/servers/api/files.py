@@ -18,9 +18,9 @@ no-existence-signal posture; a traversal-unsafe path is 422; an oversized edit /
 upload is 413; a transitional server is 409; a disconnected worker is 503).
 
 A store outage is 503 ``storage_unavailable`` on every read and on the writes a
-repeat converges for (write, upload, rollback, make-dir); the rename and the
-delete, which a repeat cannot finish once their mutation has landed, keep the
-generic 500 (issue #3233, see ``_storage_unavailable``).
+repeat converges for (write, upload, make-dir); the rename, the delete and the
+rollback, which a repeat cannot always finish once their mutation has landed,
+keep the generic 500 (issue #3233, see ``_storage_unavailable``).
 
 Running-server file failures carry a refined reason (issue #548): the Worker
 emits one umbrella ``FILE_ACCESS_DENIED`` for several distinct conditions, so the
@@ -83,7 +83,6 @@ from fastapi import (
     UploadFile,
     status,
 )
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from mc_server_dashboard_api.audit.domain import operations as ops
@@ -113,7 +112,11 @@ from mc_server_dashboard_api.http_content_disposition import content_disposition
 from mc_server_dashboard_api.http_datetime import UtcDatetime
 from mc_server_dashboard_api.http_head import head_response
 from mc_server_dashboard_api.http_problem import ProblemException, problem
-from mc_server_dashboard_api.http_streaming import started
+from mc_server_dashboard_api.http_streaming import (
+    ClosingStreamingResponse,
+    aclose_stream,
+    started,
+)
 from mc_server_dashboard_api.identity.domain.token_service import TokenService
 from mc_server_dashboard_api.identity.domain.value_objects import (
     UserId as IdentityUserId,
@@ -602,8 +605,6 @@ async def rollback_file(
             recorder, ops.FILE_ROLLBACK, authorized, community_id, server_id
         )
         raise _conflict("server_busy") from exc
-    except ServerFileStorageUnavailableError as exc:
-        raise _storage_unavailable() from exc
     await _record_file(recorder, ops.FILE_ROLLBACK, authorized, community_id, server_id)
 
 
@@ -775,7 +776,7 @@ async def download_file(
                     rel_path=path,
                 )
                 body = await started(opened)
-                response = StreamingResponse(
+                response = ClosingStreamingResponse(
                     body,
                     media_type=_ZIP_MEDIA_TYPE,
                     headers=zip_headers,
@@ -822,7 +823,7 @@ async def download_file(
                     rel_path=path,
                 )
                 body = await started(opened)
-                response = StreamingResponse(
+                response = ClosingStreamingResponse(
                     body,
                     media_type=_FILE_MEDIA_TYPE,
                     headers=headers,
@@ -858,8 +859,9 @@ async def download_file(
         except BaseException:
             # No response will consume the stream now, and a begun stream holds
             # what it opened — a descriptor, or the snapshot's reader lease
-            # (issue #3234). Close it here rather than leave it to be collected.
-            await _close(opened)
+            # (issue #3234). Close it here rather than leave it to be collected;
+            # the response, which closes it on every other way out, never ran.
+            await aclose_stream(opened)
             raise
     return response
 
@@ -1228,14 +1230,6 @@ async def search_files(
     return SearchResponse(paths=result.paths, truncated=result.truncated)
 
 
-async def _close(stream: AsyncIterator[bytes] | None) -> None:
-    """Close a begun download stream that no response is going to consume."""
-
-    aclose = getattr(stream, "aclose", None)
-    if aclose is not None:
-        await aclose()
-
-
 async def _read_capped_upload(file: UploadFile) -> bytes:
     """Pull the multipart body in chunks, aborting with 413 past the upload cap.
 
@@ -1346,9 +1340,11 @@ def _storage_unavailable() -> ProblemException:
     """503 for a store outage on a route whose failure is safe to retry (#3233).
 
     Mapped on the reads, which leave nothing behind, and on the writes a repeat
-    converges for — a file write, an upload, a rollback, a make-dir. The rename
-    and the delete are deliberately NOT mapped: interrupted after their mutation
-    they answer a retry with a 409 or a 404, so the outage stays the 500 it was.
+    converges for — a file write, an upload, a make-dir. The rename, the delete
+    and the rollback are deliberately NOT mapped: interrupted after their
+    mutation they answer a retry with a 409 or a 404, so the outage stays the 500
+    it was. For the rollback that is the full version ring: capturing the file it
+    replaces can evict the very version being rolled back to.
     """
 
     return _service_unavailable("storage_unavailable")
