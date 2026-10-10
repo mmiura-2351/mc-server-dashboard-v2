@@ -36,6 +36,14 @@ import {
 export const TOKEN_EXPIRED_CLOSE_CODE = 4419;
 
 /**
+ * The close code the API sends when a mid-stream re-check no longer accepts the
+ * token a socket was opened with — its account was deactivated or deleted
+ * (WEBUI_SPEC.md 2.6, #3227). The remedy is the same refresh: it is what turns
+ * a rejected session into a logout instead of an endless reconnect loop.
+ */
+export const UNAUTHENTICATED_CLOSE_CODE = 4401;
+
+/**
  * Backoff bounds (WEBUI_SPEC.md 7.2). Exponential from a small base, capped, so
  * a flapping or down API is retried promptly at first and then backs off to a
  * steady ~30s probe instead of hammering.
@@ -83,7 +91,7 @@ export class EventsSocketClient {
   private attempt = 0;
   /** The token the live socket was opened with, to detect a stale connection. */
   private connectedToken: string | null = null;
-  /** The token the API last closed a socket for as expired; never reused. */
+  /** The token the API last closed a socket for as expired or rejected; never reused. */
   private expiredToken: string | null = null;
   private unsubscribeRotation: (() => void) | null = null;
   private stopped = false;
@@ -151,7 +159,10 @@ export class EventsSocketClient {
     }
     this.socket = null;
     this.callbacks.onDown();
-    if (code === TOKEN_EXPIRED_CLOSE_CODE) {
+    if (
+      code === TOKEN_EXPIRED_CLOSE_CODE ||
+      code === UNAUTHENTICATED_CLOSE_CODE
+    ) {
       this.expiredToken = this.connectedToken;
       this.connect();
       return;
@@ -159,7 +170,8 @@ export class EventsSocketClient {
     this.scheduleReconnect();
   }
 
-  // The API closed a socket because its token expired: refresh through the
+  // The API closed a socket because its token expired or is no longer
+  // accepted (deactivated or deleted account): refresh through the
   // shared single-flight path (the one the API client retries 401s through)
   // before reconnecting. A refresh that rotates the token reconnects via
   // reconnect-on-rotate, usually before this resumes. One that fails retries on

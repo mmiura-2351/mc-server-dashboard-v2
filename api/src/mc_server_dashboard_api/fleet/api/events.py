@@ -22,8 +22,8 @@ same condition would produce:
 - ``4419`` — the access token the socket was opened with has expired (mid-stream
   only; see below).
 
-The socket lives no longer than the access token it was opened with (#1862): it
-is authenticated once, at the handshake, so at the instant that token would stop
+The socket lives no longer than the access token it was opened with (#1862):
+that token is its only credential, so at the instant it would stop
 verifying the socket closes with ``4419`` — distinct from the handshake's
 ``4401`` so a client knows to refresh its session before reconnecting rather
 than retrying with the token it has. A browser never sees the handshake's
@@ -36,9 +36,9 @@ traffic (#3227). The re-check first re-runs the handshake's authentication —
 the check REST applies to every request — so an account deactivated or deleted
 after accept is closed ``4401`` within one interval, as its next REST call
 would be rejected 401. It then re-runs the two-layer gate for the user as just
-re-read, so a member removed, a grant revoked or a platform admin demoted stops
-receiving within the same interval, closed with the code the accept-time gate
-would have used. The re-check is a user load plus two indexed queries.
+re-read, so a member removed or a grant revoked stops receiving within the same
+interval, closed with the code the accept-time gate would have used. The
+re-check is a user load plus two indexed queries.
 
 Delivery is best-effort and decoupled from REST (FR-MON-4): if no event ever
 arrives, the socket simply stays quiet; a slow client that overflows its buffer
@@ -605,8 +605,8 @@ async def _reauthorize(
 
     Authentication is re-run exactly as REST runs it per request, so whatever
     makes the next REST call a 401 — today a deactivated or deleted account —
-    closes the socket ``4401``. The gate then runs for the user as re-read, so
-    a change to the platform-admin flag takes effect as it does on REST.
+    closes the socket ``4401``. The gate then runs for the user as re-read,
+    as it does on REST, not as the handshake saw them.
     """
 
     authentication = await reauthenticate()
