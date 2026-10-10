@@ -131,6 +131,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     PortRangeExhaustedError,
     RetiredConfigKeyError,
     ServerBusyError,
+    ServerFileStorageUnavailableError,
     ServerFilesUnsettledError,
     ServerNameAlreadyExistsError,
     ServerNotFoundError,
@@ -1367,6 +1368,11 @@ _LIFECYCLE_CLASSIFICATION: dict[type[Exception], tuple[Outcome, str]] = {
     # (issue #3223). Raised before the desired-state flip, so nothing started; a
     # storage failure is transient, and the retry makes the write again.
     WorkingSetSeedFailedError: (Outcome.ERROR, "seed_failed"),
+    # StartServer's EULA read or ``accept_eula`` write hit a store outage (issue
+    # #3233). Both run before the desired-state flip, in a transaction that is
+    # then rolled back, so nothing started and the retry repeats the same read or
+    # rewrites the same ``eula.txt``.
+    ServerFileStorageUnavailableError: (Outcome.ERROR, "storage_unavailable"),
 }
 _LIFECYCLE_FAILURES = tuple(_LIFECYCLE_CLASSIFICATION)
 # The transient (ERROR) reasons render as 503; the refusals (DENIED) as 409.
@@ -1375,6 +1381,7 @@ _SERVICE_UNAVAILABLE_REASONS = {
     "worker_unavailable",
     "jar_unavailable",
     "seed_failed",
+    "storage_unavailable",
 }
 
 

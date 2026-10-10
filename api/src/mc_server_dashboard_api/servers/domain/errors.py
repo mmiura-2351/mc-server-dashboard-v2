@@ -353,6 +353,24 @@ class ServerFilesUnsettledError(ServerError):
     """
 
 
+class ServerFileStorageUnavailableError(ServerError):
+    """A working-set file operation failed because the store was unavailable (#3233).
+
+    The ``FileStore`` seam's translation of the storage ``StorageUnavailableError``,
+    mirroring :class:`BackupStorageUnavailableError`: a transient backend fault (a
+    transport failure or a backend 5xx), not a missing path and not a refused one.
+    Translating it at the seam keeps the storage type out of the servers layer.
+
+    Whether the edge answers it 503 ``storage_unavailable`` is decided per
+    operation, by what the failure leaves behind. A read leaves nothing, so every
+    read answers 503. A write answers 503 only where repeating the request
+    converges on the state a first-time success would have produced (a file write,
+    an upload, a make-dir); where it does not -- a delete, a rename or a rollback
+    interrupted after its mutation, a write that follows an already-committed row
+    -- no route maps it and the edge reports the 500 it always did.
+    """
+
+
 class ContentDirProtectedError(ServerError):
     """A Files API operation targeted a path under the plugin content directory.
 
@@ -637,6 +655,24 @@ class PluginCacheBlobNotFoundError(ServerError):
     row still references, where a miss is a storage-consistency fault (a GC race
     or an external deletion) with no local recovery, not a client error: no route
     maps it, and the edge reports it as a 500.
+    """
+
+
+class PluginCacheStorageUnavailableError(ServerError):
+    """A plugin-cache blob operation failed because the store was unavailable (#3233).
+
+    The ``PluginCacheStore`` seam's translation of the storage
+    ``ObjectStoreUnavailableError``, mirroring
+    :class:`ResourcePackStorageUnavailableError`. Distinct from
+    :class:`PluginCacheBlobNotFoundError`: the blob may well be there, so the
+    catalog resolver must not read this as the cache miss it downloads around.
+
+    The edge answers 503 ``storage_unavailable`` where the cache is reached before
+    anything is committed -- an upload or catalog install or update resolving its
+    jar, and the client-modpack download beginning its stream -- since the cache
+    is content-addressed and repeating the request stores or reads the same key.
+    Where the cache is read after a plugin row has already been committed (an
+    enable or a side change materializing the jar) no route maps it.
     """
 
 

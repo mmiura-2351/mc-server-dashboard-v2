@@ -71,7 +71,11 @@ export function fileOperationErrorPresentation(
           return { key: "files.error.invalidInput" };
       }
     case 503:
-      return { key: "files.error.workerUnavailable" };
+      // The store holding the files, not the server's Worker, did not answer.
+      // Without this case the message would blame an agent that is fine.
+      return error.reason === "storage_unavailable"
+        ? { key: "files.error.storageUnavailable" }
+        : { key: "files.error.workerUnavailable" };
     default:
       return { key: "files.error.generic" };
   }

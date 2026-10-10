@@ -17,8 +17,12 @@ import pytest
 from mc_server_dashboard_api.servers.adapters.plugin_cache_store import (
     ObjectPluginCacheStore,
 )
-from mc_server_dashboard_api.servers.domain.errors import PluginCacheBlobNotFoundError
+from mc_server_dashboard_api.servers.domain.errors import (
+    PluginCacheBlobNotFoundError,
+    PluginCacheStorageUnavailableError,
+)
 from tests.storage.fake_s3 import FakeS3Store, fake_s3_factory
+from tests.storage.faulty_s3 import Faults, faulty_s3_factory
 
 
 async def _stream(data: bytes) -> AsyncIterator[bytes]:
@@ -148,3 +152,67 @@ async def test_delete_absent_is_idempotent() -> None:
     cache = ObjectPluginCacheStore(fake_s3_factory(store))
     # Should not raise on a missing key.
     await cache.delete("0" * 64)
+
+
+# --- store outage (issue #3233) ---------------------------------------------
+
+
+@pytest.mark.parametrize("method", ["put", "open", "list_entries", "delete"])
+async def test_a_store_outage_crosses_the_seam_as_the_servers_type(method: str) -> None:
+    """No storage type crosses the seam, whichever call the outage strikes — and
+    for ``open`` it is not the miss the catalog resolver downloads around."""
+
+    store = FakeS3Store()
+    faults = Faults()
+    cache = ObjectPluginCacheStore(faulty_s3_factory(store, faults))
+    content = b"jar-bytes"
+    sha256 = hashlib.sha256(content).hexdigest()
+    await cache.put(sha256, _stream(content))
+    faults.always()
+
+    with pytest.raises(PluginCacheStorageUnavailableError):
+        if method == "put":
+            await cache.put("f" * 64, _stream(b"other"))
+        elif method == "open":
+            _ = [chunk async for chunk in cache.open(sha256)]
+        elif method == "list_entries":
+            await cache.list_entries()
+        else:
+            await cache.delete(sha256)
+
+
+async def test_put_interrupted_during_the_upload_is_finished_by_a_repeat() -> None:
+    """What makes a failed ingest safe to retry: the key is the content's own
+    address, so the repeat stores the same bytes under the same name."""
+
+    store = FakeS3Store()
+    faults = Faults()
+    cache = ObjectPluginCacheStore(faulty_s3_factory(store, faults))
+    content = b"jar-bytes"
+    sha256 = hashlib.sha256(content).hexdigest()
+    faults.when = lambda op, key: op == "upload_multipart"
+
+    with pytest.raises(PluginCacheStorageUnavailableError):
+        await cache.put(sha256, _stream(content))
+    assert f"plugin-cache/{sha256}" not in store.objects
+
+    faults.clear()
+    await cache.put(sha256, _stream(content))
+
+    assert b"".join([chunk async for chunk in cache.open(sha256)]) == content
+
+
+async def test_closing_a_begun_open_releases_the_client_at_once() -> None:
+    store = FakeS3Store()
+    faults = Faults()
+    cache = ObjectPluginCacheStore(faulty_s3_factory(store, faults))
+    content = b"jar-bytes"
+    sha256 = hashlib.sha256(content).hexdigest()
+    await cache.put(sha256, _stream(content))
+    stream = cache.open(sha256)
+    await anext(stream)
+    assert faults.open_clients == 1
+
+    await stream.aclose()  # type: ignore[attr-defined]
+
+    assert faults.open_clients == 0

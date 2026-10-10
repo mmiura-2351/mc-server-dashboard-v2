@@ -29,6 +29,9 @@ const PLUGIN_REASON_PRESENTATION: Record<string, TranslationKey> = {
   invalid_display_name: "plugins.error.invalidDisplayName",
   bedrock_port_range_exhausted: "plugins.error.bedrockPortRangeExhausted",
   bedrock_port_taken: "plugins.error.bedrockPortTaken",
+  // Also a 503, but the jar store rather than the server's Worker: the status
+  // fallback below would blame an agent that is fine.
+  storage_unavailable: "plugins.error.storageUnavailable",
   not_found: "plugins.error.notFound",
 };
 

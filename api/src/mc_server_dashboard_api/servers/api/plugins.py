@@ -47,6 +47,10 @@ from mc_server_dashboard_api.dependencies import (
 from mc_server_dashboard_api.http_datetime import UtcDatetime
 from mc_server_dashboard_api.http_head import head_response
 from mc_server_dashboard_api.http_problem import ProblemException, problem
+from mc_server_dashboard_api.http_streaming import (
+    ClosingStreamingResponse,
+    started,
+)
 from mc_server_dashboard_api.servers.application.catalog import (
     CheckPluginUpdate,
     CheckUpdates,
@@ -86,6 +90,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidFilePathError,
     InvalidPluginSideError,
     PluginAlreadyExistsError,
+    PluginCacheStorageUnavailableError,
     PluginNotFoundError,
     PortAlreadyTakenError,
     PortRangeExhaustedError,
@@ -532,6 +537,13 @@ async def install_plugin(
             target_type=ops.TARGET_SERVER,
         )
         raise _conflict("server_busy") from exc
+    except PluginCacheStorageUnavailableError as exc:
+        # The jar cache is reached before the plugin row is committed, and it is
+        # content-addressed, so nothing is left for a retry to trip over (issue
+        # #3233). A store outage on the working-set write that FOLLOWS the commit
+        # is deliberately not mapped here: the row is in by then, and a retry
+        # could only answer 409.
+        raise _service_unavailable("storage_unavailable") from exc
     await _record_plugin(
         recorder, ops.PLUGIN_INSTALL, authorized, community_id, plugin.id.value
     )
@@ -863,6 +875,12 @@ async def update_plugin(
             recorder, ops.PLUGIN_UPDATE, authorized, community_id, plugin_id
         )
         raise _conflict("server_busy") from exc
+    except PluginCacheStorageUnavailableError as exc:
+        # Resolving the new jar reaches the cache before the row is updated, so
+        # the plugin is still on its old version and a retry starts over (issue
+        # #3233). An outage on the working-set writes after the commit is not
+        # mapped, as on install.
+        raise _service_unavailable("storage_unavailable") from exc
     await _record_plugin(
         recorder, ops.PLUGIN_UPDATE, authorized, community_id, plugin.id.value
     )
@@ -1202,6 +1220,15 @@ async def download_client_modpack(
         raise _not_found() from exc
     except UnsupportedPluginServerTypeError as exc:
         raise _unprocessable("unsupported_server_type") from exc
+    if request.method != "HEAD":
+        # Begin the zip while a status can still be chosen (issue #3233): the
+        # first jar is opened on the stream's first iteration, which used to run
+        # after the 200 was sent, so a cache outage was an aborted download. An
+        # outage on a later jar still is — the status is committed by then.
+        try:
+            stream = await started(stream)
+        except PluginCacheStorageUnavailableError as exc:
+            raise _service_unavailable("storage_unavailable") from exc
     if request.method == "HEAD":
         # Returning before the stream is iterated is what the probe is for (issue
         # #2560): the generator above is obtained to decide the status but never
@@ -1212,7 +1239,9 @@ async def download_client_modpack(
         return head_response(
             media_type="application/zip", headers=_client_modpack_headers()
         )
-    return StreamingResponse(
+    # Closes the stream — and the cache blob it has open — on every way out,
+    # a client that disconnects mid-download included (issue #3234).
+    return ClosingStreamingResponse(
         stream,
         media_type="application/zip",
         headers=_client_modpack_headers(),

@@ -36,7 +36,12 @@ class CacheEntry:
 
 
 class PluginCacheStore(abc.ABC):
-    """Port: content-addressed blob storage for cached plugin/mod jars."""
+    """Port: content-addressed blob storage for cached plugin/mod jars.
+
+    Every method raises ``PluginCacheStorageUnavailableError`` when the store
+    itself could not serve the request (issue #3233) -- :meth:`open` on the
+    iteration that hit it, like its miss.
+    """
 
     @abc.abstractmethod
     async def put(self, sha256: str, stream: ByteStream) -> None:

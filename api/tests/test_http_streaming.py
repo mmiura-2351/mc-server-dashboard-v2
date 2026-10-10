@@ -4,8 +4,11 @@ import logging
 from collections.abc import AsyncIterator
 
 import pytest
+from starlette.requests import ClientDisconnect
+from starlette.types import Message
 
 from mc_server_dashboard_api.http_streaming import (
+    ClosingStreamingResponse,
     ShortResponseBodyError,
     counted,
     started,
@@ -123,3 +126,102 @@ async def test_started_composes_with_the_declared_length_guard() -> None:
     # sees every byte, including the one pulled ahead.
     with pytest.raises(ShortResponseBodyError):
         await _drain(counted(await started(_chunks([b"short"])), 99))
+
+
+# --- closing a begun stream (issue #3234) -----------------------------------
+
+
+class _Source:
+    """A two-chunk stream that records being closed."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def stream(self) -> AsyncIterator[bytes]:
+        try:
+            yield b"first"
+            yield b"second"
+        finally:
+            self.closed = True
+
+
+async def test_closing_a_started_stream_closes_its_source() -> None:
+    # ``started`` hands back a generator over the begun source. Closing it must
+    # reach the source: ``async for`` alone does not forward the close, and the
+    # source would keep what it opened until it was garbage-collected.
+    source = _Source()
+    stream = await started(source.stream())
+    assert await anext(stream) == b"first"
+
+    await stream.aclose()  # type: ignore[attr-defined]
+
+    assert source.closed
+
+
+async def test_closing_a_started_stream_before_iterating_it_closes_its_source() -> None:
+    # The source is begun by ``started`` itself, so it holds what it opened even
+    # if nobody ever takes a chunk from the returned stream. A generator closed
+    # before its first iteration never runs its ``finally``; this close must.
+    source = _Source()
+    stream = await started(source.stream())
+
+    await stream.aclose()  # type: ignore[attr-defined]
+
+    assert source.closed
+
+
+_HTTP_SCOPE = {"type": "http", "asgi": {"spec_version": "2.4"}}
+
+
+async def _receive() -> Message:
+    return {"type": "http.disconnect"}
+
+
+async def test_closing_response_closes_the_body_when_the_client_disconnects() -> None:
+    # Starlette stops iterating the body when a send fails and leaves the
+    # generator suspended at its ``yield``. The response closes it instead.
+    source = _Source()
+    response = ClosingStreamingResponse(await started(source.stream()))
+    bodies = 0
+
+    async def _send(message: Message) -> None:
+        nonlocal bodies
+        if message["type"] == "http.response.body":
+            bodies += 1
+            if bodies == 2:
+                raise OSError("client went away")
+
+    with pytest.raises(ClientDisconnect):
+        await response(_HTTP_SCOPE, _receive, _send)
+
+    assert source.closed
+
+
+async def test_closing_response_closes_the_body_after_a_complete_transfer() -> None:
+    source = _Source()
+    response = ClosingStreamingResponse(await started(source.stream()))
+    sent = bytearray()
+
+    async def _send(message: Message) -> None:
+        if message["type"] == "http.response.body":
+            sent.extend(message.get("body", b""))
+
+    await response(_HTTP_SCOPE, _receive, _send)
+
+    assert bytes(sent) == b"firstsecond"
+    assert source.closed
+
+
+async def test_closing_response_closes_the_body_when_the_header_send_fails() -> None:
+    # Disconnected before the first body chunk: the body was never iterated by
+    # the response, only begun by ``started``.
+    source = _Source()
+    response = ClosingStreamingResponse(await started(source.stream()))
+
+    async def _send(message: Message) -> None:
+        raise OSError("client went away")
+
+    with pytest.raises(ClientDisconnect):
+        await response(_HTTP_SCOPE, _receive, _send)
+
+    assert source.closed
