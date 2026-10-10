@@ -20,7 +20,7 @@ from __future__ import annotations
 import base64
 import datetime as dt
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from urllib.parse import quote
 
 import httpx2
@@ -81,6 +81,7 @@ from mc_server_dashboard_api.servers.application.export_import import (
 )
 from mc_server_dashboard_api.servers.application.files import (
     DirListing,
+    DownloadFile,
     SearchResult,
     WriteFile,
     file_download_grant_resource,
@@ -95,6 +96,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     PlatformManagedKeyError,
     ServerBusyError,
     ServerFileNotFoundError,
+    ServerFileStorageUnavailableError,
     ServerFilesUnsettledError,
     ServerNotFoundError,
     ServerNotStoppedError,
@@ -113,12 +115,15 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerId as ServerScopeId,
 )
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
+from mc_server_dashboard_api.storage.adapters.object_store import ObjectStorage
 from tests.audit.fakes import RecordingAuditRecorder
 from tests.client_utils import enter_client
 from tests.community.fakes import FakeAuthzUnitOfWork
 from tests.identity.fakes import FakeClock, make_user
 from tests.identity.fakes import FakeUnitOfWork as IdentityFakeUnitOfWork
 from tests.servers.fakes import FakeUnitOfWork
+from tests.storage.fake_s3 import FakeS3Store
+from tests.storage.faulty_s3 import Faults, faulty_s3_factory
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 
@@ -221,12 +226,18 @@ class _FakeDownload:
         file_content: bytes = b"",
         zip_chunks: list[bytes] | None = None,
         error: Exception | None = None,
+        stream_error: Exception | None = None,
     ) -> None:
         self._is_dir = is_dir
         self._file_content = file_content
         self._zip_chunks = zip_chunks or [b"zip"]
         self._error = error
+        # Raised on the download stream's FIRST iteration, where the real streams
+        # locate what they read — after the probe has already answered.
+        self._stream_error = stream_error
         self.calls: list[str] = []
+        # Set once a begun download stream has been closed.
+        self.stream_closed = False
 
     async def is_dir(
         self,
@@ -251,14 +262,19 @@ class _FakeDownload:
         content = self._file_content
 
         async def _gen() -> AsyncIterator[bytes]:
+            if self._stream_error is not None:
+                raise self._stream_error
             # Yield in two chunks (when non-empty) so the route's StreamingResponse
             # is exercised as a real stream, not a single buffered blob (#265).
             half = len(content) // 2
-            if half:
-                yield content[:half]
-                yield content[half:]
-            elif content:
-                yield content
+            try:
+                if half:
+                    yield content[:half]
+                    yield content[half:]
+                elif content:
+                    yield content
+            finally:
+                self.stream_closed = True
 
         return _gen()
 
@@ -282,8 +298,13 @@ class _FakeDownload:
         self.calls.append("dir_zip")
 
         async def _gen() -> AsyncIterator[bytes]:
-            for chunk in self._zip_chunks:
-                yield chunk
+            if self._stream_error is not None:
+                raise self._stream_error
+            try:
+                for chunk in self._zip_chunks:
+                    yield chunk
+            finally:
+                self.stream_closed = True
 
         return _gen()
 
@@ -2661,3 +2682,330 @@ def test_upload_under_root_properties_path_is_422_platform_managed_path() -> Non
     )
     assert resp.status_code == 422
     assert resp.json()["reason"] == "platform_managed_path"
+
+
+# --- store outage (issue #3233) --------------------------------------------
+
+
+def _outage() -> ServerFileStorageUnavailableError:
+    return ServerFileStorageUnavailableError("x")
+
+
+_Request = tuple[str, str, dict[str, object]]
+
+# Every route whose store outage is answered 503: the reads, which leave nothing
+# behind, and the writes a repeat converges for. Each entry is the ``_app``
+# keyword naming the use case, then the request that reaches it.
+_OUTAGE_503_ROUTES: dict[str, tuple[str, _Request]] = {
+    "list": ("list_", ("GET", "", {"params": {"path": ".", "list": "true"}})),
+    "read": ("read", ("GET", "", {"params": {"path": "f"}})),
+    "write": (
+        "write",
+        ("PUT", "", {"params": {"path": "f"}, "json": {"content_base64": ""}}),
+    ),
+    "history": ("history", ("GET", "/history", {"params": {"path": "f"}})),
+    "version": (
+        "version",
+        ("GET", "/version", {"params": {"path": "f", "version_id": "v1"}}),
+    ),
+    "rollback": (
+        "rollback",
+        ("POST", "/rollback", {"params": {"path": "f"}, "json": {"version_id": "v1"}}),
+    ),
+    "mkdir": ("mkdir", ("POST", "/directories", {"params": {"path": "d"}})),
+    "search": ("search", ("POST", "/search", {"json": {"query": "x"}})),
+}
+
+
+@pytest.mark.parametrize("route", sorted(_OUTAGE_503_ROUTES))
+def test_store_outage_is_503_storage_unavailable(route: str) -> None:
+    keyword, (method, suffix, kwargs) = _OUTAGE_503_ROUTES[route]
+    recorder = RecordingAuditRecorder()
+    app = _app(
+        member=True,
+        allow=True,
+        recorder=recorder,
+        **{keyword: _FakeUseCase(error=_outage())},  # type: ignore[arg-type]
+    )
+    client = _client(app)
+
+    resp = client.request(method, _url(uuid.uuid4(), uuid.uuid4(), suffix), **kwargs)  # type: ignore[arg-type]
+
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "storage_unavailable"
+    # Not a refusal and not a success: nothing is recorded, as for a
+    # disconnected worker.
+    assert recorder.events == []
+
+
+def test_upload_store_outage_is_503_storage_unavailable() -> None:
+    app = _app(member=True, allow=True, upload=_FakeUpload(error=_outage()))
+    client = _client(app)
+
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/upload"),
+        params={"path": "."},
+        files={"file": ("f", b"x", "application/octet-stream")},
+    )
+
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "storage_unavailable"
+
+
+def test_download_grant_store_outage_is_503_storage_unavailable() -> None:
+    app = _app(member=True, allow=True, download=_FakeDownload(error=_outage()))
+    client = _client(app)
+
+    resp = _mint(client, uuid.uuid4(), uuid.uuid4(), "world")
+
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "storage_unavailable"
+
+
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+def test_download_probe_store_outage_is_503_storage_unavailable(method: str) -> None:
+    recorder = RecordingAuditRecorder()
+    app = _app(
+        member=True,
+        allow=True,
+        download=_FakeDownload(error=_outage()),
+        recorder=recorder,
+    )
+    client = _client(app)
+
+    resp = client.request(
+        method,
+        _url(uuid.uuid4(), uuid.uuid4(), "/download"),
+        params={"path": "f"},
+        headers=_bearer(),
+    )
+
+    assert resp.status_code == 503
+    assert recorder.events == []
+
+
+@pytest.mark.parametrize(
+    ("keyword", "request_"),
+    [
+        ("rename", ("POST", "/rename", {"json": {"from": "a", "to": "b"}})),
+        ("delete", ("DELETE", "", {"params": {"path": "f"}})),
+    ],
+)
+def test_store_outage_on_a_non_convergent_write_stays_500(
+    keyword: str, request_: _Request
+) -> None:
+    """A rename or a delete interrupted after its mutation answers a repeat with
+    a 409 or a 404 (pinned at the seam in
+    ``test_file_store_storage_unavailable.py``), so the outage is deliberately
+    not the 503 that would invite one. It reaches the edge as the servers type
+    and is reported as the 500 it always was."""
+
+    method, suffix, kwargs = request_
+    app = _app(member=True, allow=True, **{keyword: _FakeUseCase(error=_outage())})  # type: ignore[arg-type]
+    client = _client(app)
+
+    resp = client.request(method, _url(uuid.uuid4(), uuid.uuid4(), suffix), **kwargs)  # type: ignore[arg-type]
+
+    assert resp.status_code == 500
+    assert resp.json()["reason"] == "internal_error"
+
+
+# --- download: the stream is begun before the headers (issue #3234) --------
+
+
+@pytest.mark.parametrize("is_dir", [False, True])
+def test_download_whose_target_vanished_after_the_probe_is_404(is_dir: bool) -> None:
+    """The probe saw the path; the download's own stream, opened afterwards, does
+    not find it. That used to surface on the body's first iteration — after the
+    200 and its Content-Length were sent."""
+
+    recorder = RecordingAuditRecorder()
+    app = _app(
+        member=True,
+        allow=True,
+        download=_FakeDownload(
+            is_dir=is_dir,
+            file_content=b"level",
+            stream_error=ServerFileNotFoundError("x"),
+        ),
+        recorder=recorder,
+    )
+    client = _client(app)
+
+    resp = client.get(
+        _url(uuid.uuid4(), uuid.uuid4(), "/download"),
+        params={"path": "world"},
+        headers=_bearer(),
+    )
+
+    assert resp.status_code == 404
+    # Nothing left the system, so no download is recorded.
+    assert recorder.events == []
+
+
+@pytest.mark.parametrize("is_dir", [False, True])
+def test_download_whose_store_fails_on_open_is_503(is_dir: bool) -> None:
+    recorder = RecordingAuditRecorder()
+    app = _app(
+        member=True,
+        allow=True,
+        download=_FakeDownload(
+            is_dir=is_dir, file_content=b"level", stream_error=_outage()
+        ),
+        recorder=recorder,
+    )
+    client = _client(app)
+
+    resp = client.get(
+        _url(uuid.uuid4(), uuid.uuid4(), "/download"),
+        params={"path": "world"},
+        headers=_bearer(),
+    )
+
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "storage_unavailable"
+    assert recorder.events == []
+
+
+class _FailingRecorder(RecordingAuditRecorder):
+    async def record(self, event: object) -> None:
+        raise RuntimeError("audit store down")
+
+
+@pytest.mark.parametrize("is_dir", [False, True])
+def test_download_closes_its_begun_stream_when_the_audit_write_fails(
+    is_dir: bool,
+) -> None:
+    """The one exit between beginning the stream and handing it to a response.
+    No response will consume the stream, so the route closes it rather than
+    leaving the descriptor or reader lease it holds to the garbage collector."""
+
+    download = _FakeDownload(is_dir=is_dir, file_content=b"level-bytes")
+    app = _app(member=True, allow=True, download=download, recorder=_FailingRecorder())
+    client = _client(app)
+
+    resp = client.get(
+        _url(uuid.uuid4(), uuid.uuid4(), "/download"),
+        params={"path": "world"},
+        headers=_bearer(),
+    )
+
+    assert resp.status_code == 500
+    assert download.stream_closed
+
+
+class _AfterProbeFileStore(StorageFileStoreAdapter):
+    """The real seam, with a hook between the download's probe and its open.
+
+    ``DownloadFile.is_dir`` confirms a file by opening a stream of its own and
+    closing it; the download then opens a second one. ``before_download_open``
+    runs just before that second open — the window issue #3234 is about.
+    """
+
+    def __init__(self, storage: ObjectStorage) -> None:
+        super().__init__(storage=storage)
+        self.opens = 0
+        self.before_download_open: Callable[[], Awaitable[None]] | None = None
+
+    def open_file_stream(
+        self,
+        *,
+        community_id: ServerCommunityId,
+        server_id: ServerScopeId,
+        rel_path: str,
+    ) -> AsyncIterator[bytes]:
+        self.opens += 1
+        inner = super().open_file_stream(
+            community_id=community_id, server_id=server_id, rel_path=rel_path
+        )
+        if self.opens != 2 or self.before_download_open is None:
+            return inner
+        return self._hooked(self.before_download_open, inner)
+
+    async def _hooked(
+        self, hook: Callable[[], Awaitable[None]], inner: AsyncIterator[bytes]
+    ) -> AsyncIterator[bytes]:
+        await hook()
+        async for chunk in inner:
+            yield chunk
+
+
+def _real_download_app(
+    community: uuid.UUID, server: uuid.UUID, recorder: RecordingAuditRecorder
+) -> tuple[FastAPI, _AfterProbeFileStore, Faults]:
+    """Wire the download route to a REAL DownloadFile over real object Storage."""
+
+    faults = Faults()
+    file_store = _AfterProbeFileStore(
+        ObjectStorage(faulty_s3_factory(FakeS3Store(), faults))
+    )
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_stopped_server(community, server))
+    _app(member=True, allow=True, recorder=recorder)
+    app = _shared_app
+    app.dependency_overrides[get_download_file] = lambda: DownloadFile(
+        uow=uow, file_store=file_store
+    )
+    return app, file_store, faults
+
+
+async def _seed_level_dat(
+    file_store: StorageFileStoreAdapter, community: uuid.UUID, server: uuid.UUID
+) -> None:
+    await file_store.write_file(
+        community_id=ServerCommunityId(community),
+        server_id=ServerScopeId(server),
+        rel_path="world/level.dat",
+        content=b"level-bytes",
+    )
+
+
+async def test_file_deleted_between_the_probe_and_the_open_is_a_clean_404() -> None:
+    community, server = uuid.uuid4(), uuid.uuid4()
+    recorder = RecordingAuditRecorder()
+    app, file_store, _ = _real_download_app(community, server, recorder)
+    await _seed_level_dat(file_store, community, server)
+
+    async def _delete() -> None:
+        await file_store.delete_file(
+            community_id=ServerCommunityId(community),
+            server_id=ServerScopeId(server),
+            rel_path="world/level.dat",
+        )
+
+    file_store.before_download_open = _delete
+    client = _client(app)
+
+    resp = client.get(
+        _url(community, server, "/download"),
+        params={"path": "world/level.dat"},
+        headers=_bearer(),
+    )
+
+    assert file_store.opens == 2
+    assert resp.status_code == 404
+    assert recorder.events == []
+
+
+async def test_store_failing_between_the_probe_and_the_open_is_a_clean_503() -> None:
+    community, server = uuid.uuid4(), uuid.uuid4()
+    recorder = RecordingAuditRecorder()
+    app, file_store, faults = _real_download_app(community, server, recorder)
+    await _seed_level_dat(file_store, community, server)
+
+    async def _go_down() -> None:
+        faults.always()
+
+    file_store.before_download_open = _go_down
+    client = _client(app)
+
+    resp = client.get(
+        _url(community, server, "/download"),
+        params={"path": "world/level.dat"},
+        headers=_bearer(),
+    )
+
+    assert file_store.opens == 2
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "storage_unavailable"
+    assert recorder.events == []

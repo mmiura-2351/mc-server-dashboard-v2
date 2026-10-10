@@ -10,20 +10,34 @@ skips the upload when the blob already exists, so identical bytes land once.
 
 The seam translates the storage error so no storage type crosses back into the
 servers layer (mirroring ``backup_store.py`` and ``resource_pack_store.py``): a
-missing blob surfaces as :class:`PluginCacheBlobNotFoundError` (issue #2338).
+missing blob surfaces as :class:`PluginCacheBlobNotFoundError` (issue #2338), and
+a store outage on any of the four calls as
+:class:`PluginCacheStorageUnavailableError` (issue #3233).
+
+What an interrupted :meth:`put` leaves behind is at most the blob itself: the
+object client aborts the multipart upload before it reports the outage, and a
+completion whose response was lost leaves the completed blob under its content
+key. Either way a retry is safe -- the key is the content's own address, so the
+retry finds the blob and skips the upload, or uploads the same bytes again.
 """
 
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
-from mc_server_dashboard_api.servers.domain.errors import PluginCacheBlobNotFoundError
+from mc_server_dashboard_api.servers.domain.errors import (
+    PluginCacheBlobNotFoundError,
+    PluginCacheStorageUnavailableError,
+)
 from mc_server_dashboard_api.servers.domain.plugin_cache_store import (
     CacheEntry,
     PluginCacheStore,
 )
 from mc_server_dashboard_api.storage.adapters.object_store import S3ClientFactory
-from mc_server_dashboard_api.storage.domain.errors import NotFoundError
+from mc_server_dashboard_api.storage.domain.errors import (
+    NotFoundError,
+    ObjectStoreUnavailableError,
+)
 
 
 def _key(sha256: str) -> str:
@@ -38,11 +52,14 @@ class ObjectPluginCacheStore(PluginCacheStore):
 
     async def put(self, sha256: str, stream: AsyncIterator[bytes]) -> None:
         key = _key(sha256)
-        async with self._client_factory() as client:
-            # Dedup-on-ingest: identical content addresses the same key, so skip
-            # the upload when the blob is already cached.
-            if await client.head_object(key) is None:
-                await client.upload_multipart(key, stream)
+        try:
+            async with self._client_factory() as client:
+                # Dedup-on-ingest: identical content addresses the same key, so
+                # skip the upload when the blob is already cached.
+                if await client.head_object(key) is None:
+                    await client.upload_multipart(key, stream)
+        except ObjectStoreUnavailableError as exc:
+            raise PluginCacheStorageUnavailableError(key) from exc
 
     def open(self, sha256: str) -> AsyncIterator[bytes]:
         return self._open_gen(sha256)
@@ -62,11 +79,18 @@ class ObjectPluginCacheStore(PluginCacheStore):
             # blob a plugin row still references it is a storage-consistency
             # fault. Translating keeps the storage type from crossing the seam.
             raise PluginCacheBlobNotFoundError(key) from exc
+        except ObjectStoreUnavailableError as exc:
+            # Not a miss: the blob may be there, so the resolver must not download
+            # around it, and a mid-body failure must not pass for a short jar.
+            raise PluginCacheStorageUnavailableError(key) from exc
 
     async def list_entries(self) -> list[CacheEntry]:
         prefix = "plugin-cache/"
-        async with self._client_factory() as client:
-            objs = await client.list_objects(prefix)
+        try:
+            async with self._client_factory() as client:
+                objs = await client.list_objects(prefix)
+        except ObjectStoreUnavailableError as exc:
+            raise PluginCacheStorageUnavailableError(prefix) from exc
         return [
             CacheEntry(
                 sha256=obj.key.removeprefix(prefix),
@@ -77,5 +101,9 @@ class ObjectPluginCacheStore(PluginCacheStore):
         ]
 
     async def delete(self, sha256: str) -> None:
-        async with self._client_factory() as client:
-            await client.delete_object(_key(sha256))
+        key = _key(sha256)
+        try:
+            async with self._client_factory() as client:
+                await client.delete_object(key)
+        except ObjectStoreUnavailableError as exc:
+            raise PluginCacheStorageUnavailableError(key) from exc

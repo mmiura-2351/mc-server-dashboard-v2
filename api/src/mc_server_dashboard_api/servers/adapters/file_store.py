@@ -12,23 +12,31 @@ and the storage errors (``NotFoundError`` -> :class:`ServerFileNotFoundError`,
 ``PathTraversalError`` / ``SymlinkRefusedError`` / ``NameTooLongError`` ->
 :class:`InvalidFilePathError`, ``PathOccupiedError`` ->
 :class:`FileAlreadyExistsError`, a ``VersionId`` ``ValueError`` ->
-:class:`InvalidVersionIdError`) so no storage type crosses back into the servers
-layer. The last two are the mutation-side errno vocabulary (issue #2433): an
-over-long destination name is a 422 ``name_too_long`` and a non-directory blocking
-a needed path component is the same 409 the never-clobber rename returns.
+:class:`InvalidVersionIdError`, ``StorageUnavailableError`` ->
+:class:`ServerFileStorageUnavailableError`) so no storage type crosses back into
+the servers layer. The two before the last are the mutation-side errno vocabulary
+(issue #2433): an over-long destination name is a 422 ``name_too_long`` and a
+non-directory blocking a needed path component is the same 409 the never-clobber
+rename returns.
+
+The last is the store outage (issue #3233), translated on every method, reads and
+writes alike. The seam only names it; whether a route answers 503
+``storage_unavailable`` depends on what that operation's failure leaves behind,
+which :class:`ServerFileStorageUnavailableError` describes.
 """
 
 from __future__ import annotations
 
 import logging
 import zipfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 
 from mc_server_dashboard_api.servers.domain.errors import (
     FileAlreadyExistsError,
     InvalidFilePathError,
     InvalidVersionIdError,
     ServerFileNotFoundError,
+    ServerFileStorageUnavailableError,
 )
 from mc_server_dashboard_api.servers.domain.file_store import FileEntry, FileStore
 from mc_server_dashboard_api.servers.domain.value_objects import (
@@ -40,6 +48,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
     NotFoundError,
     PathOccupiedError,
     PathTraversalError,
+    StorageUnavailableError,
     SymlinkRefusedError,
 )
 from mc_server_dashboard_api.storage.domain.port import Storage, WorkingSetView
@@ -133,6 +142,8 @@ class StorageFileStoreAdapter(FileStore):
         community, server = _scope(community_id, server_id)
         try:
             return await self._storage.read_file(community, server, _rel_path(rel_path))
+        except StorageUnavailableError as exc:
+            raise ServerFileStorageUnavailableError(str(server_id.value)) from exc
         except _PATH_REFUSED as exc:
             raise _refused(rel_path, exc) from exc
         except NotFoundError as exc:
@@ -156,6 +167,8 @@ class StorageFileStoreAdapter(FileStore):
                 community, server, _rel_path(rel_path)
             ):
                 yield chunk
+        except StorageUnavailableError as exc:
+            raise ServerFileStorageUnavailableError(str(server_id.value)) from exc
         except _PATH_REFUSED as exc:
             raise _refused(rel_path, exc) from exc
         except NotFoundError as exc:
@@ -169,6 +182,8 @@ class StorageFileStoreAdapter(FileStore):
             entries = await self._storage.list_dir(
                 community, server, _rel_path(rel_path)
             )
+        except StorageUnavailableError as exc:
+            raise ServerFileStorageUnavailableError(str(server_id.value)) from exc
         except _PATH_REFUSED as exc:
             raise _refused(rel_path, exc) from exc
         except NotFoundError as exc:
@@ -186,6 +201,8 @@ class StorageFileStoreAdapter(FileStore):
             return await self._storage.path_exists(
                 community, server, _rel_path(rel_path)
             )
+        except StorageUnavailableError as exc:
+            raise ServerFileStorageUnavailableError(str(server_id.value)) from exc
         except _PATH_REFUSED as exc:
             raise _refused(rel_path, exc) from exc
 
@@ -202,6 +219,8 @@ class StorageFileStoreAdapter(FileStore):
             await self._storage.write_file(
                 community, server, _rel_path(rel_path), content
             )
+        except StorageUnavailableError as exc:
+            raise ServerFileStorageUnavailableError(str(server_id.value)) from exc
         except _PATH_REFUSED as exc:
             raise _refused(rel_path, exc) from exc
         except _PATH_CONFLICT as exc:
@@ -215,6 +234,8 @@ class StorageFileStoreAdapter(FileStore):
             await self._storage.retain_file_version(
                 community, server, _rel_path(rel_path)
             )
+        except StorageUnavailableError as exc:
+            raise ServerFileStorageUnavailableError(str(server_id.value)) from exc
         except _PATH_REFUSED as exc:
             raise _refused(rel_path, exc) from exc
 
@@ -224,6 +245,8 @@ class StorageFileStoreAdapter(FileStore):
         community, server = _scope(community_id, server_id)
         try:
             await self._storage.delete_file(community, server, _rel_path(rel_path))
+        except StorageUnavailableError as exc:
+            raise ServerFileStorageUnavailableError(str(server_id.value)) from exc
         except _PATH_REFUSED as exc:
             raise _refused(rel_path, exc) from exc
         except NotFoundError as exc:
@@ -235,6 +258,8 @@ class StorageFileStoreAdapter(FileStore):
         community, server = _scope(community_id, server_id)
         try:
             await self._storage.delete_dir(community, server, _rel_path(rel_path))
+        except StorageUnavailableError as exc:
+            raise ServerFileStorageUnavailableError(str(server_id.value)) from exc
         except _PATH_REFUSED as exc:
             raise _refused(rel_path, exc) from exc
         except NotFoundError as exc:
@@ -253,6 +278,8 @@ class StorageFileStoreAdapter(FileStore):
             await self._storage.rename_file(
                 community, server, _rel_path(from_path), _rel_path(to_path)
             )
+        except StorageUnavailableError as exc:
+            raise ServerFileStorageUnavailableError(str(server_id.value)) from exc
         except _PATH_REFUSED as exc:
             raise _refused(from_path, exc) from exc
         except _PATH_CONFLICT as exc:
@@ -273,6 +300,8 @@ class StorageFileStoreAdapter(FileStore):
             await self._storage.rename_dir(
                 community, server, _rel_path(from_path), _rel_path(to_path)
             )
+        except StorageUnavailableError as exc:
+            raise ServerFileStorageUnavailableError(str(server_id.value)) from exc
         except _PATH_REFUSED as exc:
             raise _refused(from_path, exc) from exc
         except _PATH_CONFLICT as exc:
@@ -286,6 +315,8 @@ class StorageFileStoreAdapter(FileStore):
         community, server = _scope(community_id, server_id)
         try:
             await self._storage.make_dir(community, server, _rel_path(rel_path))
+        except StorageUnavailableError as exc:
+            raise ServerFileStorageUnavailableError(str(server_id.value)) from exc
         except _PATH_REFUSED as exc:
             raise _refused(rel_path, exc) from exc
         except _PATH_CONFLICT as exc:
@@ -326,6 +357,29 @@ class StorageFileStoreAdapter(FileStore):
         *,
         extra: list[tuple[str, bytes]] | None = None,
     ) -> AsyncIterator[bytes]:
+        # An outage anywhere in the zip — pinning the view, a listing, a member's
+        # read — is translated here, once, so no storage type crosses the seam
+        # (issue #3233). It still ends the stream: an outage is not the vanished or
+        # refused member the walk skips, and a zip silently missing a file would
+        # pass for a complete one. The inner generator is closed explicitly so the
+        # view's lease is released when this one is, not whenever it is collected.
+        zip_stream = self._zip_dir_gen(community_id, server_id, rel_path, extra=extra)
+        try:
+            async for chunk in zip_stream:
+                yield chunk
+        except StorageUnavailableError as exc:
+            raise ServerFileStorageUnavailableError(str(server_id.value)) from exc
+        finally:
+            await zip_stream.aclose()
+
+    async def _zip_dir_gen(
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        rel_path: str,
+        *,
+        extra: list[tuple[str, bytes]] | None = None,
+    ) -> AsyncGenerator[bytes, None]:
         community, server = _scope(community_id, server_id)
         sink = _ZipStreamSink()
         # Pin one snapshot for the entire walk via the active-reader lease so a
@@ -483,6 +537,8 @@ class StorageFileStoreAdapter(FileStore):
             versions = await self._storage.list_file_versions(
                 community, server, _rel_path(rel_path)
             )
+        except StorageUnavailableError as exc:
+            raise ServerFileStorageUnavailableError(str(server_id.value)) from exc
         except _PATH_REFUSED as exc:
             raise _refused(rel_path, exc) from exc
         except NotFoundError as exc:
@@ -502,6 +558,8 @@ class StorageFileStoreAdapter(FileStore):
             return await self._storage.read_file_version(
                 community, server, _rel_path(rel_path), _version_id(version_id)
             )
+        except StorageUnavailableError as exc:
+            raise ServerFileStorageUnavailableError(str(server_id.value)) from exc
         except _PATH_REFUSED as exc:
             raise _refused(rel_path, exc) from exc
         except NotFoundError as exc:
@@ -520,6 +578,8 @@ class StorageFileStoreAdapter(FileStore):
             await self._storage.rollback_file(
                 community, server, _rel_path(rel_path), _version_id(version_id)
             )
+        except StorageUnavailableError as exc:
+            raise ServerFileStorageUnavailableError(str(server_id.value)) from exc
         except _PATH_REFUSED as exc:
             raise _refused(rel_path, exc) from exc
         except NotFoundError as exc:

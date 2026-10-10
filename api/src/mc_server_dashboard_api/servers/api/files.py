@@ -65,6 +65,7 @@ import base64
 import binascii
 import posixpath
 import uuid
+from collections.abc import AsyncIterator
 from typing import Annotated
 from urllib.parse import quote
 
@@ -107,6 +108,7 @@ from mc_server_dashboard_api.http_content_disposition import content_disposition
 from mc_server_dashboard_api.http_datetime import UtcDatetime
 from mc_server_dashboard_api.http_head import head_response
 from mc_server_dashboard_api.http_problem import ProblemException, problem
+from mc_server_dashboard_api.http_streaming import started
 from mc_server_dashboard_api.identity.domain.token_service import TokenService
 from mc_server_dashboard_api.identity.domain.value_objects import (
     UserId as IdentityUserId,
@@ -142,6 +144,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     PlatformManagedKeyError,
     ServerBusyError,
     ServerFileNotFoundError,
+    ServerFileStorageUnavailableError,
     ServerFilesUnsettledError,
     ServerNotFoundError,
     ServerNotStoppedError,
@@ -295,6 +298,8 @@ async def read_or_list_files(
             raise _service_unavailable("worker_unavailable") from exc
         except CommandDispatchError as exc:
             raise _conflict("command_failed") from exc
+        except ServerFileStorageUnavailableError as exc:
+            raise _storage_unavailable() from exc
         return DirListingResponse(
             path=path,
             entries=[DirEntryResponse.from_entry(e) for e in listing.entries],
@@ -332,6 +337,8 @@ async def read_or_list_files(
         raise _service_unavailable("worker_unavailable") from exc
     except CommandDispatchError as exc:
         raise _conflict("command_failed") from exc
+    except ServerFileStorageUnavailableError as exc:
+        raise _storage_unavailable() from exc
     return FileContentResponse(
         path=path, content_base64=base64.b64encode(content).decode("ascii")
     )
@@ -427,6 +434,8 @@ async def write_file(
         raise _service_unavailable("worker_unavailable") from exc
     except CommandDispatchError as exc:
         raise _conflict("command_failed") from exc
+    except ServerFileStorageUnavailableError as exc:
+        raise _storage_unavailable() from exc
     await _record_file(recorder, ops.FILE_WRITE, authorized, community_id, server_id)
 
 
@@ -461,6 +470,8 @@ async def list_file_history(
         raise _not_found() from exc
     except InvalidFilePathError as exc:
         raise _unprocessable("invalid_path") from exc
+    except ServerFileStorageUnavailableError as exc:
+        raise _storage_unavailable() from exc
     return FileVersionsResponse(path=path, versions=versions)
 
 
@@ -509,6 +520,8 @@ async def read_file_version(
         raise _unprocessable("invalid_path") from exc
     except InvalidVersionIdError as exc:
         raise _unprocessable("invalid_version_id") from exc
+    except ServerFileStorageUnavailableError as exc:
+        raise _storage_unavailable() from exc
     return FileContentResponse(
         path=path, content_base64=base64.b64encode(content).decode("ascii")
     )
@@ -584,6 +597,8 @@ async def rollback_file(
             recorder, ops.FILE_ROLLBACK, authorized, community_id, server_id
         )
         raise _conflict("server_busy") from exc
+    except ServerFileStorageUnavailableError as exc:
+        raise _storage_unavailable() from exc
     await _record_file(recorder, ops.FILE_ROLLBACK, authorized, community_id, server_id)
 
 
@@ -668,6 +683,8 @@ async def upload_file(
             recorder, ops.FILE_UPLOAD, authorized, community_id, server_id
         )
         raise _conflict("server_busy") from exc
+    except ServerFileStorageUnavailableError as exc:
+        raise _storage_unavailable() from exc
     await _record_file(recorder, ops.FILE_UPLOAD, authorized, community_id, server_id)
 
 
@@ -710,6 +727,9 @@ async def download_file(
     """
 
     probing = request.method == "HEAD"
+    # The begun download stream, kept so the one exit that can follow its opening
+    # without a response to consume it — the audit write below — can close it.
+    opened: AsyncIterator[bytes] | None = None
     try:
         is_dir = await use_case.is_dir(
             community_id=CommunityId(community_id),
@@ -733,13 +753,19 @@ async def download_file(
                     media_type=_ZIP_MEDIA_TYPE, headers=zip_headers
                 )
             else:
-                stream = await use_case.dir_zip(
+                # Begun here, like the file branch below (issue #3234): the zip
+                # pins its snapshot and lists the requested directory on its first
+                # iteration, so a directory that went away since the probe, or a
+                # store that stopped answering, still chooses a status. A failure
+                # deeper in the walk has none left to choose and aborts the body.
+                opened = await use_case.dir_zip(
                     community_id=CommunityId(community_id),
                     server_id=ServerId(server_id),
                     rel_path=path,
                 )
+                body = await started(opened)
                 response = StreamingResponse(
-                    stream,
+                    body,
                     media_type=_ZIP_MEDIA_TYPE,
                     headers=zip_headers,
                 )
@@ -770,13 +796,23 @@ async def download_file(
                 # chunk; the probe skips the download, not the dispatch.)
                 response = head_response(media_type=_FILE_MEDIA_TYPE, headers=headers)
             else:
-                file_stream = await use_case.file_stream(
+                # Begin the stream here, so the file is located while the status
+                # can still be chosen (issue #3234), as the backup and resource
+                # pack downloads do (issues #2415, #2455). ``is_dir`` above probed
+                # the path through a stream of its own and closed it; this is a
+                # second, independent open, and it used to happen on the body's
+                # first iteration — after Starlette had sent the 200 and its
+                # Content-Length. A file deleted in between, or a store that
+                # stopped answering, was an aborted 200 rather than the 404 / 503
+                # the handlers below now give it.
+                opened = await use_case.file_stream(
                     community_id=CommunityId(community_id),
                     server_id=ServerId(server_id),
                     rel_path=path,
                 )
+                body = await started(opened)
                 response = StreamingResponse(
-                    file_stream,
+                    body,
                     media_type=_FILE_MEDIA_TYPE,
                     headers=headers,
                 )
@@ -796,13 +832,24 @@ async def download_file(
                 recorder, ops.FILE_DOWNLOAD, authorized, community_id, server_id
             )
         raise _conflict("server_unsettled") from exc
+    except ServerFileStorageUnavailableError as exc:
+        # Reached before any byte is on the wire, whichever call it struck: the
+        # probe, the size listing, or the stream begun above (issue #3234).
+        raise _storage_unavailable() from exc
     if not probing:
         # Deliberately unrecorded for a HEAD (issue #2383), here and in the
         # refusal above: a metadata probe is not a download, and recording one
         # identically would inflate the file:download counts.
-        await _record_file(
-            recorder, ops.FILE_DOWNLOAD, authorized, community_id, server_id
-        )
+        try:
+            await _record_file(
+                recorder, ops.FILE_DOWNLOAD, authorized, community_id, server_id
+            )
+        except BaseException:
+            # No response will consume the stream now, and a begun stream holds
+            # what it opened — a descriptor, or the snapshot's reader lease
+            # (issue #3234). Close it here rather than leave it to be collected.
+            await _close(opened)
+            raise
     return response
 
 
@@ -889,6 +936,8 @@ async def issue_file_download_grant(
             recorder, ops.FILE_DOWNLOAD, authorized, community_id, server_id
         )
         raise _conflict("server_unsettled") from exc
+    except ServerFileStorageUnavailableError as exc:
+        raise _storage_unavailable() from exc
 
     grant = tokens.issue_download_grant(
         IdentityUserId(authorized.user_id.value), _download_grant_resource(request)
@@ -1111,6 +1160,8 @@ async def make_directory(
             recorder, ops.FILE_MKDIR, authorized, community_id, server_id
         )
         raise _conflict("server_busy") from exc
+    except ServerFileStorageUnavailableError as exc:
+        raise _storage_unavailable() from exc
     await _record_file(recorder, ops.FILE_MKDIR, authorized, community_id, server_id)
 
 
@@ -1160,8 +1211,18 @@ async def search_files(
             recorder, ops.FILE_SEARCH, authorized, community_id, server_id
         )
         raise _conflict("server_unsettled") from exc
+    except ServerFileStorageUnavailableError as exc:
+        raise _storage_unavailable() from exc
     await _record_file(recorder, ops.FILE_SEARCH, authorized, community_id, server_id)
     return SearchResponse(paths=result.paths, truncated=result.truncated)
+
+
+async def _close(stream: AsyncIterator[bytes] | None) -> None:
+    """Close a begun download stream that no response is going to consume."""
+
+    aclose = getattr(stream, "aclose", None)
+    if aclose is not None:
+        await aclose()
 
 
 async def _read_capped_upload(file: UploadFile) -> bytes:
@@ -1268,6 +1329,18 @@ def _too_large() -> ProblemException:
 
 def _service_unavailable(reason: str) -> ProblemException:
     return problem(status.HTTP_503_SERVICE_UNAVAILABLE, reason)
+
+
+def _storage_unavailable() -> ProblemException:
+    """503 for a store outage on a route whose failure is safe to retry (#3233).
+
+    Mapped on the reads, which leave nothing behind, and on the writes a repeat
+    converges for — a file write, an upload, a rollback, a make-dir. The rename
+    and the delete are deliberately NOT mapped: interrupted after their mutation
+    they answer a retry with a 409 or a 404, so the outage stays the 500 it was.
+    """
+
+    return _service_unavailable("storage_unavailable")
 
 
 def _conflict(reason: str) -> ProblemException:

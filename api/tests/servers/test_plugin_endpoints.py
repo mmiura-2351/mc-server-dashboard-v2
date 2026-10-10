@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from collections.abc import AsyncIterator
 
 import pytest
 from fastapi import FastAPI
@@ -70,10 +71,12 @@ from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
     InvalidPluginSideError,
     PluginAlreadyExistsError,
+    PluginCacheStorageUnavailableError,
     PluginNotFoundError,
     PortAlreadyTakenError,
     PortRangeExhaustedError,
     ServerBusyError,
+    ServerFileStorageUnavailableError,
     ServerFilesUnsettledError,
     ServerNotFoundError,
     UnsupportedPluginServerTypeError,
@@ -1080,3 +1083,77 @@ def test_resolve_apply_busy_audit_targets_server() -> None:
     assert [e.operation for e in recorder.events] == [ops.PLUGIN_RESOLVE]
     assert recorder.events[0].outcome is Outcome.DENIED
     assert recorder.events[0].target_type == ops.TARGET_SERVER
+
+
+# --- store outage (issue #3233) --------------------------------------------
+
+
+def test_install_plugin_cache_outage_is_503() -> None:
+    # The jar cache is reached before the plugin row is committed, and it is
+    # content-addressed, so nothing is left for the retry to trip over.
+    recorder = RecordingAuditRecorder()
+    app = _app(
+        member=True,
+        allow=True,
+        install=_FakeInstall(error=PluginCacheStorageUnavailableError("x")),
+        recorder=recorder,
+    )
+    client = _client(app)
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4()),
+        data={"display_name": "Test"},
+        files={"file": ("test.jar", b"jar-bytes", "application/java-archive")},
+    )
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "storage_unavailable"
+    assert recorder.events == []
+
+
+def test_update_plugin_cache_outage_is_503() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        update=_FakeUseCase(error=PluginCacheStorageUnavailableError("x")),
+    )
+    client = _client(app)
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/update"),
+        json={"version_id": "v1"},
+    )
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "storage_unavailable"
+
+
+def test_install_plugin_working_set_outage_after_the_commit_stays_500() -> None:
+    # The working-set write follows the row's commit, so a retry of the install
+    # could only answer 409 ``plugin_already_exists``. The outage reaches the edge
+    # as the servers type and deliberately keeps the 500 rather than a 503 that
+    # would invite that retry.
+    app = _app(
+        member=True,
+        allow=True,
+        install=_FakeInstall(error=ServerFileStorageUnavailableError("x")),
+    )
+    client = _client(app)
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4()),
+        data={"display_name": "Test"},
+        files={"file": ("test.jar", b"jar-bytes", "application/java-archive")},
+    )
+    assert resp.status_code == 500
+    assert resp.json()["reason"] == "internal_error"
+
+
+def test_download_client_modpack_cache_outage_on_open_is_503() -> None:
+    # The first jar is opened on the stream's first iteration. The route begins
+    # the stream before the headers, so an outage there chooses a status instead
+    # of aborting an already-sent 200.
+    async def _stream() -> AsyncIterator[bytes]:
+        raise PluginCacheStorageUnavailableError("x")
+        yield b""  # pragma: no cover - makes this an async generator
+
+    app = _app(member=True, allow=True, download_modpack=_FakeUseCase(result=_stream()))
+    resp = _client(app).get(_client_url(uuid.uuid4(), uuid.uuid4(), "/download"))
+
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "storage_unavailable"
