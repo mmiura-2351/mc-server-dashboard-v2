@@ -9,11 +9,10 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
 
-// TestHandleRejectsUnsafeServerID covers the command-intake guard (issue #782):
-// an empty, traversal, or separator-bearing ServerID is rejected before any
-// handler joins it into a scratch path, so SnapshotTrigger never tars the
-// scratch ROOT and HydrateTrigger never escapes it. The reject must carry
-// FILE_ACCESS_DENIED and leave the scratch tree untouched.
+// TestHandleRejectsUnsafeServerID covers the command-intake guard: an empty, traversal, or separator-bearing
+// ServerID is rejected before any handler joins it into a scratch path, so SnapshotTrigger never tars the
+// scratch ROOT and HydrateTrigger never escapes it. The reject must carry FILE_ACCESS_DENIED and leave the
+// scratch tree untouched.
 func TestHandleRejectsUnsafeServerID(t *testing.T) {
 	cases := []struct {
 		name     string

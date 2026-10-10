@@ -1,18 +1,5 @@
-// Command stub-geyser stands in for Geyser's RakNet listener inside a
-// Minecraft server container, for the Bedrock relay e2e (epic #1540, issue
-// #1547). It answers only RakNet's Unconnected Ping (0x01) with an Unconnected
-// Pong (0x1c), echoing back the ping's time field -- enough to prove datagrams
-// reach the container and a reply routes back through the same flow, without
-// booting a real Geyser (a Modrinth/GeyserMC download would make CI flaky;
-// real Geyser+Floodgate behavior was already validated live, epic #1540 issue
-// #1542). See docs/app/BEDROCK.md and worker/test/e2e/bedrock_e2e_test.go,
-// which drives the real bedrocktunnel.Manager and a real container running
-// this image against the real relay listener.
-//
-// RakNet offline-message framing (minecraft.wiki/w/RakNet):
-//
-//	Unconnected Ping (client -> server): 1 (id) + 8 (time) + 16 (magic) + 8 (client GUID)
-//	Unconnected Pong (server -> client): 1 (id) + 8 (time, echoed) + 8 (server GUID) + 16 (magic) + 2 (string length) + N (server id string)
+// Command stub-geyser answers RakNet Unconnected Ping with Pong to test datagram routing without a real Geyser
+// download.
 package main
 
 import (
@@ -43,10 +30,7 @@ func main() {
 	defer func() { _ = conn.Close() }()
 	log.Printf("stub-geyser: listening on :%d/udp", geyserPort)
 
-	// PID 1 in a container's PID namespace does not get the default terminate
-	// action for an unhandled SIGTERM (only an explicit handler does), so
-	// without this `docker stop` would wait out the full SIGKILL grace period on
-	// every teardown (mirrors worker/test/e2e/stub/java's explicit trap).
+	// Handle SIGTERM explicitly as container PID 1 so docker stop need not wait for SIGKILL.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM)
 	go func() {

@@ -28,14 +28,7 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
 
-// TestControlPlaneKeepaliveMatchesServerContract pins the client-side keepalive
-// parameters the control-plane dial applies (issue #1709). The values are a
-// cross-module contract with the API server's enforcement policy
-// (api/src/mc_server_dashboard_api/fleet/adapters/grpc_server.py
-// _keepalive_options): Time must stay at or above twice the server's
-// grpc.http2.min_ping_interval_without_data_ms (10s) or the server answers the
-// ping cadence with GOAWAY ENHANCE_YOUR_CALM, and at or above gRPC-Go's 10s
-// client floor (below it the library silently raises it).
+// Keep client pings above the gRPC-Go floor and API enforcement floor to avoid silent adjustment or GOAWAY.
 func TestControlPlaneKeepaliveMatchesServerContract(t *testing.T) {
 	if got, want := controlPlaneKeepalive.Time, 20*time.Second; got != want {
 		t.Errorf("controlPlaneKeepalive.Time = %v, want %v", got, want)
@@ -70,9 +63,8 @@ func TestRunFailsFastOnMissingConfig(t *testing.T) {
 	}
 }
 
-// TestResolveRconHost pins the RCON host-resolution gate (issue #218): only a
-// container-driven server consults the container driver's resolver; every other
-// server (and a worker with no container driver built) dials the host loopback
+// TestResolveRconHost pins the RCON host-resolution gate: only a container-driven server consults the container
+// driver's resolver; every other server (and a worker with no container driver built) dials the host loopback
 // (empty host).
 func TestResolveRconHost(t *testing.T) {
 	containerResolver := func(serverID string) string {
@@ -123,23 +115,7 @@ func TestResolveRconHost(t *testing.T) {
 	}
 }
 
-// The boot-time scratch reclaims are pinned HERE, at the call site, and not only as
-// functions (PR #3170 review round 1, issues #3167 / #2799). Both are package-level
-// helpers nothing else invokes, so a unit test of the function leaves the wiring free:
-// deleting either line from run() kept the whole Worker suite green while boot stopped
-// reclaiming world-sized trees, which is exactly the acceptance criterion ("removed at
-// the next Worker boot") that the function test does not reach.
-//
-// run() is reachable without Docker or a live API. The control-plane dial is lazy
-// (grpc.NewClient connects on first use), the container driver's client construction only
-// parses the docker host (NewEngineClient), and Run returns nil at once on a cancelled
-// context. TestRunFailsFastOnMissingConfig already calls run() for the config leg; this
-// covers the scratch legs.
-//
-// What this test must NOT fake is the orphan sweep's success: since review round 2 the
-// reclaims are gated on it (see run()), so boot is given a docker socket that ANSWERS the
-// sweep's container list — with no containers, which is the quiescence the reclaims
-// require. The failed-sweep half is TestBootLeavesScratchLeftoversWhenTheOrphanSweepFails.
+// Exercise reclaims through boot so missing wiring cannot pass helper-only tests.
 func TestBootReclaimsScratchLeftovers(t *testing.T) {
 	scratch := t.TempDir()
 	gone := []string{
@@ -147,9 +123,8 @@ func TestBootReclaimsScratchLeftovers(t *testing.T) {
 		seedScratchTree(t, filepath.Join(scratch, ".hydrate-s1-superseded-654321")),
 		seedScratchTree(t, filepath.Join(scratch, ".sweeping-s1-123456")),
 	}
-	// A live working set and a displaced recovery tree are NOT boot garbage: the first
-	// is what the held-set scan advertises, the second is retained for operator
-	// recovery until a successful snapshot sweeps it (issue #911).
+	// A live working set and a displaced recovery tree are NOT boot garbage: the first is what the held-set scan
+	// advertises, the second is retained for operator recovery until a successful snapshot sweeps it.
 	kept := []string{
 		seedScratchTree(t, filepath.Join(scratch, "s1")),
 		seedScratchTree(t, filepath.Join(scratch, ".displaced-s2")),
@@ -185,20 +160,7 @@ func TestBootReclaimsScratchLeftovers(t *testing.T) {
 	}
 }
 
-// The reclaims run AFTER the container orphan sweep, and that order is the load-bearing
-// one: the sweep is what stops a container from still writing into a tree it holds under
-// its pre-park-aside name, and #2799 / #3167 both rest on "no writer is left". The sweep
-// lives inside buildInstanceManager, so this test fails the manager build outright — an
-// unsupported docker host, which NewEngineClient refuses without contacting Docker — and
-// asserts the trees are untouched. Hoisting either reclaim above buildInstanceManager
-// therefore fails here.
-//
-// The remaining ordering — the two reclaims against ScanHeldServers below them — is not
-// pinned, and cannot regress into a fault: both scans skip .hydrate- and .sweeping- names
-// by prefix (isReservedScratchName, pinned by
-// TestHydrateScratchIsDiscoveredAndCrashLeftTreesAreReclaimed and
-// TestInterruptedDisplacedSweepIsNotAdvertisedAsHeld), so the held set is identical
-// whichever side of the scan the reclaims run on.
+// Gate the orphan sweep to verify no scratch tree is deleted while a container may still write it.
 func TestBootReclaimsWaitForTheContainerOrphanSweep(t *testing.T) {
 	scratch := t.TempDir()
 	leftovers := []string{
@@ -228,27 +190,7 @@ func TestBootReclaimsWaitForTheContainerOrphanSweep(t *testing.T) {
 	}
 }
 
-// A FAILED container orphan sweep leaves the boot reclaims with nothing to stand on, so
-// they must delete nothing (PR #3170 review round 2). Both of them rest on one premise —
-// no container this Worker started is still writing into a tree they are about to
-// recursively delete — and the sweep is what establishes it. A failed sweep is
-// deliberately non-fatal (buildInstanceManager logs it: a docker socket flap must not stop
-// the Worker from serving), so the premise can simply be false here.
-//
-// The path that makes it dangerous rather than untidy: a sweep that failed at an EARLIER
-// boot leaves an orphan running with <scratch>/<id> bind-mounted, and the Worker does not
-// know about it (nothing re-adopts containers, so its instance map is empty). A
-// HydrateTrigger for that id therefore proceeds and renames the live tree aside — to
-// .hydrate-<id>-superseded-* when the .displaced-<id> slot is occupied (issue #2278), and
-// to .displaced-<id> otherwise, from where a later successful snapshot's sweep renames it
-// to .sweeping-<id>-*. The orphan's mount follows the inode, so it keeps writing into the
-// renamed tree. A boot whose sweep fails again would then delete a LIVE world, and the
-// server's open descriptors would keep writing into unlinked inodes, losing everything
-// after that too.
-//
-// Skipping costs a delay: the trees wait for a boot whose sweep succeeds, and that is
-// strictly better than deleting a live world, because the leak is recoverable and the
-// deletion is not.
+// A failed orphan sweep must leave all recovery and hydrate leftovers intact.
 func TestBootLeavesScratchLeftoversWhenTheOrphanSweepFails(t *testing.T) {
 	scratch := t.TempDir()
 	leftovers := []string{
@@ -276,26 +218,7 @@ func TestBootLeavesScratchLeftoversWhenTheOrphanSweepFails(t *testing.T) {
 	}
 }
 
-// The held-set scan's region fsck rests on the SAME premise as the two boot reclaims —
-// nobody is writing into what it reads — and the container orphan sweep is what
-// establishes it, so it is gated on the sweep too (issue #3171). The two tests below are
-// that gate's legs at the real call site: the fsck exists to catch a durable gen-N marker
-// left next to a torn world by a power loss (issue #834), and its verdict is only
-// meaningful on a quiesced set, which regionfsck states as its own contract. After a
-// FAILED sweep an orphan can still be running with <scratch>/<id> bind-mounted and the
-// Worker does not know it (nothing re-adopts containers, PR #3170), so the scan can read a
-// mid-write world, call it torn and advertise generation 0 — a false "hydrate me" that
-// dispatches a destructive hydrate over a live world.
-//
-// Both legs are asserted at the Register payload, the only place the verdict acts (issue
-// #3178). run() hands its scan result to session.NewRunner, but Runner.runOnce REPLACES
-// caps.HeldServers with the command handler's in-session HeldServers() before every
-// registration, including the first (session.go, issue #1711), and that scan reads the
-// generation marker without a fsck. The boot verdict reaches the wire only because a
-// quiesced boot rewrites a torn set's marker to 0; a verdict kept only in the boot list is
-// overwritten before the first Register leaves. The WARN assertions stay alongside: the
-// line is what an operator reads, and on the quiesced leg it is the only surviving record
-// of the marker's original generation (STORAGE.md Section 4.6).
+// A failed sweep must skip fsck without suppressing the held-generation advertisement.
 func TestBootDoesNotJudgeHeldWorldsWhenTheOrphanSweepFails(t *testing.T) {
 	scratch := t.TempDir()
 	seedTornWorkingSet(t, filepath.Join(scratch, "s1"), 9)
@@ -335,16 +258,8 @@ func TestBootDoesNotJudgeHeldWorldsWhenTheOrphanSweepFails(t *testing.T) {
 	}
 }
 
-// The quiesced leg: on a boot whose sweep DID establish that nothing is writing, a
-// genuinely torn set must be advertised at generation 0 (issue #834) — on the FIRST
-// Register and on every re-registration after it (issue #3178). The API replaces its held
-// map wholesale on each Register, so a reconnect that went back to the recorded generation
-// would re-open the skip gate before the hydrate ran, and the server would boot the torn
-// world after all.
-//
-// This leg is also what keeps the failed-sweep leg honest: both use the same fixture, so
-// if that image ever stopped reading as torn, this test fails instead of the other one
-// passing vacuously.
+// Assert generation zero on first registration and reconnect so the held-map replacement cannot revive a torn
+// generation.
 func TestBootJudgesATornHeldWorldWhenTheOrphanSweepSucceeds(t *testing.T) {
 	scratch := t.TempDir()
 	seedTornWorkingSet(t, filepath.Join(scratch, "s1"), 9)
@@ -385,16 +300,8 @@ func TestBootJudgesATornHeldWorldWhenTheOrphanSweepSucceeds(t *testing.T) {
 	}
 }
 
-// A set the boot judged torn stops being advertised as torn as soon as a hydrate repairs
-// it, without waiting for a reboot (issue #3178). The verdict is persisted in the marker
-// rather than remembered anywhere else, so the hydrate's own marker write
-// (handleHydrate -> recordGeneration) is what clears it: there is no separate verdict to
-// invalidate, and therefore none that can go stale.
-//
-// run() cannot host this leg (it builds the real data-plane client), so the composition is
-// rebuilt from the same real parts — the quiesced boot scan, a real Manager, the real
-// control-plane adapter and session Runner — with only the data plane faked: a Transfer
-// that swaps in a sound tree and reports the generation the store served.
+// Repair the torn tree through fake hydrate, then require registration to read the newly written generation
+// marker.
 func TestHydratedTornHeldSetIsAdvertisedAtItsServedGenerationWithoutAReboot(t *testing.T) {
 	scratch := t.TempDir()
 	seedTornWorkingSet(t, filepath.Join(scratch, "s1"), 9)
@@ -590,12 +497,7 @@ func runInBackground(t *testing.T) func() {
 	return stop
 }
 
-// setBootEnv gives run() the configuration Load accepts, pointed at the test's own scratch
-// dir, docker host and control-plane endpoint — the three knobs that decide what the boot
-// sequence does. EVERY key applyEnv reads is set here, including the ones set to empty:
-// leaving one inherited lets a malformed ambient value fail these tests during
-// configuration loading instead of at the boot step they exercise (PR #3170 review round
-// 2). The comment on each is what the boot path does with it.
+// Set every Worker environment input so ambient settings cannot change the boot path under test.
 func setBootEnv(t *testing.T, scratch, dockerHost, grpcEndpoint string) {
 	t.Helper()
 	keys := map[string]string{
@@ -624,12 +526,8 @@ func setBootEnv(t *testing.T, scratch, dockerHost, grpcEndpoint string) {
 	for k, v := range keys {
 		t.Setenv(k, v)
 	}
-	// The claim above is checked, not trusted: an MCD_WORKER_* variable this map does not
-	// name is one the ambient environment still controls, and a malformed value there fails
-	// these tests in configuration loading instead of at the boot step they exercise. Only
-	// a variable that is actually SET can do that, which is exactly what this sees — so a
-	// key added to applyEnv and missed here surfaces the first time anyone's environment
-	// carries it, including CI's.
+	// Reject inherited Worker variables missing from the fixture map so new config inputs cannot silently affect
+	// boot tests.
 	for _, kv := range os.Environ() {
 		name, _, _ := strings.Cut(kv, "=")
 		if !strings.HasPrefix(name, "MCD_WORKER_") {
@@ -698,16 +596,8 @@ func cancelOnFirstDial(t *testing.T, cancel context.CancelFunc) string {
 	return l.Addr().String()
 }
 
-// seedTornWorkingSet creates a held working set whose one region file is GENUINELY torn,
-// alongside the generation marker the scan reads: an 8 KiB file holding only the two
-// header sectors, whose location entry 0 points at sector 2 — exactly EOF — so the chunk
-// it references starts past the end of the file (regionfsck's sector_out_of_bounds). This
-// is the shape a crash mid-chunk-save leaves, and the one the fsck exists to catch.
-//
-// The image and the marker name are spelled out here rather than shared with the
-// instancemanager fixtures, which are behind an internal package's test files; the two
-// boot tests are paired so the shape cannot rot silently — the sweep-succeeded leg fails
-// the moment this stops reading as torn.
+// Seed an 8 KiB region whose first chunk points exactly at EOF, alongside its generation marker.
+// The successful-sweep test ensures this shared fixture still reads as torn.
 func seedTornWorkingSet(t *testing.T, dir string, gen int) {
 	t.Helper()
 	region := make([]byte, 2*4096)
@@ -726,14 +616,8 @@ func seedTornWorkingSet(t *testing.T, dir string, gen int) {
 	}
 }
 
-// captureStderr redirects os.Stderr to a pipe for the rest of the test and returns the
-// reader for what boot logged there — run() builds its own logger over os.Stderr
-// (newLogger), so this is where a test of the wiring observes a boot decision that nothing
-// else exposes. The returned func restores os.Stderr and reads the pipe once; it is also
-// registered as cleanup, so a t.Fatal inside the captured window cannot leave the process
-// logging into a closed pipe. The pipe's buffer bounds what may be logged before the read:
-// at level warn the whole boot writes a handful of lines, far under it, and a boot that
-// exceeded it would block rather than lose output.
+// Capture stderr because run constructs its own logger; cleanup restores it even after test failure.
+// Keep output below the pipe buffer until the final read to avoid blocking boot.
 func captureStderr(t *testing.T) func() string {
 	t.Helper()
 	r, w, err := os.Pipe()

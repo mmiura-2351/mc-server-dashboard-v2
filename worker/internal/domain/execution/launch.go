@@ -7,9 +7,8 @@ import (
 	"path/filepath"
 )
 
-// ForgeInstallLogRelpath is the working-dir-relative path the supervised Forge
-// installer's combined output is written to, so an operator can read it through
-// the files API (issue #305). It lives under logs/ alongside the server's own
+// ForgeInstallLogRelpath is the working-dir-relative path the supervised Forge installer's combined output is
+// written to, so an operator can read it through the files API. It lives under logs/ alongside the server's own
 // logs.
 const ForgeInstallLogRelpath = "logs/forge-install.log"
 
@@ -33,21 +32,11 @@ var ErrForgeArgsfileAmbiguous = errors.New("execution: multiple Forge args files
 // cannot pick one deterministically.
 var ErrLegacyForgeJarAmbiguous = errors.New("execution: multiple legacy Forge jars found")
 
-// legacyForgeJarGlob matches the legacy Forge universal/launch jar in the
-// working set root. Legacy Forge installers (MC <=1.16.x) produce a
-// forge-<mc_version>-<forge_version>.jar instead of unix_args.txt.
-//
-// Safety: the glob does not match the installer jar because the API always
-// saves the installer as "server.jar" (api/.../lifecycle.py _DEFAULT_JAR_RELPATH).
-// If the API ever preserves the upstream filename (forge-*-installer.jar), the
-// caller must exclude spec.JarRelpath from the matches.
+// Legacy Forge produces forge-*.jar; the installer must remain server.jar so it cannot match this glob.
 const legacyForgeJarGlob = "forge-*.jar"
 
-// LaunchPlan describes how to launch (or first install) a server, resolved from
-// the spec and the working set's current contents (issue #305). When NeedsInstall
-// is true the driver runs InstallArgs to completion, then re-plans (the args file
-// is then present and LaunchArgs is built); otherwise LaunchArgs launches the
-// server directly.
+// LaunchPlan requires InstallArgs followed by re-planning when NeedsInstall is true; otherwise LaunchArgs is
+// ready.
 type LaunchPlan struct {
 	// NeedsInstall is true when the Forge args file is absent, so the working set
 	// is uninstalled and the supervised installer must run first.
@@ -74,12 +63,8 @@ type PathResolver struct {
 	Exists func(relpath string) bool
 }
 
-// BuildLaunchPlan resolves how to launch the server described by spec, given the
-// host workingDir (for globbing the working set) and a PathResolver mapping
-// working-set paths onto the driver's command line (issue #305). For
-// LaunchModeJar it returns the historical JAR launch. For LaunchModeForgeArgsfile
-// it globs the Forge args file: present -> a Forge args-file launch; absent ->
-// NeedsInstall with the installer args; ambiguous -> an error.
+// BuildLaunchPlan returns a JAR launch, a unique Forge launch artifact, or an install plan when absent.
+// Multiple matching artifacts are an error; paths maps host paths to driver paths.
 func BuildLaunchPlan(spec InstanceSpec, workingDir string, paths PathResolver) (LaunchPlan, error) {
 	if spec.LaunchMode == LaunchModeForgeArgsfile {
 		return forgePlan(spec, workingDir, paths)
@@ -104,15 +89,7 @@ func forgePlan(spec InstanceSpec, workingDir string, paths PathResolver) (Launch
 	return LaunchPlan{LaunchArgs: forgeLaunchArgs(spec, jvmArgsPath, paths.Resolve(rel))}, nil
 }
 
-// heapHeadroomMB returns the memory (MiB) to reserve below the memory LIMIT for
-// JVM off-heap + native overhead (metaspace, thread stacks, code cache, GC
-// structures, direct/mapped buffers), so the derived heap plus that overhead
-// stays under the ceiling and the kernel/Docker (set later by #707/#708) does not
-// OOM-kill the process. The reserve is max(20% of the limit, 256 MiB): the 20%
-// scales with the heap (off-heap/native cost grows with workload and heap size),
-// while the 256 MiB floor covers the fixed JVM base for a small server where 20%
-// would be too thin. (The API floors the limit at 512 MiB, #705, so the derived
-// heap is comfortably positive for any accepted limit.)
+// Reserve max(20%, 256 MiB) for JVM native and off-heap memory below the total limit.
 func heapHeadroomMB(limitMB uint32) uint32 {
 	headroom := limitMB / 5
 	if headroom < 256 {
@@ -121,13 +98,8 @@ func heapHeadroomMB(limitMB uint32) uint32 {
 	return headroom
 }
 
-// heapArgs derives the JVM heap (-Xms/-Xmx) from the spec's memory LIMIT, or nil
-// when unset (limit 0 -> the driver/JVM picks a default, the pre-#706 launch).
-// -Xmx is the limit minus headroom (see heapHeadroomMB); -Xms is pinned equal to
-// -Xmx so the JVM commits its full heap up front rather than growing under load,
-// which keeps a long-running server's footprint predictable against the ceiling.
-// A limit so small that the headroom would consume the whole heap yields no flags
-// (the JVM default is safer than a non-positive -Xmx).
+// Pin Xms and Xmx to the limit minus headroom for predictable heap commitment.
+// Unset or too-small limits leave JVM defaults.
 func heapArgs(spec InstanceSpec) []string {
 	if spec.MemoryLimitMB == 0 {
 		return nil
@@ -170,11 +142,8 @@ func JarLaunchArgs(spec InstanceSpec, jarPath string) []string {
 	return jarLaunchArgs(spec, jarPath)
 }
 
-// ResolveLegacyForgeJar globs for a legacy Forge launch jar (forge-*.jar) in
-// the working set root. Legacy Forge installers (MC <=1.16.x) produce this jar
-// instead of unix_args.txt. Returns the working-dir-relative slash path when
-// exactly one match exists. Returns ("", false, nil) when none is found, and
-// ErrLegacyForgeJarAmbiguous when multiple matches exist.
+// ResolveLegacyForgeJar finds legacy Forge launch JARs when installers do not produce args files.
+// Return the unique relative path, no match, or ErrLegacyForgeJarAmbiguous.
 func ResolveLegacyForgeJar(workingDir string) (relpath string, found bool, err error) {
 	matches, err := filepath.Glob(filepath.Join(workingDir, legacyForgeJarGlob))
 	if err != nil {
@@ -194,13 +163,9 @@ func ResolveLegacyForgeJar(workingDir string) (relpath string, found bool, err e
 	}
 }
 
-// CleanForgeInstallArtifacts removes stale Forge install outputs from workingDir
-// so a subsequent install starts from a clean slate. It removes all files
-// matching forgeArgsfileGlob (libraries/net/minecraftforge/forge/*/unix_args.txt)
-// and legacyForgeJarGlob (forge-*.jar) in the working set root. It does NOT
-// remove the installer jar (always server.jar, which does not match forge-*.jar)
-// or user_jvm_args.txt. Returns errors only for glob failures; individual remove
-// failures are silently ignored so the install can still proceed (issue #1127).
+// CleanForgeInstallArtifacts removes Forge args files and launch JARs, preserving server.jar and
+// user_jvm_args.txt.
+// Only glob errors are returned; individual removal failures are ignored.
 func CleanForgeInstallArtifacts(workingDir string) error {
 	for _, glob := range []string{
 		filepath.Join(workingDir, filepath.FromSlash(forgeArgsfileGlob)),
@@ -217,11 +182,8 @@ func CleanForgeInstallArtifacts(workingDir string) error {
 	return nil
 }
 
-// resolveForgeArgsfile globs the Forge args file under workingDir, reporting
-// whether exactly one match exists. It returns ("", false, nil) when no match
-// exists (install needed), the single match's working-dir-relative slash path
-// with found=true when exactly one exists, and ErrForgeArgsfileAmbiguous when
-// more than one matches.
+// resolveForgeArgsfile returns the unique relative match, no match when install is needed, or an ambiguity
+// error.
 func resolveForgeArgsfile(workingDir string) (relpath string, found bool, err error) {
 	matches, err := filepath.Glob(filepath.Join(workingDir, filepath.FromSlash(forgeArgsfileGlob)))
 	if err != nil {

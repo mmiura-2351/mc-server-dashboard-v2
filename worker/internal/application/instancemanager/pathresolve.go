@@ -10,24 +10,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// openParentBeneath opens the parent directory of target as a dirfd that is
-// guaranteed to stay beneath root, closing the residual TOCTOU left by the
-// resolve-then-reopen-by-lexical-path approach (issue #122): the final open /
-// rename happens *relative to this fd*, so a concurrently swapped intermediate
-// symlink between the check and the act can no longer redirect the access.
-//
-// safeJoin has already rejected lexical escapes (absolute / ".."); this resolves
-// each component of the path *under root* refusing to follow symlinks, so an
-// intermediate-component symlink the running MC process plants is denied rather
-// than followed (FR-FILE-4).
-//
-// When mkdir is true (the edit path), missing intermediate components are created
-// beneath root as part of the same race-free walk, so MkdirAll can no longer
-// traverse a link and create dirs outside the root.
-//
-// It returns the parent dirfd (the caller must close it), the leaf base name to
-// open/rename relative to that fd, and any error. A symlink or escape on the
-// path yields an error.
+// openParentBeneath walks beneath root by descriptor and refuses symlinks, including during parent creation.
+// The caller must close the returned parent fd and perform the final operation relative to it.
 func openParentBeneath(root, target string, mkdir bool) (parentFd int, leaf string, err error) {
 	rel, err := filepath.Rel(root, target)
 	if err != nil {
@@ -41,11 +25,8 @@ func openParentBeneath(root, target string, mkdir bool) (parentFd int, leaf stri
 	leaf = components[len(components)-1]
 	dirs := components[:len(components)-1]
 
-	// The working-set root is trusted (we own the scratch tree), so a plain open
-	// is fine; the per-component NOFOLLOW walk below is what enforces containment.
-	// For an edit, materialize the root first (a fresh server hydrated to nothing
-	// has no working dir yet); for a read, a missing root surfaces as ENOENT so
-	// the caller maps it to a not-found result.
+	// The scratch root is trusted; walk all child components with O_NOFOLLOW.
+	// Edits create missing parents, while reads surface a missing root as ENOENT.
 	if mkdir {
 		if err := os.MkdirAll(root, 0o750); err != nil {
 			return -1, "", fmt.Errorf("creating root %q: %w", root, err)
@@ -89,8 +70,7 @@ func openParentBeneath(root, target string, mkdir bool) (parentFd int, leaf stri
 				next, oerr = unix.Openat(cur, comp,
 					unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 				if oerr == nil {
-					// The directory is the Worker's creation; give it its parent's
-					// owner so the server can traverse it (issue #2600).
+					// The directory is the Worker's creation; give it its parent's owner so the server can traverse it.
 					if ownErr := inheritOwner(cur, next); ownErr != nil {
 						_ = unix.Close(next)
 						_ = unix.Close(cur)
@@ -124,19 +104,8 @@ var (
 	fchownFd = unix.Fchown
 )
 
-// inheritOwner gives the entry the Worker just created behind fd the owner of the
-// directory it was created in (parentFd).
-//
-// A server's working set belongs to the user its container runs as, which is not
-// the Worker's own under a root Worker (issue #2600). An entry the Worker creates
-// while the server is up — an edited file's replacement, a missing parent
-// directory — would otherwise be the Worker's, mode 0640 / 0750, and the server
-// could no longer read, overwrite or traverse it. The directory's owner is the
-// run-as user once the driver has handed the working set over, and the Worker
-// itself before that, so this needs no knowledge of who that user is.
-//
-// Both ends are descriptors already resolved beneath the working-set root, so no
-// path is looked up again and a swapped symlink cannot redirect the change.
+// Inherit directory ownership for new files and parents so the container user can still read and write them.
+// Both descriptors are already resolved beneath scratch; no symlink-following path lookup is needed.
 func inheritOwner(parentFd, fd int) error {
 	uid, gid, err := dirOwner(parentFd)
 	if err != nil {

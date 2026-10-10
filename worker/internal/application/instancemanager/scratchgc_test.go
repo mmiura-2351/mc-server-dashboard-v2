@@ -14,14 +14,8 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
 
-// seedScratch creates a non-empty scratch working dir for serverID so a test can
-// assert whether a stop/restart removed or retained it. It mirrors what a real
-// hydrate/run leaves behind (at least one file under scratchDir/<id>), which
-// since issue #2802 includes the GENERATION MARKER: a 200 hydrate embeds it in
-// the tree before the swap-in (issue #917) and a 204 stamps it as its only write,
-// so a marker-less dir is not a state any hydrate leaves — and it is the exact
-// state launchReserved's guard refuses. Content 0 keeps readGeneration's answer
-// what an unmarked dir gave before (an unknown/never-hydrated set).
+// seedScratch provides content and a generation-zero marker, matching hydrated scratch while keeping the
+// generation unknown.
 func seedScratch(t *testing.T, m *Manager, serverID string) string {
 	t.Helper()
 	dir := filepath.Join(m.scratchDir, serverID)
@@ -37,15 +31,7 @@ func seedScratch(t *testing.T, m *Manager, serverID string) string {
 	return dir
 }
 
-// A confirmed StopServer is an AUTHORITATIVE stop. The Worker must NOT GC the
-// local working set on the stop itself: the API sends the final SnapshotTrigger
-// for FR-DATA-7 only AFTER the stop's CommandResult (StopServer.__call__,
-// lifecycle.py), so a stop-time GC would leave that snapshot to pack an empty
-// dir and lose the world progressed since the last periodic snapshot (issue
-// #841). The scratch is GC'd only AFTER the post-stop final snapshot publishes
-// (TestStoppedSnapshotRemovesScratchAfterPublish); #762's anti-accumulation goal
-// is preserved by reclaiming it then (and, for a snapshot that never arrives, at
-// the next start's hydrate or worker-restart scan).
+// Keep scratch through confirmed stop because the API's final snapshot runs afterwards.
 func TestStopRetainsScratchForFinalSnapshot(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
@@ -61,11 +47,7 @@ func TestStopRetainsScratchForFinalSnapshot(t *testing.T) {
 	}
 }
 
-// The bug fixed by #841: the API drives a graceful stop, then sends the final
-// SnapshotTrigger for the same (now stopped, unassigned) id. The working set must
-// still be present when that snapshot packs it. Before the fix, handleStop GC'd
-// the scratch before returning, so the snapshot captured an empty dir and the
-// world progressed since the last periodic snapshot was silently lost.
+// Drive stop then final snapshot and require the world to remain present when packing begins.
 func TestStopThenFinalSnapshotPacksWorkingSet(t *testing.T) {
 	tr := &fakeTransfer{}
 	d := &fakeDriver{}
@@ -85,10 +67,7 @@ func TestStopThenFinalSnapshotPacksWorkingSet(t *testing.T) {
 	}
 }
 
-// #762's anti-accumulation goal, repositioned by #841: the scratch IS reclaimed,
-// but AFTER the post-stop final snapshot has published it — not before. Once the
-// stopped-id snapshot succeeds the working set is captured authoritatively and the
-// API has unassigned the Worker, so the local copy is safe to GC.
+// Reclaim stopped scratch only after successful final publication.
 func TestStoppedSnapshotRemovesScratchAfterPublish(t *testing.T) {
 	tr := &fakeTransfer{}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
@@ -105,15 +84,8 @@ func TestStoppedSnapshotRemovesScratchAfterPublish(t *testing.T) {
 	}
 }
 
-// A duplicate stopped-id SnapshotTrigger arriving AFTER the scratch was GC'd —
-// the final snapshot published, removeScratch ran, but the CommandResult was lost
-// on a dropped stream so the API re-dispatched — must be refused WITHOUT a
-// transfer (issue #1713). Packing the absent dir uploads an empty tar with the
-// base-generation guard disabled (readGeneration(absent) is 0, so the header is
-// omitted), leaving the API-side empty-staging refusal as the only defense. The
-// refusal is SERVER_NOT_FOUND, not TRANSFER_FAILED: no working set is held for
-// the id, and no retry can succeed without a hydrate — a terminal condition, not
-// a transient transfer failure.
+// A duplicate snapshot after successful cleanup must refuse absent scratch before packing, with
+// SERVER_NOT_FOUND.
 func TestStoppedSnapshotAbsentWorkingDirRefusedWithoutTransfer(t *testing.T) {
 	tr := &fakeTransfer{}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
@@ -128,11 +100,10 @@ func TestStoppedSnapshotAbsentWorkingDirRefusedWithoutTransfer(t *testing.T) {
 	if res.Success || res.ErrorCode != session.CommandErrorServerNotFound {
 		t.Fatalf("duplicate stopped-id snapshot after GC = %+v, want server-not-found refusal", res)
 	}
-	// The phrase is load-bearing (issue #1790): the API's final-snapshot path
-	// matches it (with the SERVER_NOT_FOUND code) to downgrade this refusal from
-	// its data-loss ERROR to a benign-duplicate INFO — _WORKING_SET_ABSENT_MARKER
-	// in api/src/mc_server_dashboard_api/servers/application/lifecycle.py. A
-	// reword here silently re-arms the false alarm unless done together.
+	// The phrase is load-bearing: the API's final-snapshot path matches it (with the SERVER_NOT_FOUND code) to
+	// downgrade this refusal from its data-loss ERROR to a benign-duplicate INFO, _WORKING_SET_ABSENT_MARKER in
+	// api/src/mc_server_dashboard_api/servers/application/lifecycle.py. A reword here silently re-arms the false
+	// alarm unless done together.
 	if !strings.Contains(res.ErrorMessage, "working dir absent") {
 		t.Fatalf("refusal message = %q, want the API-pinned phrase \"working dir absent\"", res.ErrorMessage)
 	}
@@ -141,9 +112,9 @@ func TestStoppedSnapshotAbsentWorkingDirRefusedWithoutTransfer(t *testing.T) {
 	}
 }
 
-// A FAILED stopped-id snapshot must RETAIN the scratch: the working set was not
-// captured, so GC-ing it would lose the world exactly as the stop-time GC did
-// (issue #841). The retained scratch is reclaimed on a later retry or at startup.
+// A FAILED stopped-id snapshot must RETAIN the scratch: the working set was not captured, so GC-ing it would
+// lose the world exactly as the stop-time GC did. The retained scratch is reclaimed on a later retry or at
+// startup.
 func TestStoppedSnapshotFailureRetainsScratch(t *testing.T) {
 	tr := &fakeTransfer{err: errors.New("boom")}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
@@ -175,13 +146,7 @@ func TestRunningSnapshotRetainsScratch(t *testing.T) {
 	}
 }
 
-// A crash mid-hydrate (datatransfer.unpackAndSwap, issue #772) leaves
-// .hydrate-<id>-* temp/trash siblings in the scratch root. The next start's
-// leftover sweep only clears them if the id is re-placed onto this Worker, so the
-// authoritative reclamation (server delete / re-placed elsewhere) must sweep this
-// id's siblings too — otherwise the world-sized orphan leaks permanently (issue
-// #806). Since #841 that reclamation runs on the stopped-id final snapshot, not on
-// the stop itself: the scratch dir and this id's leftovers are reclaimed together.
+// Reclaim this ID's hydrate leftovers with stopped scratch, including servers never placed here again.
 func TestFinalSnapshotSweepsHydrateLeftovers(t *testing.T) {
 	tr := &fakeTransfer{}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
@@ -212,22 +177,8 @@ func TestFinalSnapshotSweepsHydrateLeftovers(t *testing.T) {
 	}
 }
 
-// The hydrate leftovers go BEFORE the scratch dir, and the order is the whole point
-// (issue #3167) — the same hazard issue #2934 closed on the deleted-server reclaim.
-// <scratch>/<id> is what keeps the id advertised: both held-set scans skip
-// .hydrate-<id>-* (isReservedScratchName), so the instant that dir goes the id leaves
-// held_servers and no PER-ID pass is ever offered it again. A server deleted or
-// re-placed elsewhere never gets another stopped-id snapshot, the API stops deriving the
-// id into unknown_held_server_ids, and datatransfer's own sweep runs only if the server
-// is re-placed onto this Worker. Sweeping AFTER the removal therefore turned every
-// interruption in that window into a world-sized tree that only a Worker BOOT reclaims
-// (ReclaimHydrateLeftovers) — the backstop, not the plan: a Worker runs for months
-// between boots.
-//
-// This path is MORE exposed than the reclaim #2934 fixed, not less. It runs on a session
-// command lane, which shutdown abandons without waiting at all (Runner.serve joins no
-// lane, issue #3168), so an ordinary SIGTERM reaches the window that a crash reaches on
-// the reclaim path — which Close does join.
+// Gate final-snapshot cleanup at scratch removal; hydrate leftovers must already be gone for interruption-safe
+// retry.
 func TestStoppedIDGCSweepsHydrateLeftoversBeforeTheScratchDirGoes(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	dir := seedScratch(t, m, "s1")
@@ -267,8 +218,8 @@ func TestStoppedIDGCSweepsHydrateLeftoversBeforeTheScratchDirGoes(t *testing.T) 
 	}
 }
 
-// sweepHydrateLeftovers removes only the .hydrate-<id>-* siblings for the given id,
-// leaving the server's own scratch dir and unrelated entries untouched (issue #806).
+// sweepHydrateLeftovers removes only the.hydrate-<id>-* siblings for the given id, leaving the server's own
+// scratch dir and unrelated entries untouched.
 func TestSweepHydrateLeftovers(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
@@ -302,11 +253,7 @@ func TestSweepHydrateLeftovers(t *testing.T) {
 	}
 }
 
-// A RestartServer is a TRANSIENT restart: the API's RestartServer keeps the
-// assignment (desired stays running) and the same Worker keeps its live working
-// set so the #698 hydrate-skip still applies on the next start. The Worker must
-// RETAIN the scratch — deleting it here would reintroduce the #696 rollback
-// (a later hydrate would unpack the last snapshot over an empty dir) (issue #762).
+// Restart keeps assignment and scratch so relaunch uses the current local world.
 func TestRestartRetainsScratch(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
@@ -322,10 +269,8 @@ func TestRestartRetainsScratch(t *testing.T) {
 	}
 }
 
-// A failed-stop orphan may still be alive (the driver could not confirm
-// termination, issue #251): the lingering process can still write the working
-// set, so a failed StopServer must RETAIN the scratch. GC only on a CONFIRMED
-// stop (issue #762).
+// A failed-stop orphan may still be alive (the driver could not confirm termination): the lingering process can
+// still write the working set, so a failed StopServer must RETAIN the scratch. GC only on a CONFIRMED stop.
 func TestFailedStopRetainsScratch(t *testing.T) {
 	d := &orphanDriver{stopAfter: 1} // first Stop fails, leaving an orphan
 	m := newManager(t, d, nil)
@@ -338,10 +283,9 @@ func TestFailedStopRetainsScratch(t *testing.T) {
 	if res.Success {
 		t.Fatalf("first stop = %+v, want failure (driver could not confirm termination)", res)
 	}
-	// The failure must be the ORPHAN one, not a short-circuit. A stop that never
-	// reached the driver refuses with SERVER_NOT_FOUND before attemptStop runs, and
-	// the retention assertion below then holds vacuously — which is exactly how this
-	// test passed for the wrong reason while the start was refused (issue #2828).
+	// The failure must be the ORPHAN one, not a short-circuit. A stop that never reached the driver refuses with
+	// SERVER_NOT_FOUND before attemptStop runs, and the retention assertion below then holds vacuously, which is
+	// exactly how this test passed for the wrong reason while the start was refused.
 	if res.ErrorCode != session.CommandErrorInternal {
 		t.Fatalf("first stop = %+v, want the unconfirmed-termination failure (INTERNAL); "+
 			"a SERVER_NOT_FOUND here means no instance was registered and the orphan path never ran", res)
@@ -351,9 +295,8 @@ func TestFailedStopRetainsScratch(t *testing.T) {
 	}
 }
 
-// seedDisplaced creates a .displaced-<id> tree, as a prior hydrate would have left
-// when it moved a retained-for-recovery scratch aside (issue #906). Returns the path
-// so a test can assert whether a snapshot reclaimed it.
+// seedDisplaced creates a.displaced-<id> tree, as a prior hydrate would have left when it moved a
+// retained-for-recovery scratch aside. Returns the path so a test can assert whether a snapshot reclaimed it.
 func seedDisplaced(t *testing.T, m *Manager, serverID string) string {
 	t.Helper()
 	dir := filepath.Join(m.scratchDir, ".displaced-"+serverID)
@@ -366,9 +309,7 @@ func seedDisplaced(t *testing.T, m *Manager, serverID string) string {
 	return dir
 }
 
-// A successful STOPPED-id snapshot proves the store now supersedes this server's
-// world, so the .displaced-<id> recovery tree a prior hydrate kept aside (issue #906)
-// is reclaimed alongside the scratch — mirroring the #845 GC-on-success pattern.
+// Successful stopped publication makes the displaced recovery tree redundant.
 func TestStoppedSnapshotGCsDisplacedTree(t *testing.T) {
 	tr := &fakeTransfer{}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
@@ -383,9 +324,8 @@ func TestStoppedSnapshotGCsDisplacedTree(t *testing.T) {
 	}
 }
 
-// A successful RUNNING-id snapshot also supersedes any displaced recovery tree (the
-// store now holds the live world), so it GCs .displaced-<id> too (issue #906). The
-// live scratch dir itself is retained — the server still owns it.
+// A successful RUNNING-id snapshot also supersedes any displaced recovery tree (the store now holds the live
+// world), so it GCs.displaced-<id> too. The live scratch dir itself is retained, the server still owns it.
 func TestRunningSnapshotGCsDisplacedTree(t *testing.T) {
 	tr := &fakeTransfer{}
 	ctrl := &fakeControl{reply: "ok"}
@@ -405,14 +345,12 @@ func TestRunningSnapshotGCsDisplacedTree(t *testing.T) {
 	}
 }
 
-// The sweep in the post-upload tail is gated on the same working-dir identity pin as
-// the marker stamp beside it (issue #2291, closing the window #917 item 3 named). With
-// the working dir replaced mid-upload by a concurrent stream's hydrate, the tree at
-// .displaced-<id> is that hydrate's recovery copy — the world as it stood before the
-// swap, which this snapshot never published — so removing it would spend a copy this
-// success does not supersede. The sweep is skipped instead, and the leaked tree is
-// reclaimed by the next successful snapshot for the id (the #906 GC-on-success
-// contract). The publish itself still succeeds: only the GC is declined.
+// The sweep in the post-upload tail is gated on the same working-dir identity pin as the marker stamp beside it
+// (closing the window item 3 named). With the working dir replaced mid-upload by a concurrent stream's hydrate,
+// the tree at.displaced-<id> is that hydrate's recovery copy, the world as it stood before the swap, which this
+// snapshot never published, so removing it would spend a copy this success does not supersede. The sweep is
+// skipped instead, and the leaked tree is reclaimed by the next successful snapshot for the id (the
+// GC-on-success contract). The publish itself still succeeds: only the GC is declined.
 func TestRunningSnapshotSkipsDisplacedSweepWhenWorkingDirReplaced(t *testing.T) {
 	tr := &fakeTransfer{gen: 12}
 	ctrl := &fakeControl{reply: "ok"}
@@ -439,18 +377,7 @@ func TestRunningSnapshotSkipsDisplacedSweepWhenWorkingDirReplaced(t *testing.T) 
 	}
 }
 
-// A hydrate that lands WHILE a successful snapshot's sweep is still removing the
-// displaced tree must find the slot empty, never the half-deleted tree (issue #2799).
-// The removal is a traversal that takes seconds for a world-sized tree, and the
-// hydrate's oldest-wins check (datatransfer.displacedSlotHoldsWorkingSet, the same
-// "holds a working set" test as hasWorkingSet) reads the slot BY NAME: a tree still
-// being traversed there reads as an occupied slot, so the hydrate retains it — while
-// the traversal finishes deleting it — and drops the live set it displaces. The
-// identity pin on the sweep (issue #2291) does not cover this: the working dir is still
-// the packed tree when the sweep starts, and it is the HYDRATE that misreads the slot.
-//
-// The removal seam lands a racing hydrate part-way through the traversal, the one
-// interleaving the fix has to hold for, rather than racing for it.
+// Pause recursive removal after rename so hydrate sees an empty recovery slot, never a half-deleted tree.
 func TestHydrateDuringDisplacedSweepFindsTheSlotEmpty(t *testing.T) {
 	tr := &fakeTransfer{}
 	ctrl := &fakeControl{reply: "ok"}
@@ -517,19 +444,7 @@ func TestHydrateDuringDisplacedSweepFindsTheSlotEmpty(t *testing.T) {
 	}
 }
 
-// A running-id sweep must not take a recovery copy a hydrate parked in the slot AFTER
-// the caller's identity pin passed (issue #3118). The pin gates the sweep (issue #2291),
-// but it keeps passing right up to the moment the racing hydrate renames the working dir
-// aside — and what the sweep's rename takes out of the slot is whatever sits there at
-// THAT instant, not what its Lstat saw. The shape is routine, not exotic: the slot held
-// marker-only junk (a 204 hydrate leaves a world-less <scratch>/<id> that the next
-// hydrate parks here by the ordinary displace path), the hydrate clears that junk and
-// parks its live set directly in the slot as its recovery copy, and the sweep then
-// renames that live set out and removes it — a tree this snapshot never published,
-// holding the published state plus everything written since its pack.
-//
-// The rename seam lands the hydrate's park in that gap, the one interleaving the
-// post-rename re-check has to hold for, rather than racing for it.
+// Park a recovery copy after the caller's pin check; the sweep must recheck after rename and put the copy back.
 func TestDisplacedSweepKeepsARecoveryCopyParkedAfterThePinCheck(t *testing.T) {
 	tr := &fakeTransfer{}
 	ctrl := &fakeControl{reply: "ok"}
@@ -628,25 +543,8 @@ func assertScratchRoot(t *testing.T, m *Manager, want ...string) {
 	}
 }
 
-// TWO running-id sweeps for one id can reach the .displaced-<id> slot at once — they take
-// no cross-stream reservation (#829 item 4) — and while both sit between their rename and
-// their decision, whatever one of them puts back occupies the slot against the other.
-// Round 1 of the PR #3121 review found that through world-less junk; round 3 found it
-// again through a tree whose classification merely FAILED, which is retained on purpose:
-//
-//	B Lstat J -> B renames J out (slot empty) -> the hydrate parks its live set L in the
-//	slot -> A renames L out -> B cannot classify J and puts it back -> A finds the slot
-//	occupied and leaves L under .sweeping-, which the next boot deletes.
-//
-// No rule about J alone closes that: keeping an unclassifiable tree is the safe direction
-// for J, and it is exactly what costs L. The sweeps have to stop competing for the slot,
-// so a sweep that finds another one already holding this id's slot DECLINES — it renames
-// nothing, and the tree it would have swept stays where it is. A decline costs a leak the
-// next successful snapshot reclaims, which is the #906 contract.
-//
-// The invariant each row proves: a tree that holds a working set is never deleted because
-// some OTHER tree's classification came out junk (row 1) or uncertain (row 2, the
-// reviewer's combined case).
+// Overlap two sweeps and a hydrate to prove the slot claim prevents one put-back from stranding another recovery
+// copy.
 func TestOverlappingDisplacedSweepsKeepTheRecoveryCopy(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -756,18 +654,7 @@ func TestOverlappingDisplacedSweepsKeepTheRecoveryCopy(t *testing.T) {
 	}
 }
 
-// The sweep's "is this worth putting back" rule must answer exactly as the hydrate's slot
-// rule does (datatransfer.displacedSlotHoldsWorkingSet), and this is its twin test in the
-// issue #2280 style: each side asserts the SAME fixtures from its own package, so a rule
-// that drifts fails CI here instead of degrading a durability decision silently. The
-// counterpart is TestJunkDisplacedSlotDoesNotShadowLiveSet in
-// worker/internal/adapters/datatransfer.
-//
-// The SYMLINK row is why the rule cannot be hasWorkingSet: that one reads through a
-// symlink and would call a link to a populated directory a working set, while the hydrate
-// calls it junk. A sweep believing it holds a working set puts the link back into the
-// slot, and the slot is then occupied against a concurrent sweep holding the real
-// recovery tree (PR #3121 review, round 2).
+// Use the same fixtures as the hydrate slot tests so both layers classify recovery trees identically.
 func TestSweptTreeClassifierMatchesTheHydrateSlotRule(t *testing.T) {
 	populated := filepath.Join(t.TempDir(), "elsewhere")
 	seedHydrateShapedTree(t, populated, 7)
@@ -849,8 +736,7 @@ func TestDisplacedSweepDoesNotPutBackASymlinkSlot(t *testing.T) {
 	if err != nil || len(left) != 1 {
 		t.Fatalf("renamed entries = %v (err %v), want exactly one (the symlink)", left, err)
 	}
-	// The link went to .sweeping- as itself, and its target was never touched: the sweep
-	// must not follow it, neither to classify it nor to remove it.
+	// Inject a swept-tree read error; retain the uncertain recovery copy rather than leave it for boot deletion.
 	if info, lerr := os.Lstat(left[0]); lerr != nil || info.Mode()&os.ModeSymlink == 0 {
 		t.Fatalf("%s mode = %v (err %v), want a symlink", filepath.Base(left[0]), info, lerr)
 	}
@@ -859,15 +745,14 @@ func TestDisplacedSweepDoesNotPutBackASymlinkSlot(t *testing.T) {
 	}
 }
 
-// A tree the sweep cannot READ is kept, not dropped (PR #3121 review, round 2). The
-// classification answers "is this copy worth keeping", so a transient EACCES/EMFILE/EIO
-// must not silently become "world-less junk, leave it for the boot reclaim to delete" —
-// the same direction datatransfer takes on its side (TestUnreadableDisplacedSlotFails-
-// HydrateWithoutDiscarding). Putting an unclassifiable tree back costs at worst an
-// occupied slot; leaving it costs the only copy of the unpublished delta.
+// A tree the sweep cannot READ is kept, not dropped (review, round 2). The classification answers "is this copy
+// worth keeping", so a transient EACCES/EMFILE/EIO must not silently become "world-less junk, leave it for the
+// boot reclaim to delete", the same direction datatransfer takes on its side (TestUnreadableDisplacedSlotFails-
+// HydrateWithoutDiscarding). Putting an unclassifiable tree back costs at worst an occupied slot; leaving it
+// costs the only copy of the unpublished delta.
 //
-// The failure is injected through a seam rather than a chmod fixture: a mode-000 dir is
-// readable by root, so a chmod-based test silently stops asserting anything as root.
+// The failure is injected through a seam rather than a chmod fixture: a mode-000 dir is readable by root, so a
+// chmod-based test silently stops asserting anything as root.
 func TestDisplacedSweepKeepsATreeItCannotClassify(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	slot := filepath.Join(m.scratchDir, ".displaced-s1")
@@ -886,12 +771,8 @@ func TestDisplacedSweepKeepsATreeItCannotClassify(t *testing.T) {
 	assertScratchRoot(t, m, ".displaced-s1")
 }
 
-// A tree the sweep cannot put back stays WHOLE under its .sweeping-<id>-* name for the
-// boot reclaim (issue #3118). With the working dir replaced mid-sweep the tree may be a
-// recovery copy the snapshot never published, and a slot that has filled again holds
-// another one: renaming over that would spend a copy, and removing the tree would be a
-// delete on a guess. The drop is deferred to ReclaimInterruptedDisplacedSweeps instead,
-// which is no worse than the unconditional removal this replaced.
+// If the slot has refilled, preserve the swept tree whole under its temporary name rather than overwrite another
+// copy.
 func TestDisplacedSweepLeavesATreeItCannotPutBack(t *testing.T) {
 	h := &capturingSlogHandler{}
 	m := newManager(t, &fakeDriver{}, nil).WithLogger(slog.New(h))
@@ -934,11 +815,10 @@ func TestDisplacedSweepLeavesATreeItCannotPutBack(t *testing.T) {
 	assertSweepInfo(t, h, "left a swept displaced tree", "swept_to", left[0])
 }
 
-// The put-back is fsynced too (issue #3118): it undoes a rename the sweep was about to
-// make durable (issue #2799), and a power loss that rolled the put-back back would strand
-// the tree under a .sweeping-<id>-* name the next boot reclaims — turning a recovery copy
-// into garbage. No test can stage the power loss, so the sync and removal seams record
-// the order instead: one sync, with the tree already back in the slot, and no traversal.
+// The put-back is fsynced too: it undoes a rename the sweep was about to make durable, and a power loss that
+// rolled the put-back back would strand the tree under a.sweeping-<id>-* name the next boot reclaims, turning a
+// recovery copy into garbage. No test can stage the power loss, so the sync and removal seams record the order
+// instead: one sync, with the tree already back in the slot, and no traversal.
 func TestDisplacedSweepSyncsTheTreeItPutsBack(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	slot := filepath.Join(m.scratchDir, ".displaced-s1")
@@ -1009,11 +889,10 @@ func interruptDisplacedSweep(t *testing.T, m *Manager, serverID string) string {
 	return filepath.Join(m.scratchDir, left[0])
 }
 
-// The tree an interrupted sweep leaves is a full working set with a generation marker,
-// under a name that is not a server id: the held-set scans must skip it exactly as they
-// skip the .displaced- and .hydrate- siblings (issue #2799), or the Worker advertises a
-// server id the API never assigned and region-fscks a world-sized tree at every boot
-// until it is reclaimed.
+// The tree an interrupted sweep leaves is a full working set with a generation marker, under a name that is not
+// a server id: the held-set scans must skip it exactly as they skip the.displaced- and.hydrate- siblings, or the
+// Worker advertises a server id the API never assigned and region-fscks a world-sized tree at every boot until
+// it is reclaimed.
 func TestInterruptedDisplacedSweepIsNotAdvertisedAsHeld(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	seedHydrateShapedTree(t, filepath.Join(m.scratchDir, "s1"), 7)
@@ -1034,13 +913,7 @@ func TestInterruptedDisplacedSweepIsNotAdvertisedAsHeld(t *testing.T) {
 	}
 }
 
-// The tree an interrupted sweep leaves is reclaimed at the next Worker boot (issue
-// #2799), and by nothing else: a crash inside the stopped-id GC (removeScratch) leaves it
-// with the scratch dir already gone, so the id is never advertised as held again and the
-// deleted-server reclaim is never offered it. Deleting it at boot is unconditional
-// because nothing sweeps at boot and the sweep had already decided the tree was garbage.
-// Everything else in the scratch root — a live scratch, another server's recovery tree,
-// a crashed hydrate's leftover — is not this reclaim's to touch.
+// Boot reclaim must remove interrupted sweep trees even when server scratch no longer advertises their ID.
 func TestBootReclaimsInterruptedDisplacedSweeps(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	leftover := interruptDisplacedSweep(t, m, "s1")
@@ -1063,26 +936,7 @@ func TestBootReclaimsInterruptedDisplacedSweeps(t *testing.T) {
 	}
 }
 
-// A .hydrate-<id>-* tree left by an interrupted hydrate — or by a GC path killed
-// between its leftover sweep and the scratch removal that ends the id's advertisement —
-// is reclaimed at the next Worker boot (issue #3167), and by nothing else once that
-// scratch dir is gone: both held-set scans skip .hydrate- names, so the id is never
-// advertised again, the API never re-derives it into unknown_held_server_ids, and
-// datatransfer's own sweep runs only if the server is re-placed onto this Worker. A
-// server deleted or re-placed elsewhere leaked a world-sized tree permanently.
-//
-// Deleting them at boot is unconditional for the reasons ReclaimInterruptedDisplacedSweeps
-// is (issue #2799): no hydrate is in flight — the session that dispatches one does not
-// exist until after this call — the container orphan sweep has already stopped every
-// writer, and a .hydrate- tree is never the copy worth keeping. A hydrate parks the live
-// set it displaces DIRECTLY at .displaced-<id> precisely so the recovery copy is never
-// under a sweepable name (issue #910); what a .hydrate- name holds is either the temp
-// tree unpacked from the store or the superseded set oldest-wins elected to drop, which
-// unpackAndSwap leaves "for the next leftover sweep" in its own words (issue #3112).
-//
-// Everything else in the scratch root — a live scratch, a recovery tree, an interrupted
-// displaced sweep's tree — is not this reclaim's to touch. The persisted prefix
-// is pinned by the shared scratchformat contract test.
+// Boot cleanup must reclaim hydrate leftovers whose server scratch no longer exists to advertise per-ID cleanup.
 func TestBootReclaimsHydrateLeftovers(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	// Both crash-left forms: the per-hydrate temp tree and the superseded live set. Each
@@ -1113,11 +967,10 @@ func TestBootReclaimsHydrateLeftovers(t *testing.T) {
 	}
 }
 
-// The sweep fsyncs the scratch root AFTER its rename and BEFORE its traversal (issue
-// #2799). Without that barrier a power loss can persist the traversal's unlinks yet roll
-// back the un-fsynced rename, putting a half-deleted tree back in the .displaced-<id>
-// slot, where a later hydrate's oldest-wins check retains it over the live set. No test
-// can stage the power loss, so the sync and removal seams record the order instead.
+// The sweep fsyncs the scratch root AFTER its rename and BEFORE its traversal. Without that barrier a power loss
+// can persist the traversal's unlinks yet roll back the un-fsynced rename, putting a half-deleted tree back in
+// the.displaced-<id> slot, where a later hydrate's oldest-wins check retains it over the live set. No test can
+// stage the power loss, so the sync and removal seams record the order instead.
 func TestDisplacedSweepSyncsTheRenameBeforeRemoving(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	slot := filepath.Join(m.scratchDir, ".displaced-s1")
@@ -1149,10 +1002,9 @@ func TestDisplacedSweepSyncsTheRenameBeforeRemoving(t *testing.T) {
 	}
 }
 
-// A failed sync stops the sweep before its traversal (issue #2799): removing a tree whose
-// rename is not durable is exactly what a power loss can turn into a half-deleted tree
-// back in the slot. The tree stays whole under its .sweeping-<id>-* name, off the slot,
-// for the next boot's ReclaimInterruptedDisplacedSweeps to take.
+// A failed sync stops the sweep before its traversal: removing a tree whose rename is not durable is exactly
+// what a power loss can turn into a half-deleted tree back in the slot. The tree stays whole under
+// its.sweeping-<id>-* name, off the slot, for the next boot's ReclaimInterruptedDisplacedSweeps to take.
 func TestDisplacedSweepSyncFailureLeavesTheTreeWhole(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	slot := filepath.Join(m.scratchDir, ".displaced-s1")
@@ -1187,9 +1039,8 @@ func TestDisplacedSweepSyncFailureLeavesTheTreeWhole(t *testing.T) {
 	}
 }
 
-// A FAILED snapshot must RETAIN the displaced recovery tree: the store did not
-// capture the world, so the .displaced-<id> copy is still the only one — GC-ing it
-// would defeat the recovery insurance entirely (issue #906).
+// A FAILED snapshot must RETAIN the displaced recovery tree: the store did not capture the world, so
+// the.displaced-<id> copy is still the only one, GC-ing it would defeat the recovery insurance entirely.
 func TestSnapshotFailureRetainsDisplacedTree(t *testing.T) {
 	tr := &fakeTransfer{err: errors.New("boom")}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
@@ -1204,12 +1055,8 @@ func TestSnapshotFailureRetainsDisplacedTree(t *testing.T) {
 	}
 }
 
-// A .displaced-<id> tree must never be treated as a LIVE scratch: it is dot-prefixed
-// so it cannot collide with a server-id scratch dir, and the id-scoped sweeps touch
-// only their own server's siblings (issue #906). ScanHeldServers must SKIP the
-// .displaced- prefix entirely (issue #910): reporting it triggers a per-boot header
-// fsck of a world-sized recovery tree and a confusing server_id=.displaced-<id>
-// corrupt warning.
+// Exclude displaced copies from held-set scans and isolate per-ID sweeps so recovery siblings are never treated
+// as live scratch.
 func TestDisplacedTreeNotTreatedAsLiveScratch(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	displaced := seedDisplaced(t, m, "s1")

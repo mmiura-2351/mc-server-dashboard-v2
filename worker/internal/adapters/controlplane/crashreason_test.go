@@ -9,10 +9,9 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
 
-// Every crash reason the execution domain can emit maps onto its own wire value,
-// and an empty or unrecognized name is UNSPECIFIED — an unclassified crash (issue
-// #1093). The names come from execution.CrashReason.String, so the table is keyed
-// by the domain values and cannot drift from them.
+// Every crash reason the execution domain can emit maps onto its own wire value, and an empty or unrecognized
+// name is UNSPECIFIED, an unclassified crash. The names come from execution.CrashReason.String, so the table is
+// keyed by the domain values and cannot drift from them.
 func TestMapCrashReason(t *testing.T) {
 	cases := map[string]controlplanev1.CrashReason{
 		execution.CrashReasonUnspecified.String():                  controlplanev1.CrashReason_CRASH_REASON_UNSPECIFIED,

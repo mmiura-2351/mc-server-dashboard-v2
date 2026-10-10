@@ -1,30 +1,7 @@
 //go:build e2e
 
-// This file adds the container-driver RESTART scenario (issue #234) to the
-// cross-language e2e harness. Unlike datatransfer_e2e_test.go (the Go data-plane
-// client against the real Python API), this scenario exercises the REAL Docker
-// daemon: it builds the real container ExecutionDriver on the real EngineClient,
-// wraps it in the real instancemanager.Manager, and drives a StartServer then a
-// RestartServer through the manager's command path — the same path a control-
-// plane RestartServer command takes.
-//
-// Why a real daemon: three rounds of fixes for the create-vs-async-remover race
-// (#226 name conflict, #229 inspect-404, #233 remove-already-in-progress) each
-// passed their unit tests against the dockerAPI fake while the real daemon kept
-// finding a new interleaving. A restart re-creates the deterministic
-// mcsd-<server-id> name while the exit-watcher's async removal of the just-
-// stopped container is still in flight, so only the real daemon's timing
-// reproduces the class. This scenario is the structural guard for it.
-//
-// It is gated three ways so it never runs in the ordinary `go test ./...` pass
-// or the data-plane harness job:
-//   - the `e2e` build tag (this file compiles only under `-tags e2e`),
-//   - MCD_E2E_DOCKER must be set (the data-plane harness job leaves it unset),
-//     and
-//   - MCD_E2E_STUB_IMAGE names the prebuilt stub image (worker/test/e2e/stub);
-//     the test skips when it is unset.
-//
-// See worker/README.md for a local run (it needs a reachable Docker daemon).
+// Exercise back-to-back restart against Docker with a Java shim that blocks until SIGTERM.
+// This covers deterministic-name reuse and asynchronous container removal without a JVM download.
 package e2e
 
 import (
@@ -50,15 +27,8 @@ const (
 	stubMCVersion = "1.20.4"
 )
 
-// generationMarkerFile is the working-dir-relative generation marker every real
-// hydrate leaves behind (instancemanager/generation.go: a 200 hydrate embeds it in
-// the tree before the swap-in rename, a 204 stamps it as its only write). Since
-// issue #2802 it is the LAUNCH GUARD's predicate — launchReserved refuses a launch
-// over a working set carrying no marker, because that is precisely the claim a
-// skipped hydrate relied on — so a hand-seeded working set that omits it has its
-// StartServer refused before the driver is ever reached. The persisted name is
-// part of internal/domain/scratchformat's compatibility contract; keep this local
-// seed aligned with its GenerationMarkerFile constant.
+// Seed the exact marker required by launchReserved; keep its name aligned with
+// scratchformat.GenerationMarkerFile.
 const generationMarkerFile = ".mcsd_generation"
 
 // seedWorkingSet materialises a working set for serverID under scratchDir: the
@@ -79,25 +49,17 @@ func seedWorkingSet(t *testing.T, scratchDir, serverID string, files map[string]
 // `docker stop`: the stub image runs no RCON listener.
 var errNoRCON = errors.New("e2e: rcon unavailable for stub")
 
-// TestContainerRestartRecreatesContainer drives a real container-driver restart
-// against a real Docker daemon and asserts the server returns to running in a
-// NEW container — the create-vs-async-remover race the restart fixes (#226/#229/
-// #233) target. A successful RestartServer means Stop (which triggers the async
-// removal of the stopped container) and the immediately-following Start (which
-// re-creates the same deterministic name) both completed; the assertion that the
-// new container has a different id and is running proves the recreate won the
-// race rather than reusing or colliding with the old container.
+// Require a new running container after restart so deterministic-name teardown cannot be mistaken for reuse.
 func TestContainerRestartRecreatesContainer(t *testing.T) {
 	if os.Getenv("MCD_E2E_DOCKER") == "" {
 		t.Skip("MCD_E2E_DOCKER not set; skipping container-driver e2e (needs a Docker daemon)")
 	}
 	image := env(t, "MCD_E2E_STUB_IMAGE")
 
-	// Reclaim stub containers leaked by previous harness runs that were killed by
-	// a panic or `go test -timeout` before t.Cleanup could run (issue #256). It
-	// runs only here, after both env gates above, so it stays inert in the plain
-	// `go test ./...` pass. Best-effort: a leaked orphan must not block a green
-	// run, so a reaper error is logged, not fatal.
+	// Reclaim stub containers leaked by previous harness runs that were killed by a panic or `go test -timeout`
+	// before t.Cleanup could run. It runs only here, after both env gates above, so it stays inert in the plain `go
+	// test./...` pass. Best-effort: a leaked orphan must not block a green run, so a reaper error is logged, not
+	// fatal.
 	reapCtx, reapCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	if err := reapStaleE2EContainers(reapCtx); err != nil {
 		t.Logf("e2e reaper: %v", err)
@@ -143,12 +105,7 @@ func TestContainerRestartRecreatesContainer(t *testing.T) {
 			return nil, errNoRCON
 		},
 	)
-	// Close joins the status, log and metrics pumps and the status dispatcher
-	// (issue #2777). Without it they outlive the test, and here they run against a
-	// real daemon: the metrics pump keeps sampling Docker stats on a real clock for
-	// the rest of the binary's life. Deferred rather than t.Cleanup so it runs
-	// BEFORE the container removals registered below — the pumps stop sampling a
-	// container that still exists (issue #2875).
+	// Close the manager before container cleanup so metrics and status pumps cannot outlive their Docker targets.
 	defer mgr.Close()
 
 	serverID := newServerID(t)

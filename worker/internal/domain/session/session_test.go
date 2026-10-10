@@ -97,14 +97,8 @@ func TestHeartbeatCadence(t *testing.T) {
 	<-done
 }
 
-// TestHeartbeatNotStarvedByEventTraffic reproduces issue #341: with a steady
-// stream of inbound events arriving at sub-interval spacing across several
-// intervals, the runner must still send a heartbeat at every interval boundary.
-// The previous code re-armed the heartbeat via clock.After on every select
-// iteration, so a never-idle select never chose the heartbeat case — the worker
-// starved its own heartbeat and the API marked it offline. The heartbeat
-// deadline must be a persistent timer, reset only after a beat is sent, so its
-// cadence is independent of event traffic.
+// Keep events arriving across multiple intervals to verify traffic cannot postpone the persistent heartbeat
+// timer.
 func TestHeartbeatNotStarvedByEventTraffic(t *testing.T) {
 	transport := newFakeTransport(acceptedAck())
 	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
@@ -202,11 +196,9 @@ func TestReconnectReRegisters(t *testing.T) {
 	<-done
 }
 
-// A command the Worker does not handle is answered with the canned
-// "unsupported" result (CommandErrorInternal) correlated to its id and never
-// reaches a handler. The empty-ServerID guard only applies to handled kinds, so
-// an orphan command of an unknown (or empty) Kind stays unsupported too (issue
-// #1618).
+// A command the Worker does not handle is answered with the canned "unsupported" result (CommandErrorInternal)
+// correlated to its id and never reaches a handler. The empty-ServerID guard only applies to handled kinds, so
+// an orphan command of an unknown (or empty) Kind stays unsupported too.
 func TestUnsupportedCommandIsAcknowledged(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -411,9 +403,8 @@ func TestListFilesDispatchedToHandler(t *testing.T) {
 	done := make(chan struct{})
 	go func() { _ = r.Run(ctx); close(done) }()
 
-	// ListFiles is small and stays inline on the receive loop; it must reach the
-	// handler rather than be answered with the canned "unsupported" result
-	// (issue #219).
+	// ListFiles is small and stays inline on the receive loop; it must reach the handler rather than be answered
+	// with the canned "unsupported" result.
 	transport.commands <- Command{CommandID: "cmd-4", ServerID: "srv-1", Kind: "ListFiles", Path: "."}
 
 	waitFor(t, func() bool { return len(handler.handledCopy()) == 1 })
@@ -458,9 +449,8 @@ func (h *blockingHandler) Events() <-chan StatusEvent   { return h.events }
 func (h *blockingHandler) Logs() <-chan LogEvent        { return nil }
 func (h *blockingHandler) Metrics() <-chan MetricsEvent { return nil }
 
-// A slow snapshot for one server must not block a fast command (e.g. a stop of
-// another server) — the long-running transfer runs off the serial receive loop
-// (issue #95).
+// A slow snapshot for one server must not block a fast command (e.g. a stop of another server), the long-running
+// transfer runs off the serial receive loop.
 func TestSlowSnapshotDoesNotBlockOtherCommands(t *testing.T) {
 	transport := newFakeTransport(acceptedAck())
 	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
@@ -550,9 +540,8 @@ func (h *laneHandler) handledIDs() []string {
 	return ids
 }
 
-// A slow graceful Stop on s1 (a lifecycle command, handled inline before issue
-// #95) must not delay a command for a different server s2: per-server lanes run
-// concurrently across servers (issue #95).
+// A slow graceful Stop on s1 (a lifecycle command, handled inline before) must not delay a command for a
+// different server s2: per-server lanes run concurrently across servers.
 func TestSlowStopDoesNotBlockOtherServer(t *testing.T) {
 	transport := newFakeTransport(acceptedAck())
 	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
@@ -599,8 +588,8 @@ func TestSlowStopDoesNotBlockOtherServer(t *testing.T) {
 	<-done
 }
 
-// Commands for the SAME server stay strictly ordered even under a burst: a lane
-// executes its server's commands serially in arrival order (issue #95).
+// Commands for the SAME server stay strictly ordered even under a burst: a lane executes its server's commands
+// serially in arrival order.
 func TestSameServerCommandsStayOrdered(t *testing.T) {
 	transport := newFakeTransport(acceptedAck())
 	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
@@ -635,8 +624,8 @@ func TestSameServerCommandsStayOrdered(t *testing.T) {
 	<-done
 }
 
-// After a server's lane goes idle, its goroutine and map entry are torn down so
-// an ever-growing roster of servers does not leak goroutines (issue #95).
+// After a server's lane goes idle, its goroutine and map entry are torn down so an ever-growing roster of
+// servers does not leak goroutines.
 func TestIdleLaneIsTornDown(t *testing.T) {
 	transport := newFakeTransport(acceptedAck())
 	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
@@ -659,12 +648,8 @@ func TestIdleLaneIsTornDown(t *testing.T) {
 	<-done
 }
 
-// gateHandler blocks every command whose Kind is in slowKinds until released,
-// recording handling order. Commands whose Kind is not slow (e.g. ServerCommand)
-// return immediately. It models long-running lane work (hydrate/stop) saturating
-// the concurrency cap while an instant ServerCommand wants to run. When detached
-// is true, slow commands block only on release (ignoring ctx cancellation),
-// modeling a ctx-detached stop that outlives its stream (issue #1617).
+// gateHandler holds slow kinds until release; detached mode ignores stream cancellation to model an ongoing
+// stop.
 type gateHandler struct {
 	mu        sync.Mutex
 	handled   []Command
@@ -712,11 +697,9 @@ func (h *gateHandler) Events() <-chan StatusEvent   { return nil }
 func (h *gateHandler) Logs() <-chan LogEvent        { return nil }
 func (h *gateHandler) Metrics() <-chan MetricsEvent { return nil }
 
-// A burst of slow long-running ops on maxConcurrentLanes distinct servers
-// saturates the global concurrency cap. An instant ServerCommand for a further,
-// otherwise-idle server must still complete promptly — the quick-command bypass
-// lets it skip the cap (issue #169). Without the bypass it blocks on a lane slot
-// and this test times out.
+// A burst of slow long-running ops on maxConcurrentLanes distinct servers saturates the global concurrency cap.
+// An instant ServerCommand for a further, otherwise-idle server must still complete promptly, the quick-command
+// bypass lets it skip the cap. Without the bypass it blocks on a lane slot and this test times out.
 func TestQuickCommandBypassesSaturatedCap(t *testing.T) {
 	transport := newFakeTransport(acceptedAck())
 	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
@@ -764,9 +747,8 @@ func TestQuickCommandBypassesSaturatedCap(t *testing.T) {
 	<-done
 }
 
-// A TunnelDial (a player join) must also bypass the saturated cap: a join must
-// not queue behind a hydrate (issue #958, RELAY.md Section 5). This mirrors the
-// ServerCommand bypass with a TunnelDial as the quick command.
+// A TunnelDial (a player join) must also bypass the saturated cap: a join must not queue behind a hydrate
+// (RELAY.md Section 5). This mirrors the ServerCommand bypass with a TunnelDial as the quick command.
 func TestTunnelDialBypassesSaturatedCap(t *testing.T) {
 	transport := newFakeTransport(acceptedAck())
 	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
@@ -810,11 +792,9 @@ func TestTunnelDialBypassesSaturatedCap(t *testing.T) {
 	<-done
 }
 
-// OpenBedrockTunnel must also bypass the saturated cap (issue #1546,
-// docs/app/BEDROCK_TUNNEL.md): Open returns once the tunnel is registered, not
-// once the handshake completes, so it must not queue behind a hydrate either.
-// This mirrors TestTunnelDialBypassesSaturatedCap with OpenBedrockTunnel as the
-// quick command.
+// OpenBedrockTunnel must also bypass the saturated cap (docs/app/BEDROCK_TUNNEL.md): Open returns once the
+// tunnel is registered, not once the handshake completes, so it must not queue behind a hydrate either. This
+// mirrors TestTunnelDialBypassesSaturatedCap with OpenBedrockTunnel as the quick command.
 func TestOpenBedrockTunnelBypassesSaturatedCap(t *testing.T) {
 	transport := newFakeTransport(acceptedAck())
 	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
@@ -858,9 +838,8 @@ func TestOpenBedrockTunnelBypassesSaturatedCap(t *testing.T) {
 	<-done
 }
 
-// The bypass must not break per-server FIFO/safety: a ServerCommand queued behind
-// a same-server long-running op must still wait for that op, never racing ahead
-// of it (issue #169). A command must not run against a server mid-hydrate.
+// The bypass must not break per-server FIFO/safety: a ServerCommand queued behind a same-server long-running op
+// must still wait for that op, never racing ahead of it. A command must not run against a server mid-hydrate.
 func TestQuickCommandStillSerializesWithinServer(t *testing.T) {
 	transport := newFakeTransport(acceptedAck())
 	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
@@ -1005,9 +984,9 @@ func TestCleanShutdownOnCancel(t *testing.T) {
 	}
 }
 
-// The RegisterAck's transfer_deadline is pushed onto a handler that implements
-// the optional TransferDeadlineSetter after registration (issue #874), so the
-// instance manager can bound its data-plane transfers from one source.
+// The RegisterAck's transfer_deadline is pushed onto a handler that implements the optional
+// TransferDeadlineSetter after registration, so the instance manager can bound its data-plane transfers from one
+// source.
 func TestRegisterAckTransferDeadlinePlumbedToHandler(t *testing.T) {
 	ack := acceptedAck()
 	ack.TransferDeadline = 11 * time.Minute
@@ -1035,11 +1014,10 @@ func TestRegisterAckTransferDeadlinePlumbedToHandler(t *testing.T) {
 	<-done
 }
 
-// After a (re-)register the session asks a handler that implements the optional
-// StatusResyncer to re-emit its live instances' state (issue #985), and those
-// re-emitted events are forwarded as StatusChange on the freshly registered
-// stream — so an API restart moves a still-running server out of observed=unknown
-// within seconds instead of over the reconciler grace window.
+// After a (re-)register the session asks a handler that implements the optional StatusResyncer to re-emit its
+// live instances' state, and those re-emitted events are forwarded as StatusChange on the freshly registered
+// stream, so an API restart moves a still-running server out of observed=unknown within seconds instead of over
+// the reconciler grace window.
 func TestRegisterTriggersStatusResyncOnNewStream(t *testing.T) {
 	first := newFakeTransport(acceptedAck())
 	second := newFakeTransport(acceptedAck())
@@ -1117,10 +1095,9 @@ func TestRegisterStatusResyncEmptyEmitsNothing(t *testing.T) {
 	<-done
 }
 
-// A handled-kind command with an empty ServerID must be rejected with
-// CommandErrorServerNotFound and never reach the handler (issue #1618). Every
-// handled kind is server-scoped by contract; an empty id bypasses the
-// per-server lane machinery and would run inline on the receive goroutine.
+// A handled-kind command with an empty ServerID must be rejected with CommandErrorServerNotFound and never reach
+// the handler. Every handled kind is server-scoped by contract; an empty id bypasses the per-server lane
+// machinery and would run inline on the receive goroutine.
 func TestHandledKindWithEmptyServerIDRejected(t *testing.T) {
 	transport := newFakeTransport(acceptedAck())
 	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
@@ -1171,9 +1148,8 @@ func TestHandledKindWithEmptyServerIDRejected(t *testing.T) {
 	<-done
 }
 
-// An empty-ServerID handled-kind command must not block the receive loop: it
-// is rejected instantly with CommandErrorServerNotFound, so a subsequent command
-// for a real server proceeds without delay (issue #1618).
+// An empty-ServerID handled-kind command must not block the receive loop: it is rejected instantly with
+// CommandErrorServerNotFound, so a subsequent command for a real server proceeds without delay.
 func TestEmptyServerIDCommandDoesNotBlockReceiveLoop(t *testing.T) {
 	transport := newFakeTransport(acceptedAck())
 	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
@@ -1228,9 +1204,8 @@ func TestEmptyServerIDCommandDoesNotBlockReceiveLoop(t *testing.T) {
 	<-done
 }
 
-// The RegisterAck's unknown_held_server_ids is pushed onto a handler that
-// implements the optional ScratchReclaimer after registration (issue #924),
-// intersected with the held set this Register actually advertised.
+// The RegisterAck's unknown_held_server_ids is pushed onto a handler that implements the optional
+// ScratchReclaimer after registration, intersected with the held set this Register actually advertised.
 func TestRegisterAckUnknownHeldServerIDsPlumbedToReclaimer(t *testing.T) {
 	ack := acceptedAck()
 	ack.UnknownHeldServerIDs = []string{"srv-a", "srv-b"}
@@ -1315,12 +1290,8 @@ func TestRegisterAckEmptyUnknownHeldServerIDsSkipsReclaimer(t *testing.T) {
 	<-done
 }
 
-// TestReRegistrationRefreshesHeldServers verifies that after a reconnect, the
-// Runner uses the handler's current held-server inventory rather than the stale
-// boot-time snapshot (issue #1711). The test sets up two transports: the first
-// stream's close triggers a reconnect onto the second, and the handler's
-// HeldServers() return is changed between the two registrations so the test
-// can assert that the second Register carries the updated inventory.
+// Change the provider inventory between two registrations and require reconnect to advertise the updated
+// generations.
 func TestReRegistrationRefreshesHeldServers(t *testing.T) {
 	// First transport: closes immediately after registration to trigger reconnect.
 	t1 := newFakeTransport(acceptedAck())
@@ -1342,10 +1313,9 @@ func TestReRegistrationRefreshesHeldServers(t *testing.T) {
 	}
 	handler.setHeldServers(initialHeld)
 
-	// The boot list differs from the provider's, so the first Register shows which one the
-	// Runner sent. The provider must win from the very first registration: the Worker's
-	// boot scan persists its torn verdicts in the generation marker the provider reads
-	// (issue #3178), so the marker — not the boot list — is the one source of truth.
+	// The boot list differs from the provider's, so the first Register shows which one the Runner sent. The
+	// provider must win from the very first registration: the Worker's boot scan persists its torn verdicts in the
+	// generation marker the provider reads, so the marker, not the boot list, is the one source of truth.
 	caps := testCaps()
 	caps.HeldServers = []HeldServer{{ServerID: "server-a", Generation: 99}}
 	r := NewRunner(dialer, caps, clock, discardLogger(),
@@ -1404,11 +1374,9 @@ func TestReRegistrationRefreshesHeldServers(t *testing.T) {
 	<-done
 }
 
-// TestLaneCapEnforcedAcrossReconnect verifies that maxConcurrentLanes is
-// enforced worker-wide, not per-connection generation. When a stream drops
-// mid-command, the in-flight lane goroutines (detached stops) still hold their
-// cap slots, so the new dispatcher must not allow more than maxConcurrentLanes
-// total (issue #1617).
+// TestLaneCapEnforcedAcrossReconnect verifies that maxConcurrentLanes is enforced worker-wide, not
+// per-connection generation. When a stream drops mid-command, the in-flight lane goroutines (detached stops)
+// still hold their cap slots, so the new dispatcher must not allow more than maxConcurrentLanes total.
 func TestLaneCapEnforcedAcrossReconnect(t *testing.T) {
 	t1 := newFakeTransport(acceptedAck())
 	t2 := newFakeTransport(acceptedAck())

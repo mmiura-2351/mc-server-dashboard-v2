@@ -11,10 +11,9 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
 
-// ackStream is a WorkerService_SessionClient double whose Recv blocks until the
-// test releases it and then answers with a RegisterAck. It lets a test place the
-// ack at an exact point relative to the register-ack deadline instead of hoping
-// to hit the boundary by timing (issue #2020).
+// ackStream is a WorkerService_SessionClient double whose Recv blocks until the test releases it and then
+// answers with a RegisterAck. It lets a test place the ack at an exact point relative to the register-ack
+// deadline instead of hoping to hit the boundary by timing.
 type ackStream struct {
 	entered chan struct{}
 	release chan struct{}
@@ -65,12 +64,7 @@ func newAckTransport() (tr *transport, stream *ackStream, tick chan time.Time, c
 	return tr, stream, tick, canceled
 }
 
-// TestRecvRegisterAckReportsTimeoutWhenDeadlineWins pins the losing half of the
-// boundary race (issue #2020): once the deadline watcher has cancelled the
-// per-stream context, an ack that lands immediately afterwards must be reported
-// as a timeout. Returning it as a success would hand the run loop a registered
-// session on a context it no longer owns, and the next Send/Recv would fail with
-// codes.Canceled — a pointless disconnect/backoff/re-register cycle.
+// Once timeout owns cancellation, a late ack must still return timeout rather than a registered dead stream.
 func TestRecvRegisterAckReportsTimeoutWhenDeadlineWins(t *testing.T) {
 	tr, stream, tick, canceled := newAckTransport()
 

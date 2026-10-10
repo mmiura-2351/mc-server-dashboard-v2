@@ -10,76 +10,15 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/scratchformat"
 )
 
-// writeGeneration records gen as the working-set generation in workingDir. It is
-// best-effort from the caller's view: a write failure is returned for logging but
-// must not fail the hydrate/snapshot it follows. On the 200 hydrate path the marker
-// was already written atomically into the temp tree before the swap-in rename
-// (issue #917), so this call is idempotent; on the 204 path and the snapshot path it
-// is the only write.
-//
-// "Best-effort" is bounded by DIRECTION, and the two are not symmetric (issue #2284).
-// A marker OLDER than the tree it sits in — the outcome of a missing or failed write —
-// costs one extra hydrate and nothing else, because the API's skip-hydrate gate
-// (skip_hydrate = held >= store, issue #767) then does not skip. Since issue #2802 an
-// ABSENT marker costs that same extra hydrate by a second route: it is the launch
-// guard's predicate (launchReserved), so a start the API did skip the hydrate for is
-// refused and the API replays the launch WITH the hydrate (issue #2499's replay). Both
-// routes converge on one extra transfer, so the bound is unchanged — but a scratch that
-// can never persist the marker now blocks the start rather than booting a fresh world,
-// which is the correct direction and operator-visible. A marker NEWER than
-// its tree is a correctness failure: the gate skips the hydrate that would correct the
-// tree and the Worker boots a working set that is not the generation it claims to be.
-// So a caller that cannot prove the marker still describes the directory it is writing
-// into must not write it at all — see writeGenerationGuarded. The file is
-// written atomically (temp
-// sibling + rename) so a crash mid-write never leaves a torn generation, and the
-// temp contents are fsynced before the rename so a crash cannot surface an EMPTY
-// marker — a durable rename over unflushed bytes would read as gen 0, and combined
-// with the hydrate-merge interplay that "extra hydrate" is not entirely harmless
-// (issue #787). The directory is fsynced after the rename so the rename itself is
-// durable: the caller (handleHydrate) reaches this only after Hydrate has already
-// fsynced the working tree the marker describes, so the marker can never become
-// durable before that tree. A successful write also sweeps the temp siblings that
-// earlier crashed writes stranded in workingDir (sweepGenerationTemps, issue #2283),
-// so the cleanup is self-healing rather than a separate mechanism.
+// writeGeneration atomically publishes a fsynced marker, then fsyncs the directory.
+// Failures are best-effort, but callers must never stamp a generation newer than the tree they wrote.
 func writeGeneration(workingDir string, gen uint64) error {
 	return writeGenerationGuarded(workingDir, gen, nil)
 }
 
-// writeGenerationGuarded is writeGeneration with an optional last-moment guard, run
-// immediately before the rename that publishes the marker. It exists for the running-id
-// snapshot's stamp (issue #2284), whose caller must not publish a marker once the
-// working dir has stopped being the directory it packed; every other caller passes nil
-// and gets writeGeneration's behaviour byte for byte.
-//
-// The guard runs THERE rather than only in the caller because the caller's check is
-// check-then-act, and exactly ONE sub-window of that gap can publish a marker into the
-// wrong tree. Take T to be the instant a concurrent hydrate's swap completes:
-//
-//   - T before CreateTemp below (i.e. across the caller's check and MkdirAll): the temp
-//     is created inside the REPLACEMENT directory, every later path resolves there
-//     consistently, and the rename succeeds — the marker lands on a tree this caller
-//     never packed. This is the wrong-stamp window, and this guard is what closes it.
-//   - T after CreateTemp: the temp lives inside the pinned inode, which the swap has
-//     moved to .displaced-<id>. tmpName resolves through the path, so its lookup now
-//     enters the replacement directory, where that name does not exist: the rename
-//     fails ENOENT on its SOURCE and no marker can be published. Path semantics close
-//     this window on their own — including the whole fsync above, which is the slowest
-//     part of the gap. The guard's contribution here is not safety but classification:
-//     the caller reports a clean skip instead of an ENOENT marker-write error.
-//
-// So the residual is not "the fsync" and not "one rename": for any T that lands wholly
-// before or wholly after the rename below, a wrong stamp is impossible. What these path
-// semantics do not decide is a swap interleaved WITHIN that one rename's own resolution
-// of its two path arguments. That is the honest bound, and it is why the renameat-against-
-// the-pinned-descriptor rewrite is not worth its cost (see recordGenerationIfUnchanged).
-//
-// A refused write removes its temp — unlike the rename-failure path below, which strands
-// a complete marker on purpose, this temp is one nothing will ever publish. That cleanup
-// is effective in the first case above (the temp is in the replacement dir, at a path
-// that still resolves); in the second the temp has ridden the pinned inode into
-// .displaced-<id> and the Remove is a harmless ENOENT, leaving an inert temp that the
-// displaced tree's own reclaim covers.
+// Check directory identity immediately before publishing; a replacement before temp creation can otherwise be
+// stamped.
+// The path-based rename still has a residual race if replacement interleaves with its path resolution.
 func writeGenerationGuarded(workingDir string, gen uint64, guard func() bool) error {
 	// Ensure the working dir exists: a hydrate that served a 204 (no published
 	// snapshot) does not create it, but the generation (0) still needs recording so
@@ -87,11 +26,9 @@ func writeGenerationGuarded(workingDir string, gen uint64, guard func() bool) er
 	if err := os.MkdirAll(workingDir, 0o750); err != nil {
 		return err
 	}
-	// The pattern is DERIVED from the marker name, not spelled out: hasWorkingSet
-	// (issue #2279), the snapshot pack (issue #834) and sweepGenerationTemps
-	// (issue #2283) all recognise a temp by that same prefix, so a literal here
-	// would let a rename of the constant leave the creation site behind and strand
-	// temps no consumer matches (issue #2287).
+	// The pattern is DERIVED from the marker name, not spelled out: hasWorkingSet, the snapshot pack and
+	// sweepGenerationTemps all recognise a temp by that same prefix, so a literal here would let a rename of the
+	// constant leave the creation site behind and strand temps no consumer matches.
 	tmp, err := os.CreateTemp(workingDir, scratchformat.GenerationMarkerFile+"-*")
 	if err != nil {
 		return err
@@ -118,58 +55,19 @@ func writeGenerationGuarded(workingDir string, gen uint64, guard func() bool) er
 		_ = os.Remove(tmpName)
 		return errWorkingDirReplaced
 	}
-	// A failed rename deliberately leaves the temp in place instead of unlinking it
-	// inline as the three paths above do. Those unlink because their temp holds torn or
-	// unflushed bytes; this one holds a complete, fsynced generation under the temp
-	// form, which every consumer already treats as non-content (issues #2279, #834), so
-	// it is inert until reclaimed — by the next successful marker write's sweep
-	// (sweepGenerationTemps, issue #2283) or by the scratch GC's RemoveAll, the same two
-	// reclaims that cover a crash-stranded temp.
+	// A failed rename leaves a complete fsynced temp that consumers ignore.
+	// The next successful marker write or whole-scratch cleanup reclaims it.
 	if err := os.Rename(tmpName, filepath.Join(workingDir, scratchformat.GenerationMarkerFile)); err != nil {
 		return err
 	}
 	sweepGenerationTemps(workingDir)
-	// fsync the dir so the rename (the marker's appearance) is itself durable, not
-	// just the file contents: the ordering guarantee (issue #787) requires the
-	// marker to become durable only AFTER the tree it describes.
+	// fsync the dir so the rename (the marker's appearance) is itself durable, not just the file contents: the
+	// ordering guarantee requires the marker to become durable only AFTER the tree it describes.
 	return fsyncDir(workingDir)
 }
 
-// sweepGenerationTemps removes the ".mcsd_generation-XXXX" temp siblings a crashed
-// earlier marker write left behind in workingDir (issue #2283). A crash between the
-// temp write and the rename strands one such file per crash, and nothing else
-// reclaims them until the whole scratch dir is GC'd, so the next successful marker
-// write cleans up after its predecessors.
-//
-// It runs AFTER the rename, so the marker itself already carries its final name and
-// is never matched: the predicate requires the temp form (the marker name plus "-"),
-// not merely the marker prefix that hasWorkingSet (issue #2279) and the snapshot pack
-// (issue #834) treat as non-content — those two only IGNORE what they match, while
-// this unlinks it, so an over-broad match here would delete real files. Directories
-// are skipped for the same reason.
-//
-// The sweep CAN unlink a CONCURRENT writer's in-flight temp, and does so in practice
-// (8 goroutines x 50 writes on one dir: 0 rename errors without the sweep, ~300
-// ENOENT renames with it; that measurement drove writeGeneration directly). Two marker
-// writes still overlap on one workingDir, though the shape is narrower than it was:
-// the per-server FIFO lanes are per-STREAM (the dispatcher is recreated per serve,
-// domain/session/session.go), and a running-id snapshot deliberately takes no id
-// reservation (issue #829 item 4, handleSnapshot) though a hydrate and a stopped-id
-// snapshot do, so a dropped stream's post-upload snapshot tail can still run while a
-// NEW stream's hydrate records its own marker. What survives of that overlap after the
-// snapshot tail's identity guard (issue #2284) is (i) a concurrent hydrate that did NOT
-// replace the working dir — the 204 path leaves destDir untouched — and (ii) the
-// guard's own residual, the rename-sized window between its last check and the marker
-// rename.
-//
-// That is accepted rather than prevented, because what the loser loses is bounded: the
-// marker can never be absent or torn (the winner's rename precedes this sweep and its
-// final name is never matched), so the loser forfeits only a best-effort marker UPDATE
-// — which writeGeneration's contract already permits and recordGeneration logs without
-// propagating — and a lost update costs at most one extra hydrate. Which of two
-// concurrent writes wins was already last-rename-wins before this sweep existed. The
-// sweep is otherwise best-effort too: a ReadDir or Remove failure is ignored so it can
-// never fail the marker write.
+// Remove only marker temp files, never directories or the published marker.
+// A concurrent writer may lose its best-effort update; the already-published marker remains intact.
 func sweepGenerationTemps(workingDir string) {
 	entries, err := os.ReadDir(workingDir)
 	if err != nil {
@@ -200,26 +98,8 @@ var openWorkingDirRef = os.Open
 // Production always uses os.Stat.
 var statWorkingDirRef = os.Stat
 
-// workingDirRef pins the IDENTITY of a working directory across a window in which a
-// concurrent stream may replace it (issue #2284). It answers one question: is the
-// directory at this path still the same directory object it was when the window opened?
-//
-// TWO mechanics make that answer trustworthy, and NEITHER is an optimisation:
-//
-//   - os.SameFile compares (device, inode) and is portable, so no syscall/build-tag
-//     work — a hand-rolled inode comparison would buy nothing.
-//   - The descriptor is held OPEN for the whole window. A bare Stat-at-capture /
-//     Stat-at-compare token is defeated by inode ABA: a first hydrate renames the dir
-//     aside, a sweep frees the inode, and a second hydrate's os.MkdirTemp can be handed
-//     that same inode back and rename it into place — the token then MATCHES and the
-//     caller acts on a directory it never pinned. Holding the descriptor defers the
-//     inode's reclamation until close, so the number can never be recycled inside the
-//     window. Do not "simplify" this to two Stat calls; the double-hydrate case that
-//     breaks it is one handleSnapshot explicitly documents as reachable, and
-//     TestWorkingDirRefSurvivesUnlinkAndRejectsReplacement fails if the descriptor goes.
-//
-// The cost is one file descriptor per in-flight running snapshot, so a ref MUST be
-// closed on every path out of the window.
+// workingDirRef holds an open descriptor so SameFile cannot accept a recycled inode after replacement.
+// Close it on every exit path.
 type workingDirRef struct {
 	dir  string
 	file *os.File    // held open for the whole window — see the ABA note above
@@ -301,10 +181,9 @@ func fsyncDir(dir string) error {
 	return d.Sync()
 }
 
-// readGeneration returns the generation recorded in workingDir, or 0 when the
-// marker is absent or unparseable (issue #763). A 0 means "held but at an unknown
-// generation": the API treats it as older than any published store generation and
-// hydrates, which is the safe direction (never skip a hydrate on an unknown set).
+// readGeneration returns the generation recorded in workingDir, or 0 when the marker is absent or unparseable. A
+// 0 means "held but at an unknown generation": the API treats it as older than any published store generation
+// and hydrates, which is the safe direction (never skip a hydrate on an unknown set).
 func readGeneration(workingDir string) uint64 {
 	data, err := os.ReadFile(filepath.Join(workingDir, scratchformat.GenerationMarkerFile))
 	if err != nil {

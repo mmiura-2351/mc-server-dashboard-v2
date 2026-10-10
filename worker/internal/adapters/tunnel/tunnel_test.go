@@ -241,10 +241,9 @@ func TestDialSplicesBothDirections(t *testing.T) {
 	}
 }
 
-// TestDialUsesContainerHostOverNetwork: when a gameHost resolver returns a
-// container name (the container driver runs on a user-defined network), the Dialer
-// targets containerName(serverID):<gamePort> over the network — not the worker's
-// own loopback, which has no host-published port (issue #979).
+// TestDialUsesContainerHostOverNetwork: when a gameHost resolver returns a container name (the container driver
+// runs on a user-defined network), the Dialer targets containerName(serverID):<gamePort> over the network, not
+// the worker's own loopback, which has no host-published port.
 func TestDialUsesContainerHostOverNetwork(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -283,9 +282,8 @@ func TestDialUsesContainerHostOverNetwork(t *testing.T) {
 	}
 }
 
-// TestDialUsesLoopbackWithoutNetwork: with no network configured (the gameHost
-// resolver returns empty), the Dialer keeps targeting the published-port loopback
-// (issue #979 preserves the no-network path).
+// TestDialUsesLoopbackWithoutNetwork: with no network configured (the gameHost resolver returns empty), the
+// Dialer keeps targeting the published-port loopback (preserves the no-network path).
 func TestDialUsesLoopbackWithoutNetwork(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -379,13 +377,7 @@ func (c *closeRecordingConn) CloseWrite() error {
 
 func (c *closeRecordingConn) wasClosed() bool { return c.closed.Load() > 0 }
 
-// TestSpliceClosesBothConnsOnCleanEOF: after a clean EOF in both directions the
-// splice must fully close both conns (not just CloseWrite), so their fds are
-// released deterministically rather than waiting on the netFD finalizer.
-//
-// The test injects close-recording wrappers for both the relay conn (via
-// tlsDial) and the game conn (via gameDial) and asserts that both wrappers
-// observed a Close() call — not just a CloseWrite — after the clean-EOF splice.
+// Record full Close calls after both directions reach EOF; CloseWrite alone leaves descriptors open.
 func TestSpliceClosesBothConnsOnCleanEOF(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -482,9 +474,8 @@ func assertReadClosed(t *testing.T, conn net.Conn) {
 	}
 }
 
-// TestHandshakeRejectsInvalidToken: the handshake must reject tokens that are
-// empty or contain newline/carriage-return characters before writing anything to
-// the connection (issue #1053).
+// TestHandshakeRejectsInvalidToken: the handshake must reject tokens that are empty or contain
+// newline/carriage-return characters before writing anything to the connection.
 func TestHandshakeRejectsInvalidToken(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -601,9 +592,9 @@ func TestShutdownClosesTunnels(t *testing.T) {
 	}
 }
 
-// TestDialUsesColonSpelledGamePort: the port dialed is the one the Minecraft
-// server bound, in whatever Java-recognized spelling the file uses — the shared
-// parser reads "server-port:<port>" exactly as the server does (issue #2811).
+// TestDialUsesColonSpelledGamePort: the port dialed is the one the Minecraft server bound, in whatever
+// Java-recognized spelling the file uses, the shared parser reads "server-port:<port>" exactly as the server
+// does.
 func TestDialUsesColonSpelledGamePort(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -634,11 +625,10 @@ func TestDialUsesColonSpelledGamePort(t *testing.T) {
 	}
 }
 
-// TestDialFailsOnUnreadableProperties: an unreadable server.properties fails the
-// dial with a message naming the file instead of silently falling back to 25565
-// — the relay's own port, which would splice the player back into the relay
-// while the container driver refuses to start that very server (issues #2792,
-// #2621). A directory in the file's place stands in for any such I/O failure.
+// TestDialFailsOnUnreadableProperties: an unreadable server.properties fails the dial with a message naming the
+// file instead of silently falling back to 25565, the relay's own port, which would splice the player back into
+// the relay while the container driver refuses to start that very server. A directory in the file's place stands
+// in for any such I/O failure.
 func TestDialFailsOnUnreadableProperties(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -671,9 +661,8 @@ func TestDialFailsOnUnreadableProperties(t *testing.T) {
 	}
 }
 
-// TestDialReadsGamePortPastAnOverlongLine: a line longer than bufio.Scanner's
-// token cap used to truncate the parse and lose server-port, sending the tunnel
-// to the 25565 default. The shared parser reads the whole file (issue #2811).
+// TestDialReadsGamePortPastAnOverlongLine: a line longer than bufio.Scanner's token cap used to truncate the
+// parse and lose server-port, sending the tunnel to the 25565 default. The shared parser reads the whole file.
 func TestDialReadsGamePortPastAnOverlongLine(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

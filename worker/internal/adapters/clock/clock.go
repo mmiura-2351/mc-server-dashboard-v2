@@ -1,6 +1,4 @@
-// Package clock provides the production Clock adapter backed by the wall clock.
-// It implements the session.Clock Port (internal/domain/session); tests inject
-// a fake clock instead.
+// Package clock implements session.Clock with the wall clock.
 package clock
 
 import (

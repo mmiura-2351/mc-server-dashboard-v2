@@ -60,13 +60,7 @@ func TestStalledSinkCoalescesToLatest(t *testing.T) {
 		<-m.events
 	}
 
-	// Coalescing converges s1 to its latest, but it does not promise that latest
-	// is the *first* s1 event delivered: if the dispatcher had already pulled an
-	// intermediate status into a blocked send before the later transitions
-	// arrived, that intermediate is delivered first and the latest follows it. So
-	// drain s1 events until the stream goes quiet and assert on the converged
-	// value, rather than on the first event seen — which races the dispatcher
-	// (issue #308).
+	// Drain to convergence: a dispatcher may already hold an intermediate event when a newer status arrives.
 	var latest string
 	overall := time.After(2 * time.Second)
 	for {
@@ -106,13 +100,7 @@ func TestCoalesceMultiServerIsolation(t *testing.T) {
 		<-m.events
 	}
 
-	// Coalescing converges each server to its latest, but it does not promise
-	// that latest is the *first* event delivered for that server: if the
-	// dispatcher had already pulled an intermediate status into a blocked send
-	// before the later transitions arrived, that intermediate is delivered first
-	// and the latest follows it. So track latest-wins per server and assert on the
-	// converged value after the stream goes quiet, rather than on the first event
-	// seen — which races the dispatcher (issue #308).
+	// Track the last delivered status per server; coalescing may deliver an already-dispatched intermediate first.
 	latest := map[string]string{}
 	overall := time.After(2 * time.Second)
 	for {
@@ -189,13 +177,7 @@ func seqOf(t *testing.T, state string) int {
 	return n
 }
 
-// TestCoalesceAcrossFastToStalledBoundary exercises one server crossing from the
-// fast path into coalescing and back out: a few transitions flow directly onto a
-// drained sink, then the sink fills mid-burst (coalescing engages) and the
-// remaining transitions collapse to the latest. It asserts strict per-server
-// ordering across the boundary — every delivered sequence is newer than the last
-// (no older event after a newer one) — and that the final delivery is the latest
-// sequence. States are labelled "v<N>" so ordering is checkable by sequence.
+// Label statuses with sequence numbers to detect overtaking as a server enters and leaves coalescing.
 func TestCoalesceAcrossFastToStalledBoundary(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 

@@ -6,9 +6,7 @@ import (
 	"io"
 )
 
-// lengthPrefixSize is the size, in bytes, of the big-endian length prefix on
-// each framed handshake message on the QUIC stream (docs/app/BEDROCK_TUNNEL.md
-// Section 4: "Stream wire format").
+// Handshake messages have a four-byte big-endian length prefix.
 const lengthPrefixSize = 4
 
 // writeFramed writes data as one length-prefixed message: a 4-byte big-endian
@@ -23,9 +21,7 @@ func writeFramed(w io.Writer, data []byte) error {
 	return err
 }
 
-// readFramed reads one length-prefixed message. A declared length over
-// maxBytes is rejected without reading further, so a misbehaving peer cannot
-// make the reader buffer unbounded data.
+// Reject oversized frames before reading or allocating their payload.
 func readFramed(r io.Reader, maxBytes int) ([]byte, error) {
 	var lenBuf [lengthPrefixSize]byte
 	if _, err := io.ReadFull(r, lenBuf[:]); err != nil {

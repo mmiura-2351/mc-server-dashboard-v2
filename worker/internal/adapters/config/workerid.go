@@ -1,12 +1,6 @@
 package config
 
-// Worker identity defaulting and validation. The API rejects a non-UUID
-// worker id at registration (issue #99), because a server's assigned worker is
-// a UUID column. So an explicit worker.id must be a UUID, and the zero-config
-// default must also be a UUID. To keep identity stable across restarts (so the
-// API's assignment rebuild and assigned_worker_id rows stay coherent), the
-// default is a UUIDv4 persisted at <scratch_dir>/worker-id: generated once on
-// first boot, then read back on every later load.
+// Persist the generated UUID at <scratch_dir>/worker-id so assignments survive Worker restarts.
 
 import (
 	"crypto/rand"
@@ -22,11 +16,8 @@ import (
 // zero-config worker id.
 const workerIDFileName = "worker-id"
 
-// resolveWorkerID fills cfg.Worker.ID when unset and validates it. An explicit
-// id (from file or env) must be a UUID and is used as-is; a non-UUID explicit
-// id fails fast client-side (better operator UX than a remote gRPC abort). When
-// unset, the id comes from <scratch_dir>/worker-id, generated and persisted on
-// first boot so it stays stable across restarts.
+// resolveWorkerID validates explicit UUIDs or loads the stable generated ID from scratch, creating it on first
+// boot.
 func resolveWorkerID(cfg *Config) error {
 	if cfg.Worker.ID != "" {
 		if !isUUID(cfg.Worker.ID) {

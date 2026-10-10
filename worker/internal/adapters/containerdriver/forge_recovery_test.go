@@ -9,11 +9,10 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 )
 
-// The tests below drive an install whose Wait result was lost to a daemon blip:
-// Wait returns a transport error (and exit code 0, as the real client does), and
-// the re-inspect finds the container exited but still present. The exit status
-// the daemon kept on that container — not the lost Wait result — must decide
-// whether the install failed and why (issue #1093, PR #3280 review).
+// The tests below drive an install whose Wait result was lost to a daemon blip: Wait returns a transport error
+// (and exit code 0, as the real client does), and the re-inspect finds the container exited but still present.
+// The exit status the daemon kept on that container, not the lost Wait result, must decide whether the install
+// failed and why (review).
 
 var errWaitTransport = errors.New("containerdriver: POST /wait: EOF")
 
@@ -166,9 +165,8 @@ func TestInstallLostWaitRecoversSuccessfulExitAndLaunches(t *testing.T) {
 	}
 }
 
-// When the container is already GONE its exit status is unrecoverable, so the
-// produced artifacts stay the authority (issue #895): an install that left its
-// args file launches even though its output carries a marker.
+// When the container is already GONE its exit status is unrecoverable, so the produced artifacts stay the
+// authority: an install that left its args file launches even though its output carries a marker.
 func TestInstallLostWaitContainerGoneWithMarkersStillLaunchesOnArtifacts(t *testing.T) {
 	dir := t.TempDir()
 	docker := newForgeFakeDocker()

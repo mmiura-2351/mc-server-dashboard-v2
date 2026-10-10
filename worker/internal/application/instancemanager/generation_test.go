@@ -18,9 +18,8 @@ func generationMarkerPath(m *Manager, serverID string) string {
 	return filepath.Join(m.scratchDir, serverID, generationFile)
 }
 
-// TestHydrateRecordsGeneration proves a HydrateTrigger records the store
-// generation the API served in the working set's marker, so a later registration
-// re-reports it (issue #763).
+// TestHydrateRecordsGeneration proves a HydrateTrigger records the store generation the API served in the
+// working set's marker, so a later registration re-reports it.
 func TestHydrateRecordsGeneration(t *testing.T) {
 	tr := &fakeTransfer{gen: 11}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
@@ -33,11 +32,10 @@ func TestHydrateRecordsGeneration(t *testing.T) {
 	}
 }
 
-// TestSnapshotRecordsNewGeneration proves a RUNNING-server SnapshotTrigger records
-// the NEW store generation the publish produced, so the held generation advances to
-// match the scratch it pushed (issue #763). The running case is the one that retains
-// its scratch — a STOPPED-id snapshot is the post-stop final capture and GCs the
-// scratch instead of recording a generation onto a dir it is about to delete (#841).
+// TestSnapshotRecordsNewGeneration proves a RUNNING-server SnapshotTrigger records the NEW store generation the
+// publish produced, so the held generation advances to match the scratch it pushed. The running case is the one
+// that retains its scratch, a STOPPED-id snapshot is the post-stop final capture and GCs the scratch instead of
+// recording a generation onto a dir it is about to delete.
 func TestSnapshotRecordsNewGeneration(t *testing.T) {
 	tr := &fakeTransfer{gen: 12}
 	ctrl := &fakeControl{reply: "ok"}
@@ -56,17 +54,8 @@ func TestSnapshotRecordsNewGeneration(t *testing.T) {
 	}
 }
 
-// replaceWorkingDirLikeHydrate replaces dir the way a concurrent stream's hydrate
-// does, so a test's interleaving reproduces the real one. It MIRRORS
-// datatransfer.unpackAndSwap: build a fresh tree under a temp sibling, write the
-// marker into it before the swap (issue #917), rename the live dir aside to
-// .displaced-<id>, then rename the temp tree in — see the
-// os.Rename(destDir, asideAt) / swapRename(tmpDir, destDir) pair in
-// internal/adapters/datatransfer/datatransfer.go.
-//
-// The rename is the whole point: it gives the path a DIFFERENT directory object. A
-// hook that merely rewrote files inside dir would leave the identity unchanged and
-// prove nothing about the guard. Keep this in step with unpackAndSwap.
+// Mirror hydrate's rename-based replacement, including its pre-swap marker.
+// Rewriting files in place would leave identity unchanged and fail to exercise the snapshot guard.
 func replaceWorkingDirLikeHydrate(t *testing.T, dir string, gen uint64) {
 	t.Helper()
 	parent, id := filepath.Dir(dir), filepath.Base(dir)
@@ -88,16 +77,7 @@ func replaceWorkingDirLikeHydrate(t *testing.T, dir string, gen uint64) {
 	}
 }
 
-// TestRunningSnapshotSkipsGenerationStampWhenWorkingDirReplaced is the regression
-// test for issue #2284. A running-id snapshot takes no per-id reservation (issue
-// #829 item 4), so an old dropped stream's post-upload tail can still be running
-// after a NEW stream has re-placed the server here and hydrated it. Stamping the
-// newly published generation onto that replaced tree would make the marker describe
-// a world it does not hold — and because the marker would then be NEWER than the
-// tree, the #767 skip-hydrate gate (skip_hydrate = held >= store, lifecycle.py)
-// would skip the very hydrate that corrects it and boot the wrong generation,
-// silently. The stamp must be skipped instead, leaving the hydrate's own generation
-// in place so the API re-hydrates.
+// Replace scratch during an old stream's upload tail; the new tree must keep its own generation marker.
 func TestRunningSnapshotSkipsGenerationStampWhenWorkingDirReplaced(t *testing.T) {
 	tr := &fakeTransfer{gen: 12}
 	ctrl := &fakeControl{reply: "ok"}
@@ -125,13 +105,7 @@ func TestRunningSnapshotSkipsGenerationStampWhenWorkingDirReplaced(t *testing.T)
 	}
 }
 
-// TestWriteGenerationGuardedRefusesAndRemovesItsTemp pins the pre-rename guard itself
-// (issue #2284): a guard that reports the working dir is no longer the pinned one must
-// stop the marker from being published, report the distinct errWorkingDirReplaced so the
-// caller can log a skip rather than a marker-write failure, and leave no temp behind.
-// Without this the guard block can be deleted outright with the rest of the suite green,
-// because every interleaving test trips the CALLER's earlier check and returns before
-// writeGenerationGuarded is ever reached with a failing guard.
+// Fail the pre-rename guard directly; caller-side interleaving tests alone may return before this guard runs.
 func TestWriteGenerationGuardedRefusesAndRemovesItsTemp(t *testing.T) {
 	dir := t.TempDir()
 
@@ -202,22 +176,8 @@ func TestRunningSnapshotSkipsGenerationStampWhenWorkingDirRemoved(t *testing.T) 
 	}
 }
 
-// TestRunningSnapshotSkipsStampWhenWorkingDirReplacedAfterTheCheck drives the ONE
-// interleaving that the caller's pre-check cannot catch and the pre-rename guard must
-// (issue #2284): the replacement lands AFTER recordGenerationIfUnchanged has checked and
-// passed, but BEFORE writeGenerationGuarded creates the marker temp. The temp is then
-// created inside the REPLACEMENT directory, so every later path resolves there
-// consistently and the rename would publish generation 12 onto a tree this snapshot
-// never packed. (Once the temp exists the window is closed by path semantics instead:
-// the temp rides the pinned inode into .displaced-<id> and the rename fails ENOENT on
-// its source. That is why this test has to strike before CreateTemp to be meaningful.)
-//
-// The interleaving is microseconds wide in production — it spans MkdirAll — so it is
-// driven through statWorkingDirRef rather than raced for: the fake performs the swap
-// after the pre-check has read the OLD identity but before it returns, then delegates.
-//
-// It also pins the classification: this must be logged as a SKIP with the structured
-// reason, not as recordGeneration's marker-write error.
+// Replace the directory after the caller's identity check but before marker temp creation to exercise the
+// pre-rename guard.
 func TestRunningSnapshotSkipsStampWhenWorkingDirReplacedAfterTheCheck(t *testing.T) {
 	tr := &fakeTransfer{gen: 12}
 	ctrl := &fakeControl{reply: "ok"}
@@ -380,12 +340,8 @@ func TestRunningSnapshotSkipsStampWhenIdentityUnavailable(t *testing.T) {
 	}
 }
 
-// TestHydrateStampIsUnconditional proves the hydrate's own stamp was not gated along
-// with the snapshot's. handleHydrate holds a per-id reservation across the whole
-// transfer AND is the writer that produced the tree, so its marker is always correct.
-// Gating it would be a correctness regression: a permanently missing marker reads as
-// generation 0, and the API could then never skip a hydrate. The fake Hydrate never
-// creates the working dir, so only the stamp's own MkdirAll can produce it.
+// Hydrate owns its reserved tree, so its stamp is unconditional even when the transfer did not create the
+// directory.
 func TestHydrateStampIsUnconditional(t *testing.T) {
 	tr := &fakeTransfer{gen: 11}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
@@ -403,18 +359,8 @@ func TestHydrateStampIsUnconditional(t *testing.T) {
 	}
 }
 
-// TestWorkingDirRefSurvivesUnlinkAndRejectsReplacement pins the two mechanics the
-// guard rests on, so a later "simplify" cannot quietly remove either.
-//
-//  1. os.SameFile against the captured identity REJECTS a different directory object
-//     at the same path — the shape a hydrate's swap produces.
-//  2. The *os.File is held OPEN for the whole window, which is what makes inode ABA
-//     impossible. With a bare Stat-at-capture / Stat-at-compare token, hydrate #1
-//     could free the inode and hydrate #2's os.MkdirTemp be handed it straight back;
-//     the token would then MATCH and the stale snapshot would stamp anyway — the
-//     detector failing in the UNSAFE direction on exactly the double-hydrate case
-//     handleSnapshot documents as reachable. Holding the fd defers the inode's
-//     reclamation until close, so it can never be recycled inside the window.
+// Hold the original directory open through unlink and replacement so recycled inode numbers cannot satisfy the
+// pin.
 func TestWorkingDirRefSurvivesUnlinkAndRejectsReplacement(t *testing.T) {
 	root := t.TempDir()
 	dir := filepath.Join(root, "s1")
@@ -453,10 +399,9 @@ func TestWorkingDirRefSurvivesUnlinkAndRejectsReplacement(t *testing.T) {
 	}
 }
 
-// TestSnapshotDeclaresHeldGenerationAsBase proves a SnapshotTrigger declares the
-// store generation the working set was hydrated from (the held marker) as the
-// publish's base generation, so the API's publish-time generation guard can refuse
-// a stale publish (issue #847).
+// TestSnapshotDeclaresHeldGenerationAsBase proves a SnapshotTrigger declares the store generation the working
+// set was hydrated from (the held marker) as the publish's base generation, so the API's publish-time generation
+// guard can refuse a stale publish.
 func TestSnapshotDeclaresHeldGenerationAsBase(t *testing.T) {
 	tr := &fakeTransfer{gen: 12}
 	ctrl := &fakeControl{reply: "ok"}
@@ -478,10 +423,9 @@ func TestSnapshotDeclaresHeldGenerationAsBase(t *testing.T) {
 	}
 }
 
-// TestSnapshotDeclaresWorkerIDAsPublisher proves a SnapshotTrigger declares this
-// Worker's own id as the publisher, so the API's publish-time generation guard can
-// tell a same-Worker re-publish (lost-response self-heal) from a different-Worker
-// stale publish (issue #847 bug 3).
+// TestSnapshotDeclaresWorkerIDAsPublisher proves a SnapshotTrigger declares this Worker's own id as the
+// publisher, so the API's publish-time generation guard can tell a same-Worker re-publish (lost-response
+// self-heal) from a different-Worker stale publish.
 func TestSnapshotDeclaresWorkerIDAsPublisher(t *testing.T) {
 	tr := &fakeTransfer{gen: 12}
 	ctrl := &fakeControl{reply: "ok"}
@@ -500,11 +444,10 @@ func TestSnapshotDeclaresWorkerIDAsPublisher(t *testing.T) {
 	}
 }
 
-// TestGenerationMarkerRemovedAfterFinalSnapshot proves the generation marker
-// follows the scratch lifecycle: the post-stop final snapshot GCs the scratch
-// (issue #762/#841), which drops the marker with it, so a reclaimed server reports
-// holding nothing and the API hydrates afresh (issue #763). The stop itself now
-// RETAINS the marker so the final snapshot can still pack the working set (#841).
+// TestGenerationMarkerRemovedAfterFinalSnapshot proves the generation marker follows the scratch lifecycle: the
+// post-stop final snapshot GCs the scratch, which drops the marker with it, so a reclaimed server reports
+// holding nothing and the API hydrates afresh. The stop itself now RETAINS the marker so the final snapshot can
+// still pack the working set.
 func TestGenerationMarkerRemovedAfterFinalSnapshot(t *testing.T) {
 	tr := &fakeTransfer{}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
@@ -532,10 +475,9 @@ func TestGenerationMarkerRemovedAfterFinalSnapshot(t *testing.T) {
 	}
 }
 
-// TestWriteGenerationSweepsStaleTempSiblings proves a successful marker write
-// reclaims the ".mcsd_generation-XXXX" temp siblings a crashed earlier write left
-// behind (issue #2283): the leftovers are removed, the marker itself holds the new
-// generation, and real working-set content is untouched.
+// TestWriteGenerationSweepsStaleTempSiblings proves a successful marker write reclaims the
+// ".mcsd_generation-XXXX" temp siblings a crashed earlier write left behind: the leftovers are removed, the
+// marker itself holds the new generation, and real working-set content is untouched.
 func TestWriteGenerationSweepsStaleTempSiblings(t *testing.T) {
 	dir := t.TempDir()
 	leftover := filepath.Join(dir, ".mcsd_generation-123456")
@@ -562,10 +504,9 @@ func TestWriteGenerationSweepsStaleTempSiblings(t *testing.T) {
 	}
 }
 
-// TestWriteGenerationKeepsTempFormDirectory proves the sweep only reclaims FILES in
-// the temp form (issue #2283): a directory whose name happens to carry the temp
-// prefix is working-set content the scan already ignores, and deleting it would
-// silently destroy data.
+// TestWriteGenerationKeepsTempFormDirectory proves the sweep only reclaims FILES in the temp form: a directory
+// whose name happens to carry the temp prefix is working-set content the scan already ignores, and deleting it
+// would silently destroy data.
 func TestWriteGenerationKeepsTempFormDirectory(t *testing.T) {
 	dir := t.TempDir()
 	sub := filepath.Join(dir, ".mcsd_generation-dir")
@@ -582,23 +523,7 @@ func TestWriteGenerationKeepsTempFormDirectory(t *testing.T) {
 	}
 }
 
-// TestStrandedGenerationTempMatchesTheMarkerTempPredicates proves the temp name
-// writeGeneration actually creates is the one every consumer's marker-temp predicate
-// matches (issue #2287). The creation site and the three predicates are coupled only
-// by the string they share, so a rename of the marker name that misses the creation
-// site would strand temps no consumer recognises: hasWorkingSet (issue #2279) and the
-// snapshot pack (issue #834) would read a leftover as working-set content — the Worker
-// then advertises holding a world it does not hold — and sweepGenerationTemps (issue
-// #2283) would stop reclaiming them.
-//
-// So the expectations here are DERIVED from the shared marker name rather than hardcoded: a
-// rename that carries the creation site with it keeps this test green, while one that
-// leaves the creation site behind turns it red. The scratchformat contract pins the
-// persisted marker NAME; this guards the temp PATTERN against that name.
-//
-// The temp is stranded through the real creation site: a directory sitting at the
-// marker path makes the rename fail, leaving behind exactly what a crash between the
-// temp write and the rename leaves behind.
+// Capture the actual stranded temp name so producer and all marker-exclusion predicates are checked together.
 func TestStrandedGenerationTempMatchesTheMarkerTempPredicates(t *testing.T) {
 	dir := t.TempDir()
 	// The directory makes the rename fail with EISDIR, and writeGeneration's
@@ -652,9 +577,8 @@ func strandedGenerationTemp(t *testing.T, dir string) string {
 	return names[0]
 }
 
-// TestGenerationMarkerRetainedOnRestart proves a transient restart retains the
-// generation marker (the same Worker keeps its live working set), so the held
-// generation is re-reported on the next registration (issue #763).
+// TestGenerationMarkerRetainedOnRestart proves a transient restart retains the generation marker (the same
+// Worker keeps its live working set), so the held generation is re-reported on the next registration.
 func TestGenerationMarkerRetainedOnRestart(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)

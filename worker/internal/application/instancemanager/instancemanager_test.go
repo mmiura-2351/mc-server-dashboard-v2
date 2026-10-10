@@ -47,21 +47,15 @@ type fakeInstance struct {
 	events   chan execution.StatusEvent
 	stopped  bool
 	graceful bool
-	// alive/aliveErr are what ProbeAlive answers, held INDEPENDENTLY of state
-	// (issue #2475). ProbeAlive exists precisely because the two can diverge: a
-	// failed driver Stop restores the cached state to its pre-stop value while the
-	// container's real fate is whatever the daemon says (issue #2473). A fake that
-	// derived liveness from state could not express that divergence, so a
-	// converger test written against it would be a tautology. Tests set these via
-	// setAlive; the base fake starts alive and a successful Stop makes it dead, so
-	// an instance nobody touches still behaves as before.
+	// Keep probe liveness independent of cached state so failed-stop tests can model their divergence.
+	// A fake derived from state would make convergence checks tautological.
 	alive    bool
 	aliveErr error
 	// probes counts ProbeAlive calls so a test can anchor on the converger's own
 	// progress instead of a wall-clock sleep.
 	probes int
-	// seq, when set, records a "stop" marker on Stop so a test can assert the
-	// terminate ordered against the RCON recorder (the #1007 flush-before-stop).
+	// seq, when set, records a "stop" marker on Stop so a test can assert the terminate ordered against the RCON
+	// recorder (the flush-before-stop).
 	seq *[]string
 }
 
@@ -96,9 +90,8 @@ func (i *fakeInstance) Status() execution.ServerState {
 	return i.state
 }
 
-// ProbeAlive answers from the independently-held alive/aliveErr, never from
-// state (issue #2475). A non-nil aliveErr models a daemon that cannot answer at
-// all — the case the converger reports as `unknown`.
+// ProbeAlive answers from the independently-held alive/aliveErr, never from state. A non-nil aliveErr models a
+// daemon that cannot answer at all, the case the converger reports as `unknown`.
 func (i *fakeInstance) ProbeAlive(context.Context) (bool, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -132,19 +125,8 @@ func (i *fakeInstance) wasStopped() (stopped, graceful bool) {
 	return i.stopped, i.graceful
 }
 
-// fakeControl is an in-memory ServerControl for ServerCommand forwarding. When
-// seq is set, every executed line is also appended to it so a test can assert the
-// RCON ordering against another recorder (the snapshot save-off / save-on bracket,
-// #694). failOnCancelled makes Execute return the context error when ctx is
-// already cancelled, so a test can prove the deferred save-on ran on a live,
-// detached context rather than the request's dead one.
-//
-// failLines maps a specific command line to the error Execute returns for it, so a
-// test can fail one step of the quiesce bracket (e.g. save-all) while others
-// succeed (#907 partial-quiesce path). When poison is set, fakeControl models the
-// real rcon client: the FIRST Execute error marks the connection broken, and every
-// subsequent Execute returns rcon.ErrConnBroken until the client is redialed — the
-// data-loss interaction the poisoned-restore fix addresses.
+// fakeControl records RCON ordering alongside other fake actions.
+// Per-line errors simulate a command that may have executed before its reply failed.
 type fakeControl struct {
 	reply           string
 	err             error
@@ -188,9 +170,8 @@ func (c *fakeControl) Execute(ctx context.Context, line string) (string, error) 
 
 func (c *fakeControl) Close() error { return nil }
 
-// rconFailInstance models a driver instance whose RCON "stop" fails, causing
-// the driver to fall back to docker stop. The preFallback hook is invoked (if
-// supplied) on the graceful path, just as the real driver does (#1007). This
+// rconFailInstance models a driver instance whose RCON "stop" fails, causing the driver to fall back to docker
+// stop. The preFallback hook is invoked (if supplied) on the graceful path, just as the real driver does. This
 // lets the instancemanager tests verify the flush wiring.
 type rconFailInstance struct {
 	*fakeInstance
@@ -230,37 +211,20 @@ func newManager(t *testing.T, d execution.ExecutionDriver, ctrl execution.Server
 	scratch := t.TempDir()
 	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch,
 		func(context.Context, string, string, string) (execution.ServerControl, error) {
-			// The real openControl never yields a nil control without an error (main.go).
-			// Tests that don't wire one exercise RCON-free paths; surface that as a dial
-			// failure so the #1007 stop-flush (and the snapshot quiesce) degrade gracefully
-			// instead of dereferencing a nil control.
+			// Model an unwired control as a dial error; production never returns a nil control without an error.
 			if ctrl == nil {
 				return nil, fmt.Errorf("test: no rcon control configured")
 			}
 			return ctrl, nil
 		})
-	// Drop the quiesce settle-wait poll interval to zero by default so a running-id
-	// snapshot test does not pay the real 2s poll (#907); tests that exercise the
-	// settle-wait itself override it explicitly.
+	// Drop the quiesce settle-wait poll interval to zero by default so a running-id snapshot test does not pay the
+	// real 2s poll; tests that exercise the settle-wait itself override it explicitly.
 	m.settlePollInterval = 0
 	closeWithTest(t, m)
 	return m
 }
 
-// closeWithTest ends the manager with the test that built it (issues #2493,
-// #2777). A test whose stop fails records a failed-stop orphan, and an orphan
-// nobody resolves keeps its converger probing and re-stopping at the production
-// cadence — inside a test binary, against the fixtures of a test that finished
-// minutes ago. Every manager also owns a status dispatcher from the moment New
-// returns, and every started instance a status and a metrics pump; none of them
-// end on their own here, because no fake in this package ever closes an
-// instance's event channel. Close joins them all, so the goroutines are gone
-// before the test is.
-//
-// EVERY New in this package's tests registers it, not only the constructors and
-// not only the tests that can reach an orphan: New alone starts a goroutine, so
-// a manager built without a Close is a leak whatever the test does with it.
-// TestMain (shutdown_test.go) is what holds that line.
+// Register cleanup immediately so assertions that abort a test still close the Manager and join its goroutines.
 func closeWithTest(t *testing.T, m *Manager) {
 	t.Helper()
 	t.Cleanup(m.Close)
@@ -270,10 +234,9 @@ func startCmd() session.Command {
 	return session.Command{CommandID: "c1", ServerID: "s1", Kind: "StartServer", Driver: "container", MinecraftVersion: "1.21"}
 }
 
-// A StartServer launches the driver against the id's working dir under scratch —
-// the working set the API's preceding HydrateTrigger put there (control_plane.proto,
-// StartServer). The start no longer conjures that directory when it is missing: see
-// TestStartRefusedWhenWorkingDirAbsent (issue #2499).
+// A StartServer launches the driver against the id's working dir under scratch, the working set the API's
+// preceding HydrateTrigger put there (control_plane.proto, StartServer). The start no longer conjures that
+// directory when it is missing: see TestStartRefusedWhenWorkingDirAbsent.
 func TestStartServerLaunchesAgainstTheWorkingDir(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
@@ -297,13 +260,7 @@ func TestStartServerLaunchesAgainstTheWorkingDir(t *testing.T) {
 	}
 }
 
-// A start whose working dir is ABSENT is REFUSED rather than launched into an empty
-// directory (issue #2499). The API issues a HydrateTrigger before every start that
-// needs one, so an absent working dir means the hydrate was skipped over a working
-// set this Worker does not hold — the #696 class, and the direction that loses a
-// world rather than costing an extra transfer. The refusal is SERVER_NOT_FOUND and
-// its message carries the "working dir absent" phrase the API keys on
-// (_WORKING_SET_ABSENT_MARKER, lifecycle.py) to re-launch WITH a full hydrate.
+// Missing scratch must return the API's working-set-absent refusal so launch replays with a full hydrate.
 func TestStartRefusedWhenWorkingDirAbsent(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
@@ -327,11 +284,9 @@ func TestStartRefusedWhenWorkingDirAbsent(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(m.scratchDir, "s1")); !os.IsNotExist(err) {
 		t.Fatalf("working dir stat err = %v, want it to still be absent", err)
 	}
-	// The refusal releases the reservation it took, so the corrective launch — the
-	// API's re-dispatch after its own hydrate — is not refused BUSY behind this one
-	// (the leak shape of issue #1950). Read the map directly rather than inferring it
-	// from a follow-up command's code: a command that fails BEFORE reserve() would
-	// make the inference vacuous.
+	// The refusal releases the reservation it took, so the corrective launch, the API's re-dispatch after its own
+	// hydrate, is not refused BUSY behind this one (the leak shape of). Read the map directly rather than inferring
+	// it from a follow-up command's code: a command that fails BEFORE reserve would make the inference vacuous.
 	m.mu.Lock()
 	leaked := m.reserved["s1"]
 	m.mu.Unlock()
@@ -345,12 +300,8 @@ func TestStartRefusedWhenWorkingDirAbsent(t *testing.T) {
 	}
 }
 
-// A working dir holding ONLY the generation marker STARTS (issue #2802). That is
-// the 204 "nothing published yet" shape: writeGenerationGuarded MkdirAll's the dir
-// and stamps the marker as its only write, and booting a fresh world out of it is
-// the contract, not an accident. It is the case that decides the guard's predicate
-// — a content predicate ("level.dat present") would refuse this legitimate first
-// start, which is why the predicate is the marker and nothing else.
+// Marker-only scratch is a legitimate first start after a 204 hydrate; a content-based launch guard would reject
+// it.
 func TestStartAcceptsMarkerOnlyWorkingDir(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
@@ -372,13 +323,7 @@ func TestStartAcceptsMarkerOnlyWorkingDir(t *testing.T) {
 	}
 }
 
-// A scratch dir whose CONTENTS were destroyed while the directory itself survived
-// is refused exactly like an absent one (issue #2802). The #2499 guard was a bare
-// directory stat, so this shape passed it and booted the server into an empty
-// directory — the same #696 loss, one rmdir short of the case that was closed. The
-// predicate is the generation marker, so a dir holding only a CRASHED stamp's temp
-// sibling (".mcsd_generation-*", which no consumer treats as a marker) is refused
-// too: the claim the skipped hydrate relied on was never published.
+// An emptied directory and a marker-temp-only directory both lack the exact marker required by launch.
 func TestStartRefusedWhenScratchEmptiedInPlace(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -431,14 +376,8 @@ func TestStartRefusedWhenScratchEmptiedInPlace(t *testing.T) {
 	}
 }
 
-// A RESTART of a RUNNING server whose working set was destroyed out of band is
-// refused on the RELAUNCH (issue #2802). Until the guard moved into launchReserved
-// it lived in handleStart only, so the restart's relaunch went straight to the
-// MkdirAll and booted the live server into an empty directory — #2499's hole
-// reached through a different verb. The stop is taken first (any recovery needs the
-// server stopped and the on-disk world is already forfeit), so the server is left
-// down and evicted, exactly as the port_conflict / image_missing relaunch rows; the
-// API's reconciler re-launches it WITH a hydrate.
+// A restart must apply the same working-set guard to relaunch after stop; failure leaves API reconciliation to
+// recover.
 func TestRestartRefusedWhenWorkingSetDestroyed(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, &fakeControl{reply: "ok"}).WithTransfer(&fakeTransfer{})
@@ -470,9 +409,8 @@ func TestRestartRefusedWhenWorkingSetDestroyed(t *testing.T) {
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("working dir stat err = %v, want it to still be absent", err)
 	}
-	// The instance is evicted (the restart's stop confirmed) and the id is left
-	// unreserved, so the API's corrective re-launch is not refused BUSY behind it
-	// (the leak shape of issue #1950). Read both maps directly rather than inferring
+	// The instance is evicted (the restart's stop confirmed) and the id is left unreserved, so the API's corrective
+	// re-launch is not refused BUSY behind it (the leak shape of). Read both maps directly rather than inferring
 	// them from a follow-up command.
 	m.mu.Lock()
 	_, tracked := m.instances["s1"]
@@ -492,10 +430,9 @@ func TestRestartRefusedWhenWorkingSetDestroyed(t *testing.T) {
 	}
 }
 
-// The command's resource allocation reaches the InstanceSpec: the memory limit
-// (bytes on the wire, #706) is converted to MiB, and the CPU allocation
-// (millicores, #723) is carried as-is with no derivation. Unset stays 0 (default
-// heap, default weight).
+// The command's resource allocation reaches the InstanceSpec: the memory limit (bytes on the wire) is converted
+// to MiB, and the CPU allocation (millicores) is carried as-is with no derivation. Unset stays 0 (default heap,
+// default weight).
 func TestStartCarriesResourceAllocationToSpec(t *testing.T) {
 	tests := []struct {
 		name             string
@@ -533,8 +470,8 @@ func TestStartCarriesResourceAllocationToSpec(t *testing.T) {
 	}
 }
 
-// An unset launch mode (the default) launches with the historical JAR mode, so
-// the spec carries LaunchModeJar — the byte-for-byte original behavior (#305).
+// An unset launch mode (the default) launches with the historical JAR mode, so the spec carries LaunchModeJar,
+// the byte-for-byte original behavior.
 func TestStartDefaultLaunchModeIsJar(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
@@ -570,8 +507,8 @@ func TestStartJarLaunchMode(t *testing.T) {
 	}
 }
 
-// A "forge-argsfile" launch mode threads LaunchModeForgeArgsfile onto the spec so
-// the driver runs the install-then-launch sequence (#305).
+// A "forge-argsfile" launch mode threads LaunchModeForgeArgsfile onto the spec so the driver runs the
+// install-then-launch sequence.
 func TestStartForgeLaunchMode(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
@@ -590,9 +527,8 @@ func TestStartForgeLaunchMode(t *testing.T) {
 	}
 }
 
-// An unrecognized launch mode is a malformed command: it fails with INTERNAL
-// (an unpinned code, so the #294 contract table is untouched) and never starts
-// the driver (#305).
+// An unrecognized launch mode is a malformed command: it fails with INTERNAL (an unpinned code, so the contract
+// table is untouched) and never starts the driver.
 func TestStartUnknownLaunchMode(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
@@ -655,9 +591,9 @@ func TestStopServerGraceful(t *testing.T) {
 	}
 }
 
-// A graceful stop whose RCON "stop" succeeds: the fakeInstance does not call the
-// preFallback hook (it is a minimal fake), so no save-all appears in the sequence.
-// The real driver calls preFallback always before stop on the graceful path (#1007).
+// A graceful stop whose RCON "stop" succeeds: the fakeInstance does not call the preFallback hook (it is a
+// minimal fake), so no save-all appears in the sequence. The real driver calls preFallback always before stop on
+// the graceful path.
 func TestStopServerGracefulRCONSuccessSkipsFlush(t *testing.T) {
 	var seq []string
 	d := &fakeDriver{}
@@ -681,9 +617,8 @@ func TestStopServerGracefulRCONSuccessSkipsFlush(t *testing.T) {
 	}
 }
 
-// When the driver calls the preFallback hook on the graceful path, the flush
-// must run: save-all + settle lands the dirty chunks on disk before the process
-// is terminated (#1007). The rconFailInstance models this by calling the
+// When the driver calls the preFallback hook on the graceful path, the flush must run: save-all + settle lands
+// the dirty chunks on disk before the process is terminated. The rconFailInstance models this by calling the
 // preFallback hook.
 func TestStopServerGracefulRCONFailureFlushesBeforeTerminate(t *testing.T) {
 	var seq []string
@@ -706,9 +641,8 @@ func TestStopServerGracefulRCONFailureFlushesBeforeTerminate(t *testing.T) {
 	}
 }
 
-// A force stop (cmd.Force) is the operator's "kill it now" escape hatch and must
-// NOT attempt the graceful save-all flush — it intentionally skips the save so a
-// wedged or unresponsive server can still be terminated (#1007).
+// A force stop (cmd.Force) is the operator's "kill it now" escape hatch and must NOT attempt the graceful
+// save-all flush, it intentionally skips the save so a wedged or unresponsive server can still be terminated.
 func TestStopServerForceSkipsFlush(t *testing.T) {
 	var seq []string
 	d := &fakeDriver{}
@@ -733,12 +667,7 @@ func TestStopServerForceSkipsFlush(t *testing.T) {
 	}
 }
 
-// A failed save-all on the graceful-stop flush must DEGRADE to terminating the
-// server, not wedge the stop (#1007): the flush is best-effort, and a stop that
-// could not save must still complete (the API gives stop dispatch a bounded
-// budget and an unflushed world is no worse than today's pre-fix behavior). Uses
-// rconFailDriver so the preFallback hook fires and exercises the save-all code
-// path.
+// Fail save-all inside the graceful-stop hook and require stop to proceed despite the best-effort flush failure.
 func TestStopServerGracefulProceedsWhenSaveFails(t *testing.T) {
 	var seq []string
 	d := &rconFailDriver{}
@@ -759,9 +688,8 @@ func TestStopServerGracefulProceedsWhenSaveFails(t *testing.T) {
 	}
 }
 
-// A failed save-off on the graceful-stop flush must still proceed to save-all
-// (#1038): save-off is best-effort — if it fails, the flush continues with
-// save-all so dirty chunks still land on disk. The stop must succeed regardless.
+// A failed save-off on the graceful-stop flush must still proceed to save-all: save-off is best-effort, if it
+// fails, the flush continues with save-all so dirty chunks still land on disk. The stop must succeed regardless.
 func TestStopServerGracefulProceedsWhenSaveOffFails(t *testing.T) {
 	var seq []string
 	d := &rconFailDriver{}
@@ -784,9 +712,8 @@ func TestStopServerGracefulProceedsWhenSaveOffFails(t *testing.T) {
 	}
 }
 
-// A failed save-off poisons the RCON connection (#919), so save-all on the same
-// connection returns ErrConnBroken. flushBeforeStopWithDriver must redial a fresh
-// connection so save-all succeeds (#1040).
+// A failed save-off poisons the RCON connection, so save-all on the same connection returns ErrConnBroken.
+// flushBeforeStopWithDriver must redial a fresh connection so save-all succeeds.
 func TestStopServerGracefulRedialsAfterPoisonedSaveOff(t *testing.T) {
 	var seq []string
 	d := &rconFailDriver{}
@@ -829,10 +756,9 @@ func TestStopServerGracefulRedialsAfterPoisonedSaveOff(t *testing.T) {
 	}
 }
 
-// Cascading RCON failure (#1135): save-off poisons the connection, the manager
-// redials, but save-all ALSO fails on the fresh connection (the Minecraft RCON
-// server is completely unreachable). The stop must still complete — RCON failure
-// should never prevent server shutdown.
+// Cascading RCON failure: save-off poisons the connection, the manager redials, but save-all ALSO fails on the
+// fresh connection (the Minecraft RCON server is completely unreachable). The stop must still complete, RCON
+// failure should never prevent server shutdown.
 func TestStopServerGracefulCompletesWhenBothRCONCommandsFail(t *testing.T) {
 	var seq []string
 	d := &rconFailDriver{}
@@ -894,12 +820,8 @@ func TestServerCommandForwardsOutput(t *testing.T) {
 	}
 }
 
-// TestOpenControlReceivesRunningServerDriver pins the per-server driver
-// resolution the RCON dial host depends on: on a worker that advertises both
-// drivers, the manager must hand openControl the driver that actually runs each
-// server (issue #218). The seam carries the driver name; the resolution itself
-// lives in main.go's openControl, exercised here through the driver value the
-// manager passes.
+// Pass each running server's actual driver to openControl; advertised drivers do not determine its RCON
+// topology.
 func TestOpenControlReceivesRunningServerDriver(t *testing.T) {
 	var gotDriver string
 	scratch := t.TempDir()
@@ -973,11 +895,10 @@ func assertDialsCarry(t *testing.T, got []string, want string) {
 	}
 }
 
-// TestOpenControlReceivesTheServerMinecraftVersion pins that every RCON dial for
-// a server carries that server's Minecraft version, which decides the charset
-// its RCON password is read in (issue #3116). The running-server paths take it
-// from the StartServer command; the stop paths, which evict that command before
-// they dial, carry it alongside the driver name.
+// TestOpenControlReceivesTheServerMinecraftVersion pins that every RCON dial for a server carries that server's
+// Minecraft version, which decides the charset its RCON password is read in. The running-server paths take it
+// from the StartServer command; the stop paths, which evict that command before they dial, carry it alongside
+// the driver name.
 func TestOpenControlReceivesTheServerMinecraftVersion(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -1016,8 +937,7 @@ func TestStatusEventsAreForwarded(t *testing.T) {
 	}
 }
 
-// A crash the driver classified reaches the session with its reason's wire name
-// beside the detail (issue #1093).
+// A crash the driver classified reaches the session with its reason's wire name beside the detail.
 func TestCrashReasonIsForwarded(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
@@ -1059,9 +979,8 @@ func TestRestartStopsAndStarts(t *testing.T) {
 	}
 }
 
-// An in-place restart with fakeInstance (which does not call preFallback): no
-// save-all appears in the sequence. The real driver calls preFallback always
-// before stop on the graceful path (#1007).
+// An in-place restart with fakeInstance (which does not call preFallback): no save-all appears in the sequence.
+// The real driver calls preFallback always before stop on the graceful path.
 func TestRestartRCONSuccessSkipsFlush(t *testing.T) {
 	var seq []string
 	d := &fakeDriver{}
@@ -1083,9 +1002,8 @@ func TestRestartRCONSuccessSkipsFlush(t *testing.T) {
 	}
 }
 
-// When a restart uses rconFailInstance (which calls preFallback), the flush
-// must run: the relaunch re-reads the same on-disk scratch, so unflushed dirty
-// chunks would roll the block edits back (#1007).
+// When a restart uses rconFailInstance (which calls preFallback), the flush must run: the relaunch re-reads the
+// same on-disk scratch, so unflushed dirty chunks would roll the block edits back.
 func TestRestartRCONFailureFlushesBeforeTerminate(t *testing.T) {
 	var seq []string
 	d := &rconFailDriver{}
@@ -1125,8 +1043,8 @@ func TestRestartResultCarriesOriginalCorrelationID(t *testing.T) {
 	}
 }
 
-// A driver Start error wrapping execution.ErrPortConflict surfaces as the
-// sanitized port_conflict code, not the generic internal one (issue #225).
+// A driver Start error wrapping execution.ErrPortConflict surfaces as the sanitized port_conflict code, not the
+// generic internal one.
 func TestStartPortConflictSurfacesCode(t *testing.T) {
 	d := &fakeDriver{startErr: fmt.Errorf("containerdriver: start: %w", execution.ErrPortConflict)}
 	m := newManager(t, d, nil)
@@ -1138,8 +1056,7 @@ func TestStartPortConflictSurfacesCode(t *testing.T) {
 	}
 }
 
-// A driver Start error wrapping execution.ErrImageMissing surfaces as the
-// sanitized image_missing code (issue #225).
+// A driver Start error wrapping execution.ErrImageMissing surfaces as the sanitized image_missing code.
 func TestStartImageMissingSurfacesCode(t *testing.T) {
 	d := &fakeDriver{startErr: fmt.Errorf("containerdriver: create: %w", execution.ErrImageMissing)}
 	m := newManager(t, d, nil)
@@ -1151,7 +1068,7 @@ func TestStartImageMissingSurfacesCode(t *testing.T) {
 	}
 }
 
-// An unclassified driver Start error keeps the generic internal code (issue #225).
+// An unclassified driver Start error keeps the generic internal code.
 func TestStartUnclassifiedFailureIsInternal(t *testing.T) {
 	d := &fakeDriver{startErr: fmt.Errorf("daemon unreachable")}
 	m := newManager(t, d, nil)

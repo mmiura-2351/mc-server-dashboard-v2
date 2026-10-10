@@ -12,12 +12,8 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
 
-// saveOnRecorder is a concurrency-safe openControl. fakeControl cannot stand in
-// here: the shutdown restore dials on its own goroutine while the stop that
-// opened the bracket is still inside the driver, so two brackets append RCON
-// lines at once and an unsynchronised recorder is a data race the -race build
-// fails on rather than a fixture. failLines maps a command line to the error
-// Execute returns for it, so a test can fail one step of the flush.
+// Record RCON calls under a lock because shutdown restoration and stop lanes execute concurrently.
+// Per-line failures model uncertain command outcomes.
 type saveOnRecorder struct {
 	mu        sync.Mutex
 	lines     []string
@@ -184,13 +180,7 @@ func awaitLine(t *testing.T, rec *saveOnRecorder, line, why string) {
 	t.Fatalf("rcon lines = %v, want %q: %s", rec.all(), line, why)
 }
 
-// flushGatedInstance runs the pre-stop flush and then PARKS inside the driver
-// Stop, holding the manager in exactly the window this issue is about: the
-// flush's save-off has disabled auto-save on a server that is still running, and
-// nothing re-enables it until the escalation resolves one way or the other. In
-// production that window is the containerdriver's escalation — the kill call plus
-// the post-kill exit confirmation, up to 60 s after a flush that succeeded and
-// ~160 s after one that did not.
+// Run the pre-stop flush, then park driver Stop to hold a live server between save-off and stop resolution.
 type flushGatedInstance struct {
 	*fakeInstance
 	stopEntered chan struct{}
@@ -211,8 +201,8 @@ func newFlushGatedInstance(id string, stopErr error) *flushGatedInstance {
 }
 
 func (i *flushGatedInstance) Stop(ctx context.Context, graceful bool, preFallback ...func(context.Context) bool) error {
-	// Run the flush before the terminate, exactly as the real containerdriver does
-	// on the graceful path (#1007) — it is what issues the save-off.
+	// Run the flush before the terminate, exactly as the real containerdriver does on the graceful path, it is what
+	// issues the save-off.
 	if graceful && len(preFallback) > 0 && preFallback[0] != nil {
 		_ = preFallback[0](ctx)
 	}
@@ -241,16 +231,7 @@ func (d *flushGatedDriver) Start(_ context.Context, spec execution.InstanceSpec)
 	return d.inst, nil
 }
 
-// gatedDialControl is an openControl whose dial can be ARMED to block, modeling a
-// server that TCP-accepts but never finishes the RCON handshake. A fixture that
-// answers instantly cannot show whether Close waited for the restore to land, so
-// the slow dial is the whole point. It honours ctx exactly as rcon.Dial does
-// (DialContext plus a handshake deadline), which is also what lets a BOUNDED
-// restore give up on its own.
-//
-// Dials before arm() answer instantly, so the stop's own flush is never gated, and
-// onlyServer (when set) confines the gate to one id so a second server's flush can
-// run to completion beside a blocked one.
+// Gate selected restore dials while honoring context cancellation; earlier flush dials remain immediate.
 type gatedDialControl struct {
 	rec         *saveOnRecorder
 	gate        atomic.Bool
@@ -295,18 +276,7 @@ func newSaveOnManager(t *testing.T, d execution.ExecutionDriver, open controlFun
 	return m
 }
 
-// A retry stop quiesces the world with save-off and re-enables it only once the
-// escalation has resolved (restoreSaveOnAfterFailedStop). A Worker that went down
-// inside that window left a SURVIVING Minecraft container with auto-save off: the
-// container is not a Compose service, so nothing stops it on the way out, and the
-// repair arrived only at the next Worker boot (containerdriver.sweepSaveOn,
-// #1710) — which an explicit stop or `docker compose down` never brings. Close
-// closes the bracket itself now, at the moment the shutdown starts (issue #3166).
-//
-// The assertion is made while the stop is STILL PARKED, and that is what makes it
-// a pin on the timing rather than merely on the call: the parked escalation is
-// what Close is waiting for, so a restore issued after that Wait could not appear
-// here.
+// Hold the converger's stop in flight and require shutdown to restore its outstanding save-off bracket.
 func TestCloseRestoresSaveOnForAConvergerStopStillInFlight(t *testing.T) {
 	rec := &saveOnRecorder{}
 	m := newSaveOnManager(t, &fakeDriver{}, rec.open)
@@ -338,13 +308,7 @@ func TestCloseRestoresSaveOnForAConvergerStopStillInFlight(t *testing.T) {
 	}
 }
 
-// The same window on the OPERATOR lane, which is where a timer cannot reach it:
-// Runner.serve joins no command lane (#3168), so an in-flight StopServer is
-// abandoned the moment run() returns and its save-off was never restored at all —
-// not by the escalation (the process exits under it) and not by compose's
-// stop_grace_period (nothing waits for that lane). Close's drain is keyed on the
-// outstanding save-off rather than on which lane issued it, so this lane is
-// covered by the same code (issue #3166).
+// Cover an operator lane, which Close does not join; the outstanding-bracket ledger must still restore save-on.
 func TestCloseRestoresSaveOnForAnOperatorStopStillInFlight(t *testing.T) {
 	rec := &saveOnRecorder{}
 	d := &flushGatedDriver{}
@@ -388,16 +352,7 @@ func TestCloseRestoresSaveOnForAnOperatorStopStillInFlight(t *testing.T) {
 	}
 }
 
-// Close must not merely ISSUE the restore, it must not return until the save-on
-// has landed: the process exits the moment run() returns (main.go), which kills a
-// restore still in flight — so a shutdown that left it unjoined would have moved
-// the loss rather than fixed it.
-//
-// A fixture that answers instantly cannot show this, which is why the dial is
-// gated here: the test proves Close is still inside itself while the restore is
-// parked in the dial, then releases it and requires the save-on to be recorded by
-// the time Close returns. The stop runs on the operator lane deliberately — Close
-// joins nothing there, so the restore is the ONLY thing that can be holding it.
+// Gate restore dial and require Close to wait for save-on; a fire-and-forget restore would die with the process.
 func TestCloseWaitsForTheShutdownRestoreToLand(t *testing.T) {
 	rec := &saveOnRecorder{}
 	gate := newGatedDialControl(rec)
@@ -447,16 +402,7 @@ func TestCloseWaitsForTheShutdownRestoreToLand(t *testing.T) {
 	}
 }
 
-// ...but the wait is BOUNDED. The restore is one dial plus one command against a
-// server on the same docker network, sub-second whenever that server answers at
-// all; a server that does not answer within the bound is, in this exact window, a
-// server whose stop is escalating BECAUSE it is not answering, and holding the
-// Worker's shutdown open for it buys nothing the next boot's sweepSaveOn does not
-// already cover. An unbounded wait here would instead put the failure path's
-// generous restoreSaveTimeout on a shutdown leg that nothing overlaps.
-//
-// The gate is never released, so the only thing that can end this Close is the
-// bound.
+// Never release restore dial; only its bounded context may let Close finish.
 func TestCloseBoundsTheWaitForAnUnreachableRestore(t *testing.T) {
 	// The relationship is the requirement, not the number: the shutdown restore has
 	// no escalation to hide behind, so it cannot carry the budget sized for one that
@@ -540,18 +486,8 @@ func TestCloseIssuesNoSaveOnOnceTheStopResolved(t *testing.T) {
 	}
 }
 
-// A save-off whose ROUND TRIP failed may still have disabled auto-save: rcon.Execute
-// writes the command and only then waits for a reply, so a timeout says nothing
-// about whether Minecraft ran it. The debt is therefore recorded before the command
-// goes on the wire, and the shutdown restores auto-save for a server whose save-off
-// was merely reported as failing — the direction that costs one idempotent save-on
-// when wrong, instead of a surviving world that saves nothing.
-//
-// The parked stop CONFIRMS termination once released, so the failure-path restore
-// never runs: the save-on this test sees can only be the shutdown's. And the
-// release waits for the shutdown context to be cancelled, which happens after
-// Close's drain has already read this id — without that anchor the stop could
-// resolve first and forget the debt.
+// Simulate save-off executing despite a failed reply; shutdown must still issue save-on before the stop
+// resolves.
 func TestCloseRestoresSaveOnWhenTheFlushSaveOffReportedFailure(t *testing.T) {
 	rec := &saveOnRecorder{failLines: map[string]error{"save-off": errors.New("rcon read timeout")}}
 	m := newSaveOnManager(t, &fakeDriver{}, rec.open)
@@ -582,13 +518,7 @@ func TestCloseRestoresSaveOnWhenTheFlushSaveOffReportedFailure(t *testing.T) {
 	}
 }
 
-// The debt must outlive the driver Stop's RETURN, all the way past the restore that
-// the failure calls for. Forgetting it in between is not a cosmetic ordering: Close
-// joins no command lane, so a drain landing in that window finds an empty map and
-// the process exits under a survivor with auto-save still off.
-//
-// Asserted from inside the restore's own dial, which is the one instant where the
-// ordering is observable without a race.
+// Assert inside restore dial that the debt remains visible after failed Stop until restoration finishes.
 func TestFailedStopKeepsTheDebtUntilItsRestoreRan(t *testing.T) {
 	rec := &saveOnRecorder{}
 	d := &flushOrphanDriver{stopAfter: 1} // the stop fails: the restore path runs
@@ -630,17 +560,8 @@ func TestFailedStopKeepsTheDebtUntilItsRestoreRan(t *testing.T) {
 	}
 }
 
-// THE LEDGER IS READ MORE THAN ONCE, because a stop already dispatched can open its
-// bracket AFTER the first read. The flush's own RCON dial stands between the command
-// and its save-off, and that dial is a TCP connect plus an AUTH handshake — up to
-// rcon's 30 s ceiling, not an instant — so a stop that was in flight when the
-// shutdown began can land its save-off well after Close drained. Close outlives that
-// by however long its joined work takes and then returns: the operator lane it
-// belongs to is never joined (#3168), so the process exited under a survivor with
-// auto-save off.
-//
-// The window is reproduced exactly: Close starts BEFORE the save-off, with a parked
-// converger holding it inside its join so the late bracket has somewhere to land.
+// Open a late bracket after Close's first drain while a gated converger holds the join; require the final drain
+// to restore it.
 func TestCloseRestoresSaveOnForADebtArmedAfterItsFirstDrain(t *testing.T) {
 	rec := &saveOnRecorder{}
 	gate := newGatedDialControl(rec)
@@ -712,16 +633,7 @@ func TestCloseRestoresSaveOnForADebtArmedAfterItsFirstDrain(t *testing.T) {
 	}
 }
 
-// ...and once the ledger is SEALED, the flush must not open a bracket at all. That is
-// what makes the read above the LAST one, and so what makes Close terminate: after
-// the seal no debt can be created, so no third pass is needed and no drain loop can
-// spin against a lane that keeps re-arming.
-//
-// Skipping the save-off costs this stop its quiesce — save-all and the settle still
-// run, exactly as when a save-off fails (#1038) — and that cost is confined to a lane
-// whose escalation cannot complete anyway: the seal is set after Close has joined
-// everything it joins, so nothing reaching this branch has a stop the Worker will see
-// through.
+// After the final drain seals the ledger, a late flush must not send save-off because no restore can cover it.
 func TestFlushSkipsSaveOffOnceTheSaveOnLedgerIsSealed(t *testing.T) {
 	rec := &saveOnRecorder{}
 	gate := newGatedDialControl(rec)
@@ -770,16 +682,7 @@ func TestFlushSkipsSaveOffOnceTheSaveOnLedgerIsSealed(t *testing.T) {
 	}
 }
 
-// LEG: THE SEND. Registering the debt is not the same event as putting save-off on
-// the wire, and everything between the two is on this side of the ledger's edge:
-// the statement gap, a preemption, or a slow Execute. A drain that read the entry
-// and dialed straight away could complete its save-on first and leave the order
-// save-on → save-off → save-all, with the entry already taken so the sealing pass
-// sees nothing — the Worker exits under a survivor whose auto-save is off.
-//
-// So a drain never overtakes a save-off it has not seen return. Here the save-off
-// is held ON THE WIRE, which is the same side of the edge as the statement gap the
-// finding names: the entry exists, the write does not.
+// Hold save-off in Execute after ledger registration; shutdown save-on must wait for the write to return.
 func TestCloseWaitsForAnInFlightSaveOffBeforeRestoring(t *testing.T) {
 	rec := &saveOnRecorder{blockLines: map[string]chan struct{}{"save-off": make(chan struct{})}}
 	d := &flushGatedDriver{}
@@ -835,13 +738,7 @@ func TestCloseWaitsForAnInFlightSaveOffBeforeRestoring(t *testing.T) {
 	}
 }
 
-// LEG: THE SEND, when the write never comes back. The hold above is bounded by the
-// drain's own budget, and on expiry it declines to restore rather than guessing. That
-// is the honest inference and not a concession: a save-off whose write has not
-// returned within the budget is one the server is not answering, so it most likely
-// never landed and auto-save is still on — while a save-on issued over a save-off
-// that lands later leaves auto-save OFF, which is the very state being repaired. Such
-// a server is the one containerdriver.sweepSaveOn covers at the next boot (#1710).
+// A save-off write that never returns must exhaust the shared restore budget without an out-of-order save-on.
 func TestCloseDeclinesToRestoreAnUnconfirmedSaveOff(t *testing.T) {
 	rec := &saveOnRecorder{blockLines: map[string]chan struct{}{"save-off": make(chan struct{})}}
 	d := &flushGatedDriver{}
@@ -881,13 +778,7 @@ func TestCloseDeclinesToRestoreAnUnconfirmedSaveOff(t *testing.T) {
 	}
 }
 
-// LEG: THE EDGE IS THE WRITE, not the flush. The hold exists to order the restore
-// after the save-off, so it must be released by that command's return and nothing
-// later. Releasing it at the end of the flush instead would make the drain wait out
-// save-all and the settle — up to settleBudget, far past its own budget — so a
-// bracket whose save-off DID go out would be declined rather than restored.
-//
-// Here save-off returns promptly and save-all is the command left on the wire.
+// Release the write edge after save-off, then hold save-all; restore must not wait for the rest of the flush.
 func TestCloseRestoresOnceTheSaveOffReturnsWithoutAwaitingTheRestOfTheFlush(t *testing.T) {
 	rec := &saveOnRecorder{blockLines: map[string]chan struct{}{"save-all": make(chan struct{})}}
 	d := &flushGatedDriver{}

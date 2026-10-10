@@ -195,12 +195,8 @@ func TestEditFileIntermediateSymlinkViaNewDirsIsDenied(t *testing.T) {
 	}
 }
 
-// TestOpenParentBeneathWriteRidesDirfd is the resolved-dirfd regression for the
-// residual TOCTOU (issue #122). A truly concurrent symlink swap is inherently
-// racy to test; instead it deterministically swaps the lexical parent for an
-// escaping symlink *after* the parent is resolved, then writes through the
-// resolved fd. If the write rode the lexical path it would escape; riding the fd,
-// it lands on the original (now-renamed) inode and never touches the outside dir.
+// Replace the lexical parent with an escaping symlink after resolving its fd; writes must stay on the original
+// inode.
 func TestOpenParentBeneathWriteRidesDirfd(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	root := filepath.Join(m.scratchDir, "s1")
@@ -281,7 +277,7 @@ func TestReadFileOversizedIsDenied(t *testing.T) {
 	if res.ErrorCode != session.CommandErrorFileAccessDenied {
 		t.Fatalf("ErrorCode = %v, want FileAccessDenied", res.ErrorCode)
 	}
-	// issue #548: the refined reason lets the API map it to 413, not invalid_path.
+	// The refined reason lets the API return 413 for an oversized file.
 	if res.FileAccessReason != session.FileAccessReasonPayloadTooLarge {
 		t.Fatalf("FileAccessReason = %v, want PayloadTooLarge", res.FileAccessReason)
 	}
@@ -390,7 +386,7 @@ func TestEditFileOversizedIsDenied(t *testing.T) {
 	if res.ErrorCode != session.CommandErrorFileAccessDenied {
 		t.Fatalf("ErrorCode = %v, want FileAccessDenied", res.ErrorCode)
 	}
-	// issue #548: the refined reason lets the API map it to 413, not invalid_path.
+	// The refined reason lets the API return 413 for an oversized edit.
 	if res.FileAccessReason != session.FileAccessReasonPayloadTooLarge {
 		t.Fatalf("FileAccessReason = %v, want PayloadTooLarge", res.FileAccessReason)
 	}

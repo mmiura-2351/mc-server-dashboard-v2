@@ -37,9 +37,8 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	if got := cfg.Log.Format; got != "json" {
 		t.Errorf("Log.Format = %q, want default %q", got, "json")
 	}
-	// worker.drivers has no default (issue #781): "container" is the only shipped
-	// driver and needs images, so the value must be supplied. Verify it passes
-	// through.
+	// worker.drivers has no default: "container" is the only shipped driver and needs images, so the value must be
+	// supplied. Verify it passes through.
 	if len(cfg.Worker.Drivers) != 1 || cfg.Worker.Drivers[0] != "container" {
 		t.Errorf("Worker.Drivers = %v, want [container]", cfg.Worker.Drivers)
 	}
@@ -66,9 +65,8 @@ func TestLoadFailsFastOnMissingRequired(t *testing.T) {
 	}
 }
 
-// TestLoadFailsFastOnBlankRequired pins the whitespace-only half of the
-// secret-blank rule (CONFIGURATION.md Section 3, issue #3085): a blank required
-// key reads as missing, not as a value, whichever layer supplied it.
+// TestLoadFailsFastOnBlankRequired pins the whitespace-only half of the secret-blank rule (CONFIGURATION.md
+// Section 3): a blank required key reads as missing, not as a value, whichever layer supplied it.
 func TestLoadFailsFastOnBlankRequired(t *testing.T) {
 	requiredKeys := []string{"api.grpc_endpoint", "api.credential", "worker.scratch_dir"}
 
@@ -179,9 +177,8 @@ level = "debug"
 	}
 }
 
-// TestLoadKeepsNonBlankCredentialVerbatim pins the other side of the blank rule
-// (issue #3085): only a whitespace-only value is collapsed. A non-blank
-// credential is not trimmed, because the API's end of this shared secret
+// TestLoadKeepsNonBlankCredentialVerbatim pins the other side of the blank rule: only a whitespace-only value is
+// collapsed. A non-blank credential is not trimmed, because the API's end of this shared secret
 // (control.worker_credential, _blank_to_none) keeps it verbatim too.
 func TestLoadKeepsNonBlankCredentialVerbatim(t *testing.T) {
 	env := mapEnv(map[string]string{
@@ -211,10 +208,9 @@ func TestLoadRejectsInvalidValue(t *testing.T) {
 		wantKeys []string
 	}{
 		{name: "unknown driver", env: map[string]string{"MCD_WORKER_WORKER_DRIVERS": "container,bogus"}, wantKeys: []string{"bogus"}},
-		// worker.drivers no longer has a zero-config default (issue #781), so a
-		// config that simply omits it is rejected — the path every
-		// previously-zero-config worker now hits. The error names "container" so
-		// the operator knows what to advertise.
+		// worker.drivers no longer has a zero-config default, so a config that simply omits it is rejected, the path
+		// every previously-zero-config worker now hits. The error names "container" so the operator knows what to
+		// advertise.
 		{name: "omitted drivers", env: map[string]string{"MCD_WORKER_WORKER_DRIVERS": ""}, wantKeys: []string{"worker.drivers", "container"}},
 		{name: "container without images", env: map[string]string{"MCD_WORKER_DRIVER_CONTAINER_IMAGES": ""}, wantKeys: []string{"driver.container.images"}},
 		{name: "malformed max_servers", env: map[string]string{"MCD_WORKER_WORKER_MAX_SERVERS": "not-a-number"}, wantKeys: []string{"WORKER_MAX_SERVERS"}},
@@ -263,9 +259,8 @@ func TestLoadFailsFastWhenTLSNeitherCAFileNorInsecure(t *testing.T) {
 	}
 }
 
-// TestLoadFailsFastWhenTLSCAFileBlankWithoutInsecure pins that a whitespace-only
-// api.tls.ca_file counts as unset (issue #3085), so it cannot stand in for the
-// required CA bundle.
+// TestLoadFailsFastWhenTLSCAFileBlankWithoutInsecure pins that a whitespace-only api.tls.ca_file counts as
+// unset, so it cannot stand in for the required CA bundle.
 func TestLoadFailsFastWhenTLSCAFileBlankWithoutInsecure(t *testing.T) {
 	env := mapEnv(map[string]string{
 		"MCD_WORKER_API_GRPC_ENDPOINT":  "api:50051",
@@ -283,10 +278,9 @@ func TestLoadFailsFastWhenTLSCAFileBlankWithoutInsecure(t *testing.T) {
 	}
 }
 
-// TestLoadCollapsesBlankCAFileWithInsecure pins that the value the rest of the
-// Worker reads agrees with what validation judged (issue #3085): a
-// whitespace-only api.tls.ca_file with api.tls.insecure=true is unset, so the
-// dial wiring takes the plaintext branch rather than opening a file named "   ".
+// TestLoadCollapsesBlankCAFileWithInsecure pins that the value the rest of the Worker reads agrees with what
+// validation judged: a whitespace-only api.tls.ca_file with api.tls.insecure=true is unset, so the dial wiring
+// takes the plaintext branch rather than opening a file named " ".
 func TestLoadCollapsesBlankCAFileWithInsecure(t *testing.T) {
 	env := mapEnv(map[string]string{
 		"MCD_WORKER_API_GRPC_ENDPOINT":       "api:50051",
@@ -345,11 +339,7 @@ func mtlsBaseEnv(t *testing.T) map[string]string {
 	}
 }
 
-// TestLoadRejectsHalfMTLSClientPair pins the reject of a half-configured mTLS
-// client pair (issue #2661): exactly one of api.tls.client_cert_file /
-// api.tls.client_key_file set is a fatal validation error naming the missing
-// half — matching the "exactly one of ca_file/insecure" precedent. This flips
-// the behavior #1981 pinned as "silently ignored".
+// Require both mTLS certificate and key, naming the missing half on failure.
 func TestLoadRejectsHalfMTLSClientPair(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -359,7 +349,7 @@ func TestLoadRejectsHalfMTLSClientPair(t *testing.T) {
 	}{
 		{name: "cert without key", setKey: "MCD_WORKER_API_TLS_CLIENT_CERT_FILE", wantNamed: "api.tls.client_key_file"},
 		{name: "key without cert", setKey: "MCD_WORKER_API_TLS_CLIENT_KEY_FILE", wantNamed: "api.tls.client_cert_file"},
-		// A whitespace-only half counts as unset (issue #3085).
+		// A whitespace-only half counts as unset.
 		{name: "cert with blank key", setKey: "MCD_WORKER_API_TLS_CLIENT_CERT_FILE", blankKey: "MCD_WORKER_API_TLS_CLIENT_KEY_FILE", wantNamed: "api.tls.client_key_file"},
 		{name: "key with blank cert", setKey: "MCD_WORKER_API_TLS_CLIENT_KEY_FILE", blankKey: "MCD_WORKER_API_TLS_CLIENT_CERT_FILE", wantNamed: "api.tls.client_cert_file"},
 	}
@@ -382,8 +372,7 @@ func TestLoadRejectsHalfMTLSClientPair(t *testing.T) {
 	}
 }
 
-// TestLoadAcceptsWholeOrNoMTLSClientPair pins the accept side of #2661: both
-// halves of the mTLS client pair set, or neither, passes validation.
+// Accept both mTLS files or neither.
 func TestLoadAcceptsWholeOrNoMTLSClientPair(t *testing.T) {
 	t.Run("both halves set", func(t *testing.T) {
 		env := mtlsBaseEnv(t)
@@ -400,9 +389,8 @@ func TestLoadAcceptsWholeOrNoMTLSClientPair(t *testing.T) {
 		}
 	})
 
-	// Both halves whitespace-only is "neither set" (issue #3085), and the loaded
-	// values must say so too: the dial wiring loads the pair whenever both are
-	// non-empty, so a surviving "   " would open files named "   ".
+	// Both halves whitespace-only is "neither set", and the loaded values must say so too: the dial wiring loads
+	// the pair whenever both are non-empty, so a surviving " " would open files named " ".
 	t.Run("both halves blank", func(t *testing.T) {
 		env := mtlsBaseEnv(t)
 		env["MCD_WORKER_API_TLS_CLIENT_CERT_FILE"] = "   "
@@ -555,9 +543,8 @@ func loadableContainerUser() string {
 	return ContainerUser{UID: os.Geteuid(), GID: os.Getegid()}.String()
 }
 
-// The uid:gid MC containers run as follows from who the Worker is: root can serve
-// any unprivileged user and defaults to a fixed one, an unprivileged Worker can
-// only run servers as itself (issue #2600).
+// The uid:gid MC containers run as follows from who the Worker is: root can serve any unprivileged user and
+// defaults to a fixed one, an unprivileged Worker can only run servers as itself.
 func TestResolveContainerUser(t *testing.T) {
 	tests := []struct {
 		name       string

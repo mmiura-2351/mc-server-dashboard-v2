@@ -9,36 +9,15 @@ import (
 	"time"
 )
 
-// flowIdleTimeout / flowSweepInterval bound how long a per-flow local UDP
-// socket survives without activity before this Worker closes it — purely a
-// local resource-hygiene measure; it is the relay's own flow table (with the
-// same defaults, docs/app/BEDROCK_TUNNEL.md Section 7) that actually decides
-// when a Bedrock client is gone, and simply stops sending datagrams for that
-// flow id once it does.
+// Evict idle local sockets; the relay's flow table determines when a client is gone.
 const flowIdleTimeout = 60 * time.Second
 const flowSweepInterval = 15 * time.Second
 
-// udpReadBufferSize is sized generously above the relay's 1200-byte RakNet
-// payload budget so a Geyser reply is read in full (docs/app/BEDROCK_TUNNEL.md
-// Section 6).
+// Leave room above the relay's 1200-byte payload budget to read Geyser replies in full.
 const udpReadBufferSize = 2048
 
-// maxFlowsPerTunnel bounds how many concurrent local UDP sockets one tunnel's
-// flowRegistry will open. Today the relay's own per-tunnel admission (ipcaps
-// + flow table, relay/internal/bedrock/tunnel.go) is what actually limits how
-// many flow ids a Worker ever sees -- this is a second, independent ceiling
-// against a misbehaving or compromised relay minting flow ids without bound,
-// which would otherwise exhaust the Worker's sockets/goroutines one per flow
-// id. The value is set well above any realistic concurrent-player count for a
-// single Bedrock server (production servers rarely approach even a few
-// hundred concurrent connections) while staying well below the relay's own
-// default global admission ceiling (ipcaps.DefaultGlobalMax = 10_000,
-// relay/internal/ipcaps/ipcaps.go), since a compromised relay cannot be
-// trusted to honor that ceiling either. A new flow id past this bound is
-// dropped -- no socket or goroutine opened -- and logged at most once per
-// tunnel connection (see capLogged) rather than per datagram, so it cannot
-// become its own log-spam vector; idle eviction (evictIdle) frees capacity
-// for later flows the same way it always has.
+// Cap local sockets independently of relay admission to contain a misbehaving relay.
+// Log a capacity refusal once per connection; idle eviction makes room for new flows.
 const maxFlowsPerTunnel = 4096
 
 // datagramSender is the subset of *quic.Conn a flow's reply pump needs.
@@ -46,13 +25,7 @@ type datagramSender interface {
 	SendDatagram(p []byte) error
 }
 
-// flowRegistry maps relay-assigned flow ids to a dedicated local UDP socket
-// dialed to the server's Geyser port — "one local UDP socket per relay flow
-// id" (docs/app/BEDROCK_TUNNEL.md Section 5). It is entirely connection-scoped:
-// pump creates one fresh registry per dial/handshake attempt and closeAll runs
-// when that connection ends, since flow ids restart from zero on every new
-// QUIC connection and carrying one across a reconnect would misroute the
-// relay's flow ids onto the wrong local socket.
+// flowRegistry owns one local UDP socket per relay flow ID and is discarded on reconnect.
 type flowRegistry struct {
 	dialUDP  func(ctx context.Context, addr string) (net.Conn, error)
 	target   string
@@ -73,11 +46,7 @@ type flowSocket struct {
 	lastSeen time.Time
 }
 
-// newFlowRegistry builds a registry whose flows dial target (the resolved
-// Geyser address for one server) via dialUDP, and whose replies are sent back
-// over sender with the same flow id the relay assigned. It starts the idle
-// sweep goroutine; the caller must call closeAll to stop it and release every
-// socket.
+// newFlowRegistry starts idle eviction; the caller must closeAll to release its sockets and goroutine.
 func newFlowRegistry(dialUDP func(context.Context, string) (net.Conn, error), target string, sender datagramSender, logger *slog.Logger, serverID string) *flowRegistry {
 	r := &flowRegistry{
 		dialUDP:  dialUDP,
@@ -92,14 +61,8 @@ func newFlowRegistry(dialUDP func(context.Context, string) (net.Conn, error), ta
 	return r
 }
 
-// forward writes payload for flow id to its local UDP socket, dialing a fresh
-// one on first sight of id — the relay assigns flow ids, the Worker only ever
-// mints a *local* socket for one, never a flow id of its own
-// (docs/app/BEDROCK_TUNNEL.md Section 5). A new id seen once the registry
-// already holds maxFlowsPerTunnel flows is dropped instead: no socket or
-// goroutine is opened, and the drop is logged at most once per registry (see
-// logCapOnce). It is called serially from the connection's single receive
-// loop, so the check-then-create below never races itself.
+// forward creates sockets only for relay-assigned IDs, dropping new IDs at capacity.
+// The single receive loop serializes creation.
 func (r *flowRegistry) forward(ctx context.Context, id uint32, payload []byte) error {
 	r.mu.Lock()
 	fs, ok := r.byID[id]
@@ -127,10 +90,7 @@ func (r *flowRegistry) forward(ctx context.Context, id uint32, payload []byte) e
 	return err
 }
 
-// logCapOnce logs the maxFlowsPerTunnel ceiling being hit, but only the first
-// time for this registry (i.e. once per tunnel connection) — a relay that
-// keeps minting new flow ids past the ceiling must not turn this into a
-// per-datagram log-spam vector.
+// Log once per connection so excess flow IDs cannot flood the log.
 func (r *flowRegistry) logCapOnce() {
 	r.mu.Lock()
 	already := r.capLogged
@@ -143,12 +103,7 @@ func (r *flowRegistry) logCapOnce() {
 		"server_id", r.serverID, "max_flows_per_tunnel", maxFlowsPerTunnel)
 }
 
-// readPump reads Geyser's replies for one flow and forwards them back over the
-// QUIC connection, prefixed with the same flow id the relay assigned
-// (docs/app/BEDROCK_TUNNEL.md Section 5: "the Worker only ever echoes back the
-// flow id"). It exits on any read error — whether from idle eviction, closeAll,
-// or an unexpected failure (e.g. ICMP port-unreachable) — and self-evicts the
-// flow entry so that forward will redial a fresh socket on the next datagram.
+// readPump echoes the relay's flow ID and evicts the socket on read failure so the next datagram can redial.
 func (r *flowRegistry) readPump(id uint32, fs *flowSocket) {
 	buf := make([]byte, udpReadBufferSize)
 	for {
@@ -213,9 +168,7 @@ func (r *flowRegistry) evictIdle() {
 	}
 }
 
-// closeAll stops the sweep loop and closes every live flow socket, unblocking
-// their readPump goroutines — the connection-scoped flow-state discard
-// docs/app/BEDROCK_TUNNEL.md Section 5 requires on redial.
+// closeAll stops eviction and closes sockets, unblocking their read pumps.
 func (r *flowRegistry) closeAll() {
 	close(r.sweep)
 	r.mu.Lock()

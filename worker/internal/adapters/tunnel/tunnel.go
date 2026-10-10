@@ -1,13 +1,5 @@
-// Package tunnel implements the Worker side of the relay dial-back tunnel
-// (RELAY.md Section 5): for one player session it dials the relay's tunnel
-// listener over TLS, presents a single-use token, dials the local server's
-// loopback game port, and splices the two connections verbatim so the player's
-// byte stream reaches the Minecraft server end to end.
-//
-// There is no persistent Worker↔relay connection: one dial-back per join, owned
-// by the Worker process. The splice goroutines run on the Dialer's base context
-// and are torn down when the Worker shuts down (close all tunnel conns); the
-// relay/client recovers by rejoining (no reconnect here).
+// Package tunnel splices one TLS relay dial-back to a Minecraft game connection per player join.
+// Splices live until connection close or Worker shutdown; reconnect requires a new join.
 package tunnel
 
 import (
@@ -37,37 +29,20 @@ const handshakePreamble = "MCSD-TUNNEL/1\n"
 // waiting player connection (RELAY.md Section 5).
 const handshakeOK = "OK\n"
 
-// handshakeTimeout bounds the whole dial-back handshake: TLS dial, token send,
-// and the "OK\n" read must complete within it or the dial fails (RELAY.md
-// Section 5 — the relay drops a tunnel that sends nothing within 5 s; the Worker
-// applies the symmetric bound to its own attempt).
+// Bound TLS dial, token send, and OK reply together so an unresponsive peer cannot hold the command lane.
 const handshakeTimeout = 5 * time.Second
 
-// defaultGamePort is the Minecraft default game port, used when the server's
-// server.properties does not set server-port. It mirrors the container driver's
-// default (the published loopback port the relay path dials).
+// defaultGamePort must match the container driver's fallback port.
 const defaultGamePort = "25565"
 
-// Dialer dials the relay tunnel and splices it to a local server's game port.
-// One Dialer serves the whole Worker; each Dial handles one player session. The
-// splice goroutines live on baseCtx so they outlive the per-command result and
-// are torn down on Worker shutdown (RELAY.md Section 5).
+// Dialer owns player splices on baseCtx so they outlive command completion and close on shutdown.
 type Dialer struct {
 	// baseCtx bounds every live splice: when it is cancelled (Worker shutdown)
 	// the registry below closes all tunnel conns so no splice goroutine leaks.
 	baseCtx context.Context
-	// gameBindIP is driver.container.game_bind_ip: the host interface the game
-	// port is published on. The Worker dials the loopback (127.0.0.1) when it is
-	// 0.0.0.0 (loopback still reaches an all-interfaces bind) and the configured
-	// IP otherwise (RELAY.md Section 5).
+	// Dial loopback for an all-interfaces publication; otherwise use gameBindIP.
 	gameBindIP string
-	// gameHost resolves the per-server dial host for the game port. It returns a
-	// non-empty container name when the container driver runs on a user-defined
-	// network — the worker is itself a container on that network, so the server's
-	// game port is reachable at the container name, not the worker's own loopback
-	// where the host publication does not exist (issue #979). It returns empty for
-	// the no-network / non-container case, where dialHost falls back to the
-	// gameBindIP-derived loopback. Never nil: New installs a stub returning empty.
+	// Use container DNS on a configured network; the Worker's loopback cannot reach host publications.
 	gameHost func(serverID string) string
 	logger   *slog.Logger
 	// tlsDial opens a TLS connection to addr verifying against cfg; injectable so
@@ -80,9 +55,7 @@ type Dialer struct {
 	conns map[net.Conn]struct{}
 }
 
-// Spec is everything one TunnelDial needs (RELAY.md Section 5): the local
-// server's working dir (for its game port), and the relay endpoint, token, and
-// optional CA the Worker dials back to.
+// Spec holds relay credentials and working-set paths for one player dial-back.
 type Spec struct {
 	// ServerID is the target server, used only for logging.
 	ServerID string
@@ -98,11 +71,8 @@ type Spec struct {
 	CAPEM string
 }
 
-// New builds a Dialer. baseCtx bounds every splice (cancel it to tear down all
-// live tunnels on Worker shutdown); gameBindIP is driver.container.game_bind_ip;
-// gameHost resolves the per-server game dial host (the container name over a
-// user-defined network, else empty for the gameBindIP loopback fallback — issue
-// #979). A nil gameHost is treated as the no-network case (always loopback).
+// New resolves game connections through container DNS or gameBindIP; nil gameHost uses the latter.
+// Cancelling baseCtx ends all splices.
 func New(baseCtx context.Context, gameBindIP string, gameHost func(serverID string) string, logger *slog.Logger) *Dialer {
 	if logger == nil {
 		logger = slog.Default()
@@ -134,11 +104,7 @@ func New(baseCtx context.Context, gameBindIP string, gameHost func(serverID stri
 	return d
 }
 
-// Dial dials the relay, completes the token handshake, dials the local game
-// port, and starts splicing. It returns once the splice is established (or with
-// an error on any dial/handshake failure); the splice itself runs on the
-// Dialer's base context, off the caller's command context, so it outlives the
-// CommandResult (RELAY.md Section 5). ctx bounds only the synchronous setup.
+// Dial returns after setup; ctx bounds setup while baseCtx owns the established splice.
 func (d *Dialer) Dial(ctx context.Context, spec Spec) error {
 	tlsCfg, err := d.tlsConfig(spec.CAPEM)
 	if err != nil {
@@ -165,9 +131,7 @@ func (d *Dialer) Dial(ctx context.Context, spec Spec) error {
 		return err
 	}
 	gameAddr := net.JoinHostPort(d.dialHost(spec.ServerID), port)
-	// Dial under setupCtx so a blackholing non-loopback game_bind_ip fails fast
-	// (within the 5 s setup budget) instead of stalling the lane for the kernel
-	// connect timeout while the relay's player window has already expired.
+	// Keep the game dial inside the setup deadline so a blackholed address cannot stall the lane.
 	gameConn, err := d.gameDial(setupCtx, gameAddr)
 	if err != nil {
 		_ = relayConn.Close()
@@ -193,14 +157,8 @@ func (d *Dialer) tlsConfig(caPEM string) (*tls.Config, error) {
 	return &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: pool}, nil
 }
 
-// dialHost picks the host to dial serverID's game port at. When the container
-// driver runs on a user-defined network it returns the server's container name,
-// reached over that network (the worker is itself a container there, so the
-// host-published port is not on the worker's loopback — issue #979); this mirrors
-// the RCON dial-host resolution so the two cannot drift. Otherwise it falls back
-// to the published-port host: loopback when the game bind IP is unset or an
-// any-address — IPv4 0.0.0.0 or IPv6 :: / [::] — since loopback reaches an
-// all-interfaces publish; the configured IP otherwise (RELAY.md Section 5).
+// Use container DNS on a configured network, otherwise the published host IP.
+// Unset and all-interfaces addresses resolve to loopback.
 func (d *Dialer) dialHost(serverID string) string {
 	if host := d.gameHost(serverID); host != "" {
 		return host
@@ -212,11 +170,7 @@ func (d *Dialer) dialHost(serverID string) string {
 	return d.gameBindIP
 }
 
-// handshake sends the preamble + token and requires "OK\n" before the context
-// deadline (RELAY.md Section 5). Any other reply, EOF, or timeout is an error.
-// It reads the reply one byte at a time and stops at the newline, so it never
-// consumes the player bytes the relay starts splicing right after "OK\n" — a
-// buffered reader would swallow them and corrupt the stream.
+// Read the OK reply without buffering ahead: consuming player bytes here would corrupt the splice.
 func handshake(ctx context.Context, conn net.Conn, token string) error {
 	if token == "" || strings.ContainsAny(token, "\n\r") {
 		return fmt.Errorf("tunnel: invalid tunnel token")
@@ -234,17 +188,13 @@ func handshake(ctx context.Context, conn net.Conn, token string) error {
 	if reply != handshakeOK {
 		return fmt.Errorf("tunnel: relay refused handshake (reply %q)", reply)
 	}
-	// Clear the handshake deadline: the splice has no idle timeout of its own
-	// (RELAY.md Section 5 — the relay propagates close, the MC protocol keep-alives
-	// do the rest).
+	// Clear the setup deadline; established splices rely on protocol keepalives and peer close.
 	_ = conn.SetDeadline(time.Time{})
 	return nil
 }
 
-// readLine reads up to limit bytes one at a time, stopping after the first
-// newline (inclusive). Reading single bytes keeps the read from over-consuming
-// into the spliced byte stream that follows "OK\n"; limit bounds a relay that
-// never sends a newline.
+// readLine stops exactly at newline so player bytes following OK remain unread.
+// limit bounds a peer that never sends a newline.
 func readLine(conn net.Conn, limit int) (string, error) {
 	buf := make([]byte, 0, limit)
 	one := make([]byte, 1)
@@ -260,11 +210,7 @@ func readLine(conn net.Conn, limit int) (string, error) {
 	return string(buf), nil
 }
 
-// splice copies bytes both ways between the relay and game connections with
-// half-close propagation: when one direction reaches EOF the peer's write half is
-// closed (CloseWrite) so the other side sees a clean end of stream, and once both
-// directions finish both conns are fully closed and deregistered. RELAY.md
-// Section 5.
+// splice propagates half-closes so the reverse direction can drain before both connections close.
 func (d *Dialer) splice(relayConn, gameConn net.Conn, serverID string) {
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -272,20 +218,14 @@ func (d *Dialer) splice(relayConn, gameConn net.Conn, serverID string) {
 	go func() { defer wg.Done(); copyHalf(relayConn, gameConn) }()
 	wg.Wait()
 
-	// Fully close both conns so their fds are released deterministically. The clean
-	// EOF path only CloseWrites, so without this the read fds linger until the Go
-	// runtime's netFD finalizer runs; on a long-lived Worker they would accumulate.
-	// Double-closing the error path's already-closed conns is harmless.
+	// Half-close leaves read descriptors open; release both connections after the copies finish.
 	_ = relayConn.Close()
 	_ = gameConn.Close()
 	d.deregister(relayConn, gameConn)
 	d.logger.Debug("tunnel closed", "server_id", serverID)
 }
 
-// copyHalf copies src into dst until EOF or error, then half-closes dst's write
-// side so the peer sees end-of-stream while its own reverse copy still drains. On
-// any error it fully closes both ends to unblock the reverse copy (RELAY.md
-// Section 5 — close both on either side's error/EOF).
+// copyHalf preserves reverse draining on EOF and closes both ends on error to unblock the peer copy.
 func copyHalf(dst, src net.Conn) {
 	_, err := io.Copy(dst, src)
 	if err != nil {
@@ -304,9 +244,7 @@ func copyHalf(dst, src net.Conn) {
 	_ = dst.Close()
 }
 
-// register / deregister track live conns so closeAll can tear them down on
-// Worker shutdown. A conn registered after baseCtx is already cancelled is closed
-// immediately (the shutdown sweep already ran).
+// Track live connections for shutdown; close late registrations immediately after baseCtx cancellation.
 func (d *Dialer) register(conns ...net.Conn) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -344,18 +282,8 @@ func (d *Dialer) closeAll() {
 	}
 }
 
-// gamePort reads server-port from the server's working-dir server.properties,
-// falling back to the Minecraft default when the file is absent or the key is
-// unset — mirroring the container driver's published-port resolution, which
-// reads the same file through the same parser (containerdriver.ports). Keep the
-// two resolutions in sync: if the driver ever maps a host port that differs from
-// the container port, the tunnel must dial the host port, not server-port.
-//
-// An unreadable (as opposed to absent) file is an error rather than a silent
-// fallback: the fallback is 25565, the relay's own port, so a tunnel that dialed
-// it would splice the player into the relay instead of the server while the
-// driver refuses to start that same server at all (issues #2621, #2792). Only an
-// ABSENT file still takes the default.
+// gamePort must match the container driver's port resolution.
+// Only an absent file or key uses the default; unreadable files fail to avoid dialing the relay itself.
 func gamePort(workingDir string) (string, error) {
 	props, err := readProperties(filepath.Join(workingDir, "server.properties"))
 	if err != nil {
@@ -367,11 +295,7 @@ func gamePort(workingDir string) (string, error) {
 	return defaultGamePort, nil
 }
 
-// readProperties reads and parses the server.properties at path with the shared
-// Java-compatible reader (internal/javaproperties), so the port dialed is the
-// one the Minecraft server bound even when the file spells it "server-port:25599"
-// or "server-port 25599" (issue #2811). An absent file yields an empty map (the
-// caller falls back to the default); every other read failure is returned.
+// readProperties uses Java properties grammar; an absent file yields defaults, other read errors fail.
 func readProperties(path string) (map[string]string, error) {
 	data, err := os.ReadFile(path) //nolint:gosec // path is the server's own working dir, not user-controlled.
 	if err != nil {

@@ -1,36 +1,7 @@
 //go:build e2e
 
-// This file drives the Bedrock relay protocol-level e2e (epic #1540, issue
-// #1547): the REAL worker/internal/adapters/bedrocktunnel.Manager, opening a
-// tunnel to the REAL relay/internal/bedrock.Listener (run by the sibling
-// relay/test/e2e/bedrock_relay_e2e_test.go, see its package doc for why this
-// needs two coordinating `go test` processes), forwarding to a REAL Docker
-// container running the fake-Geyser stub image
-// (worker/test/e2e/stub-geyser/main.go) on the REAL container ExecutionDriver's
-// user-defined-network path (docs/app/BEDROCK_TUNNEL.md Section 2: the worker
-// reaches Geyser over the docker network exactly as it reaches the Java port).
-//
-// This suite asserts the three things the relay's and the worker's own
-// package-level tests cannot: they fake the OTHER side (relay tests fake the
-// Worker's QUIC client; worker tests fake the relay AND the container's UDP
-// target). Here, a scripted "Bedrock client" -- a plain UDP socket sending a
-// RakNet Unconnected Ping -- proves, over REAL sockets throughout:
-//  1. a datagram reaches the container and the reply returns through the same
-//     flow (TestBedrockTunnelEndToEnd's initial round trip),
-//  2. two concurrent clients demux correctly (their pings never cross), and
-//  3. tunnel teardown on server stop unbinds the relay's public UDP port.
-//
-// Not proven here (explicitly out of scope): the API's OpenBedrockTunnel
-// dispatch and ValidateBedrockTunnel credential minting (issue #1544, faked by
-// the relay-side stubValidator), a real Geyser/Floodgate RakNet stack (validated
-// live, epic #1540 issue #1542), and a full Bedrock login.
-//
-// Gated three ways, like restart_e2e_test.go:
-//   - the `e2e` build tag,
-//   - MCD_E2E_DOCKER must be set (a reachable Docker daemon), and
-//   - MCD_BEDROCK_E2E_RELAY_ADDR / MCD_BEDROCK_E2E_CA_FILE / MCD_E2E_STUB_GEYSER_IMAGE
-//     must all be set (scripts/run_bedrock_e2e.sh sets them after confirming the
-//     relay-side process is listening).
+// Exercise real Worker QUIC tunnels, relay routing, and a Docker RakNet ping/pong stub.
+// This checks datagram forwarding and flow isolation, not full Geyser login.
 package e2e
 
 import (
@@ -51,23 +22,15 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/containerdriver"
 )
 
-// Shared test fixture. Kept in sync with
-// relay/test/e2e/bedrock_relay_e2e_test.go's matching declarations of the same
-// name (bedrockE2EServerID, bedrockE2EToken, bedrockE2EDefaultBedrockPort,
-// bedrockE2EPort) -- both files are maintained together in the same PR; change
-// one, change both.
+// Keep these fixture IDs, tokens, ports, and overrides aligned with relay/test/e2e/bedrock_relay_e2e_test.go.
 const (
 	bedrockE2EServerID           = "bedrock-e2e-server"
 	bedrockE2EToken              = "bedrock-e2e-token"
 	bedrockE2EDefaultBedrockPort = 19140
 )
 
-// bedrockE2EPort returns the public bedrock_port fixture:
-// MCD_BEDROCK_E2E_BEDROCK_PORT when set (scripts/run_bedrock_e2e.sh forwards
-// it so the harness can run alongside a live bedrock-enabled relay-profile
-// deployment already holding the default -- the same posture as
-// scripts/run_relay_e2e.sh's port overrides), else the default. The default
-// sits inside the compose-published client window (19132-19231/udp).
+// Allow an overridden public UDP port so E2E can run beside a live deployment; the default lies in the published
+// range.
 func bedrockE2EPort(t *testing.T) uint32 {
 	t.Helper()
 	v := os.Getenv("MCD_BEDROCK_E2E_BEDROCK_PORT")
@@ -151,13 +114,7 @@ func pollUntil(t *testing.T, timeout time.Duration, what string, cond func() boo
 	}
 }
 
-// containerIPAddress shells out to `docker inspect` for containerName's address
-// on network -- the containerdriver.EngineClient has no such accessor (the real
-// driver only ever needs a container NAME, resolved via the docker network's
-// own embedded DNS from inside another container on that network; this test
-// process runs on the bare host, which has no access to that resolver, so it
-// reads the IP directly instead). Kept local to this test file rather than
-// added to the production driver, which has no use for it.
+// The host test lacks container-network DNS, so inspect the IP directly; production dials container names.
 func containerIPAddress(t *testing.T, ctx context.Context, containerName, network string) string {
 	t.Helper()
 	// `index` (not dotted field access) because a docker-network name may
@@ -296,12 +253,7 @@ func TestBedrockTunnelEndToEnd(t *testing.T) {
 		}
 	}
 
-	// 3. Tunnel teardown on server stop unbinds the relay's public UDP port.
-	// Close is what the worker's OpenBedrockTunnel/CloseBedrockTunnel command
-	// handler calls on a server stop (worker/internal/application/instancemanager);
-	// driven directly here since this suite's job is the tunnel/data-path
-	// behavior, not that command-dispatch wiring (already unit-tested in
-	// instancemanager/bedrocktunnel_test.go).
+	// Close the tunnel directly to test UDP unbinding; command-to-tunnel wiring is covered by Manager unit tests.
 	m.Close(bedrockE2EServerID)
 	pollUntil(t, 10*time.Second, "relay port unbind", func() bool {
 		l, err := net.ListenPacket("udp", relayPublicAddr)

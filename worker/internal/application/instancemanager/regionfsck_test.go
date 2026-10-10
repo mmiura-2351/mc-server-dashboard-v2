@@ -33,11 +33,10 @@ func healthyRegion() []byte {
 	return image
 }
 
-// unalignedLiveRegion is a structurally-sound region with the legitimate UNPADDED
-// tail of a 26.x world (issue #923): an 8 KiB header plus one chunk in sector 2
-// whose data ends mid-sector, so the file size is NOT a multiple of 4096 but the
-// trailing chunk fits byte-precisely (offset*4096 + 4 + length == size). The single
-// rule set (issue #927) accepts it on every path — running OR stopped.
+// unalignedLiveRegion is a structurally-sound region with the legitimate UNPADDED tail of a 26.x world: an 8 KiB
+// header plus one chunk in sector 2 whose data ends mid-sector, so the file size is NOT a multiple of 4096 but
+// the trailing chunk fits byte-precisely (offset*4096 + 4 + length == size). The single rule set accepts it on
+// every path, running OR stopped.
 func unalignedLiveRegion() []byte {
 	const tail = 459 // partial final sector, mirroring the observed 922,059-byte file.
 	size := 2*fsckSector + tail
@@ -54,9 +53,7 @@ func unalignedLiveRegion() []byte {
 	return image
 }
 
-// seedWorkingSet writes data into <scratch>/<serverID>/region/r.0.0.mca, plus the
-// generation marker every real hydrate leaves alongside it — the launch guard's
-// predicate since issue #2802, so a fixture without it cannot start a server.
+// seedWorkingSet includes the generation marker every hydrate publishes, allowing the launch guard to pass.
 func seedWorkingSet(t *testing.T, m *Manager, serverID string, data []byte) {
 	t.Helper()
 	dir := filepath.Join(m.scratchDir, serverID, "region")
@@ -72,15 +69,14 @@ func seedWorkingSet(t *testing.T, m *Manager, serverID string, data []byte) {
 	}
 }
 
-// A snapshot over a working set with a structurally corrupt region is refused
-// before the pack/upload: the pre-pack fsck flags it and handleSnapshot returns a
-// coded transfer-failed error, so no transfer happens (#741, fail fast at the
-// source rather than after a full tar+upload the API gate would reject anyway).
+// A snapshot over a working set with a structurally corrupt region is refused before the pack/upload: the
+// pre-pack fsck flags it and handleSnapshot returns a coded transfer-failed error, so no transfer happens (fail
+// fast at the source rather than after a full tar+upload the API gate would reject anyway).
 func TestSnapshotTriggerCorruptWorkingSetRefusedPrePack(t *testing.T) {
 	tr := &fakeTransfer{}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
 
-	// A torn region (size not a 4096 multiple) — the #703 reproduction shape.
+	// A non-empty file too short for both headers is structurally torn.
 	seedWorkingSet(t, m, "s1", healthyRegion()[:3*fsckSector-10])
 
 	res := m.Handle(context.Background(), snapshotCmd())
@@ -109,11 +105,7 @@ func TestSnapshotTriggerHealthyWorkingSetProceeds(t *testing.T) {
 	}
 }
 
-// A running-server snapshot runs the pre-pack fsck inside the #694 save-off/save-on
-// bracket: on corruption it still re-enables auto-save (the deferred save-on) and
-// refuses the upload, so the server is never left with auto-save disabled. The
-// corruption here is persistent (the seeded file never changes), so it survives the
-// #907 fsck retries and the snapshot is ultimately refused.
+// Persistent corruption refuses upload after bounded retries and still restores auto-save.
 func TestSnapshotTriggerCorruptRunningServerRefusesAndRestoresSaveOn(t *testing.T) {
 	ctrl := &fakeControl{reply: "ok"}
 	tr := &fakeTransfer{}
@@ -140,11 +132,10 @@ func TestSnapshotTriggerCorruptRunningServerRefusesAndRestoresSaveOn(t *testing.
 	}
 }
 
-// A running-server periodic snapshot retries the pre-pack fsck on transient
-// corruption (#907): a region write still in flight just after the save-all flush
-// can read as torn, but that must not veto the snapshot. Here the first scan reads
-// a torn region; the file is repaired to a healthy region during the retry backoff,
-// so a later attempt is clean and the snapshot proceeds.
+// A running-server periodic snapshot retries the pre-pack fsck on transient corruption: a region write still in
+// flight just after the save-all flush can read as torn, but that must not veto the snapshot. Here the first
+// scan reads a torn region; the file is repaired to a healthy region during the retry backoff, so a later
+// attempt is clean and the snapshot proceeds.
 func TestSnapshotTriggerRunningServerFsckRetriesPastTransientCorruption(t *testing.T) {
 	ctrl := &fakeControl{reply: "ok"}
 	tr := &fakeTransfer{}
@@ -180,12 +171,7 @@ func TestSnapshotTriggerRunningServerFsckRetriesPastTransientCorruption(t *testi
 	}
 }
 
-// The quiesce settle-wait blocks until the async save's region files stop changing
-// before the fsck/copy runs (#907): a file still being written between scans delays
-// the snapshot, and only once two consecutive scans observe an identical
-// (mtime, size) does the snapshot proceed. Here a writer rewrites the region for a
-// short burst after save-all, then stops; the settle-wait waits out the burst and
-// the snapshot then publishes.
+// Rewrite regions after save-all, then stop; packing must wait for two identical region scans.
 func TestSnapshotTriggerRunningServerSettlesThenProceeds(t *testing.T) {
 	ctrl := &fakeControl{reply: "ok"}
 	tr := &fakeTransfer{}
@@ -227,9 +213,9 @@ func TestSnapshotTriggerRunningServerSettlesThenProceeds(t *testing.T) {
 	}
 }
 
-// The stopped-id (at-rest) snapshot does NOT retry the fsck (#907): the world is at
-// rest there, so a detected corruption is real signal, not a mid-write race, and is
-// refused fail-closed on the first scan with NO retry backoff.
+// The stopped-id (at-rest) snapshot does NOT retry the fsck: the world is at rest there, so a detected
+// corruption is real signal, not a mid-write race, and is refused fail-closed on the first scan with NO retry
+// backoff.
 func TestSnapshotTriggerStoppedServerFsckNotRetried(t *testing.T) {
 	tr := &fakeTransfer{}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
@@ -248,10 +234,9 @@ func TestSnapshotTriggerStoppedServerFsckNotRetried(t *testing.T) {
 	}
 }
 
-// A RUNNING server's periodic snapshot over a working set with the legitimate
-// unpadded tail of a 26.x world (non-4096-aligned but byte-precisely valid)
-// PROCEEDS: the single rule set treats the unpadded tail as the on-disk format, not
-// corruption (#927).
+// A RUNNING server's periodic snapshot over a working set with the legitimate unpadded tail of a 26.x world
+// (non-4096-aligned but byte-precisely valid) PROCEEDS: the single rule set treats the unpadded tail as the
+// on-disk format, not corruption.
 func TestSnapshotTriggerRunningServerUnalignedTailProceeds(t *testing.T) {
 	ctrl := &fakeControl{reply: "ok"}
 	tr := &fakeTransfer{}
@@ -274,11 +259,7 @@ func TestSnapshotTriggerRunningServerUnalignedTailProceeds(t *testing.T) {
 	}
 }
 
-// The #927 regression case: the STOPPED-id (at-rest) snapshot over the SAME unaligned
-// tail now PROCEEDS. The old strict mode refused it on the `stopped => 4096-padded`
-// assumption, which does not hold after a sweep-stop timeout / SIGKILL / crash — so
-// the stop-leg checkpoint failed exactly when it was the last chance to capture the
-// world. The single rule set accepts the byte-precisely-valid unpadded set.
+// A valid unpadded stopped world must pass; forced termination does not guarantee sector padding.
 func TestSnapshotTriggerStoppedServerUnalignedTailProceeds(t *testing.T) {
 	tr := &fakeTransfer{}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
@@ -294,11 +275,9 @@ func TestSnapshotTriggerStoppedServerUnalignedTailProceeds(t *testing.T) {
 	}
 }
 
-// When RCON cannot be opened for a RUNNING server, the periodic snapshot is refused
-// with the distinct quiesce_unavailable classification (#907) rather than packing
-// the unquiesced live world (the 35/35 false-positive source). The next tick
-// retries; the post-stop final snapshot still covers a permanently-RCON-broken
-// server.
+// When RCON cannot be opened for a RUNNING server, the periodic snapshot is refused with the distinct
+// quiesce_unavailable classification rather than packing the unquiesced live world (the 35/35 false-positive
+// source). The next tick retries; the post-stop final snapshot still covers a permanently-RCON-broken server.
 func TestSnapshotTriggerRunningServerRconUnavailableRefusesQuiesceUnavailable(t *testing.T) {
 	tr := &fakeTransfer{}
 	scratch := t.TempDir()

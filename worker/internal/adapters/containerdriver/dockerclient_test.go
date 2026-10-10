@@ -113,9 +113,8 @@ func TestEngineClientCreateEncodesSpec(t *testing.T) {
 	}
 }
 
-// A non-zero memory ceiling is encoded as the host-config Memory field (in bytes)
-// so the daemon caps the container at that hard limit; a zero ceiling omits it,
-// leaving the container unconstrained (issue #707).
+// A non-zero memory ceiling is encoded as the host-config Memory field (in bytes) so the daemon caps the
+// container at that hard limit; a zero ceiling omits it, leaving the container unconstrained.
 func TestEngineClientCreateEncodesMemory(t *testing.T) {
 	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"Id": "abc123"})
@@ -139,8 +138,8 @@ func TestEngineClientCreateEncodesMemory(t *testing.T) {
 	}
 }
 
-// A zero memory ceiling omits the Memory field from the wire payload (Memory has
-// the omitempty tag), so the container runs unconstrained (issue #707).
+// A zero memory ceiling omits the Memory field from the wire payload (Memory has the omitempty tag), so the
+// container runs unconstrained.
 func TestEngineClientCreateOmitsMemoryWhenZero(t *testing.T) {
 	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"Id": "abc123"})
@@ -155,9 +154,8 @@ func TestEngineClientCreateOmitsMemoryWhenZero(t *testing.T) {
 	}
 }
 
-// The run-as user is encoded as the top-level User field and the dropped
-// capabilities as the host-config CapDrop list, which is where the Engine reads
-// them (issue #2600).
+// The run-as user is encoded as the top-level User field and the dropped capabilities as the host-config CapDrop
+// list, which is where the Engine reads them.
 func TestEngineClientCreateEncodesUserAndCapDrop(t *testing.T) {
 	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"Id": "abc123"})
@@ -189,16 +187,8 @@ func TestEngineClientCreateEncodesUserAndCapDrop(t *testing.T) {
 	}
 }
 
-// A configured network is encoded as a NetworkingConfig endpoint so the daemon
-// attaches the container to that user-defined network at create time (issue
-// #218). An empty network omits it, keeping the default bridge.
-//
-// The fixture is the network the shipped compose file actually points the driver
-// at: `mcsd-servers`, the dedicated MC-server network, NOT the control-plane
-// `mcsd` (issue #2590). This client encodes whatever name it is handed — the
-// segmentation itself is a deployment property, owned by `compose.yaml`
-// (MCD_WORKER_DRIVER_CONTAINER_NETWORK) and described in
-// docs/app/SECURITY.md — so this test pins the encoding, not the choice.
+// Encode the supplied user-defined network, omitting NetworkingConfig only when empty.
+// Deployment owns the selected network name; this test covers Engine request encoding.
 func TestEngineClientCreateEncodesNetwork(t *testing.T) {
 	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"Id": "abc123"})
@@ -245,10 +235,9 @@ func TestEngineClientCreateOmitsNetworkWhenEmpty(t *testing.T) {
 	}
 }
 
-// The CreateSpec's per-server CPU weight rides through to the host-config
-// CpuShares field, the relative weight the Engine translates to cpu.weight on
-// cgroup v2 (issues #518/#724). It is a soft share, never a hard quota: no
-// NanoCpus (or any hard CPU cap) is encoded.
+// The CreateSpec's per-server CPU weight rides through to the host-config CpuShares field, the relative weight
+// the Engine translates to cpu.weight on cgroup v2. It is a soft share, never a hard quota: no NanoCpus (or any
+// hard CPU cap) is encoded.
 func TestEngineClientCreateEncodesCPUShares(t *testing.T) {
 	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"Id": "abc123"})
@@ -310,8 +299,7 @@ func TestEngineClientListFiltersByLabel(t *testing.T) {
 	if len(got) != 1 || got[0].ID != "a" || got[0].Name != "/mcsd-s1" || got[0].State != "running" {
 		t.Fatalf("List = %v", got)
 	}
-	// The sweep reads a swept container's Minecraft version off its labels
-	// (issue #3116), so List must carry them.
+	// The sweep reads a swept container's Minecraft version off its labels, so List must carry them.
 	if got[0].Labels[labelMCVersion] != "1.20.1" {
 		t.Fatalf("Labels = %v, want the container's labels", got[0].Labels)
 	}
@@ -369,11 +357,9 @@ func TestEngineClientStatsComputesCPU(t *testing.T) {
 	if q.Get("stream") != "false" {
 		t.Fatalf("stream = %q, want false", q.Get("stream"))
 	}
-	// one-shot must NOT be set: without it the daemon collects two internal
-	// samples and returns meaningful precpu_stats; with it the daemon returns
-	// immediately with precpu_stats zeroed, making the CPU delta cover the
-	// entire container lifetime and truncating to 0 on a long-running host
-	// (issue #1068).
+	// one-shot must NOT be set: without it the daemon collects two internal samples and returns meaningful
+	// precpu_stats; with it the daemon returns immediately with precpu_stats zeroed, making the CPU delta cover the
+	// entire container lifetime and truncating to 0 on a long-running host.
 	if q.Get("one-shot") != "" {
 		t.Fatalf("one-shot = %q, want absent", q.Get("one-shot"))
 	}
@@ -428,8 +414,8 @@ func TestEngineClientSurfacesDaemonError(t *testing.T) {
 	}
 }
 
-// A 409 from /containers/create is surfaced as errNameConflict so the driver can
-// run its remove-on-conflict retry (issue #226).
+// A 409 from /containers/create is surfaced as errNameConflict so the driver can run its remove-on-conflict
+// retry.
 func TestEngineClientCreateConflictIsTyped(t *testing.T) {
 	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusConflict)
@@ -460,9 +446,8 @@ func TestEngineClientCreateNonConflictIsNotTyped(t *testing.T) {
 	}
 }
 
-// ImagePull splits the image ref into fromImage/tag, drains the progress stream
-// to completion, and returns nil when the stream ends without an error (issue
-// #904).
+// ImagePull splits the image ref into fromImage/tag, drains the progress stream to completion, and returns nil
+// when the stream ends without an error.
 func TestEngineClientImagePullDrainsStream(t *testing.T) {
 	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"status":"Pulling from library/eclipse-temurin"}` + "\n"))
@@ -486,9 +471,8 @@ func TestEngineClientImagePullDrainsStream(t *testing.T) {
 	}
 }
 
-// A pull whose progress stream ends on an error object (an offline host, a denied
-// or unknown image) fails even though the HTTP status was 200: the Engine returns
-// 200 then reports the failure in the stream (issue #904).
+// A pull whose progress stream ends on an error object (an offline host, a denied or unknown image) fails even
+// though the HTTP status was 200: the Engine returns 200 then reports the failure in the stream.
 func TestEngineClientImagePullStreamErrorFails(t *testing.T) {
 	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"status":"Pulling from library/eclipse-temurin"}` + "\n"))
@@ -505,8 +489,7 @@ func TestEngineClientImagePullStreamErrorFails(t *testing.T) {
 	}
 }
 
-// A non-2xx response (the daemon rejecting the request outright) fails the pull
-// directly (issue #904).
+// A non-2xx response (the daemon rejecting the request outright) fails the pull directly.
 func TestEngineClientImagePullNon2xxFails(t *testing.T) {
 	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -519,11 +502,9 @@ func TestEngineClientImagePullNon2xxFails(t *testing.T) {
 	}
 }
 
-// splitImageTag splits on the tag colon, defaulting to latest when none is given
-// and leaving a registry host:port (which precedes a "/") untagged (issue #904). A
-// digest-pinned ref (name@sha256:...) stays whole as the fromImage with no tag, so
-// the Engine pulls by digest rather than choking on a "tag" of the hex digest
-// (issue #915).
+// splitImageTag splits on the tag colon, defaulting to latest when none is given and leaving a registry
+// host:port (which precedes a "/") untagged. A digest-pinned ref (name@sha256:...) stays whole as the fromImage
+// with no tag, so the Engine pulls by digest rather than choking on a "tag" of the hex digest.
 func TestSplitImageTag(t *testing.T) {
 	cases := []struct {
 		image, name, tag string
@@ -545,10 +526,9 @@ func TestSplitImageTag(t *testing.T) {
 	}
 }
 
-// ImagePull passes a digest-pinned ref as fromImage with no tag param, the Engine
-// /images/create contract for pulling by digest; splitting it on the last colon
-// would send tag=<hex digest>, which the Engine rejects, so lazy pull would never
-// succeed for a digest-pinned base image (issue #915).
+// ImagePull passes a digest-pinned ref as fromImage with no tag param, the Engine /images/create contract for
+// pulling by digest; splitting it on the last colon would send tag=<hex digest>, which the Engine rejects, so
+// lazy pull would never succeed for a digest-pinned base image.
 func TestEngineClientImagePullByDigest(t *testing.T) {
 	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"status":"Download complete"}` + "\n"))
@@ -571,8 +551,7 @@ func TestEngineClientImagePullByDigest(t *testing.T) {
 	}
 }
 
-// Inspect decodes the container id, labels, and running state used to resolve a
-// create name conflict (issue #226).
+// Inspect decodes the container id, labels, and running state used to resolve a create name conflict.
 func TestEngineClientInspectDecodesLabelsAndState(t *testing.T) {
 	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{
@@ -599,9 +578,9 @@ func TestEngineClientInspectDecodesLabelsAndState(t *testing.T) {
 	}
 }
 
-// Inspect decodes the daemon's OOMKilled flag and exit code, which the install
-// supervisor reads to tell a memory-limit kill from any other failure and to
-// recover the exit status of an install whose Wait result was lost (issue #1093).
+// Inspect decodes the daemon's OOMKilled flag and exit code, which the install supervisor reads to tell a
+// memory-limit kill from any other failure and to recover the exit status of an install whose Wait result was
+// lost.
 func TestEngineClientInspectDecodesOOMKilled(t *testing.T) {
 	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"Id": "abc123", "State": {"Running": false, "OOMKilled": true, "ExitCode": 137}}`))
@@ -617,8 +596,8 @@ func TestEngineClientInspectDecodesOOMKilled(t *testing.T) {
 	}
 }
 
-// A 404 from Inspect is surfaced as errNotFound so the driver treats the
-// conflict as already resolved and retries the create (issue #229).
+// A 404 from Inspect is surfaced as errNotFound so the driver treats the conflict as already resolved and
+// retries the create.
 func TestEngineClientInspectNotFoundIsTyped(t *testing.T) {
 	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
@@ -632,8 +611,7 @@ func TestEngineClientInspectNotFoundIsTyped(t *testing.T) {
 	}
 }
 
-// A non-404 Inspect failure is not reported as not-found, so the driver keeps the
-// conservative fallback (issue #229).
+// A non-404 Inspect failure is not reported as not-found, so the driver keeps the conservative fallback.
 func TestEngineClientInspectNonNotFoundIsNotTyped(t *testing.T) {
 	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -650,9 +628,8 @@ func TestEngineClientInspectNonNotFoundIsNotTyped(t *testing.T) {
 	}
 }
 
-// A 409 from Remove ("removal already in progress") is surfaced as
-// errRemovalInProgress so the wait-for-name-free loop treats the in-flight
-// removal as progress and keeps polling (issue #233).
+// A 409 from Remove ("removal already in progress") is surfaced as errRemovalInProgress so the
+// wait-for-name-free loop treats the in-flight removal as progress and keeps polling.
 func TestEngineClientRemoveInProgressIsTyped(t *testing.T) {
 	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusConflict)

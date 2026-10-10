@@ -14,23 +14,16 @@ type Capabilities struct {
 	WorkerVersion string
 	Drivers       []string
 	MaxServers    uint32
-	// HeldServers is the set of working sets this Worker already holds in its
-	// persistent local scratch at registration, each tagged with the generation the
-	// local working set is at (issue #763). The adapter maps it onto the wire
-	// Register.held_servers; the API uses it to skip the destructive hydrate on a
-	// same-worker restart ONLY when the held generation is fresh enough (a hydrate
-	// would clobber the Worker's live, newer working set with the last authoritative
-	// snapshot). It generalizes the presence-only HeldServerIDs of issue #696.
+	// HeldServers lets the API skip hydrate only when the local generation is fresh enough.
 	HeldServers []HeldServer
-	// Resources advertises the host's hardware resources (CPU cores and total
-	// memory) for the API's placement logic (FR-WRK-3, issue #1218). When
-	// MemoryBytes is 0 the API skips the memory hard-gate, so this must be
-	// populated from the actual host values at startup.
+	// Resources advertises the host's hardware resources (CPU cores and total memory) for the API's placement logic
+	// (FR-WRK-3). When MemoryBytes is 0 the API skips the memory hard-gate, so this must be populated from the
+	// actual host values at startup.
 	Resources HostResources
 }
 
-// HostResources is a coarse description of a Worker host's hardware resources,
-// used by the API's placement logic to enforce memory/CPU gates (issue #1218).
+// HostResources is a coarse description of a Worker host's hardware resources, used by the API's placement logic
+// to enforce memory/CPU gates.
 type HostResources struct {
 	// CPUCores is the number of logical CPUs available to the Worker.
 	CPUCores uint32
@@ -38,9 +31,8 @@ type HostResources struct {
 	MemoryBytes uint64
 }
 
-// HeldServer is one working set this Worker holds in local scratch, with the
-// generation it is at (issue #763). The adapter maps it onto the wire HeldServer
-// message; the generation is the authoritative store generation the working set
+// HeldServer is one working set this Worker holds in local scratch, with the generation it is at. The adapter
+// maps it onto the wire HeldServer message; the generation is the authoritative store generation the working set
 // was last hydrated from or snapshotted to.
 type HeldServer struct {
 	ServerID   string
@@ -50,28 +42,15 @@ type HeldServer struct {
 // RegisterAck is the API's answer to a Register (CONTROL_PLANE.md Section 4.1).
 type RegisterAck struct {
 	HeartbeatInterval time.Duration
-	// TransferDeadline bounds a single data-plane transfer (snapshot upload /
-	// hydrate download) Worker-side (issue #874). The API derives it from its
-	// hydrate/snapshot budgets plus a margin, so it is always >= the API budget:
-	// the API-side timeout fires first and this is the cleanup backstop that
-	// closes the unbounded-upload case (#869). A non-positive value (an older
-	// API that does not set the field) leaves the transfer unbounded as before.
+	// TransferDeadline is the Worker cleanup backstop beyond the API's transfer budget.
+	// Non-positive values leave transfers unbounded.
 	TransferDeadline time.Duration
-	// UnknownHeldServerIDs is the subset of Register.held_servers whose server
-	// no longer exists in the API (deleted while the scratch was live, issue
-	// #924). The Worker reclaims the scratch dir and .hydrate-<id>-* leftovers
-	// for each id listed here. .displaced-<id> trees are NOT reclaimed (issue
-	// #911). An empty list (or an older API that does not set the field) means
-	// nothing to reclaim.
+	// UnknownHeldServerIDs reclaims deleted servers' scratch and hydrate leftovers, preserving displaced recovery
+	// copies.
 	UnknownHeldServerIDs []string
 }
 
-// Command is an inbound API command, reduced to the fields the session and its
-// CommandHandler need (CONTROL_PLANE.md Section 5). The lifecycle commands
-// (StartServer/StopServer/RestartServer/ServerCommand) and the file commands
-// (ReadFile/EditFile) are dispatched to the handler; Hydrate/Snapshot run their
-// data-plane transfer. An unset command oneof is answered with an "unsupported"
-// CommandResult, never silently dropped.
+// Command is transport-neutral; an unknown or unset command kind receives an unsupported result.
 type Command struct {
 	CommandID string
 	ServerID  string
@@ -80,23 +59,20 @@ type Command struct {
 	Kind string
 	// Driver is the requested execution backend for StartServer.
 	Driver string
-	// LaunchMode is the requested launch shape for StartServer (issue #305). It is
-	// the wire LaunchMode name ("jar" / "forge-argsfile"); empty (an unset field)
-	// is treated as the JAR launch, the historical behavior.
+	// LaunchMode is the requested launch shape for StartServer. It is the wire LaunchMode name ("jar" /
+	// "forge-argsfile"); empty (an unset field) is treated as the JAR launch, the historical behavior.
 	LaunchMode string
 	// JarRelpath is the server JAR path for StartServer (relative to the working
 	// set).
 	JarRelpath string
-	// MinecraftVersion drives Java runtime selection for StartServer, and the
-	// charset server.properties is read in for RCON (issue #3116).
+	// MinecraftVersion drives Java runtime selection for StartServer, and the charset server.properties is read in
+	// for RCON.
 	MinecraftVersion string
-	// MemoryLimitBytes is the per-server memory ceiling for StartServer (the
-	// operator-declared limit, issue #706). 0 means unset — the driver picks a
-	// default heap. The instance manager converts it to MiB for the InstanceSpec.
+	// MemoryLimitBytes is the per-server memory ceiling for StartServer (the operator-declared limit). 0 means
+	// unset, the driver picks a default heap. The instance manager converts it to MiB for the InstanceSpec.
 	MemoryLimitBytes uint64
-	// CPUMillis is the per-server CPU allocation in millicores for StartServer (the
-	// operator-declared soft share, issue #723). 0 means unset — the driver applies
-	// its default weight. Carried as-is onto the InstanceSpec; no derivation.
+	// CPUMillis is the per-server CPU allocation in millicores for StartServer (the operator-declared soft share).
+	// 0 means unset, the driver applies its default weight. Carried as-is onto the InstanceSpec; no derivation.
 	CPUMillis uint32
 	// Force skips the graceful path for StopServer.
 	Force bool
@@ -148,28 +124,10 @@ type CommandResult struct {
 	FileListing  *FileListing
 	ErrorCode    CommandErrorCode
 	ErrorMessage string
-	// FileAccessReason refines a CommandErrorFileAccessDenied failure into the
-	// specific condition (is-a-directory, symlink refusal, oversized payload,
-	// etc.) so the API surfaces an honest problem reason rather than collapsing
-	// every file denial into "invalid path" (issue #548). It is meaningful only
-	// when ErrorCode is CommandErrorFileAccessDenied; the zero value
-	// (FileAccessReasonUnspecified) is the generic path denial.
+	// FileAccessReason refines FILE_ACCESS_DENIED; zero means a generic path denial.
 	FileAccessReason FileAccessReason
-	// HeldGeneration is the Worker's DECLARATION that it still holds this
-	// server's working set locally, at this generation, now that the command has
-	// finished (issue #2481). Set only by a SnapshotTrigger, and only when the
-	// Worker's own generation marker was published at that value — the same
-	// on-disk fact ScanHeldServers re-advertises in Register.held_servers, so the
-	// declaration and the advertisement are one number, not two.
-	//
-	// nil means "declared nothing", which is what a snapshot that DELETED the
-	// scratch (the stopped-id branch's removeScratch, #762/#841) and a snapshot
-	// whose marker stamp was skipped (#2284) both report. The API records a held
-	// generation only from a non-nil value, so nil leaves its inventory stale and
-	// the next start hydrates — the safe direction. A pointer, not a 0 sentinel:
-	// generation 0 already means "held at an unknown generation" in
-	// Register.held_servers, so "held at 0" and "nothing declared" must stay
-	// distinguishable.
+	// HeldGeneration declares only a generation whose local marker was successfully published.
+	// nil declares nothing, distinct from holding generation zero; removed scratch must never be declared.
 	HeldGeneration *uint64
 }
 
@@ -212,24 +170,18 @@ const (
 	// CommandErrorFileAccessDenied marks a rejected file access: a traversal-unsafe
 	// path or an oversized read/edit (FR-FILE-4, CONTROL_PLANE.md Section 7).
 	CommandErrorFileAccessDenied
-	// CommandErrorPortConflict marks a StartServer whose driver could not publish a
-	// host port already in use (issue #225). The container driver classifies it
-	// from the docker start error; the raw daemon text stays in Worker logs.
+	// CommandErrorPortConflict marks a StartServer whose driver could not publish a host port already in use. The
+	// container driver classifies it from the docker start error; the raw daemon text stays in Worker logs.
 	CommandErrorPortConflict
-	// CommandErrorImageMissing marks a StartServer whose driver could not find or
-	// pull the server's container image (issue #225). The container driver
-	// classifies it from the docker create error; the raw daemon text stays in
-	// Worker logs.
+	// CommandErrorImageMissing marks a StartServer whose driver could not find or pull the server's container
+	// image. The container driver classifies it from the docker create error; the raw daemon text stays in Worker
+	// logs.
 	CommandErrorImageMissing
-	// CommandErrorBusy marks a command refused because another mutating lifecycle
-	// command is already in flight for the id (the reservation race, issue #824).
-	// Distinct from CommandErrorInvalidState: the in-flight command's outcome is
-	// not yet known, so the API must keep its assignment/intent and retry on a
-	// later tick rather than converge an observed state.
+	// CommandErrorBusy means unresolved lifecycle work or orphan convergence; the API must retain intent and retry.
 	CommandErrorBusy
 )
 
-// String renders the error code as a stable name for logs (issue #194).
+// String renders the error code as a stable name for logs.
 func (c CommandErrorCode) String() string {
 	switch c {
 	case CommandErrorInternal:
@@ -255,11 +207,7 @@ func (c CommandErrorCode) String() string {
 	}
 }
 
-// FileAccessReason refines a CommandErrorFileAccessDenied failure (issue #548).
-// The Worker emits FileAccessDenied for several conditions that are NOT
-// path-syntax problems; this value carries which one so the adapter sets the
-// wire FileAccessReason and the API maps each to an honest problem reason. The
-// adapter maps each value to the generated enum.
+// FileAccessReason distinguishes non-syntax file denials so the API can map their actual cause.
 type FileAccessReason int
 
 const (
@@ -296,11 +244,7 @@ func (r FileAccessReason) String() string {
 	}
 }
 
-// StatusEvent is an observed server-state transition the session emits as a
-// StatusChange event (CONTROL_PLANE.md Section 6). State is the wire state name
-// (e.g. "running"); the adapter maps it to the generated ServerState enum.
-// CrashReason is likewise the wire crash-reason name (e.g.
-// "forge_install_failed"), empty for an unclassified transition.
+// StatusEvent carries wire state and crash-reason names; an empty reason leaves a crash unclassified.
 type StatusEvent struct {
 	ServerID    string
 	State       string
@@ -319,9 +263,7 @@ const (
 	LogStreamStderr
 )
 
-// LogEvent is one captured line of a server's console output the session emits
-// as a LogLine event (FR-MON-2). Logs are transient relay-only at M1: the
-// Worker streams them and does not store them (REQUIREMENTS.md Section 6.13).
+// LogEvent is transient console output forwarded as LogLine; the Worker does not persist it.
 type LogEvent struct {
 	ServerID string
 	Line     string
@@ -357,21 +299,16 @@ type CommandHandler interface {
 	Metrics() <-chan MetricsEvent
 }
 
-// TransferDeadlineSetter is an optional CommandHandler capability: the session
-// pushes the RegisterAck's data-plane transfer bound onto the handler after
-// registration so it can apply a per-transfer deadline (issue #874). It is a
-// separate interface because the bound arrives from the ack, not on each
-// command; a handler that does not implement it simply runs transfers unbounded.
+// TransferDeadlineSetter accepts the registration-time transfer backstop; handlers without it remain unbounded.
 type TransferDeadlineSetter interface {
 	// SetTransferDeadline records the bound for one data-plane transfer (snapshot
 	// upload / hydrate download). A non-positive value leaves transfers unbounded.
 	SetTransferDeadline(d time.Duration)
 }
 
-// ScratchReclaimer is an optional CommandHandler capability: after registration
-// the session hands the handler the list of held server ids the API reports as
-// deleted (issue #924). The handler reclaims the scratch dir and hydrate
-// leftovers for each id, but NOT .displaced-<id> trees (issue #911).
+// ScratchReclaimer is an optional CommandHandler capability: after registration the session hands the handler
+// the list of held server ids the API reports as deleted. The handler reclaims the scratch dir and hydrate
+// leftovers for each id, but NOT.displaced-<id> trees.
 type ScratchReclaimer interface {
 	// ReclaimDeletedScratches removes scratch dirs for server ids the API
 	// confirmed no longer exist. It runs asynchronously and must not block
@@ -379,25 +316,14 @@ type ScratchReclaimer interface {
 	ReclaimDeletedScratches(serverIDs []string)
 }
 
-// StatusResyncer is an optional CommandHandler capability: after a successful
-// (re-)register the session asks the handler to re-emit the current state of
-// every instance it still holds (issue #985). On an API restart the worker
-// process stays alive with its servers running, but the API resets their
-// observed state to unknown on boot; without this re-emit they sit at unknown
-// for the full reconciler grace window and the relay treats them as stopped.
-// Re-emitting moves them out of unknown within seconds. A handler that does not
-// implement it simply skips the resync (the prior behavior).
+// StatusResyncer re-emits held instance states after registration so API restart does not leave them unknown.
 type StatusResyncer interface {
 	// ResyncStatus re-emits a StatusChange for each currently-held instance. It
 	// must be a no-op when the handler holds no instances (e.g. a fresh process).
 	ResyncStatus()
 }
 
-// HeldServerProvider is an optional CommandHandler capability: before each
-// registration the session asks the handler for the current held-server
-// inventory so re-registrations advertise fresh generations instead of the
-// stale boot-time snapshot (issue #1711). A handler that does not implement it
-// keeps the original caps unchanged (the prior behavior).
+// HeldServerProvider refreshes inventory before registration; otherwise the session reuses boot capabilities.
 type HeldServerProvider interface {
 	// HeldServers returns the working sets this Worker currently holds in its
 	// local scratch, each tagged with its recorded generation.
@@ -444,16 +370,14 @@ type Clock interface {
 	Now() time.Time
 	// After returns a channel that fires once after d elapses, like time.After.
 	After(d time.Duration) <-chan time.Time
-	// NewTimer returns a persistent, resettable timer (like time.NewTimer). The
-	// heartbeat deadline uses it so the cadence stays independent of event traffic:
-	// the timer is armed once and reset only after a heartbeat is sent, rather than
-	// re-armed via After on every select iteration (issue #341).
+	// NewTimer returns a persistent, resettable timer (like time.NewTimer). The heartbeat deadline uses it so the
+	// cadence stays independent of event traffic: the timer is armed once and reset only after a heartbeat is sent,
+	// rather than re-armed via After on every select iteration.
 	NewTimer(d time.Duration) Timer
 }
 
-// Timer is a single-shot deadline that can be re-armed, mirroring time.Timer.
-// It is the seam that keeps the heartbeat cadence deterministic under a fake
-// clock while staying independent of inbound event traffic (issue #341).
+// Timer is a single-shot deadline that can be re-armed, mirroring time.Timer. It is the seam that keeps the
+// heartbeat cadence deterministic under a fake clock while staying independent of inbound event traffic.
 type Timer interface {
 	// C is the channel on which the tick is delivered when the deadline elapses.
 	// Unlike After, the channel is stable across Reset.

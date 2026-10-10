@@ -6,17 +6,8 @@ import (
 	"testing"
 )
 
-// The three tests below pin the Worker-declared held generation a SnapshotTrigger
-// puts on its CommandResult (issue #2481). The API mirrors that declaration into
-// its held-working-set inventory, which gates the destructive skip-hydrate (#763)
-// and the reconciler's short held-start grace (#999) — so the declaration must be
-// the same fact as the on-disk marker the Worker re-advertises at registration,
-// never a prediction of it.
-//
-// What makes that structural rather than careful: handleSnapshot's declaration is
-// assigned in exactly ONE place, from recordGenerationIfUnchanged's report that
-// the marker write landed. The stopped-id branch never calls it (it calls
-// removeScratch instead), so it cannot produce a declaration at all.
+// Snapshot declarations must match successfully published local markers; stopped scratch removal declares
+// nothing.
 
 // TestRunningSnapshotDeclaresTheGenerationItStamped is the positive direction: a
 // running-id snapshot keeps its scratch and stamps the freshly published
@@ -51,15 +42,7 @@ func TestRunningSnapshotDeclaresTheGenerationItStamped(t *testing.T) {
 	}
 }
 
-// TestStoppedSnapshotDeclaresNoHeldGeneration is the case issue #2481 exists for.
-// The stopped-id branch publishes and then removeScratch DELETES the working set
-// (#762/#841), so the Worker holds nothing afterwards. Declaring the published
-// generation here would let the API record held == store, take the short grace, and
-// start with skip_hydrate over a working set that is not there. Since issue #2499
-// handleStart refuses that start instead of booting an empty directory, so the
-// declaration would cost a refusal and a corrective hydrate rather than the
-// #696-class world rollback it once did — a floor under the mistake, not a licence
-// to make it.
+// Stopped snapshots delete scratch after publication, so they must declare no held generation.
 func TestStoppedSnapshotDeclaresNoHeldGeneration(t *testing.T) {
 	tr := &fakeTransfer{gen: 12}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
@@ -79,15 +62,8 @@ func TestStoppedSnapshotDeclaresNoHeldGeneration(t *testing.T) {
 	}
 }
 
-// TestRunningSnapshotDeclaresNothingWhenTheStampWasSkipped is the test that pins
-// the declaration to the MARKER WRITE rather than to the branch. A running-id
-// snapshot holds no per-id reservation (#829 item 4), so a new stream can re-place
-// and hydrate the server while this (old, dropped) stream is still uploading; the
-// #2284 identity guard then SKIPS the stamp and the marker keeps the hydrate's
-// older generation. The scratch dir is still "retained" in the crude sense — it is
-// right there on disk — but it is NOT the tree this snapshot published, so
-// declaring the published generation would be exactly the marker-newer-than-tree
-// error #2284 closed, re-introduced over the wire instead of on disk.
+// A replacement tree is still held but was not packed by this snapshot; a skipped stamp must suppress its
+// declaration.
 func TestRunningSnapshotDeclaresNothingWhenTheStampWasSkipped(t *testing.T) {
 	tr := &fakeTransfer{gen: 12}
 	ctrl := &fakeControl{reply: "ok"}

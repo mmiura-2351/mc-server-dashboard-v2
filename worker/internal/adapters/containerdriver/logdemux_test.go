@@ -86,10 +86,9 @@ func TestDemuxLogsTrimsCarriageReturn(t *testing.T) {
 	}
 }
 
-// A final payload without a trailing newline is emitted when the stream ends,
-// on each stream that carries one: a container dying abruptly flushes its last
-// diagnostic newline-less, and that line is the one that explains the crash
-// (issue #2023).
+// A final payload without a trailing newline is emitted when the stream ends, on each stream that carries one: a
+// container dying abruptly flushes its last diagnostic newline-less, and that line is the one that explains the
+// crash.
 func TestDemuxLogsEmitsUnterminatedFinalLine(t *testing.T) {
 	var buf bytes.Buffer
 	buf.Write(frame(dockerStreamStdout, "terminated\n"))
@@ -220,11 +219,10 @@ func (r *newlinelessReader) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-// A stream that never emits a newline must not grow the per-stream carry buffer
-// without bound: the cap is consulted while the line accumulates across frames,
-// not only once a newline completes it (issue #2029). Without the bound the
-// carry retains every byte the container wrote, so the worker's heap tracks the
-// container's newline-less output until the stream ends or the worker OOMs.
+// A stream that never emits a newline must not grow the per-stream carry buffer without bound: the cap is
+// consulted while the line accumulates across frames, not only once a newline completes it. Without the bound
+// the carry retains every byte the container wrote, so the worker's heap tracks the container's newline-less
+// output until the stream ends or the worker OOMs.
 func TestDemuxLogsBoundsNewlinelessCarry(t *testing.T) {
 	const total = 128 << 20 // 128 MiB of newline-less output, streamed lazily.
 
@@ -247,10 +245,9 @@ func TestDemuxLogsBoundsNewlinelessCarry(t *testing.T) {
 	}
 }
 
-// An over-long line spanning frames is truncated at MaxLogLineBytes and marked,
-// and the stream resynchronises at the next newline so the line after it is
-// emitted intact — mirroring LogPump.Scan, which keeps at most MaxLogLineBytes
-// and discards the excess until the newline arrives (issue #2029).
+// An over-long line spanning frames is truncated at MaxLogLineBytes and marked, and the stream resynchronises at
+// the next newline so the line after it is emitted intact, mirroring LogPump.Scan, which keeps at most
+// MaxLogLineBytes and discards the excess until the newline arrives.
 func TestDemuxLogsTruncatesOverLongLineAndResyncs(t *testing.T) {
 	long := strings.Repeat("a", execution.MaxLogLineBytes+5000)
 
@@ -275,9 +272,8 @@ func TestDemuxLogsTruncatesOverLongLineAndResyncs(t *testing.T) {
 	}
 }
 
-// The final unterminated partial is flushed on stream end (issue #2023) even when
-// it is itself over-long: it is emitted truncated and marked, as LogPump.Scan
-// emits its trailing partial at EOF.
+// The final unterminated partial is flushed on stream end even when it is itself over-long: it is emitted
+// truncated and marked, as LogPump.Scan emits its trailing partial at EOF.
 func TestDemuxLogsEmitsOverLongFinalPartial(t *testing.T) {
 	long := strings.Repeat("a", execution.MaxLogLineBytes+5000)
 
@@ -297,12 +293,8 @@ func TestDemuxLogsEmitsOverLongFinalPartial(t *testing.T) {
 	}
 }
 
-// The container path (demuxLogs) and the process path (LogPump.Scan) must agree
-// on over-long-line handling — #2023 established that the two paths stay
-// consistent. Feeding identical content through both must emit identical lines,
-// including where the truncation lands and whether the line is marked. The cases
-// walk the cap boundary, since that is where the two implementations could
-// plausibly disagree (issue #2029).
+// Feed identical oversized lines through Docker demux and LogPump.Scan to pin matching truncation at cap
+// boundaries.
 func TestDemuxLogsMatchesScanOverLongSemantics(t *testing.T) {
 	const lineCap = execution.MaxLogLineBytes
 	a := func(n int) string { return strings.Repeat("a", n) }

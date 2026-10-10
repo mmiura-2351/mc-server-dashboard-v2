@@ -6,17 +6,8 @@ import (
 	"testing"
 )
 
-// parityCases is the parse table mirrored one-for-one by the API's
-// tests/servers/test_server_properties.py::PARITY_CASES. Same input, same
-// parse -- that mirroring is the evidence that the platform-key guard and the
-// worker read a server.properties alike (issue #2811). Keep the two tables in
-// sync: a case added here but not there leaves the invariant unpinned. The table
-// runs through Parse, whose latin-1 decode is the API's too; ParseUTF8 reads a
-// valid-UTF-8 non-ASCII byte differently from both (issue #3116), so such an
-// input is pinned in TestParseUTF8DecodesAsMinecraft120Does, not here. An
-// UNPAIRED surrogate escape has no row either: a Go string cannot hold the lone
-// UTF-16 unit Java keeps, so it is U+FFFD here while the API's Python string
-// holds the surrogate itself (issue #3120); TestParseSurrogateEscapes pins it.
+// Keep parityCases aligned with the API's PARITY_CASES for latin-1 grammar.
+// UTF-8 decoding and unpaired surrogates have separate tests because their representations differ.
 var parityCases = []struct {
 	name  string
 	input string
@@ -117,9 +108,8 @@ var parityCases = []struct {
 		input: "rcon.password=one\\\n\nmotd=hi\n",
 		want:  map[string]string{"rcon.password": "one", "motd": "hi"},
 	},
-	// A zero-length continuation: a lone backslash, blanks aside, continues a
-	// logical line that is still empty, and Java reads the line after it as the
-	// start of a logical line (issue #3041).
+	// A zero-length continuation: a lone backslash, blanks aside, continues a logical line that is still empty, and
+	// Java reads the line after it as the start of a logical line.
 	{
 		name:  "a zero-length continuation onto a blank line",
 		input: "\\\n\n",
@@ -313,12 +303,7 @@ func TestParseParity(t *testing.T) {
 	}
 }
 
-// TestParseUTF8KeepsTheGrammar runs the parity table through the 1.20+ reader:
-// the charset changes how a non-ASCII byte decodes, never the grammar, and the
-// table's one non-ASCII input is not valid UTF-8, so it falls back to latin-1.
-// The other 53 inputs are pure ASCII and are asserted against the same wants
-// TestParseParity asserts for Parse, which is what pins that the two readers
-// agree on every ASCII key and value.
+// Run the shared grammar cases through ParseUTF8; ASCII is identical and invalid UTF-8 falls back to latin-1.
 func TestParseUTF8KeepsTheGrammar(t *testing.T) {
 	for _, tc := range parityCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -335,10 +320,8 @@ func TestParseUTF8KeepsTheGrammar(t *testing.T) {
 	}
 }
 
-// TestParseUTF8DecodesAsMinecraft120Does pins the reader a Minecraft 1.20+
-// server loads server.properties with (Settings.loadFromFile): UTF-8, and
-// latin-1 for the WHOLE file when any byte of it is not valid UTF-8 (issue
-// #3116).
+// TestParseUTF8DecodesAsMinecraft120Does pins the reader a Minecraft 1.20+ server loads server.properties with
+// (Settings.loadFromFile): UTF-8, and latin-1 for the WHOLE file when any byte of it is not valid UTF-8.
 func TestParseUTF8DecodesAsMinecraft120Does(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -385,14 +368,7 @@ func TestParseUTF8DecodesAsMinecraft120Does(t *testing.T) {
 	}
 }
 
-// TestParseSurrogateEscapes pins how a \uD800-\uDFFF escape decodes. A PAIR --
-// a high half immediately followed by a low half, which is how
-// Properties.store spells a supplementary character and therefore how a
-// pre-1.20 server's own rewrite spells one -- is the single character its two
-// UTF-16 units make, as Properties.load reads it (issue #3120). An UNPAIRED
-// half is U+FFFD: Java holds the lone unit, which has no UTF-8 spelling for the
-// Worker to send. That last row is the one place the two readers part, so these
-// cases live here and not in parityCases.
+// Pair valid UTF-16 surrogate escapes; replace unpaired units with U+FFFD because they have no UTF-8 encoding.
 func TestParseSurrogateEscapes(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -419,10 +395,9 @@ func TestParseSurrogateEscapes(t *testing.T) {
 	}
 }
 
-// TestParseHandlesLinesLongerThanTheScannerCap pins that the parser has no
-// bufio.Scanner token cap: a huge motd used to truncate the parse and drop every
-// key after it (issue #2811), which the container driver could only defend
-// against by failing the start outright.
+// TestParseHandlesLinesLongerThanTheScannerCap pins that the parser has no bufio.Scanner token cap: a huge motd
+// used to truncate the parse and drop every key after it, which the container driver could only defend against
+// by failing the start outright.
 func TestParseHandlesLinesLongerThanTheScannerCap(t *testing.T) {
 	huge := strings.Repeat("x", bufio.MaxScanTokenSize+1)
 	props := Parse([]byte("motd=" + huge + "\nserver-port=26590\n"))

@@ -20,23 +20,12 @@ func awaitManagerGoroutines(t *testing.T, want int) {
 	}
 }
 
-// TestMain runs the package and then hands the result to the shared census,
-// which fails the run if any goroutine a Manager started is still there once
-// every test has finished (issue #2777). The census lives in goroutineleak
-// rather than here so worker/test/e2e — which builds Managers against a real
-// Docker daemon and cannot import this file — asserts the same invariant off the
-// same frame list (issue #2881).
+// Run the shared goroutine census after test cleanup so unit and E2E binaries enforce the same Manager lifetime.
 func TestMain(m *testing.M) {
 	os.Exit(goroutineleak.FailIfSurvivors(m.Run()))
 }
 
-// A running instance's status pump parks on the instance's event channel and the
-// metrics pump runs off the clock until the status pump releases it. Nothing
-// closed either: an instance that never reaches a terminal state — a server
-// still up when the Worker goes down, and every fake in this package — left the
-// pair (and the metrics pump's cancel watcher) parked for the life of the
-// process, against a manager nobody owned any more (issue #2777). Close ends
-// them.
+// Keep an instance non-terminal and require Close to end its status and metrics pumps and teardown watcher.
 func TestCloseEndsThePumpsOfALiveInstance(t *testing.T) {
 	awaitManagerGoroutines(t, 0)
 	m := newManager(t, &fakeDriver{}, nil)
@@ -52,9 +41,8 @@ func TestCloseEndsThePumpsOfALiveInstance(t *testing.T) {
 	awaitManagerGoroutines(t, 0)
 }
 
-// statusDispatcher is started by New and parks on statusNotify, which nothing
-// ever closes — so every manager ever built left one behind, one per test in
-// this package (issue #2777).
+// statusDispatcher is started by New and parks on statusNotify, which nothing ever closes, so every manager ever
+// built left one behind, one per test in this package.
 func TestCloseEndsTheStatusDispatcher(t *testing.T) {
 	awaitManagerGoroutines(t, 0)
 	m := newManager(t, &fakeDriver{}, nil)
@@ -65,12 +53,7 @@ func TestCloseEndsTheStatusDispatcher(t *testing.T) {
 	awaitManagerGoroutines(t, 0)
 }
 
-// The dispatcher's send is BLOCKING by design: coalesced status is state, not a
-// stream, so backpressure is absorbed rather than dropped (issue #96). By the
-// time Close runs, nothing drains the merged stream any more — main.go closes
-// the manager only after the session runner has returned — so a dispatcher
-// observing the shutdown only between events would hold Close forever on a full
-// sink. It observes it on the send too, and the parked status is dropped.
+// Fill the status sink so the dispatcher blocks sending; shutdown must release it without a consumer.
 func TestCloseEndsAStatusDispatcherBlockedOnAFullSink(t *testing.T) {
 	awaitManagerGoroutines(t, 0)
 	m := newManager(t, &fakeDriver{}, nil)
@@ -99,10 +82,9 @@ func TestCloseEndsAStatusDispatcherBlockedOnAFullSink(t *testing.T) {
 	awaitManagerGoroutines(t, 0)
 }
 
-// A start that lands after Close registers its instance but starts no pumps.
-// Close has already run the Wait, so a pump spawned afterwards is both a
-// goroutine nobody joins and — an Add racing a Wait that has reached zero — a
-// panic away. It mirrors recordOrphan's guard for convergers (issue #2493).
+// A start that lands after Close registers its instance but starts no pumps. Close has already run the Wait, so
+// a pump spawned afterwards is both a goroutine nobody joins and, an Add racing a Wait that has reached zero, a
+// panic away. It mirrors recordOrphan's guard for convergers.
 func TestStartAfterCloseSpawnsNoPumps(t *testing.T) {
 	awaitManagerGoroutines(t, 0)
 	m := newManager(t, &fakeDriver{}, nil)
@@ -113,12 +95,7 @@ func TestStartAfterCloseSpawnsNoPumps(t *testing.T) {
 		t.Fatalf("start failed: %+v", res)
 	}
 
-	// The guard itself, asserted directly: a spawn on a closed manager is REFUSED,
-	// not merely short-lived. Watching the goroutines alone cannot see this — one
-	// started here observes the already-cancelled shutdown and leaves within
-	// microseconds — but the danger is not its lifetime, it is the Add: landing
-	// beside a Wait still in progress, that is a panic in the Worker's shutdown
-	// path, not a leak.
+	// Assert the spawn rejection directly: a briefly started goroutine could hide a WaitGroup Add/Wait race.
 	if m.goBackground(func() {}) {
 		t.Fatal("goBackground started a goroutine on a closed manager; Close has already run the Wait that counts it")
 	}

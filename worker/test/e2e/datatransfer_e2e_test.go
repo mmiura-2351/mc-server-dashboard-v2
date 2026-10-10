@@ -1,18 +1,7 @@
 //go:build e2e
 
-// Package e2e exercises the REAL Go data-plane client against a REAL running
-// Python API (issue #111). Unlike the unit tests in the datatransfer package
-// (which drive the client against an httptest fake), this harness proves the
-// archive conventions — tar member forms, sanitization, status codes, the auth
-// header — line up end to end across the two languages.
-//
-// It is gated two ways so it never runs in the ordinary `go test ./...` pass:
-//   - the `e2e` build tag (this file compiles only under `-tags e2e`), and
-//   - the MCD_E2E_API_URL + MCD_E2E_CREDENTIAL environment variables (the test
-//     skips when either is unset).
-//
-// The CI job (.github/workflows/e2e.yml) boots the API, sets these, and runs
-// `go test -tags e2e ./test/e2e/...`. See worker/README.md for a local dry run.
+// Package e2e exercises Worker HTTP transfers against a running Python API.
+// Require explicit environment gates; ordinary unit tests do not start external services.
 package e2e
 
 import (
@@ -39,9 +28,8 @@ func env(t *testing.T, name string) string {
 	return v
 }
 
-// scopeURL builds a data-plane endpoint URL for a (community, server) scope. The
-// path shape mirrors the API router prefix (the whole HTTP API is namespaced
-// under /api, issue #498 — dataplane/api/transfers.py:
+// scopeURL builds a data-plane endpoint URL for a (community, server) scope. The path shape mirrors the API
+// router prefix (the whole HTTP API is namespaced under /api,, dataplane/api/transfers.py:
 // /api/data-plane/communities/{c}/servers/{s}/...).
 func scopeURL(base, community, server, suffix string) string {
 	return base + "/api/data-plane/communities/" + community + "/servers/" + server + "/" + suffix
@@ -72,9 +60,8 @@ func TestSnapshotThenHydrateRoundTrip(t *testing.T) {
 	}
 	writeTree(t, src, want)
 
-	// Act 1: snapshot (pack + upload + publish). A clean publish is 204. Base
-	// generation 0 (never hydrated) skips the publish-time guard (#847); the worker
-	// id is recorded as the publisher (#847 bug 3).
+	// Act 1: snapshot (pack + upload + publish). A clean publish is 204. Base generation 0 (never hydrated) skips
+	// the publish-time guard; the worker id is recorded as the publisher.
 	snapshotURL := scopeURL(base, community, server, "snapshot")
 	if _, err := client.Snapshot(ctx, snapshotURL, credential, src, 0, "e2e-worker"); err != nil {
 		t.Fatalf("Snapshot against real API: %v", err)

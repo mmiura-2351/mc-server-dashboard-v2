@@ -29,10 +29,9 @@ func (t sysTimer) C() <-chan time.Time   { return t.t.C }
 func (t sysTimer) Reset(d time.Duration) { t.t.Reset(d) }
 func (t sysTimer) Stop()                 { t.t.Stop() }
 
-// silentServer accepts the Session stream but never sends a RegisterAck and never
-// returns: it models an API that wedges after opening the stream (issue #786). It
-// blocks until its context is cancelled so the client side, not the server, must
-// be the one to release the stream.
+// silentServer accepts the Session stream but never sends a RegisterAck and never returns: it models an API that
+// wedges after opening the stream. It blocks until its context is cancelled so the client side, not the server,
+// must be the one to release the stream.
 type silentServer struct {
 	controlplanev1.UnimplementedWorkerServiceServer
 }
@@ -67,9 +66,8 @@ func dialSilent(t *testing.T) *Dialer {
 	return NewDialer(conn, "the-secret", sysClock{})
 }
 
-// TestCloseUnblocksLingeringRecv proves that Close cancels the per-stream context
-// so a Recv stranded on a stream the server never tears down returns promptly
-// (issue #786). Before the fix, Close was CloseSend-only and RecvCommand could
+// TestCloseUnblocksLingeringRecv proves that Close cancels the per-stream context so a Recv stranded on a stream
+// the server never tears down returns promptly. Before the fix, Close was CloseSend-only and RecvCommand could
 // linger until process shutdown.
 func TestCloseUnblocksLingeringRecv(t *testing.T) {
 	transport, err := dialSilent(t).Dial(context.Background())
@@ -99,9 +97,8 @@ func TestCloseUnblocksLingeringRecv(t *testing.T) {
 	}
 }
 
-// TestRecvRegisterAckTimesOut proves that an API which accepts the stream but
-// never acks fails RecvRegisterAck within the deadline instead of wedging the run
-// loop forever (issue #786).
+// TestRecvRegisterAckTimesOut proves that an API which accepts the stream but never acks fails RecvRegisterAck
+// within the deadline instead of wedging the run loop forever.
 func TestRecvRegisterAckTimesOut(t *testing.T) {
 	prev := registerAckTimeout
 	registerAckTimeout = 100 * time.Millisecond
@@ -206,11 +203,9 @@ func dialDraining(t *testing.T) *Dialer {
 	return NewDialer(conn, "the-secret", sysClock{})
 }
 
-// TestSendUnblocksOnFlowControlStall proves that sendBounded cancels the stream
-// when a Send blocks longer than sendStallTimeout due to HTTP/2 flow-control
-// backpressure (issue #1714). Without the watchdog, the blocked Send would
-// starve the heartbeat goroutine until the API's heartbeat timeout kills the
-// session.
+// TestSendUnblocksOnFlowControlStall proves that sendBounded cancels the stream when a Send blocks longer than
+// sendStallTimeout due to HTTP/2 flow-control backpressure. Without the watchdog, the blocked Send would starve
+// the heartbeat goroutine until the API's heartbeat timeout kills the session.
 func TestSendUnblocksOnFlowControlStall(t *testing.T) {
 	prev := sendStallTimeout
 	sendStallTimeout = 100 * time.Millisecond

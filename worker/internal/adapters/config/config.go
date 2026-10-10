@@ -1,17 +1,5 @@
-// Package config loads the Worker's runtime configuration. It lives in the
-// adapters layer because reading configuration is an edge concern
-// (docs/app/CONFIGURATION.md Section 1): the wiring layer reads it and injects
-// already-constructed values into the domain/application layers.
-//
-// Precedence mirrors the API side and CONFIGURATION.md Section 2:
-//
-//	defaults (in code) < config file (TOML) < environment variables
-//
-// Environment variables use the MCD_WORKER_ prefix; the logical key path is
-// upper-cased with dots replaced by underscores (e.g. api.grpc_endpoint becomes
-// MCD_WORKER_API_GRPC_ENDPOINT). A required key missing from every source, or a
-// malformed value, is a fatal startup error (CONFIGURATION.md Section 2). Secret
-// values are never logged; see Config.Redacted.
+// Package config loads defaults, then TOML, then MCD_WORKER_ environment overrides.
+// Logical key paths become uppercase names with dots replaced by underscores.
 package config
 
 import (
@@ -30,9 +18,7 @@ import (
 // (CONFIGURATION.md Section 2).
 const EnvPrefix = "MCD_WORKER_"
 
-// Config is the Worker's resolved configuration. Only the keys this milestone
-// needs are modelled (CONFIGURATION.md Section 6); the rest land with their
-// features.
+// Config holds settings resolved from defaults, TOML, and environment overrides by Load.
 type Config struct {
 	API    APIConfig
 	Worker WorkerConfig
@@ -56,9 +42,7 @@ type TLSConfig struct {
 	// CAFile is the CA bundle verifying the API's TLS. When set, the Worker dials
 	// with TLS verified against it.
 	CAFile string
-	// Insecure opts in to a plaintext (no-TLS) dial. It is only honoured when
-	// CAFile is empty, and is for local/dev use only; production must set CAFile.
-	// With neither CAFile nor Insecure, config validation fails fast.
+	// Insecure explicitly permits plaintext and is mutually exclusive with CAFile.
 	Insecure bool
 	// ClientCertFile is the Worker's mTLS client certificate.
 	ClientCertFile string
@@ -69,10 +53,7 @@ type TLSConfig struct {
 // WorkerConfig is identity, advertised capabilities, and scratch space
 // (CONFIGURATION.md Sections 6.1-6.3).
 type WorkerConfig struct {
-	// ID is the stable identifier the Worker registers under. It must be a UUID
-	// (the API rejects non-UUID worker ids). When unset, a UUID is generated and
-	// persisted at <scratch_dir>/worker-id on first boot and reused thereafter
-	// (see resolveWorkerID).
+	// ID must be a UUID; when unset, it is generated and persisted at <scratch_dir>/worker-id.
 	ID string
 	// Drivers is the ExecutionDriver set this Worker advertises.
 	Drivers []string
@@ -85,8 +66,7 @@ type WorkerConfig struct {
 	MetricsIntervalSeconds uint32
 }
 
-// DriverConfig holds per-driver settings (CONFIGURATION.md Section 6.3). Only the
-// container driver has configurable inputs at this milestone.
+// DriverConfig groups settings for the advertised execution drivers.
 type DriverConfig struct {
 	// Container configures the container (Docker) ExecutionDriver. It is consulted
 	// only when worker.drivers advertises "container".
@@ -98,28 +78,15 @@ type ContainerConfig struct {
 	// DockerHost is the Docker daemon endpoint (unix:// socket). Empty uses the
 	// daemon default socket.
 	DockerHost string
-	// Images maps a Java major version to the base container image providing that
-	// JRE. The driver selects the image for the major a server's Minecraft version
-	// requires.
+	// Images maps Java majors to base images; the Minecraft version selects the required major.
 	Images map[int]string
-	// GameBindIP is the host interface the driver publishes each server's game
-	// port on. The in-code default is 127.0.0.1 (loopback-only, preserving the
-	// historical behavior); set 0.0.0.0 to accept players from outside the host.
-	// RCON always stays on loopback regardless of this value.
+	// GameBindIP controls game-port publication; RCON publication remains loopback-only.
 	GameBindIP string
-	// Network is the user-defined Docker network the driver attaches each MC
-	// container to. Empty (the default) keeps the historical behavior: containers
-	// run on the default bridge and RCON is published to the host loopback. When
-	// set — the shipped compose topology, where the Worker itself is a container —
-	// the driver attaches MC containers to this network, drops the host RCON
-	// publication, and dials RCON at the container's name on the network (the
-	// network's container-name DNS resolves it). The game-port publication is
-	// unchanged either way.
+	// Network enables container DNS and replaces host RCON publication with direct network access.
+	// Game-port publication is unchanged.
 	Network string
-	// User is the uid:gid the driver runs each MC container as and hands the
-	// server's working set to (issue #2600). After Load it is always set and never
-	// root: an unset key resolves to defaultContainerUser for a Worker running as
-	// root, and to the Worker's own uid:gid otherwise (see resolveContainerUser).
+	// User is always non-root after Load: root Workers default to defaultContainerUser, others to their own
+	// uid:gid.
 	User ContainerUser
 }
 
@@ -144,9 +111,7 @@ type LogConfig struct {
 	Format string
 }
 
-// fileConfig mirrors Config with TOML tags so the file form nests each logical
-// key under its group (CONFIGURATION.md Section 2). Pointers distinguish "unset"
-// (keep the default) from a zero value the file explicitly supplied.
+// Pointers distinguish unset TOML values from explicit zero values.
 type fileConfig struct {
 	API struct {
 		GRPCEndpoint *string `toml:"grpc_endpoint"`
@@ -182,16 +147,10 @@ type fileConfig struct {
 	} `toml:"log"`
 }
 
-// defaults returns a Config holding the in-code default values
-// (CONFIGURATION.md Section 6). Keys with no default stay zero and are checked
-// in validate.
 func defaults() Config {
 	return Config{
 		Worker: WorkerConfig{
-			// No default driver: the only shipped driver is "container", which
-			// requires driver.container.images, so there is no zero-config driver to
-			// fall back to. worker.drivers is therefore effectively required and
-			// validate() rejects an empty set (issue #781).
+			// No default driver: container requires explicitly configured Java images.
 			MaxServers: 0,
 		},
 		Driver: DriverConfig{
@@ -206,10 +165,7 @@ func defaults() Config {
 	}
 }
 
-// Load resolves the configuration from defaults, an optional TOML file, and
-// environment variables (in that precedence), then validates it. An empty path
-// skips the file layer. A required key missing everywhere or a malformed value
-// is a fatal error the caller surfaces at boot (CONFIGURATION.md Section 2).
+// Load applies defaults, optional TOML, then environment overrides and validates the result.
 func Load(path string, getenv func(string) string) (Config, error) {
 	cfg := defaults()
 
@@ -223,9 +179,7 @@ func Load(path string, getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 
-	// A blank required or secret key reads as unset (CONFIGURATION.md Section 3,
-	// issue #3085). Collapse it on the resolved value, before validate, so the
-	// value the rest of the Worker reads is the one validate judged.
+	// Treat whitespace-only required and secret values as unset before validation.
 	collapseBlank(
 		&cfg.API.GRPCEndpoint,
 		&cfg.API.Credential,
@@ -371,9 +325,6 @@ func applyEnv(cfg *Config, getenv func(string) string) error {
 	return nil
 }
 
-// parseMajorMap converts a string-keyed Java-major map (from TOML) to an
-// int-keyed one, erroring on a non-integer major. key names the config key for
-// the error message.
 func parseMajorMap(key string, in map[string]string) (map[int]string, error) {
 	out := make(map[int]string, len(in))
 	for k, value := range in {
@@ -407,10 +358,7 @@ func parseRuntimePairs(v string) (map[int]string, error) {
 	return out, nil
 }
 
-// parseContainerUser parses a driver.container.user value. It takes numeric ids
-// only — a name would be looked up in each Java image's own passwd file, and the
-// Worker hands the working set over by number — and refuses uid 0, which would
-// put the server back in the container as root.
+// Require numeric IDs for ownership handoff and reject uid 0.
 func parseContainerUser(v string) (ContainerUser, error) {
 	uidText, gidText, ok := strings.Cut(v, ":")
 	if !ok {
@@ -427,17 +375,8 @@ func parseContainerUser(v string) (ContainerUser, error) {
 	return ContainerUser{UID: int(uid), GID: int(gid)}, nil
 }
 
-// resolveContainerUser settles the uid:gid MC containers run as, given the
-// configured value (zero when unset) and the Worker process's own effective ids.
-//
-// The server and the Worker both work on the bind-mounted working set, so the
-// answer depends on who the Worker is. Running as root — the shipped compose
-// topology, where it needs the Docker socket — it can read, snapshot and delete
-// whatever any uid wrote and can hand the tree to any uid, so the containers get
-// the configured user, defaultContainerUser when none is set. Running
-// unprivileged it can do neither, so the containers must run as the Worker's own
-// uid:gid; a configured user that says otherwise is an error rather than a
-// server that cannot write its world.
+// Unprivileged Workers must share their uid:gid with the container to manage its working set.
+// Root Workers may hand ownership to a configured non-root user.
 func resolveContainerUser(configured ContainerUser, euid, egid int) (ContainerUser, error) {
 	unset := configured == ContainerUser{}
 	if euid == 0 {
@@ -455,11 +394,6 @@ func resolveContainerUser(configured ContainerUser, euid, egid int) (ContainerUs
 	return own, nil
 }
 
-// validate enforces the required keys with no default (CONFIGURATION.md Section
-// 6) and the documented value sets. Transport security is required unless
-// explicitly opted out: a CA file enables TLS, api.tls.insecure=true permits a
-// plaintext dial, and neither set is a fatal error (CONFIGURATION.md Section
-// 6.1).
 func (c Config) validate() error {
 	var missing []string
 	if c.API.GRPCEndpoint == "" {
@@ -479,9 +413,7 @@ func (c Config) validate() error {
 		return fmt.Errorf("config: api.tls.ca_file is required (or set api.tls.insecure=true for a plaintext dev dial)")
 	}
 
-	// The mTLS client pair is all-or-nothing: a half-configured pair is a silent
-	// security downgrade (no client cert loaded, no error), so reject it and name
-	// the missing half (issue #2661).
+	// Reject a partial mTLS pair instead of silently connecting without a client certificate.
 	if c.API.TLS.ClientCertFile == "" && c.API.TLS.ClientKeyFile != "" {
 		return fmt.Errorf("config: api.tls.client_cert_file is required when api.tls.client_key_file is set")
 	}
@@ -532,9 +464,7 @@ func setEnvString(dst *string, getenv func(string) string, key string) {
 	}
 }
 
-// collapseBlank resets each whitespace-only value to "" — the blank a
-// `${VAR}` compose interpolation can produce. A non-blank value is kept
-// verbatim (not trimmed), matching the API's _blank_to_none.
+// collapseBlank clears whitespace-only values but preserves non-blank values verbatim.
 func collapseBlank(values ...*string) {
 	for _, v := range values {
 		if strings.TrimSpace(*v) == "" {

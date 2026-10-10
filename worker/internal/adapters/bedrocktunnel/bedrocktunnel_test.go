@@ -488,11 +488,7 @@ func TestRetryBackoffOnRejectedRedial(t *testing.T) {
 	}
 }
 
-// After a successful handshake whose connection drops immediately (pump
-// returns), the run loop must apply a backoff delay before redialing
-// rather than looping with zero delay — the fix for the duel hot-loop
-// described in issue #1988. Mirrors session.Runner.Run, which delays
-// before every redial regardless of whether the previous attempt succeeded.
+// Back off even after a successful handshake if its connection drops immediately.
 func TestRedialAfterPumpDropAppliesBackoff(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -547,9 +543,8 @@ func TestRedialAfterPumpDropAppliesBackoff(t *testing.T) {
 	}
 }
 
-// Repeated instant displacements (pump returns well under minStableDuration)
-// must escalate the backoff delay rather than staying at Delay(0) forever
-// (issue #2153: two workers with the same token displacing each other).
+// Repeated instant displacements (pump returns well under minStableDuration) must escalate the backoff delay
+// rather than staying at Delay(0) forever (: two workers with the same token displacing each other).
 func TestInstantDisplacementEscalatesBackoff(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -594,8 +589,8 @@ func TestInstantDisplacementEscalatesBackoff(t *testing.T) {
 	}
 }
 
-// A connection that survives longer than minStableDuration resets the backoff
-// counter, so the next drop starts the sequence over (issue #2153).
+// A connection that survives longer than minStableDuration resets the backoff counter, so the next drop starts
+// the sequence over.
 func TestStableConnectionResetsBackoff(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

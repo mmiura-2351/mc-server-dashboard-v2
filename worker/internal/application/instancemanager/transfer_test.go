@@ -14,50 +14,40 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
 
-// fakeTransfer records hydrate/snapshot calls and returns a canned error. When
-// seq is set, PackSnapshot appends a "pack" marker and UploadSnapshot appends an
-// "upload" marker so a test can assert the ordering between the RCON save-off /
-// save-on bracket (#694) and the split pack/upload phases (#1710).
+// fakeTransfer records hydrate/snapshot calls and returns a canned error. When seq is set, PackSnapshot appends
+// a "pack" marker and UploadSnapshot appends an "upload" marker so a test can assert the ordering between the
+// RCON save-off / save-on bracket and the split pack/upload phases.
 type fakeTransfer struct {
 	mu        sync.Mutex
 	hydrated  []string // workingDir args
 	snapshots []string
 	packs     []string
 	uploads   []string
-	// snapshotHadWorkingSet records, per Snapshot call, whether the working dir
-	// held a real working set at the moment the pack ran (issue #841): a graceful
-	// stop must not GC the scratch before the post-stop final SnapshotTrigger packs
+	// snapshotHadWorkingSet records, per Snapshot call, whether the working dir held a real working set at the
+	// moment the pack ran: a graceful stop must not GC the scratch before the post-stop final SnapshotTrigger packs
 	// it, or the snapshot captures an empty/absent dir and is silently lost.
 	snapshotHadWorkingSet []bool
 	err                   error
 	packErr               error
 	uploadErr             error
 	seq                   *[]string
-	// gen is the store generation Hydrate/Snapshot report (issue #763); 0 by
-	// default. The manager records it in the working set's generation marker.
+	// gen is the store generation Hydrate/Snapshot report; 0 by default. The manager records it in the working
+	// set's generation marker.
 	gen uint64
-	// cancelDuringSnapshot, when set, is invoked at the start of Snapshot to model
-	// the request context being cancelled mid-transfer; Snapshot then returns
-	// context.Canceled. It proves the deferred save-on still runs (#694).
+	// cancelDuringSnapshot, when set, is invoked at the start of Snapshot to model the request context being
+	// cancelled mid-transfer; Snapshot then returns context.Canceled. It proves the deferred save-on still runs.
 	cancelDuringSnapshot context.CancelFunc
-	// snapshotBaseGenerations records, per Snapshot call, the base generation the
-	// manager declared (issue #847): the store generation the set was hydrated from.
+	// snapshotBaseGenerations records, per Snapshot call, the base generation the manager declared: the store
+	// generation the set was hydrated from.
 	snapshotBaseGenerations []uint64
-	// snapshotWorkerIDs records, per Snapshot call, the worker id the manager
-	// declared (issue #847 bug 3).
+	// snapshotWorkerIDs records, per Snapshot call, the worker id the manager declared.
 	snapshotWorkerIDs []string
-	// blockUntilCtxDone, when set, makes Hydrate/Snapshot block until the passed
-	// context is cancelled and then return ctx.Err(), modeling a stalled transfer
-	// the per-transfer deadline (issue #874) must abort. gotCtxErr captures the
+	// blockUntilCtxDone, when set, makes Hydrate/Snapshot block until the passed context is cancelled and then
+	// return ctx.Err, modeling a stalled transfer the per-transfer deadline must abort. gotCtxErr captures the
 	// error the blocked transfer observed so a test can assert it was the deadline.
 	blockUntilCtxDone bool
 	gotCtxErr         error
-	// duringUpload, when set, runs inside UploadSnapshot with the working dir the
-	// preceding PackSnapshot was given — after the pack, before the caller's
-	// post-upload tail (recordGenerationIfUnchanged -> sweepDisplaced). It models a
-	// NEW stream's re-placement hydrate replacing the working dir while this (old,
-	// dropped) stream's snapshot is still finishing that tail — the cross-stream window
-	// issue #2284 closes for the marker stamp and issue #2291 for the displaced sweep.
+	// duringUpload simulates a new stream replacing scratch before an old snapshot's marker and cleanup tail.
 	duringUpload func(workingDir string)
 }
 
@@ -244,7 +234,7 @@ func TestHydrateTriggerWithoutTransferClientFails(t *testing.T) {
 func TestSnapshotTriggerPacksWorkingDir(t *testing.T) {
 	tr := &fakeTransfer{}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
-	seedScratch(t, m, "s1") // an at-rest working set; absent is refused (#1713)
+	seedScratch(t, m, "s1") // an at-rest working set; absent is refused
 
 	res := m.Handle(context.Background(), snapshotCmd())
 	if !res.Success {
@@ -259,7 +249,7 @@ func TestSnapshotTriggerPacksWorkingDir(t *testing.T) {
 func TestSnapshotTriggerTransferFailureIsCoded(t *testing.T) {
 	tr := &fakeTransfer{err: errors.New("boom")}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
-	seedScratch(t, m, "s1") // an at-rest working set; absent is refused (#1713)
+	seedScratch(t, m, "s1") // an at-rest working set; absent is refused
 
 	res := m.Handle(context.Background(), snapshotCmd())
 	if res.Success || res.ErrorCode != session.CommandErrorTransferFailed {
@@ -267,19 +257,7 @@ func TestSnapshotTriggerTransferFailureIsCoded(t *testing.T) {
 	}
 }
 
-// A stopped-id snapshot over a scratch that holds NO WORKING SET is refused before
-// any pack or upload (issue #2813). The guard was a bare existence stat, so a
-// scratch emptied in place — or one holding only the generation marker — passed it:
-// the Worker packed nothing, the upload staged zero files, and the API's
-// 400 empty_snapshot staging gate refused the transfer only after the full cycle,
-// again on every scheduler tick, reporting a transfer failure that points away from
-// the cause. The predicate is hasWorkingSet (CONTENT), deliberately not the launch
-// guard's marker predicate (issue #2802): a marker-only dir boots a fresh world
-// there — the 204 contract — but has nothing to capture here.
-//
-// SERVER_NOT_FOUND carrying the "working dir absent" phrase, the same refusal an
-// absent dir earns (issue #1713): the API keys on the pair to read it as "nothing
-// left to capture" (_WORKING_SET_ABSENT_MARKER, lifecycle.py; issue #2480).
+// Empty and marker-only scratch have nothing to pack; content without a marker is still capturable.
 func TestSnapshotTriggerRefusedWhenScratchHoldsNoWorkingSet(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -335,14 +313,13 @@ func TestSnapshotTriggerRefusedWhenScratchHoldsNoWorkingSet(t *testing.T) {
 				t.Fatalf("transfer calls = snapshots %v, packs %v, uploads %v; want none: the refusal must precede the pack",
 					tr.snapshots, tr.packs, tr.uploads)
 			}
-			// The refusal must not GC what it refused over: removeScratch runs only after a
-			// PUBLISHED snapshot, and eating a marker-only dir would destroy the held-claim
-			// token the launch guard reads (issue #2802).
+			// The refusal must not GC what it refused over: removeScratch runs only after a PUBLISHED snapshot, and
+			// eating a marker-only dir would destroy the held-claim token the launch guard reads.
 			if _, err := os.Stat(dir); err != nil {
 				t.Fatalf("working dir stat err = %v, want the refusal to leave the scratch in place", err)
 			}
-			// The stopped path's reservation is released, so the corrective hydrate is not
-			// refused BUSY behind this refusal (the leak shape of issue #1950).
+			// The stopped path's reservation is released, so the corrective hydrate is not refused BUSY behind this
+			// refusal (the leak shape of).
 			m.mu.Lock()
 			leaked := m.reserved["s1"]
 			m.mu.Unlock()
@@ -353,14 +330,7 @@ func TestSnapshotTriggerRefusedWhenScratchHoldsNoWorkingSet(t *testing.T) {
 	}
 }
 
-// The ACCEPT side of the same boundary, driven rather than asserted in prose (PR
-// #2840 review): a scratch holding CONTENT but NO generation marker still packs.
-// It is the shape that separates this guard's predicate from the launch guard's
-// (issue #2802) in the other direction — a marker is the held-CLAIM token a launch
-// needs, not what makes a world worth capturing — and until this test existed a
-// predicate that also refused it left the whole worker package green, because every
-// other stopped-id snapshot test seeds through seedScratch, which writes both the
-// world file and the marker.
+// Content without a marker must snapshot successfully; only launch requires the held-claim marker.
 func TestSnapshotTriggerPacksContentWithoutGenerationMarker(t *testing.T) {
 	tr := &fakeTransfer{}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
@@ -380,25 +350,15 @@ func TestSnapshotTriggerPacksContentWithoutGenerationMarker(t *testing.T) {
 	if len(tr.snapshots) != 1 || tr.snapshots[0] != dir {
 		t.Fatalf("snapshots = %v, want [%q]", tr.snapshots, dir)
 	}
-	// What the pack SAW, not just that it was called: an unmarked set declares base
-	// generation 0, which leaves the publish-time staleness guard to compare against
-	// the store's own value (issue #847).
+	// What the pack SAW, not just that it was called: an unmarked set declares base generation 0, which leaves the
+	// publish-time staleness guard to compare against the store's own value.
 	if len(tr.snapshotBaseGenerations) != 1 || tr.snapshotBaseGenerations[0] != 0 {
 		t.Fatalf("base generations = %v, want [0]", tr.snapshotBaseGenerations)
 	}
 }
 
-// An UNREADABLE stopped-id scratch must NOT take the benign working-set refusal (PR
-// #2840 review). hasWorkingSet answers false when it cannot read the directory,
-// which is the safe direction where it is used to ADVERTISE held sets — a set the
-// Worker cannot prove it holds must not be advertised — and the wrong one for a
-// DURABILITY decision: SERVER_NOT_FOUND plus the "working dir absent" phrase is
-// exactly what makes StopServer._final_snapshot downgrade its data-loss ERROR to a
-// benign-duplicate INFO (lifecycle.py), so an EACCES / EMFILE / EIO would report
-// "nothing was lost" about a world that was never captured — the #841
-// swallowed-failure shape. The one other site that had to make this call already
-// made it the same way: datatransfer.displacedSlotHoldsWorkingSet returns the read
-// error rather than reusing the swallow.
+// Unreadable scratch must fail transfer, not report working-set absence that the API treats as a benign
+// duplicate.
 func TestSnapshotTriggerUnreadableScratchIsNotTheWorkingSetRefusal(t *testing.T) {
 	tr := &fakeTransfer{}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
@@ -428,14 +388,7 @@ func TestSnapshotTriggerUnreadableScratchIsNotTheWorkingSetRefusal(t *testing.T)
 	}
 }
 
-// A running-server snapshot brackets the working-dir copy with save-off →
-// save-all → settle-wait → save-on (#694/#907): save-off disables auto-save so a
-// region file cannot be captured torn mid-copy, a plain non-blocking save-all
-// drives the world to disk (NOT the blocking "save-all flush", which parked the MC
-// main thread and tripped the watchdog into crashing survival-main in production —
-// issue #693), the settle-wait then blocks until the async save's region files stop
-// changing so the fsck does not race in-flight writes (the #907 false positive),
-// and save-on re-enables auto-save afterwards.
+// Use async save-all and settling inside save-off/save-on; synchronous flush risks the tick watchdog.
 func TestSnapshotTriggerRunningServerBracketsCopyWithSaveOffOn(t *testing.T) {
 	ctrl := &fakeControl{reply: "ok"}
 	tr := &fakeTransfer{}
@@ -454,9 +407,7 @@ func TestSnapshotTriggerRunningServerBracketsCopyWithSaveOffOn(t *testing.T) {
 	}
 }
 
-// save-off brackets the PACK only (issue #1710): save-on is restored immediately
-// after the pack completes, before the upload begins. This narrows the window
-// where auto-save is disabled to the minimum needed (reading the working dir).
+// Disable auto-save only for packing; restore before upload because the spool no longer reads live scratch.
 func TestSnapshotTriggerRunningServerSaveOffBracketsTheTransfer(t *testing.T) {
 	var seq []string
 	ctrl := &fakeControl{reply: "ok", seq: &seq}
@@ -476,9 +427,7 @@ func TestSnapshotTriggerRunningServerSaveOffBracketsTheTransfer(t *testing.T) {
 	}
 }
 
-// save-on MUST still run when the upload fails: the restore re-enables auto-save
-// before the upload (issue #1710), so an upload error never leaves the server with
-// auto-save disabled. The ordering is: save-off, save-all, pack, save-on, upload.
+// Upload failure must not affect the save-on already issued after packing.
 func TestSnapshotTriggerRunningServerSaveOnRunsOnTransferError(t *testing.T) {
 	var seq []string
 	ctrl := &fakeControl{reply: "ok", seq: &seq}
@@ -499,10 +448,7 @@ func TestSnapshotTriggerRunningServerSaveOnRunsOnTransferError(t *testing.T) {
 	}
 }
 
-// save-on MUST still run when the request context is already cancelled: the
-// deferred restore runs on a context detached from the request's, so a
-// cancelled/timed-out snapshot still re-enables auto-save rather than leaving the
-// server unable to persist (#694).
+// Restore on a detached context even when the snapshot request is cancelled.
 func TestSnapshotTriggerRunningServerSaveOnRunsWhenContextCancelled(t *testing.T) {
 	// failOnCancelled makes the RCON Execute fail on a dead context, so save-on can
 	// only succeed if the restore runs on a live, detached context.
@@ -530,13 +476,8 @@ func TestSnapshotTriggerRunningServerSaveOnRunsWhenContextCancelled(t *testing.T
 	}
 }
 
-// When save-off fails the running world is NOT quiesced, so the periodic snapshot
-// is refused fail-closed (quiesce_unavailable, #907) rather than packing the live
-// world — that unquiesced pack is exactly what produced the 35/35 torn-read false
-// positives. No upload happens, and no save-on is issued (auto-save was never
-// disabled, so re-enabling it would be wrong). save-all is also NOT attempted after
-// a failed save-off: the real rcon client has already poisoned its connection, so
-// it would be a guaranteed ErrConnBroken. The next tick retries.
+// An unacknowledged save-off refuses packing and currently skips save-on.
+// A reply failure does not prove Minecraft left auto-save enabled.
 func TestSnapshotTriggerRunningServerSaveOffFailureRefusesQuiesceUnavailable(t *testing.T) {
 	ctrl := &fakeControl{err: errors.New("rcon: read length: EOF")}
 	tr := &fakeTransfer{}
@@ -564,10 +505,7 @@ func TestSnapshotTriggerRunningServerSaveOffFailureRefusesQuiesceUnavailable(t *
 	}
 }
 
-// newManagerWithControls builds a Manager whose openControl hands out the given
-// clients in order (the first dial returns ctrls[0], the next ctrls[1], ...), and
-// the last for any further dial. It models the quiesce restore redialing a fresh
-// RCON connection after the quiesce client's connection was poisoned (#907/#919).
+// Return controls in dial order, then reuse the last, to model restoration on a fresh connection.
 func newManagerWithControls(t *testing.T, d execution.ExecutionDriver, ctrls ...*fakeControl) *Manager {
 	t.Helper()
 	scratch := t.TempDir()
@@ -586,13 +524,7 @@ func newManagerWithControls(t *testing.T, d execution.ExecutionDriver, ctrls ...
 	return m
 }
 
-// When save-off succeeds but save-all fails on a running server, the world is NOT
-// quiesced, so the periodic snapshot is refused quiesce_unavailable (#907) — the
-// partial-quiesce path bug 2 lives on. The failed save-all poisons the quiesce RCON
-// connection (the real client marks it broken on any Execute error), so a save-on on
-// the SAME client returns ErrConnBroken instantly and auto-save would be left OFF.
-// The restore must therefore redial a fresh connection and re-issue save-on — the
-// #694 guarantee that save-on is delivered on every exit path. No upload happens.
+// A failed save-all may poison RCON after save-off; require redialed save-on even though snapshot is refused.
 func TestSnapshotTriggerRunningServerSaveAllFailureRefusesButRestoresSaveOnViaRedial(t *testing.T) {
 	// The quiesce client: save-off succeeds, save-all fails and poisons the
 	// connection, so its later save-on returns ErrConnBroken.
@@ -623,17 +555,16 @@ func TestSnapshotTriggerRunningServerSaveAllFailureRefusesButRestoresSaveOnViaRe
 	if !containsLine(quiesce.lines, "save-off") || !containsLine(quiesce.lines, "save-all") {
 		t.Fatalf("quiesce rcon lines = %v, want save-off and save-all", quiesce.lines)
 	}
-	// save-on was delivered on the redialed fresh connection: auto-save is restored
-	// despite the poisoned quiesce connection (#694).
+	// save-on was delivered on the redialed fresh connection: auto-save is restored despite the poisoned quiesce
+	// connection.
 	if !containsLine(fresh.lines, "save-on") {
 		t.Fatalf("redial rcon lines = %v, want save-on (restore must survive a poisoned connection)", fresh.lines)
 	}
 }
 
-// When the async save never settles (the working set's region files keep changing
-// past the settle budget), the running snapshot is refused quiesce_unavailable
-// (#907) rather than packing a world still being written, and the deferred restore
-// still runs save-on so auto-save is re-enabled. The next tick retries.
+// When the async save never settles (the working set's region files keep changing past the settle budget), the
+// running snapshot is refused quiesce_unavailable rather than packing a world still being written, and the
+// deferred restore still runs save-on so auto-save is re-enabled. The next tick retries.
 func TestSnapshotTriggerRunningServerSettleTimeoutRefusesAndRestores(t *testing.T) {
 	ctrl := &fakeControl{reply: "ok"}
 	tr := &fakeTransfer{}
@@ -670,15 +601,14 @@ func TestSnapshotTriggerRunningServerSettleTimeoutRefusesAndRestores(t *testing.
 	}
 }
 
-// A snapshot upload that exceeds the per-transfer deadline (issue #874) is
-// aborted Worker-side: SetTransferDeadline bounds the transfer's context, so a
-// stalled upload returns a deadline error rather than hanging the lane forever
-// (the unbounded-upload case #869 recovers from API-side).
+// A snapshot upload that exceeds the per-transfer deadline is aborted Worker-side: SetTransferDeadline bounds
+// the transfer's context, so a stalled upload returns a deadline error rather than hanging the lane forever (the
+// unbounded-upload case recovers from API-side).
 func TestSnapshotTriggerUploadExceedingDeadlineAborts(t *testing.T) {
 	tr := &fakeTransfer{blockUntilCtxDone: true}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
 	m.SetTransferDeadline(20 * time.Millisecond)
-	seedScratch(t, m, "s1") // an at-rest working set; absent is refused (#1713)
+	seedScratch(t, m, "s1") // an at-rest working set; absent is refused
 
 	res := m.Handle(context.Background(), snapshotCmd())
 	if res.Success || res.ErrorCode != session.CommandErrorTransferFailed {
@@ -692,8 +622,7 @@ func TestSnapshotTriggerUploadExceedingDeadlineAborts(t *testing.T) {
 	}
 }
 
-// A hydrate download is bounded symmetrically (issue #874): the same
-// per-transfer deadline aborts a stalled download.
+// A hydrate download is bounded symmetrically: the same per-transfer deadline aborts a stalled download.
 func TestHydrateTriggerDownloadExceedingDeadlineAborts(t *testing.T) {
 	tr := &fakeTransfer{blockUntilCtxDone: true}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
@@ -717,7 +646,7 @@ func TestHydrateTriggerDownloadExceedingDeadlineAborts(t *testing.T) {
 func TestSnapshotTriggerWithoutDeadlineRunsUnbounded(t *testing.T) {
 	tr := &fakeTransfer{blockUntilCtxDone: true}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
-	seedScratch(t, m, "s1") // an at-rest working set; absent is refused (#1713)
+	seedScratch(t, m, "s1") // an at-rest working set; absent is refused
 	// No SetTransferDeadline call: the bound is 0 (unbounded).
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -744,9 +673,8 @@ func TestSnapshotTriggerWithoutDeadlineRunsUnbounded(t *testing.T) {
 	}
 }
 
-// An upload failure must not prevent save-on from running: save-on is issued
-// BEFORE the upload begins (issue #1710), so save-on is always present in the
-// sequence regardless of upload outcome.
+// An upload failure must not prevent save-on from running: save-on is issued BEFORE the upload begins, so
+// save-on is always present in the sequence regardless of upload outcome.
 func TestSnapshotTriggerUploadFailureSaveOnAlreadyRestored(t *testing.T) {
 	var seq []string
 	ctrl := &fakeControl{reply: "ok", seq: &seq}
@@ -783,7 +711,7 @@ func TestSnapshotTriggerUploadFailureSaveOnAlreadyRestored(t *testing.T) {
 	}
 }
 
-// A pack failure must restore save-on and skip the upload entirely (issue #1710).
+// A pack failure must restore save-on and skip the upload entirely.
 func TestSnapshotTriggerPackFailureRestoresSaveOnAndSkipsUpload(t *testing.T) {
 	var seq []string
 	ctrl := &fakeControl{reply: "ok", seq: &seq}

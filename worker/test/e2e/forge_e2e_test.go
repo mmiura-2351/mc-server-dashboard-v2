@@ -1,29 +1,7 @@
 //go:build e2e
 
-// This file adds the container-driver FORGE supervised-install scenario
-// (issue #326) to the cross-language e2e harness. Like restart_e2e_test.go it
-// exercises the REAL Docker daemon through the real container ExecutionDriver and
-// the real instancemanager.Manager, but it drives the install-then-launch
-// sequence Forge introduced (PR #305/#306): when the Forge args file is absent
-// the driver runs a supervised install container (mcsd-<id>-install) to
-// completion, then creates+starts the launch container as the same instance.
-//
-// Why a real daemon: the install→launch handoff spans two containers, a
-// supervisor goroutine, the post-install re-plan that globs the working set, and
-// the install-output capture to logs/forge-install.log. The dockerAPI fake cannot
-// model the bind-mounted working dir that the stub installer writes the args file
-// into, nor the real two-container lifecycle. This scenario is the structural
-// guard that the cross-boundary install path reaches a running launch container
-// end to end.
-//
-// No real forge download: the stub image's `java` shim (worker/test/e2e/stub)
-// branches on its argv — `--installServer` creates the version-stamped
-// unix_args.txt the re-plan expects and exits 0, every other invocation blocks
-// until SIGTERM like a running server.
-//
-// It is gated the same three ways as restart_e2e_test.go (the `e2e` build tag,
-// MCD_E2E_DOCKER, and MCD_E2E_STUB_IMAGE), so it never runs in the ordinary
-// `go test ./...` pass. See worker/README.md for a local run.
+// Exercise supervised Forge install and launch against Docker using a Java shim that creates launch artifacts.
+// No real JVM or Forge download is required.
 package e2e
 
 import (
@@ -45,27 +23,15 @@ import (
 // libraries/net/minecraftforge/forge/*/unix_args.txt) at a fixed stub version.
 const forgeArgsfileRel = "libraries/net/minecraftforge/forge/0.0.0-stub/unix_args.txt"
 
-// TestContainerForgeInstallThenLaunch drives a Forge args-file StartServer whose
-// working set is NOT yet installed against a real Docker daemon and asserts the
-// supervised install runs, produces the args file, and the instance proceeds to a
-// running launch container — the install-then-launch sequence PR #305/#306 added.
-//
-// The install container (mcsd-<id>-install) runs the stub installer, which writes
-// the args file into the bind-mounted working dir and exits 0; the driver's
-// supervisor then re-plans (the args file is now present), creates+starts the
-// launch container under the deterministic launch name, and removes the exited
-// install container. Reaching running on the launch name, with the args file on
-// disk, the install container gone, and logs/forge-install.log written, proves
-// the whole cross-boundary path completed.
+// Start from uninstalled Forge scratch and require the install artifact followed by a live launch container.
 func TestContainerForgeInstallThenLaunch(t *testing.T) {
 	if os.Getenv("MCD_E2E_DOCKER") == "" {
 		t.Skip("MCD_E2E_DOCKER not set; skipping container-driver e2e (needs a Docker daemon)")
 	}
 	image := env(t, "MCD_E2E_STUB_IMAGE")
 
-	// Reclaim stub containers leaked by previous harness runs killed before
-	// t.Cleanup could run (issue #256). Best-effort: a leaked orphan must not block
-	// a green run, so a reaper error is logged, not fatal.
+	// Reclaim stub containers leaked by previous harness runs killed before t.Cleanup could run. Best-effort: a
+	// leaked orphan must not block a green run, so a reaper error is logged, not fatal.
 	reapCtx, reapCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	if err := reapStaleE2EContainers(reapCtx); err != nil {
 		t.Logf("e2e reaper: %v", err)
@@ -106,11 +72,9 @@ func TestContainerForgeInstallThenLaunch(t *testing.T) {
 			return nil, errNoRCON
 		},
 	)
-	// Close joins the status, log and metrics pumps and the status dispatcher
-	// (issue #2777); without it they outlive the test and the metrics pump keeps
-	// sampling this harness's Docker stats on a real clock. Deferred rather than
-	// t.Cleanup so it runs BEFORE the container removals registered below (issue
-	// #2875).
+	// Close joins the status, log and metrics pumps and the status dispatcher; without it they outlive the test and
+	// the metrics pump keeps sampling this harness's Docker stats on a real clock. Deferred rather than t.Cleanup
+	// so it runs BEFORE the container removals registered below.
 	defer mgr.Close()
 
 	serverID := newServerID(t)
@@ -191,12 +155,7 @@ func TestContainerForgeInstallThenLaunch(t *testing.T) {
 	}
 }
 
-// TestContainerForgeInstalledSkipsInstall is the cheap companion assertion: a
-// Forge args-file StartServer whose working set ALREADY has the args file must
-// launch directly, never running an install container. It seeds the args file up
-// front, so the launch plan finds it and skips the install step; the launch
-// container reaching running while the install name was never created proves the
-// re-plan short-circuit (the path a restart of an installed server takes).
+// Seed the Forge args file and require launch without any install container.
 func TestContainerForgeInstalledSkipsInstall(t *testing.T) {
 	if os.Getenv("MCD_E2E_DOCKER") == "" {
 		t.Skip("MCD_E2E_DOCKER not set; skipping container-driver e2e (needs a Docker daemon)")
@@ -237,7 +196,7 @@ func TestContainerForgeInstalledSkipsInstall(t *testing.T) {
 			return nil, errNoRCON
 		},
 	)
-	// As above: join the manager's pumps before the containers go away (issue #2875).
+	// As above: join the manager's pumps before the containers go away.
 	defer mgr.Close()
 
 	serverID := newServerID(t)

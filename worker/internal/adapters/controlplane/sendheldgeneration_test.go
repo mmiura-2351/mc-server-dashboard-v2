@@ -56,9 +56,9 @@ func sentCommandResult(t *testing.T, stream *capturingStream) *controlplanev1.Co
 	return cr
 }
 
-// TestCommandResultCarriesTheDeclaredHeldGeneration pins the wire mapping for the
-// Worker's retention declaration (issue #2481). The API records a held generation
-// from this field alone, so a declaration the Worker made must reach it intact.
+// TestCommandResultCarriesTheDeclaredHeldGeneration pins the wire mapping for the Worker's retention
+// declaration. The API records a held generation from this field alone, so a declaration the Worker made must
+// reach it intact.
 func TestCommandResultCarriesTheDeclaredHeldGeneration(t *testing.T) {
 	tr, stream := newCapturingTransport()
 	gen := uint64(12)
@@ -79,11 +79,10 @@ func TestCommandResultCarriesTheDeclaredHeldGeneration(t *testing.T) {
 	}
 }
 
-// TestCommandResultOmitsHeldGenerationWhenNothingIsDeclared is the direction that
-// carries the data-safety weight. A snapshot that GC'd the scratch (the stopped-id
-// branch) or whose marker stamp was refused declares nothing, and the wire must
-// say ABSENT rather than 0: the API records only on presence, so a spuriously
-// present field would let a start skip a hydrate it needs (issue #696 class).
+// TestCommandResultOmitsHeldGenerationWhenNothingIsDeclared is the direction that carries the data-safety
+// weight. A snapshot that GC'd the scratch (the stopped-id branch) or whose marker stamp was refused declares
+// nothing, and the wire must say ABSENT rather than 0: the API records only on presence, so a spuriously present
+// field would let a start skip a hydrate it needs (class).
 func TestCommandResultOmitsHeldGenerationWhenNothingIsDeclared(t *testing.T) {
 	tr, stream := newCapturingTransport()
 
