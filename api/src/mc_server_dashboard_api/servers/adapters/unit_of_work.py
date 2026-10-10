@@ -4,6 +4,13 @@ Opens a session from the factory on ``__aenter__`` and binds the repositories to
 it; ``commit`` commits the transaction, while leaving the block without
 committing rolls back (the session is closed either way). This gives use cases
 the all-or-nothing transaction the Port promises (DATABASE.md Section 1).
+
+A commit also publishes the status events of the observed-state writes it made
+durable, and a rollback — of the transaction or of a savepoint — discards the
+ones it undid (issue #3212): the servers repository stages one per changed row,
+so a use case that writes ``observed_state`` cannot forget the live frame, and
+no frame precedes its commit. A unit of work built without the bus refuses to
+commit such a write rather than drop its frame.
 """
 
 from __future__ import annotations
@@ -15,6 +22,7 @@ from types import TracebackType
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from mc_server_dashboard_api.fleet.domain.real_time_events import RealTimeEvents
 from mc_server_dashboard_api.servers.adapters.backup_repository import (
     SqlAlchemyBackupRepository,
 )
@@ -32,6 +40,8 @@ from mc_server_dashboard_api.servers.adapters.plugin_repository import (
 )
 from mc_server_dashboard_api.servers.adapters.repositories import (
     SqlAlchemyServerRepository,
+    publish_status_events,
+    require_status_events_wired,
 )
 from mc_server_dashboard_api.servers.adapters.resource_pack_repository import (
     SqlAlchemyResourcePackRepository,
@@ -46,9 +56,20 @@ from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 class SqlAlchemyUnitOfWork(UnitOfWork):
     """:class:`UnitOfWork` adapter over an async-SQLAlchemy session."""
 
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    servers: SqlAlchemyServerRepository
+
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        real_time_events: RealTimeEvents | None = None,
+    ) -> None:
         self._session_factory = session_factory
         self._session: AsyncSession | None = None
+        # The bus a commit publishes its observed-state writes on. Required
+        # by any unit of work that writes ``observed_state``: without it such
+        # a commit raises ``StatusEventsNotWiredError``. ``None`` suits only a
+        # unit of work that never writes the column.
+        self._real_time_events = real_time_events
 
     async def __aenter__(self) -> SqlAlchemyUnitOfWork:
         self._session = self._session_factory()
@@ -77,6 +98,7 @@ class SqlAlchemyUnitOfWork(UnitOfWork):
 
     async def commit(self) -> None:
         assert self._session is not None
+        require_status_events_wired(self.servers, self._real_time_events)
         try:
             await self._session.commit()
         except IntegrityError as exc:
@@ -85,10 +107,12 @@ class SqlAlchemyUnitOfWork(UnitOfWork):
             # commit) into the typed domain error; see adapters/integrity.py.
             translate_integrity_error(exc)
             raise
+        publish_status_events(self.servers, self._real_time_events)
 
     async def rollback(self) -> None:
         assert self._session is not None
         await self._session.rollback()
+        self.servers.take_staged_status_events()
 
     @contextlib.asynccontextmanager
     async def savepoint(self) -> AsyncIterator[None]:
@@ -98,5 +122,12 @@ class SqlAlchemyUnitOfWork(UnitOfWork):
         # what puts the refusal on the statement the body owns rather than on
         # whichever later autoflush would otherwise have run it.
         assert self._session is not None
-        async with self._session.begin_nested():
-            yield
+        # The status events staged inside go with the writes that staged them
+        # if the savepoint rolls back; the ones staged before it stay.
+        mark = self.servers.staged_status_event_count()
+        try:
+            async with self._session.begin_nested():
+                yield
+        except BaseException:
+            self.servers.discard_status_events_staged_since(mark)
+            raise

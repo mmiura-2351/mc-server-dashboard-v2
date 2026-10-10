@@ -19,6 +19,7 @@ import asyncio
 import contextlib
 import datetime as dt
 from collections.abc import AsyncIterator
+from typing import Any
 
 import grpc
 import pytest
@@ -578,13 +579,13 @@ async def test_success_resets_consecutive_failure_counter(harness: _Harness) -> 
             self.calls = 0
 
         async def record_observed_state(
-            self, *, server_id: str, worker_id: str, state: str
+            self, *, server_id: str, worker_id: str, state: str, **frame: Any
         ) -> bool:
             self.calls += 1
             if server_id == bad_server:
                 raise RuntimeError("observed-state sink unavailable")
             return await super().record_observed_state(
-                server_id=server_id, worker_id=worker_id, state=state
+                server_id=server_id, worker_id=worker_id, state=state, **frame
             )
 
     sink = _CountingSink()
@@ -798,24 +799,38 @@ async def _wait_for_published(harness: _Harness, count: int) -> None:
     raise AssertionError("event was not published in time")
 
 
+async def _wait_for_status_frame(harness: _Harness) -> None:
+    for _ in range(100):
+        if harness.state_sink.status_frames:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("status change did not reach the sink in time")
+
+
 _SERVER_ID = "11111111-1111-1111-1111-111111111111"
 
 
-async def test_status_change_is_published_to_real_time_events(
+async def test_status_change_hands_its_live_frame_to_the_sink(
     harness: _Harness,
 ) -> None:
+    """The sink relays a status change, after its commit (issue #3212).
+
+    The servicer hands the frame over with the state and publishes nothing
+    itself: a status event published here could not be ordered against the
+    commit, nor against the observed-state writes that are not Worker reports.
+    """
     stub = await harness.start()
     call = stub.Session(metadata=_auth(_CREDENTIAL))
     await call.write(_register_message())
     await call.read()  # ack
 
     await call.write(_status_message(_SERVER_ID, pb.SERVER_STATE_RUNNING))
-    await _wait_for_published(harness, 1)
+    await _wait_for_status_frame(harness)
 
-    server_id, event = harness.real_time_events.published[0]
-    assert server_id == _SERVER_ID
-    assert event.stream is EventStream.STATUS
-    assert event.payload["state"] == "running"
+    assert harness.state_sink.status_frames == [
+        (_SERVER_ID, {"state": "running", "detail": "", "reason": ""}, None)
+    ]
+    assert harness.real_time_events.published == []
     await call.done_writing()
 
 
@@ -834,13 +849,13 @@ async def test_status_change_is_published_to_real_time_events(
         ),
     ],
 )
-async def test_crash_reason_is_published_beside_the_detail(
+async def test_crash_reason_rides_the_live_frame_beside_the_detail(
     harness: _Harness, crash_reason: "pb.CrashReason.ValueType", expected: str
 ) -> None:
     """A crash the Worker classified reaches subscribers by name (issue #1093).
 
     The reason rides the live status frame exactly as the detail does; an
-    unclassified crash publishes the empty string, never a missing key.
+    unclassified crash carries the empty string, never a missing key.
     """
     stub = await harness.start()
     call = stub.Session(metadata=_auth(_CREDENTIAL))
@@ -859,40 +874,11 @@ async def test_crash_reason_is_published_beside_the_detail(
             )
         )
     )
-    await _wait_for_published(harness, 1)
+    await _wait_for_status_frame(harness)
 
-    _, event = harness.real_time_events.published[0]
-    assert event.payload == {"state": "crashed", "detail": "boom", "reason": expected}
+    _, payload, _ = harness.state_sink.status_frames[0]
+    assert payload == {"state": "crashed", "detail": "boom", "reason": expected}
     await call.done_writing()
-
-
-async def test_dropped_status_change_is_not_published() -> None:
-    """A StatusChange whose sink write is rejected (applied=False) must NOT be
-    relayed to real-time subscribers (issue #1957)."""
-    sink = FakeServerStateSink(reject_observed_for={_SERVER_ID})
-    h = _Harness(
-        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
-        FakeClock(_T0),
-        state_sink=sink,
-    )
-    try:
-        stub = await h.start()
-        call = stub.Session(metadata=_auth(_CREDENTIAL))
-        await call.write(_register_message())
-        await call.read()  # ack
-
-        await call.write(_status_message(_SERVER_ID, pb.SERVER_STATE_RUNNING))
-        # Wait for the sink to have processed the message.
-        for _ in range(100):
-            if sink.observed or sink.rejected:
-                break
-            await asyncio.sleep(0.01)
-
-        assert sink.rejected == [(_SERVER_ID, _WORKER_ID, "running")]
-        assert h.real_time_events.published == []
-        await call.done_writing()
-    finally:
-        await h.stop()
 
 
 async def test_log_line_is_published_to_real_time_events(harness: _Harness) -> None:
@@ -918,7 +904,7 @@ async def test_log_line_is_published_to_real_time_events(harness: _Harness) -> N
     await call.done_writing()
 
 
-async def test_emitted_at_is_propagated_to_published_event(
+async def test_emitted_at_is_propagated_to_the_status_frame(
     harness: _Harness,
 ) -> None:
     stub = await harness.start()
@@ -930,10 +916,10 @@ async def test_emitted_at_is_propagated_to_published_event(
     message = _status_message(_SERVER_ID, pb.SERVER_STATE_RUNNING)
     message.emitted_at.FromDatetime(emitted)
     await call.write(message)
-    await _wait_for_published(harness, 1)
+    await _wait_for_status_frame(harness)
 
-    _server_id, event = harness.real_time_events.published[0]
-    assert event.emitted_at == emitted
+    _server_id, _payload, emitted_at = harness.state_sink.status_frames[0]
+    assert emitted_at == emitted
     await call.done_writing()
 
 
@@ -946,10 +932,10 @@ async def test_unset_emitted_at_falls_back_to_none(harness: _Harness) -> None:
     # No emitted_at set on the message: the relayed event carries None, so the
     # transport falls back to receive time.
     await call.write(_status_message(_SERVER_ID, pb.SERVER_STATE_RUNNING))
-    await _wait_for_published(harness, 1)
+    await _wait_for_status_frame(harness)
 
-    _server_id, event = harness.real_time_events.published[0]
-    assert event.emitted_at is None
+    _server_id, _payload, emitted_at = harness.state_sink.status_frames[0]
+    assert emitted_at is None
     await call.done_writing()
 
 
@@ -1522,11 +1508,11 @@ async def test_heartbeat_survives_slow_status_write() -> None:
 
     class _SlowSink(FakeServerStateSink):
         async def record_observed_state(
-            self, *, server_id: str, worker_id: str, state: str
+            self, *, server_id: str, worker_id: str, state: str, **frame: Any
         ) -> bool:
             await gate.wait()
             return await super().record_observed_state(
-                server_id=server_id, worker_id=worker_id, state=state
+                server_id=server_id, worker_id=worker_id, state=state, **frame
             )
 
     sink = _SlowSink()
@@ -1585,13 +1571,13 @@ async def test_status_changes_processed_in_send_order() -> None:
             self._first = True
 
         async def record_observed_state(
-            self, *, server_id: str, worker_id: str, state: str
+            self, *, server_id: str, worker_id: str, state: str, **frame: Any
         ) -> bool:
             if self._first:
                 self._first = False
                 await gate.wait()
             return await super().record_observed_state(
-                server_id=server_id, worker_id=worker_id, state=state
+                server_id=server_id, worker_id=worker_id, state=state, **frame
             )
 
     sink = _GatedOnceSink()

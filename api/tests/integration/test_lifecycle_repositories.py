@@ -27,6 +27,9 @@ from mc_server_dashboard_api.community.domain.value_objects import (
 )
 from mc_server_dashboard_api.community.domain.value_objects import CommunityName
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
+from mc_server_dashboard_api.fleet.adapters.real_time_events import (
+    InProcessRealTimeEvents,
+)
 from mc_server_dashboard_api.servers.adapters.repositories import (
     SqlAlchemyServerRepository,
 )
@@ -95,7 +98,7 @@ async def _create_server(
 ) -> ServerId:
     factory = create_session_factory(engine)
     create = CreateServer(
-        uow=ServersUnitOfWork(factory),
+        uow=ServersUnitOfWork(factory, InProcessRealTimeEvents()),
         clock=FakeClock(_NOW),
         version_validator=FakeVersionValidator(),
         file_store=FakeFileStore(),
@@ -120,7 +123,7 @@ async def test_update_lifecycle_persists_desired_and_assignment(
     worker = uuid.uuid4()
     factory = create_session_factory(engine)
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         server = await uow.servers.get_by_id(server_id)
         assert server is not None
         server.desired_state = DesiredState.RUNNING
@@ -132,7 +135,7 @@ async def test_update_lifecycle_persists_desired_and_assignment(
         assert applied is True
         await uow.commit()
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         loaded = await uow.servers.get_by_id(server_id)
     assert loaded is not None
     assert loaded.desired_state is DesiredState.RUNNING
@@ -149,7 +152,7 @@ async def test_record_observed_state_unassign_clears_assignment(
     worker = uuid.uuid4()
     factory = create_session_factory(engine)
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         server = await uow.servers.get_by_id(server_id)
         assert server is not None
         server.desired_state = DesiredState.RUNNING
@@ -160,7 +163,7 @@ async def test_record_observed_state_unassign_clears_assignment(
         )
         await uow.commit()
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         await uow.servers.record_observed_state(
             server_id,
             observed_state=ObservedState.STOPPED,
@@ -169,7 +172,7 @@ async def test_record_observed_state_unassign_clears_assignment(
         )
         await uow.commit()
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         loaded = await uow.servers.get_by_id(server_id)
     assert loaded is not None
     assert loaded.observed_state is ObservedState.STOPPED
@@ -184,19 +187,19 @@ async def test_record_observed_state_drops_stale_write(engine: AsyncEngine) -> N
     server_id = await _create_server(engine, community_id, "survival")
     factory = create_session_factory(engine)
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         await uow.servers.record_observed_state(
             server_id, observed_state=ObservedState.RUNNING, observed_at=_NOW
         )
         await uow.commit()
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         await uow.servers.record_observed_state(
             server_id, observed_state=ObservedState.STOPPED, observed_at=_OLD
         )
         await uow.commit()
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         loaded = await uow.servers.get_by_id(server_id)
     assert loaded is not None
     assert loaded.observed_state is ObservedState.RUNNING
@@ -209,19 +212,19 @@ async def test_record_observed_state_applies_fresh_write(engine: AsyncEngine) ->
     server_id = await _create_server(engine, community_id, "survival")
     factory = create_session_factory(engine)
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         await uow.servers.record_observed_state(
             server_id, observed_state=ObservedState.RUNNING, observed_at=_OLD
         )
         await uow.commit()
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         await uow.servers.record_observed_state(
             server_id, observed_state=ObservedState.STOPPED, observed_at=_NOW
         )
         await uow.commit()
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         loaded = await uow.servers.get_by_id(server_id)
     assert loaded is not None
     assert loaded.observed_state is ObservedState.STOPPED
@@ -237,7 +240,7 @@ async def test_record_observed_state_returns_applied_flag(engine: AsyncEngine) -
     server_id = await _create_server(engine, community_id, "survival")
     factory = create_session_factory(engine)
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         first = await uow.servers.record_observed_state(
             server_id, observed_state=ObservedState.RUNNING, observed_at=_NOW
         )
@@ -245,7 +248,7 @@ async def test_record_observed_state_returns_applied_flag(engine: AsyncEngine) -
     # First write on a NULL observed_at lands.
     assert first is True
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         same_instant = await uow.servers.record_observed_state(
             server_id, observed_state=ObservedState.STOPPED, observed_at=_NOW
         )
@@ -253,7 +256,7 @@ async def test_record_observed_state_returns_applied_flag(engine: AsyncEngine) -
     # Equal stamp -> the guard drops it (same-instant duplicate).
     assert same_instant is False
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         fresher = await uow.servers.record_observed_state(
             server_id, observed_state=ObservedState.STOPPED, observed_at=_NEWER
         )
@@ -271,18 +274,18 @@ async def test_record_observed_state_accepts_first_write_on_null_observed_at(
     server_id = await _create_server(engine, community_id, "survival")
     factory = create_session_factory(engine)
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         created = await uow.servers.get_by_id(server_id)
     assert created is not None
     assert created.observed_at is None
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         await uow.servers.record_observed_state(
             server_id, observed_state=ObservedState.RUNNING, observed_at=_NOW
         )
         await uow.commit()
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         loaded = await uow.servers.get_by_id(server_id)
     assert loaded is not None
     assert loaded.observed_state is ObservedState.RUNNING
@@ -299,7 +302,7 @@ async def test_record_observed_state_drops_stale_unassign_in_same_statement(
     worker = uuid.uuid4()
     factory = create_session_factory(engine)
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         server = await uow.servers.get_by_id(server_id)
         assert server is not None
         server.desired_state = DesiredState.RUNNING
@@ -316,7 +319,7 @@ async def test_record_observed_state_drops_stale_unassign_in_same_statement(
 
     # A stale stop-convergence write would unassign — but it is older, so the whole
     # statement is a no-op and the assignment survives.
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         await uow.servers.record_observed_state(
             server_id,
             observed_state=ObservedState.STOPPED,
@@ -325,7 +328,7 @@ async def test_record_observed_state_drops_stale_unassign_in_same_statement(
         )
         await uow.commit()
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         loaded = await uow.servers.get_by_id(server_id)
     assert loaded is not None
     assert loaded.observed_state is ObservedState.RUNNING
@@ -346,7 +349,7 @@ async def test_record_observed_state_drops_write_from_lost_expected_worker(
     stale_worker = uuid.uuid4()
     factory = create_session_factory(engine)
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         server = await uow.servers.get_by_id(server_id)
         assert server is not None
         server.desired_state = DesiredState.RUNNING
@@ -361,7 +364,7 @@ async def test_record_observed_state_drops_write_from_lost_expected_worker(
         await uow.commit()
 
     # Fresher stamp, but the asserted worker no longer owns the row: dropped.
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         applied = await uow.servers.record_observed_state(
             server_id,
             observed_state=ObservedState.STOPPED,
@@ -371,14 +374,14 @@ async def test_record_observed_state_drops_write_from_lost_expected_worker(
         await uow.commit()
     assert applied is False
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         loaded = await uow.servers.get_by_id(server_id)
     assert loaded is not None
     assert loaded.observed_state is ObservedState.RUNNING
     assert loaded.observed_at == _OLD
 
     # The still-owning worker's write lands.
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         applied = await uow.servers.record_observed_state(
             server_id,
             observed_state=ObservedState.STOPPED,
@@ -388,7 +391,7 @@ async def test_record_observed_state_drops_write_from_lost_expected_worker(
         await uow.commit()
     assert applied is True
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         loaded = await uow.servers.get_by_id(server_id)
     assert loaded is not None
     assert loaded.observed_state is ObservedState.STOPPED
@@ -405,7 +408,7 @@ async def test_record_observed_state_drops_expected_worker_write_on_unassigned_r
     server_id = await _create_server(engine, community_id, "survival")
     factory = create_session_factory(engine)
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         applied = await uow.servers.record_observed_state(
             server_id,
             observed_state=ObservedState.RUNNING,
@@ -415,7 +418,7 @@ async def test_record_observed_state_drops_expected_worker_write_on_unassigned_r
         await uow.commit()
     assert applied is False
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         loaded = await uow.servers.get_by_id(server_id)
     assert loaded is not None
     assert loaded.observed_state is ObservedState.STOPPED
@@ -433,7 +436,7 @@ async def test_mark_worker_servers_unknown_overrides_fresher_observed_at(
     worker = uuid.uuid4()
     factory = create_session_factory(engine)
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         server = await uow.servers.get_by_id(server_id)
         assert server is not None
         server.desired_state = DesiredState.RUNNING
@@ -448,11 +451,11 @@ async def test_mark_worker_servers_unknown_overrides_fresher_observed_at(
         await uow.commit()
 
     # _OLD is earlier than the row's _NOW observed_at, yet the invalidation lands.
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         await uow.servers.mark_worker_servers_unknown(WorkerId(worker), _OLD)
         await uow.commit()
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         loaded = await uow.servers.get_by_id(server_id)
     assert loaded is not None
     assert loaded.observed_state is ObservedState.UNKNOWN
@@ -469,7 +472,7 @@ async def test_reset_unverifiable_overrides_fresher_observed_at(
     worker = uuid.uuid4()
     factory = create_session_factory(engine)
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         server = await uow.servers.get_by_id(server_id)
         assert server is not None
         server.desired_state = DesiredState.RUNNING
@@ -483,12 +486,12 @@ async def test_reset_unverifiable_overrides_fresher_observed_at(
         )
         await uow.commit()
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         count = await uow.servers.reset_unverifiable_observed_states(_OLD)
         await uow.commit()
     assert count == 1
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         loaded = await uow.servers.get_by_id(server_id)
     assert loaded is not None
     assert loaded.observed_state is ObservedState.UNKNOWN
@@ -508,7 +511,7 @@ async def test_update_lifecycle_compare_and_set_rejects_lost_race(
     second_worker = uuid.uuid4()
     factory = create_session_factory(engine)
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         server = await uow.servers.get_by_id(server_id)
         assert server is not None
         server.desired_state = DesiredState.RUNNING
@@ -520,7 +523,7 @@ async def test_update_lifecycle_compare_and_set_rejects_lost_race(
         assert applied is True
         await uow.commit()
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         stale = await uow.servers.get_by_id(server_id)
         assert stale is not None
         # The losing transition still believes the row is stopped/unassigned.
@@ -533,7 +536,7 @@ async def test_update_lifecycle_compare_and_set_rejects_lost_race(
         assert applied is False
         await uow.commit()
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         loaded = await uow.servers.get_by_id(server_id)
     assert loaded is not None
     assert loaded.assigned_worker_id == WorkerId(first_worker)
@@ -547,7 +550,7 @@ async def test_sink_records_observed_state_from_assigned_worker(
     worker = uuid.uuid4()
     factory = create_session_factory(engine)
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         server = await uow.servers.get_by_id(server_id)
         assert server is not None
         server.desired_state = DesiredState.RUNNING
@@ -558,12 +561,14 @@ async def test_sink_records_observed_state_from_assigned_worker(
         )
         await uow.commit()
 
-    sink = ServersServerStateSink(factory, clock=FakeClock(_NOW))
+    sink = ServersServerStateSink(
+        factory, clock=FakeClock(_NOW), real_time_events=InProcessRealTimeEvents()
+    )
     await sink.record_observed_state(
         server_id=str(server_id.value), worker_id=str(worker), state="running"
     )
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         loaded = await uow.servers.get_by_id(server_id)
     assert loaded is not None
     assert loaded.observed_state is ObservedState.RUNNING
@@ -577,7 +582,7 @@ async def test_sink_drops_status_from_non_owning_worker(engine: AsyncEngine) -> 
     intruder = uuid.uuid4()
     factory = create_session_factory(engine)
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         server = await uow.servers.get_by_id(server_id)
         assert server is not None
         server.desired_state = DesiredState.RUNNING
@@ -588,13 +593,15 @@ async def test_sink_drops_status_from_non_owning_worker(engine: AsyncEngine) -> 
         )
         await uow.commit()
 
-    sink = ServersServerStateSink(factory, clock=FakeClock(_NOW))
+    sink = ServersServerStateSink(
+        factory, clock=FakeClock(_NOW), real_time_events=InProcessRealTimeEvents()
+    )
     # A report from a worker that does not own the server is dropped, not applied.
     await sink.record_observed_state(
         server_id=str(server_id.value), worker_id=str(intruder), state="crashed"
     )
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         loaded = await uow.servers.get_by_id(server_id)
     assert loaded is not None
     # Observed state is unchanged from its created default (the write was dropped).
@@ -617,7 +624,7 @@ async def test_sink_drops_stale_worker_report_racing_a_reassignment(
     worker_b = uuid.uuid4()
     factory = create_session_factory(engine)
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         server = await uow.servers.get_by_id(server_id)
         assert server is not None
         server.desired_state = DesiredState.RUNNING
@@ -644,7 +651,7 @@ async def test_sink_drops_stale_worker_report_racing_a_reassignment(
         if raced:
             return snapshot
         raced = True
-        async with ServersUnitOfWork(factory) as uow:
+        async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
             row = await uow.servers.get_by_id(sid)
             assert row is not None
             row.desired_state = DesiredState.STOPPED
@@ -668,13 +675,15 @@ async def test_sink_drops_stale_worker_report_racing_a_reassignment(
         SqlAlchemyServerRepository, "get_by_id", get_by_id_then_reassign
     )
 
-    sink = ServersServerStateSink(factory, clock=FakeClock(_NOW))
+    sink = ServersServerStateSink(
+        factory, clock=FakeClock(_NOW), real_time_events=InProcessRealTimeEvents()
+    )
     # Stale worker A reports a state B's server is not in; it must not land.
     await sink.record_observed_state(
         server_id=str(server_id.value), worker_id=str(worker_a), state="crashed"
     )
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         loaded = await uow.servers.get_by_id(server_id)
     assert loaded is not None
     assert loaded.observed_state is ObservedState.STOPPED
@@ -698,7 +707,7 @@ async def test_sink_keeps_assignment_when_owning_worker_reports_stopped_under_st
     worker = uuid.uuid4()
     factory = create_session_factory(engine)
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         server = await uow.servers.get_by_id(server_id)
         assert server is not None
         # desired_state stays STOPPED (a graceful stop already flipped intent);
@@ -710,12 +719,14 @@ async def test_sink_keeps_assignment_when_owning_worker_reports_stopped_under_st
         )
         await uow.commit()
 
-    sink = ServersServerStateSink(factory, clock=FakeClock(_NOW))
+    sink = ServersServerStateSink(
+        factory, clock=FakeClock(_NOW), real_time_events=InProcessRealTimeEvents()
+    )
     await sink.record_observed_state(
         server_id=str(server_id.value), worker_id=str(worker), state="stopped"
     )
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         loaded = await uow.servers.get_by_id(server_id)
     assert loaded is not None
     assert loaded.observed_state is ObservedState.STOPPED
@@ -732,7 +743,7 @@ async def test_sink_keeps_assignment_when_owning_worker_reports_stopped_under_ru
     worker = uuid.uuid4()
     factory = create_session_factory(engine)
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         server = await uow.servers.get_by_id(server_id)
         assert server is not None
         server.desired_state = DesiredState.RUNNING
@@ -743,12 +754,14 @@ async def test_sink_keeps_assignment_when_owning_worker_reports_stopped_under_ru
         )
         await uow.commit()
 
-    sink = ServersServerStateSink(factory, clock=FakeClock(_NOW))
+    sink = ServersServerStateSink(
+        factory, clock=FakeClock(_NOW), real_time_events=InProcessRealTimeEvents()
+    )
     await sink.record_observed_state(
         server_id=str(server_id.value), worker_id=str(worker), state="stopped"
     )
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         loaded = await uow.servers.get_by_id(server_id)
     assert loaded is not None
     assert loaded.observed_state is ObservedState.STOPPED
@@ -766,7 +779,7 @@ async def test_sink_keeps_assignment_for_non_stopped_reports_under_desired_stopp
     worker = uuid.uuid4()
     factory = create_session_factory(engine)
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         server = await uow.servers.get_by_id(server_id)
         assert server is not None
         server.assigned_worker_id = WorkerId(worker)
@@ -776,12 +789,14 @@ async def test_sink_keeps_assignment_for_non_stopped_reports_under_desired_stopp
         )
         await uow.commit()
 
-    sink = ServersServerStateSink(factory, clock=FakeClock(_NOW))
+    sink = ServersServerStateSink(
+        factory, clock=FakeClock(_NOW), real_time_events=InProcessRealTimeEvents()
+    )
     await sink.record_observed_state(
         server_id=str(server_id.value), worker_id=str(worker), state=state
     )
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         loaded = await uow.servers.get_by_id(server_id)
     assert loaded is not None
     assert loaded.assigned_worker_id == WorkerId(worker)
@@ -793,7 +808,7 @@ async def test_sink_marks_worker_servers_unknown(engine: AsyncEngine) -> None:
     worker = uuid.uuid4()
     factory = create_session_factory(engine)
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         server = await uow.servers.get_by_id(server_id)
         assert server is not None
         server.assigned_worker_id = WorkerId(worker)
@@ -803,10 +818,12 @@ async def test_sink_marks_worker_servers_unknown(engine: AsyncEngine) -> None:
         )
         await uow.commit()
 
-    sink = ServersServerStateSink(factory, clock=FakeClock(_NOW))
+    sink = ServersServerStateSink(
+        factory, clock=FakeClock(_NOW), real_time_events=InProcessRealTimeEvents()
+    )
     await sink.mark_worker_servers_unknown(worker_id=str(worker))
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         loaded = await uow.servers.get_by_id(server_id)
     assert loaded is not None
     assert loaded.observed_state is ObservedState.UNKNOWN
@@ -822,7 +839,7 @@ async def test_sink_returns_running_assignment_ids(engine: AsyncEngine) -> None:
 
     running = await _create_server(engine, community_id, "running")
     stopped = await _create_server(engine, community_id, "stopped")
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         for sid, desired in (
             (running, DesiredState.RUNNING),
             (stopped, DesiredState.STOPPED),
@@ -836,7 +853,9 @@ async def test_sink_returns_running_assignment_ids(engine: AsyncEngine) -> None:
             )
         await uow.commit()
 
-    sink = ServersServerStateSink(factory, clock=FakeClock(_NOW))
+    sink = ServersServerStateSink(
+        factory, clock=FakeClock(_NOW), real_time_events=InProcessRealTimeEvents()
+    )
     ids = await sink.running_assignment_ids(worker_id=str(worker))
     # id -> declared memory (#843); these servers declare no limit, so 0.
     assert ids == {str(running.value): 0}
@@ -849,7 +868,7 @@ async def test_repository_running_assignment_ids_for_worker(
     factory = create_session_factory(engine)
     server_id = await _create_server(engine, community_id, "survival")
     worker = uuid.uuid4()
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         server = await uow.servers.get_by_id(server_id)
         assert server is not None
         server.assigned_worker_id = WorkerId(worker)
@@ -875,7 +894,7 @@ async def test_repository_list_desired_running_assigned(engine: AsyncEngine) -> 
     running = await _create_server(engine, community_id, "running")
     await _create_server(engine, community_id, "stopped")  # stays desired=stopped
     worker = uuid.uuid4()
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         server = await uow.servers.get_by_id(running)
         assert server is not None
         server.assigned_worker_id = WorkerId(worker)
@@ -899,7 +918,7 @@ async def _assign_with_observed(
     observed: ObservedState,
 ) -> None:
     factory = create_session_factory(engine)
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         server = await uow.servers.get_by_id(server_id)
         assert server is not None
         server.assigned_worker_id = WorkerId(worker)
@@ -932,13 +951,13 @@ async def test_reset_marks_non_terminal_assigned_unknown_keeping_assignment(
         await _assign_with_observed(engine, sid, worker, observed)
         by_state[observed] = sid
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         count = await uow.servers.reset_unverifiable_observed_states(_NOW)
         await uow.commit()
     assert count == 4
 
     for observed, sid in by_state.items():
-        async with ServersUnitOfWork(factory) as uow:
+        async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
             loaded = await uow.servers.get_by_id(sid)
         assert loaded is not None
         assert loaded.observed_state is ObservedState.UNKNOWN
@@ -958,12 +977,12 @@ async def test_reset_leaves_terminal_observed_states_untouched(
     server_id = await _create_server(engine, community_id, "survival")
     await _assign_with_observed(engine, server_id, worker, observed)
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         count = await uow.servers.reset_unverifiable_observed_states(_NOW)
         await uow.commit()
     assert count == 0
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         loaded = await uow.servers.get_by_id(server_id)
     assert loaded is not None
     assert loaded.observed_state is observed
@@ -976,18 +995,18 @@ async def test_reset_leaves_unassigned_rows_untouched(engine: AsyncEngine) -> No
     community_id = await _seed_community(engine)
     factory = create_session_factory(engine)
     server_id = await _create_server(engine, community_id, "survival")
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         await uow.servers.record_observed_state(
             server_id, observed_state=ObservedState.RUNNING, observed_at=_OLD
         )
         await uow.commit()
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         count = await uow.servers.reset_unverifiable_observed_states(_NOW)
         await uow.commit()
     assert count == 0
 
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         loaded = await uow.servers.get_by_id(server_id)
     assert loaded is not None
     assert loaded.observed_state is ObservedState.RUNNING

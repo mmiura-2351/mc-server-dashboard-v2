@@ -532,6 +532,28 @@ producers, and the wire value exists for the second:
 The ingest maps every value in this enum onto the persisted state; only
 `SERVER_STATE_UNSPECIFIED` (the proto zero value) is dropped.
 
+Every change of `observed_state` is relayed to subscribed clients as a live
+`status` frame, published after the write that made it commits
+([`WEBUI_SPEC.md`](../ui/WEBUI_SPEC.md) Section 2.6, which also states the
+one ordering case this does not yet cover). That covers an applied
+`StatusChange`, whose frame carries its `detail`, crash reason and event time,
+and equally the writes the API makes without one, whose frames carry an empty
+`detail` and reason:
+
+- `unknown` for each server of a Worker whose session drops (Section 4.4), and
+  for each assigned server still in a non-terminal state at API startup;
+- the state a lifecycle operation converges from a command's outcome —
+  `running` when a start is refused `INVALID_STATE` (the instance is already
+  live, so no `StatusChange` will follow), `stopped` when a stop is confirmed
+  or answered `SERVER_NOT_FOUND`, and `unknown` when a stop left at `stopping`
+  under a disconnected Worker is released.
+
+A write that leaves the state as it was — the bulk `unknown` over a row already
+`unknown`, a confirmed stop the Worker's own `stopped` report preceded —
+publishes nothing, unless it is a `StatusChange` carrying a `detail` or crash
+reason. A report the API drops — it comes from a Worker that no longer owns
+the server, or is no fresher than the state already recorded — is not relayed.
+
 Real-time delivery is best-effort end to end: if the control plane is down the
 API's REST endpoints still function and clients simply miss live updates
 (FR-MON-4). That degradation is API-side behaviour, not part of this contract.

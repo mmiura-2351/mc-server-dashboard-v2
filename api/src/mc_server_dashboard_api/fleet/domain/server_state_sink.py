@@ -15,6 +15,7 @@ adapter translates them at the seam.
 from __future__ import annotations
 
 import abc
+import datetime as dt
 
 
 class ServerStateSink(abc.ABC):
@@ -22,14 +23,28 @@ class ServerStateSink(abc.ABC):
 
     @abc.abstractmethod
     async def record_observed_state(
-        self, *, server_id: str, worker_id: str, state: str
+        self,
+        *,
+        server_id: str,
+        worker_id: str,
+        state: str,
+        detail: str = "",
+        reason: str = "",
+        emitted_at: dt.datetime | None = None,
     ) -> bool:
         """Cache the worker-reported observed state for ``server_id`` (FR-SRV-4).
 
         Returns True when the write was applied, False when it was dropped
-        (unknown server, ownership guard, or monotonic guard). The caller uses
-        the flag to gate downstream side-effects such as real-time event
-        publishing (issue #1957).
+        (unknown server, ownership guard, or monotonic guard).
+
+        An applied write is also relayed to subscribed clients as a live
+        status event once it is committed (FR-MON-1); a dropped one is not
+        (issue #1957). ``detail``, ``reason`` and ``emitted_at`` are the
+        report's free text, its crash reason and the Worker's event time: they
+        ride that event and are not persisted. Relaying is the adapter's job,
+        not the caller's, so that every observed-state write — this one, the
+        disconnect below, the API's own convergence writes — publishes through
+        one seam, after its commit (issue #3212).
 
         ``worker_id`` is the reporting worker; the adapter applies the write
         only when it is the server's assigned worker, so a stale or misrouted
@@ -42,7 +57,8 @@ class ServerStateSink(abc.ABC):
         """Set observed=unknown for every server assigned to ``worker_id``.
 
         Invoked when the worker disconnects: its servers' observed state is no
-        longer trustworthy (FR-WRK-4).
+        longer trustworthy (FR-WRK-4). Each server whose state this changes is
+        relayed to subscribed clients as a live status event, once committed.
         """
 
     @abc.abstractmethod

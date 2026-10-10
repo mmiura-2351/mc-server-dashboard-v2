@@ -41,6 +41,9 @@ from mc_server_dashboard_api.fleet.adapters.control_plane import (
     ControlPlaneState,
     GrpcControlPlane,
 )
+from mc_server_dashboard_api.fleet.adapters.real_time_events import (
+    InProcessRealTimeEvents,
+)
 from mc_server_dashboard_api.fleet.adapters.relay_state import (
     BedrockTunnelTable,
     RelayRegistration,
@@ -225,6 +228,7 @@ class _Harness:
         self.sink = ServersServerStateSink(
             create_session_factory(engine),
             clock=_AdvancingClock(_NOW),
+            real_time_events=InProcessRealTimeEvents(),
             control_plane=self.control_plane,
             relay_registration=self.registration,
             bedrock_tunnel_table=self.bedrock_tunnel_table,
@@ -341,6 +345,7 @@ async def test_open_skipped_when_no_relay_registered(engine: AsyncEngine) -> Non
     harness.sink = ServersServerStateSink(
         create_session_factory(engine),
         clock=_AdvancingClock(_NOW),
+        real_time_events=InProcessRealTimeEvents(),
         control_plane=harness.control_plane,
         relay_registration=harness.registration,
         bedrock_tunnel_table=harness.bedrock_tunnel_table,
@@ -433,6 +438,7 @@ async def test_api_restart_convergence_mints_fresh_and_redispatches(
     restarted_sink = ServersServerStateSink(
         create_session_factory(engine),
         clock=_AdvancingClock(_NOW + dt.timedelta(minutes=1)),
+        real_time_events=InProcessRealTimeEvents(),
         control_plane=harness.control_plane,
         relay_registration=harness.registration,
         bedrock_tunnel_table=restarted_table,

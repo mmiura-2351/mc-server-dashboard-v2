@@ -206,6 +206,12 @@ class ServerRepository(abc.ABC):
         honest (issue #292): it mutates the entity's observed fields only when
         ``True``, otherwise leaves them as-read so the return never claims a
         write that did not land.
+
+        A write that changes the state is also announced to live subscribers
+        as a status event once the transaction commits — by the unit of work,
+        not by the caller (issue #3212). The same holds for the two bulk
+        writes below. Nothing is announced for a dropped write, a rolled-back
+        transaction, or a row already at ``observed_state``.
         """
 
     @abc.abstractmethod

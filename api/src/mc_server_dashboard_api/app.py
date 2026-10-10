@@ -788,11 +788,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             bedrock_tunnel_port=settings.relay.bedrock_tunnel_port,
         )
         app.state.bedrock_tunnel_sync = bedrock_tunnel_syncer
+        # Process-wide in-process real-time event bus (FR-MON-1..4): the gRPC
+        # servicer publishes log/metrics events onto it, every committed
+        # observed-state write publishes its status event onto it (the state
+        # sink for a Worker's report or disconnect, the lifecycle units of work
+        # for the API's own writes; issue #3212), and the WebSocket endpoint
+        # subscribes per server. Best-effort and decoupled from REST — if it is
+        # empty, clients simply miss live events (graceful degradation).
+        real_time_events = InProcessRealTimeEvents()
+        app.state.real_time_events = real_time_events
         # The control-plane event path writes back observed server state through
         # this sink (its own session per call; the servicer has no request UoW).
         state_sink = ServersServerStateSink(
             create_session_factory(engine),
             clock=ServersSystemClock(),
+            real_time_events=real_time_events,
             control_plane=app.state.control_plane,
             relay_registration=relay_registration,
             bedrock_tunnel_table=bedrock_tunnel_table,
@@ -815,14 +825,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     control_plane=app.state.control_plane,
                 ),
                 clock=ServersSystemClock(),
+                real_time_events=real_time_events,
             )
         )
-        # Process-wide in-process real-time event bus (FR-MON-1..4): the gRPC
-        # servicer publishes status/log/metrics events onto it; the WebSocket
-        # endpoint subscribes per server. Best-effort and decoupled from REST —
-        # if it is empty, clients simply miss live events (graceful degradation).
-        real_time_events = InProcessRealTimeEvents()
-        app.state.real_time_events = real_time_events
         logging.getLogger(__name__).info(
             "api starting", extra={"config": settings.masked_dump()}
         )
@@ -981,7 +986,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         control_plane=schedule_control_plane,
                     ),
                     start_server=StartServer(
-                        uow=ServersUnitOfWork(create_session_factory(engine)),
+                        uow=ServersUnitOfWork(
+                            create_session_factory(engine), real_time_events
+                        ),
                         control_plane=schedule_control_plane,
                         clock=ServersSystemClock(),
                         jar_provisioner=CatalogJarProvisioner(
@@ -997,7 +1004,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         bedrock_tunnel_sync=bedrock_tunnel_syncer,
                     ),
                     stop_server=StopServer(
-                        uow=ServersUnitOfWork(create_session_factory(engine)),
+                        uow=ServersUnitOfWork(
+                            create_session_factory(engine), real_time_events
+                        ),
                         control_plane=schedule_control_plane,
                         clock=ServersSystemClock(),
                         bedrock_tunnel_sync=bedrock_tunnel_syncer,
@@ -1094,7 +1103,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             reconciler = RunReconcilerTick(
                 uow=ServersUnitOfWork(create_session_factory(engine)),
                 make_start_server=lambda: StartServer(
-                    uow=ServersUnitOfWork(create_session_factory(engine)),
+                    uow=ServersUnitOfWork(
+                        create_session_factory(engine), real_time_events
+                    ),
                     control_plane=reconciler_control_plane,
                     clock=ServersSystemClock(),
                     jar_provisioner=CatalogJarProvisioner(
@@ -1113,7 +1124,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     bedrock_tunnel_sync=bedrock_tunnel_syncer,
                 ),
                 make_stop_server=lambda: StopServer(
-                    uow=ServersUnitOfWork(create_session_factory(engine)),
+                    uow=ServersUnitOfWork(
+                        create_session_factory(engine), real_time_events
+                    ),
                     control_plane=reconciler_control_plane,
                     clock=ServersSystemClock(),
                     bedrock_tunnel_sync=bedrock_tunnel_syncer,
@@ -1144,7 +1157,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # unreachable at startup does not crash the boot (it did when this
             # ran inline in the lifespan body).
             reconciler_reset = ResetUnverifiableObservedStates(
-                uow=ServersUnitOfWork(create_session_factory(engine)),
+                uow=ServersUnitOfWork(create_session_factory(engine), real_time_events),
                 clock=ServersSystemClock(),
             )
             # Surface legacy NULL-game_port rows on startup (issue #310): such

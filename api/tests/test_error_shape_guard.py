@@ -29,13 +29,19 @@ _ALLOWED = {_SRC / "http_problem.py"}
 # schedule router serialises it into the run-history response (issue #1837), and
 # the schedule runner + its notifier adapter carry the same sanitized
 # ``schedule_run.detail`` / notification ``detail`` through the run history and
-# the real-time bus (issue #1838). Exempt from the keyword scan only; the
-# HTTPException-construction scan below still covers them.
+# the real-time bus (issue #1838). The gRPC servicer, the state sink and the
+# servers repository hand a Worker's ``StatusChange.detail`` on to the status
+# frame published once the observed-state write commits (issue #3212). Exempt
+# from the keyword scan only; the HTTPException-construction scan below still
+# covers them.
 _DETAIL_FIELD_ALLOWED = {
     _SRC / "servers" / "adapters" / "schedule_repository.py",
     _SRC / "servers" / "api" / "schedules.py",
     _SRC / "servers" / "adapters" / "notifier.py",
     _SRC / "servers" / "application" / "schedule_runner.py",
+    _SRC / "fleet" / "adapters" / "grpc_server.py",
+    _SRC / "servers" / "adapters" / "server_state_sink.py",
+    _SRC / "servers" / "adapters" / "repositories.py",
 }
 
 # Matches a ``detail=`` keyword argument (the HTTPException ad-hoc body shape).

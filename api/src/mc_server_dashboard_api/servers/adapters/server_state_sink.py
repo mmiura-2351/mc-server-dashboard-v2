@@ -21,10 +21,16 @@ observed state changed, so it is the natural single hook for both directions —
 report it, issue #2474). Gating on "freshest known"
 (the repository's existing monotonic write guard, issue #216) matters here: an
 out-of-order/stale report must not flip the tunnel the wrong way.
+
+Both writes here also relay the change to live subscribers (FR-MON-1, issue
+#3212): the repository stages a status event per changed row and this adapter
+publishes them right after its commit, the same seam the unit of work uses for
+the API-side writes.
 """
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
 import uuid
 
@@ -35,12 +41,15 @@ from mc_server_dashboard_api.fleet.adapters.relay_state import (
     BedrockTunnelTable,
     RelayRegistration,
 )
+from mc_server_dashboard_api.fleet.domain.real_time_events import RealTimeEvents
 from mc_server_dashboard_api.fleet.domain.server_state_sink import ServerStateSink
 from mc_server_dashboard_api.servers.adapters.bedrock_tunnel_sync import (
     BedrockTunnelSyncer,
 )
 from mc_server_dashboard_api.servers.adapters.repositories import (
     SqlAlchemyServerRepository,
+    publish_status_events,
+    require_status_events_wired,
 )
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.value_objects import (
@@ -80,6 +89,7 @@ class ServersServerStateSink(ServerStateSink):
         session_factory: async_sessionmaker[AsyncSession],
         *,
         clock: Clock,
+        real_time_events: RealTimeEvents | None = None,
         control_plane: GrpcControlPlane | None = None,
         relay_registration: RelayRegistration | None = None,
         bedrock_tunnel_table: BedrockTunnelTable | None = None,
@@ -87,6 +97,10 @@ class ServersServerStateSink(ServerStateSink):
     ) -> None:
         self._session_factory = session_factory
         self._clock = clock
+        # The bus the committed writes are published on. Optional only for a
+        # caller that never lands a write (the parse-failure guards): a write
+        # that would commit without it raises ``StatusEventsNotWiredError``.
+        self._real_time_events = real_time_events
         # Bedrock tunnel dispatch dependencies (issue #1544). Optional so a
         # caller that does not care about the Bedrock relay path (e.g. a unit
         # test exercising only the parse-failure guards) need not supply them;
@@ -105,7 +119,14 @@ class ServersServerStateSink(ServerStateSink):
             )
 
     async def record_observed_state(
-        self, *, server_id: str, worker_id: str, state: str
+        self,
+        *,
+        server_id: str,
+        worker_id: str,
+        state: str,
+        detail: str = "",
+        reason: str = "",
+        emitted_at: dt.datetime | None = None,
     ) -> bool:
         parsed = _parse_id(server_id, kind="server_id")
         parsed_worker = _parse_id(worker_id, kind="worker_id")
@@ -164,8 +185,15 @@ class ServersServerStateSink(ServerStateSink):
                 # skips the Bedrock tunnel sync below (a dropped write must not
                 # flip the tunnel).
                 expected_worker=WorkerId(parsed_worker),
+                detail=detail,
+                reason=reason,
+                emitted_at=emitted_at,
             )
+            require_status_events_wired(repo, self._real_time_events)
             await session.commit()
+            # Relay the observed transition to subscribed clients (FR-MON-1),
+            # before the Bedrock dispatch below: that one crosses the network.
+            publish_status_events(repo, self._real_time_events)
             if applied and server.bedrock_port is not None and self._syncer is not None:
                 await self._syncer.sync_with_session(
                     session=session,
@@ -191,7 +219,9 @@ class ServersServerStateSink(ServerStateSink):
         async with self._session_factory() as session:
             repo = SqlAlchemyServerRepository(session)
             await repo.mark_worker_servers_unknown(WorkerId(parsed), self._clock.now())
+            require_status_events_wired(repo, self._real_time_events)
             await session.commit()
+            publish_status_events(repo, self._real_time_events)
 
     async def existing_server_ids(self, *, server_ids: list[str]) -> set[str]:
         # Unparseable (non-UUID) IDs are treated as existing so the caller never

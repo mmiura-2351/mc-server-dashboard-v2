@@ -385,21 +385,26 @@ async def _relay(
     - The caller has already registered ``subscription``, so every status event
       published from then on reaches the buffer.
     - Right before the snapshot is read, the buffered status events are
-      discarded. Each was published before the read, and a worker-reported
-      transition is committed before it is published, so the read sees it or a
-      newer state. Delivering it after the snapshot could only roll the client
-      back — and not every persisted change publishes a correcting event (a
-      worker disconnect commits ``unknown`` silently), so the rollback could
-      stand indefinitely.
+      discarded. Each was published before the read, and every observed-state
+      write is committed before it is published (#3212), so the read sees it
+      or a newer state. Delivering it after the snapshot could only roll the
+      client back.
     - A status event published after the discard is delivered after the
       snapshot, in order. One that raced the read may repeat what the snapshot
-      showed, which is harmless: status frames are idempotent sets.
+      showed, which is harmless: status frames are idempotent sets. It may also
+      be older than the snapshot — published during the read, then overtaken
+      by a write the read saw. Every observed-state change publishes (#3212),
+      so when the two writes are sequential (a worker reports ``running``,
+      then its session drops) the newer write's own event follows and the
+      client ends on the newer state.
 
-    Residual until #3212: a write that commits without publishing (the worker
-    disconnect's ``unknown``, the ``lifecycle.py`` observed-state writes) can be
-    overridden by a status event published before it that entered the buffer
-    during the read — the snapshot shows the silent write, the older event
-    follows it.
+    Residual (#3307): that holds for sequential writes only. A write publishes
+    when its own commit returns, so two writers on different connections
+    publish in the order their commit acknowledgements reach the event loop,
+    which can differ from commit order. The earlier commit's event can then be
+    published last, leaving the client on the older state until the next
+    status event, status-dropping gap or reconnect. Closing it needs
+    per-server sequencing of status events (#3307).
 
     No event is held outside the buffer while a snapshot is read: the next one
     is requested only after the previous delivery (and its post-gap snapshot)

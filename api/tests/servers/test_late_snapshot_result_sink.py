@@ -115,7 +115,9 @@ async def test_clear_carries_the_worker_message_into_the_release_warning(
     server_id, worker_id = uuid.uuid4(), uuid.uuid4()
     uow = FakeUnitOfWork()
     uow.servers.seed(_held_server(server_id, worker_id))
-    monkeypatch.setattr(sink_module, "SqlAlchemyUnitOfWork", lambda _factory: uow)
+    monkeypatch.setattr(
+        sink_module, "SqlAlchemyUnitOfWork", lambda _factory, _events: uow
+    )
     detail = (
         "instancemanager: snapshot: datatransfer: snapshot request: Post "
         '"http://api:8000/api/data-plane/communities/c/servers/s/working-set": '

@@ -39,6 +39,9 @@ from mc_server_dashboard_api.community.domain.value_objects import (
 )
 from mc_server_dashboard_api.community.domain.value_objects import CommunityName
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
+from mc_server_dashboard_api.fleet.adapters.real_time_events import (
+    InProcessRealTimeEvents,
+)
 from mc_server_dashboard_api.servers.adapters.file_store import (
     StorageFileStoreAdapter,
 )
@@ -161,7 +164,9 @@ def _create_server_use_case(
     clock: Clock,
 ) -> CreateServer:
     return CreateServer(
-        uow=ServersUnitOfWork(create_session_factory(engine)),
+        uow=ServersUnitOfWork(
+            create_session_factory(engine), InProcessRealTimeEvents()
+        ),
         clock=clock,
         version_validator=FakeVersionValidator(),
         file_store=file_store,
@@ -173,7 +178,9 @@ def _start_server_use_case(
     engine: AsyncEngine, control_plane: FakeControlPlane, clock: Clock
 ) -> StartServer:
     return StartServer(
-        uow=ServersUnitOfWork(create_session_factory(engine)),
+        uow=ServersUnitOfWork(
+            create_session_factory(engine), InProcessRealTimeEvents()
+        ),
         control_plane=control_plane,
         clock=clock,
         jar_provisioner=FakeJarProvisioner(),
@@ -186,7 +193,9 @@ def _restart_server_use_case(
     engine: AsyncEngine, control_plane: FakeControlPlane, clock: Clock
 ) -> RestartServer:
     return RestartServer(
-        uow=ServersUnitOfWork(create_session_factory(engine)),
+        uow=ServersUnitOfWork(
+            create_session_factory(engine), InProcessRealTimeEvents()
+        ),
         control_plane=control_plane,
         clock=clock,
     )
@@ -196,14 +205,20 @@ def _stop_server_use_case(
     engine: AsyncEngine, control_plane: FakeControlPlane, clock: Clock
 ) -> StopServer:
     return StopServer(
-        uow=ServersUnitOfWork(create_session_factory(engine)),
+        uow=ServersUnitOfWork(
+            create_session_factory(engine), InProcessRealTimeEvents()
+        ),
         control_plane=control_plane,
         clock=clock,
     )
 
 
 def _sink(engine: AsyncEngine, clock: Clock) -> ServersServerStateSink:
-    return ServersServerStateSink(create_session_factory(engine), clock=clock)
+    return ServersServerStateSink(
+        create_session_factory(engine),
+        clock=clock,
+        real_time_events=InProcessRealTimeEvents(),
+    )
 
 
 async def _reconciler_tick(
@@ -632,7 +647,7 @@ async def test_api_restart_mid_stop_wedge_recovered_by_reconciler(
     # via reset_unverifiable. Since the row is at observed=stopped (terminal), we
     # directly update it to unknown to model the race condition.
     factory = create_session_factory(engine)
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         row = await uow.servers.get_by_id(server_id)
         assert row is not None
         # Directly record observed=unknown to simulate the wedge.
