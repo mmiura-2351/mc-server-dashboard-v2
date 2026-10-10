@@ -49,10 +49,9 @@ func TestOpenFromWorkingDirDefaultsToLoopback(t *testing.T) {
 	_ = client.Close()
 }
 
-// TestOpenFromWorkingDirReadsJavaSpellings verifies the credential is read from
-// the spellings java.util.Properties.load accepts — a colon separator, a
-// whitespace separator, and an escaped key — so the Worker dials with what the
-// Minecraft server itself read rather than missing the line entirely (#2811).
+// TestOpenFromWorkingDirReadsJavaSpellings verifies the credential is read from the spellings
+// java.util.Properties.load accepts, a colon separator, a whitespace separator, and an escaped key, so the
+// Worker dials with what the Minecraft server itself read rather than missing the line entirely.
 func TestOpenFromWorkingDirReadsJavaSpellings(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -89,9 +88,8 @@ func TestOpenFromWorkingDirReadsJavaSpellings(t *testing.T) {
 	}
 }
 
-// TestOpenFromWorkingDirUsesTheLastOccurrence verifies a key respelled and
-// appended after an untouched first line wins, as it does for the Minecraft
-// server — reading the stale first value would lose RCON control (#2811).
+// TestOpenFromWorkingDirUsesTheLastOccurrence verifies a key respelled and appended after an untouched first
+// line wins, as it does for the Minecraft server, reading the stale first value would lose RCON control.
 func TestOpenFromWorkingDirUsesTheLastOccurrence(t *testing.T) {
 	fs := newFakeServer(t, "pw")
 	dir := t.TempDir()
@@ -110,14 +108,8 @@ func TestOpenFromWorkingDirUsesTheLastOccurrence(t *testing.T) {
 	_ = client.Close()
 }
 
-// TestOpenFromWorkingDirReadsThePasswordAsTheServerVersionDoes pins that a
-// non-ASCII rcon.password authenticates (issue #3116). The fake server compares
-// the password's wire bytes with its own UTF-8 bytes -- vanilla's RconClient
-// decodes the AUTH payload as UTF-8 and String.equals it with the password it
-// loaded -- so the Worker has to decode server.properties in the charset the
-// server's version loaded it in: latin-1 before 1.20, UTF-8 first with a
-// whole-file latin-1 fallback from 1.20. A 1.20+ server rewrites the file in
-// UTF-8 at every start, so "caf\xc3\xa9" is the spelling a running one leaves.
+// Authenticate non-ASCII passwords using the file charset selected by Minecraft version.
+// The RCON auth payload itself is UTF-8 regardless of the file charset.
 func TestOpenFromWorkingDirReadsThePasswordAsTheServerVersionDoes(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -133,13 +125,8 @@ func TestOpenFromWorkingDirReadsThePasswordAsTheServerVersionDoes(t *testing.T) 
 		{"1.20 falls back to latin-1 for a file that is not UTF-8", "1.20.1", "caf\xe9", "café"},
 		{"before 1.20 reads latin-1", "1.19.4", "caf\xc3\xa9", "cafÃ©"},
 		{"an unknown version reads latin-1", "", "caf\xc3\xa9", "cafÃ©"},
-		// A pre-1.20 server rewrites the file with Properties.store(OutputStream)
-		// at every start, which re-escapes every non-ASCII character as \uXXXX --
-		// one escape per UTF-16 unit, so a supplementary character is spelled as
-		// the surrogate PAIR its two units make. That spelling is therefore what
-		// such a server always runs with once the password holds one, and
-		// Properties.load pairs the two escapes back into the character (issue
-		// #3120).
+		// Pre-1.20 Properties.store escapes supplementary characters as UTF-16 surrogate pairs; the reader must
+		// combine them.
 		{"before 1.20 pairs a surrogate-pair escape", "1.19.4", `pw\uD83D\uDE00`, "pw\U0001F600"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

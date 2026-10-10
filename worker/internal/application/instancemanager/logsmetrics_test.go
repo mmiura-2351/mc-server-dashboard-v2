@@ -124,9 +124,7 @@ func (c *fakeClock) tick() {
 func newRichManager(t *testing.T, d *richDriver, clk session.Clock) *Manager {
 	t.Helper()
 	m := New(map[string]execution.ExecutionDriver{"container": d}, t.TempDir(),
-		// No RCON wired: surface a dial failure (the real openControl never yields a nil
-		// control without an error) so the #1007 stop-flush degrades gracefully instead
-		// of dereferencing a nil control.
+		// Model unwired RCON as a dial failure, matching the production control contract.
 		func(context.Context, string, string, string) (execution.ServerControl, error) {
 			return nil, fmt.Errorf("test: no rcon control configured")
 		}).
@@ -254,14 +252,8 @@ func TestMetricsPumpStopsAfterInstanceExit(t *testing.T) {
 		t.Fatalf("stop = %+v", res)
 	}
 
-	// Wait until the pump goroutine has actually exited, then assert it emits no
-	// further metrics. Firing a tick that races the teardown select is
-	// non-deterministic (the pump may legitimately emit one straggler sample as done
-	// closes), so instead we observe exit directly through the fake clock: a live
-	// pump always re-registers an After channel before parking in its select, a dead
-	// one never does. We keep firing pending ticks (draining any straggler metrics)
-	// until the registration counter is stable across a tick that produces no new
-	// registration — at that point the goroutine has returned for good.
+	// Observe pump exit through stable fake-clock registration counts, draining legitimate teardown stragglers.
+	// A tick raced against done could otherwise emit one final sample.
 	waitForPumpExit(t, clk, m)
 
 	// The pump has exited. A subsequent tick (no After channels exist, so it is a
@@ -368,12 +360,7 @@ func drainStatus(m *Manager) {
 	}()
 }
 
-// waitForPumpExit blocks until the metrics pump goroutine has returned, draining
-// any straggler metrics it emits while tearing down. It fires each pending tick
-// and then confirms exit: a pump still in its loop re-registers an After channel
-// (registers grows) before parking, whereas an exited pump never registers again.
-// When a tick is consumed without a new registration appearing and no After
-// channels remain, the goroutine has exited for good.
+// Drive pending ticks until no timer registration remains or is renewed, draining teardown stragglers.
 func waitForPumpExit(t *testing.T, clk *fakeClock, m *Manager) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -500,12 +487,7 @@ func assertOneDropWarn(t *testing.T, h *syncSlogHandler, serverID string, count 
 	}
 }
 
-// While the merged log sink is full, the manager-level log pump counts drops
-// silently, and when the instance's stream ends it emits exactly one aggregated
-// WARN carrying the count — not one WARN per dropped line, which flooded the
-// worker's own log during control-plane outages (issue #1716). With the sink
-// still full, no in-band marker is queued: the marker is best-effort and never
-// displaces a real line.
+// A full log sink gets one aggregate warning at stream end; loss markers must not displace real lines.
 func TestLogPumpAggregatesDropsIntoOneSummaryOnExit(t *testing.T) {
 	h := &syncSlogHandler{}
 	m := newDropTestManager(t, h)
@@ -554,10 +536,9 @@ func TestLogPumpAggregatesDropsIntoOneSummaryOnExit(t *testing.T) {
 	}
 }
 
-// When the sink drains and a line next gets through (the control-plane stream
-// recovered), the pump reports the accumulated drops exactly once: one WARN on
-// the worker's own logger and one in-band "[mcsd] dropped ..." marker on the
-// merged stream so downstream log viewers learn about the gap (issue #1716).
+// When the sink drains and a line next gets through (the control-plane stream recovered), the pump reports the
+// accumulated drops exactly once: one WARN on the worker's own logger and one in-band "[mcsd] dropped..." marker
+// on the merged stream so downstream log viewers learn about the gap.
 func TestLogPumpReportsDropsOnceOnRecovery(t *testing.T) {
 	h := &syncSlogHandler{}
 	m := newDropTestManager(t, h)
@@ -668,10 +649,7 @@ func tickAndSettle(t *testing.T, clk *fakeClock) {
 	})
 }
 
-// While the merged metrics sink is full, the metrics pump counts drops
-// silently, and when the instance terminates it emits exactly one aggregated
-// WARN carrying the count — not one WARN per dropped sample, the same per-drop
-// pattern issue #1716 removed from the log pump (issue #1783).
+// Report one aggregate metrics-drop warning when the instance ends, rather than one warning per missed sample.
 func TestMetricsPumpAggregatesDropsIntoOneSummaryOnExit(t *testing.T) {
 	h := &syncSlogHandler{}
 	clk := &fakeClock{}
@@ -715,10 +693,8 @@ func TestMetricsPumpAggregatesDropsIntoOneSummaryOnExit(t *testing.T) {
 	}
 }
 
-// When the sink drains and a sample next gets through (the control-plane
-// stream recovered), the pump reports the accumulated drops exactly once and
-// resets: later successful sends — and the eventual exit — report nothing
-// more (issue #1783).
+// When the sink drains and a sample next gets through (the control-plane stream recovered), the pump reports the
+// accumulated drops exactly once and resets: later successful sends, and the eventual exit, report nothing more.
 func TestMetricsPumpReportsDropsOnceOnRecovery(t *testing.T) {
 	h := &syncSlogHandler{}
 	clk := &fakeClock{}

@@ -11,10 +11,9 @@ import (
 	controlplanev1 "github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/controlplane/mcsd/controlplane/v1"
 )
 
-// stallStream is a WorkerService_SessionClient double whose Send blocks until
-// the test releases it and then reports success. It lets a test place the
-// completion of a Send at an exact point relative to the stall deadline instead
-// of hoping to hit the boundary by timing (issue #2397).
+// stallStream is a WorkerService_SessionClient double whose Send blocks until the test releases it and then
+// reports success. It lets a test place the completion of a Send at an exact point relative to the stall
+// deadline instead of hoping to hit the boundary by timing.
 type stallStream struct {
 	entered chan struct{}
 	release chan struct{}
@@ -50,12 +49,7 @@ func newStallTransport() (tr *transport, stream *stallStream, tick chan time.Tim
 	return tr, stream, tick, canceled
 }
 
-// TestSendBoundedReportsStallWhenDeadlineWins pins the losing half of the
-// boundary race (issue #2397): once the stall watchdog has cancelled the
-// per-stream context, a Send that completes immediately afterwards must be
-// reported as a stall. Returning success would hand the run loop a healthy
-// verdict on a stream that is already cancelled, and the next Send/Recv would
-// fail with codes.Canceled somewhere with less context.
+// Once the watchdog cancels the stream, a late successful Send must still report the stall.
 func TestSendBoundedReportsStallWhenDeadlineWins(t *testing.T) {
 	tr, stream, tick, canceled := newStallTransport()
 

@@ -1,23 +1,10 @@
 #!/bin/sh
-# Stub `java` for the container-driver e2e scenarios (issues #234, #326). It runs
-# as the container's PID 1 and branches on its argv:
-#
-#   - A Forge SUPERVISED INSTALL invocation carries `--installServer`
-#     (`java -jar server.jar --installServer`, execution.forgeInstallArgs). It
-#     CREATES the launch artifact the driver's post-install re-plan globs for —
-#     libraries/net/minecraftforge/forge/<v>/unix_args.txt
-#     (execution.forgeArgsfileGlob) — relative to the working dir (/data, the
-#     bind-mounted working set) and exits 0. No JRE and no download: it only
-#     produces the file the next launch needs.
-#   - Any OTHER invocation (a plain JAR launch, or a Forge args-file launch)
-#     BLOCKS until SIGTERM so the container stays running like a real server.
-#     PID 1 receives only signals it traps, so install an explicit handler for
-#     `docker stop` to end it promptly; `wait` lets the trap fire between sleeps.
+# Create Forge launch artifacts for install invocations; otherwise wait for SIGTERM.
+# PID 1 needs an explicit signal trap so docker stop can terminate it promptly.
 
 for arg in "$@"; do
 	if [ "$arg" = "--installServer" ]; then
-		# The version segment is arbitrary for the stub — the driver globs the
-		# version with a wildcard and expects exactly one match.
+		# The driver accepts any version directory but requires exactly one match.
 		dir="libraries/net/minecraftforge/forge/0.0.0-stub"
 		mkdir -p "$dir"
 		printf 'stub forge args file\n' >"$dir/unix_args.txt"

@@ -1,10 +1,9 @@
 package session_test
 
-// Benchmark: session domain logic (issue #1122).
+// Benchmark: session domain logic.
 //
-// Measures the Backoff.Delay computation (on the reconnect hot path) and the
-// IsHandledKind dispatch filter (on the per-command hot path). To add a new
-// session benchmark, add a Benchmark<Function> following this pattern.
+// Measures the Backoff.Delay computation (on the reconnect hot path) and the IsHandledKind dispatch filter (on
+// the per-command hot path). To add a new session benchmark, add a Benchmark<Function> following this pattern.
 
 import (
 	"testing"

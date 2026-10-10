@@ -13,8 +13,7 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
 
-// ReclaimDeletedScratches removes the scratch dir and hydrate leftovers for a
-// deleted server id (issue #924).
+// ReclaimDeletedScratches removes the scratch dir and hydrate leftovers for a deleted server id.
 func TestReclaimDeletedScratchesRemovesScratchAndHydrateLeftovers(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	dir := seedScratch(t, m, "s1")
@@ -23,13 +22,7 @@ func TestReclaimDeletedScratchesRemovesScratchAndHydrateLeftovers(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	// The SYNCHRONOUS body, as the rest of this file's per-id tests use. The
-	// asynchronous entry point runs that body on a goroutine, so both checks below
-	// would race it whatever order it removes in (issue #1888), and the only
-	// barrier available is Close — which since issue
-	// #2933 also STOPS the reclaim at its loop top, so a spawn that has not reached
-	// its first id yet reclaims nothing. TestCloseJoinsAnInFlightReclaim covers the
-	// goroutine and its join; this test is about what one id's reclaim removes.
+	// Use the synchronous body for per-ID ordering checks; Close can stop asynchronous reclaim before its first ID.
 	m.reclaimDeletedScratches([]string{"s1"})
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("scratch dir not reclaimed for deleted server: stat err = %v", err)
@@ -39,25 +32,7 @@ func TestReclaimDeletedScratchesRemovesScratchAndHydrateLeftovers(t *testing.T) 
 	}
 }
 
-// The hydrate leftovers go BEFORE the scratch dir, and the order is the whole
-// point (issue #2934). <scratch>/<id> is what keeps the id advertised: both
-// held-set scans skip .hydrate-<id>-* (isReservedScratchName), so the instant that
-// dir goes the id leaves held_servers, the API never re-derives it into
-// unknown_held_server_ids, and this reclaim is the only pass that would ever be
-// offered the id again — only a Worker BOOT reclaims a .hydrate- tree
-// (ReclaimHydrateLeftovers, issue #3167), and a Worker runs for months between
-// boots, so that is the backstop and not the plan. Sweeping AFTER the removal
-// therefore made every interruption in that window a world-sized leak no runtime
-// pass ever reclaims. Sweeping before it makes the body recoverable instead: an
-// interruption anywhere in it leaves the scratch dir, and with it the
-// advertisement that re-offers the id at the next registration.
-//
-// The ordering is what makes this leg need no shutdown budget of its own (#2934).
-// Close joins this reclaim and compose.yaml's stop_grace_period bounds the whole
-// shutdown, but the value there is sized for the retry-stop leg, not this one:
-// "a partial reclaim is finished idempotently by the next registration" has to
-// hold at every point in the body, and with the other order it did not — at any
-// grace period, and for a crash or a power loss too.
+// Gate cleanup at the scratch removal boundary to verify hydrate leftovers are already gone.
 func TestReclaimSweepsHydrateLeftoversBeforeTheScratchDirGoes(t *testing.T) {
 	h := newBlockingReclaimLogger()
 	m := newManager(t, &fakeDriver{}, nil).WithLogger(slog.New(h))
@@ -85,7 +60,7 @@ func TestReclaimSweepsHydrateLeftoversBeforeTheScratchDirGoes(t *testing.T) {
 	h.unpark()
 }
 
-// ReclaimDeletedScratches MUST NOT remove .displaced-<id> trees (issue #911).
+// ReclaimDeletedScratches MUST NOT remove.displaced-<id> trees.
 func TestReclaimDeletedScratchesRetainsDisplacedTree(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	dir := seedScratch(t, m, "s1")
@@ -95,9 +70,7 @@ func TestReclaimDeletedScratchesRetainsDisplacedTree(t *testing.T) {
 	// .displaced tree is checked and its survival is a decision, not a race (see
 	// TestReclaimDeletedScratchesRemovesScratchAndHydrateLeftovers).
 	m.reclaimDeletedScratches([]string{"s1"})
-	// The scratch removal is asserted FIRST because it is what makes the retention
-	// below a decision: a reclaim that does nothing at all leaves the .displaced tree
-	// standing too, and without this check that no-op passes as #911 (issue #2984).
+	// Require scratch removal first so a no-op reclaim cannot pass the displaced-tree retention assertion.
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("scratch dir not reclaimed for deleted server: stat err = %v", err)
 	}
@@ -114,9 +87,8 @@ func TestReclaimDeletedScratchesSkipsRunningServer(t *testing.T) {
 	control := seedScratch(t, m, "s2")
 	_ = m.Handle(context.Background(), startCmd())
 
-	// s2 is the positive control, listed AFTER the running id and asserted FIRST: a
-	// reclaim that does nothing at all leaves s1 standing too, and one that aborts
-	// the call at s1 instead of skipping it never reaches s2 (issue #3025).
+	// s2 is the positive control, listed AFTER the running id and asserted FIRST: a reclaim that does nothing at
+	// all leaves s1 standing too, and one that aborts the call at s1 instead of skipping it never reaches s2.
 	m.reclaimDeletedScratches([]string{"s1", "s2"})
 	if _, err := os.Stat(control); !os.IsNotExist(err) {
 		t.Fatalf("scratch dir not reclaimed for the deleted server listed after the running one: stat err = %v", err)
@@ -137,9 +109,9 @@ func TestReclaimDeletedScratchesRefusesUnsafeID(t *testing.T) {
 	defer func() { _ = os.RemoveAll(sibling) }()
 	control := seedScratch(t, m, "s1")
 
-	// s1 is the positive control, listed AFTER the unsafe ids and asserted FIRST, so
-	// the sibling's survival is a refusal rather than a reclaim that did nothing, and
-	// a refusal that skips the id rather than aborting the call (issue #3025).
+	// s1 is the positive control, listed AFTER the unsafe ids and asserted FIRST, so the sibling's survival is a
+	// refusal rather than a reclaim that did nothing, and a refusal that skips the id rather than aborting the
+	// call.
 	m.reclaimDeletedScratches([]string{"../escaped", "", ".", "s1"})
 	if _, err := os.Stat(control); !os.IsNotExist(err) {
 		t.Fatalf("scratch dir not reclaimed for the safe id listed after the unsafe ones: stat err = %v", err)
@@ -169,8 +141,8 @@ func TestReclaimDeletedScratchesSkipsReservedServer(t *testing.T) {
 		t.Fatal("could not reserve s1 for test setup")
 	}
 
-	// s2 is the positive control, listed AFTER the reserved id and asserted FIRST
-	// (see TestReclaimDeletedScratchesSkipsRunningServer, issue #3025).
+	// s2 is the positive control, listed AFTER the reserved id and asserted FIRST (see
+	// TestReclaimDeletedScratchesSkipsRunningServer).
 	m.reclaimDeletedScratches([]string{"s1", "s2"})
 	if _, err := os.Stat(control); !os.IsNotExist(err) {
 		t.Fatalf("scratch dir not reclaimed for the deleted server listed after the reserved one: stat err = %v", err)
@@ -181,12 +153,8 @@ func TestReclaimDeletedScratchesSkipsReservedServer(t *testing.T) {
 	m.release("s1")
 }
 
-// blockingReclaimLogger parks the reclaim goroutine on one of the manager's own
-// log records and lets it go again on demand. The manager's logger is the only
-// seam INSIDE the reclaim body, and the record parked on sits between the scratch
-// removal and the reservation release — the exact window issue #2878 is about —
-// so this is what turns "a reclaim in flight" into a state a test can hold still.
-// Records it does not park on pass straight through.
+// Block at the reclaim log between scratch removal and reservation release to hold an in-flight cleanup
+// deterministically.
 type blockingReclaimLogger struct {
 	msg         string
 	entered     chan struct{}
@@ -224,11 +192,9 @@ func newBlockingReclaimLogger() *blockingReclaimLogger {
 	}
 }
 
-// Close JOINS a reclaim in flight (issue #2878). The reclaim was the one
-// manager-owned goroutine spawned with a bare go, so Close neither waited for it
-// nor cancelled it: parked here it has removed the scratch tree but has not yet
-// released the reservation, and a Close that returned in that window lets the
-// process exit inside it.
+// Close JOINS a reclaim in flight. The reclaim was the one manager-owned goroutine spawned with a bare go, so
+// Close neither waited for it nor cancelled it: parked here it has removed the scratch tree but has not yet
+// released the reservation, and a Close that returned in that window lets the process exit inside it.
 func TestCloseJoinsAnInFlightReclaim(t *testing.T) {
 	awaitManagerGoroutines(t, 0)
 	h := newBlockingReclaimLogger()
@@ -281,19 +247,15 @@ func TestCloseJoinsAnInFlightReclaim(t *testing.T) {
 	awaitManagerGoroutines(t, 0)
 }
 
-// A reclaim requested AFTER Close is dropped whole: goBackground refuses on a
-// closed manager, so no goroutine starts and no id is touched (issue #2878).
+// A reclaim requested AFTER Close is dropped whole: goBackground refuses on a closed manager, so no goroutine
+// starts and no id is touched.
 func TestReclaimDeletedScratchesAfterCloseIsDropped(t *testing.T) {
 	awaitManagerGoroutines(t, 0)
 	m := newManager(t, &fakeDriver{}, nil)
 	control := seedScratch(t, m, "s0")
 	dir := seedScratch(t, m, "s1")
 
-	// The positive control (issue #3025): no request after Close can reclaim anything,
-	// so it cannot share the dropped call. Instead the SAME entry point on the same
-	// manager reclaims s0 before Close, which makes the drop below Close's doing rather
-	// than a reclaim that does nothing. It waits on the removal itself, not on Close,
-	// which since issue #2933 stops a reclaim that has not reached its first id.
+	// Verify this entry point reclaims before Close so the later no-op proves shutdown rejection.
 	m.ReclaimDeletedScratches([]string{"s0"})
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -321,15 +283,7 @@ func TestReclaimDeletedScratchesAfterCloseIsDropped(t *testing.T) {
 	}
 }
 
-// Close stops a reclaim at the next id boundary (issue #2933). The reclaim reads
-// the shutdown at the TOP of the per-id loop — after the previous id's release,
-// before the next id's reserve — where it holds no reservation and no half-done
-// removal, so stopping there is safe by the same reasoning that makes the join
-// safe. What it buys is the bound: Close pays the filesystem work of the id
-// already in flight, not of every id still on the list. The id in flight still
-// finishes; the window from reserve to release stays uninterruptible on purpose
-// (issue #2878), which is what leaves no id with a removed tree and a held
-// reservation.
+// Pause reclaim within one ID, begin Close, then require that ID to finish and later IDs to remain untouched.
 func TestCloseStopsTheReclaimAtTheNextIDBoundary(t *testing.T) {
 	awaitManagerGoroutines(t, 0)
 	h := newBlockingReclaimLogger()
@@ -394,18 +348,7 @@ func TestCloseStopsTheReclaimAtTheNextIDBoundary(t *testing.T) {
 	awaitManagerGoroutines(t, 0)
 }
 
-// The ids a stopped reclaim skips are re-offered, not lost (issue #2933). Their
-// scratch dirs are still on disk, so HeldServers() keeps advertising them and the
-// next registration re-derives the unknown subset from that advertisement — the
-// ack-vs-advertised intersection pinned in the session package
-// (TestRegisterAckUnknownHeldServerIDsPlumbedToReclaimer) over a held set the
-// runner re-reads per registration (TestReRegistrationRefreshesHeldServers, issue
-// #1711). This is the Worker-side half those two compose with: a skipped id is
-// still HELD.
-//
-// It also pins the low end of the bound. On a manager that is already shutting
-// down the loop top stops the reclaim at the FIRST id, so "at most one id's
-// filesystem work" includes none at all.
+// Skipped IDs remain advertised so the next registration retries their reclaim.
 func TestStoppedReclaimLeavesSkippedIDsHeld(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	ids := []string{"s1", "s2"}
@@ -414,10 +357,9 @@ func TestStoppedReclaimLeavesSkippedIDsHeld(t *testing.T) {
 	}
 	seedScratch(t, m, "s0")
 
-	// The positive control (issue #3025): on a closed manager the loop top stops at
-	// the first id, so no id in the stopped call can be one it reclaims. Instead the
-	// same body on the same manager reclaims s0 before Close, which makes s1 and s2
-	// staying held below the stop rather than a reclaim that does nothing.
+	// The positive control: on a closed manager the loop top stops at the first id, so no id in the stopped call
+	// can be one it reclaims. Instead the same body on the same manager reclaims s0 before Close, which makes s1
+	// and s2 staying held below the stop rather than a reclaim that does nothing.
 	m.reclaimDeletedScratches([]string{"s0"})
 	m.Close()
 

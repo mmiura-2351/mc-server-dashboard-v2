@@ -1,12 +1,4 @@
-// Package rcon implements the execution.ServerControl Port over the Source RCON
-// protocol: forwarding console commands (FR-SRV-5) and issuing save-all / stop
-// on the graceful-stop path (ARCHITECTURE.md Section 5.2).
-//
-// The protocol is hand-rolled rather than pulled in as a dependency: it is a
-// trivial length-prefixed little-endian packet format (a few dozen lines), so a
-// third-party module would add a supply-chain surface and a 7-day-cooldown gate
-// for no real saving (docs/dev/DEPENDENCIES.md). The wire format is the
-// documented Source RCON protocol.
+// Package rcon implements execution.ServerControl over the Source RCON protocol.
 package rcon
 
 import (
@@ -28,24 +20,15 @@ const (
 	typeAuth          int32 = 3
 )
 
-// maxBodyLen bounds a packet so a misbehaving or hostile peer cannot exhaust
-// memory. The Source RCON spec caps a packet payload at 4096 bytes; the headroom
-// covers the id/type/terminator overhead.
+// Bound packet allocation; headroom covers the ID, type, and terminators beyond a 4096-byte payload.
 const maxBodyLen = 4096 + 16
 
 // ErrAuthFailed is returned when the RCON password is rejected (auth response
 // id = -1).
 var ErrAuthFailed = errors.New("rcon: authentication failed")
 
-// defaultExecuteTimeout bounds a single Execute round trip when the caller's
-// ctx carries no deadline. In practice RCON replies are sub-second; 30s is a
-// generous ceiling that still guarantees a hung server (one that accepts the
-// TCP connect but never replies) cannot wedge the call — and thus the lane or a
-// global concurrency slot — forever. A var (not a const) so tests can shrink it.
-//
-// The same ceiling bounds the dial+authenticate handshake (Dial): a peer that
-// TCP-accepts but never sends an AUTH_RESPONSE would otherwise block the read
-// forever on a deadline-less lane ctx — the same wedge shape one step earlier.
+// defaultExecuteTimeout bounds dial, authentication, and execution without a caller deadline.
+// Tests can lower it to exercise unresponsive peers.
 var defaultExecuteTimeout = 30 * time.Second
 
 // maxResponseSize bounds the total reassembled response body. A misbehaving
@@ -56,10 +39,7 @@ const maxResponseSize = 1 << 20 // 1 MiB
 // maxResponseSize.
 var ErrResponseTooLarge = errors.New("rcon: response too large")
 
-// ErrConnBroken is returned by Execute when a prior round trip failed mid-stream
-// (timeout or cancel), which can leave the connection mis-framed. The connection
-// is poisoned on such a failure so reuse fails fast and forces a redial rather
-// than reading a stale response off the broken stream.
+// ErrConnBroken rejects reuse after an I/O failure that may have left the stream mid-frame.
 var ErrConnBroken = errors.New("rcon: connection poisoned by a prior I/O error")
 
 // Client is a single authenticated RCON connection. It is not safe for
@@ -70,13 +50,8 @@ type Client struct {
 	broken bool
 }
 
-// Dial opens an RCON connection to addr and authenticates with password. It
-// returns ErrAuthFailed on a rejected password. Both the TCP connect and the
-// handshake honour ctx's deadline and fall back to defaultExecuteTimeout when
-// ctx carries none: a peer that never completes the SYN handshake (firewalled or
-// gone) cannot ride the OS's ~2-minute SYN timeout, and one that accepts the
-// connect but never sends an AUTH_RESPONSE cannot wedge the read forever. It
-// returns ctx.Err() when ctx cancellation caused the failure.
+// Dial authenticates within the caller deadline or defaultExecuteTimeout.
+// Rejected credentials return ErrAuthFailed; cancellation returns ctx.Err().
 func Dial(ctx context.Context, addr, password string) (*Client, error) {
 	// DialContext honours ctx's deadline; set Timeout as the fallback bound for a
 	// deadline-less ctx so the connect cannot hang on the OS SYN timeout.
@@ -94,27 +69,8 @@ func Dial(ctx context.Context, addr, password string) (*Client, error) {
 	return c, nil
 }
 
-// Execute sends one command line and returns the server's reply body. Vanilla
-// Minecraft's RCON server fragments replies longer than 4096 bytes into multiple
-// RESPONSE_VALUE packets with the same request id, with no end marker. Execute
-// sends a second marker command (empty body) with its own id after the real
-// command: the arrival of the marker's reply deterministically signals that all
-// fragments for the real command have been received.
-//
-// The marker goes on the wire only once the command's first reply packet has
-// been read, and never back-to-back with the command itself (issue #2618).
-// Vanilla reads one packet per read() and drops the connection when the length
-// prefix does not match the byte count that read returned, so two request
-// packets landing in the same read are one malformed packet to it: it closes
-// the connection without running either command. Waiting for a reply byte
-// proves the server has consumed the command and is back at its next read, so
-// the marker can only ever arrive alone.
-//
-// It honours ctx's deadline for the round trip, and falls back to
-// defaultExecuteTimeout when ctx carries none, so a server that accepts the
-// connection but never replies cannot block the call forever. It returns
-// ctx.Err() when ctx cancellation caused the failure, and ErrConnBroken when
-// the connection was poisoned by a prior failed round trip.
+// Execute collects fragmented replies until an empty marker command's reply arrives.
+// Send the marker only after the first reply: Vanilla can reject coalesced request packets.
 func (c *Client) Execute(ctx context.Context, line string) (string, error) {
 	if c.broken {
 		return "", ErrConnBroken
@@ -159,9 +115,7 @@ func (c *Client) Execute(ctx context.Context, line string) (string, error) {
 		return nil
 	})
 	if err != nil {
-		// A timeout or cancel can leave the stream mid-frame; poison the
-		// connection so the next reuse fails fast and redials rather than reading
-		// a stale response off a mis-framed stream.
+		// Poison a failed round trip: a partial frame makes the connection unsafe to reuse.
 		c.broken = true
 		_ = c.conn.Close()
 		return "", err
@@ -169,14 +123,8 @@ func (c *Client) Execute(ctx context.Context, line string) (string, error) {
 	return body, nil
 }
 
-// withDeadline runs fn while a per-call deadline (ctx's, or defaultExecuteTimeout
-// when ctx carries none) is set on the connection, so a hung read cannot block
-// forever. A watcher goroutine honours ctx cancellation: on ctx.Done() it sets
-// an immediate connection deadline, the standard net.Conn idiom for unblocking
-// an in-flight read from another goroutine. The watcher is closed and waited for
-// before returning so it never touches the connection after fn returns. When ctx
-// cancellation caused fn to fail, it returns ctx.Err() in place of the opaque
-// i/o timeout.
+// withDeadline bounds I/O and joins the cancellation watcher before returning.
+// Cancellation errors are returned as ctx.Err().
 func (c *Client) withDeadline(ctx context.Context, fn func() error) error {
 	deadline, ok := ctx.Deadline()
 	if !ok {

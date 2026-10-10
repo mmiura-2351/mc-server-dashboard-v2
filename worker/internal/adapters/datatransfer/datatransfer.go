@@ -1,24 +1,5 @@
-// Package datatransfer is the Worker's HTTP data-plane client: it moves a
-// server's working set between the API's authoritative Storage and the local
-// scratch dir (FR-DATA-3, FR-DATA-4). The control plane only triggers a
-// transfer and hands over a URL + token (CONTROL_PLANE.md Section 5); this
-// adapter does the bulk byte movement, off the gRPC stream.
-//
-//   - Hydrate: GET the working-set tar and stream-unpack it into the instance
-//     working dir. Members are path-sanitized (absolute paths and "..", and any
-//     symlink/hardlink escape, are rejected), mirroring the API-side filter="data"
-//     discipline so a hostile archive cannot escape the working dir. A 204 No
-//     Content means the server has no published working set yet; the Worker treats
-//     it as an empty dir and launches fresh.
-//   - Snapshot: pack the working dir into a tar spooled to a temp file (so RAM
-//     stays bounded for multi-GB worlds), Stat it for a Content-Length, then
-//     stream the file as the request body so the API's "proven complete" gate
-//     can verify the streamed byte count (STORAGE.md Section 4.1, FR-DATA-6).
-//
-// Transport security mirrors the control channel (CONFIGURATION.md Section 6.1):
-// the same CA bundle / mTLS / insecure-dev posture is reused via the injected
-// *http.Client built in the wiring layer. The transfer token travels as
-// "Authorization: Bearer <token>", the same credential model as the stream.
+// Package datatransfer moves working sets over HTTP using bearer tokens and an injected TLS policy.
+// Hydrate replaces scratch from a sanitized tar; snapshots spool to disk for bounded memory and Content-Length.
 package datatransfer
 
 import (
@@ -40,26 +21,16 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/scratchformat"
 )
 
-// generationHeader is the response header the API data plane stamps on a hydrate
-// (the store generation served) and a snapshot (the new store generation
-// published) so the Worker can record the generation of its local working set
-// (issue #763). An absent or unparseable header is read as generation 0.
+// generationHeader is the response header the API data plane stamps on a hydrate (the store generation served)
+// and a snapshot (the new store generation published) so the Worker can record the generation of its local
+// working set. An absent or unparseable header is read as generation 0.
 const generationHeader = "X-Working-Set-Generation"
 
-// baseGenerationHeader is the REQUEST header the Worker stamps on a snapshot
-// publish with the store generation its working set was hydrated from (issue
-// #847). The API's publish-time generation guard refuses the publish if the store
-// has since advanced past it, preventing a stale set from clobbering a newer
-// authoritative copy. Omitted when 0 (an unknown/never-hydrated set): the guard
-// then has no base to compare and the publish proceeds as before.
+// Omit base-generation zero; otherwise the API compares it with the current generation when deciding staleness.
 const baseGenerationHeader = "X-Working-Set-Base-Generation"
 
-// workerIDHeader is the REQUEST header the Worker stamps on a snapshot publish with
-// its own id (issue #847 bug 3), recorded by the API alongside the generation so the
-// guard can tell a same-Worker re-publish (lost-response self-heal) from a
-// different-Worker stale-scratch publish (A->B->A). Omitted when empty (an
-// unconfigured Worker): the guard then treats the publisher as unknown and stays
-// permissive.
+// Worker identity permits same-Worker republish after response loss; unknown publishers keep the permissive
+// fallback.
 const workerIDHeader = "X-Worker-Id"
 
 // parseGeneration reads the store generation from a response header, returning 0
@@ -97,17 +68,8 @@ func (c *Client) WithLogger(l *slog.Logger) *Client {
 	return c
 }
 
-// Hydrate downloads the working-set tar from url into destDir, REPLACING its
-// contents wholesale: the tar is unpacked into a fresh temp sibling that is then
-// atomically swapped into destDir, so a retained stale working set is replaced
-// (not merged) and any symlink a previous run planted in destDir is never
-// traversed (issue #772). The generation marker is written into the temp tree
-// before the swap-in rename so it is atomic with the new destDir (issue #917);
-// the caller's recordGeneration call is still needed for the 204 path and is
-// idempotent on the 200 path. A 204 response
-// means "no published working set"; destDir is left empty and Hydrate returns nil
-// (the Worker launches against an empty dir). Any archive member that would
-// escape destDir is rejected and aborts the transfer.
+// Hydrate swaps a validated 200 tar and its generation marker into destDir, preserving displaced recovery data.
+// A 204 returns the generation without touching destDir; the caller records its marker.
 func (c *Client) Hydrate(ctx context.Context, url, token, destDir string) (uint64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -123,22 +85,8 @@ func (c *Client) Hydrate(ctx context.Context, url, token, destDir string) (uint6
 
 	switch resp.StatusCode {
 	case http.StatusNoContent:
-		// No published working set yet; nothing to unpack. The store generation is
-		// 0 (the API serves no generation header on a 204), so the Worker records 0.
-		//
-		// IMPLICIT CALLER DEPENDENCY: this returns WITHOUT touching destDir, so a
-		// retained stale destDir from a prior placement is left in place (not
-		// replaced). That is safe only because the caller never reaches a 204 with a
-		// stale destDir to displace: store generation 0 + a held working set means the
-		// API gates this off with skip_hydrate (lifecycle.py), so a 204 here only ever
-		// hydrates onto an empty/absent destDir. Leaving the retained destDir is
-		// intentional — do not add a blind destDir wipe here.
-		//
-		// A wipe would also be invisible to instancemanager's generation-stamp guard
-		// (issue #2284), which detects a concurrent re-placement by the working dir's
-		// IDENTITY: the 200 path replaces destDir by rename, but a wipe-in-place would
-		// empty the very same directory object and the guard would see no change. Any
-		// future destDir mutation here must REPLACE the directory, not empty it.
+		// A 204 leaves destDir untouched; the API must skip hydrate when generation-zero storage meets held scratch.
+		// Any future mutation must replace the directory so running-snapshot identity guards can detect it.
 		return parseGeneration(resp.Header), nil
 	case http.StatusOK:
 	default:
@@ -149,11 +97,9 @@ func (c *Client) Hydrate(ctx context.Context, url, token, destDir string) (uint6
 	if err := unpackAndSwap(resp.Body, destDir, gen, c.logger); err != nil {
 		return 0, fmt.Errorf("datatransfer: unpack: %w", err)
 	}
-	// The store generation the API served, recorded by the caller alongside the
-	// freshly unpacked working set (issue #763). The marker was already written into
-	// the temp tree before the swap-in rename (issue #917), so this return value is
-	// still used by the caller's recordGeneration for the 204 path and is idempotent
-	// on the 200 path.
+	// The store generation the API served, recorded by the caller alongside the freshly unpacked working set. The
+	// marker was already written into the temp tree before the swap-in rename, so this return value is still used
+	// by the caller's recordGeneration for the 204 path and is idempotent on the 200 path.
 	return gen, nil
 }
 
@@ -162,15 +108,8 @@ func (c *Client) Hydrate(ctx context.Context, url, token, destDir string) (uint6
 // crash mid-snapshot left behind.
 const snapshotSpoolPrefix = "snapshot-"
 
-// SweepSnapshotSpools removes snapshot-*.tar spool files a crash mid-Snapshot left
-// in scratchRoot (issue #787). Snapshot spools its tar to a temp file there and
-// removes it on every return path, but a worker death between create and that
-// deferred remove leaks a world-sized file permanently: ScanHeldServers only walks
-// directories, so the orphan is invisible while consuming disk per crash. This runs
-// at startup alongside the held-server scan (cmd/worker/main.go). It is best-effort:
-// an unreadable root or a failed remove is ignored (a leftover is wasted disk, never
-// a correctness problem). Only top-level files matching the spool prefix and .tar
-// suffix are touched, so a server's working-set subdir is never entered.
+// SweepSnapshotSpools removes only top-level snapshot-*.tar files left by crashes.
+// Run before transfers start; directory scans cannot reclaim them.
 func SweepSnapshotSpools(scratchRoot string) {
 	entries, err := os.ReadDir(scratchRoot)
 	if err != nil {
@@ -184,13 +123,8 @@ func SweepSnapshotSpools(scratchRoot string) {
 	}
 }
 
-// PackSnapshot packs srcDir into a tar spooled to a temp file in srcDir's parent
-// (the scratch root, so it shares srcDir's filesystem). It returns the spool path
-// and a cleanup function that removes the spool. The caller can release the quiesce
-// bracket after PackSnapshot returns because only the pack reads the working
-// directory; the upload reads only the spool (issue #1710). A crash before the
-// cleanup leaks the spool; SweepSnapshotSpools reclaims such leftovers at startup
-// (issue #787).
+// PackSnapshot spools to the scratch filesystem and returns mandatory cleanup.
+// Only packing reads live scratch; upload may run after save-on, and boot reclaim covers crash-left spools.
 func (c *Client) PackSnapshot(_ context.Context, srcDir string) (string, func(), error) {
 	spool, err := os.CreateTemp(filepath.Dir(srcDir), snapshotSpoolPrefix+"*.tar")
 	if err != nil {
@@ -207,10 +141,9 @@ func (c *Client) PackSnapshot(_ context.Context, srcDir string) (string, func(),
 	return spoolPath, cleanup, nil
 }
 
-// UploadSnapshot streams the tar spool file at spoolPath to url, declaring
-// baseGeneration and workerID for the API's publish-time generation guard (issue
-// #847). It returns the NEW store generation the publish produced (the value of the
-// API's response header, issue #763); 0 when the header is absent (an older API).
+// UploadSnapshot streams the tar spool file at spoolPath to url, declaring baseGeneration and workerID for the
+// API's publish-time generation guard. It returns the NEW store generation the publish produced (the value of
+// the API's response header); 0 when the header is absent (an older API).
 func (c *Client) UploadSnapshot(ctx context.Context, url, token, spoolPath string, baseGeneration uint64, workerID string) (uint64, error) {
 	f, err := os.Open(spoolPath)
 	if err != nil {
@@ -262,92 +195,9 @@ func (c *Client) Snapshot(ctx context.Context, url, token, srcDir string, baseGe
 	return c.UploadSnapshot(ctx, url, token, spoolPath, baseGeneration, workerID)
 }
 
-// unpackAndSwap unpacks the tar stream into a fresh temp sibling of destDir, then
-// atomically swaps it into place (issue #772). Unpacking into a brand-new tree —
-// rather than over the retained scratch — gives REPLACE semantics (files deleted
-// upstream do not survive) and means a symlink a previous run planted in destDir
-// is never traversed (the destination tree has no pre-existing entries). The
-// generation marker is written into the temp tree BEFORE the swap-in rename
-// (issue #917) so it is atomic with the new destDir (issue #763).
-//
-// The temp dir is a dot-prefixed sibling in destDir's parent (the scratch root).
-// ScanHeldServers (scratchscan.go) skips the .displaced-<id> sibling and never
-// reports a .hydrate-* temp leftover as a held server it assigned, so a
-// crash-leftover .hydrate-* sibling is never matched; a stale one is also reclaimed
-// by the next hydrate's leftover sweep below (if the id is re-placed here), by
-// the post-final-snapshot scratch GC, which sweeps this id's .hydrate-<id>-* siblings
-// BEFORE removing scratchDir/<id> once the stopped-id final snapshot publishes
-// (issue #766/#841/#842/#3167, instancemanager.removeScratch), and — for an id that
-// never comes back, which none of those reach — by the boot reclaim
-// (instancemanager.ReclaimHydrateLeftovers, issue #3167).
-//
-// Displaced-tree retention (issue #906): the old working set this hydrate replaces
-// is NOT deleted — it is renamed aside to the per-server .displaced-<id> sibling.
-// When the final stop snapshot definitively failed (e.g. refused by an integrity
-// gate, #905), #845 retained the scratch precisely so the only copy of the world
-// survives; deleting it here on the next start's hydrate would destroy that copy.
-// Moving it aside keeps it recoverable by an operator after such an incident. The
-// displaced tree is dot-prefixed so it is never mistaken for a live scratch:
-// ScanHeldServers skips the .displaced-<id> prefix (scratchscan.go) so it is never
-// reported as a held server. At most one displaced tree exists per server, and it is
-// GC'd on the next SUCCESSFUL snapshot for this id, the moment the store provably
-// supersedes it (instancemanager.sweepDisplaced, mirroring the #845 GC-on-success
-// pattern).
-//
-// OLDEST-WINS when the slot is already occupied (issue #2278): a hydrate that finds a
-// .displaced-<id> already there KEEPS it and discards the working set it just displaced.
-// The rule rests on one near-provable fact — every successful snapshot for this id calls
-// sweepDisplaced, so a surviving .displaced-<id> means ZERO successful snapshots since it
-// was created. The exception to that is a CLASS, not a single case: a snapshot whose
-// SWEEP did not remove the tree. Three deliberate routes reach it — the running-id caller
-// declines before the sweep starts, because the working dir is no longer provably the tree
-// it packed (issue #2291); the sweep renames the tree out of the slot, re-checks that same
-// pin, finds the working dir replaced and puts the tree BACK (issue #3118); or another
-// sweep for this id already holds the id's slot claim, so this one declines without
-// renaming (issue #3118, PR #3121). A survivor from any of them MAY hold a published
-// prefix plus the delta since that pack, which is why oldest-wins keeps it — a successful
-// snapshot is not proof the tree is redundant. Otherwise both trees are
-// unpublished branches, and the discarded one can be strictly NEWER; the swap emits a
-// WARN naming both paths because of that. The rationale and the rejected alternatives
-// are in the swap block below and in issue #2278.
-//
-// Crash safety (park-aside-first swap): the temp tree is built fully (including the
-// generation marker, issue #917) before any rename. When a live destDir is present, the
-// swap then does, in order, (1) park the live destDir aside — DIRECTLY at .displaced-<id>
-// when that slot is free, so the recovery copy is never left under a .hydrate-<id>-* name
-// the NEXT hydrate's sweepHydrateLeftovers would delete (issue #910); at a
-// .hydrate-<id>-superseded-* name when the slot is occupied, because oldest-wins retains
-// what is already there and this set is the one elected to be dropped — and (2) rename
-// temp -> destDir. On a (2) failure the parked set is renamed straight back, so the
-// failure loses nothing. On success the parked set is deleted only in the
-// slot-was-occupied case, and only while the slot is still occupied; a slot a concurrent
-// sweep emptied receives the set instead (issue #3112) (best-effort).
-//
-// A crash between (1) and (2) leaves destDir absent but every copy on disk: the parked
-// set, any retained .displaced-<id>, and the new tree at the temp name. Nothing is lost —
-// the next start re-hydrates (the missing destDir reports as "holding nothing"), the temp
-// and superseded leftovers are swept, and the retained .displaced-<id> tree, which no
-// hydrate-time sweep touches, stays recoverable until the next SUCCESSFUL snapshot GCs it.
-// That converges on exactly the state a clean run produces.
-//
-// A retained .displaced-<id> is never renamed and never unlinked by this path, so its
-// survival needs NO fsync at all: no power loss anywhere in the swap can roll it into a
-// missing state. Only the parked-aside rename and the swap-in depend on the fsyncDir
-// below. Invariant: from the moment destDir is parked aside, the world it held always
-// exists under some name until the swap-in provably succeeds.
-//
-// Nothing at .displaced-<id> is touched unless a live destDir exists to displace. If
-// destDir is ABSENT (this very crash window from a prior interrupted hydrate), the
-// existing .displaced-<id> may be the ONLY copy of the world; this hydrate has nothing to
-// displace and leaves it untouched, so re-running the interrupted hydrate never destroys
-// the recovery copy (issue #910).
-//
-// Generation marker atomicity (issue #917): the generation marker is written into the
-// temp tree BEFORE the swap-in rename so it is atomic with the new destDir. A crash
-// after swap-in but before a post-swap marker write would leave a destDir with no
-// marker — the API reads gen 0 and re-dispatches hydrate, and that spurious retry
-// discards this working set whenever a .displaced-<id> is retained (issue #2278).
-// Writing it pre-swap closes that window.
+// unpackAndSwap builds and fsyncs a fresh tree with its marker, parks the old tree, then swaps in the new one.
+// Keep an occupied recovery slot; on swap failure restore the parked tree, and never delete it before successful
+// replacement.
 func unpackAndSwap(r io.Reader, destDir string, gen uint64, log *slog.Logger) error {
 	parent := filepath.Dir(destDir)
 	if err := os.MkdirAll(parent, 0o750); err != nil {
@@ -369,87 +219,29 @@ func unpackAndSwap(r io.Reader, destDir string, gen uint64, log *slog.Logger) er
 		return err
 	}
 
-	// Write the generation marker into the temp tree BEFORE the swap-in rename
-	// (issue #917): the marker must be atomic with the new destDir so a crash after
-	// swap-in never leaves a destDir with no marker. Without this, the API reads
-	// gen 0 and re-dispatches hydrate, and that spurious retry discards this working
-	// set whenever a .displaced-<id> is retained (issue #2278). writeFile fsyncs the
-	// contents; fsyncTree below makes the dir entry durable.
+	// Publish the marker with the replacement tree, never after swap-in.
+	// Fsync its contents and directory entry before rename so a crash cannot separate the claimed generation from
+	// its data.
 	if err := writeFile(filepath.Join(tmpDir, scratchformat.GenerationMarkerFile),
 		strings.NewReader(strconv.FormatUint(gen, 10)), 0o640); err != nil {
 		return err
 	}
 
-	// Durability ordering (issue #787): make the fully built temp tree durable
-	// BEFORE the swap renames. unpackTar already fsynced each file's contents; this
-	// fsyncs every directory in the tree so the dir entries (the names pointing at
-	// those files) are durable too. A power loss after the swap must never persist
-	// the new destDir and the generation marker over a tree whose files or names are
-	// not yet on disk — the #767 skip gate would boot that torn world.
+	// Fsync temp-tree directory entries after file contents and before swap so the durable marker cannot outlive
+	// its data.
 	if err := fsyncTree(tmpDir); err != nil {
 		return err
 	}
 
-	// Displace-first swap (issue #906/#910/#917): move the old working set ASIDE
-	// BEFORE swapping the new tree in. When the .displaced-<id> slot is free the aside
-	// name IS that recovery name, so the old world is never parked under an intermediate
-	// trash name a later sweep would delete. The displaced tree is the only copy of the
-	// world whenever the final stop snapshot definitively failed and #845 retained the
-	// scratch for recovery; it is GC'd only on the next SUCCESSFUL snapshot
-	// (instancemanager.sweepDisplaced).
-	//
-	// Superseded-set deferral (issue #917 bug 2, #2278): the live working set is parked
-	// ASIDE, never deleted, before the swap-in. Whichever name it is parked under, a
-	// swap-in failure renames it straight back, so no path deletes a world before the
-	// replacement is provably in place.
-	//
-	// Disk cost of that deferral: THREE world-sized copies of this one server — the
-	// unpacked temp tree, the retained .displaced-<id>, and the live set parked aside
-	// until the swap-in succeeds — are live ACROSS the swap. Scratch capacity planning
-	// must budget for it through swap completion (STORAGE.md Section 4.6).
+	// Park the old tree before swap-in so failure can restore it.
+	// Budget for three trees when the displaced slot is occupied: retained recovery, parked live data, and unpacked
+	// replacement.
 	displaced := displacedDir(destDir)
 	asideAt := ""      // where the live destDir was parked; empty when there was nothing to displace
 	dropAside := false // true when asideAt is the sweepable name, i.e. an older displaced tree is being kept
 	if _, err := os.Lstat(destDir); err == nil {
-		// A live working set is present to displace.
-		//
-		// OLDEST-WINS (issue #2278). When .displaced-<id> is already occupied, the
-		// existing tree is KEPT — never renamed, never removed by this path — and the
-		// set this hydrate displaces is parked under a sweepable name and dropped once
-		// the swap-in succeeds, provided the kept tree is still there (issue #3112, at the
-		// drop below).
-		//
-		// What that choice rests on, precisely: every snapshot that succeeds ON THIS
-		// WORKER for this id calls sweepDisplaced, so a .displaced-<id> still present at
-		// hydrate time means the retained tree was not published from here — bar the class
-		// where a snapshot's SWEEP did not remove the tree, which three deliberate routes
-		// reach: a running-id snapshot declines before the sweep starts, because the working
-		// dir is no longer provably the tree it packed (issue #2291); the sweep re-checks
-		// that pin after renaming the tree out of the slot, finds the working dir replaced
-		// and puts the tree back (issue #3118); or another sweep for this id holds the id's
-		// slot claim, so this one declines without renaming (issue #3118). A survivor from
-		// any of them may hold a published prefix plus the delta since that pack. The scope
-		// matters — sweepDisplaced only ever walks this Worker's scratch, so a snapshot
-		// that succeeded for this id on ANOTHER Worker (an A->B->A re-placement) leaves
-		// this tree in place. The tree can therefore be arbitrarily old even while the id
-		// snapshotted successfully elsewhere; what stays true is that a success on B
-		// publishes B's set, never this tree.
-		//
-		// What it does NOT rest on: it is NOT true that the set being displaced is
-		// "merely the store copy" and therefore cheap. It is the store copy PLUS
-		// everything Minecraft wrote since, and by the very argument above none of that
-		// progression was published either. BOTH trees are unpublished branches and the
-		// one dropped here can be strictly NEWER (e.g. an operator's restore_backup bumps
-		// the store generation, so the skip gate does not skip, and this hydrate discards
-		// days of unsnapshotted play while retaining the older tree). That is the accepted
-		// cost of the policy, chosen because the alternative loses the intact world in the
-		// torn-world case (#834: a torn destDir advertises generation 0, a hydrate is
-		// dispatched, and newest-wins would retain the torn tree over an intact older one).
-		// The WARN below names both paths so the cost is never silent.
-		//
-		// Deliberately NOT health-aware: no fsck, no mtime comparison to pick the "better"
-		// tree. That is option C in issue #2278 and was rejected — do not "improve" this
-		// into it.
+		// Oldest recovery wins: retain an occupied slot and drop the newly displaced branch only after swap-in.
+		// That branch may contain newer unpublished play; warn about the loss rather than selecting by health or age.
 		info, held, slotErr := displacedSlotHoldsWorkingSet(displaced)
 		if slotErr != nil {
 			return slotErr
@@ -468,9 +260,8 @@ func unpackAndSwap(r io.Reader, destDir string, gen uint64, log *slog.Logger) er
 			_ = os.Remove(aside)
 			asideAt, dropAside = aside, true
 		} else {
-			// The slot is free (or held only junk, already cleared): take the ordinary
-			// displace path, which parks the live set DIRECTLY at .displaced-<id> — never
-			// under an intermediate name a later sweep would delete (issue #910).
+			// The slot is free (or held only junk, already cleared): take the ordinary displace path, which parks the
+			// live set DIRECTLY at.displaced-<id>, never under an intermediate name a later sweep would delete.
 			asideAt = displaced
 		}
 		if err := os.Rename(destDir, asideAt); err != nil {
@@ -481,29 +272,15 @@ func unpackAndSwap(r io.Reader, destDir string, gen uint64, log *slog.Logger) er
 	}
 	if err := swapRename(tmpDir, destDir); err != nil {
 		if asideAt != "" {
-			// Restore the live working set so the failure does not lose it. If this
-			// restore itself fails the set still survives under asideAt, and any retained
-			// .displaced-<id> was never touched, so no state here has zero copies.
-			//
-			// Note this is why the WARN above is phrased as intent: on this path the
-			// discard does not actually happen.
+			// If swap-in and restore both fail, asideAt still retains the old tree and any prior displaced copy is
+			// untouched.
 			_ = os.Rename(asideAt, destDir)
 		}
 		return err
 	}
-	// Swap succeeded. When an older displaced tree was retained instead, the set parked
-	// aside is the one the policy elected to drop. Best-effort: a failure here leaks a
-	// .hydrate-<id>-* tree that every sweeper reclaims later.
-	//
-	// The slot is re-checked first (issue #3112): the drop is justified only by the
-	// retained tree still being there, and a running-id sweep, which takes no per-id
-	// reservation, can have renamed it away since the check above — its identity pin
-	// passes until destDir was parked aside. Dropping regardless would leave no local
-	// tree. An emptied slot receives the parked set instead, the outcome this hydrate
-	// reaches when the sweep lands before its check. A slot that is neither provably
-	// occupied nor provably empty, or a failed re-park, leaves the set under its superseded
-	// name, which the next leftover sweep removes: no worse than the unconditional drop
-	// this replaces, and never a delete on a guess.
+	// Before dropping the superseded branch, recheck that the retained recovery slot still exists.
+	// If a concurrent sweep emptied it, re-park the branch there instead; uncertain failures leave a sweepable
+	// leftover.
 	if dropAside {
 		if _, err := os.Lstat(displaced); err == nil {
 			_ = os.RemoveAll(asideAt)
@@ -513,57 +290,17 @@ func unpackAndSwap(r io.Reader, destDir string, gen uint64, log *slog.Logger) er
 				"retained", displaced)
 		}
 	}
-	// fsync the scratch root so BOTH swap renames (the displace-aside and the swap-in),
-	// and a re-park above, are durable: a power loss must not roll the displace rename
-	// back, and the marker the caller writes next (writeGeneration, also fsynced) can
-	// then never become durable before the destDir tree it describes (issue #787).
+	// fsync the scratch root so BOTH swap renames (the displace-aside and the swap-in), and a re-park above, are
+	// durable: a power loss must not roll the displace rename back, and the marker the caller writes next
+	// (writeGeneration, also fsynced) can then never become durable before the destDir tree it describes.
 	if err := fsyncDir(parent); err != nil {
 		return err
 	}
 	return nil
 }
 
-// displacedSlotHoldsWorkingSet reports whether the .displaced-<id> slot holds a
-// retainable recovery tree, returning its FileInfo for the discard WARN. Junk in the
-// slot — a regular file, a symlink, an empty directory, or a directory holding only
-// Worker-private generation-marker state — is cleared (best-effort) and reported as NOT
-// holding a working set.
-//
-// The guard exists because oldest-wins (issue #2278) reads the slot as a DECISION, not
-// as an obstacle: under the previous newest-wins policy junk was simply overwritten,
-// whereas here a slot that merely looks occupied would make the hydrate preserve garbage
-// and destroy a real world.
-//
-// "Holds a working set" is deliberately the predicate the rest of the codebase already
-// uses — instancemanager.hasWorkingSet: at least one child that is NOT the generation
-// marker, matched by PREFIX so writeGeneration's ".mcsd_generation-XXXX" temp siblings
-// count as marker state too (issues #2279/#2283/#834). Reusing it matters because a
-// marker-only directory is ROUTINE, not exotic: a 204 hydrate returns without creating
-// destDir and the caller's writeGeneration then creates <scratch>/<id> holding only the
-// marker, which hasWorkingSet reports as not-held — so the next 200 hydrate parks that
-// world-less directory at .displaced-<id> by the ordinary path. Retaining it over a real
-// world would be exactly the loss this guard exists to prevent.
-//
-// This is NOT a health check on the retained world (option C in #2278, rejected): it
-// applies the existing "holds a working set" test, and inspects nothing inside the world.
-//
-// Reading the slot by name is sound only because it never holds a tree mid-removal:
-// instancemanager.sweepDisplaced renames the tree out of the slot before traversing it
-// (issue #2799), so this check finds the whole tree or nothing. Were the tree removed in
-// place, a check landing mid-traversal would read the half-deleted tree as occupied and
-// retain it over the live set. The junk clear below is the one remaining in-place
-// removal of the slot, and it is safe: it only ever removes a non-directory, an empty
-// directory or a marker-only one, so any part-way state reads as junk too, and the
-// hydrate runs under its per-id reservation, so no other hydrate reads the slot meanwhile.
-//
-// Clearing junk loses nothing and is required anyway: renaming a directory onto an
-// existing FILE fails with ENOTDIR, so the ordinary displace path could not proceed
-// otherwise. Unlike hasWorkingSet — which answers false when it cannot read, the safe
-// direction for advertising held servers — an unexpected error here is RETURNED and
-// fails the hydrate. Nothing is deleted and nothing is discarded on that path, and a
-// failed hydrate is simply retried (STORAGE.md Section 4.6); silently reclassifying a
-// transient EACCES/EMFILE into "discard the live working set" is not an acceptable
-// trade for a durability decision.
+// Retain real working-set directories; clear files, symlinks, and empty or marker-only directories.
+// Read errors fail hydrate without deleting data; the displaced sweep must rename before traversing the slot.
 func displacedSlotHoldsWorkingSet(displaced string) (os.FileInfo, bool, error) {
 	info, err := os.Lstat(displaced)
 	if os.IsNotExist(err) {
@@ -587,18 +324,16 @@ func displacedSlotHoldsWorkingSet(displaced string) (os.FileInfo, bool, error) {
 	return nil, false, nil
 }
 
-// displacedDir is the per-server path the swap moves a displaced old working set to
-// (issue #906): a dot-prefixed sibling of destDir so it cannot collide with a
-// server-id scratch dir and is never matched to an assigned id by the API. One per
-// server (no random suffix): the name is written only when the slot is free, so exactly
-// one displaced tree per server exists at any time (issue #2278).
+// displacedDir is the per-server path the swap moves a displaced old working set to: a dot-prefixed sibling of
+// destDir so it cannot collide with a server-id scratch dir and is never matched to an assigned id by the API.
+// One per server (no random suffix): the name is written only when the slot is free, so exactly one displaced
+// tree per server exists at any time.
 func displacedDir(destDir string) string {
 	return filepath.Join(filepath.Dir(destDir), displacedPrefix+filepath.Base(destDir))
 }
 
-// displacedPrefix is the dot-prefixed name prefix for a displaced old working set
-// (issue #906), kept aside by a hydrate and GC'd on the next successful snapshot for
-// the server (instancemanager.sweepDisplaced).
+// displacedPrefix is the dot-prefixed name prefix for a displaced old working set, kept aside by a hydrate and
+// GC'd on the next successful snapshot for the server (instancemanager.sweepDisplaced).
 const displacedPrefix = ".displaced-"
 
 // swapRename is the final temp->destDir swap rename, indirected through a package
@@ -613,27 +348,17 @@ var swapRename = os.Rename
 // needing to race real filesystem timings. Production always uses os.Open.
 var openFile = os.Open
 
-// readDir is the function used by walkInto to list a directory. Indirected
-// through a package var for the same reason as openFile: a test can inject ENOENT
-// for a specific directory (simulating a rotated log dir / plugin temp dir
-// deleted between the parent's walk and this read) without racing real timings.
-// displacedSlotHoldsWorkingSet reads through it too, so a test can inject a
-// permission failure on the .displaced-<id> slot without a chmod fixture that would
-// silently stop testing anything when the suite runs as root (issue #2278).
-// Production always uses os.ReadDir.
+// Inject directory disappearance and recovery-slot read errors deterministically; chmod fixtures do not fail for
+// root.
 var readDir = os.ReadDir
 
-// entryInfo resolves a DirEntry's FileInfo for walkInto. os.DirEntry.Info() lazily
-// lstats the entry, so it returns ENOENT when the entry vanishes between the ReadDir
-// walk and this call — the same race family as openFile/readDir (#820/#853/#854).
-// Indirected through a package var so a test can inject ENOENT for a specific entry
-// without racing real filesystem timings. Production always uses entry.Info().
+// entryInfo resolves a DirEntry's FileInfo for walkInto. os.DirEntry.Info lazily lstats the entry, so it returns
+// ENOENT when the entry vanishes between the ReadDir walk and this call, the same race family as
+// openFile/readDir. Indirected through a package var so a test can inject ENOENT for a specific entry without
+// racing real filesystem timings. Production always uses entry.Info.
 var entryInfo = func(entry os.DirEntry) (os.FileInfo, error) { return entry.Info() }
 
-// fsyncTree fsyncs every directory in the tree rooted at dir (post-order, so a
-// child dir is durable before its parent's entry for it). File contents are already
-// fsynced as written (writeFile); this makes the directory entries durable so a
-// crash cannot lose a just-created name. Issue #787.
+// fsyncTree flushes directories child-first; writeFile has already flushed file contents.
 func fsyncTree(dir string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -731,14 +456,8 @@ func unpackTar(r io.Reader, destDir string) error {
 	}
 }
 
-// writeFile creates target, copies the member body into it, and fsyncs the
-// contents before close (issue #787): the unpacked tree is swapped into place with
-// renames, and a rename only orders metadata — without this fsync a power loss
-// could persist the swap (and the generation marker) while a just-written file is
-// still all zeros or truncated, and the #767 skip gate would then boot that torn
-// world. fsyncing per file as it is written keeps the cost proportional to the data
-// already streamed (one extra flush per file, not a re-read of the whole tree); the
-// per-dir entries are made durable by a single recursive dir-fsync after unpack.
+// Fsync file contents before swap; rename alone cannot make the data durable.
+// Flush directory entries after unpack.
 func writeFile(target string, src io.Reader, mode os.FileMode) error {
 	if mode == 0 {
 		mode = 0o640
@@ -781,10 +500,9 @@ func safeJoin(root, name string) (string, error) {
 	return joined, nil
 }
 
-// packTar writes a tar of srcDir's contents (entries relative to srcDir) into w,
-// in a deterministic (lexicographic) order. The Worker-private generation marker
-// at the scratch root is excluded (issue #763); nothing else is. log is used to
-// emit observability lines for vanished-file skips and cap/pad adjustments.
+// packTar writes a tar of srcDir's contents (entries relative to srcDir) into w, in a deterministic
+// (lexicographic) order. The Worker-private generation marker at the scratch root is excluded; nothing else is.
+// log is used to emit observability lines for vanished-file skips and cap/pad adjustments.
 func packTar(srcDir string, w io.Writer, log *slog.Logger) error {
 	root, err := filepath.Abs(srcDir)
 	if err != nil {
@@ -816,13 +534,8 @@ func walkInto(tw *tar.Writer, root, dir string, log *slog.Logger) error {
 	entries, err := readDir(dir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			// The directory vanished between the parent's ReadDir and this read
-			// (rotated log dirs, plugin temp dirs) — the directory analog of the
-			// #853 file-vanish race. Skip the subtree with a Warn rather than
-			// failing the whole snapshot: by the same argument as #853 this is a
-			// non-world dir (a world's region dirs cannot vanish under quiesce —
-			// Minecraft never unlinks them mid-write), and a partial-loss of region
-			// files is now caught downstream by the API missing-region gate (#854).
+			// Skip vanished subtrees with a warning; the API missing-region gate remains the backstop for world-data
+			// loss.
 			rel, relErr := filepath.Rel(root, dir)
 			if relErr != nil {
 				rel = dir
@@ -835,14 +548,8 @@ func walkInto(tw *tar.Writer, root, dir string, log *slog.Logger) error {
 	}
 	// os.ReadDir already returns entries sorted by name.
 	for _, entry := range entries {
-		// Exclude the Worker-private generation marker at the scratch root so it
-		// never lands in the authoritative stored working set (issue #763). The match
-		// is by PREFIX, not exact name (issue #834): writeGeneration writes the marker
-		// atomically via a ".mcsd_generation-XXXX" temp sibling + rename, so a crash
-		// before the rename leaves such a temp at the root — an exact-name exclusion
-		// would let it leak into the snapshot. It only ever lives at the root, so the
-		// dir == root guard keeps a same-prefixed file in a sub-tree (which would be
-		// part of the legitimate world) untouched.
+		// Exclude root-level marker files and temp siblings by prefix; same-prefixed files below root remain world
+		// content.
 		if dir == root && strings.HasPrefix(entry.Name(), scratchformat.GenerationMarkerFile) {
 			continue
 		}
@@ -856,13 +563,7 @@ func walkInto(tw *tar.Writer, root, dir string, log *slog.Logger) error {
 		info, err := entryInfo(entry)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
-				// The entry vanished between this directory's ReadDir and the lazy
-				// lstat behind Info() (e.g. log rotation, plugin temp cleanup) — the
-				// remaining member of the #820/#853/#854 vanish-race family. Skip it
-				// with a Warn rather than failing the whole snapshot: by the same
-				// argument as those, a world's region files cannot vanish under quiesce
-				// (Minecraft never unlinks them mid-write), and a partial-loss of region
-				// files is caught downstream by the API missing-region gate (#854).
+				// Skip entries that vanish before Info with a warning; other errors still abort packing.
 				log.Warn("snapshot: entry vanished between walk and stat; skipping",
 					"path", rel)
 				continue
@@ -898,23 +599,9 @@ func walkInto(tw *tar.Writer, root, dir string, log *slog.Logger) error {
 	return nil
 }
 
-// writeRegular writes one regular file as a tar member.
-//
-// The header Size comes from the ReadDir-time stat, but the file may grow or
-// shrink between that stat and the actual read (e.g. logs/latest.log written by
-// a running Minecraft server even while save-off is active).
-//
-//   - Vanished: if the file is gone by the time we open it (ENOENT — log
-//     rotation, atomic replace), it is skipped with a log line and no tar entry
-//     is written. Only ENOENT on the open triggers a skip; other open errors
-//     still fail the snapshot.
-//   - Growth: io.LimitedReader caps the read at Size bytes, so extra bytes that
-//     arrive after the header was committed are silently ignored. The cap is
-//     logged so a later 422 working_set_corrupt is diagnosable.
-//   - Shrink: after the LimitedReader drains the (shorter) file, the remaining
-//     byte count is padded with zeros so bytes-written == header.Size (the tar
-//     must be internally consistent: header size == bytes in the entry). The
-//     pad delta is logged for the same reason.
+// Keep tar entries consistent when files change after stat: cap growth, zero-pad shrinkage, and skip vanished
+// files.
+// Only ENOENT on open skips; other I/O failures abort the pack.
 func writeRegular(tw *tar.Writer, rel, full string, info os.FileInfo, log *slog.Logger) error {
 	// Open before writing the header so a vanished file can be skipped cleanly
 	// without leaving an uncommitted partial entry in the archive.

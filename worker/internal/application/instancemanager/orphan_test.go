@@ -13,17 +13,8 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
 
-// orphanInstance is a fakeInstance whose Stop fails until stopAfter calls have
-// been made, modelling the #211 case where a driver Stop cannot confirm
-// termination (process/container survives Kill) until a later retry succeeds.
-//
-// It faithfully models the real drivers' stopping-latch contract (issue #253):
-// Stop latches `stopping` on entry and, if already latched (terminal or a
-// concurrent/repeat stop), short-circuits to a no-op nil — exactly the behavior
-// that turned the orphan retry into a false success. The latch is reset only on
-// the failure return so a subsequent Stop re-runs the termination attempt; a
-// successful stop keeps it latched (the instance is gone). Without this faithful
-// model the manager suite could not have caught the bug.
+// orphanInstance models Stop's latch: reset on failure for retry, retain on success to deduplicate.
+// Without the reset, retries would falsely succeed while the process survives.
 type orphanInstance struct {
 	*fakeInstance
 	stopAfter int // number of leading Stop calls that fail
@@ -96,14 +87,10 @@ func awaitStatus(t *testing.T, m *Manager, serverID, state string) {
 	}
 }
 
-// An orphan whose container is still alive is re-stopped by the Worker ITSELF:
-// no operator (and no API redispatch) is involved. The manager probes the
-// orphan, sees it alive, re-runs the same stop through the manual-retry
-// machinery, and on confirmed termination retires the record and reports the
-// terminal `stopped` (issue #2475). Before this, a failed stop under a wedged
-// daemon was never looked at again.
+// Require Worker-owned convergence to probe, retry, retire, and report stopped without API or operator
+// intervention.
 func TestOrphanConvergesWithoutOperatorAction(t *testing.T) {
-	d := &orphanDriver{stopAfter: 1} // stop #1 fails; the converger's retry succeeds
+	d := &orphanDriver{stopAfter: 1} // the initial stop fails; the converger's retry succeeds
 	m := newManager(t, d, nil)
 	shrinkOrphanConverger(m)
 	seedScratch(t, m, "s1")
@@ -125,14 +112,11 @@ func TestOrphanConvergesWithoutOperatorAction(t *testing.T) {
 	})
 }
 
-// The converger keeps working an orphan whose own retry could not confirm
-// termination either: it re-records the orphan, does not spawn a second
-// converger, and converges on a later round (issue #2475). A converger that
-// treated its first failed retry as final would leave exactly the wedge this
-// issue removes.
+// The converger keeps working an orphan whose own retry could not confirm termination either: it re-records the
+// orphan, does not spawn a second converger, and converges on a later round. A converger that treated its first
+// failed retry as final would leave exactly the wedge this issue removes.
 func TestOrphanConvergesAcrossAFailedRetry(t *testing.T) {
-	// Stop #1 (the operator's) and stop #2 (the converger's first retry) both fail;
-	// only stop #3, also the converger's, confirms termination.
+	// The operator stop and first converger retry fail; only the next retry confirms termination.
 	d := &orphanDriver{stopAfter: 2}
 	m := newManager(t, d, nil)
 	shrinkOrphanConverger(m)
@@ -155,19 +139,7 @@ func TestOrphanConvergesAcrossAFailedRetry(t *testing.T) {
 	})
 }
 
-// takeOrphanReserve refuses a retry whose instance is no longer the id's
-// recorded orphan, and it never reaches for the RUNNING instance the way
-// takeStoppableReserve does. That identity guard is the whole reason the
-// converger has its own take: it decides on a probe and acts afterwards, so
-// between the two the orphan can exit on its own and a re-placed StartServer can
-// register a fresh instance under the same id — which a take that fell through to
-// m.instances would evict and SIGKILL (issue #2475).
-//
-// The state below (an orphan recorded AND an instance registered for one id) is
-// constructed, not reachable: an instance is evicted before its orphan record is
-// written. It is set up that way deliberately, so one call can observe both
-// halves of the contract — the refusal, and that the running instance is left
-// alone.
+// The converger must stop only the recorded orphan handle, never a newly registered running instance.
 func TestTakeOrphanReserveRefusesAnInstanceThatIsNoLongerTheOrphan(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	recorded := newFakeInstance("s1")
@@ -193,10 +165,9 @@ func TestTakeOrphanReserveRefusesAnInstanceThatIsNoLongerTheOrphan(t *testing.T)
 	}
 }
 
-// A failed stop must close the server's Bedrock relay tunnel: the stop intent is
-// the operator's, so players must not keep reaching an instance the Worker is
-// trying to terminate. Before this the tunnel was closed only on a CONFIRMED
-// stop, so a failed stop left it open indefinitely (issue #2468 item 2).
+// A failed stop must close the server's Bedrock relay tunnel: the stop intent is the operator's, so players must
+// not keep reaching an instance the Worker is trying to terminate. Before this the tunnel was closed only on a
+// CONFIRMED stop, so a failed stop left it open indefinitely.
 func TestFailedStopClosesBedrockTunnel(t *testing.T) {
 	d := &orphanDriver{stopAfter: 1000} // never confirms: only the failure path runs
 	bt := &fakeBedrockTunneler{}
@@ -220,31 +191,16 @@ func TestFailedStopClosesBedrockTunnel(t *testing.T) {
 	retireOrphan(t, m, d.inst.fakeInstance)
 }
 
-// retireOrphan lets a test's orphan die and WATCHES the converger take its
-// sawDead retirement path, which ends with the terminal `stopped` for the id.
-//
-// It observes and does not act: the terminal is read off the merged status
-// stream, and no command is issued. The first version polled by issuing real
-// StopServer commands, and each poll took the orphan, failed, and re-recorded it
-// — so after about a thousand iterations it exhausted the fake's failing-stop
-// budget and retired the orphan through the take path ITSELF. It then reported
-// success whether or not the converger's retirement worked at all (measured on
-// PR #2492: with the sawDead branch no-op'd, the helper still "passed", in
-// ~1.12s against the converger's ~4ms). An observer that can succeed for a
-// reason other than the one under test is the class this repo keeps repaying
-// (#2330/#2334/#2335/#2338/#2462), and this one is what the next orphan test
-// would copy.
+// Observe the converger's retirement event without clearing the record or emitting a terminal state in the test.
 func retireOrphan(t *testing.T, m *Manager, inst *fakeInstance) {
 	t.Helper()
 	inst.setAlive(false, nil)
 	awaitStatus(t, m, inst.serverID, execution.StateStopped.String())
 }
 
-// While the backend daemon cannot answer whether the orphan is alive, the Worker
-// reports `unknown` for the id rather than staying silent, and it NEVER gives up
-// probing: a bounded give-up would recreate the "Worker gives up" root cause
-// (issue #2475). The report is level-triggered — one event per transition into
-// the state, not one per probe.
+// While the backend daemon cannot answer whether the orphan is alive, the Worker reports `unknown` for the id
+// rather than staying silent, and it NEVER gives up probing: a bounded give-up would recreate the "Worker gives
+// up" root cause. The report is level-triggered, one event per transition into the state, not one per probe.
 func TestUnknownEmittedWhileDaemonUnreachable(t *testing.T) {
 	d := &orphanDriver{stopAfter: 1000}
 	m := newManager(t, d, nil)
@@ -274,11 +230,10 @@ func TestUnknownEmittedWhileDaemonUnreachable(t *testing.T) {
 	retireOrphan(t, m, d.inst.fakeInstance)
 }
 
-// A stranded orphan record self-heals (issue #2468 item 4). The pump's
-// forgetOrphanIf can run BEFORE attemptStop writes the record — the instance
-// terminated while the stop was still in flight — leaving a record nothing will
-// ever clear. The converger observes the instance dead across a probe interval
-// and retires it directly, reporting the terminal `stopped`.
+// A stranded orphan record self-heals. The pump's forgetOrphanIf can run BEFORE attemptStop writes the record,
+// the instance terminated while the stop was still in flight, leaving a record nothing will ever clear. The
+// converger observes the instance dead across a probe interval and retires it directly, reporting the terminal
+// `stopped`.
 func TestStrandedOrphanRecordIsRetired(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	shrinkOrphanConverger(m)
@@ -328,12 +283,7 @@ func TestConvergerAndOperatorStopDoNotDoubleDriveOrphan(t *testing.T) {
 	awaitStatus(t, m, "s1", "stopped")
 }
 
-// The mirror case: while an OPERATOR stop holds the id, the converger skips the
-// round rather than driving a second Stop — and, critically, keeps looping. A
-// converger that treated "cannot reserve" as "nothing left to do" would abandon
-// every orphan whose operator retry happened to be in flight, which is the
-// give-up this issue exists to remove. The converger is parked on a fake clock so
-// the two actors are ordered by the test, not by timing.
+// Hold an operator retry with the fake clock; the converger must skip that round and keep probing afterwards.
 func TestConvergerSkipsRoundWhileOperatorStopInFlight(t *testing.T) {
 	clk := &fakeClock{}
 	d := &gatedOrphanDriver{}
@@ -347,8 +297,7 @@ func TestConvergerSkipsRoundWhileOperatorStopInFlight(t *testing.T) {
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
-	// Stop #1 fails and records the orphan, spawning the converger. Both it and the
-	// metrics pump park on the fake clock; nothing advances until this test ticks.
+	// The failed stop starts convergence; the fake clock holds both converger and metrics work until ticked.
 	if first := m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"}); first.Success {
 		t.Fatalf("first stop = %+v, want failure", first)
 	}
@@ -377,9 +326,8 @@ func TestConvergerSkipsRoundWhileOperatorStopInFlight(t *testing.T) {
 	}
 }
 
-// A failed driver Stop records the instance as an orphan; a retry StopServer
-// re-attempts the driver Stop against the same instance and returns success only
-// once termination is confirmed (issue #251).
+// A failed driver Stop records the instance as an orphan; a retry StopServer re-attempts the driver Stop against
+// the same instance and returns success only once termination is confirmed.
 func TestFailedStopThenRetryTerminatesOrphan(t *testing.T) {
 	d := &orphanDriver{stopAfter: 1} // first Stop fails, second succeeds
 	m := newManager(t, d, nil)
@@ -403,9 +351,8 @@ func TestFailedStopThenRetryTerminatesOrphan(t *testing.T) {
 	}
 }
 
-// A retry stop that still cannot confirm termination returns the same
-// stop-failure error, never SERVER_NOT_FOUND: the orphan is known and may still
-// be lingering, so the API must keep the assignment (issue #251).
+// A retry stop that still cannot confirm termination returns the same stop-failure error, never
+// SERVER_NOT_FOUND: the orphan is known and may still be lingering, so the API must keep the assignment.
 func TestRetryStopStillFailingKeepsStopFailure(t *testing.T) {
 	d := &orphanDriver{stopAfter: 2} // both the initial stop and the retry fail
 	m := newManager(t, d, nil)
@@ -453,12 +400,7 @@ func TestOrphanClearedAfterSuccessfulRetry(t *testing.T) {
 	}
 }
 
-// StartServer for an orphaned id must NOT launch a second instance over the
-// lingering orphan; it is rejected pending termination (issue #251) — as BUSY,
-// because the converger (issue #2475) is actively resolving the orphan, so THIS
-// start succeeds once it does. INVALID_STATE would be read by the API as "already
-// running" and converge observed=running off a refusal that may equally mean the
-// process is already dead (issue #2476/#2467).
+// An orphan start returns BUSY so the API retries; INVALID_STATE would falsely converge its state to running.
 func TestStartOverOrphanRejected(t *testing.T) {
 	d := &orphanDriver{stopAfter: 1}
 	m := newManager(t, d, nil)
@@ -475,11 +417,10 @@ func TestStartOverOrphanRejected(t *testing.T) {
 	}
 }
 
-// HydrateTrigger for an orphaned id gets the same protection as a running
-// server: hydrating would replace the working set out from under a process that
-// may still be alive, so it is rejected (issue #251) — as BUSY for the same
-// reason a start is (issue #2476): the hydrate will be accepted once the orphan
-// converges, so the API must retry it rather than read a settled state off it.
+// HydrateTrigger for an orphaned id gets the same protection as a running server: hydrating would replace the
+// working set out from under a process that may still be alive, so it is rejected, as BUSY for the same reason a
+// start is: the hydrate will be accepted once the orphan converges, so the API must retry it rather than read a
+// settled state off it.
 func TestHydrateOverOrphanRejected(t *testing.T) {
 	d := &orphanDriver{stopAfter: 1}
 	m := newManager(t, d, nil).WithTransfer(&fakeTransfer{})
@@ -493,11 +434,9 @@ func TestHydrateOverOrphanRejected(t *testing.T) {
 	}
 }
 
-// RestartServer for an orphaned id must be refused as the settled INVALID_STATE
-// it is, not as SERVER_NOT_FOUND: the process this Worker could not confirm dead
-// is probably still running, and "server not running" is a false statement about
-// it (issue #2466). The orphan record must survive the refusal so the retry stop
-// can still terminate it.
+// RestartServer for an orphaned id must be refused as the settled INVALID_STATE it is, not as SERVER_NOT_FOUND:
+// the process this Worker could not confirm dead is probably still running, and "server not running" is a false
+// statement about it. The orphan record must survive the refusal so the retry stop can still terminate it.
 func TestRestartOverOrphanRejected(t *testing.T) {
 	d := &orphanDriver{stopAfter: 1}
 	m := newManager(t, d, nil)
@@ -519,9 +458,8 @@ func TestRestartOverOrphanRejected(t *testing.T) {
 	}
 }
 
-// ServerCommand for an orphaned id is refused the same way: the console must not
-// tell the operator the server is not running while its process is probably
-// still alive (issue #2466).
+// ServerCommand for an orphaned id is refused the same way: the console must not tell the operator the server is
+// not running while its process is probably still alive.
 func TestServerCommandOverOrphanRejected(t *testing.T) {
 	d := &orphanDriver{stopAfter: 1}
 	m := newManager(t, d, &fakeControl{reply: "ok"})
@@ -535,11 +473,9 @@ func TestServerCommandOverOrphanRejected(t *testing.T) {
 	}
 }
 
-// TunnelDial for an orphaned id is refused before the dialer is consulted, with
-// the orphan's INVALID_STATE rather than SERVER_NOT_FOUND. The dial is
-// fire-and-forget, so the code reaches only the API's diagnostic log — which is
-// exactly where an operator looks when a "running" server refuses joins (issue
-// #2466).
+// TunnelDial for an orphaned id is refused before the dialer is consulted, with the orphan's INVALID_STATE
+// rather than SERVER_NOT_FOUND. The dial is fire-and-forget, so the code reaches only the API's diagnostic log,
+// which is exactly where an operator looks when a "running" server refuses joins.
 func TestTunnelDialOverOrphanRejected(t *testing.T) {
 	d := &orphanDriver{stopAfter: 1}
 	m := newManager(t, d, nil) // no tunnel dialer: the orphan refusal precedes it
@@ -553,16 +489,8 @@ func TestTunnelDialOverOrphanRejected(t *testing.T) {
 	}
 }
 
-// OpenBedrockTunnel for an orphaned id is refused before the tunneler is
-// consulted, with the orphan's INVALID_STATE rather than SERVER_NOT_FOUND. The
-// path is reached whenever the API's freshest known state for the server is still
-// running while this Worker has already recorded the orphan — the tunnel sync
-// fires on that cached state (servers/adapters/bedrock_tunnel_sync.py), and the
-// stop that produced the orphan does not change it until the Worker's own report
-// lands. Like TunnelDial the dispatch is fire-and-forget, so the code reaches only
-// the API's WARN log — which must not say the server is not running (issue #2466).
-// This verb keeps INVALID_STATE under issue #2476: unlike a start, it is refused
-// for what the state IS and will not be carried out once the orphan converges.
+// Refuse an orphan's Bedrock tunnel open with INVALID_STATE before reaching the tunneler.
+// The API dispatches without awaiting the result, so the refusal is diagnostic only.
 func TestOpenBedrockTunnelOverOrphanRejected(t *testing.T) {
 	d := &orphanDriver{stopAfter: 1}
 	m := newManager(t, d, nil) // no bedrock tunneler: the orphan refusal precedes it
@@ -576,8 +504,8 @@ func TestOpenBedrockTunnelOverOrphanRejected(t *testing.T) {
 	}
 }
 
-// A genuinely unknown id still gets SERVER_NOT_FOUND on those same paths: the
-// orphan refusal must not swallow the honest not-found answer (issue #2466).
+// A genuinely unknown id still gets SERVER_NOT_FOUND on those same paths: the orphan refusal must not swallow
+// the honest not-found answer.
 func TestRestartAndCommandForUnknownIDStillServerNotFound(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, &fakeControl{reply: "ok"})
 	for _, cmd := range []session.Command{
@@ -593,9 +521,8 @@ func TestRestartAndCommandForUnknownIDStillServerNotFound(t *testing.T) {
 	}
 }
 
-// Recording an orphan must be visible in the Worker log: nothing enumerates
-// m.orphans, so without this line "every command for this server is refused" is
-// a code-reading exercise rather than an operator-visible fact (issue #2466).
+// Recording an orphan must be visible in the Worker log: nothing enumerates m.orphans, so without this line
+// "every command for this server is refused" is a code-reading exercise rather than an operator-visible fact.
 func TestFailedStopLogsOrphanRecord(t *testing.T) {
 	h := &capturingSlogHandler{}
 	d := &orphanDriver{stopAfter: 1}
@@ -637,14 +564,8 @@ func TestOrphanClearedWhenInstanceExitsOnItsOwn(t *testing.T) {
 	d.inst.events <- execution.StatusEvent{ServerID: "s1", State: execution.StateStopped}
 	close(d.inst.events)
 
-	// Anchor on the pump's own progress rather than a fixed sleep: the pump
-	// forwards the terminal stopped status onto the merged stream as the last
-	// action of its event loop, then the loop exits and the deferred
-	// forgetOrphanIf clears the orphan (issue #253). Draining that terminal event
-	// off m.Events() deterministically advances the pump past its final send, so
-	// the remaining window before the orphan is cleared is only the deferred call
-	// scheduling — collapsing the old dependency on a fixed deadline that an
-	// overloaded -race runner could exceed (issue #330).
+	// Drain the pump's terminal event before awaiting deferred orphan retirement to avoid fixed-sleep scheduling
+	// assumptions.
 	overall := time.After(2 * time.Second)
 drain:
 	for {
@@ -687,8 +608,8 @@ type flushOrphanInstance struct {
 }
 
 func (i *flushOrphanInstance) Stop(ctx context.Context, graceful bool, preFallback ...func(context.Context) bool) error {
-	// Call the pre-fallback hook (the flush) before terminate, just as the real
-	// containerdriver does on the graceful path (#1007).
+	// Call the pre-fallback hook (the flush) before terminate, just as the real containerdriver does on the
+	// graceful path.
 	if graceful && len(preFallback) > 0 && preFallback[0] != nil {
 		_ = preFallback[0](ctx)
 	}
@@ -721,11 +642,9 @@ func (d *flushOrphanDriver) Start(_ context.Context, spec execution.InstanceSpec
 	return d.inst, nil
 }
 
-// A retried stop for a failed-stop orphan must pass the correct driver name to
-// openControl so the RCON flush resolves the container's address — not the
-// loopback host. On a docker-network topology (RCON not published to the host)
-// an empty driver makes the dial fail and the flush is silently skipped
-// (issue #1712).
+// A retried stop for a failed-stop orphan must pass the correct driver name to openControl so the RCON flush
+// resolves the container's address, not the loopback host. On a docker-network topology (RCON not published to
+// the host) an empty driver makes the dial fail and the flush is silently skipped.
 func TestOrphanRetryStopPassesDriverToFlush(t *testing.T) {
 	d := &flushOrphanDriver{stopAfter: 1} // first Stop fails, second succeeds
 	var drivers []string
@@ -743,14 +662,13 @@ func TestOrphanRetryStopPassesDriverToFlush(t *testing.T) {
 		t.Fatalf("seed running instance: %+v", res)
 	}
 
-	// Stop #1: driver is captured before take — flush runs with the correct driver.
+	// Capture the driver before eviction so the first stop flush resolves RCON correctly.
 	first := m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
 	if first.Success {
 		t.Fatalf("first stop = %+v, want failure (driver could not confirm termination)", first)
 	}
 
-	// Stop #2 (retry): the orphan retry must still pass "container" to openControl,
-	// not an empty string.
+	// An orphan retry must retain the container driver for RCON routing.
 	drivers = nil // reset so we observe only the retry's flush
 	retry := m.Handle(context.Background(), session.Command{CommandID: "stop2", ServerID: "s1", Kind: "StopServer"})
 	if !retry.Success {
@@ -766,11 +684,9 @@ func TestOrphanRetryStopPassesDriverToFlush(t *testing.T) {
 	}
 }
 
-// A failed graceful stop, and every retry of the orphan it leaves -- the
-// operator's and the converger's -- dials RCON with the server's Minecraft
-// version, although the stop evicted the StartServer command the version came
-// from: it rides on the orphan record beside the driver name (issues #1712,
-// #3116).
+// A failed graceful stop, and every retry of the orphan it leaves -- the operator's and the converger's -- dials
+// RCON with the server's Minecraft version, although the stop evicted the StartServer command the version came
+// from: it rides on the orphan record beside the driver name.
 func TestFailedStopAndOrphanRetriesCarryTheMinecraftVersion(t *testing.T) {
 	stop := func(id string) session.Command {
 		return session.Command{CommandID: id, ServerID: "s1", Kind: "StopServer"}
@@ -806,8 +722,8 @@ func TestFailedStopAndOrphanRetriesCarryTheMinecraftVersion(t *testing.T) {
 	})
 }
 
-// A restart whose internal stop fails leaves the same orphan record: it does not
-// relaunch, and a retry stop can still terminate the orphan (issue #251).
+// A restart whose internal stop fails leaves the same orphan record: it does not relaunch, and a retry stop can
+// still terminate the orphan.
 func TestRestartStopFailureLeavesOrphan(t *testing.T) {
 	d := &orphanDriver{stopAfter: 1}
 	m := newManager(t, d, nil)
@@ -828,10 +744,9 @@ func TestRestartStopFailureLeavesOrphan(t *testing.T) {
 	}
 }
 
-// A graceful stop that fails (driver Stop returns an error — the container
-// survived Kill) must re-enable auto-save on the surviving server. The pre-stop
-// flush issued save-off; without save-on the server runs with auto-save
-// permanently disabled, silently losing player progress (issue #2021).
+// A graceful stop that fails (driver Stop returns an error, the container survived Kill) must re-enable
+// auto-save on the surviving server. The pre-stop flush issued save-off; without save-on the server runs with
+// auto-save permanently disabled, silently losing player progress.
 func TestFailedStopRestoresSaveOn(t *testing.T) {
 	d := &flushOrphanDriver{stopAfter: 1} // first Stop fails
 	var seq []string
@@ -871,9 +786,8 @@ func TestFailedStopRestoresSaveOn(t *testing.T) {
 	}
 }
 
-// When the failed-stop save-on restore cannot dial RCON (openControl errors),
-// the original stop error is still returned and the orphan is recorded so the
-// reconciler retry can still terminate the server (issue #2021).
+// When the failed-stop save-on restore cannot dial RCON (openControl errors), the original stop error is still
+// returned and the orphan is recorded so the reconciler retry can still terminate the server.
 func TestFailedStopSaveOnDialFailureStillReturnsStopFailure(t *testing.T) {
 	d := &flushOrphanDriver{stopAfter: 1}
 	var dialCount int
@@ -906,9 +820,8 @@ func TestFailedStopSaveOnDialFailureStillReturnsStopFailure(t *testing.T) {
 	}
 }
 
-// A forced stop failure must NOT issue save-on: the forced path skips the
-// flush entirely (no save-off was sent), so there is nothing to restore
-// (issue #2021).
+// A forced stop failure must NOT issue save-on: the forced path skips the flush entirely (no save-off was sent),
+// so there is nothing to restore.
 func TestForcedFailedStopSkipsSaveOn(t *testing.T) {
 	d := &flushOrphanDriver{stopAfter: 1}
 	var seq []string
@@ -934,8 +847,8 @@ func TestForcedFailedStopSkipsSaveOn(t *testing.T) {
 	}
 }
 
-// A restart whose internal stop fails must also restore save-on on the
-// survivor, just like a plain StopServer failure (issue #2021).
+// A restart whose internal stop fails must also restore save-on on the survivor, just like a plain StopServer
+// failure.
 func TestRestartStopFailureRestoresSaveOn(t *testing.T) {
 	d := &flushOrphanDriver{stopAfter: 1}
 	var seq []string
@@ -992,16 +905,7 @@ func (i *gatedProbeInstance) ProbeAlive(ctx context.Context) (bool, error) {
 	return i.fakeInstance.ProbeAlive(ctx)
 }
 
-// A converger must not outlive the manager that spawned it (issue #2493). The
-// park is what made that leak lethal: the converger sleeps out its probe interval
-// — 30s at the production base, 5 min at the cap — so an orphan nobody resolves
-// left a goroutine probing and re-stopping long after whoever built the manager
-// was done with it. Inside a test binary that is a goroutine writing to a
-// finished test's fixtures.
-//
-// The converger below is parked on the UNSHRUNK production cadence deliberately:
-// the budget this test allows Close is a fraction of one probe interval, so a
-// Close that only stopped it between rounds could not pass.
+// Leave the production probe interval unchanged so prompt Close proves shutdown interrupts the parked converger.
 func TestCloseStopsAConvergerParkedOnItsProbeInterval(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	m.recordOrphan("s1", newFakeInstance("s1"), "container", "1.21")
@@ -1016,11 +920,7 @@ func TestCloseStopsAConvergerParkedOnItsProbeInterval(t *testing.T) {
 	}
 }
 
-// Close does not merely signal the convergers, it JOINS them. A converger caught
-// mid-round is still using the manager's fixtures — it probes the instance and
-// re-stops it through attemptStop, which dials openControl — so a Close that
-// returned while one was in flight would leave the #2493 race exactly where it
-// was, only harder to see.
+// Hold a converger mid-round to verify Close joins it before test fixtures are released.
 func TestCloseWaitsForAConvergerMidRound(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	shrinkOrphanConverger(m)
@@ -1064,21 +964,7 @@ func TestRecordOrphanAfterCloseSpawnsNoConverger(t *testing.T) {
 	}
 }
 
-// cancelledProbeInstance answers a probe the way a real driver does when the
-// context it was given dies under it: no verdict, the context's error. It is the
-// shape the converger's own probe bound has — probeAliveWithTimeout derives from
-// the manager's shutdown context — so it is what a Close landing mid-probe
-// actually produces. gatedProbeInstance cannot stand in for it: that one ignores
-// its context and answers `alive`, which sends the converger down the retry path
-// instead.
-//
-// What ends the probe is the test's release channel, never a clock. An earlier
-// version blocked on the context and leaned on an interval long enough for the
-// test to call Close first — which made the assertion a race the test had to win,
-// in the package whose whole issue is latent timing surfaces. Here the test
-// releases the probe only after the shutdown is observably cancelled, so the
-// converger is guaranteed to be inspecting the answer with the manager already
-// closed.
+// Return a context error from a cancelled probe, matching a real driver rather than ignoring its deadline.
 type cancelledProbeInstance struct {
 	*fakeInstance
 	probeEntered chan struct{}
@@ -1102,17 +988,7 @@ func (i *cancelledProbeInstance) ProbeAlive(ctx context.Context) (bool, error) {
 	return false, ctx.Err()
 }
 
-// A probe killed BY the shutdown must not be reported as a daemon that cannot
-// answer. `unknown` is a claim about the server — the API's #1599 arm redispatches
-// a stop on it — so emitting one on the way out would have the Worker's last word
-// about the id be a state it never observed (issue #2493). The converger leaves
-// silently instead, and leaves the record alone: a cancelled probe resolves
-// nothing, and the id stays guarded.
-//
-// The ordering below is all happens-before, no wall clock: the probe is entered,
-// Close cancels the shutdown, the test observes that cancellation, and only then
-// releases the probe — so the answer the converger inspects is always one that
-// arrived at a closed manager.
+// Gate a cancelled probe's return after Close begins; shutdown must not emit unknown as a liveness observation.
 func TestConvergerLeavesQuietlyWhenTheShutdownCancelsItsProbe(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	shrinkOrphanConverger(m)

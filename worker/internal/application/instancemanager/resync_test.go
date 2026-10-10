@@ -25,9 +25,8 @@ func drainStatuses(t *testing.T, m *Manager, want int) []session.StatusEvent {
 	return got
 }
 
-// ResyncStatus re-emits a StatusChange for every held instance reflecting its
-// current state (issue #985), so an API restart moves the server out of
-// observed=unknown at once rather than over the reconciler grace window.
+// ResyncStatus re-emits a StatusChange for every held instance reflecting its current state, so an API restart
+// moves the server out of observed=unknown at once rather than over the reconciler grace window.
 func TestResyncStatusReEmitsHeldInstances(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	running := newFakeInstance("srv-run")
@@ -51,11 +50,10 @@ func TestResyncStatusReEmitsHeldInstances(t *testing.T) {
 	}
 }
 
-// A control-plane reconnect must not hide a failed-stop orphan (issue #2468
-// item 3): ResyncStatus reports every recorded orphan as `unknown`, the honest
-// answer for a process this Worker could not confirm dead. Before this it
-// snapshotted only m.instances, from which orphans have already been evicted, so
-// a reconnect left the API's row asserting a staler state as fact.
+// A control-plane reconnect must not hide a failed-stop orphan: ResyncStatus reports every recorded orphan as
+// `unknown`, the honest answer for a process this Worker could not confirm dead. Before this it snapshotted only
+// m.instances, from which orphans have already been evicted, so a reconnect left the API's row asserting a
+// staler state as fact.
 func TestResyncStatusReportsOrphanUnknown(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	m.orphans["srv-orphan"] = orphanEntry{inst: newFakeInstance("srv-orphan"), driver: "container"}
@@ -81,13 +79,8 @@ func TestResyncStatusEmptyEmitsNothing(t *testing.T) {
 	}
 }
 
-// ResyncStatus must not hold m.mu while emitting (sendStatus can coalesce and
-// wake the dispatcher). This test proves the lock is released before the emit by
-// having a concurrent goroutine that needs m.mu run while the events sink is
-// blocked: if ResyncStatus held m.mu across the emit, the concurrent lock would
-// deadlock with the unread sink. The sink has capacity 32, so to truly block the
-// emit we fill it first, then assert the concurrent m.mu acquisition still
-// completes.
+// Fill the event sink and acquire mu concurrently to verify resync does not hold the manager lock while
+// emitting.
 func TestResyncStatusDoesNotHoldLockDuringEmit(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	// Fill the events sink (cap 32) so the next emit must block/coalesce rather

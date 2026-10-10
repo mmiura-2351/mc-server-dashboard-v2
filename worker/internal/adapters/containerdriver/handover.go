@@ -11,40 +11,16 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// This file is the working-set hand-over: before the driver creates a container
-// it makes the run-as user the owner of the server's bind-mounted working set,
-// so a server that no longer runs as root can write its world, logs and config
-// (issue #2600).
-//
-// The tree is written by code the operator does not control, and under the
-// shipped topology the Worker walking it is root. Two things keep that from
-// becoming a way to re-own files outside the tree:
-//
-//   - nothing may be running against the tree: awaitQuiescent establishes that
-//     no container of this server is alive before the walk starts, and refuses
-//     the start when it cannot tell;
-//   - the walk never resolves a path. It descends by descriptor — each directory
-//     is opened relative to its parent's descriptor with O_NOFOLLOW, each entry
-//     is re-owned relative to its directory's descriptor without following a
-//     link — so a directory swapped for a symlink mid-walk is refused, not
-//     followed.
+// Quiesce the working set before ownership handoff, then walk by descriptor with O_NOFOLLOW.
+// The root Worker must never follow server-controlled symlinks outside the tree.
 
 // quiescentStates are the Engine container states in which no process of the
 // container exists. Every other state — running, paused, restarting, removing,
 // and anything this code does not know — counts as possibly alive.
 var quiescentStates = map[string]bool{"created": true, "exited": true, "dead": true}
 
-// awaitQuiescent returns nil once no container of serverID — launch or install,
-// whoever created it — can be running against the working set. It fails closed:
-// while one is or may be alive nothing is handed over, and a daemon that cannot
-// say refuses outright.
-//
-// A live-looking container is waited for, up to the same window the create's own
-// name-conflict loop allows (issue #233), before the start is refused. A restart
-// needs that: the daemon's container list still reports the previous container
-// as running for a moment after its exit was observed, and then as removing
-// while the exit-watcher reaps it (issue #226). An orphan that really is alive
-// simply outlasts the window.
+// awaitQuiescent fails closed for live or unobservable launch/install containers, regardless of owner.
+// Wait briefly for daemon teardown state to settle after a confirmed exit.
 func (d *Driver) awaitQuiescent(ctx context.Context, serverID string) error {
 	deadline := time.NewTimer(d.conflictDeadline)
 	defer deadline.Stop()
@@ -83,20 +59,8 @@ type handOverStats struct {
 	entries, changed int
 }
 
-// handOverWorkingSet makes the run-as user the owner of workingDir and of every
-// entry beneath it that it does not already own, and reports what it did.
-//
-// Entries already owned are left untouched, so a Worker that runs as the run-as
-// user itself (an unprivileged host process) makes no chown call. Such a Worker
-// cannot give away a file it does not own; one it meets — left by a container
-// that ran as root before this change — fails the start with the path, rather
-// than booting a server that cannot save its world.
-//
-// Only an absent workingDir is tolerated (nothing to hand over; the Manager's
-// working-set guard refuses a start without one before the driver is reached).
-// Any failure after the walk has begun — an entry that vanished, a directory
-// that turned into something else — is an error: the tree was not fully handed
-// over, and the caller must not start a server on it.
+// handOverWorkingSet changes only mismatched ownership and fails if the walk cannot complete.
+// An absent root is tolerated here; the Manager's launch guard rejects missing working sets.
 func (d *Driver) handOverWorkingSet(ctx context.Context, workingDir string) (handOverStats, error) {
 	var stats handOverStats
 	rootFd, err := unix.Open(workingDir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)

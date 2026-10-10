@@ -180,9 +180,8 @@ func TestCloseBedrockTunnelSucceedsWithoutRunningInstance(t *testing.T) {
 	}
 }
 
-// A successful StopServer also tears down the server's Bedrock tunnel locally
-// (attemptStop), without waiting on a separate CloseBedrockTunnel dispatch to
-// arrive (issue #1546, docs/app/BEDROCK_TUNNEL.md Section 3).
+// A successful StopServer also tears down the server's Bedrock tunnel locally (attemptStop), without waiting on
+// a separate CloseBedrockTunnel dispatch to arrive (docs/app/BEDROCK_TUNNEL.md Section 3).
 func TestStopServerClosesBedrockTunnel(t *testing.T) {
 	d := &fakeDriver{}
 	bt := &fakeBedrockTunneler{}

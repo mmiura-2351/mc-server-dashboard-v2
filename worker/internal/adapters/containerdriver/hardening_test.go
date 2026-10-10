@@ -134,8 +134,7 @@ func assertHardened(t *testing.T, got CreateSpec) {
 	}
 }
 
-// The launch container runs as the configured unprivileged user and without
-// CAP_NET_RAW (issue #2600).
+// The launch container runs as the configured unprivileged user and without CAP_NET_RAW.
 func TestLaunchContainerRunsNonRootWithoutNetRaw(t *testing.T) {
 	docker := newFakeDocker()
 	d, _ := hardenedDriver(docker)
@@ -147,9 +146,8 @@ func TestLaunchContainerRunsNonRootWithoutNetRaw(t *testing.T) {
 	assertHardened(t, docker.createSpec)
 }
 
-// The driver never resolves its run-as user to root, whatever its caller left
-// unset: a configured user wins, an unset one is the Worker's own, and a root
-// Worker gets the fixed unprivileged default (issue #2600).
+// The driver never resolves its run-as user to root, whatever its caller left unset: a configured user wins, an
+// unset one is the Worker's own, and a root Worker gets the fixed unprivileged default.
 func TestResolveRunAsNeverYieldsRoot(t *testing.T) {
 	tests := []struct {
 		name                string
@@ -173,8 +171,8 @@ func TestResolveRunAsNeverYieldsRoot(t *testing.T) {
 	}
 }
 
-// A driver built with no run-as user still sets a non-root User on the container
-// rather than leaving the image's default (issue #2600).
+// A driver built with no run-as user still sets a non-root User on the container rather than leaving the image's
+// default.
 func TestRunAsUnsetStillRunsNonRoot(t *testing.T) {
 	docker := newFakeDocker()
 	d := newTestDriver(docker, nil, errors.New("no rcon"))
@@ -189,9 +187,8 @@ func TestRunAsUnsetStillRunsNonRoot(t *testing.T) {
 	}
 }
 
-// Every container of a Forge start — the install container, its retry, and the
-// launch container the supervisor creates afterwards — is hardened the same way
-// (issue #2600).
+// Every container of a Forge start, the install container, its retry, and the launch container the supervisor
+// creates afterwards, is hardened the same way.
 func TestForgeInstallRetryAndLaunchContainersAreHardened(t *testing.T) {
 	prev := installRetryBackoff
 	installRetryBackoff = []time.Duration{time.Millisecond, time.Millisecond}
@@ -232,11 +229,10 @@ func TestForgeInstallRetryAndLaunchContainersAreHardened(t *testing.T) {
 	drainClosed(inst.Events())
 }
 
-// A working set whose entries the run-as user does not own is handed to it before
-// the container is created — the first start after an upgrade, where the tree
-// still holds files the old root server wrote, and every start after a hydrate,
-// which writes the tree as the Worker's own user. A symlink is re-owned itself and
-// never followed (issue #2600).
+// A working set whose entries the run-as user does not own is handed to it before the container is created, the
+// first start after an upgrade, where the tree still holds files the old root server wrote, and every start
+// after a hydrate, which writes the tree as the Worker's own user. A symlink is re-owned itself and never
+// followed.
 func TestStartHandsWorkingSetToRunAsUserBeforeCreate(t *testing.T) {
 	dir, outside := workingSet(t)
 	docker := newForgeFakeDocker()
@@ -263,9 +259,8 @@ func TestStartHandsWorkingSetToRunAsUserBeforeCreate(t *testing.T) {
 	}
 }
 
-// Entries the run-as user already owns are left alone: a Worker that runs as the
-// run-as user itself (an unprivileged host process) makes no chown call (issue
-// #2600).
+// Entries the run-as user already owns are left alone: a Worker that runs as the run-as user itself (an
+// unprivileged host process) makes no chown call.
 func TestStartLeavesAnAlreadyOwnedWorkingSetAlone(t *testing.T) {
 	dir, _ := workingSet(t)
 	docker := newFakeDocker()
@@ -281,8 +276,8 @@ func TestStartLeavesAnAlreadyOwnedWorkingSetAlone(t *testing.T) {
 	}
 }
 
-// A working set that cannot be handed over fails the start before any container
-// is created: a server that cannot write its world must not boot (issue #2600).
+// A working set that cannot be handed over fails the start before any container is created: a server that cannot
+// write its world must not boot.
 func TestStartFailsWhenWorkingSetCannotBeHandedOver(t *testing.T) {
 	dir, _ := workingSet(t)
 	docker := newFakeDocker()
@@ -299,10 +294,9 @@ func TestStartFailsWhenWorkingSetCannotBeHandedOver(t *testing.T) {
 	}
 }
 
-// The launch container created after a Forge install gets its own hand-over, so
-// entries that appeared during the install — the install log the Worker itself
-// writes, as its own user — reach the run-as user before the server starts
-// (issue #2600).
+// The launch container created after a Forge install gets its own hand-over, so entries that appeared during the
+// install, the install log the Worker itself writes, as its own user, reach the run-as user before the server
+// starts.
 func TestForgeLaunchHandsOverEntriesCreatedDuringInstall(t *testing.T) {
 	dir, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -327,11 +321,9 @@ func TestForgeLaunchHandsOverEntriesCreatedDuringInstall(t *testing.T) {
 	drainClosed(inst.Events())
 }
 
-// A container of the server that is, or may be, alive holds the working set: once
-// it has outlasted the wait, the start is refused with no ownership change and no
-// create. That covers an orphan the startup sweep failed to stop, which the
-// Manager has no record of, and every state the driver cannot vouch for (issue
-// #2600).
+// A container of the server that is, or may be, alive holds the working set: once it has outlasted the wait, the
+// start is refused with no ownership change and no create. That covers an orphan the startup sweep failed to
+// stop, which the Manager has no record of, and every state the driver cannot vouch for.
 func TestStartRefusesHandOverWhileAContainerOfTheServerMayBeAlive(t *testing.T) {
 	for _, state := range []string{"running", "paused", "restarting", "removing", "something-new", ""} {
 		t.Run("state "+state, func(t *testing.T) {
@@ -358,8 +350,7 @@ func TestStartRefusesHandOverWhileAContainerOfTheServerMayBeAlive(t *testing.T) 
 	}
 }
 
-// When the daemon cannot say which containers exist, liveness is unknown and the
-// start is refused the same way (issue #2600).
+// When the daemon cannot say which containers exist, liveness is unknown and the start is refused the same way.
 func TestStartRefusesHandOverWhenLivenessIsUnknown(t *testing.T) {
 	dir, _ := workingSet(t)
 	docker := newFakeDocker()
@@ -399,10 +390,9 @@ func (l *listScript) List(context.Context, string, string) ([]Container, error) 
 	return answer, nil
 }
 
-// The previous container of a restart is waited out rather than refused: the
-// daemon still lists it as running for a moment after its exit, then as removing
-// while the exit-watcher reaps it. Nothing is handed over until it is gone
-// (issue #2600).
+// The previous container of a restart is waited out rather than refused: the daemon still lists it as running
+// for a moment after its exit, then as removing while the exit-watcher reaps it. Nothing is handed over until it
+// is gone.
 func TestStartWaitsOutThePreviousContainerOfARestart(t *testing.T) {
 	dir, _ := workingSet(t)
 	docker := &listScript{fakeDocker: newFakeDocker(), answers: [][]Container{
@@ -430,10 +420,9 @@ func TestStartWaitsOutThePreviousContainerOfARestart(t *testing.T) {
 	}
 }
 
-// A directory swapped for a symlink in the middle of the walk cannot lead it out
-// of the working set: the walk descends by descriptor and refuses the link. The
-// swap happens at the worst moment — right after the directory itself was
-// re-owned, before the walk enters it (issue #2600).
+// A directory swapped for a symlink in the middle of the walk cannot lead it out of the working set: the walk
+// descends by descriptor and refuses the link. The swap happens at the worst moment, right after the directory
+// itself was re-owned, before the walk enters it.
 func TestHandOverCannotBeRedirectedBySwappingADirectoryForASymlink(t *testing.T) {
 	dir, outside := workingSet(t)
 	world := filepath.Join(dir, "world")
@@ -462,10 +451,9 @@ func TestHandOverCannotBeRedirectedBySwappingADirectoryForASymlink(t *testing.T)
 	}
 }
 
-// Once the walk is inside a directory, moving that directory aside and putting a
-// symlink in its place changes nothing: its entries are still re-owned where they
-// are, relative to the open descriptor, and nothing behind the link is touched
-// (issue #2600).
+// Once the walk is inside a directory, moving that directory aside and putting a symlink in its place changes
+// nothing: its entries are still re-owned where they are, relative to the open descriptor, and nothing behind
+// the link is touched.
 func TestHandOverStaysInAnOpenedDirectoryThatIsSwappedBehindIt(t *testing.T) {
 	dir, outside := workingSet(t)
 	world := filepath.Join(dir, "world")
@@ -495,9 +483,8 @@ func TestHandOverStaysInAnOpenedDirectoryThatIsSwappedBehindIt(t *testing.T) {
 	}
 }
 
-// Only a working dir that is absent from the start is tolerated. An entry that
-// vanishes once the walk has begun leaves the tree partly handed over, and that
-// is reported, not swallowed (issue #2600).
+// Only a working dir that is absent from the start is tolerated. An entry that vanishes once the walk has begun
+// leaves the tree partly handed over, and that is reported, not swallowed.
 func TestHandOverReportsAnIncompleteWalk(t *testing.T) {
 	t.Run("absent working dir", func(t *testing.T) {
 		d, _ := hardenedDriver(newFakeDocker())
@@ -529,7 +516,7 @@ func TestHandOverReportsAnIncompleteWalk(t *testing.T) {
 	})
 }
 
-// The walk stops when the start is cancelled (issue #2600).
+// The walk stops when the start is cancelled.
 func TestHandOverStopsWhenCancelled(t *testing.T) {
 	dir, _ := workingSet(t)
 	d, rec := hardenedDriver(newFakeDocker())
@@ -546,8 +533,7 @@ func TestHandOverStopsWhenCancelled(t *testing.T) {
 	}
 }
 
-// The hand-over reports how much it visited and changed, which the driver logs
-// with its duration (issue #2600).
+// The hand-over reports how much it visited and changed, which the driver logs with its duration.
 func TestHandOverCountsEntries(t *testing.T) {
 	dir, _ := workingSet(t)
 	d, _ := hardenedDriver(newFakeDocker())

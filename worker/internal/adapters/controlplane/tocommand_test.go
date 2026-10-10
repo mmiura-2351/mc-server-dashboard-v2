@@ -18,9 +18,8 @@ func TestToCommandMapsPayload(t *testing.T) {
 		want session.Command
 	}{
 		{
-			// An unset launch_mode (UNSPECIFIED) maps to the empty launch mode,
-			// which the instancemanager treats as the historical JAR launch (issue
-			// #305). Unset memory_limit_bytes / cpu_millis stay 0.
+			// An unset launch_mode (UNSPECIFIED) maps to the empty launch mode, which the instancemanager treats as the
+			// historical JAR launch. Unset memory_limit_bytes / cpu_millis stay 0.
 			name: "start with defaults",
 			cmd: &controlplanev1.ApiCommand{Command: &controlplanev1.ApiCommand_Start{Start: &controlplanev1.StartServer{
 				Driver:           controlplanev1.ExecutionDriverKind_EXECUTION_DRIVER_KIND_CONTAINER,
@@ -47,8 +46,7 @@ func TestToCommandMapsPayload(t *testing.T) {
 			want: session.Command{Kind: "StartServer", LaunchMode: "forge-argsfile"},
 		},
 		{
-			// The per-server memory ceiling (#706) and soft CPU allocation (#723)
-			// are carried unchanged.
+			// The per-server memory ceiling and soft CPU allocation are carried unchanged.
 			name: "start with resource limits",
 			cmd: &controlplanev1.ApiCommand{Command: &controlplanev1.ApiCommand_Start{Start: &controlplanev1.StartServer{
 				MemoryLimitBytes: 2048 * 1024 * 1024,
@@ -110,8 +108,7 @@ func TestToCommandMapsPayload(t *testing.T) {
 			},
 		},
 		{
-			// OpenBedrockTunnel / CloseBedrockTunnel (issue #1544) carry the
-			// credential the bedrocktunnel QUIC client (issue #1546) dials the relay
+			// OpenBedrockTunnel / CloseBedrockTunnel carry the credential the bedrocktunnel QUIC client dials the relay
 			// with.
 			name: "open bedrock tunnel",
 			cmd: &controlplanev1.ApiCommand{Command: &controlplanev1.ApiCommand_OpenBedrockTunnel{OpenBedrockTunnel: &controlplanev1.OpenBedrockTunnel{
@@ -189,9 +186,8 @@ func TestMapErrorCode(t *testing.T) {
 	}
 }
 
-// mapFileAccessReason translates each domain reason onto the wire enum so the
-// API can surface an honest problem reason instead of a blanket invalid_path
-// (issue #548).
+// mapFileAccessReason translates each domain reason onto the wire enum so the API can surface an honest problem
+// reason instead of a blanket invalid_path.
 func TestMapFileAccessReason(t *testing.T) {
 	cases := []struct {
 		reason session.FileAccessReason

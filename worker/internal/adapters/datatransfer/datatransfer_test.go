@@ -73,11 +73,9 @@ func TestHydrateUnpacksWorkingSet(t *testing.T) {
 }
 
 func TestHydrateReplacesStaleWorkingSet(t *testing.T) {
-	// Hydrate must REPLACE the dest's contents, not merge: a file present in the
-	// stale working set but absent from the served tar must be gone afterwards
-	// (the A->B->A stale-generation case, issue #772). A merge would leave the
-	// stale file behind, producing an internally inconsistent mixed-generation
-	// world that region fsck cannot detect.
+	// Hydrate must REPLACE the dest's contents, not merge: a file present in the stale working set but absent from
+	// the served tar must be gone afterwards (the A->B->A stale-generation case). A merge would leave the stale
+	// file behind, producing an internally inconsistent mixed-generation world that region fsck cannot detect.
 	body := tarOf(map[string]string{
 		"server.properties": "new",
 		"world/level.dat":   "new-world",
@@ -127,9 +125,8 @@ func TestHydrateReplacesStaleWorkingSet(t *testing.T) {
 }
 
 func TestHydrateDoesNotFollowPreexistingSymlink(t *testing.T) {
-	// A pre-existing symlink in the working set at a path a tar member also names
-	// must NOT be followed: hydrating into a brand-new tree means the planted link
-	// is never traversed, so the link's target is left untouched (issue #772).
+	// A pre-existing symlink in the working set at a path a tar member also names must NOT be followed: hydrating
+	// into a brand-new tree means the planted link is never traversed, so the link's target is left untouched.
 	body := tarOf(map[string]string{"server.properties": "from-tar"})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write(body)
@@ -176,9 +173,8 @@ func TestHydrateDoesNotFollowPreexistingSymlink(t *testing.T) {
 }
 
 func TestHydrateLeavesNoTempSiblingsInScratch(t *testing.T) {
-	// The temp/trash dirs the swap uses live in the scratch root next to dest; a
-	// successful hydrate must clean them all up so ScanHeldServers does not later
-	// see bogus held-server entries (issue #772, scratchscan.go interplay).
+	// The temp/trash dirs the swap uses live in the scratch root next to dest; a successful hydrate must clean them
+	// all up so ScanHeldServers does not later see bogus held-server entries (scratchscan.go interplay).
 	body := tarOf(map[string]string{"server.properties": "x"})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write(body)
@@ -295,19 +291,18 @@ func TestSnapshotPacksAndUploadsWithContentLength(t *testing.T) {
 	if gen != 9 {
 		t.Fatalf("generation = %d, want 9", gen)
 	}
-	// The declared base generation (the set's hydrated-from generation) rides the
-	// request header so the API's publish-time guard can check it (#847).
+	// The declared base generation (the set's hydrated-from generation) rides the request header so the API's
+	// publish-time guard can check it.
 	if gotBaseGen != "7" {
 		t.Fatalf("X-Working-Set-Base-Generation = %q, want %q", gotBaseGen, "7")
 	}
-	// The publishing Worker's id rides the request header so the API's guard can tell
-	// a same-Worker re-publish (lost-response self-heal) from a different-Worker stale
-	// publish (#847 bug 3).
+	// The publishing Worker's id rides the request header so the API's guard can tell a same-Worker re-publish
+	// (lost-response self-heal) from a different-Worker stale publish.
 	if gotWorkerID != "worker-7" {
 		t.Fatalf("X-Worker-Id = %q, want %q", gotWorkerID, "worker-7")
 	}
-	// The snapshot-source mode header is gone (#927: one region rule set, no
-	// source-keyed split), so the Worker never sends it.
+	// The snapshot-source mode header is gone (: one region rule set, no source-keyed split), so the Worker never
+	// sends it.
 	if hadSource {
 		t.Fatal("X-Snapshot-Source header sent; the mode split was removed (#927)")
 	}
@@ -338,9 +333,8 @@ func TestSnapshotPacksAndUploadsWithContentLength(t *testing.T) {
 }
 
 func TestSnapshotOmitsBaseGenerationHeaderWhenUnknown(t *testing.T) {
-	// A base generation of 0 (an unknown / never-hydrated set) must NOT send the
-	// header (issue #847): the API's publish-time guard then has no base to compare
-	// and the publish proceeds as before, keeping the header backward-compatible.
+	// A base generation of 0 (an unknown / never-hydrated set) must NOT send the header: the API's publish-time
+	// guard then has no base to compare and the publish proceeds as before, keeping the header backward-compatible.
 	srcDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(srcDir, "server.properties"), []byte("p"), 0o640); err != nil {
 		t.Fatal(err)
@@ -363,26 +357,24 @@ func TestSnapshotOmitsBaseGenerationHeaderWhenUnknown(t *testing.T) {
 	if hadBaseGen {
 		t.Fatal("X-Working-Set-Base-Generation header sent for base generation 0")
 	}
-	// An empty worker id (e.g. an unconfigured Worker) must NOT send the header
-	// (issue #847 bug 3): the API's guard then treats the publisher as unknown and
-	// stays permissive.
+	// An empty worker id (e.g. an unconfigured Worker) must NOT send the header: the API's guard then treats the
+	// publisher as unknown and stays permissive.
 	if hadWorkerID {
 		t.Fatal("X-Worker-Id header sent for an empty worker id")
 	}
 }
 
 func TestSnapshotExcludesGenerationMarker(t *testing.T) {
-	// The Worker-private generation marker at the scratch root must NOT be packed
-	// into the snapshot (issue #763): it is Worker-private state that would
-	// otherwise land in the authoritative stored working set and be re-hydrated to
-	// other Workers / the live Minecraft dir. A same-named file deeper in the tree
-	// is part of the legitimate world and must still be packed.
+	// The Worker-private generation marker at the scratch root must NOT be packed into the snapshot: it is
+	// Worker-private state that would otherwise land in the authoritative stored working set and be re-hydrated to
+	// other Workers / the live Minecraft dir. A same-named file deeper in the tree is part of the legitimate world
+	// and must still be packed.
 	srcDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(srcDir, generationMarkerFile), []byte("7"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	// A leftover marker TEMP file at the root (a crash before writeGeneration's
-	// rename, issue #834) must ALSO be excluded — the exclusion is by prefix.
+	// A leftover marker TEMP file at the root (a crash before writeGeneration's rename) must ALSO be excluded, the
+	// exclusion is by prefix.
 	if err := os.WriteFile(filepath.Join(srcDir, generationMarkerFile+"-123456"), []byte("temp"), 0o640); err != nil {
 		t.Fatal(err)
 	}
@@ -500,9 +492,8 @@ func TestSnapshotRemovesSpoolFile(t *testing.T) {
 }
 
 func TestSweepSnapshotSpoolsRemovesLeftoverSpools(t *testing.T) {
-	// A crash mid-snapshot leaks snapshot-*.tar in the scratch root; the startup
-	// sweep must reclaim them while leaving server working-set dirs and unrelated
-	// files untouched (issue #787).
+	// A crash mid-snapshot leaks snapshot-*.tar in the scratch root; the startup sweep must reclaim them while
+	// leaving server working-set dirs and unrelated files untouched.
 	scratch := t.TempDir()
 	leaked := []string{"snapshot-123.tar", "snapshot-abc.tar"}
 	for _, name := range leaked {
@@ -538,8 +529,8 @@ func TestSweepSnapshotSpoolsMissingRootIsNoOp(t *testing.T) {
 	SweepSnapshotSpools(filepath.Join(t.TempDir(), "absent"))
 }
 
-// PackSnapshot creates a tar spool in the scratch root (srcDir's parent) that
-// contains the working set, and its cleanup function removes the spool (issue #1710).
+// PackSnapshot creates a tar spool in the scratch root (srcDir's parent) that contains the working set, and its
+// cleanup function removes the spool.
 func TestPackSnapshotSpoolsToScratchRoot(t *testing.T) {
 	scratch := t.TempDir()
 	srcDir := filepath.Join(scratch, "server")
@@ -599,8 +590,8 @@ func TestPackSnapshotSpoolsToScratchRoot(t *testing.T) {
 	}
 }
 
-// UploadSnapshot streams the spool file with the correct headers and returns
-// the API's generation from the response (issue #1710).
+// UploadSnapshot streams the spool file with the correct headers and returns the API's generation from the
+// response.
 func TestUploadSnapshotStreamsSpoolWithHeaders(t *testing.T) {
 	// Create a spool from a real working set using PackSnapshot.
 	scratch := t.TempDir()
@@ -710,21 +701,7 @@ func closedDataPlane(t *testing.T) (*http.Client, string) {
 	return client, transferURL
 }
 
-// TestTransferErrorNamesTheDataPlaneURL pins that a transfer against an
-// unreachable data plane names the URL the Worker was handed (issue #2595). An
-// operator who keeps the shipped compose default (MCD_API_SERVER__DATA_PLANE_BASE_URL
-// pinned to the compose-internal http://api:8000) and then adds a Worker on a second
-// host gets no boot-time signal at all — the variable is set, so the API's startup
-// warning stays quiet (DEPLOYMENT.md Section 8). The first failed transfer is the
-// only signal, so the URL has to be readable off it rather than inferred. Hydrate
-// and snapshot are the two halves of the transfer pair the misconfiguration breaks,
-// and each fails on its own error path.
-//
-// The property comes from net/http wrapping transport failures in *url.Error, which
-// formats the URL. That is incidental today; pinned here so a later rewrite of these
-// error paths (a sanitized message, a sentinel error, a wrap that drops %w) cannot
-// silently take the diagnosis away. Asserts on the URL only — the dial error text
-// under it is resolver- and platform-dependent.
+// Use a TCP-refused endpoint so the error identifies the advertised data-plane URL without a long timeout.
 func TestTransferErrorNamesTheDataPlaneURL(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -763,11 +740,10 @@ type fakeInfo struct {
 
 func (f fakeInfo) Size() int64 { return f.size }
 
-// TestWriteRegularSizeDriftBetweenWalkAndCopy verifies that a file whose size
-// changed between the ReadDir stat and the copy leaves a consistent tar: the entry
-// is exactly the header-declared (stat-time) size and the archive untars cleanly.
-// A grown file is capped (no ErrWriteTooLong); a shrunk file is zero-padded. Each
-// drift is logged (issue #820).
+// TestWriteRegularSizeDriftBetweenWalkAndCopy verifies that a file whose size changed between the ReadDir stat
+// and the copy leaves a consistent tar: the entry is exactly the header-declared (stat-time) size and the
+// archive untars cleanly. A grown file is capped (no ErrWriteTooLong); a shrunk file is zero-padded. Each drift
+// is logged.
 func TestWriteRegularSizeDriftBetweenWalkAndCopy(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -836,8 +812,8 @@ func TestWriteRegularSizeDriftBetweenWalkAndCopy(t *testing.T) {
 	}
 }
 
-// sweepHydrateLeftovers reclaims this id's .hydrate-<id>-* temp/trash siblings a
-// crashed hydrate left behind, and touches nothing else (issue #806).
+// sweepHydrateLeftovers reclaims this id's.hydrate-<id>-* temp/trash siblings a crashed hydrate left behind, and
+// touches nothing else.
 func TestSweepHydrateLeftovers(t *testing.T) {
 	scratch := t.TempDir()
 	// A stale leftover for "server" from a crashed hydrate.
@@ -893,10 +869,9 @@ func (h *capturingHandler) hasMessage(msg string) bool {
 	return false
 }
 
-// TestWriteRegularVanishedFileIsSkipped verifies that a file deleted between
-// the walk and os.Open (ENOENT) is silently skipped and does not fail the
-// snapshot (issue #820). The tar must contain the other files but not the
-// vanished one.
+// TestWriteRegularVanishedFileIsSkipped verifies that a file deleted between the walk and os.Open (ENOENT) is
+// silently skipped and does not fail the snapshot. The tar must contain the other files but not the vanished
+// one.
 func TestWriteRegularVanishedFileIsSkipped(t *testing.T) {
 	srcDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(srcDir, "kept.txt"), []byte("keep"), 0o640); err != nil {
@@ -941,8 +916,8 @@ func TestWriteRegularVanishedFileIsSkipped(t *testing.T) {
 	}
 }
 
-// TestWriteRegularVanishedFileOtherErrorFails verifies that non-ENOENT open
-// errors (e.g. permission denied) still fail the snapshot (issue #820).
+// TestWriteRegularVanishedFileOtherErrorFails verifies that non-ENOENT open errors (e.g. permission denied)
+// still fail the snapshot.
 func TestWriteRegularVanishedFileOtherErrorFails(t *testing.T) {
 	srcDir := t.TempDir()
 	target := filepath.Join(srcDir, "noperm.txt")
@@ -966,9 +941,8 @@ func TestWriteRegularVanishedFileOtherErrorFails(t *testing.T) {
 	}
 }
 
-// TestSnapshotSkipsVanishedFilesAndSucceeds verifies that a snapshot of a
-// directory where a file disappears between the walk and the open succeeds
-// (issue #820). The vanished file must be absent from the uploaded tar, and the
+// TestSnapshotSkipsVanishedFilesAndSucceeds verifies that a snapshot of a directory where a file disappears
+// between the walk and the open succeeds. The vanished file must be absent from the uploaded tar, and the
 // remaining files must be present.
 func TestSnapshotSkipsVanishedFilesAndSucceeds(t *testing.T) {
 	srcDir := t.TempDir()
@@ -1033,10 +1007,6 @@ func TestSnapshotSkipsVanishedFilesAndSucceeds(t *testing.T) {
 	}
 }
 
-// TestWalkIntoVanishedDirIsSkipped verifies the directory analog of the #820/#853
-// file-vanish race (issue #854): a directory deleted between the parent's walk and
-// this read (ENOENT on ReadDir) is skipped with a Warn rather than failing the
-// whole snapshot. The kept sibling must still be archived.
 func TestWalkIntoVanishedDirIsSkipped(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "kept.txt"), []byte("keep"), 0o640); err != nil {
@@ -1092,8 +1062,8 @@ func TestWalkIntoVanishedDirIsSkipped(t *testing.T) {
 	}
 }
 
-// TestWalkIntoNonENOENTDirErrorFails verifies a non-ENOENT ReadDir error (e.g. a
-// permission error) still fails the whole snapshot, never a silent skip (#854).
+// TestWalkIntoNonENOENTDirErrorFails verifies a non-ENOENT ReadDir error (e.g. a permission error) still fails
+// the whole snapshot, never a silent skip.
 func TestWalkIntoNonENOENTDirErrorFails(t *testing.T) {
 	root := t.TempDir()
 	sub := filepath.Join(root, "sub")
@@ -1117,11 +1087,6 @@ func TestWalkIntoNonENOENTDirErrorFails(t *testing.T) {
 	}
 }
 
-// TestWalkIntoVanishedEntryInfoIsSkipped verifies the entry.Info() member of the
-// #820/#853/#854 vanish-race family (issue #887): an entry that disappears between
-// the parent's ReadDir and the lazy lstat behind entry.Info() (ENOENT) is skipped
-// with a Warn rather than failing the whole snapshot. The kept sibling must still
-// be archived.
 func TestWalkIntoVanishedEntryInfoIsSkipped(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "kept.txt"), []byte("keep"), 0o640); err != nil {
@@ -1178,8 +1143,8 @@ func TestWalkIntoVanishedEntryInfoIsSkipped(t *testing.T) {
 	}
 }
 
-// TestWalkIntoNonENOENTEntryInfoErrorFails verifies a non-ENOENT entry.Info() error
-// still fails the whole snapshot, never a silent skip (issue #887).
+// TestWalkIntoNonENOENTEntryInfoErrorFails verifies a non-ENOENT entry.Info error still fails the whole
+// snapshot, never a silent skip.
 func TestWalkIntoNonENOENTEntryInfoErrorFails(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "file.txt"), []byte("x"), 0o640); err != nil {
@@ -1199,11 +1164,10 @@ func TestWalkIntoNonENOENTEntryInfoErrorFails(t *testing.T) {
 	}
 }
 
-// When the final temp->destDir swap rename fails after the old working set was
-// already displaced aside to .displaced-<id>, unpackAndSwap must restore the old copy
-// so no data is lost (the displace-first restore branch, issue #772 / #806 / #910).
-// The old copy must end up recoverable (here: back at destDir) and never be left as
-// the only copy under a .hydrate-* name a later sweep would delete.
+// When the final temp->destDir swap rename fails after the old working set was already displaced aside
+// to.displaced-<id>, unpackAndSwap must restore the old copy so no data is lost (the displace-first restore
+// branch). The old copy must end up recoverable (here: back at destDir) and never be left as the only copy under
+// a.hydrate-* name a later sweep would delete.
 func TestHydrateRestoresOldCopyWhenSwapRenameFails(t *testing.T) {
 	orig := swapRename
 	swapRename = func(_, _ string) error { return errors.New("forced swap failure") }
@@ -1245,11 +1209,7 @@ func TestHydrateRestoresOldCopyWhenSwapRenameFails(t *testing.T) {
 	}
 }
 
-// A hydrate over an existing scratch must MOVE the displaced old working set aside to
-// .displaced-<id> rather than delete it (issue #906): when the final stop snapshot
-// definitively failed, #845 retained that scratch as the only copy of the world, and
-// the next start's hydrate would otherwise destroy it. The displaced tree's content
-// must be preserved intact for operator recovery.
+// Preserve the displaced world intact for manual recovery after a failed final snapshot.
 func TestHydrateDisplacesOldWorkingSetInsteadOfDeleting(t *testing.T) {
 	body := tarOf(map[string]string{"server.properties": "new"})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -1259,8 +1219,8 @@ func TestHydrateDisplacesOldWorkingSetInsteadOfDeleting(t *testing.T) {
 
 	scratch := t.TempDir()
 	dest := filepath.Join(scratch, "server")
-	// A pre-existing working set holding the only copy of a world progressed past the
-	// store (the retained-for-recovery scratch, #845).
+	// A pre-existing working set holding the only copy of a world progressed past the store (the
+	// retained-for-recovery scratch).
 	if err := os.MkdirAll(filepath.Join(dest, "world"), 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -1289,13 +1249,8 @@ func TestHydrateDisplacesOldWorkingSetInsteadOfDeleting(t *testing.T) {
 	}
 }
 
-// A 200 hydrate must REPLACE destDir with a different directory object, not rewrite it
-// in place. The instancemanager's generation-stamp guard (issue #2284) detects a
-// concurrent re-placement by comparing the working dir's identity (os.SameFile against
-// a pinned descriptor) across the snapshot's window — it is correct ONLY because this
-// swap is a rename. Nothing else pins that, so an "optimisation" here that unpacked
-// straight into destDir would silently defeat the guard and let a stale snapshot stamp
-// its generation onto a tree it never packed.
+// Require a different directory object after hydrate; in-place unpack would defeat the snapshot generation
+// identity guard.
 func TestHydrateSwapChangesDestDirIdentity(t *testing.T) {
 	body := tarOf(map[string]string{"server.properties": "new"})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -1331,13 +1286,7 @@ func TestHydrateSwapChangesDestDirIdentity(t *testing.T) {
 	}
 }
 
-// A SECOND hydrate over the same id must KEEP the tree already at .displaced-<id> and
-// discard the working set it just displaced (oldest-wins, issue #2278). A surviving
-// .displaced-<id> means no snapshot for this id has succeeded since it was created (any
-// success calls sweepDisplaced, bar one that declined the sweep because the tree it packed
-// had been replaced, issue #2291), so both trees are unpublished branches; the policy
-// retains the FIRST one. At most one displaced tree per server still holds (#906), and
-// the superseded set must leave no .hydrate-* leftover behind.
+// A second hydrate retains the first recovery branch and removes the superseded live branch only after swap-in.
 func TestHydrateKeepsOldestDisplacedTree(t *testing.T) {
 	body := tarOf(map[string]string{"server.properties": "x"})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -1396,21 +1345,7 @@ func TestHydrateKeepsOldestDisplacedTree(t *testing.T) {
 	}
 }
 
-// Displace-first ordering (issue #910): the "aside" step must move the old working
-// set DIRECTLY to .displaced-<id>, never to an intermediate .hydrate-<id>-*.trash
-// name. The distinction is load-bearing: a crash (or the fsync error return) after
-// the aside-rename but before the swap-in completes leaves the old world ONLY under
-// that aside name with destDir absent. If the aside name is a .hydrate-<id>-* one, the
-// NEXT hydrate's sweepHydrateLeftovers deletes it — destroying the #906 recovery copy
-// one hydrate later. This pins the on-disk state at the instant of swap-in: the old
-// copy must already sit at .displaced-<id> and nothing must be parked under a
-// .hydrate-* name a sweep would delete.
-//
-// SCOPE (issue #2278): this rule applies when the .displaced-<id> slot is EMPTY, as in
-// this fixture. When it is already occupied, oldest-wins keeps the tree that is there
-// and deliberately parks the superseded live set under a sweepable .hydrate-<id>-* name
-// — see TestSwapParksSupersededSetUnderSweepableName. That is not a regression of #910:
-// a recovery copy still sits at .displaced-<id> throughout.
+// Inject failure after park-aside to verify the recovery copy never receives a sweepable hydrate name.
 func TestSwapAsidesOldCopyToDisplacedNotTrash(t *testing.T) {
 	scratch := t.TempDir()
 	dest := filepath.Join(scratch, "server")
@@ -1469,11 +1404,10 @@ func TestSwapAsidesOldCopyToDisplacedNotTrash(t *testing.T) {
 	}
 }
 
-// Re-running an interrupted hydrate must NOT destroy the recovery copy (issue #910):
-// a crash between the displace-aside and the swap-in leaves destDir absent and the
-// only copy of the world under .displaced-<id>. The next hydrate has nothing to
-// displace, so it must leave that .displaced-<id> tree intact — nothing in the slot is
-// touched unless a live destDir exists to displace.
+// Re-running an interrupted hydrate must NOT destroy the recovery copy: a crash between the displace-aside and
+// the swap-in leaves destDir absent and the only copy of the world under.displaced-<id>. The next hydrate has
+// nothing to displace, so it must leave that.displaced-<id> tree intact, nothing in the slot is touched unless a
+// live destDir exists to displace.
 func TestReHydrateDoesNotDeleteDisplacedWhenDestAbsent(t *testing.T) {
 	body := tarOf(map[string]string{"server.properties": "fresh"})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -1506,12 +1440,7 @@ func TestReHydrateDoesNotDeleteDisplacedWhenDestAbsent(t *testing.T) {
 	}
 }
 
-// A failed restore on the swap-in failure path must NEVER delete the only copy
-// (issue #910 finding 2): with the displace-first reorder the old world sits under
-// .displaced-<id> when the swap rename fails, so even if the restore rename back to
-// destDir also fails, the recovery copy survives there. This forces the swap rename
-// to fail and asserts the old content is recoverable from .displaced-<id> (the swap
-// path never actively removes it).
+// Fail swap-in and restore to verify the only old copy remains recoverable under the displaced name.
 func TestHydrateNeverDeletesOnlyCopyOnSwapFailure(t *testing.T) {
 	orig := swapRename
 	// Fail the swap-in AND any restore attempt: both go through swapRename only for
@@ -1549,11 +1478,10 @@ func TestHydrateNeverDeletesOnlyCopyOnSwapFailure(t *testing.T) {
 	}
 }
 
-// The generation marker must be present in the temp tree BEFORE the swap-in rename
-// (issue #917 bug 1): if it is written after the swap, a crash between swap-in and
-// marker write leaves a destDir with no marker — the API reads gen 0 and re-dispatches
-// hydrate, and that spurious retry discards this working set whenever a .displaced-<id>
-// is retained (issue #2278).
+// The generation marker must be present in the temp tree BEFORE the swap-in rename: if it is written after the
+// swap, a crash between swap-in and marker write leaves a destDir with no marker, the API reads gen 0 and
+// re-dispatches hydrate, and that spurious retry discards this working set whenever a.displaced-<id> is
+// retained.
 func TestGenerationMarkerPresentAtSwapTime(t *testing.T) {
 	const servedGen uint64 = 42
 	body := tarOf(map[string]string{"server.properties": "new"})
@@ -1595,12 +1523,7 @@ func TestGenerationMarkerPresentAtSwapTime(t *testing.T) {
 	}
 }
 
-// Prior displaced tree must survive a swap failure when both destDir and
-// .displaced-<id> exist (issue #917 bug 2): the prior displaced must not be deleted
-// before the swap-in succeeds, so a swap failure leaves both the old destDir and the
-// prior displaced recoverable. Under oldest-wins (issue #2278) this also covers the
-// restore path: the retained tree is never touched at all, and the superseded set is
-// renamed back from its aside name instead of being dropped.
+// With both live and retained trees present, swap failure must preserve both and restore the parked live tree.
 func TestPriorDisplacedSurvivesSwapFailure(t *testing.T) {
 	orig := swapRename
 	swapRename = func(_, _ string) error { return errors.New("forced swap failure") }
@@ -1646,18 +1569,8 @@ func TestPriorDisplacedSurvivesSwapFailure(t *testing.T) {
 	}
 }
 
-// Pins the exact on-disk layout AT THE INSTANT of the swap-in rename when the
-// .displaced-<id> slot is already occupied (oldest-wins, issue #2278):
-//
-//	.displaced-server        → still holds "prior"   (retained, never renamed)
-//	.hydrate-server-superseded-* → holds "current"   (the set this hydrate supersedes)
-//	server                   → absent                (parked aside, not yet swapped in)
-//
-// This is the test that catches a regression to newest-wins: under that policy
-// .displaced-server would hold "current" at this instant instead. The superseded set
-// must sit under a .hydrate-<id>-* name so a crash in this window is reclaimable by
-// every existing sweeper, and the live set must NOT have been deleted — a swap failure
-// here still has to be able to put it back.
+// Inspect the swap-in boundary: keep the prior displaced tree, park the superseded live tree, and retain the new
+// temp tree.
 func TestSwapParksSupersededSetUnderSweepableName(t *testing.T) {
 	scratch := t.TempDir()
 	dest := filepath.Join(scratch, "server")
@@ -1717,9 +1630,9 @@ func TestSwapParksSupersededSetUnderSweepableName(t *testing.T) {
 	}
 }
 
-// After a SUCCESSFUL swap with a prior displaced tree present, the retained tree keeps
-// its content, the superseded set is dropped (no .hydrate-* leftover pinning disk), and
-// destDir holds the new set plus its generation marker (issue #2278).
+// After a SUCCESSFUL swap with a prior displaced tree present, the retained tree keeps its content, the
+// superseded set is dropped (no.hydrate-* leftover pinning disk), and destDir holds the new set plus its
+// generation marker.
 func TestSupersededSetDroppedOnSuccessfulSwap(t *testing.T) {
 	scratch := t.TempDir()
 	dest := filepath.Join(scratch, "server")
@@ -1763,15 +1676,8 @@ func TestSupersededSetDroppedOnSuccessfulSwap(t *testing.T) {
 	}
 }
 
-// A running-id snapshot's displaced sweep takes no per-id reservation (#829 item 4), and
-// its identity pin still passes until the hydrate parks destDir aside, so its rename can
-// empty the .displaced-<id> slot after the oldest-wins check read it as held and before
-// the hydrate drops the set it superseded (issue #3112). Dropping it then leaves no local
-// tree at all: the sweep removed the tree oldest-wins kept, and the drop removes the one
-// given up for it. The hydrate must find the slot empty at the drop and park the
-// superseded set there instead, the outcome it reaches when the sweep lands before its
-// check. The sweep is landed at both ends of that window: right after the slot check, and
-// right after the swap-in, the last step before the drop.
+// Empty the recovery slot after oldest-wins selected it; hydrate must re-park the superseded branch before
+// discarding it.
 func TestSupersededSetKeptWhenSweepEmptiesSlotBeforeDrop(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -1891,9 +1797,9 @@ func TestSupersededSetKeptWhenSweepEmptiesSlotBeforeDrop(t *testing.T) {
 	}
 }
 
-// A failed swap-in must put the superseded set back at destDir and leave the retained
-// tree untouched (issue #2278): oldest-wins drops the superseded set only AFTER the
-// swap-in succeeds, so a failure loses nothing and leaves no scratch leftovers.
+// A failed swap-in must put the superseded set back at destDir and leave the retained tree untouched:
+// oldest-wins drops the superseded set only AFTER the swap-in succeeds, so a failure loses nothing and leaves no
+// scratch leftovers.
 func TestSupersededSetRestoredWhenSwapFails(t *testing.T) {
 	orig := swapRename
 	swapRename = func(_, _ string) error { return errors.New("forced swap failure") }
@@ -1938,12 +1844,8 @@ func TestSupersededSetRestoredWhenSwapFails(t *testing.T) {
 	}
 }
 
-// A crash between the aside-rename and the swap-in must CONVERGE on the next hydrate,
-// not accumulate (issue #2278, the S2 crash row). The post-crash fixture is destDir
-// absent, the retained tree at .displaced-<id>, the superseded set and the unpacked temp
-// tree both under .hydrate-<id>-* names. A fresh hydrate sweeps both leftovers, finds
-// nothing to displace, and swaps in — ending at the same state a clean run produces,
-// with the oldest tree still retained.
+// Rehydrate from the crash layout between park-aside and swap-in, reclaiming incomplete trees while preserving
+// recovery.
 func TestCrashBetweenAsideAndSwapConvergesToOldest(t *testing.T) {
 	body := tarOf(map[string]string{"server.properties": "fresh"})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -1989,13 +1891,8 @@ func TestCrashBetweenAsideAndSwapConvergesToOldest(t *testing.T) {
 	}
 }
 
-// Junk in the .displaced-<id> slot must NOT shadow a real world (issue #2278). Under
-// newest-wins junk was simply overwritten; under oldest-wins an occupied-looking slot
-// makes the hydrate discard the live set, so "occupied" must mean "a directory holding
-// something", not merely "a name exists". Realistic sources are a partially-failed
-// best-effort RemoveAll in sweepDisplaced and an operator's half-finished manual
-// cleanup (STORAGE.md Section 4.6). In both sub-cases the hydrate must take the
-// ordinary path: the live set lands at .displaced-<id> and is recoverable.
+// Files, links, and marker-only directories are not recovery worlds and must not cause a real live world to be
+// discarded.
 func TestJunkDisplacedSlotDoesNotShadowLiveSet(t *testing.T) {
 	cases := []struct {
 		name string
@@ -2024,9 +1921,9 @@ func TestJunkDisplacedSlotDoesNotShadowLiveSet(t *testing.T) {
 				t.Fatal(err)
 			}
 		}},
-		// Same, via a marker TEMP sibling: writeGeneration writes the marker atomically
-		// through a ".mcsd_generation-XXXX" temp + rename, so a crash before the rename
-		// leaves one behind. The match must be by prefix, as hasWorkingSet does (#2279).
+		// Same, via a marker TEMP sibling: writeGeneration writes the marker atomically through a
+		// ".mcsd_generation-XXXX" temp + rename, so a crash before the rename leaves one behind. The match must be by
+		// prefix, as hasWorkingSet does.
 		{"marker temp sibling only", func(t *testing.T, path string) {
 			if err := os.MkdirAll(path, 0o750); err != nil {
 				t.Fatal(err)
@@ -2035,12 +1932,8 @@ func TestJunkDisplacedSlotDoesNotShadowLiveSet(t *testing.T) {
 				t.Fatal(err)
 			}
 		}},
-		// A symlink is junk however populated its target is: the rule Lstats the slot and
-		// requires a DIRECTORY, so it never reads through the link. This row is the
-		// counterpart of TestSweptTreeClassifierMatchesTheHydrateSlotRule in
-		// worker/internal/application/instancemanager, where the running-id sweep applies
-		// the same rule to a tree it is about to put back; a rule that read through the
-		// link there would put it into the slot ahead of a real recovery tree.
+		// A populated symlink target is still junk; keep this classification aligned with the application-layer sweep
+		// tests.
 		{"symlink to a populated dir", func(t *testing.T, path string) {
 			target := filepath.Join(t.TempDir(), "elsewhere")
 			if err := os.MkdirAll(filepath.Join(target, "world"), 0o750); err != nil {
@@ -2086,16 +1979,8 @@ func TestJunkDisplacedSlotDoesNotShadowLiveSet(t *testing.T) {
 	}
 }
 
-// An unexpected error reading the .displaced-<id> slot must FAIL the hydrate, never be
-// reclassified as a decision (issue #2278). The slot check answers "which world do we
-// keep", so a transient EACCES/EMFILE must not silently become "the slot is occupied,
-// discard the live working set" — nor "the slot is junk, delete it". Failing loses
-// nothing: the caller maps a hydrate error to CommandErrorTransferFailed exactly as it
-// does for ENOSPC, and the transfer is retried (STORAGE.md Section 4.6).
-//
-// The failure is injected through the readDir seam rather than a chmod fixture: a
-// mode-000 directory is readable by root, so a chmod-based test silently stops asserting
-// anything whenever the suite runs as root.
+// Inject slot read errors rather than chmod, which root ignores; hydrate must fail without choosing a world to
+// delete.
 func TestUnreadableDisplacedSlotFailsHydrateWithoutDiscarding(t *testing.T) {
 	scratch := t.TempDir()
 	dest := filepath.Join(scratch, "server")
@@ -2152,9 +2037,8 @@ func TestUnreadableDisplacedSlotFailsHydrateWithoutDiscarding(t *testing.T) {
 	}
 }
 
-// Discarding a working set must be visible to an operator (issue #2278): oldest-wins
-// gives up the newer unpublished branch, and the WARN naming BOTH paths is the whole
-// mitigation for that. Without it the loss is silent.
+// Discarding a working set must be visible to an operator: oldest-wins gives up the newer unpublished branch,
+// and the WARN naming BOTH paths is the whole mitigation for that. Without it the loss is silent.
 func TestDiscardWarnsWithBothPaths(t *testing.T) {
 	scratch := t.TempDir()
 	dest := filepath.Join(scratch, "server")

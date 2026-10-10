@@ -124,12 +124,7 @@ func TestFlowRegistryEvictIdleClosesSocket(t *testing.T) {
 		t.Fatalf("forward: %v", err)
 	}
 
-	// forward's "x" makes the fake geyser echo back, and readPump refreshes
-	// lastSeen to now on that echo. Wait for the echo to be observed (readPump
-	// sets lastSeen before it SendDatagrams the reply) before back-dating, so
-	// the refresh cannot land afterwards and defeat the eviction we assert.
-	// One datagram forwarded means exactly one echo, after which readPump
-	// blocks on the next read and lastSeen stays put.
+	// Wait for the echo before backdating lastSeen so readPump's refresh cannot undo the eviction fixture.
 	_ = sender.waitSent(t, 1)
 
 	r.mu.Lock()
@@ -192,12 +187,8 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
-// seedFlows directly inserts n placeholder flows into r.byID, bypassing
-// dialUDP/forward, so ceiling tests can cheaply fill the registry up to (or
-// past) maxFlowsPerTunnel without dialing thousands of real sockets. Each
-// placeholder is backed by an in-memory net.Pipe end (no OS socket), which
-// still satisfies net.Conn for evictIdle/closeAll's Close calls. Seeded ids
-// start at 1_000_000, clear of any id a test forwards explicitly.
+// Seed placeholder flows with net.Pipe to fill capacity without thousands of OS sockets.
+// Use IDs outside the range forwarded by these tests.
 func seedFlows(r *flowRegistry, n int, lastSeen time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -327,7 +318,6 @@ func TestFlowRegistryReadPumpErrorEvictsFlowAndRedials(t *testing.T) {
 	r := newFlowRegistry(dialUDP, geyser.addr(), sender, discardLogger(), "s1")
 	defer r.closeAll()
 
-	// First forward: dials socket #1, starts readPump.
 	if err := r.forward(context.Background(), 1, []byte("a")); err != nil {
 		t.Fatalf("forward(1): %v", err)
 	}

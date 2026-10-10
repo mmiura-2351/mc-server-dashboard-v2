@@ -1,5 +1,5 @@
-// Package hostresources reads the host's CPU and memory information using Go
-// stdlib and /proc/meminfo, avoiding external dependencies (issue #1218).
+// Package hostresources reads the host's CPU and memory information using Go stdlib and /proc/meminfo, avoiding
+// external dependencies.
 package hostresources
 
 import (

@@ -1,21 +1,11 @@
-// Package session holds the Worker's control-plane session logic as a pure
-// state machine: the registration handshake, the heartbeat cadence, reconnect
-// with backoff, and the protocol-shape acknowledgement of inbound commands.
-//
-// It depends on the standard library only (docs/app/ARCHITECTURE.md Section 2):
-// the gRPC transport, the wall clock, and randomness are injected as Ports
-// (Transport, Clock, rand source) so the logic is exercised with fakes. The
-// adapters layer translates this package's decisions to and from the generated
-// control-plane messages.
+// Package session manages registration, heartbeats, reconnects, and command dispatch.
+// Transport, time, and randomness are injected so the domain uses only the standard library.
 package session
 
 import "time"
 
-// Backoff computes the reconnect delay sequence: exponential growth from an
-// initial delay, capped at a maximum, with full jitter to avoid a reconnect
-// thundering herd (CONTROL_PLANE.md Section 4.4 makes the Worker responsible for
-// reconnecting). It is a value, safe to copy; Attempt is the only mutable state
-// the caller advances.
+// Backoff computes capped exponential delays with full jitter to spread reconnect attempts.
+// The caller owns the attempt counter.
 type Backoff struct {
 	// Initial is the base delay for the first reconnect attempt.
 	Initial time.Duration

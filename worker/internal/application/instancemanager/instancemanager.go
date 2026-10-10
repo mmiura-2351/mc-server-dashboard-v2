@@ -1,15 +1,5 @@
-// Package instancemanager is the Worker use case that turns control-plane
-// lifecycle/console commands into ExecutionDriver calls and surfaces observed
-// state transitions back onto the session (CONTROL_PLANE.md Section 5/6). It
-// implements session.CommandHandler. It tracks one running instance per server
-// id and owns the per-server working dir under the scratch root.
-//
-// Working-set posture: HydrateTrigger pulls the server's working set from the
-// API data plane into scratchDir/<server_id> before launch; the API issues it
-// before StartServer (FR-DATA-4). A server with no published working set yet
-// hydrates to an empty dir (the endpoint is 204). SnapshotTrigger pushes the
-// working set back. Hydrate/snapshot are long-running and run off the session's
-// serial receive loop (issue #95); the session bounds their concurrency.
+// Package instancemanager handles lifecycle, file, and transfer commands and streams instance telemetry.
+// It owns each server's scratch working set and implements session.CommandHandler.
 package instancemanager
 
 import (
@@ -35,22 +25,10 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
 
-// controlFunc opens an execution.ServerControl (RCON) for a running server,
-// used by ServerCommand forwarding. driver is the execution driver that runs the
-// server (the one recorded on its StartServer command), so the dial host can be
-// resolved per the driver's topology — a container driver with a configured
-// network reaches RCON over the network, every other driver over the host
-// loopback (issue #218). mcVersion is the server's Minecraft version (the one on
-// the same StartServer command), which decides the charset its server.properties
-// -- and so the RCON password -- is read in (issue #3116).
+// controlFunc resolves RCON using the driver's network topology and Minecraft version's password charset.
 type controlFunc func(ctx context.Context, serverID, driver, mcVersion string) (execution.ServerControl, error)
 
-// resilientControl wraps a ServerControl and auto-redials on ErrConnBroken
-// (#919). The rcon client poisons the connection on any Execute error, so a
-// multi-command bracket (save-off → save-all → save-on, or the stop sequence)
-// loses all commands after the first failure. This wrapper transparently
-// redials once per Execute call so trailing commands in a bracket survive a
-// mid-sequence timeout or error.
+// resilientControl redials once per Execute after a poisoned connection so trailing bracket commands can run.
 type resilientControl struct {
 	inner    execution.ServerControl
 	dial     func(ctx context.Context) (execution.ServerControl, error)
@@ -81,37 +59,22 @@ func (r *resilientControl) Close() error { return r.inner.Close() }
 // command carries the URL + token; the bytes ride the HTTP data plane, off the
 // control-plane stream (CONTROL_PLANE.md Section 5).
 type Transfer interface {
-	// Hydrate downloads the working set from url into workingDir (an empty/204
-	// response leaves it empty). It returns the authoritative store GENERATION the
-	// API served (the value of its response header, issue #763); 0 when the header
-	// is absent (a server with no published snapshot, or an older API).
+	// Hydrate downloads the working set from url into workingDir (an empty/204 response leaves it empty). It
+	// returns the authoritative store GENERATION the API served (the value of its response header); 0 when the
+	// header is absent (a server with no published snapshot, or an older API).
 	Hydrate(ctx context.Context, url, token, workingDir string) (uint64, error)
-	// PackSnapshot packs workingDir into a tar spool file and returns its path.
-	// The returned cleanup function removes the spool; the caller must invoke it
-	// when the spool is no longer needed. Only the pack reads the working
-	// directory, so the caller can release the quiesce bracket after PackSnapshot
-	// returns (issue #1710).
+	// PackSnapshot alone reads the working set, so quiescence may end when it returns.
+	// The caller must invoke cleanup to remove the returned spool.
 	PackSnapshot(ctx context.Context, workingDir string) (spoolPath string, cleanup func(), err error)
-	// UploadSnapshot streams the spool file at spoolPath to url, declaring
-	// baseGeneration and workerID for the API's publish-time generation guard
-	// (issue #847). It returns the NEW store generation the publish produced.
+	// UploadSnapshot streams the spool file at spoolPath to url, declaring baseGeneration and workerID for the
+	// API's publish-time generation guard. It returns the NEW store generation the publish produced.
 	UploadSnapshot(ctx context.Context, url, token, spoolPath string, baseGeneration uint64, workerID string) (uint64, error)
-	// Snapshot packs workingDir and uploads it to url, declaring baseGeneration as
-	// the store generation this working set was hydrated from (issue #847) and
-	// workerID as this Worker's own id (issue #847 bug 3): the API refuses the publish
-	// if the store has since advanced past baseGeneration AND current was published by
-	// a different worker. It returns the NEW authoritative store generation the publish
-	// produced (the value of the API's response header, issue #763); 0 when the header
-	// is absent (an older API).
+	// Snapshot returns the newly published generation, or zero if absent.
+	// The API refuses a stale baseGeneration when a different worker published the current generation.
 	Snapshot(ctx context.Context, url, token, workingDir string, baseGeneration uint64, workerID string) (uint64, error)
 }
 
-// TunnelDialer is the relay dial-back Port (RELAY.md Section 5): for one player
-// session it dials the relay's tunnel listener over TLS, presents the token, dials
-// the local server's loopback game port, and splices the two. Dial returns once
-// the splice is established (or with an error on dial/handshake failure); the
-// splice runs on the adapter's own long-lived context, off this command, and is
-// torn down on Worker shutdown.
+// TunnelDialer returns after setup; the adapter owns the splice until peer close or Worker shutdown.
 type TunnelDialer interface {
 	Dial(ctx context.Context, spec TunnelSpec) error
 }
@@ -127,14 +90,8 @@ type TunnelSpec struct {
 	CAPEM      string
 }
 
-// BedrockTunneler is the Bedrock relay QUIC tunnel Port
-// (docs/app/BEDROCK_TUNNEL.md, issue #1546): Open starts — or, for a repeated
-// spec, idempotently confirms — the per-server QUIC tunnel that forwards
-// RakNet datagrams to the container's Geyser port, reconnecting with backoff
-// while it drops; Close tears it down gracefully (CONNECTION_CLOSE plus every
-// per-flow socket). Both run off the caller: Open returns once the tunnel is
-// registered, not once the handshake completes, and Close only signals
-// teardown, so neither blocks the calling command.
+// BedrockTunneler registers tunnels and signals teardown without waiting for network I/O.
+// Repeated Open with the same spec is idempotent; dropped connections retry with backoff.
 type BedrockTunneler interface {
 	Open(spec BedrockTunnelSpec) error
 	Close(serverID string)
@@ -182,29 +139,18 @@ type Manager struct {
 	tunnel      TunnelDialer
 	bedrock     BedrockTunneler
 	logger      *slog.Logger
-	// workerID is this Worker's own id, stamped on a snapshot publish so the API's
-	// publish-time generation guard can tell a same-Worker re-publish from a
-	// different-Worker stale publish (issue #847 bug 3). Empty until WithWorkerID is
-	// called (older wiring / tests): the guard then treats the publisher as unknown.
+	// workerID is this Worker's own id, stamped on a snapshot publish so the API's publish-time generation guard
+	// can tell a same-Worker re-publish from a different-Worker stale publish. Empty until WithWorkerID is called
+	// (older wiring / tests): the guard then treats the publisher as unknown.
 	workerID string
 
 	clock           session.Clock
 	metricsInterval time.Duration
 
-	// fsckRetryDelay is the backoff between pre-pack fsck attempts for a RUNNING
-	// server's periodic snapshot (#907). A non-chunk writer can still tear a region
-	// just after the async save settles, so a transient torn read must not veto the
-	// snapshot; the check is retried snapshotFsckAttempts times with this delay. It
-	// is a field (not a const) so tests can shrink it to zero; the stopped-server
-	// (at-rest, fail-closed) path does not retry. Defaulted in New.
+	// Retry running-world fsck to tolerate residual non-chunk writes; stopped worlds are checked once.
 	fsckRetryDelay time.Duration
 
-	// settlePollInterval / settleBudget tune the quiesce settle-wait for a RUNNING
-	// server's periodic snapshot (#907): after the async save-all, the working set's
-	// .mca files are polled every settlePollInterval and considered settled once two
-	// consecutive scans observe identical (mtime, size) for every region file, bounded
-	// by settleBudget. They are fields (not consts) so tests can shrink them, mirroring
-	// fsckRetryDelay. Defaulted in New.
+	// After async save-all, two identical region (mtime, size) scans indicate settling, bounded by settleBudget.
 	settlePollInterval time.Duration
 	settleBudget       time.Duration
 
@@ -214,50 +160,22 @@ type Manager struct {
 	// the real filesystem.
 	scanRegion func(root string) (regionState, error)
 
-	// snapshotAfterRunningCheck, when non-nil, runs between handleSnapshot's
-	// UNRESERVED running check and the stopped path's reserve() -- the window in
-	// which a start can register an instance and turn that reserve() into the
-	// "already running" INVALID_STATE refusal. Production leaves it nil; the
-	// contract test sets it so the {SnapshotTrigger, snapshot_reserve_race} row of
-	// proto/contract/command_error_contract.json is driven by the real interleaving
-	// instead of asserted by prose (issue #2472). A field, not a package var, so it
-	// belongs to the manager under test -- mirroring scanRegion above.
+	// Test hook for a start racing the stopped snapshot's reservation; nil in production.
 	snapshotAfterRunningCheck func(serverID string)
 
-	// orphanProbeInterval / orphanProbeMaxInterval are the failed-stop-orphan
-	// converger's probe cadence and its exponential-backoff cap (issue #2475).
-	// They are fields (not consts) so tests can shrink them to milliseconds,
-	// mirroring fsckRetryDelay. Defaulted in New; the waits go through m.clock.
+	// orphanProbeInterval / orphanProbeMaxInterval are the failed-stop-orphan converger's probe cadence and its
+	// exponential-backoff cap. They are fields (not consts) so tests can shrink them to milliseconds, mirroring
+	// fsckRetryDelay. Defaulted in New; the waits go through m.clock.
 	orphanProbeInterval    time.Duration
 	orphanProbeMaxInterval time.Duration
 
-	// shutdown is cancelled by Close and is the lifetime the background goroutines
-	// the manager owns run under — the orphan convergers (issue #2493), the status
-	// dispatcher, and the per-instance status/log/metrics pumps (issue #2777). Each
-	// parks on it alongside whatever it normally waits for, so closing the manager
-	// ends everything it started instead of leaving goroutines running against a
-	// manager nobody owns any more. Two manager-owned goroutines do not park on it
-	// that way, for different reasons: the metrics pump's teardown watcher parks on
-	// the instance's done channel, so the cancellation reaches it one hop away,
-	// through the status pump whose return closes that channel; and the
-	// deleted-scratch reclaim reads it only at the top of its per-id loop, after a
-	// release and before the next reserve (issue #2933), so the id already in
-	// flight runs to its release uninterruptibly and Close reaches that one by
-	// waiting (issue #2878).
-	// background counts every one of them — both of those included — so Close can
-	// join them: "signalled" is not "gone", and a signal a goroutine cannot act on
-	// yet still has to be waited out. A converger caught mid-round is still driving
-	// driver calls, and a pump past its WaitGroup Done still holds its frame.
+	// Close cancels background work and joins every counted goroutine, including watcher teardown.
+	// An in-flight scratch reclaim finishes its current ID before observing shutdown.
 	shutdown       context.Context
 	stopBackground context.CancelFunc
 	background     sync.WaitGroup
 
-	// transferDeadlineNanos bounds a single data-plane transfer (snapshot upload /
-	// hydrate download) Worker-side (issue #874). The session pushes it from the
-	// RegisterAck after registration (SetTransferDeadline); the hydrate/snapshot
-	// handlers apply it as a per-transfer context deadline. It is read on lane
-	// goroutines and written on the session goroutine, so it is atomic. 0 (an
-	// older API, or before the first ack) leaves the transfer unbounded as before.
+	// The session writes the transfer bound while lane goroutines read it; zero means unbounded.
 	transferDeadlineNanos atomic.Int64
 
 	mu        sync.Mutex
@@ -266,139 +184,26 @@ type Manager struct {
 	// RestartServer (which carries no driver/version) can relaunch with the same
 	// spec.
 	startCmds map[string]session.Command
-	// orphans remembers instances whose driver Stop failed (could not confirm
-	// termination, issue #211): take() already evicted them from instances, so a
-	// retry stop would otherwise find no tracked instance and return
-	// SERVER_NOT_FOUND, which the API's stop convergence reads as "no live process"
-	// and unassigns — over a process/container that may still be lingering (issue
-	// #251). Keeping the Instance and its driver name here lets a retry re-attempt
-	// the driver Stop against the same handle and resolve RCON identically (issue
-	// #1712), reporting success only on confirmed termination; until then every
-	// other command over the id is refused naming the orphan, so no path claims
-	// the server is not running about a process that is probably alive (issue
-	// #2466). The refusal CODE splits by whether the refused command will succeed
-	// once the orphan converges (issue #2476): BUSY for start / hydrate /
-	// stopped-id snapshot through reserve, which the API retries until it is let
-	// through; INVALID_STATE for restart through takeRunningReserve and console /
-	// relay tunnel dial / Bedrock tunnel open through notRunningRefusal, which are
-	// refused for what the state IS and are never executed later. CloseBedrockTunnel is
-	// the deliberate exception: it takes no running check and stays a success, so
-	// a tunnel that outlived its server can still be torn down. The instance's
-	// status pump clears the record if the orphan finally exits on its own, and
-	// the per-id converger (issue #2475) drives it to a settled outcome meanwhile
-	// instead of leaving the id guarded until an operator intervenes.
+	// Retain failed-stop handles until termination is confirmed; absence must never imply a live orphan is gone.
+	// Retryable operations return BUSY, running-only operations INVALID_STATE; tunnel close remains allowed.
 	orphans map[string]orphanEntry
-	// converging marks server ids that already have a convergeOrphan goroutine
-	// running, so the orphan its own retry stop re-records does not spawn a second
-	// one (issue #2475). It is claimed with the record in recordOrphan and cleared
-	// in currentOrphan, in the same critical section that observes the record gone,
-	// so the flag can never outlive its goroutine or block its successor.
+	// Allow one converger per orphan ID; claim and clear the flag with the orphan record under mu.
 	converging map[string]bool
-	// pendingSaveOn names the servers a pre-stop flush MAY have disabled auto-save on
-	// and whose stop has not resolved yet — the save-off bracket
-	// flushBeforeStopWithDriver opens and only a confirmed termination (nothing to
-	// restore) or restoreSaveOnAfterFailedStop (the survivor) closes. It holds the
-	// RCON target the restore needs, because by then the instance is evicted from
-	// startCmds and controlTargetFor would answer empty (issue #2021).
-	//
-	// "MAY have" is the honest tense at both ends, and both are deliberate. The entry
-	// is written BEFORE save-off goes on the wire, because rcon.Execute writes the
-	// command and only then waits for a reply, so a failed round trip does not mean
-	// the server did not run it; and it is removed only once attemptStop has done
-	// whatever its outcome calls for, never before the restore that outcome triggers.
-	// Both ends err towards one redundant, idempotent save-on rather than towards a
-	// surviving world that saves nothing.
-	//
-	// A flush can also be REFUSED an entry, once saveOnSealed is set, and then it does
-	// not disable auto-save at all. That is the third side of the same bias: past the
-	// seal there is no longer anyone to restore, so the only safe bracket is the one
-	// that is never opened.
-	//
-	// It exists so the bracket can be closed by the WORKER rather than by the next
-	// boot (issue #3166). The escalation between the two points is tens of seconds
-	// to minutes long — the kill call plus the post-kill exit confirmation after a
-	// flush that succeeded, the whole stopDeadline before them after one that did
-	// not — and a Worker that goes down inside it leaves a SURVIVING Minecraft
-	// container with auto-save off: the container is not a Compose service, so
-	// nothing stops it on the way out. Close drains this map and issues the save-on
-	// itself, beside its join rather than in front of it and bounded by
-	// closingSaveOnTimeout, so its worst-case bound is unchanged — and it reaches the
-	// one lane no timer can, the operator stop that Runner.serve abandons without
-	// waiting (#3168).
+	// Record the RCON target before save-off can be sent, and clear it only after stop resolution or save-on.
+	// Close restores outstanding brackets; a sealed ledger refuses new save-off writes.
 	pendingSaveOn map[string]saveOnTarget
-	// saveOnSealed forbids any further entry in pendingSaveOn. Close sets it in the
-	// same critical section as its LAST read of the ledger, which is what makes that
-	// read final: a flush either lands its mark before the seal and is in the map
-	// Close took, or observes the seal and does not disable auto-save at all. Without
-	// it the drain would need a loop, and the loop's termination would be an argument
-	// about whether some other lane can keep re-arming.
+	// Seal the ledger with Close's final read so a late flush cannot disable auto-save without a restore.
 	saveOnSealed bool
-	// closingSaveOnTimeout bounds each save-on Close issues from pendingSaveOn,
-	// which is the whole of the latency this change can add to a shutdown. A field
-	// (not the const it defaults to) so a test can shrink it, mirroring
-	// fsckRetryDelay. Read only by Close, which has already set closed under mu, so
-	// it needs no synchronisation of its own.
+	// Bound shutdown save-on restores separately from the longer failed-stop restore.
 	closingSaveOnTimeout time.Duration
-	// closed records that Close has run, so a command still in flight during
-	// shutdown does not spawn a background goroutine nothing will ever join — a
-	// converger for an orphan it records (issue #2493), or the pumps for an
-	// instance it starts (issue #2777). It is set under the SAME mu that guards
-	// every spawn, which is what keeps the WaitGroup honest: a spawn either
-	// happens before Close takes the lock (and is counted, so Close waits for it)
-	// or observes the flag and does not happen at all — never an Add racing the
-	// Wait.
+	// Guard spawning and Close with the same mu so WaitGroup.Add cannot race Wait after shutdown.
 	closed bool
-	// reserved marks a server id as having a mutating lifecycle command in flight so
-	// a duplicate re-issued after a stream reconnect cannot overlap the original
-	// (issue #780). It is claimed under mu and held across the long operation, then
-	// released (or, on a successful start, handed off to the registered instance
-	// under the same mu so the id is never unclaimed). A command arriving while the
-	// id is reserved is rejected with BUSY (issue #824) — distinct from the settled
-	// "already running" INVALID_STATE, since the in-flight command's outcome is not
-	// yet known, so the API retries rather than converging on it. Which commands
-	// reserve, and over which window:
-	//   - StartServer: before driver.Start, until the instance is registered, so a
-	//     re-issued duplicate cannot pass the running check and launch a second
-	//     process while the original is still mid-driver.Start (the primary window).
-	//   - HydrateTrigger: across the transfer, so a re-issued hydrate (or a racing
-	//     start/snapshot) cannot write the same working set concurrently.
-	//   - StopServer / RestartServer: across the eviction -> stop-confirmed window
-	//     (and a restart's relaunch). takeStoppableReserve / takeRunningReserve evict
-	//     the instance AND reserve under one mu, so the id stays claimed while the
-	//     detached stop confirms termination — a re-sent stop then gets BUSY (#824),
-	//     not SERVER_NOT_FOUND, and the API keeps the assignment instead of unassigning
-	//     over a still-live process.
-	//   - SnapshotTrigger: only the STOPPED-id path (the set is at rest and the API
-	//     has typically unassigned), to block a racing hydrate from rewriting the dir
-	//     mid-pack. A running-id snapshot does NOT reserve: a live instance already
-	//     blocks reserve(), and its save-off bracket is the quiesce.
-	// The file handlers (ReadFile / EditFile / ListFiles) act atomically on individual
-	// files and take no reservation.
+	// Reserve IDs across start, hydrate, stop/restart, and stopped snapshots, returning BUSY on overlap.
+	// Running snapshots and atomic file operations do not reserve; registration replaces a start's claim under mu.
 	reserved map[string]bool
 
-	// sweepingSlot marks a server id whose .displaced-<id> slot a displaced sweep is
-	// currently deciding about — from the Lstat that finds the tree through the rename
-	// out of the slot to the put-back or the commit to remove (issue #3118, PR #3121
-	// review round 3). Only that window is claimed, not the world-sized traversal that
-	// follows it.
-	//
-	// It exists because the slot holds ONE tree and two sweeps for one id can reach it
-	// at once: running-id snapshots take no reservation (#829 item 4), so an old dropped
-	// stream's sweep can overlap a newer one's. While both are past their rename,
-	// whatever one of them puts back occupies the slot against the other — and the other
-	// may be holding the hydrate's live recovery copy, which then goes under .sweeping-
-	// for the next boot to delete. No rule about the individual trees closes that: a tree
-	// whose classification FAILED is retained on purpose (putBackSweptTree), and that
-	// retention is what costs the other tree.
-	//
-	// The claim is NON-BLOCKING: a sweep that finds the id claimed declines, renaming
-	// nothing and leaving the tree where it is. Declining is the established posture for
-	// this GC — a declined sweep leaks one tree until the next successful snapshot
-	// reclaims it (#906/#2291) — and it keeps a sweep from waiting on another sweep's
-	// filesystem work. It is NOT the per-id reservation #829 item 4 declined: that one
-	// would span a whole running-id snapshot and reject concurrent commands with BUSY,
-	// while this is in-process, covers a handful of syscalls in the GC tail, and refuses
-	// no command.
+	// Claim only the displaced-slot decision window, preventing overlapping sweeps from displacing recovery copies.
+	// A competing sweep declines immediately; recursive removal runs after the claim is released.
 	sweepingSlot map[string]bool
 
 	// events/logs/metrics are the merged streams the session forwards. Per-instance
@@ -407,16 +212,8 @@ type Manager struct {
 	logs    chan session.LogEvent
 	metrics chan session.MetricsEvent
 
-	// Status coalescing (issue #96): observed_state must converge to the latest
-	// state per server even under sink backpressure, so status events are never
-	// dropped. When the events sink is full, the newest status for a server
-	// replaces any older pending one (latest-state-wins) in pendingStatus, and a
-	// single statusDispatcher goroutine drains it into events as the sink admits.
-	// coalescing marks a server whose status is being funneled through the
-	// dispatcher; while set, every status for that server is routed through the
-	// pending slot so a fast-path send can never overtake an in-flight dispatch
-	// (order is preserved per server). dirtyStatus is the FIFO of servers awaiting
-	// dispatch. statusNotify wakes the dispatcher (capacity 1: a coalesced signal).
+	// Coalesce status by server so backpressure retains the latest state.
+	// Route all updates through the pending slot until dispatch completes to prevent overtaking.
 	statusMu      sync.Mutex
 	pendingStatus map[string]session.StatusEvent
 	coalescing    map[string]bool
@@ -462,16 +259,7 @@ func New(drivers map[string]execution.ExecutionDriver, scratchDir string, openCo
 	return m
 }
 
-// goBackground starts fn as a goroutine the manager owns and Close joins. It
-// reports whether the goroutine was started: a CLOSED manager starts nothing,
-// because Close has already run the Wait that a later Add would race — and,
-// with the counter back at zero, panic against. The Add happens under the SAME
-// mu that Close sets closed under, so a start either lands before Close takes
-// the lock and is therefore waited for, or does not happen at all.
-//
-// recordOrphan performs the same Add inline rather than calling this: its spawn
-// decision must also claim the per-id converging flag, and both have to be taken
-// in one critical section.
+// goBackground counts work under the same lock that closes the manager; closed managers spawn nothing.
 func (m *Manager) goBackground(fn func()) bool {
 	m.mu.Lock()
 	if m.closed {
@@ -487,151 +275,15 @@ func (m *Manager) goBackground(fn func()) bool {
 	return true
 }
 
-// Close ends EVERY goroutine the manager started and waits for them to exit: the
-// failed-stop-orphan convergers (issue #2493), the status dispatcher New starts,
-// the deleted-scratch reclaim ReclaimDeletedScratches starts (issue #2878), and
-// the per-instance status/log/metrics pumps startPumps starts (issue #2777).
-// Nothing joined the latter group before, and none of them ended on their own: a
-// pump parks on an instance channel that a server still running never closes, and
-// the dispatcher parks on a notify channel nothing ever closes. In the Worker that
-// only ever showed up at process exit; in the test binary, where a manager's
-// lifetime is one test, one package run left ~91k of them parked against managers
-// their tests had finished with.
-//
-// The wait is the point: a converger caught mid-round is inside a driver call, so
-// returning on the signal alone would leave exactly the window this closes. The
-// probe is bound to the same cancelled context and returns at once, but a retry
-// stop already in flight is not interruptible by design — the driver detaches the
-// escalation from its caller's context so a dropped stream cannot abandon a
-// half-stopped container (issue #770) — so Close can take that stop's remaining
-// budget to return. Waiting out a stop the Worker is already driving is the right
-// end of that trade: the alternative is exiting while a SIGKILL escalation is
-// half-issued. The pumps and the dispatcher add nothing to that bound: each parks
-// on the shutdown alongside its own wait and leaves at once. A reclaim in flight
-// does add to it, for the same reason and by the same trade, but only for the ONE
-// id it is on: that id's body is uninterruptible filesystem work, and the
-// alternative is exiting mid-RemoveAll and leaving a half-removed working set
-// behind (issue #2878). The ids after it cost nothing — the reclaim reads the
-// shutdown at the top of its per-id loop, where it holds neither a reservation nor
-// a half-done removal, and returns (issue #2933). The reservation it holds across
-// the in-flight id is NOT part of the trade — reserved is in-memory and dies with
-// the process.
-//
-// WHAT IS IN FLIGHT IS DROPPED, deliberately, and this changes nothing an operator
-// or the API can observe. Close runs after the session runner has returned
-// (main.go), so by then nothing drains the merged status/log/metrics streams —
-// which is also why the dispatcher must observe the shutdown ON ITS SEND and not
-// only between events, or a full sink would hold Close forever. The alternative,
-// draining first, would deliver into channels no session reads, and before this
-// the same events died with the process anyway. Each site states its own drop:
-// pump, logPump, metricsPump, statusDispatcher.
-//
-// THIS WAIT IS WHAT compose.yaml's stop_grace_period ON THE WORKER IS SIZED FOR
-// (issue #2934, owner decision 2026-09-23). Under compose the process gets that
-// long between SIGTERM and SIGKILL, and the two numbers are a pair: change this
-// bound and the compose value is wrong, and vice versa.
-//
-// The bound is roughly 280 s. A retry stop already inside inst.Stop costs
-// flushTimeout + stopDeadline + the kill call + the post-kill exit confirmation +
-// restoreSaveTimeout (90 + 100 + 30 + 30 + 30 s at the containerdriver defaults).
-// Those last three ADD rather than share: the kill runs on a context detached from
-// stopDeadline so it reaches the daemon even when the earlier phases consumed the
-// whole budget, and waitExitDone honours no context at all. The one reclaim id in
-// flight costs a RemoveAll per tree instead (3.4 s for a 4 GB / 21k-file working
-// set, measured warm on ext4). Docker's 10 s default cut both.
-//
-// ONE LEG IS WHY THE VALUE EXISTS, and the other two are honest about not needing
-// it:
-//
-//   - reserved, orphans and converging are in-memory and die with the process
-//     either way — at 10 s or at 280 s.
-//   - a reclaim cut anywhere in its per-id body leaves <scratch>/<id> on disk, and
-//     that dir IS the advertisement that re-offers the id: the held-set scans
-//     report it, the API re-derives unknown_held_server_ids from that report, and
-//     the next registration's reclaim finishes the removal. The sweep order in
-//     reclaimDeletedScratches is what makes this true at every point in the body
-//     rather than most of them. The residual is a dir holding nothing but its
-//     generation marker: not advertised, and not data.
-//   - a retry stop cut between the flush's save-off and restoreSaveOnAfterFailedStop
-//     leaves a SURVIVING MC container with auto-save disabled: the container is not
-//     a compose service, so nothing stops it on the way out, and
-//     containerdriver.sweepSaveOn (issue #1710) issues its RCON save-on to every
-//     running orphan only at the NEXT Worker boot — which `restart: unless-stopped`
-//     does not bring after an explicit stop, so `docker compose down` leaves that
-//     container running and saving nothing until the stack returns.
-//     THIS LEG NO LONGER WAITS FOR THE GRACE PERIOD: Close settles it up front,
-//     from pendingSaveOn, at the moment the shutdown starts (issue #3166), and again
-//     after the join for a bracket that was opened in between. What the timer still
-//     buys on this leg is the escalation itself — a stop the Worker is already driving
-//     gets to finish rather than being cut half-issued.
-//     The drain's own cost is closingSaveOnTimeout (5 s), paid once and only when a
-//     server does not answer, which leaves this bound where it was.
-//
-// The cost is bounded: the value is a CEILING, not a wait, so a Close with nothing
-// in flight still returns in milliseconds and the timer is never observed. What it
-// does NOT reach is the same escalation dispatched as an operator StopServer: that
-// runs on a session lane nothing joins, so it is abandoned the moment run()
-// returns, at any value. Closing that one is a change to the lanes, not to this
-// timer (#3168) — though the auto-save half of it is already covered, because the
-// drain above is keyed on the outstanding save-off rather than on which lane
-// issued it.
-//
-// TWO CASES REMAIN UNCOVERED, by the drain and by the timer alike, because neither
-// is a shutdown: a host power loss inside the bracket, and the MC server crashing
-// inside it. Nothing runs Close in the first, and in the second the world the
-// save-off was protecting is already lost. The only repair for them is
-// containerdriver.sweepSaveOn at the next boot, which reaches a still-running
-// container whenever a boot follows — and does not arrive at all while the stack
-// stays down.
-//
-// Close is idempotent and terminal: it is safe to call on a manager that has
-// already been closed (the flag is monotonic, cancelling a cancelled context is a
-// no-op, and a settled WaitGroup returns from Wait immediately), and a closed
-// manager still records orphans (the record is what guards the id) and still
-// registers a started instance, but spawns no convergers and no pumps for them.
+// Close cancels and joins background work, and restores outstanding stop save-off brackets with a bounded drain.
+// It is terminal and idempotent; session command lanes are not joined.
 func (m *Manager) Close() {
 	m.mu.Lock()
 	m.closed = true
 	m.mu.Unlock()
 	m.stopBackground()
-	// Settle the outstanding save-off debts BESIDE the join, never in front of it
-	// (issue #3166). Started here, each restore overlaps the escalation Close is
-	// already waiting out, so a Close that had work to do pays nothing for them and
-	// one with nothing outstanding starts none.
-	//
-	// THE LEDGER IS READ TWICE, and the second read is why. A stop dispatched before
-	// the shutdown began has its own RCON dial between the command and its save-off —
-	// a TCP connect plus an AUTH handshake, up to rcon's 30 s ceiling — so it can open
-	// a bracket long after the first read, and its lane is one Close never joins
-	// (#3168): the Worker would exit under a survivor with auto-save off. The second
-	// read happens after the join, when nothing Close joins is left to arm anything,
-	// and it SEALS the ledger in the same critical section, so a flush that arrives
-	// later declines to disable auto-save instead. Two passes, no loop, and the
-	// termination argument is local: after the seal no debt can exist.
-	//
-	// The second pass costs no extra time. Both passes share one WaitGroup and the
-	// first pass's restores are already bounded, so the join below ends no earlier
-	// than they do — the wait is still one closingSaveOnTimeout past the join, not two.
-	//
-	// THE WAIT IS JOINED AND BOUNDED, and both halves are required. Unjoined, the
-	// process exit that follows Close (main.go returns immediately after) kills a
-	// restore still in flight, which would move the loss rather than close it.
-	// Unbounded, a server that never answers would put the failure path's generous
-	// restoreSaveTimeout on a shutdown leg that nothing overlaps. So each restore
-	// carries closingSaveOnTimeout instead — 5 s, derived at that constant — and
-	// THE WHOLE ADDED LATENCY OF THIS CHANGE IS THAT ONE BOUND, paid once however
-	// many servers are draining, and only when a server does not answer.
-	//
-	// Close's ~280 s worst case is therefore unchanged, and so is the compose value
-	// paired with it: 5 s is well inside the restoreSaveTimeout leg that bound already
-	// counts. What CAN get slower is the best case — a quiesced stop that resolves in
-	// the same instant leaves no join for its restore to hide behind, so a Close that
-	// would have returned at once pays up to those 5 s, and only if the dial hangs
-	// rather than being refused, which a just-exited container normally is.
-	//
-	// They ride a LOCAL WaitGroup, not m.background: the flag above is already set,
-	// so goBackground would (correctly) refuse them, and joining them here is what
-	// keeps them from outliving the manager the way issue #2777's pumps did.
+	// Restore outstanding brackets concurrently with the join, then drain and seal once more for late flushes.
+	// Join restores locally with closingSaveOnTimeout so they cannot outlive Close or stall shutdown indefinitely.
 	var restores sync.WaitGroup
 	settle := func(pending map[string]saveOnTarget) {
 		for serverID, target := range pending {
@@ -668,20 +320,15 @@ func (m *Manager) WithTunnelDialer(t TunnelDialer) *Manager {
 	return m
 }
 
-// WithBedrockTunneler wires the Bedrock relay QUIC tunnel used by
-// OpenBedrockTunnel/CloseBedrockTunnel (docs/app/BEDROCK_TUNNEL.md, issue
-// #1546). Without it, an OpenBedrockTunnel fails with an internal error and a
+// WithBedrockTunneler wires the Bedrock relay QUIC tunnel used by OpenBedrockTunnel/CloseBedrockTunnel
+// (docs/app/BEDROCK_TUNNEL.md). Without it, an OpenBedrockTunnel fails with an internal error and a
 // CloseBedrockTunnel is a no-op success.
 func (m *Manager) WithBedrockTunneler(t BedrockTunneler) *Manager {
 	m.bedrock = t
 	return m
 }
 
-// SetTransferDeadline records the per-transfer bound the API advertised in
-// RegisterAck (session.TransferDeadlineSetter, issue #874). The hydrate/snapshot
-// handlers apply it as a context deadline so an upload/download cannot outlive
-// the API's budget indefinitely (#869). A non-positive value clears the bound,
-// leaving transfers unbounded as before.
+// SetTransferDeadline applies the API's cleanup backstop; non-positive values clear the bound.
 func (m *Manager) SetTransferDeadline(d time.Duration) {
 	if d < 0 {
 		d = 0
@@ -689,11 +336,8 @@ func (m *Manager) SetTransferDeadline(d time.Duration) {
 	m.transferDeadlineNanos.Store(int64(d))
 }
 
-// transferContext derives the context a data-plane transfer runs under: the
-// request ctx bounded by the configured transfer deadline (issue #874) when one
-// is set, else the request ctx unchanged. The per-request deadline is the clean
-// mechanism — it bounds one transfer without capping the http.Client's streaming
-// reads globally. The returned cancel is always non-nil and must be called.
+// transferContext bounds one transfer without globally timing out streaming HTTP reads.
+// The caller must cancel the returned context.
 func (m *Manager) transferContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	d := time.Duration(m.transferDeadlineNanos.Load())
 	if d <= 0 {
@@ -702,9 +346,8 @@ func (m *Manager) transferContext(ctx context.Context) (context.Context, context
 	return context.WithTimeout(ctx, d)
 }
 
-// WithWorkerID sets this Worker's own id, stamped on a snapshot publish so the
-// API's publish-time generation guard can distinguish a same-Worker re-publish
-// from a different-Worker stale publish (issue #847 bug 3).
+// WithWorkerID sets this Worker's own id, stamped on a snapshot publish so the API's publish-time generation
+// guard can distinguish a same-Worker re-publish from a different-Worker stale publish.
 func (m *Manager) WithWorkerID(id string) *Manager {
 	m.workerID = id
 	return m
@@ -775,20 +418,14 @@ func (m *Manager) handleHydrate(ctx context.Context, cmd session.Command) sessio
 		return fail(cmd.CommandID, session.CommandErrorTransferFailed,
 			"instancemanager: no data-plane transfer client configured")
 	}
-	// Reserve the id for the duration of the transfer so a re-issued HydrateTrigger
-	// (or a racing StartServer/SnapshotTrigger) cannot write the same working set
-	// concurrently with the original after a stream reconnect (issue #780). The
-	// reservation also subsumes the running / failed-stop-orphan preconditions —
-	// hydrating either would replace the working set out from under a live process
-	// (issue #251) — and is always released on return.
+	// Reserve across hydrate to prevent reconnects from concurrently replacing a live or in-flight working set.
 	if ok, code, msg := m.reserve(cmd.ServerID); !ok {
 		return fail(cmd.CommandID, code, msg)
 	}
 	defer m.release(cmd.ServerID)
 
 	workingDir := filepath.Join(m.scratchDir, cmd.ServerID)
-	// Bound the download with the per-transfer deadline (issue #874) so a stalled
-	// hydrate cannot hang the lane indefinitely.
+	// Bound the download with the per-transfer deadline so a stalled hydrate cannot hang the lane indefinitely.
 	transferCtx, cancel := m.transferContext(ctx)
 	defer cancel()
 	gen, err := m.transfer.Hydrate(transferCtx, cmd.TransferURL, cmd.TransferToken, workingDir)
@@ -796,25 +433,7 @@ func (m *Manager) handleHydrate(ctx context.Context, cmd session.Command) sessio
 		return fail(cmd.CommandID, session.CommandErrorTransferFailed,
 			fmt.Sprintf("instancemanager: hydrate: %v", err))
 	}
-	// Record the generation the working set is now at (issue #763): the API served
-	// the authoritative store at this generation, so the local scratch matches it.
-	// A 0 (no published snapshot, or an older API) is recorded as-is — the API then
-	// treats this set as older than any published store generation and re-hydrates,
-	// the safe direction. On the 200 path the marker was already written atomically
-	// into the temp tree before the swap-in rename (issue #917), so this call is
-	// idempotent; on the 204 path it is the only write. Best-effort: a failure only
-	// costs an extra hydrate next start, never correctness, so it is logged not
-	// propagated.
-	//
-	// Declare the served generation to the API only when that stamp actually landed
-	// (issue #2500). The API prefers this over its own pre-dispatch store read (#2477),
-	// which can only understate; but a declaration the marker does not back would let a
-	// later start skip a hydrate it needs, so the value is taken FROM recordGeneration's
-	// report of the write — the same &gen it stamped — not from the transfer succeeding.
-	// This is the snapshot path's argument (#2481) with its guard removed: handleHydrate
-	// holds the per-id reservation across the whole transfer AND is the writer that
-	// produced the tree, so no concurrent stream can have replaced it, and the marker
-	// write is the sole thing that can decline to declare.
+	// Declare the served generation only if its local marker was published; a transfer alone is not proof.
 	var declaredGeneration *uint64
 	if m.recordGeneration(workingDir, cmd.ServerID, gen) {
 		declaredGeneration = &gen
@@ -824,21 +443,8 @@ func (m *Manager) handleHydrate(ctx context.Context, cmd session.Command) sessio
 	}
 }
 
-// recordGeneration writes the working-set generation marker, logging (not failing) on
-// error: a marker this call fails to write is one OLDER than the tree, which costs an
-// extra hydrate and nothing else. It is unconditional, and its single caller is what
-// makes that sound — handleHydrate holds a per-id reservation across the whole transfer
-// AND is the writer that produced the tree, so the marker it writes always describes
-// what is on disk. The running-id snapshot's tail holds no such reservation and goes
-// through recordGenerationIfUnchanged instead. Do not gate this one: a marker that is
-// never written reads as generation 0, so the API could never skip a hydrate again.
-//
-// It REPORTS whether the marker was published, and that return value is the sole source
-// of the Worker-declared held generation on the hydrate's CommandResult (issue #2500).
-// The API mirrors that declaration into the inventory its skip-hydrate gate reads, so the
-// declaration has to be the write's own outcome rather than the transfer merely having
-// succeeded: a marker this call could not write is older than the tree, so declaring the
-// served generation anyway would let a later start skip the corrective hydrate.
+// recordGeneration is unconditional because hydrate owns the reserved tree it produced.
+// Return whether the marker was published; write failures log and leave the API to hydrate again.
 func (m *Manager) recordGeneration(workingDir, serverID string, gen uint64) bool {
 	if err := writeGeneration(workingDir, gen); err != nil {
 		m.logger.Warn("could not record working-set generation",
@@ -848,39 +454,10 @@ func (m *Manager) recordGeneration(workingDir, serverID string, gen uint64) bool
 	return true
 }
 
-// recordGenerationIfUnchanged records the generation only while workingDir is still the
-// directory ref pinned (issue #2284). It is the running-id snapshot's stamp, which runs
-// in the one tail that holds no per-id reservation, so a NEW stream can have re-placed
-// this server here and hydrated it while this (old, dropped) stream was uploading. The
-// hydrate replaces the working dir by rename, so the identity check sees it.
-//
-// A mismatch SKIPS the stamp and the caller still returns success: the publish really
-// did happen and minted this generation server-side, so failing the command would
-// report a valid publish as a transfer failure. The marker then keeps the hydrate's
-// generation, which is older than the store's, so the #767 gate does not skip and the
-// API re-hydrates — one extra hydrate, correct world. Stamping instead would leave the
-// marker NEWER than the tree, which makes that same gate skip the corrective hydrate and
-// boot the wrong generation silently. Nothing is reported to the API (a CommandResult
-// carries no warning channel); the WARN is the only signal.
-//
-// The check is repeated as writeGenerationGuarded's pre-rename guard, and that second
-// check is what closes the one interleaving this one cannot: a replacement landing after
-// the check here but before the marker temp is created gets a temp inside the REPLACEMENT
-// tree, which then publishes cleanly. Once the temp exists the marker can no longer land
-// in a replacement tree at all — the temp rides the pinned inode to .displaced-<id> and
-// the rename fails ENOENT on its source — so between them no wrong stamp survives except
-// a swap interleaved inside the marker rename's own path resolution. That is why the
-// renameat-against-the-pinned-descriptor rewrite is NOT done here: it would buy only that
-// last sliver, while rewriting the shared, fsync-ordered writeGeneration the hydrate path
-// also uses and writing a marker into the displaced tree that STORAGE.md Section 4.6's
-// manual recovery reads. See writeGenerationGuarded for the case analysis.
-//
-// It REPORTS whether the marker was published, and that return value is the sole source
-// of the Worker-declared held generation on the snapshot's CommandResult (issue #2481).
-// The API mirrors that declaration into the inventory its skip-hydrate gate reads, so the
-// declaration has to be the marker write's own outcome rather than a second opinion about
-// it: every skip above returns false through the same statement that suppresses the write,
-// so no code path can report a generation this function did not stamp.
+// Stamp and declare only while the pinned directory remains current; replacement skips the stamp without failing
+// publish.
+// Repeat the identity check immediately before rename; path resolution inside that rename remains a residual
+// race.
 func (m *Manager) recordGenerationIfUnchanged(ref *workingDirRef, workingDir, serverID string, gen uint64) bool {
 	reason := ""
 	guard := func() bool {
@@ -916,48 +493,11 @@ func (m *Manager) recordGenerationIfUnchanged(ref *workingDirRef, workingDir, se
 // deadline so the call cannot hang the goroutine forever.
 const restoreSaveTimeout = 30 * time.Second
 
-// closingSaveOnTimeout bounds the SAME RCON call when Close issues it for a stop
-// bracket still outstanding at shutdown (issue #3166). It is deliberately far
-// shorter than restoreSaveTimeout above, and the reason is what the two budgets
-// have to overlap with rather than any difference in the work:
-//
-//   - restoreSaveTimeout is spent inside a Close that is already waiting out the
-//     escalation it follows, so it is hidden. This one has nothing to hide behind —
-//     Close joins no command lane at all — so whatever it spends is added to the
-//     Worker's shutdown, which is the cost the whole change exists to avoid.
-//   - the work is one rcon.Dial (TCP connect plus the AUTH handshake) and one
-//     Execute round trip, both of which are sub-second whenever the server answers
-//     at all — rcon's own defaultExecuteTimeout comment says so, and its 30 s is a
-//     ceiling against a wedged peer rather than a duration anything spends.
-//   - a server that has NOT answered within this bound is, in this exact window, a
-//     server whose stop is escalating precisely because it is not answering. Holding
-//     the shutdown open longer for it buys nothing: containerdriver.sweepSaveOn
-//     repairs a container that survives at the next boot, and one that does not
-//     survive needs no restore. containerdriver bounds that same boot-time dial with
-//     sweepCallMargin for the same reason.
-//
-// 5 s is an order of magnitude above the healthy case and half of Docker's own 10 s
-// default grace, so the drain can never be what an unconfigured deployment is
-// SIGKILLed for. It is also the WHOLE of the latency this change can add to a
-// shutdown: Close's restores run concurrently, so a drain of any size costs at most
-// this once, and Close's ~280 s worst case — which compose's stop_grace_period is
-// sized for — is untouched, since 5 s is well inside the restoreSaveTimeout leg that
-// bound already counts.
-//
-// Manager.closingSaveOnTimeout defaults to it so a test can shrink it, mirroring
-// fsckRetryDelay.
+// Bound concurrent shutdown restores to five seconds; failed-stop restores use the longer restoreSaveTimeout.
 const closingSaveOnTimeout = 5 * time.Second
 
-// snapshotFsckAttempts is how many times the pre-pack region fsck is run for a
-// RUNNING server's periodic snapshot before the snapshot is refused (#907). The
-// quiesce settle-wait already blocks until the async save's region writes have
-// stopped changing, so the chunk-save tearing is gone by the time the fsck runs;
-// this small retry is the secondary backstop for a residual tear from a NON-chunk
-// writer (a plugin or background task save-off does not gate) racing the scan. The
-// first failing attempt is retried (snapshotFsckAttempts-1 retries) with
-// defaultFsckRetryDelay backoff, and the snapshot proceeds as soon as one attempt
-// is clean. The stopped-server (at-rest) path uses a single fail-closed attempt —
-// a failure there is real signal, not a mid-write race.
+// Retry running-world corruption briefly for non-chunk writers that save-off does not gate.
+// Stopped worlds use a single scan.
 const snapshotFsckAttempts = 3
 
 // defaultFsckRetryDelay is the default backoff between the running-server fsck
@@ -965,67 +505,16 @@ const snapshotFsckAttempts = 3
 // command budget (control.snapshot_timeout_seconds=600). Tests shrink it to zero.
 const defaultFsckRetryDelay = 2 * time.Second
 
-// defaultSettlePollInterval / defaultSettleBudget bound the quiesce settle-wait
-// (#907): after the async save-all the working set's .mca files are re-scanned
-// every defaultSettlePollInterval, and the save is considered settled once two
-// consecutive scans observe identical (mtime, size) for every region file. The
-// wait gives up after defaultSettleBudget and the snapshot is refused
-// quiesce_unavailable (the next tick retries). The budget is generous yet well
-// inside the snapshot command budget (control.snapshot_timeout_seconds=600), so
-// the settle-wait never races the command timeout. Tests shrink both.
+// Bound the async-save settle wait; lack of two identical scans refuses the periodic snapshot.
+// Tests shrink the interval and budget.
 const (
 	defaultSettlePollInterval = 2 * time.Second
 	defaultSettleBudget       = 60 * time.Second
 )
 
-// handleSnapshot packs the server's working dir and uploads it. For a running
-// server it brackets the working-dir copy with RCON save-off / save-on so the
-// Minecraft server does not write to the world mid-copy and a region file cannot
-// be captured torn (#694, CONTROL_PLANE.md Section 6.9): it issues save-off to
-// disable auto-save, a plain non-blocking save-all to drive the world to disk,
-// then a settle-wait that polls the region files until their (mtime, size) stops
-// changing across a quiet window — so the asynchronous save has provably completed
-// before the fsck/copy reads it — runs the transfer over the now-quiescent working
-// dir, then save-on to re-enable auto-save.
-//
-// We deliberately do NOT use save-all flush. The synchronous flush runs on the
-// Minecraft main thread and, on a live world with a player online, parked the tick
-// past max-tick-time and tripped the Server Watchdog into forcibly shutting the
-// server down mid-saveAllChunks — a demonstrated production crash (issue #693,
-// survival-main 2026-06-08, a 13 MB world on defaults; removed by commit 0bf86a6).
-// The async save + settle-wait quiesces the on-disk state (a plain non-blocking
-// save-all returns before the asynchronous save completes, so an immediate fsck
-// would race the in-flight writes and read healthy regions as torn — the #907
-// false-positive of 35/35 region files reported corrupt on a world that scans
-// clean at rest) without ever parking the main thread.
-//
-// For a RUNNING server the quiesce is fail-closed (#907): if RCON cannot be
-// opened, save-off / save-all fail, or the save never settles within the budget,
-// the working set is NOT actually quiesced, so packing it would reproduce exactly
-// those torn-read false positives and waste a full tar+upload the API gate would
-// reject. The periodic snapshot is instead refused with a distinct
-// quiesce_unavailable error so operators can tell "could not quiesce" from "world
-// is corrupt"; the next tick (5 min) retries. The tradeoff: a server whose RCON is
-// permanently broken never gets a PERIODIC snapshot — but its FINAL post-stop
-// snapshot (the stopped-id path below, which needs no RCON) still captures the
-// world, so this bounds the loss to progression since the last good periodic
-// snapshot, not the whole world. Once save-off succeeds, save-on is guaranteed on
-// every exit path — success, transfer error, or a cancelled/timed-out request
-// context — via a deferred restore that runs on a detached context (redialing RCON
-// if the connection was poisoned), so the server is never left with auto-save
-// disabled.
-//
-// Once the working set is quiesced (bracketed above for a running server, at rest
-// for a stopped one), a structural region fsck runs before the transfer (#741):
-// on detected corruption the snapshot is refused with a coded error — failing fast
-// at the source instead of after a full tar+upload the API gate would reject — and
-// the deferred restore still re-enables auto-save. For a RUNNING server the fsck is
-// retried a small bounded number of times with backoff (#907): the settle-wait has
-// already absorbed the chunk-save tearing, so this retry is the secondary backstop
-// for a residual tear from a non-chunk writer (one save-off does not gate) racing
-// the scan. The STOPPED (at-rest) path stays single-shot fail-closed — a failure
-// there is real corruption signal, not a race. A fsck I/O error is best-effort
-// (logged, the transfer proceeds) so it cannot wedge the snapshot.
+// handleSnapshot quiesces running worlds with save-off, async save-all, and a settle wait before fsck and
+// packing.
+// Restore save-on after packing; stopped worlds reserve their ID and need no RCON.
 func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) session.CommandResult {
 	if m.transfer == nil {
 		return fail(cmd.CommandID, session.CommandErrorTransferFailed,
@@ -1034,132 +523,30 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 	m.mu.Lock()
 	_, running := m.instances[cmd.ServerID]
 	m.mu.Unlock()
-	// The running flag is read outside any reservation, so a start can register an
-	// instance between here and the stopped path's reserve() below; the contract
-	// table records what that race emits, and this seam is how the test enters it
-	// deterministically (issue #2472).
+	// The running flag is read outside any reservation, so a start can register an instance between here and the
+	// stopped path's reserve below; the contract table records what that race emits, and this seam is how the test
+	// enters it deterministically.
 	if hook := m.snapshotAfterRunningCheck; hook != nil {
 		hook(cmd.ServerID)
 	}
 	workingDir := filepath.Join(m.scratchDir, cmd.ServerID)
-	// restore re-enables auto-save after the quiesce. Declared here so it is
-	// accessible after the if/else for the explicit restore() call between pack and
-	// upload (issue #1710). Made idempotent via sync.Once so the deferred safety-net
-	// and the explicit call do not double-issue save-on.
+	// restore re-enables auto-save after the quiesce. Declared here so it is accessible after the if/else for the
+	// explicit restore call between pack and upload. Made idempotent via sync.Once so the deferred safety-net and
+	// the explicit call do not double-issue save-on.
 	var restore func()
 	// pin guards the running path's marker stamp; nil (and unused) on the stopped path,
 	// which records no generation. Declared here so the post-upload tail below can see it.
 	var pin *workingDirRef
-	// declaredGeneration is what this command DECLARES the Worker still holds when it
-	// returns (issue #2481); nil declares nothing. It has exactly one assignment, in
-	// the running branch's tail, and its value comes from recordGenerationIfUnchanged
-	// reporting that the marker write landed — so the declaration cannot disagree with
-	// the marker, and the stopped-id branch (which calls removeScratch instead of that
-	// function, and is the else of the same if) has no statement that can set it.
-	//
-	// Deliberately NOT named heldGeneration: that is the package function
-	// (scratchscan.go) computing the register-time advertisement this value mirrors,
-	// and shadowing it here would hide the very identifier a reader needs to follow to
-	// see that the two report the same marker.
+	// Declare only a successfully stamped, still-held generation; stopped snapshots remove scratch and declare
+	// nothing.
 	var declaredGeneration *uint64
 	if running {
-		// Pin the working dir's IDENTITY for the whole window, from before the quiesce
-		// to the post-upload marker stamp (issue #2284). Because this branch takes no
-		// reservation (see below), a concurrent stream can replace this directory while
-		// the snapshot runs; the stamp must then not claim the newly published
-		// generation for a tree it never packed. Captured this early rather than just
-		// before the pack because it is strictly more conservative at zero cost in
-		// normal operation — reserve() rejects a hydrate while the instance is
-		// registered, and it is registered precisely because we are in this branch, so
-		// the only thing that can replace the dir from here on is the cross-stream
-		// stop-then-hydrate this detects. The running path always has the dir (the
-		// start created it). Closed on every return out of this handler.
+		// Pin before quiescence so an old stream's upload tail cannot stamp a replacement tree.
 		pin = pinWorkingDir(workingDir)
 		defer pin.close()
 
-		// The running-id snapshot takes NO reservation across its quiesce window, and
-		// that is safe (issue #829, item 4):
-		//   - Same stream: SnapshotTrigger and a StopServer/RestartServer for one id are
-		//     queued on the same per-server lane (session dispatcher, #95) and run
-		//     serially in FIFO order; the snapshot runs inline holding a concurrency
-		//     slot and does not detach, so a same-stream stop cannot overlap it.
-		//   - Cross stream: an old dropped stream's snapshot can still be running when a
-		//     new stream's lane runs a stop/restart, which (holding no reservation here)
-		//     evicts and terminates the process mid-tar. The worst this yields is a TORN
-		//     capture — the stop's shutdown re-saves regions while the tar reads them.
-		//     A tear that happens DURING the tar is caught downstream by the API's #739
-		//     content-integrity gate. That gate runs the byte-precise region check (issue
-		//     #927: one rule set, no source-keyed mode), which still catches realistic
-		//     tears: any referenced chunk whose byte extent overruns EOF, any entry
-		//     pointing at/past EOF, garbage prefixes. Those the gate REFUSES — the publish
-		//     aborts, the staging area is dropped, and current/
-		//     keeps the last good generation: no silent corruption and no overwrite. The
-		//     only escape from the byte-precise bound is a truncation landing exactly at
-		//     the final referenced chunk's byte boundary with no entries beyond; that one
-		//     PASSES the gate, which is acceptable because it is indistinguishable from a
-		//     consistent older state (the lost bytes are unreferenced). And this is a
-		//     PERIODIC snapshot of a still-running server, not
-		//     the post-stop FINAL one (a stopped-id snapshot, which DOES reserve below),
-		//     so a refused capture simply retries on the next tick — nothing is lost.
-		// A reservation would only convert that refused-and-retried outcome into a
-		// BUSY-rejected one — same net effect, more coordination state — so it
-		// is intentionally not taken.
-		//
-		// The same no-reservation choice leaves TWO further cross-stream edges in the
-		// post-upload tail, and BOTH are closed by the one mechanism pinned above — the
-		// working dir's identity. Neither needed a reservation, so the item-4 decision
-		// stands for both.
-		//
-		// The sharper one (issue #2284) was the marker stamp: a stale snapshot writing the
-		// newly published generation onto a tree a concurrent hydrate had just swapped in,
-		// leaving a marker NEWER than its tree — which does not merely cost a hydrate, it
-		// defeats the #767 gate that would have corrected the tree, so the server boots the
-		// wrong generation silently. The stamp is refused when the identity no longer
-		// matches.
-		//
-		// The second, narrower edge (issue #917 item 3, closed by issue #2291): an old
-		// dropped stream's snapshot can SUCCEED and call
-		// sweepDisplaced(serverID) below while a NEW stream's re-placement hydrate for the
-		// same id has just renamed the live working set aside to .displaced-<id>
-		// (datatransfer.unpackAndSwap step (2)) — an ungated sweep then deletes THAT
-		// hydrate's recovery copy. Same-stream overlap is excluded by the per-server FIFO
-		// lanes as above. Cross-stream is bounded by a ctx asymmetry: the upload runs on
-		// transferContext, derived from the stream's serveCtx, so a stream drop cancels the
-		// in-flight upload and the snapshot fails before any sweep. Only the post-upload
-		// tail was exposed — and the new stream must meanwhile reconnect, register, and
-		// download+unpack a whole working set to reach its displace. PackSnapshot ignores
-		// ctx, which is why the torn-capture case above stays wide while this one was
-		// narrow to begin with.
-		//
-		// What made it worth closing rather than accepting is what the snapshot's success
-		// does NOT prove. It publishes the state as of its PACK, not the tree the sweep
-		// would remove: restore() re-enables auto-save at the pack/upload split (below),
-		// and a GRACEFUL stop on the racing stream additionally drives a shutdown save into
-		// the same dir before the hydrate displaces it (a forced stop does not, but the
-		// resumed auto-save has already written), so that tree is the published prefix PLUS
-		// an unpublished delta — bounded by the pack, not by the displacement, so if two
-		// hydrate cycles fit inside one upload window it can be an entire session. And the
-		// bound assumes the racing hydrate CREATED the tree: under oldest-wins (issue
-		// #2278) a hydrate finding the slot occupied creates none, so an ungated sweep
-		// destroys the older RETAINED tree instead, whose age no bound here describes, and
-		// since that hydrate also drops the set it superseded the race could leave no local
-		// branch at all — only the store's pack generation. Gating the sweep also removes
-		// the derived failure where the hydrate's own swap-in fails and its restore rename
-		// finds the parked tree gone (ENOENT), leaving destDir absent.
-		//
-		// The cost, stated plainly: the GC will occasionally decline to reclaim disk it
-		// would have reclaimed before. That is the safe direction — a declined sweep leaks
-		// one world-sized tree until the next successful snapshot for the id reclaims it,
-		// which is the #906 GC-on-success contract itself, where the ungated sweep's
-		// failure was an unrecoverable delete. The microseconds between the check and the
-		// sweep's rename (issue #2799: the removal itself runs on the renamed tree, off
-		// the slot) were left open on the reading that they could only leak. They could
-		// not: the check passes until the racing hydrate renames the working dir aside, so
-		// the hydrate can clear world-less junk from the slot and park its own live set
-		// there in between, and the rename takes THAT (issue #3118). The pin therefore
-		// goes into sweepDisplaced as well and is checked again after the rename, while
-		// putting the tree back is still possible — closing the window without the per-id
-		// reservation item 4 declined, so that decision still stands.
+		// Running snapshots take no reservation: per-stream FIFO orders stops, and the API validates captured regions.
+		// Across reconnects, use the identity pin for both marker stamping and displaced-tree cleanup.
 		var quiesced bool
 		var rawRestore func()
 		quiesced, rawRestore = m.quiesceRunning(ctx, cmd.ServerID, workingDir)
@@ -1167,29 +554,15 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		restore = func() { once.Do(rawRestore) }
 		defer restore()
 		if !quiesced {
-			// The world could not be quiesced (RCON down, save-off/save-all failed, or the
-			// async save never settled within the budget): packing it live is what produced
-			// the #907 35/35 false positives, a wasted tar+upload the API gate rejects.
-			// Refuse this PERIODIC snapshot with a distinct classification so operators can
-			// tell "could not quiesce" from "world is corrupt"; the next tick retries. The
-			// post-stop FINAL snapshot still covers a permanently-RCON-broken server (the
-			// stopped-id path needs no RCON).
+			// Refuse an unquiesced periodic snapshot; the final stopped snapshot does not require RCON.
 			m.logger.Warn("snapshot refused: could not quiesce running world",
 				"server_id", cmd.ServerID, "reason", "quiesce_unavailable")
 			return fail(cmd.CommandID, session.CommandErrorTransferFailed,
 				"instancemanager: snapshot refused: quiesce_unavailable (could not quiesce running world)")
 		}
 	} else {
-		// Stopped-id snapshot: the set is at rest and the API has typically already
-		// unassigned (a graceful stop snapshots after unassign, so a user start can
-		// re-place this id on the same Worker concurrently). Reserve the id for the
-		// pack so a racing HydrateTrigger (or start) cannot rewrite the working dir
-		// while it is mid-fsck/tar — a mixed capture whose .mca files are each valid
-		// would slip past the #749 integrity gate (the snapshot×hydrate cross-race the
-		// #780 review confirmed). A reservation already held by such a racing command
-		// rejects with BUSY. Running-id snapshots stay reservation-free: a
-		// running instance already blocks reserve(), and the save-off bracket above is
-		// their quiesce. Released on every return below.
+		// Reserve stopped scratch through packing and removal so a racing hydrate cannot mix valid files from two
+		// trees.
 		if ok, code, msg := m.reserve(cmd.ServerID); !ok {
 			return fail(cmd.CommandID, code, msg)
 		}
@@ -1197,66 +570,9 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 	}
 
 	if !running {
-		// Refuse a stopped-id snapshot whose scratch holds no working set (issue
-		// #1713): there is nothing to capture, so packing would upload an empty tar
-		// as a candidate new generation with the staleness guard disabled
-		// (readGeneration on an unmarked dir is 0, so the base-generation header is
-		// omitted) — leaving the API-side empty-staging refusal as the only defense
-		// and burning a full pack+upload+refusal cycle, again on every scheduler
-		// tick. The usual cause is a benign duplicate: the final snapshot published,
-		// removeScratch GC'd the dir, but the CommandResult was lost on a dropped
-		// stream so the API re-dispatched. The worker keeps no tombstone that could
-		// tell that apart from a genuinely missing working set (e.g. never
-		// hydrated), so one distinct refusal covers both. SERVER_NOT_FOUND (not
-		// TRANSFER_FAILED): no working set is held for this id and no retry can
-		// succeed without a hydrate — a terminal condition, not a transient transfer
-		// failure. The check is race-free: the reservation above already holds off
-		// any hydrate/start that could create the working set concurrently. The
-		// running path needs no guard — a tracked instance's working dir was created
-		// by its start.
-		//
-		// The PREDICATE is the working set's CONTENT, not a directory stat (issue
-		// #2813): a scratch emptied in place, and one holding only the generation
-		// marker (or a crashed stamp's ".mcsd_generation-*" temp), passed the stat and
-		// reached the pack — which excludes exactly those files, so the upload staged
-		// zero files and the API refused it 400 empty_snapshot after the whole cycle,
-		// reporting the environment-dependent transfer_failed that points away from
-		// the cause. It is deliberately NOT the launch guard's marker predicate (issue
-		// #2802), which the sibling refusal below uses: what a launch needs is the
-		// held-claim token, so a marker-ONLY dir passes there (the 204 fresh-boot
-		// contract), while what a snapshot needs is something to capture, so the same
-		// dir is refused here. Content WITHOUT a marker packs, which is right — there
-		// is a world to publish, and that direction is pinned by
-		// TestSnapshotTriggerPacksContentWithoutGenerationMarker.
-		//
-		// The directory is read HERE rather than through hasWorkingSet (PR #2840
-		// review): that helper answers false when it cannot read, which is the safe
-		// direction for the scans that ADVERTISE held sets but the wrong one for this
-		// decision. The refusal below is what makes StopServer._final_snapshot
-		// downgrade its data-loss ERROR to a benign-duplicate INFO, so reporting it on
-		// an EACCES/EMFILE/EIO would say "nothing was lost" about a world that was
-		// never captured — the #841 swallowed-failure shape, and a direct
-		// contradiction of is_working_set_absent_refusal's own contract. Only
-		// os.IsNotExist IS the statement (the dir is gone); every other read error is
-		// a failed operation and carries the unpinned transfer_failed, the same call
-		// datatransfer.displacedSlotHoldsWorkingSet already made for its own
-		// durability decision.
-		//
-		// The "working dir absent" phrase in the message is load-bearing (issue
-		// #1790): the API's final-snapshot path keys on it (together with the
-		// SERVER_NOT_FOUND code) to downgrade this refusal from its data-loss
-		// ERROR to a benign-duplicate INFO, and the periodic scheduler reads the same
-		// pair as "nothing left to capture" (issue #2480) — see
-		// _WORKING_SET_ABSENT_MARKER in
-		// api/src/mc_server_dashboard_api/servers/application/lifecycle.py.
-		// Reword only together with that discriminator (and both sides' tests): the
-		// message below is declared as "working_set_absent.snapshot" in
-		// proto/contract/command_error_contract.json, which TestCommandErrorContract
-		// asserts this emission against and the API's fixtures are built from, so a
-		// reword here is red until that declaration and the API's phrase follow (issue
-		// #2843). It is kept verbatim for the emptied and marker-only shapes too: the
-		// prose is a shade imprecise there, but the discriminator is exact — the same
-		// trade the launch guard made.
+		// Require capturable content, not just a marker; propagate read errors instead of claiming the world is
+		// absent.
+		// Keep "working dir absent" synchronized with the API discriminator and command-error contract.
 		entries, err := os.ReadDir(workingDir)
 		if err != nil && !os.IsNotExist(err) {
 			return fail(cmd.CommandID, session.CommandErrorTransferFailed,
@@ -1271,19 +587,7 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		}
 	}
 
-	// Pre-pack structural region fsck (#741): fail fast at the source if the
-	// working set is already corrupt (e.g. a region torn by a crash-during-save,
-	// #703), so we refuse the snapshot here — clear signal, no wasted tar+upload —
-	// rather than after a full transfer the API gate (#749) would reject anyway.
-	// The set is quiesced at this point: a running server is bracketed by save-off +
-	// async save-all + settle-wait above (#694/#907), and a stopped one is not being
-	// written. For a running server the check is retried with backoff (#907) so a
-	// residual tear from a non-chunk writer racing the scan after the save settled
-	// cannot, as a transient torn read, veto a periodic snapshot; a stopped (at-rest)
-	// set is checked once, fail-closed. The check is fail-closed on detected
-	// corruption but best-effort on a fsck I/O error
-	// — an error reading the set must not wedge the snapshot, so it is logged and the
-	// transfer proceeds (the API gate remains the correctness guarantee).
+	// Refuse detected corruption before packing; log fsck I/O failures and defer validation to the API gate.
 	if report, err := m.checkWorkingSet(ctx, cmd.ServerID, workingDir, running); err != nil {
 		m.logger.Warn("snapshot pre-pack region fsck failed; proceeding without it",
 			"server_id", cmd.ServerID, "error", err)
@@ -1294,23 +598,18 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 				len(report.Corrupt), report.Scanned, filepath.Base(first.Path), first.Reason))
 	}
 
-	// Declare the store generation this set was hydrated from (issue #847) so the API
-	// can refuse the publish if the store advanced past it. 0 (an unknown/never-
-	// hydrated set) leaves the guard to compare against the store's current value.
+	// Declare the store generation this set was hydrated from so the API can refuse the publish if the store
+	// advanced past it. 0 (an unknown/never- hydrated set) leaves the guard to compare against the store's current
+	// value.
 	baseGeneration := readGeneration(workingDir)
-	// Bound the pack+upload with the per-transfer deadline (issue #874): without it
-	// the upload has no deadline at all and could outlive the API's snapshot_timeout
-	// indefinitely (#869). The bound is the API budget + a margin (the ack value),
-	// so the API-side timeout fires first and this is the cleanup backstop.
+	// Bound the pack+upload with the per-transfer deadline: without it the upload has no deadline at all and could
+	// outlive the API's snapshot_timeout indefinitely. The bound is the API budget + a margin (the ack value), so
+	// the API-side timeout fires first and this is the cleanup backstop.
 	transferCtx, cancel := m.transferContext(ctx)
 	defer cancel()
 
 	if running {
-		// Running-server snapshot (issue #1710): split pack from upload so save-on is
-		// restored as soon as the pack (the only phase that reads the live working dir)
-		// completes. The upload reads only the spool file and does not need the server
-		// quiesced. A multi-GB upload can take minutes; keeping auto-save disabled for
-		// that entire window risked permanent save-off on a worker crash mid-upload.
+		// Restore save-on after packing; upload reads only the spool and may take minutes.
 		spoolPath, cleanup, err := m.transfer.PackSnapshot(transferCtx, workingDir)
 		if err != nil {
 			return fail(cmd.CommandID, session.CommandErrorTransferFailed,
@@ -1326,46 +625,12 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 			return fail(cmd.CommandID, session.CommandErrorTransferFailed,
 				fmt.Sprintf("instancemanager: snapshot upload: %v", err))
 		}
-		// Record the NEW generation the publish produced (issue #763): the scratch we
-		// just pushed is the source of this store generation, so its local generation
-		// advances to match. This keeps a same-Worker restart's held generation equal to
-		// the store generation (the API then skips the destructive hydrate). Best-effort
-		// (logged, not failed) — see recordGeneration.
-		//
-		// Conditional on the identity pinned above (issue #2284): this is the unreserved
-		// tail, so the tree that was packed may already have been replaced by a new
-		// stream's hydrate. Stamping the published generation onto THAT tree is the one
-		// outcome that must not happen — it is what the skip-hydrate gate reads, so a
-		// marker newer than its tree makes the API skip the hydrate that would correct
-		// it. Skipped instead: see recordGenerationIfUnchanged.
-		//
-		// Declare the generation to the API only when that stamp actually landed (issue
-		// #2481). The API mirrors the declaration into the same inventory the gate reads,
-		// so a declaration the marker does not back would defeat the guard above over the
-		// wire instead of on disk — hence the value is taken FROM the write's report, not
-		// from being in this branch.
+		// Stamp and declare only the tree this snapshot packed; never advance a replacement tree's generation.
 		if m.recordGenerationIfUnchanged(pin, workingDir, cmd.ServerID, gen) {
 			declaredGeneration = &gen
 		}
-		// GC the displaced tree a prior hydrate kept aside (issue #906): a successful
-		// publish proves the store now holds (and supersedes) this server's world, so the
-		// recovery copy is no longer needed. Mirrors the #845 GC-on-success pattern.
-		//
-		// Conditional on the same identity pin as the stamp above (issue #2291): what the
-		// success supersedes is the tree this snapshot PACKED, so once a concurrent
-		// hydrate has replaced that tree the proof no longer covers whatever now sits at
-		// .displaced-<id> — which is that hydrate's own recovery copy. Checked against the
-		// pin directly rather than against the stamp's return value: that value is also
-		// false for an ordinary marker-write I/O error, which is no reason to decline the
-		// GC. The tradeoff is stated in STORAGE.md Section 4.6 — the sweep now sometimes
-		// leaks a tree it would have reclaimed, until the next successful snapshot for the
-		// id reclaims it.
-		//
-		// The pin goes INTO the sweep as well (issue #3118), because this check cannot
-		// cover what the sweep's rename takes: it passes until the racing hydrate renames
-		// the working dir aside, and the hydrate can park its live set in the slot in
-		// between. The sweep checks again once the tree is out of the slot, while putting
-		// it back is still possible.
+		// A successful publish supersedes only the pinned tree; pass the pin into cleanup to protect a racing
+		// hydrate's recovery copy.
 		if ok, why := pin.current(); ok {
 			m.sweepDisplaced(cmd.ServerID, pin.current)
 		} else {
@@ -1380,24 +645,8 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 			return fail(cmd.CommandID, session.CommandErrorTransferFailed,
 				fmt.Sprintf("instancemanager: snapshot: %v", err))
 		}
-		// Stopped-id snapshot succeeded: this is the post-stop FINAL snapshot (or a
-		// snapshot of an at-rest set). The working set is now captured authoritatively
-		// and the API has typically already unassigned this Worker, so the local scratch
-		// is redundant — GC it now to reclaim disk and shrink the stale-leftover surface
-		// (#762's anti-accumulation goal, relocated here from the stop path so the final
-		// snapshot can no longer pack an empty dir, issue #841). The GC is deferred to
-		// AFTER a successful publish: a failed snapshot returned above with the scratch
-		// intact, so nothing is lost. The reservation taken in the stopped branch is
-		// still held (released by the deferred release on return), so no racing hydrate
-		// or start can recreate the dir between the publish and this removal. Recording
-		// the new generation would be pointless work on a dir we are about to delete —
-		// and declaring one to the API (issue #2481) would be a lie about what this
-		// Worker holds: the API would record held == store for a scratch that no longer
-		// exists, take the short held-start grace, and start with skip_hydrate over
-		// nothing. That start is now REFUSED at launch rather than booted into an empty
-		// directory (handleStart, issue #2499), so the declaration would cost a refusal
-		// and a corrective hydrate instead of a #696-class world rollback — still wrong,
-		// and still not worth making the guard earn its keep on.
+		// Remove stopped scratch only after publish succeeds, while the reservation still blocks replacement.
+		// Do not stamp or declare a generation for scratch being removed.
 		m.removeScratch(cmd.ServerID)
 	}
 	return session.CommandResult{
@@ -1405,19 +654,8 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 	}
 }
 
-// checkWorkingSet runs the pre-pack region fsck (issue #927: ONE rule set — a
-// non-4096-aligned tail is the normal on-disk shape, not a tear, on both the
-// running and the stopped path; the `stopped => padded` invariant the old strict
-// mode relied on does not survive a sweep-stop timeout / SIGKILL / crash). For a
-// stopped (at-rest) set it is a single fail-closed scan. For a RUNNING server it
-// retries on detected corruption up to snapshotFsckAttempts times with
-// fsckRetryDelay backoff (#907): the quiesce settle-wait has already let the async
-// save's region writes complete, so a residual tear is a non-chunk writer racing
-// the scan, and that transient should not veto a periodic snapshot — so the latest
-// clean attempt wins, and only a corruption that persists across every attempt
-// refuses the snapshot. A fsck I/O error is returned as-is (the caller treats it as
-// best-effort) and is not retried. On ctx cancellation it returns ctx.Err() (not the
-// last corrupt report) so a cancelled snapshot is not misclassified as corruption.
+// checkWorkingSet retries running-world corruption and checks stopped worlds once.
+// I/O errors are not retried; cancellation returns ctx.Err() rather than a corruption report.
 func (m *Manager) checkWorkingSet(ctx context.Context, serverID, workingDir string, running bool) (regionfsck.Report, error) {
 	if !running {
 		return regionfsck.CheckWorkingSet(workingDir)
@@ -1443,34 +681,8 @@ func (m *Manager) checkWorkingSet(ctx context.Context, serverID, workingDir stri
 	}
 }
 
-// quiesceRunning brackets a running-server snapshot so the world is not written
-// during the working-dir copy (#694). It opens RCON, disables auto-save
-// (save-off), issues a plain non-blocking save-all, then waits for the
-// asynchronous save to settle (settleWorkingSet: the region files' (mtime, size)
-// stop changing across a quiet window) so the fsck/copy reads a fully-written
-// world. It returns (quiesced, restore). quiesced is true only when the on-disk
-// state is actually quiesced — RCON opened AND save-off AND save-all succeeded AND
-// the save settled within the budget; the caller refuses the periodic snapshot
-// otherwise rather than packing a live world (#907).
-//
-// It deliberately uses a non-blocking save-all, NOT save-all flush: the
-// synchronous flush runs on the Minecraft main thread and crashed survival-main in
-// production on 2026-06-08 by parking a tick past max-tick-time and tripping the
-// Server Watchdog (issue #693). The settle-wait recovers the on-disk guarantee a
-// plain save-all lacks (it returns before the async save completes) without ever
-// parking the main thread.
-//
-// The save-on restore is still guaranteed whenever save-off succeeded: the
-// returned restore re-enables auto-save with save-on (only when save-off actually
-// succeeded) and always closes the RCON connection. It runs save-on on a context
-// detached from ctx (carrying restoreSaveTimeout) so a cancelled or timed-out
-// request still re-enables auto-save. Because the rcon client poisons its
-// connection on ANY Execute error (a failed/timed-out save-all leaves the same
-// client returning ErrConnBroken), the restore redials a fresh connection via
-// openControl and retries save-on once if the first attempt fails — otherwise a
-// running server would be left with auto-save permanently OFF (#694 hard
-// requirement). A final failure is logged loudly: auto-save stuck off is
-// operator-actionable.
+// quiesceRunning uses async save-all plus settling; synchronous flush can trip the Minecraft tick watchdog.
+// After acknowledged save-off, restore on a detached context and redial poisoned RCON connections.
 func (m *Manager) quiesceRunning(ctx context.Context, serverID, workingDir string) (bool, func()) {
 	driverName, mcVersion := m.controlTargetFor(serverID)
 	raw, err := m.openControl(ctx, serverID, driverName, mcVersion)
@@ -1478,9 +690,8 @@ func (m *Manager) quiesceRunning(ctx context.Context, serverID, workingDir strin
 		m.logger.Warn("snapshot quiesce: open rcon failed", "server_id", serverID, "error", err)
 		return false, func() {}
 	}
-	// Wrap in resilientControl (#919): a mid-bracket Execute error poisons the
-	// rcon connection, so save-all after a timed-out save-off (or save-on after
-	// a timed-out save-all) would return ErrConnBroken instantly. The wrapper
+	// Wrap in resilientControl: a mid-bracket Execute error poisons the rcon connection, so save-all after a
+	// timed-out save-off (or save-on after a timed-out save-all) would return ErrConnBroken instantly. The wrapper
 	// auto-redials so the bracket's trailing commands still reach the server.
 	ctrl := &resilientControl{
 		inner: raw,
@@ -1516,40 +727,8 @@ func (m *Manager) quiesceRunning(ctx context.Context, serverID, workingDir strin
 	}
 }
 
-// flushBeforeStopWithDriver drives the live world's dirty chunks to disk before
-// a graceful stop (issue #1007). The driver calls it always before tryRCONStop
-// on the graceful path, because MC's own shutdown save does NOT reliably flush
-// dirty region chunks when a player was connected.
-//
-// It issues a non-blocking save-all (the SAME mechanism quiesceRunning uses —
-// NOT save-all flush, whose synchronous flush parked a tick past max-tick-time
-// and tripped the Server Watchdog into a production crash, #693) and waits for
-// the asynchronous save to settle (settleWorkingSet: the region files' (mtime,
-// size) stop changing) so the chunks have landed on disk before the terminate.
-//
-// driverName is the driver that runs this server and mcVersion its Minecraft
-// version, both captured before the instance was evicted from the manager's map
-// (controlTargetFor would return empty after eviction).
-//
-// It is best-effort and bounded: any failure — RCON cannot be opened, save-off or
-// save-all errors, or the save never settles within the budget — is logged and the
-// stop proceeds anyway. Wedging a stop on a save failure would be strictly worse
-// than the pre-fix behavior; the common path completes the flush. The settle
-// budget (m.settleBudget, default 60s) stays well inside the API's stop dispatch
-// budget (stop_timeout_seconds=600).
-//
-// save-off is issued first to disable MC's auto-save disk writes (#1038): without
-// it, an active player's actions continuously generate new chunk writes, so
-// settleWorkingSet never converges within the budget. save-on is NOT sent — the
-// server is about to be stopped, so there is nothing to restore, and re-enabling
-// writes during the settle window would reintroduce the convergence problem.
-//
-// That leaves auto-save off on a server that is still running until the stop
-// resolves, so a save-off that LANDED is recorded in pendingSaveOn: a stop that
-// confirms termination has nothing to restore, one that fails reaches
-// restoreSaveOnAfterFailedStop, and a Worker that starts closing before either
-// happens settles the debt itself rather than leaving it to the next boot (issue
-// #3166).
+// Flush asynchronously before graceful termination, disabling auto-save so region writes can settle.
+// Failures do not block stop; pendingSaveOn restores survivors and brackets outstanding during shutdown.
 func (m *Manager) flushBeforeStopWithDriver(ctx context.Context, serverID, driverName, mcVersion string) bool {
 	raw, err := m.openControl(ctx, serverID, driverName, mcVersion)
 	if err != nil {
@@ -1557,9 +736,8 @@ func (m *Manager) flushBeforeStopWithDriver(ctx context.Context, serverID, drive
 			"server_id", serverID, "error", err)
 		return false
 	}
-	// Wrap in resilientControl (#919/#1040): a save-off failure poisons the rcon
-	// connection, so save-all on the same client returns ErrConnBroken instantly.
-	// The wrapper auto-redials so save-all degrades to the pre-save-off behavior
+	// Wrap in resilientControl: a save-off failure poisons the rcon connection, so save-all on the same client
+	// returns ErrConnBroken instantly. The wrapper auto-redials so save-all degrades to the pre-save-off behavior
 	// (flush without quiesce) instead of silently losing the flush entirely.
 	ctrl := &resilientControl{
 		inner: raw,
@@ -1571,41 +749,18 @@ func (m *Manager) flushBeforeStopWithDriver(ctx context.Context, serverID, drive
 	}
 	defer func() { _ = ctrl.Close() }()
 
-	// Record the debt BEFORE the command goes on the wire, not after it answers.
-	// rcon.Execute writes save-off and only then waits for a reply, so a round trip
-	// that times out says nothing about whether Minecraft ran it — and even a clean
-	// success can be interrupted between the reply and the record. Recording first is
-	// the only ordering with no window, and it errs the way that costs least: a debt
-	// for a save-off that never landed is one idempotent save-on, while a missing one
-	// is a surviving world that saves nothing (issue #3166).
-	//
-	// The bracket is opened here rather than at the dial above because a flush that
-	// could not dial never sends anything, and the forced stop path never calls this
-	// function at all (TestForcedFailedStopSkipsSaveOn).
-	//
-	// A REFUSED debt means the ledger is sealed, and then auto-save must not be
-	// disabled at all: Close has joined everything it joins and read the ledger for
-	// the last time, so nothing would ever re-enable it. This lane reaches the dial
-	// only because it was dispatched before the shutdown began, and it is not joined,
-	// so the process exits under it mid-escalation — the stop the quiesce exists to
-	// protect never completes anyway. Skipping costs this one stop its quiesce, no
-	// more than a save-off that fails already does (#1038), and it is the only shape
-	// that cannot leave auto-save off: nothing was turned off.
+	// Record before sending: a failed save-off round trip may still have disabled auto-save.
+	// A sealed ledger refuses the bracket because no shutdown restore can cover a new write.
 	written, quiesce := m.markPendingSaveOn(serverID, driverName, mcVersion)
 
-	// Disable auto-save so settleWorkingSet converges quickly even with active
-	// players (#1038). Best-effort: if save-off fails, save-all still runs — the
-	// settle may time out but the flush is no worse than before this fix.
+	// Disable auto-save so settleWorkingSet converges quickly even with active players. Best-effort: if save-off
+	// fails, save-all still runs, the settle may time out but the flush is no worse than before this fix.
 	if !quiesce {
 		m.logger.Warn("stop flush: worker is closing; skipping save-off so auto-save cannot be left disabled",
 			"server_id", serverID)
 	} else {
 		_, err := ctrl.Execute(ctx, "save-off")
-		// Close the edge the moment the write is back, before anything is done with its
-		// outcome: a shutdown restore for this id is holding on it, and what it needs to
-		// know is that the command is no longer in flight — not whether it was answered.
-		// Closed on the error path too, for the same reason the entry was recorded before
-		// the write: a round trip that failed may still have disabled auto-save.
+		// Signal write completion even on error so a shutdown restore never overtakes save-off.
 		close(written)
 		if err != nil {
 			m.logger.Warn("stop flush: save-off failed; proceeding with save-all",
@@ -1626,15 +781,8 @@ func (m *Manager) flushBeforeStopWithDriver(ctx context.Context, serverID, drive
 	return true
 }
 
-// restoreSaveOn re-enables auto-save after a running-server snapshot quiesce.
-// It runs on a context detached from the request's (carrying restoreSaveTimeout)
-// so a cancelled/timed-out snapshot still re-enables auto-save. The save-all/settle
-// step may have failed and poisoned ctrl's connection (the rcon client marks the
-// connection broken on any Execute error), so a save-on on the same ctrl can return
-// ErrConnBroken instantly; on any failure it redials a fresh RCON connection via
-// openControl and retries save-on once with a short backoff inside the timeout, so
-// a running server is never left with auto-save permanently OFF (#694). A final
-// failure is logged loudly — auto-save stuck off is operator-actionable.
+// Restore snapshot auto-save on a detached context; redial and retry once if the existing connection fails.
+// Log final failure because the server may remain with auto-save disabled.
 func (m *Manager) restoreSaveOn(ctx context.Context, serverID string, ctrl execution.ServerControl) {
 	restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restoreSaveTimeout)
 	defer cancel()
@@ -1671,25 +819,8 @@ func (m *Manager) restoreSaveOn(ctx context.Context, serverID string, ctrl execu
 	}
 }
 
-// restoreSaveOnAfterFailedStop re-enables auto-save on a server whose graceful
-// stop failed (the container/process survived Kill). The pre-stop flush issued
-// save-off to quiesce the world; because the stop never confirmed termination,
-// the server keeps running with auto-save disabled — every block edit, chest
-// open, and mob move since the flush is at risk if the JVM crashes before the
-// reconciler retries (issue #2021).
-//
-// Unlike restoreSaveOn (the snapshot path), the caller's RCON connection is
-// already closed and the instance was evicted from startCmds by
-// takeStoppableReserve, so controlTargetFor would return empty. The helper
-// accepts driverName and mcVersion explicitly (captured before eviction) and
-// dials a fresh RCON connection on a context detached from the (possibly
-// cancelled) request.
-//
-// It is no longer the only closer of that bracket: restoreSaveOnWhileClosing
-// settles the same debt from pendingSaveOn when the Worker starts closing with the
-// escalation still in flight (issue #3166). The two are independent and both
-// idempotent — this one runs whenever the graceful stop failed, whether or not the
-// shutdown already pre-empted it.
+// Restore failed graceful stops with a fresh RCON connection and a detached timeout.
+// Pass the captured driver and version because the instance has already been evicted.
 func (m *Manager) restoreSaveOnAfterFailedStop(ctx context.Context, serverID, driverName, mcVersion string) {
 	if err := m.dialAndSaveOn(ctx, restoreSaveTimeout, serverID, driverName, mcVersion); err != nil {
 		m.logger.Error("failed stop: auto-save NOT restored; surviving server is running with auto-save disabled",
@@ -1700,44 +831,17 @@ func (m *Manager) restoreSaveOnAfterFailedStop(ctx context.Context, serverID, dr
 		"server_id", serverID)
 }
 
-// restoreSaveOnWhileClosing re-enables auto-save on a server whose pre-stop flush
-// disabled it and whose stop is STILL IN FLIGHT when the Worker starts closing
-// (issue #3166). It is the same RCON call restoreSaveOnAfterFailedStop makes,
-// issued at the start of the shutdown instead of at the end of the escalation:
-// both outcomes of that escalation are fine to have pre-empted — a stop that
-// confirms termination leaves nobody to read the setting, and one that does not
-// reaches its own restore, which is idempotent.
-//
-// It differs from that one in two ways beyond its logging, which says "the stop has
-// not finished" rather than "the stop failed" because that is the true thing to tell
-// an operator here. First, it HOLDS until the bracket's save-off write has returned:
-// the ledger entry exists from before that write, so the entry alone does not say the
-// command has gone out, and a restore that overtook it would leave auto-save off (the
-// second clause of the ledger invariant, saveOnTarget). Second, it carries a much
-// shorter budget (closingSaveOnTimeout) covering the hold and the restore together:
-// the failed-stop restore is hidden inside a join Close is doing anyway, while this
-// one is added to the Worker's shutdown.
+// Shutdown restore waits for save-off completion, sharing one short budget between the wait and RCON.
+// A later failed-stop restore is harmless because save-on is idempotent.
 func (m *Manager) restoreSaveOnWhileClosing(serverID string, target saveOnTarget) {
-	// Do not overtake the save-off this bracket may still be writing. The entry exists
-	// from before the command goes on the wire, so reading it says nothing about
-	// whether the write has happened; the edge says that, and it is the second clause
-	// of the ledger invariant (saveOnTarget).
-	// The hold and the restore share ONE budget, so the drain still costs at most one
-	// closingSaveOnTimeout rather than two. A write that returns at the very last
-	// instant leaves a non-positive remainder, which makes the dial below fail at once
-	// through its own error path — no separate branch for it.
+	// Wait for save-off completion before restoring; the wait and dial share one deadline.
 	deadline := time.Now().Add(m.closingSaveOnTimeout)
 	hold := time.NewTimer(m.closingSaveOnTimeout)
 	defer hold.Stop()
 	select {
 	case <-target.written:
 	case <-hold.C:
-		// DECLINE rather than guess, and this is the honest inference rather than a
-		// concession: a save-off whose write has not returned within the budget is one
-		// the server is not answering, so it most likely never landed and auto-save is
-		// still on — while a save-on issued over a save-off that lands afterwards leaves
-		// auto-save OFF, which is the state being repaired. Such a server is exactly the
-		// one containerdriver.sweepSaveOn reaches at the next boot (issue #1710).
+		// Do not send save-on before an outstanding save-off finishes; log the unresolved bracket for recovery.
 		m.logger.Error("worker closing: auto-save NOT restored; the server never confirmed its save-off, so a restore could be overtaken by it",
 			"server_id", serverID, "driver", target.driver, "timeout", m.closingSaveOnTimeout)
 		return
@@ -1751,16 +855,8 @@ func (m *Manager) restoreSaveOnWhileClosing(serverID string, target saveOnTarget
 		"server_id", serverID)
 }
 
-// dialAndSaveOn dials a FRESH RCON connection for serverID and issues save-on on
-// a context detached from ctx and bounded by restoreSaveTimeout, so a cancelled
-// request — or a Worker already shutting down — still re-enables auto-save. It is
-// the mechanism both out-of-band restores share; each caller logs its own framing.
-//
-// A fresh dial rather than a reused one is the point: the caller's connection is
-// closed by then (the flush's ctrl) or poisoned (the rcon client marks the
-// connection broken on any Execute error), and the instance is evicted from
-// startCmds, so driverName and mcVersion have to be passed in — controlTargetFor
-// would answer empty (issues #2021, #1712, #3116).
+// dialAndSaveOn uses a fresh connection on a detached context bounded by the supplied timeout.
+// The captured driver and version remain available after instance eviction.
 func (m *Manager) dialAndSaveOn(ctx context.Context, timeout time.Duration, serverID, driverName, mcVersion string) error {
 	restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
 	defer cancel()
@@ -1775,59 +871,17 @@ func (m *Manager) dialAndSaveOn(ctx context.Context, timeout time.Duration, serv
 	return nil
 }
 
-// saveOnTarget is one entry in the ledger: the RCON target of an outstanding
-// pre-stop save-off — the driver that runs the server and its Minecraft version, the
-// pair every out-of-band save-on needs to resolve the dial host (#1712) and the
-// password's charset (#3116) after the instance has been evicted — plus the edge that
-// orders the restore after the write.
-//
-// THE LEDGER INVARIANT, which the three windows of issues #3166's review rounds were
-// all failures of, stated once so the protocol is a rule rather than a series of
-// boundary fixes:
-//
-//	For every save-off this manager writes, exactly one of these restores it:
-//	  - the lane, when attemptStop's outcome calls for restoreSaveOnAfterFailedStop;
-//	    the entry is cleared only after that has run, so the clear cannot race it;
-//	  - a Close drain, and only after the write has RETURNED, so the restore can
-//	    never precede the save-off it undoes.
-//	A save-off is never written for a bracket the seal refused, and no bracket is
-//	opened after the seal.
-//
-// written is that second clause's mechanism: the flush creates the entry before the
-// command goes on the wire and closes this channel once the Execute has returned,
-// whatever it returned. A drain waits on it before dialing. Everything between the
-// mark and the write therefore sits on one side of a real happens-before edge — the
-// statement gap, a preemption of any length, a slow write, resilientControl's redial
-// retry — instead of racing the drain.
-//
-// The rejected alternative was a claim the sender re-checks: the drain takes the
-// entry, and a flush that no longer owns one does not write. It cannot be made total.
-// check-then-write is two steps, so a drain claiming between them still lands its
-// save-on first, and closing THAT would need m.mu held across RCON I/O — which would
-// serialise every server's flush behind one lock. Ordering the write ahead of the
-// restore needs no lock at all, because the flush is the only writer of the edge and
-// the drain only reads it.
+// saveOnTarget retains RCON routing and a write-completion edge for a pre-stop bracket.
+// Record before save-off; restore only after written closes, and never open a bracket after the ledger is
+// sealed.
 type saveOnTarget struct {
 	driver    string
 	mcVersion string
 	written   chan struct{}
 }
 
-// markPendingSaveOn records that serverID's pre-stop flush is about to disable
-// auto-save, and returns the edge the caller MUST close once its save-off write has
-// returned — see saveOnTarget for the ledger invariant this pair implements. It also
-// reports whether the debt was taken on, and a FALSE means the caller must not disable
-// auto-save at all: the ledger is sealed, Close has already read it for the last time,
-// and a bracket opened now would be closed by nobody.
-//
-// The seal is what bounds Close's drain to two passes instead of a loop. Without it
-// the drain would have to keep re-reading — a stop dispatched before the shutdown
-// began has its own RCON dial (a TCP connect plus an AUTH handshake, up to rcon's
-// 30 s ceiling) between the command and its save-off, so it can arm a debt long after
-// the first read — and a loop whose exit depends on no lane re-arming is a loop whose
-// termination is an argument about other code. Refusing instead makes it a local
-// invariant: after the seal, no debt can exist, so the pass that set it is the last
-// one needed.
+// markPendingSaveOn returns the channel to close after save-off finishes, even on error.
+// A false result forbids save-off because shutdown has sealed the ledger.
 func (m *Manager) markPendingSaveOn(serverID, driverName, mcVersion string) (chan struct{}, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1874,15 +928,8 @@ func (m *Manager) drainPendingSaveOn(seal bool) map[string]saveOnTarget {
 	return pending
 }
 
-// settleWorkingSet waits for an asynchronous save-all to finish writing the
-// working set's region files before the fsck/copy reads them (#907). It snapshots
-// the (mtime, size) of every .mca under workingDir, re-scans every settlePollInterval,
-// and reports settled (true) once two consecutive scans are identical — the save's
-// region writes have stopped. It gives up (false) after settleBudget so a world
-// that never settles refuses the periodic snapshot (quiesce_unavailable) instead of
-// waiting unbounded, and returns false on ctx cancellation. A scan I/O error is
-// transient (a region file being rewritten can momentarily vanish), so it is treated
-// as "not yet settled" and retried within the budget rather than aborting.
+// settleWorkingSet requires two identical region (mtime, size) scans within settleBudget.
+// Scan errors retry within the budget; cancellation or expiry returns false.
 func (m *Manager) settleWorkingSet(ctx context.Context, serverID, workingDir string) bool {
 	deadline := time.Now().Add(m.settleBudget)
 	prev, err := m.scanRegion(workingDir)
@@ -1967,19 +1014,12 @@ func (m *Manager) handleStart(ctx context.Context, cmd session.Command) session.
 
 	launchMode, ok := launchModeFor(cmd.LaunchMode)
 	if !ok {
-		// An unrecognized launch mode is a malformed command, not a per-precondition
-		// case in the #294 contract table; it surfaces as the unpinned INTERNAL code.
+		// Unknown launch modes are malformed commands and return INTERNAL.
 		return fail(cmd.CommandID, session.CommandErrorInternal,
 			fmt.Sprintf("instancemanager: unknown launch mode %q", cmd.LaunchMode))
 	}
 
-	// Reserve the id before driver.Start so a duplicate StartServer re-issued after
-	// a stream reconnect cannot pass the running check and launch a second instance
-	// while the original is still mid-driver.Start (issue #780). The reservation is
-	// released on every exit path below — including a failed start — so a retry can
-	// proceed. It is not released on success: the registered instance then holds the
-	// id (a duplicate sees the running instance), so releasing the reservation only
-	// after registration keeps the id continuously claimed across the handoff.
+	// Claim the ID before Start; register the instance under the same lock that releases the claim.
 	if ok, code, msg := m.reserve(cmd.ServerID); !ok {
 		return fail(cmd.CommandID, code, msg)
 	}
@@ -1987,84 +1027,12 @@ func (m *Manager) handleStart(ctx context.Context, cmd session.Command) session.
 	return m.launchReserved(ctx, cmd, driver, launchMode)
 }
 
-// launchReserved performs the start under an ALREADY-HELD reservation (taken by
-// handleStart or carried across a restart's stop, issue #780): it refuses a launch
-// whose working set this Worker does not hold, runs driver.Start, and registers the
-// instance, releasing the reservation on every failure path and handing the id off
-// to the registered instance under one mu critical section on success — so the id is
-// never unclaimed.
-//
-// The working-set guard lives HERE rather than in handleStart (issue #2802) because
-// this is the single place a launch happens: handleStart's start and handleRestart's
-// RELAUNCH both pass through it. While it sat in handleStart only, a restart of a
-// running server whose scratch had been destroyed out of band went straight to the
-// MkdirAll this function used to open with and booted the live server into an empty
-// directory — #2499's hole reached through a different verb. Replacing that MkdirAll
-// with the refusal also removes the "silently manufacture an empty dir" hazard
-// structurally: nothing here creates a working dir any more, so past the guard the
-// directory is known to be one the Worker really holds.
+// launchReserved requires held scratch for both start and restart, then atomically hands the claim to the
+// instance.
+// Every failure releases the reservation; this path never creates a missing working set.
 func (m *Manager) launchReserved(ctx context.Context, cmd session.Command, driver execution.ExecutionDriver, launchMode execution.LaunchMode) session.CommandResult {
-	// Refuse a launch whose working set is not on disk (issue #2499, extended to the
-	// restart's relaunch and to an emptied-in-place scratch by issue #2802). The API
-	// issues a HydrateTrigger before every StartServer that needs one
-	// (control_plane.proto, StartServer), so by the time a launch happens the working
-	// set is always held: a 200 hydrate swaps the unpacked tree in, and even a 204
-	// ("nothing published yet") stamps the generation marker (writeGenerationGuarded).
-	// A missing one therefore means the API skipped the hydrate — its held-working-set
-	// inventory says this Worker holds a generation at least as fresh as the store
-	// (skip_hydrate = held >= store, lifecycle.py) — over a working set this Worker
-	// does not actually hold. Every input to that belief is honest about the moment it
-	// was taken (the register-time scan, issue #2477's hydrate-side recording, issue
-	// #2481's publish-side declaration) and none of them re-checks at launch, so an
-	// out-of-band destruction of a live Worker's scratch has no floor between two
-	// registrations. Without this check the start boots into a directory holding
-	// nothing: the world is replaced by nothing, and the next snapshot publishes that
-	// — the #696 class, and the one residual of the inventory design that fails toward
-	// a SKIPPED hydrate instead of an extra one.
-	//
-	// The PREDICATE is the GENERATION MARKER, not a directory stat (issue #2802): the
-	// marker is precisely the claim the skipped hydrate relied on. The register-time
-	// advertisement reads it (scratchscan.go, readGeneration), a 200 hydrate embeds it
-	// in the tree before the swap-in rename (issue #917), a 204 stamps it as its only
-	// write, and the Worker declares a held generation to the API only when the stamp
-	// landed (issue #2500). One stat covers both destructions: the dir gone (ENOENT on
-	// the path) and the dir emptied in place (the marker gone with the contents), which
-	// a bare directory stat passed. The name is matched EXACTLY — a ".mcsd_generation-*"
-	// temp sibling from a crashed stamp is not a marker to any consumer, so it does not
-	// count here either. A marker-ONLY dir PASSES: that is the 204 nothing-published
-	// contract, where booting a fresh world is intended — which is why a content
-	// predicate ("level.dat present") would be wrong. Residual: a destruction that
-	// spares the marker but eats the content still boots.
-	//
-	// REFUSE rather than hydrate here (the owner's call on issue #2499). Hydrating
-	// anyway would be self-healing and invisible, which is its weakness: it masks a
-	// host whose disk is being destroyed underneath a running Worker and the operator
-	// learns nothing. The refusal is the loud version of the same recovery — the API
-	// answers a start by re-launching WITH a full hydrate (_launch, lifecycle.py), and
-	// a restart's refused relaunch by leaving the server down for the reconciler's
-	// redispatch_start, which meets this same guard and takes that replay. So the
-	// recovery is stop (the restart's own) -> hydrate -> start, assembled from shipped
-	// parts. The WARN below plus the API's own WARN are what tell the operator it
-	// happened.
-	//
-	// The check is race-free: the reservation is already held, so it holds off the
-	// hydrate or start that could create the working set concurrently. It sits after
-	// reserve() so the unsettled states keep their own codes — a running instance still
-	// answers INVALID_STATE and an orphan/in-flight command still answers BUSY, which
-	// the API converges and retries on respectively.
-	//
-	// SERVER_NOT_FOUND, with the same "working dir absent" phrase handleSnapshot's
-	// sibling refusal uses (issue #1713): no working set is held for this id and no
-	// retry can succeed without a hydrate. The phrase is load-bearing — the API keys
-	// on it together with the code (_WORKING_SET_ABSENT_MARKER in
-	// api/src/mc_server_dashboard_api/servers/application/lifecycle.py) to tell this
-	// refusal from a plain SERVER_NOT_FOUND. It is kept verbatim for the emptied case
-	// too: the prose is a shade imprecise there, but the discriminator is exact, and
-	// rewording it would mean touching every pinned site on both sides at once — which
-	// is now enforced rather than remembered: the message below is declared as
-	// "working_set_absent.launch" in proto/contract/command_error_contract.json,
-	// TestCommandErrorContract asserts this emission against that declaration, and the
-	// API's phrase is pinned to the same entry (issue #2843).
+	// Require the exact generation marker; marker-only scratch is valid for a fresh 204 hydrate.
+	// Keep "working dir absent" synchronized with the API replay discriminator and command-error contract.
 	workingDir := filepath.Join(m.scratchDir, cmd.ServerID)
 	if _, err := os.Stat(filepath.Join(workingDir, scratchformat.GenerationMarkerFile)); os.IsNotExist(err) {
 		m.release(cmd.ServerID)
@@ -2081,12 +1049,11 @@ func (m *Manager) launchReserved(ctx context.Context, cmd session.Command, drive
 		MinecraftVersion: cmd.MinecraftVersion,
 		JarRelpath:       cmd.JarRelpath,
 		LaunchMode:       launchMode,
-		// The wire carries the memory LIMIT in bytes (#706); the spec carries it in
-		// MiB. 0 stays 0 (unset -> default heap). Truncating to MiB is exact for any
-		// real limit (the API only ever sends whole-MiB values).
+		// The wire carries the memory LIMIT in bytes; the spec carries it in MiB. 0 stays 0 (unset -> default heap).
+		// Truncating to MiB is exact for any real limit (the API only ever sends whole-MiB values).
 		MemoryLimitMB: uint32(cmd.MemoryLimitBytes / (1024 * 1024)),
-		// The CPU allocation (millicores, #723) is carried as-is onto the spec; no
-		// derivation. 0 stays 0 (unset -> default weight).
+		// The CPU allocation (millicores) is carried as-is onto the spec; no derivation. 0 stays 0 (unset -> default
+		// weight).
 		CPUMillis: cmd.CPUMillis,
 	})
 	if err != nil {
@@ -2095,10 +1062,9 @@ func (m *Manager) launchReserved(ctx context.Context, cmd session.Command, drive
 			fmt.Sprintf("instancemanager: start: %v", err))
 	}
 
-	// Register the instance, then drop the reservation under the same mu: the
-	// tracked instance now holds the id, so there is no window where neither the
-	// reservation nor the instance claims it (a concurrent duplicate always sees
-	// one or the other, issue #780).
+	// Register the instance, then drop the reservation under the same mu: the tracked instance now holds the id, so
+	// there is no window where neither the reservation nor the instance claims it (a concurrent duplicate always
+	// sees one or the other).
 	m.mu.Lock()
 	m.instances[cmd.ServerID] = inst
 	m.startCmds[cmd.ServerID] = cmd
@@ -2109,21 +1075,8 @@ func (m *Manager) launchReserved(ctx context.Context, cmd session.Command, drive
 	return session.CommandResult{CommandID: cmd.CommandID, Success: true}
 }
 
-// startPumps launches the per-instance fan-in goroutines for an instance:
-// status events, captured logs (if the instance is a LogSource), and periodic
-// metrics (always; up-only when the instance is not a StatsSource). The status
-// pump owns a done channel it closes when the instance reaches a terminal state;
-// the log and metrics pumps watch it so all three tear down cleanly on
-// stop/crash/eviction without leaking goroutines (FR-MON-2, FR-MON-3).
-//
-// A terminal state is the only thing that used to end them, and a server the
-// Worker is shut down underneath never reaches one — so they are manager-owned
-// goroutines Close joins (issue #2777). A start that lands on an already-closed
-// manager therefore starts NONE of them: the instance is registered (the map is
-// what guards the id) but its events go nowhere, which is what they did anyway
-// with no session left to forward them to. The status pump is started first and
-// gates the other two, so the pumps that watch its done channel can never be
-// started without the pump that closes it.
+// Start status first so its done channel can end log and metrics pumps.
+// Close joins all pumps; an already-closed manager starts none.
 func (m *Manager) startPumps(serverID string, inst execution.Instance) {
 	done := make(chan struct{})
 	if !m.goBackground(func() { m.pump(serverID, inst, done) }) {
@@ -2142,205 +1095,63 @@ func (m *Manager) handleStop(ctx context.Context, cmd session.Command, graceful 
 		return fail(cmd.CommandID, session.CommandErrorServerNotFound,
 			"instancemanager: server not running")
 	case takeInFlight:
-		// A lifecycle command is already reserved in flight for this id (issue #780):
-		// most importantly, a DETACHED stop from a dropped stream's lane is still
-		// confirming termination — takeStoppableReserve evicted the instance and holds
-		// the reservation across inst.Stop (up to ~3x stopTimeout). A re-sent StopServer
-		// on the reconnected stream must NOT get SERVER_NOT_FOUND here: that makes the
-		// API converge observed=stopped and unassign while the old process is still
-		// alive and writing, after which a re-placed start's HydrateTrigger would clobber
-		// the live working set. Returning BUSY (issue #824) makes the API's redispatch_stop
-		// keep the assignment and retry on a later tick (lifecycle.py), converging safely
-		// once the detached stop finishes (the id then becomes genuinely SERVER_NOT_FOUND).
+		// An in-flight detached stop must return BUSY so the API cannot unassign a process still writing its world.
 		return fail(cmd.CommandID, session.CommandErrorBusy,
 			"instancemanager: a lifecycle command is already in flight for this server")
 	}
-	// The id is now reserved across the eviction -> stop-confirmed window so the
-	// detached stop is the sole writer; released on every return below (issue #780).
+	// The id is now reserved across the eviction -> stop-confirmed window so the detached stop is the sole writer;
+	// released on every return below.
 	defer m.release(cmd.ServerID)
 	if err := m.attemptStop(ctx, cmd.ServerID, inst, graceful, driver, mcVersion); err != nil {
 		return fail(cmd.CommandID, session.CommandErrorInternal,
 			fmt.Sprintf("instancemanager: stop: %v", err))
 	}
-	// Do NOT GC the scratch here, even though a confirmed StopServer is an
-	// AUTHORITATIVE stop (issue #841). The API sends the FINAL snapshot for this id
-	// only AFTER this stop's CommandResult (StopServer.__call__, lifecycle.py,
-	// FR-DATA-7): a stop-time GC would leave that SnapshotTrigger to pack an empty
-	// dir, silently losing the world progressed since the last periodic snapshot.
-	// The #762 reclamation moves to AFTER the post-stop final snapshot publishes
-	// (handleSnapshot's stopped-id branch) — see removeScratch.
+	// Retain scratch after stop: the API sends its final snapshot only after this result.
+	// Reclaim it only after that stopped snapshot publishes successfully.
 	return session.CommandResult{CommandID: cmd.CommandID, Success: true}
 }
 
-// removeScratchTree is the os.RemoveAll removeScratch takes the scratch dir out with,
-// indirected through a package var (mirroring removeDisplacedTree) so a test can observe
-// the exact instant the id stops being advertised — the point after which no per-id pass
-// is ever offered it again, and therefore the point the hydrate-leftover sweep has to
-// precede (issue #3167). The deleted-server reclaim needs no such seam: its own removal
-// logs on success, so the test there parks on that record. Production always uses
-// os.RemoveAll.
+// Inject scratch removal to assert hydrate leftovers are gone before the ID stops being advertised.
 var removeScratchTree = os.RemoveAll
 
-// removeScratch sweeps any .hydrate-<id>-* temp/trash siblings a crash mid-hydrate left
-// behind for this id (datatransfer.unpackAndSwap, issue #772, swept via
-// sweepHydrateLeftovers) and then deletes the server's local working-set scratch dir.
-// That order is load-bearing rather than incidental — see the body (issue #3167).
-// It is best-effort: a removal failure is logged, never surfaced — the working
-// set has already been captured (the snapshot that triggers it succeeded), and
-// leftover scratch is a hygiene problem, not a failure. A missing dir is a no-op
-// (os.RemoveAll returns nil).
-//
-// Reclamation contract (issue #841, preserving #762's anti-accumulation goal):
-//   - GC runs ONLY after a successful STOPPED-id SnapshotTrigger — the post-stop
-//     final snapshot (or a snapshot of an at-rest set). At that point the working
-//     set is captured authoritatively and the API has typically unassigned this
-//     Worker, so the local copy is redundant and safe to reclaim. The scratch dir
-//     and this id's hydrate leftovers (#842) are reclaimed together at that moment.
-//   - It does NOT run on the stop itself (the final snapshot has not happened yet),
-//     on a FAILED snapshot (nothing was captured — losing it would be the #841 bug),
-//     or on a RUNNING-id snapshot (the live server still owns its working set).
-//   - If the final snapshot NEVER arrives (API crash between stop and snapshot, or
-//     the Worker/stream dropping before it lands), the scratch persists. It is then
-//     reclaimed by the next authoritative event for that id: a later start hydrates
-//     a fresh working set over it, or — on a same-Worker restart — ScanHeldServers
-//     reports it as held and the API's generation-gated hydrate (#763/#767) either
-//     reuses it (still current) or re-hydrates (stale). This bounds accumulation to
-//     at most one at-rest working set per stopped server, never an unbounded leak.
-//   - A server DELETED while its scratch was live is reclaimed at the next
-//     registration via ReclaimDeletedScratches (issue #924). The API computes the
-//     unknown subset of held_servers and returns it in RegisterAck; the Worker
-//     removes the scratch dir and hydrate leftovers but NOT .displaced-<id> trees
-//     (issue #911).
+// removeScratch runs only after a successful stopped snapshot and preserves data on publish failure.
+// Deleted-server scratch is reclaimed separately at registration; displaced recovery copies have their own
+// sweep.
 func (m *Manager) removeScratch(serverID string) {
-	// The leftovers go FIRST, and the order is load-bearing (issue #3167, the same
-	// hazard issue #2934 closed on the deleted-server reclaim). <scratch>/<id> is what
-	// keeps the id advertised — both held-set scans skip .hydrate-<id>-*
-	// (isReservedScratchName) — so the instant it is removed the id leaves held_servers
-	// and no PER-ID pass is ever offered it again: a deleted or re-placed-elsewhere
-	// server gets no further stopped-id snapshot, the API stops deriving the id into
-	// unknown_held_server_ids, and datatransfer's own sweep runs only if the server comes
-	// back to this Worker. Sweeping after the removal therefore left every interruption
-	// in that window a world-sized tree only a Worker BOOT reclaims
-	// (ReclaimHydrateLeftovers) — the backstop, not the plan, on a Worker that runs for
-	// months. This way round, an interruption anywhere in here leaves the scratch dir
-	// standing, and with it the advertisement that re-offers the id.
-	//
-	// This path is MORE exposed than that reclaim, not less: it runs on a session command
-	// lane, which shutdown abandons without waiting at all (Runner.serve joins no lane),
-	// so an ordinary SIGTERM reaches the window a crash reaches there.
+	// Sweep hydrate leftovers before deleting scratch: its presence keeps the ID advertised for retry after
+	// interruption.
 	m.sweepHydrateLeftovers(serverID)
 	dir := filepath.Join(m.scratchDir, serverID)
 	if err := removeScratchTree(dir); err != nil {
 		m.logger.Warn("failed to remove scratch dir after final snapshot",
 			"server_id", serverID, "dir", dir, "error", err)
 	}
-	// The successful stopped-id snapshot proves the store supersedes this server's
-	// world, so a displaced tree a prior hydrate kept aside for recovery (issue #906)
-	// is now redundant and reclaimed alongside the scratch. No identity re-check is
-	// passed: this path holds the per-id reservation, so no hydrate can park a fresh
-	// recovery copy in the slot mid-sweep (issue #3118).
-	//
-	// It does NOT follow that this path removes whatever it finds. The id's slot claim is
-	// taken here exactly as it is on the running-id path (detachDisplacedTree), and a claim
-	// another sweep already holds is this path's one DELIBERATE decline: the reservation
-	// rejects hydrates and starts, not a running-id sweep from an older, already-dropped
-	// stream, which takes no reservation of its own and whose lanes are a different
-	// stream's — so such a sweep can be holding the claim when this one arrives.
-	//
-	// It is not the only way the tree is left behind. Every step is best-effort, so a slot
-	// Lstat cannot read, a .sweeping- name MkdirTemp cannot create and a failed rename out
-	// of the slot leave it exactly where a held claim does (an ABSENT slot is not this case:
-	// there is simply no tree to sweep). What is specific to this path is where all of them
-	// land — the removal above has just retired the advertisement that keeps the id eligible
-	// for any later per-id pass, so a tree left in the slot waits for a re-placement onto
-	// this Worker or for an operator (STORAGE.md Section 4.6); no next tick reclaims it.
-	// Only past the rename does a failure leave the tree under .sweeping- instead, which the
-	// next boot's ReclaimInterruptedDisplacedSweeps takes.
+	// The reservation excludes hydrates, so no identity pin is needed, but another stream's sweep can still claim
+	// the slot.
+	// A declined sweep after scratch removal leaves recovery copies for re-placement or manual cleanup.
 	m.sweepDisplaced(serverID, nil)
 }
 
-// sweepDisplaced removes the .displaced-<id> tree a prior hydrate moved aside for
-// recovery (issue #906). It runs on the next SUCCESSFUL snapshot for the id — the
-// moment the store provably supersedes the displaced world — mirroring the #845
-// GC-on-success reclamation. The name matches datatransfer.displacedDir exactly
-// (".displaced-<id>"), so only this id's displaced tree is touched. Best-effort: a
-// failure is ignored (the leftover is wasted disk, never a correctness problem). A
-// missing tree is a no-op.
-//
-// RENAME, THEN REMOVE (issue #2799). The tree is first renamed out of the slot to a
-// unique .sweeping-<id>-* sibling, and only that name is traversed. The slot is what a
-// hydrate's oldest-wins check (datatransfer.displacedSlotHoldsWorkingSet) reads, by
-// name, and removing the tree in place is a traversal that takes seconds for a
-// world-sized tree: a check landing inside it read the half-deleted tree as an occupied
-// slot, retained it — while the traversal went on deleting it — and dropped the live set
-// the hydrate displaced. The rename empties the slot atomically before any traversal
-// starts, so a hydrate finds either the whole tree or nothing; the scratch root is
-// fsynced before the traversal, so not even a power loss can put a half-deleted tree
-// back in the slot. A failed rename therefore returns WITHOUT removing anything: falling
-// back to an in-place removal would reopen that window, and declining costs only a leak,
-// retried by the next successful snapshot. A traversal that does not finish (a crash,
-// or a removal error) leaves the tree under its .sweeping- name, which
-// ReclaimInterruptedDisplacedSweeps removes at the next Worker boot.
-//
-// The function itself removes nothing unconditionally; the CALLERS establish that the
-// success really does supersede the tree being removed, and they do it differently. The
-// stopped-id caller (removeScratch) holds a per-id reservation, so no hydrate can be
-// racing it and it passes a nil stillPinned. The running-id caller takes no reservation
-// (#829 item 4), so it gates this call on the working-dir identity pin instead (issue
-// #2291, reusing the #2284 pin) and hands that pin's check in as stillPinned: an old
-// dropped stream's snapshot can still succeed after a NEW stream re-placed the server
-// here and hydrated it, and the .displaced-<id> it would sweep is then that hydrate's
-// recovery copy — a tree this snapshot never published, holding the published state
-// plus whatever the world progressed since its PACK — rather than a world the success
-// supersedes. That is the window issue #917 item 3 named and left open.
-//
-// RE-CHECK AFTER THE RENAME (issue #3118), because the caller's gate alone cannot cover
-// what the rename takes. The pin keeps passing right up to the moment the racing hydrate
-// renames the working dir aside, and the rename below takes whatever sits in the slot at
-// THAT instant, not what the Lstat above saw: a hydrate can clear world-less junk from
-// the slot and park its live set there in between, so the sweep's residual was never a
-// leak-only direction — it could take the fresh recovery copy. The identity is therefore
-// checked again once the tree is out of the slot and before anything is unlinked. A
-// removal then happens only while the working dir is still the tree this snapshot
-// packed; a tree that holds a working set and was taken from a slot whose working dir was
-// replaced meanwhile goes back where it came from, and only when the slot is empty —
-// putBackSweptTree has the full rule and what it costs. Every uncertainty resolves to "not current"
-// (workingDirRef.current), so an unreadable identity puts the tree back too: the leak
-// direction, at worst one more tree until the next successful snapshot.
-//
-// What a decline costs is that LEAK — one world-sized tree until the next successful
-// snapshot for the id reclaims it, which is the #906 contract itself. The one loss left
-// is crash-conditional: a power loss after the rename out of the slot and before the
-// put-back is durable rolls the tree back to its .sweeping- name, which the next boot
-// reclaims. That window is strictly narrower than the unconditional removal it replaced,
-// and the boot reclaim is deliberately not taught to put trees back — a .sweeping- tree
-// is garbage in every other case.
+// Rename displaced trees out of their slot and fsync before recursive removal, preventing hydrates from seeing
+// partial deletion.
+// Recheck running-snapshot identity after rename; uncertain recovery copies are put back rather than deleted.
 func (m *Manager) sweepDisplaced(serverID string, stillPinned func() (bool, string)) {
 	trash, remove := m.detachDisplacedTree(serverID, stillPinned)
 	if !remove {
 		return
 	}
-	// Make the rename durable before the traversal unlinks anything, so a power loss
-	// cannot roll it back over a half-deleted tree and put that tree back in the slot.
-	// Both still happen after the rename and before the first unlink (#2799); they run
-	// OUTSIDE the slot claim because they no longer touch the slot, and a world-sized
-	// traversal is not something another sweep for this id should have to wait behind.
+	// Make the rename durable before the traversal unlinks anything, so a power loss cannot roll it back over a
+	// half-deleted tree and put that tree back in the slot. Both still happen after the rename and before the first
+	// unlink; they run OUTSIDE the slot claim because they no longer touch the slot, and a world-sized traversal is
+	// not something another sweep for this id should have to wait behind.
 	if err := syncSweepScratchRoot(m.scratchDir); err != nil {
 		return
 	}
 	_ = removeDisplacedTree(trash)
 }
 
-// detachDisplacedTree performs the slot-visible half of a sweep under this id's slot
-// claim (sweepingSlot): find the tree, rename it out of the slot, re-check the caller's
-// identity pin and either hand the tree over for removal or put it back. It reports the
-// name the tree now sits under and whether removing it is justified.
-//
-// Everything that reads or writes .displaced-<id> is inside the claim, and nothing else
-// is. A sweep that cannot take the claim returns having touched nothing: the tree it
-// would have swept stays in the slot, and the next successful snapshot for the id sweeps
-// it instead. That decline is what keeps two sweeps from deciding about one slot at once,
-// which is the precondition for a put-back of one tree costing the other (issue #3118).
+// Claim the slot only through rename, identity recheck, and possible put-back.
+// A competing sweep declines without touching it; recursive removal runs outside the claim.
 func (m *Manager) detachDisplacedTree(serverID string, stillPinned func() (bool, string)) (string, bool) {
 	if !m.claimDisplacedSlot(serverID) {
 		return "", false
@@ -2390,58 +1201,8 @@ func (m *Manager) releaseDisplacedSlot(serverID string) {
 	delete(m.sweepingSlot, serverID)
 }
 
-// putBackSweptTree renames a tree the sweep had taken out of the .displaced-<id> slot
-// back into it, for the re-check above (issue #3118). It runs before any unlink, so the
-// tree is still whole.
-//
-// THE TREE must hold a working set, by sweptTreeHoldsWorkingSet — the rule the HYDRATE
-// applies to this same slot, type-aware and error-returning, pinned to the adapter's copy
-// by a twin test rather than shared through an import the layering does not allow. It is
-// deliberately not hasWorkingSet: that one reads through a symlink and folds every read
-// failure into "no working set", and both answers are "delete this at the next boot" here
-// (PR #3121 review, round 2). Running-id sweeps take NO cross-stream
-// reservation, so TWO sweeps for one id can be in this window at once — only a running-id
-// one ever reaches this put-back, but the sweep it would block may be the stopped-id one,
-// whose reservation does not exclude a sweep that takes none — and world-less junk put back
-// by one of them occupies the slot against the other, which may be holding the hydrate's
-// live set. That set would then go under .sweeping- for the next boot to delete, which is
-// the loss this function exists to prevent (PR #3121 review, round 1). Junk is left under
-// .sweeping- instead: it is the garbage the boot reclaim expects, and what this sweep was
-// going to do with it anyway.
-//
-// THE SLOT must be empty, and empty is the whole rule, not a proxy for "holds nothing
-// worth keeping": os.Rename REFUSES any existing directory as its target (an EEXIST it
-// raises itself, before the syscall — unlike rename(2), which would replace an empty
-// one), so a slot holding marker-only junk blocks the put-back whatever this function
-// decides about it. Emptying it first is not an option: the sweep holds no reservation,
-// so RemoveAll on the slot is exactly the in-place removal issue #2799 forbids — a
-// hydrate can clear that junk and park its live set between the read and the removal, and
-// the removal would then delete a live world. Only the hydrate, under its per-id
-// reservation, can clear the slot. The Lstat is therefore an early-out and a log
-// distinction; what makes the put-back safe is the rename refusing to clobber whatever a
-// concurrent hydrate parked since.
-//
-// ON READ UNCERTAINTY the tree is KEPT, not dropped: an unclassifiable tree falls through
-// to the put-back. The asymmetry is the point — putting back a tree that turns out to be
-// junk costs at worst an occupied slot, while leaving one that turns out to be real costs
-// the only copy of the unpublished delta at the next boot. It is the direction the
-// hydrate takes on the same read (an unreadable slot fails the hydrate rather than being
-// reclassified into a discard).
-//
-// That retention is only safe because THIS id's slot claim (sweepingSlot) makes this
-// function the only sweep deciding about the slot: the tree put back here can no longer
-// occupy the slot against a concurrent sweep holding a proven recovery tree. The
-// invariant the pair upholds: a tree that holds a working set is never deleted because
-// some OTHER tree's classification was junk or uncertain.
-//
-// A tree that cannot go back stays under its .sweeping- name for
-// ReclaimInterruptedDisplacedSweeps, and that is logged: it decides what the next boot
-// deletes, and a .sweeping- tree is garbage everywhere else. Junk left behind is not
-// logged — it IS ordinary garbage, indistinguishable from an interrupted sweep's.
-//
-// The put-back can also lose a race to a LATER hydrate's own park into the same empty
-// slot: that park then fails with ENOTEMPTY and fails the hydrate, which deletes nothing
-// before its park (datatransfer.unpackAndSwap) and is simply retried.
+// Put back real or unreadable recovery trees only into an empty slot; never clear a racing hydrate's slot.
+// Junk stays under .sweeping- for boot cleanup; a crash before durable put-back can still lose a recovery copy.
 func (m *Manager) putBackSweptTree(serverID, displaced, trash, why string) {
 	if holds, err := sweptTreeHoldsWorkingSet(trash); err == nil && !holds {
 		// PROVABLY world-less junk is not worth putting back, and putting it back is
@@ -2468,13 +1229,7 @@ func (m *Manager) putBackSweptTree(serverID, displaced, trash, why string) {
 		"server_id", serverID, "retained", displaced, "reason", why)
 }
 
-// renameSweptTree is the os.Rename sweepDisplaced empties the slot with, indirected
-// through a package var (mirroring removeDisplacedTree) so a test can land a racing
-// hydrate's park in the one gap that decides what this rename takes — between the Lstat
-// that found the slot occupied and the rename itself — rather than race for it. Only the
-// rename OUT of the slot goes through it; putBackSweptTree renames back with os.Rename
-// directly, so a test's seam cannot also intercept the recovery. Production always uses
-// os.Rename.
+// Inject only the rename out of the slot so tests can race a hydrate without intercepting recovery put-back.
 var renameSweptTree = os.Rename
 
 // syncSweepScratchRoot is the fsyncDir sweepDisplaced makes its rename durable with,
@@ -2491,20 +1246,8 @@ var syncSweepScratchRoot = fsyncDir
 // Production always uses os.RemoveAll.
 var removeDisplacedTree = os.RemoveAll
 
-// sweepHydrateLeftovers removes the .hydrate-<id>-* temp/trash siblings a crashed
-// hydrate for serverID left in the scratch root. The next start's leftover sweep
-// (datatransfer.sweepHydrateLeftovers) clears them too, but only if the server is
-// re-placed onto this Worker; a deleted/re-placed-elsewhere id would otherwise leak
-// the world-sized orphan until the next Worker boot, where ReclaimHydrateLeftovers takes
-// it (issue #3167) — months away on a Worker that does not restart, which is why this
-// per-id sweep stays the one that runs at the time it matters, and why its CALLERS run it
-// before the scratch removal that ends the id's advertisement.
-//
-// The prefix is built from the name the held-set scans skip on, and matches
-// datatransfer.hydrateTmpPrefix
-// exactly (".hydrate-<id>-"), so only this id's leftovers are touched — not another
-// server's dir or a similarly named one. Best-effort: a removal failure is ignored
-// (a leftover is wasted disk, never a correctness problem).
+// Sweep per-ID hydrate leftovers before scratch removal, including IDs never placed on this Worker again.
+// Boot reclaim is the backstop for interrupted cleanup.
 func (m *Manager) sweepHydrateLeftovers(serverID string) {
 	entries, err := os.ReadDir(m.scratchDir)
 	if err != nil {
@@ -2518,34 +1261,9 @@ func (m *Manager) sweepHydrateLeftovers(serverID string) {
 	}
 }
 
-// ReclaimDeletedScratches removes scratch dirs for server ids the API confirmed
-// no longer exist (issue #924). It runs asynchronously on a goroutine so it does
-// not block heartbeats or command dispatch. Per id it validates the id, claims a
-// reservation (skipping running/orphaned/reserved ids), sweeps this id's hydrate
-// leftovers, removes the scratch dir, then releases the reservation. That order
-// is load-bearing rather than incidental — see the body. .displaced-<id> trees are
-// intentionally NOT reclaimed (issue #911: retained for operator recovery).
-//
-// Reclamation contract update (issue #924, extending #841):
-//   - The post-stop final snapshot path (removeScratch) remains the primary GC.
-//   - This method covers the gap: a server deleted while its scratch was live
-//     (the final snapshot never arrived), reclaimed at the next registration.
-//   - Phase 2 (refresh held inventory per re-registration) is implemented:
-//     HeldServers() (issue #1711) refreshes the advertised set each register.
-//
-// The goroutine is manager-owned, so it goes through goBackground and Close JOINS
-// it (issue #2878). The join is what lets the PER-ID body stay uninterruptible: from
-// reserve to release the id holds a reservation and, for part of that window, a
-// half-removed working set, so a cancellation landing there would let the process
-// exit inside exactly the window the join closes. Between ids nothing is held, so
-// the loop TOP does read the shutdown (issue #2933) and what Close pays is the one
-// id already in flight rather than every id still on the list.
-//
-// A reclaim requested AFTER Close is dropped whole, and silently: goBackground
-// starts nothing on a closed manager, and ScratchReclaimer is void so there is
-// nothing to report back to the session. Nothing is lost either — the API
-// recomputes the unknown subset of held_servers on every registration, so an id
-// dropped here is offered again at the next one.
+// ReclaimDeletedScratches runs asynchronously, reserving each ID while removing hydrate leftovers then scratch.
+// Check shutdown between IDs; Close joins the current ID, and displaced recovery copies remain for manual
+// recovery.
 func (m *Manager) ReclaimDeletedScratches(serverIDs []string) {
 	m.goBackground(func() { m.reclaimDeletedScratches(serverIDs) })
 }
@@ -2554,15 +1272,8 @@ func (m *Manager) ReclaimDeletedScratches(serverIDs []string) {
 // Tests call this directly to avoid timing dependencies on the goroutine.
 func (m *Manager) reclaimDeletedScratches(serverIDs []string) {
 	for _, id := range serverIDs {
-		// The body's one cancellation point, deliberately HERE and nowhere else
-		// (issue #2933). The loop top sits after the previous id's release and
-		// before this id's reserve, so a return holds no reservation and leaves no
-		// half-removed working set — safe by the same reasoning that makes Close's
-		// join safe, and it bounds Close to the id already in flight instead of
-		// every id still on the list. The ids left unreached are re-offered, not
-		// lost: they still hold their scratch dirs, so the next registration
-		// advertises them in held_servers again and the API re-derives the unknown
-		// subset from that advertisement.
+		// Stop only between IDs, when no reservation is held; unreached scratch remains advertised for the next
+		// registration.
 		if m.shutdown.Err() != nil {
 			return
 		}
@@ -2577,23 +1288,8 @@ func (m *Manager) reclaimDeletedScratches(serverIDs []string) {
 			// an in-flight command — skip it rather than interfere.
 			continue
 		}
-		// The leftovers go FIRST, and the order is load-bearing (issue #2934).
-		// <scratch>/<id> is what keeps the id advertised — both held-set scans skip
-		// .hydrate-<id>-* (isReservedScratchName) — so the instant it is removed the
-		// id leaves held_servers, the API stops deriving it into
-		// unknown_held_server_ids, and this pass is the only one that would ever be
-		// offered the id again; only a Worker BOOT reclaims a .hydrate- tree
-		// (ReclaimHydrateLeftovers, issue #3167), and that is the backstop rather than
-		// the plan — a Worker runs for months between boots. Sweeping after the removal
-		// made every interruption in that window a world-sized leak nothing on this
-		// Worker's runtime ever reclaims. This way round, an interruption anywhere
-		// in the body leaves the scratch dir standing, and with it the advertisement that
-		// re-offers the id — which is what makes "a partial reclaim is finished
-		// idempotently by the next registration" true at EVERY point in the body,
-		// not merely at most of them. It is also what keeps this leg out of the
-		// shutdown budget: compose.yaml's stop_grace_period is sized for Close's
-		// retry-stop leg, and an interruption here costs nothing at any value of it —
-		// or in a crash or a power loss, which no value reaches.
+		// Delete hydrate leftovers first: scratch presence is what advertises the ID for cleanup retry after
+		// interruption.
 		m.sweepHydrateLeftovers(id)
 		dir := filepath.Join(m.scratchDir, id)
 		if _, statErr := os.Stat(dir); statErr == nil {
@@ -2605,30 +1301,20 @@ func (m *Manager) reclaimDeletedScratches(serverIDs []string) {
 					"server_id", id, "dir", dir)
 			}
 		}
-		// NOTE: .displaced-<id> trees are intentionally NOT reclaimed here
-		// (issue #911). They are retained for operator recovery.
+		// NOTE:.displaced-<id> trees are intentionally NOT reclaimed here. They are retained for operator recovery.
 		m.release(id)
 	}
 }
 
-// orphanEntry pairs a failed-stop orphan instance with the execution driver name
-// and Minecraft version it was started under, so the retry stop can resolve the
-// RCON dial host exactly as stop #1 did (issue #1712) and read the RCON password
-// in the same charset (issue #3116).
+// orphanEntry retains the driver and Minecraft version needed for retry-stop RCON routing and password decoding.
 type orphanEntry struct {
 	inst      execution.Instance
 	driver    string
 	mcVersion string
 }
 
-// takeOutcome is the result of takeStoppableReserve / takeRunningReserve: an
-// instance was taken and reserved, no live instance exists (genuinely unknown ->
-// SERVER_NOT_FOUND), a lifecycle command is already reserved in flight for the id
-// (a detached stop still confirming, or a start/hydrate mid-operation -> BUSY,
-// issue #780/#824), or a failed-stop orphan is recorded for the id (a process
-// this Worker could not confirm dead -> INVALID_STATE, issue #2466).
-// takeOrphaned is reachable only from takeRunningReserve: takeStoppableReserve
-// TAKES the orphan (that is the retry path that terminates it).
+// takeOutcome distinguishes an acquired handle, an unknown ID, an in-flight reservation, and a failed-stop
+// orphan.
 type takeOutcome int
 
 const (
@@ -2638,35 +1324,12 @@ const (
 	takeOrphaned
 )
 
-// orphanPendingMsg is the precondition message every command refused over a
-// recorded failed-stop orphan carries. One constant so the reserve()-gated
-// commands (start/hydrate/stopped-id snapshot) and the ones that check the
-// orphan directly (restart/console/tunnel dial) say the same thing about the
-// same state — the point of issue #2466 is that the refusal reads honestly
-// wherever it surfaces. The API discriminates on the CODE, not this text, and
-// the code deliberately differs between those two groups (issue #2476): the
-// message describes the STATE, which is identical; the code answers whether THIS
-// command will succeed once the converger resolves it, which is not.
+// Share orphan-state text across commands; the API uses the error code to distinguish retryable and settled
+// refusals.
 const orphanPendingMsg = "instancemanager: server has a failed-stop orphan pending termination"
 
-// takeStoppableReserve atomically (under mu) selects the instance to stop for
-// serverID and claims an in-flight reservation across the eviction -> stop-confirmed
-// window so a re-sent StopServer arriving while the detached stop is still confirming
-// termination is rejected rather than treated as SERVER_NOT_FOUND (issue #780).
-//
-// It drains either a tracked running instance (evicting it as take does) or a
-// previously recorded failed-stop orphan (left in place until the retry confirms
-// termination, issue #251), reserving the id in the same critical section. If neither
-// is tracked it reports takeInFlight when the id is already reserved (another
-// lifecycle command — typically the original detached stop — is in flight) and
-// takeNotFound only for genuinely unknown ids. The caller must release on every
-// return path.
-//
-// The returned driver is the execution driver name for the instance and
-// mcVersion its Minecraft version: read from startCmds for a running instance
-// (before deletion), or from the orphan entry for a failed-stop orphan (issues
-// #1712, #3116). This makes the capture atomic with the take, eliminating the
-// TOCTOU between a separate controlTargetFor call and the eviction.
+// takeStoppableReserve captures the instance, driver, and version while atomically reserving the ID.
+// Orphans remain recorded until termination is confirmed; the caller must release the reservation.
 func (m *Manager) takeStoppableReserve(serverID string) (execution.Instance, string, string, takeOutcome) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -2677,16 +1340,8 @@ func (m *Manager) takeStoppableReserve(serverID string) (execution.Instance, str
 		m.reserved[serverID] = true
 		return inst, start.Driver, start.MinecraftVersion, takeFound
 	}
-	// Check the reservation BEFORE the orphan branch. A failed-stop orphan retains
-	// its instance record while a stop for the id is in flight (attemptStop deletes
-	// the orphan only on a confirmed termination), so an orphan-retry stop1 holds
-	// the reservation AND keeps the orphan recorded across its inst.Stop. If a
-	// re-sent stop2 walked into the orphan branch here it would take the same orphan
-	// instance a second time; both stops then run their deferred release, and stop1's
-	// release steals the reservation out from under the still-running stop2 — worst
-	// case leaving stop2 to drive removeScratch unreserved. Honoring the reservation
-	// first rejects stop2 with takeInFlight (-> BUSY) instead, exactly as it
-	// already does for a detached running-instance stop (issue #780).
+	// Check reservations before orphans: two stops sharing one handle would let the first release the second's
+	// claim.
 	if m.reserved[serverID] {
 		return nil, "", "", takeInFlight
 	}
@@ -2697,26 +1352,8 @@ func (m *Manager) takeStoppableReserve(serverID string) (execution.Instance, str
 	return nil, "", "", takeNotFound
 }
 
-// attemptStop runs the driver Stop for serverID's instance. On failure it
-// records the instance as a failed-stop orphan so a retry can re-attempt
-// termination against the same handle rather than returning SERVER_NOT_FOUND; on
-// success it forgets any orphan record for the id (issue #251) and closes the
-// server's Bedrock relay tunnel, if any (docs/app/BEDROCK_TUNNEL.md, issue
-// #1546) — a Worker-local safety net so the tunnel comes down as soon as this
-// Worker confirms the stop, without waiting on the API's own CloseBedrockTunnel
-// dispatch to arrive. Close is idempotent, so this is a no-op for a non-Bedrock
-// server or one with no tunnel open. attemptStop is shared by StopServer and
-// the stop phase of RestartServer, so a restart also closes and later reopens
-// the tunnel — matching the API's own "any transition away from running closes
-// it" semantics (PR #1558).
-//
-// driverName is the driver that runs this server and mcVersion its Minecraft
-// version (returned atomically by takeStoppableReserve / takeRunningReserve
-// alongside the instance). On a graceful stop, attemptStop passes a pre-fallback
-// flush closure so the driver can flush the live world (save-all + settle) before
-// stop — the driver calls it always before tryRCONStop on the graceful path
-// (#1007). On failure both are preserved on the orphan entry so a retry resolves
-// RCON identically (issues #1712, #3116).
+// attemptStop retains failed stops as orphans and closes Bedrock tunnels only on confirmed termination.
+// Use the captured driver and version for pre-stop flush and any later orphan retry.
 func (m *Manager) attemptStop(ctx context.Context, serverID string, inst execution.Instance, graceful bool, driverName, mcVersion string) error {
 	var preFallback func(context.Context) bool
 	if graceful {
@@ -2725,39 +1362,27 @@ func (m *Manager) attemptStop(ctx context.Context, serverID string, inst executi
 		}
 	}
 	err := inst.Stop(ctx, graceful, preFallback)
-	// The flush's save-off is settled only once this call has done whatever the
-	// stop's outcome calls for: a confirmed termination leaves nobody to restore it
-	// for, and a failure reaches restoreSaveOnAfterFailedStop below. DEFERRED rather
-	// than placed here, so the clear can never precede that restore — Close joins no
-	// command lane, so a drain landing in between would find an empty map and let the
-	// process exit under a survivor with auto-save still off (issue #3166).
+	// Clear the save-off debt only after any failed-stop restore finishes so Close cannot miss an outstanding
+	// bracket.
 	defer m.clearPendingSaveOn(serverID)
 	if err != nil {
-		// Record the orphan and hand it to a converger, so the Worker keeps working
-		// the stop on its own instead of waiting for an operator to notice (issue
-		// #2475). recordOrphan is idempotent on the converger: the retries the
-		// converger itself issues land back here and re-record without spawning a
-		// second one.
+		// Record the orphan and hand it to a converger, so the Worker keeps working the stop on its own instead of
+		// waiting for an operator to notice. recordOrphan is idempotent on the converger: the retries the converger
+		// itself issues land back here and re-record without spawning a second one.
 		m.recordOrphan(serverID, inst, driverName, mcVersion)
-		// The orphan record is otherwise invisible: nothing enumerates m.orphans, so
-		// "why is every command for this server refused?" was a code-reading exercise
-		// (issue #2466). Say it once, at the moment the state is entered — the id is
-		// now guarded against start / hydrate / restart / console / relay tunnel
-		// dial / Bedrock tunnel open until a retry stop confirms termination or the
-		// process exits on its own.
+		// Log entry into the orphan state so command refusals remain diagnosable while convergence attempts
+		// termination.
 		m.logger.Warn("recorded failed-stop orphan; the process may still be running",
 			"server_id", serverID, "driver", driverName, "graceful", graceful, "error", err)
-		// Close the Bedrock relay tunnel here too, not only on a confirmed stop
-		// (issue #2468 item 2): the stop intent is the operator's, and an instance
-		// this Worker is still trying to terminate must not keep taking joins for
-		// however long convergence takes. Close is idempotent and takes no running
-		// check, so the operator can still tear it down by hand either way.
+		// Close the Bedrock relay tunnel here too, not only on a confirmed stop: the stop intent is the operator's,
+		// and an instance this Worker is still trying to terminate must not keep taking joins for however long
+		// convergence takes. Close is idempotent and takes no running check, so the operator can still tear it down by
+		// hand either way.
 		if m.bedrock != nil {
 			m.bedrock.Close(serverID)
 		}
-		// The graceful path issued save-off before the flush; because the stop
-		// failed, the server may still be alive with auto-save disabled. Re-enable
-		// it so player progress is not silently lost (issue #2021).
+		// The graceful path issued save-off before the flush; because the stop failed, the server may still be alive
+		// with auto-save disabled. Re-enable it so player progress is not silently lost.
 		if graceful {
 			m.restoreSaveOnAfterFailedStop(ctx, serverID, driverName, mcVersion)
 		}
@@ -2772,21 +1397,9 @@ func (m *Manager) attemptStop(ctx context.Context, serverID string, inst executi
 	return nil
 }
 
-// takeRunningReserve atomically (under mu) evicts the tracked running instance for
-// serverID, captures its original StartServer spec, and claims an in-flight
-// reservation so the id stays continuously claimed across the restart's
-// stop -> relaunch window (issue #780). It reports takeInFlight when no instance is
-// tracked but the id is already reserved (a detached stop or another lifecycle
-// command still in flight) and takeNotFound for a genuinely unknown id. A restart
-// applies only to a tracked running instance, so a recorded orphan is NOT taken
-// here (it is left for the stop-retry path, issue #251) — it reports takeOrphaned,
-// so the restart is refused as a settled INVALID_STATE naming the orphan rather
-// than as SERVER_NOT_FOUND, which would tell the operator the server is not
-// running about a process that is probably still alive (issue #2466). The
-// reservation is checked BEFORE the orphan for the same reason as in
-// takeStoppableReserve: while an orphan-retry stop is in flight the id carries
-// both, and the in-flight command's outcome is not yet known, so BUSY (retry
-// later) is the honest answer rather than a settled state.
+// takeRunningReserve atomically evicts the instance, captures its start spec, and claims the ID through
+// relaunch.
+// Check an in-flight reservation before the orphan record so an unresolved stop returns BUSY.
 func (m *Manager) takeRunningReserve(serverID string) (execution.Instance, session.Command, takeOutcome) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -2808,24 +1421,21 @@ func (m *Manager) takeRunningReserve(serverID string) (execution.Instance, sessi
 }
 
 func (m *Manager) handleRestart(ctx context.Context, cmd session.Command) session.CommandResult {
-	// Single atomic take: this is the sole decision point for the restart path.
-	// It distinguishes all three outcomes without a TOCTOU window (issue #1950).
+	// Single atomic take: this is the sole decision point for the restart path. It distinguishes all three outcomes
+	// without a TOCTOU window.
 	inst, start, outcome := m.takeRunningReserve(cmd.ServerID)
 	switch outcome {
 	case takeNotFound:
 		return fail(cmd.CommandID, session.CommandErrorServerNotFound,
 			"instancemanager: server not running")
 	case takeOrphaned:
-		// A prior stop for this id could not confirm termination, so the process is
-		// probably still alive — restarting it is refused, but as the settled state
-		// it is, not as "not running" (issue #2466). The retry stop (StopServer) is
-		// the path that terminates the orphan; only once it confirms does the id
-		// become genuinely unknown.
+		// A prior stop for this id could not confirm termination, so the process is probably still alive, restarting
+		// it is refused, but as the settled state it is, not as "not running". The retry stop (StopServer) is the path
+		// that terminates the orphan; only once it confirms does the id become genuinely unknown.
 		return fail(cmd.CommandID, session.CommandErrorInvalidState, orphanPendingMsg)
 	case takeInFlight:
-		// A lifecycle command (e.g. a detached stop from a dropped stream, or a start/
-		// hydrate mid-operation) is already reserved in flight for this id (issue #780).
-		// Rejecting with BUSY (issue #824) rather than SERVER_NOT_FOUND keeps the API from
+		// A lifecycle command (e.g. a detached stop from a dropped stream, or a start/ hydrate mid-operation) is
+		// already reserved in flight for this id. Rejecting with BUSY rather than SERVER_NOT_FOUND keeps the API from
 		// unassigning a server whose process may still be alive.
 		return fail(cmd.CommandID, session.CommandErrorBusy,
 			"instancemanager: a lifecycle command is already in flight for this server")
@@ -2846,28 +1456,14 @@ func (m *Manager) handleRestart(ctx context.Context, cmd session.Command) sessio
 		return fail(cmd.CommandID, session.CommandErrorInternal,
 			fmt.Sprintf("instancemanager: unknown launch mode %q", start.LaunchMode))
 	}
-	// The id is reserved from here across the stop and the relaunch; it is handed off
-	// to the re-registered instance on a successful relaunch (launchReserved) and
-	// released on every failure path so the id is never left unclaimed under the still-
-	// stopping process (issue #780).
-	//
-	// A restart whose stop cannot confirm termination leaves the same failed-stop
-	// orphan as a plain StopServer would, so the reconciler's retry path can still
-	// terminate it rather than double-instancing over it (issue #251). The reservation
-	// is dropped on this failure path; the orphan record then guards the id instead.
+	// Keep the ID reserved through stop and relaunch; a failed stop transfers protection to the orphan record.
 	if err := m.attemptStop(ctx, cmd.ServerID, inst, true, start.Driver, start.MinecraftVersion); err != nil {
 		m.release(cmd.ServerID)
 		return fail(cmd.CommandID, session.CommandErrorInternal,
 			fmt.Sprintf("instancemanager: restart stop: %v", err))
 	}
-	// Relaunch with the original StartServer spec under the still-held reservation;
-	// RestartServer carries no driver/jar/version of its own.
-	//
-	// If the relaunch fails (stop succeeded, but Start does not), the server is
-	// left down and already evicted from the manager. We do not attempt recovery
-	// here: the API sees the coded CommandResult error plus the observed
-	// stopped/crashed status event, and desired-state reconciliation (bringing the
-	// server back to its intended state) is the API's job, not the Worker's.
+	// Relaunch with the original start spec; if it fails after stop, API desired-state reconciliation owns
+	// recovery.
 	res := m.launchReserved(ctx, start, driver, launchMode)
 	// Carry the RestartServer's correlation id so the API can match the result to
 	// the command it issued, not the internal StartServer command.
@@ -2875,17 +1471,8 @@ func (m *Manager) handleRestart(ctx context.Context, cmd session.Command) sessio
 	return res
 }
 
-// notRunningRefusal reports whether serverID has no tracked running instance and,
-// when it has none, the coded refusal the command must fail with. Both facts are
-// read in one critical section so the classification cannot straddle a concurrent
-// orphan record.
-//
-// A recorded failed-stop orphan is refused as INVALID_STATE naming the orphan,
-// not SERVER_NOT_FOUND: this Worker could not confirm the process dead, so it is
-// probably still alive, holding its port and writing its world, and "server not
-// running" is a false statement about it (issue #2466). Every other untracked id
-// keeps SERVER_NOT_FOUND — the code stays reserved for ids this Worker genuinely
-// knows nothing about.
+// Read running and orphan state under one lock; an orphan returns INVALID_STATE because termination is
+// unconfirmed.
 func (m *Manager) notRunningRefusal(serverID string) (session.CommandErrorCode, string, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -2919,24 +1506,8 @@ func (m *Manager) handleServerCommand(ctx context.Context, cmd session.Command) 
 	return session.CommandResult{CommandID: cmd.CommandID, Success: true, Output: out}
 }
 
-// handleTunnelDial opens a relay dial-back tunnel for one player session (RELAY.md
-// Section 5). The server must be running locally — a not-running server returns
-// SERVER_NOT_FOUND, a failed-stop orphan INVALID_STATE (issue #2466) — and the
-// dialer resolves its published loopback game port from the working dir, dials
-// the relay endpoint, presents the token, and splices the
-// two. It returns once the splice is established; the splice itself runs on the
-// dialer's own long-lived context, off this command, so it outlives the result. A
-// TunnelDial is a quick command: it bypasses the slow-lane cap (session layer) so
-// a join never queues behind a hydrate.
-//
-// The dial is dispatched fire-and-forget (RELAY.md Section 4): the API awaits no
-// result and the relay's real answer is the dial-back arriving, so this refusal
-// reaches nobody but the API's diagnostic log
-// (fleet/adapters/control_plane.py _log_fire_and_forget_result, which logs the
-// message at WARN). The joining player's experience is unchanged either way —
-// the join stalls until the relay times it out, because the route still says
-// running. Only the log line differs, and that is exactly the line an operator
-// reads when a "running" server refuses joins.
+// handleTunnelDial requires a locally running server and returns after splice setup.
+// The API dispatches without awaiting the result, so refusals appear only in its diagnostic log.
 func (m *Manager) handleTunnelDial(ctx context.Context, cmd session.Command) session.CommandResult {
 	if code, msg, refused := m.notRunningRefusal(cmd.ServerID); refused {
 		return fail(cmd.CommandID, code, msg)
@@ -2959,28 +1530,8 @@ func (m *Manager) handleTunnelDial(ctx context.Context, cmd session.Command) ses
 	return session.CommandResult{CommandID: cmd.CommandID, Success: true}
 }
 
-// handleOpenBedrockTunnel starts (or, for a repeated command with the same
-// credential, idempotently confirms) this server's Bedrock relay QUIC tunnel
-// (docs/app/BEDROCK_TUNNEL.md, issue #1546). Like TunnelDial, the server must
-// be running locally, and a failed-stop orphan is refused as INVALID_STATE
-// rather than SERVER_NOT_FOUND (issue #2466) — an orphan reaches this handler
-// because the API dispatches Open off an observed=running WRITE (the sink's hook
-// on an applied StatusChange(running), or a lifecycle convergence;
-// servers/adapters/bedrock_tunnel_sync.py) and that dispatch is fire-and-forget,
-// so a stop whose driver Stop cannot confirm termination in the gap records the
-// orphan before the command lands: the API's cached running state does not move
-// until the Worker's own next report. The refusal therefore reaches only the
-// API's WARN log, which must not say the server is not running about a process
-// that may still be alive. This verb keeps INVALID_STATE where start / hydrate /
-// stopped-id snapshot moved to BUSY (issue #2476): it is refused for what the
-// state IS and is never carried out once the orphan converges, so BUSY would
-// promise a success that never comes.
-//
-// Unlike TunnelDial, Open does not itself dial/handshake
-// synchronously: it registers the tunnel and returns, while the QUIC dial,
-// handshake, datagram pump, and any reconnect-with-backoff run off this
-// command on the tunneler's own long-lived context — a slow or rejected relay
-// dial must not hold up the command result.
+// handleOpenBedrockTunnel requires a locally running server; orphans return INVALID_STATE.
+// Registration returns before asynchronous dial, handshake, and retries.
 func (m *Manager) handleOpenBedrockTunnel(cmd session.Command) session.CommandResult {
 	if code, msg, refused := m.notRunningRefusal(cmd.ServerID); refused {
 		return fail(cmd.CommandID, code, msg)
@@ -3003,20 +1554,7 @@ func (m *Manager) handleOpenBedrockTunnel(cmd session.Command) session.CommandRe
 	return session.CommandResult{CommandID: cmd.CommandID, Success: true}
 }
 
-// handleCloseBedrockTunnel tears down this server's Bedrock relay tunnel, if
-// any (docs/app/BEDROCK_TUNNEL.md Section 3, issue #1546). Unlike Open it does
-// not require the server to still be tracked as running: it is also the
-// Worker-local safety net a successful StopServer triggers on its own
-// (attemptStop), so a Close arriving after the instance is already evicted —
-// or for a server this Worker never opened a tunnel for — must still succeed,
-// not SERVER_NOT_FOUND.
-//
-// That makes it the one running-server command with nothing for the failed-stop
-// orphan refusal to fix (issue #2466): it takes no running check at all, so it
-// never reported an orphan as not-running, and over an orphan it does the useful
-// thing — a failed stop leaves the tunnel open (issue #2468) and this closes it.
-// Refusing it for an orphan would remove the only way to take that tunnel down
-// without terminating the process.
+// Allow tunnel close even for untracked servers or failed-stop orphans so stale tunnels can always be torn down.
 func (m *Manager) handleCloseBedrockTunnel(cmd session.Command) session.CommandResult {
 	if m.bedrock != nil {
 		m.bedrock.Close(cmd.ServerID)
@@ -3031,12 +1569,8 @@ func (m *Manager) handleCloseBedrockTunnel(cmd session.Command) session.CommandR
 // FILE_ACCESS_DENIED error rather than streaming megabytes onto the stream.
 const MaxFileBytes = 4 * 1024 * 1024
 
-// handleReadFile reads a working-set-relative file and returns its bytes
-// (Section 6.9, 7.2). The path is sanitized against traversal (FR-FILE-4); a
-// missing file maps to SERVER_NOT_FOUND (the API turns it into a 404) and an
-// oversized file to FILE_ACCESS_DENIED. It is executed on the server's
-// per-server lane (issue #95): a small file read is fast, unlike the bulk
-// transfers the session takes off the lane.
+// handleReadFile rejects traversal and symlinks, returning SERVER_NOT_FOUND for absence and FILE_ACCESS_DENIED
+// for oversize.
 func (m *Manager) handleReadFile(cmd session.Command) session.CommandResult {
 	root := filepath.Join(m.scratchDir, cmd.ServerID)
 	target, err := safeJoin(root, cmd.Path)
@@ -3095,11 +1629,8 @@ func (m *Manager) handleReadFile(cmd session.Command) session.CommandResult {
 	return session.CommandResult{CommandID: cmd.CommandID, Success: true, FileContent: content}
 }
 
-// handleEditFile writes bytes to a working-set-relative file (Section 6.9, 7.2).
-// The path is sanitized against traversal and the payload is size-bounded; the
-// write is atomic (temp sibling + rename) so a concurrent reader never sees a
-// torn file. It is executed on the server's per-server lane, issue #95 (a small,
-// interactive edit).
+// handleEditFile bounds the payload and atomically replaces the target beneath scratch without following
+// symlinks.
 func (m *Manager) handleEditFile(cmd session.Command) session.CommandResult {
 	if len(cmd.Content) > MaxFileBytes {
 		return failFileAccess(cmd.CommandID, session.FileAccessReasonPayloadTooLarge,
@@ -3113,12 +1644,8 @@ func (m *Manager) handleEditFile(cmd session.Command) session.CommandResult {
 			fmt.Sprintf("instancemanager: edit file: %v", err))
 	}
 
-	// Resolve (and, for missing intermediate dirs, create) the parent as a dirfd
-	// beneath the root via a per-component O_NOFOLLOW walk, then write relative to
-	// that fd. An intermediate-component symlink the MC process could plant is
-	// refused rather than followed, the dir creation cannot traverse a link out of
-	// the root, and the temp-create + rename act on the same resolved fd, so a
-	// concurrent symlink swap between the walk and the rename cannot redirect it.
+	// Resolve and create parents beneath the root with O_NOFOLLOW, then write and rename through that pinned
+	// directory fd.
 	parentFd, leaf, err := openParentBeneath(root, target, true)
 	if err != nil {
 		// O_NOFOLLOW refused an intermediate-component symlink (ELOOP); any other
@@ -3155,15 +1682,8 @@ func (m *Manager) handleEditFile(cmd session.Command) session.CommandResult {
 // enough for any realistic config directory.
 const MaxDirEntries = 4096
 
-// handleListFiles lists a directory in the live working set (Section 6.9, 7.2).
-// The listing is read-only. The path is sanitized against traversal (FR-FILE-4)
-// exactly like read/edit, the directory is opened through the hardened dirfd
-// resolution refusing intermediate or final symlinks, and the result is bounded
-// to MaxDirEntries with a truncation marker. A missing directory maps to
-// SERVER_NOT_FOUND (the API turns it into a 404); a path that is a regular file
-// (not a directory) is FILE_ACCESS_DENIED. It is executed on the server's
-// per-server lane (issue #95): a single directory read is fast, unlike the bulk
-// transfers the session takes off the lane.
+// handleListFiles refuses traversal and symlinks and caps results at MaxDirEntries.
+// Missing directories return SERVER_NOT_FOUND; non-directories return FILE_ACCESS_DENIED.
 func (m *Manager) handleListFiles(cmd session.Command) session.CommandResult {
 	root := filepath.Join(m.scratchDir, cmd.ServerID)
 
@@ -3195,13 +1715,8 @@ func (m *Manager) handleListFiles(cmd session.Command) session.CommandResult {
 	return session.CommandResult{CommandID: cmd.CommandID, Success: true, FileListing: listing}
 }
 
-// openListDir resolves the directory at relPath beneath root to a dirfd, refusing
-// to follow any intermediate or final symlink. relPath == "." (or empty) lists
-// the working-set root directly (safeJoin rejects the root as a file path, so the
-// listing handles it here). For any other path it reuses the same hardened
-// resolution as read/edit (openParentBeneath) and opens the leaf as a directory
-// relative to the resolved parent fd, so a concurrent symlink swap cannot
-// redirect it. The caller owns the returned fd.
+// openListDir accepts dot/empty for the root and refuses symlinks in every other component.
+// The caller owns the returned directory fd.
 func (m *Manager) openListDir(root, relPath string) (int, error) {
 	if relPath == "" || relPath == "." {
 		return unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
@@ -3222,11 +1737,8 @@ func (m *Manager) openListDir(root, relPath string) (int, error) {
 		unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 }
 
-// readDirEntries reads the immediate children of dirFd (not recursive), bounded
-// to MaxDirEntries. It dups the fd into an *os.File so os.File.ReadDir does the
-// getdents loop; the dup keeps the caller's fd ownership intact (os.File closes
-// its own copy). Each entry is stat'd relative to dirFd without following a
-// symlink, so an entry's type/size reflect the link itself, not its target.
+// readDirEntries caps immediate children and stats them relative to dirFd without following links.
+// Duplicate the fd so os.File owns only the copy.
 func readDirEntries(dirFd int) (*session.FileListing, error) {
 	dup, err := unix.Dup(dirFd)
 	if err != nil {
@@ -3264,16 +1776,8 @@ func readDirEntries(dirFd int) (*session.FileListing, error) {
 	return &session.FileListing{Entries: entries, Truncated: truncated}, nil
 }
 
-// validateServerID rejects a ServerID that is unsafe to join into a scratch
-// path before any handler does so (issue #782). The API sends the canonical
-// text form of a UUID (str(uuid)); every legitimate id is therefore a single
-// non-empty path component with no separator and no "." / ".." meaning. An
-// empty id would make a filepath.Join collapse onto the scratch ROOT (so
-// SnapshotTrigger would tar every server's world) and a "../x" id would escape
-// it. This is defense-in-depth on a trusted control plane: it rejects the
-// dangerous shapes without pinning to strict UUID syntax, so a future id scheme
-// that stays a sane single component keeps working. Mirrors safeJoin's lexical
-// discipline.
+// Require a non-empty path component other than dot or dot-dot so handlers cannot access the scratch root or
+// escape it.
 func validateServerID(id string) error {
 	if id == "" {
 		return errors.New("refusing empty server id")
@@ -3290,12 +1794,8 @@ func validateServerID(id string) error {
 	return nil
 }
 
-// safeJoin joins name under root and verifies the result stays inside root.
-// Absolute paths and any ".." component are rejected outright (not clamped),
-// mirroring the data-plane extractor's discipline (FR-FILE-4). The string-level
-// check below does not resolve symlinks; the handlers additionally resolve the
-// parent through openParentBeneath (a per-component O_NOFOLLOW walk beneath root)
-// and act on the resulting dirfd, so no in-path link can redirect the access.
+// safeJoin rejects absolute paths and dot-dot components but does not resolve symlinks.
+// Handlers must also use openParentBeneath and operate relative to its descriptor.
 func safeJoin(root, name string) (string, error) {
 	slashed := filepath.ToSlash(name)
 	if path.IsAbs(slashed) {
@@ -3353,13 +1853,9 @@ func readLeafNoFollow(parentFd int, leaf string) ([]byte, error) {
 	return io.ReadAll(f)
 }
 
-// atomicWriteAt writes data to a temp file created under parentFd, fsyncs it, and
-// renames it over leaf relative to the same dirfd, so a concurrent reader sees
-// either the old or the complete new content, never a partial write. The whole
-// operation rides parentFd (already resolved beneath the root), so it cannot be
-// redirected by a concurrently swapped intermediate symlink. An existing symlink
-// or directory at leaf is refused before the write (errIsDir / ELOOP) rather than
-// replaced silently.
+// atomicWriteAt fsyncs a temp and renames it relative to the pinned parent fd, preventing intermediate symlink
+// redirection.
+// Reject a symlink or directory at the target leaf.
 func atomicWriteAt(parentFd int, leaf string, data []byte) error {
 	if err := refuseExistingLeaf(parentFd, leaf); err != nil {
 		return err
@@ -3377,9 +1873,8 @@ func atomicWriteAt(parentFd int, leaf string, data []byte) error {
 		_ = unix.Unlinkat(parentFd, tmpName, 0)
 	}()
 
-	// The replacement is the Worker's creation; give it the directory's owner
-	// before it is published, so a server running as another user can still read
-	// and rewrite its own file (issue #2600).
+	// The replacement is the Worker's creation; give it the directory's owner before it is published, so a server
+	// running as another user can still read and rewrite its own file.
 	if err := inheritOwner(parentFd, fd); err != nil {
 		return fmt.Errorf("setting owner: %w", err)
 	}
@@ -3415,13 +1910,8 @@ func refuseExistingLeaf(parentFd int, leaf string) error {
 	return nil
 }
 
-// controlTargetFor returns the execution driver and Minecraft version recorded
-// for serverID's running instance (its StartServer command's Driver and
-// MinecraftVersion), so the RCON dial host can be resolved per driver and the
-// RCON password read in the charset of that version (issue #3116). Both are
-// empty for a server that is not running, in which case the caller resolves the
-// loopback host — but every caller first confirms the server is running, so the
-// recorded command is present.
+// controlTargetFor reads the running instance's driver and version for RCON routing and charset.
+// Untracked servers return empty values.
 func (m *Manager) controlTargetFor(serverID string) (driver, mcVersion string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -3429,16 +1919,8 @@ func (m *Manager) controlTargetFor(serverID string) (driver, mcVersion string) {
 	return start.Driver, start.MinecraftVersion
 }
 
-// reserve claims serverID for an in-flight mutating lifecycle command (issue
-// #780). It atomically rejects — under the same mu held for the running/orphan
-// checks, so there is no check-then-act gap — when the id is already running, has
-// a failed-stop orphan pending, or already carries a reservation, and otherwise
-// marks it reserved. ok reports whether the claim was taken; on a rejection, code
-// classifies the failure (CommandErrorInvalidState for the one SETTLED state this
-// gate sees, "already running"; CommandErrorBusy for the two unsettled ones, the
-// reservation race of issue #824 and the pending orphan of issue #2476) and msg is
-// the precondition message the caller fails with. It must be paired with release
-// on every exit path.
+// reserve atomically claims an idle ID; running returns INVALID_STATE, reservations and orphans return BUSY.
+// Pair a successful claim with release on every failure path.
 func (m *Manager) reserve(serverID string) (ok bool, code session.CommandErrorCode, msg string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -3446,38 +1928,22 @@ func (m *Manager) reserve(serverID string) (ok bool, code session.CommandErrorCo
 		return false, session.CommandErrorInvalidState, "instancemanager: server already running"
 	}
 	if _, orphaned := m.orphans[serverID]; orphaned {
-		// A prior stop could not confirm termination: the process/container may
-		// still be lingering. Starting/hydrating now would double-instance over it,
-		// so the command is refused (issue #251) — but as BUSY, not INVALID_STATE
-		// (issue #2476). Since issue #2475 the orphan is never a settled state: a
-		// converger is probing the process, retrying the stop while it is alive and
-		// retiring the record once it is confirmed gone, so THIS command succeeds on
-		// a later retry. That is exactly the BUSY contract (issue #824) — outcome not
-		// yet known, retry rather than converge.
-		//
-		// INVALID_STATE here was the #2467 wedge: reserve() cannot tell an orphan
-		// whose process is alive from one already dead, yet it answered the same code
-		// the API reads as "already running" on a start, so a dead orphan's refusal
-		// manufactured observed=running on a server that was down. The verbs that
-		// check m.orphans directly — restart / console / tunnel dial / Bedrock tunnel
-		// open — keep INVALID_STATE on purpose: they are refused for what the state
-		// IS and will never be executed later, so BUSY would promise a success that
-		// never comes.
+		// An orphan is unresolved while convergence runs; return BUSY so the API retries without claiming it is
+		// running.
 		return false, session.CommandErrorBusy, orphanPendingMsg
 	}
 	if m.reserved[serverID] {
-		// A re-issued duplicate arriving while the original is still in flight after
-		// a stream reconnect (issue #780): reject it as BUSY rather than overlap the
-		// original. The original's outcome is unknown, so the API must NOT converge
-		// observed=running on this — it keeps the assignment and retries (issue #824).
+		// A re-issued duplicate arriving while the original is still in flight after a stream reconnect: reject it as
+		// BUSY rather than overlap the original. The original's outcome is unknown, so the API must NOT converge
+		// observed=running on this, it keeps the assignment and retries.
 		return false, session.CommandErrorBusy, "instancemanager: a lifecycle command is already in flight for this server"
 	}
 	m.reserved[serverID] = true
 	return true, 0, ""
 }
 
-// release drops serverID's in-flight reservation so a later command (a retry
-// after a failure, or the next lifecycle op) can claim it again (issue #780).
+// release drops serverID's in-flight reservation so a later command (a retry after a failure, or the next
+// lifecycle op) can claim it again.
 func (m *Manager) release(serverID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -3496,12 +1962,8 @@ func (m *Manager) restoreRunning(serverID string, inst execution.Instance, start
 	delete(m.reserved, serverID)
 }
 
-// pump forwards an instance's status events onto the merged stream, mapping the
-// domain state to its wire name. It also forgets a crashed instance so the server
-// id can be started again. It exits when the instance closes its event channel —
-// or when the manager is closed (issue #2777), because a server that is still
-// running when the Worker goes down never closes it — closing done either way to
-// release the log/metrics pumps for the same instance.
+// pump forwards status and retires exited instances; Close ends it even if a live instance never closes events.
+// Closing done releases the corresponding log and metrics pumps.
 func (m *Manager) pump(serverID string, inst execution.Instance, done chan struct{}) {
 	defer close(done)
 	events := inst.Events()
@@ -3509,10 +1971,9 @@ func (m *Manager) pump(serverID string, inst execution.Instance, done chan struc
 		select {
 		case ev, ok := <-events:
 			if !ok {
-				// The instance closed its stream: it reached a terminal state on its
-				// own. If it was recorded as a failed-stop orphan (issue #251), forget
-				// the record so a later stop for the id is a genuinely unknown server,
-				// not a lingering retry target.
+				// The instance closed its stream: it reached a terminal state on its own. If it was recorded as a
+				// failed-stop orphan, forget the record so a later stop for the id is a genuinely unknown server, not a
+				// lingering retry target.
 				m.forgetOrphanIf(serverID, inst)
 				return
 			}
@@ -3524,24 +1985,14 @@ func (m *Manager) pump(serverID string, inst execution.Instance, done chan struc
 				CrashReason: ev.CrashReason.String(),
 			})
 		case <-m.shutdown.Done():
-			// Close. A status the instance has already queued is DROPPED: nothing
-			// drains the merged stream by then (Close runs after the session runner
-			// returns, main.go), so forwarding it would only move it into a channel
-			// no one reads — which is what happened before, one process exit later.
-			// The orphan record is left alone on this path: the instance has NOT
-			// exited, and retiring its record would claim a fate the Worker never
-			// observed.
+			// Drop queued status on shutdown because the session no longer drains it; do not retire an orphan whose exit
+			// was not observed.
 			return
 		}
 	}
 }
 
-// forgetOrphanIf removes serverID's failed-stop orphan record only if it is still
-// the given inst, so it does not clear a record belonging to a different instance
-// (issue #251). It reports whether it removed anything: the pump ignores that (it
-// is retiring a record that may not exist), while the converger emits the terminal
-// `stopped` only when this call is the one that actually retired the record
-// (issue #2475).
+// forgetOrphanIf removes only the matching handle; only the successful remover may emit converger retirement.
 func (m *Manager) forgetOrphanIf(serverID string, inst execution.Instance) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -3552,26 +2003,8 @@ func (m *Manager) forgetOrphanIf(serverID string, inst execution.Instance) bool 
 	return false
 }
 
-// ResyncStatus re-emits a StatusChange for every instance the manager still
-// holds, so a control-plane (re-)register moves those servers out of the API's
-// post-restart observed=unknown state within seconds instead of waiting out the
-// reconciler grace window (issue #985). The instance manager persists across
-// control-plane reconnects, so its instances map still names the live servers;
-// re-emitting their current Status() reflects reality (running/starting/etc.).
-// On a fresh process both maps are empty (the orphan sweep removed leftovers and
-// no instances are re-created), so this is a harmless no-op.
-//
-// Failed-stop orphans are reported too, as `unknown` (issue #2468 item 3): they
-// have been evicted from instances, so a resync that snapshotted only that map
-// left the reconnected API's row asserting a staler state as fact about a process
-// this Worker could not confirm dead. `unknown` is the honest answer and the one
-// the API's #1599 arm already redispatches a stop for. The two maps are disjoint —
-// an instance is evicted before its orphan record is written — so no id is
-// reported twice.
-//
-// Both maps are snapshotted under the lock, which is then RELEASED before any
-// emit: sendStatus can coalesce and wake the dispatcher, so it must never run
-// while m.mu is held.
+// ResyncStatus reports tracked instances and unknown failed-stop orphans after registration.
+// Snapshot both maps under mu, then release it before sendStatus to avoid lock inversion.
 func (m *Manager) ResyncStatus() {
 	m.mu.Lock()
 	type snap struct {
@@ -3592,15 +2025,8 @@ func (m *Manager) ResyncStatus() {
 	}
 }
 
-// sendStatus forwards a status event with latest-state-wins coalescing under
-// backpressure (issue #96). The fast path is a non-blocking send onto events,
-// which preserves order and every transition while the sink has room. When the
-// sink is full, the event is parked in the per-server pending slot (replacing any
-// older pending status for that server) and the dispatcher is woken to deliver it
-// once the sink drains. While a server is being routed through the dispatcher
-// (coalescing), every event for it goes through the slot so a fast-path send can
-// never overtake an in-flight dispatch: per-server ordering is preserved and only
-// superseded intermediate states are skipped.
+// Coalesce latest status per server under backpressure, routing all updates through the pending slot until
+// dispatch completes.
 func (m *Manager) sendStatus(ev session.StatusEvent) {
 	m.statusMu.Lock()
 	if m.coalescing[ev.ServerID] {
@@ -3624,19 +2050,8 @@ func (m *Manager) sendStatus(ev session.StatusEvent) {
 	}
 }
 
-// statusDispatcher drains coalesced status events onto the events sink, one
-// server at a time in arrival order, using blocking sends so backpressure is
-// absorbed (not dropped). It runs for the Manager's lifetime and ends with Close
-// (issue #2777): statusNotify is never closed, so before that it simply parked
-// forever on a quiet sink, one leaked goroutine per manager ever built.
-//
-// It observes the shutdown on BOTH waits, and the send is the one that matters:
-// Close runs after the session runner has returned (main.go), so nothing drains
-// events any more, and a dispatcher watching the shutdown only between events
-// would hold Close forever on a full sink. Whatever is parked in pendingStatus
-// at that moment is DROPPED — the same fate it had when the process exited under
-// this goroutine, and the coalescing contract is about converging observed_state
-// for a session that is still there to read it.
+// statusDispatcher watches shutdown while waiting and sending so a full, undrained sink cannot hold Close.
+// Pending statuses are dropped once the session has ended.
 func (m *Manager) statusDispatcher() {
 	for {
 		select {
@@ -3675,22 +2090,8 @@ func (m *Manager) statusDispatcher() {
 	}
 }
 
-// logPump forwards an instance's captured log lines onto the merged log stream
-// (FR-MON-2). It exits when the instance closes its log channel (terminal
-// state). Under sink backpressure it drops the line: logs are a stream, not
-// state, so they keep the lossy posture (unlike status, which coalesces; issue
-// #96). The per-instance LogPump already bounds and marks drops at the capture
-// edge. Drops here are counted silently and reported as one aggregated summary
-// per congestion episode — when a line next gets through, or when the stream
-// ends — instead of one WARN per dropped line, which flooded the worker's own
-// log for the whole length of a control-plane outage (issue #1716). The counter
-// is goroutine-local: one pump goroutine runs per server, so no locking is
-// needed.
-//
-// Like the status pump it also ends on the manager's shutdown (issue #2777): a
-// server still running when the Worker goes down never closes its log stream.
-// Lines still queued in it are DROPPED, which is the posture this pump already
-// has for a congested sink, and by then nothing drains the merged stream anyway.
+// logPump drops lines under backpressure and reports one aggregate count per congestion episode.
+// Shutdown also drops queued lines because no session remains to drain them.
 func (m *Manager) logPump(serverID string, src execution.LogSource) {
 	dropped := 0
 	logs := src.Logs()
@@ -3719,14 +2120,7 @@ loop:
 	}
 }
 
-// reportDroppedLogs emits the aggregated summary for one sink-congestion
-// episode: a single WARN on the worker's own logger (operator observability)
-// and, best-effort, an in-band marker on the merged stream so downstream log
-// viewers learn about the gap — mirroring the per-instance LogPump's
-// dropped-count marker (execution/logpump.go). The marker send never blocks
-// and never displaces a real line: it is only attempted after a real line got
-// through (or the stream ended), and is skipped when the sink is still full —
-// the WARN already carries the count.
+// Report a congestion episode once in Worker logs and best-effort in-band, without displacing a real line.
 func (m *Manager) reportDroppedLogs(serverID string, dropped int) {
 	m.logger.Warn("dropped log lines; sink full", "server_id", serverID, "count", dropped)
 	select {
@@ -3739,26 +2133,13 @@ func (m *Manager) reportDroppedLogs(serverID string, dropped int) {
 	}
 }
 
-// metricsPump samples the instance on the configured interval and forwards a
-// Metrics event per tick until the instance terminates (done closed). When the
-// instance is not a StatsSource, or a sample errors, it emits an up-only sample
-// (server id with zero stats) so the API still learns the server is running
-// (FR-MON-3). A full sink drops the sample: metrics are a stream, not state, so
-// they keep the lossy posture (unlike status, which coalesces; issue #96).
-// Drops are counted silently and reported as one aggregated WARN per congestion
-// episode — when a sample next gets through, or when the pump exits — mirroring
-// logPump (issues #1716, #1783). The counter is goroutine-local: one pump
-// goroutine runs per server, so no locking is needed.
+// metricsPump emits up-only samples when stats are unavailable and drops samples under backpressure.
+// Report one aggregate warning per congestion episode.
 func (m *Manager) metricsPump(serverID string, inst execution.Instance, done chan struct{}) {
 	stats, _ := inst.(execution.StatsSource)
 
-	// Bound every Sample by a context cancelled when the instance tears down (done
-	// closes) or when the manager is closed, so a hung Engine stats call does not
-	// leak this goroutine past stop/crash and cannot hold Close (issue #2777).
-	// Each sample additionally carries a timeout proportionate to the interval so
-	// a single slow-but-not-stuck call cannot stall the cadence. The watcher is a
-	// manager-owned goroutine too: it parks on done, so Close has to join it to be
-	// able to say nothing of the manager's is still running.
+	// Cancel sampling on instance teardown or manager shutdown, and bound each sample by the interval.
+	// Count the teardown watcher too so Close joins it.
 	pumpCtx, cancel := context.WithCancel(m.shutdown)
 	defer cancel()
 	m.goBackground(func() {
@@ -3768,11 +2149,7 @@ func (m *Manager) metricsPump(serverID string, inst execution.Instance, done cha
 
 	dropped := 0
 	for {
-		// The tick is not taken at teardown, and an unfired one is not waited out:
-		// metrics are a periodic stream, not state, so a sample the shutdown lands
-		// on is simply never produced — a gap consumers already read as missing
-		// points. The shutdown is watched here as well as through done so the
-		// cadence (15s in production) can never sit between Close and the exit.
+		// Watch shutdown while waiting for the next tick so Close never waits out the metrics interval.
 		stop := false
 		select {
 		case <-done:
@@ -3811,21 +2188,13 @@ func (m *Manager) metricsPump(serverID string, inst execution.Instance, done cha
 	}
 }
 
-// reportDroppedMetrics emits the aggregated summary for one metrics
-// sink-congestion episode: a single WARN with the drop count, the metrics
-// counterpart of reportDroppedLogs. Unlike logs, no in-band marker is sent:
-// MetricsEvent carries only numeric fields, so a marker would have to be a
-// fabricated sample, and a gap in a periodic series is already visible to
-// consumers as missing points.
+// Report aggregate metrics drops only in Worker logs; numeric samples cannot carry an honest in-band loss
+// marker.
 func (m *Manager) reportDroppedMetrics(serverID string, dropped int) {
 	m.logger.Warn("dropped metrics samples; sink full", "server_id", serverID, "count", dropped)
 }
 
-// sampleWithTimeout calls Sample under a context that is cancelled when parent is
-// (instance teardown) or when the per-sample timeout elapses, whichever comes
-// first. The timeout is the sampling interval: a sample that has not returned by
-// the time the next one is due is abandoned so a stuck Engine call cannot wedge
-// the cadence.
+// Bound a sample to one interval so an unresponsive Engine cannot stall cadence indefinitely.
 func sampleWithTimeout(parent context.Context, stats execution.StatsSource, timeout time.Duration) (execution.MetricsSample, error) {
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
@@ -3851,10 +2220,9 @@ func (m *Manager) forgetIf(serverID string, inst execution.Instance) {
 	}
 }
 
-// launchModeFor maps the command's wire launch-mode name to the execution
-// LaunchMode, reporting false for an unrecognized name (issue #305). An empty
-// name (an unset field) maps to LaunchModeJar, so a command from an API that
-// does not set the field launches exactly as before this field existed.
+// launchModeFor maps the command's wire launch-mode name to the execution LaunchMode, reporting false for an
+// unrecognized name. An empty name (an unset field) maps to LaunchModeJar, so a command from an API that does
+// not set the field launches exactly as before this field existed.
 func launchModeFor(name string) (execution.LaunchMode, bool) {
 	switch name {
 	case "", "jar":
@@ -3866,10 +2234,9 @@ func launchModeFor(name string) (execution.LaunchMode, bool) {
 	}
 }
 
-// startErrorCode classifies a driver Start failure into a CommandResult error
-// code. A driver (the container driver) wraps a known operational failure with a
-// sanitized execution sentinel so the API can surface a friendlier 409 reason
-// than the generic one; any other failure stays internal (issue #225).
+// startErrorCode classifies a driver Start failure into a CommandResult error code. A driver (the container
+// driver) wraps a known operational failure with a sanitized execution sentinel so the API can surface a
+// friendlier 409 reason than the generic one; any other failure stays internal.
 func startErrorCode(err error) session.CommandErrorCode {
 	switch {
 	case errors.Is(err, execution.ErrPortConflict):
@@ -3891,9 +2258,8 @@ func fail(commandID string, code session.CommandErrorCode, msg string) session.C
 	}
 }
 
-// failFileAccess builds a CommandErrorFileAccessDenied result carrying the
-// specific reason that refines it (issue #548). The API maps the reason to an
-// honest problem reason and HTTP status instead of a blanket invalid_path.
+// failFileAccess builds a CommandErrorFileAccessDenied result carrying the specific reason that refines it. The
+// API maps the reason to an honest problem reason and HTTP status instead of a blanket invalid_path.
 func failFileAccess(commandID string, reason session.FileAccessReason, msg string) session.CommandResult {
 	return session.CommandResult{
 		CommandID:        commandID,

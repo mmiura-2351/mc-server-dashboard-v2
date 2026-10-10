@@ -1,33 +1,5 @@
-// Package containerdriver implements the execution.ExecutionDriver Port by
-// running a server inside a Docker container (FR-EXE-2, FR-EXE-4). The Docker
-// Engine interaction sits behind the narrow dockerAPI seam so unit tests run
-// against a fake and no Docker daemon is needed in CI; the real client is a
-// hand-rolled HTTP-over-unix-socket adapter (dockerclient.go), keeping the
-// dependency tree empty as the RCON client did (docs/dev/DEPENDENCIES.md).
-//
-// Lifecycle: a successful create+start
-// enters StateStarting and is held there until the server logs its startup-
-// complete "Done (X.XXXs)! For help" line (by which point RCON is listening),
-// then transitions to running; a bounded fallback timeout reports running anyway
-// if the marker never appears (issue #345). The container exiting while no Stop
-// is in flight is a crash (StateCrashed, FR-SRV-4); an exit during a Stop is a
-// clean StateStopped.
-//
-// Stop semantics (ARCHITECTURE.md Section 5.2): a graceful stop prefers the
-// in-band RCON "stop" command (reusing the ServerControl seam), then falls back
-// to `docker stop` (SIGTERM with a timeout, escalating to SIGKILL inside the
-// daemon), then a direct `docker kill`. A forced stop skips the RCON step.
-//
-// Memory is enforced as a hard container limit: the create path sets the Docker
-// host-config Memory field from InstanceSpec.MemoryLimitMB (MiB→bytes) so the
-// kernel OOM-kills a runaway server at the container boundary rather than letting
-// it starve the host (issue #707). An unset limit (0) sets no constraint,
-// preserving the prior behavior. CPU is a per-server SOFT relative share: the
-// create path sets the host-config CpuShares weight proportional to
-// InstanceSpec.CPUMillis (1024 shares = 1 core), so a larger allocation wins more
-// CPU under contention without any hard quota (NanoCpus is never set) that would
-// throttle MC tick latency (issue #724); an unset allocation (0) keeps the fixed
-// default weight (issue #518). Disk quotas remain deferred.
+// Package containerdriver runs Minecraft in Docker through an injectable Engine API.
+// It enforces hard memory limits and relative CPU shares; zero values leave the configured defaults.
 package containerdriver
 
 import (
@@ -58,52 +30,25 @@ const (
 // daemon escalates to SIGKILL.
 const defaultStopTimeout = 30 * time.Second
 
-// defaultFlushTimeout bounds the pre-stop flush (#1007): the RCON save-off /
-// save-all plus the settle-wait that drives the live world's dirty chunks to
-// disk before the container is terminated. It is generous enough for the
-// manager's 60 s settle budget plus the RCON round trips, and it is the whole
-// bound when the flush's RCON hangs. The flush runs to completion before the
-// stop escalation's own deadline starts (Stop), so this budget is additive to
-// stopDeadline rather than carved out of it (issue #2622). Tests shrink it.
+// defaultFlushTimeout covers RCON and settling before escalation starts; it is additive to stopDeadline.
 const defaultFlushTimeout = 90 * time.Second
 
-// defaultSweepCallMargin is the slack added on top of each Sweep daemon call's
-// expected duration to bound it against a wedged daemon (issue #338). The startup
-// Sweep runs with context.Background() (cmd/worker), so without a per-call
-// deadline a wedged Docker daemon would block worker startup indefinitely. A
-// healthy daemon answers each call well inside the deadline, so the bound never
-// fires on the success path; it only caps the wedged case. The graceful-stop call
-// gets StopTimeout + this margin (the daemon needs the full grace before
-// escalating to SIGKILL); the list/remove calls get this margin alone.
+// Bound sweep calls against an unresponsive daemon; stop gets its full grace plus this margin.
 const defaultSweepCallMargin = 10 * time.Second
 
-// defaultReadinessTimeout bounds how long the driver holds StateStarting waiting
-// for the server's startup-complete log marker before falling back to running
-// (issue #345). It is generous enough for a modded server's boot (tens of
-// seconds) while never leaving a server stuck in starting when its log format
-// omits the marker.
+// Fall back to running after this bound if the startup-complete log marker never appears.
 const defaultReadinessTimeout = 5 * time.Minute
 
-// defaultConflictPollInterval and defaultConflictDeadline bound the
-// wait-for-name-free loop createContainer runs on a create name conflict: it
-// polls every interval until the deadline for the deterministic name to free as
-// the async exit-watcher finishes the previous container's teardown (issue #233).
+// defaultConflictPollInterval and defaultConflictDeadline bound the wait-for-name-free loop createContainer runs
+// on a create name conflict: it polls every interval until the deadline for the deterministic name to free as
+// the async exit-watcher finishes the previous container's teardown.
 const (
 	defaultConflictPollInterval = 250 * time.Millisecond
 	defaultConflictDeadline     = 10 * time.Second
 )
 
-// waitTransportProbeInterval and waitTransportProbeDeadline bound the re-inspect
-// loop supervise runs when docker.Wait returns a TRANSPORT error (a daemon
-// restart/blip) rather than a confirmed exit. A transport error does not mean the
-// container died, so supervise re-inspects the container to learn its real state
-// before deciding a terminal: it polls every interval until the deadline,
-// re-attaching a waiter if the container is still running, emitting the terminal
-// if it is gone, and emitting nothing if the daemon stays unreachable past the
-// deadline so the manager's last authoritative state stands (issue #865). The
-// bound mirrors the wedged-daemon posture of the conflict loop (issue #233) and
-// the startup Sweep (issue #338): a healthy daemon answers the first probe, so
-// this only caps the wedged case. Vars (not consts) so tests can shrink them.
+// Re-inspect after Wait transport errors; unreachable does not prove exit.
+// Bound probes and preserve the last observed state when the daemon remains unavailable.
 var (
 	waitTransportProbeInterval = 250 * time.Millisecond
 	waitTransportProbeDeadline = 30 * time.Second
@@ -116,12 +61,7 @@ const maxInstallRetries = 2
 
 var installRetryBackoff = []time.Duration{5 * time.Second, 15 * time.Second}
 
-// defaultImagePullTimeout bounds a lazy base-image pull (issue #904). A pull is
-// hundreds of MB and the EngineClient has no http.Client timeout, so the create
-// path gives the pull its own generous deadline rather than the create call's
-// short budget; a slow first pull of a large tier completes within it on a
-// healthy host, and the bound only caps a wedged/never-finishing pull. A var (not
-// a const) so a future test can shrink it; none does today.
+// Give lazy image pulls their own bounded budget; downloads may outlast the create request.
 var defaultImagePullTimeout = 10 * time.Minute
 
 // defaultGameBindIP is the host interface the game port is published on when
@@ -132,11 +72,7 @@ const (
 	rconBindIP        = "127.0.0.1"
 )
 
-// controlFunc opens an execution.ServerControl (RCON) for a server, used for the
-// graceful-stop "stop" command. rconHost is the host to dial RCON at — empty for
-// the host loopback (no network), or the container name when a user-defined
-// network is configured (issue #218). It returns an error when RCON is
-// unavailable; the driver then falls back to `docker stop`.
+// controlFunc opens RCON through loopback or container DNS; failure permits docker-stop fallback.
 type controlFunc func(ctx context.Context, spec execution.InstanceSpec, rconHost string) (execution.ServerControl, error)
 
 // Options tunes the driver.
@@ -153,40 +89,24 @@ type Options struct {
 	// GameBindIP is the host interface the game port is published on. Empty uses
 	// defaultGameBindIP (loopback), preserving the historical behavior.
 	GameBindIP string
-	// Network is the user-defined Docker network MC containers attach to. Empty
-	// (the default) keeps the historical behavior: containers run on the default
-	// bridge and RCON is published to the host loopback. When set, the driver
-	// attaches each container to this network, drops the RCON host publication, and
-	// dials RCON at the container name over the network (issue #218).
+	// Network enables container DNS and direct RCON, replacing loopback host publication.
 	Network string
-	// ConflictPollInterval and ConflictDeadline tune the wait-for-name-free loop
-	// createContainer runs on a create name conflict (issue #233). Zero uses the
-	// production defaults; tests set short values to keep the suite fast.
+	// ConflictPollInterval and ConflictDeadline tune the wait-for-name-free loop createContainer runs on a create
+	// name conflict. Zero uses the production defaults; tests set short values to keep the suite fast.
 	ConflictPollInterval time.Duration
 	ConflictDeadline     time.Duration
-	// ReadinessTimeout bounds how long the driver holds StateStarting waiting for
-	// the server's startup-complete log marker before falling back to running
-	// (issue #345). Zero uses defaultReadinessTimeout.
+	// ReadinessTimeout bounds how long the driver holds StateStarting waiting for the server's startup-complete log
+	// marker before falling back to running. Zero uses defaultReadinessTimeout.
 	ReadinessTimeout time.Duration
-	// SweepCallMargin is the slack added to each startup-Sweep daemon call's
-	// deadline so a wedged daemon cannot hang worker startup (issue #338). Zero uses
-	// defaultSweepCallMargin; tests set a short value to keep the suite fast.
+	// SweepCallMargin is the slack added to each startup-Sweep daemon call's deadline so a wedged daemon cannot
+	// hang worker startup. Zero uses defaultSweepCallMargin; tests set a short value to keep the suite fast.
 	SweepCallMargin time.Duration
-	// ScratchDir is the working-set scratch root. When set, the startup Sweep issues
-	// a best-effort RCON save-on to running orphans before stopping them (issue
-	// #1710): a worker crash mid-snapshot may have left auto-save disabled, and
-	// stopping without restore would leave the server permanently save-off. Empty
-	// skips the save-on (the pre-fix behavior).
+	// ScratchDir enables best-effort save-on for running orphans before startup sweep stops them.
 	ScratchDir string
-	// RunAsUID and RunAsGID are the uid:gid every container the driver creates runs
-	// as, and the owner it hands the working set to before each create (issue
-	// #2600). The Worker's wiring always sets them from driver.container.user, which
-	// never resolves to root. A zero RunAsUID (unset) uses the Worker process's own
-	// uid:gid, or DefaultRunAsUID:DefaultRunAsGID when the Worker is root.
+	// RunAsUID/RunAsGID select non-root container ownership; zero uses the Worker IDs or the root-Worker defaults.
 	RunAsUID int
 	RunAsGID int
-	// Logger records the lazy base-image pull (image name, duration) at INFO (issue
-	// #904). Nil uses a discard logger.
+	// Logger records the lazy base-image pull (image name, duration) at INFO. Nil uses a discard logger.
 	Logger *slog.Logger
 }
 
@@ -197,27 +117,26 @@ type Driver struct {
 	openControl controlFunc
 	workerID    string
 	stopTimeout time.Duration
-	// flushTimeout bounds the pre-stop flush (issue #2622).
+	// flushTimeout bounds the pre-stop flush.
 	flushTimeout time.Duration
 	gameBindIP   string
 	network      string
 	scratchDir   string
-	// runAsUID and runAsGID are the uid:gid server containers run as, and chownAt
-	// the call that hands a working-set entry to them (chownAtNoFollow; a test
-	// seam, since only root can give a file away) (issue #2600).
+	// runAsUID and runAsGID are the uid:gid server containers run as, and chownAt the call that hands a working-set
+	// entry to them (chownAtNoFollow; a test seam, since only root can give a file away).
 	runAsUID int
 	runAsGID int
 	chownAt  func(dirFd int, name string, uid, gid int) error
-	// conflictPoll and conflictDeadline bound the wait-for-name-free loop (#233).
+	// conflictPoll and conflictDeadline bound the wait-for-name-free loop.
 	conflictPoll     time.Duration
 	conflictDeadline time.Duration
-	// readinessTimeout bounds the hold-on-starting wait (issue #345).
+	// readinessTimeout bounds the hold-on-starting wait.
 	readinessTimeout time.Duration
-	// sweepCallMargin bounds each startup-Sweep daemon call (issue #338).
+	// sweepCallMargin bounds each startup-Sweep daemon call.
 	sweepCallMargin time.Duration
-	// imagePullTimeout bounds a lazy base-image pull (issue #904).
+	// imagePullTimeout bounds a lazy base-image pull.
 	imagePullTimeout time.Duration
-	// logger records the lazy base-image pull at INFO (issue #904).
+	// logger records the lazy base-image pull at INFO.
 	logger *slog.Logger
 }
 
@@ -280,29 +199,20 @@ func New(docker dockerAPI, images *ImageSelector, openControl controlFunc, opts 
 	}
 }
 
-// RconHost returns the host that RCON for serverID is dialed at. It is empty when no
-// network is configured (the caller falls back to the host loopback), and the
-// container name when a user-defined network is configured: the network's
-// container-name DNS resolves it, so RCON is reached over the network rather than
-// the unreachable host loopback (issue #218).
+// RconHost returns container DNS on a configured network, otherwise empty for loopback fallback.
 func (d *Driver) RconHost(serverID string) string {
 	return d.networkHost(serverID)
 }
 
-// GameHost returns the host the relay tunnel dials serverID's game port at. Like
-// RconHost it is empty when no network is configured (the tunnel falls back to the
-// published-port loopback) and the container name when a user-defined network is
-// configured: the worker process is itself a container on that network, so the
-// server's game port is reachable at the container name over the network, not at
-// the worker's own loopback where the host publication does not exist (issue #979).
+// GameHost returns container DNS on a configured network; Worker loopback cannot reach host-published game
+// ports.
 func (d *Driver) GameHost(serverID string) string {
 	return d.networkHost(serverID)
 }
 
-// networkHost is the single decision RconHost and GameHost share: empty with no
-// network (caller dials the host loopback), the container name over the
-// user-defined network otherwise, so the RCON and tunnel dial hosts can never
-// drift (issues #218, #979).
+// networkHost is the single decision RconHost and GameHost share: empty with no network (caller dials the host
+// loopback), the container name over the user-defined network otherwise, so the RCON and tunnel dial hosts can
+// never drift.
 func (d *Driver) networkHost(serverID string) string {
 	if d.network == "" {
 		return ""
@@ -310,17 +220,8 @@ func (d *Driver) networkHost(serverID string) string {
 	return containerName(serverID)
 }
 
-// Start resolves the base image and the launch plan, then either launches the
-// server container directly or — for a Forge args-file launch whose working set
-// is not yet installed — runs a supervised install container first and returns
-// immediately; a supervisor goroutine runs the install to completion, then
-// creates+starts the launch container as the SAME instance and removes the exited
-// install container once the launch's fate is decided (issue #305). The install
-// container carries a distinct name (mcsd-<id>-install) so it never collides with
-// the deterministic launch name, so the #233 wait-for-name-free loop is not
-// entered against the still-present install container. It emits starting then
-// running (or crashed if the install fails); a successful return means the install
-// or launch container was started.
+// Start launches directly or supervises Forge installation before launching the same instance.
+// Success means a container started, not that installation or Minecraft startup has completed.
 func (d *Driver) Start(ctx context.Context, spec execution.InstanceSpec) (execution.Instance, error) {
 	image, err := d.images.Select(spec.MinecraftVersion)
 	if err != nil {
@@ -354,10 +255,8 @@ func (d *Driver) Start(ctx context.Context, spec execution.InstanceSpec) (execut
 	inst.emit(execution.StateStarting, "")
 
 	if plan.NeedsInstall {
-		// Remove stale Forge install artifacts (args files, legacy jars) so the
-		// re-install starts from a clean slate and never hits ambiguous-match
-		// errors (issue #1127). A cleanup failure is logged but does not block
-		// the install.
+		// Remove stale Forge install artifacts (args files, legacy jars) so the re-install starts from a clean slate
+		// and never hits ambiguous-match errors. A cleanup failure is logged but does not block the install.
 		if cleanErr := execution.CleanForgeInstallArtifacts(spec.WorkingDir); cleanErr != nil {
 			d.logger.Warn("failed to clean stale Forge artifacts before install",
 				"server_id", spec.ServerID, "err", cleanErr)
@@ -392,10 +291,9 @@ func containerPathResolver(workingDir string) execution.PathResolver {
 	}
 }
 
-// launchContainer creates and starts the server launch container, returning its
-// id. It publishes the game (and, off-network, RCON) ports and runs the launch
-// argv in exec form. It heals the deterministic-name conflict via createContainer
-// (the #233 wait-for-name-free loop).
+// launchContainer creates and starts the server launch container, returning its id. It publishes the game (and,
+// off-network, RCON) ports and runs the launch argv in exec form. It heals the deterministic-name conflict via
+// createContainer (the wait-for-name-free loop).
 func (d *Driver) launchContainer(ctx context.Context, spec execution.InstanceSpec, image string, launchArgs []string) (string, error) {
 	gamePort, rconPort, err := ports(spec.WorkingDir)
 	if err != nil {
@@ -406,13 +304,7 @@ func (d *Driver) launchContainer(ctx context.Context, spec execution.InstanceSpe
 	portMappings := []PortMapping{
 		{ContainerPort: gamePort, HostIP: d.gameBindIP, HostPort: gamePort},
 	}
-	// RCON publication depends on the topology. With no network configured (bare-
-	// metal parity) RCON is published on the host loopback and
-	// dialed there. With a user-defined network configured, the host RCON
-	// publication is DROPPED — RCON never leaves the docker network — and the
-	// driver dials RCON at the container name over that network instead (issue
-	// #218). It is a control channel that must never be exposed beyond loopback /
-	// the docker network.
+	// Keep RCON inside the Docker network when configured, otherwise publish only on host loopback.
 	if d.network == "" {
 		portMappings = append(portMappings,
 			PortMapping{ContainerPort: rconPort, HostIP: rconBindIP, HostPort: rconPort})
@@ -435,39 +327,25 @@ func (d *Driver) launchContainer(ctx context.Context, spec execution.InstanceSpe
 		return "", err
 	}
 	if err := d.docker.Start(ctx, id); err != nil {
-		// Best-effort cleanup of the created-but-unstarted container.
 		d.removeCreated(ctx, id)
 		return "", err
 	}
 	return id, nil
 }
 
-// startCleanupRemoveTimeout bounds removeCreated's best-effort Remove of a
-// created-but-unstarted container after a failed Start. A healthy daemon
-// answers a remove well inside it (the startup Sweep's remove calls carry the
-// same 10s posture, issue #338); the bound only caps a wedged daemon.
+// Bound detached failed-start cleanup so an unresponsive daemon cannot stall it indefinitely.
 const startCleanupRemoveTimeout = 10 * time.Second
 
-// removeCreated is the best-effort cleanup of a created-but-unstarted container
-// whose Start failed. It runs detached from the command context
-// (context.WithoutCancel, bounded by startCleanupRemoveTimeout): a failed Start
-// is often *caused by* that context being cancelled (a dropped session stream),
-// and a Remove on the same context fails instantly, leaking a Created container
-// that pins the deterministic name until the #233 wait-for-name-free loop or a
-// worker-restart Sweep reaps it (issue #1715). The detachment mirrors the
-// driver's other cleanup calls (pullImage, Stop's escalation).
+// Remove failed-start containers on a detached, bounded context; the cancelled request cannot perform its own
+// cleanup.
 func (d *Driver) removeCreated(ctx context.Context, id string) {
 	removeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), startCleanupRemoveTimeout)
 	defer cancel()
 	_ = d.docker.Remove(removeCtx, id)
 }
 
-// runInstallContainer creates and starts the supervised Forge install container,
-// returning its id. It runs `java -jar <jar> --installServer` (exec form) against
-// the same image and bind-mounted working dir as the launch, under a distinct
-// name (mcsd-<id>-install) so it never collides with the launch name. It publishes
-// no ports (the installer needs none) and attaches no network, keeping the install
-// step independent of the launch topology.
+// runInstallContainer uses a distinct name and no published ports for supervised Forge installation.
+// It currently uses the default bridge rather than the configured server network.
 func (d *Driver) runInstallContainer(ctx context.Context, spec execution.InstanceSpec, image string, plan execution.LaunchPlan) (string, error) {
 	create := CreateSpec{
 		Name:             installContainerName(spec.ServerID),
@@ -479,30 +357,21 @@ func (d *Driver) runInstallContainer(ctx context.Context, spec execution.Instanc
 		MemoryLimitBytes: memoryLimitBytes(spec.MemoryLimitMB),
 		CPUShares:        cpuShares(spec.CPUMillis),
 	}
-	// createContainer carries the #233 wait-for-name-free loop, but the distinct
-	// install name almost never hits it: a leftover install container from a crash
-	// is reaped by the startup Sweep (which the worker-id label scopes), and the
-	// loop self-heals the rare case where a prior install container under the same
-	// name has not finished tearing down yet. Do not "simplify" this to a bare
-	// docker.Create — that would lose the stale-install-container self-healing.
+	// Keep conflict recovery for stale install names, even though install and launch names differ.
 	id, err := d.createServerContainer(ctx, spec, create)
 	if err != nil {
 		return "", err
 	}
 	if err := d.docker.Start(ctx, id); err != nil {
-		// Best-effort cleanup, detached from the command context (issue #1715).
+		// Best-effort cleanup, detached from the command context.
 		d.removeCreated(ctx, id)
 		return "", err
 	}
 	return id, nil
 }
 
-// DefaultRunAsUID and DefaultRunAsGID are the uid:gid server containers run as
-// under a Worker that runs as root (the shipped compose topology) when none is
-// configured. It is a fixed id with no account behind it on the host or in the
-// Java images, and deliberately not the 10001 the api and relay images run as:
-// the working sets of untrusted server code must not share an owner with the
-// API's storage volume.
+// Root Workers default to a fixed non-root uid:gid distinct from the API and relay user.
+// Server-controlled working sets must not share ownership with authoritative storage.
 const (
 	DefaultRunAsUID = 25565
 	DefaultRunAsGID = 25565
@@ -522,25 +391,13 @@ func resolveRunAs(uid, gid, ownUID, ownGID int) (int, int) {
 	return DefaultRunAsUID, DefaultRunAsGID
 }
 
-// droppedCapabilities are the capabilities removed from every container the
-// driver creates. NET_RAW is what opens raw and packet sockets, the primitive
-// behind ARP spoofing and sniffing on the shared servers bridge; a Minecraft
-// server needs neither (issue #2600).
+// droppedCapabilities are the capabilities removed from every container the driver creates. NET_RAW is what
+// opens raw and packet sockets, the primitive behind ARP spoofing and sniffing on the shared servers bridge; a
+// Minecraft server needs neither.
 var droppedCapabilities = []string{"NET_RAW"}
 
-// createServerContainer is the one path every container that runs
-// server-controlled code is created through — the launch container and the Forge
-// install container, first attempt or retry. It makes the container run as the
-// unprivileged run-as user without NET_RAW, and first hands the bind-mounted
-// working set to that user, so the server can write its world, logs and config
-// (issue #2600). It then creates through createContainer.
-//
-// The hand-over runs before EVERY create rather than once at hydrate because the
-// working set gains Worker-owned entries in between: a hydrate or restore writes
-// the tree as the Worker's user, the install supervisor creates
-// logs/forge-install.log, and a working set from before this change holds
-// root-owned files from the days the server itself ran as root. The walk itself,
-// and the check that nothing is running against the tree, are in handover.go.
+// Hand ownership to the non-root user before every install or launch create and drop NET_RAW.
+// Hydrate and Worker log writes can introduce new Worker-owned files between creates.
 func (d *Driver) createServerContainer(ctx context.Context, spec execution.InstanceSpec, create CreateSpec) (string, error) {
 	begin := time.Now()
 	if err := d.awaitQuiescent(ctx, spec.ServerID); err != nil {
@@ -560,20 +417,8 @@ func (d *Driver) createServerContainer(ctx context.Context, spec execution.Insta
 	return d.createContainer(ctx, create)
 }
 
-// classifyStartError wraps a create/start failure with a sanitized execution
-// sentinel (execution.ErrPortConflict / execution.ErrImageMissing) when the
-// Docker daemon's message matches a known operational class, so the instance
-// manager can surface a friendlier failure code than the generic internal one
-// (issue #225). Any other error is returned unchanged (the default stays
-// internal).
-//
-// FRAGILITY: the Docker Engine API has no machine-readable error class for these
-// — it returns a 500/404 with a free-text daemon message — so detection is
-// substring matching on that prose. A daemon-message wording change across Docker
-// versions would silently drop a server back to the unclassified "internal" code
-// (never a misclassification: an unmatched message simply falls through). The raw
-// daemon text continues to ride the wrapped error into the Worker logs regardless,
-// so a field diagnosis never depends on the classification succeeding.
+// Daemon error classes require substring matching because the Engine API returns free-text errors.
+// Unknown wording stays unclassified; raw diagnostics remain in Worker logs.
 func classifyStartError(err error) error {
 	if err == nil {
 		return nil
@@ -587,11 +432,7 @@ func classifyStartError(err error) error {
 	return err
 }
 
-// isImageMissing reports whether a create error is the daemon saying the base
-// image is not present (or cannot be pulled). The detection is substring matching
-// on the free-text daemon message (see classifyStartError's FRAGILITY note); the
-// create path uses it to decide whether to attempt a lazy pull (issue #904) and
-// classifyStartError uses it to sanitize the failure.
+// Use the same free-text image-miss classifier for lazy pulls and sanitized start errors.
 func isImageMissing(err error) bool {
 	if err == nil {
 		return false
@@ -600,17 +441,7 @@ func isImageMissing(err error) bool {
 	return strings.Contains(msg, "No such image") || strings.Contains(msg, "pull access denied")
 }
 
-// createPullingOnMiss creates the container, and on an image-missing failure
-// pulls the base image once and retries the create (issue #904). The container
-// driver historically never pulled, so a fresh host's first start failed with
-// image_missing even though DEPLOYMENT.md promised the worker would pull; this
-// lazy pull-on-miss makes that promise true without the disk/bandwidth cost of
-// eager startup pulls. A pull failure (offline host, denied/unknown image) is
-// folded back into the original image-missing create error so the friendly
-// ErrImageMissing classification (issue #225) is preserved and the operator never
-// sees a raw 404 — the pull error rides along for diagnostics. The retry runs
-// Create directly (not back through this helper) so a second image-missing
-// genuinely fails rather than looping.
+// On image miss, pull once and retry create; keep ErrImageMissing classification if the pull fails.
 func (d *Driver) createPullingOnMiss(ctx context.Context, create CreateSpec) (string, error) {
 	id, err := d.docker.Create(ctx, create)
 	if !isImageMissing(err) {
@@ -622,15 +453,8 @@ func (d *Driver) createPullingOnMiss(ctx context.Context, create CreateSpec) (st
 	return d.docker.Create(ctx, create)
 }
 
-// pullImage pulls the base image under its own generous deadline (issue #904),
-// logging the image and duration at INFO. The pull is hundreds of MB and the
-// EngineClient has no http.Client timeout, so the create call's short context
-// would cut it off; it runs on a detached context bounded by imagePullTimeout
-// instead, so a slow first pull of a large tier is not aborted while a wedged
-// pull is still capped. The pull persists on the host regardless of the caller's
-// outcome, so even if a first pull outlasts the caller's start budget (the retry
-// Create then fails on the cancelled ctx), the image is now cached and the
-// reconciler's next start converges.
+// Pull on a detached, bounded context so a slow first download can populate the cache after the start request
+// expires.
 func (d *Driver) pullImage(ctx context.Context, image string) error {
 	pullCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), d.imagePullTimeout)
 	defer cancel()
@@ -643,30 +467,9 @@ func (d *Driver) pullImage(ctx context.Context, image string) error {
 	return nil
 }
 
-// createContainer creates the container, healing the create name conflict a
-// back-to-back restart hits while the exit-watcher's async removal of the exited
-// container has not yet freed the deterministic name. Three successive one-shot
-// fixes each lost to a new interleaving of this race (#226 name conflict, #229
-// inspect-404, #233 remove-already-in-progress), so on a 409 name conflict the
-// driver runs a bounded wait-for-name-free loop instead of a single special case
-// (issue #233): it polls (every conflictPoll, until conflictDeadline, honoring
-// ctx) for the name to free.
-//
-// Each iteration inspects the conflicting name:
-//   - 404: the name is free, so retry the create. Success returns; a fresh 409
-//     means the name flickered while the daemon finishes teardown, so keep
-//     polling; any other create error is returned.
-//   - this Worker's label and not running: a stale leftover, so issue a remove.
-//     A DELETE 409 ("removal in progress") is the watcher already removing it —
-//     progress, keep polling. Any other remove error: the watcher may still win,
-//     keep polling until the deadline.
-//   - foreign label or running: fail immediately, never removing a container we
-//     do not own or a live server (the conservative posture is unchanged).
-//   - any other inspect error: transient, keep polling until the deadline.
-//
-// On deadline expiry the original conflict is returned wrapped with the last
-// decline reason, so a field diagnosis does not require code reading (keeping
-// #231's observability).
+// Poll name conflicts until stale owned containers are removed; never remove a running or foreign container.
+// Transient inspect/removal errors retry within the bound; expiry returns the original conflict with
+// diagnostics.
 func (d *Driver) createContainer(ctx context.Context, create CreateSpec) (string, error) {
 	id, err := d.createPullingOnMiss(ctx, create)
 	if !errors.Is(err, errNameConflict) {
@@ -721,39 +524,16 @@ func (d *Driver) createContainer(ctx context.Context, create CreateSpec) (string
 	}
 }
 
-// logBufferLines bounds the per-instance captured-log buffer; matches the
-// now-removed host-process driver's posture (drop-oldest + dropped-count marker, issue #96).
+// logBufferLines bounds the per-instance captured-log buffer; matches the now-removed host-process driver's
+// posture (drop-oldest + dropped-count marker).
 const logBufferLines = 256
 
-// containerStateRunning is the Engine's container-state string for a running
-// container (the State field /containers/json reports). The sweep gracefully
-// stops a running orphan before removing it (issue #336).
+// containerStateRunning is the Engine's container-state string for a running container (the State field
+// /containers/json reports). The sweep gracefully stops a running orphan before removing it.
 const containerStateRunning = "running"
 
-// Sweep removes leftover containers labelled for this Worker, recovering from a
-// crash that left a server's container running or stopped. It is called once at
-// startup before any server is launched; the deterministic name plus the
-// worker-id label scope it to this Worker's own containers so it never touches
-// unrelated ones.
-//
-// A RUNNING orphan is stopped gracefully first — `docker stop` with the driver's
-// StopTimeout grace, SIGTERM then SIGKILL inside the daemon — so the MC server's
-// shutdown hook saves the world before the container goes away; a plain
-// force-remove would SIGKILL it and lose unsaved data (issue #336). A stop
-// failure does not leak the container: the remove runs regardless, and the stop
-// error is surfaced in the joined result. Exited/created orphans are
-// force-removed directly (no graceful stop). Removal/stop errors for individual
-// containers are returned joined so the caller can log them, but a partial sweep
-// does not block startup.
-//
-// Each daemon call runs under a per-call deadline derived from ctx so a wedged
-// daemon cannot block worker startup indefinitely (issue #338): the startup Sweep
-// is invoked with context.Background() and the EngineClient has no http.Client
-// timeout, so without these bounds a hung daemon would hang startup forever. The
-// graceful stop gets StopTimeout + a margin (the daemon needs the full grace to
-// escalate to SIGKILL); list/remove get the margin alone. A healthy daemon
-// answers each call well inside its deadline, so the bound never fires on the
-// success path.
+// Sweep stops running containers owned by this Worker before removing them, even if stop fails.
+// Bound each daemon call and return joined errors; the caller decides whether startup continues.
 func (d *Driver) Sweep(ctx context.Context) error {
 	listCtx, cancel := context.WithTimeout(ctx, d.sweepCallMargin)
 	containers, err := d.docker.List(listCtx, labelWorkerID, d.workerID)
@@ -764,20 +544,11 @@ func (d *Driver) Sweep(ctx context.Context) error {
 	var errs []error
 	for _, c := range containers {
 		if c.State == containerStateRunning {
-			// Best-effort save-on (issue #1710): a worker crash mid-snapshot may have
-			// left auto-save disabled via the quiesce bracket's save-off. Issuing save-on
-			// before stop ensures the MC server's shutdown hook (triggered by the SIGTERM
-			// from docker stop) can auto-save the world. Failure is logged and does not
-			// block the stop — the pre-fix behavior was no save-on at all.
+			// Best-effort save-on repairs interrupted snapshot brackets before graceful orphan stop.
 			d.sweepSaveOn(ctx, c.Name, c.Labels[labelMCVersion])
 
-			// This bare docker.Stop is the orphan-sweep stop leg observed in the #927
-			// incident (a redeploy sweep stopped a running 26.x server, then the stop-leg
-			// snapshot found unpadded regions). The daemon-internal SIGTERM→SIGKILL
-			// escalation here is NOT directly observable — unlike the supervised stop in
-			// instance.Stop, which emits a WARN on its explicit kill fallback (see
-			// Instance.Stop). An elapsed-time/exit-code(137) escalation heuristic at this
-			// site is deferred (#927).
+			// Daemon-internal stop escalation is not directly observable here; unlike instance.Stop, this path has no
+			// explicit kill event.
 			stopCtx, cancel := context.WithTimeout(ctx, d.stopTimeout+d.sweepCallMargin)
 			err := d.docker.Stop(stopCtx, c.ID, d.stopTimeout)
 			cancel()
@@ -795,20 +566,8 @@ func (d *Driver) Sweep(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// sweepSaveOn issues a best-effort RCON save-on to a running orphan container
-// before it is stopped (issue #1710). A worker crash mid-snapshot leaves the MC
-// server with auto-save disabled; restoring it before the SIGTERM ensures the
-// shutdown save captures the world. Install containers (suffix "-install") are
-// skipped — they are not MC servers. Failure is logged and never blocks the stop.
-//
-// mcVersion comes from the container's own mc-version label, which is the only
-// place left to read it: the Worker this sweep cleans up after crashed, taking
-// the StartServer command with it. It decides the charset the server.properties
-// this dial reads its RCON password from is decoded in (issue #3116) — without
-// it a 1.20+ server's non-ASCII password reads as latin-1, auth fails, and the
-// stop below runs with auto-save still off. A container labelled by an older
-// Worker carries no version and falls back to latin-1, the reader that Worker
-// itself used.
+// Best-effort save-on before stopping an orphan repairs a bracket interrupted by Worker failure.
+// Use the container's Minecraft-version label for password decoding; skip install containers.
 func (d *Driver) sweepSaveOn(ctx context.Context, containerName, mcVersion string) {
 	if d.openControl == nil || d.scratchDir == "" {
 		return
@@ -854,10 +613,9 @@ func (d *Driver) serverIDFromName(name string) string {
 	return strings.TrimPrefix(name, containerNamePrefix)
 }
 
-// labels are attached to every container: a worker-id label scopes the orphan
-// sweep, a server-id label identifies the server, and an mc-version label
-// records the Minecraft version, which the sweep needs after a crash took the
-// StartServer command that carried it (issue #3116).
+// labels are attached to every container: a worker-id label scopes the orphan sweep, a server-id label
+// identifies the server, and an mc-version label records the Minecraft version, which the sweep needs after a
+// crash took the StartServer command that carried it.
 func (d *Driver) labels(serverID, mcVersion string) map[string]string {
 	return map[string]string{
 		labelWorkerID:  d.workerID,
@@ -870,17 +628,8 @@ func (d *Driver) labels(serverID, mcVersion string) map[string]string {
 // and the server's working directory.
 const containerWorkDir = "/data"
 
-// containerCmd builds the in-container command (exec form) from a launch argv:
-// the base image provides the `java` binary, so the command is `java` followed by
-// the resolved JVM arguments. The argv is built by execution.BuildLaunchPlan
-// against the in-container path resolver, so paths are already /data-relative.
-//
-// It also gives the JVM a home. The run-as uid has no passwd entry in the Java
-// images, and a JVM up to 17 then reports user.home as the literal "?" — which
-// libraries resolve against the working dir, leaving a "?" directory (the Forge
-// installer's JNA cache, measured) in the working set and so in every snapshot.
-// /tmp is in the container's own filesystem: writable by any uid and discarded
-// with the container, as /root was while the server ran as root (issue #2600).
+// Set user.home to /tmp because numeric users may lack passwd entries and older JVMs otherwise use "?".
+// This keeps temporary library caches out of the snapshotted working set.
 func containerCmd(args []string) []string {
 	return append([]string{"java", "-Duser.home=" + containerHomeDir}, args...)
 }
@@ -888,20 +637,14 @@ func containerCmd(args []string) []string {
 // containerHomeDir is the user.home every server JVM is launched with.
 const containerHomeDir = "/tmp"
 
-// memoryLimitBytes converts the per-server memory ceiling from mebibytes (the
-// InstanceSpec unit, issue #706) to bytes for the Docker host-config Memory
-// field (issue #707). A zero ceiling stays zero — no constraint.
+// memoryLimitBytes converts the per-server memory ceiling from mebibytes (the InstanceSpec unit) to bytes for
+// the Docker host-config Memory field. A zero ceiling stays zero, no constraint.
 func memoryLimitBytes(limitMB uint32) int64 {
 	return int64(limitMB) * 1024 * 1024
 }
 
-// cpuShares converts the per-server CPU allocation from millicores (the
-// InstanceSpec unit, issue #723) to a Docker relative CPU weight (issue #724),
-// at Docker's baseline of 1024 shares = 1 core: round(millis * 1024 / 1000) (so
-// 2000m → 2048). An unset allocation (0) keeps the fixed default weight
-// (gameServerCPUShares), preserving the pre-#724 behavior for existing servers.
-// The result is a SOFT share that only arbitrates contention; no hard CPU quota
-// (NanoCpus) is set.
+// cpuShares maps millicores to relative weight at 1024 shares per core; zero uses gameServerCPUShares.
+// No hard CPU quota is imposed.
 func cpuShares(cpuMillis uint32) int64 {
 	if cpuMillis == 0 {
 		return gameServerCPUShares
@@ -909,15 +652,14 @@ func cpuShares(cpuMillis uint32) int64 {
 	return (int64(cpuMillis)*1024 + 500) / 1000
 }
 
-// instance is one running container. Across a Forge install+launch it owns two
-// containers in succession (the install container, then the launch container);
-// containerID is the current one, guarded by mu (issue #305).
+// instance is one running container. Across a Forge install+launch it owns two containers in succession (the
+// install container, then the launch container); containerID is the current one, guarded by mu.
 type instance struct {
 	spec        execution.InstanceSpec
 	docker      dockerAPI
 	containerID string
-	// image/network/gameBindIP/labels/createFn carry what superviseInstall needs to
-	// create the launch container after the install container exits (issue #305).
+	// image/network/gameBindIP/labels/createFn carry what superviseInstall needs to create the launch container
+	// after the install container exits.
 	image       string
 	network     string
 	gameBindIP  string
@@ -928,15 +670,13 @@ type instance struct {
 	// host loopback, the container name when a user-defined network is configured.
 	rconHost    string
 	stopTimeout time.Duration
-	// flushTimeout bounds the pre-stop flush preFallback (issue #2622).
+	// flushTimeout bounds the pre-stop flush preFallback.
 	flushTimeout time.Duration
-	// readinessTimeout bounds the hold-on-starting wait before falling back to
-	// running (issue #345).
+	// readinessTimeout bounds the hold-on-starting wait before falling back to running.
 	readinessTimeout time.Duration
-	// logger records the graceful-stop -> kill escalation at WARN (issue #927), so a
-	// stop that timed out (leaving the world's regions unpadded for the stop-leg
-	// snapshot) is diagnosable. Never nil: Start copies the Driver's logger, which
-	// defaults to a discard handler.
+	// logger records the graceful-stop -> kill escalation at WARN, so a stop that timed out (leaving the world's
+	// regions unpadded for the stop-leg snapshot) is diagnosable. Never nil: Start copies the Driver's logger,
+	// which defaults to a discard handler.
 	logger *slog.Logger
 
 	events chan execution.StatusEvent
@@ -950,44 +690,26 @@ type instance struct {
 	logWG     sync.WaitGroup
 	logCancel context.CancelFunc
 
-	// beforeLaunch is a test-only hook fired inside superviseInstall after the
-	// launch container is created but immediately before the latch-check-and-start
-	// critical section, so a test can drive a Stop into the exact
-	// install-exit→launch window the section must close (issue #306). Nil in
-	// production.
+	// Test hook after launch creation and before the stop-check/start critical section; nil in production.
 	beforeLaunch func()
 
-	// beforeRetryStart is a test-only hook fired inside superviseInstall after the
-	// retry install container is created but before the latch-check-and-start
-	// critical section, so a test can drive a Stop into the exact retry-setup
-	// window (issue #1987). Nil in production.
+	// beforeRetryStart is a test-only hook fired inside superviseInstall after the retry install container is
+	// created but before the latch-check-and-start critical section, so a test can drive a Stop into the exact
+	// retry-setup window. Nil in production.
 	beforeRetryStart func()
 
-	// beforeReadyPublish is a test-only hook fired inside awaitReady after
-	// state is set to Running but before emitLocked publishes the event, under
-	// i.mu. A test spawns Stop here; pre-fix Stop could interleave (the lock was
-	// released between state write and emit), post-fix Stop blocks on the held
-	// lock (issue #2022). Nil in production.
+	// Test hook under i.mu between running-state assignment and event publication; nil in production.
 	beforeReadyPublish func()
 
-	// beforeSurvivedReset is a test-only hook fired inside Stop after the post-kill
-	// confirm wait times out but before re-acquiring the lock to reset the latch, so
-	// a test can drive the container exit (and supervise) into the exact window the
-	// survived-kill restore must not stomp (issue #392). Nil in production.
+	// beforeSurvivedReset is a test-only hook fired inside Stop after the post-kill confirm wait times out but
+	// before re-acquiring the lock to reset the latch, so a test can drive the container exit (and supervise) into
+	// the exact window the survived-kill restore must not stomp. Nil in production.
 	beforeSurvivedReset func()
 
-	// metricsMu guards the cached metrics RCON connection reused across player-count
-	// samples (issue #1622). It is a dedicated lock — never i.mu — held only for the
-	// duration of a sample's dial+"list" or the terminal close, so a slow RCON round
-	// trip cannot stall the state machine (Status/Stop/supervise). The connection is
-	// kept separate from the console-command and graceful-stop RCON paths (each of
-	// which dials its own transient connection), so no cross-path locking arises.
+	// Use a separate metrics lock so slow RCON sampling cannot block status or stop.
+	// Console and graceful-stop connections are independent.
 	metricsMu sync.Mutex
-	// metricsControl is the persistent RCON connection player-count sampling reuses;
-	// nil before the first dial and after a poisoned connection is discarded. The
-	// rcon client is not safe for concurrent use and poisons itself on any Execute
-	// error, so access is serialized by metricsMu and a broken connection is
-	// discarded to force a redial on the next sample.
+	// Serialize metrics RCON access; discard a poisoned connection so the next sample redials.
 	metricsControl execution.ServerControl
 	// metricsClosed latches once the instance terminates and closeMetricsControl has
 	// run, so a late in-flight sample does not redial a connection nobody would
@@ -997,25 +719,15 @@ type instance struct {
 	mu       sync.Mutex
 	state    execution.ServerState
 	stopping bool
-	// stopRequested is a sticky record that a Stop was ever requested. Unlike
-	// stopping (which the survived-kill failure path resets so a retry re-runs the
-	// escalation, issue #253), it is never cleared, so supervise reports the
-	// eventual exit as stopped — not a spurious crash — even when the container
-	// survived the kill window and then died after the latch reset (issue #257).
+	// stopRequested survives failed-stop latch resets so a later exit is still classified as requested.
 	stopRequested bool
-	// exitObserved is set by supervise under the lock the moment it observes the
-	// container exit, before recording the terminal state. The survived-kill restore
-	// checks it under the same lock and skips the reset when set, so it cannot stomp
-	// a terminal state supervise reached during the post-kill wait window (#392).
+	// exitObserved is set by supervise under the lock the moment it observes the container exit, before recording
+	// the terminal state. The survived-kill restore checks it under the same lock and skips the reset when set, so
+	// it cannot stomp a terminal state supervise reached during the post-kill wait window.
 	exitObserved bool
 	closed       bool
-	// terminalLatched is set by emit the first time a terminal state is published.
-	// Once latched, emit drops any later non-terminal event: awaitReady's running
-	// and Stop's stopping can race past supervise's stopped|crashed, and a
-	// latest-wins consumer would otherwise transiently report a dead container as
-	// running/stopping. The latch is read and set under i.mu, which emit already
-	// holds, so the terminal emit and these post-terminal emits are serialized
-	// (issue #835).
+	// Latch the first terminal event so racing readiness and stopping events cannot report a dead container as
+	// live.
 	terminalLatched bool
 }
 
@@ -1034,20 +746,15 @@ func (i *instance) currentContainerID() string {
 	return i.containerID
 }
 
-// beginLaunch wires the launch container's log capture, marks the instance
-// running, and starts the exit supervisor. It is the shared tail of a direct
-// launch and a post-install launch, so a Forge install+launch reaches running
-// through the same path as a plain start (issue #305).
+// beginLaunch wires the launch container's log capture, marks the instance running, and starts the exit
+// supervisor. It is the shared tail of a direct launch and a post-install launch, so a Forge install+launch
+// reaches running through the same path as a plain start.
 func (i *instance) beginLaunch(id string) {
 	i.setContainerID(id)
 	i.beginLaunchTail(id)
 }
 
-// beginLaunchTail wires log capture, starts the exit supervisor, and holds
-// StateStarting until the server reports readiness (the startup-complete log
-// marker) before transitioning to running (issue #345). superviseInstall calls
-// it after publishing and starting the launch under the latch lock, so the
-// publish and the stopping re-check stay one critical section (issue #306).
+// Begin log capture and exit supervision only after launch publication under the stop latch lock.
 func (i *instance) beginLaunchTail(id string) {
 	// Follow the container's multiplexed log stream into the per-instance pump.
 	// The follow is bound to logCtx so supervise can end it on container exit;
@@ -1063,12 +770,7 @@ func (i *instance) beginLaunchTail(id string) {
 	go i.awaitReady()
 }
 
-// awaitReady holds StateStarting until the server's startup-complete log marker
-// appears (RCON is listening by then), the readiness fallback elapses, or the
-// container exits first; only the first two transition to running (issue #345).
-// The transition is gated under the lock on the instance still being in
-// StateStarting, so a container that crashed while booting (supervise set
-// crashed) or a Stop that latched stopping is never overwritten with running.
+// Only transition starting to running after readiness or fallback; never overwrite stopping or a terminal state.
 func (i *instance) awaitReady() {
 	if !execution.WaitReady(i.logPump.Ready(), i.exited, i.readinessTimeout) {
 		return // the container exited first; supervise owns the terminal state.
@@ -1085,28 +787,12 @@ func (i *instance) awaitReady() {
 	i.emitLocked(execution.StateRunning, "", execution.CrashReasonUnspecified)
 }
 
-// superviseInstall waits for the supervised install container to exit, captures
-// its output to logs/forge-install.log, then creates+starts the launch container
-// as the SAME instance (issue #305). On a non-zero install exit the instance goes
-// crashed and no launch container is created; a Stop that terminated the install
-// container reports stopped. Every crash of the install itself carries a
-// CrashReason, so a client can tell it from a runtime crash and point at the
-// install log (issue #1093). The install container is removed once its fate is
-// decided (in every terminal branch, and after the launch is published): keeping
-// it as the current container until then gives a concurrent Stop a valid target
-// through the install-exit→launch handoff window (issue #306). Its distinct name
-// (mcsd-<id>-install) means the launch create never contends with it.
-//
-// Retry-publish invariant (issue #1987): the retry container is created outside
-// the lock, then {stop re-check, docker.Start, containerID publish,
-// exitObserved reset} form one critical section — mirroring the install→launch
-// handoff (issue #306). This prevents Stop from capturing a stale containerID
-// and returning false success against a removed container while the retried
-// installer keeps running.
+// Supervise installation and publish the launch as the same instance, keeping the install container until
+// handoff.
+// Serialize stop recheck, Start, and container-ID publication so Stop cannot miss a retry or launch.
 func (i *instance) superviseInstall(installID string) {
-	// Retry loop: on a non-zero install exit, clean artifacts and re-run the
-	// install container up to maxInstallRetries additional times before giving
-	// up (issue #1128). Transport-error re-attach is per-attempt (issue #881).
+	// Retry loop: on a non-zero install exit, clean artifacts and re-run the install container up to
+	// maxInstallRetries additional times before giving up. Transport-error re-attach is per-attempt.
 	var (
 		exitCode int64
 		waitErr  error
@@ -1114,15 +800,8 @@ func (i *instance) superviseInstall(installID string) {
 	for attempt := 0; ; attempt++ {
 		scan := i.captureInstallOutput(installID)
 
-		// Re-attach on transport errors the same way supervise does: a daemon
-		// blip does not mean the install container died (issue #881).
-		//
-		// recovered is the exited container's own record when the Wait result was
-		// lost to such a blip: Wait then returned no exit status at all, so the one
-		// the daemon kept on the container stands in for it and the attempt is
-		// judged like any other (issue #1093). A container already gone has no
-		// record; its exit status stays unknown, the stale transport error is
-		// dropped, and the re-plan's artifact check decides (issue #895).
+		// A Wait transport error is not an install exit; recover the stored exit record by Inspect.
+		// If the container is gone, the launch artifact check decides whether installation succeeded.
 		var recovered *ContainerInfo
 		for {
 			exitCode, waitErr = i.docker.Wait(context.Background(), installID)
@@ -1143,12 +822,8 @@ func (i *instance) superviseInstall(installID string) {
 		}
 
 		i.mu.Lock()
-		// Mark the install exit observed so the survived-kill restore, re-acquiring
-		// the lock, skips its reset rather than stomping the terminal state set
-		// below (mirrors supervise's exitObserved guard, issue #595/#392). Read
-		// the sticky stop intent: a container that survived the kill window and
-		// then died after the latch was reset is still a requested stop, so report
-		// stopped (mirrors issue #257).
+		// Mark exit before publishing terminal state so a failed-stop reset cannot overwrite it.
+		// Use sticky stop intent even when the transient stopping latch was reset.
 		i.exitObserved = true
 		stopping := i.stopRequested
 		i.mu.Unlock()
@@ -1159,18 +834,13 @@ func (i *instance) superviseInstall(installID string) {
 			return
 		}
 
-		// A Wait that returned cleanly reports the installer's own exit code, and
-		// only exit 0 is a successful install: the daemon answers a non-zero exit
-		// with a nil error too (issue #1093).
+		// A Wait that returned cleanly reports the installer's own exit code, and only exit 0 is a successful install:
+		// the daemon answers a non-zero exit with a nil error too.
 		if waitErr == nil && exitCode == 0 {
 			break // install succeeded, proceed to re-plan
 		}
 
-		// Install failed. A failure the Worker can explain is deterministic — the
-		// same memory limit or Java runtime fails the next attempt the same way —
-		// so it is reported at once instead of being retried (issue #1093). The
-		// container is inspected before it is removed, unless the recovery above
-		// already did.
+		// Report explained install failures immediately; the same memory limit or Java runtime will fail again.
 		oomKilled := false
 		if recovered != nil {
 			oomKilled = recovered.OOMKilled
@@ -1195,17 +865,16 @@ func (i *instance) superviseInstall(installID string) {
 			return
 		}
 
-		// Backoff before retry, polling for Stop so a concurrent Stop is
-		// observed promptly rather than sleeping the full backoff (issue #1128).
+		// Backoff before retry, polling for Stop so a concurrent Stop is observed promptly rather than sleeping the
+		// full backoff.
 		if i.installBackoffOrStopping(installRetryBackoff[attempt]) {
 			i.finishTerminal(execution.StateStopped, "")
 			return
 		}
 
-		// Re-check stopRequested after backoff: a Stop may have arrived in the
-		// window between Remove and the backoff start that was too late for
-		// the backoff polling to observe (issue #1128). Use the sticky
-		// stopRequested, consistent with installBackoffOrStopping (issue #1442).
+		// Re-check stopRequested after backoff: a Stop may have arrived in the window between Remove and the backoff
+		// start that was too late for the backoff polling to observe. Use the sticky stopRequested, consistent with
+		// installBackoffOrStopping.
 		i.mu.Lock()
 		stopping = i.stopRequested
 		i.mu.Unlock()
@@ -1214,14 +883,8 @@ func (i *instance) superviseInstall(installID string) {
 			return
 		}
 
-		// Clean stale artifacts and create (but do not start) the retry container
-		// outside the lock (issue #1127). The latch re-check, Start, containerID
-		// publish, and exitObserved reset are one critical section — mirroring the
-		// install→launch handoff (issue #306) — so a Stop racing this window either
-		// wins the lock first (aborting and removing the unstarted container) or
-		// blocks for the one Start call and then acts on the already-started retry
-		// container. There is therefore no published-but-unstarted sub-window for
-		// Stop to mishandle (issue #1987).
+		// Create retry containers outside the lock, then serialize stop recheck, Start, ID publication, and exit
+		// reset.
 		_ = execution.CleanForgeInstallArtifacts(i.spec.WorkingDir)
 		newID, err := i.createInstallRetryContainer()
 		if err != nil {
@@ -1250,9 +913,8 @@ func (i *instance) superviseInstall(installID string) {
 		installID = newID
 	}
 
-	// The install exited cleanly. A Stop that arrived after the wait returned
-	// but before the re-plan still wins — report stopped and clean up. Read the
-	// sticky stopRequested, consistent with the in-loop check (issue #595).
+	// The install exited cleanly. A Stop that arrived after the wait returned but before the re-plan still wins,
+	// report stopped and clean up. Read the sticky stopRequested, consistent with the in-loop check.
 	i.mu.Lock()
 	stopping := i.stopRequested
 	i.mu.Unlock()
@@ -1285,13 +947,8 @@ func (i *instance) superviseInstall(installID string) {
 		plan = execution.LaunchPlan{LaunchArgs: execution.JarLaunchArgs(i.spec, jarPath)}
 	}
 
-	// Create the launch container outside the lock: the create rides the Docker API
-	// and may run the #233 wait-for-name-free loop, so it must not block a
-	// concurrent Stop. The launch name differs from the install name, so the create
-	// does not contend with the still-present install container; the install
-	// container is removed only after the launch decision, so until then it remains
-	// the current container and a concurrent Stop has a valid target (issue #306).
-	// The created launch container is not started yet.
+	// Create outside the lock so name-conflict polling cannot block Stop.
+	// Keep the install container as Stop's target until the launch decision.
 	id, err := i.createLaunchContainer(plan.LaunchArgs)
 	if err != nil {
 		_ = i.docker.Remove(context.Background(), installID)
@@ -1303,21 +960,11 @@ func (i *instance) superviseInstall(installID string) {
 		i.beforeLaunch()
 	}
 
-	// The latch re-check, the publish, and the start are one critical section
-	// (issue #306). Holding the lock across the single docker start (not the
-	// expensive create above) is the container analogue of the now-removed host-process driver
-	// holding the lock across cmd.Start: a Stop racing this window either wins the
-	// lock first — observed below, aborting and removing the unstarted launch
-	// container — or blocks for the one start call and then acts on the
-	// already-started launch. There is therefore no published-but-unstarted
-	// sub-window for Stop to mishandle.
+	// Serialize stop recheck, Start, and publication so Stop cannot target a published-but-unstarted launch.
 	i.mu.Lock()
 	if i.stopping {
-		// A Stop won the latch after the install exited but before the launch
-		// started. The current container is still the (exited) install container, so
-		// Stop acts on a valid target; remove the unstarted launch container we
-		// created and the install container, then report stopped. Stop's waitExit is
-		// released by finishTerminal closing i.exited (issue #306).
+		// If Stop won before launch, remove the unstarted launch and exited install containers, then release exit
+		// waiters.
 		i.mu.Unlock()
 		_ = i.docker.Remove(context.Background(), id)
 		_ = i.docker.Remove(context.Background(), installID)
@@ -1340,10 +987,9 @@ func (i *instance) superviseInstall(installID string) {
 	i.beginLaunchTail(id)
 }
 
-// createLaunchContainer creates (but does not start) the launch container after a
-// successful install, reusing the driver's create helper through the captured
-// fields. Starting is deferred to the latch-guarded critical section so a Stop can
-// abort the launch before it starts (issue #306).
+// createLaunchContainer creates (but does not start) the launch container after a successful install, reusing
+// the driver's create helper through the captured fields. Starting is deferred to the latch-guarded critical
+// section so a Stop can abort the launch before it starts.
 func (i *instance) createLaunchContainer(launchArgs []string) (string, error) {
 	gamePort, rconPort, err := ports(i.spec.WorkingDir)
 	if err != nil {
@@ -1371,13 +1017,7 @@ func (i *instance) createLaunchContainer(launchArgs []string) (string, error) {
 	return i.createFn(context.Background(), i.spec, create)
 }
 
-// installBackoffOrStopping sleeps for d in small increments, checking the
-// sticky stopRequested flag between each tick so a concurrent Stop is observed
-// within one tick rather than after the full delay. Returns true if a stop was
-// requested (the caller should abort), false if the full delay elapsed.
-// stopRequested is used instead of the transient stopping flag because a Stop
-// whose kill fails or is survived clears stopping but leaves stopRequested set
-// (issue #1442).
+// Check sticky stopRequested between backoff ticks; a failed kill may already have reset stopping.
 func (i *instance) installBackoffOrStopping(d time.Duration) bool {
 	const tick = 50 * time.Millisecond
 	remaining := d
@@ -1398,12 +1038,7 @@ func (i *instance) installBackoffOrStopping(d time.Duration) bool {
 	return false
 }
 
-// createInstallRetryContainer creates (but does not start) a new install
-// container for a retry attempt, reusing the instance's captured fields. Starting
-// is deferred to the latch-guarded critical section so a Stop can abort the retry
-// before it starts (issue #1987). It mirrors Driver.runInstallContainer's create
-// but omits Start, like createLaunchContainer for the install→launch handoff
-// (issue #306).
+// Create retries without starting them so the latch-guarded handoff can abort a racing Stop.
 func (i *instance) createInstallRetryContainer() (string, error) {
 	plan, err := execution.BuildLaunchPlan(i.spec, i.spec.WorkingDir, containerPathResolver(i.spec.WorkingDir))
 	if err != nil {
@@ -1422,15 +1057,8 @@ func (i *instance) createInstallRetryContainer() (string, error) {
 	return i.createFn(context.Background(), i.spec, create)
 }
 
-// captureInstallOutput follows the install container's log stream and writes it to
-// logs/forge-install.log in the working dir, so an operator can read the install
-// diagnostics via the files API (issue #305). It is best-effort: a failure to open
-// the stream or the log file leaves the file empty/absent rather than failing the
-// install (the install's own exit code is the authority on success).
-//
-// It returns what this attempt's output said about why it might have failed. The
-// log file is appended to across attempts and starts, so the stream — not the
-// file — is what gets scanned (issue #1093).
+// Append install output to the working-set log without failing installation on logging errors.
+// Classify only this attempt's stream because the file includes earlier attempts.
 func (i *instance) captureInstallOutput(installID string) *installOutputScan {
 	scan := &installOutputScan{}
 	rc, err := i.docker.Logs(context.Background(), installID)
@@ -1452,17 +1080,7 @@ func (i *instance) captureInstallOutput(installID string) *installOutputScan {
 	return scan
 }
 
-// The strings a failed Forge installer leaves in its output for the two failures
-// the Worker explains (issue #1093). Both are the JVM's own fully qualified error
-// names, so they appear only when that error was actually thrown: the installer's
-// class listings spell classes with slashes ("java/lang/OutOfMemoryError").
-//
-//   - An installer whose heap is too small dies in a processor with
-//     "java.lang.OutOfMemoryError: Java heap space" and exit 1.
-//   - An installer the runtime is too old to load dies at once with
-//     "java.lang.UnsupportedClassVersionError: ... Unsupported major.minor
-//     version N" (or "... compiled by a more recent version of the Java Runtime")
-//     and exit 1.
+// Match JVM dotted exception names; installer class listings use slashes and must not trigger these diagnoses.
 var (
 	installOutOfMemoryMarker      = []byte("java.lang.OutOfMemoryError")
 	installJavaIncompatibleMarker = []byte("java.lang.UnsupportedClassVersionError")
@@ -1490,14 +1108,9 @@ func (s *installOutputScan) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// explainInstallFailure reports the specific reason a FAILED install attempt
-// failed, when the Worker can tell (issue #1093). oomKilled is the daemon's
-// record of a kernel OOM kill, read off the install container before it is
-// removed. Out of memory is either that record (the installer never gets to
-// print anything; exit 137 alone is not enough, since any SIGKILL exits 137) or
-// the JVM's own heap error in the output. ok is false for every other failure, which
-// stays a generic, retryable one — a missed explanation costs a vaguer message,
-// a wrong one sends the operator after the wrong fix.
+// Classify memory failure from the daemon OOM flag or JVM output; exit 137 alone also means other SIGKILL
+// causes.
+// Unexplained failures remain generic and retryable.
 func (i *instance) explainInstallFailure(scan *installOutputScan, oomKilled bool) (reason execution.CrashReason, detail string, ok bool) {
 	if scan.outOfMemory || oomKilled {
 		detail = "forge install ran out of memory: no memory limit is set for this server, " +
@@ -1528,15 +1141,14 @@ func (i *instance) oomKilled(id string) bool {
 	return err == nil && info.OOMKilled
 }
 
-// finishTerminal records a terminal state reached during the install phase (no
-// launch container started), emits it, and closes the event/exited channels so
-// the manager's pump and any in-flight Stop wait observe the end (issue #305).
+// finishTerminal records a terminal state reached during the install phase (no launch container started), emits
+// it, and closes the event/exited channels so the manager's pump and any in-flight Stop wait observe the end.
 func (i *instance) finishTerminal(state execution.ServerState, detail string) {
 	i.finish(state, detail, execution.CrashReasonUnspecified)
 }
 
-// finishInstallCrash is finishTerminal for a crash of the install itself, tagged
-// with why so a client can tell it from a runtime crash (issue #1093).
+// finishInstallCrash is finishTerminal for a crash of the install itself, tagged with why so a client can tell
+// it from a runtime crash.
 func (i *instance) finishInstallCrash(reason execution.CrashReason, detail string) {
 	i.finish(execution.StateCrashed, detail, reason)
 }
@@ -1552,9 +1164,8 @@ func (i *instance) finish(state execution.ServerState, detail string, reason exe
 	i.closed = true
 	close(i.events)
 	i.mu.Unlock()
-	// Release the cached metrics RCON connection so it never outlives the instance
-	// (issue #1622). Closing i.events above stops the metrics pump, so this cannot
-	// contend with a sample for long.
+	// Release the cached metrics RCON connection so it never outlives the instance. Closing i.events above stops
+	// the metrics pump, so this cannot contend with a sample for long.
 	i.closeMetricsControl()
 }
 
@@ -1564,11 +1175,7 @@ func (i *instance) Status() execution.ServerState {
 	return i.state
 }
 
-// ProbeAlive reports whether the container is running right now, from a live
-// Inspect and never from i.state (execution.Instance, issue #2473). It is
-// single-shot by contract: the classification is inspectAlive's decision table
-// and the caller owns the retry cadence, so an unreachable daemon returns an
-// error here rather than being polled out as exitedAfterTransportError does.
+// ProbeAlive performs one live Inspect; cached state cannot establish liveness and daemon errors remain unknown.
 func (i *instance) ProbeAlive(ctx context.Context) (bool, error) {
 	return i.inspectAlive(ctx, i.currentContainerID())
 }
@@ -1592,10 +1199,9 @@ func (i *instance) captureLogs(ctx context.Context, id string) {
 	demuxLogs(rc, i.logPump)
 }
 
-// Sample reads a one-shot resource sample from the Engine stats endpoint
-// (execution.StatsSource, FR-MON-3). An error (daemon unreachable, container
-// gone) makes the manager fall back to an up-only sample. Player count is
-// queried best-effort via RCON "list"; a failure leaves it zero (issue #1068).
+// Sample reads a one-shot resource sample from the Engine stats endpoint (execution.StatsSource, FR-MON-3). An
+// error (daemon unreachable, container gone) makes the manager fall back to an up-only sample. Player count is
+// queried best-effort via RCON "list"; a failure leaves it zero.
 func (i *instance) Sample(ctx context.Context) (execution.MetricsSample, error) {
 	stats, err := i.docker.Stats(ctx, i.currentContainerID())
 	if err != nil {
@@ -1609,18 +1215,8 @@ func (i *instance) Sample(ctx context.Context) (execution.MetricsSample, error) 
 	}, nil
 }
 
-// queryPlayerCount reuses a persistent per-instance RCON connection and sends
-// "list" to get the online player count. Dialing once and reusing the connection
-// across samples keeps the vanilla server from logging a "Thread RCON Client
-// started/shutting down" pair on every metrics tick (issue #1622).
-//
-// It is best-effort: any error (RCON not ready, dial failure, unparseable
-// response) returns 0 so the metrics sample is still emitted with honest zeroes
-// rather than failing the whole sample. The rcon client poisons itself on any
-// Execute error, so a failed sample discards the connection and the next sample
-// redials a fresh one — at most one redial per tick, never a hot loop. Access is
-// serialized by metricsMu so the terminal close (closeMetricsControl) cannot race
-// a sample.
+// Reuse RCON across metrics samples to avoid connection lifecycle log spam.
+// On failure return zero players and discard poisoned connections; serialize sampling and terminal close.
 func (i *instance) queryPlayerCount(ctx context.Context) uint32 {
 	i.metricsMu.Lock()
 	defer i.metricsMu.Unlock()
@@ -1650,10 +1246,9 @@ func (i *instance) queryPlayerCount(ctx context.Context) uint32 {
 	return parsePlayerCount(reply)
 }
 
-// closeMetricsControl closes the cached metrics RCON connection (if any) and
-// latches metricsClosed so a late in-flight sample does not redial a connection
-// nobody would close. Called from the terminal paths so the connection never
-// outlives the instance (issue #1622).
+// closeMetricsControl closes the cached metrics RCON connection (if any) and latches metricsClosed so a late
+// in-flight sample does not redial a connection nobody would close. Called from the terminal paths so the
+// connection never outlives the instance.
 func (i *instance) closeMetricsControl() {
 	i.metricsMu.Lock()
 	defer i.metricsMu.Unlock()
@@ -1697,51 +1292,22 @@ func (i *instance) Stop(ctx context.Context, graceful bool, preFallback ...func(
 		return nil
 	}
 	i.stopping = true
-	// Record the stop intent stickily so supervise reports the eventual exit as
-	// stopped even if the survived-kill failure path later clears stopping (#257).
+	// Record the stop intent stickily so supervise reports the eventual exit as stopped even if the survived-kill
+	// failure path later clears stopping.
 	i.stopRequested = true
-	// Capture the pre-stop state before overwriting it with stopping: the
-	// survived-kill failure path (below) restores it rather than hardcoding running,
-	// so a stop escalation that hits the survived-kill error while the instance is
-	// still starting — Stop is reachable from starting since the readiness gating of
-	// issue #350 holds starting through the MC boot — does not relabel a still-booting
-	// container as running and misreport it to the control plane (issue #352).
+	// Capture the prior state so a failed stop of a booting server restores starting rather than reporting running.
 	prior := i.state
 	i.state = execution.StateStopping
-	// Capture the current container under the same lock that latches stopping, so
-	// the install→launch handoff (which only proceeds when stopping is unset)
-	// cannot race this read: Stop acts on whichever container is current, and a
-	// concurrent install supervisor sees stopping set and launches nothing (#305).
+	// Capture the current container under the same lock that latches stopping, so the install→launch handoff (which
+	// only proceeds when stopping is unset) cannot race this read: Stop acts on whichever container is current, and
+	// a concurrent install supervisor sees stopping set and launches nothing.
 	id := i.containerID
 	i.mu.Unlock()
 	i.emit(execution.StateStopping, "")
 
-	// Always flush before stop on the graceful path (#1007/#1008): MC's own
-	// shutdown save (via RCON "stop") does NOT reliably flush dirty region
-	// chunks when a player was connected — observed on MC 26.1.2 with
-	// relay/tunnel connections. The flush (RCON save-all + settleWorkingSet)
-	// ensures chunks are on disk BEFORE the process terminates.
-	//
-	// It runs on a context detached from the caller's (same reason the
-	// escalation below is detached: a dropped session stream must not abort a
-	// stop already under way, #770) and bounded by its own flushTimeout — and it
-	// runs BEFORE the escalation deadline starts. The two budgets are therefore
-	// additive, not shared: however long the flush takes, up to flushTimeout, the
-	// escalation still gets the whole stopDeadline for the RCON wait, the SIGTERM
-	// grace and the post-Stop wait. Charging the flush to the escalation instead
-	// left a wedged-RCON flush ~10 s of a 100 s budget for a 30 s SIGTERM grace,
-	// which is the killed-instead-of-stopped failure this whole path exists to
-	// prevent (issue #2622). The worst case for a graceful stop is thus
-	// flushTimeout + stopDeadline (90 s + 100 s by default), well inside the
-	// API's stop dispatch budget (control.stop_timeout_seconds=600).
-	//
-	// When the flush succeeds (returns true), RCON "stop" and docker stop
-	// (SIGTERM) are SKIPPED: both trigger MC's own shutdown save, which
-	// re-writes ALL loaded region files. If that save is interrupted by a kill
-	// (the MC 26.1.2 shutdown-hang observed with relay/tunnel connections), the
-	// half-written regions overwrite the safely-flushed data and corrupt the
-	// post-stop snapshot — the root cause of the world-rollback bug. SIGKILL
-	// cannot be intercepted, so the flushed files stay intact.
+	// Flush on a detached budget before escalation; its duration must not consume the shutdown grace.
+	// A successful flush skips RCON stop and SIGTERM: their shutdown saves could overwrite flushed data if
+	// interrupted.
 	flushed := false
 	if graceful && len(preFallback) > 0 && preFallback[0] != nil {
 		flushCtx, flushCancel := context.WithTimeout(context.WithoutCancel(ctx), i.flushTimeout)
@@ -1749,20 +1315,8 @@ func (i *instance) Stop(ctx context.Context, graceful bool, preFallback ...func(
 		flushCancel()
 	}
 
-	// Once a stop has begun, detach the escalation from the caller's context. The
-	// graceful stop usually runs on a per-server lane whose ctx is the gRPC
-	// session stream's serveCtx; if the stream drops mid-stop, a cancelled ctx
-	// would fail the docker Stop/Kill HTTP calls and the waits immediately, so a
-	// still-healthy, still-stopping container gets recorded as a failed-stop
-	// orphan — spurious churn that blocks start/hydrate until a retried stop
-	// clears it (issue #770). Decouple instead: run the escalation against a
-	// detached context bound by stopDeadline so the container keeps its full
-	// grace period regardless of the caller, while the bound still caps a hung
-	// daemon call. The post-Kill confirm (waitExitDone) already ignores caller
-	// cancellation, so it stays as is.
-	//
-	// The deadline starts here, after the flush, so it bounds only the escalation
-	// it was sized for (issue #2622).
+	// Detach escalation from the session so reconnect cannot interrupt a stop already in progress.
+	// Start its deadline after the separately bounded flush.
 	stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), i.stopDeadline())
 	defer cancel()
 
@@ -1776,15 +1330,7 @@ func (i *instance) Stop(ctx context.Context, graceful bool, preFallback ...func(
 		}
 	}
 
-	// The stop did not confirm the container's exit within the stop timeout, so it is
-	// escalating to a direct kill. This is exactly the case where Minecraft's shutdown
-	// may not have finished sector-padding its region files, so the stop-leg snapshot
-	// captures an unpadded (live-format) world — diagnosable here at WARN with the
-	// server id and the timeout, so an unpadded-scratch cause traces back to a stop
-	// timeout (issue #927). The message distinguishes the two arrival paths: only the
-	// graceful path actually attempted (and timed out) a clean shutdown, while a
-	// forced stop (graceful=false) skips RCON/docker-stop by design and kills
-	// directly, so "graceful stop timed out" would misdescribe it.
+	// Distinguish a successful flush, a timed-out graceful shutdown, and an intentional forced kill in diagnostics.
 	if flushed {
 		i.logger.Info("flush succeeded; terminating container",
 			"server_id", i.spec.ServerID)
@@ -1803,16 +1349,8 @@ func (i *instance) Stop(ctx context.Context, graceful bool, preFallback ...func(
 	killCtx, killCancel := context.WithTimeout(context.WithoutCancel(stopCtx), 30*time.Second)
 	defer killCancel()
 	if err := i.docker.Kill(killCtx, id); err != nil {
-		// The kill call itself errored (e.g. a hung or erroring daemon), so this Stop
-		// failed without confirming the container died. Reset the stopping latch (and
-		// restore the pre-stop state) so a retried Stop re-runs the full sequence
-		// instead of short-circuiting on the entry guard and returning a false nil
-		// success — which would otherwise let the API remove the orphan record and GC
-		// the authoritative-stop scratch (#766) while the container may still be alive
-		// (issue #816). Mirror the survived-kill reset (#253): keep the same
-		// exitObserved guard, since the container can exit concurrently and supervise
-		// then owns the terminal state (#392), and leave stopRequested sticky so a
-		// later exit is recorded stopped rather than a spurious crash (#257).
+		// Reset a failed kill for retry unless supervision already observed exit.
+		// Keep stopRequested sticky so a later exit is stopped, not a crash.
 		i.mu.Lock()
 		if i.exitObserved {
 			i.mu.Unlock()
@@ -1823,38 +1361,15 @@ func (i *instance) Stop(ctx context.Context, graceful bool, preFallback ...func(
 		i.mu.Unlock()
 		return fmt.Errorf("containerdriver: kill: %w", err)
 	}
-	// Confirm the kill actually terminated the container. A container that survives
-	// docker kill leaves this final wait timing out; report it as a stop failure so
-	// the manager reports the command failed, the API keeps the assignment, and the
-	// reconciler retries (issue #211). Reporting success here would let the API
-	// unassign while the container lingers. The instance was already evicted from
-	// the manager's map (handleStop's take()), so the linger is owned by the startup
-	// sweep and the reconciler, not re-tracked here.
-	//
-	// This wait does not honor ctx cancellation: the kill is already issued, so a
-	// cancelled caller context must not be read as a lingering container when the
-	// container did in fact exit. Only the timeout means it survived.
+	// Confirm termination after kill before reporting success; the API must keep assignment if the container
+	// survives.
+	// Ignore caller cancellation during this confirmation because the kill is already issued.
 	if !i.waitExitDone(i.stopTimeout) {
 		if i.beforeSurvivedReset != nil {
 			i.beforeSurvivedReset()
 		}
-		// The container survived the kill, so this Stop failed but the container is
-		// still alive. Reset the stopping latch (and the recorded state back to its
-		// pre-stop value, since the container is still alive) so a subsequent Stop
-		// re-runs the full graceful→docker stop→docker kill→confirm sequence instead
-		// of short-circuiting on the entry guard and returning a false success (issue
-		// #253). Restoring the prior state rather than hardcoding running keeps a
-		// still-starting instance labelled starting (issue #352). The reset is
-		// confined to this failure path: a successful stop keeps stopping latched so
-		// concurrent stops still dedupe.
-		//
-		// But the container can exit during the wait above, between waitExitDone
-		// timing out and re-acquiring the lock: supervise then sets a terminal state
-		// and the reset would stomp it back to prior, misreporting a dead container as
-		// alive (issue #392). Skip the reset entirely when supervise has observed the
-		// exit — the container is gone, supervise owns the terminal state, and there
-		// is nothing to retry. stopRequested stays set regardless, so supervise
-		// records stopped rather than a spurious crash (issue #257).
+		// Restore pre-stop state for retry only if supervision has not observed exit.
+		// Keep stopRequested sticky so a late exit remains an intentional stop.
 		i.mu.Lock()
 		if i.exitObserved {
 			i.mu.Unlock()
@@ -1874,22 +1389,14 @@ func (i *instance) Stop(ctx context.Context, graceful bool, preFallback ...func(
 // daemon call.
 const stopDeadlineGrace = 10 * time.Second
 
-// stopDeadline bounds the detached escalation context (issue #770). The
-// graceful path runs an RCON wait (stopTimeout), a docker Stop whose daemon-side
-// SIGTERM grace is itself stopTimeout, a post-Stop wait (stopTimeout), then a
-// docker Kill — so 3*stopTimeout plus a grace covers the whole sequence without
-// cutting an in-progress stop short, while still capping a hung daemon call.
-//
-// The pre-stop flush is deliberately NOT part of this budget: Stop starts the
-// deadline after the flush has returned or its own flushTimeout has expired, so
-// this value is sized for the escalation alone (issue #2622).
+// stopDeadline covers RCON wait, daemon grace, post-stop wait, and kill margin.
+// The pre-stop flush has its own preceding budget.
 func (i *instance) stopDeadline() time.Duration {
 	return 3*i.stopTimeout + stopDeadlineGrace
 }
 
-// waitExitDone reports whether the container reached a terminal state within d,
-// observing only the exit and the timeout (not caller-context cancellation). It
-// confirms a kill terminated the container (issue #211).
+// waitExitDone reports whether the container reached a terminal state within d, observing only the exit and the
+// timeout (not caller-context cancellation). It confirms a kill terminated the container.
 func (i *instance) waitExitDone(d time.Duration) bool {
 	timer := time.NewTimer(d)
 	defer timer.Stop()
@@ -1912,14 +1419,7 @@ func isTerminal(s execution.ServerState) bool {
 // A var (not a const) so tests can shrink it.
 var rconPhaseCap = 30 * time.Second
 
-// rconStopDeadline gives the RCON phase its own sub-budget within the detached
-// stopCtx. stopCtx carries the whole escalation deadline, so rcon's own 30s
-// fallback never fires there; a pathological peer could otherwise drag the
-// exchange to just under the full budget and leave the docker Stop/Kill waits
-// near-zero grace (the #703-adjacent shape, issue #832). Cap the phase at
-// min(rconPhaseCap, remaining/3): the /3 reserves the bulk of the remaining
-// budget for the escalation steps that follow, and the cap keeps the phase short
-// on a large budget.
+// Cap RCON at min(rconPhaseCap, remaining/3) so the later signal and exit waits retain shutdown grace.
 func rconStopDeadline(ctx context.Context) time.Time {
 	phase := rconPhaseCap
 	if deadline, ok := ctx.Deadline(); ok {
@@ -1930,10 +1430,9 @@ func rconStopDeadline(ctx context.Context) time.Time {
 	return time.Now().Add(phase)
 }
 
-// tryRCONStop opens RCON and sends "stop", reporting whether the in-band stop was
-// issued successfully. A failure returns false so Stop falls back to `docker
-// stop`. The exchange runs under a phase deadline so a hung peer cannot consume
-// the whole stop budget (issue #832).
+// tryRCONStop opens RCON and sends "stop", reporting whether the in-band stop was issued successfully. A failure
+// returns false so Stop falls back to `docker stop`. The exchange runs under a phase deadline so a hung peer
+// cannot consume the whole stop budget.
 func (i *instance) tryRCONStop(ctx context.Context) bool {
 	ctx, cancel := context.WithDeadline(ctx, rconStopDeadline(ctx))
 	defer cancel()
@@ -1965,21 +1464,8 @@ func (i *instance) waitExit(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-// supervise blocks on the container exit and emits the terminal state: stopped
-// when a stop was requested, crashed otherwise (FR-SRV-4). It removes the
-// container afterwards and closes the event and log streams.
-//
-// A Wait TRANSPORT error (a daemon restart/blip) is not a confirmed exit: the
-// container may still be running, so emitting a terminal here would wrongly
-// report a live server as crashed and — once the terminal latch (issue #835)
-// fires — permanently suppress the later running emit (issue #865). Instead the
-// loop re-inspects the container with a bounded poll: a still-running container
-// re-attaches a waiter and supervision continues; a gone container falls through
-// to the terminal emit; a daemon still unreachable past the bound re-attaches a
-// waiter too, emitting nothing so the manager's last authoritative state stands
-// until the next observation. A confirmed exit (clean Wait, or a non-transport
-// error such as a 404 the inspect also resolves as gone) breaks the loop
-// directly.
+// supervise emits stopped for requested stops and crashed for other confirmed exits.
+// Wait transport errors trigger bounded re-inspection and reattachment, never an assumed crash.
 func (i *instance) supervise() {
 	id := i.currentContainerID()
 
@@ -1989,17 +1475,13 @@ func (i *instance) supervise() {
 		if waitErr == nil || !isTransportError(waitErr) || i.exitedAfterTransportError(id) {
 			break
 		}
-		// Throttle re-attach so back-to-back transport errors do not hot-spin
-		// against the daemon socket (issue #881).
+		// Throttle re-attach so back-to-back transport errors do not hot-spin against the daemon socket.
 		time.Sleep(waitTransportProbeInterval)
 	}
 
 	i.mu.Lock()
-	// Mark the exit observed before recording the terminal state so the
-	// survived-kill restore, re-acquiring the lock, skips its reset rather than
-	// stomping the terminal state set below (issue #392). Read the sticky stop
-	// intent here too: a container that survived the kill window and then died after
-	// the latch was reset is still a requested stop, so report stopped (issue #257).
+	// Mark exit before terminal publication and use sticky stop intent so late failed-stop resets cannot invent a
+	// crash.
 	i.exitObserved = true
 	stopping := i.stopRequested
 	i.mu.Unlock()
@@ -2032,19 +1514,13 @@ func (i *instance) supervise() {
 	close(i.events)
 	i.mu.Unlock()
 
-	// Release the cached metrics RCON connection now the container is gone so it
-	// does not leak an fd into the next container (issue #1622). This runs after the
-	// container removal above so it never delays a restart; closing i.events stops
-	// the metrics pump, so any in-flight sample unblocks and this acquires the lock
-	// without waiting out a full sample.
+	// Release cached metrics RCON after container removal; event closure cancels sampling so terminal cleanup can
+	// acquire its lock.
 	i.closeMetricsControl()
 }
 
-// isTransportError reports whether err from a docker call is a transport-level
-// failure (daemon restart/blip, socket gone) rather than a daemon HTTP response.
-// A non-2xx response is carried by statusError; everything else returned from a
-// docker call is a transport failure. supervise uses this to distinguish a Wait
-// daemon blip (re-inspect) from a confirmed exit or a 404-gone (terminal).
+// Only statusError is an Engine HTTP response; other call errors require re-observing the container before
+// declaring exit.
 func isTransportError(err error) bool {
 	if err == nil {
 		return false
@@ -2053,12 +1529,8 @@ func isTransportError(err error) bool {
 	return !errors.As(err, &status)
 }
 
-// inspectAlive classifies ONE Inspect of container id into the driver's liveness
-// decision table, shared by the single-shot ProbeAlive and the bounded re-inspect
-// loop (exitAfterTransportError) so the two cannot drift. errNotFound (a 404)
-// is not an error: a container the daemon does not know is definitively not
-// alive. Any other Inspect error means the daemon is unreachable and the answer
-// is genuinely unavailable — never a guessed false.
+// inspectAlive shares one liveness rule with ProbeAlive and supervision: 404 means dead, other errors mean
+// unknown.
 func (i *instance) inspectAlive(ctx context.Context, id string) (bool, error) {
 	info, _, err := i.inspectState(ctx, id)
 	return info.Running, err
@@ -2078,24 +1550,15 @@ func (i *instance) inspectState(ctx context.Context, id string) (info ContainerI
 	}
 }
 
-// exitedAfterTransportError re-inspects the container after a Wait transport
-// error to learn its real state, bounding the daemon-unreachable case with a
-// poll deadline (issue #865). It returns true when the container is confirmed
-// gone or exited (supervise should emit the terminal), and false when it is
-// still running or the daemon stays unreachable past the deadline (supervise
-// should re-attach a waiter and keep supervising, emitting nothing). The
-// gone/exited/alive classification is inspectAlive's; a daemon-unreachable error
-// from it is retried until the deadline. Each Inspect call carries a context
-// derived from the probe deadline so a wedged-but-connected daemon cannot hold a
-// single Inspect call past the bound (issue #881).
+// Return true only for confirmed exit; alive or unreachable reattaches Wait without changing status.
+// Each Inspect is bounded by the overall probe deadline.
 func (i *instance) exitedAfterTransportError(id string) bool {
 	exited, _, _ := i.exitAfterTransportError(id)
 	return exited
 }
 
-// exitAfterTransportError is exitedAfterTransportError keeping the inspection
-// that confirmed the exit: found is true, with the exited container's info, when
-// the container still exists, and false when it is already gone (issue #1093).
+// exitAfterTransportError is exitedAfterTransportError keeping the inspection that confirmed the exit: found is
+// true, with the exited container's info, when the container still exists, and false when it is already gone.
 func (i *instance) exitAfterTransportError(id string) (exited bool, info ContainerInfo, found bool) {
 	deadline := time.Now().Add(waitTransportProbeDeadline)
 	for {
@@ -2120,25 +1583,15 @@ func (i *instance) set(s execution.ServerState) {
 	i.mu.Unlock()
 }
 
-// emit publishes a status event without ever blocking supervision. When the
-// buffer is full it coalesces latest-state-wins: the oldest buffered event is
-// discarded to make room for this one, mirroring the manager's coalescing (issue
-// #96) so the terminal event is never dropped (issue #790). It returns silently
-// once the stream is closed.
-//
-// A terminal state latches: once one is emitted, any later non-terminal event is
-// dropped. awaitReady's running and Stop's stopping can be emitted after
-// supervise's stopped|crashed (the terminal emit is not guaranteed to be the last
-// call), and a latest-wins consumer would otherwise transiently report a dead
-// container as running/stopping (issue #835).
+// emit coalesces without blocking; once terminal, ignore later non-terminal events from readiness or Stop races.
 func (i *instance) emit(state execution.ServerState, detail string) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.emitLocked(state, detail, execution.CrashReasonUnspecified)
 }
 
-// emitLocked is the lock-free core of emit. Caller must hold i.mu. reason
-// classifies a crashed state the driver can explain (issue #1093).
+// emitLocked is the lock-free core of emit. Caller must hold i.mu. reason classifies a crashed state the driver
+// can explain.
 func (i *instance) emitLocked(state execution.ServerState, detail string, reason execution.CrashReason) {
 	if i.closed {
 		return
@@ -2176,20 +1629,8 @@ var (
 	_ execution.StatsSource = (*instance)(nil)
 )
 
-// ports reads the server's game and RCON ports from its working-dir
-// server.properties, falling back to the Minecraft defaults when the file is
-// absent or a key is unset. Start publishes the game port on the configured host
-// interface and RCON on loopback. The file itself is parsed by the shared
-// Java-compatible reader (internal/javaproperties), which tunnel.gamePort
-// (adapters/tunnel/tunnel.go) also uses, so the two cannot disagree about what
-// the file says; keep the resolution around it in sync too — if the driver ever
-// maps a host port that differs from the container port, the tunnel must dial
-// the host port, not server-port.
-//
-// An unreadable file fails the start instead of falling back: the fallback is
-// 25565, the relay's port, so a failed read turns a correctly tracked server
-// into a host-port collision that never starts (issue #2621). Only an ABSENT file
-// still takes the defaults.
+// ports must agree with tunnel.gamePort; only an absent file or key uses defaults.
+// Fail unreadable files rather than accidentally publishing the relay's default port.
 func ports(workingDir string) (game, rcon string, err error) {
 	props, err := readProperties(filepath.Join(workingDir, "server.properties"))
 	if err != nil {

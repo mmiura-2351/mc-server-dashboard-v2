@@ -10,12 +10,7 @@ import (
 	"time"
 )
 
-// ErrTerminal marks a connection failure the run loop must not retry: the same
-// dial would fail the same way (e.g. the API aborted the stream for a bad/
-// missing credential or a protocol violation). The transport adapter wraps such
-// errors with this sentinel; transient failures are returned unwrapped so the
-// loop reconnects with backoff. The domain stays transport-neutral — the adapter
-// decides which wire failures are terminal (CONTROL_PLANE.md Section 4.1).
+// ErrTerminal marks adapter-classified credential or protocol errors that must not reconnect.
 var ErrTerminal = errors.New("session: terminal connection error")
 
 // Runner drives the Worker's control-plane session: it registers, heartbeats,
@@ -32,10 +27,9 @@ type Runner struct {
 	// deterministic tests.
 	randFloat func() float64
 
-	// sem bounds concurrent long-running lane work worker-wide (not per-stream)
-	// so that maxConcurrentLanes is enforced even when in-flight goroutines
-	// from a dropped stream outlive the dispatcher that started them (issue
-	// #1617). Quick commands bypass it (issue #169).
+	// sem bounds concurrent long-running lane work worker-wide (not per-stream) so that maxConcurrentLanes is
+	// enforced even when in-flight goroutines from a dropped stream outlive the dispatcher that started them. Quick
+	// commands bypass it.
 	sem chan struct{}
 
 	// dispatcher holds the per-server command lanes for the active stream. It is
@@ -76,12 +70,8 @@ func NewRunner(dialer Dialer, caps Capabilities, clock Clock, logger *slog.Logge
 	return r
 }
 
-// Run connects and maintains the session until ctx is cancelled (clean
-// shutdown) or a terminal connection error occurs. On a transient transport
-// error it reconnects with backoff, re-registering from scratch each time
-// (CONTROL_PLANE.md Section 4.4). It returns nil on a cancellation-driven
-// shutdown and ErrTerminal when the API aborted the stream for a non-retryable
-// reason (e.g. a refused registration).
+// Run reconnects transient failures with backoff until cancellation or ErrTerminal.
+// Each reconnect registers afresh; cancellation returns nil.
 func (r *Runner) Run(ctx context.Context) error {
 	attempt := 0
 	for {
@@ -134,8 +124,8 @@ func (r *Runner) runOnce(ctx context.Context) (registered bool, err error) {
 		}
 	}()
 
-	// Refresh the held-server inventory so each (re-)registration advertises
-	// current generations, not the stale boot-time snapshot (issue #1711).
+	// Refresh the held-server inventory so each (re-)registration advertises current generations, not the stale
+	// boot-time snapshot.
 	if provider, ok := r.handler.(HeldServerProvider); ok {
 		r.caps.HeldServers = provider.HeldServers()
 	}
@@ -159,18 +149,16 @@ func (r *Runner) runOnce(ctx context.Context) (registered bool, err error) {
 		"transfer_deadline", ack.TransferDeadline,
 	)
 
-	// Hand the ack's data-plane transfer bound to the handler so it can apply a
-	// per-transfer deadline (issue #874). The handler derives the bound from this
-	// one source (the API's budget + margin); a non-positive value (an older API)
+	// Hand the ack's data-plane transfer bound to the handler so it can apply a per-transfer deadline. The handler
+	// derives the bound from this one source (the API's budget + margin); a non-positive value (an older API)
 	// leaves transfers unbounded, the prior behavior.
 	if setter, ok := r.handler.(TransferDeadlineSetter); ok {
 		setter.SetTransferDeadline(ack.TransferDeadline)
 	}
 
-	// Reclaim scratch dirs for held servers the API reports as deleted (issue
-	// #924). Defense in depth: intersect the ack's list with the held set this
-	// Register actually advertised, so a malformed ack cannot point the Worker
-	// at a server it never claimed to hold.
+	// Reclaim scratch dirs for held servers the API reports as deleted. Defense in depth: intersect the ack's list
+	// with the held set this Register actually advertised, so a malformed ack cannot point the Worker at a server
+	// it never claimed to hold.
 	if reclaimer, ok := r.handler.(ScratchReclaimer); ok && len(ack.UnknownHeldServerIDs) > 0 {
 		held := make(map[string]bool, len(r.caps.HeldServers))
 		for _, hs := range r.caps.HeldServers {
@@ -187,13 +175,7 @@ func (r *Runner) runOnce(ctx context.Context) (registered bool, err error) {
 		}
 	}
 
-	// Re-emit the current state of every still-held instance so the API moves
-	// them out of its post-restart observed=unknown state within seconds rather
-	// than over the reconciler grace window (issue #985). These events flow
-	// through the handler's Events() channel, which serve() begins draining onto
-	// this fresh stream below; the handler's coalesce/pending buffer absorbs them
-	// if they are emitted before serve() starts draining, so none are lost. On a
-	// fresh process the handler holds no instances and this is a no-op.
+	// Re-emit held states after registration; the pending-status buffer retains them until serve drains events.
 	if resyncer, ok := r.handler.(StatusResyncer); ok {
 		resyncer.ResyncStatus()
 	}
@@ -201,24 +183,10 @@ func (r *Runner) runOnce(ctx context.Context) (registered bool, err error) {
 	return true, r.serve(ctx, transport, interval)
 }
 
-// maxConcurrentLanes bounds how many per-server command lanes execute commands
-// at once off the receive loop (issue #95). A small cap keeps a burst of distinct
-// servers from spawning unbounded goroutines while still letting independent
-// servers' commands — including a slow graceful Stop — proceed in parallel. The
-// cap limits concurrent execution, not routing: the receive loop never blocks on
-// it, so a full pool delays only the start of additional servers' work, never the
-// dispatch of further commands. Quick commands (ServerCommand) bypass the cap
-// entirely so an instant op is never delayed by long-running lane work on other
-// servers (issue #169); see runLane and isQuickCommand.
+// maxConcurrentLanes caps slow command execution across servers; routing and quick commands bypass it.
 const maxConcurrentLanes = 4
 
-// serve runs the steady state: a heartbeat ticker, an inbound-command receive
-// loop, and a single serialized transport-send path, until the stream errors or
-// ctx is cancelled. The receive loop runs in a goroutine so a blocking
-// RecvCommand never starves the heartbeat; command results (from the per-server
-// lanes and the inline path) flow back through the results channel so all
-// transport Sends happen on this one goroutine (a gRPC stream is not safe for
-// concurrent Send).
+// serve serializes transport sends; receive and command execution run separately so heartbeats can proceed.
 func (r *Runner) serve(ctx context.Context, transport Transport, interval time.Duration) error {
 	serveCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -248,12 +216,7 @@ func (r *Runner) serve(ctx context.Context, transport Transport, interval time.D
 		metrics = r.handler.Metrics()
 	}
 
-	// The heartbeat deadline is a persistent timer armed once and reset only after
-	// a beat is sent. Sending other message types does not touch it, so the
-	// cadence stays independent of event traffic — a never-idle select no longer
-	// starves the heartbeat (issue #341). The old code re-armed clock.After on
-	// every iteration, so a steady stream of inbound events kept resetting the
-	// deadline and the heartbeat case could never win.
+	// Reset the heartbeat timer only after sending a beat so other event traffic cannot postpone it.
 	heartbeat := r.clock.NewTimer(interval)
 	defer heartbeat.Stop()
 
@@ -288,18 +251,8 @@ func (r *Runner) serve(ctx context.Context, transport Transport, interval time.D
 	}
 }
 
-// receiveLoop reads inbound commands and routes each, never blocking on a
-// slow command for one server. A command targeting a server is handed to that
-// server's lane, which executes the server's commands serially (so start/stop for
-// one server never interleave) while different servers' lanes run concurrently —
-// a slow graceful Stop on one server no longer delays commands for another (issue
-// #95). A command with no server id (or an unset/unknown oneof) has no lane to
-// order against, so it is handled inline; the inline path is guaranteed instant:
-// for an empty id, handleCommand either rejects a handled (server-scoped) kind
-// with CommandErrorServerNotFound (issue #1618) or returns the canned
-// "unsupported" result. A command is never silently dropped (CONTROL_PLANE.md
-// Section 5). Every result is pushed to results, drained by the single sender in
-// serve.
+// receiveLoop queues server-scoped commands in FIFO lanes and rejects malformed commands inline.
+// All results go through serve's single sender.
 func (r *Runner) receiveLoop(ctx context.Context, transport Transport, disp *dispatcher) error {
 	for {
 		cmd, err := transport.RecvCommand(ctx)
@@ -325,11 +278,7 @@ func (r *Runner) emitResult(ctx context.Context, results chan<- CommandResult, r
 	}
 }
 
-// handle dispatches a command to the handler when it is a handled kind and a
-// handler is wired; otherwise it returns the "unsupported" result. Every result
-// flows back through here, so a single failure-logging site (issue #194) covers
-// every handler: a failed result is logged at WARN with the command context the
-// CommandResult itself does not carry (server_id, kind).
+// Log every failed handler result with server ID and command kind, which the result itself does not carry.
 func (r *Runner) handle(ctx context.Context, cmd Command) CommandResult {
 	result := r.handleCommand(ctx, cmd)
 	if !result.Success {
@@ -344,11 +293,7 @@ func (r *Runner) handle(ctx context.Context, cmd Command) CommandResult {
 	return result
 }
 
-// handleCommand produces the CommandResult for a command, dispatching to the
-// handler for a handled kind and answering "unsupported" otherwise. A handled
-// kind with an empty ServerID is rejected with CommandErrorServerNotFound
-// rather than dispatched: every handled kind is server-scoped by contract, so
-// an empty id means the command cannot reach any server (issue #1618).
+// Reject handled commands with no ServerID before dispatch; unhandled kinds return unsupported.
 func (r *Runner) handleCommand(ctx context.Context, cmd Command) CommandResult {
 	if r.handler != nil && IsHandledKind(cmd.Kind) {
 		if cmd.ServerID == "" {
@@ -374,15 +319,8 @@ func (r *Runner) handleCommand(ctx context.Context, cmd Command) CommandResult {
 	}
 }
 
-// IsHandledKind reports whether a command kind is dispatched to the handler.
-// It must stay in lockstep with the handler's own switch (the instance
-// manager's Manager.Handle): a kind the handler accepts but this filter omits
-// is answered with the canned "unsupported" result and never reaches the
-// handler (issue #219). An instancemanager test guards that contract.
-//
-// Every kind listed here is server-scoped; a future worker-scoped (fleet-wide)
-// command kind must NOT be added to this list without revisiting the empty-
-// ServerID guard in handleCommand (issue #1618).
+// IsHandledKind must match Manager.Handle; omitted kinds never reach the handler.
+// All listed kinds are server-scoped and subject to the empty-ServerID guard.
 func IsHandledKind(kind string) bool {
 	switch kind {
 	case "StartServer", "StopServer", "RestartServer", "ServerCommand",
@@ -394,13 +332,7 @@ func IsHandledKind(kind string) bool {
 	}
 }
 
-// dispatcher routes commands to per-server lanes (issue #95). Each lane runs one
-// server's commands serially on its own goroutine; lanes run concurrently up to
-// sem's capacity. A lane is created on first use and removed once its queue
-// drains, so an ever-growing roster of servers leaks no goroutines. All state is
-// guarded by mu; the lane queue lives inline on the lane so enqueue and the
-// drain-and-exit decision are made under the same lock, closing the race where a
-// command arrives just as a lane decides to exit.
+// dispatcher serializes each server's queue; enqueue and idle teardown share mu to avoid losing commands.
 type dispatcher struct {
 	r       *Runner
 	ctx     context.Context
@@ -410,7 +342,6 @@ type dispatcher struct {
 	lanes map[string]*lane
 }
 
-// lane is one server's serial command queue.
 type lane struct {
 	queue []Command
 }
@@ -424,9 +355,7 @@ func newDispatcher(ctx context.Context, r *Runner, results chan<- CommandResult)
 	}
 }
 
-// dispatch queues cmd on its server's lane, starting the lane's worker if it is
-// not already running. It never blocks on command execution or the concurrency
-// cap, so a slow command for one server cannot delay routing for another.
+// dispatch never waits for command execution or a global concurrency slot.
 func (d *dispatcher) dispatch(cmd Command) {
 	d.mu.Lock()
 	l, ok := d.lanes[cmd.ServerID]
@@ -442,14 +371,7 @@ func (d *dispatcher) dispatch(cmd Command) {
 	}
 }
 
-// runLane drains a server's queue serially until it is empty, then removes the
-// lane and exits. The lane preserves per-server FIFO: one goroutine runs the
-// server's commands in arrival order, so a command never races ahead of an
-// earlier same-server op. The global concurrency cap (sem) is acquired
-// per-command and only for long-running ops; quick commands bypass it (issue
-// #169), so an instant ServerCommand for an otherwise-idle server is not delayed
-// by other servers' slow hydrate/stop work holding every cap slot. The bypass
-// touches only the global cap — the same-server ordering above is unaffected.
+// runLane preserves per-server FIFO; quick commands bypass only the global concurrency cap.
 func (d *dispatcher) runLane(serverID string, l *lane) {
 	for {
 		d.mu.Lock()
@@ -467,8 +389,7 @@ func (d *dispatcher) runLane(serverID string, l *lane) {
 			continue
 		}
 
-		// A dead-generation lane (stream already dropped) must not consume a
-		// worker-wide cap slot; bail before the blocking acquire (issue #1617).
+		// Do not acquire a Worker-wide slot for a lane whose stream has ended.
 		if d.ctx.Err() != nil {
 			d.removeLane(serverID)
 			return
@@ -485,21 +406,8 @@ func (d *dispatcher) runLane(serverID string, l *lane) {
 	}
 }
 
-// isQuickCommand reports whether a command kind is an instant op that bypasses
-// the global concurrency cap. ServerCommand qualifies: it sends one console/RCON
-// line to an already-running server and returns at once. TunnelDial qualifies too
-// (RELAY.md Section 5): it dials the relay, completes the token handshake, and
-// returns once the splice is established — the long-lived splice runs on its own
-// goroutines off the lane, so the command itself is instant and a join must not
-// queue behind a hydrate (issue #958). OpenBedrockTunnel/CloseBedrockTunnel
-// qualify for the same reason (docs/app/BEDROCK_TUNNEL.md, issue #1546): Open
-// returns once the tunnel is registered, and its dial/handshake/reconnect-with-
-// backoff run off the lane on the tunnel's own long-lived context, so neither
-// command should queue behind a hydrate. Every other server-scoped kind
-// (StartServer/StopServer/RestartServer, HydrateTrigger/SnapshotTrigger, and the
-// file ops) can run long and stays bounded by the cap (issue #169). The bypass
-// keeps per-server FIFO: it changes only whether a lane acquires a cap slot for a
-// command, never the order in which a server's commands run.
+// Console and tunnel commands bypass the global cap so joins cannot queue behind another server's transfer.
+// Per-server FIFO still applies; long-lived tunnel work runs outside the lane.
 func isQuickCommand(kind string) bool {
 	switch kind {
 	case "ServerCommand", "TunnelDial", "OpenBedrockTunnel", "CloseBedrockTunnel":
@@ -509,15 +417,12 @@ func isQuickCommand(kind string) bool {
 	}
 }
 
-// removeLane drops a lane that never started draining (ctx already cancelled).
 func (d *dispatcher) removeLane(serverID string) {
 	d.mu.Lock()
 	delete(d.lanes, serverID)
 	d.mu.Unlock()
 }
 
-// laneCount reports the number of live lanes on the active stream's dispatcher,
-// for tests asserting idle teardown. It is zero when no stream is being served.
 func (r *Runner) laneCount() int {
 	r.mu.Lock()
 	disp := r.dispatcher

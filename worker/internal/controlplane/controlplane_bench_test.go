@@ -1,10 +1,9 @@
 package controlplane_test
 
-// Benchmark: proto message marshal/unmarshal (issue #1122).
+// Benchmark: proto message marshal/unmarshal.
 //
-// Measures the serialization cost of the control-plane Register message, which
-// is on the hot path of every (re-)connection. To add a new proto benchmark,
-// add a Benchmark<Message> function following this pattern.
+// Measures the serialization cost of the control-plane Register message, which is on the hot path of every
+// (re-)connection. To add a new proto benchmark, add a Benchmark<Message> function following this pattern.
 
 import (
 	"testing"

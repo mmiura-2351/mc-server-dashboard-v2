@@ -28,11 +28,10 @@ func (h *capturingSlogHandler) Handle(_ context.Context, r slog.Record) error {
 func (h *capturingSlogHandler) WithAttrs(_ []slog.Attr) slog.Handler { return h }
 func (h *capturingSlogHandler) WithGroup(_ string) slog.Handler      { return h }
 
-// TestScanHeldServersReportsNonEmptyDirsWithGeneration verifies the registration
-// scan reports non-empty scratch subdirectories with the generation recorded in
-// their marker file and SKIPS empty/absent ones and dirs holding only the marker
-// (issue #763): an empty scratch holds no working set, so reporting it would let
-// the API skip the hydrate and boot a fresh/empty world.
+// TestScanHeldServersReportsNonEmptyDirsWithGeneration verifies the registration scan reports non-empty scratch
+// subdirectories with the generation recorded in their marker file and SKIPS empty/absent ones and dirs holding
+// only the marker: an empty scratch holds no working set, so reporting it would let the API skip the hydrate and
+// boot a fresh/empty world.
 func TestScanHeldServersReportsNonEmptyDirsWithGeneration(t *testing.T) {
 	scratch := t.TempDir()
 
@@ -48,7 +47,7 @@ func TestScanHeldServersReportsNonEmptyDirsWithGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A non-empty server dir WITHOUT a marker (predates #763) -> reported at gen 0.
+	// A non-empty server dir WITHOUT a marker (predates) -> reported at gen 0.
 	heldNoMarker := filepath.Join(scratch, "held-nomarker")
 	if err := os.MkdirAll(filepath.Join(heldNoMarker, "world"), 0o750); err != nil {
 		t.Fatal(err)
@@ -89,18 +88,7 @@ func TestScanHeldServersReportsNonEmptyDirsWithGeneration(t *testing.T) {
 	}
 }
 
-// TestScanHeldServersSkipsGenerationMarkerTempLeftover verifies a scratch dir whose
-// only content is a ".mcsd_generation-XXXXXX" temp leftover is NOT reported as held
-// (issue #2279). writeGeneration writes the marker atomically via such a temp sibling
-// + rename, so a crash before the rename leaves one behind in an otherwise-EMPTY
-// scratch; an exact-name marker comparison reads that leftover as a real working set
-// and makes the Worker advertise holding a world it does not hold.
-//
-// The same fixture pins the opposite direction: the identical leftover NEXT TO real
-// world content is still reported held. The prefix skip must ignore only the marker
-// and its temp siblings — a wider prefix, or a skip hoisted to the whole dir, would
-// make the Worker DROP a world it does hold from its advertisement, a worse failure
-// than the one this fixes.
+// Use the real marker-temp prefix so a crashed marker write cannot advertise an empty working set.
 func TestScanHeldServersSkipsGenerationMarkerTempLeftover(t *testing.T) {
 	scratch := t.TempDir()
 
@@ -147,27 +135,15 @@ func TestScanHeldServersMissingScratchRoot(t *testing.T) {
 	}
 }
 
-// TestScanHeldServersTornRegionForcesHydrate verifies a held set whose region file
-// is structurally torn is advertised at generation 0 even though its marker records
-// gen N (issue #834): a periodic running-id snapshot makes the gen-N marker durable
-// while the live world is never fsynced, so a power loss can leave a durable gen-N
-// marker next to a torn local world. Advertising gen N would let the #767 skip gate
-// boot the torn world; advertising 0 forces a hydrate that recovers the consistent
-// store copy.
-//
-// This is the QUIESCED leg (quiesced=true): the boot whose container orphan sweep
-// succeeded, where the fsck's verdict is trustworthy because no live writer is left.
-// The other leg — the same fixture on a boot whose sweep did not establish that — is
-// TestScanHeldServersAdvertisesTheRecordedGenerationWhenQuiescenceIsUnproven, and the
-// two together are the whole rule (issue #3171).
+// A durable generation marker may outlive torn world writes; boot fsck must force recovery hydrate with
+// generation zero.
 func TestScanHeldServersTornRegionForcesHydrate(t *testing.T) {
 	scratch := t.TempDir()
 
-	// A held set whose region is genuinely torn but whose marker still records gen 9.
-	// Under the unified rule (issue #927) an unaligned size is no longer corrupt per
-	// se; this fixture stays refused because healthyRegion()'s chunk declares a
-	// sector-filling length (4092) whose byte extent (offset 8192 + 4 + 4092 = 12288)
-	// now overruns the truncated size (12278) -> truncated_chunk.
+	// A held set whose region is genuinely torn but whose marker still records gen 9. Under the unified rule an
+	// unaligned size is no longer corrupt per se; this fixture stays refused because healthyRegion's chunk declares
+	// a sector-filling length (4092) whose byte extent (offset 8192 + 4 + 4092 = 12288) now overruns the truncated
+	// size (12278) -> truncated_chunk.
 	torn := filepath.Join(scratch, "torn-server", "region")
 	if err := os.MkdirAll(torn, 0o750); err != nil {
 		t.Fatal(err)
@@ -207,11 +183,10 @@ func TestScanHeldServersTornRegionForcesHydrate(t *testing.T) {
 		}
 	}
 
-	// The verdict is PERSISTED, not just returned (issue #3178): the session replaces the
-	// boot list with the in-session HeldServers() before every Register, and that scan runs
-	// no fsck, so a verdict held only in this return value never reaches the API. The torn
-	// set's marker therefore reads 0 from now on, and every later scan reports 0 until a
-	// hydrate's own marker write replaces it.
+	// The verdict is PERSISTED, not just returned: the session replaces the boot list with the in-session
+	// HeldServers before every Register, and that scan runs no fsck, so a verdict held only in this return value
+	// never reaches the API. The torn set's marker therefore reads 0 from now on, and every later scan reports 0
+	// until a hydrate's own marker write replaces it.
 	if gen := readGeneration(filepath.Join(scratch, "torn-server")); gen != 0 {
 		t.Errorf("torn-server marker = %d after the quiesced boot scan, want 0: the in-session "+
 			"scan every Register sends reads the marker, so a torn verdict that is not written "+
@@ -231,11 +206,8 @@ func TestScanHeldServersTornRegionForcesHydrate(t *testing.T) {
 	}
 }
 
-// TestScanHeldServersFailedTornMarkerRewriteIsBestEffort verifies a torn verdict whose
-// marker rewrite fails degrades to the pre-#3178 behaviour instead of failing the scan:
-// the boot list still says 0, the marker keeps its recorded generation (so the in-session
-// scan advertises that, the same outcome as a fsck I/O error), and the failure is logged
-// with the recorded generation so an operator can tell what the API was told.
+// Marker-write failure remains best-effort: boot returns zero, registration reads the unchanged marker, and the
+// error is logged.
 func TestScanHeldServersFailedTornMarkerRewriteIsBestEffort(t *testing.T) {
 	scratch := t.TempDir()
 	torn := filepath.Join(scratch, "torn-server", "region")
@@ -279,11 +251,10 @@ func TestScanHeldServersFailedTornMarkerRewriteIsBestEffort(t *testing.T) {
 	}
 }
 
-// TestScanHeldServersTornSetWithoutAMarkerGainsNone verifies the torn-verdict rewrite is
-// skipped when the marker already reads 0 — in particular when there is no marker at all.
-// An absent marker already advertises 0, and it is also the launch guard's refusal
-// predicate (issue #2802): creating one here would let a start the API skipped the
-// hydrate for boot the torn world instead of being refused and replayed with the hydrate.
+// TestScanHeldServersTornSetWithoutAMarkerGainsNone verifies the torn-verdict rewrite is skipped when the marker
+// already reads 0, in particular when there is no marker at all. An absent marker already advertises 0, and it
+// is also the launch guard's refusal predicate: creating one here would let a start the API skipped the hydrate
+// for boot the torn world instead of being refused and replayed with the hydrate.
 func TestScanHeldServersTornSetWithoutAMarkerGainsNone(t *testing.T) {
 	scratch := t.TempDir()
 	torn := filepath.Join(scratch, "torn-server", "region")
@@ -318,26 +289,7 @@ func readMarkerBytes(t *testing.T, workingDir string) []byte {
 	return b
 }
 
-// TestScanHeldServersAdvertisesTheRecordedGenerationWhenQuiescenceIsUnproven verifies
-// the boot scan does NOT judge a held world when the container orphan sweep did not
-// establish quiescence (issue #3171): every held set is advertised at the generation its
-// marker records, torn-looking or not.
-//
-// The fsck's verdict is only meaningful on a quiesced set — regionfsck states that
-// contract at its own site, and the gen-0 rule above inherits it. After a failed sweep
-// an orphan container can still be running with <scratch>/<id> bind-mounted: the failure
-// is deliberately non-fatal, and nothing re-adopts containers, so the Worker does not
-// even know the world is live (PR #3170). The scan then reads a mid-write world and can
-// call a healthy set torn, and a generation 0 is a false "hydrate me" — the API's skip
-// gate dispatches the destructive hydrate over a world that is still being written.
-//
-// Advertising the marker unjudged costs the opposite risk, and it is the smaller one: a
-// genuinely torn set is booted at its recorded generation for this ONE boot, with the
-// consistent store copy still there, while the alternative destroys a live world
-// irrecoverably. The fsck is deferred, not dropped — it runs at the next boot whose sweep
-// succeeds, the leg TestScanHeldServersTornRegionForcesHydrate pins. The remaining
-// alternative, skipping the scan altogether, advertises NOTHING held and makes the API
-// hydrate every server on this Worker, which is worse than either.
+// Without proven quiescence, advertise the recorded marker and skip fsck to avoid hydrating over a live writer.
 func TestScanHeldServersAdvertisesTheRecordedGenerationWhenQuiescenceIsUnproven(t *testing.T) {
 	scratch := t.TempDir()
 
@@ -382,22 +334,16 @@ func TestScanHeldServersAdvertisesTheRecordedGenerationWhenQuiescenceIsUnproven(
 				"world (issue #3171)", got, want)
 		}
 	}
-	// An unjudged set is not rewritten either (issue #3178): the marker is what every later
-	// Register reads, so a write here would carry the unproven verdict to the API anyway.
+	// An unjudged set is not rewritten either: the marker is what every later Register reads, so a write here would
+	// carry the unproven verdict to the API anyway.
 	if gen := readGeneration(filepath.Join(scratch, "torn-server")); gen != 9 {
 		t.Errorf("torn-server marker = %d after an unquiesced boot scan, want 9 untouched: a boot "+
 			"that cannot prove no orphan is writing must not persist a torn verdict (issue #3171)", gen)
 	}
 }
 
-// TestScanHeldServersLiveFormatScratchAdvertisesHeldGeneration verifies the boot
-// scan advertises the RECORDED generation for a structurally-sound live-format
-// scratch — the unpadded (non-4096-aligned) tail a crashed or non-gracefully-stopped
-// 26.x server leaves behind (issue #927/#926 item 1). Under the unified region rule
-// such a scratch is not corrupt, so its marker generation N must be advertised (not
-// gen 0). Advertising N lets the #767 skip gate (held >= published) boot the held
-// world directly, preserving the crashed server's progression instead of forcing a
-// gen-0 recovery hydrate that would roll it back by up to a snapshot interval.
+// Advertise the recorded generation for valid unpadded scratch so a crash does not force unnecessary recovery
+// hydrate.
 func TestScanHeldServersLiveFormatScratchAdvertisesHeldGeneration(t *testing.T) {
 	scratch := t.TempDir()
 
@@ -426,10 +372,9 @@ func TestScanHeldServersLiveFormatScratchAdvertisesHeldGeneration(t *testing.T) 
 	}
 }
 
-// TestWarnOrphanDisplacedTreesLogsUnassigned verifies WarnOrphanDisplacedTrees
-// emits a WARN for each .displaced-<id> tree whose server id is NOT in heldServers
-// (issue #911): the server was deleted or re-placed elsewhere and the displaced tree
-// is now an orphan the operator must handle manually.
+// TestWarnOrphanDisplacedTreesLogsUnassigned verifies WarnOrphanDisplacedTrees emits a WARN for
+// each.displaced-<id> tree whose server id is NOT in heldServers: the server was deleted or re-placed elsewhere
+// and the displaced tree is now an orphan the operator must handle manually.
 func TestWarnOrphanDisplacedTreesLogsUnassigned(t *testing.T) {
 	scratch := t.TempDir()
 
@@ -481,9 +426,9 @@ func TestWarnOrphanDisplacedTreesLogsUnassigned(t *testing.T) {
 	}
 }
 
-// TestWarnOrphanDisplacedTreesSilentWhenAllAssigned verifies no WARNs are emitted
-// when every displaced tree belongs to a currently-held server (issue #911): those
-// trees will be GC'd by sweepDisplaced on the next successful snapshot.
+// TestWarnOrphanDisplacedTreesSilentWhenAllAssigned verifies no WARNs are emitted when every displaced tree
+// belongs to a currently-held server: those trees will be GC'd by sweepDisplaced on the next successful
+// snapshot.
 func TestWarnOrphanDisplacedTreesSilentWhenAllAssigned(t *testing.T) {
 	scratch := t.TempDir()
 
@@ -500,9 +445,8 @@ func TestWarnOrphanDisplacedTreesSilentWhenAllAssigned(t *testing.T) {
 	}
 }
 
-// TestWarnOrphanDisplacedTreesNilLoggerIsSafe verifies that WarnOrphanDisplacedTrees
-// does not panic when log is nil (issue #911): callers that don't care about log
-// output (or tests that pass nil) must not crash.
+// TestWarnOrphanDisplacedTreesNilLoggerIsSafe verifies that WarnOrphanDisplacedTrees does not panic when log is
+// nil: callers that don't care about log output (or tests that pass nil) must not crash.
 func TestWarnOrphanDisplacedTreesNilLoggerIsSafe(t *testing.T) {
 	scratch := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(scratch, ".displaced-s1"), 0o750); err != nil {
@@ -512,8 +456,8 @@ func TestWarnOrphanDisplacedTreesNilLoggerIsSafe(t *testing.T) {
 	WarnOrphanDisplacedTrees(scratch, nil, nil)
 }
 
-// TestWarnOrphanDisplacedTreesMissingScratchRootIsSafe verifies an absent scratch
-// root does not panic or error (issue #911): a first-boot Worker has no scratch dir.
+// TestWarnOrphanDisplacedTreesMissingScratchRootIsSafe verifies an absent scratch root does not panic or error:
+// a first-boot Worker has no scratch dir.
 func TestWarnOrphanDisplacedTreesMissingScratchRootIsSafe(t *testing.T) {
 	h := &capturingSlogHandler{}
 	WarnOrphanDisplacedTrees(filepath.Join(t.TempDir(), "does-not-exist"), nil, slog.New(h))
@@ -522,12 +466,8 @@ func TestWarnOrphanDisplacedTreesMissingScratchRootIsSafe(t *testing.T) {
 	}
 }
 
-// TestManagerHeldServersReadsCurrentGenerations verifies the Manager.HeldServers
-// method returns the current generation for each held working set (issue #1711).
-// Unlike the boot-time ScanHeldServers, HeldServers runs no region fsck: it reads
-// the marker, and the quiesced boot scan has already persisted any torn verdict
-// there as 0 (issue #3178, TestScanHeldServersTornRegionForcesHydrate), so the
-// verdict reaches every Register without re-judging worlds this Worker may be running.
+// Read current markers on registration without re-running fsck against live worlds; boot has persisted any torn
+// verdict.
 func TestManagerHeldServersReadsCurrentGenerations(t *testing.T) {
 	scratch := t.TempDir()
 

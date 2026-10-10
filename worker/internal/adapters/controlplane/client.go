@@ -1,14 +1,5 @@
-// Package controlplane is the gRPC adapter for the Worker's control-plane
-// session Port (internal/domain/session). It dials the API, attaches the Worker
-// credential, opens the bidirectional Session stream, and translates between the
-// domain's transport-neutral types and the generated control-plane messages.
-//
-// Authentication: the Worker credential travels as gRPC call metadata
-// ("authorization: Bearer <credential>"), not as a proto field — the Register
-// message carries no credential (CONTROL_PLANE.md Sections 2 and 4.1; the
-// credential is configuration, Section 6.1). Transport security (TLS/mTLS) sits
-// below this contract; the wiring layer builds the gRPC credentials (cmd/worker
-// dial).
+// Package controlplane translates session types to gRPC messages.
+// The Worker credential is bearer metadata, never a Register field; TLS is configured by the wiring layer.
 package controlplane
 
 import (
@@ -32,25 +23,11 @@ import (
 // control-plane server reads it to authenticate the stream.
 const authMetadataKey = "authorization"
 
-// registerAckTimeout bounds how long RecvRegisterAck waits for the API's opening
-// RegisterAck (CONTROL_PLANE.md Section 4.1). Without it, an API that accepts the
-// stream but never acks would wedge the run loop until process shutdown: the run
-// loop blocks in RecvRegisterAck before it ever reaches the serve/heartbeat loop,
-// so nothing else can notice the stall or tear the stream down (issue #786). The
-// value is generous against a slow-but-live API yet far below any operator's
-// patience for a stuck Worker. There is no transport-timeout config knob today
-// (config.go carries none), and inventing one for an internal failsafe is not
-// warranted; it is a package var rather than a const only so tests can lower it.
+// Bound the opening ack wait, which runs before heartbeat monitoring begins.
+// Tests can lower this timeout.
 var registerAckTimeout = 30 * time.Second
 
-// sendStallTimeout bounds how long a single stream.Send may block before the
-// transport is torn down. Under sustained backpressure (log flood, slow-reading
-// API) a Send can wedge on a full HTTP/2 flow-control window. While blocked,
-// heartbeats cannot be sent; if the stall outlasts the API's heartbeat timeout
-// the watchdog kills the session. sendBounded wraps every Send with this
-// deadline so a stalled write surfaces as an error and triggers a reconnect
-// instead of a silent session kill (issue #1714). Package var so tests can
-// lower it.
+// Bound sends blocked by HTTP/2 flow control so heartbeats cannot be starved indefinitely.
 var sendStallTimeout = 10 * time.Second
 
 // Dialer opens a fresh Session stream per Dial, implementing session.Dialer.
@@ -66,15 +43,10 @@ func NewDialer(conn grpc.ClientConnInterface, credential string, clock session.C
 	return &Dialer{conn: conn, credential: credential, clock: clock}
 }
 
-// Dial opens the bidirectional Session stream and returns it as a
-// session.Transport. The credential is injected as outgoing metadata on the
-// stream context.
+// Dial opens Session with bearer metadata attached to its stream context.
 func (d *Dialer) Dial(ctx context.Context) (session.Transport, error) {
 	client := controlplanev1.NewWorkerServiceClient(d.conn)
-	// The stream rides a per-stream cancellable context, not the long-lived Run
-	// ctx directly, so Close can cancel it and unblock a Recv that is otherwise
-	// stranded — RecvCommand's stream.Recv ignores the ctx it is passed and waits
-	// only on this stream context (issue #786).
+	// Use a per-stream context so Close can unblock Recv independently of the Runner lifetime.
 	streamCtx, cancel := context.WithCancel(ctx)
 	authCtx := metadata.AppendToOutgoingContext(streamCtx, authMetadataKey, "Bearer "+d.credential)
 
@@ -86,27 +58,13 @@ func (d *Dialer) Dial(ctx context.Context) (session.Transport, error) {
 	return &transport{stream: stream, clock: d.clock, cancel: cancel}, nil
 }
 
-// transport adapts one open Session stream to session.Transport.
-//
-// The per-call ctx on the Send methods is deliberately unused (issue #1709):
-// in gRPC-Go a stream send's blocking is governed by the stream-lifetime
-// context fixed at Dial, not a per-send deadline, and a small send "succeeds"
-// locally once buffered into the HTTP/2 transport regardless of any deadline —
-// so a per-send timeout cannot detect a silently dead path. That is instead
-// the job of client-side keepalive on the underlying connection (cmd/worker
-// dial): it closes the dead transport, which errors the pending and subsequent
-// Send/Recv calls so the run loop tears down the stream and reconnects.
-//
-// However, keepalive cannot detect a live-but-window-exhausted path: the
-// connection is healthy, but the HTTP/2 flow-control window is full so Send
-// blocks indefinitely. sendBounded wraps every Send with an internal stall
-// watchdog (sendStallTimeout) that cancels the stream when a single send
-// exceeds the deadline, surfacing the stall as an error (issue #1714).
+// transport uses stream cancellation to bound blocked sends; gRPC ignores per-call contexts.
+// Connection keepalive detects silent path loss, while sendBounded handles flow-control stalls.
 type transport struct {
 	stream controlplanev1.WorkerService_SessionClient
 	clock  session.Clock
-	// cancel tears down the per-stream context; Close calls it after CloseSend so
-	// an in-flight Recv returns instead of lingering (issue #786).
+	// cancel tears down the per-stream context; Close calls it after CloseSend so an in-flight Recv returns instead
+	// of lingering.
 	cancel context.CancelFunc
 }
 
@@ -118,9 +76,7 @@ func (t *transport) SendRegister(_ context.Context, caps session.Capabilities) e
 			Register: &controlplanev1.Register{
 				WorkerId:      caps.WorkerID,
 				WorkerVersion: caps.WorkerVersion,
-				// held_servers advertises the working sets this Worker already holds,
-				// each with its generation, so the API skips a destructive hydrate on a
-				// same-worker restart only when the held generation is fresh (#763).
+				// Advertise held generations so the API skips hydrate only for a sufficiently fresh working set.
 				HeldServers: mapHeldServers(caps.HeldServers),
 				Capabilities: &controlplanev1.WorkerCapabilities{
 					Drivers:    mapDrivers(caps.Drivers),
@@ -140,17 +96,7 @@ func (t *transport) SendRegister(_ context.Context, caps session.Capabilities) e
 }
 
 func (t *transport) RecvRegisterAck(_ context.Context) (session.RegisterAck, error) {
-	// Bound the wait: an API that opens the stream but never acks must not wedge
-	// the run loop forever (issue #786). The timer cancels the stream context,
-	// which unblocks the pending stream.Recv with a context error.
-	//
-	// settled decides which of the two paths owns the outcome when the ack lands
-	// exactly at the deadline (issue #2020): a tick already buffered in the timer
-	// channel cannot be retracted by Stop, and closing done does not stop the
-	// watcher from taking the deadline arm. Whichever path wins this single CAS
-	// wins the race — the watcher cancels only if it wins, and an ack that loses
-	// is reported as a timeout rather than returned on a context this call no
-	// longer owns.
+	// The CAS selects one winner between ack and timeout; Stop cannot retract an already buffered tick.
 	var settled atomic.Bool
 	deadline := t.clock.NewTimer(registerAckTimeout)
 	defer deadline.Stop()
@@ -201,18 +147,10 @@ func (t *transport) SendHeartbeat(_ context.Context) error {
 }
 
 func (t *transport) SendCommandResult(_ context.Context, result session.CommandResult) error {
-	// held_generation rides alongside the result oneof rather than in it: it is not
-	// a command's OUTPUT but the Worker's declaration about its own local scratch
-	// (issue #2481), and it is carried through verbatim — nil stays absent, so a
-	// snapshot that GC'd the scratch or skipped its marker stamp declares nothing
-	// and the API keeps hydrating.
+	// Preserve nil held_generation: it declares nothing when scratch was removed or its marker was not stamped.
 	cr := &controlplanev1.CommandResult{Success: result.Success, HeldGeneration: result.HeldGeneration}
 	if result.Success {
-		// A successful ServerCommand carries its console output, a ReadFile its
-		// bytes, and a ListFiles its directory listing (mutually exclusive); other
-		// successes have no payload (CONTROL_PLANE.md Section 5). FileListing and
-		// FileContent are checked first so an empty listing / empty file (non-nil
-		// but zero-length) still rides its own arm of the result oneof.
+		// Check non-nil file results first so empty files and directories retain their result oneof arm.
 		switch {
 		case result.FileListing != nil:
 			cr.Result = &controlplanev1.CommandResult_FileListing{
@@ -227,8 +165,8 @@ func (t *transport) SendCommandResult(_ context.Context, result session.CommandR
 		cr.Error = &controlplanev1.CommandError{
 			Code:    mapErrorCode(result.ErrorCode),
 			Message: result.ErrorMessage,
-			// FileAccessReason refines a FILE_ACCESS_DENIED failure (issue #548);
-			// it is UNSPECIFIED for every other code, the proto3 default.
+			// FileAccessReason refines a FILE_ACCESS_DENIED failure; it is UNSPECIFIED for every other code, the proto3
+			// default.
 			FileAccessReason: mapFileAccessReason(result.FileAccessReason),
 		}
 	}
@@ -329,26 +267,15 @@ func (t *transport) RecvCommand(_ context.Context) (session.Command, error) {
 	}
 }
 
-// Close releases the stream. It half-closes the send direction first (CloseSend)
-// to signal a graceful end, then cancels the per-stream context so any in-flight
-// Recv returns instead of lingering on a half-closed-but-not-torn-down stream
-// (issue #786). The run loop discards the transport and dials a fresh stream on
-// every reconnect, so there is no path that wants the stream to outlive Close;
-// the cancel is therefore unconditional and immediate rather than a separate
-// teardown method.
+// Close half-closes sending, then cancels the stream to unblock any pending Recv.
 func (t *transport) Close() error {
 	err := t.stream.CloseSend()
 	t.cancel()
 	return err
 }
 
-// classify maps a gRPC stream error to the domain's terminal/transient
-// distinction. The API aborts the stream with a status code for a bad/missing
-// credential or a protocol violation (a registration refusal is never carried
-// in the ack; CONTROL_PLANE.md Section 4.1): those codes are terminal so the run
-// loop stops instead of reconnecting forever with the same rejected input. All
-// other failures (UNAVAILABLE, DEADLINE_EXCEEDED, mid-stream drops) stay
-// transient and keep the backoff-reconnect path. err must be non-nil.
+// classify marks credential and protocol refusals terminal; other failures reconnect.
+// err must be non-nil.
 func classify(err error) error {
 	switch status.Code(err) {
 	case codes.Unauthenticated, codes.PermissionDenied, codes.FailedPrecondition, codes.InvalidArgument:
@@ -358,19 +285,8 @@ func classify(err error) error {
 	}
 }
 
-// sendBounded wraps stream.Send with a stall watchdog: if the send does not
-// complete within sendStallTimeout, the stream context is cancelled so the
-// blocked Send returns with a context error. This prevents a single backpressured
-// send from starving the heartbeat goroutine (issue #1714).
-//
-// settled decides which of the two paths owns the outcome when the send
-// completes exactly at the deadline (issue #2397): a tick already buffered in
-// the timer channel cannot be retracted by Stop, and closing done does not stop
-// the watchdog from taking the deadline arm. Whichever path wins this single CAS
-// wins the race — the watchdog cancels only if it wins, and a send that loses is
-// reported as a stall rather than as a success on a stream this call no longer
-// owns. The stall error carries no ErrTerminal, so the run loop classifies it
-// transient and reconnects (session.Run), exactly as it does for a genuine stall.
+// sendBounded cancels a stalled stream and returns a transient reconnect error.
+// The CAS selects one winner between completion and timeout, even with a buffered timer tick.
 func (t *transport) sendBounded(msg *controlplanev1.WorkerMessage) error {
 	var settled atomic.Bool
 	deadline := t.clock.NewTimer(sendStallTimeout)
@@ -420,8 +336,7 @@ func mapDrivers(names []string) []controlplanev1.ExecutionDriverKind {
 	return out
 }
 
-// mapHeldServers translates the held working sets to the wire HeldServer messages
-// the API reads on Register (issue #763).
+// mapHeldServers translates the held working sets to the wire HeldServer messages the API reads on Register.
 func mapHeldServers(held []session.HeldServer) []*controlplanev1.HeldServer {
 	out := make([]*controlplanev1.HeldServer, 0, len(held))
 	for _, h := range held {
@@ -458,9 +373,7 @@ func mapErrorCode(code session.CommandErrorCode) controlplanev1.CommandErrorCode
 	}
 }
 
-// mapFileAccessReason translates the domain file-access reason to the wire enum
-// (issue #548). The zero value (and any unrecognized value) maps to UNSPECIFIED,
-// the generic path denial.
+// Unrecognized file-access reasons map to UNSPECIFIED.
 func mapFileAccessReason(reason session.FileAccessReason) controlplanev1.FileAccessReason {
 	switch reason {
 	case session.FileAccessReasonIsADirectory:
@@ -493,19 +406,14 @@ func mapServerState(state string) controlplanev1.ServerState {
 	case "crashed":
 		return controlplanev1.ServerState_SERVER_STATE_CRASHED
 	case "unknown":
-		// The Worker cannot currently confirm the instance's fate: it neither
-		// observed a clean exit nor can it see the process (issue #2474). Without
-		// this case the name falls through to UNSPECIFIED, which the API ingest
-		// drops — leaving the row asserting a staler state as fact.
+		// UNKNOWN must reach the API; UNSPECIFIED is dropped and would leave a stale observed state.
 		return controlplanev1.ServerState_SERVER_STATE_UNKNOWN
 	default:
 		return controlplanev1.ServerState_SERVER_STATE_UNSPECIFIED
 	}
 }
 
-// mapCrashReason translates a domain crash-reason name to the wire CrashReason
-// enum (CONTROL_PLANE.md Section 6). The empty name — an unclassified transition
-// — and any unrecognized one are UNSPECIFIED.
+// Empty or unrecognized crash reasons map to UNSPECIFIED.
 func mapCrashReason(reason string) controlplanev1.CrashReason {
 	switch reason {
 	case "forge_install_failed":
@@ -599,10 +507,7 @@ func driverName(kind controlplanev1.ExecutionDriverKind) string {
 	}
 }
 
-// launchModeName maps the wire LaunchMode enum to the launch-mode name the
-// instancemanager consumes (issue #305). UNSPECIFIED maps to the empty name,
-// which the manager treats as the historical JAR launch — so a command from an
-// API that does not set the field behaves exactly as before.
+// Unset launch modes preserve the default JAR launch.
 func launchModeName(mode controlplanev1.LaunchMode) string {
 	switch mode {
 	case controlplanev1.LaunchMode_LAUNCH_MODE_JAR:

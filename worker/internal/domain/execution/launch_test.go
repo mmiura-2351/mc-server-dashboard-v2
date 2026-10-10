@@ -49,9 +49,8 @@ func TestBuildLaunchPlanJar(t *testing.T) {
 	}
 }
 
-// JAR mode with a memory limit derives the JVM heap (-Xms/-Xmx = limit minus
-// headroom) and keeps the flags before the jar (issue #706). At a 2048 MiB limit
-// the headroom is max(20%, 256) = 409 MiB, so the heap is 1639 MiB.
+// JAR mode with a memory limit derives the JVM heap (-Xms/-Xmx = limit minus headroom) and keeps the flags
+// before the jar. At a 2048 MiB limit the headroom is max(20%, 256) = 409 MiB, so the heap is 1639 MiB.
 func TestBuildLaunchPlanJarHeap(t *testing.T) {
 	dir := t.TempDir()
 	spec := InstanceSpec{ServerID: "s1", WorkingDir: dir, JarRelpath: "server.jar", MemoryLimitMB: 2048}
@@ -76,7 +75,7 @@ func TestHeapArgsFromMemoryLimit(t *testing.T) {
 		want    []string
 	}{
 		{name: "unset emits nothing", limitMB: 0, want: nil},
-		// 512 floor (#705): headroom = max(102, 256) = 256 -> heap 256.
+		// 512 floor: headroom = max(102, 256) = 256 -> heap 256.
 		{name: "floor uses 256 headroom floor", limitMB: 512, want: []string{"-Xms256M", "-Xmx256M"}},
 		// boundary where 20% overtakes the 256 floor: 1280/5 = 256.
 		{name: "boundary 20pct equals floor", limitMB: 1280, want: []string{"-Xms1024M", "-Xmx1024M"}},
@@ -215,8 +214,7 @@ func TestResolveLegacyForgeJarAmbiguous(t *testing.T) {
 	}
 }
 
-// CleanForgeInstallArtifacts removes stale args files and legacy jars so
-// a re-install starts from a clean slate (issue #1127).
+// CleanForgeInstallArtifacts removes stale args files and legacy jars so a re-install starts from a clean slate.
 func TestCleanForgeInstallArtifactsRemovesAll(t *testing.T) {
 	dir := t.TempDir()
 	// Two stale args files from different Forge versions.

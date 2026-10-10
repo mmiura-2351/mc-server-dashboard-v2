@@ -27,49 +27,41 @@ type fakeDocker struct {
 	createSpec CreateSpec
 	createErr  error
 	startErr   error
-	// conflictsLeft makes the next N Create calls return errNameConflict before a
-	// success, modelling the create racing the async removal of the exited
-	// container (issue #226). createCalls counts every Create call.
+	// conflictsLeft makes the next N Create calls return errNameConflict before a success, modelling the create
+	// racing the async removal of the exited container. createCalls counts every Create call.
 	conflictsLeft int
 	createCalls   int
-	// createImageMissesLeft makes the next N Create calls fail with the daemon's
-	// "No such image" prose before a success, modelling a host that lacks the base
-	// image until the driver pulls it (issue #904). imagePulls records the images
+	// createImageMissesLeft makes the next N Create calls fail with the daemon's "No such image" prose before a
+	// success, modelling a host that lacks the base image until the driver pulls it. imagePulls records the images
 	// passed to ImagePull (in order); imagePullErr forces a pull failure.
 	createImageMissesLeft int
 	imagePulls            []string
 	imagePullErr          error
 
-	// inspectInfo / inspectErr are returned by Inspect when resolving a conflict.
-	// inspectSteps, when non-empty, scripts the wait-for-name-free loop: each
-	// Inspect call pops the next step (the last step repeats once exhausted), so a
-	// test can model the name flickering as the daemon finishes teardown (issue
-	// #233).
+	// inspectInfo / inspectErr are returned by Inspect when resolving a conflict. inspectSteps, when non-empty,
+	// scripts the wait-for-name-free loop: each Inspect call pops the next step (the last step repeats once
+	// exhausted), so a test can model the name flickering as the daemon finishes teardown.
 	inspectInfo  ContainerInfo
 	inspectErr   error
 	inspectSteps []inspectStep
-	// inspectBlocksUntilCtxDone models a wedged daemon for Inspect: the call
-	// blocks until its context is cancelled and then returns the context error.
-	// It drives the probe-Inspect-bounded test (issue #881): without a context
-	// deadline on the Inspect call the probe would hang past the probe deadline.
+	// inspectBlocksUntilCtxDone models a wedged daemon for Inspect: the call blocks until its context is cancelled
+	// and then returns the context error. It drives the probe-Inspect-bounded test: without a context deadline on
+	// the Inspect call the probe would hang past the probe deadline.
 	inspectBlocksUntilCtxDone bool
 
 	stopCalled bool
 	stopNoExit bool
-	// stopBudgetLeft records how much of its context deadline the driver's Stop
-	// call still had when it arrived (stopBudgetSeen marks it recorded). It is the
-	// measurement the stop-deadline pin reads: the escalation budget must not have
-	// been spent by the pre-stop flush (issue #2622).
+	// stopBudgetLeft records how much of its context deadline the driver's Stop call still had when it arrived
+	// (stopBudgetSeen marks it recorded). It is the measurement the stop-deadline pin reads: the escalation budget
+	// must not have been spent by the pre-stop flush.
 	stopBudgetLeft time.Duration
 	stopBudgetSeen bool
-	// stopBlocksUntilCancel models a wedged daemon: Stop ignores the timeout and
-	// blocks until its context is cancelled, returning the context error. It drives
-	// the bounded-Sweep test (issue #338); without a per-call deadline on Sweep's
-	// Stop call this would block forever and the test would hang.
+	// stopBlocksUntilCancel models a wedged daemon: Stop ignores the timeout and blocks until its context is
+	// cancelled, returning the context error. It drives the bounded-Sweep test; without a per-call deadline on
+	// Sweep's Stop call this would block forever and the test would hang.
 	stopBlocksUntilCancel bool
-	// stopped records the ids passed to Stop (in order), and stopErr forces a Stop
-	// failure. Used by the Sweep tests to assert the graceful-stop-before-remove
-	// ordering for running orphans (issue #336).
+	// stopped records the ids passed to Stop (in order), and stopErr forces a Stop failure. Used by the Sweep tests
+	// to assert the graceful-stop-before-remove ordering for running orphans.
 	stopped    []string
 	stopErr    error
 	killCalled bool
@@ -77,15 +69,13 @@ type fakeDocker struct {
 	// killNoExit models a container that survives docker kill: Kill records the
 	// call but does not release Wait, so the post-Kill waitExit times out.
 	killNoExit bool
-	// killSurvive counts how many leading Kill calls survive (do not release Wait);
-	// each Kill decrements it, and a Kill at zero exits the container. It models a
-	// container that lingers through the first kill(s) and dies on a later retry,
-	// driving the re-attemptable-Stop path (issue #253).
+	// killSurvive counts how many leading Kill calls survive (do not release Wait); each Kill decrements it, and a
+	// Kill at zero exits the container. It models a container that lingers through the first kill(s) and dies on a
+	// later retry, driving the re-attemptable-Stop path.
 	killSurvive int
-	// killErrs scripts per-call Kill errors (the last entry repeats once exhausted);
-	// a nil entry lets that Kill proceed normally. It models a docker kill call that
-	// errors (hung/erroring daemon) on the first attempt and succeeds on a retry,
-	// driving the kill-error re-attemptable-Stop path (issue #816).
+	// killErrs scripts per-call Kill errors (the last entry repeats once exhausted); a nil entry lets that Kill
+	// proceed normally. It models a docker kill call that errors (hung/erroring daemon) on the first attempt and
+	// succeeds on a retry, driving the kill-error re-attemptable-Stop path.
 	killErrs []error
 	removed  []string
 
@@ -95,18 +85,16 @@ type fakeDocker struct {
 	// removeErrs, when non-empty, scripts per-call Remove results for the loop
 	// (the last entry repeats once exhausted); empty falls back to removeErr.
 	removeErrs []error
-	// removeCtxErrs records ctx.Err() at each Remove call, so a test can assert a
-	// cleanup Remove was issued on a live context rather than the already-cancelled
-	// command context (issue #1715).
+	// removeCtxErrs records ctx.Err at each Remove call, so a test can assert a cleanup Remove was issued on a live
+	// context rather than the already-cancelled command context.
 	removeCtxErrs []error
 
 	exitCode int64
 	exitErr  error
 	exited   chan struct{}
-	// waitGate, when non-nil, drives Wait result-by-result instead of the single
-	// f.exited release: each Wait call blocks reading one waitResult from it, so a
-	// test can script a transport error on the first Wait followed by a real exit
-	// on the re-attached waiter (issue #865).
+	// waitGate, when non-nil, drives Wait result-by-result instead of the single f.exited release: each Wait call
+	// blocks reading one waitResult from it, so a test can script a transport error on the first Wait followed by a
+	// real exit on the re-attached waiter.
 	waitGate chan waitResult
 
 	// logBody is the multiplexed stream Logs returns; logErr forces a Logs error.
@@ -313,8 +301,8 @@ func (f *fakeDocker) stopWasCalled() bool {
 	return f.stopCalled
 }
 
-// stopBudget reports how much of its deadline the driver's Stop call had left on
-// arrival, and whether a Stop with a deadline was seen at all (issue #2622).
+// stopBudget reports how much of its deadline the driver's Stop call had left on arrival, and whether a Stop
+// with a deadline was seen at all.
 func (f *fakeDocker) stopBudget() (time.Duration, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -400,7 +388,7 @@ func TestContainerSample(t *testing.T) {
 	}
 }
 
-// Sample still succeeds with honest zeroes when RCON is unavailable (issue #1068).
+// Sample still succeeds with honest zeroes when RCON is unavailable.
 func TestContainerSampleNoRCON(t *testing.T) {
 	docker := newFakeDocker()
 	docker.stats = ContainerStats{CPUMillis: 100, MemoryBytes: 4096}
@@ -427,9 +415,8 @@ func TestContainerSampleNoRCON(t *testing.T) {
 	}
 }
 
-// queryPlayerCount dials RCON once and reuses that connection across samples, so
-// the server no longer logs a "Thread RCON Client started/shutting down" pair on
-// every metrics tick (issue #1622).
+// queryPlayerCount dials RCON once and reuses that connection across samples, so the server no longer logs a
+// "Thread RCON Client started/shutting down" pair on every metrics tick.
 func TestQueryPlayerCountReusesConnection(t *testing.T) {
 	ctrl := &fakeMetricsControl{listReply: "There are 4 of a max of 20 players online: a, b, c, d"}
 	var dials int
@@ -454,9 +441,8 @@ func TestQueryPlayerCountReusesConnection(t *testing.T) {
 	}
 }
 
-// A metrics connection poisoned by an Execute error (rcon.ErrConnBroken) is
-// discarded and redialed on the next sample — exactly once, not in a hot loop
-// (issue #1622).
+// A metrics connection poisoned by an Execute error (rcon.ErrConnBroken) is discarded and redialed on the next
+// sample, exactly once, not in a hot loop.
 func TestQueryPlayerCountRedialsAfterPoison(t *testing.T) {
 	broken := &fakeMetricsControl{execErr: rcon.ErrConnBroken}
 	fresh := &fakeMetricsControl{listReply: "There are 2 of a max of 20 players online: a, b"}
@@ -488,8 +474,8 @@ func TestQueryPlayerCountRedialsAfterPoison(t *testing.T) {
 	}
 }
 
-// A dial failure degrades the sample to 0 without caching a connection, so the
-// next tick retries the dial rather than the whole sample failing (issue #1622).
+// A dial failure degrades the sample to 0 without caching a connection, so the next tick retries the dial rather
+// than the whole sample failing.
 func TestQueryPlayerCountDegradesToZeroOnDialFailure(t *testing.T) {
 	var dials int
 	inst := &instance{
@@ -510,8 +496,8 @@ func TestQueryPlayerCountDegradesToZeroOnDialFailure(t *testing.T) {
 	}
 }
 
-// closeMetricsControl releases the cached connection and latches so a later sample
-// does not redial a connection nobody would close (issue #1622).
+// closeMetricsControl releases the cached connection and latches so a later sample does not redial a connection
+// nobody would close.
 func TestCloseMetricsControlReleasesAndLatches(t *testing.T) {
 	ctrl := &fakeMetricsControl{listReply: "There are 1 of a max of 20 players online: a"}
 	var dials int
@@ -539,8 +525,8 @@ func TestCloseMetricsControlReleasesAndLatches(t *testing.T) {
 	}
 }
 
-// supervise closes the cached metrics connection when the container exits, so a
-// persistent RCON connection never leaks past the instance (issue #1622).
+// supervise closes the cached metrics connection when the container exits, so a persistent RCON connection never
+// leaks past the instance.
 func TestSuperviseClosesMetricsConnection(t *testing.T) {
 	docker := newFakeDocker()
 	docker.stats = ContainerStats{CPUMillis: 10, MemoryBytes: 4096}
@@ -604,13 +590,12 @@ func TestParsePlayerCount(t *testing.T) {
 type fakeControl struct {
 	stopCalled bool
 	onStop     func()
-	// hangUntilCtxDone models a pathological peer that drags the RCON "stop"
-	// exchange: Execute blocks until the call's ctx is cancelled (the stop-path
-	// phase deadline), then returns its error. tryRCONStop must give up at the
-	// phase budget rather than ride the whole escalation deadline (issue #832).
+	// hangUntilCtxDone models a pathological peer that drags the RCON "stop" exchange: Execute blocks until the
+	// call's ctx is cancelled (the stop-path phase deadline), then returns its error. tryRCONStop must give up at
+	// the phase budget rather than ride the whole escalation deadline.
 	hangUntilCtxDone bool
-	// listReply is returned by Execute when the command is "list" (player count
-	// query, issue #1068). Empty means the default empty reply.
+	// listReply is returned by Execute when the command is "list" (player count query). Empty means the default
+	// empty reply.
 	listReply string
 }
 
@@ -633,12 +618,8 @@ func (c *fakeControl) Execute(ctx context.Context, line string) (string, error) 
 
 func (c *fakeControl) Close() error { return nil }
 
-// fakeMetricsControl is a ServerControl double for the player-count metrics tests
-// (issue #1622). listReply is returned for "list"; execErr, when set, fails every
-// Execute so a test can drive the poison-and-redial path. Close records the call
-// and, when closedCh is non-nil, signals it once so a lifecycle test can await the
-// terminal release without racing. It is used single-goroutine in the direct unit
-// tests; the lifecycle test only reads closedCh, never closeCount.
+// fakeMetricsControl records Execute and terminal Close; lifecycle tests synchronize through closedCh.
+// Direct counter reads are limited to single-goroutine tests.
 type fakeMetricsControl struct {
 	listReply  string
 	execErr    error
@@ -676,20 +657,19 @@ func newTestDriver(docker *fakeDocker, ctrl execution.ServerControl, ctrlErr err
 		WorkerID:    "w1",
 		StopTimeout: 50 * time.Millisecond,
 		GameBindIP:  "0.0.0.0",
-		// A short readiness fallback lets tests that do not feed a Done marker reach
-		// running promptly via the timeout path (issue #345).
+		// A short readiness fallback lets tests that do not feed a Done marker reach running promptly via the timeout
+		// path.
 		ReadinessTimeout: 20 * time.Millisecond,
 		// Short conflict-loop timing keeps the wait-for-name-free tests fast.
 		ConflictPollInterval: time.Millisecond,
 		ConflictDeadline:     100 * time.Millisecond,
-		// A short sweep margin keeps the wedged-daemon Sweep test fast (issue #338).
+		// A short sweep margin keeps the wedged-daemon Sweep test fast.
 		SweepCallMargin: 50 * time.Millisecond,
 	})
 }
 
-// newReadinessTestDriver builds a driver with an explicit readiness fallback
-// timeout so the readiness tests (issue #345) can isolate the marker path (long
-// timeout) from the fallback path (short timeout).
+// newReadinessTestDriver builds a driver with an explicit readiness fallback timeout so the readiness tests can
+// isolate the marker path (long timeout) from the fallback path (short timeout).
 func newReadinessTestDriver(docker *fakeDocker, readinessTimeout time.Duration) *Driver {
 	return New(docker, images(), func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
 		return nil, errors.New("no rcon")
@@ -732,12 +712,7 @@ func drainTo(t *testing.T, ch <-chan execution.StatusEvent, want execution.Serve
 	}
 }
 
-// awaitLogLine reads the Logs() stream until a line containing want surfaces. It
-// is the deterministic synchronization point the hold-on-starting test relies on:
-// once a benign boot line appears on Logs(), the capture goroutine has demuxed the
-// boot window, and since markReadyIfDone runs synchronously before a line is
-// queued (logpump.go), any readiness marker present would already have fired
-// Ready. So the marker has provably NOT been seen yet — no sleep needed.
+// Await a benign captured line to prove capture is active; readiness detection runs before a line is queued.
 func awaitLogLine(t *testing.T, ch <-chan execution.LogEvent, want string) {
 	t.Helper()
 	deadline := time.After(2 * time.Second)
@@ -787,18 +762,7 @@ func TestStartReachesRunning(t *testing.T) {
 	}
 }
 
-// Running is reported only after the server logs its startup-complete "Done"
-// line; until then the instance holds StateStarting so a client gating console
-// input on running does not hit the RCON boot window (issue #345).
-//
-// This pins the PR's core invariant: running is never observed BEFORE the
-// readiness marker. The container log stream is held open (an io.Pipe) without the
-// Done line and the readiness timeout is long, so neither the marker path nor the
-// fallback can fire. A benign boot line driven through to Logs() is the
-// deterministic synchronization point (see awaitLogLine): once it surfaces, the
-// instance must still be starting with no running event emitted; only after the
-// Done frame is written does running arrive. Re-introducing the pre-fix immediate
-// StateRunning emit in beginLaunchTail makes the negative assertions below fail.
+// Gate the real startup marker rather than waiting for the fallback timeout.
 func TestStartHoldsStartingUntilReadyMarker(t *testing.T) {
 	pr, pw := io.Pipe()
 	docker := newFakeDocker()
@@ -843,9 +807,8 @@ func TestStartHoldsStartingUntilReadyMarker(t *testing.T) {
 	_ = pw.Close()
 }
 
-// With no readiness marker in the logs, the instance still reaches running once
-// the fallback timeout elapses, so a server whose log format differs never
-// sticks in starting forever (issue #345).
+// With no readiness marker in the logs, the instance still reaches running once the fallback timeout elapses, so
+// a server whose log format differs never sticks in starting forever.
 func TestStartReachesRunningViaFallbackTimeout(t *testing.T) {
 	docker := newFakeDocker()
 	// No log body, so the Done marker never appears; only the fallback can run it.
@@ -858,9 +821,8 @@ func TestStartReachesRunningViaFallbackTimeout(t *testing.T) {
 	drainTo(t, inst.Events(), execution.StateRunning)
 }
 
-// A container that exits while still starting (before any readiness marker)
-// surfaces as crashed, not running: a boot crash (e.g. eula=false) must not be
-// masked by the readiness wait (issue #345).
+// A container that exits while still starting (before any readiness marker) surfaces as crashed, not running: a
+// boot crash (e.g. eula=false) must not be masked by the readiness wait.
 func TestStartExitDuringStartingReportsCrashed(t *testing.T) {
 	docker := newFakeDocker()
 	// A long readiness timeout: the exit, not the fallback, must drive the state.
@@ -878,11 +840,10 @@ func TestStartExitDuringStartingReportsCrashed(t *testing.T) {
 	}
 }
 
-// A Wait TRANSPORT error (daemon restart/blip) while the container is still
-// running must NOT emit crashed: supervise re-inspects, sees the container alive,
-// re-attaches a waiter, and only the eventual real exit drives the terminal
-// (issue #865). A wrongly-emitted crashed here would also latch terminal and
-// permanently suppress later running emits (issue #835), so this also guards that.
+// A Wait TRANSPORT error (daemon restart/blip) while the container is still running must NOT emit crashed:
+// supervise re-inspects, sees the container alive, re-attaches a waiter, and only the eventual real exit drives
+// the terminal. A wrongly-emitted crashed here would also latch terminal and permanently suppress later running
+// emits, so this also guards that.
 func TestWaitTransportErrorContainerRunningContinuesSupervising(t *testing.T) {
 	docker := newFakeDocker()
 	// Unbuffered gate: each push blocks until supervise reads it, synchronising the
@@ -911,9 +872,8 @@ func TestWaitTransportErrorContainerRunningContinuesSupervising(t *testing.T) {
 	}
 }
 
-// A Wait TRANSPORT error while the container is actually GONE (the daemon blip
-// coincided with the container's exit) emits crashed: the re-inspect resolves a
-// 404 to gone, so the terminal is correct rather than suppressed (issue #865).
+// A Wait TRANSPORT error while the container is actually GONE (the daemon blip coincided with the container's
+// exit) emits crashed: the re-inspect resolves a 404 to gone, so the terminal is correct rather than suppressed.
 func TestWaitTransportErrorContainerGoneEmitsCrashed(t *testing.T) {
 	docker := newFakeDocker()
 	docker.waitGate = make(chan waitResult)
@@ -931,9 +891,8 @@ func TestWaitTransportErrorContainerGoneEmitsCrashed(t *testing.T) {
 	drainTo(t, inst.Events(), execution.StateCrashed)
 }
 
-// A Wait TRANSPORT error while a Stop is in flight and the container is GONE
-// emits stopped, not crashed: the sticky stop intent still governs the terminal
-// once the re-inspect confirms the exit (issues #257/#865).
+// A Wait TRANSPORT error while a Stop is in flight and the container is GONE emits stopped, not crashed: the
+// sticky stop intent still governs the terminal once the re-inspect confirms the exit.
 func TestWaitTransportErrorWhileStoppingContainerGoneEmitsStopped(t *testing.T) {
 	docker := newFakeDocker()
 	docker.waitGate = make(chan waitResult)
@@ -964,10 +923,9 @@ func TestWaitTransportErrorWhileStoppingContainerGoneEmitsStopped(t *testing.T) 
 	drainTo(t, inst.Events(), execution.StateStopped)
 }
 
-// When the daemon stays unreachable past the re-inspect bound, supervise emits
-// NOTHING and keeps supervising (re-attaches a waiter), leaving the manager's
-// last authoritative state standing until the next observation (issue #865). The
-// chosen behavior: no speculative terminal on a wedged daemon.
+// When the daemon stays unreachable past the re-inspect bound, supervise emits NOTHING and keeps supervising
+// (re-attaches a waiter), leaving the manager's last authoritative state standing until the next observation.
+// The chosen behavior: no speculative terminal on a wedged daemon.
 func TestWaitTransportErrorDaemonUnreachableEmitsNothing(t *testing.T) {
 	docker := newFakeDocker()
 	docker.waitGate = make(chan waitResult)
@@ -1002,11 +960,10 @@ func TestWaitTransportErrorDaemonUnreachableEmitsNothing(t *testing.T) {
 	}
 }
 
-// The probe's Inspect call must be bounded by the probe deadline context so a
-// wedged-but-connected daemon cannot hang a single Inspect call past the 30s
-// probe bound (issue #881). The fake's inspectBlocksUntilCtxDone models a daemon
-// that never returns from Inspect; once the context deadline fires the call must
-// unblock and supervise must proceed (re-attach) rather than hanging forever.
+// The probe's Inspect call must be bounded by the probe deadline context so a wedged-but-connected daemon cannot
+// hang a single Inspect call past the 30s probe bound. The fake's inspectBlocksUntilCtxDone models a daemon that
+// never returns from Inspect; once the context deadline fires the call must unblock and supervise must proceed
+// (re-attach) rather than hanging forever.
 func TestProbeInspectBoundedByProbeDeadline(t *testing.T) {
 	docker := newFakeDocker()
 	docker.waitGate = make(chan waitResult)
@@ -1040,9 +997,8 @@ func TestProbeInspectBoundedByProbeDeadline(t *testing.T) {
 	drainTo(t, inst.Events(), execution.StateCrashed)
 }
 
-// After a Wait transport error + re-inspect, supervise throttles re-attach with
-// a sleep so there is no tight hot-spin against the daemon socket even if
-// multiple transport errors arrive back-to-back (issue #881). The re-attach must
+// After a Wait transport error + re-inspect, supervise throttles re-attach with a sleep so there is no tight
+// hot-spin against the daemon socket even if multiple transport errors arrive back-to-back. The re-attach must
 // still work correctly: a real exit after the throttled re-attach emits crashed.
 func TestSuperviseReAttachThrottledAfterTransportError(t *testing.T) {
 	docker := newFakeDocker()
@@ -1071,11 +1027,9 @@ func TestSuperviseReAttachThrottledAfterTransportError(t *testing.T) {
 	drainTo(t, inst.Events(), execution.StateCrashed)
 }
 
-// ProbeAlive answers "is this container alive right now?" from a single live
-// Inspect, sharing the classification the re-inspect probe uses (issue #2473).
-// A container the daemon does not know (404) is definitively not alive; only an
-// unreachable daemon makes the answer unavailable, and that is an error return
-// rather than a guessed false.
+// ProbeAlive answers "is this container alive right now?" from a single live Inspect, sharing the classification
+// the re-inspect probe uses. A container the daemon does not know (404) is definitively not alive; only an
+// unreachable daemon makes the answer unavailable, and that is an error return rather than a guessed false.
 func TestProbeAlive(t *testing.T) {
 	daemonUnreachable := errors.New("containerdriver: GET inspect: connection refused")
 	tests := []struct {
@@ -1122,9 +1076,8 @@ func TestProbeAlive(t *testing.T) {
 	}
 }
 
-// ProbeAlive must never answer from the cached state: both Stop failure paths
-// deliberately reset i.state to the pre-stop value, so a cached read cannot say
-// whether the container is alive now (issue #2473).
+// ProbeAlive must never answer from the cached state: both Stop failure paths deliberately reset i.state to the
+// pre-stop value, so a cached read cannot say whether the container is alive now.
 func TestProbeAliveIgnoresCachedState(t *testing.T) {
 	docker := newFakeDocker()
 	docker.inspectInfo = ContainerInfo{ID: "container-1", Running: true}
@@ -1162,18 +1115,17 @@ func TestStartCreateSpec(t *testing.T) {
 	if got.Labels[labelWorkerID] != "w1" || got.Labels[labelServerID] != "s1" {
 		t.Fatalf("Labels = %v, want worker/server labels", got.Labels)
 	}
-	// The Minecraft version rides on the container so the startup sweep can read
-	// it back after a crash took the StartServer command with it (issue #3116).
+	// The Minecraft version rides on the container so the startup sweep can read it back after a crash took the
+	// StartServer command with it.
 	if got.Labels[labelMCVersion] != spec().MinecraftVersion {
 		t.Fatalf("Labels = %v, want the Minecraft version %q", got.Labels, spec().MinecraftVersion)
 	}
 }
 
-// The launch container carries the per-server resource allocation. A memory
-// ceiling becomes the Docker host-config Memory limit, converted MiB→bytes; unset
-// (0) leaves the container unconstrained (issue #707). The CPU weight is
-// proportional to CPUMillis at 1024 shares = 1 core; unset (0) keeps the
-// historical fixed weight so existing servers do not regress (issue #724).
+// The launch container carries the per-server resource allocation. A memory ceiling becomes the Docker
+// host-config Memory limit, converted MiB→bytes; unset (0) leaves the container unconstrained. The CPU weight is
+// proportional to CPUMillis at 1024 shares = 1 core; unset (0) keeps the historical fixed weight so existing
+// servers do not regress.
 func TestStartLaunchContainerResources(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -1240,9 +1192,8 @@ func TestStartGamePortBindIP(t *testing.T) {
 	}
 }
 
-// The driver publishes the port server.properties names, not the Minecraft
-// default: the game port is the DB-tracked one the API seeds into the file
-// (issue #2621).
+// The driver publishes the port server.properties names, not the Minecraft default: the game port is the
+// DB-tracked one the API seeds into the file.
 func TestStartPublishesConfiguredGamePort(t *testing.T) {
 	dir := t.TempDir()
 	writeProperties(t, dir, "motd=hi\nserver-port=26590\n")
@@ -1263,9 +1214,8 @@ func TestStartPublishesConfiguredGamePort(t *testing.T) {
 	}
 }
 
-// A server.properties that cannot be read must fail the start naming the file
-// rather than falling back to the 25565 default, which is the relay's port and
-// collides on the host (issue #2621). A directory in the file's place is the
+// A server.properties that cannot be read must fail the start naming the file rather than falling back to the
+// 25565 default, which is the relay's port and collides on the host. A directory in the file's place is the
 // stand-in for any such I/O failure.
 func TestStartFailsOnUnreadableProperties(t *testing.T) {
 	dir := t.TempDir()
@@ -1289,9 +1239,8 @@ func TestStartFailsOnUnreadableProperties(t *testing.T) {
 	}
 }
 
-// A line longer than bufio.Scanner's token cap used to truncate the parse and
-// lose every key after it; the shared parser reads the whole file, so the
-// tracked port is still published (issue #2811).
+// A line longer than bufio.Scanner's token cap used to truncate the parse and lose every key after it; the
+// shared parser reads the whole file, so the tracked port is still published.
 func TestStartPublishesGamePortAfterAnOverlongLine(t *testing.T) {
 	dir := t.TempDir()
 	writeProperties(t, dir, "motd="+strings.Repeat("x", bufio.MaxScanTokenSize+1)+"\nserver-port=26590\n")
@@ -1309,8 +1258,7 @@ func TestStartPublishesGamePortAfterAnOverlongLine(t *testing.T) {
 	}
 }
 
-// The driver publishes the port the Minecraft server will bind, whatever
-// Java-recognized spelling the file uses (issue #2811).
+// The driver publishes the port the Minecraft server will bind, whatever Java-recognized spelling the file uses.
 func TestStartPublishesColonSpelledGamePort(t *testing.T) {
 	dir := t.TempDir()
 	writeProperties(t, dir, "motd=hi\nserver-port:26590\n")
@@ -1363,10 +1311,9 @@ func TestStartNoNetworkPublishesRCON(t *testing.T) {
 	}
 }
 
-// When driver.container.network is set the driver attaches the container to that
-// network, DROPS the RCON host publication (RCON never leaves the docker
-// network), keeps the game-port publication, and surfaces the RCON dial host as
-// the container name (issue #218).
+// When driver.container.network is set the driver attaches the container to that network, DROPS the RCON host
+// publication (RCON never leaves the docker network), keeps the game-port publication, and surfaces the RCON
+// dial host as the container name.
 func TestStartWithNetworkDropsRCONPublication(t *testing.T) {
 	docker := newFakeDocker()
 	d := New(docker, images(), func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
@@ -1565,13 +1512,7 @@ func TestGracefulStopFlushFalseFallsBackToRCON(t *testing.T) {
 	}
 }
 
-// The stop escalation's deadline starts AFTER the pre-stop flush, so a flush that
-// burns its entire budget does not shorten the SIGTERM grace `docker stop` gets
-// (issue #2622). The flush here hangs until the driver cancels it at its own
-// flush budget — the worst case, a wedged RCON — and the assertion measures the
-// budget the docker Stop call actually arrived with: it must still be the full
-// stop deadline, not the deadline minus the flush. This reddens if stopCtx is
-// created before the flush again.
+// Exhaust the flush budget, then inspect docker Stop's context to prove escalation retains its full grace.
 func TestStopDeadlineStartsAfterFlush(t *testing.T) {
 	const (
 		stopTimeout  = 50 * time.Millisecond
@@ -1658,12 +1599,7 @@ func TestStopWaitSatisfiedByCrash(t *testing.T) {
 	}
 }
 
-// Once a stop has begun, escalation is decoupled from the caller's context
-// (issue #770): a cancelled ctx — e.g. the gRPC session stream dropping mid-stop
-// — must NOT fail the docker calls/waits immediately and record a still-healthy,
-// still-stopping container as a failed-stop orphan. The RCON "stop" is accepted
-// and the container exits within its grace, so Stop completes cleanly without
-// docker stop/kill even though ctx was cancelled before Stop ran.
+// Cancel the request before Stop and require detached RCON shutdown to complete without a false orphan.
 func TestStopDetachesEscalationFromContextCancellation(t *testing.T) {
 	docker := newFakeDocker()
 	// RCON "stop" is accepted; the container exits shortly after, well inside the
@@ -1720,12 +1656,7 @@ func TestGracefulStopFallsBackToDockerStop(t *testing.T) {
 	}
 }
 
-// A pathological RCON peer that drags the "stop" exchange must not consume the
-// whole escalation budget: tryRCONStop runs under its own phase deadline, so it
-// gives up promptly and the docker stop/kill steps keep their full grace (issue
-// #832). Here the peer hangs the "stop" until its phase ctx fires; the docker
-// stop then exits the container, so Stop completes without escalating to docker
-// kill.
+// Hold RCON stop until its phase deadline; docker stop must still get enough budget to confirm exit.
 func TestStopRCONPhaseBudgetPreservesEscalationGrace(t *testing.T) {
 	prev := rconPhaseCap
 	rconPhaseCap = 20 * time.Millisecond
@@ -1756,10 +1687,9 @@ func TestStopRCONPhaseBudgetPreservesEscalationGrace(t *testing.T) {
 	}
 }
 
-// When the container ignores docker stop past the timeout, the driver escalates
-// to docker kill and logs the escalation at WARN with the server id (issue #927):
-// a stop timeout can leave the world's regions unpadded for the stop-leg snapshot,
-// so the escalation must be diagnosable.
+// When the container ignores docker stop past the timeout, the driver escalates to docker kill and logs the
+// escalation at WARN with the server id: a stop timeout can leave the world's regions unpadded for the stop-leg
+// snapshot, so the escalation must be diagnosable.
 func TestGracefulStopEscalatesToKill(t *testing.T) {
 	var buf syncBuffer
 	docker := newFakeDocker()
@@ -1795,9 +1725,9 @@ func TestGracefulStopEscalatesToKill(t *testing.T) {
 	}
 }
 
-// A forced stop (graceful=false) that escalates to a kill logs the FORCED-stop
-// WARN, not the graceful one: a forced stop skips the clean shutdown by design, so
-// "graceful stop timed out" would misdescribe it (#927 diagnostic accuracy).
+// A forced stop (graceful=false) that escalates to a kill logs the FORCED-stop WARN, not the graceful one: a
+// forced stop skips the clean shutdown by design, so "graceful stop timed out" would misdescribe it (diagnostic
+// accuracy).
 func TestForcedStopEscalatesToKillWithForcedMessage(t *testing.T) {
 	var buf syncBuffer
 	docker := newFakeDocker()
@@ -1855,9 +1785,8 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
-// When docker kill fails to terminate the container, the post-Kill waitExit times
-// out. Stop must report this as a failure so the manager reports the command
-// failed, the API keeps the assignment, and the reconciler retries (issue #211);
+// When docker kill fails to terminate the container, the post-Kill waitExit times out. Stop must report this as
+// a failure so the manager reports the command failed, the API keeps the assignment, and the reconciler retries;
 // reporting success here would let the API unassign while the container lingers.
 func TestGracefulStopFailsWhenContainerSurvivesKill(t *testing.T) {
 	docker := newFakeDocker()
@@ -1880,12 +1809,7 @@ func TestGracefulStopFailsWhenContainerSurvivesKill(t *testing.T) {
 	}
 }
 
-// A stop escalation that hits the survived-docker-kill failure path while the
-// instance is still starting must not relabel the still-booting container as
-// running. Stop is reachable from starting because readiness gating holds
-// starting through the MC boot (issue #350); the survived-kill reset restores the
-// pre-stop state, so a starting instance stays starting rather than misreporting
-// running to the control plane (issue #352).
+// A failed stop during boot must restore starting, never promote the surviving container to running.
 func TestSurvivedKillFromStartingDoesNotReportRunning(t *testing.T) {
 	pr, pw := io.Pipe()
 	defer func() { _ = pw.Close() }()
@@ -1925,11 +1849,10 @@ func TestSurvivedKillFromStartingDoesNotReportRunning(t *testing.T) {
 	}
 }
 
-// The container can exit during the post-kill confirm wait, in the window between
-// waitExitDone timing out and the survived-kill restore re-acquiring the lock:
-// supervise sets the terminal state, and the restore must not stomp it back to
-// the pre-stop state (issue #392). The beforeSurvivedReset hook drives the exit
-// and supervise into that exact window, then the restore runs.
+// The container can exit during the post-kill confirm wait, in the window between waitExitDone timing out and
+// the survived-kill restore re-acquiring the lock: supervise sets the terminal state, and the restore must not
+// stomp it back to the pre-stop state. The beforeSurvivedReset hook drives the exit and supervise into that
+// exact window, then the restore runs.
 func TestSurvivedKillRestoreDoesNotStompTerminalState(t *testing.T) {
 	docker := newFakeDocker()
 	docker.stopNoExit = true // docker stop falls through to docker kill
@@ -1960,11 +1883,10 @@ func TestSurvivedKillRestoreDoesNotStompTerminalState(t *testing.T) {
 	}
 }
 
-// A container that survives the kill for the whole timeout and then dies after the
-// survived-kill restore reset the stopping latch must still be recorded stopped,
-// not a spurious crash: a stop was requested (issue #257). The reset clears
-// stopping (so a retry can run), but the sticky stop intent makes supervise
-// report the operator-requested stop correctly.
+// A container that survives the kill for the whole timeout and then dies after the survived-kill restore reset
+// the stopping latch must still be recorded stopped, not a spurious crash: a stop was requested. The reset
+// clears stopping (so a retry can run), but the sticky stop intent makes supervise report the operator-requested
+// stop correctly.
 func TestSurvivedKillThenLateExitRecordsStopped(t *testing.T) {
 	docker := newFakeDocker()
 	docker.stopNoExit = true // docker stop falls through to docker kill
@@ -1992,11 +1914,9 @@ func TestSurvivedKillThenLateExitRecordsStopped(t *testing.T) {
 	}
 }
 
-// After a Stop that fails because the container survives docker kill, a retry
-// Stop must re-run the kill-and-confirm sequence rather than short-circuit on the
-// stopping latch. When the container then dies on the retry kill, the retry
-// returns success (issue #253). Without the latch reset the retry would return a
-// false nil.
+// After a Stop that fails because the container survives docker kill, a retry Stop must re-run the
+// kill-and-confirm sequence rather than short-circuit on the stopping latch. When the container then dies on the
+// retry kill, the retry returns success. Without the latch reset the retry would return a false nil.
 func TestStopReattemptableAfterSurvivedKill(t *testing.T) {
 	docker := newFakeDocker()
 	d := newTestDriver(docker, nil, errors.New("rcon dial failed"))
@@ -2024,9 +1944,8 @@ func TestStopReattemptableAfterSurvivedKill(t *testing.T) {
 	drainTo(t, inst.Events(), execution.StateStopped)
 }
 
-// A retry Stop while the container is STILL surviving the kill must fail again,
-// never return a false nil: the orphan is still alive and the API must keep the
-// assignment (issue #253).
+// A retry Stop while the container is STILL surviving the kill must fail again, never return a false nil: the
+// orphan is still alive and the API must keep the assignment.
 func TestRetryStopStillSurvivingFailsAgain(t *testing.T) {
 	docker := newFakeDocker()
 	d := newTestDriver(docker, nil, errors.New("rcon dial failed"))
@@ -2050,11 +1969,10 @@ func TestRetryStopStillSurvivingFailsAgain(t *testing.T) {
 	}
 }
 
-// When the docker kill call itself errors (hung/erroring daemon), Stop must fail
-// without leaving the stopping latch set: a retried Stop has to re-run the full
-// kill sequence rather than short-circuit on the entry guard and return a false
-// nil success, which would let the API remove the orphan and GC its scratch while
-// the container may still be alive (issue #816). Here the retry kill succeeds.
+// When the docker kill call itself errors (hung/erroring daemon), Stop must fail without leaving the stopping
+// latch set: a retried Stop has to re-run the full kill sequence rather than short-circuit on the entry guard
+// and return a false nil success, which would let the API remove the orphan and GC its scratch while the
+// container may still be alive. Here the retry kill succeeds.
 func TestStopReattemptableAfterKillError(t *testing.T) {
 	docker := newFakeDocker()
 	d := newTestDriver(docker, nil, errors.New("rcon dial failed"))
@@ -2161,9 +2079,8 @@ func TestStartCreateFailure(t *testing.T) {
 	}
 }
 
-// A docker start error whose daemon message reports a host-port collision is
-// classified as a port conflict so the instance manager can emit the sanitized
-// port_conflict code (issue #225).
+// A docker start error whose daemon message reports a host-port collision is classified as a port conflict so
+// the instance manager can emit the sanitized port_conflict code.
 func TestStartPortConflictClassified(t *testing.T) {
 	docker := newFakeDocker()
 	docker.startErr = errors.New(
@@ -2178,9 +2095,8 @@ func TestStartPortConflictClassified(t *testing.T) {
 	}
 }
 
-// A docker create error whose daemon message reports a missing image is
-// classified as image-missing so the instance manager can emit the sanitized
-// image_missing code (issue #225).
+// A docker create error whose daemon message reports a missing image is classified as image-missing so the
+// instance manager can emit the sanitized image_missing code.
 func TestStartImageMissingClassified(t *testing.T) {
 	docker := newFakeDocker()
 	docker.createErr = errors.New(
@@ -2194,8 +2110,8 @@ func TestStartImageMissingClassified(t *testing.T) {
 	}
 }
 
-// A pull-access-denied create error (a private/typo image the daemon cannot
-// pull) is also classified as image-missing (issue #225).
+// A pull-access-denied create error (a private/typo image the daemon cannot pull) is also classified as
+// image-missing.
 func TestStartPullAccessDeniedClassifiedImageMissing(t *testing.T) {
 	docker := newFakeDocker()
 	docker.createErr = errors.New(
@@ -2210,10 +2126,9 @@ func TestStartPullAccessDeniedClassifiedImageMissing(t *testing.T) {
 	}
 }
 
-// On a fresh host the base image is absent, so the first create fails
-// image-missing; the driver pulls the configured image and retries the create
-// once, and the start then succeeds (issue #904). The pull targets the exact
-// image the create asked for.
+// On a fresh host the base image is absent, so the first create fails image-missing; the driver pulls the
+// configured image and retries the create once, and the start then succeeds. The pull targets the exact image
+// the create asked for.
 func TestStartImageMissingPullsAndRetries(t *testing.T) {
 	docker := newFakeDocker()
 	// The first create misses the image; the pull makes the retry succeed.
@@ -2238,10 +2153,9 @@ func TestStartImageMissingPullsAndRetries(t *testing.T) {
 	}
 }
 
-// When the pull itself fails (an offline host, a denied or unknown image) the
-// driver keeps the friendly ErrImageMissing classification so the operator sees
-// the sanitized image_missing code rather than a raw 404; the pull error rides
-// along for diagnostics (issue #904).
+// When the pull itself fails (an offline host, a denied or unknown image) the driver keeps the friendly
+// ErrImageMissing classification so the operator sees the sanitized image_missing code rather than a raw 404;
+// the pull error rides along for diagnostics.
 func TestStartImageMissingPullFailsPreservesClassification(t *testing.T) {
 	docker := newFakeDocker()
 	docker.createImageMissesLeft = 1
@@ -2264,9 +2178,8 @@ func TestStartImageMissingPullFailsPreservesClassification(t *testing.T) {
 	}
 }
 
-// A non-image-missing create error (e.g. a daemon-internal failure) must NOT
-// trigger a pull: the lazy pull is scoped to the image-missing class only (issue
-// #904).
+// A non-image-missing create error (e.g. a daemon-internal failure) must NOT trigger a pull: the lazy pull is
+// scoped to the image-missing class only.
 func TestStartNonImageMissingCreateErrorDoesNotPull(t *testing.T) {
 	docker := newFakeDocker()
 	docker.createErr = errors.New("containerdriver: POST /containers/create: status 500: boom")
@@ -2283,8 +2196,8 @@ func TestStartNonImageMissingCreateErrorDoesNotPull(t *testing.T) {
 	}
 }
 
-// An unclassified start failure carries neither sanitized category, so the
-// instance manager keeps the generic internal code (issue #225).
+// An unclassified start failure carries neither sanitized category, so the instance manager keeps the generic
+// internal code.
 func TestStartUnclassifiedFailureNoCategory(t *testing.T) {
 	docker := newFakeDocker()
 	docker.startErr = errors.New("containerdriver: POST /containers/c/start: status 500: out of memory")
@@ -2313,10 +2226,9 @@ func TestStartFailureCleansUpContainer(t *testing.T) {
 	}
 }
 
-// The start-failure cleanup Remove runs detached from the command context: when
-// the session stream drops mid-start, Start fails with context.Canceled and a
-// Remove on the same context would fail instantly, leaking a Created container
-// that pins the deterministic name mcsd-<id> (issue #1715).
+// The start-failure cleanup Remove runs detached from the command context: when the session stream drops
+// mid-start, Start fails with context.Canceled and a Remove on the same context would fail instantly, leaking a
+// Created container that pins the deterministic name mcsd-<id>.
 func TestStartFailureCleanupDetachedFromCancelledContext(t *testing.T) {
 	docker := newFakeDocker()
 	docker.startErr = context.Canceled
@@ -2371,9 +2283,8 @@ func TestSweepRemovesWorkerContainers(t *testing.T) {
 	}
 }
 
-// A RUNNING orphan is stopped gracefully (docker stop with the grace) before it
-// is removed, so the MC server's SIGTERM shutdown hook saves the world instead of
-// being SIGKILLed by the force-remove (issue #336).
+// A RUNNING orphan is stopped gracefully (docker stop with the grace) before it is removed, so the MC server's
+// SIGTERM shutdown hook saves the world instead of being SIGKILLed by the force-remove.
 func TestSweepGracefullyStopsRunningContainerBeforeRemove(t *testing.T) {
 	docker := newFakeDocker()
 	docker.listResult = []Container{{ID: "a", Name: "/mcsd-s1", State: "running"}}
@@ -2390,8 +2301,7 @@ func TestSweepGracefullyStopsRunningContainerBeforeRemove(t *testing.T) {
 	}
 }
 
-// A non-running orphan (exited/created) keeps the force-remove-only behavior: no
-// graceful stop is issued (issue #336).
+// A non-running orphan (exited/created) keeps the force-remove-only behavior: no graceful stop is issued.
 func TestSweepRemovesExitedContainerWithoutStop(t *testing.T) {
 	docker := newFakeDocker()
 	docker.listResult = []Container{{ID: "a", Name: "/mcsd-s1", State: "exited"}}
@@ -2408,9 +2318,8 @@ func TestSweepRemovesExitedContainerWithoutStop(t *testing.T) {
 	}
 }
 
-// A graceful-stop failure on a running orphan must not leak the container: Sweep
-// still removes it (force) and surfaces the stop error in the joined result
-// (issue #336).
+// A graceful-stop failure on a running orphan must not leak the container: Sweep still removes it (force) and
+// surfaces the stop error in the joined result.
 func TestSweepStopFailureStillRemovesAndSurfaces(t *testing.T) {
 	docker := newFakeDocker()
 	docker.listResult = []Container{{ID: "a", Name: "/mcsd-s1", State: "running"}}
@@ -2440,12 +2349,7 @@ func TestSweepListError(t *testing.T) {
 	}
 }
 
-// A wedged daemon must not block worker startup: Sweep bounds each daemon call so
-// a Stop that never returns is cut off by its per-call deadline and surfaced as a
-// stop error, rather than hanging startup forever (issue #338). The fake's Stop
-// blocks until its context is cancelled, so without the bound this test would
-// hang; with it, Sweep returns within the deadline and still force-removes the
-// orphan.
+// Block daemon Stop until its context expires; Sweep must return the error and still remove the orphan.
 func TestSweepBoundsWedgedStop(t *testing.T) {
 	docker := newFakeDocker()
 	docker.listResult = []Container{{ID: "a", Name: "/mcsd-s1", State: "running"}}
@@ -2471,9 +2375,8 @@ func TestSweepBoundsWedgedStop(t *testing.T) {
 	}
 }
 
-// A running orphan receives a best-effort RCON save-on before the docker stop
-// (issue #1710): a worker crash mid-snapshot may have left auto-save disabled.
-// The save-on must precede the stop so the MC shutdown hook can auto-save.
+// A running orphan receives a best-effort RCON save-on before the docker stop: a worker crash mid-snapshot may
+// have left auto-save disabled. The save-on must precede the stop so the MC shutdown hook can auto-save.
 func TestSweepIssuesSaveOnToRunningOrphanBeforeStop(t *testing.T) {
 	docker := newFakeDocker()
 	docker.listResult = []Container{{ID: "a", Name: "/mcsd-s1", State: "running"}}
@@ -2504,13 +2407,8 @@ func TestSweepIssuesSaveOnToRunningOrphanBeforeStop(t *testing.T) {
 	}
 }
 
-// The sweep's save-on dial must carry the swept server's Minecraft version: it
-// decides the charset that server's server.properties -- and so its RCON
-// password -- is read in (issue #3116). The Worker crash this sweep cleans up
-// after took the StartServer command the version came from, so the version is
-// recovered from the container's own label. Dialing without it reads a 1.20+
-// server's non-ASCII password as latin-1, auth fails, and the sweep stops the
-// container with auto-save still off -- the very loss #1710 exists to prevent.
+// Recover Minecraft version from the container label so orphan save-on decodes non-ASCII RCON passwords
+// correctly.
 func TestSweepSaveOnDialsWithTheContainersMinecraftVersion(t *testing.T) {
 	docker := newFakeDocker()
 	docker.listResult = []Container{{
@@ -2544,8 +2442,8 @@ func TestSweepSaveOnDialsWithTheContainersMinecraftVersion(t *testing.T) {
 	}
 }
 
-// A failed save-on must not prevent the stop or removal (issue #1710): the pre-fix
-// behavior was no save-on at all, so any save-on failure degrades gracefully.
+// A failed save-on must not prevent the stop or removal: the pre-fix behavior was no save-on at all, so any
+// save-on failure degrades gracefully.
 func TestSweepSaveOnFailureStillStopsAndRemoves(t *testing.T) {
 	docker := newFakeDocker()
 	docker.listResult = []Container{{ID: "a", Name: "/mcsd-s1", State: "running"}}
@@ -2584,10 +2482,9 @@ func (c *fakeRconControl) Execute(_ context.Context, line string) (string, error
 
 func (c *fakeRconControl) Close() error { return nil }
 
-// The wait-for-name-free loop (issue #233) heals every interleaving of the
-// create-vs-async-remover race on the deterministic name. The five tests below
-// drive the loop branches; a foreign label or a running own container still
-// fails immediately (the conservative posture is unchanged).
+// The wait-for-name-free loop heals every interleaving of the create-vs-async-remover race on the deterministic
+// name. The five tests below drive the loop branches; a foreign label or a running own container still fails
+// immediately (the conservative posture is unchanged).
 
 // The async exit-watcher remover wins the race: the create 409s, the inspect
 // finds the name already gone (404), so the driver retries the create and Start
@@ -2749,10 +2646,7 @@ func TestStartConflictFailsImmediatelyWithoutPolling(t *testing.T) {
 	}
 }
 
-// When the name never frees within the deadline (remove keeps failing for a
-// reason other than removal-in-progress), the loop gives up and fails with the
-// original conflict wrapped by the last decline reason, keeping #231's
-// observability.
+// Deadline failure must retain the original conflict and the latest decline reason for diagnostics.
 func TestStartConflictLoopDeadlineFails(t *testing.T) {
 	docker := newFakeDocker()
 	// Every create conflicts; the conflict never resolves.
@@ -2773,9 +2667,8 @@ func TestStartConflictLoopDeadlineFails(t *testing.T) {
 	}
 }
 
-// TestEmitCoalescesTerminalEventOnFullBuffer bursts more events than the 8-slot
-// buffer with no consumer, then drains. The latest-state-wins coalescing must
-// have kept the terminal event so it is never dropped (issue #790).
+// TestEmitCoalescesTerminalEventOnFullBuffer bursts more events than the 8-slot buffer with no consumer, then
+// drains. The latest-state-wins coalescing must have kept the terminal event so it is never dropped.
 func TestEmitCoalescesTerminalEventOnFullBuffer(t *testing.T) {
 	inst := &instance{
 		spec:   execution.InstanceSpec{ServerID: "srv-790"},
@@ -2804,11 +2697,9 @@ func TestEmitCoalescesTerminalEventOnFullBuffer(t *testing.T) {
 	}
 }
 
-// TestEmitDropsNonTerminalAfterTerminal asserts the terminal latch: once a
-// terminal state is emitted, a later non-terminal event (awaitReady's running or
-// Stop's stopping racing past supervise's stopped|crashed) is dropped so a
-// latest-wins consumer never sees a dead container flip back to running/stopping
-// (issue #835).
+// TestEmitDropsNonTerminalAfterTerminal asserts the terminal latch: once a terminal state is emitted, a later
+// non-terminal event (awaitReady's running or Stop's stopping racing past supervise's stopped|crashed) is
+// dropped so a latest-wins consumer never sees a dead container flip back to running/stopping.
 func TestEmitDropsNonTerminalAfterTerminal(t *testing.T) {
 	inst := &instance{
 		spec:   execution.InstanceSpec{ServerID: "srv-835"},
@@ -2826,11 +2717,10 @@ func TestEmitDropsNonTerminalAfterTerminal(t *testing.T) {
 	}
 }
 
-// TestEmitTerminalLatchUnderConcurrentBurst future-proofs the mu-serialized emit
-// assumption: many goroutines burst non-terminal events while one emits the
-// terminal state. The latch is read and set under i.mu, so regardless of
-// scheduling the last buffered event is the terminal one and no non-terminal
-// event is buffered after it (issue #835).
+// TestEmitTerminalLatchUnderConcurrentBurst future-proofs the mu-serialized emit assumption: many goroutines
+// burst non-terminal events while one emits the terminal state. The latch is read and set under i.mu, so
+// regardless of scheduling the last buffered event is the terminal one and no non-terminal event is buffered
+// after it.
 func TestEmitTerminalLatchUnderConcurrentBurst(t *testing.T) {
 	for trial := 0; trial < 50; trial++ {
 		inst := &instance{
@@ -2892,16 +2782,8 @@ func drainStates(ch <-chan execution.StatusEvent) []execution.ServerState {
 	}
 }
 
-// A Stop that lands between awaitReady's state write and event publish must not
-// cause running to appear after stopping on the event channel. The
-// beforeReadyPublish hook fires inside awaitReady after state=Running is written
-// but before the event is published (under i.mu in the fix). Pre-fix the lock
-// was released between those two steps, so Stop could acquire it and emit
-// stopping first; post-fix both happen under one lock hold so Stop blocks until
-// running is already enqueued (issue #2022).
-//
-// stopNoExit + killNoExit prevent the container from exiting during the window,
-// which would set terminalLatched and mask the ordering violation.
+// Pause under the readiness publication lock and race Stop; running must precede stopping.
+// Keep the container alive so terminal-event suppression cannot mask incorrect ordering.
 func TestStopDuringReadyPublishWindowDoesNotEmitRunning(t *testing.T) {
 	pr, pw := io.Pipe()
 	docker := newFakeDocker()

@@ -113,7 +113,7 @@ func TestListFilesOnRegularFileIsDenied(t *testing.T) {
 	if res.ErrorCode != session.CommandErrorFileAccessDenied {
 		t.Fatalf("ErrorCode = %v, want FileAccessDenied", res.ErrorCode)
 	}
-	// issue #548: a file (not a directory) is its own reason, not invalid_path.
+	// A non-directory path has its own denial reason.
 	if res.FileAccessReason != session.FileAccessReasonNotADirectory {
 		t.Fatalf("FileAccessReason = %v, want NotADirectory", res.FileAccessReason)
 	}

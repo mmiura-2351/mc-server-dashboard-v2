@@ -36,15 +36,8 @@ const defaultDockerHost = "unix:///var/run/docker.sock"
 // Engine 24+; the endpoints this client uses are stable well below it.
 const apiVersion = "v1.43"
 
-// gameServerCPUShares is the default CPU weight a container gets when the server
-// has no per-server CPU allocation (InstanceSpec.CPUMillis == 0): double the
-// Docker default of 1024, so a game server wins CPU contention against batch
-// workloads (CI builds, test suites) sharing the host: under heavy host load the
-// unprioritised MC server thread starved and stalled tens of seconds, dropping
-// players (issue #518). CPUShares is a relative weight, not a cap — the Engine
-// translates it to cpu.weight on cgroup v2 — so it only arbitrates contention and
-// does not change absolute capacity. A set allocation overrides this with a
-// proportional weight (issue #724); the constant remains the unset fallback.
+// Double the default CPU weight to favor game servers under contention, without imposing a hard cap.
+// An explicit CPUMillis allocation overrides this fallback.
 const gameServerCPUShares = 2048
 
 // EngineClient speaks the Docker Engine API over a unix socket using net/http.
@@ -55,9 +48,7 @@ type EngineClient struct {
 	http *http.Client
 }
 
-// NewEngineClient builds an EngineClient for the given Docker host. An empty host
-// uses the default unix socket. Only unix:// hosts are supported; a tcp:// host
-// is rejected (TLS/remote daemons are out of scope for M1).
+// NewEngineClient accepts Unix socket hosts only; empty uses the default socket and TCP hosts are rejected.
 func NewEngineClient(host string) (*EngineClient, error) {
 	if host == "" {
 		host = defaultDockerHost
@@ -100,17 +91,14 @@ type createBody struct {
 type hostConfig struct {
 	Binds        []string                 `json:"Binds,omitempty"`
 	PortBindings map[string][]portBinding `json:"PortBindings,omitempty"`
-	// CPUShares is the container's relative CPU weight, per-server and
-	// proportional to the CPU allocation (issues #518/#724). The Engine translates
-	// it to cpu.weight on cgroup v2. It is a soft share, not a hard quota — no
-	// NanoCpus is ever set, so MC tick latency is not throttled.
+	// CPUShares is the container's relative CPU weight, per-server and proportional to the CPU allocation. The
+	// Engine translates it to cpu.weight on cgroup v2. It is a soft share, not a hard quota, no NanoCpus is ever
+	// set, so MC tick latency is not throttled.
 	CPUShares int64 `json:"CpuShares,omitempty"`
-	// Memory is the hard container memory limit in bytes (issue #707). The Engine
-	// translates it to memory.max on cgroup v2; the kernel OOM-kills the container
-	// when it exceeds this. Zero (omitted) leaves the container unconstrained.
+	// Memory is the hard container memory limit in bytes. The Engine translates it to memory.max on cgroup v2; the
+	// kernel OOM-kills the container when it exceeds this. Zero (omitted) leaves the container unconstrained.
 	Memory int64 `json:"Memory,omitempty"`
-	// CapDrop lists the capabilities removed from the container's default set
-	// (issue #2600).
+	// CapDrop lists the capabilities removed from the container's default set.
 	CapDrop []string `json:"CapDrop,omitempty"`
 }
 
@@ -119,10 +107,9 @@ type portBinding struct {
 	HostPort string `json:"HostPort"`
 }
 
-// networkingConfig attaches the container to a user-defined network at create
-// time. The Engine keys EndpointsConfig by network name; an empty endpoint object
-// is enough to join, and a user-defined network then resolves the container's
-// name via its embedded DNS (issue #218).
+// networkingConfig attaches the container to a user-defined network at create time. The Engine keys
+// EndpointsConfig by network name; an empty endpoint object is enough to join, and a user-defined network then
+// resolves the container's name via its embedded DNS.
 type networkingConfig struct {
 	EndpointsConfig map[string]struct{} `json:"EndpointsConfig"`
 }
@@ -159,8 +146,8 @@ func (c *EngineClient) Create(ctx context.Context, spec CreateSpec) (string, err
 	if err := c.do(ctx, http.MethodPost, "/containers/create", q, body, &resp); err != nil {
 		var status statusError
 		if errors.As(err, &status) && status.code == http.StatusConflict {
-			// Surface a typed conflict so the driver can run its remove-on-conflict
-			// retry (issue #226); keep the daemon message for diagnostics.
+			// Surface a typed conflict so the driver can run its remove-on-conflict retry; keep the daemon message for
+			// diagnostics.
 			return "", fmt.Errorf("%w: %v", errNameConflict, err)
 		}
 		return "", err
@@ -168,14 +155,7 @@ func (c *EngineClient) Create(ctx context.Context, spec CreateSpec) (string, err
 	return resp.ID, nil
 }
 
-// ImagePull pulls the image ref from its registry via POST /images/create,
-// draining the progress stream to completion (issue #904). The Engine returns a
-// 200 immediately and then streams newline-delimited JSON progress objects; the
-// pull is only complete when the stream ends, and a failure (offline host, denied
-// or unknown image) surfaces as an "error"/"errorDetail" object in the stream
-// rather than a non-2xx status — so a successful HTTP response is not a successful
-// pull. The stream is drained and scanned for that error; the daemon message is
-// kept for the diagnostic the driver attaches to ErrImageMissing.
+// ImagePull must drain the progress stream: HTTP 200 can still contain an error object before EOF.
 func (c *EngineClient) ImagePull(ctx context.Context, image string) error {
 	name, tag := splitImageTag(image)
 	q := url.Values{"fromImage": {name}}
@@ -199,12 +179,8 @@ func (c *EngineClient) ImagePull(ctx context.Context, image string) error {
 	return drainPullStream(resp.Body)
 }
 
-// drainPullStream reads the /images/create progress stream to completion,
-// returning the in-stream error if the pull failed mid-stream (issue #904). The
-// stream is a sequence of JSON objects; an object carrying an "error" (or the
-// "errorDetail.message") field is the daemon reporting the pull failed. Draining
-// to EOF is what makes the pull synchronous: the image is on the host only once
-// the stream ends without an error.
+// drainPullStream reads until EOF and surfaces error/errorDetail objects; HTTP success alone does not complete a
+// pull.
 func drainPullStream(r io.Reader) error {
 	dec := json.NewDecoder(r)
 	for {
@@ -230,18 +206,8 @@ func drainPullStream(r io.Reader) error {
 	}
 }
 
-// splitImageTag splits an image ref into its name and tag, defaulting the tag to
-// "latest" when none is given. It splits on the LAST colon only when that colon
-// is not part of a registry host:port (which always precedes a "/"), so
-// "host:5000/img" stays untagged (→ latest) while "img:1.21" and
-// "host:5000/img:1.21" split correctly.
-//
-// A digest-pinned ref ("name@sha256:...") is returned whole as the name with an
-// empty tag: the Engine's /images/create contract pulls by digest from fromImage
-// alone, with no tag param (ImagePull omits it for an empty tag). Splitting on the
-// digest's own colon would send fromImage="name@sha256" and tag="<hex>", which the
-// Engine rejects, so lazy pull would never succeed for a digest-pinned image
-// (issue #915).
+// Split only a tag colon after the last slash; preserve registry ports and default untagged names to latest.
+// Digest refs stay whole with an empty tag because Engine pulls them through fromImage alone.
 func splitImageTag(image string) (name, tag string) {
 	if strings.Contains(image, "@") {
 		return image, ""
@@ -253,8 +219,7 @@ func splitImageTag(image string) (name, tag string) {
 	return image[:lastColon], image[lastColon+1:]
 }
 
-// Inspect returns the labels and running state of the named container, used to
-// resolve a create name conflict (issue #226).
+// Inspect returns the labels and running state of the named container, used to resolve a create name conflict.
 func (c *EngineClient) Inspect(ctx context.Context, name string) (ContainerInfo, error) {
 	var resp struct {
 		ID    string `json:"Id"`
@@ -270,8 +235,8 @@ func (c *EngineClient) Inspect(ctx context.Context, name string) (ContainerInfo,
 	if err := c.do(ctx, http.MethodGet, "/containers/"+name+"/json", nil, nil, &resp); err != nil {
 		var status statusError
 		if errors.As(err, &status) && status.code == http.StatusNotFound {
-			// Surface a typed not-found so the driver treats the conflict as already
-			// resolved and retries the create (issue #229); keep the daemon message.
+			// Surface a typed not-found so the driver treats the conflict as already resolved and retries the create;
+			// keep the daemon message.
 			return ContainerInfo{}, fmt.Errorf("%w: %v", errNotFound, err)
 		}
 		return ContainerInfo{}, err
@@ -287,14 +252,8 @@ func (c *EngineClient) Start(ctx context.Context, id string) error {
 	return c.do(ctx, http.MethodPost, "/containers/"+id+"/start", nil, nil, nil)
 }
 
-// Stop sends SIGTERM and, after timeout, SIGKILL.
-//
-// A real daemon answers 304 Not Modified when the container is already stopped,
-// which do() reports as an error; the driver then escalates to Kill. That path is
-// reachable only via a self-exit race (the container exits between our Wait
-// observing it and this Stop firing) and is benign: supervise has already
-// recorded the terminal state, and Kill on a dead container is a harmless no-op.
-// We accept the spurious escalation rather than special-casing 304.
+// Stop sends SIGTERM then SIGKILL after the grace period.
+// An already-stopped 304 escalates to a harmless kill after a self-exit race.
 func (c *EngineClient) Stop(ctx context.Context, id string, timeout time.Duration) error {
 	q := url.Values{"t": {fmt.Sprintf("%d", int(timeout.Seconds()))}}
 	return c.do(ctx, http.MethodPost, "/containers/"+id+"/stop", q, nil, nil)
@@ -322,15 +281,7 @@ func (c *EngineClient) Remove(ctx context.Context, id string) error {
 	if err := c.do(ctx, http.MethodDelete, "/containers/"+id, q, nil, nil); err != nil {
 		var status statusError
 		if errors.As(err, &status) && status.code == http.StatusConflict {
-			// Mapping a DELETE 409 to "removal in progress" is sound only because
-			// this request always sends force=true (set above): with force, the
-			// daemon returns 409 solely for a removal already in flight. Without
-			// force, a 409 also means "container is running", which this branch
-			// would silently misclassify — so keep force=true if this ever changes.
-			//
-			// Surface a typed conflict so the wait-for-name-free loop treats an
-			// in-flight removal as progress and keeps polling (issue #233); keep the
-			// daemon message for diagnostics.
+			// force=true makes DELETE 409 mean removal is already in progress; without force it can also mean running.
 			return fmt.Errorf("%w: %v", errRemovalInProgress, err)
 		}
 		return err
@@ -396,14 +347,7 @@ func (c *EngineClient) Logs(ctx context.Context, id string) (io.ReadCloser, erro
 	return resp.Body, nil
 }
 
-// Stats reads a one-shot resource sample for a container (FR-MON-3). stream=false
-// without one-shot makes the daemon collect two internal samples (~1 s apart) and
-// return precpu_stats from the first and cpu_stats from the second, so the CPU
-// delta is a recent interval measurement. With one-shot=true the daemon returns
-// immediately with precpu_stats zeroed (the handler reinitialises its cached
-// preCPUStats to zero on each request), making the delta cover the entire
-// container lifetime; on a long-running host uint32 truncation rounds that average
-// to zero (issue #1068).
+// Stats requests two daemon samples for a recent CPU delta; one-shot samples measure lifetime usage instead.
 func (c *EngineClient) Stats(ctx context.Context, id string) (ContainerStats, error) {
 	var raw statsResponse
 	q := url.Values{"stream": {"false"}}

@@ -9,12 +9,8 @@ import (
 
 const testSector = 4096
 
-// buildRegion assembles a synthetic region image from the documented layout (no
-// committed binaries). chunks maps a location-table entry index to its (offset,
-// sectorCount); when nil, a single healthy chunk at index 0 occupying sector 2 is
-// placed. length overrides the chunk's length prefix (-1 fills the sector), and
-// compression sets its compression byte. sectors is the total file size in
-// sectors (>= 2 header sectors).
+// buildRegion synthesizes location entries and chunk prefixes without committed binary fixtures.
+// A nil chunk map seeds one healthy chunk; length -1 fills its allocated sector.
 func buildRegion(chunks map[int][2]int, sectors int, length int, compression byte) []byte {
 	if chunks == nil {
 		chunks = map[int][2]int{0: {2, 1}}
@@ -99,10 +95,9 @@ func TestKnownCompressionSchemesAreAccepted(t *testing.T) {
 }
 
 func TestTornMidChunkIsTruncatedChunk(t *testing.T) {
-	// A file truncated mid-write inside its trailing referenced chunk: the size is
-	// no longer a 4096 multiple, but that alone is NOT corruption (issue #927) — the
-	// byte-precise EOF bound catches the real tear (the chunk's declared length now
-	// overruns the shorter file) and classifies it truncated_chunk.
+	// A file truncated mid-write inside its trailing referenced chunk: the size is no longer a 4096 multiple, but
+	// that alone is NOT corruption, the byte-precise EOF bound catches the real tear (the chunk's declared length
+	// now overruns the shorter file) and classifies it truncated_chunk.
 	image := buildRegion(nil, 3, -1, 2)
 	path := write(t, filepath.Join(t.TempDir(), "r.mca"), image[:len(image)-10]) // torn mid-write.
 	reason, _ := CheckRegionFile(path)
@@ -112,9 +107,8 @@ func TestTornMidChunkIsTruncatedChunk(t *testing.T) {
 }
 
 func TestZeroSizeRegionIsClean(t *testing.T) {
-	// Minecraft legitimately writes 0-byte region containers (e.g. fresh poi
-	// regions with no chunks yet); an empty file is an empty region, structurally
-	// sound, not a torn save (issue #905).
+	// Minecraft legitimately writes 0-byte region containers (e.g. fresh poi regions with no chunks yet); an empty
+	// file is an empty region, structurally sound, not a torn save.
 	path := write(t, filepath.Join(t.TempDir(), "r.mca"), []byte{})
 	reason, err := CheckRegionFile(path)
 	if err != nil {
@@ -126,8 +120,8 @@ func TestZeroSizeRegionIsClean(t *testing.T) {
 }
 
 func TestShortNonZeroRegionIsFlagged(t *testing.T) {
-	// A non-zero file below the two header sectors is a torn header, not an empty
-	// region (issue #905): 100 bytes and a single full sector both stay flagged.
+	// A non-zero file below the two header sectors is a torn header, not an empty region: 100 bytes and a single
+	// full sector both stay flagged.
 	for _, size := range []int{100, testSector} {
 		path := write(t, filepath.Join(t.TempDir(), "r.mca"), make([]byte, size))
 		reason, _ := CheckRegionFile(path)
@@ -190,11 +184,10 @@ func TestZeroLengthChunkIsTruncated(t *testing.T) {
 	}
 }
 
-// unalignedTrailingChunk builds a region whose final chunk extends BYTE-PRECISELY
-// to a non-4096 EOF — the unpadded tail of a live MC 26.x world (issue #923). The
-// header is two sectors; a single chunk occupies sector 2 with a declared length
-// that ends `tail` bytes into sector 2 (tail < sectorSize, so the file size is not
-// a 4096 multiple). The chunk's payload fits exactly: offset*4096 + 4 + length == size.
+// unalignedTrailingChunk builds a region whose final chunk extends BYTE-PRECISELY to a non-4096 EOF, the
+// unpadded tail of a live MC 26.x world. The header is two sectors; a single chunk occupies sector 2 with a
+// declared length that ends `tail` bytes into sector 2 (tail < sectorSize, so the file size is not a 4096
+// multiple). The chunk's payload fits exactly: offset*4096 + 4 + length == size.
 func unalignedTrailingChunk(tail int) []byte {
 	const offset = 2
 	size := offset*testSector + tail
@@ -212,10 +205,9 @@ func unalignedTrailingChunk(tail int) []byte {
 }
 
 func TestUnalignedTrailingChunkIsHealthy(t *testing.T) {
-	// A live 26.x world's region: non-4096 size, but the trailing chunk fits
-	// byte-precisely. The single rule set (issue #927) treats it as healthy — an
-	// unaligned tail is the on-disk format, not a tear. This is the case the old
-	// strict mode wrongly refused on the stop-leg checkpoint.
+	// A live 26.x world's region: non-4096 size, but the trailing chunk fits byte-precisely. The single rule set
+	// treats it as healthy, an unaligned tail is the on-disk format, not a tear. This is the case the old strict
+	// mode wrongly refused on the stop-leg checkpoint.
 	path := write(t, filepath.Join(t.TempDir(), "r.0.0.mca"), unalignedTrailingChunk(459))
 
 	reason, err := CheckRegionFile(path)
@@ -265,9 +257,7 @@ func TestAlignedHealthyRegionIsClean(t *testing.T) {
 }
 
 func TestCheckWorkingSetAcceptsUnalignedTail(t *testing.T) {
-	// The #927 regression case at the working-set level: a set mixing an unaligned
-	// (live-format) tail and a normal aligned region scans healthy — the stop-leg
-	// snapshot of a crashed/non-gracefully-stopped server now PROCEEDS.
+	// Aligned and valid unpadded regions must both pass the working-set scan.
 	root := t.TempDir()
 	write(t, filepath.Join(root, "region", "r.0.0.mca"), unalignedTrailingChunk(459))
 	write(t, filepath.Join(root, "region", "r.1.0.mca"), buildRegion(nil, 3, -1, 2))
@@ -345,9 +335,8 @@ func TestWalkerOnCleanWorkingSetIsHealthy(t *testing.T) {
 }
 
 func TestWalkerCountsZeroByteRegionAsScannedHealthy(t *testing.T) {
-	// The production reproduction (issue #905): a fully quiesced world whose only
-	// "suspect" files are 0-byte poi regions must scan clean so its stop snapshot
-	// is not refused.
+	// The production reproduction: a fully quiesced world whose only "suspect" files are 0-byte poi regions must
+	// scan clean so its stop snapshot is not refused.
 	root := t.TempDir()
 	write(t, filepath.Join(root, "region", "r.0.0.mca"), buildRegion(nil, 3, -1, 2))
 	write(t, filepath.Join(root, "poi", "r.-1.-1.mca"), []byte{})

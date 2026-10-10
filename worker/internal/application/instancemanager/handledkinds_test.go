@@ -8,12 +8,7 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
 
-// handledKinds is the canonical set of command kinds Manager.Handle dispatches.
-// It is the single source the drift guard checks both layers against: the
-// session-layer filter session.IsHandledKind must accept every one of these
-// (otherwise the command is answered with the canned "unsupported" result and
-// never reaches Handle — the bug in issue #219), and Manager.Handle must not
-// fall through to its "unhandled command" default for any of them.
+// Check both session.IsHandledKind and Manager.Handle against this set so no supported command is filtered out.
 var handledKinds = []string{
 	"StartServer", "StopServer", "RestartServer", "ServerCommand",
 	"HydrateTrigger", "SnapshotTrigger", "ReadFile", "EditFile", "ListFiles",
@@ -25,11 +20,9 @@ var handledKinds = []string{
 // fail for other reasons) from the unhandled-command fallback.
 const unhandledPrefix = "instancemanager: unhandled command"
 
-// TestHandledKindsReachSessionFilter guards against the two layers drifting
-// apart: the session dispatch filter (session.IsHandledKind) and the handler's
-// own switch (Manager.Handle) must agree on which kinds are handled. A kind the
-// handler accepts but the filter omits is silently answered "unsupported" and
-// never dispatched (issue #219).
+// TestHandledKindsReachSessionFilter guards against the two layers drifting apart: the session dispatch filter
+// (session.IsHandledKind) and the handler's own switch (Manager.Handle) must agree on which kinds are handled. A
+// kind the handler accepts but the filter omits is silently answered "unsupported" and never dispatched.
 func TestHandledKindsReachSessionFilter(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 

@@ -1,14 +1,4 @@
-# Stub "Geyser" image for the Bedrock relay e2e (epic #1540, issue #1547): a
-# minimal RakNet Unconnected Ping/Pong responder on :19132/udp standing in for
-# Geyser inside a Minecraft server container (worker/test/e2e/stub-geyser/main.go
-# doc comment has the wire-format detail). It needs no JRE, no JAR, and no
-# Modrinth/GeyserMC download -- real Geyser+Floodgate behavior was already
-# validated live (epic #1540 issue #1542).
-#
-# Multi-stage: build the static binary with the fixture's Go toolchain. Its
-# patch intentionally does not track worker/Dockerfile's builder pin. Ship it
-# alone on the sibling container-driver e2e stub's already-vetted
-# digest-pinned Alpine base (worker/test/e2e/stub/Dockerfile).
+# Build a RakNet ping/pong stub to test Bedrock datagram routing without Geyser downloads.
 FROM golang:1.27.0 AS builder
 
 WORKDIR /src

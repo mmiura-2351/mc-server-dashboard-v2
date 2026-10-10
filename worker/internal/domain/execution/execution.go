@@ -1,10 +1,4 @@
-// Package execution holds the Worker's execution-backend core: the
-// ExecutionDriver Port that realizes logical start/stop for a server instance,
-// the ServerControl Port, and the value types they exchange. It depends on the
-// standard library only (ARCHITECTURE.md Section 2, Section 5.2). Concrete drivers
-// (container, future k8s) live in the adapters layer and implement these
-// interfaces, so the application and session layers never know which backend runs
-// a server (FR-EXE-1, FR-EXE-4).
+// Package execution defines backend-neutral lifecycle, control, and telemetry contracts.
 package execution
 
 import (
@@ -50,11 +44,7 @@ func (s ServerState) String() string {
 	}
 }
 
-// CrashReason classifies a StateCrashed transition a driver can explain (issue
-// #1093). It mirrors the wire CrashReason (CONTROL_PLANE.md Section 6) and rides
-// the StatusEvent beside the free-text Detail, so a client can show a specific
-// message without parsing that text. The zero value is every crash a driver does
-// not classify.
+// CrashReason mirrors the wire enum for explained crashes; zero leaves the transition unclassified.
 type CrashReason int
 
 const (
@@ -86,11 +76,7 @@ func (r CrashReason) String() string {
 	}
 }
 
-// LaunchMode selects how a driver builds a server's launch command (issue #305).
-// It is carried explicitly on the start command, never inferred from the
-// working-set contents. The zero value (LaunchModeJar) is the historical
-// behavior (a `java -jar <jar> nogui` launch), so an unset launch mode launches
-// exactly as before this field existed.
+// LaunchMode comes from the command, never inferred from scratch contents; zero selects JAR launch.
 type LaunchMode int
 
 const (
@@ -105,10 +91,7 @@ const (
 	LaunchModeForgeArgsfile
 )
 
-// InstanceSpec is everything a driver needs to launch one server instance. It is
-// backend-neutral: a now-removed host-process, container, or future k8s driver all consume
-// the same spec (FR-EXE-4). The working set under WorkingDir is prepared by the
-// hydrate path (epic #8); this milestone runs against an empty/pre-seeded dir.
+// InstanceSpec is backend-neutral; hydrate prepares WorkingDir before launch.
 type InstanceSpec struct {
 	// ServerID is the API's identifier for the server, used to scope status
 	// events and to key the instance in the manager.
@@ -116,29 +99,20 @@ type InstanceSpec struct {
 	// WorkingDir is the absolute path to the server's working set, the process
 	// working directory (CONFIGURATION.md worker.scratch_dir root).
 	WorkingDir string
-	// MinecraftVersion drives Java runtime selection (FR-EXE-5) and the charset
-	// server.properties is read in for RCON (issue #3116).
+	// MinecraftVersion drives Java runtime selection (FR-EXE-5) and the charset server.properties is read in for
+	// RCON.
 	MinecraftVersion string
 	// JarRelpath is the server JAR path relative to WorkingDir (StartServer
 	// carries it; the API ships the JAR via hydrate, ARCHITECTURE.md Section 7.3).
 	// In LaunchModeForgeArgsfile it is the Forge installer JAR used for the
 	// supervised install step.
 	JarRelpath string
-	// LaunchMode selects the launch command shape (JAR vs Forge args file). The
-	// zero value is the historical JAR launch (issue #305).
+	// LaunchMode selects the launch command shape (JAR vs Forge args file). The zero value is the historical JAR
+	// launch.
 	LaunchMode LaunchMode
-	// MemoryLimitMB is the per-server memory ceiling in mebibytes (the
-	// operator-declared limit carried from StartServer, issue #706). It is the
-	// LIMIT, not the heap: the JVM heap (`-Xmx`) is derived from it (limit minus
-	// headroom, see heapArgs), and the enforcement drivers (#707/#708) consume this
-	// ceiling to cap the container/process. 0 means unset — the driver/JVM picks a
-	// default heap, preserving the pre-#706 launch.
+	// MemoryLimitMB is the total ceiling, including JVM headroom; zero leaves the heap unset.
 	MemoryLimitMB uint32
-	// CPUMillis is the per-server CPU allocation in millicores (1000 = one core),
-	// the operator-declared SOFT relative share carried from StartServer (issue
-	// #723). Unlike MemoryLimitMB there is NO derivation: it is carried as-is and
-	// the enforcement driver (#724) turns it into a relative CPUShares weight. 0
-	// means unset — the driver applies its default weight.
+	// CPUMillis is a relative CPU share in millicores, not a hard quota; zero uses the driver default.
 	CPUMillis uint32
 }
 
@@ -167,10 +141,7 @@ const (
 	LogStreamStderr
 )
 
-// LogEvent is one captured line of a server's console output (FR-MON-2). The
-// instance manager forwards these onto the control plane as LogLine events.
-// Logs are transient relay-only at M1: the Worker streams them and does not
-// store them (REQUIREMENTS.md Section 6.13).
+// LogEvent is transient console output forwarded to the control plane; the Worker does not persist it.
 type LogEvent struct {
 	ServerID string
 	Line     string
@@ -188,36 +159,21 @@ type MetricsSample struct {
 	PlayerCount uint32
 }
 
-// LogSource is an optional capability an Instance may implement to stream its
-// captured console output. The instance manager type-asserts it; a driver that
-// cannot capture logs simply does not implement it (keeping the core Instance
-// interface unchanged, FR-EXE-4). The channel closes when the instance
-// terminates and no further lines will arrive.
+// LogSource is optional; its channel closes when no further instance logs will arrive.
 type LogSource interface {
 	Logs() <-chan LogEvent
 }
 
-// StatsSource is an optional capability an Instance may implement to report a
-// one-shot metrics sample on demand. The instance manager polls it on the
-// configured interval while the instance runs. A driver that cannot measure a
-// given stat cheaply leaves it zero; one that cannot measure any returns an
-// error and the manager emits an up-only sample.
+// StatsSource is optional; unavailable fields stay zero and a sample error makes the manager emit up-only
+// metrics.
 type StatsSource interface {
 	// Sample reads the instance's current resource usage. An error means no
 	// honest measurement was available this tick.
 	Sample(ctx context.Context) (MetricsSample, error)
 }
 
-// ExecutionDriver realizes logical lifecycle operations for one execution
-// backend (FR-EXE-1). Start launches an instance and returns a handle; the
-// handle owns stop, status, and the crash-notification stream. Keeping per-
-// instance operations on the returned Instance (rather than driver methods keyed
-// by server id) lets a container or k8s driver hold backend-specific handle
-// state without changing this interface (FR-EXE-4).
-//
-// The ExecutionDriver name is the contract term fixed by REQUIREMENTS.md
-// FR-EXE-1 and ARCHITECTURE.md Section 5.2; the documented Port name is kept
-// despite the package-stutter lint.
+// ExecutionDriver starts backend-specific Instance handles that own lifecycle and status.
+// The Port name is fixed by the execution contract.
 type ExecutionDriver interface { //nolint:revive // documented Port name (FR-EXE-1)
 	// Start launches the server described by spec and returns its Instance. It
 	// errors if the instance cannot be launched (e.g. no Java runtime, spawn
@@ -231,35 +187,13 @@ type ExecutionDriver interface { //nolint:revive // documented Port name (FR-EXE
 // unless a Stop is in flight). The channel closes when the instance reaches a
 // terminal state and no further events will arrive.
 type Instance interface {
-	// Stop ends the instance. A graceful stop tries the in-band shutdown (RCON
-	// "stop") and falls back to signals; a non-graceful stop forces termination.
-	// It returns once the process has exited or the stop deadline elapsed.
-	//
-	// preFallback, when supplied, is called always before stop on the graceful
-	// path (before tryRCONStop and before docker stop) so the caller can flush
-	// the live world to disk while the process is still alive. It is NOT called
-	// on a force stop (graceful=false). At most one callback is accepted.
-	// When the callback returns true the world data is fully flushed; Stop then
-	// skips RCON "stop" and SIGTERM (both trigger MC's own shutdown save, which
-	// can overwrite the flushed data if killed mid-write) and terminates the
-	// process with SIGKILL so the flushed region files stay intact.
-	// The callback gets its own budget, which runs before the stop deadline
-	// starts rather than out of it, so a slow flush never shortens the shutdown
-	// grace; the two are additive in the worst case (issue #2622).
+	// Stop confirms termination or returns an error; a graceful stop runs at most one preFallback callback.
+	// The callback has a separate budget; true skips shutdown saves and uses SIGKILL to preserve flushed files.
 	Stop(ctx context.Context, graceful bool, preFallback ...func(context.Context) bool) error
 	// Status reports the last observed state.
 	Status() ServerState
-	// ProbeAlive reports whether the instance's underlying process/container is
-	// currently alive, by direct observation (not cached state): neither Status
-	// nor Events can answer it, since both Stop failure paths reset the cached
-	// state to its pre-stop value and Events only carries transitions the driver
-	// could confirm. err != nil means the answer is genuinely unavailable (e.g.
-	// the backend daemon is unreachable) — never a guessed false. It is
-	// single-shot: the caller owns the retry cadence.
-	//
-	// A core method rather than an optional capability (LogSource/StatsSource):
-	// converging on a container that outlived a failed stop is a correctness
-	// obligation of every driver, not an optional nicety (issue #2467).
+	// ProbeAlive observes the process directly, independently of cached status; errors mean unknown.
+	// It performs one probe; the caller owns retries.
 	ProbeAlive(ctx context.Context) (alive bool, err error)
 	// Events streams state transitions for this instance until it terminates.
 	Events() <-chan StatusEvent
@@ -287,14 +221,12 @@ var ErrUnknownServer = errors.New("execution: unknown server")
 // current state (e.g. start an already-running server).
 var ErrInvalidState = errors.New("execution: invalid state for command")
 
-// ErrPortConflict is wrapped into a driver's Start error when a server could not
-// be launched because a host port it must publish is already in use (issue
-// #225). The instance manager matches it with errors.Is to emit a sanitized
+// ErrPortConflict is wrapped into a driver's Start error when a server could not be launched because a host port
+// it must publish is already in use. The instance manager matches it with errors.Is to emit a sanitized
 // port_conflict failure code instead of the generic internal one.
 var ErrPortConflict = errors.New("execution: host port already in use")
 
-// ErrImageMissing is wrapped into a driver's Start error when a server could not
-// be launched because its container image is absent and could not be pulled
-// (issue #225). The instance manager matches it with errors.Is to emit a
+// ErrImageMissing is wrapped into a driver's Start error when a server could not be launched because its
+// container image is absent and could not be pulled. The instance manager matches it with errors.Is to emit a
 // sanitized image_missing failure code instead of the generic internal one.
 var ErrImageMissing = errors.New("execution: container image missing")

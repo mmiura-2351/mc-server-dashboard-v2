@@ -1,45 +1,14 @@
-// Package javaproperties parses a Java ".properties" file with the grammar of
-// java.util.Properties.load, so the Worker reads a server.properties as the
-// Minecraft server it supervises does (issue #2811). Which charset the server
-// decodes the file in depends on its version: latin-1 before Minecraft 1.20
-// (Parse), UTF-8 first with a latin-1 fallback from 1.20 (ParseUTF8, issue
-// #3116). The two readings differ only in how a non-ASCII byte decodes, never in
-// the ASCII structure the grammar walks (a UTF-8 multi-byte sequence holds no
-// ASCII byte), so they agree on every pure-ASCII key and value.
+// Package javaproperties implements Java properties grammar for RCON and game-port readers.
+// Parse decodes latin-1; ParseUTF8 uses UTF-8 with whole-file latin-1 fallback.
 //
-// The three adapters that need values out of a server.properties -- the RCON
-// credentials, the container driver's published ports, and the tunnel's game
-// port -- used to carry a "key=value"-only copy of a parser each. Java accepts
-// considerably more than that, so a respelled line ("rcon.password:evil",
-// "server-port 25599", an escaped or \uXXXX-spelled key, a backslash
-// continuation) read one way here and another way in the server. This package is
-// the single reader all three share.
+// Keys end at unescaped equals, colon, or whitespace; duplicate keys use the last value.
+// Leading space, tab, and form feed are ignored; trailing value whitespace is retained.
 //
-// The grammar, following the reference implementation:
+// LF, CRLF, and lone CR terminate lines. Odd trailing backslashes continue a value.
+// A comment does not continue; an empty continuation still permits a new comment or blank line.
 //
-//   - Parse decodes bytes as latin-1 (ISO-8859-1), which is what
-//     Properties.load does with an InputStream: every byte maps to the code
-//     point of the same value. ParseUTF8 decodes them as UTF-8, or as latin-1
-//     when the file is not valid UTF-8. Every rule below holds for both.
-//   - A line ends at "\n", "\r\n" or a lone "\r". Leading whitespace (space, tab,
-//     form feed) is skipped, and a line that is then empty is ignored.
-//   - A line whose first non-whitespace character is '#' or '!' is a comment and
-//     is dropped -- a comment does NOT continue on a trailing backslash.
-//   - A line ending in an ODD number of backslashes continues onto the next
-//     line, whose own leading whitespace is skipped. Once the continued line
-//     has text in it, a continuation line is never a comment, and a blank one
-//     ends the value. Until then -- a lone backslash, a zero-length
-//     continuation -- the next line is read as the START of the logical line:
-//     blank, it is skipped, and '#' or '!' make it a comment (issue #3041).
-//     At EOF a lone backslash is an empty key with an empty value, unless its
-//     line ends in "\r\n", after which Java reads one more, empty, line.
-//   - The key runs to the first unescaped '=', ':' or whitespace. Whitespace
-//     after the key, then one optional '=' or ':', then further whitespace are
-//     skipped; everything remaining -- trailing whitespace included -- is the
-//     value.
-//   - "\t", "\r", "\n", "\f" and "\uXXXX" are decoded in both key and value; any
-//     other escaped character stands for itself.
-//   - A key repeated in the file takes its LAST occurrence's value.
+// Standard escapes and Unicode escapes are decoded; malformed Unicode stays literal.
+// Valid UTF-16 surrogate pairs become one rune, while unpaired units become U+FFFD.
 package javaproperties
 
 import (
@@ -49,23 +18,13 @@ import (
 	"unicode/utf8"
 )
 
-// Parse parses the contents of a Java .properties file into its key/value pairs,
-// last occurrence winning, decoding it as latin-1 -- how a Minecraft server
-// before 1.20 reads server.properties. It never fails: a .properties file has no
-// syntax a reader can reject, and the one construct the reference implementation
-// throws on -- a malformed \uXXXX escape -- is decoded here as the literal
-// characters instead (see loadConvert). Callers own the I/O and its error
-// policy; whole contents are parsed at once, so no line length truncates the
-// parse.
+// Parse decodes latin-1 with Java properties grammar; duplicate keys use the last value.
+// Malformed Unicode escapes remain literal instead of raising Java's exception.
 func Parse(data []byte) map[string]string {
 	return parse(latin1ToUTF8(data))
 }
 
-// ParseUTF8 is Parse with the charset a Minecraft 1.20+ server reads its
-// server.properties in: UTF-8, or latin-1 for the WHOLE file when data is not
-// valid UTF-8. The server's decoder reports the first malformed byte, and the
-// server then reloads the file from the start as ISO-8859-1
-// (Settings.loadFromFile).
+// ParseUTF8 uses UTF-8 when valid; otherwise the entire file falls back to latin-1, matching Minecraft 1.20+.
 func ParseUTF8(data []byte) map[string]string {
 	if !utf8.Valid(data) {
 		return Parse(data)
@@ -73,9 +32,7 @@ func ParseUTF8(data []byte) map[string]string {
 	return parse(data)
 }
 
-// parse runs the grammar over text, which is UTF-8. Every byte the grammar acts
-// on is ASCII and no byte of a UTF-8 multi-byte sequence is, so this byte-wise
-// walk splits text exactly where Java's char-wise one splits the decoded file.
+// Grammar bytes are ASCII, which cannot occur within UTF-8 multibyte sequences, so byte-wise splitting is safe.
 func parse(data []byte) map[string]string {
 	out := map[string]string{}
 	for i := 0; i < len(data); {
@@ -108,8 +65,6 @@ func parse(data []byte) map[string]string {
 	return out
 }
 
-// latin1ToUTF8 decodes data as latin-1 (ISO-8859-1) into UTF-8 text: every byte
-// becomes the code point of the same value.
 func latin1ToUTF8(data []byte) []byte {
 	out := make([]byte, 0, len(data))
 	for _, c := range data {
@@ -118,9 +73,7 @@ func latin1ToUTF8(data []byte) []byte {
 	return out
 }
 
-// naturalLine returns the bytes of the line starting at off, without its
-// terminator, and the offset of the next line. "\r\n", a lone "\r" and a lone
-// "\n" all terminate; an unterminated final line runs to the end.
+// naturalLine accepts LF, CRLF, and lone CR, excluding the terminator.
 func naturalLine(data []byte, off int) (line []byte, next int) {
 	end := off
 	for end < len(data) && data[end] != '\n' && data[end] != '\r' {
@@ -135,7 +88,6 @@ func naturalLine(data []byte, off int) (line []byte, next int) {
 	return data[off:end], end + 1
 }
 
-// trimLeadingBlanks drops the leading space / tab / form feed run.
 func trimLeadingBlanks(line []byte) []byte {
 	i := 0
 	for i < len(line) && isBlank(line[i]) {
@@ -146,14 +98,10 @@ func trimLeadingBlanks(line []byte) []byte {
 
 func isBlank(c byte) bool { return c == ' ' || c == '\t' || c == '\f' }
 
-// isLoneBackslash reports whether line, already stripped of its leading blanks,
-// is a zero-length continuation: a single backslash, which continues a logical
-// line without adding anything to it.
+// A lone backslash continues without contributing text, so the next line is still a logical-line start.
 func isLoneBackslash(line []byte) bool { return len(line) == 1 && line[0] == '\\' }
 
-// endsWithOddBackslash reports whether line ends in an odd-length backslash run,
-// which is what makes it continue onto the next line (an even run is a sequence
-// of escaped backslashes and terminates the logical line).
+// An odd trailing backslash continues; an even run ends the logical line.
 func endsWithOddBackslash(line []byte) bool {
 	n := 0
 	for i := len(line) - 1; i >= 0 && line[i] == '\\'; i-- {
@@ -162,8 +110,6 @@ func endsWithOddBackslash(line []byte) bool {
 	return n%2 == 1
 }
 
-// splitKeyValue splits one logical line (already stripped of its leading
-// whitespace) into its decoded key and value.
 func splitKeyValue(line []byte) (key, value string) {
 	keyEnd := len(line)
 	valueStart := len(line)
@@ -194,21 +140,8 @@ func splitKeyValue(line []byte) (key, value string) {
 	return loadConvert(line[:keyEnd]), loadConvert(line[valueStart:])
 }
 
-// loadConvert resolves the .properties escapes in raw, which is UTF-8 text,
-// mirroring Properties.loadConvert. A malformed \uXXXX -- which the reference
-// implementation rejects with an exception -- yields the literal 'u' followed by
-// whatever came after it, so a hand-mangled file is read rather than turning
-// every caller into an error path (the Minecraft server refuses such a file
-// outright, so no value we could return would match it anyway).
-//
-// A \uD800-\uDFFF escape spells one UTF-16 unit of a surrogate pair. Two such
-// escapes side by side -- a high half then a low half -- spell one supplementary
-// character, which is how Properties.store writes anything above the BMP and so
-// how a pre-1.20 server's own boot rewrite spells it; they are combined here
-// into that character, as Properties.load does (issue #3120). An UNPAIRED half
-// becomes U+FFFD, since a Go string cannot hold the lone unit Java keeps; that
-// is the one place the parse is not byte-identical to Java's, and the result is
-// still stable.
+// loadConvert keeps malformed Unicode escapes literal and combines valid UTF-16 surrogate pairs.
+// Unpaired surrogates become U+FFFD because Go cannot encode Java's lone UTF-16 units.
 func loadConvert(raw []byte) string {
 	var b strings.Builder
 	b.Grow(len(raw))
@@ -244,14 +177,8 @@ func loadConvert(raw []byte) string {
 	return b.String()
 }
 
-// unicodeEscape decodes the \uXXXX escape whose four hex digits start at off,
-// returning the rune it spells and how many bytes from off it consumed. A
-// high-surrogate escape IMMEDIATELY followed by a low-surrogate one spells a
-// single supplementary character, so both escapes are consumed and the pair is
-// decoded into it (issue #3120); utf16.DecodeRune settles which ordering counts
-// as a pair, returning utf8.RuneError for anything else. An unpaired half is
-// returned as the surrogate it is, which strings.Builder.WriteRune writes as
-// U+FFFD.
+// unicodeEscape consumes a following low surrogate with a high surrogate to produce one rune.
+// Unpaired surrogates are left for WriteRune to replace with U+FFFD.
 func unicodeEscape(raw []byte, off int) (r rune, consumed int, ok bool) {
 	v, ok := hex4(raw, off)
 	if !ok {
@@ -267,7 +194,6 @@ func unicodeEscape(raw []byte, off int) (r rune, consumed int, ok bool) {
 	return v, 4, true
 }
 
-// hex4 decodes the four hex digits at off into the code point they spell.
 func hex4(raw []byte, off int) (rune, bool) {
 	if off+4 > len(raw) {
 		return 0, false

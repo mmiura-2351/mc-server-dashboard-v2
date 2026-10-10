@@ -11,9 +11,8 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
 
-// The working-set owner the ownership tests pretend the server runs as: an
-// identity distinct from the test process, standing in for the run-as user under
-// a root Worker (issue #2600).
+// The working-set owner the ownership tests pretend the server runs as: an identity distinct from the test
+// process, standing in for the run-as user under a root Worker.
 const (
 	serverUID = 25565
 	serverGID = 25566
@@ -50,9 +49,8 @@ func asRootWorker(t *testing.T) (chowned func(path string) bool) {
 	}
 }
 
-// Overwriting a file of a running server leaves the replacement owned by the
-// working set's owner, not by the Worker: under a root Worker the server runs as
-// another user and must still read and rewrite its own file (issue #2600).
+// Overwriting a file of a running server leaves the replacement owned by the working set's owner, not by the
+// Worker: under a root Worker the server runs as another user and must still read and rewrite its own file.
 func TestEditFileOverwriteKeepsWorkingSetOwner(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	full := writeWorkingFile(t, m, "s1", "server.properties", []byte("motd=old"))
@@ -71,9 +69,8 @@ func TestEditFileOverwriteKeepsWorkingSetOwner(t *testing.T) {
 	}
 }
 
-// A new nested file gets the working set's owner on the file AND on every parent
-// directory the edit had to create, so the server can traverse to it. The
-// directory that already existed is not touched (issue #2600).
+// A new nested file gets the working set's owner on the file AND on every parent directory the edit had to
+// create, so the server can traverse to it. The directory that already existed is not touched.
 func TestEditFileNewNestedFileInheritsWorkingSetOwner(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	root := filepath.Join(m.scratchDir, "s1")
@@ -100,8 +97,8 @@ func TestEditFileNewNestedFileInheritsWorkingSetOwner(t *testing.T) {
 	}
 }
 
-// An edit whose ownership cannot be set fails and keeps the old content, rather
-// than publishing a file the server cannot read (issue #2600).
+// An edit whose ownership cannot be set fails and keeps the old content, rather than publishing a file the
+// server cannot read.
 func TestEditFileFailsWhenOwnershipCannotBeSet(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	full := writeWorkingFile(t, m, "s1", "server.properties", []byte("motd=old"))

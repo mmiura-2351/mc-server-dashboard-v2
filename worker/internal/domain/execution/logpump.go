@@ -17,26 +17,17 @@ const MaxLogLineBytes = 8 * 1024
 // truncationMarker is appended to a line that exceeded MaxLogLineBytes.
 const truncationMarker = "…[truncated]"
 
-// readyMarker matches the Minecraft server's startup-complete line, e.g.
-// `[Server thread/INFO]: Done (12.345s)! For help, type "help"`. Vanilla, Paper
-// and Forge all print this once the server is listening (RCON included), so it
-// is the readiness signal a driver waits for before reporting StateRunning
-// (issue #345).
+// The Minecraft startup-complete Done line indicates game and RCON listeners are ready.
 var readyMarker = regexp.MustCompile(`Done \([0-9.]+s\)! For help`)
 
-// LogPump captures a server's stdout/stderr line by line into a bounded, lossy
-// per-instance buffer (FR-MON-2). Logs are best-effort: under backpressure the
-// pump drops the oldest buffered line and, once a slot frees, emits a single
-// marker line reporting how many lines were dropped. This mirrors the status
-// event posture (issue #96) — log volume is the forcing function, so the
-// capture path never blocks the server process. Logs are transient relay-only
-// at M1 (REQUIREMENTS.md Section 6.13): the pump streams, it does not persist.
+// LogPump never blocks the process: overflow drops oldest lines and later emits a loss marker.
+// Logs are streamed, not persisted.
 type LogPump struct {
 	serverID string
 	out      chan LogEvent
 
-	// ready is closed once a captured line matches readyMarker, signalling the
-	// server is up and listening (issue #345). readyOnce guards the one-shot close.
+	// ready is closed once a captured line matches readyMarker, signalling the server is up and listening.
+	// readyOnce guards the one-shot close.
 	ready     chan struct{}
 	readyOnce sync.Once
 
@@ -63,11 +54,8 @@ func NewLogPump(serverID string, bufSize int) *LogPump {
 // finished and Close has been called.
 func (p *LogPump) Logs() <-chan LogEvent { return p.out }
 
-// Ready is closed the first time a captured line reports the server finished
-// starting (the Minecraft "Done (X.XXXs)! For help" line). A driver selects on
-// it to hold StateStarting until the server is actually listening (issue #345).
-// It never fires if the marker is never seen; the driver pairs it with a
-// bounded fallback timeout.
+// Ready closes at the first startup-complete marker; pair it with a fallback for servers that never log the
+// marker.
 func (p *LogPump) Ready() <-chan struct{} { return p.ready }
 
 // markReadyIfDone closes the ready channel (once) when line is the startup-
@@ -78,13 +66,7 @@ func (p *LogPump) markReadyIfDone(line string) {
 	}
 }
 
-// WaitReady blocks until the server signals readiness (ready closed), the
-// fallback timeout elapses, or the instance exits first (exited closed). It
-// reports whether the caller should transition starting→running: true when the
-// server became ready or the fallback fired, false when the instance exited
-// first (the exit path owns the terminal state). The fallback bounds the wait so
-// a server whose log format omits the marker never sticks in starting forever
-// (issue #345).
+// WaitReady permits running after readiness or the fallback timeout, but not after observed exit.
 func WaitReady(ready, exited <-chan struct{}, fallback time.Duration) bool {
 	timer := time.NewTimer(fallback)
 	defer timer.Stop()
@@ -98,13 +80,7 @@ func WaitReady(ready, exited <-chan struct{}, fallback time.Duration) bool {
 	}
 }
 
-// Scan reads r line by line and emits each as a LogEvent on the given stream
-// until r reaches EOF or errors. It returns when r is exhausted; callers run it
-// in a goroutine per stream (stdout, stderr). A line longer than MaxLogLineBytes
-// is truncated with a marker and the scan continues — an oversized line never
-// stops the stream. It uses a bufio.Reader ReadSlice loop rather than a
-// bufio.Scanner so an over-long line is recovered (the Scanner surfaced it as
-// ErrTooLong and stopped, losing the rest of the stream).
+// Scan truncates oversized lines and continues reading; bufio.Scanner would stop at the first one.
 func (p *LogPump) Scan(r io.Reader, stream LogStream) {
 	br := bufio.NewReader(r)
 	for {
@@ -142,9 +118,8 @@ func (p *LogPump) Scan(r io.Reader, stream LogStream) {
 			}
 			return
 		}
-		// Strip a trailing \r that a buffer-boundary split left in kept:
-		// when CRLF spans the ReadSlice boundary, trimLineEnd only sees the
-		// final chunk (\n) and the \r from the previous chunk stays (#2067).
+		// Strip a trailing \r that a buffer-boundary split left in kept: when CRLF spans the ReadSlice boundary,
+		// trimLineEnd only sees the final chunk (\n) and the \r from the previous chunk stays.
 		if n := len(kept); n > 0 && kept[n-1] == '\r' {
 			kept = kept[:n-1]
 		}
@@ -180,11 +155,8 @@ func (p *LogPump) Emit(line string, stream LogStream) {
 	p.emit(truncate(line), stream)
 }
 
-// emit queues a line, dropping the oldest buffered line under backpressure. When
-// a drop happens it queues a dropped-count marker in the freed slot (in place of
-// the new line) so the consumer always learns about the loss in order, even
-// under sustained backpressure. It never blocks the caller (the server
-// process's output).
+// On overflow replace the oldest line with a loss marker so the consumer learns about drops without blocking the
+// server.
 func (p *LogPump) emit(line string, stream LogStream) {
 	p.mu.Lock()
 	if p.closed {
@@ -193,8 +165,8 @@ func (p *LogPump) emit(line string, stream LogStream) {
 	}
 	p.mu.Unlock()
 
-	// Detect the readiness marker before queuing, so a Done line still fires Ready
-	// even if backpressure later drops it from the buffer (issue #345).
+	// Detect the readiness marker before queuing, so a Done line still fires Ready even if backpressure later drops
+	// it from the buffer.
 	p.markReadyIfDone(line)
 
 	ev := LogEvent{ServerID: p.serverID, Line: line, Stream: stream}

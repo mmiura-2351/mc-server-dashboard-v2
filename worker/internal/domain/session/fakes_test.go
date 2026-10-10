@@ -284,18 +284,15 @@ type fakeHandler struct {
 	events  chan StatusEvent
 	logs    chan LogEvent
 	metrics chan MetricsEvent
-	// transferDeadline records the value the session pushed via the optional
-	// TransferDeadlineSetter after registration (issue #874); deadlineSet flags
-	// that the setter was called at all.
+	// transferDeadline records the value the session pushed via the optional TransferDeadlineSetter after
+	// registration; deadlineSet flags that the setter was called at all.
 	transferDeadline time.Duration
 	deadlineSet      bool
-	// resyncCalls counts ResyncStatus invocations (issue #985). resyncEmit, if
-	// set, is the status the handler re-emits onto events when ResyncStatus is
-	// called, modeling the instance manager re-reporting a live instance.
+	// resyncCalls counts ResyncStatus invocations. resyncEmit, if set, is the status the handler re-emits onto
+	// events when ResyncStatus is called, modeling the instance manager re-reporting a live instance.
 	resyncCalls int
 	resyncEmit  []StatusEvent
-	// reclaimedIDs records the server ids passed to ReclaimDeletedScratches
-	// (issue #924).
+	// reclaimedIDs records the server ids passed to ReclaimDeletedScratches.
 	reclaimedIDs []string
 }
 
@@ -334,9 +331,8 @@ func (h *fakeHandler) transferDeadlineCopy() (time.Duration, bool) {
 	return h.transferDeadline, h.deadlineSet
 }
 
-// ResyncStatus models the instance manager re-emitting its live instances'
-// state after a (re-)register (issue #985): it counts the call and pushes any
-// configured events onto the events channel, exactly as the real handler does.
+// ResyncStatus models the instance manager re-emitting its live instances' state after a (re-)register: it
+// counts the call and pushes any configured events onto the events channel, exactly as the real handler does.
 func (h *fakeHandler) ResyncStatus() {
 	h.mu.Lock()
 	h.resyncCalls++
@@ -353,7 +349,7 @@ func (h *fakeHandler) resyncCallsCopy() int {
 	return h.resyncCalls
 }
 
-// ReclaimDeletedScratches records the ids for test assertions (issue #924).
+// ReclaimDeletedScratches records the ids for test assertions.
 func (h *fakeHandler) ReclaimDeletedScratches(serverIDs []string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -401,9 +397,8 @@ func (d *fakeDialer) dialCount() int {
 	return d.calls
 }
 
-// fakeHeldServerHandler wraps a fakeHandler and adds HeldServerProvider so the
-// session refreshes caps before each registration (issue #1711). Tests that do
-// not need the refresh use fakeHandler directly, so the existing reclaim tests
+// fakeHeldServerHandler wraps a fakeHandler and adds HeldServerProvider so the session refreshes caps before
+// each registration. Tests that do not need the refresh use fakeHandler directly, so the existing reclaim tests
 // are not affected by the new interface.
 type fakeHeldServerHandler struct {
 	*fakeHandler

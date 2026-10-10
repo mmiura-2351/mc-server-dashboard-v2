@@ -14,10 +14,9 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
 
-// gatedDriver blocks inside Start until release is closed, so a test can hold the
-// first StartServer mid-driver.Start (modeling the now-removed host-process RealSpawn / Forge
-// create window from issue #780) and issue the re-issued duplicate while the
-// original is still in flight. startErr, when set, fails every Start.
+// gatedDriver blocks inside Start until release is closed, so a test can hold the first StartServer
+// mid-driver.Start (modeling the now-removed host-process RealSpawn / Forge create window from) and issue the
+// re-issued duplicate while the original is still in flight. startErr, when set, fails every Start.
 type gatedDriver struct {
 	mu       sync.Mutex
 	started  int
@@ -48,9 +47,8 @@ func (d *gatedDriver) startCount() int {
 	return d.started
 }
 
-// gatedTransfer blocks inside Hydrate until release is closed, mirroring the
-// long-running hydrate window an old stream's lane can still be writing when the
-// re-issued HydrateTrigger arrives (issue #780).
+// gatedTransfer blocks inside Hydrate until release is closed, mirroring the long-running hydrate window an old
+// stream's lane can still be writing when the re-issued HydrateTrigger arrives.
 type gatedTransfer struct {
 	mu       sync.Mutex
 	hydrated int
@@ -99,10 +97,9 @@ func awaitEnter(t *testing.T, c <-chan struct{}) {
 	}
 }
 
-// A duplicate StartServer re-issued while the original is mid-driver.Start (the
-// reconnect-redelivery window, issue #780) is rejected with BUSY (issue #824, the
-// reservation race is distinct from a settled "already running") and the driver
-// is started exactly once — never two instances for one server.
+// A duplicate StartServer re-issued while the original is mid-driver.Start (the reconnect-redelivery window) is
+// rejected with BUSY (the reservation race is distinct from a settled "already running") and the driver is
+// started exactly once, never two instances for one server.
 func TestConcurrentDuplicateStartStartsDriverOnce(t *testing.T) {
 	d := newGatedDriver()
 	m := newManager(t, d, nil)
@@ -129,9 +126,8 @@ func TestConcurrentDuplicateStartStartsDriverOnce(t *testing.T) {
 	}
 }
 
-// When a reserved start fails (driver.Start errors), the reservation is released
-// so a retry over the same id can proceed (issue #780): the reservation must not
-// wedge the id after a failure.
+// When a reserved start fails (driver.Start errors), the reservation is released so a retry over the same id can
+// proceed: the reservation must not wedge the id after a failure.
 func TestReservationReleasedAfterStartFailure(t *testing.T) {
 	d := newGatedDriver()
 	d.startErr = context.DeadlineExceeded
@@ -163,10 +159,9 @@ func TestReservationReleasedAfterStartFailure(t *testing.T) {
 	}
 }
 
-// gatedStopInstance is a fakeInstance whose Stop blocks until stopRelease is
-// closed, modeling a DETACHED stop from a dropped stream's lane that keeps running
-// (up to ~3x stopTimeout) after takeStoppableReserve has already evicted the
-// instance (issue #780). stopEntered signals when Stop has been entered.
+// gatedStopInstance is a fakeInstance whose Stop blocks until stopRelease is closed, modeling a DETACHED stop
+// from a dropped stream's lane that keeps running (up to ~3x stopTimeout) after takeStoppableReserve has already
+// evicted the instance. stopEntered signals when Stop has been entered.
 type gatedStopInstance struct {
 	*fakeInstance
 	stopEntered chan struct{}
@@ -198,11 +193,7 @@ func (d *gatedStopDriver) Start(_ context.Context, spec execution.InstanceSpec) 
 	return d.inst, nil
 }
 
-// A StopServer re-sent while a DETACHED stop is still confirming termination — the
-// reconnect-redelivery window of issue #780 — must be rejected with BUSY (issue
-// #824), never SERVER_NOT_FOUND: the latter makes the API unassign while the old
-// process is still alive, after which a re-placed start's hydrate clobbers the live
-// working set.
+// A re-sent stop must return BUSY while detached termination is unresolved so the API retains assignment.
 func TestResentStopDuringDetachedStopRejectedBusy(t *testing.T) {
 	d := &gatedStopDriver{}
 	m := newManager(t, d, nil).WithTransfer(&fakeTransfer{})
@@ -245,9 +236,8 @@ func TestResentStopDuringDetachedStopRejectedBusy(t *testing.T) {
 	}
 }
 
-// A duplicate HydrateTrigger re-issued while the original is mid-transfer is
-// rejected with BUSY (issue #824) and the transfer runs exactly once, so the two do
-// not write the same working set concurrently (issue #780).
+// A duplicate HydrateTrigger re-issued while the original is mid-transfer is rejected with BUSY and the transfer
+// runs exactly once, so the two do not write the same working set concurrently.
 func TestConcurrentDuplicateHydrateRunsOnce(t *testing.T) {
 	tr := newGatedTransfer()
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
@@ -276,11 +266,7 @@ func TestConcurrentDuplicateHydrateRunsOnce(t *testing.T) {
 	}
 }
 
-// gatedOrphanInstance is a fakeInstance whose FIRST Stop fails (recording a
-// failed-stop orphan) and whose RETRY Stop blocks until stopRelease is closed,
-// modeling an orphan-retry stop that is still confirming termination. The orphan
-// record therefore stays in place AND the id stays reserved across the retry's
-// inst.Stop — the exact window issue #829 item 1 guards.
+// gatedOrphanInstance keeps a retry stop in flight while its orphan record and reservation coexist.
 type gatedOrphanInstance struct {
 	*fakeInstance
 	stopCalls   int
@@ -327,12 +313,8 @@ func (d *gatedOrphanDriver) Start(_ context.Context, spec execution.InstanceSpec
 	return d.inst, nil
 }
 
-// A StopServer re-sent while an orphan-RETRY stop is still confirming termination
-// must be rejected with BUSY (issue #824), not walk into the orphan branch and take
-// the same orphan a second time (issue #829 item 1). If it did, both stops' deferred
-// release would fire and the first to return would steal the still-running stop's
-// reservation — worst case leaving an unreserved id. takeStoppableReserve must
-// honor the reservation before the orphan branch.
+// Keep orphan retry in flight; a re-sent stop must not take the same handle or release the first retry's
+// reservation.
 func TestResentStopDuringOrphanRetryRejectedBusy(t *testing.T) {
 	d := &gatedOrphanDriver{}
 	m := newManager(t, d, nil).WithTransfer(&fakeTransfer{})
@@ -391,9 +373,8 @@ func TestResentStopDuringOrphanRetryRejectedBusy(t *testing.T) {
 	}
 }
 
-// A RestartServer whose recorded driver is no longer offered by this Worker must
-// fail WITHOUT evicting the live running instance: the driver/launch-mode
-// resolution happens after takeRunningReserve (issue #1619) but on failure the
+// A RestartServer whose recorded driver is no longer offered by this Worker must fail WITHOUT evicting the live
+// running instance: the driver/launch-mode resolution happens after takeRunningReserve but on failure the
 // instance is restored so the still-running process stays tracked and reachable.
 func TestRestartUnavailableDriverLeavesInstanceTracked(t *testing.T) {
 	d := &fakeDriver{}
@@ -424,11 +405,9 @@ func TestRestartUnavailableDriverLeavesInstanceTracked(t *testing.T) {
 	}
 }
 
-// A RestartServer for an unknown id must return SERVER_NOT_FOUND without
-// leaking a reservation: a subsequent StartServer for the same id must succeed,
-// not be wedged with BUSY. The pre-fix code's hasRunning pre-check raced with
-// takeRunningReserve and permanently leaked reserved[id]=true on the takeFound
-// path (issue #1950).
+// A RestartServer for an unknown id must return SERVER_NOT_FOUND without leaking a reservation: a subsequent
+// StartServer for the same id must succeed, not be wedged with BUSY. The pre-fix code's hasRunning pre-check
+// raced with takeRunningReserve and permanently leaked reserved[id]=true on the takeFound path.
 func TestRestartNeverLeaksReservation(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
@@ -455,9 +434,7 @@ func TestRestartNeverLeaksReservation(t *testing.T) {
 	}
 }
 
-// A RestartServer dispatched while a StartServer is still mid-driver.Start must
-// return BUSY and not permanently wedge the id: after the start completes, a
-// StopServer must succeed (the reservation was never leaked). Issue #1950.
+// Restart during Start must return BUSY without leaking the reservation; stop succeeds after Start commits.
 func TestRestartRacingStartCompletion(t *testing.T) {
 	d := newGatedDriver()
 	m := newManager(t, d, nil)
@@ -488,8 +465,7 @@ func TestRestartRacingStartCompletion(t *testing.T) {
 	}
 }
 
-// A RestartServer dispatched while a StartServer holds the reservation (mid-
-// driver.Start) must return BUSY. Issue #1950.
+// Restart during an in-flight Start must return BUSY.
 func TestRestartMidStartStillBusy(t *testing.T) {
 	d := newGatedDriver()
 	m := newManager(t, d, nil)
@@ -508,15 +484,7 @@ func TestRestartMidStartStillBusy(t *testing.T) {
 	close(d.release)
 }
 
-// Concurrent StartServer + RestartServer on the same id must never permanently
-// leak a reservation. The pre-fix TOCTOU window between hasRunning (which
-// released mu) and the inner takeRunningReserve allowed a concurrent start to
-// commit the instance between the two calls, causing takeFound whose evicted
-// instance was discarded without release — permanently wedging the id.
-//
-// This stress test opens that window by hammering concurrent start+restart
-// pairs over many unique ids. Under the old code it reliably leaks within a few
-// thousand iterations (~0.5s); under the fix it passes deterministically.
+// Stress concurrent start/restart handoff and verify no ID is permanently left reserved after either outcome.
 func TestRestartConcurrentStartNeverLeaksReservation(t *testing.T) {
 	const iterations = 30000
 	d := &fakeDriver{}
@@ -524,13 +492,7 @@ func TestRestartConcurrentStartNeverLeaksReservation(t *testing.T) {
 
 	for i := 0; i < iterations; i++ {
 		id := fmt.Sprintf("srv-%d", i)
-		// The window only exists if the start actually COMMITS an instance, so the id
-		// needs a working set: since issue #2499 a start over one this Worker does not
-		// hold is refused before driver.Start, which would make every iteration a no-op
-		// and neuter this stress test silently. The guard's predicate is the generation
-		// marker (issue #2802), so a bare MkdirAll no longer suffices — but the marker
-		// alone does, exactly as a 204 hydrate leaves it: the race is about the start
-		// committing, not about what the tree contains.
+		// Seed the marker so Start really commits and the stress test reaches the reservation handoff.
 		dir := filepath.Join(m.scratchDir, id)
 		if err := os.MkdirAll(dir, 0o750); err != nil {
 			t.Fatal(err)
@@ -571,11 +533,7 @@ func TestRestartConcurrentStartNeverLeaksReservation(t *testing.T) {
 		}
 	}
 
-	// Pin that the loop really drove the window. Everything above asserts the absence
-	// of a leak only a COMMITTED start can produce, so anything that stops the starts
-	// landing turns this stress test green while testing nothing — which is exactly
-	// what happened when issue #2499's launch-time guard arrived and no id had a
-	// working set. Counting the driver's launches makes that failure loud.
+	// Count driver starts so a launch guard cannot make the stress test pass without exercising the race.
 	if starts := d.startCount(); starts < iterations/2 {
 		t.Fatalf("driver started %d times over %d iterations: far too few for the "+
 			"start-vs-restart window to be exercised — this stress test has been neutered", starts, iterations)

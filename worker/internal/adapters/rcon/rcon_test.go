@@ -13,33 +13,14 @@ import (
 	"time"
 )
 
-// mcReadSettle is how long the fake server waits for the wire to go quiet before
-// each command read, so "what one read() returns" is what the client has actually
-// put on the wire rather than a race. Two packets written back-to-back land within
-// microseconds on loopback, so this window makes a client that keeps two request
-// packets in flight fail deterministically; a client that keeps only one in
-// flight is unaffected however long the window is.
-//
-// The settle covers only the post-auth (command) read, not the auth read: the
-// sequencing it catches is a property of the EXEC_COMMAND path (a command written
-// back-to-back with its end-of-response marker, issue #2618), and the auth
-// handshake only ever puts a single packet on the wire. Keeping the auth read off
-// the settle also keeps this constant decoupled from Dial's handshake deadline —
-// raising it no longer eats into that budget (issue #2624). See serve().
+// Wait for wire quiet so back-to-back requests reliably reach the fake Minecraft reader in one read.
 const mcReadSettle = 25 * time.Millisecond
 
 // errMCFraming is what the fake reports when a read carried something other than
 // exactly one packet. See readPacketMC.
 var errMCFraming = errors.New("fake mc server: read did not carry exactly one packet")
 
-// fakeServer is an in-process RCON server for tests. It authenticates a single
-// password and echoes a canned reply per command, recording what it saw.
-//
-// It frames reads the way Minecraft's own RCON server does, not the way a
-// stream-oriented client would — see readPacketMC. That distinction is the whole
-// point of the fake: a stub that reassembles the request stream accepts wire
-// traffic vanilla Minecraft rejects, which is exactly how issue #2618 survived
-// a full test suite.
+// fakeServer models Minecraft's single-read framing rather than accepting arbitrary stream reassembly.
 type fakeServer struct {
 	ln       net.Listener
 	password string
@@ -268,13 +249,8 @@ func TestExecuteCtxCancellationUnblocksSilentServer(t *testing.T) {
 	}
 }
 
-// Execute must never keep two request packets in flight (issue #2618): vanilla
-// Minecraft reads one packet per read() and drops the connection when the length
-// prefix does not match the bytes that read returned, so a command written
-// back-to-back with its end-of-response marker lands in one read and kills the
-// connection before either command runs. Against a real 1.21.1 server that made
-// every save-off / save-all fail with "rcon: read length: EOF", so no running
-// server could be quiesced.
+// Model Vanilla's one-read framing so coalesced command and marker packets are rejected rather than silently
+// accepted.
 func TestExecuteKeepsOneRequestPacketInFlight(t *testing.T) {
 	fs := newFakeServer(t, "secret")
 	fs.reply["save-off"] = "Automatic saving is now disabled"
@@ -301,12 +277,8 @@ func TestExecuteKeepsOneRequestPacketInFlight(t *testing.T) {
 	}
 }
 
-// A command whose reply body is empty must still complete. Vanilla always sends
-// at least one RESPONSE_VALUE per command — measured on 1.21.1, where `say` and
-// `me` reply with a zero-byte body rather than nothing at all — which is what
-// lets Execute wait for the first reply before writing its marker. A server that
-// answered some command with no packet would strand that wait, so pin the
-// boundary.
+// An empty reply still contains a RESPONSE_VALUE packet, allowing the client to send its marker without
+// deadlocking.
 func TestExecuteEmptyReplyCompletes(t *testing.T) {
 	fs := newFakeServer(t, "secret")
 	fs.reply["say hello"] = ""
@@ -335,11 +307,10 @@ func TestDialAuthFailure(t *testing.T) {
 	}
 }
 
-// With no deadline on ctx, Dial against an address that never completes the SYN
-// handshake (firewalled / blackholed) must bound the TCP connect at the default
-// fallback rather than ride the OS's ~2-minute SYN timeout (issue #832). It uses
-// a TEST-NET-3 address (RFC 5737, guaranteed non-routable) so the SYN is dropped
-// with no RST, exercising the connect bound rather than a fast refusal.
+// With no deadline on ctx, Dial against an address that never completes the SYN handshake (firewalled /
+// blackholed) must bound the TCP connect at the default fallback rather than ride the OS's ~2-minute SYN
+// timeout. It uses a TEST-NET-3 address (RFC 5737, guaranteed non-routable) so the SYN is dropped with no RST,
+// exercising the connect bound rather than a fast refusal.
 func TestDialDefaultDeadlineBoundsConnect(t *testing.T) {
 	prev := defaultExecuteTimeout
 	defaultExecuteTimeout = 100 * time.Millisecond
@@ -553,9 +524,8 @@ func TestExecuteRejectsOversizedResponse(t *testing.T) {
 		if err != nil {
 			return
 		}
-		// Execute writes the marker only after the command's first reply packet
-		// arrives (#2618), so send one fragment, drain the marker, then send the
-		// rest — fragments totalling > maxResponseSize.
+		// Execute writes the marker only after the command's first reply packet arrives, so send one fragment, drain
+		// the marker, then send the rest, fragments totalling > maxResponseSize.
 		frag := strings.Repeat("X", 4096)
 		if err := writePacket(srv, cmdID, typeResponseValue, frag); err != nil {
 			return
@@ -608,9 +578,8 @@ func TestExecuteRejectsWrongPacketType(t *testing.T) {
 		if err != nil {
 			return
 		}
-		// Execute writes the marker only after the command's first reply packet
-		// arrives (#2618), so send one valid fragment, drain the marker, then send
-		// a fragment with the wrong packet type.
+		// Execute writes the marker only after the command's first reply packet arrives, so send one valid fragment,
+		// drain the marker, then send a fragment with the wrong packet type.
 		_ = writePacket(srv, cmdID, typeResponseValue, "good")
 		if _, _, _, err := readPacket(srv); err != nil { // marker
 			return
@@ -628,26 +597,8 @@ func TestExecuteRejectsWrongPacketType(t *testing.T) {
 	}
 }
 
-// readPacketMC reads one request packet the way vanilla Minecraft's RCON server
-// does. Measured against a real 1.21.1 server for issue #2618: it performs ONE
-// read() per loop iteration into a fixed 1460-byte buffer and requires the
-// length prefix to equal the bytes that read returned, minus the 4 prefix bytes.
-// Anything else — including two well-formed packets that happened to arrive in
-// the same read — is a malformed packet, and the server closes the connection
-// without executing either.
-//
-// So a client must never keep two request packets in flight: writing a command
-// and its end-of-response marker back-to-back puts both in one read and kills
-// the connection. A stream-oriented reader (readPacket below) reassembles that
-// traffic happily and hides the defect, which is why the fake models the real
-// framing instead.
-//
-// n is the byte count the read returned, reported so a framing violation can be
-// described rather than surfacing as a bare EOF on the client.
-//
-// settle gates the pre-read settle window (mcReadSettle): the caller passes true
-// for command reads, where a client can keep two request packets in flight, and
-// false for the single-packet auth read, which has nothing to settle for.
+// readPacketMC models Vanilla's single-read packet framing with a 1460-byte buffer.
+// Optional settling exposes request coalescing; do not replace this with the stream-oriented readPacket helper.
 func readPacketMC(conn net.Conn, settle bool) (id, typ int32, body string, n int, err error) {
 	// Let the wire settle first, so a client that put two packets on it is seen
 	// to have done so rather than racing the read.

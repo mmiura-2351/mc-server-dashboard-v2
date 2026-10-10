@@ -151,9 +151,8 @@ func TestLogPumpEmitAfterCloseIsNoOp(t *testing.T) {
 	}
 }
 
-// The pump fires its readiness signal when a Minecraft "Done (X.XXXs)! For
-// help" startup line passes through, so a driver can hold StateStarting until
-// the server is actually accepting connections (issue #345).
+// The pump fires its readiness signal when a Minecraft "Done (X.XXXs)! For help" startup line passes through, so
+// a driver can hold StateStarting until the server is actually accepting connections.
 func TestLogPumpReadyOnDoneLine(t *testing.T) {
 	p := NewLogPump("s1", 16)
 	p.Emit(`[12:00:00] [Server thread/INFO]: Done (12.345s)! For help, type "help"`, LogStreamStdout)
@@ -177,10 +176,9 @@ func TestLogPumpNotReadyOnOtherLines(t *testing.T) {
 	}
 }
 
-// When the CRLF line ending spans the 4096-byte ReadSlice buffer boundary
-// (content length ≡ 4095 mod 4096 so the CR is the last byte of one read and
-// the LF begins the next), the trailing CR must still be stripped — matching
-// the container demux path (issue #2067).
+// When the CRLF line ending spans the 4096-byte ReadSlice buffer boundary (content length ≡ 4095 mod 4096 so the
+// CR is the last byte of one read and the LF begins the next), the trailing CR must still be stripped, matching
+// the container demux path.
 func TestLogPumpScanTrimsCRLFAcrossReadSliceBoundary(t *testing.T) {
 	p := NewLogPump("s1", 16)
 	// 4095 content bytes + \r\n: the CR lands on the 4096th byte (last in the

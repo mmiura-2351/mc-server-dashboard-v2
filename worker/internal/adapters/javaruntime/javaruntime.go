@@ -1,9 +1,4 @@
-// Package javaruntime maps a Minecraft version to the required Java major
-// version(s) via the legacy compatibility table (FR-EXE-5, ARCHITECTURE.md
-// Section 7.3). The container driver resolves a base image by this bracket logic.
-//
-// The version→Java mapping follows the legacy reference
-// (https://github.com/mmiura-2351/mc-server-dashboard-api/blob/master/docs/app/JAVA_COMPATIBILITY.md).
+// Package javaruntime maps Minecraft versions to preferred Java majors for container image selection.
 package javaruntime
 
 import (
@@ -33,12 +28,8 @@ func MajorsFor(mcVersion string) ([]int, error) {
 	case v.atMost(1, 21, 11):
 		return []int{21}, nil
 	default:
-		// Policy: a Minecraft version newer than every bracket in this table
-		// selects the newest configured runtime. New MC releases generally require
-		// the latest Java, so until the table is extended with the next published
-		// bracket, the safest default is the most recent Java we know about (the
-		// current newest bracket targets Java 25). The table is the authoritative
-		// list and is extended as Mojang publishes new Java requirements.
+		// Versions newer than the table use Java 25, the newest supported bracket.
+		// Update the table when Minecraft publishes a new Java requirement.
 		return []int{25}, nil
 	}
 }

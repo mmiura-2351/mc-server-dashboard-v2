@@ -79,10 +79,9 @@ func TestBuildTLSConfigWithoutClientPair(t *testing.T) {
 	}
 }
 
-// TestBuildTLSConfigWithClientPair pins the mTLS branch: when both
-// client_cert_file and client_key_file are set, the loaded client certificate
-// is attached to the config. A regression dropping this branch would compile,
-// pass CI, and surface only as a rejected mTLS handshake at runtime (#1981).
+// TestBuildTLSConfigWithClientPair pins the mTLS branch: when both client_cert_file and client_key_file are set,
+// the loaded client certificate is attached to the config. A regression dropping this branch would compile, pass
+// CI, and surface only as a rejected mTLS handshake at runtime.
 func TestBuildTLSConfigWithClientPair(t *testing.T) {
 	dir := t.TempDir()
 	caPath, _ := writeSelfSignedCertKey(t, dir)
@@ -101,12 +100,7 @@ func TestBuildTLSConfigWithClientPair(t *testing.T) {
 	}
 }
 
-// TestBuildTLSConfigHalfClientPairIsRejected flips the #1981 pin: a
-// half-configured mTLS client pair (only one of client_cert_file /
-// client_key_file) is now a fatal config-validation error, so buildTLSConfig
-// never sees one. The full both-direction / accept-side coverage lives in the
-// config package's validator tests; this pins that main's Load path rejects it
-// and names the missing half (issue #2661).
+// Reject half-configured mTLS through main's Load path before buildTLSConfig can see it.
 func TestBuildTLSConfigHalfClientPairIsRejected(t *testing.T) {
 	env := map[string]string{
 		"MCD_WORKER_API_GRPC_ENDPOINT":        "api:50051",

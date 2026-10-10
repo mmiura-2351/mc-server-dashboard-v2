@@ -16,18 +16,16 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
 
-// contractRow is one row of the cross-language contract table
-// (proto/contract/command_error_contract.json, issue #204). The row's `api`
-// column is the API side's business and is checked by the Python test; this
-// side reads only what it can drive.
+// contractRow is one row of the cross-language contract table (proto/contract/command_error_contract.json). The
+// row's `api` column is the API side's business and is checked by the Python test; this side reads only what it
+// can drive.
 type contractRow struct {
 	Kind         string `json:"kind"`
 	Precondition string `json:"precondition"`
 	Code         string `json:"code"`
 	Why          string `json:"why"`
-	// Message names the entry in the table's `messages` section whose text this
-	// cell emits verbatim. Empty for every other cell: a message is pinned only
-	// where the API reads one (issue #2843).
+	// Message names the entry in the table's `messages` section whose text this cell emits verbatim. Empty for
+	// every other cell: a message is pinned only where the API reads one.
 	Message string `json:"message"`
 }
 
@@ -38,18 +36,8 @@ type contractPrecondition struct {
 	Description []string `json:"description"`
 }
 
-// contractMessage is one refusal message the API discriminates on by TEXT rather
-// than by code alone (issue #2843). The table already recorded that such a match
-// exists -- the api column of the rows below names is_working_set_absent_refusal --
-// without carrying the text being matched, so the API's marker and its fixtures
-// were unverified hand copies of a Go literal and a reword here drifted them
-// silently. The text lives in the shared file instead: this side asserts the real
-// emission equals it, the API side asserts its discriminator is Phrase and builds
-// its fixtures from Text, so a reword cannot be accepted on one side alone.
-//
-// Text is the Worker literal verbatim. A `%s` in it stands for a runtime value (the
-// working dir), so the comparison is prefix+suffix there and exact everywhere else;
-// either way every declared character is pinned.
+// contractMessage pins refusal text used by the API alongside the error code.
+// Both emitters and API fixtures consume the shared contract to catch wording drift.
 type contractMessage struct {
 	Name   string `json:"name"`
 	Site   string `json:"site"`
@@ -97,12 +85,8 @@ func assertMessage(t *testing.T, msg contractMessage, got string) {
 	}
 }
 
-// unaffectedCode marks a cell whose precondition determines no emission for that
-// kind: the handler never consults that state (the file handlers take no instance
-// check), or the state cannot arise for it at all (a StopServer never invokes
-// driver.Start, so no start classification can reach it). It is a ROW, not an
-// absence — the table must carry one for every (kind, precondition) cell so that a
-// missing row always means "forgotten", never "not applicable" (issue #2472).
+// Require an explicit unaffected row for cells a handler cannot reach; a missing row must always mean a contract
+// gap.
 const unaffectedCode = "unaffected"
 
 // cell identifies one (kind, precondition) of the matrix the table must cover.
@@ -194,14 +178,8 @@ func (d *relaunchFailDriver) Start(_ context.Context, spec execution.InstanceSpe
 	return newFakeInstance(spec.ServerID), nil
 }
 
-// driveRow builds a Manager driven into the row's precondition, then dispatches
-// one command of the row's kind and returns the result. Every precondition is
-// reproduced with the existing fakes so the assertion reflects what the
-// instancemanager actually emits, not a hand-fed status (the #202 fix). A few
-// preconditions are reached differently by different kinds (a restart's driver
-// comes from the recorded start spec, and its driver.Start is the relaunch), so
-// those cases branch on the row's kind rather than pretending one arrangement
-// reaches them all.
+// driveRow creates the real precondition with fakes, including restart relaunch, rather than supplying a canned
+// result.
 func driveRow(t *testing.T, row contractRow) session.CommandResult {
 	t.Helper()
 	const serverID = "s1"
@@ -210,16 +188,14 @@ func driveRow(t *testing.T, row contractRow) session.CommandResult {
 	switch row.Precondition {
 	case "instance_stopped":
 		m := newContractManager(t, &fakeDriver{})
-		// The id's working set is present at rest (a prior hydrate/run left it):
-		// SnapshotTrigger's stopped path packs it. An absent working dir is the
-		// separate working_set_absent precondition (issue #1713).
+		// The id's working set is present at rest (a prior hydrate/run left it): SnapshotTrigger's stopped path packs
+		// it. An absent working dir is the separate working_set_absent precondition.
 		seedScratch(t, m, serverID)
 		return m.Handle(ctx, contractCmd(t, row.Kind, serverID))
 
 	case "working_set_absent":
-		// No instance and no scratch dir for the id: a stopped-id snapshot must refuse
-		// rather than pack the absent dir into an empty tar (issue #1713), and every
-		// running-server verb sees an id this Worker knows nothing about.
+		// No instance and no scratch dir for the id: a stopped-id snapshot must refuse rather than pack the absent dir
+		// into an empty tar, and every running-server verb sees an id this Worker knows nothing about.
 		m := newContractManager(t, &fakeDriver{})
 		return m.Handle(ctx, contractCmd(t, row.Kind, serverID))
 
@@ -229,9 +205,8 @@ func driveRow(t *testing.T, row contractRow) session.CommandResult {
 		return m.Handle(ctx, contractCmd(t, row.Kind, serverID))
 
 	case "running_working_set_absent":
-		// A tracked RUNNING instance whose working-set claim is gone from the scratch
-		// root: start it, then destroy the id's dir out of band under the live process
-		// (issue #2802). The restart's RELAUNCH meets launchReserved's guard here.
+		// A tracked RUNNING instance whose working-set claim is gone from the scratch root: start it, then destroy the
+		// id's dir out of band under the live process. The restart's RELAUNCH meets launchReserved's guard here.
 		m := newContractManager(t, &fakeDriver{})
 		startRunning(t, m)
 		if err := os.RemoveAll(filepath.Join(m.scratchDir, serverID)); err != nil {
@@ -240,13 +215,8 @@ func driveRow(t *testing.T, row contractRow) session.CommandResult {
 		return m.Handle(ctx, contractCmd(t, row.Kind, serverID))
 
 	case "working_set_emptied":
-		// No tracked instance, orphan or reservation, and the id's dir EXISTS at the
-		// scratch root but is empty of BOTH marker and content: destroyed in place
-		// (issues #2802, #2813). It is the shape both directory stats passed, and the
-		// one both replacements refuse — though by different predicates, a launch
-		// keying on the generation marker and a stopped-id snapshot on the working
-		// set's content. This fixture is where the two agree; see the precondition's
-		// description in the contract table for where they part company.
+		// An emptied scratch lacks both marker and content, so both launch and snapshot refuse it for their distinct
+		// predicates.
 		m := newContractManager(t, &fakeDriver{})
 		if err := os.MkdirAll(filepath.Join(m.scratchDir, serverID), 0o750); err != nil {
 			t.Fatal(err)
@@ -254,14 +224,7 @@ func driveRow(t *testing.T, row contractRow) session.CommandResult {
 		return m.Handle(ctx, contractCmd(t, row.Kind, serverID))
 
 	case "orphan_pending":
-		// A failed first Stop records the server as a failed-stop orphan; the row
-		// command then runs against that pending orphan (issue #251/#253).
-		//
-		// stopAfter is how many Stops the driver fails before confirming. StopServer
-		// takes 1 so the row's own command is the RETRY that terminates the orphan —
-		// the contract statement for that cell is that a stop is not refused over an
-		// orphan, it IS the path that resolves it. Every other kind keeps the orphan
-		// immovable, so nothing can retire it mid-row.
+		// Keep orphans unresolved for refusal rows; StopServer alone retries and terminates the orphan.
 		stopAfter := 1000
 		if row.Kind == "StopServer" {
 			stopAfter = 1
@@ -274,15 +237,13 @@ func driveRow(t *testing.T, row contractRow) session.CommandResult {
 		return m.Handle(ctx, contractCmd(t, row.Kind, serverID))
 
 	case "command_in_flight":
-		// Hold a StartServer mid-driver.Start so the id is reserved but no instance is
-		// tracked yet — the same state a detached stop occupies between takeStoppableReserve's
-		// eviction and stop confirmation (issue #780). The row command then arrives while the
-		// reservation is held and must be rejected, not treated as SERVER_NOT_FOUND.
+		// Hold a StartServer mid-driver.Start so the id is reserved but no instance is tracked yet, the same state a
+		// detached stop occupies between takeStoppableReserve's eviction and stop confirmation. The row command then
+		// arrives while the reservation is held and must be rejected, not treated as SERVER_NOT_FOUND.
 		d := newGatedDriver()
 		m := newContractManager(t, d)
-		// The gated start must get PAST the working-set guard (issue #2499) to reach
-		// driver.Start and hold the reservation there; the row's own command is what
-		// this fixture is about.
+		// The gated start must get PAST the working-set guard to reach driver.Start and hold the reservation there;
+		// the row's own command is what this fixture is about.
 		seedScratch(t, m, serverID)
 		go func() { _ = m.Handle(ctx, startCmd()) }()
 		awaitEnter(t, d.entered)
@@ -290,11 +251,10 @@ func driveRow(t *testing.T, row contractRow) session.CommandResult {
 		return m.Handle(ctx, contractCmd(t, row.Kind, serverID))
 
 	case "snapshot_reserve_race":
-		// handleSnapshot reads the running flag OUTSIDE the reservation and reserves
-		// only afterwards, so a start that registers an instance in that window turns
-		// the stopped path's reserve() into the "already running" refusal. The seam
-		// runs the start inside exactly that window, so the row is driven by the real
-		// interleaving rather than asserted by prose (issue #2472).
+		// handleSnapshot reads the running flag OUTSIDE the reservation and reserves only afterwards, so a start that
+		// registers an instance in that window turns the stopped path's reserve into the "already running" refusal.
+		// The seam runs the start inside exactly that window, so the row is driven by the real interleaving rather
+		// than asserted by prose.
 		m := newContractManager(t, &fakeDriver{})
 		seedScratch(t, m, serverID)
 		var once sync.Once
@@ -303,9 +263,8 @@ func driveRow(t *testing.T, row contractRow) session.CommandResult {
 
 	case "driver_unavailable":
 		if row.Kind == "RestartServer" {
-			// A restart resolves its driver from the RECORDED start spec, not from the
-			// command, so the state is "the running instance's driver is no longer
-			// offered by this Worker" (issue #1619).
+			// A restart resolves its driver from the RECORDED start spec, not from the command, so the state is "the
+			// running instance's driver is no longer offered by this Worker".
 			m := newContractManager(t, &fakeDriver{})
 			startRunning(t, m)
 			delete(m.drivers, "container")
@@ -317,10 +276,9 @@ func driveRow(t *testing.T, row contractRow) session.CommandResult {
 		return m.Handle(ctx, cmd)
 
 	case "port_conflict":
-		// A driver whose Start fails with the sanitized port-conflict sentinel: the
-		// container driver derives it from the Docker daemon message; here the fake
-		// returns the wrapped sentinel so the assertion reflects the real
-		// classification path (issue #225).
+		// A driver whose Start fails with the sanitized port-conflict sentinel: the container driver derives it from
+		// the Docker daemon message; here the fake returns the wrapped sentinel so the assertion reflects the real
+		// classification path.
 		return driveStartError(t, row, fmt.Errorf("start: %w", execution.ErrPortConflict))
 
 	case "image_missing":
@@ -339,9 +297,8 @@ func driveRow(t *testing.T, row contractRow) session.CommandResult {
 		return m.Handle(ctx, cmd)
 
 	case "unsafe_server_id":
-		// An empty server id collapses every scratch-path join onto the scratch
-		// ROOT; the intake guard must reject it before any handler runs (issue
-		// #782). Driven with the empty id since that is the most dangerous shape.
+		// An empty server id collapses every scratch-path join onto the scratch ROOT; the intake guard must reject it
+		// before any handler runs. Driven with the empty id since that is the most dangerous shape.
 		m := newContractManager(t, &fakeDriver{})
 		return m.Handle(ctx, contractCmd(t, row.Kind, ""))
 
@@ -351,9 +308,9 @@ func driveRow(t *testing.T, row contractRow) session.CommandResult {
 	}
 }
 
-// driveStartError drives the row's kind against a driver whose Start fails with a
-// sanitized sentinel (issue #225). StartServer meets it on its own driver.Start;
-// RestartServer meets it on the relaunch, after a successful start it can restart.
+// driveStartError drives the row's kind against a driver whose Start fails with a sanitized sentinel.
+// StartServer meets it on its own driver.Start; RestartServer meets it on the relaunch, after a successful start
+// it can restart.
 func driveStartError(t *testing.T, row contractRow, startErr error) session.CommandResult {
 	t.Helper()
 	const serverID = "s1"
@@ -364,9 +321,8 @@ func driveStartError(t *testing.T, row contractRow, startErr error) session.Comm
 		return m.Handle(ctx, contractCmd(t, row.Kind, serverID))
 	}
 	m := newContractManager(t, &fakeDriver{startErr: startErr})
-	// driver.Start is reachable only once the working set is present: a start over an
-	// absent working dir is refused before it (issue #2499), so the sanitized start
-	// classifications are preconditions ON TOP of a held working set.
+	// driver.Start is reachable only once the working set is present: a start over an absent working dir is refused
+	// before it, so the sanitized start classifications are preconditions ON TOP of a held working set.
 	seedScratch(t, m, serverID)
 	return m.Handle(ctx, contractCmd(t, row.Kind, serverID))
 }
@@ -401,9 +357,8 @@ func contractCmd(t *testing.T, kind, serverID string) session.Command {
 	return cmd
 }
 
-// TestContractTableCoversEveryHandledKind pins the table's kind list to the
-// canonical set Manager.Handle dispatches. A new command kind must bring its own
-// column of rows rather than being contracted by nobody (issue #2472).
+// TestContractTableCoversEveryHandledKind pins the table's kind list to the canonical set Manager.Handle
+// dispatches. A new command kind must bring its own column of rows rather than being contracted by nobody.
 func TestContractTableCoversEveryHandledKind(t *testing.T) {
 	table := loadContract(t)
 	got := slices.Clone(table.Kinds)
@@ -416,12 +371,7 @@ func TestContractTableCoversEveryHandledKind(t *testing.T) {
 	}
 }
 
-// TestContractTableIsExhaustive is the direction the table-driven assertion below
-// cannot cover on its own (issue #2472): it checks the table against the MATRIX,
-// not the matrix against the table. Every (kind, precondition) cell must carry a
-// row, so a precondition a handler answers but nobody wrote down is a red test
-// instead of a silent gap — the shape that let {SnapshotTrigger, orphan_pending}
-// and handleSnapshot's reserve race go unrecorded.
+// Require every command/precondition matrix cell so a table-driven test cannot silently omit a handler state.
 func TestContractTableIsExhaustive(t *testing.T) {
 	table := loadContract(t)
 	kinds := map[string]bool{}
@@ -473,13 +423,8 @@ func TestContractTableIsExhaustive(t *testing.T) {
 	}
 }
 
-// TestCommandErrorContract is the worker side of the #204 guard: every row in the
-// shared table is reproduced against the real instancemanager and the emitted
-// code must equal the table. Drift on either the code or the table fails here.
-//
-// Since issue #2843 a row may also name a declared message, and the emitted TEXT
-// must equal it: that is the half of the contract the API's
-// is_working_set_absent_refusal reads, and it was pinned nowhere.
+// Reproduce every shared contract row through Manager and compare its error code and any declared discriminator
+// text.
 func TestCommandErrorContract(t *testing.T) {
 	table := loadContract(t)
 	messages := messagesByName(t, table)
@@ -510,11 +455,7 @@ func TestCommandErrorContract(t *testing.T) {
 	}
 }
 
-// TestContractMessagesAreDrivenByARow is the direction the assertion above cannot
-// cover: it checks the emissions against the messages, not the messages against the
-// emissions. A declared message no row names is never compared with anything, so it
-// would keep asserting the API's fixtures against a text the Worker stopped
-// emitting -- the drift issue #2843 closed, re-opened one indirection further out.
+// Require every declared message to be exercised by a row so unused fixtures cannot hide wording drift.
 func TestContractMessagesAreDrivenByARow(t *testing.T) {
 	table := loadContract(t)
 	named := map[string]bool{}

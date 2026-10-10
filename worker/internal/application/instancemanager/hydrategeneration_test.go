@@ -7,25 +7,12 @@ import (
 	"testing"
 )
 
-// The two tests below pin the Worker-declared held generation a HydrateTrigger puts
-// on its CommandResult (issue #2500). They are the hydrate-path twin of the snapshot
-// declaration in heldgeneration_test.go: the API mirrors the declaration into the
-// held-working-set inventory its skip-hydrate gate (#763) and the reconciler's short
-// held-start grace (#999) read, so the declaration must be the same fact as the
-// on-disk marker the Worker re-advertises at registration, never a prediction of it.
-//
-// What makes that structural rather than careful: handleHydrate's declaration is
-// assigned in exactly ONE place, from recordGeneration's report that the marker write
-// landed, and it takes &gen — the same variable handed to the write. handleHydrate's
-// case is simpler than the snapshot's: it holds a per-id reservation across the whole
-// transfer AND is the writer that produced the tree, so recordGeneration is
-// unconditional (no #2284 identity guard) and the only way to declare nothing is for
-// the marker write itself to fail.
+// Declare a hydrate generation only after its local marker lands; the API uses it to decide whether to skip
+// future hydrates.
 
-// TestSuccessfulHydrateDeclaresTheGenerationItServed is the positive direction: a
-// hydrate pulls the store's working set at the served generation and stamps it into
-// the marker, so it declares that generation to the API — which then need not read
-// the store itself before dispatching (issue #2500), a read that can only understate.
+// TestSuccessfulHydrateDeclaresTheGenerationItServed is the positive direction: a hydrate pulls the store's
+// working set at the served generation and stamps it into the marker, so it declares that generation to the API,
+// which then need not read the store itself before dispatching, a read that can only understate.
 func TestSuccessfulHydrateDeclaresTheGenerationItServed(t *testing.T) {
 	tr := &fakeTransfer{gen: 9}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
@@ -50,14 +37,7 @@ func TestSuccessfulHydrateDeclaresTheGenerationItServed(t *testing.T) {
 	}
 }
 
-// TestHydrateDeclaresNothingWhenTheMarkerWriteFailed pins the declaration to the
-// marker WRITE rather than to the transfer's success. recordGeneration is best-effort:
-// a marker it fails to write is one OLDER than the tree, costing an extra hydrate and
-// nothing else, so the hydrate still succeeds. But the API must then fall back to its
-// pre-dispatch read (issue #2500) rather than trust a declaration the marker does not
-// back — otherwise a hydrate whose stamp was lost would let a later start skip the
-// hydrate that would repair the tree. Absence of the marker is forced by seeding a
-// regular file where the working dir would go, so writeGeneration's MkdirAll fails.
+// Force marker-write failure while hydrate succeeds; no generation may be declared without the on-disk stamp.
 func TestHydrateDeclaresNothingWhenTheMarkerWriteFailed(t *testing.T) {
 	tr := &fakeTransfer{gen: 9}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)

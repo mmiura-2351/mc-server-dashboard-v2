@@ -40,13 +40,8 @@ func (t realTimer) C() <-chan time.Time   { return t.t.C }
 func (t realTimer) Reset(d time.Duration) { t.t.Reset(d) }
 func (t realTimer) Stop()                 { t.t.Stop() }
 
-// fakeServer is an in-process WorkerService implementing the API side of the
-// stream lifecycle (CONTROL_PLANE.md Section 4) just enough to exercise the
-// client. It mirrors the real servicer (#83): a bad/missing credential aborts
-// the stream with gRPC status UNAUTHENTICATED rather than a RegisterAck — a
-// refusal is never carried in the ack. On success it answers Register with a
-// RegisterAck, records heartbeats, and can drop the stream after the first
-// heartbeat to drive a transient reconnect.
+// fakeServer rejects credentials with gRPC status, acks valid registration, and can drop after heartbeat to test
+// reconnect.
 type fakeServer struct {
 	controlplanev1.UnimplementedWorkerServiceServer
 
@@ -65,7 +60,7 @@ type fakeServer struct {
 
 func (s *fakeServer) Session(stream controlplanev1.WorkerService_SessionServer) error {
 	if !s.checkAuth(stream.Context()) {
-		// Match #83: abort with a status code; a refusal is never carried in the ack.
+		// Registration refusals abort with a gRPC status; they are never carried in RegisterAck.
 		return status.Error(codes.Unauthenticated, "worker credential rejected")
 	}
 
@@ -236,9 +231,8 @@ func TestHappyPathRegisterAndHeartbeat(t *testing.T) {
 	<-done
 }
 
-// TestRegisterAdvertisesHeldServers proves the adapter maps the domain
-// Capabilities.HeldServers (id + generation) onto the wire Register.held_servers
-// (issue #763), so the API can skip the destructive hydrate on a same-worker
+// TestRegisterAdvertisesHeldServers proves the adapter maps the domain Capabilities.HeldServers (id +
+// generation) onto the wire Register.held_servers, so the API can skip the destructive hydrate on a same-worker
 // restart only when the held generation is fresh enough.
 func TestRegisterAdvertisesHeldServers(t *testing.T) {
 	srv := &fakeServer{
@@ -277,10 +271,9 @@ func TestRegisterAdvertisesHeldServers(t *testing.T) {
 	}
 }
 
-// TestAuthRejectStopsRunner proves a wrong-credential Worker STOPS instead of
-// reconnecting forever: the server aborts the stream with UNAUTHENTICATED (as
-// #83 does), the adapter classifies that as terminal, and the runner returns
-// session.ErrTerminal without ever registering.
+// TestAuthRejectStopsRunner proves a wrong-credential Worker STOPS instead of reconnecting forever: the server
+// aborts the stream with UNAUTHENTICATED (as does), the adapter classifies that as terminal, and the runner
+// returns session.ErrTerminal without ever registering.
 func TestAuthRejectStopsRunner(t *testing.T) {
 	srv := &fakeServer{
 		wantCredential: "the-secret",
@@ -342,9 +335,8 @@ func TestServerDropTriggersReconnect(t *testing.T) {
 	<-done
 }
 
-// TestRegisterAdvertisesResources proves the adapter maps the domain
-// Capabilities.Resources onto the wire WorkerCapabilities.resources
-// (issue #1218), so the API's placement logic can enforce memory/CPU gates.
+// TestRegisterAdvertisesResources proves the adapter maps the domain Capabilities.Resources onto the wire
+// WorkerCapabilities.resources, so the API's placement logic can enforce memory/CPU gates.
 func TestRegisterAdvertisesResources(t *testing.T) {
 	srv := &fakeServer{
 		wantCredential: "the-secret",
@@ -381,9 +373,8 @@ func TestRegisterAdvertisesResources(t *testing.T) {
 	}
 }
 
-// TestRegisterAndHeartbeatCarryCorrelationId proves the adapter stamps a fresh
-// UUID correlation_id on Register and Heartbeat messages (NFR-OBS-1, issue #2002)
-// so an operator can trace each event end to end.
+// TestRegisterAndHeartbeatCarryCorrelationId proves the adapter stamps a fresh UUID correlation_id on Register
+// and Heartbeat messages (NFR-OBS-1) so an operator can trace each event end to end.
 func TestRegisterAndHeartbeatCarryCorrelationId(t *testing.T) {
 	srv := &fakeServer{
 		wantCredential: "the-secret",

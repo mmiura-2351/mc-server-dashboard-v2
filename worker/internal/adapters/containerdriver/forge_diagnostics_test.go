@@ -30,11 +30,9 @@ func startForgeInstall(t *testing.T, docker *forgeFakeDocker, spec execution.Ins
 	return inst
 }
 
-// An install container the kernel OOM-killed at its memory limit (exit 137 with
-// the daemon's OOMKilled flag, and nothing about it in the installer's own
-// output) crashes with the out-of-memory reason and a detail naming the limit. It
-// is not retried: the same limit kills the next attempt the same way (issue
-// #1093).
+// An install container the kernel OOM-killed at its memory limit (exit 137 with the daemon's OOMKilled flag, and
+// nothing about it in the installer's own output) crashes with the out-of-memory reason and a detail naming the
+// limit. It is not retried: the same limit kills the next attempt the same way.
 func TestForgeInstallOOMKilledReportsOutOfMemoryWithoutRetry(t *testing.T) {
 	shrinkInstallBackoff(t)
 	dir := t.TempDir()
@@ -61,9 +59,8 @@ func TestForgeInstallOOMKilledReportsOutOfMemoryWithoutRetry(t *testing.T) {
 	}
 }
 
-// An installer whose JVM exhausted its heap exits 1 without the kernel being
-// involved; the only evidence is java.lang.OutOfMemoryError in its output. That
-// is the same out-of-memory reason, and equally not retried (issue #1093).
+// An installer whose JVM exhausted its heap exits 1 without the kernel being involved; the only evidence is
+// java.lang.OutOfMemoryError in its output. That is the same out-of-memory reason, and equally not retried.
 func TestForgeInstallJavaHeapExhaustedReportsOutOfMemoryWithoutRetry(t *testing.T) {
 	shrinkInstallBackoff(t)
 	dir := t.TempDir()
@@ -83,10 +80,9 @@ func TestForgeInstallJavaHeapExhaustedReportsOutOfMemoryWithoutRetry(t *testing.
 	}
 }
 
-// An installer the selected Java runtime cannot load dies on
-// java.lang.UnsupportedClassVersionError. It crashes with the Java-incompatible
-// reason, naming the Minecraft version the runtime was selected for, and is not
-// retried: the same runtime refuses the same classes (issue #1093).
+// An installer the selected Java runtime cannot load dies on java.lang.UnsupportedClassVersionError. It crashes
+// with the Java-incompatible reason, naming the Minecraft version the runtime was selected for, and is not
+// retried: the same runtime refuses the same classes.
 func TestForgeInstallUnsupportedClassVersionReportsJavaIncompatibleWithoutRetry(t *testing.T) {
 	shrinkInstallBackoff(t)
 	dir := t.TempDir()
@@ -110,10 +106,9 @@ func TestForgeInstallUnsupportedClassVersionReportsJavaIncompatibleWithoutRetry(
 	}
 }
 
-// An installer that exits non-zero with none of the specific signals is a
-// generic install failure: it is retried (it may be a transient download
-// failure), and after the last attempt crashes with the generic install reason
-// and the exit code (issue #1093, #1128).
+// An installer that exits non-zero with none of the specific signals is a generic install failure: it is retried
+// (it may be a transient download failure), and after the last attempt crashes with the generic install reason
+// and the exit code.
 func TestForgeInstallNonZeroExitIsRetriedThenReportsGenericFailure(t *testing.T) {
 	shrinkInstallBackoff(t)
 	dir := t.TempDir()
@@ -139,9 +134,8 @@ func TestForgeInstallNonZeroExitIsRetriedThenReportsGenericFailure(t *testing.T)
 	}
 }
 
-// Exit 137 alone is a SIGKILL from anywhere; without the daemon's OOMKilled flag
-// it is not attributed to memory, so it stays a generic, retried failure rather
-// than a wrong "raise the memory limit" (issue #1093).
+// Exit 137 alone is a SIGKILL from anywhere; without the daemon's OOMKilled flag it is not attributed to memory,
+// so it stays a generic, retried failure rather than a wrong "raise the memory limit".
 func TestForgeInstallSigkillWithoutOOMFlagIsNotOutOfMemory(t *testing.T) {
 	shrinkInstallBackoff(t)
 	dir := t.TempDir()
@@ -162,8 +156,8 @@ func TestForgeInstallSigkillWithoutOOMFlagIsNotOutOfMemory(t *testing.T) {
 	}
 }
 
-// The diagnostic markers only explain a FAILED install. An installer that prints
-// one and still exits 0 succeeded, and the server launches (issue #1093).
+// The diagnostic markers only explain a FAILED install. An installer that prints one and still exits 0
+// succeeded, and the server launches.
 func TestForgeInstallMarkerInOutputOfSuccessfulInstallStillLaunches(t *testing.T) {
 	dir := t.TempDir()
 	docker := newForgeFakeDocker()
@@ -179,8 +173,8 @@ func TestForgeInstallMarkerInOutputOfSuccessfulInstallStillLaunches(t *testing.T
 	drainClosed(inst.Events())
 }
 
-// A successful install that leaves nothing launchable is an install-phase crash
-// too, so the client offers the install log for it (issue #1093).
+// A successful install that leaves nothing launchable is an install-phase crash too, so the client offers the
+// install log for it.
 func TestForgeInstallProducingNothingLaunchableCarriesTheInstallReason(t *testing.T) {
 	dir := t.TempDir()
 	docker := newForgeFakeDocker()

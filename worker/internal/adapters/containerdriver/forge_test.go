@@ -236,9 +236,8 @@ func writeArgsfile(t *testing.T, dir string) {
 	}
 }
 
-// A Forge start with the args file already present launches one container (the
-// launch container, deterministic name), reaching running, with no install
-// container created (issue #305).
+// A Forge start with the args file already present launches one container (the launch container, deterministic
+// name), reaching running, with no install container created.
 func TestForgeContainerArgsfilePresentLaunches(t *testing.T) {
 	dir := t.TempDir()
 	writeArgsfile(t, dir)
@@ -258,10 +257,9 @@ func TestForgeContainerArgsfilePresentLaunches(t *testing.T) {
 	drainClosed(inst.Events())
 }
 
-// A Forge start with no args file creates the install container under the
-// distinct mcsd-<id>-install name, runs it, then on success creates+starts the
-// launch container under the deterministic name as the SAME instance (issue #305).
-// The install container is removed before the launch create.
+// A Forge start with no args file creates the install container under the distinct mcsd-<id>-install name, runs
+// it, then on success creates+starts the launch container under the deterministic name as the SAME instance. The
+// install container is removed before the launch create.
 func TestForgeContainerInstallThenLaunch(t *testing.T) {
 	dir := t.TempDir()
 	docker := newForgeFakeDocker()
@@ -302,9 +300,8 @@ func TestForgeContainerInstallThenLaunch(t *testing.T) {
 	drainClosed(inst.Events())
 }
 
-// Both the Forge install container and the post-install launch container carry
-// the per-server memory ceiling as the Docker host-config Memory limit, converted
-// MiB→bytes (issue #707).
+// Both the Forge install container and the post-install launch container carry the per-server memory ceiling as
+// the Docker host-config Memory limit, converted MiB→bytes.
 func TestForgeContainerMemoryLimit(t *testing.T) {
 	dir := t.TempDir()
 	docker := newForgeFakeDocker()
@@ -337,9 +334,8 @@ func TestForgeContainerMemoryLimit(t *testing.T) {
 	drainClosed(inst.Events())
 }
 
-// Both the Forge install container and the post-install launch container carry
-// the per-server CPU weight, proportional to CPUMillis (1024 shares = 1 core),
-// so 2000m → 2048 (issue #724).
+// Both the Forge install container and the post-install launch container carry the per-server CPU weight,
+// proportional to CPUMillis (1024 shares = 1 core), so 2000m → 2048.
 func TestForgeContainerCPUShares(t *testing.T) {
 	dir := t.TempDir()
 	docker := newForgeFakeDocker()
@@ -371,9 +367,8 @@ func TestForgeContainerCPUShares(t *testing.T) {
 	drainClosed(inst.Events())
 }
 
-// A Forge install container exiting non-zero is retried up to maxInstallRetries
-// times; after all attempts fail the instance reports crashed with an attempt
-// count and never creates the launch container (issue #305, #1128).
+// A Forge install container exiting non-zero is retried up to maxInstallRetries times; after all attempts fail
+// the instance reports crashed with an attempt count and never creates the launch container.
 func TestForgeContainerInstallFailureCrashesNoLaunch(t *testing.T) {
 	prev := installRetryBackoff
 	installRetryBackoff = []time.Duration{time.Millisecond, time.Millisecond}
@@ -403,8 +398,8 @@ func TestForgeContainerInstallFailureCrashesNoLaunch(t *testing.T) {
 	}
 }
 
-// Stop during the install phase terminates the install container and reports
-// stopped; no launch container is created (issue #305).
+// Stop during the install phase terminates the install container and reports stopped; no launch container is
+// created.
 func TestForgeContainerStopDuringInstall(t *testing.T) {
 	dir := t.TempDir()
 	docker := newForgeFakeDocker()
@@ -427,8 +422,7 @@ func TestForgeContainerStopDuringInstall(t *testing.T) {
 	}
 }
 
-// The install container's output is captured to logs/forge-install.log in the
-// working dir (issue #305).
+// The install container's output is captured to logs/forge-install.log in the working dir.
 func TestForgeContainerInstallOutputWrittenToLog(t *testing.T) {
 	dir := t.TempDir()
 	docker := newForgeFakeDocker()
@@ -458,8 +452,8 @@ func TestForgeContainerInstallOutputWrittenToLog(t *testing.T) {
 	drainClosed(inst.Events())
 }
 
-// The JAR launch (default mode) keeps its historical in-container Cmd
-// byte-for-byte: `java -jar /data/server.jar nogui` (issue #305 parity).
+// The JAR launch (default mode) keeps its historical in-container Cmd byte-for-byte: `java -jar /data/server.jar
+// nogui` (parity).
 func TestJarContainerCmdParity(t *testing.T) {
 	docker := newForgeFakeDocker()
 	d := forgeDriver(docker)
@@ -485,13 +479,7 @@ func TestJarContainerCmdParity(t *testing.T) {
 	drainClosed(inst.Events())
 }
 
-// A Stop that wins the stopping latch after the install container has exited but
-// before the launch container is started must abort the launch: no launch
-// container is started, Stop reports cleanly, and the instance ends stopped with
-// no server left running (issue #306). The beforeLaunch hook fires in the exact
-// install-exit→launch window the critical section must close, driving a Stop to
-// win the latch there. The launch container has been created at that point, so the
-// abort must remove it before it can start.
+// Pause between install exit and launch start, then let Stop win; remove the unstarted launch container.
 func TestForgeContainerStopWinsLatchBeforeLaunch(t *testing.T) {
 	dir := t.TempDir()
 	docker := newForgeFakeDocker()
@@ -531,10 +519,9 @@ func TestForgeContainerStopWinsLatchBeforeLaunch(t *testing.T) {
 	}
 }
 
-// A Wait TRANSPORT error on the install container where the container is gone
-// and no argsfile was produced still crashes — the re-plan check (not the stale
-// transport error) is the authority: no install artifacts means the install
-// failed (issue #895).
+// A Wait TRANSPORT error on the install container where the container is gone and no argsfile was produced still
+// crashes, the re-plan check (not the stale transport error) is the authority: no install artifacts means the
+// install failed.
 func TestInstallWaitTransportErrorContainerGoneEmitsCrashed(t *testing.T) {
 	dir := t.TempDir()
 	docker := newForgeFakeDocker()
@@ -567,10 +554,9 @@ func TestInstallWaitTransportErrorContainerGoneEmitsCrashed(t *testing.T) {
 	}
 }
 
-// A Wait TRANSPORT error on the install container where the container is gone
-// BUT the install actually succeeded (argsfile written) must fall through to the
-// re-plan check and proceed to launch, not crash with the stale transport error
-// (issue #895).
+// A Wait TRANSPORT error on the install container where the container is gone BUT the install actually succeeded
+// (argsfile written) must fall through to the re-plan check and proceed to launch, not crash with the stale
+// transport error.
 func TestInstallWaitTransportErrorContainerGoneButArgsfileExistsLaunches(t *testing.T) {
 	dir := t.TempDir()
 	docker := newForgeFakeDocker()
@@ -607,9 +593,8 @@ func TestInstallWaitTransportErrorContainerGoneButArgsfileExistsLaunches(t *test
 	drainClosed(inst.Events())
 }
 
-// A Wait TRANSPORT error on the install container while the container is STILL
-// RUNNING means the daemon blipped but the install is ongoing: superviseInstall
-// must re-attach a waiter and continue, not crash prematurely (issue #881).
+// A Wait TRANSPORT error on the install container while the container is STILL RUNNING means the daemon blipped
+// but the install is ongoing: superviseInstall must re-attach a waiter and continue, not crash prematurely.
 func TestInstallWaitTransportErrorContainerRunningContinuesSupervising(t *testing.T) {
 	dir := t.TempDir()
 	docker := newForgeFakeDocker()
@@ -646,8 +631,8 @@ func TestInstallWaitTransportErrorContainerRunningContinuesSupervising(t *testin
 	drainClosed(inst.Events())
 }
 
-// A Forge install that produces a legacy forge-*.jar (no unix_args.txt) proceeds
-// to launch via JAR mode instead of crashing (issue #1093).
+// A Forge install that produces a legacy forge-*.jar (no unix_args.txt) proceeds to launch via JAR mode instead
+// of crashing.
 func TestForgeContainerLegacyJarFallback(t *testing.T) {
 	dir := t.TempDir()
 	docker := newForgeFakeDocker()
@@ -689,8 +674,8 @@ func TestForgeContainerLegacyJarFallback(t *testing.T) {
 	drainClosed(inst.Events())
 }
 
-// A Forge install that produces no args file and no legacy forge jar still
-// crashes with the original error message (issue #1093).
+// A Forge install that produces no args file and no legacy forge jar still crashes with the original error
+// message.
 func TestForgeContainerNoArgsNoLegacyJarCrashes(t *testing.T) {
 	dir := t.TempDir()
 	docker := newForgeFakeDocker()
@@ -712,8 +697,7 @@ func TestForgeContainerNoArgsNoLegacyJarCrashes(t *testing.T) {
 	}
 }
 
-// First install attempt fails, second succeeds: the instance proceeds to launch
-// without crashing (issue #1128).
+// First install attempt fails, second succeeds: the instance proceeds to launch without crashing.
 func TestForgeInstallRetrySucceeds(t *testing.T) {
 	prev := installRetryBackoff
 	installRetryBackoff = []time.Duration{time.Millisecond, time.Millisecond}
@@ -755,8 +739,7 @@ func TestForgeInstallRetrySucceeds(t *testing.T) {
 	drainClosed(inst.Events())
 }
 
-// All install attempts fail: the instance crashes with an attempt-count message
-// (issue #1128).
+// All install attempts fail: the instance crashes with an attempt-count message.
 func TestForgeInstallRetryExhausted(t *testing.T) {
 	prev := installRetryBackoff
 	installRetryBackoff = []time.Duration{time.Millisecond, time.Millisecond}
@@ -787,7 +770,7 @@ func TestForgeInstallRetryExhausted(t *testing.T) {
 	}
 }
 
-// Stop during the retry backoff aborts the retry and reports stopped (issue #1128).
+// Stop during the retry backoff aborts the retry and reports stopped.
 func TestForgeInstallRetryStopDuringBackoff(t *testing.T) {
 	// Use a long backoff so Stop arrives during the sleep.
 	prev := installRetryBackoff
@@ -840,10 +823,9 @@ func TestForgeInstallRetryStopDuringBackoff(t *testing.T) {
 	}
 }
 
-// installBackoffOrStopping must detect a stop via the sticky stopRequested flag,
-// not the transient stopping flag: a Stop whose kill fails or is survived clears
-// stopping but leaves stopRequested set. Without the sticky read, the backoff
-// poll misses the abort and the retry proceeds (issue #1442).
+// installBackoffOrStopping must detect a stop via the sticky stopRequested flag, not the transient stopping
+// flag: a Stop whose kill fails or is survived clears stopping but leaves stopRequested set. Without the sticky
+// read, the backoff poll misses the abort and the retry proceeds.
 func TestInstallBackoffOrStoppingReadsStopRequested(t *testing.T) {
 	inst := &instance{}
 	// Simulate a Stop whose kill was survived: stopping is cleared but
@@ -857,11 +839,10 @@ func TestInstallBackoffOrStoppingReadsStopRequested(t *testing.T) {
 	}
 }
 
-// An install container that survives docker kill and then dies after the
-// survived-kill latch reset must still be recorded stopped (not a spurious
-// crash): the sticky stopRequested flag tells superviseInstall the exit was
-// operator-requested, even though the transient stopping latch was cleared by
-// the survived-kill failure path (issue #595, mirrors #257 for the install phase).
+// An install container that survives docker kill and then dies after the survived-kill latch reset must still be
+// recorded stopped (not a spurious crash): the sticky stopRequested flag tells superviseInstall the exit was
+// operator-requested, even though the transient stopping latch was cleared by the survived-kill failure path
+// (mirrors for the install phase).
 func TestInstallSurvivedKillThenLateExitRecordsStopped(t *testing.T) {
 	dir := t.TempDir()
 	docker := newForgeFakeDocker()
@@ -905,12 +886,7 @@ func TestInstallSurvivedKillThenLateExitRecordsStopped(t *testing.T) {
 	}
 }
 
-// The exitObserved guard in the install phase prevents the survived-kill restore
-// from stomping a terminal state that superviseInstall already set. The install
-// container exits in the window between waitExitDone timing out and the
-// survived-kill restore re-acquiring the lock; superviseInstall sets exitObserved
-// under the lock, and the restore skips the reset (issue #595, mirrors #392 for
-// the install phase).
+// Exit the installer just before failed-stop reset acquires the lock; exitObserved must preserve terminal state.
 func TestInstallSurvivedKillRestoreDoesNotStompTerminalState(t *testing.T) {
 	dir := t.TempDir()
 	docker := newForgeFakeDocker()
@@ -954,12 +930,7 @@ func TestInstallSurvivedKillRestoreDoesNotStompTerminalState(t *testing.T) {
 	}
 }
 
-// A Stop that arrives after the first install attempt fails but before the retry
-// container is started must win: the retry container is never started, Stop
-// returns nil, and the instance reaches stopped. Without the guarded publish
-// (issue #1987), Stop captures a stale containerID pointing at the removed old
-// container, gets 404s, checks the stale exitObserved=true, and returns a false
-// nil while the retried installer keeps running.
+// Let Stop win after failed install but before retry start; it must not succeed against a stale container ID.
 func TestForgeInstallRetryStopWinsLatchBeforeRetryStart(t *testing.T) {
 	prev := installRetryBackoff
 	installRetryBackoff = []time.Duration{time.Millisecond, time.Millisecond}
@@ -1053,11 +1024,10 @@ func TestForgeInstallRetryStopWinsLatchBeforeRetryStart(t *testing.T) {
 	}
 }
 
-// When install attempt N exits (non-zero, triggering a retry) and attempt N+1
-// starts a new container, exitObserved must be reset so a Stop during attempt
-// N+1 whose kill is survived still triggers the survived-kill restore. Without
-// the reset, exitObserved stays true from the old container and Stop returns a
-// false nil — the new container is still alive (issue #595).
+// When install attempt N exits (non-zero, triggering a retry) and attempt N+1 starts a new container,
+// exitObserved must be reset so a Stop during attempt N+1 whose kill is survived still triggers the
+// survived-kill restore. Without the reset, exitObserved stays true from the old container and Stop returns a
+// false nil, the new container is still alive.
 func TestInstallRetryResetsExitObservedForNewContainer(t *testing.T) {
 	prev := installRetryBackoff
 	installRetryBackoff = []time.Duration{time.Millisecond, time.Millisecond}
@@ -1090,10 +1060,9 @@ func TestInstallRetryResetsExitObservedForNewContainer(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	// Wait until the retry container is started (issue #1987: with the guarded
-	// publish, we must wait for Start to complete — not just Create — otherwise
-	// Stop may win the lock before Start and abort the retry instead of racing
-	// the Wait). The install container name is reused, so count Start calls.
+	// Wait until the retry container is started (: with the guarded publish, we must wait for Start to complete,
+	// not just Create, otherwise Stop may win the lock before Start and abort the retry instead of racing the
+	// Wait). The install container name is reused, so count Start calls.
 	deadline := time.After(2 * time.Second)
 	for {
 		docker.mu.Lock()

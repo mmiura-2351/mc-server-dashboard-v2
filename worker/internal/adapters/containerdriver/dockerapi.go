@@ -12,26 +12,13 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/javaproperties"
 )
 
-// errNameConflict is the error Create returns when the daemon answers 409
-// Conflict because the deterministic container name is already in use. The
-// driver matches it with errors.Is to drive the remove-on-conflict retry (issue
-// #226); any other Create failure is returned unwrapped and never triggers the
-// retry.
+// errNameConflict marks Engine create 409 and permits bounded deterministic-name recovery.
 var errNameConflict = errors.New("containerdriver: container name already in use")
 
-// errNotFound is the error Inspect returns when the daemon answers 404 because
-// the named container no longer exists. During conflict resolution the driver
-// matches it with errors.Is to mean the conflict is already resolved — the async
-// exit-watcher removed the container between the create's 409 and the inspect —
-// so it retries the create directly instead of taking the conservative fallback
-// (issue #229).
+// errNotFound marks Inspect 404; a conflicting name may have been removed before inspection.
 var errNotFound = errors.New("containerdriver: container not found")
 
-// errRemovalInProgress is the error Remove returns when the daemon answers 409
-// Conflict because a removal of the container is already in flight. During the
-// wait-for-name-free loop the driver matches it with errors.Is to treat the
-// in-progress removal as progress — the exit-watcher will free the name shortly
-// — so it keeps polling instead of declining (issue #233).
+// errRemovalInProgress marks forced-remove 409; conflict recovery keeps polling while teardown finishes.
 var errRemovalInProgress = errors.New("containerdriver: container removal already in progress")
 
 // Container label keys. The worker-id label scopes the startup orphan sweep to
@@ -40,11 +27,8 @@ var errRemovalInProgress = errors.New("containerdriver: container removal alread
 const (
 	labelWorkerID = "mcsd.worker.id"
 	labelServerID = "mcsd.server.id"
-	// labelMCVersion records the Minecraft version a container runs, so the
-	// startup sweep can read it back off a container left behind by a crashed
-	// Worker: the version decides the charset that container's server.properties
-	// -- and so its RCON password -- is read in (issue #3116), and the crash took
-	// the StartServer command that carried it (issue #1710).
+	// Store Minecraft version on the container so orphan recovery can decode its RCON password after Worker state
+	// is lost.
 	labelMCVersion = "mcsd.mc.version"
 )
 
@@ -57,11 +41,7 @@ func containerName(serverID string) string {
 	return containerNamePrefix + serverID
 }
 
-// installContainerName is the deterministic name for a server's supervised Forge
-// install container (issue #305). The "-install" suffix keeps it distinct from the
-// launch name (containerName), so the short-lived install container never collides
-// with the launch container's deterministic name; both carry the worker-id label,
-// so a crash-leaked install container is reaped by the startup sweep.
+// Keep install names distinct from launch names; both carry the Worker label for orphan sweep.
 func installContainerName(serverID string) string {
 	return containerNamePrefix + serverID + "-install"
 }
@@ -73,11 +53,10 @@ func installContainerName(serverID string) string {
 type dockerAPI interface {
 	// Create creates a container from spec and returns its id.
 	Create(ctx context.Context, spec CreateSpec) (string, error)
-	// ImagePull pulls the image ref ("name:tag") from its registry, draining the
-	// Engine's progress stream to completion. It errors when the daemon rejects the
-	// request outright OR when the progress stream ends on an error message (an
-	// offline host, a denied or unknown image). The driver runs it once on an
-	// image-missing create failure, then retries the create (issue #904).
+	// ImagePull pulls the image ref ("name:tag") from its registry, draining the Engine's progress stream to
+	// completion. It errors when the daemon rejects the request outright OR when the progress stream ends on an
+	// error message (an offline host, a denied or unknown image). The driver runs it once on an image-missing
+	// create failure, then retries the create.
 	ImagePull(ctx context.Context, image string) error
 	// Start starts a created container.
 	Start(ctx context.Context, id string) error
@@ -89,14 +68,13 @@ type dockerAPI interface {
 	Wait(ctx context.Context, id string) (int64, error)
 	// Remove deletes the container (force).
 	Remove(ctx context.Context, id string) error
-	// Inspect returns the labels and running state of the container with the given
-	// name (the deterministic mcsd-<server-id> name). It is used to resolve a
-	// create name conflict (issue #226): the driver only removes the conflicting
-	// container when it carries this Worker's label and is not running. A container
-	// that no longer exists returns an error.
+	// Inspect returns the labels and running state of the container with the given name (the deterministic
+	// mcsd-<server-id> name). It is used to resolve a create name conflict: the driver only removes the conflicting
+	// container when it carries this Worker's label and is not running. A container that no longer exists returns
+	// an error.
 	Inspect(ctx context.Context, name string) (ContainerInfo, error)
-	// List returns the containers carrying the given label key/value pair,
-	// including stopped ones, each with its Engine container State (issue #336).
+	// List returns the containers carrying the given label key/value pair, including stopped ones, each with its
+	// Engine container State.
 	List(ctx context.Context, labelKey, labelValue string) ([]Container, error)
 	// Logs opens a following stdout+stderr log stream for a running container
 	// (FR-MON-2). The returned reader carries Docker's multiplexed stream frames
@@ -116,9 +94,8 @@ type ContainerStats struct {
 	MemoryBytes uint64
 }
 
-// CreateSpec describes a container to create. Only the fields the driver sets are
-// modelled. Memory is enforced as a hard container limit (issue #707); CPU is a
-// soft per-server relative share (issue #724); disk limits remain deferred.
+// CreateSpec describes a container to create. Only the fields the driver sets are modelled. Memory is enforced
+// as a hard container limit; CPU is a soft per-server relative share; disk limits remain deferred.
 type CreateSpec struct {
 	Name       string
 	Image      string
@@ -128,27 +105,20 @@ type CreateSpec struct {
 	Binds []string
 	// Ports are the container→host port publications.
 	Ports []PortMapping
-	// Network is the user-defined Docker network the container attaches to. Empty
-	// leaves the container on the default bridge (issue #218).
+	// Network is the user-defined Docker network the container attaches to. Empty leaves the container on the
+	// default bridge.
 	Network string
 	// Labels are attached for identification and the orphan sweep.
 	Labels map[string]string
-	// MemoryLimitBytes is the hard container memory ceiling in bytes, derived from
-	// InstanceSpec.MemoryLimitMB (MiB→bytes). Zero leaves the container
-	// unconstrained, preserving the pre-#707 behavior. The JVM heap (`-Xmx`) is
-	// derived to sit safely below this ceiling (issue #706), so the kernel OOM
-	// killer caps a runaway server at the container boundary rather than starving
-	// the host.
+	// MemoryLimitBytes caps total container memory; zero leaves it unconstrained.
+	// The derived JVM heap reserves headroom below this ceiling.
 	MemoryLimitBytes int64
-	// CPUShares is the container's relative CPU weight, derived from
-	// InstanceSpec.CPUMillis (1024 shares = 1 core). It is a SOFT share that only
-	// arbitrates contention — never a hard quota — so MC tick latency is not
-	// throttled (issue #724). An unset allocation (CPUMillis == 0) falls back to
-	// the fixed default weight (issue #518).
+	// CPUShares is the container's relative CPU weight, derived from InstanceSpec.CPUMillis (1024 shares = 1 core).
+	// It is a SOFT share that only arbitrates contention, never a hard quota, so MC tick latency is not throttled.
+	// An unset allocation (CPUMillis == 0) falls back to the fixed default weight.
 	CPUShares int64
-	// User is the numeric "uid:gid" the container's process runs as, and CapDrop the
-	// capabilities removed from its default set. The driver sets both on every
-	// container it creates (Driver.createServerContainer, issue #2600); empty leaves
+	// User is the numeric "uid:gid" the container's process runs as, and CapDrop the capabilities removed from its
+	// default set. The driver sets both on every container it creates (Driver.createServerContainer); empty leaves
 	// the Engine defaults (the image's user, the full default capability set).
 	User    string
 	CapDrop []string
@@ -161,25 +131,20 @@ type PortMapping struct {
 	HostPort      string
 }
 
-// Container is a listed container: its id, name, and state, used by the orphan
-// sweep. State is the Engine's container state string ("running", "exited",
-// "created", ...); the sweep gracefully stops a "running" orphan before removing
-// it so the MC server's SIGTERM shutdown hook can save (issue #336).
+// Container is a listed container: its id, name, and state, used by the orphan sweep. State is the Engine's
+// container state string ("running", "exited", "created",...); the sweep gracefully stops a "running" orphan
+// before removing it so the MC server's SIGTERM shutdown hook can save.
 type Container struct {
 	ID    string
 	Name  string
 	State string
-	// Labels are the container's labels, the ones labels() attached at create.
-	// The sweep reads the Minecraft version from them (issue #3116).
+	// Labels are the container's labels, the ones labels attached at create. The sweep reads the Minecraft version
+	// from them.
 	Labels map[string]string
 }
 
-// ContainerInfo is the subset of a container inspection the driver needs to
-// resolve a create name conflict (issue #226): the id to remove it, the labels
-// to confirm it is this Worker's, and whether it is running. OOMKilled is the
-// daemon's record that the kernel OOM-killed a process in the container, and
-// ExitCode the exit status of an exited one; the install supervisor reads both to
-// explain a failed Forge install (issue #1093).
+// ContainerInfo carries identity, ownership labels, and liveness for conflict recovery.
+// Install failure diagnosis also uses the daemon OOM flag and recorded exit code.
 type ContainerInfo struct {
 	ID        string
 	Labels    map[string]string
@@ -188,17 +153,8 @@ type ContainerInfo struct {
 	ExitCode  int64
 }
 
-// readProperties reads and parses the server.properties at path with the shared
-// Java-compatible reader (internal/javaproperties), so the ports published here
-// are the ones the Minecraft server will bind even when the file spells them
-// "server-port:25599", "server-port 25599" or with an escaped key (issue #2811).
-//
-// An ABSENT file is not an error: it returns an empty map so the caller falls back
-// to the Minecraft defaults (a legacy server whose working set was never seeded).
-// Every other failure IS an error: swallowing it would silently drop server-port
-// and publish the 25565 default, which is the relay's port and collides on the
-// host (issue #2621). The whole file is read at once, so no line length can
-// truncate the parse and lose a key that way.
+// Use Java properties grammar; absent files yield defaults, other read errors fail to avoid publishing a wrong
+// port.
 func readProperties(path string) (map[string]string, error) {
 	data, err := os.ReadFile(path) //nolint:gosec // path is the server's own working dir, not user-controlled.
 	if err != nil {
