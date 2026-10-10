@@ -45,6 +45,7 @@ from mc_server_dashboard_api.dependencies import (
     get_permission_checker,
     get_real_time_events,
     get_server_community_lookup,
+    get_ws_reauthentication,
 )
 from mc_server_dashboard_api.fleet.adapters.real_time_events import (
     InProcessRealTimeEvents,
@@ -55,6 +56,10 @@ from mc_server_dashboard_api.fleet.domain.real_time_events import (
     RealTimeEvents,
     notification_event,
 )
+from mc_server_dashboard_api.identity.application.authenticate_request import (
+    Authentication,
+)
+from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.servers.domain.value_objects import (
     ObservedState,
     ServerId,
@@ -109,6 +114,23 @@ class _FakeListServers:
         return list(self.servers)
 
 
+class _Account:
+    """The account behind a socket, as each re-authentication finds it (#3227).
+
+    Stands in for the per-request user load REST performs: ``None`` once the
+    account is deactivated, else the account's current row.
+    """
+
+    def __init__(self, user: User) -> None:
+        self.user: User | None = user
+
+    def deactivate(self) -> None:
+        self.user = None
+
+    async def __call__(self) -> Authentication | None:
+        return None if self.user is None else make_authentication(self.user)
+
+
 _shared_app: FastAPI
 
 
@@ -140,6 +162,7 @@ def _app(
         return make_authentication(user, expires_in=expires_in)
 
     app.dependency_overrides[get_current_user_ws] = _user_or_none
+    app.dependency_overrides[get_ws_reauthentication] = lambda: _Account(user)
     app.dependency_overrides[get_membership_visibility] = lambda: _FakeVisibility(
         member=member
     )
@@ -600,6 +623,120 @@ def test_token_expiry_during_a_membership_lookup_closes_without_the_frame() -> N
             )
             ws.receive_json()
     assert exc.value.code == 4419
+
+
+# --- mid-stream re-authorization (#3227) -----------------------------------
+
+
+def test_deactivated_user_is_closed_4401_at_the_next_reauthorization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deactivated account loses its open socket like its next REST call."""
+
+    from mc_server_dashboard_api.fleet.api import events as events_module
+
+    monkeypatch.setattr(events_module, "_REAUTHZ_INTERVAL_SECONDS", 0.05)
+
+    bus = InProcessRealTimeEvents()
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(bus=bus, lookup={str(server): community})
+    account = _Account(make_user())
+    app.dependency_overrides[get_ws_reauthentication] = lambda: account  # type: ignore[attr-defined]
+    client = _client(app)
+
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect(_url(community)) as ws:
+            _skip_snapshot(ws)
+            # Several re-authorizations pass while the account is active.
+            time.sleep(0.2)
+            bus.publish(
+                server_id=str(server),
+                event=RealTimeEvent(
+                    stream=EventStream.STATUS, payload={"state": "running"}
+                ),
+            )
+            assert ws.receive_json()["payload"] == {"state": "running"}
+            account.deactivate()
+            ws.receive_json()
+    assert exc.value.code == 4401
+
+
+# --- client gone during the membership lookup (#3225) ----------------------
+
+
+class _GoneDuringLookupSocket:
+    """A client that disconnects while a membership lookup is in flight.
+
+    Once the disconnect has been received, any send or close is what uvicorn
+    rejects with ``RuntimeError``; the relay must notice the client is gone
+    instead.
+    """
+
+    def __init__(self) -> None:
+        self.scope: dict[str, object] = {}
+        self.sent: list[str] = []
+        self.lookup_started = asyncio.Event()
+        self.gone = asyncio.Event()
+
+    async def accept(self, subprotocol: str | None = None) -> None:
+        pass
+
+    async def receive(self) -> dict[str, object]:
+        await self.lookup_started.wait()
+        self.gone.set()
+        return {"type": "websocket.disconnect"}
+
+    async def send_text(self, text: str) -> None:
+        if self.gone.is_set():
+            raise RuntimeError(
+                "Unexpected ASGI message 'websocket.send', after sending "
+                "'websocket.close' or response already completed."
+            )
+        self.sent.append(text)
+
+    async def close(self, code: int) -> None:
+        raise RuntimeError("Unexpected ASGI message 'websocket.close'")
+
+
+async def test_client_gone_during_the_membership_lookup_ends_the_relay_quietly() -> (
+    None
+):
+    from mc_server_dashboard_api.fleet.api import events as events_module
+
+    socket = _GoneDuringLookupSocket()
+    bus = InProcessRealTimeEvents()
+    community, server = uuid.uuid4(), uuid.uuid4()
+    user = make_user()
+
+    async def _lookup(*, server_id: str) -> uuid.UUID | None:
+        socket.lookup_started.set()
+        await socket.gone.wait()
+        await asyncio.sleep(0)  # the reader task observes the disconnect
+        return community
+
+    handler = asyncio.create_task(
+        events_module.community_events(
+            socket,  # type: ignore[arg-type]
+            community,
+            authentication=make_authentication(user),
+            reauthenticate=_Account(user),
+            visibility=_FakeVisibility(member=True),
+            checker=_FakeChecker(allow=True),
+            lookup=_lookup,
+            list_servers=_FakeListServers([]),  # type: ignore[arg-type]
+            bus=bus,
+        )
+    )
+    # The snapshot is sent only after the subscription is registered.
+    while not socket.sent:
+        await asyncio.sleep(0.001)
+    bus.publish(
+        server_id=str(server),
+        event=RealTimeEvent(stream=EventStream.STATUS, payload={"state": "running"}),
+    )
+
+    await asyncio.wait_for(handler, timeout=5)
+    assert [json.loads(text)["stream"] for text in socket.sent] == ["snapshot"]
 
 
 # --- connection lifecycle --------------------------------------------------
