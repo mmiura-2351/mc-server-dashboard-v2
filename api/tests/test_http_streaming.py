@@ -158,6 +158,18 @@ async def test_closing_a_started_stream_closes_its_source() -> None:
     assert source.closed
 
 
+async def test_closing_a_started_stream_before_iterating_it_closes_its_source() -> None:
+    # The source is begun by ``started`` itself, so it holds what it opened even
+    # if nobody ever takes a chunk from the returned stream. A generator closed
+    # before its first iteration never runs its ``finally``; this close must.
+    source = _Source()
+    stream = await started(source.stream())
+
+    await stream.aclose()  # type: ignore[attr-defined]
+
+    assert source.closed
+
+
 _HTTP_SCOPE = {"type": "http", "asgi": {"spec_version": "2.4"}}
 
 
@@ -197,4 +209,19 @@ async def test_closing_response_closes_the_body_after_a_complete_transfer() -> N
     await response(_HTTP_SCOPE, _receive, _send)
 
     assert bytes(sent) == b"firstsecond"
+    assert source.closed
+
+
+async def test_closing_response_closes_the_body_when_the_header_send_fails() -> None:
+    # Disconnected before the first body chunk: the body was never iterated by
+    # the response, only begun by ``started``.
+    source = _Source()
+    response = ClosingStreamingResponse(await started(source.stream()))
+
+    async def _send(message: Message) -> None:
+        raise OSError("client went away")
+
+    with pytest.raises(ClientDisconnect):
+        await response(_HTTP_SCOPE, _receive, _send)
+
     assert source.closed

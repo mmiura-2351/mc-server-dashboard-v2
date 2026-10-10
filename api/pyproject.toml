@@ -20,6 +20,13 @@ dependencies = [
     # 2026-05-28 as of this change.
     "fastapi>=0.136.3,<0.142",          # 2026-05-23
     "uvicorn>=0.48.0,<0.55",            # 2026-05-24
+    # Structured-concurrency primitives. Already in the tree through Starlette,
+    # which cancels a streaming response through an anyio cancel scope when the
+    # client disconnects; the download streams shield their resource cleanup
+    # from that scope (``anyio.CancelScope(shield=True)``, issue #3234), so the
+    # import is direct and declared. 4.13.0 (2026-03-24) is the locked version,
+    # well outside the 7-day cooldown (Section 3); cap the next major.
+    "anyio>=4.13.0,<5",                 # 2026-03-24
     # WebSocket protocol implementation for uvicorn (#507). Bare uvicorn ships no
     # WS library, so its auto-selector resolves AutoWebSocketsProtocol to None and
     # silently downgrades every WS upgrade to plain HTTP — the live /events

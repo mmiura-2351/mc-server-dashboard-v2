@@ -32,6 +32,8 @@ import logging
 import zipfile
 from collections.abc import AsyncGenerator, AsyncIterator
 
+import anyio
+
 from mc_server_dashboard_api.servers.domain.errors import (
     FileAlreadyExistsError,
     InvalidFilePathError,
@@ -105,11 +107,16 @@ async def _aclose(stream: AsyncIterator[object]) -> None:
     and the reader lease and client that stream holds — alive until the
     interpreter finalizes it (issue #3234). Every delegating generator below
     closes what it opened in a ``finally`` through this.
+
+    Shielded, because that ``finally`` also runs when a download is cancelled
+    mid-read: inside an already-cancelled scope every further ``await`` is
+    cancelled again, and a close abandoned halfway releases nothing.
     """
 
     aclose = getattr(stream, "aclose", None)
     if aclose is not None:
-        await aclose()
+        with anyio.CancelScope(shield=True):
+            await aclose()
 
 
 def _scope(
@@ -399,7 +406,7 @@ class StorageFileStoreAdapter(FileStore):
             except StorageUnavailableError as exc:
                 raise ServerFileStorageUnavailableError(str(server_id.value)) from exc
             finally:
-                await zip_stream.aclose()
+                await _aclose(zip_stream)
 
     async def _zip_dir_gen(
         self,

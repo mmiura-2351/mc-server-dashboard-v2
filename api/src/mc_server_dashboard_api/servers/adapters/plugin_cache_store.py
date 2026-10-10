@@ -33,7 +33,10 @@ from mc_server_dashboard_api.servers.domain.plugin_cache_store import (
     CacheEntry,
     PluginCacheStore,
 )
-from mc_server_dashboard_api.storage.adapters.object_store import S3ClientFactory
+from mc_server_dashboard_api.storage.adapters.object_store import (
+    S3ClientFactory,
+    shielded_exit,
+)
 from mc_server_dashboard_api.storage.domain.errors import (
     NotFoundError,
     ObjectStoreUnavailableError,
@@ -67,7 +70,10 @@ class ObjectPluginCacheStore(PluginCacheStore):
     async def _open_gen(self, sha256: str) -> AsyncIterator[bytes]:
         key = _key(sha256)
         try:
-            async with self._client_factory() as client:
+            # The exit is shielded: a client-mods download disconnected while a
+            # jar's read is pending unwinds through it inside a cancelled scope,
+            # and the client's release must still complete (issue #3234).
+            async with shielded_exit(self._client_factory()) as client:
                 # get_object already raises NotFoundError on a missing key, so no
                 # redundant head_object first.
                 async for chunk in await client.get_object(key):

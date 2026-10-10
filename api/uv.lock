@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = "==3.13.*"
 
 [manifest]
@@ -740,6 +740,7 @@ source = { editable = "." }
 dependencies = [
     { name = "aioboto3" },
     { name = "alembic" },
+    { name = "anyio" },
     { name = "argon2-cffi" },
     { name = "asyncpg" },
     { name = "bcrypt" },
@@ -776,6 +777,7 @@ dev = [
 requires-dist = [
     { name = "aioboto3", specifier = ">=15.5.0,<16" },
     { name = "alembic", specifier = ">=1.18.4,<2" },
+    { name = "anyio", specifier = ">=4.13.0,<5" },
     { name = "argon2-cffi", specifier = ">=25.1.0,<26" },
     { name = "asyncpg", specifier = ">=0.31.0,<0.32" },
     { name = "bcrypt", specifier = ">=5.0.0,<6" },

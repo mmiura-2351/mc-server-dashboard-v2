@@ -19,6 +19,7 @@ injected at a chosen call); only the database is a fake.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import io
 import uuid
@@ -26,7 +27,9 @@ import zipfile
 from typing import Any
 
 import pytest
+from starlette.types import Message
 
+from mc_server_dashboard_api.http_streaming import ClosingStreamingResponse, started
 from mc_server_dashboard_api.servers.adapters.file_store import (
     StorageFileStoreAdapter,
 )
@@ -548,20 +551,60 @@ async def test_start_eula_write_over_a_full_ring_is_still_finished_by_a_repeat()
 # --- a closed client-mods download holds nothing (issue #3234) --------------
 
 
+async def _client_modpack(rig: _Rig) -> Any:
+    await rig.seed({"eula.txt": b"eula=true\n"})
+    plugin = await _install_mod(rig)
+    plugin.side = "client"
+    await rig.uow.plugins.update(plugin)
+    return await DownloadClientModpack(uow=rig.uow, cache=rig.cache)(**rig.scope)
+
+
 async def test_closing_a_begun_client_modpack_releases_the_cache_client() -> None:
     """Closed while a jar is open: the zip closes that jar's cache stream, so no
     store client stays open behind it."""
 
     rig = _Rig(server_type=ServerType.FABRIC)
-    await rig.seed({"eula.txt": b"eula=true\n"})
-    plugin = await _install_mod(rig)
-    plugin.side = "client"
-    await rig.uow.plugins.update(plugin)
-    download = DownloadClientModpack(uow=rig.uow, cache=rig.cache)
-    stream = await download(**rig.scope)
+    stream = await _client_modpack(rig)
     await anext(stream)
     assert rig.faults.open_clients == 1
 
-    await stream.aclose()  # type: ignore[attr-defined]
+    await stream.aclose()
+
+    assert rig.faults.open_clients == 0
+
+
+async def test_a_client_modpack_closed_before_its_first_chunk_holds_nothing() -> None:
+    rig = _Rig(server_type=ServerType.FABRIC)
+    body = await started(await _client_modpack(rig))
+    assert rig.faults.open_clients == 1
+
+    await body.aclose()  # type: ignore[attr-defined]
+
+    assert rig.faults.open_clients == 0
+
+
+async def test_a_client_modpack_disconnected_during_a_pending_read_holds_nothing() -> (
+    None
+):
+    """The disconnect lands while a jar's next chunk is pending, on the ASGI 2.3
+    path Starlette cancels through a cancel scope: the cache stream unwinds
+    inside the cancelled scope, and its client's release — which awaits — must
+    still run to completion."""
+
+    rig = _Rig(server_type=ServerType.FABRIC)
+    stream = await _client_modpack(rig)
+    rig.faults.stall_body = lambda key: key.startswith("plugin-cache/")
+    response = ClosingStreamingResponse(await started(stream))
+
+    async def _receive() -> Message:
+        await rig.faults.stalled.wait()
+        for _ in range(5):
+            await asyncio.sleep(0)
+        return {"type": "http.disconnect"}
+
+    async def _send(message: Message) -> None:
+        return None
+
+    await response({"type": "http", "asgi": {"spec_version": "2.3"}}, _receive, _send)
 
     assert rig.faults.open_clients == 0

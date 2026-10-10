@@ -35,8 +35,9 @@ to translate there.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
 import pytest
@@ -591,5 +592,100 @@ async def test_a_download_whose_client_disconnects_holds_nothing_afterwards(
         await response(
             {"type": "http", "asgi": {"spec_version": "2.4"}}, _receive, _send
         )
+
+    assert _holds_nothing(rig)
+
+
+# --- disconnects the response's own close cannot reach (review round 2) ------
+
+# What the installed Uvicorn advertises: below 2.4, Starlette watches for the
+# disconnect itself and cancels the streaming task through a cancel scope.
+_ASGI_2_3 = {"type": "http", "asgi": {"spec_version": "2.3"}}
+_ASGI_2_4 = {"type": "http", "asgi": {"spec_version": "2.4"}}
+
+
+def _download_source(rig: _Rig, target: str) -> AsyncIterator[bytes]:
+    if target == "file":
+        return rig.seam.open_file_stream(**rig.scope, rel_path="world/level.dat")
+    return rig.seam.download_dir(**rig.scope, rel_path="world")
+
+
+async def _never() -> None:
+    await asyncio.Event().wait()
+
+
+@pytest.mark.parametrize("target", ["file", "directory"])
+async def test_a_download_closed_before_its_first_chunk_holds_nothing(
+    target: str,
+) -> None:
+    """``started`` has begun the stream — lease taken, client open — and the
+    stream it returns is closed without ever being iterated."""
+
+    rig = await _published()
+    body = await started(_download_source(rig, target))
+    assert not _holds_nothing(rig)
+
+    await body.aclose()  # type: ignore[attr-defined]
+
+    assert _holds_nothing(rig)
+
+
+@pytest.mark.parametrize("target", ["file", "directory"])
+@pytest.mark.parametrize("asgi", ["2.3", "2.4"])
+async def test_a_download_disconnected_before_its_first_body_chunk_holds_nothing(
+    target: str, asgi: str
+) -> None:
+    """The client is gone before any body chunk is sent: on ASGI 2.4 the header
+    send fails; below it the disconnect cancels a header send still in flight.
+    Either way the response never iterates the body it must still close."""
+
+    rig = await _published()
+    response = ClosingStreamingResponse(await started(_download_source(rig, target)))
+
+    async def _receive() -> Message:
+        return {"type": "http.disconnect"}
+
+    async def _send(message: Message) -> None:
+        if asgi == "2.4":
+            raise OSError("client went away")
+        await _never()
+
+    if asgi == "2.4":
+        with pytest.raises(ClientDisconnect):
+            await response(_ASGI_2_4, _receive, _send)
+    else:
+        await response(_ASGI_2_3, _receive, _send)
+
+    assert _holds_nothing(rig)
+
+
+@pytest.mark.parametrize("target", ["file", "directory"])
+async def test_a_download_disconnected_during_a_pending_read_holds_nothing(
+    target: str,
+) -> None:
+    """The case the response's final close is too late for. The disconnect lands
+    while the next chunk's read is pending, so the cancel scope throws the
+    cancellation INTO that read and the streams unwind right there — inside a
+    scope that cancels every further ``await``. Releasing the store's client
+    awaits (the test double's exit yields to the loop, as a real client's does),
+    so each layer has to shield what it releases, or the release is abandoned
+    halfway and the client is never returned."""
+
+    rig = await _published()
+    # The file bodies only; the pointer and marker reads answer normally.
+    rig.faults.stall_body = lambda key: "/snapshots/" in key
+    response = ClosingStreamingResponse(await started(_download_source(rig, target)))
+
+    async def _receive() -> Message:
+        await rig.faults.stalled.wait()
+        # Let the response reach the read that will never answer.
+        for _ in range(5):
+            await asyncio.sleep(0)
+        return {"type": "http.disconnect"}
+
+    async def _send(message: Message) -> None:
+        return None
+
+    await response(_ASGI_2_3, _receive, _send)
 
     assert _holds_nothing(rig)

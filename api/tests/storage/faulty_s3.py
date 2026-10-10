@@ -9,8 +9,9 @@ backend 5xx or a transport failure.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager
 from typing import Any
 
 from mc_server_dashboard_api.storage.adapters.object_store import (
@@ -30,8 +31,14 @@ class Faults:
     def __init__(self) -> None:
         self.when: Fault = lambda op, key: False
         # Clients currently inside their ``async with``: what a stream that was
-        # opened and not yet closed is still holding.
+        # opened and not yet closed is still holding. Counted down only once the
+        # client's exit has run to completion (see :class:`_FaultyContext`).
         self.open_clients = 0
+        # The ``get_object`` bodies (by key) that deliver their first chunk and
+        # then never answer again: a read that is PENDING, for a test to
+        # disconnect into. ``stalled`` is set once a body has reached that point.
+        self.stall_body: Callable[[str], bool] = lambda key: False
+        self.stalled = asyncio.Event()
 
     def always(self) -> None:
         self.when = lambda op, key: True
@@ -53,21 +60,49 @@ class _FaultyClient:
         async def _call(*args: Any, **kwargs: Any) -> Any:
             if self._faults.when(name, str(args[0]) if args else ""):
                 raise ObjectStoreUnavailableError(f"injected outage: {name}")
-            return await method(*args, **kwargs)
+            result = await method(*args, **kwargs)
+            if name == "get_object" and self._faults.stall_body(str(args[0])):
+                return _stalling(result, self._faults)
+            return result
 
         return _call
 
 
+async def _stalling(body: AsyncIterator[bytes], faults: Faults) -> AsyncIterator[bytes]:
+    """Deliver ``body``'s first chunk, then leave the next read pending forever."""
+
+    yield await anext(body)
+    faults.stalled.set()
+    await asyncio.Event().wait()
+
+
+class _FaultyContext(AbstractAsyncContextManager[S3Client]):
+    """One client's ``async with``, whose exit AWAITS like a real client's does.
+
+    Releasing a real S3 client is asynchronous. The exit here yields to the event
+    loop once before it counts the client as released, so cleanup that is
+    cancelled partway — an exit running inside an already-cancelled scope — is
+    visible as a client that never got counted down (issue #3234).
+    """
+
+    def __init__(
+        self, inner: AbstractAsyncContextManager[S3Client], faults: Faults
+    ) -> None:
+        self._inner = inner
+        self._faults = faults
+
+    async def __aenter__(self) -> S3Client:
+        client = await self._inner.__aenter__()
+        self._faults.open_clients += 1
+        return _FaultyClient(client, self._faults)  # type: ignore[return-value]
+
+    async def __aexit__(self, *exc_info: Any) -> bool | None:
+        await asyncio.sleep(0)
+        suppress = await self._inner.__aexit__(*exc_info)
+        self._faults.open_clients -= 1
+        return suppress
+
+
 def faulty_s3_factory(backing: FakeS3Store, faults: Faults) -> S3ClientFactory:
     inner = fake_s3_factory(backing)
-
-    @asynccontextmanager
-    async def _factory() -> AsyncIterator[S3Client]:
-        async with inner() as client:
-            faults.open_clients += 1
-            try:
-                yield _FaultyClient(client, faults)  # type: ignore[misc]
-            finally:
-                faults.open_clients -= 1
-
-    return _factory
+    return lambda: _FaultyContext(inner(), faults)
