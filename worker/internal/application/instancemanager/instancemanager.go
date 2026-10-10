@@ -1352,7 +1352,7 @@ func (m *Manager) takeStoppableReserve(serverID string) (execution.Instance, str
 	return nil, "", "", takeNotFound
 }
 
-// attemptStop retains failed stops as orphans and closes Bedrock tunnels only on confirmed termination.
+// attemptStop retains failed stops as orphans and closes Bedrock tunnels even on failure to block new joins.
 // Use the captured driver and version for pre-stop flush and any later orphan retry.
 func (m *Manager) attemptStop(ctx context.Context, serverID string, inst execution.Instance, graceful bool, driverName, mcVersion string) error {
 	var preFallback func(context.Context) bool
