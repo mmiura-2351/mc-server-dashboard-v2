@@ -32,11 +32,17 @@ import (
 const FileName = "server.properties"
 
 // MaxSize is the largest server.properties Read returns; a larger file is
-// refused. A vanilla server.properties is some sixty short keys, on the order of
-// a kilobyte, and its longest values — a MOTD, a resource-pack prompt, legacy
-// JSON generator-settings — add a few KiB at most, so 1 MiB is hundreds of times
-// any real file while keeping the read a trivial allocation.
-const MaxSize = 1 << 20
+// refused. It is the cap on a file edit through the dashboard
+// (instancemanager.MaxFileBytes, 4 MiB) and must never be below it: a
+// server.properties the Worker itself accepted as an edit must not then be
+// refused for its size when the server is started. An adapter cannot import the
+// application package that owns that constant, so the value is repeated here and
+// the relationship is pinned by a test on the instancemanager side
+// (TestServerPropertiesReaderAcceptsAnythingAnEditCanWrite). A real
+// server.properties is some sixty short keys, on the order of a kilobyte, so the
+// cap is far above any legitimate file while keeping the read a bounded, small
+// allocation.
+const MaxSize = 4 << 20
 
 // openAt opens the entry name of the directory behind dirFd. It is a variable so
 // a test can replace the file, or the working set, at the exact point between the

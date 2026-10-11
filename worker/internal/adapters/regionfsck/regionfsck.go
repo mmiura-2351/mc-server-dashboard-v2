@@ -147,10 +147,14 @@ type Finding struct {
 
 // Report is the aggregate result of walking a working set's .mca files. Scanned
 // counts every region file examined; Corrupt lists one finding per corrupt file
-// (the first failing reason).
+// (the first failing reason). Skipped counts the entries that were listed in
+// their directory but gone by the time the walk looked at them, and so were
+// neither descended into nor examined; it is zero on a working set at rest, and
+// the caller logs it.
 type Report struct {
 	Scanned int
 	Corrupt []Finding
+	Skipped int
 }
 
 // Healthy reports whether nothing was flagged.
@@ -312,9 +316,19 @@ func checkOpened(fd int, path string) (Reason, error) {
 // are descended into (whatever their name), regular files named *.mca are
 // checked, and everything else — a symlink, to a file or a directory, dangling or
 // not; a FIFO, socket or device — is left out unopened, as the snapshot leaves it
-// out of the archive. A hint the open then contradicts (the entry vanished, or
-// was replaced by something of another kind) is an error, as an entry vanishing
-// mid-walk always was: the caller logs it and goes on without the check.
+// out of the archive. Only names whose directory entry says "directory" or
+// "regular file named *.mca" are lstat'ed at all.
+//
+// An entry gone between its directory's listing and that lstat is skipped and
+// counted in Report.Skipped: a running server deletes files all the time, and one
+// deletion must not cost the scan and the findings it already holds. A hint the
+// open then contradicts (the entry vanished in that narrower window, or was
+// replaced by something of another kind) is an error and no report, as an entry
+// vanishing mid-walk always was: the caller logs it.
+//
+// One caveat on "never resolves a path": on a filesystem whose listing carries no
+// entry types, the os package fills them in with an lstat by path. That answer,
+// like the listing's, only ever leaves a name out.
 func CheckWorkingSet(root string) (Report, error) {
 	// The root is the one name resolved by path: it is the Worker's own entry in
 	// the scratch root, which the server (confined to what is beneath it) cannot
@@ -372,15 +386,30 @@ var (
 func walk(dirFd int, path string, depth int, report *Report) error {
 	dir := os.NewFile(uintptr(dirFd), path)
 	defer func() { _ = dir.Close() }()
-	names, err := dir.Readdirnames(-1)
+	entries, err := dir.ReadDir(-1)
 	if err != nil {
 		return &os.PathError{Op: "readdir", Path: path, Err: err}
 	}
-	sort.Strings(names)
-	for _, name := range names {
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	for _, entry := range entries {
+		name := entry.Name()
+		// The type the listing carries costs nothing and is used for one thing only:
+		// to leave alone, without a system call, the names that cannot matter — the
+		// bulk of a working set (logs, plugin files, temp files). It is never what
+		// an open is trusted on: a name it lets through gets the lstat below, and
+		// what is then opened is judged on its own descriptor.
+		if !entry.IsDir() && (!entry.Type().IsRegular() || !strings.HasSuffix(name, ".mca")) {
+			continue
+		}
 		entryPath := filepath.Join(path, name)
 		var hint unix.Stat_t
 		if err := statAt(dirFd, name, &hint); err != nil {
+			if errors.Is(err, unix.ENOENT) {
+				// Gone since the listing: a running server deletes files all the
+				// time, and one deletion must not cost the scan and its findings.
+				report.Skipped++
+				continue
+			}
 			return &os.PathError{Op: "lstat", Path: entryPath, Err: err}
 		}
 		switch hint.Mode & unix.S_IFMT {

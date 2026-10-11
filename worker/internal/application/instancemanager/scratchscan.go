@@ -213,6 +213,11 @@ func heldGeneration(workingDir, serverID string, quiesced bool, log *slog.Logger
 		}
 		return 0
 	}
+	if report.Skipped > 0 && log != nil {
+		// Nothing should be deleting files in a quiesced set.
+		log.Warn("held-set region fsck skipped entries that vanished mid-scan; advertising recorded generation",
+			"server_id", serverID, "generation", gen, "skipped", report.Skipped, "scanned", report.Scanned)
+	}
 	return gen
 }
 

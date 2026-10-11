@@ -604,7 +604,8 @@ whatever its size (issue #3335). The worker's own reads of `server.properties`
 — for the RCON password and port, the ports it publishes, and the port a relay
 tunnel dials — go through one reader that opens the file relative to the
 working-set root without following links or blocking, accepts only a regular
-file, and reads at most 1 MiB: a `server.properties` replaced by a link to
+file, and reads at most 4 MiB (the cap on a file edit, so a file the dashboard
+accepted is never refused for its size): a `server.properties` replaced by a link to
 another server's file is refused rather than read, so that server's RCON
 password is never sent to the container that planted the link, and the refusal
 fails the operation (a start, a tunnel dial, an RCON open) instead of falling
