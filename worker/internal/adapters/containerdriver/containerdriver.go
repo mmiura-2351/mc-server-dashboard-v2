@@ -537,9 +537,9 @@ var droppedCapabilities = []string{"NET_RAW"}
 //
 // The hand-over runs before EVERY create rather than once at hydrate because the
 // working set gains Worker-owned entries in between: a hydrate or restore writes
-// the tree as the Worker's user, the install supervisor creates
-// logs/forge-install.log, and a working set from before this change holds
-// root-owned files from the days the server itself ran as root. The walk itself,
+// the tree as the Worker's user, and a working set from before this change holds
+// root-owned files from the days the server itself ran as root (the install log
+// is not one of them: openInstallLog gives it its directory's owner). The walk itself,
 // and the check that nothing is running against the tree, are in handover.go.
 func (d *Driver) createServerContainer(ctx context.Context, spec execution.InstanceSpec, create CreateSpec) (string, error) {
 	begin := time.Now()
@@ -1426,11 +1426,14 @@ func (i *instance) createInstallRetryContainer() (string, error) {
 // logs/forge-install.log in the working dir, so an operator can read the install
 // diagnostics via the files API (issue #305). It is best-effort: a failure to open
 // the stream or the log file leaves the file empty/absent rather than failing the
-// install (the install's own exit code is the authority on success).
+// install (the install's own exit code is the authority on success). A log that
+// cannot be opened inside the working set — the installer can plant a link there
+// (issue #3298) — is logged at WARN and the install goes on without it.
 //
 // It returns what this attempt's output said about why it might have failed. The
 // log file is appended to across attempts and starts, so the stream — not the
-// file — is what gets scanned (issue #1093).
+// file — is what gets scanned (issue #1093); it is scanned whether or not the
+// file could be opened.
 func (i *instance) captureInstallOutput(installID string) *installOutputScan {
 	scan := &installOutputScan{}
 	rc, err := i.docker.Logs(context.Background(), installID)
@@ -1439,12 +1442,11 @@ func (i *instance) captureInstallOutput(installID string) *installOutputScan {
 	}
 	defer func() { _ = rc.Close() }()
 
-	logPath := filepath.Join(i.spec.WorkingDir, filepath.FromSlash(execution.ForgeInstallLogRelpath))
-	if err := os.MkdirAll(filepath.Dir(logPath), 0o750); err != nil {
-		return scan
-	}
-	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o640) //nolint:gosec // logPath is the server's own working dir, not user-controlled.
+	f, err := openInstallLog(i.spec.WorkingDir)
 	if err != nil {
+		i.logger.Warn("forge install log not written; continuing the install without it",
+			"server_id", i.spec.ServerID, "path", execution.ForgeInstallLogRelpath, "err", err)
+		demuxLogsTo(rc, scan)
 		return scan
 	}
 	defer func() { _ = f.Close() }()
