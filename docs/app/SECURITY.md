@@ -591,7 +591,14 @@ wrote, it is done only once no container of that server — launch or install �
 is alive (a live or unaccounted-for one refuses the start, with no ownership
 change), and it walks the tree by directory descriptor without following
 links, so a directory swapped for a symlink cannot lead it outside the working
-set. A file the worker writes into a running server's working set (a file edit
+set. A snapshot — which is also taken while the server runs — reads the tree
+the same way (issue #3334): each directory and file is opened relative to its
+parent's descriptor without following links, and what goes into the archive is
+decided on the opened descriptor, so an entry swapped for a symlink or a FIFO
+mid-snapshot is skipped instead of being packed from outside the working set or
+blocking the worker. The walk holds one descriptor per directory level and
+refuses a working set nested deeper than 128 directories.
+A file the worker writes into a running server's working set (a file edit
 through the API, and any parent directory it has to create) is given its
 directory's owner on the open descriptor, so the server keeps access to it.
 

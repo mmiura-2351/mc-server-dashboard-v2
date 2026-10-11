@@ -32,10 +32,13 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/scratchformat"
 )
@@ -607,28 +610,11 @@ const displacedPrefix = ".displaced-"
 // fail only this one). Production always uses os.Rename.
 var swapRename = os.Rename
 
-// openFile is the function used by writeRegular to open a file for reading. It
-// is indirected through a package var so a test can inject ENOENT for a specific
-// path (simulating log-rotation deletion between the walk and the open) without
-// needing to race real filesystem timings. Production always uses os.Open.
-var openFile = os.Open
-
-// readDir is the function used by walkInto to list a directory. Indirected
-// through a package var for the same reason as openFile: a test can inject ENOENT
-// for a specific directory (simulating a rotated log dir / plugin temp dir
-// deleted between the parent's walk and this read) without racing real timings.
-// displacedSlotHoldsWorkingSet reads through it too, so a test can inject a
-// permission failure on the .displaced-<id> slot without a chmod fixture that would
-// silently stop testing anything when the suite runs as root (issue #2278).
-// Production always uses os.ReadDir.
+// readDir lists a directory by path. displacedSlotHoldsWorkingSet reads the
+// .displaced-<id> slot through it, so a test can inject a permission failure on
+// the slot without a chmod fixture that would silently stop testing anything when
+// the suite runs as root (issue #2278). Production always uses os.ReadDir.
 var readDir = os.ReadDir
-
-// entryInfo resolves a DirEntry's FileInfo for walkInto. os.DirEntry.Info() lazily
-// lstats the entry, so it returns ENOENT when the entry vanishes between the ReadDir
-// walk and this call — the same race family as openFile/readDir (#820/#853/#854).
-// Indirected through a package var so a test can inject ENOENT for a specific entry
-// without racing real filesystem timings. Production always uses entry.Info().
-var entryInfo = func(entry os.DirEntry) (os.FileInfo, error) { return entry.Info() }
 
 // fsyncTree fsyncs every directory in the tree rooted at dir (post-order, so a
 // child dir is durable before its parent's entry for it). File contents are already
@@ -781,6 +767,73 @@ func safeJoin(root, name string) (string, error) {
 	return joined, nil
 }
 
+// The snapshot walk (packTar, walkInto, packDir, packRegular) never resolves a
+// path below the working-set root (issue #3334). A snapshot is taken of a RUNNING
+// server too: its code — which the operator does not control — has the working
+// set bind-mounted and can replace any entry at any moment, and under the shipped
+// topology the Worker walking it is root. A walk that decided what an entry was
+// and then opened it by path would follow a symlink swapped in between the two
+// and pack a host file into the snapshot, which a restore then hands to the
+// tenant. So, like the hand-over walk (containerdriver/handover.go):
+//
+//   - the root is opened once; every directory is opened relative to its parent's
+//     descriptor with O_NOFOLLOW|O_DIRECTORY, every file relative to its
+//     directory's descriptor with O_NOFOLLOW — the refusal of a link and the open
+//     are one system call;
+//   - what is archived (kind, mode, size) is read with fstat from the descriptor
+//     that was opened, i.e. from the very object whose bytes are then copied.
+//
+// The lstat before the open is only a hint: it picks the open flags and lets the
+// walk leave out, unopened, what it never archives. A hint the open then
+// contradicts means the entry was replaced in between; it is skipped with a Warn.
+//
+// What the walk does with each kind of entry (as the path-based walk did, unless
+// noted):
+//
+//   - directory, regular file: archived.
+//   - symlink: left out, never read and never followed — a restore rejects link
+//     members anyway (unpackTar).
+//   - FIFO, socket, device: left out, never opened. One swapped in for a regular
+//     file after the hint is opened O_NONBLOCK|O_NOCTTY (so a FIFO without a
+//     writer cannot block the snapshot), recognised by fstat, and closed unread.
+//   - hard link: each name is archived as an independent regular member holding
+//     the file's content; no link member is ever written. A second name is not
+//     a way out of the tree for the server: it can only link what it can already
+//     read inside its own mount (link(2) does not cross a mount).
+//   - an entry that vanishes mid-walk: skipped with a Warn.
+//   - a file that changes size mid-copy: see writeRegular.
+//
+// packOpenDirFlags and packOpenFileFlags are the only flags the walk opens with.
+const (
+	packOpenDirFlags  = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
+	packOpenFileFlags = unix.O_RDONLY | unix.O_NOFOLLOW | unix.O_NONBLOCK | unix.O_NOCTTY | unix.O_CLOEXEC
+)
+
+// maxPackDepth bounds how deep the walk descends. The walk holds one descriptor
+// per level, and the tree's shape is the server's to choose: without a bound a
+// deliberately deep tree would exhaust the Worker's descriptor table, which every
+// other server on the Worker shares. A working set nested deeper fails its
+// snapshot (a Minecraft tree is around ten levels deep).
+const maxPackDepth = 128
+
+// statAt lstats the entry name of the directory behind dirFd (the walk's hint),
+// and openAt opens it. Both act relative to a descriptor only. They are variables
+// so a test can make an entry vanish, or replace it, at an exact point of the
+// walk without racing real filesystem timings; production never reassigns them.
+var (
+	statAt = func(dirFd int, name string, st *unix.Stat_t) error {
+		return unix.Fstatat(dirFd, name, st, unix.AT_SYMLINK_NOFOLLOW)
+	}
+	openAt = func(dirFd int, name string, flags int) (int, error) {
+		for {
+			fd, err := unix.Openat(dirFd, name, flags, 0)
+			if !errors.Is(err, unix.EINTR) {
+				return fd, err
+			}
+		}
+	}
+)
+
 // packTar writes a tar of srcDir's contents (entries relative to srcDir) into w,
 // in a deterministic (lexicographic) order. The Worker-private generation marker
 // at the scratch root is excluded (issue #763); nothing else is. log is used to
@@ -790,137 +843,153 @@ func packTar(srcDir string, w io.Writer, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	info, err := os.Stat(root)
-	if err != nil {
-		if os.IsNotExist(err) {
-			// An empty/absent working dir snapshots to an empty tar.
-			return tar.NewWriter(w).Close()
-		}
-		return err
+	// The root is the one name resolved by path: it is the Worker's own entry in
+	// the scratch root, which the server (confined to what is beneath it) cannot
+	// replace.
+	rootFd, err := unix.Open(root, packOpenDirFlags, 0)
+	if errors.Is(err, unix.ENOENT) {
+		// An empty/absent working dir snapshots to an empty tar.
+		return tar.NewWriter(w).Close()
 	}
-	if !info.IsDir() {
+	if errors.Is(err, unix.ENOTDIR) {
 		return fmt.Errorf("datatransfer: snapshot source %q is not a directory", srcDir)
+	}
+	if err != nil {
+		return &os.PathError{Op: "open", Path: srcDir, Err: err}
 	}
 
 	tw := tar.NewWriter(w)
-	if err := walkInto(tw, root, root, log); err != nil {
+	// A member's path may be as long as the path-based walk could resolve below
+	// root, and no longer: a hydrate unpacks by path, so an archive holding a
+	// longer name could be published but never restored.
+	if err := walkInto(tw, rootFd, "", unix.PathMax-1-len(root)-1, 0, log); err != nil {
 		_ = tw.Close()
 		return err
 	}
 	return tw.Close()
 }
 
-// walkInto adds the contents of dir (relative to root) to tw, recursing in
-// lexicographic order for a deterministic-ish archive.
-func walkInto(tw *tar.Writer, root, dir string, log *slog.Logger) error {
-	entries, err := readDir(dir)
+// walkInto adds the contents of the directory behind dirFd to tw, recursing in
+// lexicographic order for a deterministic-ish archive. It takes ownership of
+// dirFd. rel is the directory's slash-separated path below the root ("" for the
+// root itself); it names members and labels errors and is never resolved. maxRel
+// is the longest member path allowed, depth the directory's level below the root.
+func walkInto(tw *tar.Writer, dirFd int, rel string, maxRel, depth int, log *slog.Logger) error {
+	dir := os.NewFile(uintptr(dirFd), rel)
+	defer func() { _ = dir.Close() }()
+	names, err := dir.Readdirnames(-1)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			// The directory vanished between the parent's ReadDir and this read
-			// (rotated log dirs, plugin temp dirs) — the directory analog of the
-			// #853 file-vanish race. Skip the subtree with a Warn rather than
-			// failing the whole snapshot: by the same argument as #853 this is a
-			// non-world dir (a world's region dirs cannot vanish under quiesce —
-			// Minecraft never unlinks them mid-write), and a partial-loss of region
-			// files is now caught downstream by the API missing-region gate (#854).
-			rel, relErr := filepath.Rel(root, dir)
-			if relErr != nil {
-				rel = dir
-			}
-			log.Warn("snapshot: directory vanished between walk and read; skipping",
-				"path", filepath.ToSlash(rel))
-			return nil
-		}
-		return err
+		return &os.PathError{Op: "readdir", Path: rel, Err: err}
 	}
-	// os.ReadDir already returns entries sorted by name.
-	for _, entry := range entries {
+	// Byte order, as os.ReadDir sorted the path-based walk's entries.
+	sort.Strings(names)
+	for _, name := range names {
 		// Exclude the Worker-private generation marker at the scratch root so it
 		// never lands in the authoritative stored working set (issue #763). The match
 		// is by PREFIX, not exact name (issue #834): writeGeneration writes the marker
 		// atomically via a ".mcsd_generation-XXXX" temp sibling + rename, so a crash
 		// before the rename leaves such a temp at the root — an exact-name exclusion
 		// would let it leak into the snapshot. It only ever lives at the root, so the
-		// dir == root guard keeps a same-prefixed file in a sub-tree (which would be
-		// part of the legitimate world) untouched.
-		if dir == root && strings.HasPrefix(entry.Name(), scratchformat.GenerationMarkerFile) {
+		// root guard keeps a same-prefixed file in a sub-tree (which would be part of
+		// the legitimate world) untouched.
+		if rel == "" && strings.HasPrefix(name, scratchformat.GenerationMarkerFile) {
 			continue
 		}
-		full := filepath.Join(dir, entry.Name())
-		rel, err := filepath.Rel(root, full)
-		if err != nil {
-			return err
+		entryRel := name
+		if rel != "" {
+			entryRel = rel + "/" + name
 		}
-		rel = filepath.ToSlash(rel)
+		if len(entryRel) > maxRel {
+			return &os.PathError{Op: "stat", Path: entryRel, Err: unix.ENAMETOOLONG}
+		}
 
-		info, err := entryInfo(entry)
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				// The entry vanished between this directory's ReadDir and the lazy
-				// lstat behind Info() (e.g. log rotation, plugin temp cleanup) — the
-				// remaining member of the #820/#853/#854 vanish-race family. Skip it
-				// with a Warn rather than failing the whole snapshot: by the same
-				// argument as those, a world's region files cannot vanish under quiesce
-				// (Minecraft never unlinks them mid-write), and a partial-loss of region
-				// files is caught downstream by the API missing-region gate (#854).
+		var hint unix.Stat_t
+		if err := statAt(dirFd, name, &hint); err != nil {
+			if errors.Is(err, unix.ENOENT) {
+				// The entry vanished between this directory's listing and the lstat
+				// (e.g. log rotation, plugin temp cleanup) — a member of the
+				// #820/#853/#854 vanish-race family. Skip it with a Warn rather than
+				// failing the whole snapshot: by the same argument as those, a world's
+				// region files cannot vanish under quiesce (Minecraft never unlinks
+				// them mid-write), and a partial-loss of region files is caught
+				// downstream by the API missing-region gate (#854).
 				log.Warn("snapshot: entry vanished between walk and stat; skipping",
-					"path", rel)
+					"path", entryRel)
 				continue
 			}
-			return err
+			return &os.PathError{Op: "stat", Path: entryRel, Err: err}
 		}
-		// Skip symlinks and other special files: a legitimate working set is plain
-		// files and dirs, and following links would risk archiving outside root.
-		if info.Mode()&os.ModeSymlink != 0 {
-			continue
+		switch hint.Mode & unix.S_IFMT {
+		case unix.S_IFDIR:
+			err = packDir(tw, dirFd, name, entryRel, maxRel, depth+1, log)
+		case unix.S_IFREG:
+			err = packRegular(tw, dirFd, name, entryRel, log)
+		default:
+			// Symlinks and special files: a legitimate working set is plain files
+			// and dirs. They are left out without being opened.
 		}
-
-		if entry.IsDir() {
-			if err := tw.WriteHeader(&tar.Header{
-				Name:     rel + "/",
-				Typeflag: tar.TypeDir,
-				Mode:     int64(info.Mode().Perm()),
-			}); err != nil {
-				return err
-			}
-			if err := walkInto(tw, root, full, log); err != nil {
-				return err
-			}
-			continue
-		}
-		if !info.Mode().IsRegular() {
-			continue
-		}
-		if err := writeRegular(tw, rel, full, info, log); err != nil {
+		if err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// writeRegular writes one regular file as a tar member.
-//
-// The header Size comes from the ReadDir-time stat, but the file may grow or
-// shrink between that stat and the actual read (e.g. logs/latest.log written by
-// a running Minecraft server even while save-off is active).
-//
-//   - Vanished: if the file is gone by the time we open it (ENOENT — log
-//     rotation, atomic replace), it is skipped with a log line and no tar entry
-//     is written. Only ENOENT on the open triggers a skip; other open errors
-//     still fail the snapshot.
-//   - Growth: io.LimitedReader caps the read at Size bytes, so extra bytes that
-//     arrive after the header was committed are silently ignored. The cap is
-//     logged so a later 422 working_set_corrupt is diagnosable.
-//   - Shrink: after the LimitedReader drains the (shorter) file, the remaining
-//     byte count is padded with zeros so bytes-written == header.Size (the tar
-//     must be internally consistent: header size == bytes in the entry). The
-//     pad delta is logged for the same reason.
-func writeRegular(tw *tar.Writer, rel, full string, info os.FileInfo, log *slog.Logger) error {
+// packDir archives the directory name of the directory behind parentFd, then
+// everything beneath it. depth is the level of the directory being archived.
+func packDir(tw *tar.Writer, parentFd int, name, rel string, maxRel, depth int, log *slog.Logger) error {
+	if depth > maxPackDepth {
+		return fmt.Errorf("datatransfer: snapshot source is nested deeper than %d directories at %q", maxPackDepth, rel)
+	}
+	// Open before writing the header, so the member describes the directory that
+	// is then walked.
+	fd, err := openAt(parentFd, name, packOpenDirFlags)
+	if err != nil {
+		switch {
+		case errors.Is(err, unix.ENOENT):
+			// The directory vanished between the parent's walk and this open
+			// (rotated log dirs, plugin temp dirs) — the directory analog of the
+			// #853 file-vanish race. Skip the subtree with a Warn rather than
+			// failing the whole snapshot: by the same argument as #853 this is a
+			// non-world dir (a world's region dirs cannot vanish under quiesce —
+			// Minecraft never unlinks them mid-write), and a partial-loss of region
+			// files is now caught downstream by the API missing-region gate (#854).
+			log.Warn("snapshot: directory vanished between walk and read; skipping",
+				"path", rel)
+			return nil
+		case errors.Is(err, unix.ENOTDIR), errors.Is(err, unix.ELOOP):
+			// No longer a directory: replaced since the hint by a symlink (refused,
+			// not followed) or by a file.
+			log.Warn("snapshot: entry changed type between stat and open; skipping",
+				"path", rel)
+			return nil
+		}
+		return &os.PathError{Op: "open", Path: rel, Err: err}
+	}
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		_ = unix.Close(fd)
+		return &os.PathError{Op: "stat", Path: rel, Err: err}
+	}
+	if err := tw.WriteHeader(&tar.Header{
+		Name:     rel + "/",
+		Typeflag: tar.TypeDir,
+		Mode:     int64(st.Mode & 0o777),
+	}); err != nil {
+		_ = unix.Close(fd)
+		return err
+	}
+	return walkInto(tw, fd, rel, maxRel, depth, log)
+}
+
+// packRegular archives the regular file name of the directory behind dirFd.
+func packRegular(tw *tar.Writer, dirFd int, name, rel string, log *slog.Logger) error {
 	// Open before writing the header so a vanished file can be skipped cleanly
 	// without leaving an uncommitted partial entry in the archive.
-	f, err := openFile(full)
+	fd, err := openAt(dirFd, name, packOpenFileFlags)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		switch {
+		case errors.Is(err, unix.ENOENT):
 			// File vanished between the walk and the open (e.g. log rotation).
 			// Minecraft never unlinks region files mid-write, and quiesce is
 			// best-effort (RCON failure leaves the server running unbracketed),
@@ -929,16 +998,68 @@ func writeRegular(tw *tar.Writer, rel, full string, info os.FileInfo, log *slog.
 			log.Warn("snapshot: file vanished between walk and open; skipping",
 				"path", rel)
 			return nil
+		case errors.Is(err, unix.ELOOP), errors.Is(err, unix.ENXIO):
+			// Replaced since the hint by a symlink (refused, not followed) or by a
+			// socket (which cannot be opened).
+			log.Warn("snapshot: entry changed type between stat and open; skipping",
+				"path", rel)
+			return nil
 		}
-		return err
+		return &os.PathError{Op: "open", Path: rel, Err: err}
 	}
-	defer func() { _ = f.Close() }()
+	defer func() { _ = unix.Close(fd) }()
 
-	size := info.Size()
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		return &os.PathError{Op: "stat", Path: rel, Err: err}
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFREG {
+		// Replaced since the hint by a directory, FIFO or device; nothing is read
+		// from it.
+		log.Warn("snapshot: entry changed type between stat and open; skipping",
+			"path", rel)
+		return nil
+	}
+	return writeRegular(tw, rel, fdReader(fd), st.Size, int64(st.Mode&0o777), log)
+}
+
+// fdReader reads a regular file through its raw descriptor. The descriptor keeps
+// the O_NONBLOCK it was opened with, which has no effect on a regular file.
+type fdReader int
+
+func (fd fdReader) Read(p []byte) (int, error) {
+	for {
+		n, err := unix.Read(int(fd), p)
+		switch {
+		case errors.Is(err, unix.EINTR):
+			continue
+		case err != nil:
+			return 0, err
+		case n == 0:
+			return 0, io.EOF
+		}
+		return n, nil
+	}
+}
+
+// writeRegular writes one regular file, read from f, as the tar member rel.
+//
+// size is what fstat reported on the open file, but the file may grow or shrink
+// between that stat and the actual read (e.g. logs/latest.log written by a
+// running Minecraft server even while save-off is active).
+//
+//   - Growth: io.LimitedReader caps the read at Size bytes, so extra bytes that
+//     arrive after the header was committed are silently ignored. The cap is
+//     logged so a later 422 working_set_corrupt is diagnosable.
+//   - Shrink: after the LimitedReader drains the (shorter) file, the remaining
+//     byte count is padded with zeros so bytes-written == header.Size (the tar
+//     must be internally consistent: header size == bytes in the entry). The
+//     pad delta is logged for the same reason.
+func writeRegular(tw *tar.Writer, rel string, f io.Reader, size, mode int64, log *slog.Logger) error {
 	if err := tw.WriteHeader(&tar.Header{
 		Name:     rel,
 		Typeflag: tar.TypeReg,
-		Mode:     int64(info.Mode().Perm()),
+		Mode:     mode,
 		Size:     size,
 	}); err != nil {
 		return err

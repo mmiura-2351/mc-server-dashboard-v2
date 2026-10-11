@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/scratchformat"
 )
 
@@ -754,17 +756,8 @@ func TestTransferErrorNamesTheDataPlaneURL(t *testing.T) {
 	}
 }
 
-// fakeInfo wraps a real os.FileInfo but overrides Size() so we can simulate a
-// file that grew or shrank between the ReadDir stat and the actual copy.
-type fakeInfo struct {
-	os.FileInfo
-	size int64
-}
-
-func (f fakeInfo) Size() int64 { return f.size }
-
 // TestWriteRegularSizeDriftBetweenWalkAndCopy verifies that a file whose size
-// changed between the ReadDir stat and the copy leaves a consistent tar: the entry
+// changed between the walk's fstat and the copy leaves a consistent tar: the entry
 // is exactly the header-declared (stat-time) size and the archive untars cleanly.
 // A grown file is capped (no ErrWriteTooLong); a shrunk file is zero-padded. Each
 // drift is logged (issue #820).
@@ -797,17 +790,17 @@ func TestWriteRegularSizeDriftBetweenWalkAndCopy(t *testing.T) {
 			if err := os.WriteFile(path, []byte(tc.onDisk), 0o640); err != nil {
 				t.Fatal(err)
 			}
-			realInfo, err := os.Stat(path)
+			f, err := os.Open(path)
 			if err != nil {
 				t.Fatal(err)
 			}
-			// Stat reports the walk-time size, before the file changed on disk.
-			info := fakeInfo{FileInfo: realInfo, size: tc.statSize}
+			defer func() { _ = f.Close() }()
 
 			h := &capturingHandler{}
 			var buf bytes.Buffer
 			tw := tar.NewWriter(&buf)
-			if err := writeRegular(tw, "latest.log", path, info, slog.New(h)); err != nil {
+			// statSize is the walk-time size, before the file changed on disk.
+			if err := writeRegular(tw, "latest.log", f, tc.statSize, 0o640, slog.New(h)); err != nil {
 				t.Fatalf("writeRegular: %v", err)
 			}
 			if err := tw.Close(); err != nil {
@@ -894,7 +887,7 @@ func (h *capturingHandler) hasMessage(msg string) bool {
 }
 
 // TestWriteRegularVanishedFileIsSkipped verifies that a file deleted between
-// the walk and os.Open (ENOENT) is silently skipped and does not fail the
+// the walk and the open (ENOENT) is skipped and does not fail the
 // snapshot (issue #820). The tar must contain the other files but not the
 // vanished one.
 func TestWriteRegularVanishedFileIsSkipped(t *testing.T) {
@@ -907,12 +900,8 @@ func TestWriteRegularVanishedFileIsSkipped(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Stat the vanished file to get its info (simulates the ReadDir-time snapshot).
-	info, err := os.Stat(vanished)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Delete the file before writeRegular opens it.
+	dirFd := openDirFd(t, srcDir)
+	// Delete the file before packRegular opens it.
 	if err := os.Remove(vanished); err != nil {
 		t.Fatal(err)
 	}
@@ -921,8 +910,8 @@ func TestWriteRegularVanishedFileIsSkipped(t *testing.T) {
 	log := slog.New(h)
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
-	if err := writeRegular(tw, "vanished.log", vanished, info, log); err != nil {
-		t.Fatalf("writeRegular must skip a vanished file, got error: %v", err)
+	if err := packRegular(tw, dirFd, "vanished.log", "vanished.log", log); err != nil {
+		t.Fatalf("packRegular must skip a vanished file, got error: %v", err)
 	}
 	if err := tw.Close(); err != nil {
 		t.Fatalf("tw.Close: %v", err)
@@ -949,14 +938,10 @@ func TestWriteRegularVanishedFileOtherErrorFails(t *testing.T) {
 	if err := os.WriteFile(target, []byte("x"), 0o000); err != nil {
 		t.Fatal(err)
 	}
-	info, err := os.Stat(target)
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
-	err = writeRegular(tw, "noperm.txt", target, info, slog.Default())
+	err := packRegular(tw, openDirFd(t, srcDir), "noperm.txt", "noperm.txt", slog.Default())
 	if err == nil {
 		// Root can open mode-000 files; skip on root.
 		if os.Getuid() == 0 {
@@ -976,8 +961,8 @@ func TestSnapshotSkipsVanishedFilesAndSucceeds(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Inject a vanished-file via the package-level openFile var: the file exists
-	// when ReadDir walks the directory but returns ENOENT when opened, simulating
+	// Inject a vanished-file via the package-level openAt var: the file exists
+	// when the walk lists the directory but returns ENOENT when opened, simulating
 	// log rotation between walk and open.
 	vanished := filepath.Join(srcDir, "vanished.log")
 	if err := os.WriteFile(vanished, []byte("log line\n"), 0o640); err != nil {
@@ -991,15 +976,15 @@ func TestSnapshotSkipsVanishedFilesAndSucceeds(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// Swap the openFile hook so vanished.log gets ENOENT.
-	orig := openFile
-	openFile = func(name string) (*os.File, error) {
-		if filepath.Base(name) == "vanished.log" {
-			return nil, os.ErrNotExist
+	// Swap the openAt hook so vanished.log gets ENOENT.
+	orig := openAt
+	openAt = func(dirFd int, name string, flags int) (int, error) {
+		if name == "vanished.log" {
+			return -1, unix.ENOENT
 		}
-		return os.Open(name)
+		return orig(dirFd, name, flags)
 	}
-	defer func() { openFile = orig }()
+	defer func() { openAt = orig }()
 
 	h := &capturingHandler{}
 	c := New(srv.Client()).WithLogger(slog.New(h))
@@ -1035,8 +1020,8 @@ func TestSnapshotSkipsVanishedFilesAndSucceeds(t *testing.T) {
 
 // TestWalkIntoVanishedDirIsSkipped verifies the directory analog of the #820/#853
 // file-vanish race (issue #854): a directory deleted between the parent's walk and
-// this read (ENOENT on ReadDir) is skipped with a Warn rather than failing the
-// whole snapshot. The kept sibling must still be archived.
+// its open (ENOENT) is skipped with a Warn rather than failing the whole snapshot.
+// The kept sibling must still be archived.
 func TestWalkIntoVanishedDirIsSkipped(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "kept.txt"), []byte("keep"), 0o640); err != nil {
@@ -1048,28 +1033,28 @@ func TestWalkIntoVanishedDirIsSkipped(t *testing.T) {
 	}
 
 	// Inject ENOENT for the logs/ subtree only (it "rotated away" mid-pack).
-	orig := readDir
-	readDir = func(name string) ([]os.DirEntry, error) {
-		if name == gone {
-			return nil, os.ErrNotExist
+	orig := openAt
+	openAt = func(dirFd int, name string, flags int) (int, error) {
+		if name == "logs" {
+			return -1, unix.ENOENT
 		}
-		return os.ReadDir(name)
+		return orig(dirFd, name, flags)
 	}
-	defer func() { readDir = orig }()
+	defer func() { openAt = orig }()
 
 	h := &capturingHandler{}
 	log := slog.New(h)
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
-	if err := walkInto(tw, root, root, log); err != nil {
+	if err := walkRoot(t, tw, root, log); err != nil {
 		t.Fatalf("walkInto must skip a vanished directory, got error: %v", err)
 	}
 	if err := tw.Close(); err != nil {
 		t.Fatalf("tw.Close: %v", err)
 	}
 
-	// kept.txt is archived; the logs/ subtree produced no member beyond its own
-	// (already-written) dir header.
+	// kept.txt is archived; the logs/ subtree produced no member, not even a
+	// header for the directory that could not be opened.
 	names := map[string]bool{}
 	tr := tar.NewReader(&buf)
 	for {
@@ -1085,6 +1070,9 @@ func TestWalkIntoVanishedDirIsSkipped(t *testing.T) {
 	if !names["kept.txt"] {
 		t.Fatal("kept.txt must be in the snapshot tar")
 	}
+	if names["logs/"] {
+		t.Fatal("logs/ must not be in the snapshot tar (it vanished before the open)")
+	}
 
 	const wantMsg = "snapshot: directory vanished between walk and read; skipping"
 	if !h.hasMessage(wantMsg) {
@@ -1092,8 +1080,9 @@ func TestWalkIntoVanishedDirIsSkipped(t *testing.T) {
 	}
 }
 
-// TestWalkIntoNonENOENTDirErrorFails verifies a non-ENOENT ReadDir error (e.g. a
-// permission error) still fails the whole snapshot, never a silent skip (#854).
+// TestWalkIntoNonENOENTDirErrorFails verifies a directory open error other than a
+// vanish or a type change (e.g. a permission error) still fails the whole
+// snapshot, never a silent skip (#854).
 func TestWalkIntoNonENOENTDirErrorFails(t *testing.T) {
 	root := t.TempDir()
 	sub := filepath.Join(root, "sub")
@@ -1101,25 +1090,25 @@ func TestWalkIntoNonENOENTDirErrorFails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	orig := readDir
-	readDir = func(name string) ([]os.DirEntry, error) {
-		if name == sub {
-			return nil, os.ErrPermission
+	orig := openAt
+	openAt = func(dirFd int, name string, flags int) (int, error) {
+		if name == "sub" {
+			return -1, unix.EACCES
 		}
-		return os.ReadDir(name)
+		return orig(dirFd, name, flags)
 	}
-	defer func() { readDir = orig }()
+	defer func() { openAt = orig }()
 
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
-	if err := walkInto(tw, root, root, slog.Default()); err == nil {
-		t.Fatal("walkInto must propagate a non-ENOENT ReadDir error")
+	if err := walkRoot(t, tw, root, slog.Default()); err == nil {
+		t.Fatal("walkInto must propagate a non-ENOENT directory open error")
 	}
 }
 
-// TestWalkIntoVanishedEntryInfoIsSkipped verifies the entry.Info() member of the
+// TestWalkIntoVanishedEntryInfoIsSkipped verifies the lstat member of the
 // #820/#853/#854 vanish-race family (issue #887): an entry that disappears between
-// the parent's ReadDir and the lazy lstat behind entry.Info() (ENOENT) is skipped
+// the directory's listing and the walk's lstat of it (ENOENT) is skipped
 // with a Warn rather than failing the whole snapshot. The kept sibling must still
 // be archived.
 func TestWalkIntoVanishedEntryInfoIsSkipped(t *testing.T) {
@@ -1131,22 +1120,23 @@ func TestWalkIntoVanishedEntryInfoIsSkipped(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Inject ENOENT from Info() for vanished.log only: it exists at ReadDir time but
-	// the lazy lstat behind Info() fails, simulating a delete between walk and stat.
-	orig := entryInfo
-	entryInfo = func(entry os.DirEntry) (os.FileInfo, error) {
-		if entry.Name() == "vanished.log" {
-			return nil, os.ErrNotExist
+	// Inject ENOENT from the lstat for vanished.log only: it exists when the
+	// directory is listed but the lstat fails, simulating a delete between walk and
+	// stat.
+	orig := statAt
+	statAt = func(dirFd int, name string, st *unix.Stat_t) error {
+		if name == "vanished.log" {
+			return unix.ENOENT
 		}
-		return entry.Info()
+		return orig(dirFd, name, st)
 	}
-	defer func() { entryInfo = orig }()
+	defer func() { statAt = orig }()
 
 	h := &capturingHandler{}
 	log := slog.New(h)
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
-	if err := walkInto(tw, root, root, log); err != nil {
+	if err := walkRoot(t, tw, root, log); err != nil {
 		t.Fatalf("walkInto must skip a vanished entry, got error: %v", err)
 	}
 	if err := tw.Close(); err != nil {
@@ -1178,24 +1168,24 @@ func TestWalkIntoVanishedEntryInfoIsSkipped(t *testing.T) {
 	}
 }
 
-// TestWalkIntoNonENOENTEntryInfoErrorFails verifies a non-ENOENT entry.Info() error
-// still fails the whole snapshot, never a silent skip (issue #887).
+// TestWalkIntoNonENOENTEntryInfoErrorFails verifies a non-ENOENT lstat error still
+// fails the whole snapshot, never a silent skip (issue #887).
 func TestWalkIntoNonENOENTEntryInfoErrorFails(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "file.txt"), []byte("x"), 0o640); err != nil {
 		t.Fatal(err)
 	}
 
-	orig := entryInfo
-	entryInfo = func(_ os.DirEntry) (os.FileInfo, error) {
-		return nil, os.ErrPermission
+	orig := statAt
+	statAt = func(_ int, _ string, _ *unix.Stat_t) error {
+		return unix.EACCES
 	}
-	defer func() { entryInfo = orig }()
+	defer func() { statAt = orig }()
 
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
-	if err := walkInto(tw, root, root, slog.Default()); err == nil {
-		t.Fatal("walkInto must propagate a non-ENOENT entry.Info() error")
+	if err := walkRoot(t, tw, root, slog.Default()); err == nil {
+		t.Fatal("walkInto must propagate a non-ENOENT lstat error")
 	}
 }
 
