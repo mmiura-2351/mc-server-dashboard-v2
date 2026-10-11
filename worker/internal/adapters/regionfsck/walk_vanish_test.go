@@ -78,6 +78,42 @@ func TestWalkerSkipsADirectoryThatVanishedAfterTheListing(t *testing.T) {
 	assertKeptTheEarlierFinding(t, report, err, 3, 1)
 }
 
+// The type a directory listing carries is not what the walk goes by: a region
+// file replaced by a link or a FIFO after the listing is seen for what it is by
+// the lstat, and left out unopened like any other.
+func TestWalkerDoesNotTrustTheListingsEntryType(t *testing.T) {
+	outside := write(t, filepath.Join(t.TempDir(), "r.9.9.mca"), tornRegion())
+	for name, plant := range map[string]func(path string) error{
+		"replaced by a symlink": func(path string) error { return os.Symlink(outside, path) },
+		"replaced by a fifo":    func(path string) error { return unix.Mkfifo(path, 0o600) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := tornThenHealthy(t)
+			path := filepath.Join(root, "region", "r.1.0.mca")
+			beforeStatting(t, "r.1.0.mca", func() {
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+				if err := plant(path); err != nil {
+					t.Fatal(err)
+				}
+			})
+			opened := false
+			origOpen := openAt
+			t.Cleanup(func() { openAt = origOpen })
+			openAt = func(dirFd int, entry string, flags int) (int, error) {
+				opened = opened || entry == "r.1.0.mca"
+				return origOpen(dirFd, entry, flags)
+			}
+			report, err := checkWithin(t, root)
+			assertKeptTheEarlierFinding(t, report, err, 3, 0)
+			if opened {
+				t.Error("the walk opened an entry its lstat said is not a regular file")
+			}
+		})
+	}
+}
+
 // A file that is not a region file is not looked at beyond its directory entry,
 // so its vanishing is not even noticed.
 func TestWalkerIgnoresAFileThatIsNotARegionVanishingAfterTheListing(t *testing.T) {
