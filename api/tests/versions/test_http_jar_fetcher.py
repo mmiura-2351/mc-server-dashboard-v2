@@ -10,6 +10,8 @@ and the SSRF guard refuses a URL resolving to a private IP (#1598).
 from __future__ import annotations
 
 import functools
+import gzip
+from collections.abc import AsyncIterator
 
 import httpx2
 import pytest
@@ -62,6 +64,46 @@ async def test_aborts_over_cap_body(monkeypatch: pytest.MonkeyPatch) -> None:
     _install_transport(monkeypatch, handler)
     with pytest.raises(JarTooLargeError):
         await HttpxJarFetcher().fetch(_URL)
+
+
+@pytest.mark.asyncio
+async def test_compressed_body_is_aborted_before_it_is_inflated_whole(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cap bounds what a compressed body inflates to, not only what it yields.
+
+    The cap is counted on decoded bytes, so it protects only if the client hands
+    them over in bounded pieces. httpx2 before 2.12.0 inflated each network read
+    whole first (PYSEC-2026-3846): a few kilobytes on the wire reached the cap
+    check as one chunk hundreds of times the cap.
+    """
+
+    cap = 1024 * 1024
+    plain_size = 32 * cap
+    monkeypatch.setattr(http_jar_fetcher, "MAX_JAR_BYTES", cap)
+    bomb = gzip.compress(bytes(plain_size))
+
+    def handler(_: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            200, headers={"Content-Encoding": "gzip"}, stream=httpx2.ByteStream(bomb)
+        )
+
+    inflated = 0
+    aiter_bytes = httpx2.Response.aiter_bytes
+
+    async def counting(
+        self: httpx2.Response, chunk_size: int | None = None
+    ) -> AsyncIterator[bytes]:
+        nonlocal inflated
+        async for chunk in aiter_bytes(self, chunk_size):
+            inflated += len(chunk)
+            yield chunk
+
+    monkeypatch.setattr(httpx2.Response, "aiter_bytes", counting)
+    _install_transport(monkeypatch, handler)
+    with pytest.raises(JarTooLargeError):
+        await HttpxJarFetcher().fetch(_URL)
+    assert inflated <= 4 * cap
 
 
 @pytest.mark.asyncio

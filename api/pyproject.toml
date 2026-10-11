@@ -24,9 +24,11 @@ dependencies = [
     # which cancels a streaming response through an anyio cancel scope when the
     # client disconnects; the download streams shield their resource cleanup
     # from that scope (``anyio.CancelScope(shield=True)``, issue #3234), so the
-    # import is direct and declared. 4.13.0 (2026-03-24) is the locked version,
-    # well outside the 7-day cooldown (Section 3); cap the next major.
-    "anyio>=4.13.0,<5",                 # 2026-03-24
+    # import is direct and declared. 4.14.2 (2026-07-12) is the locked version,
+    # well outside the 7-day cooldown (Section 3); cap the next major. The floor
+    # is a security floor: every release below 4.14.2 carries published
+    # advisories (#3325).
+    "anyio>=4.14.2,<5",                 # 2026-07-12
     # WebSocket protocol implementation for uvicorn (#507). Bare uvicorn ships no
     # WS library, so its auto-selector resolves AutoWebSocketsProtocol to None and
     # silently downgrades every WS upgrade to plain HTTP — the live /events
@@ -74,9 +76,10 @@ dependencies = [
     # Confined to the adapters at the transport edge. This is the sole runtime HTTP
     # client (#1764 retired the prior httpx 0.28 pin): starlette's TestClient also
     # imports it under the `httpx2` name, and since runtime deps are installed in
-    # the test env, no separate dev pin is needed. 2.5.0 (2026-06-25) is outside
-    # the 7-day cooldown (Section 3); cap the next major.
-    "httpx2>=2.5.0,<3",                 # 2026-06-25
+    # the test env, no separate dev pin is needed. 2.13.1 (2026-09-23) is outside
+    # the 7-day cooldown (Section 3); cap the next major. The floor is a security
+    # floor: every release below 2.12.0 carries published advisories (#3325).
+    "httpx2>=2.13.1,<3",                # 2026-09-23
     # Prometheus exposition + metric primitives behind the /metrics endpoint
     # (issue #282, NFR-OBS): the standard client library renders the text format
     # and provides the Counter/Histogram/Gauge primitives and the custom-collector
