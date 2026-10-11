@@ -597,7 +597,18 @@ parent's descriptor without following links, and what goes into the archive is
 decided on the opened descriptor, so an entry swapped for a symlink or a FIFO
 mid-snapshot is skipped instead of being packed from outside the working set or
 blocking the worker. The walk holds one descriptor per directory level and
-refuses a working set nested deeper than 128 directories.
+refuses a working set nested deeper than 128 directories. The region check
+that precedes a snapshot walks the tree the same way, under the same depth
+bound, and reads a fixed number of fixed-size pieces of each region file
+whatever its size (issue #3335). The worker's own reads of `server.properties`
+— for the RCON password and port, the ports it publishes, and the port a relay
+tunnel dials — go through one reader that opens the file relative to the
+working-set root without following links or blocking, accepts only a regular
+file, and reads at most 1 MiB: a `server.properties` replaced by a link to
+another server's file is refused rather than read, so that server's RCON
+password is never sent to the container that planted the link, and the refusal
+fails the operation (a start, a tunnel dial, an RCON open) instead of falling
+back to a default port or password.
 A file the worker writes into a running server's working set (a file edit
 through the API, and any parent directory it has to create) is given its
 directory's owner on the open descriptor, so the server keeps access to it.

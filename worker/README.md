@@ -38,6 +38,7 @@ worker/
         ├── javaruntime/   # Minecraft version → Java major mapping
         ├── rcon/          # ServerControl over the Source RCON protocol
         ├── regionfsck/    # structural .mca region validation before a snapshot
+        ├── serverproperties/  # no-follow, size-bounded read of a working set's server.properties
         └── tunnel/        # Worker side of the relay TLS dial-back tunnel
 ```
 

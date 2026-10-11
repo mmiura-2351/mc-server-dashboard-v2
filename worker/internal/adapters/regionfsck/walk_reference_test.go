@@ -261,6 +261,8 @@ func TestVerdictOnAWorkingSetAtRestMatchesThePathBasedWalk(t *testing.T) {
 		t.Fatalf("the fixture holds only %d healthy regions; reference report = %+v", healthy, want)
 	}
 
+	t.Logf("fixture: %d region files scanned, %d corrupt %v", want.Scanned, len(want.Corrupt), reasons)
+
 	got, err := CheckWorkingSet(root)
 	if err != nil {
 		t.Fatalf("CheckWorkingSet: %v", err)
