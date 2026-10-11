@@ -36,6 +36,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -44,7 +45,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/serverproperties"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/javaproperties"
 )
 
 // defaultGamePort is the Minecraft server port when server.properties does not
@@ -2181,8 +2184,9 @@ var (
 // ports reads the server's game and RCON ports from its working-dir
 // server.properties, falling back to the Minecraft defaults when the file is
 // absent or a key is unset. Start publishes the game port on the configured host
-// interface and RCON on loopback. The file itself is parsed by the shared
-// Java-compatible reader (internal/javaproperties), which tunnel.gamePort
+// interface and RCON on loopback. The file itself is read by the shared no-follow
+// reader (adapters/serverproperties) and parsed by the shared Java-compatible
+// parser (internal/javaproperties), both of which tunnel.gamePort
 // (adapters/tunnel/tunnel.go) also uses, so the two cannot disagree about what
 // the file says; keep the resolution around it in sync too — if the driver ever
 // maps a host port that differs from the container port, the tunnel must dial
@@ -2191,12 +2195,15 @@ var (
 // An unreadable file fails the start instead of falling back: the fallback is
 // 25565, the relay's port, so a failed read turns a correctly tracked server
 // into a host-port collision that never starts (issue #2621). Only an ABSENT file
-// still takes the defaults.
+// still takes the defaults (a legacy server whose working set was never seeded).
+// A file the reader refuses — a symlink, dangling or not, a FIFO or other
+// non-regular file, an oversized one (issue #3335) — is unreadable, not absent.
 func ports(workingDir string) (game, rcon string, err error) {
-	props, err := readProperties(filepath.Join(workingDir, "server.properties"))
-	if err != nil {
-		return "", "", err
+	data, err := serverproperties.Read(workingDir)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return "", "", fmt.Errorf("containerdriver: %w", err)
 	}
+	props := javaproperties.Parse(data)
 	game = props["server-port"]
 	if game == "" {
 		game = defaultGamePort

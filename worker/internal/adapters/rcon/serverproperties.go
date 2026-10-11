@@ -4,11 +4,10 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/serverproperties"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/javaproperties"
 )
 
@@ -30,7 +29,7 @@ const defaultRCONHost = "127.0.0.1"
 // the file is read in (issue #3116). It errors when RCON is not
 // enabled/configured; the graceful-stop path then falls back to signals.
 func OpenFromWorkingDir(ctx context.Context, workingDir, host, mcVersion string) (*Client, error) {
-	props, err := readProperties(filepath.Join(workingDir, "server.properties"), mcVersion)
+	props, err := readProperties(workingDir, mcVersion)
 	if err != nil {
 		return nil, err
 	}
@@ -51,16 +50,24 @@ func OpenFromWorkingDir(ctx context.Context, workingDir, host, mcVersion string)
 	return Dial(ctx, net.JoinHostPort(host, port), password)
 }
 
-// readProperties reads and parses the server.properties at path with the shared
-// Java-compatible reader (internal/javaproperties), in the charset a server of
-// mcVersion loads it in, so the credential dialed with is the one the Minecraft
+// readProperties reads and parses the server.properties of workingDir with the
+// shared Java-compatible reader (internal/javaproperties), in the charset a server
+// of mcVersion loads it in, so the credential dialed with is the one the Minecraft
 // server itself read: a "rcon.password:secret", an escaped or \uXXXX-spelled
 // key, or a backslash continuation is no longer invisible here (issue #2811),
 // and a non-ASCII password reaches the server as the text it holds (issue
-// #3116). Any read failure is an error, an absent file included -- without a
-// password there is nothing to dial, and the caller falls back to signals.
-func readProperties(path, mcVersion string) (map[string]string, error) {
-	data, err := os.ReadFile(path) //nolint:gosec // path is the server's own working dir, not user-controlled.
+// #3116).
+//
+// The bytes come from the shared no-follow reader (adapters/serverproperties),
+// because the password read here is then sent to the server's own container: a
+// server.properties the server replaced with a link to another server's file
+// would otherwise disclose that server's password (issue #3335). Any read
+// failure is an error -- an absent file, and a file the reader refuses (a
+// symlink, a FIFO or other non-regular file, an oversized one). There is no
+// default and no remembered password to fall back on: without one read from this
+// file, now, there is nothing to dial, and the caller falls back to signals.
+func readProperties(workingDir, mcVersion string) (map[string]string, error) {
+	data, err := serverproperties.Read(workingDir)
 	if err != nil {
 		return nil, fmt.Errorf("rcon: read server.properties: %w", err)
 	}

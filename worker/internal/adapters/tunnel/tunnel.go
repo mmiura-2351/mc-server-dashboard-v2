@@ -20,12 +20,11 @@ import (
 	"io/fs"
 	"log/slog"
 	"net"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/serverproperties"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/javaproperties"
 )
 
@@ -355,30 +354,22 @@ func (d *Dialer) closeAll() {
 // fallback: the fallback is 25565, the relay's own port, so a tunnel that dialed
 // it would splice the player into the relay instead of the server while the
 // driver refuses to start that same server at all (issues #2621, #2792). Only an
-// ABSENT file still takes the default.
+// ABSENT file still takes the default. A file the shared no-follow reader
+// (adapters/serverproperties) refuses — a symlink, dangling or not, a FIFO or
+// other non-regular file, an oversized one (issue #3335) — is unreadable, not
+// absent.
+//
+// The file is parsed with the shared Java-compatible parser
+// (internal/javaproperties), so the port dialed is the one the Minecraft server
+// bound even when the file spells it "server-port:25599" or "server-port 25599"
+// (issue #2811).
 func gamePort(workingDir string) (string, error) {
-	props, err := readProperties(filepath.Join(workingDir, "server.properties"))
-	if err != nil {
-		return "", err
+	data, err := serverproperties.Read(workingDir)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return "", fmt.Errorf("tunnel: %w", err)
 	}
-	if port := props["server-port"]; port != "" {
+	if port := javaproperties.Parse(data)["server-port"]; port != "" {
 		return port, nil
 	}
 	return defaultGamePort, nil
-}
-
-// readProperties reads and parses the server.properties at path with the shared
-// Java-compatible reader (internal/javaproperties), so the port dialed is the
-// one the Minecraft server bound even when the file spells it "server-port:25599"
-// or "server-port 25599" (issue #2811). An absent file yields an empty map (the
-// caller falls back to the default); every other read failure is returned.
-func readProperties(path string) (map[string]string, error) {
-	data, err := os.ReadFile(path) //nolint:gosec // path is the server's own working dir, not user-controlled.
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return map[string]string{}, nil
-		}
-		return nil, fmt.Errorf("tunnel: read %s: %w", path, err)
-	}
-	return javaproperties.Parse(data), nil
 }
