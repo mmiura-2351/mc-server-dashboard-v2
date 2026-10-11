@@ -326,9 +326,9 @@ func checkOpened(fd int, path string) (Reason, error) {
 // replaced by something of another kind) is an error and no report, as an entry
 // vanishing mid-walk always was: the caller logs it.
 //
-// One caveat on "never resolves a path": on a filesystem whose listing carries no
-// entry types, the os package fills them in with an lstat by path. That answer,
-// like the listing's, only ever leaves a name out.
+// On a filesystem whose listing carries no entry types, the os package fills them
+// in with an fstatat on the directory's descriptor (no path is resolved), and
+// drops an entry that vanished meanwhile without it reaching Report.Skipped.
 func CheckWorkingSet(root string) (Report, error) {
 	// The root is the one name resolved by path: it is the Worker's own entry in
 	// the scratch root, which the server (confined to what is beneath it) cannot
