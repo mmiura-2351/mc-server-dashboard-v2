@@ -8,6 +8,7 @@ keeps grants and access tokens non-interchangeable in both directions.
 
 from __future__ import annotations
 
+import base64
 import datetime as dt
 
 import jwt
@@ -108,6 +109,18 @@ def test_garbage_token_is_rejected() -> None:
     clock = _FakeClock(dt.datetime(2026, 6, 4, tzinfo=dt.timezone.utc))
     with pytest.raises(InvalidAccessTokenError):
         _service(clock).verify_access_token("not-a-jwt")
+
+
+def test_token_with_a_deeply_nested_header_is_rejected() -> None:
+    # The header segment is parsed before the signature is checked, so this
+    # input needs no key. PyJWT below 2.14.0 let json's RecursionError escape
+    # jwt.decode (PYSEC-2026-4142, #3319) — past the adapter's handler, which
+    # turns only PyJWT's own errors into the domain error.
+    clock = _FakeClock(dt.datetime(2026, 6, 4, tzinfo=dt.timezone.utc))
+    depth = 70_000
+    header = base64.urlsafe_b64encode(b"[" * depth + b"]" * depth).decode()
+    with pytest.raises(InvalidAccessTokenError):
+        _service(clock).verify_access_token(f"{header}.e30.eA")
 
 
 def test_refresh_secret_is_opaque_not_its_hash() -> None:
