@@ -14,6 +14,11 @@ translates the storage ``NotFoundError`` / ``PathTraversalError`` /
 application layer. The last two both become :class:`InvalidFilePathError`, with the
 ``symlink_refused`` reason distinguishing a refused path-component symlink from a
 traversal escape (issue #2432).
+
+Every method, read or write, raises :class:`ServerFileStorageUnavailableError`
+when the store itself could not serve the request (issue #3233). After a write
+that says nothing about whether the mutation was applied: it may have been, in
+part or in whole.
 """
 
 from __future__ import annotations

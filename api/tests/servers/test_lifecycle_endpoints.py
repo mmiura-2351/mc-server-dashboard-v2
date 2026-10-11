@@ -44,6 +44,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidLifecycleTransitionError,
     LifecycleTransitionConflictError,
     NoEligibleWorkerError,
+    ServerFileStorageUnavailableError,
     ServerNotFoundError,
     ServerNotRunningError,
     WorkingSetSeedFailedError,
@@ -257,6 +258,20 @@ def test_start_owed_player_file_write_failure_is_503() -> None:
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "start"))
     assert resp.status_code == 503
     assert resp.json()["reason"] == "seed_failed"
+
+
+def test_start_store_outage_is_503() -> None:
+    # The EULA read, or the ``accept_eula`` write, hit a store outage (issue
+    # #3233). Both run before the desired-state flip, so nothing started.
+    app = _app(
+        member=True,
+        allow=True,
+        start=_FakeUseCase(error=ServerFileStorageUnavailableError("x")),
+    )
+    client = _client(app)
+    resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "start"))
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "storage_unavailable"
 
 
 def test_start_worker_unavailable_is_503() -> None:

@@ -11,11 +11,11 @@ it hands back — the type the route above it maps to its edge status.
 
 The property each test guards is that the failure is reported as a store outage
 and nothing else: not a miss (a 404 / a silently skipped member), not a corrupt
-world, and not a short body passed off as a complete one. Where the seam has a
-modelled outage type (backups, resource packs) it must arrive as that type,
-which the routes answer 503 ``storage_unavailable``. Where it has none (files,
-the plugin cache) the storage type still crosses the seam and the edge answers
-the generic 500 — the same answer an outage at request initiation gets there.
+world, and not a short body passed off as a complete one. Every seam has a
+modelled outage type and the failure must arrive as that type: backups and
+resource packs since #2378 / #2455, files and the plugin cache since #3233. The
+read routes above them answer it 503 ``storage_unavailable`` when it strikes
+before the headers; a body already flowing has no status left and aborts.
 """
 
 from __future__ import annotations
@@ -39,7 +39,9 @@ from mc_server_dashboard_api.servers.adapters.resource_pack_store import (
 )
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupStorageUnavailableError,
+    PluginCacheStorageUnavailableError,
     ResourcePackStorageUnavailableError,
+    ServerFileStorageUnavailableError,
 )
 from mc_server_dashboard_api.servers.domain.resource_pack import ResourcePackId
 from mc_server_dashboard_api.servers.domain.value_objects import (
@@ -47,10 +49,6 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerId,
 )
 from mc_server_dashboard_api.storage.adapters.object_store import ObjectStorage
-from mc_server_dashboard_api.storage.domain.errors import (
-    ObjectStoreUnavailableError,
-    StorageUnavailableError,
-)
 from mc_server_dashboard_api.storage.domain.value_objects import (
     CommunityId as StorageCommunityId,
 )
@@ -116,7 +114,7 @@ async def _delivered_before(
     return bytes(got)
 
 
-# --- files: no modelled outage, so the edge answers 500 ---------------------
+# --- files: the modelled outage, which the read routes answer 503 -----------
 
 
 async def test_file_read_mid_body_failure_is_an_outage_not_a_miss() -> None:
@@ -131,7 +129,7 @@ async def test_file_read_mid_body_failure_is_an_outage_not_a_miss() -> None:
     backing.read_aborts[key] = [_ABORT_AT]
     adapter = StorageFileStoreAdapter(storage=storage)
 
-    with pytest.raises(StorageUnavailableError):
+    with pytest.raises(ServerFileStorageUnavailableError):
         await adapter.read_file(
             community_id=community, server_id=server, rel_path="server.properties"
         )
@@ -153,7 +151,7 @@ async def test_file_stream_mid_body_failure_raises_after_the_delivered_bytes() -
         adapter.open_file_stream(
             community_id=community, server_id=server, rel_path="level.dat"
         ),
-        StorageUnavailableError,
+        ServerFileStorageUnavailableError,
     )
 
     assert delivered == _CONTENT[:_ABORT_AT]
@@ -181,7 +179,7 @@ async def test_dir_zip_member_failure_aborts_the_zip_instead_of_skipping_it(
     backing.read_aborts[key] = [abort_at]
     adapter = StorageFileStoreAdapter(storage=storage)
 
-    with pytest.raises(StorageUnavailableError):
+    with pytest.raises(ServerFileStorageUnavailableError):
         await drain(
             adapter.download_dir(
                 community_id=community, server_id=server, rel_path="world"
@@ -209,7 +207,7 @@ async def test_file_version_read_mid_body_failure_is_an_outage_not_a_miss() -> N
     key = _only_key(backing, under="versions", ending=f"/{version_id}")
     backing.read_aborts[key] = [_ABORT_AT]
 
-    with pytest.raises(StorageUnavailableError):
+    with pytest.raises(ServerFileStorageUnavailableError):
         await adapter.read_version(
             community_id=community,
             server_id=server,
@@ -391,15 +389,15 @@ async def test_resource_pack_mid_body_failure_raises_after_the_delivered_bytes()
     assert delivered == _CONTENT[:_ABORT_AT]
 
 
-# --- plugin cache: no modelled outage, so the edge answers 500 --------------
+# --- plugin cache: the modelled outage --------------------------------------
 
 
 async def test_plugin_cache_mid_body_failure_is_an_outage_not_a_cache_miss() -> None:
-    """The plugin cache seam translates only a missing blob
-    (``PluginCacheBlobNotFoundError``, which the catalog resolver treats as a
-    miss and downloads instead). A blob whose body dies partway is not missing:
-    it surfaces as the store outage, and the callers buffer the whole blob before
-    using it, so no truncated jar is ever written."""
+    """A missing blob is ``PluginCacheBlobNotFoundError``, which the catalog
+    resolver treats as a miss and downloads instead. A blob whose body dies
+    partway is not missing: it surfaces as the cache's outage type, and the
+    callers buffer the whole blob before using it, so no truncated jar is ever
+    written."""
 
     backing = FakeS3Store()
     cache = ObjectPluginCacheStore(close_tracking_factory(fake_s3_factory(backing)))
@@ -411,6 +409,8 @@ async def test_plugin_cache_mid_body_failure_is_an_outage_not_a_cache_miss() -> 
     await cache.put(sha256, _blob())
     backing.read_aborts[f"plugin-cache/{sha256}"] = [_ABORT_AT]
 
-    delivered = await _delivered_before(cache.open(sha256), ObjectStoreUnavailableError)
+    delivered = await _delivered_before(
+        cache.open(sha256), PluginCacheStorageUnavailableError
+    )
 
     assert delivered == _CONTENT[:_ABORT_AT]

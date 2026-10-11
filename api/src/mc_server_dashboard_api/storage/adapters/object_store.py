@@ -59,7 +59,10 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from types import TracebackType
 from typing import Any, Literal, Protocol
+
+import anyio
 
 from mc_server_dashboard_api.storage.adapters.failure_seam import (
     FailureSeam,
@@ -251,6 +254,36 @@ class S3Client(Protocol):
 # session/client lifecycle stays inside the adapter's own calls. An
 # ``asynccontextmanager``-decorated async generator satisfies this shape.
 S3ClientFactory = Callable[[], AbstractAsyncContextManager[S3Client]]
+
+
+class shielded_exit(AbstractAsyncContextManager[S3Client]):  # noqa: N801
+    """Enter ``client`` as usual; run its exit shielded from cancellation (#3234).
+
+    For the read streams a download holds open. When the client disconnects while
+    a read is pending, the response's cancel scope throws the cancellation into
+    that read and the stream unwinds through this exit — still inside the
+    cancelled scope, where every further ``await`` is cancelled again. Releasing
+    an S3 client awaits, so unshielded it would be abandoned halfway: the
+    connection is never returned. Shielding only the exit keeps the read itself
+    cancellable.
+    """
+
+    def __init__(self, client: AbstractAsyncContextManager[S3Client]) -> None:
+        self._client = client
+
+    async def __aenter__(self) -> S3Client:
+        return await self._client.__aenter__()
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> bool | None:
+        suppress: bool | None = None
+        with anyio.CancelScope(shield=True):
+            suppress = await self._client.__aexit__(exc_type, exc_val, exc_tb)
+        return suppress
 
 
 class _ObjectSnapshotHandle(SnapshotHandle):
@@ -1604,7 +1637,7 @@ class ObjectStorage(Storage):
         sub: str,
         rel_path: RelPath,
     ) -> AsyncIterator[bytes]:
-        async with self._client_factory() as client:
+        async with shielded_exit(self._client_factory()) as client:
             snapshot_prefix = await self._lease_live_snapshot(
                 client, community_id, server_id
             )
@@ -2424,7 +2457,7 @@ class _ObjectWorkingSetView(WorkingSetView):
         self._leased = False
 
     async def __aenter__(self) -> WorkingSetView:
-        async with self._storage._client_factory() as client:
+        async with shielded_exit(self._storage._client_factory()) as client:
             server_prefix = self._storage._server_prefix(
                 self._community_id, self._server_id
             )
@@ -2456,7 +2489,7 @@ class _ObjectWorkingSetView(WorkingSetView):
             raise NotFoundError(f"directory not found: {rel_path.value}")
         sub = self._storage._safe_subkey(rel_path)
         dir_suffix = sub + "/" if sub else ""
-        async with self._storage._client_factory() as client:
+        async with shielded_exit(self._storage._client_factory()) as client:
             objs = await client.list_objects(self._snapshot_prefix + dir_suffix)
         if not objs and sub:
             raise NotFoundError(f"directory not found: {rel_path.value}")
@@ -2470,7 +2503,7 @@ class _ObjectWorkingSetView(WorkingSetView):
 
     async def _stream_file(self, sub: str, rel_path: RelPath) -> AsyncIterator[bytes]:
         assert self._snapshot_prefix is not None
-        async with self._storage._client_factory() as client:
+        async with shielded_exit(self._storage._client_factory()) as client:
             key = self._snapshot_prefix + sub
             if await client.head_object(key) is None:
                 raise NotFoundError(f"file not found: {rel_path.value}")

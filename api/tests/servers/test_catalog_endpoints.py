@@ -49,6 +49,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     CatalogChecksumMismatchError,
     CatalogProjectNotFoundError,
     CatalogUpstreamFailedError,
+    PluginCacheStorageUnavailableError,
     PortAlreadyTakenError,
     PortRangeExhaustedError,
     ServerFilesUnsettledError,
@@ -390,6 +391,23 @@ def test_install_from_catalog_bedrock_window_exhausted_is_503() -> None:
     )
     assert resp.status_code == 503
     assert resp.json()["reason"] == "bedrock_port_range_exhausted"
+
+
+def test_install_from_catalog_cache_outage_is_503() -> None:
+    # Resolving the jar reaches the content-addressed cache before the plugin row
+    # is committed (issue #3233), so the retry starts clean.
+    app = _app(
+        member=True,
+        allow=True,
+        install=_FakeUseCase(error=PluginCacheStorageUnavailableError("x")),
+    )
+    client = _client(app)
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/install"),
+        json={"project_id": "geyser", "version_id": "ver-1"},
+    )
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "storage_unavailable"
 
 
 def test_install_from_catalog_bedrock_port_race_is_409() -> None:

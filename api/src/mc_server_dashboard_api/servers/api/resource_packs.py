@@ -70,6 +70,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ResourcePackNotFoundError,
     ResourcePackStorageUnavailableError,
     ServerBusyError,
+    ServerFileStorageUnavailableError,
     ServerFilesUnsettledError,
     ServerNotFoundError,
     WorkingSetSeedFailedError,
@@ -600,6 +601,10 @@ async def assign_resource_pack(
         # the other working-set writes, not an unmapped 500. Only the row is known
         # to be undone -- the storage write may have replaced the file first.
         raise _service_unavailable("seed_failed") from exc
+    except ServerFileStorageUnavailableError as exc:
+        # The server.properties READ hit a store outage (issue #3233). It runs
+        # before the assignment is upserted, so nothing changed.
+        raise _service_unavailable("storage_unavailable") from exc
 
     await recorder.record(
         AuditEvent(
@@ -660,6 +665,12 @@ async def unassign_resource_pack(
         raise _conflict("server_unsettled") from exc
     except ServerBusyError as exc:
         raise _conflict("server_busy") from exc
+    except ServerFileStorageUnavailableError as exc:
+        # Reading or rewriting server.properties hit a store outage (issue
+        # #3233). Both precede the row's delete, so the assignment still stands
+        # and unassigning again clears the same keys; the interrupted write may
+        # already have replaced the file.
+        raise _service_unavailable("storage_unavailable") from exc
 
     await recorder.record(
         AuditEvent(

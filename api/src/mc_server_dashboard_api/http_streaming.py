@@ -52,6 +52,10 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 
+import anyio
+from fastapi.responses import StreamingResponse
+from starlette.types import Receive, Scope, Send
+
 _logger = logging.getLogger(__name__)
 
 
@@ -89,18 +93,78 @@ async def started(source: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
         # below then yields nothing, which is the body a zero-length declaration
         # asks for.
         first = None
-    return _replaying(first, source)
+    return _Replaying(first, source)
 
 
-async def _replaying(
-    first: bytes | None, rest: AsyncIterator[bytes]
-) -> AsyncIterator[bytes]:
-    """Yield the already-pulled ``first`` chunk, then the remainder of the source."""
+class _Replaying(AsyncIterator[bytes]):
+    """The already-pulled ``first`` chunk, then the remainder of the source.
 
-    if first is not None:
-        yield first
-    async for chunk in rest:
-        yield chunk
+    A class rather than an async generator because of what closing it has to do
+    (issue #3234). The source is ALREADY begun when this is built, so it holds
+    what it opened from this moment on — and closing a generator that has never
+    been iterated does not enter its body, so a ``finally`` in one would be
+    skipped in exactly the case that matters: a response that fails or is
+    disconnected before its first body chunk. :meth:`aclose` here closes the
+    source whether or not a chunk was ever taken.
+    """
+
+    def __init__(self, first: bytes | None, rest: AsyncIterator[bytes]) -> None:
+        self._first = first
+        self._rest = rest
+
+    def __aiter__(self) -> AsyncIterator[bytes]:
+        return self
+
+    async def __anext__(self) -> bytes:
+        if self._first is not None:
+            first, self._first = self._first, None
+            return first
+        return await anext(self._rest)
+
+    async def aclose(self) -> None:
+        await aclose_stream(self._rest)
+
+
+async def aclose_stream(stream: object) -> None:
+    """Close ``stream`` now if it can be closed; a no-op for ``None``.
+
+    For a begun stream that nothing is going to consume. A begun store stream
+    holds what it opened — a descriptor, a client, a snapshot's reader lease —
+    and releases it only when it is exhausted or closed.
+
+    Shielded: this runs on the way out of a response, which may be a response
+    being cancelled, and a cancel scope that is already cancelled re-cancels
+    every further ``await`` inside it — the close would be abandoned halfway.
+    """
+
+    aclose = getattr(stream, "aclose", None)
+    if aclose is not None:
+        with anyio.CancelScope(shield=True):
+            await aclose()
+
+
+class ClosingStreamingResponse(StreamingResponse):
+    """A :class:`StreamingResponse` that closes its body stream when it is done.
+
+    Starlette iterates the body and, when the client goes away mid-transfer,
+    simply stops: the generator is left suspended at its ``yield``, and whatever
+    it holds stays held until the interpreter finalizes it. Closing the iterator
+    on every way out of the response — completion, disconnect, a failure in the
+    body, a failure before the first chunk — releases it at once instead (issue
+    #3234).
+
+    This close covers a body that was left SUSPENDED. A disconnect that lands
+    while the body is mid-read is a different case: the cancellation is thrown
+    into the read, the generators unwind right there, and nothing is left for
+    this close to do. What they release on that path is made cancellation-safe
+    where it is released (the seams' and the store's shielded cleanup), not here.
+    """
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await aclose_stream(self.body_iterator)
 
 
 async def counted(source: AsyncIterator[bytes], declared: int) -> AsyncIterator[bytes]:

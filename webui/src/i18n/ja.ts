@@ -823,6 +823,8 @@ export const ja: Record<TranslationKey, string> = {
   "files.error.invalidInput": "リクエストが無効です。",
   "files.error.workerUnavailable":
     "サーバーエージェントが切断されています。しばらくしてから再度お試しください。",
+  "files.error.storageUnavailable":
+    "現在、ファイルストレージを利用できません。しばらくしてから再度お試しください。",
   "files.error.serverBusy":
     "別の操作が進行中です。完了するまでお待ちください。",
   "files.error.conflict": "競合が発生したため、操作を完了できませんでした。",
@@ -1733,6 +1735,8 @@ export const ja: Record<TranslationKey, string> = {
     "{Noun}が見つかりません。削除された可能性があります。",
   "plugins.error.workerUnavailable":
     "サーバーエージェントが切断されています。しばらくしてから再度お試しください。",
+  "plugins.error.storageUnavailable":
+    "現在ストレージを利用できないため、変更は行われていません。しばらくしてから再度お試しください。",
   "plugins.error.downloadTooLarge":
     "クライアント用Modのサイズ ({size}) がブラウザでのダウンロード上限 (512 MiB) を超えています。",
   "plugins.error.generic": "エラーが発生しました。もう一度お試しください。",

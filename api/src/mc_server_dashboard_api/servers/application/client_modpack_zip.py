@@ -33,7 +33,9 @@ from __future__ import annotations
 
 import os
 import zipfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import aclosing
+from typing import cast
 
 from mc_server_dashboard_api.servers.domain.plugin import (
     ServerPlugin,
@@ -121,10 +123,16 @@ async def stream_client_modpack(
             entry_name = _unique_name(
                 sanitize_plugin_filename(plugin.filename), used_names
             )
-            with zf.open(f"mods/{entry_name}", "w") as entry:
-                async for chunk in cache.open(plugin.sha256):
-                    entry.write(chunk)
-                    yield sink.drain()
+            # Closed explicitly: ``async for`` does not forward a close, so a
+            # download closed while a jar is open would otherwise leave that
+            # blob's stream — and its store client — to the garbage collector
+            # (issue #3234).
+            blob = cast("AsyncGenerator[bytes, None]", cache.open(plugin.sha256))
+            async with aclosing(blob):
+                with zf.open(f"mods/{entry_name}", "w") as entry:
+                    async for chunk in blob:
+                        entry.write(chunk)
+                        yield sink.drain()
     # Flush the central directory written by ZipFile.__exit__.
     remaining = sink.drain()
     if remaining:

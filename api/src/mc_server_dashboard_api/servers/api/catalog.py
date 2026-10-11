@@ -51,6 +51,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
     InvalidFilePathError,
     PluginAlreadyExistsError,
+    PluginCacheStorageUnavailableError,
     PortAlreadyTakenError,
     PortRangeExhaustedError,
     ServerBusyError,
@@ -359,6 +360,12 @@ async def install_from_catalog(
             server_id,
         )
         raise _conflict("server_busy") from exc
+    except PluginCacheStorageUnavailableError as exc:
+        # Resolving the jar reaches the cache before the plugin row is committed,
+        # and the cache is content-addressed, so a retry starts clean (issue
+        # #3233). An outage on the working-set write after the commit is not
+        # mapped: the row is in by then, and a retry could only answer 409.
+        raise _service_unavailable("storage_unavailable") from exc
     await recorder.record(
         AuditEvent(
             operation=ops.PLUGIN_INSTALL,
