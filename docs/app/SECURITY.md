@@ -610,6 +610,21 @@ another server's file is refused rather than read, so that server's RCON
 password is never sent to the container that planted the link, and the refusal
 fails the operation (a start, a tunnel dial, an RCON open) instead of falling
 back to a default port or password.
+The worker's generation marker (`.mcsd_generation`, in the working-set root —
+its record of which store generation the set is at) is touched the same way
+(issue #3336). It is read through that same reader with a 32-byte cap (a
+generation is at most 20 digits): a marker replaced by a link, a FIFO, a
+directory, an oversized file or anything that is not one number is refused
+with a `WARN` and read as generation 0, the same as an absent marker, which
+makes the API hydrate that server. The worker reads every held server's marker
+at boot and before each registration, so the refusal is per server: one
+server's planted marker neither blocks nor fails the scan for the others. A
+launch is refused, and replayed with a hydrate, unless the marker is a regular
+file. The marker is written to an exclusively created temporary file and
+renamed into place, both relative to the working-set root's descriptor, so
+whatever was planted at either name is replaced or refused, never written
+through. What this does not make trustworthy is the marker's *value* — see "The
+generation marker's value" below.
 A file the worker writes into a running server's working set (a file edit
 through the API, and any parent directory it has to create) is given its
 directory's owner on the open descriptor, so the server keeps access to it.
@@ -725,6 +740,38 @@ security model, and the following remain true:
   readable and writable by the code running there. That is inherent to running
   the server at all; the boundary protects *other* tenants' data, not the
   contents of the container that hosts the hostile plugin.
+- **The generation marker's value.** The marker lives in that same directory,
+  which the server's user owns, so the code running there can replace it with a
+  regular file holding any number, and the worker cannot tell that file from
+  one it wrote (issue #3336). The worker reports the number in two places, and
+  the API only ever *compares* it:
+  - as the held generation, on registration. The API skips the hydrate before a
+    start when `held >= store`
+    ([`CONTROL_PLANE.md`](CONTROL_PLANE.md) Section 5.1). A number forged **at or
+    above** the store's makes the worker start the server on the working set it
+    already holds instead of the store's copy; forged **below**, or made
+    unreadable, it forces a hydrate that replaces that working set (the replaced
+    tree is parked aside, [`STORAGE.md`](STORAGE.md) Section 4.6).
+  - as the base generation of a snapshot. The publish guard refuses a base
+    *below* the store's current generation when another worker published it;
+    a forged high base is never below, so it passes that guard, and a forged low
+    one can only get the server's own publish refused.
+
+  None of this reaches another server or the store's bookkeeping: both
+  comparisons are scoped to the one server, the generation a publish produces
+  is always the store's own `current + 1` and never the declared number, and
+  the commit-time check that the publisher is the assigned worker does not
+  read the marker. What a server gains is over **its own lineage**: it can keep
+  running the working set it holds where the store has moved on without it, and
+  then publish that set as the newest generation. The store moves on without
+  the worker when a backup is restored, a file is edited while the server is
+  stopped, or the JAR changes — each relies on the next start hydrating — and
+  only if the working set outlived the stop, which it does when the final
+  snapshot was refused (a server can cause that: the region check refuses a
+  torn world). So a hostile plugin can make a backup restore or an at-rest edit
+  of its own server silently not take effect. Closing that needs the marker's
+  value to come from somewhere the container cannot write; it is open on issue
+  #3336 and not implemented.
 
 ---
 

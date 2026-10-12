@@ -93,11 +93,12 @@ func markerPlants() []markerPlant {
 			}
 			return ""
 		}},
-		// Zero-padded past the cap: it parses as 42 when read whole, so only the size
-		// bound refuses it.
+		// Zero-padded to 33 bytes, one past the 32-byte cap: it parses as 42 when read
+		// whole, so only the size bound refuses it. The length is spelled out so that
+		// raising the cap fails here.
 		{"well-formed but over the size cap", func(t *testing.T, path string) string {
 			t.Helper()
-			padded := strings.Repeat("0", maxGenerationMarkerBytes) + outsideGeneration
+			padded := strings.Repeat("0", 31) + outsideGeneration
 			if err := os.WriteFile(path, []byte(padded), 0o600); err != nil {
 				t.Fatal(err)
 			}
