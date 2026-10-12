@@ -21,6 +21,7 @@ import base64
 import datetime as dt
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
+from pathlib import Path
 from urllib.parse import quote
 
 import httpx2
@@ -1865,6 +1866,102 @@ def test_write_unicode_path_is_accepted(tmp_path: object) -> None:
         json={"content_base64": ""},
     )
     assert resp.status_code == 204
+
+
+# --- an edit at the cap, in the JSON serializations a client may send --------
+#
+# A JSON encoder may write the ``/`` of the base64 alphabet as ``\/`` (PHP's
+# does by default), which doubles that character on the wire. The body limit has
+# to carry the file cap in that serialization too (PR #3364 review, B1); the
+# bound on the PARSED string is the same either way. These run through the real
+# router, body limit and WriteFile, over real fs Storage.
+
+# Every byte value, so the base64 uses its whole alphabet -- "/" included.
+_MIXED_AT_CAP = bytes(range(256)) * (MAX_EDIT_BYTES // 256)
+# All 0xFF encodes to nothing but "/" (and padding): the most escaping can add.
+_ALL_SLASHES_AT_CAP = b"\xff" * MAX_EDIT_BYTES
+
+
+def _edit_body(content: bytes, *, escape_slashes: bool) -> bytes:
+    encoded = base64.b64encode(content).decode("ascii")
+    if escape_slashes:
+        encoded = encoded.replace("/", "\\/")
+    # Spaced like json.dumps' default separators: insignificant whitespace.
+    return ('{"content_base64": "' + encoded + '"}').encode("ascii")
+
+
+def _put_raw(client: TestClient, url: str, body: bytes) -> httpx2.Response:
+    return client.put(
+        url,
+        params={"path": "f.bin"},
+        content=body,
+        headers={"content-type": "application/json"},
+    )
+
+
+def _stored(tmp_path: object) -> list[bytes]:
+    return [p.read_bytes() for p in Path(str(tmp_path)).rglob("*") if p.is_file()]
+
+
+@pytest.mark.parametrize("escape_slashes", [False, True], ids=["plain", "escaped"])
+@pytest.mark.parametrize(
+    "content", [_MIXED_AT_CAP, _ALL_SLASHES_AT_CAP], ids=["mixed", "all-slashes"]
+)
+def test_write_at_the_cap_is_stored_in_either_serialization(
+    tmp_path: object, content: bytes, escape_slashes: bool
+) -> None:
+    assert len(content) == MAX_EDIT_BYTES
+    community, server = uuid.uuid4(), uuid.uuid4()
+    client = _client(_real_write_app(tmp_path, community, server))
+    body = _edit_body(content, escape_slashes=escape_slashes)
+    assert len(body) <= MAX_WRITE_BODY_BYTES
+
+    resp = _put_raw(client, _url(community, server), body)
+
+    assert resp.status_code == 204
+    assert content in _stored(tmp_path)
+
+
+def test_the_fully_escaped_cap_is_the_largest_supported_body() -> None:
+    # The worst case the limit is derived from: every character escaped.
+    body = _edit_body(_ALL_SLASHES_AT_CAP, escape_slashes=True)
+    assert 2 * (MAX_EDIT_BASE64_CHARS - 2) < len(body) <= MAX_WRITE_BODY_BYTES
+
+
+@pytest.mark.parametrize("escape_slashes", [False, True], ids=["plain", "escaped"])
+def test_write_one_byte_past_the_cap_is_413_in_either_serialization(
+    tmp_path: object, escape_slashes: bool
+) -> None:
+    community, server = uuid.uuid4(), uuid.uuid4()
+    client = _client(_real_write_app(tmp_path, community, server))
+    body = _edit_body(_MIXED_AT_CAP + b"\x00", escape_slashes=escape_slashes)
+
+    resp = _put_raw(client, _url(community, server), body)
+
+    assert resp.status_code == 413
+    assert resp.json() == _FILE_TOO_LARGE
+    assert _stored(tmp_path) == []
+
+
+@pytest.mark.parametrize("past", [0, 1])
+def test_write_body_limit_is_exact(tmp_path: object, past: int) -> None:
+    # Padding the JSON with insignificant whitespace sizes the body without
+    # changing the file in it: at exactly the limit it is read and stored, one
+    # byte past it the body limit refuses it.
+    community, server = uuid.uuid4(), uuid.uuid4()
+    client = _client(_real_write_app(tmp_path, community, server))
+    body = _edit_body(_MIXED_AT_CAP, escape_slashes=False)
+    body = body + b" " * (MAX_WRITE_BODY_BYTES + past - len(body))
+
+    resp = _put_raw(client, _url(community, server), body)
+
+    if past:
+        assert resp.status_code == 413
+        assert resp.json() == _FILE_TOO_LARGE
+        assert _stored(tmp_path) == []
+    else:
+        assert resp.status_code == 204
+        assert _MIXED_AT_CAP in _stored(tmp_path)
 
 
 # --- file download grants (issue #2352) ------------------------------------

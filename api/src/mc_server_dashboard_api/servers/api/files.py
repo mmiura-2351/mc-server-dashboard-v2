@@ -181,10 +181,19 @@ _UPLOAD_CHUNK_BYTES = 1024 * 1024
 # case's byte check refuses those, as before.
 MAX_EDIT_BASE64_CHARS = 4 * ((MAX_EDIT_BYTES + 2) // 3)
 
-# The most request body the edit route reads: that string, plus room for the JSON
-# around it. Past it the body is refused while it is still streaming in, instead
-# of being buffered, parsed and decoded first.
-MAX_WRITE_BODY_BYTES = MAX_EDIT_BASE64_CHARS + 64 * 1024
+# The most request body the edit route reads. Past it the body is refused while
+# it is still streaming in, instead of being buffered, parsed and decoded first.
+#
+# It is sized for the JSON *serialization* of that string, which is the client's
+# choice, not just the string. Every base64 character is one byte on the wire
+# except ``/``, which an encoder may write as the two-byte ``\/`` (PHP's does by
+# default); a file of all 0xFF bytes encodes to nothing but ``/``, so escaping
+# can at most double the string. The 64 KiB on top covers the envelope — the
+# key, the punctuation and insignificant whitespace. A body that spells
+# characters as six-byte ``\uXXXX`` escapes is valid JSON too, but no mainstream
+# encoder emits one for ASCII and it is not provided for: such a body is refused
+# here once it passes this limit.
+MAX_WRITE_BODY_BYTES = 2 * MAX_EDIT_BASE64_CHARS + 64 * 1024
 
 # The ``?path=`` default shared by the download and its grant mint. The two must
 # read the same value for an absent parameter, or a grant minted without a path

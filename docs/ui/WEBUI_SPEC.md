@@ -142,7 +142,7 @@ spooled to disk past its route's limit. The limits are constants:
 | Routes | Most body read | 413 `reason` |
 |---|---|---|
 | Every route not listed below (all JSON routes) | 1 MiB | `request_too_large` |
-| `PUT …/files` | 5,657,944 bytes: the base64 of a 4 MiB file (5,592,408 characters) + 64 KiB | `file_too_large` |
+| `PUT …/files` | 11,250,352 bytes: twice the base64 of a 4 MiB file (2 × 5,592,408 characters) + 64 KiB. Twice, because a JSON encoder may write the `/` of base64 as `\/`, and a file of all `0xFF` bytes is nothing but `/`; a body that `\uXXXX`-escapes its characters is not provided for | `file_too_large` |
 | `POST …/files/upload`, `POST …/servers/import` | 512 MiB file + 1 MiB of multipart envelope | `file_too_large` |
 | `POST …/backups/upload` | 512 MiB file + 1 MiB | `too_large` |
 | `POST …/plugins` | 512 MiB jar + 1 MiB | `file_too_large` |

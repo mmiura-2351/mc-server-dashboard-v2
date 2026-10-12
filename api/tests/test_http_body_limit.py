@@ -398,10 +398,12 @@ def test_every_route_has_the_limit_the_inventory_says(shared_app: FastAPI) -> No
 
 
 def test_the_write_body_limit_carries_a_file_at_the_edit_cap() -> None:
-    # 4 * ceil(n / 3) characters of base64 for n bytes, plus the JSON around it.
+    # 4 * ceil(n / 3) characters of base64 for n bytes. On the wire each is one
+    # byte, or two where an encoder escapes "/" as "\/" -- at worst all of them
+    # -- plus 64 KiB for the JSON around the string (test_file_endpoints.py
+    # drives both serializations through the route).
     assert MAX_EDIT_BASE64_CHARS == 4 * -(-MAX_EDIT_BYTES // 3) == 5_592_408
-    envelope = len(json.dumps({"content_base64": ""}))
-    assert MAX_WRITE_BODY_BYTES >= MAX_EDIT_BASE64_CHARS + envelope
+    assert MAX_WRITE_BODY_BYTES == 2 * 5_592_408 + 64 * 1024 == 11_250_352
 
 
 async def test_the_real_app_refuses_an_endless_file_write_within_its_limit(
