@@ -9,7 +9,10 @@ import (
 	"strings"
 	"testing"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/nofollow"
 )
 
 // generationMarkerPath returns the path of the working-set generation marker for
@@ -156,6 +159,44 @@ func TestWriteGenerationGuardedRefusesAndRemovesItsTemp(t *testing.T) {
 	}
 }
 
+// TestWriteGenerationGuardedReportsAStampTheReplacementOvertook pins the guard's second
+// run (issue #3336). The write acts on the working dir it opened, so a replacement that
+// lands after the pre-rename guard passed no longer fails the rename: the marker is
+// published into the directory that was opened, by then parked at .displaced-<id>. That
+// stamp is true of the tree it lands on, but the slot holds the hydrate's tree, so the
+// write must not be reported as landed — the caller would declare a held generation the
+// slot does not have. The replacement is performed inside the guard's first run, after
+// which that run answers as it sampled: still current.
+func TestWriteGenerationGuardedReportsAStampTheReplacementOvertook(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "s1")
+	if err := os.Mkdir(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	guard := func() bool {
+		calls++
+		if calls == 1 {
+			replaceWorkingDirLikeHydrate(t, dir, 7)
+			return true
+		}
+		return false
+	}
+
+	err := writeGenerationGuarded(dir, 12, guard)
+
+	if !errors.Is(err, errWorkingDirReplaced) {
+		t.Fatalf("writeGenerationGuarded = %v, want errWorkingDirReplaced", err)
+	}
+	if got := readGeneration(dir); got != 7 {
+		t.Fatalf("generation in the slot = %d, want the hydrate's 7", got)
+	}
+	displaced := filepath.Join(filepath.Dir(dir), ".displaced-s1")
+	if got := readGeneration(displaced); got != 12 {
+		t.Fatalf("generation in the displaced tree = %d, want 12: the stamp belongs to the "+
+			"directory the write opened", got)
+	}
+}
+
 // TestWriteGenerationGuardedWritesWhenTheGuardHolds is the companion direction: a guard
 // that reports the dir unchanged must not disturb the write at all. Together with the
 // refusal test above it pins the guard as a decision point rather than a blanket veto.
@@ -206,11 +247,11 @@ func TestRunningSnapshotSkipsGenerationStampWhenWorkingDirRemoved(t *testing.T) 
 // interleaving that the caller's pre-check cannot catch and the pre-rename guard must
 // (issue #2284): the replacement lands AFTER recordGenerationIfUnchanged has checked and
 // passed, but BEFORE writeGenerationGuarded creates the marker temp. The temp is then
-// created inside the REPLACEMENT directory, so every later path resolves there
+// created inside the REPLACEMENT directory, so every later step acts there
 // consistently and the rename would publish generation 12 onto a tree this snapshot
-// never packed. (Once the temp exists the window is closed by path semantics instead:
-// the temp rides the pinned inode into .displaced-<id> and the rename fails ENOENT on
-// its source. That is why this test has to strike before CreateTemp to be meaningful.)
+// never packed. (A replacement after the write has opened the working dir cannot do
+// that — the write stays on the descriptor it opened — and is covered by
+// TestWriteGenerationGuardedReportsAStampTheReplacementOvertook.)
 //
 // The interleaving is microseconds wide in production — it spans MkdirAll — so it is
 // driven through statWorkingDirRef rather than raced for: the fake performs the swap
@@ -625,7 +666,12 @@ func TestStrandedGenerationTempMatchesTheMarkerTempPredicates(t *testing.T) {
 			"would advertise holding a world it does not hold (issue #2279)", stranded)
 	}
 
-	sweepGenerationTemps(dir)
+	dirFd, err := nofollow.OpenDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = unix.Close(dirFd) }()
+	sweepGenerationTemps(dirFd)
 
 	if _, err := os.Stat(filepath.Join(dir, stranded)); !os.IsNotExist(err) {
 		t.Fatalf("stranded temp %q survived the sweep: stat err = %v", stranded, err)

@@ -866,14 +866,12 @@ func (m *Manager) recordGeneration(workingDir, serverID string, gen uint64) bool
 // The check is repeated as writeGenerationGuarded's pre-rename guard, and that second
 // check is what closes the one interleaving this one cannot: a replacement landing after
 // the check here but before the marker temp is created gets a temp inside the REPLACEMENT
-// tree, which then publishes cleanly. Once the temp exists the marker can no longer land
-// in a replacement tree at all — the temp rides the pinned inode to .displaced-<id> and
-// the rename fails ENOENT on its source — so between them no wrong stamp survives except
-// a swap interleaved inside the marker rename's own path resolution. That is why the
-// renameat-against-the-pinned-descriptor rewrite is NOT done here: it would buy only that
-// last sliver, while rewriting the shared, fsync-ordered writeGeneration the hydrate path
-// also uses and writing a marker into the displaced tree that STORAGE.md Section 4.6's
-// manual recovery reads. See writeGenerationGuarded for the case analysis.
+// tree, which then publishes cleanly. Once the write has opened the working dir the
+// marker can no longer land in a replacement tree at all: every later step acts on that
+// descriptor (issue #3336), so a replacement after it leaves the marker in the pinned
+// tree, by then at .displaced-<id>, and the guard's second run after the rename keeps
+// this function from reporting that stamp as held. See writeGenerationGuarded for the
+// case analysis.
 //
 // It REPORTS whether the marker was published, and that return value is the sole source
 // of the Worker-declared held generation on the snapshot's CommandResult (issue #2481).
@@ -1200,7 +1198,7 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		// Refuse a stopped-id snapshot whose scratch holds no working set (issue
 		// #1713): there is nothing to capture, so packing would upload an empty tar
 		// as a candidate new generation with the staleness guard disabled
-		// (readGeneration on an unmarked dir is 0, so the base-generation header is
+		// (recordedGeneration on an unmarked dir is 0, so the base-generation header is
 		// omitted) — leaving the API-side empty-staging refusal as the only defense
 		// and burning a full pack+upload+refusal cycle, again on every scheduler
 		// tick. The usual cause is a benign duplicate: the final snapshot published,
@@ -1299,8 +1297,9 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 
 	// Declare the store generation this set was hydrated from (issue #847) so the API
 	// can refuse the publish if the store advanced past it. 0 (an unknown/never-
-	// hydrated set) leaves the guard to compare against the store's current value.
-	baseGeneration := readGeneration(workingDir)
+	// hydrated set, or one whose marker the read refuses, issue #3336) leaves the guard
+	// to compare against the store's current value.
+	baseGeneration := recordedGeneration(workingDir, cmd.ServerID, m.logger)
 	// Bound the pack+upload with the per-transfer deadline (issue #874): without it
 	// the upload has no deadline at all and could outlive the API's snapshot_timeout
 	// indefinitely (#869). The bound is the API budget + a margin (the ack value),
@@ -2027,14 +2026,18 @@ func (m *Manager) launchReserved(ctx context.Context, cmd session.Command, drive
 	//
 	// The PREDICATE is the GENERATION MARKER, not a directory stat (issue #2802): the
 	// marker is precisely the claim the skipped hydrate relied on. The register-time
-	// advertisement reads it (scratchscan.go, readGeneration), a 200 hydrate embeds it
+	// advertisement reads it (scratchscan.go, recordedGeneration), a 200 hydrate embeds it
 	// in the tree before the swap-in rename (issue #917), a 204 stamps it as its only
 	// write, and the Worker declares a held generation to the API only when the stamp
 	// landed (issue #2500). One stat covers both destructions: the dir gone (ENOENT on
 	// the path) and the dir emptied in place (the marker gone with the contents), which
 	// a bare directory stat passed. The name is matched EXACTLY — a ".mcsd_generation-*"
 	// temp sibling from a crashed stamp is not a marker to any consumer, so it does not
-	// count here either. A marker-ONLY dir PASSES: that is the 204 nothing-published
+	// count here either. Nor does anything that is not a regular file (issue #3336): the
+	// server's own code can plant a link, a FIFO or a directory at the name, the
+	// advertisement reads such a thing as generation 0 (readGenerationMarker), so it is
+	// not the claim a skipped hydrate relied on, and it is judged without following it
+	// (generationMarkerPresent). A marker-ONLY dir PASSES: that is the 204 nothing-published
 	// contract, where booting a fresh world is intended — which is why a content
 	// predicate ("level.dat present") would be wrong. Residual: a destruction that
 	// spares the marker but eats the content still boots.
@@ -2069,10 +2072,10 @@ func (m *Manager) launchReserved(ctx context.Context, cmd session.Command, drive
 	// TestCommandErrorContract asserts this emission against that declaration, and the
 	// API's phrase is pinned to the same entry (issue #2843).
 	workingDir := filepath.Join(m.scratchDir, cmd.ServerID)
-	if _, err := os.Stat(filepath.Join(workingDir, scratchformat.GenerationMarkerFile)); os.IsNotExist(err) {
+	if err := generationMarkerPresent(workingDir); err != nil {
 		m.release(cmd.ServerID)
 		m.logger.Warn("launch refused: working dir absent",
-			"server_id", cmd.ServerID, "working_dir", workingDir, "reason", "working_set_absent")
+			"server_id", cmd.ServerID, "working_dir", workingDir, "reason", "working_set_absent", "marker", err)
 		return fail(cmd.CommandID, session.CommandErrorServerNotFound,
 			fmt.Sprintf("instancemanager: start refused: working dir absent (%s): the hydrate was "+
 				"skipped for a working set this Worker does not hold", workingDir))

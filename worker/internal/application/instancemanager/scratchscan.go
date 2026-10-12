@@ -74,6 +74,12 @@ func isReservedScratchName(name string) bool {
 // hydrate does. A rewrite that fails is logged and degrades to advertising the recorded
 // generation, the same best-effort class as a fsck I/O error.
 //
+// A marker the read REFUSES — a link, a FIFO, a directory, an oversized or unparsable
+// file, any of which the server's own code can plant (issue #3336) — is read as 0 with a
+// WARN, like an absent one: the set is still advertised, at the generation that makes the
+// API hydrate it, and the scan moves on to the next server without having followed,
+// blocked on or read through the plant (readGenerationMarker).
+//
 // quiesced is the CALLER's statement that no container this Worker started can still
 // be writing into a scratch tree — the same premise the boot reclaims above require,
 // established by the container orphan sweep and by nothing else. The fsck is skipped
@@ -171,7 +177,7 @@ var rewriteTornMarker = writeGeneration
 // next boot that can prove the premise. ScanHeldServers' doc has the full argument,
 // including why skipping the advertisement instead is worse.
 func heldGeneration(workingDir, serverID string, quiesced bool, log *slog.Logger) uint64 {
-	gen := readGeneration(workingDir)
+	gen := recordedGeneration(workingDir, serverID, log)
 	if !quiesced {
 		if log != nil {
 			log.Warn("skipping the held-set region fsck: the container orphan sweep did not "+
@@ -251,7 +257,7 @@ func (m *Manager) HeldServers() []session.HeldServer {
 		}
 		held = append(held, session.HeldServer{
 			ServerID:   entry.Name(),
-			Generation: readGeneration(workingDir),
+			Generation: recordedGeneration(workingDir, entry.Name(), m.logger),
 		})
 	}
 	return held

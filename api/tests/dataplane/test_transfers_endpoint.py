@@ -324,6 +324,34 @@ def test_snapshot_matching_base_generation_publishes(tmp_path: Path) -> None:
     assert _read_tar(asyncio.run(_read())) == {"world/level.dat": b"gen2"}
 
 
+def test_snapshot_base_above_current_cannot_move_the_store_generation(
+    tmp_path: Path,
+) -> None:
+    # Issue #3336: the base a Worker declares is read from a marker the server's
+    # own code can rewrite, so it can be any number. It is only ever compared
+    # (base < current, the #847 guard): a forged base far above current is not
+    # refused, and the generation the publish mints is still current + 1 — the
+    # store's counter is derived server-side and never takes the declared value.
+    import asyncio
+
+    client, storage = _setup(tmp_path)
+    community, server = _scope()
+    asyncio.run(_publish(storage, community, server, {"keep.txt": b"gen1"}))
+    scope = (CommunityId(community), ServerId(server))
+    current = asyncio.run(storage.current_generation(*scope))
+
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"),
+            content=_tar_bytes({"world/level.dat": b"gen2"}),
+            headers={**_auth(), "X-Working-Set-Base-Generation": str(2**64 - 1)},
+        )
+
+    assert resp.status_code == 204
+    assert resp.headers["X-Working-Set-Generation"] == str(current + 1)
+    assert asyncio.run(storage.current_generation(*scope)) == current + 1
+
+
 def test_snapshot_stale_base_from_different_publisher_is_refused(
     tmp_path: Path,
 ) -> None:

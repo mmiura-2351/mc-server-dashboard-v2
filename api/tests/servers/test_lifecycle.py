@@ -696,6 +696,26 @@ async def test_start_skips_hydrate_when_held_generation_is_fresh() -> None:
     assert [k for k, _, _ in cp.dispatched] == ["start"]
 
 
+async def test_start_skips_hydrate_when_held_generation_is_above_the_store() -> None:
+    # Issue #3336: the held generation is the Worker's reading of a marker the
+    # server's own code can rewrite, and the gate only compares it. A value no
+    # publish ever minted (above the store's) therefore skips the hydrate too —
+    # including the one a backup restore or an at-rest edit relies on to reach the
+    # Worker. This pins that documented limit of the gate (SECURITY.md Section 6);
+    # it is not a statement that the limit is wanted.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    cp = FakeControlPlane(
+        place_to=WorkerId(worker),
+        held={(WorkerId(worker), ServerId(server_id)): 2**64 - 1},
+    )
+    await _start_server(uow, cp, store_generation=6)(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    assert [k for k, _, _ in cp.dispatched] == ["start"]
+
+
 async def test_start_hydrates_when_held_generation_is_stale() -> None:
     # When the Worker holds a stale generation, __call__ must hydrate to get the
     # latest working set before starting (#1007).

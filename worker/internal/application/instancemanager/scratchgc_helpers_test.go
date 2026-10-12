@@ -11,6 +11,13 @@ import (
 // Existing fixtures keep their short name; production uses scratchformat directly.
 const generationFile = scratchformat.GenerationMarkerFile
 
+// readGeneration is the marker's value as the production readers act on it: a refused
+// marker reads as 0, like an absent one.
+func readGeneration(workingDir string) uint64 {
+	gen, _ := readGenerationMarker(workingDir)
+	return gen
+}
+
 // seedHydrateShapedTree creates a directory holding a real working set (world
 // content plus a generation marker at gen).
 func seedHydrateShapedTree(t *testing.T, dir string, gen uint64) {
