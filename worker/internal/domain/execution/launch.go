@@ -3,7 +3,6 @@ package execution
 import (
 	"errors"
 	"fmt"
-	"path/filepath"
 )
 
 // ForgeInstallLogRelpath is the working-dir-relative path the supervised Forge
@@ -60,36 +59,44 @@ type LaunchPlan struct {
 	LaunchArgs []string
 }
 
-// PathResolver maps a working-dir-relative path to the path a driver passes on
-// the launch command line: a host-absolute path for the now-removed host-process driver, the
-// in-container path for the container driver. Exists reports whether the
-// relative path exists in the working set (the driver checks the host path).
+// PathResolver is everything the launch planning learns about a working set, and
+// how the working set's paths are spelled on the launch command line. The
+// planning itself does no file I/O: the driver supplies these and answers them
+// from the host working dir.
+//
+// Exists and Files see only the working set itself: an entry counts only if it is
+// a regular file reached from the working-set root without following a symbolic
+// link at any component, the last one included. The working set is written by
+// code the operator does not control, so a link — or a directory, FIFO or device
+// where a file is expected — is the same as nothing there (issue #3352).
 type PathResolver struct {
 	// Resolve maps a slash-separated working-dir-relative path to the driver's
-	// command-line path.
+	// command-line path: the in-container path for the container driver.
 	Resolve func(relpath string) string
-	// Exists reports whether the working-dir-relative path is present in the
-	// working set (checked against the host working dir).
+	// Exists reports whether the working-dir-relative path is such a regular file.
 	Exists func(relpath string) bool
+	// Files returns the working-dir-relative slash paths of the regular files
+	// matching the slash-separated path.Match pattern, in no particular order.
+	Files func(pattern string) ([]string, error)
 }
 
-// BuildLaunchPlan resolves how to launch the server described by spec, given the
-// host workingDir (for globbing the working set) and a PathResolver mapping
-// working-set paths onto the driver's command line (issue #305). For
-// LaunchModeJar it returns the historical JAR launch. For LaunchModeForgeArgsfile
-// it globs the Forge args file: present -> a Forge args-file launch; absent ->
-// NeedsInstall with the installer args; ambiguous -> an error.
-func BuildLaunchPlan(spec InstanceSpec, workingDir string, paths PathResolver) (LaunchPlan, error) {
+// BuildLaunchPlan resolves how to launch the server described by spec, given a
+// PathResolver that answers for the working set and maps its paths onto the
+// driver's command line (issue #305). For LaunchModeJar it returns the historical
+// JAR launch. For LaunchModeForgeArgsfile it looks for the Forge args file:
+// present -> a Forge args-file launch; absent -> NeedsInstall with the installer
+// args; ambiguous -> an error.
+func BuildLaunchPlan(spec InstanceSpec, paths PathResolver) (LaunchPlan, error) {
 	if spec.LaunchMode == LaunchModeForgeArgsfile {
-		return forgePlan(spec, workingDir, paths)
+		return forgePlan(spec, paths)
 	}
 	return LaunchPlan{LaunchArgs: jarLaunchArgs(spec, paths.Resolve(spec.JarRelpath))}, nil
 }
 
 // forgePlan builds the Forge launch plan: an args-file launch when exactly one
 // args file is present, the installer step when none is, an error when several.
-func forgePlan(spec InstanceSpec, workingDir string, paths PathResolver) (LaunchPlan, error) {
-	rel, found, err := resolveForgeArgsfile(workingDir)
+func forgePlan(spec InstanceSpec, paths PathResolver) (LaunchPlan, error) {
+	rel, found, err := resolveForgeArgsfile(paths)
 	if err != nil {
 		return LaunchPlan{}, err
 	}
@@ -169,25 +176,21 @@ func JarLaunchArgs(spec InstanceSpec, jarPath string) []string {
 	return jarLaunchArgs(spec, jarPath)
 }
 
-// ResolveLegacyForgeJar globs for a legacy Forge launch jar (forge-*.jar) in
+// ResolveLegacyForgeJar looks for a legacy Forge launch jar (forge-*.jar) in
 // the working set root. Legacy Forge installers (MC <=1.16.x) produce this jar
 // instead of unix_args.txt. Returns the working-dir-relative slash path when
 // exactly one match exists. Returns ("", false, nil) when none is found, and
 // ErrLegacyForgeJarAmbiguous when multiple matches exist.
-func ResolveLegacyForgeJar(workingDir string) (relpath string, found bool, err error) {
-	matches, err := filepath.Glob(filepath.Join(workingDir, legacyForgeJarGlob))
+func ResolveLegacyForgeJar(paths PathResolver) (relpath string, found bool, err error) {
+	matches, err := paths.Files(legacyForgeJarGlob)
 	if err != nil {
-		return "", false, fmt.Errorf("execution: glob legacy Forge jar: %w", err)
+		return "", false, fmt.Errorf("execution: find legacy Forge jar: %w", err)
 	}
 	switch len(matches) {
 	case 0:
 		return "", false, nil
 	case 1:
-		rel, err := filepath.Rel(workingDir, matches[0])
-		if err != nil {
-			return "", false, fmt.Errorf("execution: relativize legacy Forge jar: %w", err)
-		}
-		return filepath.ToSlash(rel), true, nil
+		return matches[0], true, nil
 	default:
 		return "", false, fmt.Errorf("%w: %d matching %s", ErrLegacyForgeJarAmbiguous, len(matches), legacyForgeJarGlob)
 	}
@@ -202,27 +205,21 @@ func ForgeInstallArtifactGlobs() []string {
 	return []string{forgeArgsfileGlob, legacyForgeJarGlob}
 }
 
-// resolveForgeArgsfile globs the Forge args file under workingDir, reporting
-// whether exactly one match exists. It returns ("", false, nil) when no match
-// exists (install needed), the single match's working-dir-relative slash path
-// with found=true when exactly one exists, and ErrForgeArgsfileAmbiguous when
-// more than one matches.
-func resolveForgeArgsfile(workingDir string) (relpath string, found bool, err error) {
-	matches, err := filepath.Glob(filepath.Join(workingDir, filepath.FromSlash(forgeArgsfileGlob)))
+// resolveForgeArgsfile looks for the Forge args file in the working set,
+// reporting whether exactly one match exists. It returns ("", false, nil) when no
+// match exists (install needed), the single match's working-dir-relative slash
+// path with found=true when exactly one exists, and ErrForgeArgsfileAmbiguous
+// when more than one matches.
+func resolveForgeArgsfile(paths PathResolver) (relpath string, found bool, err error) {
+	matches, err := paths.Files(forgeArgsfileGlob)
 	if err != nil {
-		// The only error filepath.Glob returns is ErrBadPattern; the pattern is a
-		// constant, so this never fires in practice. Surface it rather than hide it.
-		return "", false, fmt.Errorf("execution: glob Forge args file: %w", err)
+		return "", false, fmt.Errorf("execution: find Forge args file: %w", err)
 	}
 	switch len(matches) {
 	case 0:
 		return "", false, nil
 	case 1:
-		rel, err := filepath.Rel(workingDir, matches[0])
-		if err != nil {
-			return "", false, fmt.Errorf("execution: relativize Forge args file: %w", err)
-		}
-		return filepath.ToSlash(rel), true, nil
+		return matches[0], true, nil
 	default:
 		return "", false, fmt.Errorf("%w: %d under %s", ErrForgeArgsfileAmbiguous, len(matches), forgeArgsfileGlob)
 	}
