@@ -1321,6 +1321,7 @@
           "command": {
             "anyOf": [
               {
+                "maxLength": 1446,
                 "type": "string"
               },
               {
@@ -3365,6 +3366,7 @@
       "ServerCommandRequest": {
         "properties": {
           "line": {
+            "maxLength": 1446,
             "minLength": 1,
             "title": "Line",
             "type": "string"
@@ -3740,6 +3742,7 @@
           "command": {
             "anyOf": [
               {
+                "maxLength": 1446,
                 "type": "string"
               },
               {
@@ -4038,6 +4041,7 @@
         "description": "A pre-action player-warning step for a stop/restart schedule (#1839).",
         "properties": {
           "message": {
+            "maxLength": 1442,
             "minLength": 1,
             "title": "Message",
             "type": "string"
@@ -4165,6 +4169,7 @@
         "properties": {
           "content_base64": {
             "default": "",
+            "maxLength": 5592408,
             "title": "Content Base64",
             "type": "string"
           }
