@@ -3,7 +3,6 @@ package execution
 import (
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 )
 
@@ -194,27 +193,13 @@ func ResolveLegacyForgeJar(workingDir string) (relpath string, found bool, err e
 	}
 }
 
-// CleanForgeInstallArtifacts removes stale Forge install outputs from workingDir
-// so a subsequent install starts from a clean slate. It removes all files
-// matching forgeArgsfileGlob (libraries/net/minecraftforge/forge/*/unix_args.txt)
-// and legacyForgeJarGlob (forge-*.jar) in the working set root. It does NOT
-// remove the installer jar (always server.jar, which does not match forge-*.jar)
-// or user_jvm_args.txt. Returns errors only for glob failures; individual remove
-// failures are silently ignored so the install can still proceed (issue #1127).
-func CleanForgeInstallArtifacts(workingDir string) error {
-	for _, glob := range []string{
-		filepath.Join(workingDir, filepath.FromSlash(forgeArgsfileGlob)),
-		filepath.Join(workingDir, legacyForgeJarGlob),
-	} {
-		matches, err := filepath.Glob(glob)
-		if err != nil {
-			return fmt.Errorf("execution: clean Forge artifacts: glob %s: %w", glob, err)
-		}
-		for _, m := range matches {
-			_ = os.Remove(m)
-		}
-	}
-	return nil
+// ForgeInstallArtifactGlobs returns the working-dir-relative slash patterns of
+// the outputs a Forge install leaves behind, which the driver removes before a
+// (re-)install so it starts from a clean slate (issue #1127): the generated args
+// files and the legacy launch jars in the working set root. Neither matches the
+// installer jar (always server.jar) or user_jvm_args.txt.
+func ForgeInstallArtifactGlobs() []string {
+	return []string{forgeArgsfileGlob, legacyForgeJarGlob}
 }
 
 // resolveForgeArgsfile globs the Forge args file under workingDir, reporting
