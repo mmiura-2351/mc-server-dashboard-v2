@@ -1,6 +1,5 @@
 // @vitest-environment jsdom
-// Pinned to jsdom: the WAI-ARIA focus-return test relies on jsdom's focus
-// handling (issue #1751).
+// Keep jsdom for focus restoration behavior.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   act,
@@ -52,9 +51,7 @@ vi.mock("../api/client.ts", async () => {
   return { ...actual, api: mockApi };
 });
 
-// Only `downloadFile` is stubbed (the other detail-page tabs use it); the real
-// `saveUrlAs` runs so the export download can be asserted on the anchor it
-// synthesises.
+// Keep saveUrlAs real so assertions observe the generated download anchor.
 const mockDownload = vi.hoisted(() => ({ downloadFile: vi.fn() }));
 vi.mock("../api/download.ts", async () => {
   const actual =
@@ -74,9 +71,7 @@ vi.mock("../permissions/ActiveCommunityProvider.tsx", () => ({
 }));
 vi.mock("../permissions/useCan.ts", () => ({ useCan: () => mockCan }));
 
-// Spy on navigate while keeping the real one working: tab switches now drive the
-// URL hash (#514), so the navigate must actually update the location, not no-op.
-// The spy records the calls (the delete test asserts the dashboard redirect).
+// Spy without replacing navigation because tab switches must update the URL hash.
 const navigateMock = vi.hoisted(() => vi.fn());
 vi.mock("react-router", async () => {
   const actual =
@@ -115,11 +110,7 @@ function server(overrides: Record<string, unknown> = {}) {
   };
 }
 
-// Route api.get by path: the Settings tab's resource-pack assignment (#1179) is
-// its own endpoint whose contract is `null | ResourcePackAssignmentResponse`, so
-// it must not be answered by the server-detail catch-all (issue #2247), and
-// /api/meta is a deployment-facts body, not a server (issue #2525).
-// Everything else still falls through to the server detail body.
+// Route assignment and metadata reads separately; neither has the server-detail response shape.
 function routeGet(
   opts: {
     srv?: Record<string, unknown>;
@@ -129,8 +120,7 @@ function routeGet(
   const srv = server(opts.srv);
   mockApi.get.mockImplementation((path: string) => {
     if (path.endsWith("/resource-pack")) {
-      // "No pack assigned" is a 200 with a null body, not a 404 (issue #2238).
-      // The assigned state is covered by ServerResourcePackSection.test.tsx.
+      // No assigned pack is a successful 200 with a null body.
       return Promise.resolve(null);
     }
     if (path === "/api/meta") {
@@ -182,13 +172,10 @@ describe("ServerDetailPage scaffold + header", () => {
     renderPage();
 
     expect(await screen.findByText("survival")).toBeInTheDocument();
-    // The state pill carries the observed-state label with the pill class.
     const pill = screen
       .getAllByText(t("dashboard.state.running"))
       .find((el) => el.className.includes("pill"));
     expect(pill).toBeDefined();
-    // The worker chip is labelled and the id abbreviated (#644): "worker-a"
-    // shortens to its leading segment.
     expect(
       screen.getByText(`${t("serverDetail.worker")}: worker`),
     ).toBeInTheDocument();
@@ -214,7 +201,6 @@ describe("ServerDetailPage scaffold + header", () => {
     fireEvent.click(
       screen.getByRole("tab", { name: t("serverDetail.tab.schedules") }),
     );
-    // The schedules panel loads and shows its empty state.
     expect(await screen.findByText(t("schedules.empty"))).toBeInTheDocument();
   });
 
@@ -329,9 +315,6 @@ describe("ServerDetailPage page-specific tabs (#514, #1894, #2017, #1898)", () =
   });
 
   it("wraps the plugins tab body in a labelled tabpanel (#1894)", async () => {
-    // The plugins tab body was rendered bare, so its button's aria-controls
-    // pointed at a non-existent panel; it must wrap in the same tabpanel the
-    // sibling tabs use. Route the tab's GET calls so its child renders cleanly.
     mockApi.get.mockImplementation((path: string) => {
       if (path.endsWith("/plugins/validate")) {
         return Promise.resolve({
@@ -349,7 +332,6 @@ describe("ServerDetailPage page-specific tabs (#514, #1894, #2017, #1898)", () =
         return Promise.resolve({ plugins: [] });
       }
       if (path === "/api/meta") {
-        // The plugins tab reads the deployment's Bedrock flag (#1543).
         return Promise.resolve(meta());
       }
       return Promise.resolve(server());
@@ -371,11 +353,7 @@ describe("ServerDetailPage page-specific tabs (#514, #1894, #2017, #1898)", () =
   });
 
   it("ArrowRight skips the hidden plugins tab on vanilla servers (#2017)", async () => {
-    // Keyboard navigation must cycle only through rendered tabs: selecting the
-    // filtered-out plugins tab leaves no tab selected and strands focus.
-    // ArrowRight lands on the players tab, which fires both group lists; each
-    // is a `GroupResponse[]`, and the catch-all's server object would make the
-    // tab's `attachedGroups.map` throw once the query resolved (issue #2525).
+    // Exclude hidden tabs from keyboard navigation and return arrays for the Players tab's group queries.
     mockApi.get.mockImplementation((path: string) => {
       if (path.endsWith("/schedules")) {
         return Promise.resolve([]);
@@ -402,11 +380,7 @@ describe("ServerDetailPage page-specific tabs (#514, #1894, #2017, #1898)", () =
   });
 
   it("a tabpanel whose content has no focusable element is focusable (#1898)", async () => {
-    // A read-only user on an empty plugins list gets a panel with no focusable
-    // descendant at all; without tabindex=0 on the panel, activating the tab
-    // strands the keyboard user — Tab jumps straight past the panel content.
-    // APG tabs: the panel is focusable when it has no focusable element or its
-    // first element with content is not focusable.
+    // A read-only empty panel has no focusable child, so the panel itself must remain keyboard reachable.
     mockCan = (code) => code === "plugin:read";
     mockApi.get.mockImplementation((path: string) => {
       if (path.endsWith("/plugins/validate")) {
@@ -425,7 +399,6 @@ describe("ServerDetailPage page-specific tabs (#514, #1894, #2017, #1898)", () =
         return Promise.resolve({ plugins: [] });
       }
       if (path === "/api/meta") {
-        // The plugins tab reads the deployment's Bedrock flag (#1543).
         return Promise.resolve(meta());
       }
       return Promise.resolve(server());
@@ -434,7 +407,6 @@ describe("ServerDetailPage page-specific tabs (#514, #1894, #2017, #1898)", () =
     await screen.findByText("survival");
 
     const panel = await screen.findByRole("tabpanel");
-    // Precondition: nothing inside the panel can take focus.
     expect(
       panel.querySelectorAll(
         "a[href], button, input, select, textarea, [tabindex]",
@@ -498,14 +470,11 @@ describe("ServerDetailPage lifecycle controls", () => {
       screen.getByRole("menuitem", { name: t("serverDetail.stopForce") }),
     );
 
-    // The confirmation dialog should appear.
     expect(
       screen.getByText(t("serverDetail.forceStop.dialogBody")),
     ).toBeInTheDocument();
-    // The API must NOT have been called yet.
     expect(mockApi.post).not.toHaveBeenCalled();
 
-    // Confirm the force stop.
     fireEvent.click(
       screen.getByRole("button", {
         name: t("serverDetail.forceStop.confirm"),
@@ -529,15 +498,12 @@ describe("ServerDetailPage lifecycle controls", () => {
       screen.getByRole("menuitem", { name: t("serverDetail.stopForce") }),
     );
 
-    // Dialog is open.
     expect(
       screen.getByText(t("serverDetail.forceStop.dialogBody")),
     ).toBeInTheDocument();
 
-    // Cancel.
     fireEvent.click(screen.getByRole("button", { name: t("common.cancel") }));
 
-    // Dialog closes, no API call.
     expect(
       screen.queryByText(t("serverDetail.forceStop.dialogBody")),
     ).not.toBeInTheDocument();
@@ -637,11 +603,9 @@ describe("ServerDetailPage lifecycle controls", () => {
       expect(force).toHaveAttribute("tabindex", "0");
       expect(graceful).toHaveAttribute("tabindex", "-1");
 
-      // Wrap forward past the last item back to the first.
       fireEvent.keyDown(force, { key: "ArrowDown" });
       expect(graceful).toHaveFocus();
 
-      // Wrap backward from the first to the last.
       fireEvent.keyDown(graceful, { key: "ArrowUp" });
       expect(force).toHaveFocus();
     });
@@ -661,19 +625,16 @@ describe("ServerDetailPage lifecycle controls", () => {
       await openWith("Enter");
       const [graceful, force] = items();
 
-      // "Force stop" starts with F.
       fireEvent.keyDown(graceful, { key: "f" });
       expect(force).toHaveFocus();
 
-      // "Stop (graceful)" starts with S.
       fireEvent.keyDown(force, { key: "s" });
       expect(graceful).toHaveFocus();
     });
 
     it("Enter activates the focused item (force requires confirmation)", async () => {
-      await openWith("ArrowUp"); // focuses Force stop
+      await openWith("ArrowUp");
       fireEvent.keyDown(items()[1], { key: "Enter" });
-      // Force stop opens the confirmation dialog instead of firing immediately.
       expect(
         screen.getByText(t("serverDetail.forceStop.dialogBody")),
       ).toBeInTheDocument();
@@ -690,7 +651,7 @@ describe("ServerDetailPage lifecycle controls", () => {
     });
 
     it("Space activates the focused item", async () => {
-      await openWith("Enter"); // focuses Stop (graceful)
+      await openWith("Enter");
       fireEvent.keyDown(items()[0], { key: " " });
       await waitFor(() =>
         expect(mockApi.post).toHaveBeenCalledWith(
@@ -722,11 +683,9 @@ describe("ServerDetailPage lifecycle controls", () => {
     it("returns focus to the trigger after click activation of force via confirm (APG)", async () => {
       const trigger = await openWith("Enter");
       fireEvent.click(items()[1]);
-      // Force opens the confirm dialog; the menu closes.
       expect(
         screen.queryByRole("menuitem", { name: t("serverDetail.stopForce") }),
       ).not.toBeInTheDocument();
-      // Confirm the force stop; focus returns to the trigger.
       fireEvent.click(
         screen.getByRole("button", {
           name: t("serverDetail.forceStop.confirm"),
@@ -744,7 +703,6 @@ describe("ServerDetailPage lifecycle controls", () => {
     renderPage();
 
     await screen.findByText("survival");
-    // restart is permitted by the resolver but the server denies at run-time.
     fireEvent.click(
       screen.getByRole("button", { name: t("serverDetail.restart") }),
     );
@@ -764,12 +722,6 @@ describe("ServerDetailPage lifecycle controls", () => {
     afterEach(() => restoreWs());
 
     it("wires the header controls to the optimistic lifecycle", async () => {
-      // The transition state machine itself is covered in
-      // useLifecycleMutation.test.tsx; this pins the detail page's wiring: the
-      // header pill's detail cache, the live status frame landing in that same
-      // cache, the controls held while in flight, the dashboard list refreshed
-      // on settle, and the toast receiving the verb (command_failed reads
-      // differently for restart).
       mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
       let rejectPost!: (err: unknown) => void;
       mockApi.post.mockReturnValue(
@@ -800,8 +752,6 @@ describe("ServerDetailPage lifecycle controls", () => {
         screen.getByRole("button", { name: t("serverDetail.export") }),
       ).toBeDisabled();
 
-      // The server crashes mid-flight: restart applies again, but the open
-      // request still holds it.
       act(() => {
         MockWebSocket.last().open();
         MockWebSocket.last().message(
@@ -816,14 +766,13 @@ describe("ServerDetailPage lifecycle controls", () => {
         screen.getByRole("button", { name: t("serverDetail.restart") }),
       ).toBeDisabled();
 
-      // Hang the settle refetch so the pill below is the cache, not a reload.
+      // Keep refetch pending so the assertion observes the live cache update.
       mockApi.get.mockReturnValue(new Promise(() => {}));
       act(() => rejectPost(new ApiError(409, { reason: "command_failed" })));
 
       expect(
         await screen.findByText(t("dashboard.lifecycle.restartPending")),
       ).toBeInTheDocument();
-      // The failed restart does not roll the newer crash back to "running".
       expect(statePill()).toBe(t("dashboard.state.crashed"));
       expect(
         screen.getByRole("button", { name: t("serverDetail.restart") }),
@@ -834,8 +783,6 @@ describe("ServerDetailPage lifecycle controls", () => {
     });
 
     it("wires the Start button to POST start and the starting pill", async () => {
-      // The smoke above drives Restart; this pins that Start on a stopped
-      // server sends its own verb and writes its own transitional state.
       mockApi.get.mockResolvedValue(
         server({ observed_state: "stopped", desired_state: "stopped" }),
       );
@@ -871,12 +818,11 @@ describe("ServerDetailPage export (minted grant, #2353)", () => {
   const clicks: HTMLAnchorElement[] = [];
   let fetchSpy: MockInstance<typeof fetch>;
 
-  /** URLs the page requested itself, rather than handing to the browser. */
   const fetchedUrls = () => fetchSpy.mock.calls.map(([input]) => String(input));
 
   beforeEach(() => {
     clicks.length = 0;
-    // Capture the synthesised anchor click instead of navigating.
+    // Capture the anchor click without navigating the test document.
     vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
       this: HTMLAnchorElement,
     ) {
@@ -911,14 +857,11 @@ describe("ServerDetailPage export (minted grant, #2353)", () => {
     await waitFor(() => expect(mockApi.post).toHaveBeenCalledWith(GRANT_PATH));
     await waitFor(() => expect(clicks).toHaveLength(1));
     expect(clicks[0].getAttribute("href")).toBe(GRANT_URL);
-    // The export response carries no Content-Disposition (#2357), so the
-    // `download` attribute is what names the saved file.
+    // Omit Content-Disposition in this fixture so the download attribute must supply the filename.
     expect(clicks[0].download).toBe("survival.zip");
     expect(
       await screen.findByText(t("serverDetail.exportStarted")),
     ).toBeInTheDocument();
-    // The ZIP body is never read by the tab: no capped fetch+Blob path, and no
-    // request to the grant URL at all — only the browser fetches it.
     expect(mockDownload.downloadFile).not.toHaveBeenCalled();
     expect(fetchedUrls()).not.toContain(GRANT_URL);
     expect(fetchedUrls().filter((url) => url.includes("?grant="))).toEqual([]);
@@ -940,7 +883,6 @@ describe("ServerDetailPage export (minted grant, #2353)", () => {
     });
     fireEvent.click(button);
 
-    // A second click must not mint a second grant (and save twice).
     await waitFor(() => expect(button).toBeDisabled());
     fireEvent.click(button);
     expect(mockApi.post).toHaveBeenCalledTimes(1);
@@ -1065,9 +1007,7 @@ describe("ServerDetailPage export (minted grant, #2353)", () => {
 });
 
 describe("ServerDetailPage settings", () => {
-  // Install the mock socket so the events client stays "connected" and never
-  // fires onDown -> invalidate, which would refetch the detail query and
-  // consume the port-check mockResolvedValueOnce out from under the test.
+  // Stub the event socket so disconnect refetches cannot consume the queued port-check response.
   let restoreWs: () => void;
 
   beforeEach(() => {
@@ -1097,8 +1037,6 @@ describe("ServerDetailPage settings", () => {
   });
 
   it("hides the game-port control in relay mode (#1002)", async () => {
-    // A non-null join_hostname signals relay mode: players join port-less, so
-    // the port is internal plumbing the API manages and the control is hidden.
     routeGet({ srv: { join_hostname: "survival.mc.example.com" } });
     renderPage();
 
@@ -1108,7 +1046,6 @@ describe("ServerDetailPage settings", () => {
     expect(
       screen.queryByLabelText(t("serverDetail.settings.gamePort")),
     ).toBeNull();
-    // The slug (join address name) control is shown in relay mode.
     expect(
       screen.getByLabelText(t("serverDetail.settings.slug")),
     ).toBeInTheDocument();
@@ -1149,12 +1086,10 @@ describe("ServerDetailPage settings", () => {
   });
 
   it("checks port availability on blur and shows the taken hint", async () => {
-    // Route by path so that the resource-pack assignment query (#1179) and the
-    // meta query don't consume the port-check response.
+    // Route by path so assignment and metadata queries cannot consume port-check responses.
     const srv = server({ observed_state: "stopped" });
     mockApi.get.mockImplementation((path: string) => {
       if (path.endsWith("/resource-pack")) {
-        // "No pack assigned" is a 200 with a null body, not a 404 (#2238).
         return Promise.resolve(null);
       }
       if (path === "/api/meta") {
@@ -1186,15 +1121,12 @@ describe("ServerDetailPage settings", () => {
   });
 
   it("ignores a stale out-of-order port-check response (#1592)", async () => {
-    // Two blurs in quick succession on different ports: the first port's check
-    // resolves *after* the second's. Without a request guard the stale "taken"
-    // verdict for 25570 would clobber the current "available" verdict for 25571.
+    // Resolve checks out of order to verify an old verdict cannot replace the current port's result.
     const srv = server({ observed_state: "stopped" });
     let resolveFirst: (v: unknown) => void = () => {};
     let resolveSecond: (v: unknown) => void = () => {};
     mockApi.get.mockImplementation((path: string) => {
       if (path.endsWith("/resource-pack")) {
-        // "No pack assigned" is a 200 with a null body, not a 404 (#2238).
         return Promise.resolve(null);
       }
       if (path === "/api/meta") {
@@ -1217,20 +1149,16 @@ describe("ServerDetailPage settings", () => {
     await screen.findByText("survival");
     openSettings();
     const portInput = screen.getByDisplayValue("25565");
-    // First blur on 25570 leaves its check pending.
     fireEvent.change(portInput, { target: { value: "25570" } });
     fireEvent.blur(portInput);
-    // Second blur on 25571 supersedes it.
     fireEvent.change(portInput, { target: { value: "25571" } });
     fireEvent.blur(portInput);
 
-    // The current (second) request resolves first: available.
     resolveSecond({ port: 25571, in_range: true, available: true });
     expect(
       await screen.findByText(t("serverDetail.port.available")),
     ).toBeInTheDocument();
 
-    // The stale (first) request resolves later as taken — it must be ignored.
     resolveFirst({ port: 25570, in_range: true, available: false });
     await waitFor(() =>
       expect(
@@ -1293,7 +1221,6 @@ describe("ServerDetailPage settings", () => {
     );
 
     await waitFor(() => expect(mockApi.patch).toHaveBeenCalled());
-    // A freshly typed `10` is parsed with JSON-value semantics → a number.
     const config = JSON.parse(mockApi.patch.mock.calls[0][1].body).config;
     expect(config).toEqual({ "view-distance": 10 });
     expect(typeof config["view-distance"]).toBe("number");
@@ -1311,7 +1238,6 @@ describe("ServerDetailPage settings", () => {
 
     await screen.findByText("survival");
     openSettings();
-    // Rename only the `motd` key; the integer override row is untouched.
     fireEvent.change(screen.getByDisplayValue("motd"), {
       target: { value: "greeting" },
     });
@@ -1322,14 +1248,11 @@ describe("ServerDetailPage settings", () => {
     await waitFor(() => expect(mockApi.patch).toHaveBeenCalled());
     const config = JSON.parse(mockApi.patch.mock.calls[0][1].body).config;
     expect(config).toEqual({ snapshot_interval_seconds: 3600, greeting: "hi" });
-    // The untouched integer survives as a number, not "3600".
     expect(typeof config.snapshot_interval_seconds).toBe("number");
   });
 
   it("preserves the original value type when only a row's key is renamed (#791)", async () => {
-    // A string value that parses as a JSON literal ("12" → 12 via
-    // parseConfigValue) must stay a string if the user only renamed the key —
-    // the row must NOT be flagged as edited in that case.
+    // Renaming a key must not reparse its untouched string value as a number.
     routeGet({
       srv: {
         observed_state: "stopped",
@@ -1341,7 +1264,6 @@ describe("ServerDetailPage settings", () => {
 
     await screen.findByText("survival");
     openSettings();
-    // Rename the key — the value "12" is untouched.
     fireEvent.change(screen.getByDisplayValue("motd"), {
       target: { value: "greeting" },
     });
@@ -1351,7 +1273,6 @@ describe("ServerDetailPage settings", () => {
 
     await waitFor(() => expect(mockApi.patch).toHaveBeenCalled());
     const config = JSON.parse(mockApi.patch.mock.calls[0][1].body).config;
-    // "12" must stay a string — the key rename must not trigger re-parsing.
     expect(config).toEqual({ greeting: "12" });
     expect(typeof config.greeting).toBe("string");
   });
@@ -1418,13 +1339,9 @@ describe("ServerDetailPage settings", () => {
 
     await waitFor(() => expect(mockApi.patch).toHaveBeenCalled());
     const config = JSON.parse(mockApi.patch.mock.calls[0][1].body).config;
-    // The user only edited `motd`, but the system-managed key round-trips
-    // untouched rather than being dropped from the replaced config blob.
     expect(config).toEqual({ resolved_jar_sha256: "abc123", motd: "bye" });
   });
 
-  // The reason → message table lives in
-  // serverSettingsErrorPresentation.test.ts; these pin the save wiring.
   it("toasts a mapped save failure and keeps the edited form", async () => {
     routeGet({ srv: { observed_state: "running" } });
     mockApi.patch.mockRejectedValue(
@@ -1503,7 +1420,6 @@ describe("ServerDetailPage settings", () => {
     expect(screen.getByDisplayValue("1024")).toBeInTheDocument();
     expect(screen.getByDisplayValue("1000")).toBeInTheDocument();
 
-    // Simulate a react-query refetch returning updated server data.
     routeGet({
       srv: {
         name: "new-name",
@@ -1655,13 +1571,7 @@ describe("ServerDetailPage settings memory limit", () => {
       await screen.findByText(t("serverDetail.settings.memoryLimitRange")),
     ).toBeInTheDocument();
 
-    // Drive a real save so "blocks the save" is asserted, not assumed: the save
-    // button is disabled below the 512 MiB floor, so clicking it is inert and
-    // patch never fires. The bare `patch not called` was vacuous — no save was
-    // attempted — and a synchronous assert would pass for the wrong reason:
-    // react-query runs the mutationFn in a microtask, so `act` below flushes it.
-    // With the disabled gate removed the click reaches the mutation and this
-    // reddens.
+    // Attempt Save and flush mutation microtasks; checking patch alone could pass without exercising validation.
     const saveButton = screen.getByRole("button", {
       name: t("serverDetail.settings.save"),
     });
@@ -1681,13 +1591,7 @@ describe("ServerDetailPage settings memory limit", () => {
     await screen.findByText("survival");
     openSettings();
 
-    // Wait for the operator-configured ceiling from /api/meta (#1069) to land
-    // before entering the value, so it is validated against the meta ceiling and
-    // not the hardcoded pre-meta fallback. Without this barrier findByText below
-    // resolves on the pre-meta render — whose error comes from the fallback
-    // ceiling — and the test is blind to the operator ceiling it claims to cover
-    // (issue #2597). Raising the fixture's max_memory_limit_mb above 1048577 then
-    // reddens this: the value becomes in-range and the error never renders.
+    // Wait for /meta's ceiling before entering the value so the built-in fallback cannot satisfy this test.
     await waitFor(() =>
       expect(queryClient.getQueryData(["meta"])).toBeDefined(),
     );
@@ -1697,13 +1601,7 @@ describe("ServerDetailPage settings memory limit", () => {
       await screen.findByText(t("serverDetail.settings.memoryLimitRange")),
     ).toBeInTheDocument();
 
-    // Drive a real save so "blocks the save" is asserted, not assumed: the save
-    // button is disabled while the value is out of range, so clicking it is inert
-    // and patch never fires. The bare `patch not called` was vacuous — no save
-    // was attempted (#2597) — and a synchronous assert would also pass for the
-    // wrong reason: react-query runs the mutationFn in a microtask, so `act`
-    // below flushes it. With the disabled gate removed the click reaches the
-    // mutation and this reddens.
+    // Attempt Save and flush mutation microtasks before asserting that no PATCH ran.
     const saveButton = screen.getByRole("button", {
       name: t("serverDetail.settings.save"),
     });
@@ -1714,9 +1612,7 @@ describe("ServerDetailPage settings memory limit", () => {
   });
 
   it("rejects a value above the operator-configured ceiling that the default would allow (#1069)", async () => {
-    // With a configured max of 4096 MiB, 8192 is out of range even though it
-    // sits well under the default 1 TiB ceiling — so this reddens only if the
-    // page honours the /meta ceiling rather than the hardcoded default.
+    // Choose a value above /meta's ceiling but below the built-in one to distinguish which limit is used.
     routeGet({
       srv: { observed_state: "stopped", memory_limit_mb: null, config: {} },
       meta: { max_memory_limit_mb: 4096 },
@@ -1732,13 +1628,7 @@ describe("ServerDetailPage settings memory limit", () => {
       await screen.findByText(t("serverDetail.settings.memoryLimitRange")),
     ).toBeInTheDocument();
 
-    // Drive a real save so "blocks the save" is asserted, not assumed: the save
-    // button is disabled while the value exceeds the operator-configured ceiling,
-    // so clicking it is inert and patch never fires. The bare `patch not called`
-    // was vacuous — no save was attempted — and a synchronous assert would pass
-    // for the wrong reason: react-query runs the mutationFn in a microtask, so
-    // `act` below flushes it. With the disabled gate removed the click reaches
-    // the mutation and this reddens.
+    // Attempt Save and flush mutation microtasks before asserting that no PATCH ran.
     const saveButton = screen.getByRole("button", {
       name: t("serverDetail.settings.save"),
     });
@@ -1763,13 +1653,7 @@ describe("ServerDetailPage settings memory limit", () => {
       await screen.findByText(t("serverDetail.settings.memoryLimitRange")),
     ).toBeInTheDocument();
 
-    // Drive a real save so "blocks the save" is asserted, not assumed: the save
-    // button is disabled while the value is non-integer, so clicking it is inert
-    // and patch never fires. The bare `patch not called` was vacuous — no save
-    // was attempted — and a synchronous assert would pass for the wrong reason:
-    // react-query runs the mutationFn in a microtask, so `act` below flushes it.
-    // With the disabled gate removed the click reaches the mutation and this
-    // reddens.
+    // Attempt Save and flush mutation microtasks before asserting that no PATCH ran.
     const saveButton = screen.getByRole("button", {
       name: t("serverDetail.settings.save"),
     });
@@ -1918,13 +1802,7 @@ describe("ServerDetailPage settings CPU allocation", () => {
       await screen.findByText(t("serverDetail.settings.cpuAllocationRange")),
     ).toBeInTheDocument();
 
-    // Drive a real save so "blocks the save" is asserted, not assumed: the save
-    // button is disabled below the 100-millicore floor, so clicking it is inert
-    // and patch never fires. The bare `patch not called` was vacuous — no save
-    // was attempted — and a synchronous assert would pass for the wrong reason:
-    // react-query runs the mutationFn in a microtask, so `act` below flushes it.
-    // With the disabled gate removed the click reaches the mutation and this
-    // reddens.
+    // Attempt Save and flush mutation microtasks before asserting that no PATCH ran.
     const saveButton = screen.getByRole("button", {
       name: t("serverDetail.settings.save"),
     });
@@ -1949,13 +1827,7 @@ describe("ServerDetailPage settings CPU allocation", () => {
       await screen.findByText(t("serverDetail.settings.cpuAllocationRange")),
     ).toBeInTheDocument();
 
-    // Drive a real save so "blocks the save" is asserted, not assumed: the save
-    // button is disabled above the 128000-millicore ceiling, so clicking it is
-    // inert and patch never fires. The bare `patch not called` was vacuous — no
-    // save was attempted — and a synchronous assert would pass for the wrong
-    // reason: react-query runs the mutationFn in a microtask, so `act` below
-    // flushes it. With the disabled gate removed the click reaches the mutation
-    // and this reddens.
+    // Attempt Save and flush mutation microtasks before asserting that no PATCH ran.
     const saveButton = screen.getByRole("button", {
       name: t("serverDetail.settings.save"),
     });
@@ -1980,13 +1852,7 @@ describe("ServerDetailPage settings CPU allocation", () => {
       await screen.findByText(t("serverDetail.settings.cpuAllocationRange")),
     ).toBeInTheDocument();
 
-    // Drive a real save so "blocks the save" is asserted, not assumed: the save
-    // button is disabled while the value is non-integer, so clicking it is inert
-    // and patch never fires. The bare `patch not called` was vacuous — no save
-    // was attempted — and a synchronous assert would pass for the wrong reason:
-    // react-query runs the mutationFn in a microtask, so `act` below flushes it.
-    // With the disabled gate removed the click reaches the mutation and this
-    // reddens.
+    // Attempt Save and flush mutation microtasks before asserting that no PATCH ran.
     const saveButton = screen.getByRole("button", {
       name: t("serverDetail.settings.save"),
     });
@@ -2008,11 +1874,7 @@ describe("ServerDetailPage settings CPU allocation", () => {
 });
 
 describe("ServerDetailPage header addresses (issues #961, #982, #1543)", () => {
-  // Display, copy and reset behavior live in ServerAddressBadges.test.tsx; this
-  // pins what the header owns: it hands the server's addresses to the badges.
-  // The relay-off port fallback is covered by the scaffold test above.
   it("wires the server's Java and Bedrock addresses into the header badges", async () => {
-    // Joining needs no permission: a caller with no actions still sees them.
     mockCan = () => false;
     mockApi.get.mockResolvedValue(
       server({
@@ -2032,7 +1894,6 @@ describe("ServerDetailPage header addresses (issues #961, #982, #1543)", () => {
         name: `${t("dashboard.bedrockLabel")}: play.example.com:19132`,
       }),
     ).toHaveAttribute("class", "badge copyable");
-    // Relay mode: the game port appears nowhere in the header.
     expect(screen.queryByText(/25565/)).not.toBeInTheDocument();
   });
 });
@@ -2060,7 +1921,6 @@ describe("ServerDetailPage settings slug (issue #961)", () => {
     await screen.findByText("survival");
     openSettings();
 
-    // The slug field is aria-labelled; when relay is off it must not appear.
     expect(
       screen.queryByLabelText(t("serverDetail.settings.slug")),
     ).not.toBeInTheDocument();
@@ -2153,7 +2013,6 @@ describe("ServerDetailPage settings slug (issue #961)", () => {
 
     await screen.findByText("survival");
     openSettings();
-    // Do not change the slug field; just save.
     fireEvent.click(
       screen.getByRole("button", { name: t("serverDetail.settings.save") }),
     );
@@ -2185,8 +2044,7 @@ describe("ServerDetailPage settings slug (issue #961)", () => {
       screen.getByRole("button", { name: t("serverDetail.settings.save") }),
     );
 
-    // Scope the wait to the slug field so a duplicate toast cannot stall the
-    // query until it auto-dismisses; the no-toast check then runs at once.
+    // Scope the wait to the slug field so a duplicate toast cannot delay the assertion until it dismisses.
     await within(slugInput.closest(".field") as HTMLElement).findByText(
       t("serverDetail.settings.slugTaken"),
     );
@@ -2248,8 +2106,6 @@ describe("ServerDetailPage delete (typed confirm)", () => {
   });
 });
 
-// ── Overview live streams + Console tab (issue #440) ─────────────────────────
-
 function serverFrame(stream: string, payload: unknown) {
   return JSON.stringify({ stream, ts: "t", payload });
 }
@@ -2283,7 +2139,6 @@ describe("ServerDetailPage Overview live streams", () => {
       );
     });
 
-    // CPU 1500 milli-cores → 1.5 cores; players 4; memory 2 MiB.
     expect(screen.getByText("1.5")).toBeInTheDocument();
     expect(screen.getByText("4")).toBeInTheDocument();
     expect(screen.getByText("starting up")).toBeInTheDocument();
@@ -2297,7 +2152,6 @@ describe("ServerDetailPage Overview live streams", () => {
     act(() => {
       MockWebSocket.last().open();
     });
-    // No metrics frame yet: a clear collecting state, not an empty/zero value.
     expect(
       screen.getByText(t("serverDetail.metric.collecting")),
     ).toBeInTheDocument();
@@ -2311,7 +2165,6 @@ describe("ServerDetailPage Overview live streams", () => {
         }),
       );
     });
-    // First frame renders the value immediately (no N-sample gate).
     expect(screen.getByText("1.5")).toBeInTheDocument();
     expect(
       screen.queryByText(t("serverDetail.metric.collecting")),
@@ -2323,7 +2176,6 @@ describe("ServerDetailPage Overview live streams", () => {
     renderPage();
     await screen.findByText("survival");
 
-    // Coming up but no frame yet: honest "collecting", not the stopped copy.
     expect(
       screen.getByText(t("serverDetail.metric.collecting")),
     ).toBeInTheDocument();
@@ -2356,7 +2208,6 @@ describe("ServerDetailPage Overview live streams", () => {
     });
     expect(screen.getByText("1.5")).toBeInTheDocument();
 
-    // The server stops: the strip falls back to idle, not the frozen value.
     act(() => {
       MockWebSocket.last().message(
         serverFrame("status", { state: "stopped", detail: "" }),
@@ -2503,14 +2354,11 @@ describe("ServerDetailPage Overview live streams", () => {
       }),
     );
 
-    // The Console tab content is now visible.
     expect(
       screen.getByRole("checkbox", { name: t("serverDetail.console.follow") }),
     ).toBeInTheDocument();
   });
 
-  // Forge install diagnostics (issue #1093): the crash reason a status frame
-  // carries selects a specific message and gates the install-log affordance.
   async function crashWithReason(reason: string | undefined) {
     mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
     renderPage();
@@ -2536,7 +2384,6 @@ describe("ServerDetailPage Overview live streams", () => {
     await crashWithReason(reason);
 
     expect(screen.getByText(t(key))).toBeInTheDocument();
-    // The Worker's own detail stays visible beside the explanation.
     expect(screen.getByText("boom")).toBeInTheDocument();
   });
 
@@ -2777,8 +2624,7 @@ describe("ServerDetailPage Console tab", () => {
 
 describe("sparklinePoints", () => {
   it("scales a series to the viewbox, inverting y so high reads high", () => {
-    // min=0 max=10 over width 100 / height 20, three samples → x at 0,50,100.
-    // y inverts: value 0 → bottom (20), value 10 → top (0), value 5 → mid (10).
+    // For a 100x20 viewbox, values 0, 10, 5 yield points (0,20), (50,0), (100,10).
     expect(sparklinePoints([0, 10, 5], 100, 20)).toBe(
       "0.0,20.0 50.0,0.0 100.0,10.0",
     );

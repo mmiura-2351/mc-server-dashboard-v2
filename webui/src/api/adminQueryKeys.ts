@@ -1,11 +1,5 @@
-// React Query keys for the platform-admin community listing. Both the admin
-// Communities page and the admin Audit community picker read GET
-// /admin/communities but with different limits and purposes; keying them by the
-// bare offset collided (both resolved to ["admin","communities",0] at the first
-// page), so React Query deduped them and one page served the other's wrong-limit
-// data. These purpose-scoped builders keep the shared ["admin","communities"]
-// prefix — so a single invalidateQueries on that prefix still refreshes both —
-// while embedding the full request shape so the two call sites never collide.
+// Include purpose and page size in list keys to prevent cross-page cache collisions.
+// Keep a shared prefix so mutations can invalidate both listings.
 export const ADMIN_COMMUNITIES_KEY = ["admin", "communities"] as const;
 
 export function adminCommunitiesListKey(limit: number, offset: number) {

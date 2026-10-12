@@ -1,21 +1,3 @@
-/**
- * Server detail — Backups tab (WEBUI_SPEC.md 6.7).
- *
- * Stats header (count / total size / newest / oldest), a backups table with
- * per-row download / restore / delete, a create button (works while running —
- * the API takes the save-all + snapshot path), and an upload picker. Scheduled
- * backups are no longer configured here: the FR-BAK-3 cadence moved to the
- * general scheduler (a first-class `backup` schedule, #1840), so the tab only
- * points `backup:schedule` holders at the Schedules surface. Those same holders
- * also get the scheduled-backup retention editor (keep-N / tiered / clear, the
- * #1841 API), which prunes only `scheduled` backups (#1843).
- *
- * Restore requires the server stopped (the API answers 409 `server_not_stopped`
- * otherwise). Rather than a fragile auto-chain, the restore dialog explains the
- * requirement, offers a one-click stop while the server is not stopped, and asks
- * the user to retry once it has stopped — the honest two-step (WEBUI_SPEC.md 6.7).
- */
-
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRef, useState } from "react";
 import {
@@ -50,18 +32,14 @@ type ServerResponse = components["schemas"]["ServerResponse"];
 type BackupResponse = components["schemas"]["BackupResponse"];
 type RetentionPolicyBody = components["schemas"]["RetentionPolicyBody"];
 
-/** Backups list query key — scoped to the server, invalidated on every change. */
 function backupsKey(communityId: string, serverId: string) {
   return ["backups", communityId, serverId] as const;
 }
 
-/** Backups statistics query key. */
 function statsKey(communityId: string, serverId: string) {
   return ["backups", communityId, serverId, "statistics"] as const;
 }
 
-// The presentation contract reads only an API problem's status and reason; a
-// failure that is not an API problem (a network error) takes the fallback.
 function backupErrorKey(
   error: unknown,
   fallback?: TranslationKey,
@@ -95,13 +73,8 @@ export function ServerBackupsTab({
   const canCreate = can("backup:create", { serverId });
   const canRestore = can("backup:restore", { serverId });
   const canDelete = can("backup:delete", { serverId });
-  // The FR-BAK-3 inline cadence field is retired (#1840): scheduled backups are
-  // now a first-class `backup` schedule managed on the Schedules surface. Those
-  // who used to hold `backup:schedule` are pointed there instead of editing a
-  // config key here.
   const canSchedule = can("backup:schedule", { serverId });
-  // The restore dialog's one-click stop hits the lifecycle stop endpoint, gated
-  // on server:stop. Without it the user must ask an operator to stop the server.
+  // Offer the preliminary stop only with server:stop; other users need an operator to stop it.
   const canStop = can("server:stop", { serverId });
 
   const stopped = normalizeState(server.observed_state) === "stopped";
@@ -190,11 +163,7 @@ export function ServerBackupsTab({
     },
   });
 
-  // A backup archive can be multi-GB, so it must never be buffered into a Blob
-  // just to attach the Bearer header (#2314): mint a short-lived self-
-  // authenticating URL and hand it to the browser, which streams it to disk.
-  // The grant lives ~30 s, so minting and clicking are one step — never minted
-  // ahead of time or cached.
+  // Mint a short-lived URL at click time so the browser streams large backups directly to disk.
   const download = useMutation({
     mutationFn: async (backup: BackupResponse) => {
       const grant = await api.post(
@@ -234,18 +203,12 @@ export function ServerBackupsTab({
   if (!canRead) {
     return <p className="sub">{t("backups.noRead")}</p>;
   }
-  // The listing is the primary content; its loading/error drive the whole tab.
-  // Statistics is secondary and handled inline below, so a stats-only failure
-  // can no longer blank a healthy listing (#2554).
+  // Listing failure drives the tab; statistics errors stay inline and cannot hide a usable list.
   const listState = classifyQueryResult(listQuery);
   if (listState.kind === "pending") {
     return <p className="sub">{t("backups.loading")}</p>;
   }
-  // Error only when there is nothing to show (an initial load failed). A
-  // failed background refetch retains `data`, so the cached page keeps
-  // rendering through transient API blips (#1805). Route the error through
-  // the presentation contract so a specific reason (e.g. storage_unavailable) reaches
-  // the user instead of the generic load message (#2554).
+  // Retain cached content on refetch failure; route initial errors through the reason-aware presentation.
   if (listState.kind === "error") {
     return (
       <p className="field-error">
@@ -260,10 +223,7 @@ export function ServerBackupsTab({
 
   return (
     <section className="backups">
-      {/* Statistics is secondary: a failure here must not blank the listing
-          (#2554). While it is still loading render nothing (transient — it
-          resolves alongside the listing); on failure surface its reason in the
-          slot rather than discarding the message. */}
+      {/* Keep statistics failures in their own slot without hiding the backup list. */}
       {statsQuery.isPending ? null : stats === undefined ? (
         <p className="field-error backups-stats-error">
           {t(backupErrorKey(statsQuery.error, "backups.stats.loadError"))}
@@ -274,9 +234,7 @@ export function ServerBackupsTab({
           <Stat
             labelKey="backups.stat.totalSize"
             value={humanizeBytes(stats.total_bytes)}
-            // total_bytes sums only backups with a recorded size; legacy
-            // NULL-size rows are excluded (#281). Flag the figure as partial so
-            // it is not misread as full usage (#640).
+            // Flag total_bytes as partial when legacy backups have no recorded size.
             hint={
               stats.unknown_size_count > 0
                 ? t("backups.stat.totalSizePartial")
@@ -407,10 +365,6 @@ export function ServerBackupsTab({
                         : t("backups.unknownCreator"))}
                   </td>
                   <td className="row-actions">
-                    {/* Disabled while any mint is in flight, so a double-click
-                        cannot mint two grants and save twice (#2326). The mint
-                        settles in ~100 ms, so briefly disabling the other rows
-                        too is unnoticeable. */}
                     <button
                       type="button"
                       className="btn sm"
@@ -420,8 +374,6 @@ export function ServerBackupsTab({
                       {t("backups.download")}
                     </button>
                     {canRestore && (
-                      // An unreadable archive (#2374) has no bytes to restore and
-                      // no override, so the action is disabled and says why.
                       <button
                         type="button"
                         className="btn sm"
@@ -485,13 +437,8 @@ export function ServerBackupsTab({
   );
 }
 
-// Condition badge driven by the API `health` field (#745). A healthy backup
-// renders nothing — only the at-risk states (quarantined / unreadable / unknown,
-// and any future value, which reads as unknown) earn a badge, so a clean list
-// stays quiet. Each badge carries a plain-language hover title; no internal
-// jargon leaks. Unreadable (#2374) is kept apart from quarantined because the
-// remedy differs: a damaged world can still be force-restored, an archive whose
-// bytes are gone cannot.
+// Hide healthy badges and distinguish damaged from unreadable archives.
+// Damaged archives allow force restore; unreadable archives cannot be restored.
 const HEALTH_BADGES: Record<
   string,
   { className: string; label: TranslationKey; title: TranslationKey }
@@ -547,12 +494,10 @@ function Stat({
 
 type RetentionMode = "none" | "keepLast" | "tiered";
 
-/** Remount key: give the editor fresh state whenever the persisted policy changes. */
 function retentionKey(policy: ServerResponse["backup_retention"]): string {
   return JSON.stringify(policy ?? null);
 }
 
-/** Read the persisted (loosely typed) policy into an editor mode + field strings. */
 function readRetention(policy: ServerResponse["backup_retention"]): {
   mode: RetentionMode;
   keepLast: string;
@@ -588,20 +533,12 @@ function readRetention(policy: ServerResponse["backup_retention"]): {
   return { mode: "none", keepLast: "", daily: "", weekly: "", monthly: "" };
 }
 
-/** Parse a tier field: blank counts as 0; a non-integer or negative is invalid. */
 function tierValue(raw: string): number | null {
   if (raw.trim() === "") return 0;
   const n = Number(raw);
   return Number.isInteger(n) && n >= 0 ? n : null;
 }
 
-// The scheduled-backup retention policy (#1841 API / #1843 UI), gated on
-// backup:schedule. Three shapes: none (Save clears via DELETE), keep-N (PUT
-// {keep_last}), and tiered (PUT {daily, weekly, monthly}). It prunes ONLY
-// `scheduled` backups. The editor is keyed on the persisted policy so a save's
-// refetch remounts it with the stored value; nothing mutates on mount. The
-// client-side check mirrors the API's keep_last >= 1 XOR (each tier >= 0, at
-// least one > 0) rule, with the server's invalid_retention_policy as a backstop.
 function RetentionEditor({
   server,
   communityId,
@@ -648,9 +585,7 @@ function RetentionEditor({
     onSuccess: () => {
       showToast(t("backups.retention.saved"), "success");
       invalidate();
-      // A pruning PUT deletes scheduled-backup rows synchronously before
-      // responding, so the backups table and stats strip must refetch too —
-      // otherwise stale deleted rows remain visible until a manual refresh.
+      // Retention updates prune rows synchronously; refetch both the list and statistics after saving.
       queryClient.invalidateQueries({
         queryKey: backupsKey(communityId, server.id),
       });
@@ -696,15 +631,13 @@ function RetentionEditor({
   };
 
   const busy = save.isPending || clear.isPending;
-  // "none" with no stored policy is a no-op — skip the pointless DELETE.
   const disabled = busy || (mode === "none" && !hasPolicy);
 
   return (
     <div className="backups-retention-editor">
       <span className="field-inline">
         {t("backups.retention.modeLabel")}
-        {/* aria-label: a select wrapped by its label text would fold the option
-            texts into the accessible name — set it explicitly instead. */}
+        {/* Set aria-label explicitly so select options do not become part of the accessible name. */}
         <select
           aria-label={t("backups.retention.modeLabel")}
           value={mode}
@@ -792,16 +725,8 @@ function RetentionEditor({
   );
 }
 
-// Restore is stopped-only. While the server is not stopped this dialog explains
-// the requirement and offers a one-click stop; the user retries restore once it
-// has settled (the honest two-step — no auto-chain). When stopped it is a
-// typed-confirm restore. A 409 server_not_stopped (state changed mid-flight) is
-// surfaced specifically.
-//
-// A quarantined backup (health === "quarantined") is known-damaged: the restore
-// is gated behind an extra explicit acknowledgement and sent with force=true,
-// the operator override the API requires for a corrupt backup (#745). A healthy
-// (or unknown) backup keeps the existing typed-confirm path with no force.
+// Restore requires a stopped server; offer stop first and let the user retry after it settles.
+// Quarantined backups also require acknowledgement and force=true.
 function RestoreDialog({
   backup,
   server,
@@ -845,9 +770,7 @@ function RestoreDialog({
 
   const restore = useMutation({
     mutationFn: () =>
-      // force=true is the operator override the API requires to restore a
-      // known-corrupt backup (#745); a healthy backup restores without it. The
-      // query suffix keeps the schema-literal path type via the cast.
+      // Use force=true only for an acknowledged restore of a quarantined backup.
       api.post(
         quarantined
           ? (`${restorePath}?force=true` as typeof restorePath)

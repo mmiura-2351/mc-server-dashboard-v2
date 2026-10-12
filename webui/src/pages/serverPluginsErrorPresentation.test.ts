@@ -1,5 +1,4 @@
 // @vitest-environment node
-// DOM-free contract test: the Plugins tab renders the selected key with its noun.
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../api/client.ts";
 import { pluginErrorPresentation } from "./serverPluginsErrorPresentation.ts";

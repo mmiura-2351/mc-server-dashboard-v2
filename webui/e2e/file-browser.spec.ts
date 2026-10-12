@@ -10,13 +10,9 @@ import { signIn } from "./ui.ts";
 
 const API_URL = process.env.MCD_E2E_API_URL ?? "http://127.0.0.1:8000";
 
-// The file browser requires a worker-assigned server — skip in environments
-// that only run the API (the default CI setup). Set MCD_E2E_HAS_WORKER=1 to
-// enable.
+// File-browser flows need a Worker; API-only CI skips them unless MCD_E2E_HAS_WORKER=1.
 const HAS_WORKER = process.env.MCD_E2E_HAS_WORKER === "1";
 
-// Helper: create a user, community, and server for file-browser tests. Returns
-// the IDs and credentials needed to drive the UI and clean up via API.
 async function setupServer(
   request: import("@playwright/test").APIRequestContext,
 ) {
@@ -29,8 +25,7 @@ async function setupServer(
   );
   const token = await login(request, owner.username, owner.password);
 
-  // Create a stopped Vanilla server via API (avoids the wizard flow and its
-  // external catalog dependency).
+  // Create via the API to avoid the wizard's external version-catalog dependency.
   const res = await request.post(
     `${API_URL}/api/communities/${communityId}/servers`,
     {
@@ -41,8 +36,7 @@ async function setupServer(
         mc_edition: "java",
         mc_version: "1.21.6",
         execution_backend: "container",
-        // game_port omitted: the API auto-allocates a free in-range port, so
-        // parallel/sequential setups never collide on the global port space.
+        // Omit game_port so the API allocates a free port for each fixture.
         eula_accepted: true,
       },
     },
@@ -53,7 +47,6 @@ async function setupServer(
   return { owner, communityId, serverId: server.id, token };
 }
 
-// Helper: open the file browser tab for a given server.
 async function openFilesBrowser(
   page: import("@playwright/test").Page,
   communityId: string,
@@ -61,12 +54,9 @@ async function openFilesBrowser(
 ) {
   await page.goto(`/communities/${communityId}/servers/${serverId}`);
   await page.getByRole("tab", { name: /Files/ }).click();
-  // Wait for the file tree container to appear (may show loading, empty, or
-  // a listing depending on worker state).
   await expect(page.locator(".file-tree")).toBeVisible();
 }
 
-// Helper: upload a file via the API (bypasses the UI for reliable test setup).
 async function uploadFile(
   request: import("@playwright/test").APIRequestContext,
   communityId: string,
@@ -93,7 +83,6 @@ async function uploadFile(
   expect(res.ok(), await res.text()).toBeTruthy();
 }
 
-// Helper: delete a file via the API.
 async function deleteFile(
   request: import("@playwright/test").APIRequestContext,
   communityId: string,
@@ -107,9 +96,7 @@ async function deleteFile(
   );
 }
 
-// Dispatch a synthetic drop event on the file tree with the given file.
-// This is the most reliable way to simulate drag-and-drop in Playwright
-// since real drag-and-drop from outside the browser is not supported.
+// Playwright cannot drag files from outside the browser; dispatch a synthetic drop instead.
 async function dropFileOnTree(
   page: import("@playwright/test").Page,
   fileName: string,
@@ -148,12 +135,10 @@ test.describe("file browser drag-and-drop upload", () => {
 
     await dropFileOnTree(page, "e2e-dnd-test.txt", "hello");
 
-    // Wait for the uploaded file to appear in the listing.
     await expect(page.locator("text=e2e-dnd-test.txt")).toBeVisible({
       timeout: 15_000,
     });
 
-    // Clean up: delete the uploaded file.
     await deleteFile(request, communityId, serverId, token, "e2e-dnd-test.txt");
   });
 
@@ -163,7 +148,7 @@ test.describe("file browser drag-and-drop upload", () => {
     await openFilesBrowser(page, communityId, serverId);
 
     await page.evaluate(() => {
-      // Minimal ZIP file bytes (empty archive).
+      // An empty ZIP archive's end-of-central-directory record.
       const zipBytes = new Uint8Array([
         0x50, 0x4b, 0x05, 0x06, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0,
@@ -203,7 +188,6 @@ test.describe("file browser drag-and-drop overwrite", () => {
     const { owner, communityId, serverId, token } = await setupServer(request);
     await signIn(page, owner.username, owner.password);
 
-    // Upload initial file.
     await uploadFile(
       request,
       communityId,
@@ -218,21 +202,17 @@ test.describe("file browser drag-and-drop overwrite", () => {
       timeout: 15_000,
     });
 
-    // Drop same filename.
     await dropFileOnTree(page, "ow-confirm.txt", "updated");
 
-    // Confirm overwrite.
     await expect(page.locator(".modal")).toBeVisible({ timeout: 10_000 });
     await page
       .locator(".modal button")
       .filter({ hasText: /Overwrite|上書き/ })
       .click();
 
-    // Dialog should close and file should still be in the listing.
     await expect(page.locator(".modal")).not.toBeVisible({ timeout: 5_000 });
     await expect(page.locator("text=ow-confirm.txt")).toBeVisible();
 
-    // Clean up.
     await deleteFile(request, communityId, serverId, token, "ow-confirm.txt");
   });
 
@@ -240,7 +220,6 @@ test.describe("file browser drag-and-drop overwrite", () => {
     const { owner, communityId, serverId, token } = await setupServer(request);
     await signIn(page, owner.username, owner.password);
 
-    // Upload initial file.
     await uploadFile(
       request,
       communityId,
@@ -255,20 +234,16 @@ test.describe("file browser drag-and-drop overwrite", () => {
       timeout: 15_000,
     });
 
-    // Drop same filename.
     await dropFileOnTree(page, "ow-skip.txt", "should-be-skipped");
 
-    // Click Skip.
     await expect(page.locator(".modal")).toBeVisible({ timeout: 10_000 });
     await page
       .locator(".modal button")
       .filter({ hasText: /Skip|スキップ/ })
       .click();
 
-    // Dialog should close.
     await expect(page.locator(".modal")).not.toBeVisible({ timeout: 5_000 });
 
-    // Clean up.
     await deleteFile(request, communityId, serverId, token, "ow-skip.txt");
   });
 });

@@ -81,36 +81,18 @@ const TAB_LABEL: Record<Tab, TranslationKey> = {
   settings: "serverDetail.tab.settings",
 };
 
-/** Server types that do not support plugins/mods (no backend support). */
 const PLUGIN_UNSUPPORTED_TYPES = new Set(["vanilla"]);
 
-/**
- * Server types whose managed content lives in `mods/` rather than `plugins/`,
- * mirroring the backend mapping (servers/domain/plugin.py): Fabric/Forge are
- * mods, Paper is plugins (#1320).
- */
+/** Fabric and Forge use mods/; Paper uses plugins/, matching the backend's content mapping. */
 const MOD_LOADER_TYPES = new Set(["fabric", "forge"]);
 
-/** The loader-aware label key for the content tab (Mods vs Plugins). */
 function pluginTabLabelKey(serverType: string): TranslationKey {
   return MOD_LOADER_TYPES.has(serverType)
     ? "serverDetail.tab.mods"
     : "serverDetail.tab.plugins";
 }
 
-/**
- * The mutation body behind both Export buttons (the actions bar and the
- * settings danger zone).
- *
- * An export zip carries the whole working set, so it must never be buffered
- * into a Blob just to attach the Bearer header (#2353): mint a short-lived
- * self-authenticating URL and hand it to the browser, which streams it to disk.
- * The grant lives ~30 s, so minting and clicking are one step — never minted on
- * render or cached. The export response names itself via `Content-Disposition`
- * since #2357, so the anchor's `download` attribute is now redundant rather
- * than load-bearing; it is kept because it names the file without waiting for
- * the response headers, and same-origin it wins anyway.
- */
+/** Mint export URLs on click so large ZIPs stream directly to disk without tab buffering. */
 function exportViaGrant(communityId: string, server: ServerResponse) {
   return async () => {
     const grant = await api.post(
@@ -123,20 +105,7 @@ function exportViaGrant(communityId: string, server: ServerResponse) {
   };
 }
 
-/**
- * The shared wrapper for every server-detail tab panel (issue #1898).
- *
- * `tabIndex={0}` puts the panel itself in the tab sequence: several panels have
- * no focusable descendant at all in plausible states (a read-only user on an
- * empty backups/schedules/plugins list), so without it activating a tab strands
- * the keyboard user. Others merely open with non-focusable content (overview's
- * metrics strip, settings' heading), which is what triggers the WAI-ARIA APG
- * tabs pattern's set-wide rule — "it is recommended that all tabpanel elements
- * in a tab set are focusable if there are any panels in the set that contain
- * content where the first element in the panel is not focusable". So every
- * panel goes through this wrapper, console included, even though console does
- * open on a focusable element (the follow checkbox).
- */
+/** Make every panel focusable: some states have no focusable child, or begin with noninteractive content. */
 function TabPanel({ name, children }: { name: Tab; children: ReactNode }) {
   return (
     <div
@@ -167,14 +136,12 @@ function Loaded({
   serverId: string;
 }) {
   const can = useCan();
-  // Active tab lives in the URL hash (#514) so Back walks the tab history;
-  // #overview is the default and keeps a clean URL.
   const [tab, setTab] = useTabHash(TABS);
-  // One WS per open detail page, shared by all tabs (WEBUI_SPEC.md 7.2).
+  // Share one event socket across the open detail page's tabs.
   const events = useServerEvents(communityId, serverId);
   const query = useQuery({
     queryKey: serverKey(communityId, serverId),
-    // Stamped so live status frames are ordered against each REST attempt.
+    // Stamp REST attempts so live frames can be ordered against them.
     queryFn: stampedQueryFn(({ signal }) =>
       api.get(
         apiPath("/api/communities/{community_id}/servers/{server_id}", {
@@ -191,10 +158,7 @@ function Loaded({
   if (queryState.kind === "pending") {
     return <p className="sub">{t("serverDetail.loading")}</p>;
   }
-  // Full-page error only when there is nothing to show (the initial load
-  // failed). A failed background refetch retains `data`, so the cached page
-  // keeps rendering through transient API blips; the WS-driven degraded pill
-  // already signals that live updates are down (#1724).
+  // Retain cached content on background refetch failure; stream status is reported separately.
   if (queryState.kind === "error") {
     return <p className="field-error">{t("serverDetail.loadError")}</p>;
   }
@@ -308,20 +272,13 @@ function Loaded({
   );
 }
 
-// ── Overview header + lifecycle controls ────────────────────────────────────
-
-/**
- * The crash reasons a status frame can name (CONTROL_PLANE.md Section 6, issue
- * #1093): each is a crash of the supervised Forge install, whose output is in
- * the install log. An empty or unknown reason is an unclassified crash.
- */
+/** Known Forge-install crash reasons can offer an install-log viewer; unknown reasons remain unclassified. */
 const FORGE_INSTALL_CRASH_REASONS: ReadonlySet<string> = new Set([
   "forge_install_failed",
   "forge_install_out_of_memory",
   "forge_install_java_incompatible",
 ]);
 
-/** The reasons specific enough to say what the operator should do. */
 const CRASH_REASON_MESSAGE = {
   forge_install_out_of_memory:
     "serverDetail.crashReason.forgeInstallOutOfMemory",
@@ -349,8 +306,6 @@ function Header({
 }) {
   const state = normalizeState(server.observed_state);
   const pill = statePill(state);
-  // The reconciler has not yet converged when desired ≠ observed; show an
-  // applying hint (WEBUI_SPEC.md 6.4).
   const drifting = server.desired_state !== server.observed_state;
 
   return (
@@ -470,8 +425,6 @@ function Controls({
     showToast(t(lifecycleErrorMessage(error)), "error");
   };
 
-  // The optimistic pill, its #1727-safe rollback and the settle refetch live
-  // in useLifecycleMutation, shared with the dashboard rows (issue #3146).
   const lifecycle = useLifecycleMutation({
     communityId,
     serverId: server.id,
@@ -596,14 +549,7 @@ function Controls({
   );
 }
 
-// Stop with a graceful/force choice (WEBUI_SPEC.md 6.4). The bare button stops
-// gracefully; the caret toggles a small menu whose entries pick the mode.
-//
-// The menu follows the WAI-ARIA menu-button keyboard pattern (#496): a roving
-// tabindex (only the active item is tabbable), arrow keys / Home / End move
-// focus, type-ahead jumps to the next item by first letter, Enter/Space
-// activates, and Escape closes and returns focus to the trigger. Two items only,
-// so the logic is kept local rather than hoisted into a generic menu primitive.
+// Use the menu-button keyboard pattern: roving focus, type-ahead, and Escape focus restoration.
 function StopControl({
   disabled,
   onStop,
@@ -612,9 +558,7 @@ function StopControl({
   onStop: (force: boolean) => void;
 }) {
   const [open, setOpen] = useState(false);
-  // When true the force-stop confirmation modal is shown.
   const [confirmForce, setConfirmForce] = useState(false);
-  // Index of the focused menu item while open; drives the roving tabindex.
   const [active, setActive] = useState(0);
   const ref = useRef<HTMLSpanElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -639,19 +583,14 @@ function StopControl({
     }
   };
 
-  // Move focus to the menu item once open/active settles, so opening with a key
-  // lands focus on the right entry and arrow keys keep DOM focus in step.
+  // Move DOM focus after the open state and active menu index commit.
   useLayoutEffect(() => {
     if (open) {
       itemRefs.current[active]?.focus();
     }
   }, [open, active]);
 
-  // Close the menu on a click outside it or on Escape, mirroring the
-  // document-listener pattern in Modal.tsx (listeners attached only while open).
-  // Escape returns focus to the trigger so keyboard users are not stranded; the
-  // per-item handler below also catches it (and stops propagation), so this is
-  // the fallback for an Escape pressed before focus has entered the menu.
+  // Document-level Escape handles the interval before focus enters the menu and restores the trigger.
   useEffect(() => {
     if (!open) {
       return;
@@ -675,8 +614,6 @@ function StopControl({
     };
   }, [open]);
 
-  // Open from the trigger via the keyboard: Enter/Space/Down focus the first
-  // item, Up focuses the last (WAI-ARIA menu-button pattern).
   const onTriggerKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
     if (
       event.key === "Enter" ||
@@ -724,7 +661,6 @@ function StopControl({
         activate(menu[i].force);
         break;
       default: {
-        // Type-ahead: jump to the next item whose label starts with the key.
         if (event.key.length !== 1) {
           return;
         }
@@ -826,8 +762,7 @@ function Overview({
   events: ServerEventsState;
   onOpenConsole: () => void;
 }) {
-  // Last ~200 lines of the live stream; local RCON echoes are console-only, so
-  // the tail shows only real server output / gap markers (WEBUI_SPEC.md 6.4).
+  // Exclude local RCON echoes from the overview tail; they belong only in the console.
   const logs = useLogs(events.logStore);
   const tail = logs
     .filter((e) => e.kind === "line" || e.kind === "gap")
@@ -857,8 +792,6 @@ function Overview({
   );
 }
 
-// ── Metrics strip (WEBUI_SPEC.md 6.4) ───────────────────────────────────────
-
 function MetricsStrip({
   samples,
   running,
@@ -867,10 +800,7 @@ function MetricsStrip({
   running: boolean;
 }) {
   const latest = samples.at(-1);
-  // Until the first frame arrives, say so honestly: "collecting" while the
-  // server is live — running or still coming up (frames are sparse, ~10-15s) —
-  // else "no metrics while stopped" since SPEC 7.2 has no metrics stream when
-  // the server is at rest.
+  // Before metrics arrive, distinguish a live stream collecting samples from a stopped server with no stream.
   if (latest === undefined) {
     return (
       <div className="card metrics-strip metrics-strip-empty">
@@ -889,7 +819,6 @@ function MetricsStrip({
       <Sparkline
         labelKey="serverDetail.metric.cpu"
         values={samples.map((s) => s.cpuMillis)}
-        // CPU in milli-cores → cores, one decimal.
         current={latest ? `${(latest.cpuMillis / 1000).toFixed(1)}` : null}
         unitKey="serverDetail.metric.cores"
       />
@@ -913,9 +842,7 @@ function formatMiB(bytes: number): string {
   return (bytes / (1024 * 1024)).toFixed(0);
 }
 
-// A self-drawn sparkline: an inline-SVG polyline over the sample window, scaled
-// to its own min/max so the shape reads even for a flat-but-nonzero series. No
-// charting dependency (WEBUI_SPEC.md 6.4: self-drawn, client-side only).
+// Scale the sample window to its own min/max so small variations remain visible.
 function Sparkline({
   labelKey,
   values,
@@ -960,7 +887,6 @@ function Sparkline({
   );
 }
 
-/** Map a value series to a polyline `points` string spanning the viewbox. */
 export function sparklinePoints(
   values: number[],
   width: number,
@@ -973,18 +899,14 @@ export function sparklinePoints(
   return values
     .map((v, i) => {
       const x = i * step;
-      // Invert y: SVG origin is top-left, so a higher value sits higher up.
+      // Invert y because SVG's origin is at the top-left.
       const y = height - ((v - min) / span) * height;
       return `${x.toFixed(1)},${y.toFixed(1)}`;
     })
     .join(" ");
 }
 
-// ── Shared log view + Console tab (WEBUI_SPEC.md 6.5) ────────────────────────
-
-// A single log row, memoized so that when a new entry is appended only the new
-// row renders — existing rows keep their referentially-stable entry objects and
-// skip reconciliation entirely (#1725).
+// Stable entry objects let memoized log rows skip rerendering when another entry arrives.
 const LogRow = memo(function LogRow({ entry }: { entry: LogEntry }) {
   if (entry.kind === "gap") {
     return <div className="log-gap">{t("serverDetail.missedEvents")}</div>;
@@ -997,10 +919,6 @@ const LogRow = memo(function LogRow({ entry }: { entry: LogEntry }) {
   );
 });
 
-// The log stream renderer shared by the Overview tail and the Console. Each
-// entry is color-keyed by source (stdout/stderr) or echo kind (command/output);
-// a gap entry renders the inline "missed events" divider (WEBUI_SPEC.md 7.2).
-// In follow mode it auto-scrolls to the newest line on each update.
 function LogView({
   entries,
   follow,
@@ -1009,7 +927,6 @@ function LogView({
   follow: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
-  // Re-scroll to the newest line whenever the entries change while following.
   // biome-ignore lint/correctness/useExhaustiveDependencies: `entries` drives the auto-scroll; re-run on every append.
   useLayoutEffect(() => {
     if (follow && ref.current !== null) {
@@ -1039,11 +956,9 @@ function Console({
   const onForbidden = useOnForbidden();
   const [follow, setFollow] = useState(true);
   const [filter, setFilter] = useState("");
-  // Clear hides everything up to (and including) this entry id; -1 hides none.
-  // Keyed by stable id, not position, so the bounded-buffer trim cannot shift it.
+  // Track the clear boundary by stable entry ID so buffer trimming cannot shift it; -1 hides nothing.
   const [clearedThrough, setClearedThrough] = useState(-1);
   const [command, setCommand] = useState("");
-  // Local command history for ↑/↓; -1 means "not browsing history".
   const history = useRef<string[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
 
@@ -1090,7 +1005,6 @@ function Console({
     send.mutate(line);
   };
 
-  // ↑/↓ browse the local history; at the bottom (index -1) the input is blank.
   const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     const items = history.current;
     if (event.key === "ArrowUp" && items.length > 0) {
@@ -1191,61 +1105,37 @@ function Console({
   );
 }
 
-// ── Settings tab ────────────────────────────────────────────────────────────
-
-// Config keys the system manages/derives, not the user: they are hidden from the
-// overrides editor (issue #645) so they can't be edited or deleted, but their
-// values are preserved across a save (see `Settings`) since the PATCH replaces
-// the whole `config` blob. `resolved_jar_sha256` is the resolved-JAR content
-// address and `resolved_jar_source` is the source fingerprint for auto-update
-// detection (issue #1676), both written by the start path.
+// Hide platform-managed config keys but preserve them on save because PATCH replaces the entire config.
 const SYSTEM_MANAGED_CONFIG_KEYS = new Set([
   "resolved_jar_sha256",
   "resolved_jar_source",
 ]);
 
-// The per-server memory limit (issue #709) rides the `config` blob as a reserved
-// key (unit: MiB), but it has a dedicated field rather than a raw override row,
-// so it is hidden from the overrides editor and merged back explicitly on save.
+// Memory has a dedicated field; exclude it from raw overrides and merge it on save.
 const MEMORY_LIMIT_KEY = "memory_limit_mb";
-// Relay slug validation — mirror the API rule (RELAY.md Section 15):
-// a lowercase DNS label: starts/ends with [a-z0-9], up to 63 chars total,
-// internal chars may include hyphens.
+// Match the API's lowercase DNS-label rule, including its 63-character limit.
 const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
-// A slug input is valid when it matches the DNS-label regex; blank is also
-// allowed (leave field empty → keep the current slug by omitting it from PATCH).
+// Blank omits slug from PATCH so the current address remains unchanged.
 function slugValid(value: string): boolean {
   return value.trim() === "" || SLUG_RE.test(value.trim());
 }
 
-// Mirror the API validator (servers/domain/memory_limit.py): a whole number in
-// [512, 1 TiB] MiB; the API rejects out-of-range values as `invalid_memory_limit`.
 const MEMORY_LIMIT_FLOOR_MIB = 512;
 const MEMORY_LIMIT_DEFAULT_CEILING_MIB = 1024 * 1024;
 
-// The per-server CPU allocation (issue #726) rides the `config` blob the same
-// way as the memory limit, but the value is a *soft, relative share* (millicores,
-// 1000 = one core), not a hard cap. It has a dedicated field rather than a raw
-// override row, so it is hidden from the overrides editor and merged back on save.
+// CPU allocation is a relative share in millicores, not a hard cap; edit it through its dedicated field.
 const CPU_ALLOCATION_KEY = "cpu_millis";
-// Mirror the API validator (servers/domain/cpu_allocation.py): a whole number in
-// [100, 128000] millicores; the API rejects out-of-range values as
-// `invalid_cpu_allocation`.
 const CPU_ALLOCATION_FLOOR_MILLIS = 100;
 const CPU_ALLOCATION_CEILING_MILLIS = 128_000;
 
-// The keys hidden from the overrides editor: system-managed plus the memory
-// limit and CPU allocation, which each have their own field.
 const HIDDEN_CONFIG_KEYS = new Set([
   ...SYSTEM_MANAGED_CONFIG_KEYS,
   MEMORY_LIMIT_KEY,
   CPU_ALLOCATION_KEY,
 ]);
 
-// A non-blank memory-limit input is valid only as a whole number within range;
-// blank means "unset → driver default" and is always allowed. The ceiling can
-// be overridden by the operator-configurable max (#1069).
+// Blank omits the memory limit; nonblank values must be integers within the operator-configured range.
 function memoryLimitValid(
   value: string,
   ceiling: number = MEMORY_LIMIT_DEFAULT_CEILING_MIB,
@@ -1261,8 +1151,6 @@ function memoryLimitValid(
   );
 }
 
-// A non-blank CPU-allocation input is valid only as a whole number within range;
-// blank means "unset → auto" and is always allowed.
 function cpuAllocationValid(value: string): boolean {
   if (value.trim() === "") {
     return true;
@@ -1278,13 +1166,9 @@ function cpuAllocationValid(value: string): boolean {
 interface ConfigRow {
   key: string;
   value: string;
-  // The original JSON value of this key as loaded from the server, preserved
-  // so an untouched row round-trips its exact type (e.g. an integer
-  // `snapshot_interval_seconds` stays a number) rather than being re-parsed
-  // from its display string. `undefined` for rows the user added.
+  // Retain the original JSON type of untouched values instead of reparsing their display strings.
   original?: unknown;
-  // Set once the user edits this row's value (or key), so a save reparses the
-  // string instead of reusing `original`.
+  // Value edits require reparsing; a key-only rename preserves the original value type.
   edited?: boolean;
 }
 
@@ -1298,8 +1182,7 @@ function toRows(config: Record<string, unknown>): ConfigRow[] {
     }));
 }
 
-// The system-managed entries (issue #645) the editor hides but a save must carry
-// back unchanged, since the PATCH replaces the whole `config` blob.
+// Carry hidden managed keys through the full config replacement unchanged.
 function systemManagedConfig(
   config: Record<string, unknown>,
 ): Record<string, unknown> {
@@ -1310,11 +1193,7 @@ function systemManagedConfig(
   );
 }
 
-// Parse a value-input string with JSON-value semantics: a valid JSON literal
-// (number / boolean / null / object / array) keeps that type, anything else
-// (including a bare word like `hard`) stays a string. So `12` round-trips as a
-// number and the API's non-bool-int cadence key (snapshot_interval_seconds) is
-// not sent as a string → no spurious 422.
+// Parse valid JSON literals as typed values; keep other input as a string.
 function parseConfigValue(value: string): unknown {
   try {
     return JSON.parse(value);
@@ -1330,8 +1209,6 @@ function fromRows(rows: ConfigRow[]): Record<string, unknown> {
     if (trimmed.length === 0) {
       continue;
     }
-    // An untouched loaded row keeps its original typed value; an edited or new
-    // row is parsed from its display string.
     out[trimmed] =
       row.edited !== true && "original" in row
         ? row.original
@@ -1363,26 +1240,20 @@ function Settings({
   const [rows, setRows] = useState<ConfigRow[]>(() =>
     toRows(server.config as Record<string, unknown>),
   );
-  // Empty string ↔ unset (driver default); a number ↔ the limit in MiB.
   const [memoryLimit, setMemoryLimit] = useState(
     typeof server.memory_limit_mb === "number"
       ? String(server.memory_limit_mb)
       : "",
   );
-  // Empty string ↔ unset (auto); a number ↔ the allocation in millicores.
   const [cpuAllocation, setCpuAllocation] = useState(
     typeof server.cpu_millis === "number" ? String(server.cpu_millis) : "",
   );
   const [portHint, setPortHint] = useState<TranslationKey | null>(null);
-  // Only the latest issued check may apply its result: blurs on different ports
-  // can resolve out of order and a stale response must not clobber the current
-  // hint (#1592).
+  // Ignore earlier port checks that finish after a newer check.
   const portCheckRequest = useRef(0);
   const [confirmOpen, setConfirmOpen] = useState(false);
 
-  // Re-sync form state when the server prop changes (e.g. after a save +
-  // cache invalidation or an external edit) so the form never submits stale
-  // values that silently overwrite concurrent changes (#1212).
+  // Resync after external updates or saves so stale form values do not overwrite refreshed server data.
   useEffect(() => {
     setName(server.name);
     setSlug(server.slug);
@@ -1408,8 +1279,7 @@ function Settings({
     server.cpu_millis,
   ]);
 
-  // Operator-configurable memory-limit ceiling from /meta (issue #1069). The
-  // meta query is shared with the create page via react-query's cache.
+  // Use /meta's operator-configured memory ceiling; share its query cache with server creation.
   const metaQuery = useQuery({
     queryKey: ["meta"],
     queryFn: ({ signal }) => api.get("/api/meta", { signal }),
@@ -1419,9 +1289,7 @@ function Settings({
       ? metaQuery.data.max_memory_limit_mb
       : MEMORY_LIMIT_DEFAULT_CEILING_MIB;
 
-  // Relay mode is signalled by a non-null join_hostname (the API exposes it only
-  // when relay.enabled). In relay mode the game port is hidden and API-managed
-  // (#1002); in direct mode it stays editable.
+  // A join_hostname signals relay mode, where the API manages the hidden game port.
   const relayEnabled = server.join_hostname !== null;
   const canUpdate = can("server:update", { serverId: server.id });
   const memoryLimitOk = memoryLimitValid(memoryLimit, maxMemoryLimitMb);
@@ -1434,7 +1302,6 @@ function Settings({
     if (onForbidden(error)) {
       return;
     }
-    // Slug-specific errors land inline on the field rather than as toasts.
     const { target, key } = serverSettingsErrorPresentation(
       error instanceof ApiError ? error.reason : undefined,
     );
@@ -1455,21 +1322,13 @@ function Settings({
         {
           body: JSON.stringify({
             name,
-            // In relay mode the port is hidden and API-managed, so omit it from
-            // the PATCH; in direct mode send the edited value (#1002).
             ...(relayEnabled
               ? {}
               : { game_port: port === "" ? null : Number(port) }),
-            // Include slug rename only when the field is non-empty and differs
-            // from the current value; omit otherwise so the API keeps the slug.
             ...(slug.trim() !== "" && slug.trim() !== server.slug
               ? { slug: slug.trim() }
               : {}),
-            // Re-merge the hidden system-managed keys (issue #645) so the full
-            // config replace doesn't drop them, then layer the memory limit
-            // (issue #709) and CPU allocation (issue #726): a number when set,
-            // omitted when cleared so the server falls back to the driver
-            // default / auto share.
+            // Preserve hidden managed keys; omit cleared resource limits so the driver uses defaults.
             config: {
               ...systemManagedConfig(server.config as Record<string, unknown>),
               ...fromRows(rows),
@@ -1593,9 +1452,6 @@ function Settings({
           </label>
         )}
         <div className="form-row">
-          {/* In relay mode players join via the slug hostname (port-less); the
-              game port is internal plumbing the API auto-allocates, so hide the
-              control. Direct mode still needs a port-forward, so keep it (#1002). */}
           {relayEnabled ? null : (
             <label className="field">
               {t("serverDetail.settings.gamePort")}
@@ -1749,9 +1605,7 @@ function ConfigEditor({
   disabled: boolean;
   onChange: (rows: ConfigRow[]) => void;
 }) {
-  // Only mark a row edited when its VALUE changes; a key-only rename must not
-  // trigger re-parsing of the display string, so a stored "12" (string) stays
-  // a string and doesn't silently coerce to the number 12 on save (#791).
+  // A key-only rename must preserve a stored string such as "12" rather than coercing it to a number.
   const update = (i: number, patch: Partial<ConfigRow>) =>
     onChange(
       rows.map((r, j) =>

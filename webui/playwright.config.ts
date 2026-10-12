@@ -1,35 +1,13 @@
 import { createHash } from "node:crypto";
 import { defineConfig, devices } from "@playwright/test";
 
-// Playwright E2E config (issue #491). The suite drives the real UI against a
-// real API + Postgres over the critical flows.
-//
-// Division of labour:
-//   - The API (uvicorn + Postgres + migrations + a seeded admin) is booted by
-//     the orchestration around this config — `make webui-e2e` locally, the e2e
-//     workflow in CI — because it needs the database up first. globalSetup only
-//     asserts the API is reachable, so a misconfigured run fails fast with a
-//     clear message instead of a wall of UI timeouts.
-//   - The UI is the Vite dev server (`npm run dev`), started here as a
-//     webServer. Dev is the honest cheap option: the dev-server proxy
-//     (vite.config.ts) forwards the /api prefix (REST + the WebSocket event
-//     streams) to the API, keeping the browser same-origin with the API exactly
-//     as production does — `vite preview` does not apply that proxy. The proxy
-//     target follows MCD_E2E_API_URL via VITE_API_PROXY_TARGET.
-//
-// Chromium only for the first cut.
+// The caller starts the API and database; this config starts Vite for its /api proxy.
+// The preview server does not apply that proxy.
 
 const API_URL = process.env.MCD_E2E_API_URL ?? "http://127.0.0.1:8000";
 const UI_HOST = "127.0.0.1";
-// Default the dev-server port to a value derived from this worktree's absolute
-// path, so concurrent worktrees on a shared host never share the default port
-// (issue #1861). `reuseExistingServer` (local dev) reuses whatever server
-// already answers on `url`; with a fixed 5173 default it silently latched onto
-// a CONCURRENT worktree's dev server — which proxied to that worktree's own API
-// — and tested the wrong stack. A per-worktree default means it only ever
-// reuses THIS worktree's own server. The 20000-29999 band stays clear of the
-// API (8000/18000), Postgres (5544), Vite's own 5173, and the Linux ephemeral
-// range (32768+). MCD_E2E_UI_PORT still overrides it explicitly.
+// Derive the default port from the worktree path to reduce cross-worktree server reuse.
+// Use 20000-29999 to avoid the standard service and Linux ephemeral port ranges.
 const defaultUiPort =
   20000 +
   (createHash("sha256")
@@ -42,8 +20,7 @@ const UI_URL = `http://${UI_HOST}:${UI_PORT}`;
 
 export default defineConfig({
   testDir: "./e2e",
-  // E2E is the slow path: keep it serial-ish and give the network-backed
-  // version catalog room. CI retries once to absorb a transient source blip.
+  // Allow time for upstream catalog requests and retry transient failures in CI.
   fullyParallel: false,
   workers: 1,
   retries: process.env.CI ? 1 : 0,
@@ -62,12 +39,7 @@ export default defineConfig({
     },
   ],
   webServer: {
-    // Bind the dev server to the same literal host Playwright probes
-    // (UI_URL). Vite defaults to "localhost", which on the CI runner can
-    // resolve to IPv6 ::1 (Node >=17 keeps the resolver's verbatim order)
-    // while `url` is IPv4 127.0.0.1 — the probe then never connects and the
-    // run dies with a 120s "config.webServer" timeout. Pinning --host keeps
-    // the listen address and the probe address identical.
+    // Bind to the probe's IPv4 address; localhost may resolve to IPv6 instead.
     command: `npm run dev -- --host ${UI_HOST} --port ${UI_PORT} --strictPort`,
     url: UI_URL,
     reuseExistingServer: !process.env.CI,

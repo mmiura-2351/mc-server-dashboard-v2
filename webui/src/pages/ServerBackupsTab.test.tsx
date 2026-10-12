@@ -50,9 +50,7 @@ vi.mock("../api/client.ts", async () => {
   };
 });
 
-// Only `downloadFile` is stubbed (the other detail-page tabs use it); the real
-// `saveUrlAs` runs so the backups download can be asserted on the anchor it
-// synthesises.
+// Keep saveUrlAs real so assertions observe the generated download anchor.
 const mockDownload = vi.hoisted(() => ({ downloadFile: vi.fn() }));
 vi.mock("../api/download.ts", async () => {
   const actual =
@@ -72,8 +70,7 @@ vi.mock("../permissions/ActiveCommunityProvider.tsx", () => ({
 }));
 vi.mock("../permissions/useCan.ts", () => ({ useCan: () => mockCan }));
 
-// Use the real router (incl. useNavigate): switching to the Backups tab now
-// drives the URL hash (#514), so navigate must update the location, not no-op.
+// Use the real router because tab switching updates the URL hash.
 
 function server(overrides: Record<string, unknown> = {}) {
   return {
@@ -114,10 +111,7 @@ const STATS = {
   oldest: "2026-06-04T00:00:00Z",
 };
 
-// Route api.get by path: server detail, backups list, statistics. Per-endpoint
-// (never a catch-all reject, #2247/#2359/#2525): `listError` / `statsError`
-// reject only their own endpoint so the other two keep resolving — the server
-// detail query must still succeed for the tab to mount.
+// Reject only the requested failing endpoint; server detail must load for the tab to mount.
 function routeGet(
   opts: {
     srv?: Record<string, unknown>;
@@ -186,8 +180,7 @@ beforeEach(() => {
   mockPostFormWithProgress.mockReset();
   mockDownload.downloadFile.mockReset();
   mockCan = () => true;
-  // The detail page opens a per-server events socket; without a mock the events
-  // client onDown fires invalidate and refetches mid-test (prior CI flakes).
+  // Stub the event socket so disconnect-driven refetches cannot race fixture assertions.
   restoreWs = installMockWebSocket();
 });
 
@@ -201,15 +194,12 @@ describe("ServerBackupsTab stats + table", () => {
     routeGet();
     await openBackups();
 
-    // "1.5 GiB" appears for both the total-size stat and the single row.
     expect((await screen.findAllByText("1.5 GiB")).length).toBe(2);
     expect(screen.getByText("manual")).toBeInTheDocument();
-    // The creator cell carries the full value as a hover title (#519).
     expect(screen.getByText("miura").closest("td")).toHaveAttribute(
       "title",
       "miura",
     );
-    // The stats header labels render (count uses "Backups", scoped to the strip).
     expect(screen.getByText(t("backups.stat.totalSize"))).toBeInTheDocument();
     expect(screen.getByText(t("backups.stat.newest"))).toBeInTheDocument();
   });
@@ -222,13 +212,10 @@ describe("ServerBackupsTab stats + table", () => {
     });
     await openBackups();
 
-    // The raw ISO no longer leaks: rendered via toLocaleString (no "T", no
-    // microseconds).
     const formatted = new Date(createdAt).toLocaleString();
     expect(await screen.findByText(formatted)).toBeInTheDocument();
     expect(screen.queryByText(createdAt)).not.toBeInTheDocument();
 
-    // A UUID author is abbreviated, full id in the cell title.
     expect(screen.getByText("ad1051a7").closest("td")).toHaveAttribute(
       "title",
       authorId,
@@ -242,17 +229,13 @@ describe("ServerBackupsTab stats + table", () => {
     });
     await openBackups();
 
-    // The username is shown instead of the shortened id, and the full id stays
-    // in the cell title for hover.
     const cell = (await screen.findByText("alice")).closest("td");
     expect(cell).toHaveAttribute("title", authorId);
-    // The shortened id is not shown when a username resolved.
     expect(screen.queryByText("ad1051a7")).not.toBeInTheDocument();
   });
 
   it("formats the newest/oldest stat timestamps (#644)", async () => {
-    // Empty list so the formatted stat values cannot collide with a row's
-    // created-at cell.
+    // Use an empty list so statistics cannot collide with formatted dates in table rows.
     routeGet({ backups: [] });
     await openBackups();
 
@@ -265,9 +248,6 @@ describe("ServerBackupsTab stats + table", () => {
   });
 
   it("renders an unknown-size row and flags the total as partial", async () => {
-    // A legacy NULL-size backup (predates size tracking, #281): the row shows
-    // "unknown" and the total-size stat is flagged as a partial sum so the
-    // figure is not silently misread as full usage (#640).
     routeGet({
       backups: [backup(), backup({ id: "b-old", size_bytes: null })],
       stats: { ...STATS, count: 2, unknown_size_count: 1 },
@@ -305,7 +285,6 @@ describe("ServerBackupsTab condition badge (#745)", () => {
     await openBackups();
 
     const badge = await screen.findByText(t("backups.health.unreadable"));
-    // The hover title carries the remedy, which differs from a damaged world's.
     expect(badge).toHaveAttribute("title", t("backups.health.unreadableTitle"));
     expect(
       screen.queryByText(t("backups.health.quarantined")),
@@ -374,13 +353,12 @@ describe("ServerBackupsTab create / upload / download / delete", () => {
     const clicks: HTMLAnchorElement[] = [];
     let fetchSpy: MockInstance<typeof fetch>;
 
-    /** URLs the page requested itself, rather than handing to the browser. */
     const fetchedUrls = () =>
       fetchSpy.mock.calls.map(([input]) => String(input));
 
     beforeEach(() => {
       clicks.length = 0;
-      // Capture the synthesised anchor click instead of navigating.
+      // Capture the anchor click without navigating the test document.
       vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(
         function (this: HTMLAnchorElement) {
           clicks.push(this);
@@ -413,8 +391,6 @@ describe("ServerBackupsTab create / upload / download / delete", () => {
       await waitFor(() => expect(clicks).toHaveLength(1));
       expect(clicks[0].getAttribute("href")).toBe(GRANT_URL);
       expect(clicks[0].download).toBe(`${BID}.tar.gz`);
-      // The archive body is never read by the tab: no capped fetch+Blob path,
-      // and no request to the grant URL at all — only the browser fetches it.
       expect(mockDownload.downloadFile).not.toHaveBeenCalled();
       expect(fetchedUrls()).not.toContain(GRANT_URL);
       expect(
@@ -437,7 +413,6 @@ describe("ServerBackupsTab create / upload / download / delete", () => {
       });
       fireEvent.click(button);
 
-      // A second click must not mint a second grant (and save twice).
       await waitFor(() => expect(button).toBeDisabled());
       fireEvent.click(button);
       expect(mockApi.post).toHaveBeenCalledTimes(1);
@@ -505,7 +480,6 @@ describe("ServerBackupsTab restore (stopped-only two-step)", () => {
     expect(
       screen.getByText(t("backups.restoreDialog.blocked")),
     ).toBeInTheDocument();
-    // No typed-confirm restore offered while running; only a stop button.
     expect(
       screen.queryByRole("button", {
         name: t("backups.restoreDialog.confirm"),
@@ -557,7 +531,6 @@ describe("ServerBackupsTab restore (stopped-only two-step)", () => {
     fireEvent.click(
       await screen.findByRole("button", { name: t("backups.restore") }),
     );
-    // The damaged-data warning is shown and the confirm uses the force label.
     expect(
       screen.getByText(t("backups.restoreDialog.damagedWarning")),
     ).toBeInTheDocument();
@@ -565,7 +538,6 @@ describe("ServerBackupsTab restore (stopped-only two-step)", () => {
       name: t("backups.restoreDialog.damagedConfirm"),
     });
 
-    // Typing the phrase alone is not enough — the extra acknowledgement gates it.
     fireEvent.change(
       screen.getByPlaceholderText(t("backups.restoreDialog.phrase")),
       { target: { value: "RESTORE" } },
@@ -590,8 +562,6 @@ describe("ServerBackupsTab restore (stopped-only two-step)", () => {
     });
     await openBackups();
 
-    // The archive cannot be read back, so there is no override to offer: the
-    // restore action is disabled and says why instead of opening the dialog.
     const restore = await screen.findByRole("button", {
       name: t("backups.restore"),
     });
@@ -617,7 +587,6 @@ describe("ServerBackupsTab restore (stopped-only two-step)", () => {
     fireEvent.click(
       await screen.findByRole("button", { name: t("backups.restore") }),
     );
-    // No damaged warning, no acknowledgement checkbox on a healthy backup.
     expect(
       screen.queryByText(t("backups.restoreDialog.damagedWarning")),
     ).not.toBeInTheDocument();
@@ -639,8 +608,6 @@ describe("ServerBackupsTab restore (stopped-only two-step)", () => {
   });
 
   it("hides the stop button without server:stop and explains instead", async () => {
-    // The one-click stop hits the lifecycle stop endpoint (server:stop); without
-    // it the user must ask an operator to stop the server.
     mockCan = (code) => code !== "server:stop";
     routeGet({ srv: { observed_state: "running" } });
     await openBackups();
@@ -698,8 +665,6 @@ describe("ServerBackupsTab restore (stopped-only two-step)", () => {
         ".toast",
       ),
     ).not.toBeNull();
-    // Unlike a 403, the failure keeps the dialog and its typed phrase so the
-    // user can retry once the server has stopped.
     expect(
       screen.getByPlaceholderText(t("backups.restoreDialog.phrase")),
     ).toHaveValue("RESTORE");
@@ -708,8 +673,6 @@ describe("ServerBackupsTab restore (stopped-only two-step)", () => {
 
 describe("ServerBackupsTab schedule note", () => {
   it("points a backup:schedule holder at the Schedules surface (#1840)", async () => {
-    // The FR-BAK-3 inline cadence field is retired: the tab now only shows a
-    // note pointing at Schedules, and never PATCHes a backup_interval_hours key.
     routeGet({ srv: { config: { motd: "hi" } } });
     await openBackups();
 
@@ -724,7 +687,6 @@ describe("ServerBackupsTab schedule note", () => {
     routeGet();
     await openBackups();
 
-    // Wait for the tab to settle, then assert the note is absent.
     await screen.findByText(t("backups.col.created"));
     expect(
       screen.queryByText(t("backups.schedule.movedNote")),
@@ -775,8 +737,6 @@ describe("ServerBackupsTab permission gating", () => {
   });
 
   it("names the upload limit on a reasonless 413 upload", async () => {
-    // A proxy's body-size refusal carries no problem+json reason, so only the
-    // status can name it.
     routeGet();
     mockPostFormWithProgress.mockRejectedValue(new ApiError(413, undefined));
     await openBackups();
@@ -793,9 +753,6 @@ describe("ServerBackupsTab permission gating", () => {
   });
 
   it("names the platform-managed path on a 422 platform_managed_path upload (#2790)", async () => {
-    // A member under the root server.properties path is refused before the
-    // archive is stored (issue #2869). Without an arm for the reason the switch
-    // fell through to the generic toast, which says nothing about the member.
     routeGet();
     mockPostFormWithProgress.mockRejectedValue(
       new ApiError(422, { reason: "platform_managed_path" }),
@@ -811,10 +768,6 @@ describe("ServerBackupsTab permission gating", () => {
     const toast = await screen.findByText(
       t("backups.error.platformManagedPath"),
     );
-    // The route refuses two member shapes (backups.py `_validate_backup_archive`,
-    // issue #3037): a directory member by its own name, and any file member by
-    // its parent. An archive carrying only `server.properties/foo.txt` has no
-    // directory entry to find, so the message names both and the action.
     expect(toast.textContent).toMatch(/server\.properties directory/);
     expect(toast.textContent).toMatch(/entry under server\.properties\//);
     expect(toast.textContent).toMatch(/upload again/);
@@ -843,9 +796,6 @@ describe("ServerBackupsTab permission gating", () => {
 
 describe("ServerBackupsTab query error surfacing (#2554)", () => {
   it("surfaces a 503 storage_unavailable on the listing with the specific message", async () => {
-    // The listing query failing initially must route through the presentation
-    // contract so the object-store reason reaches the user, not the generic load
-    // message.
     routeGet({
       listError: new ApiError(503, { reason: "storage_unavailable" }),
     });
@@ -854,9 +804,7 @@ describe("ServerBackupsTab query error surfacing (#2554)", () => {
     expect(
       await screen.findByText(t("backups.error.storageUnavailable")),
     ).toBeInTheDocument();
-    // Fails if the error is routed back through the generic load path...
     expect(screen.queryByText(t("backups.loadError"))).not.toBeInTheDocument();
-    // ...or misattributed to the server host by the bare-503 status mapping.
     expect(
       screen.queryByText(t("backups.error.workerUnavailable")),
     ).not.toBeInTheDocument();
@@ -870,8 +818,6 @@ describe("ServerBackupsTab query error surfacing (#2554)", () => {
   });
 
   it("keeps the listing rendered when statistics alone fails", async () => {
-    // Statistics is the secondary query; its 503 must not blank a healthy 200
-    // listing. The listing renders and the stats error shows in the stats slot.
     routeGet({
       statsError: new ApiError(503, { reason: "storage_unavailable" }),
     });
@@ -885,7 +831,6 @@ describe("ServerBackupsTab query error surfacing (#2554)", () => {
 });
 
 describe("ServerBackupsTab retention editor (#1843)", () => {
-  // The first retention PUT (path + init), or undefined if never called.
   function retentionPut(): [string, RequestInit] | undefined {
     return mockApi.put.mock.calls.find((call) =>
       String(call[0]).endsWith("/backups/retention"),
@@ -907,7 +852,6 @@ describe("ServerBackupsTab retention editor (#1843)", () => {
 
     const mode = (await modeSelect()) as HTMLSelectElement;
     expect(mode.value).toBe("none");
-    // No numeric fields until a keep/tiered mode is chosen.
     expect(
       screen.queryByLabelText(t("backups.retention.keepLastLabel")),
     ).not.toBeInTheDocument();
@@ -946,13 +890,11 @@ describe("ServerBackupsTab retention editor (#1843)", () => {
   });
 
   it("refreshes backups and stats after a pruning save", async () => {
-    // A PUT that prunes deletes rows server-side before responding; the table
-    // and stats must refetch so stale deleted rows don't linger (#1865 review).
+    // Retention prunes rows before responding; verify the list and statistics are invalidated afterward.
     mockApi.put.mockResolvedValue({ keep_last: 1 });
     routeGet();
     const { queryClient } = await openBackups();
 
-    // Spy on queryClient.invalidateQueries after the editor renders.
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
     fireEvent.change(await modeSelect(), { target: { value: "keepLast" } });
@@ -1078,7 +1020,6 @@ describe("ServerBackupsTab retention editor (#1843)", () => {
     await openBackups();
 
     fireEvent.change(await modeSelect(), { target: { value: "tiered" } });
-    // Leave every tier empty (each counts as 0).
     fireEvent.click(saveButton());
 
     expect(

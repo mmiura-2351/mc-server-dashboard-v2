@@ -9,11 +9,6 @@ import { t } from "../i18n/index.ts";
 import { installMockXhrUpload } from "../test/mockXhrUpload.ts";
 import { renderApp } from "../test/render.tsx";
 
-// Resource packs library page (#1178). Driven through the real router +
-// providers via renderApp; a fetch mock dispatches on URL + method so a single
-// case can stand up bootstrap (/users/me, /communities, permissions) plus the
-// resource pack list, upload, download, and delete.
-
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -158,7 +153,6 @@ function signedIn(overrides: MockOverrides = {}) {
         );
       }
 
-      // Download endpoint — return a blob-like response.
       if (url.match(/\/api\/resource-packs\/[^/]+\/download/)) {
         if (overrides.downloadStorageUnavailable) {
           return Promise.resolve(errorResponse(503, "storage_unavailable"));
@@ -182,8 +176,7 @@ beforeEach(() => {
   fetchMock.mockReset();
   calls = [];
   clearAccessToken();
-  // Uploads go through postFormWithProgress (XHR, #1207); route XHR through the
-  // same fetch dispatcher so the upload hits the mocked POST handler.
+  // Route XHR through the same dispatcher as fetch so upload mocks reach the POST handler.
   restoreXhr = installMockXhrUpload(fetchMock);
 });
 
@@ -253,11 +246,9 @@ describe("resource packs library", () => {
     });
     fireEvent.click(uploadButton);
 
-    // Fill display name.
     const nameInput = await screen.findByRole("textbox");
     fireEvent.change(nameInput, { target: { value: "My Pack" } });
 
-    // Select file.
     const fileInput = screen.getByLabelText(
       t("common.chooseFile"),
     ) as HTMLInputElement;
@@ -266,7 +257,6 @@ describe("resource packs library", () => {
     });
     fireEvent.change(fileInput, { target: { files: [file] } });
 
-    // Submit.
     const submitButton = screen.getByRole("button", {
       name: t("resourcePacks.uploadDialog.submit"),
     });
@@ -314,8 +304,6 @@ describe("resource packs library", () => {
 
     await screen.findByText(t("resourcePacks.uploaded"));
 
-    // The shared upload-progress singleton must be idle after a successful
-    // upload — otherwise other upload surfaces show a stale progress bar.
     const { result } = renderHook(() => useUploadProgress());
     expect(result.current.active).toBe(false);
   });
@@ -352,8 +340,6 @@ describe("resource packs library", () => {
   });
 
   it("names the storage outage when an upload answers 503 storage_unavailable", async () => {
-    // Nothing was stored and no pack was created, so the upload is worth
-    // sending again — which the generic toast would not say (issue #2458).
     signedIn({ uploadStorageUnavailable: true });
 
     renderApp({ path: "/resource-packs" });
@@ -412,17 +398,14 @@ describe("resource packs library", () => {
 
     await screen.findByText("Faithful");
 
-    // Click the first delete button (Faithful).
     const deleteButtons = screen.getAllByRole("button", {
       name: t("resourcePacks.delete"),
     });
     fireEvent.click(deleteButtons[0]);
 
-    // Type the confirm phrase (the display name).
     const input = await screen.findByPlaceholderText("Faithful");
     fireEvent.change(input, { target: { value: "Faithful" } });
 
-    // Confirm.
     fireEvent.click(
       screen.getByRole("button", {
         name: t("resourcePacks.deleteDialog.confirm"),

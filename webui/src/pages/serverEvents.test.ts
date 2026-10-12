@@ -66,7 +66,6 @@ describe("parseServerFrame", () => {
     expect(
       parseServerFrame(frame("log", { line: "hello", stream: "stderr" })),
     ).toEqual({ kind: "log", line: "hello", stream: "stderr" });
-    // An unknown/absent std stream falls back to stdout.
     expect(parseServerFrame(frame("log", { line: "hi" }))).toEqual({
       kind: "log",
       line: "hi",
@@ -182,11 +181,11 @@ describe("ServerEventsClient", () => {
     first.open();
     first.fail();
     expect(onDown).toHaveBeenCalledTimes(1);
-    vi.advanceTimersByTime(500); // attempt 1: step 1000 * 0.5
+    vi.advanceTimersByTime(500);
     expect(MockWebSocket.instances).toHaveLength(2);
 
     MockWebSocket.last().open();
-    setAccessToken("tok-2"); // rotation
+    setAccessToken("tok-2");
     expect(MockWebSocket.last().protocols).toEqual(["access_token", "tok-2"]);
     client.close();
   });

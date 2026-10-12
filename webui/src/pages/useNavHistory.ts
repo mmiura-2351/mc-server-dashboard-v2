@@ -2,18 +2,9 @@ import { useCallback, useRef, useState } from "react";
 
 export type NavState = { dir: string; openFile: string | null };
 
-/**
- * Browser-like navigation history for the file browser.
- *
- * Tracks directory navigation and file opens in a linear history stack.
- * Back/forward buttons move the index; navigating to a new location after
- * going back clears the forward stack (standard browser behavior).
- *
- * The returned `navigate`, `goBack`, and `goForward` are referentially stable
- * (safe as useEffect deps without triggering re-runs on every render).
- */
+/** Keep navigation callbacks stable and discard forward history when navigating after Back. */
 export function useNavHistory(
-  /** Initial state (read only on mount; later changes are ignored). */
+  /** Initial state is read only on mount; later changes are ignored. */
   initial?: NavState,
 ) {
   const [, forceRender] = useState(0);
@@ -36,7 +27,6 @@ export function useNavHistory(
     forceRender((n) => n + 1);
   }, []);
 
-  /** Move back; returns the resulting state (or the current one if already at the start). */
   const goBack = useCallback((): NavState => {
     const st = stateRef.current;
     if (st.index > 0) {
@@ -47,7 +37,6 @@ export function useNavHistory(
     return st.history[st.index];
   }, []);
 
-  /** Move forward; returns the resulting state (or the current one if already at the end). */
   const goForward = useCallback((): NavState => {
     const st = stateRef.current;
     if (st.index < st.history.length - 1) {
@@ -58,13 +47,7 @@ export function useNavHistory(
     return st.history[st.index];
   }, []);
 
-  /**
-   * Sync the internal stack to an externally-driven state (browser
-   * back/forward). If the target matches an existing entry, move the index
-   * there (preserving forward history). Otherwise replace the current entry
-   * without truncating — an unknown state from the browser URL should not
-   * destroy the in-app forward stack.
-   */
+  /** External URL navigation reuses a matching entry or replaces the current one without discarding forward history. */
   const jumpTo = useCallback((next: NavState) => {
     const st = stateRef.current;
     const cur = st.history[st.index];

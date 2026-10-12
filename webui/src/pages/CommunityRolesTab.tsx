@@ -18,12 +18,6 @@ import { classifyQueryResult } from "../queryState.ts";
 
 type RoleResponse = components["schemas"]["RoleResponse"];
 
-// Roles tab (WEBUI_SPEC.md 6.10 / 2.2): list with the preset Owner locked
-// (`is_preset` — no edit/delete affordances); create / edit / delete custom
-// roles, the editor being a permission matrix grouped by the 9 families. The
-// matrix derives entirely from COMMUNITY_PERMISSION_FAMILIES (the typed
-// catalog) so the 30 codes never need a second hand-kept list. List/get gate on
-// `role:read` (the tab itself); create/edit/delete on `role:manage`.
 export function CommunityRolesTab({
   communityId,
   can,
@@ -38,9 +32,7 @@ export function CommunityRolesTab({
   const [editing, setEditing] = useState<RoleResponse | "new" | null>(null);
   const [deleting, setDeleting] = useState<RoleResponse | null>(null);
 
-  // A role mutation also refreshes the Members tab's role chips: those chips are
-  // rendered from each member's roles in the members list, so deleting/renaming
-  // a role must invalidate both the roles list and the members list (#473).
+  // Role edits also change member role chips, so invalidate both list projections.
   const invalidateRoles = () => {
     queryClient.invalidateQueries({ queryKey: rolesKeys.list(communityId) });
     queryClient.invalidateQueries({ queryKey: membersKeys.list(communityId) });
@@ -84,9 +76,7 @@ export function CommunityRolesTab({
   if (rolesState.kind === "pending") {
     return <p className="sub">{t("communitySettings.roles.loading")}</p>;
   }
-  // Error only when there is nothing to show (the initial load failed). A
-  // failed background refetch retains `data`, so the cached list keeps
-  // rendering through transient API blips (#1797).
+  // Retain cached content when only a background refetch fails.
   if (rolesState.kind === "error") {
     return (
       <p className="field-error">{t("communitySettings.roles.loadError")}</p>
@@ -174,8 +164,6 @@ export function CommunityRolesTab({
   );
 }
 
-// Map a create/update rejection to a specific message; otherwise the generic
-// one (roles.py: 409 name_taken / preset_role, 422 invalid_name).
 function saveErrorMessage(error: unknown): TranslationKey {
   if (error instanceof ApiError) {
     if (error.reason === "name_taken") {
@@ -232,8 +220,7 @@ function RoleEditor({
           : t("communitySettings.roles.updated"),
         "success",
       );
-      // Renaming a role changes the chip text in the Members tab, so refresh
-      // both the roles list and the members list (#473).
+      // Renaming changes member role chips too; refresh both list projections.
       queryClient.invalidateQueries({ queryKey: rolesKeys.list(communityId) });
       queryClient.invalidateQueries({
         queryKey: membersKeys.list(communityId),
@@ -343,8 +330,7 @@ function RoleEditor({
                 <label key={code} className="roles-perm">
                   <input
                     type="checkbox"
-                    // The full code disambiguates the checkbox (several families
-                    // share an action label such as "Read").
+                    // Show the full code because several permission families use the same action label.
                     aria-label={code}
                     checked={selected.has(code)}
                     onChange={() => toggle(code)}

@@ -1,36 +1,15 @@
-/**
- * Thin typed fetch helper over the generated OpenAPI {@link paths}.
- *
- * The UI is same-origin with the API (WEBUI_SPEC.md 7.7): in development the
- * Vite dev server proxies the API paths to a local API, in production the API
- * serves the built SPA. So requests use relative paths and the browser attaches
- * the same-origin session cookie automatically — there is no base URL and no
- * CORS here, by design.
- *
- * This is deliberately minimal (one request function); feature code in later
- * phases builds typed call sites on top of the generated `paths` type. It is
- * not a generated runtime — just enough to keep call sites honest against the
- * schema.
- *
- * On top of that it carries the session plumbing (WEBUI_SPEC.md 7.1): it
- * attaches the in-memory access token as a Bearer credential and, on a 401 from
- * a non-auth endpoint, transparently performs a single-flight refresh and
- * retries the request once. The refresh itself is owned by the session layer
- * and registered here, so the client does not depend on it.
- */
+/** Use same-origin URLs and in-memory Bearer tokens; the session layer injects 401 refresh handling. */
 
 import { getAccessToken, getAuthEpoch } from "../auth/tokenStore.ts";
 import type { paths } from "./schema";
 
-/** Paths that declare the given HTTP method in the generated schema. */
 type PathsWith<M extends string> = {
   [P in keyof paths]: paths[P] extends Record<M, unknown> ? P : never;
 }[keyof paths];
 
-/** Successful (2xx) status codes openapi-typescript emits as literal keys. */
+/** OpenAPI emits successful status codes as literal keys. */
 type SuccessStatus = 200 | 201 | 202 | 203 | 204 | 205 | 206;
 
-/** The typed JSON response body for a successful (2xx) operation, if any. */
 type JsonResponse<Op> = Op extends { responses: infer R }
   ? R[Extract<keyof R, SuccessStatus>] extends infer Success
     ? Success extends { content: { "application/json": infer B } }
@@ -39,24 +18,17 @@ type JsonResponse<Op> = Op extends { responses: infer R }
     : unknown
   : unknown;
 
-/** The operation object for a given path + method. */
 type Op<P extends keyof paths, M extends string> = M extends keyof paths[P]
   ? paths[P][M]
   : never;
 
-/** Shape of an RFC 9457 `application/problem+json` body (AUTH_API.md 2). */
+/** RFC 9457 extension fields used by the UI. */
 interface ProblemDetails {
   reason?: string;
   permission?: string;
   key?: string;
 }
 
-/**
- * Pull a string-valued member out of a problem+json body. The UI branches on
- * `reason` and renders the members some reasons carry — `permission` on a 403
- * denial, `key` on a 422 `platform_managed_key` refusal (AUTH_API.md 2);
- * anything that is not a problem+json object yields `undefined`.
- */
 function readProblemString(
   body: unknown,
   key: keyof ProblemDetails,
@@ -71,18 +43,11 @@ function readProblemString(
 }
 
 export class ApiError extends Error {
-  /** RFC 9457 `reason` extension member, when the body is problem+json. */
+  /** RFC 9457 reason extension, when supplied as a string. */
   readonly reason: string | undefined;
-  /**
-   * The `permission` extension member naming the missing permission code on a
-   * 403 denial (AUTH_API.md 2, issue #425); undefined on other responses.
-   */
+  /** Missing permission code on authorization denials, when supplied as a string. */
   readonly permission: string | undefined;
-  /**
-   * The `key` extension member naming the platform-managed `server.properties`
-   * key a 422 `platform_managed_key` refusal was raised for (issue #2623);
-   * undefined on other responses.
-   */
+  /** Platform-managed server.properties key rejected by the API, when supplied as a string. */
   readonly key: string | undefined;
 
   constructor(
@@ -97,16 +62,8 @@ export class ApiError extends Error {
   }
 }
 
-/**
- * The session layer registers a single-flight refresh here. It takes the
- * authentication epoch the failed request was sent in and resolves true when
- * that session's access token was re-established, false otherwise (a hard
- * logout, a transient failure, or a session that has since ended), so the
- * client can decide whether to retry. A true result is only valid in that
- * epoch: callers re-check `getAuthEpoch()` in the same synchronous step as the
- * retry, since the session can change while the result is being delivered
- * (#3224). Kept as an injected hook to avoid a client -> session import cycle.
- */
+/** Inject refresh handling to avoid a client/session import cycle.
+ * A successful refresh is valid only in its request epoch; recheck before retrying. */
 type Refresher = (requestEpoch: number) => Promise<boolean>;
 let refresher: Refresher | null = null;
 
@@ -118,11 +75,6 @@ export function getRefresher(): Refresher | null {
   return refresher;
 }
 
-/**
- * Reset the injected refresher for tests. It is a module-level singleton that
- * otherwise survives across test cases/files; clearing it per case keeps the
- * 401-retry path from invoking a stale refresher left by an earlier render.
- */
 export function resetForTesting(): void {
   refresher = null;
 }
@@ -131,11 +83,7 @@ function isAuthPath(path: string): boolean {
   return path.startsWith("/api/auth/");
 }
 
-/**
- * Whether a `content-type` header declares a JSON type the API uses: regular
- * `application/json` or RFC 9457 `application/problem+json` (AUTH_API.md 2).
- * Anything else (an HTML proxy/LB error page) is treated as non-JSON.
- */
+/** Proxy error pages may be HTML; parse only the API's JSON content types. */
 function isJsonContentTypeHeader(contentType: string | null): boolean {
   return /\bapplication\/(problem\+)?json\b/i.test(contentType ?? "");
 }
@@ -150,8 +98,7 @@ async function rawRequest(
   init?: RequestInit,
 ): Promise<Response> {
   const token = getAccessToken();
-  // A FormData body is multipart: leave the content-type unset so the browser
-  // adds it with the generated boundary. Everything else is JSON.
+  // Let the browser supply a multipart boundary for FormData; other bodies use JSON.
   const isFormData = init?.body instanceof FormData;
   return fetch(path, {
     ...init,
@@ -175,30 +122,20 @@ async function request<P extends keyof paths, M extends string>(
   const httpMethod = method.toUpperCase();
   const url = path as string;
 
-  // The session the request is sent under (rawRequest reads its token in this
-  // same synchronous step).
+  // Capture the epoch synchronously with rawRequest reading the token.
   const epoch = getAuthEpoch();
   let response = await rawRequest(httpMethod, url, init);
 
-  // Transparent refresh: a 401 from a non-auth endpoint means the access token
-  // expired. Run the shared single-flight refresh and retry once. The
-  // /api/auth/* endpoints surface their own 401s untouched (no refresh on the
-  // refresh). The retry happens only while the request's session is still
-  // current, so a request never replays under a different user (#3224).
+  // Retry non-auth 401s once, only within the original session; refreshing auth routes would recurse.
   if (response.status === 401 && refresher !== null && !isAuthPath(url)) {
     const refreshed = await refresher(epoch);
     if (refreshed && epoch === getAuthEpoch()) {
       response = await rawRequest(httpMethod, url, init);
     }
-    // A 401 on the retried request (post-refresh) is intentionally surfaced as a
-    // raw ApiError, not a hard logout: the session is valid, this endpoint just
-    // denied access. The #410 guards must not misread it as session expiry.
+    // Surface a second 401 as ApiError without another refresh or hard logout.
   }
 
-  // Only trust the body as JSON when the server says so. A non-JSON body — an
-  // HTML 502/504 from the dev proxy or an LB error page — must surface as a
-  // typed ApiError carrying the status, never as a raw SyntaxError leaking to
-  // the caller.
+  // Preserve the HTTP status when a proxy returns HTML or malformed JSON.
   const text = await response.text();
   const jsonBody = isJsonContentType(response);
   let body: unknown;
@@ -206,8 +143,7 @@ async function request<P extends keyof paths, M extends string>(
     try {
       body = JSON.parse(text);
     } catch {
-      // A JSON content-type whose body is unparseable: fall through to the
-      // failure paths below with a body-less ApiError rather than throwing raw.
+      // Malformed JSON falls through to the ApiError paths below.
     }
   }
 
@@ -215,8 +151,7 @@ async function request<P extends keyof paths, M extends string>(
     throw new ApiError(response.status, body);
   }
 
-  // Success path stays strict: a 2xx that should carry JSON but did not (wrong
-  // content-type or unparseable) is a typed failure, not a SyntaxError.
+  // A nonempty success body that cannot be parsed is also an ApiError.
   if (text.length > 0 && body === undefined) {
     throw new ApiError(response.status, undefined);
   }
@@ -226,12 +161,7 @@ async function request<P extends keyof paths, M extends string>(
 /** Reports upload progress in bytes; `total` is 0 when the size is unknown. */
 export type UploadProgress = (loaded: number, total: number) => void;
 
-/**
- * True for the `AbortError` DOMException that {@link sendForm} rejects with
- * when its signal fires (issue #1780). Callers use it to swallow intentional
- * cancellations — an explicit cancel is not a user-visible error. Matches the
- * same shape as the fetch-side {@link isAbortError} in `download.ts`.
- */
+/** Match AbortError by name so intentional upload cancellation can be handled across runtimes. */
 export function isUploadAbortError(error: unknown): boolean {
   return (
     typeof error === "object" &&
@@ -240,23 +170,14 @@ export function isUploadAbortError(error: unknown): boolean {
   );
 }
 
-/**
- * One XHR attempt: POST a FormData body, emitting upload progress through
- * `onProgress`. Resolves the raw {@link XMLHttpRequest} once it loads (any
- * status) and rejects only on a transport-level failure — the status branching
- * (JSON parse, refresh, ApiError) is the caller's job, mirroring how `request`
- * inspects a fetch `Response`.
- *
- * When `signal` is provided and fires, `xhr.abort()` is called and the
- * promise rejects with an `AbortError` DOMException (issue #1780).
- */
+/** Resolve on any HTTP response; reject transport failures and signal cancellation.
+ * The caller handles status codes and parses the response. */
 function sendForm(
   url: string,
   body: FormData,
   onProgress?: UploadProgress,
   signal?: AbortSignal,
 ): Promise<XMLHttpRequest> {
-  // Fast-reject when the signal is already aborted — no XHR needed.
   if (signal?.aborted) {
     return Promise.reject(
       new DOMException("The operation was aborted.", "AbortError"),
@@ -265,15 +186,12 @@ function sendForm(
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", url);
-    // Carry the same-origin session cookie, matching the fetch path's
-    // `credentials: "same-origin"`.
     xhr.withCredentials = true;
     const token = getAccessToken();
     if (token != null) {
       xhr.setRequestHeader("authorization", `Bearer ${token}`);
     }
-    // A FormData body is multipart: leave content-type unset so the browser adds
-    // it with the generated boundary (same rule as the fetch path).
+    // Let the browser set the multipart boundary.
     if (onProgress !== undefined) {
       xhr.upload.onprogress = (event) => {
         onProgress(event.loaded, event.lengthComputable ? event.total : 0);
@@ -283,7 +201,6 @@ function sendForm(
     xhr.onerror = () => reject(new ApiError(0, undefined));
     xhr.onabort = () =>
       reject(new DOMException("The operation was aborted.", "AbortError"));
-    // Wire the abort signal to the XHR (issue #1780).
     if (signal !== undefined) {
       signal.addEventListener("abort", () => xhr.abort(), { once: true });
     }
@@ -291,12 +208,7 @@ function sendForm(
   });
 }
 
-/**
- * Multipart POST with real-time upload progress (issue #1207). XHR is the
- * pragmatic choice: fetch cannot surface bytes-uploaded progress. It runs the
- * FormData body through the same auth, single-flight 401 refresh, and typed
- * error/JSON handling as {@link request}, adding the `onProgress` feedback.
- */
+/** Use XHR because fetch does not expose upload progress; retain the JSON client's auth and error handling. */
 export async function postFormWithProgress<P extends PathsWith<"post">>(
   path: P,
   body: FormData,
@@ -307,9 +219,7 @@ export async function postFormWithProgress<P extends PathsWith<"post">>(
   const epoch = getAuthEpoch();
   let xhr = await sendForm(url, body, onProgress, signal);
 
-  // Transparent refresh, mirroring `request`: a 401 from a non-auth endpoint
-  // means the access token expired — refresh once and retry the upload, only
-  // while the upload's session is still current.
+  // Retry a 401 upload only while its original session is current.
   if (xhr.status === 401 && refresher !== null && !isAuthPath(url)) {
     const refreshed = await refresher(epoch);
     if (refreshed && epoch === getAuthEpoch()) {
@@ -326,7 +236,7 @@ export async function postFormWithProgress<P extends PathsWith<"post">>(
     try {
       parsed = JSON.parse(text);
     } catch {
-      // Fall through to the failure paths with a body-less ApiError.
+      // Malformed JSON falls through to the ApiError paths below.
     }
   }
 

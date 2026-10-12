@@ -8,7 +8,6 @@ import {
 
 describe("operationLabel", () => {
   it("maps a known operation code to its human-readable label", () => {
-    // The mapped label is dictionary copy, not the raw code.
     expect(operationLabel("server:start")).toBe(
       t("communitySettings.audit.op.server:start"),
     );
@@ -89,7 +88,6 @@ describe("applyAuditParams", () => {
     });
     expect(params.has("since")).toBe(true);
     expect(params.has("until")).toBe(true);
-    // Must be valid ISO 8601 (parseable without throwing).
     expect(() =>
       new Date(params.get("since") ?? "").toISOString(),
     ).not.toThrow();
@@ -100,7 +98,6 @@ describe("applyAuditParams", () => {
 
   it("ignores an invalid since value instead of throwing (#791)", () => {
     const params = new URLSearchParams();
-    // A crafted/garbage URL param that Date() cannot parse.
     expect(() =>
       applyAuditParams(params, {
         operation: "",

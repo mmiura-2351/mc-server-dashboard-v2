@@ -18,8 +18,7 @@ type GameSessionResponse = components["schemas"]["GameSessionResponse"];
 
 const SESSIONS_PAGE_SIZE = 20;
 
-// `kind` is a free-form string on the wire; only op/whitelist have a localized
-// label, anything else falls back to its raw value.
+// Translate op and whitelist; preserve unknown group kinds verbatim.
 function kindLabel(kind: string): string {
   if (kind === "op") {
     return t("players.kind.op");
@@ -30,7 +29,6 @@ function kindLabel(kind: string): string {
   return kind;
 }
 
-// Map an attach/detach error to a specific message; otherwise generic.
 function playerErrorMessage(error: unknown): TranslationKey {
   if (!(error instanceof ApiError)) return "players.error.generic";
 
@@ -78,7 +76,6 @@ export function ServerPlayersTab({
       ),
   });
 
-  // Source for the attach picker; only needed to manage attachments.
   const community = useQuery({
     queryKey: groupsKeys.list(communityId),
     queryFn: ({ signal }) =>
@@ -91,9 +88,7 @@ export function ServerPlayersTab({
     enabled: canManage,
   });
 
-  // Attach/detach changes the relation from both ends, so invalidate the whole
-  // attachment prefix: this refreshes this server's group list here and the
-  // group's server list in CommunityGroupsTab wherever it is mounted (#473).
+  // Invalidate both attachment projections because attach/detach changes the group and server views.
   const invalidate = () =>
     queryClient.invalidateQueries({
       queryKey: attachmentsKeys.all(communityId),
@@ -144,9 +139,7 @@ export function ServerPlayersTab({
   if (attachedState.kind === "pending") {
     return <p className="sub">{t("players.loading")}</p>;
   }
-  // Error only when there is nothing to show (the initial load failed). A
-  // failed background refetch retains `data`, so the cached list keeps
-  // rendering through transient API blips (#1797).
+  // Retain cached content when only a background refetch fails.
   if (attachedState.kind === "error") {
     return <p className="field-error">{t("players.loadError")}</p>;
   }
@@ -154,7 +147,6 @@ export function ServerPlayersTab({
   const attachedGroups = attachedState.data;
   const attachedIds = new Set(attachedGroups.map((g) => g.id));
   const communityGroups = community.data ?? [];
-  // Picker = community groups not already attached (WEBUI_SPEC.md 6.8).
   const candidates = communityGroups.filter((g) => !attachedIds.has(g.id));
   const busy = attach.isPending || detach.isPending;
 
@@ -192,9 +184,7 @@ export function ServerPlayersTab({
         <div className="card">
           <h2>{t("players.attachHeading")}</h2>
           {community.isPending ? (
-            // Until the community groups list resolves, the empty-state copy
-            // below would misreport "no groups" (community.data is undefined);
-            // show the loading message instead of flashing it (#665).
+            // Wait for the community list before distinguishing no groups from no attachable groups.
             <p className="sub">{t("players.loading")}</p>
           ) : candidates.length === 0 ? (
             <p className="sub">
@@ -259,11 +249,8 @@ function sessionsUrl(
   return `${base}?${params.toString()}` as "/api/communities/{community_id}/servers/{server_id}/sessions";
 }
 
-// Source badge for a session row (issue #1928). `source` is a free-form string
-// on the wire (`java` / `bedrock` / `unspecified`). Java and Bedrock get a
-// labeled badge; Bedrock's tooltip flags it as a flow-session that records only
-// the player's IP — the claimed username/UUID are unavailable (issues #1912,
-// #1904). Legacy `unspecified` rows (and any unexpected value) stay neutral.
+// Bedrock sessions contain only IP addresses; Java identities are claimed values.
+// Unspecified and unknown sources use a neutral badge.
 function sourceCell(source: string): ReactNode {
   if (source === "java") {
     return (
@@ -308,9 +295,7 @@ function SessionsView({
       <h2>{t("sessions.heading")}</h2>
       {queryState.kind === "pending" ? (
         <p className="sub">{t("sessions.loading")}</p>
-      ) : /* Error only when there is nothing to show (initial load failed).
-           A failed background refetch retains `data`, so the cached list
-           keeps rendering through transient API blips (#1805). */
+      ) : /* Retain cached content when only a background refetch fails. */
       queryState.kind === "error" ? (
         <p className="field-error">{t("sessions.loadError")}</p>
       ) : sessions.length === 0 ? (

@@ -4,10 +4,6 @@ import { clearAccessToken } from "../auth/tokenStore.ts";
 import { t } from "../i18n/index.ts";
 import { renderApp } from "../test/render.tsx";
 
-// Workers fleet page (#477). Driven through the real router/providers via
-// renderApp; a fetch mock dispatches on URL+method so a single case can stand
-// up the session bootstrap, the fleet list, and the drain/undrain endpoints.
-
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), {
     status: 200,
@@ -31,13 +27,9 @@ const ADMIN = {
   is_platform_admin: true,
 };
 
-// Pinned "now" so the heartbeat-age fixtures below and the relative-time
-// assertions in the render test see a deterministic clock (#614). Without it the
-// wall-clock can cross the 5s→6s boundary between fixture construction and
-// assertion under parallel load, flaking "5s ago" into "6s ago".
+// Seed heartbeat fixtures from a fixed reference timestamp.
 const NOW = new Date("2026-01-01T00:00:00Z");
 
-// worker-a: online (3 GiB / 4 cores, recent heartbeat). worker-b: draining.
 const WORKERS = {
   workers: [
     {
@@ -73,8 +65,6 @@ function methodOf(init: RequestInit | undefined): string {
   return (init?.method ?? "GET").toUpperCase();
 }
 
-// Wire a signed-in admin. `onDrain` is invoked for the drain/undrain calls so a
-// case can assert the request shape or force an error.
 function signedIn(
   onDrain?: (url: string, init: RequestInit | undefined) => Response,
 ) {
@@ -103,16 +93,12 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
-  // Restore the real clock for tests that pin it with fake timers (#614); a
-  // no-op for the cases that never enabled them.
   vi.useRealTimers();
 });
 
 describe("admin workers page", () => {
   it("renders the fleet with humanized bytes and heartbeat age", async () => {
-    // Pin the clock to NOW so heartbeatAge sees a deterministic now and the
-    // relative-time assertions below stay stable (#614). shouldAdvanceTime
-    // keeps async polling (findBy*, react-query) progressing under fake timers.
+    // Advance fake timers so queries and async assertions progress from the reference timestamp.
     vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.setSystemTime(NOW);
 
@@ -120,21 +106,17 @@ describe("admin workers page", () => {
 
     renderApp({ path: "/admin/workers" });
 
-    // Both workers, their versions, and status pills render.
     expect(await screen.findByText("worker-a")).toBeInTheDocument();
     expect(screen.getByText("worker-b")).toBeInTheDocument();
     expect(screen.getByText("online")).toBeInTheDocument();
     expect(screen.getByText("draining")).toBeInTheDocument();
 
-    // Drivers render as badges.
     expect(screen.getByText("process")).toBeInTheDocument();
 
-    // Resources: 4 cores · 3.0 GiB (humanizeBytes shared util).
     expect(
       screen.getByText(`4${t("admin.workers.cpuCores")} · 3.0 GiB`),
     ).toBeInTheDocument();
 
-    // Heartbeat age is humanized (recent → seconds, older → minutes).
     expect(screen.getByText("5s ago")).toBeInTheDocument();
     expect(screen.getByText("2m ago")).toBeInTheDocument();
   });
@@ -148,13 +130,11 @@ describe("admin workers page", () => {
 
     renderApp({ path: "/admin/workers" });
 
-    // worker-a is online → its action button drains.
     const drainButton = await screen.findByRole("button", {
       name: t("admin.workers.drain"),
     });
     fireEvent.click(drainButton);
 
-    // Confirm dialog appears; confirm fires the request.
     const confirm = await screen.findByRole("button", {
       name: t("admin.workers.drainConfirm"),
     });
@@ -177,7 +157,6 @@ describe("admin workers page", () => {
       await screen.findByRole("button", { name: t("admin.workers.drain") }),
     );
 
-    // The convergence warning must be visible inside the dialog before confirming.
     expect(
       await screen.findByText(t("admin.workers.drainDialogConvergenceWarning")),
     ).toBeInTheDocument();
@@ -202,7 +181,6 @@ describe("admin workers page", () => {
       }),
     );
 
-    // The toast must report the count of marked servers.
     expect(
       await screen.findByText(t("admin.workers.drainedCount", { count: 3 })),
     ).toBeInTheDocument();

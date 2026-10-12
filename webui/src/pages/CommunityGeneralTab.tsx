@@ -14,7 +14,6 @@ import { LANDING_PATH } from "../routes.ts";
 
 type CommunityResponse = components["schemas"]["CommunityResponse"];
 
-// Map a rename rejection to a specific message; otherwise the generic one.
 function renameErrorMessage(error: unknown): TranslationKey {
   if (error instanceof ApiError) {
     if (error.reason === "name_taken") {
@@ -27,10 +26,6 @@ function renameErrorMessage(error: unknown): TranslationKey {
   return "communitySettings.general.saveError";
 }
 
-// General tab (WEBUI_SPEC.md 6.10): rename (gated `community:update`) and delete
-// (typed-confirm with the community name, gated `community:delete`). On delete
-// the caller leaves the deleted community: the communities list is invalidated
-// and the active community is cleared so a stale id never stays selected.
 export function CommunityGeneralTab({
   community,
   can,
@@ -79,8 +74,7 @@ export function CommunityGeneralTab({
       ),
     onSuccess: () => {
       showToast(t("communitySettings.general.deleted"), "success");
-      // Clear the active community first so the landing never re-resolves to the
-      // now-deleted id, then refresh the list and leave for the landing.
+      // Clear the active ID before navigating so landing cannot resolve to the deleted community.
       setCommunityId(null);
       queryClient.invalidateQueries({ queryKey: ["communities"] });
       navigate(LANDING_PATH);
@@ -90,8 +84,6 @@ export function CommunityGeneralTab({
       if (onForbidden(error)) {
         return;
       }
-      // 409 community_has_servers: the API never deletes a community that still
-      // holds servers (#3218), so say what to do instead of "try again".
       showToast(
         t(
           error instanceof ApiError && error.reason === "community_has_servers"

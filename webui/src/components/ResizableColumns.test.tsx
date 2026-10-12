@@ -2,10 +2,6 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ResizableTable } from "./ResizableColumns.tsx";
 
-// Drives the shared column-resize mechanism (#520): a <colgroup>-backed table
-// whose column widths follow drag handles on the <th> boundaries, clamp to a
-// minimum, persist per-table in localStorage, and reset on double-click.
-
 const STORAGE_KEY = "mcsd.colw.test-table";
 
 function Harness({ storageKey = STORAGE_KEY }: { storageKey?: string }) {

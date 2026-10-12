@@ -11,12 +11,9 @@ import { signIn } from "./ui.ts";
 
 const API_URL = process.env.MCD_E2E_API_URL ?? "http://127.0.0.1:8000";
 
-// Schedules tab flows (WEBUI_SPEC.md 6.13, issue #1842). Schedule CRUD is
-// API-side only (the runner needs no worker), so these flows run in the
-// default CI setup — unlike the file-browser suite there is no worker gate.
+// Schedule CRUD needs no Worker, so these flows also run in API-only CI.
 
-// Helper: create a user, community, and a stopped server via API (avoids the
-// wizard flow and its external catalog dependency).
+// Create via the API to avoid the wizard's external version-catalog dependency.
 async function setupServer(
   request: import("@playwright/test").APIRequestContext,
 ) {
@@ -38,8 +35,7 @@ async function setupServer(
         server_type: "vanilla",
         mc_edition: "java",
         mc_version: "1.21.6",
-        // game_port omitted: the API auto-allocates a free in-range port, so
-        // parallel/sequential setups never collide on the global port space.
+        // Omit game_port so fixtures cannot collide on the global port pool.
       },
     },
   );
@@ -62,8 +58,6 @@ async function listSchedules(
   return res.json();
 }
 
-// Owner creates a schedule through the dialog, toggles it off, inspects run
-// history, and deletes it. Asserts the API-visible outcome at each step.
 test("owner creates, toggles, and deletes a schedule", async ({
   page,
   request,
@@ -75,39 +69,30 @@ test("owner creates, toggles, and deletes a schedule", async ({
   await page.goto(`/communities/${communityId}/servers/${serverId}`);
   await page.getByRole("tab", { name: "Schedules" }).click();
 
-  // Create via the dialog: backup action on the default 60-minute interval.
-  // The timezone select's accessible name concatenates every zone option, so
-  // substring label matching collides ("…San_Jua-n Ame-rica…" contains "name");
-  // match roles/exact labels instead.
+  // The timezone select includes zone names in its accessible name; use exact field labels.
   await page.getByRole("button", { name: "+ Create schedule" }).click();
   const dialog = page.getByRole("dialog", { name: "Create schedule" });
   await dialog.getByRole("textbox", { name: "Name" }).fill(scheduleName);
   await dialog.getByLabel("Action", { exact: true }).selectOption("backup");
   await dialog.getByRole("button", { name: "Create schedule" }).click();
 
-  // The row renders with the humanized cadence and an enabled toggle. The
-  // default 60-minute interval (3600s) humanizes to whole hours.
   const row = page.getByRole("row", { name: new RegExp(scheduleName) });
   await expect(row).toBeVisible();
   await expect(row.getByText("Every 1 h")).toBeVisible();
   const toggle = row.getByRole("checkbox");
   await expect(toggle).toBeChecked();
 
-  // API-visible: the schedule exists with a computed next run.
   const created = await listSchedules(request, token, communityId, serverId);
   expect(created.map((s) => s.name)).toContain(scheduleName);
 
-  // Disable: the toggle unchecks (next_run_at nulls out server-side).
   await toggle.click();
   await expect(toggle).not.toBeChecked();
 
-  // Run history opens (empty — the runner has not fired).
   await row.getByRole("button", { name: "Run history" }).click();
   const history = page.getByRole("dialog", { name: /Run history/ });
   await expect(history.getByText("No runs recorded yet.")).toBeVisible();
   await history.getByRole("button", { name: "Close" }).click();
 
-  // Delete with confirm; the empty state returns.
   await row.getByRole("button", { name: "Delete", exact: true }).click();
   await page
     .getByRole("dialog", { name: "Delete schedule" })
@@ -115,12 +100,10 @@ test("owner creates, toggles, and deletes a schedule", async ({
     .click();
   await expect(page.getByText("No schedules yet.")).toBeVisible();
 
-  // API-visible: the schedule is gone.
   const remaining = await listSchedules(request, token, communityId, serverId);
   expect(remaining.map((s) => s.name)).not.toContain(scheduleName);
 });
 
-// A schedule:read-only member sees the table but no write affordances.
 test("schedule:read-only member sees a read-only view", async ({
   page,
   request,
@@ -128,7 +111,6 @@ test("schedule:read-only member sees a read-only view", async ({
   const { communityId, serverId, token } = await setupServer(request);
   const scheduleName = uniqueName("readonly");
 
-  // Owner seeds a schedule via API.
   const createRes = await request.post(
     `${API_URL}/api/communities/${communityId}/servers/${serverId}/schedules`,
     {
@@ -142,7 +124,6 @@ test("schedule:read-only member sees a read-only view", async ({
   );
   expect(createRes.status(), await createRes.text()).toBe(201);
 
-  // A member holding server:read + schedule:read (no manage, no action codes).
   const member = uniqueUser("schedreader");
   const { id: memberId } = await registerUser(request, member);
   const { id: roleId } = await createRole(
@@ -173,7 +154,6 @@ test("schedule:read-only member sees a read-only view", async ({
   await page.goto(`/communities/${communityId}/servers/${serverId}`);
   await page.getByRole("tab", { name: "Schedules" }).click();
 
-  // The schedule is visible with run history, but nothing is writable.
   const row = page.getByRole("row", { name: new RegExp(scheduleName) });
   await expect(row).toBeVisible();
   await expect(row.getByRole("button", { name: "Run history" })).toBeVisible();

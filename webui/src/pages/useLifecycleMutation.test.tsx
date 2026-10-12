@@ -31,8 +31,7 @@ function server(id: string, observed_state: string): ServerResponse {
   return { id, observed_state } as ServerResponse;
 }
 
-// A POST the test settles by hand, so a status update can land between the
-// optimistic write and the API's answer.
+// Hold the POST so a live status update can arrive after the optimistic write but before completion.
 function deferred() {
   let resolve!: (value: unknown) => void;
   let reject!: (error: unknown) => void;
@@ -75,10 +74,7 @@ function renderLifecycle(
   return { result, onError };
 }
 
-// The two cache shapes the surfaces keep a server's state in: one element of
-// the dashboard's community list, or the detail page's single server. `seed`
-// writes s1's state, `read` returns it, and `push` is the WS status patch the
-// matching events hook applies (useCommunityEvents / useServerEvents).
+// Exercise both dashboard-list and detail-object cache shapes with the same status-update drivers.
 const CACHES = [
   {
     shape: "community list",
@@ -202,7 +198,6 @@ describe("useLifecycleMutation", () => {
         expect(onError).toHaveBeenCalledWith(error, "restart"),
       );
       expect(cache.read()).toBe("running");
-      // Failure refetches too: the server's truth replaces the rollback.
       expect(queryClient.getQueryState(cache.key)?.isInvalidated).toBe(true);
     });
 
@@ -215,13 +210,11 @@ describe("useLifecycleMutation", () => {
       act(() => result.current.mutate({ action: "start" }));
       await waitFor(() => expect(cache.read()).toBe("starting"));
 
-      // A WS status frame reports the server running while the POST is open.
       act(() => cache.push("running"));
       const error = new ApiError(503, { reason: "worker_unavailable" });
       await act(async () => post.reject(error));
 
       await waitFor(() => expect(onError).toHaveBeenCalledWith(error, "start"));
-      // The captured "stopped" is older than the frame and must not win.
       expect(cache.read()).toBe("running");
     });
   });
@@ -274,7 +267,6 @@ describe("useLifecycleMutation", () => {
     expect(listState("s1")).toBe("starting");
     expect(listState("s2")).toBe("stopping");
 
-    // s2 rolls back to its own captured state, not s1's.
     const error = new ApiError(500, {});
     await act(async () => stopS2.reject(error));
 

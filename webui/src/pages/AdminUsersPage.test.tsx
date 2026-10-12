@@ -7,11 +7,6 @@ import { ToastProvider } from "../components/Toast.tsx";
 import { t } from "../i18n/index.ts";
 import { AdminUsersPage } from "./AdminUsersPage.tsx";
 
-// Admin Users page tests (#475). The api client is mocked and dispatched by
-// path; useCurrentUser is mocked so a test controls who "you" is (self-action
-// edges). Each lifecycle action asserts the exact request shape the platform-
-// admin routes declare (admin_users.py / schema.ts).
-
 const mockApi = vi.hoisted(() => ({
   get: vi.fn(),
   post: vi.fn(),
@@ -54,8 +49,6 @@ function listResponse(over: Record<string, unknown> = {}) {
   };
 }
 
-// A history probe: drives navigate(-1) so a test can simulate the Back button
-// against the in-memory router (#514 offset history).
 function BackProbe() {
   const navigate = useNavigate();
   return (
@@ -163,7 +156,6 @@ describe("AdminUsersPage", () => {
     );
 
     mockApi.get.mockClear();
-    // Simulate the browser Back button: it pops the pushed offset entry.
     fireEvent.click(screen.getByText("router-back"));
     await waitFor(() =>
       expect(mockApi.get).toHaveBeenCalledWith(
@@ -258,7 +250,6 @@ describe("AdminUsersPage", () => {
     renderPage();
     await screen.findByText("alice");
 
-    // Revoke is offered for self; deactivate/delete are not.
     fireEvent.click(
       screen.getByRole("button", { name: t("admin.users.revokeAdmin") }),
     );
@@ -266,7 +257,6 @@ describe("AdminUsersPage", () => {
       screen.queryByRole("button", { name: t("admin.users.deactivate") }),
     ).not.toBeInTheDocument();
 
-    // No PUT until the self-revoke confirm.
     expect(mockApi.put).not.toHaveBeenCalled();
     fireEvent.click(
       screen.getByRole("button", { name: t("admin.users.selfRevokeConfirm") }),
@@ -322,7 +312,7 @@ describe("AdminUsersPage", () => {
   });
 
   it("disables the row actions while a lifecycle mutation is in flight", async () => {
-    // Hold the deactivate request open so the in-flight guard is observable.
+    // Hold the request open to observe the duplicate-submission guard.
     let resolve: (() => void) | undefined;
     mockApi.post.mockImplementation(
       () =>
@@ -338,8 +328,6 @@ describe("AdminUsersPage", () => {
     });
     fireEvent.click(deactivate);
 
-    // The row's actions disable while the mutation is pending so a second click
-    // can't double-fire.
     await waitFor(() => {
       expect(deactivate).toBeDisabled();
     });
@@ -463,8 +451,6 @@ describe("AdminUsersPage", () => {
   });
 
   it("shows a generic inline error when create fails without a mapped reason", async () => {
-    // A 500 / network failure carries no problem reason; the dialog must still
-    // surface feedback rather than sit silent.
     mockApi.post.mockRejectedValue(new Error("network down"));
     renderPage();
     await screen.findByText("alice");

@@ -1,19 +1,5 @@
-/**
- * The "View install log" affordance of the crash banner (issue #1093).
- *
- * When a Forge server crashed in its supervised install phase, the installer's
- * output is in `logs/forge-install.log` in the working set. This reads it
- * through the ordinary files API — no dedicated endpoint, no streaming — only
- * once the operator opens it, and shows the tail: the log is megabytes of
- * download and patch lines, appended to on every attempt, and the failure is
- * at the end.
- *
- * The files API serves a file only for a server at rest or running (SPEC
- * 6.9). A server that crashed under a running intent is neither, so the read
- * is refused 409 `server_unsettled` until the operator stops it; that, a log
- * that was never written (404) and one past the read cap (413) each get their
- * own line instead of an error.
- */
+/** Read the tail of logs/forge-install.log on demand through the files API.
+ * A crashed server with running intent must be stopped before that API permits the read. */
 
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
@@ -25,13 +11,10 @@ import { decodeBase64Text } from "./fileText.ts";
 
 type FileContent = components["schemas"]["FileContentResponse"];
 
-/** Where the Worker writes the installer's output (worker `ForgeInstallLogRelpath`). */
 const INSTALL_LOG_PATH = "logs/forge-install.log";
 
-/** How many trailing lines of the install log are shown. */
 export const INSTALL_LOG_TAIL_LINES = 200;
 
-/** The last `max` lines of `text`, and whether earlier ones were cut. */
 export function tailLines(
   text: string,
   max: number,
@@ -107,7 +90,7 @@ function InstallLogPanel({
         )}?path=${encodeURIComponent(INSTALL_LOG_PATH)}` as never,
         { signal },
       ) as Promise<FileContent>,
-    // None of the refusals above changes on a retry.
+    // These refusals require a state or file change; an immediate retry cannot resolve them.
     retry: false,
   });
 

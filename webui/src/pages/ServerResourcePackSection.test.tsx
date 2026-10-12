@@ -29,8 +29,7 @@ vi.mock("../api/client.ts", async () => {
   return { ...actual, api: mockApi };
 });
 
-// Only `downloadFile` is stubbed; the rest of the module stays real so the
-// exports the detail page reaches for (`saveUrlAs`) survive the mock (#2359).
+// Stub only downloadFile so saveUrlAs remains available to the detail page.
 const mockDownload = vi.hoisted(() => ({ downloadFile: vi.fn() }));
 vi.mock("../api/download.ts", async () => {
   const actual =
@@ -92,8 +91,6 @@ const ASSIGNMENT = {
   resource_pack_prompt: null as string | null,
 };
 
-// Route api.get by path: server detail, resource-pack assignment, resource-packs
-// library list, meta (consumed by the Settings tab).
 function routeGet(
   opts: {
     srv?: Record<string, unknown>;
@@ -110,7 +107,6 @@ function routeGet(
       if (opts.assignmentError !== undefined) {
         return Promise.reject(opts.assignmentError);
       }
-      // "No pack assigned" is a 200 with a null body, not a 404 (issue #2238).
       return Promise.resolve(assignment);
     }
     if (path === "/api/resource-packs") {
@@ -180,7 +176,6 @@ afterEach(() => {
 
 describe("ServerResourcePackSection — assignment load error", () => {
   it("shows the load error and suppresses assignment controls", async () => {
-    // Simulate a 500 error (non-404) on the assignment endpoint.
     routeGet({ assignmentError: new ApiError(500, {}) });
     await openSettings();
 
@@ -330,26 +325,21 @@ describe("ServerResourcePackSection — assign flow", () => {
     mockApi.post.mockResolvedValue(ASSIGNMENT);
     await openSettings();
 
-    // Only the section button exists before the dialog opens.
     fireEvent.click(
       await screen.findByRole("button", {
         name: t("serverDetail.resourcePack.assign"),
       }),
     );
 
-    // The dialog shows pack list in a select
     const select = await screen.findByRole("combobox");
     expect(select).toBeInTheDocument();
 
-    // Submit is disabled until a pack is selected
     const submit = dialogSubmit();
     expect(submit).toBeDisabled();
 
-    // Select a pack
     fireEvent.change(select, { target: { value: PACK.id } });
     expect(submit).not.toBeDisabled();
 
-    // Submit
     fireEvent.click(submit);
 
     await waitFor(() =>
@@ -380,10 +370,9 @@ describe("ServerResourcePackSection — assign flow", () => {
     const select = await screen.findByRole("combobox");
     fireEvent.change(select, { target: { value: PACK.id } });
 
-    // Check require
     fireEvent.click(screen.getByRole("checkbox"));
 
-    // Set prompt — find the text input inside the dialog, not the settings form
+    // Scope the prompt input to the dialog to avoid matching the surrounding settings form.
     const dialog = screen.getByRole("dialog");
     const promptInput = dialog.querySelector(
       'input[type="text"]',
@@ -438,12 +427,10 @@ describe("ServerResourcePackSection — unassign flow", () => {
       }),
     );
 
-    // Confirmation dialog appears
     expect(
       screen.getByText(t("serverDetail.resourcePack.removeDialog.body")),
     ).toBeInTheDocument();
 
-    // Confirm
     fireEvent.click(removeConfirm());
 
     await waitFor(() =>
@@ -465,7 +452,6 @@ describe("ServerResourcePackSection — unassign flow", () => {
 
     fireEvent.click(screen.getByRole("button", { name: t("common.cancel") }));
 
-    // Dialog closed, no API call
     expect(
       screen.queryByText(t("serverDetail.resourcePack.removeDialog.body")),
     ).not.toBeInTheDocument();
@@ -528,11 +514,9 @@ describe("ServerResourcePackSection — version < 1.17 option wiring", () => {
       }),
     );
 
-    // The pack select should still be present
     const select = await screen.findByRole("combobox");
     expect(select).toBeInTheDocument();
 
-    // Checkbox and text input should NOT be present
     expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
     const dialog = screen.getByRole("dialog");
     expect(dialog.querySelector('input[type="text"]')).not.toBeInTheDocument();
@@ -550,7 +534,6 @@ describe("ServerResourcePackSection — version < 1.17 option wiring", () => {
     mockApi.post.mockResolvedValue(ASSIGNMENT);
     await openSettings();
 
-    // Open the assign (change) dialog
     fireEvent.click(
       await screen.findByRole("button", {
         name: t("serverDetail.resourcePack.change"),
@@ -561,8 +544,6 @@ describe("ServerResourcePackSection — version < 1.17 option wiring", () => {
     fireEvent.change(select, { target: { value: PACK.id } });
     fireEvent.click(dialogSubmit());
 
-    // Even though the existing assignment had require=true and prompt="Hello",
-    // the mutation must send safe defaults because the server is < 1.17.
     await waitFor(() =>
       expect(mockApi.post).toHaveBeenCalledWith(
         `/api/communities/${CID}/servers/${SID}/resource-pack`,

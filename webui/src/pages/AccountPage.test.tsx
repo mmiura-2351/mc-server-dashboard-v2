@@ -1,7 +1,5 @@
 // @vitest-environment jsdom
-// Pinned to jsdom: getByLabelText("Current password") is unambiguous under
-// jsdom but matches both the input and the show/hide toggle under happy-dom
-// (issue #1751).
+// Keep jsdom: happy-dom matches both the password field and its visibility toggle by label.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
@@ -60,7 +58,6 @@ beforeEach(() => {
   mockApi.put.mockReset();
   mockApi.delete.mockReset();
   mockLogout.mockReset();
-  // Default: /users/me then /communities.
   mockApi.get.mockImplementation((path: string) => {
     if (path === "/api/users/me") return Promise.resolve(me);
     if (path === "/api/communities")
@@ -246,13 +243,11 @@ describe("AccountPage deletion", () => {
     });
     expect(confirmButton).toBeDisabled();
 
-    // The username alone is not enough: the password is still required.
     fireEvent.change(screen.getByLabelText(t("account.delete.prompt")), {
       target: { value: "miura" },
     });
     expect(confirmButton).toBeDisabled();
 
-    // Both gates satisfied enables the destructive button.
     fireEvent.change(screen.getByLabelText(t("account.delete.password")), {
       target: { value: "MyPass123!" },
     });

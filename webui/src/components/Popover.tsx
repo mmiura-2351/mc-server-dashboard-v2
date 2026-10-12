@@ -7,23 +7,11 @@ import {
   useState,
 } from "react";
 
-// Self-built popover primitive (WEBUI_SPEC.md 7.6 — no UI kit): a trigger
-// button plus an absolutely-positioned panel that closes on outside-click and
-// Escape. The panel is a sibling of the trigger inside the wrapper, so keyboard
-// focus tabs straight from the trigger into it and native controls inside stay
-// reachable/toggleable by keyboard. Escape restores focus to the trigger.
+// Keep the panel beside the trigger in DOM order so native controls remain keyboard reachable.
 
-// Gap kept between the panel and the viewport edges (px).
 const VIEWPORT_MARGIN = 8;
 
-/**
- * Horizontal offset (px, relative to the trigger's left edge) that keeps an
- * open panel within the viewport at both edges. The panel renders left-aligned
- * to the trigger (`triggerLeft` is its un-shifted viewport x); this shifts it
- * left when it would overflow the right edge, but never past the left margin,
- * and degrades to a left-margin alignment when the panel is wider than the
- * available width (#2239 narrow-viewport overflow).
- */
+/** Clamp the trigger-relative offset to viewport margins; oversized panels align to the left margin. */
 export function clampPopoverOffset(
   triggerLeft: number,
   panelWidth: number,
@@ -36,16 +24,12 @@ export function clampPopoverOffset(
 }
 
 interface PopoverProps {
-  /** Visible content of the trigger button (may include badges/carets). */
   label: ReactNode;
   /** Stable accessible name for the trigger when `label` is decorative. */
   buttonAriaLabel?: string;
   buttonClassName?: string;
   panelClassName?: string;
-  /**
-   * Panel content. A function form receives a `close` callback so an action
-   * inside the panel can dismiss it.
-   */
+  /** Function children receive close so panel actions can dismiss the popover. */
   children: ReactNode | ((close: () => void) => ReactNode);
 }
 
@@ -63,10 +47,7 @@ export function Popover({
   const panelRef = useRef<HTMLDivElement>(null);
   const panelId = useId();
 
-  // Once the panel is laid out, shift it horizontally so it never overflows the
-  // viewport at either edge — measured before paint (no flash), and recomputed
-  // on resize while open. The panel renders left-aligned to the trigger, so the
-  // clamp works from the wrapper's viewport x (#2239).
+  // Measure before paint to avoid a positioning flash; recompute while open on resize.
   useLayoutEffect(() => {
     if (!open) {
       return;
@@ -91,8 +72,6 @@ export function Popover({
     return () => window.removeEventListener("resize", reposition);
   }, [open]);
 
-  // While open, dismiss on an outside pointer-down or Escape. Escape also
-  // returns focus to the trigger so keyboard users land back where they were.
   useEffect(() => {
     if (!open) {
       return;
@@ -124,9 +103,7 @@ export function Popover({
         type="button"
         ref={triggerRef}
         className={buttonClassName}
-        // No aria-haspopup: the panel is a plain content region (a checkbox
-        // group in the dashboard filter's use), not a menu/listbox, so the
-        // disclosure leans on aria-expanded + aria-controls instead (#2668).
+        // No aria-haspopup: this panel contains ordinary controls, rather than a menu or listbox.
         aria-expanded={open}
         aria-controls={open ? panelId : undefined}
         aria-label={buttonAriaLabel}

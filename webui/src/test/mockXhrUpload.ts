@@ -1,14 +1,4 @@
-/**
- * Mock `XMLHttpRequest` that routes uploads through an existing `fetch` mock.
- *
- * `postFormWithProgress` (issue #1207) is built on XHR, which jsdom does not
- * usefully implement, so a page test that dispatches its API by URL + method
- * through a `fetch` mock would never see the upload. This double forwards the
- * XHR request to that same `fetch` mock and copies the resolved `Response` back
- * onto the XHR fields the client reads (status, responseText, content-type), so
- * the existing dispatch table covers uploads too. Install it for the duration of
- * a test and restore it after.
- */
+/** Forward XHR uploads through the fetch mock so page tests share one URL/method dispatcher. */
 
 type FetchLike = (
   input: RequestInfo | URL,
@@ -57,7 +47,6 @@ class MockUploadXHR {
       this.contentType =
         response.headers.get("content-type") ?? "application/json";
       this.responseText = await response.text();
-      // Emit a single completed-progress event so the bar exercises its path.
       this.upload.onprogress?.({
         lengthComputable: true,
         loaded: 1,
@@ -70,7 +59,6 @@ class MockUploadXHR {
   }
 }
 
-/** Install the upload XHR double over the global; returns a restore function. */
 export function installMockXhrUpload(fetchMock: FetchLike): () => void {
   const original = globalThis.XMLHttpRequest;
   // biome-ignore lint/suspicious/noExplicitAny: test double over the DOM global.

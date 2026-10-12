@@ -8,15 +8,7 @@ import { useToast } from "../components/Toast.tsx";
 import { type TranslationKey, t } from "../i18n/index.ts";
 import { LANDING_PATH } from "../routes.ts";
 
-// Register page (WEBUI_SPEC.md 6.1). Posts to /users; on success it signs the
-// new user in directly by logging in with the just-entered credentials, adopting
-// the token through the session layer, and landing on the dashboard (#537). If
-// that auto-login step fails (e.g. a registration-policy race), it falls back to
-// the route-to-login-with-notice path so the user can sign in manually with no
-// scary error. The server is authoritative on password strength; the client only
-// mirrors the FR-AUTH-4 hints to catch the obvious cases before a round-trip. 422
-// reason codes surface inline against the relevant field; other failures
-// (registration closed / throttled / unexpected) go to a toast.
+// Try auto-login after registration; if it fails, send the user to login with a registration-success notice.
 
 const MIN_PASSWORD_LENGTH = 12;
 
@@ -26,8 +18,6 @@ interface FieldErrors {
   password?: string;
 }
 
-// Map a server problem+json reason to its inline message and field. Reasons the
-// register endpoint emits are enumerated in users.py (register_user).
 const REASON_KEY: Record<string, TranslationKey> = {
   too_short: "register.reason.too_short",
   too_long_for_bcrypt: "register.reason.too_long_for_bcrypt",
@@ -51,13 +41,9 @@ function fieldForReason(reason: string): keyof FieldErrors {
   return "password";
 }
 
-// The reachable structural-422 path here: an empty username/email with a
-// long-enough password clears localValidate, so Pydantic `min_length=1` rejects
-// it server-side (#410). The fields map 1:1 to the form, so the shared
-// `fieldErrorsFromValidation` util keys directly off them.
+// Empty username/email can pass local validation; map the API's structural 422 entries to those fields.
 const VALIDATION_FIELDS = ["username", "email", "password"] as const;
 
-// Client-side mirror of the FR-AUTH-4 hints; the server remains authoritative.
 function localValidate(
   username: string,
   email: string,
@@ -103,10 +89,7 @@ export function RegisterPage() {
       await api.post("/api/users", {
         body: JSON.stringify({ username, email, password }),
       });
-      // Sign the new user in directly with the just-entered credentials (#537),
-      // reusing the same /auth/login + session-adopt path the login page takes.
-      // If this step fails (e.g. a registration-policy race), fall back to the
-      // route-to-login-with-notice path so the user can sign in manually.
+      // Keep registration successful even if auto-login fails; manual login remains available.
       try {
         const tokens = await api.post("/api/auth/login", {
           body: JSON.stringify({ username, password }),
@@ -137,7 +120,6 @@ export function RegisterPage() {
           }
         }
       }
-      // Registration closed / throttled / anything unmapped: generic toast.
       showToast(t("register.genericError"), "error");
       setSubmitting(false);
     }

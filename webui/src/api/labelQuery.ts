@@ -1,32 +1,8 @@
-/**
- * Graceful degradation for display-only secondary reads (issue #471).
- *
- * A tab gated on one permission (its primary read) often issues secondary reads
- * under *different* gates only to resolve ids into display names — e.g. the
- * Grants tab (`grant:read`) fetches members (`member:read`) and servers
- * (`server:read`) just to label rows. A caller holding only the primary gate
- * gets a 403 on those secondary reads, which would otherwise collapse the whole
- * tab into its generic load error.
- *
- * `labelQueryFn` wraps such a `queryFn` so that a 403 (and *only* a 403)
- * resolves to a supplied empty value instead of rejecting. The row-rendering
- * code then falls back to raw ids. Every other failure — 404, 500, a network
- * error — still rejects so a real outage is never hidden, and the primary read
- * (which is not wrapped) still fails the tab as before.
- *
- * The empty value is returned per call, not cached specially: React Query stores
- * it like any success, so once the caller gains the secondary gate a normal
- * staleness-driven refetch replaces it with full labels.
- */
+/** Secondary label reads may fall back to raw IDs on 403; primary reads and other failures must propagate. */
 
 import { ApiError } from "./client.ts";
 
-/**
- * Wrap a label-resolution `queryFn` to swallow a 403 into `emptyValue`. Use only
- * for display-only secondary reads; never for the tab's primary read. The
- * wrapped fn's arguments (TanStack's query-function context, carrying the abort
- * signal) pass through untouched so requests stay cancellable (issue #1728).
- */
+/** Use only for secondary display labels: resolve 403 to emptyValue and forward query arguments unchanged. */
 export function labelQueryFn<T, A extends unknown[]>(
   queryFn: (...args: A) => Promise<T>,
   emptyValue: T,

@@ -13,10 +13,7 @@ import { classifyQueryResult } from "../queryState.ts";
 type UserResponse = components["schemas"]["UserResponse"];
 type CommunityResponse = components["schemas"]["CommunityResponse"];
 
-// Map an API error to a localised message. Every domain error here is an RFC
-// 9457 problem+json carrying a machine `reason` (WEBUI_SPEC.md 7.4); the
-// account endpoints' reasons are enumerated under the `account.error.` prefix.
-// Anything unrecognised falls back to a generic message.
+// Map known account reasons to translations; unknown failures use the generic message.
 function errorMessage(error: unknown): string {
   if (error instanceof ApiError && error.reason !== undefined) {
     const key = `account.error.${error.reason}` as TranslationKey;
@@ -66,9 +63,7 @@ export function AccountPage() {
       </div>
     );
   }
-  // Full-page error only when there is nothing to show (the initial load
-  // failed). A failed background refetch retains `data`, so the cached page
-  // keeps rendering through transient API blips (#1797).
+  // Retain cached content when only a background refetch fails.
   if (userState.kind === "error") {
     return (
       <div className="account">
@@ -230,8 +225,7 @@ function PasswordSection({
 
   const onSubmit = (event: FormEvent) => {
     event.preventDefault();
-    // Client-side match check before spending a request (mirrors the register
-    // form, FR-AUTH-4). The API enforces the real strength policy server-side.
+    // Check matching passwords locally; the API enforces password strength.
     if (next !== confirm) {
       setError(t("account.password.mismatch"));
       return;
@@ -328,14 +322,11 @@ function DangerZone({ user, showToast, onDeleted }: DangerZoneProps) {
   const [open, setOpen] = useState(false);
 
   const mutation = useMutation({
-    // Re-auth: the API verifies the current password before deleting the account
-    // (WEBUI_SPEC.md 6.11). A wrong password is a 401 invalid_credentials.
+    // Account deletion requires the current password; the API reports a wrong one as invalid_credentials.
     mutationFn: (password: string) =>
       api.delete("/api/users/me", { body: JSON.stringify({ password }) }),
     onSuccess: () => {
       setOpen(false);
-      // Hard logout: the account is gone, so reset the local session and route
-      // to /login (WEBUI_SPEC.md 7.1).
       onDeleted();
     },
     onError: (error) => {

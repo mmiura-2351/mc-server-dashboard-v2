@@ -1,11 +1,3 @@
-/**
- * Benchmark: formatting utilities (issue #1122).
- *
- * Measures the shared formatting helpers used across pages. To add a new
- * format benchmark, add a test with an awaited bench().run() inside the
- * describe block.
- */
-
 import { describe, test } from "vitest";
 import { heartbeatAge, humanizeBytes, shortId, statusPill } from "./format.ts";
 import { t } from "./i18n/index.ts";

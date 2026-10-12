@@ -51,8 +51,6 @@ vi.mock("../permissions/useCan.ts", () => ({
   useCanCode: () => mockCanCreate,
 }));
 
-// Route api.get by path so the wizard's parallel catalog/version/port reads each
-// resolve to their endpoint's shape.
 function defaultGet(path: string) {
   if (path === "/api/versions") {
     return Promise.resolve({ server_types: ["vanilla", "paper", "fabric"] });
@@ -67,18 +65,12 @@ function defaultGet(path: string) {
     return Promise.resolve({ ports: [25570] });
   }
   if (path === "/api/meta") {
-    // Default to direct mode (relay off): the port control stays visible. The
-    // memory knobs come back `null` — the page reads them defensively, so
-    // omitting them would be indistinguishable from an unconfigured operator
-    // and would leave the memory-limit tests passing for the wrong reason
-    // (issue #2537).
+    // Include explicit null memory defaults so omission cannot make tests pass via fallback behavior.
     return Promise.resolve(meta());
   }
   return Promise.reject(new Error(`unexpected GET ${path}`));
 }
 
-// A location probe mirrors the current path so tests can assert the
-// post-create redirect (the URL the page navigates to).
 let lastPath = "";
 function LocationProbe() {
   const loc = useLocation();
@@ -86,9 +78,7 @@ function LocationProbe() {
   return null;
 }
 
-// The page creates in the community named by the URL `:cid` (#784), so mount it
-// under a matching route. Default to the member community; pass another cid to
-// exercise the not-found state for a community outside the caller's membership.
+// Mount under the URL community because :cid selects the wizard's target.
 function renderPage(path = `/communities/${CID}/servers/new`) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -120,9 +110,7 @@ function activeTab(): string | null {
   );
 }
 
-// Pick the Paper type and wait for the latest-version preselect effect to
-// commit the version into state — until then Next stays disabled and a click on
-// it is a no-op, which races the rest of the walk under full-suite timing.
+// Wait until the latest-version effect enables Next; clicking before that races the wizard state.
 async function pickTypeAndVersion() {
   fireEvent.click(await screen.findByText(t("serverCreate.type.paper")));
   await waitFor(() =>
@@ -130,8 +118,6 @@ async function pickTypeAndVersion() {
   );
 }
 
-// Walk steps 1→2 leaving a create-ready form: pick a type, the latest version
-// preselects, advance to config, and fill the name.
 async function reachConfigStep(name = "survival") {
   await pickTypeAndVersion();
   fireEvent.click(screen.getByText(t("serverCreate.next")));
@@ -163,7 +149,6 @@ describe("ServerCreatePage gating", () => {
   it("shows the not-found state for a URL cid outside the membership list (#784)", () => {
     renderPage("/communities/other/servers/new");
     expect(screen.getByText(t("community.notFound.title"))).toBeInTheDocument();
-    // It must not render the wizard for a community the caller is not in.
     expect(screen.queryByText(t("serverCreate.typeHeading"))).toBeNull();
   });
 });
@@ -180,17 +165,13 @@ describe("Step 1 — type & version", () => {
     await screen.findByText(t("serverCreate.type.paper"));
     expect(screen.getByText(t("serverCreate.next"))).toBeDisabled();
     fireEvent.click(screen.getByText(t("serverCreate.type.paper")));
-    // Next flips to enabled only once the preselect effect commits the version
-    // into state — anchor on that, not on the select's displayed option (which
-    // shows the first option before the effect runs and races the assertion).
+    // The select displays its first option before state commits; wait for Next to enable.
     await waitFor(() =>
       expect(screen.getByText(t("serverCreate.next"))).toBeEnabled(),
     );
   });
 
   it("falls back to the raw type string for a catalog type not in TYPE_LABEL (#791)", async () => {
-    // A future catalog type unknown to the hardcoded TYPE_LABEL map must not
-    // render a blank card — it must show the raw type string instead.
     mockApi.get.mockImplementation((path: string) => {
       if (path === "/api/versions") {
         return Promise.resolve({
@@ -201,11 +182,9 @@ describe("Step 1 — type & version", () => {
     });
     renderPage();
 
-    // Known types still show their translated labels.
     expect(
       await screen.findByText(t("serverCreate.type.vanilla")),
     ).toBeInTheDocument();
-    // The unmapped type falls back to its raw string — the card is not blank.
     expect(screen.getByText("future_engine")).toBeInTheDocument();
   });
 });
@@ -221,8 +200,6 @@ describe("Step 2 — port check", () => {
   });
 
   it("does not clobber a user-typed port with the suggestion", async () => {
-    // Block the suggest until after the user types, then let it resolve: the
-    // user's value must win.
     let resolveAvailable: (v: unknown) => void = () => {};
     mockApi.get.mockImplementation((path: string) => {
       if (path === "/api/ports/available") {
@@ -282,9 +259,7 @@ describe("Step 2 — port check", () => {
   });
 
   it("ignores a stale out-of-order port-check response (#1592)", async () => {
-    // Two blurs in quick succession on different ports: the first port's check
-    // resolves *after* the second's. Without a request guard the stale "taken"
-    // verdict for 25565 would clobber the current "available" verdict for 25566.
+    // Resolve port checks out of order to verify the stale verdict cannot replace the current one.
     let resolveFirst: (v: unknown) => void = () => {};
     let resolveSecond: (v: unknown) => void = () => {};
     mockApi.get.mockImplementation((path: string) => {
@@ -305,20 +280,16 @@ describe("Step 2 — port check", () => {
     fireEvent.click(screen.getByText(t("serverCreate.next")));
 
     const portInput = await screen.findByLabelText(t("serverCreate.portLabel"));
-    // First blur on 25565 leaves its check pending.
     fireEvent.change(portInput, { target: { value: "25565" } });
     fireEvent.blur(portInput);
-    // Second blur on 25566 supersedes it.
     fireEvent.change(portInput, { target: { value: "25566" } });
     fireEvent.blur(portInput);
 
-    // The current (second) request resolves first: available.
     resolveSecond({ in_range: true, available: true });
     expect(
       await screen.findByText(t("serverCreate.portAvailable")),
     ).toBeInTheDocument();
 
-    // The stale (first) request resolves later as taken — it must be ignored.
     resolveFirst({ in_range: true, available: false });
     await waitFor(() =>
       expect(
@@ -347,7 +318,6 @@ describe("Step 2 — port control gated on relay mode (#1002)", () => {
   });
 
   it("shows the port control while /api/meta is still loading (#1061)", async () => {
-    // Stall meta so it never resolves during the test.
     mockApi.get.mockImplementation((path: string) => {
       if (path === "/api/meta") {
         return new Promise(() => {});
@@ -372,7 +342,6 @@ describe("Step 2 — port control gated on relay mode (#1002)", () => {
     renderPage();
     await pickTypeAndVersion();
     fireEvent.click(screen.getByText(t("serverCreate.next")));
-    // Wait for step 2 to render, then confirm port is visible.
     await waitFor(() =>
       expect(
         screen.getByLabelText(t("serverCreate.portLabel")),
@@ -385,7 +354,6 @@ describe("Step 2 — port control gated on relay mode (#1002)", () => {
     renderPage();
     await pickTypeAndVersion();
     fireEvent.click(screen.getByText(t("serverCreate.next")));
-    // Advancing to config resolves; in relay mode the port field is hidden.
     await waitFor(() =>
       expect(screen.queryByLabelText(t("serverCreate.portLabel"))).toBeNull(),
     );
@@ -498,8 +466,6 @@ describe("Step 2 — resource allocation (#715)", () => {
   });
 
   it("prefills the memory limit with the operator default from /meta (#1069)", async () => {
-    // The sibling knob to max_memory_limit_mb: when the operator configures a
-    // default, the untouched field seeds from it rather than staying blank.
     mockApi.get.mockImplementation((path: string) => {
       if (path === "/api/meta") {
         return Promise.resolve(meta({ default_memory_limit_mb: 2048 }));
@@ -542,9 +508,7 @@ describe("Step 2 — resource allocation (#715)", () => {
   });
 
   it("blocks submit above the operator-configured ceiling that the default would allow (#1069)", async () => {
-    // With a configured max of 4096 MiB, 8192 is out of range even though it
-    // sits well under the default 1 TiB ceiling — so this reddens only if the
-    // page honours the /meta ceiling rather than the hardcoded default.
+    // Choose a value below the built-in ceiling but above /meta's cap to verify the operator limit is used.
     mockApi.get.mockImplementation((path: string) => {
       if (path === "/api/meta") {
         return Promise.resolve(meta({ max_memory_limit_mb: 4096 }));
@@ -620,8 +584,6 @@ describe("Step 2 — resource allocation (#715)", () => {
 });
 
 describe("create error surfacing", () => {
-  // The reason → message table lives in serverCreateErrorPresentation.test.ts;
-  // these pin how the wizard places each presentation.
   it("toasts a mapped failure and keeps the form for a retry", async () => {
     mockApi.post.mockRejectedValue(new ApiError(409, { reason: "port_taken" }));
     renderPage();
@@ -636,7 +598,6 @@ describe("create error surfacing", () => {
     ).not.toBeNull();
     expect(screen.queryByText(t("serverCreate.genericError"))).toBeNull();
     expect(lastPath).toBe(`/communities/${CID}/servers/new`);
-    // Still on the config step with the typed name, and submittable again.
     expect(screen.getByLabelText(t("serverCreate.nameLabel"))).toHaveValue(
       "survival",
     );
@@ -681,7 +642,6 @@ describe("create error surfacing", () => {
 });
 
 describe("Step 2 — join address name (slug) field (issue #981, gated on relay #1006)", () => {
-  // The slug field is only shown when relay is enabled (#1006).
   function relayGet(path: string) {
     if (path === "/api/meta") {
       return Promise.resolve(meta({ relay_enabled: true }));
@@ -696,7 +656,6 @@ describe("Step 2 — join address name (slug) field (issue #981, gated on relay 
     expect(
       screen.getByLabelText(t("serverCreate.slugLabel")),
     ).toBeInTheDocument();
-    // Hint is shown when the field is blank (valid).
     expect(screen.getByText(t("serverCreate.slugHint"))).toBeInTheDocument();
   });
 
@@ -727,7 +686,6 @@ describe("Step 2 — join address name (slug) field (issue #981, gated on relay 
     mockApi.post.mockResolvedValue({ id: "s-new" });
     renderPage();
     await reachConfigStep();
-    // Leave slug blank.
     fireEvent.click(
       screen.getByRole("button", { name: t("serverCreate.create") }),
     );
@@ -790,7 +748,6 @@ describe("Step 2 — join address name (slug) field (issue #981, gated on relay 
     );
     await screen.findByText(t("serverCreate.error.slug_taken"));
 
-    // Editing the field clears the API error.
     fireEvent.change(screen.getByLabelText(t("serverCreate.slugLabel")), {
       target: { value: "different" },
     });
@@ -850,8 +807,6 @@ describe("import tab", () => {
       expect(lastPath).toBe(`/communities/${CID}/servers/s-imported`);
     });
 
-    // The shared upload-progress singleton must be idle after a successful
-    // import — otherwise other upload surfaces show a stale progress bar.
     const { result } = renderHook(() => useUploadProgress());
     expect(result.current.active).toBe(false);
   });
@@ -877,8 +832,6 @@ describe("import tab", () => {
     expect(screen.queryByText(t("common.noFileChosen"))).toBeNull();
   });
 
-  // --- where an import failure lands (issue #3022) ---
-
   async function submitImport() {
     renderPage();
     fireEvent.click(await screen.findByText(t("serverCreate.tab.import")));
@@ -897,12 +850,6 @@ describe("import tab", () => {
   }
 
   it("surfaces a 409 slug_taken on import instead of failing silently (#3022)", async () => {
-    // The import route now answers 409 `slug_taken` where it used to 500. The
-    // create path routes that reason to its slug FIELD and reports it handled,
-    // but the import tab has no slug field — so delegating there swallowed the
-    // error and the operator saw NOTHING, which is worse than the generic toast
-    // the 500 used to produce. Import assigns the address itself, so the message
-    // is a plain retry rather than a field complaint.
     mockPostFormWithProgress.mockRejectedValue(
       new ApiError(409, { reason: "slug_taken" }),
     );
@@ -916,8 +863,6 @@ describe("import tab", () => {
     expect(
       screen.queryByText(t("serverCreate.genericError")),
     ).not.toBeInTheDocument();
-    // Not the create tab's inline slug-field string: that one tells the operator
-    // to choose another address, which they never supplied here.
     expect(
       screen.queryByText(t("serverCreate.error.slug_taken")),
     ).not.toBeInTheDocument();

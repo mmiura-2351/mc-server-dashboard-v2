@@ -1,7 +1,3 @@
-/* Global base styles ported from docs/ui/mockup/assets/style.css.
- * Reset, body background and fonts; all values reference design tokens.
- */
-
 @import "./tokens.css";
 
 * {
@@ -28,12 +24,7 @@ a:hover {
   text-decoration: underline;
 }
 
-/* Keyboard-only focus ring on every interactive element (a11y; #492). Uses
- * :focus-visible so pointer clicks stay quiet while Tab navigation is always
- * visible. The accent token keeps it on-theme; the offset lifts it clear of
- * dense controls. The `.field input:focus` border treatment below stays as the
- * primary cue for text fields, with this ring layered on top for keyboard use.
- */
+/* Use focus-visible to show keyboard focus without adding a ring to pointer clicks. */
 a:focus-visible,
 button:focus-visible,
 input:focus-visible,
@@ -55,9 +46,7 @@ h1 {
   font-size: 20px;
 }
 
-/* Visually hidden but present in the accessibility tree (a11y; #647). Used for
- * headings that label a page for screen readers without altering the visual
- * layout. */
+/* Hide visually while retaining content in the accessibility tree. */
 .visually-hidden {
   position: absolute;
   width: 1px;

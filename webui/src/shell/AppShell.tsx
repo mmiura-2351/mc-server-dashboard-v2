@@ -12,20 +12,12 @@ import { useActiveCommunity } from "../permissions/ActiveCommunityProvider.tsx";
 import { classifyQueryResult } from "../queryState.ts";
 import { dashboardPath, LANDING_PATH } from "../routes.ts";
 
-// Authenticated shell chrome: left nav (community scope + admin group) and a
-// top bar (community switcher + user menu) (WEBUI_SPEC.md Section 5). The
-// community scope resolves from the active community (#412); the switcher lists
-// the caller's communities and switching navigates to that community's
-// dashboard.
-
 interface NavSpec {
   to: string;
   icon: string;
   labelKey: TranslationKey;
 }
 
-// Community-scoped nav for the active community. Computed per-render from the
-// active id so switching re-targets every link.
 function communityNav(cid: string): NavSpec[] {
   const base = dashboardPath(cid);
   return [
@@ -60,9 +52,6 @@ function NavItem({ to, icon, labelKey }: NavSpec) {
   );
 }
 
-// Top-bar switcher: lists the caller's communities and switches the active one.
-// While the list is loading it renders a non-interactive placeholder so the bar
-// does not flicker; with no communities it shows a disabled hint.
 function CommunitySwitcher() {
   const {
     communityId,
@@ -129,10 +118,7 @@ function CommunitySwitcher() {
   );
 }
 
-// Keeps the active community in sync with the URL: deep-linking to a community
-// the caller belongs to selects it (URL wins on load). Switching from the top
-// bar drives the URL the other way (CommunitySwitcher), so this only reacts to
-// cids that actually exist in the caller's list.
+// Adopt a URL community only when it belongs to the caller; the top-bar switcher drives URL changes separately.
 function useUrlCommunitySync() {
   const { cid } = useParams();
   const { communityId, setCommunityId, communities } = useActiveCommunity();
@@ -147,8 +133,6 @@ function useUrlCommunitySync() {
   }, [cid, communityId, communities, setCommunityId]);
 }
 
-// Top-bar language selector. Switching persists the choice and reloads so the
-// module-level `t()` re-evaluates against the new dictionary (see i18n/index).
 function LanguageSwitcher() {
   return (
     <select
@@ -165,8 +149,6 @@ function LanguageSwitcher() {
 
 export function AppShell() {
   const { communityId } = useActiveCommunity();
-  // The admin nav group renders only for platform admins (#474). Same shared
-  // current-user query the admin-route guard reads, so there is one fetch.
   const isAdmin = useCurrentUser().data?.is_platform_admin === true;
   useUrlCommunitySync();
 
@@ -221,11 +203,7 @@ export function AppShell() {
           </NavLink>
         </header>
         <main className="content">
-          {/* The lazy-route Suspense boundary lives here, around <Outlet>, so a
-              not-yet-cached page chunk (#553) suspends only the content area —
-              the sidebar/top bar stay mounted instead of the whole shell
-              flashing through the app-level fallback (#602). The fallback
-              mirrors App's SessionLoading. */}
+          {/* Keep Suspense around Outlet so lazy-page loading preserves the sidebar and top bar. */}
           <Suspense
             fallback={
               <div className="auth-wrap" role="status">

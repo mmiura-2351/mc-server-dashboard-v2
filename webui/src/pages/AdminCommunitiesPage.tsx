@@ -20,18 +20,11 @@ import { t } from "../i18n/index.ts";
 import { classifyQueryResult } from "../queryState.ts";
 import { useOffsetParam } from "./urlState.ts";
 
-// Platform admin Communities page (WEBUI_SPEC.md 6.12): list ALL communities and
-// provision new ones (name + initial owner). The listing reads the platform-axis
-// endpoint GET /admin/communities (#489) — admin sees every community with its
-// member/server counts, regardless of membership — paginated like
-// GET /admin/users.
-// Provision (and delete) invalidate both this admin list and the membership-
-// scoped ["communities"] query the community switcher reuses.
+// Provisioning and deletion invalidate both the admin list and the membership-scoped switcher list.
 
 type AdminCommunityResponse = components["schemas"]["AdminCommunityResponse"];
 type AdminUserResponse = components["schemas"]["AdminUserResponse"];
 
-// The API caps a single page at 100 and defaults to 50 (admin_communities.py).
 const PAGE_SIZE = 50;
 
 function communitiesUrl(offset: number): "/api/admin/communities" {
@@ -46,7 +39,6 @@ export function AdminCommunitiesPage() {
   const queryClient = useQueryClient();
   const { showToast } = useToast();
   const [provisionOpen, setProvisionOpen] = useState(false);
-  // Page offset lives in `?offset=N` (#514) so Back restores the prior page.
   const [offset, setOffset] = useOffsetParam();
   const [deleteTarget, setDeleteTarget] =
     useState<AdminCommunityResponse | null>(null);
@@ -60,7 +52,6 @@ export function AdminCommunitiesPage() {
 
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ADMIN_COMMUNITIES_KEY });
-    // The membership-scoped switcher list shares this key.
     queryClient.invalidateQueries({ queryKey: ["communities"] });
   };
 
@@ -80,8 +71,6 @@ export function AdminCommunitiesPage() {
         invalidate();
         return;
       }
-      // 409 community_has_servers: the API never deletes a community that still
-      // holds servers (#3218), so say what has to happen first.
       showToast(
         t(
           reason === "community_has_servers"
@@ -130,9 +119,7 @@ export function AdminCommunitiesPage() {
         <p className="sub" role="status">
           {t("admin.communities.loading")}
         </p>
-      ) : /* Error only when there is nothing to show (initial load failed).
-           A failed background refetch retains `data`, so the cached page
-           keeps rendering through transient API blips (#1805). */
+      ) : /* Retain cached content when only a background refetch fails. */
       communitiesState.kind === "error" ? (
         <p className="field-error" role="alert">
           {t("admin.communities.loadError")}
@@ -248,10 +235,6 @@ function CommunityTable({
   );
 }
 
-// Map a provision rejection to a specific inline message. The provision
-// endpoint returns 409 name_taken, 422 invalid_name, 422 owner_not_found and
-// 422 invalid_owner_user_id (communities.py). The owner picker only ever sends a
-// known id, so invalid_owner_user_id falls through to the generic message.
 function provisionErrorMessage(error: unknown): string {
   if (error instanceof ApiError) {
     if (error.reason === "name_taken") {
@@ -280,12 +263,8 @@ function ProvisionDialog({
   const [ownerId, setOwnerId] = useState("");
   const [error, setError] = useState<string | null>(null);
 
-  // Owner picker source: GET /admin/users is the only listing endpoint
-  // (admin-only, paginated; max limit=100, default 50 — admin_users.py). The
-  // provision API takes a user UUID, so the picker shows username/email and
-  // submits the selected user's id. Request the max page so deployments with
-  // >50 accounts are not silently truncated; when total exceeds it we surface a
-  // hint below. Only fetched while open.
+  // The owner picker submits UUIDs and loads only while open.
+  // Request the API's maximum page size and disclose truncation above that limit.
   const users = useQuery({
     queryKey: ["users"],
     queryFn: ({ signal }) =>
@@ -331,8 +310,7 @@ function ProvisionDialog({
   };
 
   const userList: AdminUserResponse[] = users.data?.users ?? [];
-  // The API caps the page at 100; if more accounts exist, the owner picker is
-  // incomplete — say so rather than silently omitting the later users (#476).
+  // Disclose omitted accounts when the total exceeds the API's 100-user page cap.
   const userTotal = users.data?.total ?? 0;
   const usersTruncated = userTotal > userList.length;
 

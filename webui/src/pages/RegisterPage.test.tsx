@@ -29,8 +29,6 @@ function renderRegister() {
   );
 }
 
-// Fill the form with values that pass the client-side checks so submission
-// reaches the network, where the test controls the response.
 function fillValid() {
   fireEvent.change(screen.getByLabelText(t("auth.fieldUsername")), {
     target: { value: "alice" },
@@ -46,7 +44,6 @@ function fillValid() {
   });
 }
 
-// A successful POST /api/users 201 response body.
 function registeredResponse(): Response {
   return new Response(
     JSON.stringify({
@@ -59,10 +56,7 @@ function registeredResponse(): Response {
   );
 }
 
-// Route fetches by URL so the SessionProvider's bootstrap probe
-// (POST /api/auth/session) does not consume the per-test register/login mocks.
-// The bootstrap resolves signed-out; the register and login responses are queued
-// per test.
+// Route bootstrap separately so it cannot consume the queued registration or login response.
 const usersQueue: Response[] = [];
 const loginQueue: Response[] = [];
 
@@ -77,7 +71,6 @@ function queueLogin(response: Response) {
 const fetchMock = vi.fn((input: RequestInfo | URL) => {
   const url = typeof input === "string" ? input : input.toString();
   if (url.endsWith("/api/auth/session")) {
-    // Bootstrap probe: resolve signed-out so it stays out of the way.
     return Promise.resolve(new Response(null, { status: 401 }));
   }
   if (url.endsWith("/api/users")) {
@@ -135,10 +128,6 @@ describe("RegisterPage", () => {
   });
 
   it("maps a structural 422 validation_error to inline field errors", async () => {
-    // Empty username/email with a long-enough password passes localValidate and
-    // submits, where Pydantic's min_length=1 rejects it as a structural
-    // validation_error carrying the per-field errors list (#410, #395 shape:
-    // loc/msg/type, input/ctx scrubbed).
     queueUsers(
       new Response(
         JSON.stringify({
@@ -236,7 +225,6 @@ describe("RegisterPage", () => {
     expect(
       screen.getByText(t("register.reason.too_short")),
     ).toBeInTheDocument();
-    // Submission is blocked before any /api/users request goes out.
     expect(fetchMock).not.toHaveBeenCalledWith("/api/users", expect.anything());
   });
 
@@ -255,12 +243,10 @@ describe("RegisterPage", () => {
     fillValid();
     submit();
 
-    // Auto-login navigates to the landing path, not back to /login.
     await waitFor(() =>
       expect(screen.getByTestId("path")).toHaveTextContent("/"),
     );
     expect(screen.queryByTestId("path")).not.toHaveTextContent("/login");
-    // The login was performed with the just-entered credentials.
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/auth/login",
       expect.objectContaining({
@@ -274,8 +260,6 @@ describe("RegisterPage", () => {
 
   it("falls back to /login with a notice when the auto-login fails (#537)", async () => {
     queueUsers(registeredResponse());
-    // The login step fails (e.g. a registration-policy race); the user is routed
-    // to /login with the success notice rather than shown a scary error.
     queueLogin(new Response(null, { status: 401 }));
     renderRegister();
     fillValid();

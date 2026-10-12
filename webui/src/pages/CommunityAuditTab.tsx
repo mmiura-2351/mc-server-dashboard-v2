@@ -18,9 +18,6 @@ import {
 } from "./auditShared.tsx";
 import { useFilterParams, useOffsetParam } from "./urlState.ts";
 
-// The filter keys persisted in the URL query string (#563): the shared
-// operation/actor/since/until set (the community-scoped view has no community
-// filter — every row is the same community).
 const FILTER_KEYS = ["operation", "actor", "since", "until"] as const;
 
 export function auditKey(
@@ -31,10 +28,6 @@ export function auditKey(
   return ["communities", communityId, "audit", filters, offset] as const;
 }
 
-// Build the audit-list URL with the applied filters mapped to the exact query
-// params the endpoint declares (operation, actor, since, until, limit, offset —
-// schema.ts list_community_audit_log). Blank filters are omitted. The result is
-// cast back to the template path so the typed response stays AuditLogResponse.
 function auditUrl(
   communityId: string,
   filters: AuditFilters,
@@ -50,9 +43,6 @@ function auditUrl(
   return `${base}?${params.toString()}` as "/api/communities/{community_id}/audit";
 }
 
-// Audit tab (WEBUI_SPEC.md 6.10): filterable, paged view of the community audit
-// trail. Filters map to the endpoint query params; paging is limit/offset
-// (audit.py). Gated by `audit:read`; a 403 from the list routes to onForbidden.
 export function CommunityAuditTab({
   communityId,
   can,
@@ -68,20 +58,14 @@ export function CommunityAuditTab({
 
 function Loaded({ communityId }: { communityId: string }) {
   const onForbidden = useOnForbidden();
-  // Applied filters live in the URL query string (#563) so reloads and shared
-  // links restore them; `urlFilters` is the applied set, `draft` the in-progress
-  // input. The draft re-syncs to the URL on Back so the inputs follow history.
+  // Keep applied filters in the URL and draft edits separate; browser history restores the applied set.
   const [urlFilters, applyFilters] = useFilterParams(FILTER_KEYS);
   const filters: AuditFilters = { ...EMPTY_FILTERS, ...urlFilters };
   const [draft, setDraft] = useState<AuditFilters>(filters);
-  // Page offset lives in `?offset=N` (#514) so Back restores the prior page.
   const [offset, setOffset] = useOffsetParam();
   const [actorError, setActorError] = useState(false);
 
-  // Keep the inputs in step with the applied (URL) filters: Back/forward and
-  // deep links drive the URL, and the draft mirrors it. The signature folds the
-  // filter values into one stable dep so the re-sync fires only on a real URL
-  // change, not on every render's fresh object.
+  // Use a value signature to resync draft filters only when URL values change.
   const urlSignature = JSON.stringify(urlFilters);
   // biome-ignore lint/correctness/useExhaustiveDependencies: `urlSignature` stands in for the filter values; `filters` is derived from them.
   useEffect(() => {
@@ -103,20 +87,17 @@ function Loaded({ communityId }: { communityId: string }) {
   }, [query.isError, query.error, onForbidden]);
 
   const apply = () => {
-    // The backend's `actor` param is a UUID; reject free text inline rather
-    // than letting it 422 into the generic load error.
+    // Reject non-UUID actors inline instead of turning an API 422 into a generic load error.
     if (draft.actor.trim() !== "" && !isUuid(draft.actor.trim())) {
       setActorError(true);
       return;
     }
     setActorError(false);
-    // Applying writes the filters to the URL and resets offset to 0 in one
-    // history entry (useFilterParams drops the offset param).
     applyFilters(draft);
   };
 
   const records = query.data?.records ?? [];
-  // limit/offset paging gives no total: a full page implies there may be more.
+  // The API returns no total; a full page only suggests that another page may exist.
   const hasNext = records.length === PAGE_SIZE;
 
   return (
@@ -141,9 +122,7 @@ function Loaded({ communityId }: { communityId: string }) {
 
       {queryState.kind === "pending" ? (
         <p className="sub">{t("communitySettings.audit.loading")}</p>
-      ) : /* Error only when there is nothing to show (initial load failed).
-           A failed background refetch retains `data`, so the cached list
-           keeps rendering through transient API blips (#1805). */
+      ) : /* Retain cached content when only a background refetch fails. */
       queryState.kind === "error" ? (
         <p className="field-error">{t("communitySettings.audit.loadError")}</p>
       ) : records.length === 0 ? (

@@ -4,12 +4,6 @@ import { clearAccessToken } from "../auth/tokenStore.ts";
 import { t } from "../i18n/index.ts";
 import { renderApp } from "../test/render.tsx";
 
-// Admin Communities page tests (#476, #489). The app is driven through the real
-// router and providers via renderApp; a fetch mock dispatches on URL + method so
-// a single test can stand up /users/me, the membership-scoped switcher list
-// (GET /communities), the admin-wide page list (GET /admin/communities), the
-// user picker (GET /admin/users), and the provision/delete calls.
-
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -45,10 +39,8 @@ const ADMIN = {
   is_platform_admin: true,
 };
 
-// The membership-scoped switcher list (CommunityResponse: {id, name}).
 const SWITCHER_COMMUNITIES = [{ id: "c1", name: "Sakura SMP" }];
 
-// The admin-wide list (AdminCommunityResponse: id/name/created_at/counts).
 const ADMIN_COMMUNITIES = {
   total: 2,
   limit: 50,
@@ -102,8 +94,6 @@ function method(input: RequestInfo | URL, init?: RequestInit): string {
   return (init?.method ?? "GET").toUpperCase();
 }
 
-// Common dispatch for the supporting endpoints (me, switcher list, permissions,
-// users). Page-specific routes are layered on by each test before this.
 function baseRoute(url: string): Response | undefined {
   if (url === "/api/users/me") return jsonResponse(ADMIN);
   if (url === "/api/communities") return jsonResponse(SWITCHER_COMMUNITIES);
@@ -137,14 +127,11 @@ describe("admin communities list", () => {
       await screen.findByRole("heading", { name: t("page.adminCommunities") }),
     ).toBeInTheDocument();
     const table = await screen.findByRole("table");
-    // "Dev Playground" (c2) is NOT in the membership-scoped switcher list, so
-    // its presence proves the page reads the admin-wide endpoint.
+    // A community outside the membership list proves this page uses the admin-wide endpoint.
     expect(within(table).getByText("Dev Playground")).toBeInTheDocument();
     expect(within(table).getByText("c2")).toBeInTheDocument();
-    // Counts render in the row.
     expect(within(table).getByText("5")).toBeInTheDocument();
     expect(within(table).getByText("3")).toBeInTheDocument();
-    // The id cell carries the full id as a hover title (#519).
     expect(within(table).getByText("c2").closest("td")).toHaveAttribute(
       "title",
       "c2",
@@ -176,7 +163,6 @@ describe("admin communities delete", () => {
 
     const table = await screen.findByRole("table");
     const callsBefore = adminListCalls;
-    // Delete the second (non-member) community.
     const row = within(table).getByText("Dev Playground").closest("tr");
     if (row === null) throw new Error("row not found");
     fireEvent.click(
@@ -184,7 +170,6 @@ describe("admin communities delete", () => {
     );
 
     const dialog = await screen.findByRole("dialog");
-    // Typed-confirm: the destructive button stays disabled until the exact name.
     const confirm = within(dialog).getByRole("button", {
       name: t("admin.communities.deleteConfirm"),
     });
@@ -240,8 +225,6 @@ describe("admin communities delete", () => {
       }),
     );
 
-    // 404 means the community is already gone: show the success message and
-    // refetch the list, never the delete-error toast.
     expect(
       await screen.findByText(t("admin.communities.deleted")),
     ).toBeInTheDocument();
@@ -367,8 +350,6 @@ describe("admin communities owner picker", () => {
     const dialog = await screen.findByRole("dialog");
     await within(dialog).findByRole("option", { name: /alice/ });
 
-    // No truncation hint at all: match the static, value-free tail of the
-    // single interpolated sentence (last segment after the final placeholder).
     const truncatedTail = t("admin.communities.usersTruncated")
       .split("}")
       .pop();

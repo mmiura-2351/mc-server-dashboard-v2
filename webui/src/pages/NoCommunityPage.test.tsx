@@ -4,11 +4,6 @@ import { clearAccessToken } from "../auth/tokenStore.ts";
 import { t } from "../i18n/index.ts";
 import { renderApp } from "../test/render.tsx";
 
-// No-community empty state (#584). Driven through the real router + providers via
-// renderApp; the fetch mock returns an empty community list so Landing falls
-// through to the empty state, and a per-test current-user controls the admin
-// branch.
-
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), {
     status: 200,
@@ -33,8 +28,6 @@ const ADMIN = {
 };
 const MEMBER = { ...ADMIN, is_platform_admin: false };
 
-// Sign in with the given user and no communities, so Landing lands on the empty
-// state. The bootstrap refresh and any unmatched URL fall through to a token.
 function signedInWithNoCommunities(user: typeof ADMIN) {
   fetchMock.mockImplementation((input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
@@ -64,7 +57,6 @@ describe("no-community empty state", () => {
       await screen.findByRole("heading", { name: t("noCommunity.title") }),
     ).toBeInTheDocument();
     expect(screen.getByText(t("noCommunity.body"))).toBeInTheDocument();
-    // The generic placeholder copy must be gone.
     expect(screen.queryByText(t("page.placeholder"))).not.toBeInTheDocument();
   });
 

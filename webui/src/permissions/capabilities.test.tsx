@@ -12,8 +12,7 @@ import {
 import { useCan } from "./useCan.ts";
 import { useOnForbidden } from "./useOnForbidden.ts";
 
-// The session core is stubbed: these tests exercise the capability layer, not
-// the bootstrap. A signed-in session is the precondition for fetching.
+// Stub a signed-in session so capability tests do not depend on bootstrap.
 vi.mock("../auth/SessionProvider.tsx", () => ({
   useSession: () => ({ status: "signed-in", logout: vi.fn() }),
 }));
@@ -27,7 +26,6 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-/** Match a request URL (fetch is called with a path string). */
 function urlOf(call: unknown[]): string {
   return String(call[0]);
 }
@@ -101,7 +99,6 @@ describe("default-community selection", () => {
     await waitFor(() =>
       expect(screen.getByTestId("cid")).toHaveTextContent("none"),
     );
-    // No community means no permissions fetch.
     expect(
       fetchMock.mock.calls.some((c) => urlOf(c).includes("/me/permissions")),
     ).toBe(false);
@@ -133,7 +130,6 @@ describe("can() resolution against the fetched set", () => {
     await waitFor(() =>
       expect(screen.getByTestId("start-s1")).toHaveTextContent("true"),
     );
-    // Community-wide check is denied: the grant is server-scoped.
     expect(screen.getByTestId("start")).toHaveTextContent("false");
   });
 });
@@ -168,7 +164,6 @@ describe("per-community cache isolation", () => {
           jsonResponse({ permissions: ["server:start"], grants: [] }),
         );
       }
-      // c2 lacks the code.
       return Promise.resolve(jsonResponse({ permissions: [], grants: [] }));
     });
 
@@ -205,8 +200,7 @@ describe("selection reconciliation when the active community vanishes", () => {
     return (
       <div>
         <span data-testid="cid">{communityId ?? "none"}</span>
-        {/* The loaded list, so a test can wait for a specific refetch to land
-            before asserting what the selection did. */}
+        {/* Expose the loaded list so assertions can wait for a specific refetch. */}
         <span data-testid="list">
           {communities === undefined
             ? "loading"
@@ -234,12 +228,10 @@ describe("selection reconciliation when the active community vanishes", () => {
     const client = newClient();
     render(wrap(<Switcher />, client));
 
-    // Wait for the default to be selected.
     await waitFor(() =>
       expect(screen.getByTestId("cid")).toHaveTextContent("c1"),
     );
 
-    // User explicitly picks c2.
     act(() => {
       screen.getByRole("button", { name: "to-c2" }).click();
     });
@@ -247,14 +239,11 @@ describe("selection reconciliation when the active community vanishes", () => {
       expect(screen.getByTestId("cid")).toHaveTextContent("c2"),
     );
 
-    // Simulate the server removing c2 from the user's community list, then
-    // trigger a refetch (as window-focus would).
     communitiesResponse = [{ id: "c1", name: "First" }];
     await act(async () => {
       await client.invalidateQueries({ queryKey: ["communities"] });
     });
 
-    // The provider should reconcile and fall back to c1.
     await waitFor(() =>
       expect(screen.getByTestId("cid")).toHaveTextContent("c1"),
     );
@@ -279,7 +268,6 @@ describe("selection reconciliation when the active community vanishes", () => {
       expect(screen.getByTestId("cid")).toHaveTextContent("c1"),
     );
 
-    // Explicitly select c2 so the selection is user-driven.
     act(() => {
       screen.getByRole("button", { name: "to-c2" }).click();
     });
@@ -287,7 +275,6 @@ describe("selection reconciliation when the active community vanishes", () => {
       expect(screen.getByTestId("cid")).toHaveTextContent("c2"),
     );
 
-    // Both communities are removed; the user has none left.
     communitiesResponse = [];
     await act(async () => {
       await client.invalidateQueries({ queryKey: ["communities"] });
@@ -324,7 +311,6 @@ describe("selection reconciliation when the active community vanishes", () => {
       expect(screen.getByTestId("cid")).toHaveTextContent("c2"),
     );
 
-    // c2 vanishes from a loaded list: the provider falls back to c1.
     communitiesResponse = [{ id: "c1", name: "First" }];
     await act(async () => {
       await client.invalidateQueries({ queryKey: ["communities"] });
@@ -333,8 +319,6 @@ describe("selection reconciliation when the active community vanishes", () => {
       expect(screen.getByTestId("cid")).toHaveTextContent("c1"),
     );
 
-    // c2 comes back (re-invited, or a transiently inconsistent list). The stale
-    // selection must not resurrect: the user stays on c1 until they switch.
     communitiesResponse = [
       { id: "c1", name: "First" },
       { id: "c2", name: "Second" },
@@ -377,7 +361,6 @@ describe("selection reconciliation when the active community vanishes", () => {
       expect(screen.getByTestId("cid")).toHaveTextContent("c2"),
     );
 
-    // A failed fetch says nothing about the selection's fate.
     failCommunities = true;
     await act(async () => {
       await client.invalidateQueries({ queryKey: ["communities"] });
@@ -419,7 +402,6 @@ describe("selection reconciliation when the active community vanishes", () => {
       expect(screen.getByTestId("cid")).toHaveTextContent("c2"),
     );
 
-    // An empty list is not evidence that c2 specifically is gone.
     communitiesResponse = [];
     await act(async () => {
       await client.invalidateQueries({ queryKey: ["communities"] });
@@ -460,7 +442,6 @@ describe("selection reconciliation when the active community vanishes", () => {
 
     render(wrap(<Switcher />, newClient()));
 
-    // Selection made before any list has loaded: nothing can confirm it absent.
     act(() => {
       screen.getByRole("button", { name: "to-c2" }).click();
     });
@@ -507,8 +488,6 @@ describe("selection reconciliation when the active community vanishes", () => {
       expect(screen.getByTestId("cid")).toHaveTextContent("c1"),
     );
 
-    // Simulate the self-delete flow: setCommunityId(null) with communities
-    // still available. The provider should fall back to the first community.
     act(() => {
       screen.getByRole("button", { name: "clear" }).click();
     });
@@ -552,7 +531,6 @@ describe("re-fetch on 403", () => {
         return Promise.resolve(jsonResponse([{ id: "c1", name: "First" }]));
       }
       permCallCount += 1;
-      // First fetch lacks the code; after the 403 re-fetch it is granted.
       return Promise.resolve(
         jsonResponse(
           permCallCount === 1

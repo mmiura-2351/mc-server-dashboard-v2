@@ -1,7 +1,5 @@
 // @vitest-environment jsdom
-// Pinned to jsdom: the drag-and-drop tests rely on jsdom's DataTransfer /
-// DataTransferItem / webkitGetAsEntry behavior, which happy-dom implements
-// differently so drop handlers never fire (issue #1751).
+// Keep jsdom for the DataTransfer and webkitGetAsEntry fixtures used by drop tests.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   act,
@@ -63,8 +61,7 @@ const mockDownload = vi.hoisted(() => ({
   downloadFile: vi.fn(),
   fetchFileBlob: vi.fn(),
 }));
-// Keep the real module (isAbortError, DownloadTooLargeError, the size cap)
-// and stub only the two network entry points.
+// Stub only network entry points so abort detection, error classes, and size caps remain real.
 vi.mock("../api/download.ts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../api/download.ts")>()),
   ...mockDownload,
@@ -80,8 +77,7 @@ vi.mock("../permissions/ActiveCommunityProvider.tsx", () => ({
 }));
 vi.mock("../permissions/useCan.ts", () => ({ useCan: () => mockCan }));
 
-// Use the real router (incl. useNavigate): switching to the Files tab now
-// drives the URL hash (#514), so navigate must update the location, not no-op.
+// Use the real router because tab switches update the URL hash.
 
 const FILES_BASE = `/api/communities/${CID}/servers/${SID}/files`;
 
@@ -114,7 +110,6 @@ function listing(
   };
 }
 
-// Route the mocked `api.get` by URL: server detail vs file list vs file content.
 function routeGet(handlers: {
   detail?: unknown;
   list?: unknown;
@@ -159,9 +154,7 @@ async function openFiles() {
   );
 }
 
-// Render ServerFilesTab on its own so a test can inject the bulk-download
-// aggregate cap (#2063). ServerDetailPage never passes that prop, so the whole
-// page can't reach it; the tab takes `server`/`communityId`/`can` directly.
+// Render the tab directly to inject a small aggregate cap; the detail page never passes that prop.
 function renderFilesTab(
   overrides: Partial<ComponentProps<typeof ServerFilesTab>> = {},
 ) {
@@ -188,13 +181,10 @@ function renderFilesTab(
   );
 }
 
-// Install the mock socket in every describe that renders the detail page: the
-// events client opens a WS, and a missing mock has caused CI flakes (it would
-// fire onDown -> invalidate and refetch out from under the test).
+// Stub the event socket so disconnect-driven refetches cannot race fixture assertions.
 let restoreWs: () => void;
 beforeEach(() => {
-  // Vitest's object-URL adapter relies on jsdom Blob internals that changed
-  // in jsdom 30.1. These tests inspect ZIP bytes without browser downloads.
+  // Stub object URLs because the adapter depends on Blob internals; inspect ZIP bytes without browser downloads.
   vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:fake");
   vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
   restoreWs = installMockWebSocket();
@@ -315,13 +305,11 @@ describe("ServerFilesTab viewer / editor", () => {
     const [putUrl, putInit] = mockApi.put.mock.calls[0];
     expect(putUrl).toBe(`${FILES_BASE}?path=server.properties`);
     const body = JSON.parse((putInit as { body: string }).body);
-    // The PUT carries the edited text as UTF-8-safe base64.
     expect(body.content_base64).toBe(encodeUtf8Base64(edited));
   });
 
   it("keeps a raw latin-1 byte in server.properties through an unrelated edit (#2851)", async () => {
-    // 0xE9 is "é" in latin-1 and not valid UTF-8; a UTF-8-only editor showed
-    // U+FFFD and saved EF BF BD in its place.
+    // E9 represents Latin-1 é but is invalid UTF-8; preserve it instead of writing replacement-character bytes.
     routeGet({
       detail: server(),
       list: listing([{ name: "server.properties", is_dir: false }]),
@@ -376,8 +364,7 @@ describe("ServerFilesTab viewer / editor", () => {
     expect(mockApi.put).not.toHaveBeenCalled();
   });
 
-  // Before 1.20 Minecraft reads server.properties as latin-1 only, so the
-  // editor reads and writes that one file as latin-1 whatever its bytes are.
+  // Pre-1.20 Minecraft reads root server.properties as Latin-1 regardless of its byte sequence.
   it("saves server.properties as latin-1 on a pre-1.20 server even when it was ASCII (#2851)", async () => {
     routeGet({
       detail: server({ mc_version: "1.19.4" }),
@@ -400,7 +387,7 @@ describe("ServerFilesTab viewer / editor", () => {
     const body = JSON.parse(
       (mockApi.put.mock.calls[0][1] as { body: string }).body,
     );
-    // E9, not the UTF-8 C3 A9 the server would read back as "Ã©".
+    // Preserve E9 rather than UTF-8 C3 A9, which this server would misread.
     expect(body.content_base64).toBe(btoa("motd=Caf\xe9\n"));
   });
 
@@ -437,12 +424,10 @@ describe("ServerFilesTab viewer / editor", () => {
     await openFiles();
 
     fireEvent.click(await screen.findByText(/readme\.txt/));
-    // Wait for content to load and viewer pane to appear with two-pane layout.
     await screen.findByLabelText(t("files.editorLabel"));
     expect(document.querySelector(".file-layout.two-pane")).not.toBeNull();
     expect(document.querySelector(".file-viewer")).not.toBeNull();
 
-    // Close the viewer.
     fireEvent.click(
       screen.getByRole("button", { name: t("files.closeViewer") }),
     );
@@ -464,16 +449,13 @@ describe("ServerFilesTab operations", () => {
     await openFiles();
     await screen.findByText(/a\.txt/);
 
-    // Right-click on a file row to open context menu.
     const row = screen.getByText(/a\.txt/).closest("li") as HTMLElement;
     fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
 
-    // Click Upload in context menu.
     fireEvent.click(
       screen.getByRole("menuitem", { name: t("files.contextMenu.upload") }),
     );
 
-    // The hidden file input should be present; simulate choosing a file.
     const file = new File(["x"], "world.zip");
     fireEvent.change(screen.getByLabelText(t("files.contextMenu.upload")), {
       target: { files: [file] },
@@ -495,7 +477,6 @@ describe("ServerFilesTab operations", () => {
     await openFiles();
     await screen.findByText(/a\.txt/);
 
-    // Right-click to open context menu.
     const row = screen.getByText(/a\.txt/).closest("li") as HTMLElement;
     fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
 
@@ -519,7 +500,7 @@ describe("ServerFilesTab operations", () => {
       detail: server(),
       list: listing([{ name: "a.txt", is_dir: false }]),
     });
-    // Keep the create request pending so the busy state stays observable.
+    // Hold the request open to observe its busy state.
     let resolveCreate: (() => void) | undefined;
     mockApi.post.mockImplementation(
       () =>
@@ -543,8 +524,6 @@ describe("ServerFilesTab operations", () => {
     const create = screen.getByRole("button", { name: t("files.create") });
     fireEvent.click(create);
 
-    // While the POST is pending the button is disabled, so a double-click
-    // cannot fire a second (conflicting) request (#1591).
     await waitFor(() => expect(create).toBeDisabled());
     fireEvent.click(create);
     expect(mockApi.post).toHaveBeenCalledTimes(1);
@@ -562,7 +541,6 @@ describe("ServerFilesTab operations", () => {
     await openFiles();
     await screen.findByText(/old\.txt/);
 
-    // Right-click to open context menu.
     const row = screen.getByText(/old\.txt/).closest("li") as HTMLElement;
     fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
 
@@ -595,7 +573,6 @@ describe("ServerFilesTab operations", () => {
     await openFiles();
     await screen.findByText(/junk\.txt/);
 
-    // Right-click to open context menu.
     const row = screen.getByText(/junk\.txt/).closest("li") as HTMLElement;
     fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
 
@@ -622,7 +599,6 @@ describe("ServerFilesTab operations", () => {
     await openFiles();
     await screen.findByText(/log\.txt/);
 
-    // Right-click to open context menu.
     const row = screen.getByText(/log\.txt/).closest("li") as HTMLElement;
     fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
 
@@ -638,10 +614,6 @@ describe("ServerFilesTab operations", () => {
     );
   });
 
-  // A directory download no longer goes through `downloadFile` at all — it is
-  // saved from a minted grant URL (#2354). See the "Directory downloads"
-  // describe below for the `.zip` naming this test used to pin (#2018).
-
   it("runs concurrent row downloads independently, aborting only on unmount (#1728)", async () => {
     routeGet({
       detail: server(),
@@ -650,7 +622,7 @@ describe("ServerFilesTab operations", () => {
         { name: "b.txt", is_dir: false },
       ]),
     });
-    // Emulate fetch's abort contract: stay pending until the signal fires.
+    // Keep fetch pending until its signal aborts, matching the browser contract.
     mockDownload.downloadFile.mockImplementation(
       (_path: string, _name: string, signal?: AbortSignal) =>
         new Promise<void>((_, reject) => {
@@ -680,7 +652,6 @@ describe("ServerFilesTab operations", () => {
       expect(mockDownload.downloadFile).toHaveBeenCalledTimes(2),
     );
 
-    // Concurrent row downloads are legitimate: neither cancels the other.
     const [first, second] = mockDownload.downloadFile.mock.calls.map(
       (c) => c[2] as AbortSignal,
     );
@@ -689,7 +660,6 @@ describe("ServerFilesTab operations", () => {
 
     unmount();
 
-    // Leaving the view aborts everything still in flight.
     expect(first.aborted).toBe(true);
     expect(second.aborted).toBe(true);
   });
@@ -707,7 +677,7 @@ describe("ServerFilesTab operations", () => {
       }
       return Promise.resolve(server());
     });
-    // Emulate fetch's abort contract: stay pending until the signal fires.
+    // Keep fetch pending until its signal aborts, matching the browser contract.
     mockDownload.downloadFile.mockImplementation(
       (_path: string, _name: string, signal?: AbortSignal) =>
         new Promise<void>((_, reject) => {
@@ -735,9 +705,7 @@ describe("ServerFilesTab operations", () => {
       expect(mockDownload.downloadFile).toHaveBeenCalledTimes(2),
     );
 
-    // Re-requesting the same file supersedes the stale attempt...
     expect(firstSignal.aborted).toBe(true);
-    // ...and the intentional cancel must not surface as an error toast.
     expect(
       screen.queryByText(t("files.error.generic")),
     ).not.toBeInTheDocument();
@@ -746,7 +714,7 @@ describe("ServerFilesTab operations", () => {
   it("aborts the file-content request when the tab unmounts mid-load (#1728)", async () => {
     mockApi.get.mockImplementation((path: string) => {
       if (path.includes("/files?path=") && !path.includes("list=")) {
-        return new Promise(() => {}); // content GET stays in flight forever
+        return new Promise(() => {});
       }
       if (path.includes("/files?path=")) {
         return Promise.resolve(listing([{ name: "notes.txt", is_dir: false }]));
@@ -795,7 +763,6 @@ describe("ServerFilesTab permission gating", () => {
     await openFiles();
     await screen.findByText(/server\.properties/);
 
-    // Right-click to open context menu — rename/delete/upload/newFolder should be hidden.
     const row = screen
       .getByText(/server\.properties/)
       .closest("li") as HTMLElement;
@@ -829,7 +796,6 @@ describe("ServerFilesTab permission gating", () => {
     await openFiles();
     await screen.findByText("x");
 
-    // Use context menu to delete.
     const row = screen.getByText("x").closest("li") as HTMLElement;
     fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
     fireEvent.click(
@@ -850,7 +816,6 @@ describe("ServerFilesTab permission gating", () => {
 describe("ServerFilesTab search", () => {
   it("posts a {query, by, max_results} body and opens a hit in the viewer", async () => {
     mockApi.get.mockImplementation((path: string) => {
-      // After clicking a hit, the browser re-lists the hit's parent directory.
       if (path.includes("path=world") && path.includes("list=")) {
         return Promise.resolve(listing([{ name: "level.dat", is_dir: false }]));
       }
@@ -892,7 +857,6 @@ describe("ServerFilesTab search", () => {
       max_results: 100,
     });
 
-    // The hit is clickable and opens it in the viewer.
     fireEvent.click(await screen.findByText("/world/level.dat"));
     await waitFor(() =>
       expect(mockApi.get).toHaveBeenCalledWith(
@@ -923,7 +887,6 @@ describe("ServerFilesTab search", () => {
     await waitFor(() => expect(mockApi.post).toHaveBeenCalled());
     expect(JSON.parse(mockApi.post.mock.calls[0][1].body).by).toBe("content");
 
-    // The encoded hit drives a content GET whose ?path= is fully URL-encoded.
     fireEvent.click(await screen.findByText("/config/a b & c.yml"));
     await waitFor(() =>
       expect(mockApi.get).toHaveBeenCalledWith(
@@ -934,7 +897,7 @@ describe("ServerFilesTab search", () => {
   });
 });
 
-// Realistic version IDs: {ns_timestamp:020d}-{random_hex8}.
+// Version IDs begin with a 20-digit nanosecond timestamp and end in eight random hex digits.
 const VID1 = "01750852800000000000-a1b2c3d4"; // 2025-06-25T12:00:00Z
 const VID2 = "01750939200000000000-b2c3d4e5"; // 2025-06-26T12:00:00Z
 
@@ -972,13 +935,11 @@ describe("ServerFilesTab history + rollback", () => {
     await screen.findByLabelText(t("files.editorLabel"));
     fireEvent.click(screen.getByRole("button", { name: t("files.history") }));
 
-    // Dates are rendered via toLocaleString, not the raw version IDs.
     const date1 = versionDate(VID1).toLocaleString();
     const date2 = versionDate(VID2).toLocaleString();
     expect(await screen.findByText(date1)).toBeInTheDocument();
     expect(screen.getByText(date2)).toBeInTheDocument();
 
-    // Raw version IDs should NOT appear as visible text.
     expect(screen.queryByText(VID1)).not.toBeInTheDocument();
     expect(screen.queryByText(VID2)).not.toBeInTheDocument();
 
@@ -1027,7 +988,6 @@ describe("ServerFilesTab history + rollback", () => {
     await waitFor(() => expect(mockApi.post).toHaveBeenCalled());
     const [url, init] = mockApi.post.mock.calls[0];
     expect(url).toBe(`${FILES_BASE}/rollback?path=a%20b.txt`);
-    // The raw version ID is sent to the API, not the formatted date.
     expect(JSON.parse((init as { body: string }).body)).toEqual({
       version_id: VID1,
     });
@@ -1068,7 +1028,6 @@ describe("ServerFilesTab history + rollback", () => {
     expect(
       await screen.findByText(t("files.history.preview.title")),
     ).toBeInTheDocument();
-    // The version's bytes render read-only (not the current file's content).
     const previewArea = await screen.findByDisplayValue("OLD VERSION");
     expect(previewArea).toHaveAttribute("readonly");
 
@@ -1085,7 +1044,6 @@ describe("ServerFilesTab history + rollback", () => {
       if (path.includes("/files/version")) {
         return Promise.resolve({
           path: "a b.txt",
-          // A leading NUL byte makes isProbablyText() classify it as binary.
           content_base64: encodeUtf8Base64("\u0000binary"),
         });
       }
@@ -1143,7 +1101,6 @@ describe("ServerFilesTab history + rollback", () => {
     fireEvent.click(screen.getByRole("button", { name: t("files.history") }));
     await screen.findByText(versionDate(VID1).toLocaleString());
 
-    // Open the stacked rollback confirm on top of the history drawer.
     fireEvent.click(
       screen.getByRole("button", { name: t("files.history.rollback") }),
     );
@@ -1151,7 +1108,6 @@ describe("ServerFilesTab history + rollback", () => {
       screen.getByRole("button", { name: t("files.rollback.confirm") }),
     ).toBeInTheDocument();
 
-    // One Escape closes only the topmost (confirm); the history drawer stays.
     fireEvent.keyDown(document, { key: "Escape" });
     expect(
       screen.queryByRole("button", { name: t("files.rollback.confirm") }),
@@ -1232,9 +1188,6 @@ describe("ServerFilesTab running notice", () => {
 
 describe("ServerFilesTab error presentation glue", () => {
   it("names the platform-managed key a refused save would change (#2790)", async () => {
-    // The 422 carries the offending key in a `key` extension member; without an
-    // arm for the reason it collapsed into the generic invalid-input toast and
-    // the user was never told which line to revert.
     routeGet({
       detail: server(),
       list: listing([{ name: "server.properties", is_dir: false }]),
@@ -1281,7 +1234,6 @@ describe("ServerFilesTab protected content flow", () => {
     await openFiles();
     await screen.findByText(/a\.txt/);
 
-    // Right-click to open context menu and trigger upload.
     const row = screen.getByText(/a\.txt/).closest("li") as HTMLElement;
     fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
     fireEvent.click(
@@ -1291,7 +1243,6 @@ describe("ServerFilesTab protected content flow", () => {
     const file = new File(["x"], "test.jar");
     fireEvent.change(fileInput, { target: { files: [file] } });
 
-    // The notice contains the tab noun and a link to #plugins.
     const notice = await screen.findByRole("alert");
     expect(notice).toHaveTextContent(t("serverDetail.tab.plugins"));
     const link = notice.querySelector("a[href='#plugins']");
@@ -1311,7 +1262,6 @@ describe("ServerFilesTab protected content flow", () => {
     await openFiles();
     await screen.findByText(/a\.txt/);
 
-    // Right-click to open context menu and trigger upload.
     const row = screen.getByText(/a\.txt/).closest("li") as HTMLElement;
     fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
     fireEvent.click(
@@ -1326,9 +1276,7 @@ describe("ServerFilesTab protected content flow", () => {
   });
 });
 
-// Realistic mock that replicates browser DataTransfer quirks:
-// 1. items/files are cleared after the synchronous event handler (seal()).
-// 2. getAsFile() returns null after webkitGetAsEntry() on the same item.
+// Clear DataTransfer after the synchronous handler; entry lookup also consumes getAsFile on that item.
 class MockDataTransfer {
   private _items: Array<{
     kind: string;
@@ -1388,7 +1336,7 @@ class MockDataTransfer {
     return this._items.map((i) => i.file);
   }
 
-  /** Simulate browser clearing DataTransfer after sync handler completes. */
+  /** Clear DataTransfer after the synchronous handler to emulate browser behavior. */
   seal() {
     this._sealed = true;
   }
@@ -1495,8 +1443,7 @@ describe("ServerFilesTab drag-and-drop upload", () => {
     await screen.findByText(t("files.empty"));
 
     const tree = document.querySelector(".file-tree") as HTMLElement;
-    // Simulate a folder drop: webkitGetAsEntry returns a directory entry
-    // with a createReader() that yields one file.
+    // Provide one directory batch with a single file, followed by an empty batch.
     const innerFile = new File(["hello"], "readme.txt");
     const folderDt = new MockDataTransfer();
     folderDt.addFile(new File([], ""), {
@@ -1527,13 +1474,11 @@ describe("ServerFilesTab drag-and-drop upload", () => {
 
     fireEvent.drop(tree, { dataTransfer: folderDt });
 
-    // Directory creation is called first.
     await waitFor(() =>
       expect(mockApi.post).toHaveBeenCalledWith(
         expect.stringContaining("directories?path=my-folder"),
       ),
     );
-    // Then the file is uploaded to the subdirectory.
     await waitFor(() => expect(mockPostFormWithProgress).toHaveBeenCalled());
     const [url] = mockPostFormWithProgress.mock.calls[0];
     expect(url).toBe(`${FILES_BASE}/upload?path=my-folder&extract=false`);
@@ -1541,7 +1486,7 @@ describe("ServerFilesTab drag-and-drop upload", () => {
 
   it("shows preparing indicator immediately on drop before upload starts", async () => {
     routeGet({ detail: server(), list: listing([]) });
-    // Delay upload resolution so we can observe the preparing state.
+    // Hold upload completion to observe the preparation state.
     let resolveUpload: (() => void) | undefined;
     mockPostFormWithProgress.mockImplementation(
       () =>
@@ -1557,12 +1502,10 @@ describe("ServerFilesTab drag-and-drop upload", () => {
     const file = new File(["hello"], "readme.txt");
     fireEvent.drop(tree, { dataTransfer: dataTransfer([file]) });
 
-    // The preparing indicator should appear before upload starts.
     await waitFor(() =>
       expect(screen.getByText(t("files.upload.preparing"))).toBeInTheDocument(),
     );
 
-    // Wait for the upload mock to be invoked, then resolve it.
     await waitFor(() => expect(resolveUpload).toBeDefined());
     resolveUpload?.();
     await waitFor(() =>
@@ -1587,8 +1530,7 @@ describe("ServerFilesTab drag-and-drop upload", () => {
       name: "test.txt",
     });
 
-    // Seal the DataTransfer after the synchronous event handler completes,
-    // replicating browser behavior where items/files are cleared post-tick.
+    // Clear DataTransfer after the synchronous handler to emulate browser behavior.
     fireEvent.drop(tree, { dataTransfer: dt });
     dt.seal();
 
@@ -1600,9 +1542,7 @@ describe("ServerFilesTab drag-and-drop upload", () => {
 
   it("excludes oversized files from the progress denominator", async () => {
     routeGet({ detail: server(), list: listing([]) });
-    // Simulate the upload completing by invoking the progress callback with
-    // the full file size, then hold the promise so the progress bar stays
-    // visible for inspection.
+    // Emit completed progress but keep the promise pending so the bar remains observable.
     let resolveUpload: (() => void) | undefined;
     mockPostFormWithProgress.mockImplementation(
       (_url: string, form: FormData, onProgress: (loaded: number) => void) => {
@@ -1620,25 +1560,20 @@ describe("ServerFilesTab drag-and-drop upload", () => {
     const tree = document.querySelector(".file-tree") as HTMLElement;
     const small = new File(["hello"], "small.txt");
     const big = new File(["x"], "huge.bin");
-    // Fake the size to exceed the 512 MiB cap.
+    // Override size without allocating a file above the 512 MiB cap.
     Object.defineProperty(big, "size", { value: 600 * 1024 * 1024 });
 
     fireEvent.drop(tree, { dataTransfer: dataTransfer([small, big]) });
 
-    // The progress bar should reach 100% because the oversized file's bytes
-    // must not inflate the denominator.
     await waitFor(() => {
       const bar = screen.getByRole("progressbar");
       expect(bar).toHaveAttribute("aria-valuenow", "100");
     });
 
-    // Only the small file was uploaded.
     expect(mockPostFormWithProgress).toHaveBeenCalledTimes(1);
 
-    // The too-large toast fired.
     expect(screen.getByText(t("files.error.tooLarge"))).toBeInTheDocument();
 
-    // Clean up: resolve the pending upload promise.
     resolveUpload?.();
   });
 
@@ -1654,24 +1589,13 @@ describe("ServerFilesTab drag-and-drop upload", () => {
 
     fireEvent.drop(tree, { dataTransfer: dataTransfer([big]) });
 
-    // Advance past the first yield in onDrop (the preparing-indicator phase).
-    // Do NOT wrap in act() — act flushes all pending async work, which would
-    // also process the handler's second yield and run progress.reset(),
-    // hiding the bug. A bare setTimeout lets the handler pause between
-    // progress.start() (armed) and progress.reset() (disarmed), exposing
-    // the progress bar if it was incorrectly armed.
+    // Advance one timer without act; act would flush the next yield too and hide a briefly incorrect progress bar.
     await new Promise((r) => setTimeout(r, 0));
 
-    // With the pre-fix code, progress.start() fires during the tick above
-    // and the handler yields again before the upload loop — the progress
-    // bar would be in the DOM here. With the fix, the oversized file is
-    // filtered out and the handler returns early, so no bar appears.
     expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
 
-    // No upload should have been attempted.
     expect(mockPostFormWithProgress).not.toHaveBeenCalled();
 
-    // The too-large toast should have fired.
     await waitFor(() =>
       expect(screen.getByText(t("files.error.tooLarge"))).toBeInTheDocument(),
     );
@@ -1691,7 +1615,6 @@ describe("ServerFilesTab multi-select", () => {
     await openFiles();
     await screen.findByText(/a\.txt/);
 
-    // Each entry gets a checkbox labelled with its name.
     expect(screen.getByRole("checkbox", { name: "a.txt" })).toBeInTheDocument();
     expect(screen.getByRole("checkbox", { name: "b.txt" })).toBeInTheDocument();
   });
@@ -1730,7 +1653,6 @@ describe("ServerFilesTab multi-select", () => {
       screen.getByText(t("files.selectedCount", { count: 1 })),
     ).toBeInTheDocument();
 
-    // Second click deselects.
     fireEvent.click(checkA);
     expect(checkA).not.toBeChecked();
   });
@@ -1749,9 +1671,7 @@ describe("ServerFilesTab multi-select", () => {
     await openFiles();
     await screen.findByText(/a\.txt/);
 
-    // Click first item normally.
     fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
-    // Shift-click third item to select range [a, b, c].
     fireEvent.click(screen.getByRole("checkbox", { name: "c.txt" }), {
       shiftKey: true,
     });
@@ -1785,7 +1705,6 @@ describe("ServerFilesTab multi-select", () => {
     expect(screen.getByRole("checkbox", { name: "a.txt" })).toBeChecked();
     expect(screen.getByRole("checkbox", { name: "b.txt" })).toBeChecked();
 
-    // Ctrl-click again to deselect b.
     fireEvent.click(screen.getByRole("checkbox", { name: "b.txt" }), {
       ctrlKey: true,
     });
@@ -1815,7 +1734,6 @@ describe("ServerFilesTab multi-select", () => {
       screen.getByText(t("files.selectedCount", { count: 2 })),
     ).toBeInTheDocument();
 
-    // Button now says "Deselect all".
     const deselectBtn = screen.getByRole("button", {
       name: t("files.deselectAll"),
     });
@@ -1844,15 +1762,12 @@ describe("ServerFilesTab multi-select", () => {
     await openFiles();
     await screen.findByText(/a\.txt/);
 
-    // Select a file.
     fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
     expect(screen.getByRole("checkbox", { name: "a.txt" })).toBeChecked();
 
-    // Navigate into a directory.
     fireEvent.click(screen.getByText(/world/));
     await screen.findByText(/level\.dat/);
 
-    // The selection count should be gone.
     expect(
       screen.queryByText(t("files.selectedCount", { count: 1 })),
     ).not.toBeInTheDocument();
@@ -1872,7 +1787,6 @@ describe("ServerFilesTab bulk operations", () => {
     await openFiles();
     await screen.findByText(/a\.txt/);
 
-    // No bulk buttons when nothing is selected.
     expect(
       screen.queryByRole("button", { name: t("files.bulk.delete") }),
     ).not.toBeInTheDocument();
@@ -1883,10 +1797,8 @@ describe("ServerFilesTab bulk operations", () => {
       screen.queryByRole("button", { name: t("files.bulk.move") }),
     ).not.toBeInTheDocument();
 
-    // Select an item.
     fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
 
-    // Bulk buttons now visible.
     expect(
       screen.getByRole("button", { name: t("files.bulk.delete") }),
     ).toBeInTheDocument();
@@ -1911,22 +1823,18 @@ describe("ServerFilesTab bulk operations", () => {
     await openFiles();
     await screen.findByText(/a\.txt/);
 
-    // Select both items.
     fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
     fireEvent.click(screen.getByRole("checkbox", { name: "b.txt" }), {
       ctrlKey: true,
     });
 
-    // Click bulk delete.
     fireEvent.click(
       screen.getByRole("button", { name: t("files.bulk.delete") }),
     );
-    // Confirmation dialog appears.
     expect(
       screen.getByText(t("files.bulk.delete.dialogBody", { count: 2 })),
     ).toBeInTheDocument();
 
-    // Confirm.
     fireEvent.click(
       screen.getByRole("button", { name: t("files.bulk.delete.confirm") }),
     );
@@ -1953,19 +1861,16 @@ describe("ServerFilesTab bulk operations", () => {
     await openFiles();
     await screen.findByText(/a\.txt/);
 
-    // Select both items.
     fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
     fireEvent.click(screen.getByRole("checkbox", { name: "b.txt" }), {
       ctrlKey: true,
     });
 
-    // Click bulk download.
     fireEvent.click(
       screen.getByRole("button", { name: t("files.bulk.download") }),
     );
 
     await screen.findByText(t("files.bulk.download.done", { done: 2 }));
-    // Multiple files use fetchFileBlob (not downloadFile) to build a ZIP.
     await waitFor(() =>
       expect(mockDownload.fetchFileBlob).toHaveBeenCalledTimes(2),
     );
@@ -1977,7 +1882,6 @@ describe("ServerFilesTab bulk operations", () => {
       `${FILES_BASE}/download?path=b.txt`,
       expect.any(AbortSignal),
     );
-    // downloadFile should NOT have been called (ZIP handles both files).
     expect(mockDownload.downloadFile).not.toHaveBeenCalled();
     expect(createObjectURL).toHaveBeenCalledTimes(1);
     const blob = createObjectURL.mock.calls[0][0] as Blob;
@@ -2002,11 +1906,7 @@ describe("ServerFilesTab bulk operations", () => {
         { name: "world_the_end", is_dir: true },
       ]),
     });
-    // Each directory response is individually under the per-fetch cap (#2027),
-    // and the pre-check prices directories at 0 — so only the running total in
-    // the loop can catch the sum. Feed a fixed 8-byte blob per fetch and inject
-    // a 10-byte cap: the total crosses on the second fetch (16 > 10) without
-    // allocating anything near 512 MiB.
+    // Two 8-byte directory blobs cross the injected 10-byte aggregate cap while each stays below the per-fetch cap.
     mockDownload.fetchFileBlob.mockResolvedValue(new Blob(["12345678"]));
     const createObjectURL = vi.spyOn(URL, "createObjectURL");
     renderFilesTab({ maxBulkDownloadBytes: 10 });
@@ -2023,11 +1923,9 @@ describe("ServerFilesTab bulk operations", () => {
       screen.getByRole("button", { name: t("files.bulk.download") }),
     );
 
-    // The guard surfaces the size-bearing too-large toast and stops.
     await screen.findByText(
       t("files.bulk.download.tooLarge", { size: humanizeBytes(16) }),
     );
-    // It aborts before the third fetch and never builds/saves a ZIP.
     expect(mockDownload.fetchFileBlob).toHaveBeenCalledTimes(2);
     expect(createObjectURL).not.toHaveBeenCalled();
     createObjectURL.mockRestore();
@@ -2041,7 +1939,7 @@ describe("ServerFilesTab bulk operations", () => {
         { name: "b.txt", is_dir: false },
       ]),
     });
-    // Emulate fetch's abort contract: stay pending until the signal fires.
+    // Keep fetch pending until its signal aborts, matching the browser contract.
     mockDownload.fetchFileBlob.mockImplementation(
       (_path: string, signal?: AbortSignal) =>
         new Promise<Blob>((_, reject) => {
@@ -2062,7 +1960,6 @@ describe("ServerFilesTab bulk operations", () => {
       screen.getByRole("button", { name: t("files.bulk.download") }),
     );
 
-    // The loop is sequential: the first file's fetch is in flight.
     await waitFor(() =>
       expect(mockDownload.fetchFileBlob).toHaveBeenCalledTimes(1),
     );
@@ -2072,7 +1969,6 @@ describe("ServerFilesTab bulk operations", () => {
     unmount();
 
     expect(signal.aborted).toBe(true);
-    // The aborted loop stops instead of fetching the remaining files.
     await act(async () => {
       await Promise.resolve();
     });
@@ -2091,15 +1987,12 @@ describe("ServerFilesTab bulk operations", () => {
     await openFiles();
     await screen.findByText(/a\.txt/);
 
-    // Select only one item.
     fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
 
-    // Click bulk download.
     fireEvent.click(
       screen.getByRole("button", { name: t("files.bulk.download") }),
     );
 
-    // Single file uses downloadFile directly (no ZIP).
     await waitFor(() =>
       expect(mockDownload.downloadFile).toHaveBeenCalledTimes(1),
     );
@@ -2110,9 +2003,6 @@ describe("ServerFilesTab bulk operations", () => {
     );
     expect(mockDownload.fetchFileBlob).not.toHaveBeenCalled();
   });
-
-  // A single selected directory no longer goes through `downloadFile` either
-  // (#2354) — see the "Directory downloads" describe below.
 
   it("names a bulk-selected directory's nested ZIP entry with .zip (#2018)", async () => {
     routeGet({
@@ -2145,7 +2035,6 @@ describe("ServerFilesTab bulk operations", () => {
     const names = Object.keys(
       unzipSync(new Uint8Array(await blobs[0].arrayBuffer())),
     );
-    // The directory's bytes are themselves a ZIP: name the entry accordingly.
     expect(names).toContain("world.zip");
     expect(names).toContain("a.txt");
     createObjectURL.mockRestore();
@@ -2159,7 +2048,7 @@ describe("ServerFilesTab bulk operations", () => {
         { name: "world.zip", is_dir: false, size: 10 },
       ]),
     });
-    // Distinct bytes per path so an overwrite is visible, not just a key clash.
+    // Use distinct bytes so an overwritten ZIP entry cannot pass as an equivalent key.
     mockDownload.fetchFileBlob.mockImplementation((path: string) =>
       Promise.resolve(new Blob([path.endsWith("world") ? "DIR" : "FILE"])),
     );
@@ -2174,8 +2063,7 @@ describe("ServerFilesTab bulk operations", () => {
     await openFiles();
     await screen.findByRole("checkbox", { name: "world.zip" });
 
-    // Select the directory first: suffixing `world` -> `world.zip` would claim
-    // the sibling file's own name and silently drop one of the two.
+    // Select world before world.zip to expose the directory-suffix collision with its sibling file.
     fireEvent.click(screen.getByRole("checkbox", { name: "world" }));
     fireEvent.click(screen.getByRole("checkbox", { name: "world.zip" }), {
       ctrlKey: true,
@@ -2186,7 +2074,6 @@ describe("ServerFilesTab bulk operations", () => {
 
     await waitFor(() => expect(createObjectURL).toHaveBeenCalled());
     const archive = unzipSync(new Uint8Array(await blobs[0].arrayBuffer()));
-    // Both selected items survive, and neither overwrote the other.
     expect(Object.keys(archive)).toHaveLength(2);
     const decode = (name: string) => new TextDecoder().decode(archive[name]);
     expect(decode("world.zip")).toBe("FILE");
@@ -2207,16 +2094,13 @@ describe("ServerFilesTab bulk operations", () => {
     await openFiles();
     await screen.findByText(/a\.txt/);
 
-    // Select both items.
     fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
     fireEvent.click(screen.getByRole("checkbox", { name: "b.txt" }), {
       ctrlKey: true,
     });
 
-    // Click bulk move.
     fireEvent.click(screen.getByRole("button", { name: t("files.bulk.move") }));
 
-    // The move dialog appears; enter destination.
     const input = screen.getByLabelText(t("files.bulk.move.destLabel"));
     fireEvent.change(input, { target: { value: "archive" } });
     fireEvent.click(
@@ -2263,7 +2147,6 @@ describe("ServerFilesTab bulk operations", () => {
 
     expect(deleteBtn).toBeDisabled();
     expect(moveBtn).toBeDisabled();
-    // Download should still be enabled (read-only operation).
     expect(downloadBtn).not.toBeDisabled();
   });
 
@@ -2333,7 +2216,6 @@ describe("ServerFilesTab drag-and-drop file organization", () => {
     await openFiles();
     await screen.findByText(/readme\.txt/);
 
-    // Find the folder row (the <li> that contains "world").
     const folderBtn = screen.getByText(/world/).closest("li") as HTMLElement;
     const dt = internalDataTransfer(["readme.txt"]);
 
@@ -2350,7 +2232,6 @@ describe("ServerFilesTab drag-and-drop file organization", () => {
   });
 
   it("moves a file to root via breadcrumb drop", async () => {
-    // Start in the "config" subdirectory.
     mockApi.get.mockImplementation((path: string) => {
       if (path.includes("path=config") && path.includes("list=")) {
         return Promise.resolve(
@@ -2366,11 +2247,9 @@ describe("ServerFilesTab drag-and-drop file organization", () => {
     renderPage();
     await openFiles();
 
-    // Navigate into "config".
     fireEvent.click(await screen.findByText(/config/));
     await screen.findByText(/settings\.yml/);
 
-    // Drop settings.yml onto the root breadcrumb.
     const rootCrumb = screen.getByRole("button", { name: "survival" });
     const dt = internalDataTransfer(["config/settings.yml"]);
 
@@ -2378,7 +2257,6 @@ describe("ServerFilesTab drag-and-drop file organization", () => {
     fireEvent.drop(rootCrumb, { dataTransfer: dt });
 
     await waitFor(() => expect(mockApi.post).toHaveBeenCalled());
-    // Find the rename call (not the search call, if any).
     const renameCalls = mockApi.post.mock.calls.filter(
       (call) => call[0] === `${FILES_BASE}/rename`,
     );
@@ -2403,13 +2281,11 @@ describe("ServerFilesTab drag-and-drop file organization", () => {
     await openFiles();
     await screen.findByText(/a\.txt/);
 
-    // Select both files.
     fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
     fireEvent.click(screen.getByRole("checkbox", { name: "b.txt" }), {
       ctrlKey: true,
     });
 
-    // Drop selected items onto the folder.
     const folderRow = screen.getByText(/world/).closest("li") as HTMLElement;
     const dt = internalDataTransfer(["a.txt", "b.txt"]);
 
@@ -2440,16 +2316,13 @@ describe("ServerFilesTab drag-and-drop file organization", () => {
     await openFiles();
     await screen.findByText(/world/);
 
-    // Drag the "world" folder onto the "world" folder (self-drop). This would
-    // otherwise compute a move of "world" to "world/world".
+    // A folder dropped onto itself must not become a move into its own child path.
     const folderRow = screen.getByText(/world/).closest("li") as HTMLElement;
     const dt = internalDataTransfer(["world"]);
 
     fireEvent.dragOver(folderRow, { dataTransfer: dt });
     fireEvent.drop(folderRow, { dataTransfer: dt });
 
-    // Let any async move work settle, then assert nothing happened: no rename
-    // API call and no toast (neither the moved success nor a conflict error).
     await act(async () => {
       await Promise.resolve();
     });
@@ -2470,8 +2343,6 @@ describe("ServerFilesTab drag-and-drop file organization", () => {
     await openFiles();
     await screen.findByText(/a\.txt/);
 
-    // Select the drop-target folder and a file, then drop the selection onto
-    // the folder: only the file should move, the folder's self-drop is skipped.
     fireEvent.click(screen.getByRole("checkbox", { name: "world" }));
     fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }), {
       ctrlKey: true,
@@ -2556,12 +2427,9 @@ describe("ServerFilesTab drag-and-drop file organization", () => {
 
     fireEvent.dragEnter(tree, { dataTransfer: dt });
 
-    // The upload overlay should NOT appear for internal drags.
     expect(screen.queryByText(t("files.dropZone"))).not.toBeInTheDocument();
   });
 });
-
-// ── Keyboard shortcuts (issue #1465) ──────────────────────────────────────────
 
 describe("Keyboard shortcuts", () => {
   it.each([
@@ -2596,7 +2464,6 @@ describe("Keyboard shortcuts", () => {
     await openFiles();
     await screen.findByText(/a\.txt/);
 
-    // Select the file first.
     fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
     expect(screen.getByRole("checkbox", { name: "a.txt" })).toBeChecked();
 
@@ -2657,15 +2524,10 @@ describe("Keyboard shortcuts", () => {
     await openFiles();
     await screen.findByText(/a\.txt/);
 
-    // Can't select (checkboxes hidden when running for this test -- actually
-    // canEdit is still true, just running). Let me check.
-    // Actually checkboxes appear when canEdit is true regardless of running.
-    // So we can still select.
     fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
 
     fireEvent.keyDown(document, { key: "Delete" });
 
-    // No dialog because server is not at rest.
     expect(
       screen.queryByText(t("files.delete.dialogTitle")),
     ).not.toBeInTheDocument();
@@ -2704,12 +2566,10 @@ describe("Keyboard shortcuts", () => {
     await openFiles();
     await screen.findByText(/a\.txt/);
 
-    // Select both items.
     fireEvent.keyDown(document, { key: "a", ctrlKey: true });
 
     fireEvent.keyDown(document, { key: "F2" });
 
-    // No rename dialog.
     expect(screen.queryByText(t("files.newName"))).not.toBeInTheDocument();
   });
 
@@ -2722,10 +2582,8 @@ describe("Keyboard shortcuts", () => {
     await openFiles();
     await screen.findByText(/a\.txt/);
 
-    // Focus the search input.
     const searchInput = screen.getByRole("searchbox");
 
-    // Fire Ctrl+A on the input — should NOT select all files.
     fireEvent.keyDown(searchInput, { key: "a", ctrlKey: true });
 
     expect(screen.getByRole("checkbox", { name: "a.txt" })).not.toBeChecked();
@@ -2740,16 +2598,13 @@ describe("Keyboard shortcuts", () => {
     await openFiles();
     await screen.findByText(/readme\.txt/);
 
-    // Select the file.
     fireEvent.click(screen.getByRole("checkbox", { name: "readme.txt" }));
     expect(screen.getByRole("checkbox", { name: "readme.txt" })).toBeChecked();
 
-    // Open context menu.
     const row = screen.getByText(/readme\.txt/).closest("li") as HTMLElement;
     fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
     expect(screen.getByRole("menu")).toBeInTheDocument();
 
-    // Press Escape — should dismiss menu but keep selection.
     fireEvent.keyDown(document, { key: "Escape" });
 
     await waitFor(() =>
@@ -2758,8 +2613,6 @@ describe("Keyboard shortcuts", () => {
     expect(screen.getByRole("checkbox", { name: "readme.txt" })).toBeChecked();
   });
 });
-
-// ── Navigation history (issue #1475) ────────────────────────────────────────
 
 describe("ServerFilesTab navigation history", () => {
   it("goes back to root and then forward to the previous directory", async () => {
@@ -2775,22 +2628,17 @@ describe("ServerFilesTab navigation history", () => {
     renderPage();
     await openFiles();
 
-    // Navigate into world.
     fireEvent.click(await screen.findByText(/world/));
     await screen.findByText(/level\.dat/);
 
-    // Go back.
     fireEvent.click(screen.getByRole("button", { name: t("files.nav.back") }));
-    // Should be back at root listing.
     await screen.findByText(/world/);
 
-    // Forward button should now be enabled.
     const fwdBtn = screen.getByRole("button", {
       name: t("files.nav.forward"),
     });
     expect(fwdBtn).not.toBeDisabled();
 
-    // Go forward.
     fireEvent.click(fwdBtn);
     await waitFor(() =>
       expect(mockApi.get).toHaveBeenCalledWith(
@@ -2800,8 +2648,6 @@ describe("ServerFilesTab navigation history", () => {
     );
   });
 });
-
-// ── Unsaved changes guard (issue #1486) ────────────────────────────────────
 
 describe("ServerFilesTab unsaved changes guard", () => {
   it("navigates on confirm and discards the draft", async () => {
@@ -2832,23 +2678,19 @@ describe("ServerFilesTab unsaved changes guard", () => {
     const editor = await screen.findByLabelText(t("files.editorLabel"));
     fireEvent.change(editor, { target: { value: "motd=changed\n" } });
 
-    // Try to navigate to the directory.
     fireEvent.click(screen.getByText(/world/));
     await screen.findByText(t("files.unsaved.title"));
 
-    // Confirm discard.
     fireEvent.click(
       screen.getByRole("button", { name: t("files.unsaved.discard") }),
     );
 
-    // Should navigate into "world".
     await waitFor(() =>
       expect(mockApi.get).toHaveBeenCalledWith(
         `${FILES_BASE}?path=world&list=true`,
         { signal: expect.any(AbortSignal) },
       ),
     );
-    // The discard dialog should be gone.
     expect(
       screen.queryByText(t("files.unsaved.title")),
     ).not.toBeInTheDocument();
@@ -2882,10 +2724,8 @@ describe("ServerFilesTab unsaved changes guard", () => {
     fireEvent.click(screen.getByText(/world/));
     await screen.findByText(t("files.unsaved.title"));
 
-    // Cancel — click the close/cancel button on the dialog.
     fireEvent.click(screen.getByRole("button", { name: t("common.cancel") }));
 
-    // The dialog should close and the editor should still be visible.
     await waitFor(() =>
       expect(
         screen.queryByText(t("files.unsaved.title")),
@@ -2894,8 +2734,6 @@ describe("ServerFilesTab unsaved changes guard", () => {
     expect(screen.getByLabelText(t("files.editorLabel"))).toBeInTheDocument();
   });
 });
-
-// ── Overwrite confirmation dialog ─────────────────────────────────────────────
 
 describe("ServerFilesTab overwrite confirmation", () => {
   it("uploads the file when user clicks overwrite", async () => {
@@ -2976,7 +2814,6 @@ describe("ServerFilesTab overwrite confirmation", () => {
         screen.getByRole("button", { name: t("files.overwrite.skip") }),
       );
 
-      // No upload should occur — the only file was skipped.
       await waitFor(() =>
         expect(
           screen.queryByText(t("files.overwrite.title")),
@@ -3003,15 +2840,12 @@ describe("ServerFilesTab overwrite confirmation", () => {
       const fileB = new File(["new b"], "b.txt");
       fireEvent.drop(tree, { dataTransfer: dataTransfer([fileA, fileB]) });
 
-      // First dialog for a.txt.
       await screen.findByText(t("files.overwrite.title"));
-      // Check the apply-all checkbox.
       fireEvent.click(screen.getByText(t("files.overwrite.applyAll")));
       fireEvent.click(
         screen.getByRole("button", { name: t("files.overwrite.overwrite") }),
       );
 
-      // Should upload both files without another dialog.
       await waitFor(() =>
         expect(mockPostFormWithProgress).toHaveBeenCalledTimes(2),
       );
@@ -3035,15 +2869,12 @@ describe("ServerFilesTab overwrite confirmation", () => {
       const fileB = new File(["new b"], "b.txt");
       fireEvent.drop(tree, { dataTransfer: dataTransfer([fileA, fileB]) });
 
-      // First dialog for a.txt.
       await screen.findByText(t("files.overwrite.title"));
-      // Check the apply-all checkbox and click skip.
       fireEvent.click(screen.getByText(t("files.overwrite.applyAll")));
       fireEvent.click(
         screen.getByRole("button", { name: t("files.overwrite.skip") }),
       );
 
-      // Both files should be skipped — no upload.
       await waitFor(() =>
         expect(
           screen.queryByText(t("files.overwrite.title")),
@@ -3053,11 +2884,7 @@ describe("ServerFilesTab overwrite confirmation", () => {
     });
 
     it("detects conflicts using the listing snapshot from before the yield", async () => {
-      // Regression: the overwrite check must use the listing entries
-      // captured synchronously before the setTimeout(0) yield. If it
-      // reads the ref after the yield, an intervening re-render (e.g.
-      // triggered by a React Query background refetch) could clear the
-      // entries and silently skip the overwrite dialog.
+      // Use the synchronous listing snapshot; a ref read after yielding could miss an overwrite conflict.
       routeGet({
         detail: server(),
         list: listing([{ name: "readme.txt", is_dir: false }]),
@@ -3067,10 +2894,7 @@ describe("ServerFilesTab overwrite confirmation", () => {
       await openFiles();
       await screen.findByText(/readme\.txt/);
 
-      // Simulate the listing becoming empty between the drop and the
-      // overwrite check (e.g. a background refetch returns an empty
-      // response or the query is invalidated). The setTimeout(0) yield
-      // gives React a chance to re-render with the new data.
+      // Change the listing during the yield to distinguish snapshot-based checks from later ref reads.
       mockApi.get.mockImplementation((path: string) => {
         if (path.includes("/files?path=") && path.includes("list=")) {
           return Promise.resolve(listing([]));
@@ -3082,8 +2906,6 @@ describe("ServerFilesTab overwrite confirmation", () => {
       const file = new File(["new content"], "readme.txt");
       fireEvent.drop(tree, { dataTransfer: dataTransfer([file]) });
 
-      // The overwrite dialog should still appear because the snapshot was
-      // taken before the yield.
       expect(
         await screen.findByText(t("files.overwrite.title")),
       ).toBeInTheDocument();
@@ -3110,7 +2932,6 @@ describe("ServerFilesTab overwrite confirmation", () => {
       await screen.findByText(t("files.overwrite.title"));
       fireEvent.click(screen.getByRole("button", { name: t("common.cancel") }));
 
-      // No upload at all.
       await waitFor(() =>
         expect(
           screen.queryByText(t("files.overwrite.title")),
@@ -3166,7 +2987,6 @@ describe("ServerFilesTab overwrite confirmation", () => {
         screen.getByRole("button", { name: t("files.overwrite.skip") }),
       );
 
-      // All folder files skipped — no upload.
       await waitFor(() =>
         expect(
           screen.queryByText(t("files.overwrite.title")),
@@ -3222,13 +3042,10 @@ describe("ServerFilesTab overwrite confirmation", () => {
         screen.getByRole("button", { name: t("files.overwrite.overwrite") }),
       );
 
-      // File should be uploaded.
       await waitFor(() => expect(mockPostFormWithProgress).toHaveBeenCalled());
     });
   });
 });
-
-// ── Copy/paste (issue #1465) ──────────────────────────────────────────────────
 
 describe("Copy/paste", () => {
   it("Ctrl+C copies selected files", async () => {
@@ -3240,13 +3057,10 @@ describe("Copy/paste", () => {
     await openFiles();
     await screen.findByText(/readme\.txt/);
 
-    // Select the file.
     fireEvent.click(screen.getByRole("checkbox", { name: "readme.txt" }));
 
-    // Press Ctrl+C.
     fireEvent.keyDown(document, { key: "c", ctrlKey: true });
 
-    // Should see copied toast.
     expect(await screen.findByText(t("files.copied"))).toBeInTheDocument();
   });
 
@@ -3260,21 +3074,17 @@ describe("Copy/paste", () => {
     await openFiles();
     await screen.findByText(/readme\.txt/);
 
-    // Select and copy.
     fireEvent.click(screen.getByRole("checkbox", { name: "readme.txt" }));
     fireEvent.keyDown(document, { key: "c", ctrlKey: true });
     await screen.findByText(t("files.copied"));
 
-    // Paste.
     fireEvent.keyDown(document, { key: "v", ctrlKey: true });
 
-    // Same-name file exists, so overwrite dialog appears first.
     await screen.findByText(t("files.overwrite.title"));
     fireEvent.click(
       screen.getByRole("button", { name: t("files.overwrite.overwrite") }),
     );
 
-    // Should download and re-upload the file.
     await waitFor(() =>
       expect(mockDownload.fetchFileBlob).toHaveBeenCalledWith(
         `${FILES_BASE}/download?path=readme.txt`,
@@ -3295,7 +3105,6 @@ describe("Copy/paste", () => {
     await openFiles();
     await screen.findByText(/readme\.txt/);
 
-    // Copy via context menu.
     const row = screen.getByText(/readme\.txt/).closest("li") as HTMLElement;
     fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
     fireEvent.click(
@@ -3303,14 +3112,12 @@ describe("Copy/paste", () => {
     );
     await screen.findByText(t("files.copied"));
 
-    // Paste via context menu on empty space.
     const fileList = document.querySelector(".file-list") as HTMLElement;
     fireEvent.contextMenu(fileList, { clientX: 50, clientY: 50 });
     fireEvent.click(
       screen.getByRole("menuitem", { name: t("files.contextMenu.paste") }),
     );
 
-    // Same-name file exists, so overwrite dialog appears.
     await screen.findByText(t("files.overwrite.title"));
     fireEvent.click(
       screen.getByRole("button", { name: t("files.overwrite.overwrite") }),
@@ -3333,7 +3140,6 @@ describe("Copy/paste", () => {
     await openFiles();
     await screen.findByText(/readme\.txt/);
 
-    // Copy and paste.
     fireEvent.click(screen.getByRole("checkbox", { name: "readme.txt" }));
     fireEvent.keyDown(document, { key: "c", ctrlKey: true });
     await screen.findByText(t("files.copied"));
@@ -3344,7 +3150,6 @@ describe("Copy/paste", () => {
       screen.getByRole("button", { name: t("files.overwrite.skip") }),
     );
 
-    // No download or upload should occur.
     await waitFor(() =>
       expect(
         screen.queryByText(t("files.overwrite.title")),
@@ -3366,7 +3171,6 @@ describe("Copy/paste", () => {
     await openFiles();
     await screen.findByText(/readme\.txt/);
 
-    // Select all (includes the folder).
     fireEvent.keyDown(document, { key: "a", ctrlKey: true });
     await waitFor(() => {
       expect(screen.getByRole("checkbox", { name: "world" })).toBeChecked();
@@ -3375,14 +3179,11 @@ describe("Copy/paste", () => {
       ).toBeChecked();
     });
 
-    // Copy — should only copy the file, not the folder.
     fireEvent.keyDown(document, { key: "c", ctrlKey: true });
     await screen.findByText(t("files.copied"));
 
-    // Paste — should download only readme.txt.
     fireEvent.keyDown(document, { key: "v", ctrlKey: true });
 
-    // Overwrite since readme.txt exists.
     await screen.findByText(t("files.overwrite.title"));
     fireEvent.click(
       screen.getByRole("button", { name: t("files.overwrite.overwrite") }),
@@ -3393,12 +3194,9 @@ describe("Copy/paste", () => {
         `${FILES_BASE}/download?path=readme.txt`,
       ),
     );
-    // Should have only downloaded one file (the file, not the folder).
     expect(mockDownload.fetchFileBlob).toHaveBeenCalledTimes(1);
   });
 });
-
-// ── Move to... context menu (issue #1465) ───────────────────────────────────
 
 describe("Move to... context menu", () => {
   it("opens a dialog and moves the file to the destination", async () => {
@@ -3418,7 +3216,6 @@ describe("Move to... context menu", () => {
       screen.getByRole("menuitem", { name: t("files.contextMenu.moveTo") }),
     );
 
-    // Move dialog appears with destination input.
     const input = screen.getByLabelText(t("files.bulk.move.destLabel"));
     fireEvent.change(input, { target: { value: "archive" } });
     fireEvent.click(
@@ -3437,8 +3234,6 @@ describe("Move to... context menu", () => {
     ).not.toBeInTheDocument();
   });
 });
-
-// ── Arrow key navigation (issue #1465) ──────────────────────────────────────
 
 describe("Arrow key navigation", () => {
   it("moves between rows and clamps focus at each boundary", async () => {
@@ -3475,20 +3270,17 @@ describe("Arrow key navigation", () => {
   });
 });
 
-// ── Directory downloads via a minted grant (#2354) ────────────────────────────
-
 describe("ServerFilesTab directory downloads (minted grant, #2354)", () => {
   const GRANT_PATH = `${FILES_BASE}/download-grant?path=world`;
   const GRANT_URL = `${FILES_BASE}/download?path=world&grant=jwt-1`;
   const clicks: HTMLAnchorElement[] = [];
   let fetchSpy: MockInstance<typeof fetch>;
 
-  /** URLs the tab requested itself, rather than handing to the browser. */
   const fetchedUrls = () => fetchSpy.mock.calls.map(([input]) => String(input));
 
   beforeEach(() => {
     clicks.length = 0;
-    // Capture the synthesised anchor click instead of navigating.
+    // Capture the anchor click without navigating the test document.
     vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
       this: HTMLAnchorElement,
     ) {
@@ -3529,11 +3321,7 @@ describe("ServerFilesTab directory downloads (minted grant, #2354)", () => {
     await waitFor(() => expect(mockApi.post).toHaveBeenCalledWith(GRANT_PATH));
     await waitFor(() => expect(clicks).toHaveLength(1));
     expect(clicks[0].getAttribute("href")).toBe(GRANT_URL);
-    // The API streams the directory as a ZIP, so the saved file must be named
-    // `world.zip` — not the bare entry name (#2018).
     expect(clicks[0].download).toBe("world.zip");
-    // The zip is never buffered into the tab: no capped fetch+Blob path, and no
-    // request to the grant URL at all — only the browser fetches it.
     expect(mockDownload.downloadFile).not.toHaveBeenCalled();
     expect(fetchedUrls().filter((url) => url.includes("grant="))).toEqual([]);
   });

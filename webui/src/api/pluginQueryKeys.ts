@@ -1,5 +1,3 @@
-/** React-query cache keys for the plugin management endpoints. */
-
 export function pluginsKey(communityId: string, serverId: string) {
   return ["plugins", communityId, serverId] as const;
 }

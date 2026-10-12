@@ -1,5 +1,4 @@
 // @vitest-environment node
-// DOM-free logic test; runs under Node to skip per-file jsdom setup (issue #1734).
 import { describe, expect, it } from "vitest";
 import {
   decodeBase64Text,
@@ -9,15 +8,14 @@ import {
   UnencodableTextError,
 } from "./fileText.ts";
 
-// A file the content-based charset rule governs: anything but the root
-// server.properties of a pre-1.20 server.
+// Use a non-root file so the content-based charset rule applies even before Minecraft 1.20.
 const FILE = { path: "config.yml", mcVersion: "1.21.6" };
 
 describe("fileText base64 ⇄ UTF-8", () => {
   it("round-trips multi-byte UTF-8 (emoji + CJK) without mangling", () => {
     const text = "MOTD: ようこそ 🐉 サーバーへ";
     const base64 = encodeUtf8Base64(text);
-    // A bare btoa(text) would throw on these code points; the helper must not.
+    // Bare btoa throws on these Unicode code points; the helper must encode bytes first.
     const decoded = decodeBase64Text(base64, FILE);
     expect(decoded).toEqual({ text, charset: "utf-8" });
     expect(encodeTextBase64(decoded.text, decoded.charset)).toBe(base64);
@@ -26,8 +24,7 @@ describe("fileText base64 ⇄ UTF-8", () => {
 
 describe("fileText base64 ⇄ latin-1 fallback (#2851)", () => {
   it("round-trips every byte of a non-UTF-8 file unchanged", () => {
-    // All 256 byte values, 0x80-0x9F included: a WHATWG "latin1" TextDecoder is
-    // really windows-1252 and would map those onto other code points.
+    // Include bytes 80-9F to distinguish true Latin-1 from WHATWG's Windows-1252 decoder.
     const base64 = btoa(
       String.fromCharCode(...Array.from({ length: 256 }, (_, i) => i)),
     );
@@ -44,10 +41,9 @@ describe("fileText base64 ⇄ latin-1 fallback (#2851)", () => {
 });
 
 describe("fileText root server.properties before Minecraft 1.20 (#2851)", () => {
-  // A pre-1.20 server reads it with Properties.load(InputStream): latin-1
-  // only, whatever its bytes are.
+  // Pre-1.20 Properties.load(InputStream) reads server.properties as Latin-1 regardless of its bytes.
   it("reads it as latin-1 even when its bytes are valid UTF-8", () => {
-    // C3 A9 is "é" in UTF-8 but "Ã©" to a latin-1 reader.
+    // C3 A9 is é in UTF-8 but two different characters in Latin-1.
     expect(
       decodeBase64Text("w6k=", {
         path: "server.properties",
@@ -66,8 +62,7 @@ describe("fileText root server.properties before Minecraft 1.20 (#2851)", () => 
   });
 
   it("reads a root alias the API resolves to server.properties as latin-1", () => {
-    // The API's RelPath drops "." components and empty ones (redundant or
-    // trailing separators), so each of these opens the root file.
+    // Normalize dot and empty path components as the API does before identifying root server.properties.
     for (const path of [
       "./server.properties",
       "server.properties/",
@@ -96,7 +91,7 @@ describe("isProbablyText", () => {
   });
 
   it("treats content with a NUL byte as binary", () => {
-    // bytes [0x66, 0x00, 0x66] = "f\0f" → base64.
+    // Base64 of bytes 66 00 66, with a NUL inside text.
     const base64 = btoa(String.fromCharCode(0x66, 0x00, 0x66));
     expect(isProbablyText(base64)).toBe(false);
   });

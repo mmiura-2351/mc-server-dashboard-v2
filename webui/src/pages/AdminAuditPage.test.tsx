@@ -4,14 +4,8 @@ import { clearAccessToken } from "../auth/tokenStore.ts";
 import { t } from "../i18n/index.ts";
 import { renderApp } from "../test/render.tsx";
 
-// Global admin Audit page (#479). Driven through the real router and providers
-// via renderApp; a fetch mock dispatches on URL so a single test can stand up
-// /users/me, the community list, and the platform-admin global `/api/audit`
-// endpoint (path carries the query string).
-
 const COMMUNITY = { id: "11111111-1111-1111-1111-111111111111", name: "Alpha" };
-// A second community the admin is NOT a member of: it must still appear in the
-// picker, proving it is sourced from the admin-wide endpoint (#489).
+// Include a community outside the admin's memberships to distinguish the admin-wide listing.
 const OTHER_COMMUNITY = {
   id: "33333333-3333-3333-3333-333333333333",
   name: "Bravo",
@@ -66,9 +60,6 @@ const ADMIN = {
 };
 const MEMBER = { ...ADMIN, is_platform_admin: false };
 
-// Wire the fetch mock for a signed-in user with the given admin flag. The audit
-// endpoint returns the given records; the bootstrap refresh and any unmatched
-// URL fall through to a token response.
 function signedInAs(
   user: typeof ADMIN,
   records: unknown[],
@@ -96,7 +87,6 @@ function signedInAs(
   });
 }
 
-// Pull the global audit-endpoint calls (the path carries the query string).
 function auditCalls(): string[] {
   return fetchMock.mock.calls
     .map((c) => (typeof c[0] === "string" ? c[0] : String(c[0])))
@@ -132,14 +122,11 @@ describe("AdminAuditPage", () => {
 
     renderApp({ path: "/admin/audit" });
 
-    // Operation code humanized to its readable label (#643).
     expect(
       await screen.findByText(t("communitySettings.audit.op.server:start")),
     ).toBeInTheDocument();
-    // The global view shows the community column.
     const communityCells = screen.getAllByText(COMMUNITY.id);
     expect(communityCells.length).toBeGreaterThan(0);
-    // The community cell carries the full id as a hover title (#519).
     expect(communityCells[0].closest("td")).toHaveAttribute(
       "title",
       COMMUNITY.id,
@@ -161,17 +148,13 @@ describe("AdminAuditPage", () => {
 
     renderApp({ path: "/admin/audit" });
 
-    // Actor shows the resolved username; the raw id stays in the hover title.
     const actorCell = (await screen.findByText("alice")).closest("td");
     expect(actorCell).toHaveAttribute("title", "u9");
-    // Target shows the humanized type prefix + the resolved server name; the raw
-    // "type:id" stays in the title.
     const targetCell = screen
       .getByText(`${t("communitySettings.audit.targetType.server")}: survival`)
       .closest("td");
     expect(targetCell).toHaveAttribute("title", "server:s9");
-    // Community column shows the resolved name; the raw id stays in the title.
-    // "Alpha" also appears as a picker option, so scope to the table cell.
+    // Alpha also appears in the picker; scope the name assertion to its table cell.
     const communityCell = screen
       .getAllByText("Alpha")
       .map((el) => el.closest("td"))
@@ -194,23 +177,19 @@ describe("AdminAuditPage", () => {
 
     renderApp({ path: "/admin/audit" });
 
-    // Actor falls back to the raw id.
     expect((await screen.findByText("u9")).closest("td")).toHaveAttribute(
       "title",
       "u9",
     );
-    // Target falls back to the humanized type + raw id.
     expect(
       screen.getByText(`${t("communitySettings.audit.targetType.server")}: s9`),
     ).toBeInTheDocument();
-    // Community falls back to the raw id.
     const communityCells = screen.getAllByText(COMMUNITY.id);
     expect(communityCells.length).toBeGreaterThan(0);
   });
 
   it("warns that the community picker is truncated when more communities exist than one page", async () => {
-    // The picker requests one page (limit=100); report a larger total so the
-    // hint surfaces, mirroring the Provision owner picker (#476/#488).
+    // Report a total above the picker's page size to exercise its truncation hint.
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input.toString();
       if (url === "/api/users/me") return Promise.resolve(jsonResponse(ADMIN));
@@ -248,8 +227,7 @@ describe("AdminAuditPage", () => {
     renderApp({ path: "/admin/audit" });
     await screen.findByText(t("communitySettings.audit.op.server:start"));
 
-    // No truncation hint at all: match the static, value-free tail of the
-    // single interpolated sentence (last segment after the final placeholder).
+    // Match the sentence's final static segment without depending on interpolated counts.
     const truncatedTail = t("admin.audit.communitiesTruncated")
       .split("}")
       .pop();
@@ -273,8 +251,7 @@ describe("AdminAuditPage", () => {
     await screen.findByText(t("communitySettings.audit.op.server:start"));
 
     const picker = screen.getByLabelText(t("admin.audit.filterCommunity"));
-    // "Bravo" is not in the membership-scoped switcher list, so its presence as
-    // an option proves the picker reads GET /admin/communities.
+    // Bravo is absent from the membership list, so its option proves the picker reads the admin-wide endpoint.
     expect(
       within(picker).getByRole("option", { name: OTHER_COMMUNITY.name }),
     ).toBeInTheDocument();
@@ -333,8 +310,7 @@ describe("AdminAuditPage", () => {
       expect(url.searchParams.get("community")).toBe(COMMUNITY.id);
       expect(url.searchParams.get("operation")).toBe("member:add");
       expect(url.searchParams.get("actor")).toBe(ACTOR);
-      // since/until are sent as UTC instants; derive the expectation via the
-      // same local→UTC conversion so the test is timezone-independent.
+      // Convert expected local datetimes to UTC so the assertion is timezone-independent.
       expect(url.searchParams.get("since")).toBe(
         new Date(SINCE_LOCAL).toISOString(),
       );
@@ -377,14 +353,12 @@ describe("AdminAuditPage", () => {
     });
     await screen.findByText(t("communitySettings.audit.op.server:start"));
 
-    // The persisted filters drive the first request without any Apply click.
     await waitFor(() => {
       const url = new URL(auditCalls().at(-1) as string, "http://x");
       expect(url.searchParams.get("community")).toBe(COMMUNITY.id);
       expect(url.searchParams.get("operation")).toBe("member:add");
       expect(url.searchParams.get("actor")).toBe(ACTOR);
     });
-    // The inputs reflect the restored filters.
     expect(
       (
         screen.getByLabelText(
@@ -402,7 +376,6 @@ describe("AdminAuditPage", () => {
   });
 
   it("pages forward with an increased offset", async () => {
-    // A full page (50) signals there may be a next page.
     signedInAs(
       ADMIN,
       Array.from({ length: 50 }, (_, i) => record({ id: `a${i}` })),

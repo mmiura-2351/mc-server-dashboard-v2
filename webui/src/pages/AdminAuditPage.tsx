@@ -15,8 +15,6 @@ import {
 } from "./auditShared.tsx";
 import { useFilterParams, useOffsetParam } from "./urlState.ts";
 
-// The global view adds a `community` filter (empty = all communities) on top of
-// the shared operation/actor/since/until filters.
 interface AdminAuditFilters extends AuditFilters {
   community: string;
 }
@@ -29,8 +27,6 @@ const EMPTY: AdminAuditFilters = {
   community: "",
 };
 
-// The filter keys persisted in the URL query string (#563); `community` is the
-// global view's extra dropdown alongside the shared text/datetime filters.
 const FILTER_KEYS = [
   "operation",
   "actor",
@@ -39,17 +35,9 @@ const FILTER_KEYS = [
   "community",
 ] as const;
 
-// The community picker requests one max-size page (the API caps
-// /admin/communities at 100). When more communities exist the later ones are
-// omitted from the dropdown, so we surface a truncation hint — same pattern as
-// the Provision owner picker (#476/#488).
+// The API caps the picker at 100 communities; show when the list is truncated.
 const PICKER_PAGE_SIZE = 100;
 
-// Build the global audit-list URL: the shared filters plus the optional
-// `community` param, mapped to the exact query params the endpoint declares
-// (community/operation/actor/since/until/limit/offset — schema.ts
-// list_audit_log). Blank filters are omitted. The result is cast back to the
-// path literal so the typed response stays AuditLogResponse.
 function auditUrl(filters: AdminAuditFilters, offset: number): "/api/audit" {
   const params = new URLSearchParams();
   if (filters.community !== "") {
@@ -61,17 +49,8 @@ function auditUrl(filters: AdminAuditFilters, offset: number): "/api/audit" {
   return `/api/audit?${params.toString()}` as "/api/audit";
 }
 
-// Platform-admin global Audit page (WEBUI_SPEC.md 6.12): the global audit log
-// with a community filter added. Same filterable/paged shape as the
-// community-scoped tab, plus a community picker and a Community column. The
-// route is gated by RequireAdmin (App.tsx); the `/audit` endpoint is guarded by
-// platform-admin server-side (audit.py).
 export function AdminAuditPage() {
-  // The community picker lists ALL communities (admins see every community), not
-  // just the admin's own — sourced from the platform-axis GET /admin/communities
-  // (#489), the same endpoint the admin Communities page uses. It requests one
-  // max-size page; when more communities exist the dropdown is truncated and we
-  // surface a hint below.
+  // Use the admin-wide list; the membership-scoped switcher would omit other communities.
   const communitiesQuery = useQuery({
     queryKey: adminCommunitiesPickerKey(PICKER_PAGE_SIZE),
     queryFn: ({ signal }) =>
@@ -81,25 +60,17 @@ export function AdminAuditPage() {
       ),
   });
   const communities = communitiesQuery.data?.communities;
-  // The picker shows only the first page; if more communities exist, say so
-  // rather than silently omitting the rest (#476/#488).
   const communityTotal = communitiesQuery.data?.total ?? 0;
   const communitiesTruncated =
     communities !== undefined && communityTotal > communities.length;
-  // Applied filters live in the URL query string (#563) so reloads and shared
-  // links restore them; `urlFilters` is the applied set, `draft` the in-progress
-  // input. The draft re-syncs to the URL on Back so the inputs follow history.
+  // Keep applied filters in the URL and draft edits separate; browser history restores the applied set.
   const [urlFilters, applyFilters] = useFilterParams(FILTER_KEYS);
   const filters: AdminAuditFilters = { ...EMPTY, ...urlFilters };
   const [draft, setDraft] = useState<AdminAuditFilters>(filters);
-  // Page offset lives in `?offset=N` (#514) so Back restores the prior page.
   const [offset, setOffset] = useOffsetParam();
   const [actorError, setActorError] = useState(false);
 
-  // Keep the inputs in step with the applied (URL) filters: Back/forward and
-  // deep links drive the URL, and the draft mirrors it. The signature folds the
-  // filter values into one stable dep so the re-sync fires only on a real URL
-  // change, not on every render's fresh object.
+  // Use a value signature to resync draft filters only when URL values change.
   const urlSignature = JSON.stringify(urlFilters);
   // biome-ignore lint/correctness/useExhaustiveDependencies: `urlSignature` stands in for the filter values; `filters` is derived from them.
   useEffect(() => {
@@ -114,20 +85,17 @@ export function AdminAuditPage() {
   const queryState = classifyQueryResult(query);
 
   const apply = () => {
-    // The backend's `actor` param is a UUID; reject free text inline rather
-    // than letting it 422 into the generic load error.
+    // Reject non-UUID actors inline instead of turning an API 422 into a generic load error.
     if (draft.actor.trim() !== "" && !isUuid(draft.actor.trim())) {
       setActorError(true);
       return;
     }
     setActorError(false);
-    // Applying writes the filters to the URL and resets offset to 0 in one
-    // history entry (useFilterParams drops the offset param).
     applyFilters(draft);
   };
 
   const records = query.data?.records ?? [];
-  // limit/offset paging gives no total: a full page implies there may be more.
+  // The API returns no total; a full page only suggests that another page may exist.
   const hasNext = records.length === PAGE_SIZE;
 
   return (
@@ -176,9 +144,7 @@ export function AdminAuditPage() {
 
       {queryState.kind === "pending" ? (
         <p className="sub">{t("communitySettings.audit.loading")}</p>
-      ) : /* Error only when there is nothing to show (initial load failed).
-           A failed background refetch retains `data`, so the cached list
-           keeps rendering through transient API blips (#1805). */
+      ) : /* Retain cached content when only a background refetch fails. */
       queryState.kind === "error" ? (
         <p className="field-error">{t("communitySettings.audit.loadError")}</p>
       ) : records.length === 0 ? (

@@ -1,26 +1,7 @@
-/**
- * Permission code catalog (WEBUI_SPEC.md 2.2).
- *
- * The community axis is the 35-code set assignable to roles / grants. The
- * platform axis is flag-driven (not assignable to roles) but is still part of
- * the caller's effective set the API returns, so it is included in the union
- * so `can()` can be typed against every code the UI may check.
- *
- * Codes are typed as a string-literal union rather than bare `string` so a
- * typo in a `can()` call fails typecheck. The community-axis codes additionally
- * have a runtime listing grouped by their 9 families
- * (`COMMUNITY_PERMISSION_FAMILIES`) so the role/grant editor can build its
- * matrix from one source of truth — the union type is derived from that listing
- * so the two cannot drift.
- */
+/** Community codes are role-assignable; platform codes come from the admin flag.
+ * Derive the community union and editor matrix from one runtime family catalog. */
 
-/**
- * Community-axis codes grouped by family, in the order the role matrix renders
- * them (WEBUI_SPEC.md 2.2 — the 9 families, 30 codes, plus the plugin family
- * with plugin:read/manage, the session family with session:read, and the
- * schedule family with schedule:read/manage). This is the single source of
- * truth: the `CommunityPermissionCode` union is derived from it.
- */
+/** The role editor uses this family order; derive CommunityPermissionCode from the same catalog. */
 export const COMMUNITY_PERMISSION_FAMILIES = [
   {
     family: "server",
@@ -87,22 +68,16 @@ export const COMMUNITY_PERMISSION_FAMILIES = [
   },
 ] as const;
 
-/** Community-axis codes (35) — the role/grant editor's source of truth. */
 export type CommunityPermissionCode =
   (typeof COMMUNITY_PERMISSION_FAMILIES)[number]["codes"][number];
 
-/** Platform-axis codes (flag-driven, not assignable to roles). */
+/** Platform permissions come from the admin flag and cannot be assigned to community roles. */
 export type PlatformPermissionCode =
   | "worker:manage"
   | "community:provision"
   | "platform:monitor";
 
-/** Every permission code the UI may check `can()` against. */
 export type PermissionCode = CommunityPermissionCode | PlatformPermissionCode;
 
-/**
- * Runtime list of the community-axis codes, derived from
- * `COMMUNITY_PERMISSION_FAMILIES` so the two cannot drift apart.
- */
 export const COMMUNITY_PERMISSION_CODES: readonly CommunityPermissionCode[] =
   COMMUNITY_PERMISSION_FAMILIES.flatMap((f) => f.codes);

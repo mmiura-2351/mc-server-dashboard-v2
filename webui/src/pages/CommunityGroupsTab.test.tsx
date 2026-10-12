@@ -58,8 +58,6 @@ function server(over: Record<string, unknown> = {}) {
   return { id: "s1", name: "Survival", ...over };
 }
 
-// Route `api.get` by path: the page reads the community, the Groups tab reads
-// the group list, the community server list, and (on expand) a group's servers.
 function routeGet(opts: {
   groups?: unknown[];
   servers?: unknown[];
@@ -100,7 +98,6 @@ function renderPage() {
   return { ...result, queryClient };
 }
 
-// The Groups tab is not the default; land on the page then switch to it.
 async function openGroupsTab() {
   await screen.findAllByText("Sakura");
   fireEvent.click(
@@ -292,7 +289,6 @@ describe("CommunityGroupsTab", () => {
       }),
     );
 
-    // The confirm dialog must appear before the DELETE fires.
     fireEvent.click(
       await screen.findByRole("button", {
         name: t("communitySettings.groups.removePlayerConfirm"),
@@ -306,9 +302,7 @@ describe("CommunityGroupsTab", () => {
     });
   });
 
-  // #611: the Players tab renders group.players.length from the attachments
-  // (server's-groups) projection, so an add/remove must invalidate that prefix
-  // too, not only the groups list, or the count stays stale until remount.
+  // Player edits must invalidate attachments too because the Players tab reads counts from that projection.
   it("invalidates the attachments prefix after adding a player", async () => {
     const invalidate = vi.spyOn(QueryClient.prototype, "invalidateQueries");
     routeGet({ groups: [group({ players: [] })], groupServers: [] });
@@ -394,8 +388,6 @@ describe("CommunityGroupsTab", () => {
       }),
     );
 
-    // Survival is attached (it gets a Detach button once the per-group server
-    // query resolves); Creative is then the only attach candidate.
     await screen.findByRole("button", {
       name: t("communitySettings.groups.detach"),
     });
@@ -474,7 +466,6 @@ describe("CommunityGroupsTab", () => {
       }),
     ).not.toBeInTheDocument();
 
-    // The read-only detail panel still opens, but offers no mutations.
     fireEvent.click(
       screen.getByRole("button", {
         name: t("communitySettings.groups.expand"),

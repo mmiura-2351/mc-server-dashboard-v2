@@ -1,9 +1,3 @@
-/* App shell, primitives, and placeholder-page chrome.
- * Ported from docs/ui/mockup/assets/style.css; all values reference the design
- * tokens in tokens.css (WEBUI_SPEC.md Sections 5, 7.4).
- */
-
-/* ---------- Shell layout ---------- */
 .shell {
   display: flex;
   min-height: 100vh;
@@ -30,9 +24,6 @@
   font-size: 15px;
   color: var(--text);
 }
-/* The brand is a Link to the landing page (#538); keep it visually identical to
- * the static heading at rest, with a quiet hover/focus affordance matching the
- * nav links. */
 .sidebar a.brand:hover {
   color: var(--text);
   text-decoration: none;
@@ -85,12 +76,7 @@
   opacity: 0.8;
 }
 
-/* Narrow-width sidebar (#586): a fixed 220px rail plus the top bar overflows
- * sub-~430px viewports even after the #554 top-bar fix. At the shell's existing
- * 900px breakpoint collapse to an icon-only rail — hide every text label and
- * the group headings, center the icons, and shrink the column to fit one glyph.
- * The nav links and brand keep their aria-label (set in AppShell), so the
- * accessible name still resolves once the visible text is hidden. */
+/* Collapse the sidebar at narrow widths; links retain accessible names through aria-label. */
 @media (max-width: 900px) {
   .sidebar {
     width: auto;
@@ -140,8 +126,7 @@
   color: var(--text);
   font-family: inherit;
   font-size: inherit;
-  /* Let the switcher shrink and truncate a long community name instead of
-   * forcing the bar wider and pushing the trailing items off-screen (#554). */
+  /* Let long community names truncate so trailing controls stay onscreen. */
   min-width: 0;
   max-width: 100%;
   overflow: hidden;
@@ -150,20 +135,16 @@
 select.community-switcher {
   cursor: pointer;
 }
-/* No-community label in the switcher slot. Its own class (not the generic
- * `.empty` CTA, which sets `padding: 48px 20px` and would overflow the top
- * bar — #533). */
+/* Use a dedicated no-community style; the generic empty-state padding would overflow the top bar. */
 .community-switcher.no-community {
   color: var(--text-faint);
   font-weight: 400;
-  /* Stay a single line like the populated `<select>`: when the bar is narrow
-   * the label keeps the bar's height instead of wrapping and overflowing it. */
+  /* Keep the empty switcher label on one line to preserve top-bar height. */
   white-space: nowrap;
 }
 .lang-switcher {
   margin-right: 12px;
-  /* Keep the trailing controls at their intrinsic size; the community switcher
-   * is the flex item that absorbs the shrink so they never overflow (#554). */
+  /* Let the community switcher absorb shrinkage while trailing controls retain intrinsic width. */
   flex-shrink: 0;
 }
 
@@ -207,10 +188,7 @@ select.community-switcher {
   flex-shrink: 0;
 }
 
-/* Narrow-width top bar (#554): at the shell's existing 900px breakpoint the
- * trailing items would overflow off-screen, so tighten the gap and drop the
- * account label to its avatar (the link keeps its aria-label) while the
- * community switcher truncates. */
+/* Tighten the top bar on narrow screens and hide the account text while retaining its accessible name. */
 @media (max-width: 900px) {
   .topbar {
     gap: 8px;
@@ -248,7 +226,6 @@ select.community-switcher {
   flex-shrink: 0;
 }
 
-/* ---------- Buttons ---------- */
 .btn {
   display: inline-flex;
   align-items: center;
@@ -289,7 +266,6 @@ select.community-switcher {
   cursor: not-allowed;
 }
 
-/* ---------- Cards ---------- */
 .card {
   background: var(--bg-raised);
   border: 1px solid var(--border-subtle);
@@ -297,10 +273,7 @@ select.community-switcher {
   padding: 16px;
 }
 
-/* ---------- Resizable table columns (issue #520) ----------
- * Drag handle injected by ResizableTable on each header cell's right boundary.
- * The cell is positioned so the handle can sit flush against its trailing edge;
- * the affordance is hover-revealed (accent on grab) to stay quiet at rest. */
+/* Position column drag handles at the header cell's trailing edge. */
 table.data thead th {
   position: relative;
 }
@@ -328,16 +301,12 @@ table.data thead th {
 .col-resize-handle:hover::after {
   background: var(--accent-dim);
 }
-/* While a drag is active the body carries .col-resizing so the resize cursor
- * holds even as the pointer leaves the handle. */
+/* Keep the resize cursor active while dragging outside the handle. */
 body.col-resizing {
   cursor: col-resize;
   user-select: none;
 }
-/* With `table-layout: fixed` a narrowed column would otherwise clip its text
- * mid-glyph. Single-token id/operation cells already expose the full value on
- * hover via a `title` (#527), so ellipsize exactly those cells. Breakable-text
- * cells (names, emails) have no `title` and keep wrapping. */
+/* Ellipsize single-token cells with hover titles; let breakable names and emails wrap. */
 .audit table.data td[title],
 .backups table.data td[title],
 .admin-communities table.data td.mono {
@@ -346,7 +315,6 @@ body.col-resizing {
   white-space: nowrap;
 }
 
-/* ---------- Dashboard server cards (WEBUI_SPEC.md 6.2) ---------- */
 .grid {
   display: grid;
   gap: var(--space-4);
@@ -400,9 +368,7 @@ body.col-resizing {
   color: var(--text-faint);
 }
 
-/* Card/table view toggle (#541): a segmented control of two .btn that read as
- * one group; the active view is highlighted via aria-pressed. A <fieldset>
- * carries the group semantics, so reset its default chrome. */
+/* Reset fieldset chrome while keeping view-toggle group semantics. */
 .view-toggle {
   display: inline-flex;
   border: 0;
@@ -425,9 +391,6 @@ body.col-resizing {
   color: var(--text);
 }
 
-/* Compact table view (#541). Reuses the shared table.data styling pattern from
- * the admin tables; long worker ids ellipsize with the title-on-hover
- * affordance under table-layout: fixed. */
 .dashboard-table table.data {
   width: 100%;
   border-collapse: collapse;
@@ -456,10 +419,7 @@ body.col-resizing {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* Long relay addresses overflow into the Worker column under table-layout:
- * fixed (#1072). The cell constrains its box; the inner copyable button
- * truncates with ellipsis — the full value is still available via title and
- * the copy-to-clipboard click. */
+/* Constrain relay-address buttons to their cells; title and copy retain the full truncated value. */
 .dashboard-table table.data td .copyable {
   display: block;
   overflow: hidden;
@@ -483,7 +443,6 @@ body.col-resizing {
   border-color: var(--green);
 }
 
-/* Type/version + backend/port badges. */
 .badge {
   display: inline-block;
   font-size: 11px;
@@ -498,15 +457,13 @@ body.col-resizing {
   color: var(--accent);
   border-color: rgba(77, 159, 255, 0.3);
 }
-/* Backup condition badges (#745). Quarantined is a warning (amber/red so it
- * reads as at-risk); unknown stays muted, just slightly dimmer than the row. */
+/* Use warning colors for quarantined backups and muted colors for unknown health. */
 .badge.health-quarantined {
   color: var(--red);
   border-color: rgba(242, 85, 85, 0.4);
   background: rgba(242, 85, 85, 0.08);
 }
-/* Unreadable (#2374): the archive's bytes are gone — as at-risk as quarantined,
- * so it shares the warning colour; the label and title tell the two apart. */
+/* Unreadable archives share the warning color; their labels and titles distinguish the remedy. */
 .badge.health-unreadable {
   color: var(--red);
   border-color: rgba(242, 85, 85, 0.4);
@@ -520,7 +477,6 @@ body.col-resizing {
   cursor: pointer;
 }
 
-/* Observed-state pills (color tokens from #399). */
 .pill {
   display: inline-flex;
   align-items: center;
@@ -563,7 +519,6 @@ body.col-resizing {
 .pill.unknown {
   color: var(--pill-unknown-fg);
   border-color: var(--pill-unknown-border);
-  /* "striped" treatment for the unknown state (WEBUI_SPEC.md 6.2). */
   background: repeating-linear-gradient(
     45deg,
     rgba(176, 122, 255, 0.1),
@@ -588,7 +543,6 @@ body.col-resizing {
   }
 }
 
-/* Empty-state CTA. */
 .empty {
   text-align: center;
   padding: 48px 20px;
@@ -604,7 +558,6 @@ body.col-resizing {
   margin-bottom: 16px;
 }
 
-/* ---------- Form fields ---------- */
 .field {
   display: flex;
   flex-direction: column;
@@ -626,9 +579,7 @@ body.col-resizing {
   border-color: var(--accent);
 }
 
-/* Password field with show/hide toggle (issue #535). The wrapper anchors the
- * toggle button over the input's trailing edge; the input keeps its `.field
- * input` styling and reserves room so typed text never slips under the icon. */
+/* Reserve input space so password text cannot pass under the visibility toggle. */
 .password-input {
   position: relative;
   display: flex;
@@ -661,7 +612,6 @@ body.col-resizing {
   border-radius: var(--radius-sm);
 }
 
-/* ---------- Auth pages (outside the shell chrome) ---------- */
 .auth-wrap {
   min-height: 100vh;
   display: flex;
@@ -700,7 +650,6 @@ body.col-resizing {
   justify-content: center;
 }
 
-/* Inline field feedback (login/register, WEBUI_SPEC.md 6.1 / 7.4). */
 .field .hint {
   font-size: 12px;
   color: var(--text-faint);
@@ -710,10 +659,7 @@ body.col-resizing {
   color: var(--red);
 }
 
-/* Force-restore confirmation dialog: the warning and ack row render inside a
- * Modal, which the ancestor-class page scopes (`.account`, `.settings`, …) that
- * style `.field-error` / `.field-inline` do not wrap, so they carry their own
- * self-contained rules (#755). */
+/* Restore warnings render inside a modal outside the page scopes that normally style field feedback. */
 .restore-damaged-warning {
   font-size: 12px;
   color: var(--red);
@@ -724,7 +670,6 @@ body.col-resizing {
   gap: 6px;
 }
 
-/* ---------- Modal primitive ---------- */
 .modal-layer {
   position: fixed;
   inset: 0;
@@ -759,7 +704,6 @@ body.col-resizing {
   margin-top: 18px;
 }
 
-/* ---------- Toast primitive ---------- */
 .toast-zone {
   position: fixed;
   bottom: 18px;
@@ -805,7 +749,6 @@ body.col-resizing {
   border-left-color: var(--green);
 }
 
-/* ---------- Account page (WEBUI_SPEC.md 6.11) ---------- */
 .account {
   max-width: 680px;
 }
@@ -863,7 +806,6 @@ body.col-resizing {
   flex-shrink: 0;
 }
 
-/* ---------- Server detail (WEBUI_SPEC.md 6.4 / 6.9) ---------- */
 .breadcrumbs {
   font-size: 12px;
   color: var(--text-dim);
@@ -972,7 +914,6 @@ button.link:focus-visible {
   color: var(--red);
   font-size: 12px;
 }
-/* ---------- Server create wizard (WEBUI_SPEC.md 6.3) ---------- */
 .wizard-steps {
   display: flex;
   gap: 8px;
@@ -991,10 +932,7 @@ button.link:focus-visible {
 }
 .type-cards {
   display: grid;
-  /* auto-fit (not auto-fill) collapses the empty trailing track so the four
-   * remaining catalog types fill the row after the spigot card was removed
-   * (#1534); the 160px minimum makes each card comfortably larger, and the
-   * max-width keeps four cards from ballooning to ~300px on wide desktops. */
+  /* auto-fit collapses empty tracks; cap width so the type cards do not stretch excessively on wide screens. */
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: 10px;
   margin-bottom: 14px;
@@ -1094,7 +1032,6 @@ button.link:focus-visible {
   gap: 8px;
   margin-top: 14px;
 }
-/* ---------- Server detail live streams (WEBUI_SPEC.md 6.4 / 6.5) ---------- */
 .metrics-strip {
   display: flex;
   gap: 24px;
@@ -1206,7 +1143,6 @@ button.link:focus-visible {
   padding: 8px 10px;
 }
 
-/* ---------- Server detail — Backups tab (WEBUI_SPEC.md 6.7) ---------- */
 .backups-stats {
   margin-bottom: 14px;
 }
@@ -1216,8 +1152,6 @@ button.link:focus-visible {
   gap: 10px;
   margin-bottom: 14px;
 }
-/* Scheduled-backup settings card: the moved-to-Schedules note plus the
- * retention policy editor (#1843), both backup:schedule-gated. */
 .backups-retention {
   margin-bottom: 14px;
 }
@@ -1296,7 +1230,6 @@ button.link:focus-visible {
   justify-content: flex-end;
 }
 
-/* ---------- Server detail — Schedules tab (WEBUI_SPEC.md 6.13) ---------- */
 .schedules-toolbar {
   display: flex;
   align-items: center;
@@ -1322,13 +1255,8 @@ button.link:focus-visible {
   padding: 8px 12px;
   border-bottom: 1px solid var(--border-subtle);
 }
-/* Default column widths. ResizableTable renders table-layout: fixed with
-   equal auto columns; the actions column's three buttons (~230px) then
-   overflow their eighth of the width and occlude the next-run cell. Size the
-   two known-width columns here — a user drag writes an inline width on the
-   <col> (which wins over these), and a double-click reset falls back here.
-   Columns: 1 name / 2 action / 3 cadence / 4 timezone / 5 enabled /
-   6 last run / 7 next run / 8 actions. */
+/* Give action and toggle columns enough default width to avoid overlap.
+ * Dragged inline col widths take precedence; double-click resets to these defaults. */
 .schedules-table table.data col:nth-child(5) {
   width: 90px;
 }
@@ -1337,7 +1265,6 @@ button.link:focus-visible {
 }
 .schedules-table .row-actions {
   display: flex;
-  /* Wrap instead of overflowing the cell if the user drags it narrow. */
   flex-wrap: wrap;
   gap: 6px;
   justify-content: flex-end;
@@ -1354,9 +1281,7 @@ button.link:focus-visible {
 .schedules-warning-row input[type="text"] {
   flex: 1;
 }
-/* Schedule create/edit dialog — cadence section (inside a Modal, which the
-   ancestor-class page scopes that style .field-inline / .field-error don't
-   wrap, so those rules don't reach here; see shell.css:707). */
+/* Modal cadence fields sit outside page scopes, so they need their own feedback styles. */
 .schedule-cadence {
   margin-bottom: 12px;
 }
@@ -1415,7 +1340,6 @@ button.link:focus-visible {
   color: var(--text-faint);
   margin: 6px 0 0;
 }
-/* Next-runs preview (also inside the Modal). */
 .schedule-preview {
   margin-top: 4px;
   margin-bottom: 12px;
@@ -1447,11 +1371,7 @@ button.link:focus-visible {
   border-collapse: collapse;
   font-size: 13px;
 }
-/* Qualified as `table.data.schedules-runs` — a compound selector on the table
- * itself (both classes sit on the table, ServerSchedulesTab.tsx), not a wrapper
- * descendant like the `.wrapper table.data th` blocks above. What it shares with
- * them is the resulting specificity, (0,2,2), so the cell rules do not descend
- * below the shared `.data` table rules declared earlier in the file. */
+/* Match shared table specificity with both classes on the table itself, rather than a wrapper descendant. */
 table.data.schedules-runs th,
 table.data.schedules-runs td {
   text-align: left;
@@ -1470,7 +1390,6 @@ table.data.schedules-runs td {
   color: var(--text-faint);
 }
 
-/* ---------- Server detail Plugins tab (issue #1153) ---------- */
 .plugins-notice {
   margin-bottom: 12px;
 }
@@ -1504,9 +1423,6 @@ table.data.schedules-runs td {
   gap: 6px;
   justify-content: flex-end;
 }
-/* Per-row "Side" selector — mirror the form-control `.field select` styling so
- * it matches the table rather than rendering as a bare browser default (#1320).
- * The smaller padding/font keep it in scale with the 13px table rows. */
 .plugins-side-select {
   font: inherit;
   font-size: 13px;
@@ -1523,15 +1439,11 @@ table.data.schedules-runs td {
 .plugins-side-select:disabled {
   opacity: 0.6;
 }
-/* Active state for the Dependencies toggle button (#1357). */
 .plugins-table .btn.ghost.active {
   background: var(--bg-overlay);
   border-color: var(--accent-dim);
 }
-/* An inert placeholder standing in for a conditional action button ("Update" or
- * "Dependencies") on rows that lack it, so the always-present actions stay
- * column-aligned across rows (#1320). Occupies the slot but is invisible and
- * non-interactive. */
+/* Reserve conditional action slots with invisible, noninteractive placeholders so row actions align. */
 .plugins-table .row-actions-spacer {
   visibility: hidden;
   pointer-events: none;
@@ -1548,7 +1460,6 @@ table.data.schedules-runs td {
 .plugins-deps li {
   padding: 4px 0;
 }
-/* Dependency / compatibility validation checklist (issue #1307) */
 .plugins-validation {
   margin-top: 12px;
   padding: 12px 16px;
@@ -1576,7 +1487,6 @@ table.data.schedules-runs td {
 .plugins-validation .field-hint.warn {
   color: var(--amber);
 }
-/* Modrinth search modal */
 .plugins-search-input {
   width: 100%;
   font: inherit;
@@ -1643,7 +1553,6 @@ table.data.schedules-runs td {
   border-bottom: 1px solid var(--border-subtle);
 }
 
-/* ---------- Server detail Files tab (WEBUI_SPEC.md 6.6) ---------- */
 .files .notice {
   border-radius: var(--radius-sm);
   padding: 8px 12px;
@@ -1673,9 +1582,7 @@ table.data.schedules-runs td {
   gap: 12px;
   margin-bottom: 10px;
 }
-/* Styled file picker (issue #539): a design-token button drives a visually
- * hidden — but still focusable — file input, with the chosen filename shown
- * alongside. */
+/* Keep the hidden file input focusable while a styled button drives selection. */
 .file-picker {
   display: flex;
   align-items: center;
@@ -1703,9 +1610,6 @@ table.data.schedules-runs td {
   font-size: 13px;
   color: var(--text-dim);
 }
-/* Upload progress bar (issue #1207): a filled track plus a meta row showing
- * the percentage, transferred bytes, and elapsed time. Shared by every upload
- * site via the UploadProgress component. */
 .upload-progress {
   display: flex;
   flex-direction: column;
@@ -1756,16 +1660,9 @@ table.data.schedules-runs td {
 .file-layout {
   display: grid;
   gap: 14px;
-  /* Single-pane default: file tree fills the width when no viewer is open. */
   grid-template-columns: 1fr;
 }
 .file-layout.two-pane {
-  /* The name column carries a filename plus up to three action buttons, so a
-   * 1:2 split left common names (server.properties, banned-players.json)
-   * over-truncated next to a preview pane that is empty until a file is opened.
-   * Give the tree a fairer share and a wider min so typical names are readable
-   * without hover; the preview's minmax(0,…) lets it shrink instead of forcing
-   * horizontal overflow at narrow widths. */
   grid-template-columns: minmax(300px, 1fr) minmax(0, 1.4fr);
 }
 .file-list {
@@ -1790,11 +1687,8 @@ table.data.schedules-runs td {
   color: var(--accent);
   background: rgba(77, 159, 255, 0.05);
   border-left: 3px solid var(--accent);
-  padding-left: 9px; /* 12px original - 3px border */
+  padding-left: 9px;
 }
-/* Drop zone overlay (issue #1461): visual feedback when files are dragged over
- * the file-tree pane. The overlay covers the pane with a dashed border and
- * translucent background so the user knows where the files will land. */
 .file-tree.drop-zone-active {
   position: relative;
 }
@@ -1816,9 +1710,6 @@ table.data.schedules-runs td {
 .file-row.selected {
   background: rgba(77, 159, 255, 0.08);
 }
-/* Drop target highlighting for internal drag-and-drop file organization
- * (issue #1464). Folders in the listing and breadcrumb buttons receive this
- * class while a dragged file hovers over them. */
 .file-row.drop-target {
   background: rgba(77, 159, 255, 0.1);
   outline: 2px solid var(--accent);
@@ -1830,7 +1721,6 @@ table.data.schedules-runs td {
   outline: 2px solid var(--accent);
   outline-offset: -1px;
 }
-/* Context menu for file operations (issue #1465). */
 .file-context-menu {
   position: fixed;
   z-index: 25;
@@ -1917,9 +1807,7 @@ table.data.schedules-runs td {
   font-size: 14px;
   text-align: left;
   flex: 1;
-  /* Without min-width:0 a flex item refuses to shrink below its content
-   * min-content, so a long unbreakable filename defeats the ellipsis and
-   * overflows the row. */
+  /* Allow the flex item to shrink below its content width so long filenames can ellipsize. */
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1934,9 +1822,7 @@ table.data.schedules-runs td {
 .file-viewer-head .path {
   font-family: var(--font-mono);
   font-size: 13px;
-  /* A pathologically long unbreakable path must wrap (overflow-wrap:anywhere
-   * also shrinks the flex item's min-content) instead of overflowing the head
-   * horizontally at any width. */
+  /* Wrap unbreakable paths and reduce their min-content width to prevent header overflow. */
   min-width: 0;
   overflow-wrap: anywhere;
 }
@@ -1957,7 +1843,6 @@ table.data.schedules-runs td {
   padding: 10px;
   resize: vertical;
 }
-/* Search box (files/search) + per-file history drawer (files/history). */
 .files-search {
   margin-bottom: 10px;
 }
@@ -1967,9 +1852,7 @@ table.data.schedules-runs td {
   gap: 10px;
   flex-wrap: wrap;
 }
-/* The search input sits outside a `.field`, so the base `.field input` styling
- * (background/border/padding/focus) never reaches it — give it the same
- * tokenized treatment here so it isn't a bare browser search box. */
+/* Search sits outside .field, so apply the same input styling explicitly. */
 .files-search-input {
   flex: 1;
   min-width: 200px;
@@ -2022,7 +1905,6 @@ table.data.schedules-runs td {
   font-size: 13px;
 }
 
-/* Players tab — attached op/whitelist groups (issue #453, WEBUI_SPEC.md 6.8). */
 .players .card + .card {
   margin-top: 12px;
 }
@@ -2053,9 +1935,6 @@ table.data.schedules-runs td {
 .badge.kind.whitelist {
   color: var(--text-dim);
 }
-/* Session source badges (#1928). Java carries a claimed identity (green, as
- * normal); Bedrock is a flow-session with no claimed identity (amber, a caveat
- * — its tooltip explains only the IP is known). */
 .badge.source.java {
   color: var(--green);
   border-color: rgba(63, 207, 110, 0.3);
@@ -2065,7 +1944,6 @@ table.data.schedules-runs td {
   border-color: rgba(240, 180, 41, 0.3);
 }
 
-/* ---------- Community settings — Audit tab (WEBUI_SPEC.md 6.10). ---------- */
 .audit .audit-filters {
   display: flex;
   flex-wrap: wrap;
@@ -2095,7 +1973,6 @@ table.data.schedules-runs td {
   margin-top: 12px;
 }
 
-/* Roles tab — permission-matrix editor (issue #462, WEBUI_SPEC.md 6.10 / 2.2). */
 .roles-actions {
   display: flex;
   gap: 8px;
@@ -2139,7 +2016,6 @@ table.data.schedules-runs td {
   color: var(--text-dim);
 }
 
-/* Grants tab — per-server permission grants (issue #463, WEBUI_SPEC.md 6.10). */
 .grants .grants-filter {
   max-width: 280px;
   margin-bottom: 12px;
@@ -2165,7 +2041,6 @@ table.data.schedules-runs td {
   font-size: 13px;
 }
 
-/* Community settings — Groups tab (issue #464, WEBUI_SPEC.md 6.10). */
 .groups .group-list {
   list-style: none;
   margin: 0;
@@ -2227,7 +2102,6 @@ table.data.schedules-runs td {
   flex-wrap: wrap;
 }
 
-/* ---------- Admin overview metric tiles (WEBUI_SPEC.md 6.12) ---------- */
 .grid.cols-4 {
   grid-template-columns: repeat(4, 1fr);
 }
@@ -2261,14 +2135,12 @@ table.data.schedules-runs td {
 .admin-overview table.data td.num {
   font-variant-numeric: tabular-nums;
 }
-/* Admin Communities (WEBUI_SPEC.md 6.12) — #476 */
 .admin-communities table.data td.mono {
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 12px;
   color: var(--text-dim);
 }
 
-/* ---------- Admin users table (WEBUI_SPEC.md 6.12, issue #475) ---------- */
 .admin-users table.data {
   width: 100%;
   border-collapse: collapse;
@@ -2288,10 +2160,7 @@ table.data.schedules-runs td {
 .admin-users table.data td.dim {
   color: var(--text-dim);
 }
-/* The email is a long single token with no break opportunity, so under
- * `table-layout: fixed` it would overrun the Status column. Ellipsize it like
- * the dashboard's `td.dim[title]`; the cell's `title` keeps the full address
- * discoverable on hover (#638). */
+/* Ellipsize unbreakable emails under fixed table layout; the hover title retains the full address. */
 .admin-users table.data td.dim[title] {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2312,14 +2181,10 @@ table.data.schedules-runs td {
   margin-top: 12px;
 }
 
-/* Admin global Audit page (issue #479, WEBUI_SPEC.md 6.12). Reuses the .audit
-   filter/table/paging styles; the community filter <select> matches the text
-   inputs alongside it. */
 .admin-audit .audit-filters select {
   min-width: 160px;
 }
 
-/* Admin Versions page (#478): catalog table + JAR pool card. */
 .admin-versions .page-head h2 {
   margin: 0;
 }
@@ -2362,7 +2227,6 @@ table.data.schedules-runs td {
   color: var(--text-faint);
 }
 
-/* ---------- Admin Workers fleet page (WEBUI_SPEC.md 6.12) — #477 ---------- */
 .admin-workers table.data {
   width: 100%;
   border-collapse: collapse;
@@ -2402,10 +2266,6 @@ table.data.schedules-runs td {
   background: rgba(77, 159, 255, 0.08);
 }
 
-/* ---------- Role chips (Members tab, reused by Grants/Groups). Ported from
- * the community-settings mockup `.chip` (docs/ui/mockup/assets/style.css):
- * pill-shaped tokenized chips, an inline unassign affordance, and the assign
- * picker popover. The non-removable variant is just a chip without `.chip-x`. */
 .chips {
   display: flex;
   flex-wrap: wrap;
@@ -2465,7 +2325,6 @@ table.data.schedules-runs td {
   padding: 4px 6px;
 }
 
-/* ---------- Dashboard filter/sort bar (#1123). ---------- */
 .dashboard-filters {
   display: flex;
   flex-wrap: wrap;
@@ -2482,8 +2341,6 @@ table.data.schedules-runs td {
   color: var(--text);
   min-width: 180px;
 }
-/* State filter dropdown (#2239): a "State ▾" trigger opening a checkbox
- * popover of the four semantic buckets. */
 .popover {
   position: relative;
   display: inline-flex;

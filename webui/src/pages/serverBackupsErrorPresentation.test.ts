@@ -1,5 +1,4 @@
 // @vitest-environment node
-// DOM-free contract test: the Backups tab renders the selected key.
 import { describe, expect, it } from "vitest";
 import {
   backupErrorPresentation,
@@ -7,9 +6,6 @@ import {
 } from "./serverBackupsErrorPresentation.ts";
 
 describe("backupErrorPresentation", () => {
-  // `server_busy` (API lock) and `worker_busy` (Worker refusal) are one remedy,
-  // so they share one message (issue #2436). A member under the root
-  // server.properties path names what to remove (issue #2869).
   it.each([
     [409, "server_unsettled", "backups.error.unsettled"],
     [409, "server_not_stopped", "backups.error.serverMustBeStopped"],
@@ -22,8 +18,6 @@ describe("backupErrorPresentation", () => {
     expect(backupErrorPresentation(status, reason)).toBe(key);
   });
 
-  // The reason wins over the bare-503 status arm, which would blame the server
-  // host for an object-store outage (issue #2378).
   it("names the object store for a 503 storage_unavailable", () => {
     expect(backupErrorPresentation(503, "storage_unavailable")).toBe(
       "backups.error.storageUnavailable",
@@ -37,9 +31,6 @@ describe("backupErrorPresentation", () => {
     expect(backupErrorPresentation(status, undefined)).toBe(key);
   });
 
-  // Mutations fall back to the generic message; the listing and statistics
-  // loads pass their own so an unmapped failure still reads as a load failure
-  // (issue #2554).
   it.each([
     ["a mutation", undefined, "backups.error.generic"],
     ["the listing", "backups.loadError", "backups.loadError"],
@@ -54,17 +45,12 @@ describe("backupErrorPresentation", () => {
 });
 
 describe("backupRestoreErrorPresentation", () => {
-  // The server moved out of stopped mid-flight: the restore message names
-  // restoring, not the generic stopped-only operation.
   it("names the restore precondition for server_not_stopped", () => {
     expect(backupRestoreErrorPresentation(409, "server_not_stopped")).toBe(
       "backups.error.notStopped",
     );
   });
 
-  // The backup was recorded unreadable (#2374) — e.g. by a sweep that ran while
-  // the dialog was open: the message names why it cannot be restored rather than
-  // a generic failure the user would retry.
   it("names the unreadable archive for backup_unreadable", () => {
     expect(backupRestoreErrorPresentation(409, "backup_unreadable")).toBe(
       "backups.error.unreadable",

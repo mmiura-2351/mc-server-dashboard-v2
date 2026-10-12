@@ -1,23 +1,7 @@
 import { type ReactNode, useEffect, useRef } from "react";
 import { t } from "../i18n/index.ts";
 
-// Self-built modal primitive (WEBUI_SPEC.md Section 7.4 / 7.6 — no UI kit).
-// The backdrop is a sibling button behind the dialog so clicking it closes the
-// modal, while clicks inside the dialog never reach it. Escape is handled via a
-// document-level listener while open, and focus moves into the dialog on mount.
-//
-// Accessibility hardening (#408):
-// - Focus restore: the element focused when the dialog opened is refocused on
-//   close, so keyboard users land back on the trigger.
-// - Focus trap: Tab / Shift+Tab cycle within the dialog's focusable elements
-//   rather than escaping to the page behind the backdrop.
-// - Stacked dialogs: a module-level stack tracks open dialogs so Escape closes
-//   only the topmost one (the Files history drawer + rollback confirm is a live
-//   stacked case).
-
-// Module-level registry of open dialogs, ordered by open time. The last entry
-// is the topmost; only it reacts to Escape and traps Tab. A symbol per Modal
-// instance keys its slot so unmount removes the right one regardless of order.
+// Only the last open dialog handles Escape and traps Tab; symbols allow out-of-order removal.
 const dialogStack: symbol[] = [];
 
 function focusableWithin(root: HTMLElement): HTMLElement[] {
@@ -38,15 +22,10 @@ interface ModalProps {
 
 export function Modal({ open, title, onClose, children, footer }: ModalProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
-  // Hold the latest onClose so the once-per-open effect's keydown handler never
-  // goes stale, without re-running the effect (and stealing focus back into the
-  // dialog) on every render — callers pass a fresh onClose each render.
+  // Keep onClose current without rerunning the focus effect on every render.
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
 
-  // Runs once per open → close: register on the stack, capture the trigger for
-  // focus restore, move focus into the dialog, and listen on the document for
-  // Escape (topmost only) and Tab (focus trap). Cleanup restores trigger focus.
   useEffect(() => {
     if (!open) {
       return;
@@ -57,7 +36,6 @@ export function Modal({ open, title, onClose, children, footer }: ModalProps) {
     dialogRef.current?.focus();
 
     const onKeyDown = (event: KeyboardEvent) => {
-      // Only the topmost dialog reacts to keys.
       if (dialogStack.at(-1) !== id) {
         return;
       }

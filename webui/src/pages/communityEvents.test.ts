@@ -67,13 +67,12 @@ function notificationFrame(
 
 describe("backoffDelayMs", () => {
   it("doubles the cap each attempt, capped at 30s", () => {
-    // random()=1 would be the open upper bound; use just-below-1 to read the
-    // capped step (full jitter floors random*step).
+    // Use just below 1 because the jitter random source's upper bound is exclusive.
     const r = () => 0.999999;
-    expect(backoffDelayMs(1, r)).toBe(999); // step 1000
-    expect(backoffDelayMs(2, r)).toBe(1999); // step 2000
-    expect(backoffDelayMs(3, r)).toBe(3999); // step 4000
-    expect(backoffDelayMs(6, r)).toBe(31999 - 2000); // step capped: 30000-ish
+    expect(backoffDelayMs(1, r)).toBe(999);
+    expect(backoffDelayMs(2, r)).toBe(1999);
+    expect(backoffDelayMs(3, r)).toBe(3999);
+    expect(backoffDelayMs(6, r)).toBe(31999 - 2000);
     expect(backoffDelayMs(10, r)).toBeLessThanOrEqual(30000);
     expect(backoffDelayMs(10, r)).toBeGreaterThanOrEqual(29999);
   });
@@ -81,8 +80,7 @@ describe("backoffDelayMs", () => {
   it("keeps full jitter within [0, step]", () => {
     expect(backoffDelayMs(1, () => 0)).toBe(0);
     expect(backoffDelayMs(5, () => 0)).toBe(0);
-    // Mid jitter is bounded by the step.
-    expect(backoffDelayMs(3, () => 0.5)).toBe(2000); // 0.5 * 4000
+    expect(backoffDelayMs(3, () => 0.5)).toBe(2000);
   });
 });
 
@@ -315,25 +313,22 @@ describe("CommunityEventsClient", () => {
     const { client, onDown, onOpen } = makeClient();
     client.start();
     const first = MockWebSocket.last();
-    first.open(); // attempt reset to 0
+    first.open();
     expect(onOpen).toHaveBeenCalledTimes(1);
 
     first.fail();
     expect(onDown).toHaveBeenCalledTimes(1);
-    // attempt 1: step 1000, random 0.5 -> 500ms.
     vi.advanceTimersByTime(499);
     expect(MockWebSocket.instances).toHaveLength(1);
     vi.advanceTimersByTime(1);
     expect(MockWebSocket.instances).toHaveLength(2);
 
-    // A second failure before any open escalates the backoff to attempt 2.
     MockWebSocket.last().fail();
-    vi.advanceTimersByTime(999); // step 2000 * 0.5 = 1000
+    vi.advanceTimersByTime(999);
     expect(MockWebSocket.instances).toHaveLength(2);
     vi.advanceTimersByTime(1);
     expect(MockWebSocket.instances).toHaveLength(3);
 
-    // Opening resets the backoff: the next failure is attempt 1 again (500ms).
     MockWebSocket.last().open();
     MockWebSocket.last().fail();
     vi.advanceTimersByTime(500);
@@ -350,7 +345,6 @@ describe("CommunityEventsClient", () => {
     client.close();
     expect(socket.closed).toBe(true);
 
-    // A late close event from the torn-down socket does not reconnect.
     socket.fail();
     vi.advanceTimersByTime(60000);
     expect(MockWebSocket.instances).toHaveLength(1);
@@ -364,7 +358,7 @@ describe("CommunityEventsClient", () => {
     first.open();
     expect(first.protocols).toEqual(["access_token", "tok-1"]);
 
-    setAccessToken("tok-2"); // rotation
+    setAccessToken("tok-2");
     expect(first.closed).toBe(true);
     const second = MockWebSocket.last();
     expect(MockWebSocket.instances).toHaveLength(2);
@@ -372,9 +366,6 @@ describe("CommunityEventsClient", () => {
     client.close();
   });
 
-  // The API closes the socket with 4419 when the token it was opened with
-  // expires (#1862): reconnecting with that token would only fail the
-  // handshake, so the session is refreshed first.
   it("refreshes the session on a 4419 close and reconnects with the fresh token", async () => {
     const refresher = vi.fn(async () => {
       setAccessToken("tok-2");
@@ -395,11 +386,8 @@ describe("CommunityEventsClient", () => {
     client.close();
   });
 
-  // A mid-stream 4401 means the token is no longer accepted (its account was
-  // deactivated or deleted, #3227): the refresh is what ends the session,
-  // where a plain reconnect would fail its handshake forever.
   it("refreshes the session on a 4401 close instead of reconnecting with the rejected token", async () => {
-    const refresher = vi.fn(async () => false); // the session is over
+    const refresher = vi.fn(async () => false);
     setRefresher(refresher);
     const { client } = makeClient();
     client.start();
@@ -414,7 +402,7 @@ describe("CommunityEventsClient", () => {
   });
 
   it("never reconnects with the expired token when the refresh fails", async () => {
-    const refresher = vi.fn(async () => false); // transient: token unchanged
+    const refresher = vi.fn(async () => false);
     setRefresher(refresher);
     const { client } = makeClient();
     client.start();
@@ -423,7 +411,6 @@ describe("CommunityEventsClient", () => {
     MockWebSocket.last().serverClose(4419);
     await vi.advanceTimersByTimeAsync(60000);
 
-    // The refresh is retried on the backoff; the expired token is never offered.
     expect(refresher.mock.calls.length).toBeGreaterThan(1);
     expect(MockWebSocket.instances).toHaveLength(1);
 
@@ -437,9 +424,6 @@ describe("CommunityEventsClient", () => {
     client.close();
   });
 
-  // The socket refreshes through the same session core as the REST client, so
-  // a refresh it began before the session changed must not hand it the old
-  // user's token to reconnect with (#3224).
   it("never reconnects as the previous user when its refresh lands after a new sign-in", async () => {
     const pendingFetches: ((response: Response) => void)[] = [];
     vi.stubGlobal(
@@ -515,7 +499,7 @@ describe("CommunityEventsClient", () => {
     client.start();
     MockWebSocket.last().open();
 
-    setAccessToken("tok-1"); // no-op: same value, no rotation fired
+    setAccessToken("tok-1");
     expect(MockWebSocket.instances).toHaveLength(1);
     client.close();
   });

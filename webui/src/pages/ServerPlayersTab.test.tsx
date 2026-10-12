@@ -69,8 +69,6 @@ function group(over: Record<string, unknown> = {}) {
   };
 }
 
-// Route `api.get` by path: the detail page reads the server object, the Players
-// tab reads the two group lists, and optionally the sessions list.
 function routeGet(opts: {
   attached?: unknown[];
   community?: unknown[];
@@ -90,7 +88,6 @@ function routeGet(opts: {
     if (path === `/api/communities/${CID}/groups`) {
       return Promise.resolve(opts.community ?? []);
     }
-    // Bare server detail fetch.
     return Promise.resolve(serverResponse());
   });
 }
@@ -124,8 +121,7 @@ async function openPlayers() {
 }
 
 describe("ServerPlayersTab", () => {
-  // Keep the events socket "connected" so it never invalidates the detail
-  // query out from under the path-routed get mock (missing WS mocks flaked CI).
+  // Stub the event socket so disconnect-driven refetches cannot race fixture assertions.
   let restoreWs: () => void;
 
   beforeEach(() => {
@@ -156,7 +152,6 @@ describe("ServerPlayersTab", () => {
     expect(await screen.findByText("Admins")).toBeInTheDocument();
     expect(screen.getByText(t("players.kind.op"))).toBeInTheDocument();
     expect(screen.getByText(t("players.kind.whitelist"))).toBeInTheDocument();
-    // Member counts come from the group's player-list length.
     expect(
       screen.getByText(`2 ${t("players.memberCount")}`),
     ).toBeInTheDocument();
@@ -187,9 +182,6 @@ describe("ServerPlayersTab", () => {
   });
 
   it("does not flash the no-groups picker message while the community query is loading", async () => {
-    // attached resolves immediately; community never settles, so community.data
-    // stays undefined. The picker must show the loading message, not the
-    // zero-groups empty state (#665).
     mockApi.get.mockImplementation((path: string) => {
       if (path.endsWith(`/servers/${SID}/groups`)) {
         return Promise.resolve([]);
@@ -242,7 +234,6 @@ describe("ServerPlayersTab", () => {
     await openPlayers();
 
     await screen.findByText("Admins");
-    // Only the not-yet-attached group is offered to attach.
     expect(screen.getByText("Builders")).toBeInTheDocument();
     const attachButtons = screen.getAllByRole("button", {
       name: t("players.attach"),
@@ -301,7 +292,6 @@ describe("ServerPlayersTab", () => {
     expect(
       screen.queryByRole("button", { name: t("players.detach") }),
     ).not.toBeInTheDocument();
-    // The attach picker section is gated on group:manage too.
     expect(
       screen.queryByText(t("players.attachHeading")),
     ).not.toBeInTheDocument();
@@ -378,7 +368,6 @@ describe("ServerPlayersTab Sessions view (issue #961)", () => {
     renderTab();
     await openPlayers();
 
-    // Wait for groups to render so the tab is fully settled.
     await screen.findByText(t("players.heading"));
     expect(screen.queryByText(t("sessions.heading"))).not.toBeInTheDocument();
   });
@@ -413,8 +402,7 @@ describe("ServerPlayersTab Sessions view (issue #961)", () => {
     renderTab();
     await openPlayers();
 
-    // The unknown placeholder appears at least three times (hostname, IP, username).
-    // Wait for the sessions data to render (not just the loading state).
+    // Several fields use the unknown placeholder; wait for session data before counting them.
     await screen.findByText(t("sessions.col.hostname"));
     const unknowns = screen.getAllByText(t("sessions.valueUnknown"));
     expect(unknowns.length).toBeGreaterThanOrEqual(3);
@@ -437,7 +425,6 @@ describe("ServerPlayersTab Sessions view (issue #961)", () => {
 
     const badge = await screen.findByText(t("sessions.source.bedrock"));
     expect(badge).toBeInTheDocument();
-    // The tooltip conveys the flow-based session has no claimed identity.
     expect(badge).toHaveAttribute("title", t("sessions.source.bedrockHint"));
   });
 

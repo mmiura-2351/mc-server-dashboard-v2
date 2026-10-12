@@ -4,11 +4,6 @@ import { clearAccessToken } from "../auth/tokenStore.ts";
 import { t } from "../i18n/index.ts";
 import { renderApp } from "../test/render.tsx";
 
-// Admin Versions page (#478). Driven through the real router + providers via
-// renderApp; a fetch mock dispatches on URL + method so a single case can stand
-// up bootstrap (/users/me, /communities, permissions) plus the version catalog,
-// per-type listings, JAR-pool stats, refresh and GC.
-
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), {
     status: 200,
@@ -45,7 +40,6 @@ const PAPER = { versions: ["1.21.4", "1.21.1"] };
 const JAR_POOL = { count: 14, total_bytes: 2_040_109_466 };
 const GC_RESULT = { scanned: 14, deleted: 3, freed_bytes: 432_013_312 };
 
-// Capture the requests the page issues so the tests can assert refresh/GC shapes.
 let calls: { url: string; method: string }[] = [];
 
 interface MockOverrides {
@@ -121,7 +115,6 @@ describe("admin versions catalog", () => {
 
     const vanillaRow = (await screen.findByText("vanilla")).closest("tr");
     if (vanillaRow === null) throw new Error("no vanilla row");
-    // The per-type version lists load after the type list, so wait for the count.
     expect(await within(vanillaRow).findByText("3")).toBeInTheDocument();
     expect(within(vanillaRow).getByText("1.21.4")).toBeInTheDocument();
 
@@ -218,7 +211,6 @@ describe("admin versions JAR pool", () => {
     });
     const poolCard = poolHeading.closest<HTMLElement>(".jar-pool");
     if (poolCard === null) throw new Error("no jar-pool card");
-    // Stats load after the heading renders; wait for the count.
     expect(await within(poolCard).findByText("14")).toBeInTheDocument();
     expect(within(poolCard).getByText("1.9 GiB")).toBeInTheDocument();
   });
@@ -246,7 +238,6 @@ describe("admin versions JAR pool", () => {
         ),
       ).toBe(true);
     });
-    // freed_bytes 432013312 → "412.0 MiB"; deleted 3.
     expect(
       await screen.findByText(
         t("admin.versions.gcDone", { bytes: "412.0 MiB", count: 3 }),
@@ -279,7 +270,6 @@ describe("admin versions JAR pool", () => {
 
     renderApp({ path: "/admin/versions" });
 
-    // The pool card renders its own load error independent of the catalog.
     const poolHeading = await screen.findByRole("heading", {
       name: t("admin.versions.jarPool"),
     });

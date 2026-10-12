@@ -1,5 +1,4 @@
 // @vitest-environment node
-// DOM-free logic test; runs under Node to skip per-file jsdom setup (issue #1734).
 import { describe, expect, it } from "vitest";
 import {
   ADMIN_COMMUNITIES_KEY,
@@ -7,11 +6,7 @@ import {
   adminCommunitiesPickerKey,
 } from "./adminQueryKeys.ts";
 
-// Regression: the Communities page (list, limit=50) and the Audit community
-// picker (limit=100) once shared the bare key ["admin","communities",0] at the
-// first page, so React Query deduped them and served one the other's
-// wrong-limit data. The two builders must never collide, yet both must stay
-// under the shared prefix so a single invalidate refreshes both.
+// Different page sizes must not collide, but both keys must share an invalidation prefix.
 describe("admin community query keys", () => {
   it.each([
     [

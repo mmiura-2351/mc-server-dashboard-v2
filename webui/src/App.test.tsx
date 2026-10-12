@@ -7,12 +7,7 @@ import { t } from "./i18n/index.ts";
 import { useActiveCommunity } from "./permissions/ActiveCommunityProvider.tsx";
 import { renderApp } from "./test/render.tsx";
 
-// Suspend the account route indefinitely so the lazy-chunk loading frame is
-// observable: the component throws a never-resolving promise on render, exactly
-// as React.lazy does while its chunk is in flight. Lets the test assert which
-// boundary catches the suspension — the shell's inner one, not an outer one.
-// (Account is a shell route no other case in this file visits, so the broad
-// module mock does not disturb the dashboard-rendering tests.)
+// Suspend an otherwise unused route to test the shell's loading boundary without affecting dashboard cases.
 vi.mock("./pages/AccountPage.tsx", () => {
   const pending = new Promise<void>(() => {});
   return {
@@ -22,8 +17,6 @@ vi.mock("./pages/AccountPage.tsx", () => {
   };
 });
 
-// The bootstrap refresh decides signed-in vs signed-out. A 200 token response
-// signs in; a 401 signs out; a pending promise keeps it "bootstrapping".
 function tokenResponse(): Response {
   return new Response(
     JSON.stringify({
@@ -41,9 +34,6 @@ function jsonResponse(body: unknown): Response {
   });
 }
 
-// Route the bootstrap refresh and the community list (and its per-community
-// permission fetch) so the shell can resolve an active community. The shell's
-// switcher reads `GET /communities` via the shared ActiveCommunityProvider.
 function signedInWith(communities: Array<{ id: string; name: string }>) {
   fetchMock.mockImplementation((input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
@@ -60,8 +50,7 @@ function signedInWith(communities: Array<{ id: string; name: string }>) {
   });
 }
 
-// Surfaces the live URL so the deep-link redirect can be asserted without
-// depending on a guarded page's content (DashboardPage is owned elsewhere).
+// Expose the URL without mounting a guarded page to observe deep-link redirects.
 function LocationProbe() {
   const { pathname, search } = useLocation();
   return <span data-testid="url">{`${pathname}${search}`}</span>;
@@ -100,16 +89,13 @@ describe("Landing communities error state", () => {
 
     renderAt("/");
 
-    // The error message appears in the Landing content area (the CommunitySwitcher
-    // also shows the error, so multiple elements match — use findAllByText).
+    // Both the switcher and landing page show this error, so multiple matches are expected.
     const errors = await screen.findAllByText(t("shell.communitiesError"));
     expect(errors.length).toBeGreaterThanOrEqual(1);
-    // At least one retry button is present.
     const retries = screen.getAllByRole("button", {
       name: t("shell.communitiesRetry"),
     });
     expect(retries.length).toBeGreaterThanOrEqual(1);
-    // The loading indicator must not be showing.
     expect(screen.queryByText(t("auth.loading"))).not.toBeInTheDocument();
   });
 
@@ -135,12 +121,10 @@ describe("Landing communities error state", () => {
 
     renderApp({ path: "/", extras: <LocationProbe /> });
 
-    // Wait for the error state (multiple retry buttons: switcher + landing).
     const retryButtons = await screen.findAllByRole("button", {
       name: t("shell.communitiesRetry"),
     });
 
-    // Click the first retry — the second attempt succeeds and redirects to the dashboard.
     fireEvent.click(retryButtons[0]);
 
     await waitFor(() =>
@@ -151,9 +135,7 @@ describe("Landing communities error state", () => {
 
 describe("App route guards", () => {
   it("shows a neutral loading state while the session bootstraps", async () => {
-    // Hold the bootstrap refresh in flight, then release it so the shared
-    // single-flight promise in the session module resolves and does not leak
-    // a pending state into the next test.
+    // Release the bootstrap request before the next test so shared session state cannot retain it.
     let release: (r: Response) => void = () => {};
     fetchMock.mockImplementation(
       () =>
@@ -165,7 +147,6 @@ describe("App route guards", () => {
     renderAt("/communities/demo");
 
     expect(screen.getByText(t("auth.loading"))).toBeInTheDocument();
-    // No redirect flash to /login while bootstrapping.
     expect(
       screen.queryByRole("button", { name: t("login.submit") }),
     ).not.toBeInTheDocument();
@@ -188,7 +169,6 @@ describe("App route guards", () => {
         screen.getByRole("button", { name: t("login.submit") }),
       ).toBeInTheDocument(),
     );
-    // The guarded dashboard never renders.
     expect(
       screen.queryByRole("heading", { name: t("page.dashboard") }),
     ).not.toBeInTheDocument();
@@ -204,7 +184,6 @@ describe("App route guards", () => {
         screen.getByRole("heading", { name: t("page.dashboard") }),
       ).toBeInTheDocument(),
     );
-    // The community-scoped nav resolves once the community list arrives.
     await waitFor(() =>
       expect(
         screen.getByRole("link", { name: t("nav.dashboard") }),
@@ -228,8 +207,6 @@ describe("App route guards", () => {
   });
 
   it("returns to the requested deep link (path + query) after login", async () => {
-    // Bootstrap signed-out, but let /auth/login succeed and the community list
-    // resolve so the shell can render the originally requested route.
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input.toString();
       if (url === "/api/auth/session") {
@@ -246,7 +223,6 @@ describe("App route guards", () => {
 
     renderAt("/communities/demo/servers/s1?tab=logs");
 
-    // Bounced to /login with the deep link stashed in router state.
     const button = await screen.findByRole("button", {
       name: t("login.submit"),
     });
@@ -272,10 +248,6 @@ describe("App route guards", () => {
 
     renderAt("/account");
 
-    // The account route suspends (mocked above), so the content area shows the
-    // loading fallback — but the shell chrome must stay mounted. With the
-    // Suspense boundary inside AppShell around <Outlet>, the sidebar nav renders
-    // alongside the fallback instead of being torn down to the bare fallback.
     await waitFor(() =>
       expect(
         screen.getByRole("link", { name: t("nav.dashboard") }),
@@ -287,9 +259,7 @@ describe("App route guards", () => {
   it("never flashes NoCommunityPage while the default community resolves", async () => {
     signedInWith([{ id: "alpha", name: "Alpha" }]);
 
-    // A probe that records every (communityId, communities) pair it observes
-    // across renders. If the provider exposes a frame where communities are
-    // loaded but communityId is still null, this probe captures it (issue #2014).
+    // Record every render to catch a transient no-community frame after the list has loaded.
     function CommunityProbe() {
       const { communityId, communities } = useActiveCommunity();
       const log = useRef<Array<{ id: string | null; len: number | undefined }>>(
@@ -315,8 +285,6 @@ describe("App route guards", () => {
       expect(screen.getByTestId("url").textContent).toBe("/communities/alpha"),
     );
 
-    // Parse the render log and verify no frame had communities loaded (len > 0)
-    // while communityId was null — that would be the NoCommunityPage flash.
     const log = JSON.parse(
       screen.getByTestId("community-log").textContent ?? "[]",
     );

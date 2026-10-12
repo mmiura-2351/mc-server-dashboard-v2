@@ -1,17 +1,4 @@
-/**
- * 403 mutation glue (WEBUI_SPEC.md 7.3 / 7.4).
- *
- * Later phases pass any caught error through `onForbidden(error)` in their
- * mutation/error handlers. On a 403 `ApiError` it:
- *   1. toasts the missing permission (named when the body carries the
- *      `permission` extension member, generic otherwise), and
- *   2. re-fetches the active community's capabilities, since a 403 means the
- *      cached set may be stale.
- * Non-403 errors pass through untouched so callers keep their own handling.
- *
- * Returns whether it handled the error, so a caller can skip its own toast for
- * a 403 it already surfaced here.
- */
+/** On 403, show the missing permission and invalidate capabilities; return whether the error was handled. */
 
 import { useQueryClient } from "@tanstack/react-query";
 import { useCallback } from "react";

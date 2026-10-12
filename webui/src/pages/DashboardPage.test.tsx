@@ -20,8 +20,7 @@ import { serversKey } from "./useCommunityEvents.ts";
 
 const CID = "c1";
 
-// The dashboard mounts the live community-events WS; back it with the mock so
-// jsdom (which has no WebSocket) does not throw on render.
+// Stub WebSocket because the dashboard opens its event stream on mount.
 let restoreWebSocket: () => void;
 
 const mockApi = vi.hoisted(() => ({
@@ -37,7 +36,6 @@ vi.mock("../api/client.ts", async () => {
   return { ...actual, api: mockApi };
 });
 
-// A controllable active community + permission resolver per test.
 let mockCan: Can = () => true;
 vi.mock("../permissions/ActiveCommunityProvider.tsx", () => ({
   useActiveCommunity: () => ({
@@ -71,9 +69,7 @@ function server(overrides: Record<string, unknown> = {}) {
   };
 }
 
-// The page derives its community from the URL `:cid` (#784), so mount it under a
-// matching route. Default to the member community; pass another cid to exercise
-// the not-found state for a community outside the caller's membership.
+// Mount under a community URL because the page derives its active target from :cid.
 function renderPage(path = `/communities/${CID}`) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -92,8 +88,6 @@ function renderPage(path = `/communities/${CID}`) {
   return { ...result, queryClient };
 }
 
-// Surfaces the live URL search string so a test can assert the filter param
-// round-trip without reaching into router internals.
 function LocationProbe({ onChange }: { onChange: (search: string) => void }) {
   const location = useLocation();
   onChange(location.search);
@@ -106,7 +100,6 @@ beforeEach(() => {
   mockApi.get.mockReset();
   mockApi.post.mockReset();
   mockCan = () => true;
-  // The view toggle persists in localStorage; start each test from the default.
   localStorage.clear();
 });
 
@@ -123,13 +116,9 @@ describe("DashboardPage list", () => {
     expect(await screen.findByText("survival")).toBeInTheDocument();
     expect(screen.getByText("paper 1.21.6")).toBeInTheDocument();
     expect(screen.getByText(":25565")).toBeInTheDocument();
-    // The worker chip is labelled and the id abbreviated (#644): "worker-a"
-    // shortens to its leading segment.
     expect(
       screen.getByText(`${t("dashboard.col.worker")}: worker`),
     ).toBeInTheDocument();
-    // The state filter is a closed dropdown now (#2239), so only the server
-    // card renders the "running" pill.
     expect(screen.getAllByText(t("dashboard.state.running"))).toHaveLength(1);
   });
 
@@ -169,18 +158,15 @@ describe("DashboardPage list", () => {
     const { queryClient } = renderPage();
     await screen.findByText("survival");
 
-    // Simulate a transient API outage: the next background refetch fails.
     mockApi.get.mockRejectedValue(
       new ApiError(500, { reason: "internal_error" }),
     );
     await act(() => queryClient.invalidateQueries());
-    // The query-state notification lands a task after invalidateQueries
-    // settles; flush it so the assertion sees the post-refetch render.
+    // Flush the task that delivers query-state notifications after invalidation settles.
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
 
-    // The cached list stays on screen instead of a full-page error.
     expect(screen.getByText("survival")).toBeInTheDocument();
     expect(
       screen.queryByText(t("dashboard.loadError")),
@@ -200,7 +186,6 @@ describe("DashboardPage list", () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
 
-    // The API comes back: the next refetch replaces the stale list.
     mockApi.get.mockResolvedValue([server({ name: "creative" })]);
     await act(() => queryClient.invalidateQueries());
 
@@ -232,14 +217,12 @@ describe("DashboardPage community-not-found (#784)", () => {
       await screen.findByText(t("community.notFound.title")),
     ).toBeInTheDocument();
     expect(screen.getByText(t("community.notFound.body"))).toBeInTheDocument();
-    // It must not silently fall back to listing the member community's servers.
     expect(mockApi.get).not.toHaveBeenCalled();
   });
 });
 
 describe("DashboardPage permission-gated actions", () => {
   it("renders only the actions the caller may perform", async () => {
-    // A running server: stop + restart apply. Permit stop only.
     mockCan = (code) => code === "server:stop";
     mockApi.get.mockResolvedValue([server({ observed_state: "running" })]);
     renderPage();
@@ -257,7 +240,6 @@ describe("DashboardPage permission-gated actions", () => {
   });
 
   it("disables an action that does not apply to the current state", async () => {
-    // Stopped server: stop does not apply even though it is permitted.
     mockApi.get.mockResolvedValue([
       server({ observed_state: "stopped", desired_state: "stopped" }),
     ]);
@@ -289,7 +271,6 @@ describe("DashboardPage lifecycle actions", () => {
         `/api/communities/${CID}/servers/s1/start`,
       ),
     );
-    // The list refetches after the action settles.
     await waitFor(() => expect(mockApi.get).toHaveBeenCalledTimes(2));
   });
 
@@ -391,9 +372,6 @@ describe("DashboardPage lifecycle actions", () => {
     renderPage();
 
     await screen.findByText("survival");
-    // Both the start and restart buttons carry the "Restart" label, but only
-    // the start button has the `.success` class. Find the success-styled one
-    // to confirm the start action was relabeled.
     const restartButtons = screen.getAllByRole("button", {
       name: t("dashboard.startCrashed"),
     });
@@ -404,11 +382,6 @@ describe("DashboardPage lifecycle actions", () => {
   });
 
   it("drives only the clicked row through the optimistic lifecycle", async () => {
-    // The transition state machine itself is covered in
-    // useLifecycleMutation.test.tsx; this pins the dashboard's wiring: the row's
-    // own server id and list cache, the live status frame landing in that same
-    // cache, its buttons held while in flight, and its toast receiving the verb
-    // (worker_busy reads differently for stop).
     mockApi.get.mockResolvedValue([
       server({ id: "s1", name: "alpha" }),
       server({ id: "s2", name: "bravo" }),
@@ -437,7 +410,6 @@ describe("DashboardPage lifecycle actions", () => {
     expect(mockApi.post).toHaveBeenCalledWith(
       `/api/communities/${CID}/servers/s2/stop`,
     );
-    // The pill reads the in-flight verb, so pin the list-cache write directly.
     expect(
       queryClient
         .getQueryData<{ id: string; observed_state: string }[]>(serversKey(CID))
@@ -451,8 +423,6 @@ describe("DashboardPage lifecycle actions", () => {
       within(alpha).getByRole("button", { name: t("dashboard.stop") }),
     ).toBeEnabled();
 
-    // bravo crashes mid-flight: stop applies again, but the open request still
-    // holds its buttons.
     act(() => {
       MockWebSocket.last().open();
       MockWebSocket.last().message({
@@ -466,14 +436,13 @@ describe("DashboardPage lifecycle actions", () => {
       within(bravo).getByRole("button", { name: t("dashboard.stop") }),
     ).toBeDisabled();
 
-    // Hang the settle refetch so the pill below is the cache, not a reload.
+    // Keep refetch pending so the assertion observes the live cache update.
     mockApi.get.mockReturnValue(new Promise(() => {}));
     act(() => rejectPost(new ApiError(409, { reason: "worker_busy" })));
 
     expect(
       await screen.findByText(t("dashboard.lifecycle.stopPending")),
     ).toBeInTheDocument();
-    // The failed stop does not roll the newer crash back to "running".
     expect(within(bravo).getByText(t("dashboard.state.crashed"))).toBeVisible();
     expect(
       within(bravo).getByRole("button", { name: t("dashboard.stop") }),
@@ -487,7 +456,6 @@ describe("DashboardPage live status", () => {
     renderPage();
 
     await screen.findByText("survival");
-    // Only the server card renders the state pill (the filter is a dropdown).
     expect(screen.getAllByText(t("dashboard.state.stopped"))).toHaveLength(1);
 
     const socket = MockWebSocket.last();
@@ -499,11 +467,9 @@ describe("DashboardPage live status", () => {
       server_id: "s1",
     });
 
-    // After the status event, the server pill changes to "running".
     await waitFor(() =>
       expect(screen.getAllByText(t("dashboard.state.running"))).toHaveLength(1),
     );
-    // No second list fetch: the cache was patched in place.
     expect(mockApi.get).toHaveBeenCalledTimes(1);
   });
 
@@ -529,14 +495,12 @@ describe("DashboardPage view toggle (#541)", () => {
     renderPage();
 
     await screen.findByText("survival");
-    // Cards by default: no table role rendered.
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
 
     fireEvent.click(
       screen.getByRole("button", { name: t("dashboard.view.table") }),
     );
 
-    // The table view exposes column headers and the same row data.
     expect(
       screen.getByRole("columnheader", { name: /Name/ }),
     ).toBeInTheDocument();
@@ -554,7 +518,6 @@ describe("DashboardPage view toggle (#541)", () => {
     expect(screen.getByRole("table")).toBeInTheDocument();
     first.unmount();
 
-    // A fresh mount (simulating a reload) restores the table view.
     renderPage();
     await screen.findByText("survival");
     expect(screen.getByRole("table")).toBeInTheDocument();
@@ -572,14 +535,11 @@ describe("DashboardPage view toggle (#541)", () => {
       screen.getByRole("button", { name: t("dashboard.view.table") }),
     );
 
-    // Both servers, plus the shared row data: state pill, type/version,
-    // port, worker.
     expect(screen.getByText("survival")).toBeInTheDocument();
     expect(screen.getByText("creative")).toBeInTheDocument();
     expect(screen.getAllByText(t("dashboard.state.running"))).toHaveLength(2);
     expect(screen.getAllByText("paper 1.21.6")).toHaveLength(2);
     expect(screen.getAllByText("25565")).toHaveLength(2);
-    // The worker id is abbreviated to its leading segment (#644).
     expect(screen.getAllByText("worker")).toHaveLength(2);
   });
 
@@ -618,11 +578,7 @@ describe("DashboardPage server addresses (issues #982, #1543)", () => {
     expect(screen.queryByText(t("dashboard.col.port"))).not.toBeInTheDocument();
   });
 
-  // Display, copy and reset behavior live in ServerAddressBadges.test.tsx; this
-  // pins what the page owns: each row hands its own server's addresses to the
-  // card and table placements, with the port fallback when relay is off.
   it("wires each server's Java and Bedrock addresses into its card and table row", async () => {
-    // Joining needs no permission: a caller with no actions still sees them.
     mockCan = () => false;
     mockApi.get.mockResolvedValue([
       server({
@@ -698,7 +654,6 @@ describe("DashboardPage filter and sort (#1123)", () => {
     await screen.findByText("survival");
     expect(screen.getByText("creative")).toBeInTheDocument();
 
-    // Open the state dropdown and check the "Running" bucket.
     fireEvent.click(
       screen.getByRole("button", { name: t("dashboard.filter.state") }),
     );
@@ -713,8 +668,6 @@ describe("DashboardPage filter and sort (#1123)", () => {
   });
 
   it("its bucket covers a server in an unknown observed state (#2239)", async () => {
-    // `unknown` folds into the `other` bucket, closing the gap where an unknown
-    // server was hidden by any active filter.
     mockApi.get.mockResolvedValue([
       server({ id: "s1", name: "survival", observed_state: "running" }),
       server({ id: "s2", name: "mystery", observed_state: "bogus" }),
@@ -732,7 +685,6 @@ describe("DashboardPage filter and sort (#1123)", () => {
       }),
     );
 
-    // Only the unknown-state server survives the `other` filter.
     expect(screen.getByText("mystery")).toBeInTheDocument();
     expect(screen.queryByText("survival")).not.toBeInTheDocument();
   });
@@ -747,7 +699,6 @@ describe("DashboardPage filter and sort (#1123)", () => {
     const trigger = screen.getByRole("button", {
       name: t("dashboard.filter.state"),
     });
-    // No badge while nothing is selected.
     expect(trigger).not.toHaveTextContent("1");
 
     fireEvent.click(trigger);
@@ -761,10 +712,8 @@ describe("DashboardPage filter and sort (#1123)", () => {
         name: t("dashboard.filter.bucket.stopped"),
       }),
     );
-    // Two buckets selected → badge reads "2".
     expect(trigger).toHaveTextContent("2");
 
-    // Clear resets the selection and hides the badge again.
     fireEvent.click(
       screen.getByRole("button", { name: t("dashboard.filter.clear") }),
     );
@@ -778,7 +727,6 @@ describe("DashboardPage filter and sort (#1123)", () => {
     renderPage();
 
     await screen.findByText("survival");
-    // Zero selected: the plain state label, no count in the accessible name.
     fireEvent.click(
       screen.getByRole("button", { name: t("dashboard.filter.state") }),
     );
@@ -788,8 +736,6 @@ describe("DashboardPage filter and sort (#1123)", () => {
       }),
     );
 
-    // One selected: the count is announced through the accessible name, and the
-    // plain (countless) name no longer matches.
     await act(async () => {});
     expect(
       screen.getByRole("button", {
@@ -811,13 +757,11 @@ describe("DashboardPage filter and sort (#1123)", () => {
         desired_state: "stopped",
       }),
     ]);
-    // `state=starting` is a pre-#2239 raw state name, not a bucket key.
+    // Legacy bookmarks may contain raw state names that are not current bucket keys.
     const { container } = renderPage(`/communities/${CID}?state=starting`);
 
     await screen.findByText("survival");
-    // The unrecognised token hides nothing…
     expect(screen.getByText("creative")).toBeInTheDocument();
-    // …and contributes nothing to the badge count.
     const trigger = container.querySelector(".filter-state-trigger");
     expect(trigger).not.toHaveTextContent("1");
   });
@@ -837,9 +781,7 @@ describe("DashboardPage filter and sort (#1123)", () => {
     );
 
     await screen.findByText("survival");
-    // The valid `running` bucket still filters; stopped `creative` is hidden.
     expect(screen.queryByText("creative")).not.toBeInTheDocument();
-    // Only the one valid bucket is counted, not the stale token.
     const trigger = container.querySelector(".filter-state-trigger");
     expect(trigger).toHaveTextContent("1");
     expect(trigger).not.toHaveTextContent("2");
@@ -887,7 +829,6 @@ describe("DashboardPage filter and sort (#1123)", () => {
       }),
     );
 
-    // The param carries bucket keys in canonical order, not raw states.
     expect(new URLSearchParams(search).get("state")).toBe("running,crashed");
   });
 
@@ -916,13 +857,11 @@ describe("DashboardPage filter and sort (#1123)", () => {
     renderPage();
 
     await screen.findByText("survival");
-    // Switch to table view to inspect row order.
     fireEvent.click(
       screen.getByRole("button", { name: t("dashboard.view.table") }),
     );
 
     const rows = screen.getAllByRole("row");
-    // Row 0 is the header; rows 1+ are data rows.
     expect(rows[1]).toHaveTextContent("creative");
     expect(rows[2]).toHaveTextContent("survival");
   });
@@ -944,11 +883,9 @@ describe("DashboardPage filter and sort (#1123)", () => {
       screen.getByRole("button", { name: t("dashboard.view.table") }),
     );
 
-    // Click the State column header to sort by state.
     fireEvent.click(screen.getByRole("columnheader", { name: /State/ }));
 
     const rows = screen.getAllByRole("row");
-    // "running" < "stopped" alphabetically, so running first.
     expect(rows[1]).toHaveTextContent("survival");
     expect(rows[2]).toHaveTextContent("creative");
   });
@@ -965,12 +902,10 @@ describe("DashboardPage filter and sort (#1123)", () => {
       screen.getByRole("button", { name: t("dashboard.view.table") }),
     );
 
-    // Default is name ascending: alpha first.
     let rows = screen.getAllByRole("row");
     expect(rows[1]).toHaveTextContent("alpha");
     expect(rows[2]).toHaveTextContent("zulu");
 
-    // Click name header to toggle to descending.
     fireEvent.click(screen.getByRole("columnheader", { name: /Name/ }));
     rows = screen.getAllByRole("row");
     expect(rows[1]).toHaveTextContent("zulu");
@@ -988,13 +923,11 @@ describe("DashboardPage filter and sort (#1123)", () => {
     fireEvent.click(
       screen.getByRole("button", { name: t("dashboard.view.table") }),
     );
-    // Toggle to descending.
     fireEvent.click(screen.getByRole("columnheader", { name: /Name/ }));
     let rows = screen.getAllByRole("row");
     expect(rows[1]).toHaveTextContent("zulu");
     first.unmount();
 
-    // Remount: sort preference is restored from localStorage.
     renderPage();
     await screen.findByText("alpha");
     fireEvent.click(
@@ -1010,7 +943,6 @@ describe("DashboardPage filter and sort (#1123)", () => {
     renderPage();
 
     await screen.findByText("survival");
-    // The card view sort control shows the default "Name ▲".
     expect(screen.getByRole("button", { name: /Name.*▲/ })).toBeInTheDocument();
   });
 
@@ -1029,7 +961,6 @@ describe("DashboardPage filter and sort (#1123)", () => {
 
     await screen.findByText("beta-survival");
 
-    // Filter to running only via the state dropdown.
     fireEvent.click(
       screen.getByRole("button", { name: t("dashboard.filter.state") }),
     );
@@ -1039,16 +970,13 @@ describe("DashboardPage filter and sort (#1123)", () => {
       }),
     );
 
-    // gamma-lobby (stopped) is filtered out.
     expect(screen.queryByText("gamma-lobby")).not.toBeInTheDocument();
 
-    // Switch to table view to check sort order.
     fireEvent.click(
       screen.getByRole("button", { name: t("dashboard.view.table") }),
     );
 
     const rows = screen.getAllByRole("row");
-    // Sorted by name ascending: alpha-creative before beta-survival.
     expect(rows[1]).toHaveTextContent("alpha-creative");
     expect(rows[2]).toHaveTextContent("beta-survival");
   });
@@ -1058,7 +986,6 @@ describe("DashboardPage filter and sort (#1123)", () => {
     renderPage();
 
     await screen.findByText(t("dashboard.empty"));
-    // The filter bar should not render when there are no servers at all.
     expect(
       screen.queryByPlaceholderText(t("dashboard.filter.search")),
     ).not.toBeInTheDocument();
@@ -1074,31 +1001,24 @@ describe("DashboardPage filter and sort (#1123)", () => {
         desired_state: "stopped",
       }),
     ]);
-    // Pass search and state filter via URL query params.
     renderPage(`/communities/${CID}?search=surv&state=running`);
 
     await screen.findByText("survival");
-    // The search input should be pre-filled.
     const searchInput = screen.getByPlaceholderText(
       t("dashboard.filter.search"),
     );
     expect(searchInput).toHaveValue("surv");
-    // "creative" (stopped) should be hidden by both the name and state filter.
     expect(screen.queryByText("creative")).not.toBeInTheDocument();
   });
 });
 
 describe("DashboardPage desired/observed drift (issue #2443)", () => {
   it("marks a drifting row with the same affordance the detail page shows (cards view)", async () => {
-    // The concrete failed-stop case (#2435): desired=stopped is committed while
-    // the process keeps running, so observed=running. The list must surface the
-    // pending intent using the detail page's exact rule + string.
     mockApi.get.mockResolvedValue([
       server({ observed_state: "running", desired_state: "stopped" }),
     ]);
     renderPage();
 
-    // The state pill still reads "running"; the drift mark rides alongside it.
     expect(await screen.findByText("survival")).toBeInTheDocument();
     expect(screen.getByText(t("dashboard.state.running"))).toBeInTheDocument();
     expect(screen.getByText(t("serverDetail.converging"))).toBeInTheDocument();
@@ -1111,8 +1031,7 @@ describe("DashboardPage desired/observed drift (issue #2443)", () => {
     renderPage();
 
     await screen.findByText("survival");
-    // Flush the react-query settle microtask before the negative assertion so a
-    // late render cannot re-introduce the mark after the check.
+    // Flush query notifications before asserting absence so a delayed render cannot hide a regression.
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
@@ -1136,10 +1055,6 @@ describe("DashboardPage desired/observed drift (issue #2443)", () => {
   });
 
   it("keeps the drift mark on a drifting row that passes the observed-state bucket filter", async () => {
-    // s1 is drifting toward stopped but still observed running; s2 is settled
-    // stopped. Filtering to the OBSERVED bucket (running) must keep s1 visible
-    // with its drift mark, and adding the mark must not change which rows pass:
-    // the settled stopped server is still filtered out.
     mockApi.get.mockResolvedValue([
       server({
         id: "s1",

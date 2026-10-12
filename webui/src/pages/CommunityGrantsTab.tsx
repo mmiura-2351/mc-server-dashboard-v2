@@ -21,11 +21,7 @@ type GrantResponse = components["schemas"]["GrantResponse"];
 type MemberResponse = components["schemas"]["MemberResponse"];
 type ServerResponse = components["schemas"]["ServerResponse"];
 
-// Grants are per-resource and resource_type is always `server` (WEBUI_SPEC.md
-// 2.2), so the permission picker is restricted to the per-server resource
-// families the API's grantable set (GRANT_PERMISSIONS_BY_RESOURCE_TYPE) allows —
-// server/file/backup/plugin/schedule (#1858). Derived from the typed catalog so
-// the offered codes can never drift from it.
+// Resource grants allow only server-scoped permission families, derived from the typed catalog.
 const GRANTABLE_FAMILIES = [
   "server",
   "file",
@@ -42,10 +38,6 @@ function grantsKey(communityId: string, userId: string) {
   return ["communities", communityId, "grants", userId] as const;
 }
 
-// Grants tab (WEBUI_SPEC.md 6.10): list per-server permission grants with a
-// member filter, create a grant (member -> server -> codes), revoke with a
-// typed confirm. List is gated by `grant:read`, create/revoke by `grant:manage`
-// (the API gates them there); 403s route through onForbidden.
 export function CommunityGrantsTab({
   communityId,
   can,
@@ -58,11 +50,7 @@ export function CommunityGrantsTab({
   const [createOpen, setCreateOpen] = useState(false);
   const [revoking, setRevoking] = useState<GrantResponse | null>(null);
 
-  // Members and servers label the grant rows (the grant payload carries only
-  // ids) and feed the create-flow pickers. These are display-only secondary
-  // reads under different gates (`member:read` / `server:read`) than the tab's
-  // `grant:read` primary read, so a 403 degrades to an empty list (raw-id
-  // fallback) via `labelQueryFn` instead of failing the whole tab (#471).
+  // Label reads use different permissions from the grant list; on 403, retain rows with raw IDs.
   const members = useQuery({
     queryKey: membersKeys.list(communityId),
     queryFn: labelQueryFn(
@@ -77,9 +65,7 @@ export function CommunityGrantsTab({
     ),
   });
   const servers = useQuery({
-    // Use a "grants-labels" suffix so a 403→[] fallback is isolated to this
-    // query and does not pollute the shared ["communities", cid, "servers"] key
-    // that DashboardPage and CommunityGroupsTab consume (#791).
+    // Isolate the 403-to-empty label fallback from shared server-list cache entries.
     queryKey: ["communities", communityId, "servers", "grants-labels"] as const,
     queryFn: labelQueryFn(
       ({ signal }: { signal: AbortSignal }) =>
@@ -99,8 +85,6 @@ export function CommunityGrantsTab({
       const base = apiPath("/api/communities/{community_id}/grants", {
         community_id: communityId,
       });
-      // `?user_id=` is a schema query param, not part of the path key; append it
-      // to the interpolated path while keeping the path-literal type.
       const url =
         filterUserId === ""
           ? base
@@ -148,9 +132,7 @@ export function CommunityGrantsTab({
   ) {
     return <p className="sub">{t("communitySettings.grants.loading")}</p>;
   }
-  // Error only when there is nothing to show (an initial load failed). A
-  // failed background refetch retains `data`, so the cached list keeps
-  // rendering through transient API blips (#1797).
+  // Retain cached content when only a background refetch fails.
   if (
     grantsState.kind === "error" ||
     membersState.kind === "error" ||

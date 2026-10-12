@@ -38,9 +38,7 @@ function setup() {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
-  // Counts resync requests by call. (A cache-event spy would undercount here:
-  // with no observer to refetch and clear `isInvalidated`, only the first
-  // invalidation of a query emits an "invalidate" event.)
+  // Count invalidation calls; cache events emit only the first while isInvalidated remains set without an observer.
   const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
   const wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
@@ -230,7 +228,6 @@ describe("useServerEvents", () => {
       }
     });
     expect(state.metrics).toHaveLength(METRICS_WINDOW);
-    // The oldest five were dropped: the window starts at sample 5.
     expect(state.metrics[0].cpuMillis).toBe(5);
     expect(state.metrics.at(-1)?.cpuMillis).toBe(METRICS_WINDOW + 4);
   });
@@ -245,8 +242,6 @@ describe("useServerEvents", () => {
     });
     expect(state.metrics).toHaveLength(1);
 
-    // The server stops mid-view: drop the stale samples so the strip can fall
-    // back to the idle copy instead of showing frozen numbers forever.
     act(() => {
       MockWebSocket.last().message(
         frame("status", { state: "stopped", detail: "" }),
@@ -318,8 +313,6 @@ describe("useServerEvents", () => {
   });
 
   it("keeps the status detail across a snapshot of the same state", () => {
-    // A reconnect's snapshot carries no detail (it is not persisted); the crash
-    // reason the live transition carried still describes the state.
     setup();
     act(() => {
       MockWebSocket.last().open();
@@ -387,7 +380,6 @@ describe("useServerEvents", () => {
       queryKey: serverKey(CID, SID),
     });
 
-    // Reopen resyncs once: frames from the down window are never replayed.
     invalidateSpy.mockClear();
     act(() => {
       vi.advanceTimersByTime(30000);
@@ -396,7 +388,6 @@ describe("useServerEvents", () => {
     expect(state.degraded).toBe(false);
     expect(invalidateSpy).toHaveBeenCalledTimes(1);
 
-    // No log/metrics polling: advancing time issues no further refetches.
     invalidateSpy.mockClear();
     act(() => {
       vi.advanceTimersByTime(60000);
@@ -417,8 +408,6 @@ describe("useServerEvents", () => {
     act(() => {
       MockWebSocket.last().fail();
     });
-    // The onDown fallback refetched at drop time; the open must resync again
-    // because up to a full backoff window has passed since.
     invalidateSpy.mockClear();
     act(() => {
       vi.advanceTimersByTime(30000);
@@ -468,11 +457,11 @@ describe("useServerEvents", () => {
     invalidateSpy.mockClear();
     for (let i = 0; i < 2; i++) {
       act(() => {
-        MockWebSocket.last().fail(); // one refetch: onDown REST fallback
+        MockWebSocket.last().fail();
       });
       act(() => {
         vi.advanceTimersByTime(30000);
-        MockWebSocket.last().open(); // one refetch: reopen resync
+        MockWebSocket.last().open();
       });
     }
     expect(invalidateSpy).toHaveBeenCalledTimes(4);
@@ -500,7 +489,6 @@ describe("useServerEvents", () => {
     });
     expect(socket.closed).toBe(true);
 
-    // A late failure does not reconnect.
     act(() => {
       socket.fail();
       vi.advanceTimersByTime(60000);
@@ -547,7 +535,6 @@ describe("useServerEvents", () => {
     });
     expect(state.statusDetail).toBe("container exited unexpectedly");
 
-    // A new status frame replaces the previous detail.
     act(() => {
       MockWebSocket.last().message(
         frame("status", { state: "running", detail: "" }),
@@ -559,16 +546,13 @@ describe("useServerEvents", () => {
 
 type Detail = { id: string; observed_state: string };
 
-/**
- * A detail query whose REST responses the test resolves by hand, so a response
- * can land after a WS frame that is newer than its read (#3213).
- */
+/** Hold REST responses so tests can deliver older reads after newer socket frames. */
 function setupDeferred({ retry = false }: { retry?: number | false } = {}) {
   const pending: {
     resolve: (row: Detail) => void;
     reject: (error: Error) => void;
   }[] = [];
-  // Wrapped like the page's, so each attempt (retries included) is stamped.
+  // Stamp every attempt as the page does, including retries.
   const queryFn = stampedQueryFn(
     () =>
       new Promise<Detail>((resolve, reject) => {
@@ -579,7 +563,7 @@ function setupDeferred({ retry = false }: { retry?: number | false } = {}) {
     defaultOptions: { queries: { retry, retryDelay: 1000 } },
   });
   function LiveProbe() {
-    // The page's order: the events hook, then the detail query.
+    // Match the page's hook order: events first, detail query second.
     state = useServerEvents(CID, SID);
     useQuery({ queryKey: serverKey(CID, SID), queryFn });
     return null;
@@ -588,7 +572,6 @@ function setupDeferred({ retry = false }: { retry?: number | false } = {}) {
     <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
   );
   render(<LiveProbe />, { wrapper });
-  // Resolve the oldest outstanding REST read with `observed_state`.
   const respond = async (observed_state: string) => {
     const attempt = pending.shift();
     expect(attempt).toBeDefined();
@@ -597,7 +580,6 @@ function setupDeferred({ retry = false }: { retry?: number | false } = {}) {
       await vi.advanceTimersByTimeAsync(0);
     });
   };
-  // Fail the oldest outstanding REST attempt (an HTTP error).
   const fail = async () => {
     const attempt = pending.shift();
     expect(attempt).toBeDefined();
@@ -632,7 +614,6 @@ describe("useServerEvents with REST reads in flight (#3213)", () => {
       MockWebSocket.last().open();
       MockWebSocket.last().message(frame("snapshot", { state: "running" }));
     });
-    // The cold read captured the state before the transition.
     await respond("stopped");
     expect(cached()).toBe("running");
   });
@@ -655,8 +636,6 @@ describe("useServerEvents with REST reads in flight (#3213)", () => {
       MockWebSocket.last().open();
     });
     await respond("running");
-    // The drop starts a status-only refetch whose read is still in flight
-    // when the reconnect's snapshot lands.
     act(() => {
       MockWebSocket.last().fail();
     });
@@ -672,8 +651,7 @@ describe("useServerEvents with REST reads in flight (#3213)", () => {
   });
 
   it("lets a REST read started after the frame supersede it", async () => {
-    // A worker disconnect commits `unknown` without a frame; a read that
-    // started after the last frame is the newer truth.
+    // A later REST read can observe a Worker disconnect that emitted no frame.
     const { queryClient, respond, cached } = setupDeferred();
     act(() => {
       MockWebSocket.last().open();
@@ -714,8 +692,7 @@ describe("useServerEvents with REST retries (#3213)", () => {
       MockWebSocket.last().message(frame("snapshot", { state: "running" }));
     });
     await fail();
-    // The retry's request starts after the snapshot (and after a silent
-    // worker-disconnect write): its response is the newer truth.
+    // A retry begun after the snapshot can contain a newer silent Worker disconnect.
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1000);
     });

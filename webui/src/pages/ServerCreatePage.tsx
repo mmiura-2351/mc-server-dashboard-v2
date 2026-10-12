@@ -24,12 +24,6 @@ import {
 } from "./serverCreateErrorPresentation.ts";
 import { handleTabKeyDown, panelId, tabId, useTabHash } from "./urlState.ts";
 
-// Server create wizard (WEBUI_SPEC.md 6.3). Two steps for a fresh server
-// (type & version → config & EULA) plus an "Import ZIP" tab that uploads a
-// prior export. The whole page is gated on `server:create`; the server stays
-// authoritative (any 403/422/409 is surfaced honestly).
-
-// The catalogued types `GET /versions` can resolve (vanilla/paper/fabric/forge).
 type CatalogType = "vanilla" | "paper" | "fabric" | "forge";
 
 const TYPE_LABEL: Record<string, TranslationKey> = {
@@ -45,9 +39,7 @@ const TYPE_SUB: Record<string, TranslationKey> = {
   forge: "serverCreate.typeSub.forge",
 };
 
-// Per-server memory limit / CPU allocation in the create wizard (issue #715),
-// mirroring the Settings tab (ServerDetailPage.tsx). Both ride the `config` blob
-// as reserved keys and are optional: blank = driver default / auto.
+// Memory and CPU limits are reserved config keys; blank inputs omit them for default allocation.
 const MEMORY_LIMIT_KEY = "memory_limit_mb";
 const MEMORY_LIMIT_FLOOR_MIB = 512;
 const MEMORY_LIMIT_DEFAULT_CEILING_MIB = 1024 * 1024;
@@ -55,9 +47,7 @@ const CPU_ALLOCATION_KEY = "cpu_millis";
 const CPU_ALLOCATION_FLOOR_MILLIS = 100;
 const CPU_ALLOCATION_CEILING_MILLIS = 128_000;
 
-// A non-blank input is valid only as a whole number within range; blank is
-// always allowed (the key is omitted so the server falls back to the default).
-// The ceiling can be overridden by the operator-configurable max (#1069).
+// Blank omits the key; nonblank limits must be whole numbers within the operator-configured range.
 function memoryLimitValid(
   value: string,
   ceiling: number = MEMORY_LIMIT_DEFAULT_CEILING_MIB,
@@ -85,27 +75,18 @@ function cpuAllocationValid(value: string): boolean {
   );
 }
 
-// DNS-label regex for slug inline validation — mirrors the API rule (issue #981).
 const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
-// A slug input is valid when it matches the DNS-label regex; blank is also
-// allowed (leave field empty → auto-generate a random slug).
 function slugCreateValid(value: string): boolean {
   return value.trim() === "" || SLUG_RE.test(value.trim());
 }
 
 export function ServerCreatePage() {
-  // Create in the community named by the URL `:cid` (#784), not the active one:
-  // the two can disagree on a stale bookmark or a community the user has left,
-  // and creating in the active community while the URL says another is wrong.
-  // The active-community list is the caller's membership; the URL cid must be in
-  // it. `useUrlCommunitySync` (AppShell) adopts an in-membership cid as the
-  // active community, so the `server:create` capability resolves for this cid.
+  // Create in the URL community after verifying membership; the active community may differ on a stale link.
   const { cid } = useParams();
   const { communities } = useActiveCommunity();
   const canCreate = useCanCode("server:create");
 
-  // Membership still loading: hold the chrome rather than flash a not-found.
   if (communities === undefined) {
     return (
       <Chrome>
@@ -147,11 +128,7 @@ function Chrome({ children }: { children: React.ReactNode }) {
   );
 }
 
-// The two modes live in the URL hash (#540, following the #514/#528 tab
-// convention): the new-server wizard is the default and keeps a clean URL,
-// while #import deep-links to the ZIP-import tab and Back walks the tab history.
-// The wizard's internal steps stay in component state — they hold form input, so
-// per-step history would make Back discard half-filled fields.
+// Keep top-level modes in URL history, but wizard steps in component state to preserve half-filled inputs.
 const TABS = ["new", "import"] as const;
 
 function Wizard({ communityId }: { communityId: string }) {
@@ -207,10 +184,6 @@ function Wizard({ communityId }: { communityId: string }) {
   );
 }
 
-// ---------------------------------------------------------------------------
-// New-server wizard (2 steps)
-// ---------------------------------------------------------------------------
-
 interface PropOverride {
   key: string;
   value: string;
@@ -224,14 +197,11 @@ function NewServerWizard({ communityId }: { communityId: string }) {
   const [type, setType] = useState<CatalogType | null>(null);
   const [version, setVersion] = useState("");
   const [port, setPort] = useState("");
-  // Once the user edits the port, the auto-suggest must never overwrite it.
+  // Once edited, a port must not be overwritten by a late suggestion.
   const [portTouched, setPortTouched] = useState(false);
   const [name, setName] = useState("");
-  // Optional join address name (slug, issue #981). Blank = auto-generate.
   const [slug, setSlug] = useState("");
   const [props, setProps] = useState<PropOverride[]>([]);
-  // Empty string ↔ unset (driver default / auto); a number ↔ the value (MiB /
-  // millicores). Mirrors the Settings tab's optional resource fields (#715).
   const [memoryLimit, setMemoryLimit] = useState("");
   const [cpuAllocation, setCpuAllocation] = useState("");
   const [acceptEula, setAcceptEula] = useState(false);
@@ -246,21 +216,16 @@ function NewServerWizard({ communityId }: { communityId: string }) {
   const typesState = classifyQueryResult(typesQuery);
   const catalogTypes = typesQuery.data?.server_types ?? [];
 
-  // In relay mode the game port is hidden and API-managed: players join port-less
-  // via the slug hostname, so the create form surfaces no port control (#1002).
-  // In direct mode the port stays user-editable (a port-forward is needed).
+  // Relay mode allocates ports in the API; direct mode exposes them for port forwarding.
   const metaQuery = useQuery({
     queryKey: ["meta"],
     queryFn: ({ signal }) => api.get("/api/meta", { signal }),
   });
-  // While loading or on error, default to showing the port control (treat as
-  // direct-mode): hiding port controls on error is more disruptive than briefly
-  // showing them, and direct-mode is the majority case (#1061).
+  // Show the port control until metadata confirms relay mode, including metadata failures.
   const relayEnabled =
     metaQuery.isLoading || metaQuery.isError
       ? false
       : metaQuery.data?.relay_enabled === true;
-  // Operator-configurable memory-limit knobs from /meta (issue #1069).
   const defaultMemoryLimitMb: number | null =
     typeof metaQuery.data?.default_memory_limit_mb === "number"
       ? metaQuery.data.default_memory_limit_mb
@@ -282,16 +247,13 @@ function NewServerWizard({ communityId }: { communityId: string }) {
   const versionsState = classifyQueryResult(versionsQuery);
   const versions = versionsQuery.data?.versions ?? [];
 
-  // Preselect the latest version (catalogs list newest first) whenever the list
-  // for the selected type loads or changes.
+  // Catalogs list newest first, so seed the selected version from the first entry.
   useEffect(() => {
     if (versions.length > 0) {
       setVersion(versions[0]);
     }
   }, [versions]);
 
-  // Pre-fill the memory-limit field with the operator default when the meta
-  // response arrives and the user has not yet typed a value (#1069).
   const [memoryLimitTouched, setMemoryLimitTouched] = useState(false);
   useEffect(() => {
     if (defaultMemoryLimitMb !== null && !memoryLimitTouched) {
@@ -301,9 +263,7 @@ function NewServerWizard({ communityId }: { communityId: string }) {
 
   const portCheck = usePortCheck(port);
 
-  // On reaching the config step, prefill the game port from the next free port
-  // (GET /ports/available, SPEC 6.3) unless the user has already typed one. A
-  // failed suggest leaves the field empty — the user can still type a port.
+  // Suggest a port on the config step only before user edits; suggestion failure leaves manual entry available.
   useEffect(() => {
     if (step !== 2 || portTouched || relayEnabled) {
       return;
@@ -317,8 +277,7 @@ function NewServerWizard({ communityId }: { communityId: string }) {
           setPort(String(next));
         }
       } catch {
-        // Leave the field empty; the user types a port and the on-blur check
-        // still validates it.
+        // A failed suggestion leaves the port editable and its on-blur validation available.
       }
     })();
     return () => {
@@ -340,8 +299,6 @@ function NewServerWizard({ communityId }: { communityId: string }) {
         config[key.trim()] = value;
       }
     }
-    // Layer the resource fields: a number when set, omitted when blank so the
-    // server falls back to the driver default / auto share (#715).
     if (memoryLimit.trim() !== "") {
       config[MEMORY_LIMIT_KEY] = Number(memoryLimit);
     }
@@ -361,12 +318,9 @@ function NewServerWizard({ communityId }: { communityId: string }) {
             server_type: type,
             config,
             accept_eula: acceptEula,
-            // In relay mode the port is hidden and API-allocated, so omit it; in
-            // direct mode send the chosen port (null = auto-assign) (#1002).
             ...(relayEnabled
               ? {}
               : { game_port: port === "" ? null : Number(port) }),
-            // Blank slug = omit so the API auto-generates a random one (issue #981).
             ...(slug.trim() !== "" ? { slug: slug.trim() } : {}),
           }),
         },
@@ -387,10 +341,7 @@ function NewServerWizard({ communityId }: { communityId: string }) {
           <h2>{t("serverCreate.typeHeading")}</h2>
           {typesState.kind === "pending" ? (
             <p className="sub">{t("serverCreate.typeLoading")}</p>
-          ) : /* Error only when there is nothing to show (initial load
-               failed). A failed background refetch retains `data`, so
-               the cached types keep rendering through transient API
-               blips (#1805). */
+          ) : /* Retain cached content when only a background refetch fails. */
           typesState.kind === "error" ? (
             <p className="field-error">{t("serverCreate.typeLoadError")}</p>
           ) : (
@@ -426,11 +377,7 @@ function NewServerWizard({ communityId }: { communityId: string }) {
                   </label>
                   {versionsState.kind === "pending" ? (
                     <p className="sub">{t("serverCreate.versionLoading")}</p>
-                  ) : /* Error only when there is nothing to show
-                       (initial load failed). A failed background
-                       refetch retains `data`, so the cached versions
-                       keep rendering through transient blips
-                       (#1805). */
+                  ) : /* Retain cached content when only a background refetch fails. */
                   versionsState.kind === "error" ? (
                     <p className="field-error">
                       {t("serverCreate.versionLoadError")}
@@ -648,11 +595,9 @@ function PropsEditor({
 }) {
   return (
     <div className="field">
-      {/* A group heading for the override rows, not a control label. */}
       <span className="group-label">{t("serverCreate.propsHeading")}</span>
       <div className="hint">{t("serverCreate.propsHint")}</div>
       {props.map((row, i) => (
-        // The list is positional and user-built; the index is a stable enough key.
         // biome-ignore lint/suspicious/noArrayIndexKey: positional override rows
         <div key={i} className="prop-row">
           <input
@@ -701,10 +646,6 @@ function PropsEditor({
   );
 }
 
-// ---------------------------------------------------------------------------
-// Port availability check (GET /ports/check/{port} on blur)
-// ---------------------------------------------------------------------------
-
 type PortState =
   | { kind: "idle" }
   | { kind: "checking" }
@@ -715,9 +656,7 @@ type PortState =
 
 function usePortCheck(port: string) {
   const [state, setState] = useState<PortState>({ kind: "idle" });
-  // Only the latest issued check may apply its result: blurs on different ports
-  // can resolve out of order and a stale response must not clobber the current
-  // verdict (#1592).
+  // Ignore earlier port checks that finish after a newer check.
   const latestRequest = useRef(0);
 
   async function check() {
@@ -775,10 +714,6 @@ function PortFeedback({ state }: { state: PortState }) {
     </div>
   );
 }
-
-// ---------------------------------------------------------------------------
-// Import tab (POST .../servers/import, multipart)
-// ---------------------------------------------------------------------------
 
 function ImportForm({ communityId }: { communityId: string }) {
   const navigate = useNavigate();
@@ -878,13 +813,6 @@ function ImportForm({ communityId }: { communityId: string }) {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Shared error surfacing
-// ---------------------------------------------------------------------------
-
-// Surface a create failure where the presentation contract places it
-// (serverCreateErrorPresentation.ts): inline on the name or slug field, or as a
-// toast.
 function handleCreateError(
   err: unknown,
   showToast: (m: string, k: "error") => void,
@@ -906,9 +834,6 @@ function handleCreateError(
   }
 }
 
-// Import-specific surfacing: a bad archive / oversize upload, plus the create
-// reasons it shares (name conflict, …). The import form has no slug field, so
-// its presentation only ever targets the name field or a toast.
 function handleImportError(
   err: unknown,
   showToast: (m: string, k: "error") => void,
@@ -929,8 +854,7 @@ function handleImportError(
   }
 }
 
-// A structural validation_error on `name` carries the API's own message, so it
-// goes inline against the name field verbatim. Returns whether it was handled.
+// Structural name-validation errors carry API messages rather than translation keys.
 function surfaceNameValidationError(
   err: unknown,
   setNameError: (m: string) => void,

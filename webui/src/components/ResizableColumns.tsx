@@ -11,32 +11,11 @@ import {
 } from "react";
 import { t } from "../i18n/index.ts";
 
-/**
- * Shared user-resizable table columns (#520). Owner UX feedback: fixed column
- * widths fight long ids/names on one side and narrow screens on the other.
- *
- * Mechanism: the table is rendered `table-layout: fixed` with a generated
- * `<colgroup>`; each header cell gets a drag handle on its right boundary. A
- * pointer drag adjusts that column's `<col>` width (clamped to a minimum);
- * double-click resets the column to auto. Widths persist per table in
- * localStorage under the caller's `storageKey`, so they survive reloads.
- *
- * No new dependency — plain pointer events with capture + window-level
- * listeners that clean up on release.
- *
- * A11y: the handles are a pointer-only affordance (`title` tooltip), hidden
- * from assistive tech because they offer no keyboard path — matching the
- * hover-only posture elsewhere in the webui (the audit table's title-on-hover,
- * #519). Keyboard-driven resize is intentionally out of scope here and tracked
- * as a #496-class gap.
- */
+/** Resize handles support pointer input only and are hidden from assistive technology. */
 
-// Smallest a column may be dragged to (px). Keeps a column from collapsing to
-// an unusable sliver.
 const MIN_WIDTH = 48;
 
-// Per-column width overrides, keyed by column index. A missing entry means the
-// column keeps its natural (auto) width.
+// Missing column indices retain automatic widths.
 type Widths = Record<number, number>;
 
 function loadWidths(storageKey: string): Widths {
@@ -49,8 +28,6 @@ function loadWidths(storageKey: string): Widths {
     if (typeof parsed !== "object" || parsed === null) {
       return {};
     }
-    // Keep only finite positive widths; a hand-edited or corrupt entry must not
-    // feed a garbage `width` into the <col> style.
     const clean: Widths = {};
     for (const [key, value] of Object.entries(parsed)) {
       if (typeof value === "number" && Number.isFinite(value) && value > 0) {
@@ -59,7 +36,7 @@ function loadWidths(storageKey: string): Widths {
     }
     return clean;
   } catch {
-    // Corrupt/blocked storage must never break the table; fall back to auto.
+    // Unavailable or corrupt storage falls back to automatic widths.
     return {};
   }
 }
@@ -72,7 +49,7 @@ function saveWidths(storageKey: string, widths: Widths): void {
       localStorage.setItem(storageKey, JSON.stringify(widths));
     }
   } catch {
-    // Best-effort persistence; ignore quota/availability failures.
+    // Width persistence is best-effort when storage is unavailable or full.
   }
 }
 
@@ -84,7 +61,6 @@ interface ResizableTableProps {
   children: ReactNode;
 }
 
-// A drag handle injected on each header cell's right boundary.
 function ResizeHandle({
   onResizeStart,
   onReset,
@@ -102,9 +78,7 @@ function ResizeHandle({
         if (e.button !== 0) {
           return;
         }
-        // The drag tracks via window-level pointermove/pointerup listeners
-        // (see beginResize), so the handle does not need to capture the
-        // pointer — those listeners fire wherever the cursor goes.
+        // Window-level pointer listeners track dragging outside the handle without pointer capture.
         e.preventDefault();
         onResizeStart(e.clientX);
       }}
@@ -120,22 +94,15 @@ export function ResizableTable({
 }: ResizableTableProps) {
   const tableRef = useRef<HTMLTableElement>(null);
   const [widths, setWidths] = useState<Widths>(() => loadWidths(storageKey));
-  // Teardown for the drag in progress, if any. Held in a ref so unmount
-  // cleanup can run it — pagination/state changes mid-drag can unmount the
-  // table while window listeners and the body cursor class are still live.
+  // Keep drag teardown available on unmount so listeners and the body cursor cannot remain active.
   const endDragRef = useRef<(() => void) | null>(null);
 
-  // The header cells are the first <tr> of the <thead> child; their count is
-  // the column count and drives the <colgroup>.
   const childArray = Children.toArray(children);
   const thead = childArray.find(
     (c): c is ReactElement<{ children?: ReactNode }> =>
       isValidElement(c) && c.type === "thead",
   );
-  // Normalize the <thead> children once and reuse the same array below: each
-  // Children.toArray call clones its inputs, so a second call would yield fresh
-  // elements that no longer reference-match `headerRow`, leaking the original
-  // header row back into `rest` and rendering the header twice (#534).
+  // Reuse one Children.toArray result; repeated calls clone elements and break headerRow identity checks.
   const theadChildren = thead ? Children.toArray(thead.props.children) : [];
   const headerRow = theadChildren.find(
     (c): c is ReactElement<{ children?: ReactNode }> =>
@@ -175,8 +142,7 @@ export function ResizableTable({
     [storageKey],
   );
 
-  // Begin a drag from `startX`, measuring the column's current rendered width
-  // as the baseline so the first pixel of movement does not jump.
+  // Measure the rendered width at drag start to prevent an initial jump.
   const beginResize = useCallback(
     (index: number, startX: number) => {
       const cell = tableRef.current?.querySelectorAll("thead th, thead td")[
@@ -187,8 +153,6 @@ export function ResizableTable({
       const onMove = (e: PointerEvent) => {
         setColumnWidth(index, startWidth + (e.clientX - startX));
       };
-      // Shared teardown for a normal release (pointerup), a cancelled drag
-      // (pointercancel — e.g. the browser hijacks the pointer), and unmount.
       const endDrag = () => {
         window.removeEventListener("pointermove", onMove);
         window.removeEventListener("pointerup", endDrag);
@@ -205,16 +169,12 @@ export function ResizableTable({
     [setColumnWidth],
   );
 
-  // If the table unmounts mid-drag (plausible when pagination/state changes
-  // swap it out), tear down the live window listeners and body cursor class so
-  // nothing is left stuck.
   useEffect(() => {
     return () => {
       endDragRef.current?.();
     };
   }, []);
 
-  // Re-render the header row with a resize handle appended to each cell.
   const decoratedThead =
     thead && headerRow
       ? cloneElement(thead, undefined, [
@@ -227,8 +187,7 @@ export function ResizableTable({
               }>;
               return cloneElement(
                 headerCell,
-                // Children.toArray already assigned each cell a stable key
-                // ("…0", "…1"); reuse it rather than re-keying by index.
+                // Reuse the stable keys assigned by Children.toArray.
                 { key: headerCell.key },
                 <>
                   {headerCell.props.children}

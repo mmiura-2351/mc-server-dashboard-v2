@@ -1,5 +1,4 @@
 // @vitest-environment node
-// DOM-free logic test; runs under Node to skip per-file jsdom setup (issue #1734).
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   advanceAuthEpoch,
@@ -35,7 +34,6 @@ beforeEach(() => {
   vi.stubGlobal("fetch", fetchMock);
   fetchMock.mockReset();
   clearAccessToken();
-  // Default refresher: no-op failure, so tests opt into a working refresh.
   setRefresher(() => Promise.resolve(false));
 });
 
@@ -213,8 +211,7 @@ describe("request cancellation", () => {
   });
 
   it("rejects with the abort error, not an ApiError, when aborted", async () => {
-    // Emulate fetch's abort contract: reject with an AbortError DOMException
-    // once the signal fires.
+    // Emulate fetch's AbortError rejection when its signal fires.
     fetchMock.mockImplementation(
       (_url: string, init: RequestInit) =>
         new Promise((_, reject) => {
@@ -288,8 +285,6 @@ describe("transparent 401 refresh", () => {
     expect(error.status).toBe(401);
   });
 
-  // A 401 belongs to the session the request was sent under; the refresh and
-  // the retry must not act for a session that replaced it (#3224).
   it("hands the refresher the epoch the request was sent in", async () => {
     let respond: (r: Response) => void = () => {};
     fetchMock.mockImplementationOnce(
@@ -314,8 +309,7 @@ describe("transparent 401 refresh", () => {
     fetchMock.mockResolvedValue(jsonResponse(401, { reason: "x" }));
     setRefresher(
       vi.fn(async () => {
-        // The session switches after the refresh result is computed but
-        // before the client acts on it.
+        // Switch sessions after computing the refresh result but before the client consumes it.
         queueMicrotask(advanceAuthEpoch);
         return true;
       }),
@@ -328,10 +322,7 @@ describe("transparent 401 refresh", () => {
   });
 });
 
-// A minimal XMLHttpRequest test double: progress feedback needs the real upload
-// progress events, which fetch cannot surface, so postFormWithProgress is built
-// on XHR (issue #1207). The double records each constructed instance, captures
-// the request, and lets a test drive the response and the upload progress.
+// Record XHR instances so tests can drive upload progress and responses independently.
 class MockXHR {
   static instances: MockXHR[] = [];
 
@@ -379,8 +370,6 @@ class MockXHR {
     this.body = body;
   }
 
-  // --- test drivers --------------------------------------------------------
-
   reqHeaders(): Record<string, string> {
     return this.headers;
   }
@@ -393,7 +382,6 @@ class MockXHR {
     } as ProgressEvent);
   }
 
-  /** Resolve the request with a JSON body and status. */
   respond(status: number, body: unknown, contentType = "application/json") {
     this.status = status;
     this.responseHeaders["content-type"] = contentType;
@@ -401,12 +389,10 @@ class MockXHR {
     this.onload?.();
   }
 
-  /** Simulate a network-level failure. */
   fail(): void {
     this.onerror?.();
   }
 
-  /** Simulate an abort. */
   abort(): void {
     this.onabort?.();
   }
@@ -498,7 +484,7 @@ describe("postFormWithProgress", () => {
 
     const promise = postFormWithProgress("/api/resource-packs", new FormData());
     MockXHR.last().respond(401, { reason: "x" });
-    // Let the refresh microtask run, then the retried request resolves.
+    // Flush refresh microtasks before responding to the retried request.
     await Promise.resolve();
     await Promise.resolve();
     MockXHR.last().respond(201, { id: "rp1" });
@@ -568,7 +554,6 @@ describe("postFormWithProgress", () => {
       controller.signal,
     ).catch((e) => e);
 
-    // Aborting the signal should trigger xhr.abort(), which fires onabort.
     controller.abort();
 
     const error = await promise;
@@ -588,7 +573,6 @@ describe("postFormWithProgress", () => {
     ).catch((e) => e);
 
     expect(isUploadAbortError(error)).toBe(true);
-    // No XHR should have been constructed.
     expect(MockXHR.instances).toHaveLength(0);
   });
 });

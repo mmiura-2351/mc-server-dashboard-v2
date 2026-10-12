@@ -67,8 +67,6 @@ function grant(over: Record<string, unknown> = {}) {
   };
 }
 
-// Route `api.get` by path. The grants list endpoint may carry a `?user_id=`
-// filter, so match on the path prefix and surface the query string to the test.
 let lastGrantsPath = "";
 function routeGet(opts: {
   members?: unknown[];
@@ -112,7 +110,6 @@ function renderPage() {
   return { ...result, queryClient };
 }
 
-// The page lands on Members; switch to the Grants tab.
 async function openGrants() {
   await screen.findAllByText("Sakura");
   fireEvent.click(
@@ -142,7 +139,6 @@ describe("CommunityGrantsTab", () => {
     renderPage();
     await openGrants();
 
-    // "alice" appears both in the member filter and the grant row.
     expect((await screen.findAllByText("alice")).length).toBeGreaterThan(0);
     expect(screen.getByText("survival")).toBeInTheDocument();
     expect(screen.getByText("server:start")).toBeInTheDocument();
@@ -242,13 +238,11 @@ describe("CommunityGrantsTab", () => {
       }),
     );
 
-    // Grantable (per-server resource) families are offered…
     expect(screen.getByLabelText("server:start")).toBeInTheDocument();
     expect(screen.getByLabelText("file:read")).toBeInTheDocument();
     expect(screen.getByLabelText("backup:create")).toBeInTheDocument();
     expect(screen.getByLabelText("plugin:manage")).toBeInTheDocument();
     expect(screen.getByLabelText("schedule:manage")).toBeInTheDocument();
-    // …a non-grantable family code is not.
     expect(screen.queryByLabelText("member:add")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("role:manage")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("grant:manage")).not.toBeInTheDocument();
@@ -317,8 +311,6 @@ describe("CommunityGrantsTab", () => {
   });
 
   it("degrades a 403 on the secondary member/server reads to raw-id rows without failing the tab", async () => {
-    // Caller holds grant:read but not member:read / server:read: the secondary
-    // label reads 403 and must degrade to raw ids, not collapse the tab (#471).
     mockApi.get.mockImplementation((path: string) => {
       if (path === `/api/communities/${CID}/members`) {
         return Promise.reject(
@@ -338,10 +330,8 @@ describe("CommunityGrantsTab", () => {
     renderPage();
     await openGrants();
 
-    // Row falls back to the raw user_id and resource_id…
     expect(await screen.findByText("u9")).toBeInTheDocument();
     expect(screen.getByText("s9")).toBeInTheDocument();
-    // …and the tab is not collapsed into its generic load error.
     expect(
       screen.queryByText(t("communitySettings.grants.loadError")),
     ).not.toBeInTheDocument();
@@ -371,8 +361,6 @@ describe("CommunityGrantsTab", () => {
   });
 
   it("does not swallow a non-403 error on a secondary read", async () => {
-    // A 500 on a secondary read is a real outage, not an authorization gap: it
-    // must still surface the tab error rather than degrade silently.
     mockApi.get.mockImplementation((path: string) => {
       if (path === `/api/communities/${CID}/members`) {
         return Promise.reject(new ApiError(500, { reason: "internal_error" }));
@@ -404,17 +392,12 @@ describe("CommunityGrantsTab", () => {
 
     expect((await screen.findAllByText("alice")).length).toBeGreaterThan(0);
     expect(screen.getByText("survival")).toBeInTheDocument();
-    // The resolved names are shown, not the raw ids.
     expect(screen.queryByText("u1")).not.toBeInTheDocument();
     expect(screen.queryByText("s1")).not.toBeInTheDocument();
   });
 
   it("403 on servers label in grants tab does not poison the shared servers cache (#791)", async () => {
-    // The grants tab uses a distinct query key ("grants-labels" suffix) so a
-    // 403→[] fallback is isolated and does not write [] into the shared
-    // ["communities", cid, "servers"] key that the Groups/Dashboard use.
-    // Simulate: grants tab gets a 403 on servers; groups tab (which uses the
-    // shared key) must still see real server data, not [].
+    // Keep label-read fallbacks in a separate cache key so a 403 cannot replace shared server data with [].
     let groupsTabServersCallCount = 0;
     mockApi.get.mockImplementation((path: string) => {
       if (path === `/api/communities/${CID}/members`) {
@@ -423,7 +406,6 @@ describe("CommunityGrantsTab", () => {
       if (path === `/api/communities/${CID}/servers`) {
         groupsTabServersCallCount++;
         if (groupsTabServersCallCount === 1) {
-          // First call comes from grants tab; 403 to force the fallback.
           return Promise.reject(
             new ApiError(403, {
               reason: "forbidden",
@@ -431,7 +413,6 @@ describe("CommunityGrantsTab", () => {
             }),
           );
         }
-        // Subsequent calls (e.g., from groups tab) return real data.
         return Promise.resolve([server({ id: "s1", name: "survival" })]);
       }
       if (path.startsWith(`/api/communities/${CID}/grants`)) {
@@ -445,17 +426,12 @@ describe("CommunityGrantsTab", () => {
     renderPage();
     await openGrants();
 
-    // Grants tab is visible with degraded raw ids (403 on servers).
     await screen.findAllByText(t("communitySettings.grants.colMember"));
 
-    // The shared cache key must NOT have been poisoned with []. Switching to
-    // the Groups tab should trigger a fresh fetch (distinct key → no stale hit)
-    // and successfully load the server list.
     fireEvent.click(
       screen.getByRole("tab", { name: t("communitySettings.tab.groups") }),
     );
 
-    // Groups tab loads without showing a "no servers" error caused by stale [].
     expect(
       await screen.findByText(t("communitySettings.groups.heading")),
     ).toBeInTheDocument();

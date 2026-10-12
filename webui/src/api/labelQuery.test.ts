@@ -1,5 +1,4 @@
 // @vitest-environment node
-// DOM-free logic test; runs under Node to skip per-file jsdom setup (issue #1734).
 import { describe, expect, it } from "vitest";
 import { ApiError } from "./client.ts";
 import { labelQueryFn } from "./labelQuery.ts";
@@ -25,8 +24,6 @@ describe("labelQueryFn", () => {
   });
 
   it("forwards the query-function context to the wrapped fn", async () => {
-    // TanStack calls the queryFn with a context carrying the abort signal;
-    // the wrapper must pass it through so requests stay cancellable (#1728).
     const seen: unknown[] = [];
     const fn = labelQueryFn((context: { signal: AbortSignal }) => {
       seen.push(context);

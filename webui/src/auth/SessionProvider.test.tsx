@@ -66,10 +66,7 @@ beforeEach(() => {
   vi.stubGlobal("fetch", fetchMock);
   fetchMock.mockReset();
   clearAccessToken();
-  // The session core keeps module-level singletons (the injected hard-logout
-  // handler / refresher and the in-flight refresh). A handler left by a prior
-  // case is bound to an unmounted render, so a later logout navigates a stale
-  // router and the path never reaches /login. Reset them per case to isolate.
+  // Reset session singletons so later cases cannot invoke a handler bound to an unmounted router.
   resetSessionForTesting();
   resetClientForTesting();
 });
@@ -95,8 +92,6 @@ describe("SessionProvider bootstrap", () => {
     await waitFor(() =>
       expect(screen.getByTestId("status")).toHaveTextContent("signed-in"),
     );
-    // Bootstrap uses the non-rotating restore endpoint, never the rotating
-    // /api/auth/refresh, so a page load can no longer rotate the cookie (#512).
     expect(fetchMock.mock.calls[0][0]).toBe("/api/auth/session");
   });
 
@@ -108,15 +103,11 @@ describe("SessionProvider bootstrap", () => {
     await waitFor(() =>
       expect(screen.getByTestId("status")).toHaveTextContent("signed-out"),
     );
-    // Bootstrap leaves routing to the guards (#410); it does not redirect.
     expect(screen.getByTestId("path")).toHaveTextContent("/account");
   });
 });
 
-/**
- * Hold every fetch pending and hand back its resolvers in call order, so a test
- * can let an authentication response land after the session has changed.
- */
+/** Hold responses so tests can release them after changing sessions. */
 function holdFetches(): ((response: Response) => void)[] {
   const resolvers: ((response: Response) => void)[] = [];
   fetchMock.mockImplementation(
@@ -128,22 +119,15 @@ function holdFetches(): ((response: Response) => void)[] {
   return resolvers;
 }
 
-/** Let `n` microtasks run. */
 async function microtasks(n: number): Promise<void> {
   for (let i = 0; i < n; i++) {
     await Promise.resolve();
   }
 }
 
-/**
- * Every microtask count at which a session switch can land after the bootstrap
- * response arrived: before its result is computed, between computing it and
- * the provider applying it, and after.
- */
+/** Cover session switches before result computation, during delivery, and after consumption. */
 const SWITCH_POINTS = Array.from({ length: 12 }, (_, i) => i);
 
-// The bootstrap response arrives first and the session changes only afterwards,
-// while the computed result is still travelling to the provider (#3224 review).
 describe("SessionProvider bootstrap result consumed after the session changed", () => {
   it.each(SWITCH_POINTS)(
     "a signed-out result never overrides a sign-in made %i microtasks after it arrived",
@@ -194,8 +178,6 @@ describe("SessionProvider bootstrap result consumed after the session changed", 
   );
 });
 
-// A sign-in starts a new session; an authentication response still in flight
-// from before must not change what the provider reports or holds (#3224).
 describe("SessionProvider sign-in during an in-flight request", () => {
   it("keeps the new sign-in when a bootstrap rejection lands late", async () => {
     const pending = holdFetches();
@@ -254,7 +236,6 @@ describe("SessionProvider logout", () => {
 
   it("clears the query cache so the next user sees no stale data", async () => {
     const queryClient = new QueryClient();
-    // Seed the cache as if the previous user's queries had populated it.
     queryClient.setQueryData(["users", "me"], { username: "alice" });
     queryClient.setQueryData(["communities"], [{ id: "c1", name: "Alpha" }]);
 
@@ -270,8 +251,6 @@ describe("SessionProvider logout", () => {
     await waitFor(() =>
       expect(screen.getByTestId("status")).toHaveTextContent("signed-out"),
     );
-    // The previous user's cached queries are gone before the next sign-in,
-    // so no stale data renders for the next account (#532).
     expect(queryClient.getQueryData(["users", "me"])).toBeUndefined();
     expect(queryClient.getQueryData(["communities"])).toBeUndefined();
     expect(queryClient.getQueryCache().getAll()).toHaveLength(0);
@@ -284,8 +263,6 @@ describe("SessionProvider logout", () => {
       expect(screen.getByTestId("status")).toHaveTextContent("signed-in"),
     );
 
-    // A transparent refresh that 401s is involuntary: it should land on /login
-    // carrying reason=expired and the return-to location as next.
     fetchMock.mockResolvedValueOnce(new Response("", { status: 401 }));
     await refreshForRetry(getAuthEpoch());
 
@@ -311,7 +288,6 @@ describe("SessionProvider logout", () => {
     await waitFor(() =>
       expect(screen.getByTestId("path")).toHaveTextContent("/login"),
     );
-    // A deliberate logout lands on a clean /login: no reason, no next.
     expect(screen.getByTestId("search").textContent).toBe("");
   });
 
@@ -325,7 +301,6 @@ describe("SessionProvider logout", () => {
       expect(screen.getByTestId("status")).toHaveTextContent("signed-in"),
     );
 
-    // A transparent refresh that fails drives a hard logout (no API logout call).
     fetchMock.mockResolvedValueOnce(new Response("", { status: 401 }));
     await refreshForRetry(getAuthEpoch());
 

@@ -33,12 +33,10 @@ describe("PasswordInput", () => {
     const toggle = screen.getByRole("button");
     const svg = () => toggle.querySelector("svg") as SVGElement;
 
-    // Masked: slashed-eye (EyeOffIcon contains a <line> slash element)
     expect(svg().querySelector("line")).not.toBeNull();
 
     fireEvent.click(toggle);
 
-    // Revealed: open-eye (EyeIcon has no <line> element)
     expect(svg().querySelector("line")).toBeNull();
   });
 

@@ -1,16 +1,11 @@
 import { humanizeBytes } from "../format.ts";
 import { t } from "../i18n/index.ts";
 
-// Shared upload progress bar (issue #1207): a percentage-filled bar plus the
-// transferred / total bytes and elapsed time, driven by `useUploadProgress`.
-// Used by the four upload sites (resource packs, backups, files, server import)
-// so the feedback is identical everywhere.
 interface UploadProgressProps {
   loaded: number;
   total: number;
   percent: number;
   elapsedMs: number;
-  /** When provided, a cancel button is rendered (issue #1780). */
   onCancel?: () => void;
 }
 

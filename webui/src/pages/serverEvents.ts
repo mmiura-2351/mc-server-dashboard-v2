@@ -1,31 +1,10 @@
-/**
- * Per-server events WebSocket client (WEBUI_SPEC.md 6.4, 6.5, 7.2).
- *
- * A thin wrapper over the shared {@link EventsSocketClient} core
- * (`eventsSocket.ts`) for one open server-detail page's events stream
- * (`WS /communities/{cid}/servers/{sid}/events?streams=…`). The core owns the
- * socket lifecycle (connect, backoff reconnect, reconnect-on-rotate, teardown);
- * this module builds the stream-subscription URL and parses the API's typed
- * frames (`_frame` in events.py: `{stream, ts, payload}`, no `server_id` on the
- * per-server stream) into a discriminated {@link ServerFrame}, including the
- * status `snapshot` the API sends on subscribe and after every gap that dropped
- * status frames.
- *
- * One connection per open detail page, shared by all tabs (Overview, Console):
- * the caller subscribes to all three streams once and routes parsed frames to
- * each tab's consumer (WEBUI_SPEC.md 7.2).
- */
+/** Parse one server's frames and share the socket across detail tabs; EventsSocketClient owns connection mechanics. */
 
 import { EventsSocketClient, wsOrigin } from "./eventsSocket.ts";
 
-/** The subscribable streams (the GAP marker is always delivered, never asked). */
 export type Stream = "status" | "log" | "metrics";
 
-/**
- * A parsed status frame: the latest observed state + optional crash detail.
- * `reason` names a crash the Worker classified (e.g. `forge_install_failed`,
- * issue #1093); it is empty for an unclassified crash and for every other state.
- */
+/** A classified crash can carry reason/detail; unclassified crashes and other states may omit them. */
 export interface StatusFrame {
   kind: "status";
   state: string;
@@ -33,14 +12,12 @@ export interface StatusFrame {
   reason: string;
 }
 
-/** A parsed log line: the text and which std stream it came from. */
 export interface LogFrame {
   kind: "log";
   line: string;
   stream: "stdout" | "stderr";
 }
 
-/** A parsed metrics sample (cpu in milli-cores, memory in bytes, players). */
 export interface MetricsFrame {
   kind: "metrics";
   cpuMillis: number;
@@ -48,18 +25,12 @@ export interface MetricsFrame {
   playerCount: number;
 }
 
-/**
- * The status snapshot the API sends on subscribe and after every gap that
- * dropped status frames (#1795):
- * the server's persisted observed state. No `detail` or `reason` — they ride
- * only a live status transition and are not persisted.
- */
+/** Subscribe and gap snapshots carry persisted state only; crash detail and reason exist only in live transitions. */
 export interface SnapshotFrame {
   kind: "snapshot";
   state: string;
 }
 
-/** A gap marker: the client fell behind and missed events (best-effort). */
 export interface GapFrame {
   kind: "gap";
 }
@@ -72,18 +43,11 @@ export type ServerFrame =
   | GapFrame;
 
 export interface ServerEventsCallbacks {
-  /** A parsed frame from any subscribed stream (or the GAP marker). */
   onFrame: (frame: ServerFrame) => void;
-  /** The connection opened (clear degraded). */
   onOpen: () => void;
-  /** The connection went down and a reconnect is pending (enter degraded). */
   onDown: () => void;
 }
 
-/**
- * Build the `wss?://…/api/communities/{cid}/servers/{sid}/events?streams=…`
- * URL. `streams` is the comma list the API's `_parse_streams` expects.
- */
 export function serverEventsUrl(
   communityId: string,
   serverId: string,
@@ -94,11 +58,7 @@ export function serverEventsUrl(
   return `${wsOrigin()}${path}${query}`;
 }
 
-/**
- * Parse a per-server wire frame into a {@link ServerFrame}, or null when it is
- * malformed or names a stream this client does not surface. The per-server
- * frame carries no `server_id` (one socket per server, so it is implied).
- */
+/** Per-server frames omit server_id because the socket target identifies the server; reject malformed or unknown frames. */
 export function parseServerFrame(raw: string): ServerFrame | null {
   let frame: unknown;
   try {
@@ -173,14 +133,9 @@ export function parseServerFrame(raw: string): ServerFrame | null {
   return null;
 }
 
-/** All three subscribable streams, the page-wide subscription (one socket). */
 export const ALL_STREAMS: readonly Stream[] = ["status", "log", "metrics"];
 
-/**
- * Owns one server events socket and its reconnect loop. Construct it, call
- * {@link start}, and {@link close} it on page leave. Not for reuse across
- * servers — make a new one per open detail page.
- */
+/** Use a new client per server and close it when leaving the detail page. */
 export class ServerEventsClient {
   private readonly socket: EventsSocketClient;
 
@@ -206,12 +161,10 @@ export class ServerEventsClient {
     );
   }
 
-  /** Open the socket and arm the reconnect loop. Idempotent per instance. */
   start(): void {
     this.socket.start();
   }
 
-  /** Tear down: stop reconnecting, drop rotation hook, close the socket. */
   close(): void {
     this.socket.close();
   }

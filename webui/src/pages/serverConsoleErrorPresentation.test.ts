@@ -1,6 +1,4 @@
 // @vitest-environment node
-// DOM-free contract test: the Console tab appends the selected key as a
-// transcript line under the failed command (issue #2450).
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../api/client.ts";
 import { consoleCommandErrorPresentation } from "./serverConsoleErrorPresentation.ts";

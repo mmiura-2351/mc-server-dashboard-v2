@@ -1,25 +1,10 @@
-/**
- * Shared audit pieces used by both the community-scoped Audit tab
- * (CommunityAuditTab, WEBUI_SPEC.md 6.10) and the platform-admin global Audit
- * page (AdminAuditPage, WEBUI_SPEC.md 6.12). Both render the same filter inputs,
- * map them to the same query params (operation/actor/since/until + limit/offset),
- * and render the same row shape; the global view adds a `community` filter and a
- * Community column on top. Factored here so the two stay in lockstep without
- * copy-paste (issue #479).
- */
-
 import type { components } from "../api/schema";
 import { ResizableTable } from "../components/ResizableColumns.tsx";
 import { type TranslationKey, t } from "../i18n/index.ts";
 
 type AuditRecordResponse = components["schemas"]["AuditRecordResponse"];
 
-// The audit `operation` codes the backend emits (the `<resource>:<action>`
-// constants in api audit/domain/operations.py), mapped to their label keys.
-// Kept as an explicit map (the codebase's reason→key convention, e.g.
-// AdminUsersPage) so an unmapped/unknown code is a plain `undefined` lookup that
-// {@link operationLabel} falls back from — the table never breaks if the backend
-// adds a code ahead of this dictionary (#643).
+// Unknown audit operations fall back to raw codes so new backend operations remain displayable.
 const OPERATION_LABEL_KEY: Record<string, TranslationKey> = {
   "auth:login": "communitySettings.audit.op.auth:login",
   "auth:logout": "communitySettings.audit.op.auth:logout",
@@ -93,7 +78,6 @@ const OPERATION_LABEL_KEY: Record<string, TranslationKey> = {
   "plugin:resolve": "communitySettings.audit.op.plugin:resolve",
 };
 
-// The `target_type` prefixes (TARGET_* in operations.py), mapped to label keys.
 const TARGET_TYPE_LABEL_KEY: Record<string, TranslationKey> = {
   community: "communitySettings.audit.targetType.community",
   user: "communitySettings.audit.targetType.user",
@@ -107,28 +91,21 @@ const TARGET_TYPE_LABEL_KEY: Record<string, TranslationKey> = {
   plugin: "communitySettings.audit.targetType.plugin",
 };
 
-// Human-readable label for an audit `operation` code; an unmapped/unknown code
-// falls back to its raw value (#643). Display-only — filtering still uses the
-// raw code.
+// Translate operation labels only; filters keep using raw codes.
 export function operationLabel(operation: string): string {
   const key = OPERATION_LABEL_KEY[operation];
   return key === undefined ? operation : t(key);
 }
 
-// Human-readable label for a `target_type` prefix (file/user/server/…); an
-// unmapped value falls back to the raw type, mirroring operationLabel (#643).
+// Preserve unknown target types verbatim.
 export function targetTypeLabel(targetType: string): string {
   const key = TARGET_TYPE_LABEL_KEY[targetType];
   return key === undefined ? targetType : t(key);
 }
 
-// One page; the API caps a single query at 200 and defaults to 50 (audit.py).
 export const PAGE_SIZE = 50;
 
-// The text/datetime filters shared by both audit views (the global view adds a
-// community filter alongside these). `since`/`until` are naive datetime-local
-// wall-clock strings; the caller converts them to UTC instants via
-// {@link applyAuditParams}.
+// Datetime-local inputs are naive local times; convert them to UTC when building API parameters.
 export interface AuditFilters {
   operation: string;
   actor: string;
@@ -143,7 +120,7 @@ export const EMPTY_FILTERS: AuditFilters = {
   until: "",
 };
 
-// A v1-v5 UUID, the shape the backend's `actor` query param parses.
+// Validate actor as a UUID before sending it as an API filter.
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -151,10 +128,7 @@ export function isUuid(value: string): boolean {
   return UUID_RE.test(value);
 }
 
-// Map the applied text/datetime filters onto the shared query params both audit
-// endpoints declare. Blank filters are omitted. The datetime-local inputs are
-// naive local wall-clock; the backend compares against tz-aware UTC, so the
-// local instant is converted to a UTC ISO string.
+// Omit blank filters and convert local datetime inputs to UTC instants for backend comparisons.
 export function applyAuditParams(
   params: URLSearchParams,
   filters: AuditFilters,
@@ -179,9 +153,6 @@ export function applyAuditParams(
   }
 }
 
-// The operation/actor/since/until inputs shared by both views. The community
-// filter (global view only) is rendered by the caller before these. Strings come
-// from the communitySettings.audit.* dictionary, reused across both views.
 export function AuditFilterFields({
   draft,
   actorError,
@@ -236,9 +207,6 @@ export function AuditFilterFields({
   );
 }
 
-// The audit-record table. The global view passes `showCommunity` to add a
-// Community column (the community-scoped view omits it: every row is the same
-// community).
 export function AuditTable({
   records,
   showCommunity = false,
@@ -246,8 +214,7 @@ export function AuditTable({
   records: AuditRecordResponse[];
   showCommunity?: boolean;
 }) {
-  // Keyed per view: the global view's extra Community column shifts column
-  // indices, so the two persist widths independently.
+  // Persist widths separately because the global view's extra column shifts indices.
   const storageKey = showCommunity
     ? "mcsd.colw.audit-global"
     : "mcsd.colw.audit";
@@ -283,14 +250,10 @@ function AuditRow({
   entry: AuditRecordResponse;
   showCommunity: boolean;
 }) {
-  // Raw "type:id" target (type/id alone shown bare), kept verbatim for the hover
-  // title; the displayed type prefix is humanized and the id is shown as a
-  // resolved name when the backend supplies one (#682), falling back to the raw
-  // UUID otherwise.
+  // Retain raw type:id in the hover title while displaying resolved names and translated types.
   const rawTarget = [entry.target_type, entry.target_id]
     .filter((part) => part !== null)
     .join(":");
-  // Prefer the resolved name over the raw id for the target's id part (#682).
   const targetIdPart = entry.target_name ?? entry.target_id;
   const displayTarget =
     entry.target_type !== null
@@ -298,22 +261,15 @@ function AuditRow({
           .filter((part) => part !== null)
           .join(": ")
       : (targetIdPart ?? rawTarget);
-  // The actor's resolved username if available, else the raw id, else the
-  // system-actor label (#682).
   const actor =
     entry.actor_username ??
     entry.actor_id ??
     t("communitySettings.audit.systemActor");
-  // The actor's raw id stays discoverable on hover; the system actor has none.
+  // Keep the raw actor ID available on hover; system actors have none.
   const actorTitle = entry.actor_id ?? actor;
-  // The community's resolved name if available, else the raw id (#682).
   const community = entry.community_name ?? entry.community_id;
   const targetText = rawTarget === "" ? "—" : displayTarget;
-  // `title` reveals the full value on hover for the long, often-ellipsizable
-  // id/operation/target columns (#519). Hover-only (no keyboard affordance);
-  // see #496's a11y posture. The operation/target/actor/community titles carry
-  // the raw code/id so the underlying value stays discoverable after the
-  // humanization and id→name resolution (#643, #682).
+  // Keep raw codes and IDs in hover titles after translating labels and resolving names.
   return (
     <tr>
       <td>{new Date(entry.created_at).toLocaleString()}</td>
@@ -328,8 +284,6 @@ function AuditRow({
   );
 }
 
-// Prev/Next paging over the limit/offset window (no total: a full page implies
-// there may be more). Shared by both views.
 export function AuditPaging({
   offset,
   hasNext,
