@@ -125,6 +125,46 @@ ApiMessage   {correlation_id, sent_at,    oneof: RegisterAck | ApiCommand}
 kinds. Adding a command or event type is an additive `oneof` field — a
 backward-compatible change under the module's `FILE` breaking rule.
 
+### 3.1 Message size limit
+
+One encoded `WorkerMessage` or `ApiMessage` is at most **4,259,840 bytes**
+(4 MiB + 64 KiB), inclusive. Both sides set that number as the gRPC maximum
+send *and* receive message size — the API in its server options, the Worker in
+its dial options — and both are pinned to
+[`proto/contract/control_plane_limits.json`](../../proto/contract/control_plane_limits.json)
+(`max_message_bytes`) by a test on each side. It is a constant, not a setting.
+
+The limit is the file cap (`max_file_bytes` in the same file: 4,194,304 bytes,
+the Worker's `MaxFileBytes` and the API's `MAX_EDIT_BYTES`) plus 64 KiB for the
+envelope and the path. A `ReadFile` result and an `EditFile` command at exactly
+the file cap therefore fit; one byte past the cap is refused by the cap itself
+(413 `file_too_large`), not by the transport. gRPC's own defaults do not carry
+this: they are 4 MiB to receive, which a 4 MiB file plus its envelope exceeds.
+
+**An over-limit message ends the stream, so neither side ever sends one.** gRPC
+has no per-message refusal: the side that sends or receives a message over its
+limit ends the whole `Session` with `RESOURCE_EXHAUSTED`, and with it every
+server's commands on that Worker (Section 4.4). Each side therefore measures
+the encoded message before sending and substitutes something that fits, logging
+a WARN that names the command kind and server id (never the payload):
+
+| Message | Largest honest size | If it would exceed the limit |
+|---|---|---|
+| `CommandResult.file_content` (`ReadFile`) | file cap + ~70 B | The command fails `FILE_ACCESS_DENIED` / `PAYLOAD_TOO_LARGE` (413 `file_too_large`). |
+| `EditFile` command | file cap + path (≤ 4,096 B on Linux) + ~150 B | Not sent; the dispatch returns `FILE_ACCESS_DENIED` / `PAYLOAD_TOO_LARGE` (413 `file_too_large`). `ReadFile` / `ListFiles` with an oversized path are refused the same way. |
+| `CommandResult.file_listing` (`ListFiles`) | 4,096 entries × ≤ ~275 B ≈ 1.1 MiB | The Worker halves the entries until the result fits and sets `truncated`. |
+| `CommandResult.command_output` (`ServerCommand`) | 1 MiB (the Worker's RCON reassembly cap) | The command fails `INTERNAL`. |
+| `ServerCommand` command (the console line) | unbounded by the API today | Not sent; the dispatch returns `INTERNAL`. Every other command kind is refused the same way. |
+| `CommandError.message` | a short sentence, plus the command's quoted path | The failure keeps its code (and file-access reason); the text is replaced. |
+| `Event{LogLine}` | 8 KiB + a truncation marker (capped at the source) | The line is dropped. |
+| `Event{StatusChange}.detail` | a Worker-authored sentence or a daemon error (≤ a few KiB) | The transition is sent without its detail. |
+| `Register.held_servers`, `RegisterAck.unknown_held_server_ids` | ~45 B per working set held on the Worker | Not guarded — operator-scale (tens of thousands of scratch directories on one Worker), not tenant-sized. |
+| `Metrics`, `Heartbeat`, `StartServer`, `StopServer`, triggers, tunnel commands | fixed, well under 1 KiB (a tunnel CA bundle is operator configuration) | — |
+
+A command that arrives over the limit despite this — only a peer that does not
+hold this contract can send one — is still refused by the receiver's gRPC limit
+and ends the stream.
+
 ---
 
 ## 4. Stream lifecycle

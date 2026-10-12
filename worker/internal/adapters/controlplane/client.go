@@ -22,6 +22,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	controlplanev1 "github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/controlplane/mcsd/controlplane/v1"
@@ -31,6 +32,25 @@ import (
 // authMetadataKey is the metadata key carrying the Worker credential. The API's
 // control-plane server reads it to authenticate the stream.
 const authMetadataKey = "authorization"
+
+// MaxMessageBytes is the largest encoded control-plane message either side sends
+// or accepts, inclusive (CONTROL_PLANE.md Section 3.1). It is the file cap
+// (instancemanager.MaxFileBytes, 4 MiB) plus 64 KiB for the envelope and the
+// path, so a ReadFile result or an EditFile command at exactly the cap fits. The
+// API holds the same number; both are pinned to
+// proto/contract/control_plane_limits.json by a test on each side.
+const MaxMessageBytes = 4*1024*1024 + 64*1024
+
+// MessageSizeDialOption sets MaxMessageBytes as the connection's gRPC send and
+// receive limit. gRPC-Go's defaults are 4 MiB to receive — 4 MiB of file plus
+// its envelope did not fit, and the refused Recv ended the whole Session — and
+// unlimited to send, which left the API's receive limit as the only bound.
+func MessageSizeDialOption() grpc.DialOption {
+	return grpc.WithDefaultCallOptions(
+		grpc.MaxCallRecvMsgSize(MaxMessageBytes),
+		grpc.MaxCallSendMsgSize(MaxMessageBytes),
+	)
+}
 
 // registerAckTimeout bounds how long RecvRegisterAck waits for the API's opening
 // RegisterAck (CONTROL_PLANE.md Section 4.1). Without it, an API that accepts the
@@ -371,7 +391,15 @@ func classify(err error) error {
 // reported as a stall rather than as a success on a stream this call no longer
 // owns. The stall error carries no ErrTerminal, so the run loop classifies it
 // transient and reconnects (session.Run), exactly as it does for a genuine stall.
+//
+// A message over MaxMessageBytes is refused here, unsent, with
+// session.ErrMessageTooLarge: handing it to gRPC would end the stream — and with
+// it every server's commands on this Worker — on either side's size limit
+// (issue #3360).
 func (t *transport) sendBounded(msg *controlplanev1.WorkerMessage) error {
+	if size := proto.Size(msg); size > MaxMessageBytes {
+		return fmt.Errorf("%w: %d bytes encoded, the limit is %d", session.ErrMessageTooLarge, size, MaxMessageBytes)
+	}
 	var settled atomic.Bool
 	deadline := t.clock.NewTimer(sendStallTimeout)
 	defer deadline.Stop()

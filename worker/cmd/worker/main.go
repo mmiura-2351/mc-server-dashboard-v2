@@ -420,6 +420,7 @@ func dial(api config.APIConfig, logger *slog.Logger) (*grpc.ClientConn, error) {
 	conn, err := grpc.NewClient(api.GRPCEndpoint,
 		grpc.WithTransportCredentials(creds),
 		grpc.WithKeepaliveParams(controlPlaneKeepalive),
+		controlplane.MessageSizeDialOption(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("dial API %q: %w", api.GRPCEndpoint, err)

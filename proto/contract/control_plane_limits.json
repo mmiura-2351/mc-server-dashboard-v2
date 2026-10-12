@@ -1,0 +1,20 @@
+{
+  "$comment": [
+    "Cross-language size limits of the control-plane Session stream (issue #3360).",
+    "The SINGLE SOURCE OF TRUTH for two numbers the API (Python) and the Worker (Go)",
+    "must agree on; each side holds its own constant and a test asserting it equals",
+    "the value here:",
+    "  - api:    api/tests/fleet/test_control_message_size.py",
+    "  - worker: worker/internal/adapters/controlplane/message_size_test.go and",
+    "            worker/internal/application/instancemanager/files_properties_cap_test.go",
+    "",
+    "max_file_bytes is the cap on a ReadFile result and an EditFile payload",
+    "(inclusive). max_message_bytes is the largest ENCODED WorkerMessage / ApiMessage",
+    "either side sends or accepts (inclusive); both sides set it as the gRPC max send",
+    "AND max receive message size, and check it before sending. It is max_file_bytes",
+    "plus 64 KiB for the envelope and the path, so a file at exactly the cap fits.",
+    "See docs/app/CONTROL_PLANE.md Section 3.1."
+  ],
+  "max_file_bytes": 4194304,
+  "max_message_bytes": 4259840
+}

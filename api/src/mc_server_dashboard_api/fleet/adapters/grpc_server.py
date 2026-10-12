@@ -47,7 +47,10 @@ from collections.abc import AsyncIterator
 import grpc
 from grpc import aio
 
-from mc_server_dashboard_api.fleet.adapters.control_plane import ControlPlaneState
+from mc_server_dashboard_api.fleet.adapters.control_plane import (
+    MAX_MESSAGE_BYTES,
+    ControlPlaneState,
+)
 from mc_server_dashboard_api.fleet.domain.clock import Clock
 from mc_server_dashboard_api.fleet.domain.control_plane import WorkerNotConnectedError
 from mc_server_dashboard_api.fleet.domain.entities import Worker, WorkerStatus
@@ -180,6 +183,23 @@ def _keepalive_options(heartbeat_timeout: dt.timedelta) -> list[tuple[str, int]]
         # PermitWithoutStream pings between Session streams (reconnect backoff).
         ("grpc.http2.min_ping_interval_without_data_ms", _MIN_PING_INTERVAL_MS),
         ("grpc.keepalive_permit_without_calls", 1),
+    ]
+
+
+def _server_options(heartbeat_timeout: dt.timedelta) -> list[tuple[str, int]]:
+    """The control-plane server's channel options: keepalive and message size.
+
+    The size limit is :data:`MAX_MESSAGE_BYTES` in both directions. gRPC's
+    defaults are 4 MiB to receive — a ReadFile result of 4 MiB of file plus its
+    envelope did not fit, and refusing it ended the whole Session — and
+    unlimited to send, which left the Worker's receive limit as the only bound
+    (issue #3360).
+    """
+
+    return [
+        *_keepalive_options(heartbeat_timeout),
+        ("grpc.max_receive_message_length", MAX_MESSAGE_BYTES),
+        ("grpc.max_send_message_length", MAX_MESSAGE_BYTES),
     ]
 
 
@@ -784,7 +804,7 @@ def make_grpc_server(
     rule is enforced at the edge before this is called.
     """
 
-    server = aio.server(options=_keepalive_options(heartbeat_timeout))
+    server = aio.server(options=_server_options(heartbeat_timeout))
     servicer = WorkerSessionServicer(
         registry=registry,
         clock=clock,
