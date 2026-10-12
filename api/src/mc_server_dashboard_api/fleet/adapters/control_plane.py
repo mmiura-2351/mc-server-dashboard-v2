@@ -60,6 +60,16 @@ from mcsd.controlplane.v1 import control_plane_pb2 as pb
 
 _LOG = logging.getLogger(__name__)
 
+# The largest encoded control-plane message either side sends or accepts,
+# inclusive (CONTROL_PLANE.md Section 3.1). It is the file cap (MAX_EDIT_BYTES,
+# 4 MiB) plus 64 KiB for the envelope and the path, so an EditFile command or a
+# ReadFile result at exactly the cap fits. The Worker holds the same number; both
+# are pinned to proto/contract/control_plane_limits.json by a test on each side.
+MAX_MESSAGE_BYTES = 4 * 1024 * 1024 + 64 * 1024
+
+# The commands whose over-limit refusal is the file API's own "too large" answer.
+_FILE_COMMANDS = frozenset({"read_file", "edit_file", "list_files"})
+
 
 class StaleSessionError(RuntimeError):
     """Raised when ``open_session`` receives a token older than the latest opened.
@@ -484,6 +494,40 @@ def _to_api_command(command_id: str, server_id: str, command: Command) -> pb.Api
     return api
 
 
+def _refuse_over_limit(msg: pb.ApiMessage) -> CommandResult | None:
+    """The failure for a command too large to send, or ``None`` when it fits.
+
+    A message over :data:`MAX_MESSAGE_BYTES` must never reach the stream: gRPC
+    refuses it on either side's limit by ending the whole ``Session``, taking
+    every server on that Worker with it (issue #3360). The command fails alone
+    instead — a file command as the oversized-payload refusal the file cap itself
+    produces (413 ``file_too_large`` at the edge), anything else as ``INTERNAL``.
+    The WARN names the command and its server, never the payload.
+    """
+
+    size = msg.ByteSize()
+    if size <= MAX_MESSAGE_BYTES:
+        return None
+    kind = msg.api_command.WhichOneof("command")
+    _LOG.warning(
+        "command exceeds the control-plane message limit; not sent",
+        extra={
+            "kind": kind,
+            "server_id": msg.api_command.server_id,
+            "command_id": msg.api_command.command_id,
+            "size": size,
+        },
+    )
+    message = f"command exceeds the {MAX_MESSAGE_BYTES}-byte control-plane limit"
+    if kind in _FILE_COMMANDS:
+        return CommandResult(
+            code=CommandResultCode.FILE_ACCESS_DENIED,
+            message=message,
+            file_access_reason=FileAccessReason.PAYLOAD_TOO_LARGE,
+        )
+    return CommandResult(code=CommandResultCode.INTERNAL, message=message)
+
+
 def _to_result(message: pb.CommandResult) -> CommandResult:
     if message.success:
         # command_output / file_content / file_listing share the result oneof;
@@ -571,6 +615,12 @@ class GrpcControlPlane(ControlPlane):
         if queue is None:
             raise WorkerNotConnectedError(worker_id.value)
         command_id = str(uuid.uuid4())
+        api_command = _to_api_command(command_id, server_id, command)
+        msg = pb.ApiMessage(correlation_id=command_id, api_command=api_command)
+        msg.sent_at.CopyFrom(self._now_timestamp())
+        refusal = _refuse_over_limit(msg)
+        if refusal is not None:
+            return refusal
         # A FINAL snapshot's server is recorded with the pending future so a timeout
         # or cancellation that discards the future still lets a late result — a
         # failure, canonically a TRANSFER_FAILED once the worker's transfer bound
@@ -590,9 +640,6 @@ class GrpcControlPlane(ControlPlane):
         future = self._state.register_pending(
             command_id, worker_id, snapshot_server_id=snapshot_server_id
         )
-        api_command = _to_api_command(command_id, server_id, command)
-        msg = pb.ApiMessage(correlation_id=command_id, api_command=api_command)
-        msg.sent_at.CopyFrom(self._now_timestamp())
         await queue.put(msg)
         # A longer per-command budget (the start's hydrate phase, issue #822)
         # overrides the default command deadline for this one dispatch.
@@ -634,10 +681,12 @@ class GrpcControlPlane(ControlPlane):
         if queue is None:
             raise WorkerNotConnectedError(worker_id.value)
         command_id = str(uuid.uuid4())
-        future = self._state.register_pending(command_id, worker_id)
         api_command = _to_api_command(command_id, server_id, command)
         msg = pb.ApiMessage(correlation_id=command_id, api_command=api_command)
         msg.sent_at.CopyFrom(self._now_timestamp())
+        if _refuse_over_limit(msg) is not None:
+            return
+        future = self._state.register_pending(command_id, worker_id)
         await queue.put(msg)
         # Fire-and-forget: the result is not awaited here. The task is held in
         # _background_tasks so it is not GC-collected mid-flight; a done callback

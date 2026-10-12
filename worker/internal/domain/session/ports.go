@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -403,6 +404,12 @@ type HeldServerProvider interface {
 	// local scratch, each tagged with its recorded generation.
 	HeldServers() []HeldServer
 }
+
+// ErrMessageTooLarge is returned by a Transport Send method for a message whose
+// encoded form exceeds the control-plane message limit (CONTROL_PLANE.md Section
+// 3.1). Nothing was sent and the stream is intact: the caller sends something
+// smaller in its place rather than tearing the session down (issue #3360).
+var ErrMessageTooLarge = errors.New("session: message exceeds the control-plane message limit")
 
 // Transport is the Port over a single live control-plane stream. One Transport
 // value corresponds to one open Session stream; the run loop discards it on any

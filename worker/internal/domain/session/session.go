@@ -223,7 +223,7 @@ func (r *Runner) serve(ctx context.Context, transport Transport, interval time.D
 	serveCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	results := make(chan CommandResult, maxConcurrentLanes+1)
+	results := make(chan outcome, maxConcurrentLanes+1)
 	disp := newDispatcher(serveCtx, r, results)
 	r.mu.Lock()
 	r.dispatcher = disp
@@ -263,16 +263,32 @@ func (r *Runner) serve(ctx context.Context, transport Transport, interval time.D
 			return serveCtx.Err()
 		case err := <-recvErr:
 			return err
-		case result := <-results:
-			if err := transport.SendCommandResult(serveCtx, result); err != nil {
+		case o := <-results:
+			if err := r.sendResult(serveCtx, transport, o); err != nil {
 				return fmt.Errorf("send command result: %w", err)
 			}
 		case event := <-events:
-			if err := transport.SendStatusChange(serveCtx, event); err != nil {
+			err := transport.SendStatusChange(serveCtx, event)
+			if errors.Is(err, ErrMessageTooLarge) {
+				// The transition is what the API reconciles on; only the free-text
+				// detail can be this large, so it is what gives way.
+				r.logger.Warn("status change exceeds the control-plane message limit; sending it without its detail",
+					"server_id", event.ServerID, "state", event.State)
+				event.Detail = ""
+				err = transport.SendStatusChange(serveCtx, event)
+			}
+			if err != nil {
 				return fmt.Errorf("send status change: %w", err)
 			}
 		case logEvent := <-logs:
-			if err := transport.SendLogLine(serveCtx, logEvent); err != nil {
+			err := transport.SendLogLine(serveCtx, logEvent)
+			if errors.Is(err, ErrMessageTooLarge) {
+				// Logs are a transient relay (FR-MON-2): one line is dropped.
+				r.logger.Warn("log line exceeds the control-plane message limit; dropping it",
+					"server_id", logEvent.ServerID)
+				err = nil
+			}
+			if err != nil {
 				return fmt.Errorf("send log line: %w", err)
 			}
 		case metricsEvent := <-metrics:
@@ -316,11 +332,68 @@ func (r *Runner) receiveLoop(ctx context.Context, transport Transport, disp *dis
 	}
 }
 
+// outcome is a command's result on its way to the single serialized sender,
+// with the command context a CommandResult does not carry, for the sender's log.
+type outcome struct {
+	result   CommandResult
+	serverID string
+	kind     string
+}
+
+// tooLargeMessage is the error text of a result replaced for exceeding the
+// control-plane message limit.
+const tooLargeMessage = "session: the result exceeds the control-plane message limit"
+
+// sendResult sends a command's result. A result the transport refuses as over
+// the control-plane message limit is replaced by one that fits, so an oversized
+// payload costs its own command and never the stream every server on this
+// Worker shares (issue #3360).
+func (r *Runner) sendResult(ctx context.Context, transport Transport, o outcome) error {
+	result := o.result
+	err := transport.SendCommandResult(ctx, result)
+	for errors.Is(err, ErrMessageTooLarge) {
+		smaller, ok := shrinkResult(result)
+		if !ok {
+			break
+		}
+		r.logger.Warn("command result exceeds the control-plane message limit; sending a smaller one",
+			"command_id", result.CommandID, "server_id", o.serverID, "kind", o.kind)
+		result = smaller
+		err = transport.SendCommandResult(ctx, result)
+	}
+	return err
+}
+
+// shrinkResult returns a strictly smaller stand-in for a result that exceeded
+// the control-plane message limit, or false when there is nothing left to
+// shrink. A directory listing is clipped to half its entries and marked
+// truncated — truncation is already that result's contract. Any other result
+// becomes a failure carrying no payload: a file read as the oversized-payload
+// refusal the file cap itself produces, a failure under its own code, and
+// anything else as an internal error.
+func shrinkResult(result CommandResult) (CommandResult, bool) {
+	if l := result.FileListing; result.Success && l != nil && len(l.Entries) > 0 {
+		result.FileListing = &FileListing{Entries: l.Entries[:len(l.Entries)/2], Truncated: true}
+		return result, true
+	}
+	if result.ErrorMessage == tooLargeMessage {
+		return result, false
+	}
+	failed := CommandResult{CommandID: result.CommandID, ErrorCode: CommandErrorInternal, ErrorMessage: tooLargeMessage}
+	switch {
+	case !result.Success:
+		failed.ErrorCode, failed.FileAccessReason = result.ErrorCode, result.FileAccessReason
+	case result.FileContent != nil:
+		failed.ErrorCode, failed.FileAccessReason = CommandErrorFileAccessDenied, FileAccessReasonPayloadTooLarge
+	}
+	return failed, true
+}
+
 // emitResult hands a result to the single serialized sender, abandoning it only
 // if the session is tearing down (the stream will be discarded anyway).
-func (r *Runner) emitResult(ctx context.Context, results chan<- CommandResult, result CommandResult) {
+func (r *Runner) emitResult(ctx context.Context, results chan<- outcome, o outcome) {
 	select {
-	case results <- result:
+	case results <- o:
 	case <-ctx.Done():
 	}
 }
@@ -330,7 +403,7 @@ func (r *Runner) emitResult(ctx context.Context, results chan<- CommandResult, r
 // flows back through here, so a single failure-logging site (issue #194) covers
 // every handler: a failed result is logged at WARN with the command context the
 // CommandResult itself does not carry (server_id, kind).
-func (r *Runner) handle(ctx context.Context, cmd Command) CommandResult {
+func (r *Runner) handle(ctx context.Context, cmd Command) outcome {
 	result := r.handleCommand(ctx, cmd)
 	if !result.Success {
 		r.logger.Warn("command failed",
@@ -341,7 +414,7 @@ func (r *Runner) handle(ctx context.Context, cmd Command) CommandResult {
 			"error_message", result.ErrorMessage,
 		)
 	}
-	return result
+	return outcome{result: result, serverID: cmd.ServerID, kind: cmd.Kind}
 }
 
 // handleCommand produces the CommandResult for a command, dispatching to the
@@ -404,7 +477,7 @@ func IsHandledKind(kind string) bool {
 type dispatcher struct {
 	r       *Runner
 	ctx     context.Context
-	results chan<- CommandResult
+	results chan<- outcome
 
 	mu    sync.Mutex
 	lanes map[string]*lane
@@ -415,7 +488,7 @@ type lane struct {
 	queue []Command
 }
 
-func newDispatcher(ctx context.Context, r *Runner, results chan<- CommandResult) *dispatcher {
+func newDispatcher(ctx context.Context, r *Runner, results chan<- outcome) *dispatcher {
 	return &dispatcher{
 		r:       r,
 		ctx:     ctx,
