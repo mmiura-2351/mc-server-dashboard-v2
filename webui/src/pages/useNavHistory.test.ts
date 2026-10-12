@@ -42,12 +42,9 @@ describe("useNavHistory", () => {
     act(() => result.current.navigate({ dir: "world", openFile: null }));
     act(() => result.current.navigate({ dir: "world/nether", openFile: null }));
     act(() => result.current.goBack());
-    // Now at "world"; forward has "world/nether".
     act(() => result.current.navigate({ dir: "config", openFile: null }));
-    // Forward should be cleared.
     expect(result.current.canGoForward).toBe(false);
     expect(result.current.current).toEqual({ dir: "config", openFile: null });
-    // Can still go back through: root -> world -> config.
     expect(result.current.canGoBack).toBe(true);
   });
 
@@ -91,9 +88,7 @@ describe("useNavHistory", () => {
     act(() => result.current.navigate({ dir: "a", openFile: null }));
     expect(result.current.canGoBack).toBe(true);
 
-    // Navigate to the same state again.
     act(() => result.current.navigate({ dir: "a", openFile: null }));
-    // Should not have grown the history: one goBack should reach root.
     act(() => result.current.goBack());
     expect(result.current.current).toEqual({ dir: "", openFile: null });
     expect(result.current.canGoBack).toBe(false);
@@ -103,12 +98,9 @@ describe("useNavHistory", () => {
     const { result } = renderHook(() => useNavHistory());
     act(() => result.current.navigate({ dir: "a", openFile: null }));
     act(() => result.current.navigate({ dir: "b", openFile: null }));
-    // Stack: [root, a, b] at index 2.
     act(() => result.current.jumpTo({ dir: "x", openFile: null }));
-    // Should replace "b" with "x" at the same index, no forward (nothing after index 2).
     expect(result.current.current).toEqual({ dir: "x", openFile: null });
     expect(result.current.canGoForward).toBe(false);
-    // Back should reach "a", then root.
     act(() => result.current.goBack());
     expect(result.current.current).toEqual({ dir: "a", openFile: null });
     act(() => result.current.goBack());
@@ -120,12 +112,9 @@ describe("useNavHistory", () => {
     const { result } = renderHook(() => useNavHistory());
     act(() => result.current.navigate({ dir: "a", openFile: null }));
     act(() => result.current.navigate({ dir: "b", openFile: null }));
-    // Stack: [root, a, b] at index 2.
-    // jumpTo "a" should move index to 1, preserving "b" in forward history.
     act(() => result.current.jumpTo({ dir: "a", openFile: null }));
     expect(result.current.current).toEqual({ dir: "a", openFile: null });
     expect(result.current.canGoForward).toBe(true);
-    // Forward should reach "b".
     act(() => result.current.goForward());
     expect(result.current.current).toEqual({ dir: "b", openFile: null });
   });
@@ -134,7 +123,6 @@ describe("useNavHistory", () => {
     const { result } = renderHook(() => useNavHistory());
     act(() => result.current.navigate({ dir: "a", openFile: null }));
     act(() => result.current.jumpTo({ dir: "a", openFile: null }));
-    // History should not have changed.
     act(() => result.current.goBack());
     expect(result.current.current).toEqual({ dir: "", openFile: null });
     expect(result.current.canGoBack).toBe(false);
@@ -146,12 +134,10 @@ describe("useNavHistory", () => {
     act(() => result.current.navigate({ dir: "a/b", openFile: null }));
     act(() => result.current.navigate({ dir: "a/b", openFile: "a/b/x.txt" }));
 
-    // Go back twice: a/b -> a -> root.
     act(() => result.current.goBack());
     act(() => result.current.goBack());
     expect(result.current.current).toEqual({ dir: "a", openFile: null });
 
-    // Go forward once.
     act(() => result.current.goForward());
     expect(result.current.current).toEqual({ dir: "a/b", openFile: null });
   });

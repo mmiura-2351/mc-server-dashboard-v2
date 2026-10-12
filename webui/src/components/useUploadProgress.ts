@@ -1,31 +1,17 @@
 import { useCallback, useSyncExternalStore } from "react";
 import type { UploadProgress } from "../api/client.ts";
 
-/**
- * Tracks bytes-uploaded / total and elapsed time for a single upload, shared by
- * the four upload sites (issue #1207). `start(total)` arms it with the file size
- * and records the start time; `onProgress` is the {@link UploadProgress}
- * callback handed to `postFormWithProgress`; `reset` returns it to idle. The
- * derived `percent` and `elapsedMs` drive the shared `UploadProgress` bar.
- *
- * State is held at module scope so it survives component unmount/remount cycles
- * (e.g. tab switches). React is kept in sync via `useSyncExternalStore`.
- */
+/** Keep upload state at module scope so progress survives tab unmounts; useSyncExternalStore updates React. */
 export interface UploadProgressState {
   active: boolean;
   loaded: number;
   total: number;
   percent: number;
   elapsedMs: number;
-  /**
-   * Arm the tracker with the file size and return the fresh {@link AbortSignal}
-   * for the upload. Pass the returned signal to `postFormWithProgress` — it
-   * belongs to the controller that {@link cancel} will abort.
-   */
+  /** Return the fresh signal synchronously; pass it to the upload so cancel aborts that request. */
   start: (total: number) => AbortSignal;
   onProgress: UploadProgress;
   reset: () => void;
-  /** Abort the in-flight upload and reset the progress state (issue #1780). */
   cancel: () => void;
 }
 
@@ -45,7 +31,7 @@ const initialState: UploadState = {
   now: 0,
 };
 
-// Module-level singleton — survives component mount/unmount cycles.
+// Shared upload state survives component unmounts.
 let state: UploadState = { ...initialState };
 let abortController = new AbortController();
 const listeners = new Set<() => void>();
@@ -68,7 +54,7 @@ function getSnapshot(): UploadState {
 }
 
 function startUpload(total: number): AbortSignal {
-  // Each upload gets a fresh controller so a previous cancel does not affect it.
+  // A fresh controller keeps previous cancellation from aborting the next upload.
   abortController = new AbortController();
   const t = Date.now();
   state = { active: true, loaded: 0, total, startedAt: t, now: t };
@@ -80,8 +66,7 @@ function onUploadProgress(loaded: number, total: number) {
   state = {
     ...state,
     loaded,
-    // The XHR `total` is authoritative once the request is in flight; keep the
-    // file-size estimate from `start` when the event reports an unknown size.
+    // Prefer XHR's total once known; otherwise retain the initial file-size estimate.
     total: total > 0 ? total : state.total,
     now: Date.now(),
   };
@@ -93,13 +78,11 @@ function resetUpload() {
   emitChange();
 }
 
-/** Abort the in-flight XHR and reset progress (issue #1780). */
 function cancelUpload() {
   abortController.abort();
   resetUpload();
 }
 
-/** Reset module-level state. Exported only for tests. */
 export function _resetForTesting() {
   state = { ...initialState };
   abortController = new AbortController();

@@ -28,8 +28,7 @@ describe("humanizeBytes", () => {
 describe("formatDateTime", () => {
   it("renders an ISO timestamp in the viewer's locale, dropping microseconds", () => {
     const iso = "2026-06-05T13:46:35.411582Z";
-    // Locale/timezone-dependent, so check that the raw ISO no longer leaks
-    // through (no "T", no microseconds, no offset).
+    // Locale and timezone vary; assert that the raw ISO representation is not shown.
     const out = formatDateTime(iso);
     expect(out).not.toContain("T");
     expect(out).not.toContain("411582");

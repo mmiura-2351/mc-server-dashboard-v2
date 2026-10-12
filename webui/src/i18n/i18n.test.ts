@@ -24,7 +24,7 @@ describe("dictionaries", () => {
 describe("t() interpolation", () => {
   beforeEach(() => {
     localStorage.clear();
-    initLanguage(); // en default in jsdom
+    initLanguage();
   });
 
   afterEach(() => {
@@ -65,7 +65,7 @@ describe("t() interpolation", () => {
 describe("language detection and override", () => {
   beforeEach(() => {
     localStorage.clear();
-    initLanguage(); // reset to default (en) — no override, jsdom navigator is en
+    initLanguage();
   });
 
   afterEach(() => {
@@ -100,14 +100,11 @@ describe("language detection and override", () => {
 
     setLanguage("ja");
 
-    // Applied in place (no reload) and persisted, and subscribers are notified
-    // so the app re-renders against the new dictionary (issues #515, #512).
     expect(getLanguage()).toBe("ja");
     expect(t("shell.account")).toBe(ja["shell.account"]);
     expect(localStorage.getItem("mcsd.lang")).toBe("ja");
     expect(notified).toHaveBeenCalledOnce();
 
-    // A fresh boot reads the persisted override.
     initLanguage();
     expect(getLanguage()).toBe("ja");
 
@@ -118,7 +115,7 @@ describe("language detection and override", () => {
     const notified = vi.fn();
     const unsubscribe = subscribeLanguage(notified);
 
-    setLanguage("en"); // already en
+    setLanguage("en");
     expect(notified).not.toHaveBeenCalled();
 
     unsubscribe();

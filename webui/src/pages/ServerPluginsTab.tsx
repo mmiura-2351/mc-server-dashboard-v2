@@ -1,13 +1,3 @@
-/**
- * Server detail — Plugins tab (issue #1153).
- *
- * Installed plugins list with enable/disable, remove, update actions. Local
- * jar upload for plugin installation. Modrinth catalog search and install with
- * version selector. Dependency viewer per plugin. Server state awareness
- * (read-only when running, mutations require stopped server). Full permission
- * gating (plugin:read, plugin:manage).
- */
-
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import {
@@ -50,22 +40,18 @@ type PluginValidationResponse =
 type ResolutionPlanResponse = components["schemas"]["ResolutionPlanResponse"];
 type ApplyResolutionResponse = components["schemas"]["ApplyResolutionResponse"];
 
-/** Server types that support plugins/mods. Vanilla does not. */
 function supportsPlugins(serverType: string): boolean {
   return serverType !== "vanilla";
 }
 
-/** Server types whose content is mods, mirroring the backend (#1320). */
 function isModLoader(serverType: string): boolean {
   return serverType === "fabric" || serverType === "forge";
 }
 
-// Geyser detection mirrors the backend is_geyser_plugin (issue #1541): the
-// case-insensitive manifest identifier, OR the Modrinth Geyser project id/slug.
+// Match the backend's Geyser detection by manifest identifier or Modrinth project ID/slug.
 const GEYSER_MOD_IDENTIFIERS = new Set(["geyser-spigot"]);
 const GEYSER_MODRINTH_PROJECT_IDS = new Set(["wKkoqHrH", "geyser"]);
 
-/** Whether a plugin is the Geyser Bedrock translator (mirrors backend). */
 function isGeyserPlugin(p: PluginResponse): boolean {
   return (
     GEYSER_MOD_IDENTIFIERS.has((p.mod_identifier ?? "").toLowerCase()) ||
@@ -73,7 +59,6 @@ function isGeyserPlugin(p: PluginResponse): boolean {
   );
 }
 
-/** The loader-aware content noun in its three grammatical forms (#1320). */
 interface ContentNoun {
   plural: string;
   singular: string;
@@ -89,7 +74,6 @@ function contentNoun(serverType: string): ContentNoun {
   };
 }
 
-/** Substitute the `{nouns}` / `{noun}` / `{Noun}` placeholders in a string. */
 function applyNoun(text: string, noun: ContentNoun): string {
   return text
     .replace(/\{nouns\}/g, noun.plural)
@@ -97,25 +81,21 @@ function applyNoun(text: string, noun: ContentNoun): string {
     .replace(/\{Noun\}/g, noun.singularCap);
 }
 
-/** Map a manifest mod id to a friendly plugin name, falling back to the id. */
 function nameOfPlugin(plugins: PluginResponse[], modId: string): string {
   const match = plugins.find((p) => p.mod_identifier === modId);
   return match?.display_name ?? modId;
 }
 
-/** Human label for a plugin side (issue #1308). */
 function sideLabel(side: string): string {
   if (side === "server") return t("plugins.side.server");
   if (side === "client") return t("plugins.side.client");
   return t("plugins.side.both");
 }
 
-/** Human label for a plugin's provenance (issue #1934). */
 function sourceLabel(source: string): string {
   if (source === "modrinth") return t("plugins.source.modrinth");
   if (source === "geyser") return t("plugins.source.geyser");
-  // Provenance lost in a backup restore (issue #2059): labelled distinctly so it
-  // never reads as a manual Local upload it is not.
+  // Restore can lose provenance; do not label that as a manual upload.
   if (source === "unknown") return t("plugins.source.unknown");
   return t("plugins.source.local");
 }
@@ -130,7 +110,6 @@ export function ServerPluginsTab({
   can: Can;
 }) {
   const serverId = server.id;
-  // Loader-aware content noun (Plugins vs Mods) for this server (#1320).
   const noun = contentNoun(server.server_type);
   const tn = (key: TranslationKey) => applyNoun(t(key), noun);
   const { showToast } = useToast();
@@ -166,8 +145,6 @@ export function ServerPluginsTab({
     });
   };
 
-  // -- Queries --
-
   const listQuery = useQuery({
     queryKey: pluginsKey(communityId, serverId),
     enabled: canRead,
@@ -181,8 +158,6 @@ export function ServerPluginsTab({
       ),
   });
 
-  // Deployment's Bedrock discovery flag (issue #1543). The meta query is
-  // shared with the create/detail pages via react-query's cache.
   const metaQuery = useQuery({
     queryKey: ["meta"],
     queryFn: ({ signal }) => api.get("/api/meta", { signal }),
@@ -213,8 +188,6 @@ export function ServerPluginsTab({
         { signal },
       ),
   });
-
-  // -- Mutations --
 
   const enableMutation = useMutation({
     mutationFn: (plugin: PluginResponse) =>
@@ -328,9 +301,7 @@ export function ServerPluginsTab({
         ),
         "mods.zip",
       ),
-    // The ZIP is built incrementally with no Content-Length, so an oversize mod
-    // set trips the download cap mid-stream. That is not an ApiError, so it
-    // needs its own size-bearing message (#2355).
+    // Chunked ZIPs have no declared size; a mid-stream cap failure needs its own size-bearing message.
     onError: (error) => {
       if (error instanceof DownloadTooLargeError) {
         showToast(
@@ -373,8 +344,6 @@ export function ServerPluginsTab({
     },
   });
 
-  // -- Guards --
-
   if (!supportsPlugins(server.server_type)) {
     return <p className="sub">{t("plugins.unsupported")}</p>;
   }
@@ -385,9 +354,7 @@ export function ServerPluginsTab({
   if (listState.kind === "pending") {
     return <p className="sub">{tn("plugins.loading")}</p>;
   }
-  // Error only when there is nothing to show (initial load failed). A failed
-  // background refetch retains `data`, so the cached list keeps rendering
-  // through transient API blips (#1805).
+  // Retain cached content when only a background refetch fails.
   if (listState.kind === "error") {
     return <p className="field-error">{tn("plugins.loadError")}</p>;
   }
@@ -404,11 +371,9 @@ export function ServerPluginsTab({
     updateMutation.isPending ||
     sideMutation.isPending ||
     uploadMutation.isPending;
-  // Client modpack = enabled plugins whose side is client-relevant.
   const hasClientMods = plugins.some(
     (p) => p.enabled && (p.side === "client" || p.side === "both"),
   );
-  // Side column + client modpack download are mod-loader features (issue #1342).
   const showSide = isModLoader(server.server_type);
 
   return (
@@ -617,8 +582,6 @@ export function ServerPluginsTab({
   );
 }
 
-// ── Plugin row with inline actions + dependency expander ──────────────────
-
 function PluginRow({
   plugin,
   hasUpdate,
@@ -707,9 +670,7 @@ function PluginRow({
             >
               {plugin.enabled ? t("plugins.disable") : t("plugins.enable")}
             </button>
-            {/* The Update button only renders when an update is available. Render
-                an inert, hidden placeholder of the same width otherwise so the
-                following actions stay column-aligned across rows (#1320). */}
+            {/* Keep a hidden placeholder so following row actions stay aligned when Update is absent. */}
             {hasUpdate && updateVersion !== null ? (
               <button
                 type="button"
@@ -732,9 +693,7 @@ function PluginRow({
             >
               {t("plugins.remove")}
             </button>
-            {/* The Dependencies button only applies to Modrinth plugins. Render
-                an inert, hidden placeholder of the same width otherwise so the
-                Disable/Remove buttons stay column-aligned across rows (#1320). */}
+            {/* Keep a hidden placeholder so following actions stay aligned when dependencies do not apply. */}
             {plugin.source === "modrinth" ? (
               <button
                 type="button"
@@ -766,8 +725,6 @@ function PluginRow({
   );
 }
 
-// ── Dependencies view ─────────────────────────────────────────────────────
-
 function DependenciesView({
   communityId,
   serverId,
@@ -798,9 +755,7 @@ function DependenciesView({
   if (queryState.kind === "pending") {
     return <p className="sub">{t("plugins.dependencies.loading")}</p>;
   }
-  // Error only when there is nothing to show (initial load failed). A failed
-  // background refetch retains `data`, so the cached list keeps rendering
-  // through transient API blips (#1805).
+  // Retain cached content when only a background refetch fails.
   if (queryState.kind === "error") {
     return <p className="field-error">{t("plugins.error.generic")}</p>;
   }
@@ -830,8 +785,6 @@ function DependenciesView({
     </ul>
   );
 }
-
-// ── Dependency / compatibility validation checklist (issue #1307) ─────────
 
 function PluginValidationChecklist({
   validation,
@@ -920,8 +873,6 @@ function PluginValidationChecklist({
   );
 }
 
-// ── Dependency auto-resolution modal (issue #1309) ────────────────────────
-
 function PluginResolveModal({
   communityId,
   serverId,
@@ -941,8 +892,7 @@ function PluginResolveModal({
 }) {
   const { showToast } = useToast();
 
-  // The plan is a POST (it queries Modrinth), so it is a mutation triggered on
-  // open rather than a cached query. Read-only on the backend: nothing installs.
+  // The plan endpoint uses POST but is read-only; run it on open without installing anything.
   const planMutation = useMutation({
     mutationFn: (): Promise<ResolutionPlanResponse> =>
       api.post(
@@ -954,7 +904,6 @@ function PluginResolveModal({
     onError,
   });
 
-  // Compute the plan once when the modal opens.
   const runPlan = planMutation.mutate;
   useEffect(() => {
     runPlan();
@@ -1095,8 +1044,6 @@ function PluginResolveModal({
   );
 }
 
-// ── Modrinth catalog browser modal ────────────────────────────────────────
-
 function ModrinthBrowser({
   communityId,
   serverId,
@@ -1120,7 +1067,6 @@ function ModrinthBrowser({
   const [query, setQuery] = useState("");
   const [selectedProject, setSelectedProject] = useState<string | null>(null);
 
-  // Debounce: only search after user stops typing for 400ms.
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handleSearchChange = (value: string) => {
     setSearchInput(value);
@@ -1203,9 +1149,7 @@ function SearchResults({
   if (searchState.kind === "pending") {
     return <p className="sub">{applyNoun(t("plugins.loading"), noun)}</p>;
   }
-  // Error only when there is nothing to show (initial load failed). A failed
-  // background refetch retains `data`, so the cached list keeps rendering
-  // through transient API blips (#1805).
+  // Retain cached content when only a background refetch fails.
   if (searchState.kind === "error") {
     return <p className="field-error">{t("plugins.error.generic")}</p>;
   }
@@ -1244,8 +1188,6 @@ function SearchResults({
     </div>
   );
 }
-
-// ── Project detail + version picker ───────────────────────────────────────
 
 function ProjectDetailModal({
   communityId,
@@ -1313,7 +1255,6 @@ function ProjectDetailModal({
     },
   });
 
-  // Determine whether this project is already installed and which version.
   const projectId = detailQuery.data?.project.project_id ?? null;
   const installedPlugin =
     projectId !== null

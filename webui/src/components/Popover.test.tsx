@@ -34,10 +34,6 @@ describe("Popover", () => {
   });
 
   it("claims no menu popup and points aria-controls at the panel only while open", () => {
-    // The panel is a plain content region (a checkbox group in the dashboard
-    // filter's use), not a menu/listbox — so the trigger carries no
-    // aria-haspopup that would promise one, and leans on aria-expanded +
-    // aria-controls instead (#2668).
     renderPopover();
     const trigger = screen.getByRole("button", { name: "Menu" });
     expect(trigger).not.toHaveAttribute("aria-haspopup");
@@ -88,9 +84,7 @@ describe("Popover", () => {
   });
 
   it("keeps the panel within the viewport when the trigger sits near the right edge", () => {
-    // Regression (#2239 review): at ~375px the trigger sits at x≈289 and a
-    // 160px left-aligned panel overflowed the right edge by 74px. The offset
-    // shifts it left so its right edge lands within the 8px margin.
+    // At 375px, a trigger near the right edge needs a left shift to retain the viewport margin.
     const offset = clampPopoverOffset(289, 160, 375, 8);
     const panelLeft = 289 + offset;
     expect(panelLeft).toBeGreaterThanOrEqual(8);
@@ -98,8 +92,7 @@ describe("Popover", () => {
   });
 
   it("leaves a left-wrapped trigger's panel un-shifted", () => {
-    // At ~360px the bar wraps and the trigger moves to x≈79, where the panel
-    // already fits; a naive right-alignment would push it off the LEFT edge.
+    // When the panel already fits, right-alignment could push it past the left edge.
     expect(clampPopoverOffset(79, 160, 360, 8)).toBe(0);
   });
 

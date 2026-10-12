@@ -1,16 +1,6 @@
 import { type InputHTMLAttributes, useState } from "react";
 import { t } from "../i18n/index.ts";
 
-// Shared password field with a show/hide toggle (issue #535). The input type
-// switches between "password" and "text" so users can verify what they typed;
-// the toggle is a real <button> (keyboard-accessible) carrying an aria-label and
-// aria-pressed state. No icon library — an inline SVG eye affordance, consistent
-// with the app's hand-rolled iconography (no new deps, WEBUI_SPEC.md 7.6).
-//
-// It forwards the usual input props (id, value, onChange, autoComplete,
-// placeholder, required), so it drops in wherever a `type="password"` input
-// stood, under either an external `<label htmlFor>` or a wrapping `.field` label.
-
 type PasswordInputProps = Omit<InputHTMLAttributes<HTMLInputElement>, "type">;
 
 export function PasswordInput(props: PasswordInputProps) {

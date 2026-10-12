@@ -18,13 +18,8 @@ if (rootElement === null) {
   throw new Error("Root element #root not found");
 }
 
-// Re-render the app subtree when the language switches: `t()` reads a
-// module-level dictionary, so a `key` keyed on the active language remounts the
-// `App` subtree and every `t()` call re-evaluates — without a full page reload,
-// which would tear down an in-flight session-refresh rotation and could sign
-// the user out (issues #515, #512). The session/query providers sit above the
-// key boundary so the switch does not re-bootstrap the session or drop cached
-// queries; they carry no `t()` of their own.
+// Remount translated content on language changes without reloading.
+// Keep session and query providers above the key boundary so their state survives.
 function LanguageRoot() {
   const language = useSyncExternalStore(subscribeLanguage, getLanguage);
   return <App key={language} />;

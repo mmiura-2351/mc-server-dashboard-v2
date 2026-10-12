@@ -1,20 +1,12 @@
-/* Design tokens ported from docs/ui/mockup/assets/style.css.
- *
- * Theme-agnostic tokens (typography, spacing, radii) live on :root.
- * Theme-specific color tokens live under a [data-theme] selector so a light
- * theme later is a token swap, not a rewrite (WEBUI_SPEC.md Section 7.5).
- * Dark is the shipped theme and the default when no data-theme is set.
- */
+/* Keep shared geometry on :root and theme colors under data-theme; dark is the default. */
 
 :root {
-  /* Typography */
   --font-mono: "SFMono-Regular", "JetBrains Mono", Consolas, monospace;
   --font-sans:
     -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --font-size-base: 14px;
   --line-height-base: 1.5;
 
-  /* Spacing scale (derived from the mockup's recurring px steps) */
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
@@ -22,12 +14,10 @@
   --space-5: 20px;
   --space-6: 24px;
 
-  /* Radii */
   --radius: 8px;
   --radius-sm: 5px;
 }
 
-/* Dark theme (shipped). Applied by default and when data-theme="dark". */
 :root,
 :root[data-theme="dark"] {
   --bg: #0e1116;
@@ -38,20 +28,16 @@
   --border-subtle: #1f2630;
   --text: #d7dee8;
   --text-dim: #8b97a8;
-  /* Lightened from #5c6878 to clear WCAG AA 4.5:1 on every surface it sits on,
-   * including --bg-overlay (the .pill.stopped background), while staying dimmer
-   * than --text-dim so the faint < dim < text hierarchy holds (#496). */
+  /* Keep faint text at WCAG AA contrast on every surface, including the stopped-pill overlay. */
   --text-faint: #79899e;
   --accent: #4d9fff;
   --accent-dim: #2b5e9e;
 
-  /* Status palette (drives the state pills) */
   --green: #3fcf6e;
   --amber: #f0b429;
   --red: #f25555;
   --purple: #b07aff;
 
-  /* State-pill tints (text / border / background per status) */
   --pill-running-fg: var(--green);
   --pill-running-border: rgba(63, 207, 110, 0.35);
   --pill-running-bg: rgba(63, 207, 110, 0.08);

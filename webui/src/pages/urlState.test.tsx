@@ -1,9 +1,3 @@
-/**
- * Unit tests for the URL-driven view-state hooks (#514): the active tab lives in
- * the hash, the page offset in `?offset=N`, both drive history so Back restores
- * the prior view. History is simulated with MemoryRouter + a navigate(-1) probe.
- */
-
 import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, useLocation, useNavigate } from "react-router";
 import { describe, expect, it } from "vitest";
@@ -173,8 +167,6 @@ describe("useTabHash", () => {
     fireEvent.click(screen.getByText("go-console"));
     expect(screen.getByTestId("tab").textContent).toBe("console");
 
-    // Re-clicking the already-active tab must not grow history: a single Back
-    // then lands back on the default, not on a duplicate console entry.
     fireEvent.click(screen.getByText("go-console"));
     fireEvent.click(screen.getByText("back"));
     expect(screen.getByTestId("tab").textContent).toBe("overview");
@@ -188,13 +180,10 @@ describe("useTabHash", () => {
     );
     expect(screen.getByTestId("tab").textContent).toBe("console");
 
-    // Each tab's pagination is independent state, so switching tabs drops the
-    // offset param, leaving the new tab on a clean URL.
     fireEvent.click(screen.getByText("go-settings"));
     expect(screen.getByTestId("tab").textContent).toBe("settings");
     expect(screen.getByTestId("search").textContent).toBe("");
 
-    // Back returns to the paginated tab with its offset intact (via history).
     fireEvent.click(screen.getByText("back"));
     expect(screen.getByTestId("tab").textContent).toBe("console");
     expect(screen.getByTestId("search").textContent).toBe("?offset=50");
@@ -255,9 +244,6 @@ describe("useOffsetParam", () => {
         <OffsetProbe />
       </MemoryRouter>,
     );
-    // At offset 0 the "prev" button calls setOffset(0): a no-op that must not
-    // grow history, so a later Back from a real page lands on offset 0, not on
-    // a duplicate entry.
     fireEvent.click(screen.getByText("prev"));
     fireEvent.click(screen.getByText("next"));
     fireEvent.click(screen.getByText("back"));
@@ -357,9 +343,6 @@ describe("useFilterParams", () => {
     fireEvent.click(screen.getByText("apply-op"));
     expect(screen.getByTestId("operation").textContent).toBe("member:add");
 
-    // Re-applying the already-applied filter set must not grow history: a single
-    // Back then lands on the empty initial state, not on a duplicate member:add
-    // entry.
     fireEvent.click(screen.getByText("apply-op"));
     fireEvent.click(screen.getByText("back"));
     expect(screen.getByTestId("operation").textContent).toBe("");
@@ -385,8 +368,6 @@ describe("useFilterParams", () => {
     expect(screen.getByTestId("actor").textContent).toBe("");
   });
 });
-
-// ── File browser params (#1484) ───────────────────────────────────────────────
 
 function FileBrowserProbe() {
   const [{ dir, file }, setParams] = useFileBrowserParams();
@@ -518,11 +499,9 @@ describe("useFileBrowserParams", () => {
     fireEvent.click(screen.getByText("go-world"));
     expect(screen.getByTestId("dir").textContent).toBe("world");
 
-    // Replace the current entry instead of pushing a new one.
     fireEvent.click(screen.getByText("replace-config"));
     expect(screen.getByTestId("dir").textContent).toBe("config");
 
-    // Back should skip "config" (it replaced "world") and land at root.
     fireEvent.click(screen.getByText("back"));
     expect(screen.getByTestId("dir").textContent).toBe("");
   });
@@ -536,14 +515,11 @@ describe("useFileBrowserParams", () => {
     fireEvent.click(screen.getByText("go-world"));
     expect(screen.getByTestId("dir").textContent).toBe("world");
 
-    // Re-clicking must not grow history: one Back lands at root.
     fireEvent.click(screen.getByText("go-world"));
     fireEvent.click(screen.getByText("back"));
     expect(screen.getByTestId("dir").textContent).toBe("");
   });
 });
-
-// ── WAI-ARIA tab helpers (issue #1216) ────────────────────────────────────────
 
 describe("tabId / panelId", () => {
   it("produces deterministic ids for tabs and panels", () => {
@@ -552,8 +528,6 @@ describe("tabId / panelId", () => {
   });
 });
 
-// A probe that renders a real WAI-ARIA tab list with keyboard handling, so the
-// handleTabKeyDown helper can be tested end-to-end in a DOM environment.
 function AriaTabProbe() {
   const [tab, setTab] = useTabHash(TABS);
   return (

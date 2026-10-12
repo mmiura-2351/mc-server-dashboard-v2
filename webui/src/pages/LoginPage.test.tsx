@@ -42,8 +42,7 @@ function renderLogin(
 
 const fetchMock = vi.fn();
 
-// Route the bootstrap refresh to signed-out so the login page renders; the
-// per-test login response is queued via mockResolvedValueOnce after mount.
+// Queue the login response only after bootstrap has resolved signed-out.
 function bootstrapSignedOut() {
   fetchMock.mockImplementation(async (url: string) => {
     if (url === "/api/auth/refresh") {
@@ -79,7 +78,6 @@ describe("LoginPage", () => {
     bootstrapSignedOut();
     renderLogin();
 
-    // The login POST is rejected with the uniform 401 (AUTH_API.md 1).
     fetchMock.mockResolvedValueOnce(
       new Response(
         JSON.stringify({ reason: "invalid_credentials", status: 401 }),
@@ -94,7 +92,6 @@ describe("LoginPage", () => {
     expect(
       await screen.findByText(t("login.invalidCredentials")),
     ).toBeInTheDocument();
-    // Still on the login page; no token stored.
     expect(getAccessToken()).toBeNull();
   });
 

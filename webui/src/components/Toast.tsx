@@ -10,9 +10,6 @@ import {
 } from "react";
 import { t } from "../i18n/index.ts";
 
-// Self-built toast primitive (WEBUI_SPEC.md Section 7.4 / 7.6 — no UI kit).
-// API errors and success notices surface here; variants tint the left edge.
-
 export type ToastVariant = "success" | "error";
 
 interface Toast {

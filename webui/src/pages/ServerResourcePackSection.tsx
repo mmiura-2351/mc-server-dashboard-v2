@@ -1,12 +1,3 @@
-/**
- * Server detail — Resource pack assignment section (issue #1179).
- *
- * A card rendered in the Settings tab showing the current resource pack
- * assignment (or "none"), with assign/change/remove actions gated on
- * server:update and server-at-rest. The assign dialog fetches the library
- * list and lets the user pick a pack with optional require/prompt fields.
- */
-
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, api } from "../api/client.ts";
@@ -73,8 +64,7 @@ export function ServerResourcePackSection({
     queryFn: async ({
       signal,
     }): Promise<ResourcePackAssignmentResponse | null> => {
-      // "No pack assigned" is a normal state of a valid server: the API returns
-      // 200 with a null body, so no 404 special-casing is needed (issue #2238).
+      // No assigned pack is a successful 200 with a null body, not a missing server.
       return await api.get(
         apiPath(
           "/api/communities/{community_id}/servers/{server_id}/resource-pack",
@@ -125,9 +115,7 @@ export function ServerResourcePackSection({
     return null;
   }
 
-  // Error only when there is nothing to show (the initial load failed). A
-  // failed background refetch retains `data`, so the cached assignment keeps
-  // rendering through transient API blips (#1985).
+  // Retain cached content when only a background refetch fails.
   if (assignmentQuery.data === undefined) {
     return (
       <div className="card form-card">

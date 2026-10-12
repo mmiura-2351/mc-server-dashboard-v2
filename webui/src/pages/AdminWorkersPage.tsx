@@ -10,18 +10,10 @@ import { t } from "../i18n/index.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
 import { classifyQueryResult } from "../queryState.ts";
 
-// Platform admin Workers page (WEBUI_SPEC.md 6.12): the full fleet table with a
-// per-worker drain/undrain toggle. Drain is `PUT /workers/{id}/drain` (200 with
-// a `DrainResponse` body) and undrain is `DELETE /workers/{id}/drain` (204, the
-// worker:manage axis).
-// The status pill and heartbeat-age helpers are shared with the Overview page
-// rather than duplicated (#477).
-
 type WorkerResponse = components["schemas"]["WorkerResponse"];
 type DrainResponse = components["schemas"]["DrainResponse"];
 
-// A modest poll keeps the fleet view fresh without a WS: heartbeats and drain
-// state change on the order of seconds, so 12s is a reasonable middle ground.
+// Poll because worker heartbeat and drain changes have no WebSocket stream here.
 const REFRESH_INTERVAL_MS = 12_000;
 
 export function AdminWorkersPage() {
@@ -45,9 +37,7 @@ export function AdminWorkersPage() {
         <p className="sub" role="status">
           {t("admin.workers.loading")}
         </p>
-      ) : /* Error only when there is nothing to show (initial load failed).
-           A failed background refetch retains `data`, so the cached page
-           keeps rendering through transient API blips (#1805). */
+      ) : /* Retain cached content when only a background refetch fails. */
       workersState.kind === "error" ? (
         <p className="field-error" role="alert">
           {t("admin.workers.loadError")}
@@ -63,8 +53,6 @@ function Loaded({ workers }: { workers: WorkerResponse[] }) {
   const { showToast } = useToast();
   const onForbidden = useOnForbidden();
   const queryClient = useQueryClient();
-  // The worker pending confirmation; `draining` distinguishes the action so the
-  // one dialog serves both directions of the toggle.
   const [confirming, setConfirming] = useState<WorkerResponse | null>(null);
 
   const drain = useMutation({

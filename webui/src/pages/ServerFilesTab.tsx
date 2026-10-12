@@ -1,33 +1,3 @@
-/**
- * Files tab — two-pane browser + viewer/editor and basic file operations
- * (WEBUI_SPEC.md 6.6).
- *
- * Left pane: a directory listing (entries + a `truncated` notice when the
- * Worker clipped the live listing) with path breadcrumbs. Right pane: a viewer.
- * A text file opens in an editor whose Save issues a versioned base64 `PUT`; a
- * binary file offers download only. Operations: upload, mkdir, rename, delete
- * (typed confirm), download (a file reuses the authenticated helper in
- * api/download.ts; a directory is saved from a minted grant URL — #2354).
- *
- * Permission gating mirrors the API route gates (servers/api/files.py):
- * `file:read` browses/views/downloads/searches, `file:edit` writes/uploads/
- * mkdir/rename/deletes, `file:history` lists versions, `file:rollback` reverts.
- * A 403 routes through onForbidden; other errors use the feature-local toast
- * presentation contract. `content_dir_protected` instead changes the visible
- * notice and remains local control flow.
- *
- * The typed JSON client has no query-param helper, so the file routes' `?path=`
- * / `?list=` / `?extract=` are appended to the interpolated path as a string and
- * cast to the path type at the call site — the same escape hatch the lifecycle
- * controls use for `?force=`.
- *
- * Search (#451) posts a `{query, by, max_results}` body to `files/search` and
- * renders the matched paths as buttons that open the hit in the viewer (and
- * point the browser at its parent directory). The viewer's History drawer reads
- * `files/history` (a bounded version ring — see the retention hint) and rolls a
- * file back via `files/rollback`, refreshing both the content and the list.
- */
-
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { zip } from "fflate";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -69,7 +39,7 @@ import { atRest, normalizeState } from "./serverState.ts";
 import { useFileBrowserParams } from "./urlState.ts";
 import { type NavState, useNavHistory } from "./useNavHistory.ts";
 
-/** Convert a version ID ({ns_timestamp:020d}-{hex8}) to a Date. */
+/** Version IDs begin with a 20-digit nanosecond timestamp, followed by a hyphen and eight hex digits. */
 export function versionDate(versionId: string): Date {
   const nsStr = versionId.split("-")[0];
   const ms = Number(BigInt(nsStr) / 1000000n);
@@ -84,7 +54,6 @@ type SearchResult = components["schemas"]["SearchResponse"];
 type FileVersions = components["schemas"]["FileVersionsResponse"];
 type FileDownloadGrant = components["schemas"]["FileDownloadGrantResponse"];
 
-/** True when the error is a 409 content_dir_protected rejection. */
 function isContentDirProtected(error: unknown): boolean {
   return (
     error instanceof ApiError &&
@@ -93,14 +62,12 @@ function isContentDirProtected(error: unknown): boolean {
   );
 }
 
-/** The loader-aware noun for the managed-content tab (Mods vs Plugins). */
 function contentTabNoun(serverType: string): string {
   return serverType === "fabric" || serverType === "forge"
     ? t("serverDetail.tab.mods")
     : t("serverDetail.tab.plugins");
 }
 
-/** Base `/communities/{cid}/servers/{sid}/files` path for `server`. */
 function filesBase(communityId: string, serverId: string): string {
   return apiPath("/api/communities/{community_id}/servers/{server_id}/files", {
     community_id: communityId,
@@ -108,38 +75,19 @@ function filesBase(communityId: string, serverId: string): string {
   });
 }
 
-/** Maximum file upload size (512 MiB). */
 const MAX_UPLOAD_BYTES = 512 * 1024 * 1024;
 
-/** Join a directory rel-path and a child name into a POSIX rel-path. */
 function joinPath(dir: string, name: string): string {
   return dir === "" ? name : `${dir}/${name}`;
 }
 
-/**
- * The name a downloaded entry is saved under. The API streams a directory as a
- * ZIP archive, so its saved name carries the `.zip` suffix the bare entry name
- * lacks (issue #2018).
- */
+/** Directory downloads are ZIP archives; append .zip to their saved names. */
 function downloadName(name: string, isDir: boolean): string {
   return isDir ? `${name}.zip` : name;
 }
 
-/**
- * Save the directory at `path` as `filename` by minting a self-authenticating
- * URL and handing it to the browser (issue #2354).
- *
- * The API builds a directory's zip incrementally, so the response declares no
- * `Content-Length` and buffering it into a Blob just to attach the Bearer header
- * aborts past {@link MAX_DOWNLOAD_BYTES} — precisely what a multi-GB `world`
- * hit (#2027). A grant lives ~30 s, so minting and clicking are one step: never
- * minted on render, on selection, or cached.
- *
- * Single files deliberately stay on {@link downloadFile}: the API declares their
- * `Content-Length` whenever the size resolves, so an oversize one is rejected
- * before a byte is read and toasts the size. The anchor path has no such
- * pre-flight — it would save the error document under the intended filename.
- */
+/** Mint directory URLs on click so large ZIPs stream to disk without buffering.
+ * Single files retain the capped authenticated fetch path for size and error reporting. */
 async function saveDirViaGrant(
   communityId: string,
   serverId: string,
@@ -152,13 +100,11 @@ async function saveDirViaGrant(
   saveUrlAs(grant.download_url, filename);
 }
 
-/** The directory portion of a rel-path ("" for a top-level file). */
 function parentDir(path: string): string {
   const cut = path.lastIndexOf("/");
   return cut === -1 ? "" : path.slice(0, cut);
 }
 
-/** Split a rel-path into ordered breadcrumb segments with their cumulative path. */
 function breadcrumbs(path: string): { name: string; path: string }[] {
   if (path === "") {
     return [];
@@ -170,19 +116,8 @@ function breadcrumbs(path: string): { name: string; path: string }[] {
   }));
 }
 
-/**
- * Hands out the abort signal for a component's next file download
- * (issue #1728). Starting a new download aborts the previous in-flight one,
- * and unmounting the owning component aborts whatever is still running, so a
- * download never outlives its view. Callers swallow the resulting AbortError
- * via {@link isAbortError} — an intentional cancel is not a user-visible
- * failure.
- *
- * Supersede-on-new fits views where a new request means "the same download
- * again" (the Viewer's single file, the Toolbar's single selection). Where
- * concurrent downloads of different files are legitimate, use
- * {@link useDownloadSignals} instead.
- */
+/** A new download aborts the previous one; unmount aborts the active request.
+ * Use useDownloadSignals where independent concurrent downloads are needed. */
 function useDownloadSignal(): () => AbortSignal {
   const controller = useRef<AbortController | null>(null);
   useEffect(
@@ -198,14 +133,7 @@ function useDownloadSignal(): () => AbortSignal {
   }, []);
 }
 
-/**
- * Per-download variant of {@link useDownloadSignal}: every call hands out an
- * independent signal, and only unmounting the owning component aborts the
- * ones still in flight. Used by the Listing's row downloads, where starting a
- * second download must not cancel the first (PR #1778 review). Aborting an
- * already-settled controller at unmount is a no-op, so spent entries are
- * harmless.
- */
+/** Give row downloads independent signals so one download cannot cancel another; unmount aborts them all. */
 function useDownloadSignals(): () => AbortSignal {
   const controllers = useRef<AbortController[]>([]);
   useEffect(
@@ -223,12 +151,7 @@ function useDownloadSignals(): () => AbortSignal {
   }, []);
 }
 
-/**
- * Recursively read all files from a dropped directory entry.
- *
- * `readEntries()` may not return all entries in a single call (browser-imposed
- * batch limit), so we loop until it returns an empty array.
- */
+/** Directory readEntries may return batches; continue until it returns an empty batch. */
 async function readAllFiles(
   entry: FileSystemDirectoryEntry,
   basePath: string,
@@ -282,11 +205,7 @@ export function ServerFilesTab({
   server: ServerResponse;
   communityId: string;
   can: Can;
-  /**
-   * Aggregate cap for a multi-file bulk download's running byte total. Injected
-   * only by tests so they can trip the guard on a few small blobs instead of
-   * allocating half a gigabyte (#2063); production always uses the default.
-   */
+  /** Tests can lower the aggregate cap without allocating hundreds of MiB; production uses the default. */
   maxBulkDownloadBytes?: number;
 }) {
   const { showToast } = useToast();
@@ -300,13 +219,8 @@ export function ServerFilesTab({
     normalizeState(server.desired_state),
   );
 
-  // URL-driven file browser state: `?dir=` and `?file=` query params sync with
-  // the browser history so back/forward restore the prior view (#1484).
   const [urlParams, setUrlParams] = useFileBrowserParams();
 
-  // Current directory rel-path ("" is the working-set root) and the open file,
-  // tracked through a navigation history stack (issue #1475). The initial state
-  // is seeded from the URL so refreshing / deep-linking restores the view.
   const {
     current: nav,
     navigate: navNavigate,
@@ -319,25 +233,13 @@ export function ServerFilesTab({
   const dir = nav.dir;
   const openFile = nav.openFile;
 
-  // Sync between the internal nav stack and URL query params (#1484). All
-  // internal navigation goes through the wrapped helpers below, which push the
-  // URL synchronously — no effect-based nav→URL sync needed.
-  //
-  // For browser back/forward, React Router's location changes are detected via
-  // a useEffect on `urlParams`. A skip-counter prevents echoing our own pushes.
-  //
-  // Invariant: every increment of skipUrlSync must be matched by exactly one
-  // URL-change effect that decrements it. If nav state and the URL diverge
-  // such that setUrlParams no-ops, a stale increment remains and the next
-  // genuine browser Back gets swallowed. The navigate/goBack/goForward
-  // wrappers guard this by early-returning when next === current.
+  // Each skip-counter increment must consume one URL-change effect.
+  // Avoid increments for no-op navigation or the next real browser Back will be swallowed.
   const skipUrlSync = useRef(0);
 
   const navigate = useCallback(
     (next: NavState) => {
-      // Only increment the skip counter if navigation will actually happen.
-      // navNavigate no-ops when the target equals the current state; an
-      // unconsumed increment would cause a later browser-Back to be skipped.
+      // Increment only for real navigation; an unconsumed skip would swallow the next browser Back.
       if (next.dir === dir && next.openFile === openFile) return;
       skipUrlSync.current += 1;
       navNavigate(next);
@@ -349,27 +251,19 @@ export function ServerFilesTab({
     if (!canGoBack) return;
     skipUrlSync.current += 1;
     const target = navGoBack();
-    // In-app back: replace the URL (the browser history already has this
-    // state from the original navigation push).
+    // Replace the URL for in-app Back; browser history already contains the original navigation.
     setUrlParams(target.dir, target.openFile, { replace: true });
   }, [canGoBack, navGoBack, setUrlParams]);
   const goForward = useCallback(() => {
     if (!canGoForward) return;
     skipUrlSync.current += 1;
     const target = navGoForward();
-    // In-app forward: replace the URL (same reason as goBack above).
+    // Replace the URL for in-app Forward, mirroring in-app Back.
     setUrlParams(target.dir, target.openFile, { replace: true });
   }, [canGoForward, navGoForward, setUrlParams]);
 
-  // URL → nav state: browser back/forward changed the URL externally. The
-  // skip counter filters out URL changes triggered by our own navigate/
-  // goBack/goForward calls above. Uses `jumpTo` (not `navNavigate`) so the
-  // external change replaces the current entry instead of pushing, which
-  // would corrupt the internal back/forward stack.
-  //
-  // When the user has unsaved edits, browser back/forward is intercepted:
-  // restore the URL (so the browser's address bar stays correct) and show
-  // the discard confirmation dialog instead of navigating immediately.
+  // External URL changes replace the current internal entry rather than pushing another.
+  // Restore the URL and request confirmation when unsaved edits block that navigation.
   const [hasDraft, setHasDraft] = useState(false);
   const [discardConfirmOpen, setDiscardConfirmOpen] = useState(false);
   type PendingAction =
@@ -390,8 +284,6 @@ export function ServerFilesTab({
     }
     const next: NavState = { dir: urlParams.dir, openFile: urlParams.file };
     if (hasDraftRef.current) {
-      // Unsaved changes — block the external navigation. Restore the URL to
-      // the current internal state and show the discard confirmation instead.
       const loc = window.location;
       const params = new URLSearchParams(loc.search);
       if (dir === "") {
@@ -417,7 +309,6 @@ export function ServerFilesTab({
     jumpTo(next);
   }, [urlParams.dir, urlParams.file, jumpTo, dir, openFile, routerNavigate]);
 
-  // Gate in-app navigation: check hasDraft before navigating.
   const guardedNavigate = useCallback(
     (next: NavState) => {
       if (hasDraft && (next.dir !== dir || next.openFile !== openFile)) {
@@ -472,7 +363,6 @@ export function ServerFilesTab({
     pendingActionRef.current = null;
   }, []);
 
-  // beforeunload: browser tab close / refresh / full-page navigation.
   useEffect(() => {
     if (!hasDraft) return;
     const handler = (e: BeforeUnloadEvent) => {
@@ -484,13 +374,9 @@ export function ServerFilesTab({
 
   const [contentDirNotice, setContentDirNotice] = useState(false);
 
-  // Multi-select: track selected file paths and the last-clicked index for
-  // shift-click range selection. Selection clears on directory change.
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const lastClickedIdx = useRef<number | null>(null);
 
-  // Track the previous dir to clear selection when it changes (including
-  // back/forward navigation).
   const prevDirRef = useRef(dir);
   useEffect(() => {
     if (prevDirRef.current !== dir) {
@@ -500,9 +386,7 @@ export function ServerFilesTab({
     }
   }, [dir]);
 
-  // Reset hasDraft when the open file changes or becomes null (e.g. the
-  // Viewer unmounts after a delete/rename closes it). Without this, a
-  // stale hasDraft=true would block subsequent navigation.
+  // Clear stale draft state when the viewer changes or unmounts so later navigation is not blocked.
   const prevOpenFileRef = useRef(openFile);
   useEffect(() => {
     if (prevOpenFileRef.current !== openFile) {
@@ -511,7 +395,6 @@ export function ServerFilesTab({
     }
   }, [openFile]);
 
-  /** Navigate to a new directory, pushing it onto the history stack. */
   const navigateDir = (next: string) => {
     guardedNavigate({ dir: next, openFile: null });
   };
@@ -545,11 +428,10 @@ export function ServerFilesTab({
 
   const serverId = server.id;
 
-  // Upload state lifted so the drop zone and context menu can share it.
+  // Share upload state between the drop zone and context menu.
   const progress = useUploadProgress();
   const [uploadPreparing, setUploadPreparing] = useState(false);
 
-  // Overwrite confirmation dialog state — promise-based so callers can await.
   const [overwritePrompt, setOverwritePrompt] = useState<{
     fileName: string;
     showApplyAll: boolean;
@@ -586,15 +468,12 @@ export function ServerFilesTab({
     },
   });
 
-  /** Move files via POST /files/rename. Handles multi-select. */
   const moveFiles = async (paths: string[], destDir: string) => {
     let movedAny = false;
     for (const from of paths) {
       const name = from.split("/").at(-1) ?? from;
       const to = destDir === "" ? name : `${destDir}/${name}`;
-      // Skip no-op moves: dropping onto the item's current parent (from === to)
-      // or dropping a folder onto itself, where the drop target IS the dragged
-      // folder (from === destDir). Both avoid a doomed API call and toast (#1470).
+      // Skip moves into the current parent or onto the dragged folder itself.
       if (from === to || from === destDir) continue;
       try {
         await api.post(
@@ -624,8 +503,6 @@ export function ServerFilesTab({
     }
   };
 
-  // Stable refs for callbacks used in onDrop to avoid re-creating the handler
-  // on every render (onError/refetchList are not wrapped in useCallback).
   const onErrorRef = useRef(onError);
   onErrorRef.current = onError;
   const refetchListRef = useRef(refetchList);
@@ -633,7 +510,6 @@ export function ServerFilesTab({
   const listingDataRef = useRef(listing.data);
   listingDataRef.current = listing.data;
 
-  // Drag-and-drop state for the file-tree drop zone.
   const dragCounter = useRef(0);
   const [dragOver, setDragOver] = useState(false);
   const dropEnabled = canEdit && !notAtRest;
@@ -676,24 +552,18 @@ export function ServerFilesTab({
       dragCounter.current = 0;
       setDragOver(false);
       if (!dropEnabled) return;
-      // Ignore internal file-move drags — those are handled by folder/crumb targets.
+      // Folder and breadcrumb targets handle internal moves; the upload zone must ignore them.
       if (e.dataTransfer.types.includes("application/x-file-move")) return;
 
-      // ── Phase 1: synchronous — collect from DataTransfer BEFORE any yield ──
-      // The browser clears DataTransfer after the synchronous event handler
-      // completes, so all access to e.dataTransfer.items / .files must happen
-      // before the first await. FileSystemDirectoryEntry objects obtained via
-      // webkitGetAsEntry() survive beyond the event — they are independent DOM
-      // objects and can be read asynchronously later.
+      // Read DataTransfer before the first await because browsers clear it after the synchronous handler.
+      // Saved FileSystemEntry objects remain usable afterward.
       const droppedFiles: File[] = [];
       const droppedDirs: FileSystemDirectoryEntry[] = [];
 
       if (e.dataTransfer.items) {
         for (const item of e.dataTransfer.items) {
           if (item.kind !== "file") continue;
-          // getAsFile() must be called BEFORE webkitGetAsEntry() — some
-          // browsers (Chrome) "consume" the DataTransferItem when
-          // webkitGetAsEntry() is called, causing getAsFile() to return null.
+          // Call getAsFile before webkitGetAsEntry; some browsers consume the item during entry lookup.
           const file = item.getAsFile();
           const entry = item.webkitGetAsEntry?.();
           if (entry?.isDirectory) {
@@ -708,29 +578,21 @@ export function ServerFilesTab({
 
       if (droppedFiles.length === 0 && droppedDirs.length === 0) return;
 
-      // Snapshot the current listing entries BEFORE any async yield. The ref
-      // is updated on every render, so an intervening re-render (e.g. from a
-      // React Query background refetch triggered by window-focus) could clear
-      // it before the overwrite check runs.
+      // Snapshot the listing before yielding so background refetches cannot alter overwrite checks.
       const listingEntries = listingDataRef.current?.entries ?? [];
 
-      // ── Phase 2: async — safe to yield now ──
-      // Show immediate feedback before the potentially slow preparation phase.
+      // Show preparation feedback before resolving potentially large directory trees.
       setUploadPreparing(true);
       await new Promise((resolve) => setTimeout(resolve, 0));
 
-      // Collect files to upload, resolving directories recursively.
-      // `let` because the folder-level overwrite check may filter entries.
       let filesToUpload: Array<{ file: File; targetDir: string }> = [];
       const hasDirectories = droppedDirs.length > 0;
 
       try {
-        // Add regular files collected synchronously.
         for (const file of droppedFiles) {
           filesToUpload.push({ file, targetDir: dir });
         }
 
-        // Recursively read directory contents from saved entries.
         for (const dirEntry of droppedDirs) {
           const dirFiles = await readAllFiles(dirEntry, dirEntry.name);
           for (const { file, relativeDirPath } of dirFiles) {
@@ -745,7 +607,6 @@ export function ServerFilesTab({
           return;
         }
 
-        // Create necessary directories first.
         if (hasDirectories) {
           const uniqueDirs = [
             ...new Set(filesToUpload.map((f) => f.targetDir)),
@@ -760,7 +621,7 @@ export function ServerFilesTab({
                 )}?path=${encodeURIComponent(dirPath)}` as never,
               );
             } catch {
-              // Directory may already exist — ignore errors.
+              // Directory creation is best-effort; file upload failures are reported separately.
             }
           }
         }
@@ -770,9 +631,6 @@ export function ServerFilesTab({
         return;
       }
 
-      // ── Folder-level overwrite check ──
-      // When a dropped folder name matches an existing directory in the
-      // current listing, warn the user that files inside will be merged.
       if (droppedDirs.length > 0) {
         const existingDirNames = new Set(
           listingEntries.filter((e) => e.is_dir).map((e) => e.name),
@@ -818,12 +676,7 @@ export function ServerFilesTab({
         }
       }
 
-      // ── Overwrite check for files landing in the current directory ──
-      // Only check files targeting the currently listed directory, since we
-      // have listing data for it. Subdirectory uploads (from folder drops)
-      // are not checked — they typically create new directories.
-      // Uses `listingEntries` (snapshotted before the first yield) instead of
-      // reading the ref here, which could be stale after intervening renders.
+      // Check overwrite only in the listed directory; subdirectory uploads have no listing data here.
       const existingNames = new Set(
         listingEntries.filter((e) => !e.is_dir).map((e) => e.name),
       );
@@ -855,7 +708,7 @@ export function ServerFilesTab({
               });
             });
             setOverwritePrompt(null);
-            // Yield so React commits the dialog dismissal.
+            // Yield so React can commit the dialog dismissal.
             await new Promise((r) => setTimeout(r, 0));
 
             if (action === "cancel") return;
@@ -883,18 +736,15 @@ export function ServerFilesTab({
         return;
       }
 
-      // Transition from preparing indicator to progress bar.
       const totalSize = approvedFiles.reduce(
         (sum, { file }) => sum + file.size,
         0,
       );
       setUploadPreparing(false);
       const signal = progress.start(totalSize);
-      // Yield to the renderer so React commits the progress-bar state before
-      // the upload loop monopolises the main thread.
+      // Yield so React commits the progress bar before the upload loop occupies the main thread.
       await new Promise((resolve) => setTimeout(resolve, 0));
 
-      // Upload all files, tracking aggregate progress across the batch.
       let uploaded = 0;
       const total = approvedFiles.length;
       let cumulativeLoaded = 0;
@@ -939,10 +789,7 @@ export function ServerFilesTab({
     [dropEnabled, dir, communityId, serverId, showToast, progress],
   );
 
-  // Fallback: any drop anywhere on the document (including outside our zone)
-  // or a drag cancellation should reset the overlay. The `dragleave` approach
-  // with `relatedTarget === null` was unreliable and could leave the overlay
-  // stuck on repeated folder drags.
+  // Reset on document drop or cancellation; dragleave alone can leave the overlay stuck.
   useEffect(() => {
     const resetDrag = () => {
       dragCounter.current = 0;
@@ -956,13 +803,9 @@ export function ServerFilesTab({
     };
   }, []);
 
-  // Internal clipboard for copy/paste (issue #1465). Stores full relative
-  // paths of copied files. Persists across directory changes.
+  // Keep copied relative paths across directory changes.
   const [clipboard, setClipboard] = useState<string[]>([]);
 
-  // Keyboard-triggered delete/rename (issue #1465). These are separate from
-  // the inline button flows in Listing so the parent can drive them from
-  // keydown without refactoring Listing's internal state.
   const [kbDeleteOpen, setKbDeleteOpen] = useState(false);
   const [kbRenameEntry, setKbRenameEntry] = useState<DirEntry | null>(null);
 
@@ -989,7 +832,6 @@ export function ServerFilesTab({
     },
   });
 
-  /** Paste copied files into the current directory (download + upload). */
   const pasteFilesRef = useRef(async () => {});
   pasteFilesRef.current = async () => {
     if (clipboard.length === 0) return;
@@ -1000,7 +842,6 @@ export function ServerFilesTab({
     let pasted = 0;
     for (const srcPath of clipboard) {
       const name = srcPath.split("/").at(-1) ?? srcPath;
-      // Overwrite confirmation — same check as the context-menu upload path.
       if (existingNames.has(name)) {
         const { action } = await new Promise<{
           action: "overwrite" | "skip" | "cancel";
@@ -1059,11 +900,9 @@ export function ServerFilesTab({
     }
   };
 
-  // Keyboard shortcuts: Delete/Backspace, F2, Ctrl+A, Escape, Ctrl+C, Ctrl+V, arrows.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      // Skip when a text input / textarea / contenteditable is focused — the
-      // user is typing, not issuing a file command.
+      // Do not treat typing in editable elements as file-browser shortcuts.
       const tag = (e.target as HTMLElement).tagName;
       if (
         tag === "INPUT" ||
@@ -1176,7 +1015,6 @@ export function ServerFilesTab({
     }
   };
 
-  // Point the browser at the hit's parent directory and open it in the viewer.
   const openHit = (path: string) => {
     guardedNavigate({ dir: parentDir(path), openFile: path });
   };
@@ -1275,10 +1113,7 @@ export function ServerFilesTab({
           )}
           {listingState.kind === "pending" ? (
             <p className="sub">{t("files.loading")}</p>
-          ) : /* Error only when there is nothing to show (initial load
-               failed). A failed background refetch retains `data`, so
-               the cached listing keeps rendering through transient API
-               blips (#1805). */
+          ) : /* Retain cached content when only a background refetch fails. */
           listingState.kind === "error" ? (
             <p className="field-error">{t("files.listError")}</p>
           ) : (
@@ -1431,8 +1266,6 @@ export function ServerFilesTab({
   );
 }
 
-// ── Breadcrumbs ──────────────────────────────────────────────────────────────
-
 function Crumbs({
   dir,
   serverName,
@@ -1499,8 +1332,6 @@ function Crumbs({
   );
 }
 
-// ── Content-dir redirect notice ─────────────────────────────────────────────
-
 function ContentDirNotice({
   serverType,
   onDismiss,
@@ -1529,8 +1360,6 @@ function ContentDirNotice({
     </div>
   );
 }
-
-// ── Search box ───────────────────────────────────────────────────────────────
 
 function SearchBox({
   communityId,
@@ -1635,8 +1464,6 @@ function SearchBox({
   );
 }
 
-// ── Listing pane ─────────────────────────────────────────────────────────────
-
 function Listing({
   listing,
   dir,
@@ -1715,8 +1542,7 @@ function Listing({
     mutationFn: (entry: DirEntry) => {
       const path = joinPath(dir, entry.name);
       const filename = downloadName(entry.name, entry.is_dir);
-      // A directory streams as an uncappable zip, so the browser saves it from
-      // a minted URL instead of the tab buffering it (#2354).
+      // Save directory ZIPs through minted URLs so large downloads do not buffer in the tab.
       return entry.is_dir
         ? saveDirViaGrant(communityId, serverId, path, filename)
         : downloadFile(
@@ -1745,7 +1571,6 @@ function Listing({
     },
   });
 
-  // Drop-target state: which folder name is currently highlighted.
   const [folderDropTarget, setFolderDropTarget] = useState<string | null>(null);
 
   const handleDragStart = (e: React.DragEvent, full: string) => {
@@ -1753,8 +1578,6 @@ function Listing({
       e.preventDefault();
       return;
     }
-    // If the dragged item is part of the selection, move all selected items.
-    // Otherwise move just the dragged item.
     const paths = selected.has(full) ? Array.from(selected) : [full];
     e.dataTransfer.setData("application/x-file-move", JSON.stringify(paths));
     e.dataTransfer.effectAllowed = "move";
@@ -1790,7 +1613,6 @@ function Listing({
       {listing.truncated && (
         <div className="notice warn">{t("files.truncated")}</div>
       )}
-      {/* Hidden file input for context-menu upload */}
       <input
         ref={uploadRef}
         type="file"
@@ -1813,7 +1635,6 @@ function Listing({
       <ul
         className="file-list"
         onContextMenu={(e) => {
-          // Only fire for empty space (not bubbled from a file row).
           if ((e.target as HTMLElement).closest(".file-row")) return;
           e.preventDefault();
           setContextMenu({ entry: null, x: e.clientX, y: e.clientY });
@@ -1854,7 +1675,7 @@ function Listing({
                   aria-label={entry.name}
                   checked={selected.has(full)}
                   onChange={() => {
-                    /* handled by onClick for modifier-key support */
+                    /* Handle selection in onClick so modifier keys remain available. */
                   }}
                   onClick={(e) => {
                     if (e.shiftKey && lastClickedIdx.current !== null) {
@@ -2051,8 +1872,6 @@ function Listing({
   );
 }
 
-// ── Context menu ────────────────────────────────────────────────────────────
-
 function FileContextMenu({
   entry,
   x,
@@ -2103,10 +1922,7 @@ function FileContextMenu({
       }
     };
     document.addEventListener("mousedown", handleClick);
-    // Use capture phase so this fires before the parent's bubble-phase
-    // keydown handler (registered earlier on document). Without this,
-    // the parent's Escape handler clears selection before
-    // stopImmediatePropagation can prevent it.
+    // Capture keydown before the parent's bubble handler so Escape cannot clear selection first.
     document.addEventListener("keydown", handleKey, true);
     return () => {
       document.removeEventListener("mousedown", handleClick);
@@ -2182,9 +1998,6 @@ function FileContextMenu({
   );
 }
 
-// ── Viewer / editor ──────────────────────────────────────────────────────────
-
-/** Format a byte count into a human-readable string (B/KB/MB/GB). */
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -2221,8 +2034,7 @@ function Viewer({
   const { showToast } = useToast();
   const queryClient = useQueryClient();
   const nextDownloadSignal = useDownloadSignal();
-  // `null` until the user edits, so an untouched view always reflects the
-  // server's content even after a save invalidates and refetches it.
+  // Use null until editing begins so untouched content follows server refetches.
   const [draft, setDraft] = useState<string | null>(null);
   useEffect(() => {
     onDraftChange(draft !== null);
@@ -2242,7 +2054,6 @@ function Viewer({
   });
 
   const save = useMutation({
-    // Written back in the charset the file was read in (issue #2851).
     mutationFn: ({ text, charset }: DecodedText) =>
       api.put(
         `${filesBase(communityId, serverId)}?path=${encodeURIComponent(path)}` as never,
@@ -2265,9 +2076,7 @@ function Viewer({
   if (contentState.kind === "pending") {
     return <p className="sub">{t("files.loading")}</p>;
   }
-  // Error only when there is nothing to show (initial load failed). A failed
-  // background refetch retains `data`, so the cached content keeps rendering
-  // through transient API blips (#1805).
+  // Retain cached content when only a background refetch fails.
   if (contentState.kind === "error") {
     return <p className="field-error">{t("files.openError")}</p>;
   }
@@ -2388,8 +2197,6 @@ function Viewer({
   );
 }
 
-// ── History drawer + rollback ────────────────────────────────────────────────
-
 function HistoryDrawer({
   path,
   communityId,
@@ -2412,8 +2219,6 @@ function HistoryDrawer({
   const { showToast } = useToast();
   const queryClient = useQueryClient();
   const [confirming, setConfirming] = useState<string | null>(null);
-  // The version selected for a read-only content preview, or `null` when the
-  // preview is closed. Keyed query fetches only while a version is selected.
   const [previewing, setPreviewing] = useState<string | null>(null);
 
   const historyKey = ["files", "history", communityId, serverId, path];
@@ -2446,7 +2251,7 @@ function HistoryDrawer({
       ),
     onSuccess: () => {
       showToast(t("files.rolledBack"), "success");
-      // The rolled-over current is itself retained, so refresh the list too.
+      // Rollback retains the displaced current version; refetch history to include it.
       queryClient.invalidateQueries({ queryKey: historyKey });
       onRolledBack();
       setConfirming(null);
@@ -2471,10 +2276,7 @@ function HistoryDrawer({
       <p className="field-hint">{t("files.history.hint")}</p>
       {historyState.kind === "pending" ? (
         <p className="sub">{t("files.history.loading")}</p>
-      ) : /* Error only when there is nothing to show (initial load
-           failed). A failed background refetch retains `data`, so the
-           cached history keeps rendering through transient blips
-           (#1805). */
+      ) : /* Retain cached content when only a background refetch fails. */
       historyState.kind === "error" ? (
         <p className="field-error">{t("files.history.error")}</p>
       ) : historyState.data.versions.length === 0 ? (
@@ -2554,10 +2356,7 @@ function HistoryDrawer({
           </p>
           {previewState.kind === "pending" ? (
             <p className="sub">{t("files.history.preview.loading")}</p>
-          ) : /* Error only when there is nothing to show (initial load
-               failed). A failed background refetch retains `data`, so
-               the cached preview keeps rendering through transient
-               blips (#1805). */
+          ) : /* Retain cached content when only a background refetch fails. */
           previewState.kind === "error" ? (
             <p className="field-error">{t("files.history.preview.error")}</p>
           ) : isProbablyText(previewState.data.content_base64) ? (
@@ -2581,8 +2380,6 @@ function HistoryDrawer({
     </Modal>
   );
 }
-
-// ── Toolbar: select all + bulk operations ───────────────────────────────────
 
 function Toolbar({
   communityId,
@@ -2659,9 +2456,7 @@ function Toolbar({
     const paths = Array.from(selected);
     const total = paths.length;
 
-    // Pre-check: sum the sizes of selected files from the listing. Directories
-    // are excluded because the API expands them server-side; their `size` field
-    // is 0 in the listing so they don't contribute to the sum.
+    // Listing sizes omit directory contents; this precheck covers selected files only.
     const sizeByPath = new Map(
       entries.map((e) => [joinPath(dir, e.name), e.size]),
     );
@@ -2680,7 +2475,6 @@ function Toolbar({
       return;
     }
 
-    // Single file — download directly, no ZIP wrapper needed.
     if (total === 1) {
       const path = paths[0];
       const base = path.split("/").at(-1) ?? path;
@@ -2688,8 +2482,7 @@ function Toolbar({
       const filename = downloadName(base, isDir);
       setBulkBusy(true);
       try {
-        // A directory streams as an uncappable zip, so the browser saves it
-        // from a minted URL instead of the tab buffering it (#2354).
+        // Save a single directory through a minted URL instead of buffering its ZIP.
         if (isDir) {
           await saveDirViaGrant(communityId, serverId, path, filename);
         } else {
@@ -2705,7 +2498,6 @@ function Toolbar({
         showToast(t("files.bulk.download.done", { done: 1 }), "success");
       } catch (error) {
         if (isAbortError(error)) {
-          // Intentional cancel (new download started or view unmounted).
         } else if (error instanceof DownloadTooLargeError) {
           showToast(
             t("files.error.downloadTooLarge", {
@@ -2724,14 +2516,8 @@ function Toolbar({
       return;
     }
 
-    // Multiple files — fetch all, bundle into a single ZIP. The whole
-    // operation shares one abort signal so leaving the view stops the loop.
-    //
-    // A directory's suffixed key can collide with a selected sibling that
-    // already bears that exact name (dir `world` next to file `world.zip`):
-    // keep the bare path so neither entry overwrites the other. Derived from
-    // the selection rather than the accumulated keys so the result does not
-    // depend on fetch order.
+    // Use one abort signal for the entire ZIP build.
+    // A directory's .zip key may collide with a sibling file; derive names from the selection to avoid overwrite.
     const zipKey = (path: string): string => {
       const key = downloadName(path, dirPaths.has(path));
       return key !== path && selected.has(key) ? path : key;
@@ -2741,11 +2527,7 @@ function Toolbar({
     const files: Record<string, Uint8Array> = {};
     let done = 0;
     let failed = 0;
-    // The pre-check above prices directories at 0 (the listing has no real size
-    // for them), so a folder selection always passes it, and #2027's per-fetch
-    // cap only bounds each response individually. Sum the bytes actually
-    // buffered so N under-cap directories cannot together exhaust browser memory
-    // (#2063).
+    // Cap the aggregate buffered bytes too; listing sizes omit directories and per-file caps do not bound the total.
     let fetchedBytes = 0;
     for (const path of paths) {
       setBulkProgress(t("files.bulk.download.progress", { done, total }));
@@ -2760,10 +2542,7 @@ function Toolbar({
         const buf = new Uint8Array(await blob.arrayBuffer());
         fetchedBytes += buf.byteLength;
         if (fetchedBytes > maxBulkDownloadBytes) {
-          // Stop before buffering the rest of the selection, and save nothing:
-          // a partial ZIP would be a silent surprise. Reuse the pre-check's
-          // too-large toast so an up-front rejection and a mid-fetch one read
-          // identically to the user.
+          // Reject the entire selection above the cap; saving a partial ZIP would silently omit files.
           showToast(
             t("files.bulk.download.tooLarge", {
               size: humanizeBytes(fetchedBytes),
@@ -2774,13 +2553,11 @@ function Toolbar({
           setBulkProgress(null);
           return;
         }
-        // Use full path as ZIP key to avoid collisions between files with the
-        // same basename in different directories.
+        // Keep full paths as ZIP keys so equal basenames in different directories do not collide.
         files[zipKey(path)] = buf;
         done += 1;
       } catch (error) {
         if (isAbortError(error)) {
-          // Intentional cancel (view unmounted): stop fetching, save nothing.
           setBulkBusy(false);
           setBulkProgress(null);
           return;
@@ -2858,7 +2635,6 @@ function Toolbar({
     onChanged();
   };
 
-  /** Check if error is a 403 and route through onForbidden; returns true if so. */
   const onForbiddenCheck = (error: unknown): boolean => {
     if (error instanceof ApiError && error.status === 403) {
       onError(error);
@@ -2950,8 +2726,6 @@ function Toolbar({
   );
 }
 
-// ── Bulk move dialog ────────────────────────────────────────────────────────
-
 function BulkMoveDialog({
   onClose,
   onMove,
@@ -2973,8 +2747,6 @@ function BulkMoveDialog({
     />
   );
 }
-
-// ── Single-entry move dialog (context menu) ─────────────────────────────────
 
 function MoveEntryDialog({
   dir,
@@ -2999,8 +2771,6 @@ function MoveEntryDialog({
     />
   );
 }
-
-// ── Mkdir / rename prompt dialogs ────────────────────────────────────────────
 
 function MkdirDialog({
   dir,
@@ -3110,7 +2880,6 @@ function RenameDialog({
   );
 }
 
-/** A minimal single-text-field modal for mkdir / rename, on the shared Modal. */
 function PromptDialog({
   title,
   label,
@@ -3126,8 +2895,6 @@ function PromptDialog({
   value: string;
   onChange: (value: string) => void;
   confirmLabel: string;
-  // Disables the confirm button while the create/rename mutation is in flight,
-  // so a double-click can't issue a second POST that conflicts (#1591).
   busy?: boolean;
   onConfirm: () => void;
   onClose: () => void;
@@ -3164,8 +2931,6 @@ function PromptDialog({
     </Modal>
   );
 }
-
-// ── Overwrite confirmation dialog ────────────────────────────────────────────
 
 function OverwriteConfirmDialog({
   fileName,

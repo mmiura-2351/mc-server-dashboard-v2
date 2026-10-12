@@ -1,5 +1,4 @@
 // @vitest-environment node
-// DOM-free logic test; runs under Node to skip per-file jsdom setup (issue #1734).
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../api/client.ts";
 import { lifecycleErrorMessage } from "./lifecycleErrors.ts";
@@ -24,8 +23,6 @@ describe("lifecycleErrorMessage", () => {
     expect(lifecycleErrorMessage(error)).toBe("serverDetail.error.unsettled");
   });
 
-  // Contention, not a race: the request was refused without being applied and
-  // clears on its own (issue #2400).
   it.each(["worker_busy", "server_busy"])(
     "maps a 409 %s to the busy message",
     (reason) => {
@@ -34,9 +31,6 @@ describe("lifecycleErrorMessage", () => {
     },
   );
 
-  // The dispatch reached the Worker and was not applied as asked; whether the
-  // server moved depends on the verb, so the toast names the failure rather
-  // than claiming a state change (issue #2420).
   it("maps a 409 command_failed to the dispatch-failure message", () => {
     const error = new ApiError(409, { reason: "command_failed" });
     expect(lifecycleErrorMessage(error)).toBe(
@@ -44,8 +38,6 @@ describe("lifecycleErrorMessage", () => {
     );
   });
 
-  // A failed start is compensated back to stopped, so nothing is pending and
-  // the verb-agnostic message is already honest (issue #2435).
   it("keeps the dispatch-failure message for a failed start", () => {
     const error = new ApiError(409, { reason: "command_failed" });
     expect(lifecycleErrorMessage(error, "start")).toBe(
@@ -53,9 +45,6 @@ describe("lifecycleErrorMessage", () => {
     );
   });
 
-  // A failed stop leaves desired_state=stopped committed over a still-running
-  // process, so the stop intent is pending and the reconciler retries it. Both
-  // reasons the API can render for it say so (issue #2435).
   it.each(["command_failed", "worker_busy"])(
     "maps a 409 %s on stop to the pending-stop message",
     (reason) => {
@@ -66,8 +55,6 @@ describe("lifecycleErrorMessage", () => {
     },
   );
 
-  // A failed restart leaves desired_state=running, so a server the Worker took
-  // down is brought back automatically (issue #2435).
   it("maps a 409 command_failed on restart to the pending-restart message", () => {
     const error = new ApiError(409, { reason: "command_failed" });
     expect(lifecycleErrorMessage(error, "restart")).toBe(
@@ -75,11 +62,6 @@ describe("lifecycleErrorMessage", () => {
     );
   });
 
-  // Restart is the one verb for which server_not_running is not a race: the
-  // dashboard deliberately offers restart for a crashed server that is still
-  // desired-running, so "state changed" names nothing that changed (issue
-  // #2441). What is left pending is what a failed restart always leaves —
-  // desired_state=running — so it shares that message.
   it("maps a 409 server_not_running on restart to the pending-restart message", () => {
     const error = new ApiError(409, { reason: "server_not_running" });
     expect(lifecycleErrorMessage(error, "restart")).toBe(
@@ -87,10 +69,7 @@ describe("lifecycleErrorMessage", () => {
     );
   });
 
-  // The Worker refused because it could not confirm an earlier stop, so the
-  // server's process is probably still running — nothing is pending, nothing
-  // moved, and the remedy is a fresh stop. Verb-agnostic: the message names the
-  // server's condition, not what the refused verb would have done (issue #2466).
+  // A failed-stop orphan may still be running; the host already retries its stop, and restart is not pending.
   it.each([undefined, "restart"] as const)(
     "maps a 409 failed_stop_orphan on %s to the orphan message",
     (action) => {
@@ -101,8 +80,6 @@ describe("lifecycleErrorMessage", () => {
     },
   );
 
-  // worker_busy on restart applied nothing at all — the server keeps running —
-  // so it stays on the retry-in-a-moment message (issue #2435).
   it("keeps the busy message for a 409 worker_busy on restart", () => {
     const error = new ApiError(409, { reason: "worker_busy" });
     expect(lifecycleErrorMessage(error, "restart")).toBe(
@@ -110,14 +87,7 @@ describe("lifecycleErrorMessage", () => {
     );
   });
 
-  // A start refused with worker_busy is ambiguous at the edge (issue #2445): a
-  // POST-dispatch BUSY keeps desired_state=running so the reconciler's
-  // redispatch_start applies the start later, while a PRE-dispatch BUSY (a
-  // refused hydrate) is compensated back to stopped so nothing is pending — and
-  // both arrive as a bare worker_busy. The message is honest for both: it does
-  // not promise the start will be applied, and it drops the "try again" the
-  // generic busy message pushes, which on the pending path lands on
-  // invalid_transition (see below).
+  // worker_busy before dispatch compensates start; after dispatch it can remain pending, so promise neither outcome.
   it("maps a 409 worker_busy on start to the start-pending message", () => {
     const error = new ApiError(409, { reason: "worker_busy" });
     expect(lifecycleErrorMessage(error, "start")).toBe(
@@ -125,8 +95,6 @@ describe("lifecycleErrorMessage", () => {
     );
   });
 
-  // server_busy is start-only and never commits an intent, so the verb never
-  // changes its message (issue #2435).
   it("keeps the busy message for a 409 server_busy on start", () => {
     const error = new ApiError(409, { reason: "server_busy" });
     expect(lifecycleErrorMessage(error, "start")).toBe(
@@ -142,11 +110,6 @@ describe("lifecycleErrorMessage", () => {
     },
   );
 
-  // Retrying a start while desired_state=running — the state the pending-start
-  // case above leaves behind — raises invalid_transition. The generic
-  // state-changed toast contradicts having just been told the start is pending,
-  // so start alone gets a message that says the server is already coming up
-  // (issue #2445).
   it("maps a 409 invalid_transition on start to the already-running message", () => {
     const error = new ApiError(409, { reason: "invalid_transition" });
     expect(lifecycleErrorMessage(error, "start")).toBe(
@@ -154,8 +117,6 @@ describe("lifecycleErrorMessage", () => {
     );
   });
 
-  // Only start leaves a pending intent a retry collides with; stop and restart
-  // keep the state-changed treatment for invalid_transition (issue #2445).
   it.each(["stop", "restart"] as const)(
     "keeps the state-changed treatment for a 409 invalid_transition on %s",
     (action) => {
@@ -187,7 +148,6 @@ describe("lifecycleErrorMessage", () => {
     expect(lifecycleErrorMessage(error)).toBe("dashboard.actionFailed");
   });
 
-  // 503 service-unavailable reasons (issue #1092).
   it("maps a 503 no_eligible_worker to its specific message", () => {
     const error = new ApiError(503, { reason: "no_eligible_worker" });
     expect(lifecycleErrorMessage(error)).toBe(
@@ -202,10 +162,7 @@ describe("lifecycleErrorMessage", () => {
     );
   });
 
-  // A stop dispatch that timed out or lost its session failed AFTER the API
-  // committed desired_state=stopped, so the stop intent stands and the
-  // reconciler redispatches it — but the outcome is unknown, so the message
-  // can only say it is unconfirmed (issue #2440).
+  // A stop timeout leaves its committed intent pending, but does not confirm whether the server has stopped.
   it("maps a 503 worker_unavailable on stop to the unconfirmed-stop message", () => {
     const error = new ApiError(503, { reason: "worker_unavailable" });
     expect(lifecycleErrorMessage(error, "stop")).toBe(
@@ -213,9 +170,6 @@ describe("lifecycleErrorMessage", () => {
     );
   });
 
-  // A restart dispatch that could not be confirmed leaves desired_state=running,
-  // so a server the Worker took down and failed to relaunch comes back on its
-  // own (issue #2440).
   it("maps a 503 worker_unavailable on restart to the unconfirmed-restart message", () => {
     const error = new ApiError(503, { reason: "worker_unavailable" });
     expect(lifecycleErrorMessage(error, "restart")).toBe(
@@ -223,9 +177,7 @@ describe("lifecycleErrorMessage", () => {
     );
   });
 
-  // Start is ambiguous: a pre-dispatch unavailable compensates back to stopped
-  // (nothing pending), a post-dispatch one does not, and both arrive as a bare
-  // worker_unavailable — so it keeps the verb-agnostic message (issue #2440).
+  // worker_unavailable can precede or follow start dispatch, so the client cannot promise a pending start.
   it("keeps the worker-unavailable message for a failed start", () => {
     const error = new ApiError(503, { reason: "worker_unavailable" });
     expect(lifecycleErrorMessage(error, "start")).toBe(
@@ -233,8 +185,6 @@ describe("lifecycleErrorMessage", () => {
     );
   });
 
-  // no_eligible_worker is raised before any intent is committed, on every verb
-  // that can see it, so it never becomes verb-specific (issue #2440).
   it("keeps the no-eligible-worker message on stop", () => {
     const error = new ApiError(503, { reason: "no_eligible_worker" });
     expect(lifecycleErrorMessage(error, "stop")).toBe(

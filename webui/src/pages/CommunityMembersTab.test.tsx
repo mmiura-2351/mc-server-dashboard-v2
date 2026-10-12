@@ -62,8 +62,6 @@ function role(over: Record<string, unknown> = {}) {
   };
 }
 
-// Route `api.get` by path: the page reads the community, the Members tab reads
-// the member list and (when the picker is shown) the role list.
 function routeGet(opts: { members?: unknown[]; roles?: unknown[] }) {
   mockApi.get.mockImplementation((path: string) => {
     if (path === `/api/communities/${CID}/members`) {
@@ -72,7 +70,6 @@ function routeGet(opts: { members?: unknown[]; roles?: unknown[] }) {
     if (path === `/api/communities/${CID}/roles`) {
       return Promise.resolve(opts.roles ?? []);
     }
-    // Bare community fetch.
     return Promise.resolve(community());
   });
 }
@@ -98,7 +95,6 @@ function renderPage() {
   return { ...result, queryClient };
 }
 
-// The Members tab is the default tab, so the page lands on it directly.
 async function awaitMembers() {
   await screen.findAllByText("Sakura");
 }
@@ -298,7 +294,6 @@ describe("CommunityMembersTab", () => {
         name: t("communitySettings.members.remove"),
       }),
     );
-    // The confirm explains role/grant revocation.
     expect(
       screen.getByText(t("communitySettings.members.removeDialogBody")),
     ).toBeInTheDocument();
@@ -338,7 +333,6 @@ describe("CommunityMembersTab", () => {
   });
 
   it("hides add/remove/role controls without the matching permissions", async () => {
-    // No member:add, member:remove, or role:manage.
     mockCan = (code: string) =>
       code !== "member:add" &&
       code !== "member:remove" &&

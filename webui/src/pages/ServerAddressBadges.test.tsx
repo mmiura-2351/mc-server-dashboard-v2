@@ -1,8 +1,5 @@
 // @vitest-environment jsdom
-// Pinned to jsdom: the copy tests drive the document.execCommand("copy")
-// fallback, which is only exercised when navigator.clipboard is absent. jsdom
-// omits it; happy-dom provides it, so the fallback would be skipped
-// (issue #1751).
+// Use jsdom's absent clipboard API to exercise the execCommand fallback.
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { t } from "../i18n/index.ts";
@@ -31,12 +28,9 @@ function renderBadges(overrides: Record<string, unknown> = {}) {
   );
 }
 
-// The value handed to the clipboard fallback textarea on each copy, and the
-// execCommand result the next copies report.
 let copiedTexts: string[];
 let copySucceeds: boolean;
 
-// Click a badge and flush the clipboard promise's settlement.
 async function click(element: HTMLElement) {
   await act(async () => {
     fireEvent.click(element);
@@ -61,7 +55,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   copiedTexts = [];
   copySucceeds = true;
-  // jsdom does not define execCommand; define it so vi.spyOn can wrap it.
+  // Define execCommand before spying because jsdom does not provide it.
   if (!("execCommand" in document)) {
     Object.defineProperty(document, "execCommand", {
       value: () => true,
@@ -92,7 +86,6 @@ describe("ServerAddressBadges display", () => {
     expect(java).toHaveAttribute("type", "button");
     expect(java.textContent).toBe(JAVA);
     expect(java).toHaveAttribute("title", JAVA);
-    // The fallback belongs to servers without a join hostname only.
     expect(screen.queryByText(":25565")).not.toBeInTheDocument();
   });
 
@@ -112,7 +105,6 @@ describe("ServerAddressBadges display", () => {
       "title",
       t("dashboard.bedrockAddressCopyTitle", { port: 19132 }),
     );
-    // Java and Bedrock render side by side, Java first.
     expect(screen.getAllByRole("button")).toEqual([javaButton(), bedrock]);
   });
 
@@ -149,14 +141,13 @@ describe.each([
     kind: "Java",
     button: javaButton,
     copied: t("dashboard.copiedJoinHostname"),
-    // The join hostname is the whole Java address.
     copiedText: JAVA,
   },
   {
     kind: "Bedrock",
     button: bedrockButton,
     copied: t("dashboard.copiedBedrockAddress"),
-    // Host only: Bedrock's "Add Server" screen has a separate Port field.
+    // Copy only the host; Bedrock's Add Server screen has a separate port field.
     copiedText: "play.example.com",
   },
 ])("ServerAddressBadges $kind copy", ({ button, copied, copiedText }) => {
@@ -207,7 +198,6 @@ describe.each([
     copySucceeds = false;
     await click(target);
 
-    // Reverted immediately, not by the pending success timer.
     expect(target).toBe(button());
   });
 });
@@ -235,7 +225,6 @@ describe("ServerAddressBadges independent copy state", () => {
     await click(bedrockButton());
     advance(500);
 
-    // Java's timer has fired; Bedrock's, started 1000 ms later, has not.
     expect(java).toBe(javaButton());
     expect(screen.getAllByText(COPIED)).toHaveLength(1);
     advance(1000);

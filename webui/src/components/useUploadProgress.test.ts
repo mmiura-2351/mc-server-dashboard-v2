@@ -132,7 +132,6 @@ describe("useUploadProgress", () => {
 
     let signal!: AbortSignal;
     act(() => {
-      // start() returns the fresh signal synchronously — no re-render needed.
       signal = result.current.start(5000);
     });
 
@@ -156,7 +155,6 @@ describe("useUploadProgress", () => {
       second = result.current.start(2000);
     });
     expect(second.aborted).toBe(false);
-    // A cancelled controller must not leak into the next upload.
     expect(second).not.toBe(first);
   });
 });

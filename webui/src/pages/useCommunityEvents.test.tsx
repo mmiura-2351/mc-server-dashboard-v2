@@ -71,15 +71,12 @@ function setup(seed: ReturnType<typeof serverRow>[] | undefined) {
     queryClient.setQueryData(serversKey(CID), seed);
   }
   const refetchSpy = vi.fn();
-  // Stand in for the list query's refetch: invalidate calls into the client.
   queryClient.getQueryCache().subscribe((event) => {
     if (event.type === "updated" && event.action.type === "invalidate") {
       refetchSpy();
     }
   });
-  // Counts resync requests by call. (The cache-event spy undercounts repeats:
-  // with no observer to refetch and clear `isInvalidated`, only the first
-  // invalidation of a query emits an "invalidate" event.)
+  // Count invalidation calls; cache events emit only the first while isInvalidated remains set without an observer.
   const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
   const wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={queryClient}>
@@ -234,7 +231,6 @@ describe("useCommunityEvents", () => {
     });
     expect(degradedSeen).toBe(true);
 
-    // The reconnect timer fires; the new socket opens -> recovery.
     act(() => {
       vi.advanceTimersByTime(30000);
     });
@@ -265,10 +261,8 @@ describe("useCommunityEvents", () => {
       MockWebSocket.last().fail();
     });
     act(() => {
-      vi.advanceTimersByTime(30000); // poll ticks fire; reconnect timer fires
+      vi.advanceTimersByTime(30000);
     });
-    // Transitions between the last poll tick and the reopen would otherwise
-    // be lost for good: the reopen itself must reconcile once.
     invalidateSpy.mockClear();
     act(() => {
       MockWebSocket.last().open();
@@ -314,7 +308,6 @@ describe("useCommunityEvents", () => {
         notificationFrame("s1", "Scheduled stop failed", ""),
       );
     });
-    // A notification is not a status change: the cached row is untouched.
     expect(queryClient.getQueryData(serversKey(CID))).toEqual([
       { id: "s1", observed_state: "running" },
     ]);
@@ -336,16 +329,13 @@ describe("useCommunityEvents", () => {
 
 type Row = ReturnType<typeof serverRow>;
 
-/**
- * A servers-list query whose REST responses the test resolves by hand, so a
- * response can land after a WS frame that is newer than its read (#3213).
- */
+/** Hold REST responses so tests can deliver older reads after newer socket frames. */
 function setupDeferred({ retry = false }: { retry?: number | false } = {}) {
   const pending: {
     resolve: (rows: Row[]) => void;
     reject: (error: Error) => void;
   }[] = [];
-  // Wrapped like the page's, so each attempt (retries included) is stamped.
+  // Stamp every attempt as the page does, including retries.
   const queryFn = stampedQueryFn(
     () =>
       new Promise<Row[]>((resolve, reject) => {
@@ -356,7 +346,7 @@ function setupDeferred({ retry = false }: { retry?: number | false } = {}) {
     defaultOptions: { queries: { retry, retryDelay: 1000 } },
   });
   function LiveProbe() {
-    // The page's order: the events hook, then the list query.
+    // Match the page's hook order: events first, list query second.
     degradedSeen = useCommunityEvents(CID);
     useQuery({ queryKey: serversKey(CID), queryFn });
     return null;
@@ -367,7 +357,6 @@ function setupDeferred({ retry = false }: { retry?: number | false } = {}) {
     </QueryClientProvider>
   );
   render(<LiveProbe />, { wrapper });
-  // Resolve the oldest outstanding REST read with `rows`.
   const respond = async (rows: Row[]) => {
     const attempt = pending.shift();
     expect(attempt).toBeDefined();
@@ -376,7 +365,6 @@ function setupDeferred({ retry = false }: { retry?: number | false } = {}) {
       await vi.advanceTimersByTimeAsync(0);
     });
   };
-  // Fail the oldest outstanding REST attempt (an HTTP error).
   const fail = async () => {
     const attempt = pending.shift();
     expect(attempt).toBeDefined();
@@ -410,7 +398,6 @@ describe("useCommunityEvents with REST reads in flight (#3213)", () => {
       MockWebSocket.last().open();
       MockWebSocket.last().message(snapshotFrame([["s1", "running"]]));
     });
-    // The cold read captured the state before the transition.
     await respond([serverRow("s1", "stopped")]);
     expect(cached()).toEqual([{ id: "s1", observed_state: "running" }]);
   });
@@ -434,14 +421,12 @@ describe("useCommunityEvents with REST reads in flight (#3213)", () => {
     act(() => {
       MockWebSocket.last().fail();
     });
-    // The drop's poll ticks and the reconnect timer fire; settle each read.
     act(() => {
       vi.advanceTimersByTime(30000);
     });
     while (pending.length > 0) {
       await respond([serverRow("s1", "running")]);
     }
-    // The reopen starts a refetch; the snapshot lands before its response.
     act(() => {
       MockWebSocket.last().open();
       MockWebSocket.last().message(snapshotFrame([["s1", "stopped"]]));
@@ -451,8 +436,7 @@ describe("useCommunityEvents with REST reads in flight (#3213)", () => {
   });
 
   it("lets a REST read started after the frame supersede it", async () => {
-    // A worker disconnect commits `unknown` without a frame; a read that
-    // started after the last frame is the newer truth.
+    // A later REST read can observe a Worker disconnect that emitted no frame.
     const { queryClient, respond, cached } = setupDeferred();
     act(() => {
       MockWebSocket.last().open();
@@ -496,7 +480,6 @@ describe("useCommunityEvents server-set reconciliation on load (#3213)", () => {
       );
     });
     await respond([serverRow("s1", "running")]);
-    // The cold read predates s2's creation: one list refetch loads it.
     expect(pending).toHaveLength(1);
     await respond([serverRow("s1", "running"), serverRow("s2", "stopped")]);
     expect(cached()).toEqual([
@@ -562,8 +545,7 @@ describe("useCommunityEvents with REST retries (#3213)", () => {
       MockWebSocket.last().message(snapshotFrame([["s1", "running"]]));
     });
     await fail();
-    // The retry's request starts after the snapshot (and after a silent
-    // worker-disconnect write): its response is the newer truth.
+    // A retry begun after the snapshot can contain a newer silent Worker disconnect.
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1000);
     });

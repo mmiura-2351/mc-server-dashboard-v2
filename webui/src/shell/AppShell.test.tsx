@@ -23,9 +23,7 @@ function tokenResponse(): Response {
 
 const fetchMock = vi.fn();
 
-// Sign in via the bootstrap refresh and serve the given community list to the
-// shared `GET /communities` query the switcher reads. Permission fetches per
-// community are stubbed empty so capability loading does not error.
+// Return empty capabilities for each community so switcher tests do not fail on unrelated permission reads.
 function signedInWith(communities: Array<{ id: string; name: string }>) {
   fetchMock.mockImplementation((input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
@@ -46,8 +44,7 @@ function renderAt(path: string) {
   renderApp({ path });
 }
 
-// Surfaces the live URL so brand navigation can be asserted without depending
-// on a guarded page's content.
+// Expose the URL without depending on guarded-page content to verify brand navigation.
 function LocationProbe() {
   const { pathname } = useLocation();
   return <span data-testid="url">{pathname}</span>;
@@ -119,10 +116,6 @@ describe("AppShell community switcher", () => {
   it("a deep link to a non-member community renders not-found, not another community (#784)", async () => {
     signedInWith([ALPHA, BETA]);
 
-    // `gamma` is not in the caller's membership (stale bookmark / left
-    // community). The dashboard must show the not-found state and the shell must
-    // not adopt the stale cid — the switcher stays on the default first
-    // community rather than silently listing it under the wrong URL.
     renderAt("/communities/gamma");
 
     expect(
@@ -141,7 +134,6 @@ describe("AppShell community switcher", () => {
 
     renderAt("/");
 
-    // The language selector and the account link render the ja dictionary.
     expect(
       await screen.findByRole("combobox", { name: ja["shell.language"] }),
     ).toBeInTheDocument();
@@ -170,10 +162,6 @@ describe("AppShell community switcher", () => {
 
     fireEvent.change(langSwitcher, { target: { value: "ja" } });
 
-    // The choice is persisted and applied in place — no full reload, which
-    // would tear down an in-flight refresh rotation and could sign the user
-    // out (issues #515, #512). The live re-render is covered by the i18n unit
-    // test and the auth E2E.
     expect(localStorage.getItem("mcsd.lang")).toBe("ja");
     expect(reload).not.toHaveBeenCalled();
 
@@ -186,18 +174,11 @@ describe("AppShell community switcher", () => {
 
     renderAt("/");
 
-    // Once the (empty) list resolves the switcher shows the empty label; the
-    // sidebar then offers the no-communities hint instead of nav links.
     const noCommunityLabel = await screen.findByText(t("shell.noCommunity"));
     expect(noCommunityLabel).toBeInTheDocument();
-    // The label must not carry the generic `empty` class: it collides with the
-    // empty-state CTA rule (shell.css `.empty { padding: 48px 20px }`), which
-    // overrode the switcher's padding and overflowed the top bar (#533).
+    // The generic empty-state class adds large CTA padding that would overflow the switcher.
     expect(noCommunityLabel).not.toHaveClass("empty");
-    // The sidebar hint must carry the `nav-hint` class: the narrow-width
-    // breakpoint rule hides `.nav-hint` so this long prose string does not
-    // become the widest rail child and reintroduce horizontal overflow when a
-    // no-community user is on a phone (#586).
+    // The narrow-sidebar rule hides nav-hint so long no-community text cannot widen the rail.
     const hint = screen.getByText(t("shell.noCommunities"));
     expect(hint).toBeInTheDocument();
     expect(hint).toHaveClass("nav-hint");
@@ -211,10 +192,7 @@ describe("AppShell community switcher", () => {
 
     renderAt("/");
 
-    // The account link keeps its always-visible avatar but carries its text in a
-    // dedicated `.label` span, which the narrow-width topbar rule hides so the
-    // trailing items stop overflowing off-screen (#554). The accessible name
-    // still resolves from the avatar's text, so the link stays labelled.
+    // Hide only the account text at narrow widths; the avatar retains the link's accessible name.
     const account = await screen.findByRole("link", {
       name: t("shell.account"),
     });
@@ -228,11 +206,7 @@ describe("AppShell community switcher", () => {
 
     renderAt("/");
 
-    // At narrow widths the sidebar collapses to an icon-only rail: the nav text
-    // moves into a dedicated `.label` span the breakpoint rule hides, while the
-    // icon stays. The link keeps an `aria-label`, so its accessible name still
-    // resolves once the visible text is hidden (#586, mirroring the #554
-    // account-link treatment).
+    // Narrow layouts hide nav labels; aria-label must preserve link names when only icons remain.
     const dashboard = await screen.findByRole("link", {
       name: t("nav.dashboard"),
     });
@@ -258,12 +232,8 @@ describe("AppShell community switcher", () => {
 
     renderAt("/communities/alpha");
 
-    // The switcher renders the error message and a retry button instead of the
-    // permanent loading placeholder (the content area also shows the error, so
-    // multiple elements may match).
     const errors = await screen.findAllByText(t("shell.communitiesError"));
     expect(errors.length).toBeGreaterThanOrEqual(1);
-    // The switcher's error element is inside a `.community-switcher` div.
     const switcherError = errors.find(
       (el) => el.closest(".community-switcher") !== null,
     );
@@ -295,22 +265,18 @@ describe("AppShell community switcher", () => {
 
     const { queryClient } = renderApp({ path: "/communities/alpha" });
 
-    // Wait for the switcher to render with cached data.
     const switcher = await screen.findByRole("combobox", {
       name: t("shell.switchCommunity"),
     });
     expect((switcher as HTMLSelectElement).value).toBe("alpha");
 
-    // Simulate a background refetch failure (e.g. network blip on window focus).
     failCommunities = true;
     queryClient.invalidateQueries({ queryKey: ["communities"] });
 
-    // Give react-query time to process the failed refetch.
     await waitFor(() =>
       expect(queryClient.getQueryState(["communities"])?.status).toBe("error"),
     );
 
-    // The switcher must still show the working select — not the error state.
     expect(
       screen.getByRole("combobox", { name: t("shell.switchCommunity") }),
     ).toBeInTheDocument();
@@ -329,8 +295,6 @@ describe("AppShell community switcher", () => {
 
     fireEvent.click(brand);
 
-    // LANDING_PATH resolves the active community and redirects to its dashboard,
-    // so a click from /account lands on the active community's dashboard.
     await waitFor(() =>
       expect(screen.getByTestId("url")).toHaveTextContent("/communities/alpha"),
     );

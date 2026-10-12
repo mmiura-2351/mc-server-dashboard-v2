@@ -1,14 +1,9 @@
 import type { TranslationKey } from "./index.ts";
 
-// Japanese dictionary. Mirrors the key order of en.ts so future diffs against
-// the English source line up. Typed as `Record<TranslationKey, string>` so a
-// missing or extra key fails typecheck (WEBUI_SPEC.md Section 7.5). Register:
-// operations-console short form (da/dearu mixed with concise noun phrases);
-// technical terms (RCON, JAR, Worker, EULA, ZIP, UUID, MiB) kept as-is.
+// Match English key order; use concise console language and retain technical terms such as RCON and MiB.
 export const ja: Record<TranslationKey, string> = {
   "app.title": "mc-server-dashboard",
 
-  // Shell chrome
   "shell.brand": "MC Dashboard",
   "shell.account": "アカウント",
   "shell.switchCommunity": "コミュニティを切り替え",
@@ -20,7 +15,6 @@ export const ja: Record<TranslationKey, string> = {
   "shell.language.en": "English",
   "shell.language.ja": "日本語",
 
-  // Sidebar navigation (WEBUI_SPEC.md Section 5)
   "nav.community": "コミュニティ",
   "nav.dashboard": "ダッシュボード",
   "nav.createServer": "サーバーを作成",
@@ -34,7 +28,6 @@ export const ja: Record<TranslationKey, string> = {
   "nav.adminAudit": "全体監査ログ",
   "nav.sharedResources": "共有リソース",
 
-  // Placeholder pages (Phase 1: routing skeleton only)
   "page.dashboard": "サーバー",
   "page.serverCreate": "サーバーを作成",
   "page.account": "アカウント",
@@ -48,13 +41,9 @@ export const ja: Record<TranslationKey, string> = {
     "プレースホルダーページ — 内容は後のフェーズで追加されます。",
   "page.notFound": "ページが見つかりません",
 
-  // Not-found (404) route: shown for any unmatched URL (#639). The body
-  // explains the state and the link returns the user to the landing route.
   "notFound.body": "お探しのページは存在しないか、移動されました。",
   "notFound.home": "ホームに戻る",
 
-  // No-community empty state (#584): shown on the landing route when the
-  // signed-in account belongs to zero communities.
   "noCommunity.title": "コミュニティがありません",
   "noCommunity.body":
     "このアカウントはまだどのコミュニティにも所属していません。コミュニティ単位でサーバー・メンバー・設定が管理されます。",
@@ -64,19 +53,13 @@ export const ja: Record<TranslationKey, string> = {
     "プラットフォーム管理者は、最初のコミュニティを作成できます。",
   "noCommunity.adminCta": "コミュニティを作成",
 
-  // Community-not-found state (#784): shown when a URL `:cid` is not one the
-  // signed-in account belongs to (stale bookmark, or a community the user has
-  // left). The dashboard and server-create pages derive their community from the
-  // URL, so they render this instead of silently falling back to another one.
   "community.notFound.title": "コミュニティが見つかりません",
   "community.notFound.body":
     "このコミュニティは存在しないか、あなたはメンバーではありません。",
 
-  // Auth links
   "auth.toRegister": "アカウントがない場合は登録",
   "auth.toLogin": "アカウントがある場合はサインイン",
 
-  // Login / register pages and route guards (issue #410).
   "auth.loading": "読み込み中…",
   "auth.fieldUsername": "ユーザー名",
   "auth.fieldEmail": "メールアドレス",
@@ -100,7 +83,6 @@ export const ja: Record<TranslationKey, string> = {
   "register.genericError":
     "アカウントを作成できませんでした。もう一度お試しください。",
   "register.errPasswordMismatch": "パスワードが一致しません。",
-  // Server-authoritative reason codes (AUTH_API.md 2; users.py register).
   "register.reason.too_short": "パスワードが短すぎます。",
   "register.reason.too_long_for_bcrypt": "パスワードが長すぎます。",
   "register.reason.insufficient_complexity":
@@ -116,7 +98,6 @@ export const ja: Record<TranslationKey, string> = {
   "register.reason.invalid_username": "そのユーザー名は使用できません。",
   "register.reason.invalid_email": "有効なメールアドレスを入力してください。",
 
-  // UX primitives (WEBUI_SPEC.md Section 7.4)
   "common.cancel": "キャンセル",
   "common.close": "閉じる",
   "common.showPassword": "パスワードを表示",
@@ -125,13 +106,11 @@ export const ja: Record<TranslationKey, string> = {
   "common.chooseFile": "ファイルを選択",
   "common.noFileChosen": "ファイルが選択されていません",
 
-  // Upload progress (issue #1207).
   "upload.label": "アップロード中",
   "upload.bytes": "{loaded} / {total}",
   "upload.percent": "{percent}%",
   "upload.elapsed": "{seconds}秒経過",
 
-  // Account page (WEBUI_SPEC.md 6.11)
   "account.subtitle": "プロフィール・セキュリティ・所属コミュニティの管理。",
   "account.signOut": "サインアウト",
   "account.loading": "読み込み中…",
@@ -172,7 +151,6 @@ export const ja: Record<TranslationKey, string> = {
   "account.delete.prompt": "削除を有効にするにはユーザー名を入力",
   "account.delete.password": "確認のためパスワードを入力",
 
-  // API reason codes (RFC 9457 `reason`) surfaced inline / via toast.
   "account.error.username_taken": "そのユーザー名はすでに使用されています。",
   "account.error.email_taken": "そのメールアドレスはすでに使用されています。",
   "account.error.invalid_username": "そのユーザー名は無効です。",
@@ -195,7 +173,6 @@ export const ja: Record<TranslationKey, string> = {
     "あなたは最後のプラットフォーム管理者のため、アカウントを削除できません。",
   "account.error.generic": "問題が発生しました。もう一度お試しください。",
 
-  // Dashboard server cards (WEBUI_SPEC.md 6.2).
   "dashboard.subtitle": "このコミュニティのサーバー。",
   "dashboard.loading": "サーバーを読み込んでいます…",
   "dashboard.loadError":
@@ -208,11 +185,9 @@ export const ja: Record<TranslationKey, string> = {
   "dashboard.startCrashed": "再起動",
   "dashboard.stop": "停止",
   "dashboard.restart": "再起動",
-  // Card/table view toggle (#541); cards remain the default.
   "dashboard.view.label": "サーバー一覧の表示",
   "dashboard.view.cards": "カード",
   "dashboard.view.table": "テーブル",
-  // Table-view column headers (#541): the same data as the cards.
   "dashboard.col.name": "名前",
   "dashboard.col.state": "状態",
   "dashboard.col.type": "種類 / バージョン",
@@ -220,7 +195,6 @@ export const ja: Record<TranslationKey, string> = {
   "dashboard.col.address": "アドレス",
   "dashboard.col.worker": "ホスト",
   "dashboard.col.actions": "操作",
-  // Observed-state pill labels (WEBUI_SPEC.md 2.3).
   "dashboard.state.starting": "起動中",
   "dashboard.state.running": "稼働中",
   "dashboard.state.stopping": "停止中",
@@ -228,77 +202,50 @@ export const ja: Record<TranslationKey, string> = {
   "dashboard.state.restarting": "再起動中",
   "dashboard.state.crashed": "クラッシュ",
   "dashboard.state.unknown": "不明",
-  // Lifecycle action feedback.
   "dashboard.actionFailed":
     "操作を完了できませんでした。もう一度お試しください。",
-  // Conflict-flavoured lifecycle races (SPEC 7.4).
   "dashboard.stateChanged": "状態が変化しました — 更新しました。",
-  // Sanitized 409 start-failure reasons (issue #225).
   "dashboard.lifecycle.portConflict":
     "起動できませんでした: ポートがすでに使用されています。",
   "dashboard.lifecycle.imageMissing":
     "起動できませんでした: サーバーのファイルが準備できていません。しばらくしてから再試行してください。",
-  // 409 worker_busy / server_busy (issue #2400); retry is the only remedy.
   "dashboard.lifecycle.busy":
     "このサーバーで別の操作が進行中です。しばらく待ってから再試行してください。",
-  // 409 command_failed (issue #2420); the server may or may not have moved, and
-  // a retry is not known to help.
   "dashboard.lifecycle.commandFailed":
     "サーバーホストがこの操作を実行できませんでした。サーバーの現在の状態を確認してから再試行してください。",
-  // 409 command_failed / worker_busy on stop, and command_failed or
-  // server_not_running on restart (issues #2435/#2441); the committed intent is
-  // still pending, not undone.
   "dashboard.lifecycle.stopPending":
     "サーバーを停止できませんでした: まだ稼働中です。システムが停止を試行し続けます。",
   "dashboard.lifecycle.restartPending":
     "サーバーを再起動できませんでした: 一時的に停止している可能性があります。システムが自動的に復帰させます。",
-  // 409 worker_busy on start (issue #2445); ambiguous at the edge, so this must
-  // not promise the start will happen — it says it may still come up and to
-  // retry only if the server stays stopped.
+  // worker_busy may leave a pending start; promise no automatic start and allow retry only if it stays stopped.
   "dashboard.lifecycle.startPending":
     "サーバーをすぐに起動できませんでした: このサーバーで別の操作が進行中です。起動は自動的に適用される場合があります。サーバーの状態を確認し、停止したままの場合のみ再度起動してください。",
-  // 409 invalid_transition on start (issue #2445): すでに起動指定済みなので、保留中の
-  // 起動を伝えられた後の再試行にはこのメッセージを返す。
   "dashboard.lifecycle.startAlreadyRunning":
     "サーバーはすでに起動中または起動処理中のため、起動する必要はありません。",
-  // 409 failed_stop_orphan (issue #2466): the host could not confirm an earlier
-  // stop, so the process may still be running. A retry of the same action is
-  // refused identically, and since issue #2475 the host converges the orphan on
-  // its own, so the message says the work is already under way rather than asking
-  // the operator to stop it again (issue #2476).
+  // A failed-stop orphan may still be running; the host is already retrying its stop.
   "dashboard.lifecycle.failedStopOrphan":
     "前回の停止が完了していないため、このサーバーのプロセスがまだ稼働している可能性があります。システムが自動的に停止処理を進めているため、しばらく待ってから再試行してください。",
-  // 503 service-unavailable reasons (issue #1092).
   "dashboard.lifecycle.noEligibleWorker":
     "現在利用可能なサーバーホストがありません。システムが起動中の場合は、しばらく待ってから再試行してください。",
   "dashboard.lifecycle.workerUnavailable":
     "サーバーホストとの通信に失敗しました。しばらく待ってから再試行してください。",
   "dashboard.lifecycle.jarUnavailable":
     "サーバーファイルを準備できませんでした。しばらく待ってから再試行してください。",
-  // 503 worker_unavailable on stop / restart (issue #2440); the intent was
-  // already committed and the outcome is unknown, not undone.
+  // A timeout leaves committed intent intact but the operation's outcome unknown.
   "dashboard.lifecycle.stopUnconfirmed":
     "サーバーホストと通信できず、停止を確認できませんでした。すでに停止処理が進んでいる可能性があります。停止の指示は有効なままで、システムが試行を続けます。",
   "dashboard.lifecycle.restartUnconfirmed":
     "サーバーホストと通信できず、再起動を確認できませんでした。すでに復帰している可能性があります。停止したままの場合は、システムが自動的に起動します。",
-  // Live-status degraded indicator: WS down, polling fallback (SPEC 6.2 / 7.2).
   "dashboard.liveDegraded": "再接続中 — 表示の更新が遅れることがあります",
-  // Clickable join-hostname copy feedback (ServerAddressBadges, shared by the
-  // dashboard and the server detail header).
   "dashboard.copiedJoinHostname": "コピーしました！",
-  // Bedrock address:port badge (issue #1543).
   "dashboard.bedrockLabel": "Bedrock",
   "dashboard.copiedBedrockAddress": "コピーしました！",
   "dashboard.bedrockAddressCopyTitle":
     "アドレスをコピー（ポート {port} は別のポート欄に入力）",
-  // Filter and sort controls (#1123).
   "dashboard.filter.search": "名前で検索…",
   "dashboard.filter.state": "状態でフィルター",
-  // State filter dropdown: short trigger label, clear action, and the four
-  // semantic buckets (#2239).
   "dashboard.filter.stateLabel": "状態",
-  // 選択中のバケット数を状態トリガーのアクセシブル名に含める。カウントバッジ
-  // 自体は aria-hidden のため、支援技術にはこの文字列で数が伝わる（#2668）。
+  // Include the selected count in the accessible name because the badge is aria-hidden.
   "dashboard.filter.stateCount": "状態でフィルター（{count} 件選択中）",
   "dashboard.filter.clear": "クリア",
   "dashboard.filter.bucket.running": "稼働中",
@@ -311,12 +258,10 @@ export const ja: Record<TranslationKey, string> = {
   "dashboard.sort.state": "状態",
   "dashboard.sort.type": "種類",
 
-  // Server detail page (WEBUI_SPEC.md 6.4 / 6.9).
   "serverDetail.loading": "サーバーを読み込んでいます…",
   "serverDetail.loadError":
     "このサーバーを読み込めませんでした。更新してみてください。",
   "serverDetail.breadcrumb": "サーバー",
-  // Overview header.
   "serverDetail.crashDetail": "クラッシュ理由:",
   "serverDetail.crashBanner.guidance":
     "サーバーがクラッシュしました。再起動をクリックして再試行するか、コンソールで詳細を確認してください。",
@@ -342,7 +287,6 @@ export const ja: Record<TranslationKey, string> = {
   "serverDetail.noWorker": "ホスト未割り当て",
   "serverDetail.worker": "ホスト",
   "serverDetail.noPort": "ポートなし",
-  // Tabs (WEBUI_SPEC.md 6.4–6.9).
   "serverDetail.tab.overview": "概要",
   "serverDetail.tab.console": "コンソール",
   "serverDetail.tab.files": "ファイル",
@@ -350,21 +294,17 @@ export const ja: Record<TranslationKey, string> = {
   "serverDetail.tab.schedules": "スケジュール",
   "serverDetail.tab.players": "プレイヤー",
   "serverDetail.tab.settings": "設定",
-  // Overview live metrics strip + log tail (issue #440, WEBUI_SPEC.md 6.4).
   "serverDetail.metric.cpu": "CPU",
   "serverDetail.metric.memory": "メモリ",
   "serverDetail.metric.players": "プレイヤー",
   "serverDetail.metric.cores": "コア",
   "serverDetail.metric.mib": "MiB",
-  // Before the first metrics frame arrives, vs. no stream while not running.
   "serverDetail.metric.collecting": "収集中…",
   "serverDetail.metric.idle": "停止中はメトリクスがありません",
   "serverDetail.logTailHeading": "最近のログ",
   "serverDetail.openConsole": "コンソールを開く",
   "serverDetail.logTailEmpty": "まだログ出力がありません。",
-  // Inline divider where the client fell behind and missed events (SPEC 7.2).
   "serverDetail.missedEvents": "— 欠落したイベント —",
-  // Console tab (issue #440, WEBUI_SPEC.md 6.5).
   "serverDetail.console.follow": "自動スクロール",
   "serverDetail.console.filter": "絞り込み…",
   "serverDetail.console.clear": "クリア",
@@ -381,7 +321,6 @@ export const ja: Record<TranslationKey, string> = {
     "サーバーの前回の停止が完了しておらず、プロセスがまだ動作している可能性があるため、コマンドは送信されませんでした。システムが自動的に停止処理を進めています。",
   "serverDetail.console.error.rconFailed":
     "サーバーのコンソール接続（RCON）でエラーが発生したため、コマンドが実行されていない可能性があります。再送信する前にコンソールの出力を確認してください。",
-  // Lifecycle controls.
   "serverDetail.start": "起動",
   "serverDetail.startCrashed": "再起動",
   "serverDetail.stop": "停止",
@@ -394,7 +333,6 @@ export const ja: Record<TranslationKey, string> = {
   "serverDetail.restart": "再起動",
   "serverDetail.export": "エクスポート",
   "serverDetail.delete": "削除",
-  // Settings tab (WEBUI_SPEC.md 6.9).
   "serverDetail.settings.general": "全般",
   "serverDetail.settings.name": "サーバー名",
   "serverDetail.settings.gamePort": "ゲームポート",
@@ -405,21 +343,18 @@ export const ja: Record<TranslationKey, string> = {
   "serverDetail.settings.configRemove": "削除",
   "serverDetail.settings.configHint":
     "値はJSONとして解釈されます: 12 は数値、true は真偽値、それ以外は文字列です。",
-  // Per-server memory limit (issue #709).
   "serverDetail.settings.memoryLimit": "メモリ上限（MiB）",
   "serverDetail.settings.memoryLimitDefault": "既定値",
   "serverDetail.settings.memoryLimitHint":
     "このサーバーに割り当てるメモリの上限（MiB）。空欄にすると既定値を使用します。",
   "serverDetail.settings.memoryLimitRange":
     "512〜1048576 MiB の整数を入力するか、空欄にして既定値を使用してください。",
-  // Per-server CPU allocation (issue #726).
   "serverDetail.settings.cpuAllocation": "CPU割り当て（ミリコア）",
   "serverDetail.settings.cpuAllocationDefault": "自動",
   "serverDetail.settings.cpuAllocationHint":
     "このサーバーへのCPUの割り当て（ミリコア、1000＝1コア）。上限ではなく負荷時の相対的な割り当てで、ホストに余裕があればこれを超えて使用できます。空欄にすると自動になります。",
   "serverDetail.settings.cpuAllocationRange":
     "100〜128000 ミリコアの整数を入力するか、空欄にして自動にしてください。",
-  // Relay join address name field (issue #961).
   "serverDetail.settings.slug": "参加アドレス名",
   "serverDetail.settings.slugHint":
     "小文字・数字・ハイフンのみ使用できます。先頭と末尾にハイフンは使えません。変更しなければ現在の参加アドレスが維持されます。",
@@ -431,13 +366,11 @@ export const ja: Record<TranslationKey, string> = {
   "serverDetail.settings.saved": "設定を保存しました。",
   "serverDetail.settings.atRestHint":
     "名前、ゲームポート、設定の変更にはサーバーの停止が必要です。",
-  // On-blur game-port availability check (GET /ports/check/{port}).
   "serverDetail.port.available": "✓ 利用可能",
   "serverDetail.port.current": "✓ 利用可能（現在）",
   "serverDetail.port.taken": "ポートはすでに使用されています。",
   "serverDetail.port.outOfRange": "ポートが許可された範囲外です。",
   "serverDetail.port.checkError": "ポートの空き状況を確認できませんでした。",
-  // Danger zone.
   "serverDetail.danger.heading": "危険な操作",
   "serverDetail.danger.exportTitle": "サーバーをエクスポート",
   "serverDetail.danger.exportDesc":
@@ -452,12 +385,10 @@ export const ja: Record<TranslationKey, string> = {
     "サーバー、そのデータおよびバックアップを完全に削除します。この操作は元に戻せません。確認のためサーバー名を入力してください。",
   "serverDetail.delete.confirm": "サーバーを削除",
   "serverDetail.delete.prompt": "削除を有効にするにはサーバー名を入力",
-  // Outcomes (toasts).
   "serverDetail.exportStarted": "エクスポートのダウンロードを開始しました。",
   "serverDetail.deleted": "サーバーを削除しました。",
   "serverDetail.error.notStopped":
     "この変更を行う前にサーバーを停止してください。",
-  // The at-rest precondition (409 server_unsettled); action-agnostic (#2360).
   "serverDetail.error.unsettled": "この操作にはサーバーの停止が必要です。",
   "serverDetail.error.portTaken": "そのゲームポートはすでに使用されています。",
   "serverDetail.error.portOutOfRange":
@@ -470,7 +401,6 @@ export const ja: Record<TranslationKey, string> = {
     "メモリ上限は 512〜1048576 MiB の整数である必要があります。",
   "serverDetail.error.invalidCpuAllocation":
     "CPU割り当ては 100〜128000 ミリコアの整数である必要があります。",
-  // The config-blob guard (issue #94); all four reasons are reachable here.
   "serverDetail.error.configTooLarge":
     "設定の上書きが大きすぎます。全体で64KiB以内に収まるよう、値を短くするか削除してください。",
   "serverDetail.error.configNullValue":
@@ -480,29 +410,24 @@ export const ja: Record<TranslationKey, string> = {
   "serverDetail.error.configLoneSurrogate":
     "上書きのキーまたは値に壊れた文字（途中で欠けた絵文字など）が含まれています。該当の文字を入力し直すか削除してください。",
   "serverDetail.error.generic": "問題が発生しました。もう一度お試しください。",
-  // EULA acceptance dialog (issue #1104).
   "serverDetail.eulaDialog.title": "Minecraft EULAに同意しますか？",
   "serverDetail.eulaDialog.body":
     "このサーバーを起動するには、Minecraftエンドユーザーライセンス契約（EULA）に同意する必要があります。",
   "serverDetail.eulaDialog.accept": "同意して起動",
   "serverDetail.eulaDialog.link": "Minecraft EULAを確認する",
 
-  // Backups tab (WEBUI_SPEC.md 6.7).
   "backups.loading": "バックアップを読み込んでいます…",
   "backups.loadError": "バックアップを読み込めませんでした。",
   "backups.stats.loadError": "バックアップの統計を読み込めませんでした。",
   "backups.noRead": "バックアップを表示する権限がありません。",
   "backups.none": "—",
   "backups.empty": "まだバックアップがありません。",
-  // Stats header.
   "backups.stat.count": "バックアップ数",
   "backups.stat.totalSize": "合計サイズ",
-  // Shown beside the total when some backups have no recorded size (legacy
-  // NULL-size rows, #281): the figure sums only the known sizes (#640).
+  // The total sums known sizes only; legacy rows may have no recorded size.
   "backups.stat.totalSizePartial": "判明分のみ",
   "backups.stat.newest": "最新",
   "backups.stat.oldest": "最古",
-  // Table.
   "backups.col.created": "作成日時",
   "backups.col.source": "作成方法",
   "backups.col.condition": "状態",
@@ -510,33 +435,24 @@ export const ja: Record<TranslationKey, string> = {
   "backups.col.creator": "作成者",
   "backups.unknownSize": "不明",
   "backups.unknownCreator": "—",
-  // Condition badge (API `health`: healthy / quarantined / unreadable /
-  // unknown). Plain
-  // language — no internal jargon. A healthy backup shows nothing, keeping the
-  // row quiet; only the at-risk states are flagged.
   "backups.health.quarantined": "破損",
   "backups.health.quarantinedTitle":
     "このバックアップのデータは破損していることが判明しています。復元するとワールドが壊れる可能性があります。",
-  // Unreadable (#2374): the archive's bytes are gone, not the world damaged —
-  // nothing can restore it, and the remedy is on the storage side.
+  // Unreadable means the archive cannot be retrieved; it does not establish world corruption.
   "backups.health.unreadable": "読み取り不能",
   "backups.health.unreadableTitle":
     "このバックアップのファイルをストレージから読み出せなかったため、復元できません。壊れているのはワールドではなく、ストレージである可能性が高いです。次に管理者がバックアップの整合性チェックを実行したときに再検査されます。",
   "backups.health.unknown": "未検証",
   "backups.health.unknownTitle":
     "このバックアップは検査されていないため、状態は不明です。",
-  // Actions.
   "backups.create": "+ バックアップを作成",
   "backups.upload": "アップロード",
   "backups.download": "ダウンロード",
   "backups.restore": "復元",
   "backups.delete": "削除",
-  // Scheduled backups moved to the general scheduler (#1840); point users there.
   "backups.schedule.movedNote":
     "定期バックアップは「スケジュール」で設定するようになりました。",
-  // Scheduled-backup retention policy editor (issue #1841 API / #1843 UI). The
-  // policy prunes ONLY scheduled backups; manual/uploaded/event backups are
-  // never auto-deleted (the source badge distinguishes the rows).
+  // Retention prunes scheduled backups only; manual, uploaded, and event backups are preserved.
   "backups.retention.modeLabel": "定期バックアップの保持",
   "backups.retention.mode.none": "すべて保持",
   "backups.retention.mode.keepLast": "最新のN件を保持",
@@ -556,7 +472,6 @@ export const ja: Record<TranslationKey, string> = {
   "backups.retention.error.tiered":
     "0以上の整数を入力し、少なくとも1つは0より大きい値にしてください。",
   "backups.retention.error.invalid": "その保持ポリシーは無効です。",
-  // Restore dialog (stopped-only; two-step stop-then-restore).
   "backups.restoreDialog.title": "バックアップを復元",
   "backups.restoreDialog.blocked":
     "復元するとサーバーのデータが上書きされるため、サーバーを停止する必要があります。",
@@ -568,30 +483,23 @@ export const ja: Record<TranslationKey, string> = {
   "backups.restoreDialog.stopping": "サーバーを停止しています…",
   "backups.restoreDialog.body":
     "サーバーの現在のデータをこのバックアップで上書きします。この操作は元に戻せません。",
-  // Hover title on the disabled restore action of an unreadable backup (#2374).
   "backups.restoreUnavailableUnreadable":
     "このバックアップのファイルをストレージから読み出せなかったため、復元できません。",
   "backups.restoreDialog.prompt": "確認のため RESTORE と入力",
   "backups.restoreDialog.phrase": "RESTORE",
   "backups.restoreDialog.confirm": "バックアップを復元",
-  // Force-restore warning shown only when the chosen backup is quarantined
-  // (health === "quarantined"). It restores anyway with force=true, so the copy
-  // makes the deliberate, damaged-data nature explicit (#745).
+  // Force restore requires explicit acknowledgement because it can publish known-damaged world data.
   "backups.restoreDialog.damagedWarning":
     "このバックアップのデータは破損していることが判明しています。復元するとサーバーのワールドが壊れた状態になる可能性があり、その後修復する方法はありません。",
   "backups.restoreDialog.damagedConfirm": "破損したバックアップをそれでも復元",
-  // Acknowledgement checkbox label gating the force-restore — affirmation phrased
-  // (the user asserts they accept the risk), not a restatement of the warning.
   "backups.restoreDialog.damagedAck":
     "このバックアップが破損しており、修復できない壊れたワールドになる可能性があることを理解しました。",
-  // Delete dialog (typed confirm).
   "backups.deleteDialog.title": "バックアップを削除",
   "backups.deleteDialog.body":
     "バックアップアーカイブを完全に削除します。この操作は元に戻せません。",
   "backups.deleteDialog.prompt": "確認のため DELETE と入力",
   "backups.deleteDialog.phrase": "DELETE",
   "backups.deleteDialog.confirm": "バックアップを削除",
-  // Outcomes (toasts).
   "backups.created": "バックアップを作成しました。",
   "backups.uploaded": "バックアップをアップロードしました。",
   "backups.deleted": "バックアップを削除しました。",
@@ -617,7 +525,6 @@ export const ja: Record<TranslationKey, string> = {
     "ファイルサイズが512 MiBのアップロード上限を超えています。",
   "backups.error.generic": "問題が発生しました。もう一度お試しください。",
 
-  // Schedules tab (WEBUI_SPEC.md 6.13, issue #1842).
   "schedules.noRead": "スケジュールを表示する権限がありません。",
   "schedules.loading": "スケジュールを読み込んでいます…",
   "schedules.loadError": "スケジュールを読み込めませんでした。",
@@ -728,7 +635,6 @@ export const ja: Record<TranslationKey, string> = {
   "schedules.runs.outcome.failure": "失敗",
   "schedules.runs.outcome.skipped": "スキップ",
 
-  // Files tab (WEBUI_SPEC.md 6.6).
   "files.denied": "このサーバーのファイルを表示する権限がありません。",
   "files.runningNotice":
     "サーバーは稼働中です — ファイルの編集は稼働中のサーバーに即座に反映されます。アップロードとフォルダの作成にはサーバーを停止する必要があります。",
@@ -761,7 +667,6 @@ export const ja: Record<TranslationKey, string> = {
   "files.delete.dialogBody":
     "選択したファイルまたはディレクトリを完全に削除します。確認のためその名前を入力してください。",
   "files.delete.confirm": "完全に削除",
-  // Search (files/search).
   "files.search.label": "ファイルを検索",
   "files.search.placeholder": "名前で検索…",
   "files.search.byName": "名前",
@@ -771,7 +676,6 @@ export const ja: Record<TranslationKey, string> = {
   "files.search.truncated":
     "最初の結果を表示しています — さらに見るには検索を絞り込んでください。",
   "files.search.error": "検索に失敗しました。もう一度お試しください。",
-  // History drawer + rollback (files/history, files/rollback).
   "files.history": "履歴",
   "files.history.title": "バージョン履歴",
   "files.history.loading": "バージョンを読み込んでいます…",
@@ -790,7 +694,6 @@ export const ja: Record<TranslationKey, string> = {
   "files.rollback.dialogBody":
     "現在のファイルを選択したバージョンで置き換えます。サーバーを停止する必要があります。",
   "files.rollback.confirm": "今すぐロールバック",
-  // Outcomes (toasts).
   "files.saved": "ファイルを保存しました。",
   "files.uploaded": "アップロードが完了しました。",
   "files.folderCreated": "フォルダを作成しました。",
@@ -830,11 +733,9 @@ export const ja: Record<TranslationKey, string> = {
   "files.error.conflict": "競合が発生したため、操作を完了できませんでした。",
   "files.error.generic": "問題が発生しました。もう一度お試しください。",
   "files.dropZone": "ここにファイルをドロップしてアップロード",
-  // Multi-select (issue #1462).
   "files.selectAll": "すべて選択",
   "files.deselectAll": "すべて解除",
   "files.selectedCount": "{count}件選択中",
-  // Bulk operations (issue #1463).
   "files.bulk.delete": "選択項目を削除",
   "files.bulk.delete.dialogTitle": "選択項目の削除",
   "files.bulk.delete.dialogBody":
@@ -861,16 +762,13 @@ export const ja: Record<TranslationKey, string> = {
   "files.bulk.move.done": "{done} 件を移動しました。",
   "files.bulk.move.partial":
     "{done}/{total} 件を移動しました。{failed} 件失敗しました。",
-  // Drag-and-drop folder upload.
   "files.bulk.upload.progress": "アップロード中 {done}/{total}…",
   "files.bulk.upload.done": "{done} 件のファイルをアップロードしました。",
 
-  // Drag-and-drop file organization (issue #1464).
   "files.moved": "移動しました。",
   "files.error.moveConflict":
     "{name} を移動できません：移動先に同名のファイルが既に存在します。",
 
-  // Context menu (issue #1465).
   "files.contextMenu.open": "開く",
   "files.contextMenu.download": "ダウンロード",
   "files.contextMenu.downloadZip": "ZIPとしてダウンロード",
@@ -885,16 +783,13 @@ export const ja: Record<TranslationKey, string> = {
   "files.copied": "クリップボードにコピーしました。",
   "files.pasted": "貼り付けしました。",
 
-  // Navigation history (issue #1475).
   "files.nav.back": "戻る",
   "files.nav.forward": "進む",
 
-  // Unsaved changes guard (issue #1486).
   "files.unsaved.title": "未保存の変更",
   "files.unsaved.body": "未保存の変更があります。破棄しますか？",
   "files.unsaved.discard": "破棄",
 
-  // Overwrite confirmation dialog.
   "files.overwrite.title": "ファイルが既に存在します",
   "files.overwrite.body":
     "「{name}」はこのディレクトリに既に存在します。上書きしますか？",
@@ -903,25 +798,20 @@ export const ja: Record<TranslationKey, string> = {
   "files.overwrite.applyAll": "残りのすべてのファイルに適用",
   "files.overwrite.multipleFolders": "{count} 個のフォルダ",
 
-  // Players tab — applied op/whitelist groups (issue #453, WEBUI_SPEC.md 6.8).
   "players.heading": "適用中のグループ",
   "players.loading": "グループを読み込んでいます…",
   "players.loadError": "グループを読み込めませんでした。更新してみてください。",
   "players.empty": "このサーバーにはまだグループが適用されていません。",
   "players.kind.op": "op",
   "players.kind.whitelist": "whitelist",
-  // Member count shown next to each group (the group's player list length).
   "players.memberCount": "人",
   "players.detach": "解除",
   "players.detached": "グループを解除しました。",
-  // Apply picker: community groups not yet applied to this server.
   "players.attachHeading": "グループを適用",
   "players.attachEmpty": "このコミュニティのグループはすべて適用済みです。",
-  // Distinct from attachEmpty: the community has no groups at all (issue #642).
   "players.attachNoGroups": "このコミュニティにはまだグループがありません。",
   "players.attach": "適用",
   "players.attached": "グループを適用しました。",
-  // Inline pointer to the full Groups management surface (Phase 6).
   "players.manageHint": "グループの作成と編集はコミュニティ設定で行えます。",
   "players.manageLink": "コミュニティ設定",
   "players.error.unsettled":
@@ -933,7 +823,6 @@ export const ja: Record<TranslationKey, string> = {
     "サーバーエージェントが切断されています。しばらくしてから再度お試しください。",
   "players.error.generic": "問題が発生しました。もう一度お試しください。",
 
-  // Sessions view — relay game session history (issue #961).
   "sessions.heading": "セッション",
   "sessions.loading": "セッションを読み込んでいます…",
   "sessions.loadError":
@@ -947,10 +836,7 @@ export const ja: Record<TranslationKey, string> = {
   "sessions.col.end": "終了",
   "sessions.valueUnknown": "—",
   "sessions.active": "アクティブ",
-  // セッションのソース（リレーの受信経路。issue #1912, #1904）。Java は Login
-  // Start で申告された識別情報を持つが、Bedrock は Floodgate のフローセッション
-  // で IPアドレスのみを記録する（ユーザー名・UUID は取得不可）ため、その旨をバッ
-  // ジで明示する。旧データは unspecified となり、中立のダッシュを表示する。
+  // Java identities are unverified claims; Bedrock records only IP, and legacy sources render as a dash.
   "sessions.source.java": "Java",
   "sessions.source.bedrock": "Bedrock",
   "sessions.source.bedrockHint":
@@ -958,19 +844,16 @@ export const ja: Record<TranslationKey, string> = {
   "sessions.prev": "前へ",
   "sessions.next": "次へ",
 
-  // Server create wizard (WEBUI_SPEC.md 6.3).
   "serverCreate.subtitle": "新しいMinecraftサーバーを作成します。",
   "serverCreate.denied": "サーバーを作成する権限がありません。",
   "serverCreate.tab.new": "新規サーバー",
   "serverCreate.tab.import": "ZIPをインポート",
-  // Wizard step rail.
   "serverCreate.step.type": "種類とバージョン",
   "serverCreate.step.config": "設定とEULA",
   "serverCreate.next": "次へ",
   "serverCreate.back": "戻る",
   "serverCreate.create": "サーバーを作成",
   "serverCreate.creating": "作成しています…",
-  // Step 1 — type & version.
   "serverCreate.typeHeading": "サーバーの種類",
   "serverCreate.typeLoading": "サーバーの種類を読み込んでいます…",
   "serverCreate.typeLoadError":
@@ -987,7 +870,6 @@ export const ja: Record<TranslationKey, string> = {
   "serverCreate.typeSub.paper": "高性能フォーク",
   "serverCreate.typeSub.fabric": "軽量Mod",
   "serverCreate.typeSub.forge": "本格Mod",
-  // Step 2 — config & EULA (port field is direct-mode only).
   "serverCreate.portLabel": "ゲームポート",
   "serverCreate.portHint": "空いている次のポートを自動入力しました。",
   "serverCreate.portChecking": "ポートの空き状況を確認しています…",
@@ -997,7 +879,6 @@ export const ja: Record<TranslationKey, string> = {
   "serverCreate.portCheckFailed": "そのポートを確認できませんでした。",
   "serverCreate.nameLabel": "サーバー名",
   "serverCreate.namePlaceholder": "survival",
-  // Per-server resource allocation in the create wizard (issue #715).
   "serverCreate.memoryLimitLabel": "メモリ上限（MiB）",
   "serverCreate.memoryLimitDefault": "既定値",
   "serverCreate.memoryLimitHint":
@@ -1010,7 +891,6 @@ export const ja: Record<TranslationKey, string> = {
     "このサーバーへのCPUの割り当て（ミリコア、1000＝1コア）。上限ではなく負荷時の相対的な割り当てで、ホストに余裕があればこれを超えて使用できます。空欄にすると自動になります。",
   "serverCreate.cpuAllocationRange":
     "100〜128000 ミリコアの整数を入力するか、空欄にして自動にしてください。",
-  // Optional join address name (slug) at create time (issue #981).
   "serverCreate.slugLabel": "参加アドレス名（任意）",
   "serverCreate.slugPlaceholder": "例: myserver",
   "serverCreate.slugHint":
@@ -1027,7 +907,6 @@ export const ja: Record<TranslationKey, string> = {
   "serverCreate.eulaLabel": "Minecraft EULAに同意します。",
   "serverCreate.eulaWarning":
     "EULAに同意しない場合、サーバーは作成されますが、後で同意するまで起動できません。",
-  // Create error surfacing.
   "serverCreate.error.port_taken":
     "そのゲームポートはすでに使用されています。別のポートを選択してください。",
   "serverCreate.error.port_out_of_range":
@@ -1045,15 +924,12 @@ export const ja: Record<TranslationKey, string> = {
     "その参加アドレス名は無効です。小文字・数字・ハイフンのみ使用できます。",
   "serverCreate.error.slug_taken":
     "その参加アドレス名はすでに使用されています。別の名前を選択してください。",
-  // The config-blob guard (issue #94); only these two reasons are reachable
-  // from the wizard (see en.ts for why).
   "serverCreate.error.config_too_large":
     "server.properties の上書きが大きすぎます。全体で64KiB以内に収まるよう、値を短くするか削除してください。",
   "serverCreate.error.config_lone_surrogate":
     "上書きのキーまたは値に壊れた文字（途中で欠けた絵文字など）が含まれています。該当の文字を入力し直すか削除してください。",
   "serverCreate.genericError":
     "サーバーを作成できませんでした。もう一度お試しください。",
-  // Import tab.
   "serverCreate.import.heading": "ZIPエクスポートからインポート",
   "serverCreate.import.hint":
     "別のインスタンスからエクスポートしたZIPをアップロードします。下記の名前が適用されます。EULAは引き継がれません。",
@@ -1065,13 +941,11 @@ export const ja: Record<TranslationKey, string> = {
     "そのアーカイブは有効なサーバーエクスポートではありません。",
   "serverCreate.import.error.platform_managed_path":
     "そのアーカイブには server.properties/ 配下のファイルが含まれています。server.properties はファイルとして管理されるため、該当のエントリを削除するか移動してからインポートしてください。",
-  // The import assigns the join address itself (issue #3022); see en.ts.
   "serverCreate.import.error.slug_taken":
     "インポート中に、割り当てようとした参加アドレス名を他のサーバーが取得しました。サーバーは作成されていません。もう一度インポートすると別の名前が割り当てられます。",
   "serverCreate.import.tooLarge":
     "そのアーカイブはインポートするには大きすぎます。",
 
-  // Community settings (WEBUI_SPEC.md 6.10).
   "communitySettings.loading": "読み込み中…",
   "communitySettings.loadError":
     "このコミュニティを読み込めませんでした。更新してみてください。",
@@ -1083,7 +957,6 @@ export const ja: Record<TranslationKey, string> = {
   "communitySettings.tab.audit": "監査ログ",
   "communitySettings.tab.general": "全般",
 
-  // Members tab.
   "communitySettings.members.heading": "メンバー",
   "communitySettings.members.loading": "メンバーを読み込んでいます…",
   "communitySettings.members.loadError": "メンバーを読み込めませんでした。",
@@ -1120,7 +993,6 @@ export const ja: Record<TranslationKey, string> = {
   "communitySettings.members.roleError":
     "ロールを更新できませんでした。もう一度お試しください。",
 
-  // Audit tab (WEBUI_SPEC.md 6.10).
   "communitySettings.audit.heading": "監査ログ",
   "communitySettings.audit.loading": "監査ログを読み込んでいます…",
   "communitySettings.audit.loadError": "監査ログを読み込めませんでした。",
@@ -1142,10 +1014,7 @@ export const ja: Record<TranslationKey, string> = {
   "communitySettings.audit.systemActor": "（システム）",
   "communitySettings.audit.prev": "前へ",
   "communitySettings.audit.next": "次へ",
-  // 監査ログの operation コード（api audit/domain/operations.py の
-  // `<resource>:<action>` 定数）と target_type の人間向けラベル。未対応のコードは
-  // 生の値にフォールバックする（auditShared.tsx）ため、辞書に未登録のコードが
-  // 来てもテーブルは壊れない（#643）。
+  // Unknown audit operation and target-type codes fall back to their raw values.
   "communitySettings.audit.op.auth:login": "サインイン",
   "communitySettings.audit.op.auth:logout": "サインアウト",
   "communitySettings.audit.op.auth:register": "アカウント登録",
@@ -1220,7 +1089,6 @@ export const ja: Record<TranslationKey, string> = {
   "communitySettings.audit.targetType.file": "ファイル",
   "communitySettings.audit.targetType.group": "プレイヤーグループ",
 
-  // Roles tab.
   "communitySettings.roles.heading": "ロール",
   "communitySettings.roles.loading": "ロールを読み込んでいます…",
   "communitySettings.roles.loadError": "ロールを読み込めませんでした。",
@@ -1251,11 +1119,9 @@ export const ja: Record<TranslationKey, string> = {
   "communitySettings.roles.deleteDialogBody":
     "このロールを削除すると、保持しているすべてのメンバーから削除されます。この操作は元に戻せません。",
   "communitySettings.roles.deleteConfirm": "ロールを削除",
-  // Permission family group labels (WEBUI_SPEC.md 2.2).
   "communitySettings.roles.family.server": "サーバー",
   "communitySettings.roles.family.file": "ファイル",
   "communitySettings.roles.family.backup": "バックアップ",
-  // Schedule family (issue #1842): the general scheduler CRUD surface.
   "communitySettings.roles.family.schedule": "スケジュール",
   "communitySettings.roles.family.member": "メンバー",
   "communitySettings.roles.family.role": "ロール",
@@ -1263,9 +1129,7 @@ export const ja: Record<TranslationKey, string> = {
   "communitySettings.roles.family.group": "グループ",
   "communitySettings.roles.family.community": "コミュニティ",
   "communitySettings.roles.family.audit": "監査ログ",
-  // Session family (issue #961).
   "communitySettings.roles.family.session": "セッション",
-  // Permission code labels (the action within each family).
   "communitySettings.roles.code.server:create": "作成",
   "communitySettings.roles.code.server:read": "閲覧",
   "communitySettings.roles.code.server:update": "更新",
@@ -1298,10 +1162,8 @@ export const ja: Record<TranslationKey, string> = {
   "communitySettings.roles.code.community:update": "更新",
   "communitySettings.roles.code.community:delete": "削除",
   "communitySettings.roles.code.audit:read": "閲覧",
-  // Session permission code label (issue #961).
   "communitySettings.roles.code.session:read": "閲覧",
 
-  // Grants tab (WEBUI_SPEC.md 6.10): per-server permission grants.
   "communitySettings.grants.heading": "権限付与",
   "communitySettings.grants.loading": "権限付与を読み込んでいます…",
   "communitySettings.grants.loadError": "権限付与を読み込めませんでした。",
@@ -1336,7 +1198,6 @@ export const ja: Record<TranslationKey, string> = {
   "communitySettings.grants.createError":
     "権限付与を作成できませんでした。もう一度お試しください。",
 
-  // General tab.
   "communitySettings.general.heading": "全般",
   "communitySettings.general.nameLabel": "コミュニティ名",
   "communitySettings.general.save": "名前を保存",
@@ -1362,7 +1223,6 @@ export const ja: Record<TranslationKey, string> = {
   "communitySettings.general.deleteHasServers":
     "このコミュニティにはサーバーが残っています。先にこのコミュニティのサーバーを削除してください。",
 
-  // Community settings — Groups tab (WEBUI_SPEC.md 6.10, issue #464)
   "communitySettings.groups.heading": "プレイヤーグループ",
   "communitySettings.groups.loading": "グループを読み込んでいます…",
   "communitySettings.groups.loadError": "グループを読み込めませんでした。",
@@ -1424,7 +1284,6 @@ export const ja: Record<TranslationKey, string> = {
   "communitySettings.groups.attached": "サーバーに適用しました。",
   "communitySettings.groups.unknownServer": "（不明なサーバー）",
 
-  // Platform admin area (WEBUI_SPEC.md 6.12, Section 3) — #474
   "admin.denied.title": "プラットフォーム管理者専用",
   "admin.denied.body": "プラットフォーム管理エリアへのアクセス権がありません。",
   "admin.overview.subtitle": "Workerと全体の統計 — プラットフォーム管理者専用",
@@ -1459,7 +1318,6 @@ export const ja: Record<TranslationKey, string> = {
   "admin.versions.empty": "カタログ化されたサーバーの種類がありません。",
   "admin.versions.typeError": "利用不可",
   "admin.versions.refreshedAll": "バージョン一覧を再読み込みします。",
-  // Interpolated with the server type, e.g. "Refreshed catalog: paper".
   "admin.versions.refreshedOne": "カタログを更新しました: {type}",
   "admin.versions.refreshError": "カタログを更新できませんでした。",
   "admin.versions.jarPool": "サーバーダウンロード",
@@ -1473,12 +1331,9 @@ export const ja: Record<TranslationKey, string> = {
   "admin.versions.gcDialog.body":
     "稼働中のどのサーバーも使用していないダウンロード済みサーバーJARを削除します。次に必要になったときに再ダウンロードされます。",
   "admin.versions.gcDialog.confirm": "未使用ファイルを削除",
-  // Interpolated with freed bytes + deleted count, e.g.
-  // "Freed 412 MiB by deleting 3 unused JARs.".
   "admin.versions.gcDone":
     "未使用のJAR {count} 個を削除し、{bytes} を解放しました。",
   "admin.versions.gcError": "ディスク容量を解放できませんでした。",
-  // Communities (WEBUI_SPEC.md 6.12) — #476, #489
   "admin.communities.subtitle":
     "プラットフォーム上のすべてのコミュニティ。プロビジョニングは管理者専用で、セルフサービスでの作成には対応していません。",
   "admin.communities.loading": "コミュニティを読み込んでいます…",
@@ -1513,8 +1368,6 @@ export const ja: Record<TranslationKey, string> = {
   "admin.communities.ownerHint":
     "オーナーにはプリセットのOwnerロール（すべてのコミュニティ権限）が付与されます。",
   "admin.communities.usersLoadError": "ユーザー一覧を読み込めませんでした。",
-  // Truncation hint interpolated with the loaded/total counts, e.g.
-  // "Showing the first 100 of 150 users."
   "admin.communities.usersTruncated":
     "{total} 人中、最初の {n} 人のユーザーを表示しています。",
   "admin.communities.provisioned": "コミュニティをプロビジョニングしました。",
@@ -1528,7 +1381,6 @@ export const ja: Record<TranslationKey, string> = {
   "admin.communities.errGeneric":
     "コミュニティをプロビジョニングできませんでした。",
 
-  // Workers fleet page (WEBUI_SPEC.md 6.12) — #477
   "admin.workers.subtitle":
     "Workerはコントロールプレーン経由で自己登録します。メンテナンス前にサーバーを移すにはドレインしてください。",
   "admin.workers.loading": "Workerを読み込んでいます…",
@@ -1553,7 +1405,6 @@ export const ja: Record<TranslationKey, string> = {
     "ドレインを解除すると、このWorkerは再び新規配置を受け入れられるようになります。",
   "admin.workers.undrainConfirm": "Workerのドレインを解除",
   "admin.workers.drained": "Workerをドレインしました。",
-  // Shown when servers_stopped > 0, interpolated with the count.
   "admin.workers.drainedCount":
     "Workerをドレインしました。{count} 台のサーバーを停止対象としてマークしました — 各サーバーが停止済み・未割り当てになるまでこのWorkerを接続したままにしてください。",
   "admin.workers.drainDialogConvergenceWarning":
@@ -1564,7 +1415,6 @@ export const ja: Record<TranslationKey, string> = {
   "admin.workers.notice":
     "ドレインすると、Workerへの新規配置を停止します。稼働中のサーバーは最終スナップショットとともに停止され、別の場所で再起動できます。オフラインのWorkerは再接続時に自動的に再表示されます。",
 
-  // Admin Users page (WEBUI_SPEC.md 6.12) — #475
   "admin.users.loading": "ユーザーを読み込んでいます…",
   "admin.users.loadError": "ユーザーを読み込めませんでした。",
   "admin.users.empty": "ユーザーがいません。",
@@ -1601,7 +1451,6 @@ export const ja: Record<TranslationKey, string> = {
     "アカウントを完全に削除します。確認のためユーザー名を入力してください。",
   "admin.users.deletePrompt": "ユーザー名",
   "admin.users.deleteConfirm": "ユーザーを削除",
-  // Conflict reasons the lifecycle routes return (admin_users.py).
   "admin.users.error.self_target":
     "この画面では自分自身のアカウントを操作できません。アカウントページから行ってください。",
   "admin.users.error.last_platform_admin":
@@ -1610,7 +1459,6 @@ export const ja: Record<TranslationKey, string> = {
     "このユーザーはコミュニティを所有しているため削除できません。",
   "admin.users.error.not_found": "そのユーザーはもう存在しません。",
   "admin.users.error.generic": "操作を完了できませんでした。",
-  // Create-user dialog (POST /admin/users).
   "admin.users.create": "ユーザーを作成",
   "admin.users.createTitle": "ユーザーを作成",
   "admin.users.createSubmit": "作成",
@@ -1622,18 +1470,14 @@ export const ja: Record<TranslationKey, string> = {
   "admin.users.passwordHint":
     "12文字以上、大文字小文字・数字・記号を混在させてください。",
 
-  // Admin global Audit page (WEBUI_SPEC.md 6.12).
   "admin.audit.filterCommunity": "コミュニティ",
   "admin.audit.filterCommunityAll": "すべてのコミュニティ",
   "admin.audit.colCommunity": "コミュニティ",
   "admin.audit.communitiesTruncated":
     "{total} 件中、最初の {n} 件のコミュニティを表示しています。",
 
-  // Plugins tab (issue #1153).
   "serverDetail.tab.plugins": "プラグイン",
-  // Loader-aware tab label + noun (#1320): Fabric/Forge は Mod、Paper はプラグイン
-  // を管理する。日本語では語形は一つだが、英語の `{nouns}` / `{noun}` / `{Noun}`
-  // と対になるよう三つのキーを揃える。
+  // Japanese nouns are invariant; retain all three keys to match English placeholder forms.
   "serverDetail.tab.mods": "Mod",
   "plugins.contentNoun.plural.plugins": "プラグイン",
   "plugins.contentNoun.plural.mods": "Mod",
@@ -1649,7 +1493,6 @@ export const ja: Record<TranslationKey, string> = {
     "このサーバータイプはプラグインやModに対応していません。",
   "plugins.serverNotStopped":
     "{nouns}を管理するにはサーバーを停止してください。",
-  // Bedrock companion hint (issue #1543).
   "plugins.bedrockHint.text":
     "Bedrock 版のプレイヤーを参加させるには Floodgate も必要です。Floodgate-Spigot はプラグインカタログからワンクリックでインストールできます。jar を手動で入れる場合は以下からダウンロードしてください:",
   "plugins.bedrockHint.link": "GeyserMC ダウンロードページ",
@@ -1740,7 +1583,6 @@ export const ja: Record<TranslationKey, string> = {
   "plugins.error.downloadTooLarge":
     "クライアント用Modのサイズ ({size}) がブラウザでのダウンロード上限 (512 MiB) を超えています。",
   "plugins.error.generic": "エラーが発生しました。もう一度お試しください。",
-  // Dependency / compatibility validation checklist (issue #1307).
   "plugins.validation.heading": "依存関係と互換性",
   "plugins.validation.ok": "問題は見つかりませんでした。",
   "plugins.validation.missingDep":
@@ -1752,7 +1594,6 @@ export const ja: Record<TranslationKey, string> = {
   "plugins.validation.conflict": "{mod} は {other} と競合します。",
   "plugins.validation.mcMismatch":
     "{mod} は MC {serverVersion} に対応していません（対応: {modVersions}）。",
-  // 依存関係の自動解決 (issue #1309)。
   "plugins.resolve.action": "依存関係を解決",
   "plugins.resolve.loading": "解決プランを計算中…",
   "plugins.resolve.title": "依存関係を解決",
@@ -1784,7 +1625,6 @@ export const ja: Record<TranslationKey, string> = {
   "communitySettings.audit.op.plugin:resolve": "プラグインの依存関係を解決",
   "communitySettings.audit.targetType.plugin": "プラグイン",
 
-  // Resource pack library (issue #1178).
   "nav.resourcePacks": "リソースパック",
   "page.resourcePacks": "リソースパック",
   "resourcePacks.subtitle":
@@ -1825,7 +1665,6 @@ export const ja: Record<TranslationKey, string> = {
   "resourcePacks.error.storageUnavailable":
     "現在、リソースパックのストレージを利用できません。しばらくしてから再度お試しください。",
 
-  // Server resource pack assignment (issue #1179).
   "serverDetail.resourcePack.heading": "リソースパック",
   "serverDetail.resourcePack.loadError":
     "リソースパックの割り当てを読み込めませんでした。",
@@ -1868,18 +1707,14 @@ export const ja: Record<TranslationKey, string> = {
     "このサーバーからリソースパックの割り当てを解除しますか？",
   "serverDetail.resourcePack.removeDialog.confirm": "解除",
 
-  // Permission / authorization feedback (WEBUI_SPEC.md 7.3 / 7.4)
   "permissions.denied": "この操作を行う権限がありません。",
-  // Interpolated with the missing permission code, e.g. "You lack: server:start".
   "permissions.deniedNamed": "不足している権限: {permission}",
 
-  // Error boundary (#1211)
   "errorBoundary.title": "問題が発生しました",
   "errorBoundary.body":
     "予期しないエラーが発生しました。ページを再読み込みすると復旧することがあります。",
   "errorBoundary.reload": "ページを再読み込み",
 
-  // Shared format strings — heartbeat age (#1214)
   "format.secondsAgo": "{value}秒前",
   "format.minutesAgo": "{value}分前",
   "format.hoursAgo": "{value}時間前",

@@ -1,10 +1,4 @@
-/**
- * Resource pack library management page (issue #1178).
- *
- * Lists all resource packs, with upload (multipart), download (authenticated
- * blob), and delete (typed-confirm) actions. Available to all authenticated
- * users; delete is visible only to the uploader or platform admins.
- */
+/** Any signed-in user can browse packs; only uploaders and platform admins can delete them. */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
@@ -33,13 +27,7 @@ type ResourcePackResponse = components["schemas"]["ResourcePackResponse"];
 
 const PACKS_KEY = ["resource-packs"] as const;
 
-/**
- * True for the 503 `storage_unavailable` an upload or a download answers while
- * the object store is down (issues #2455, #2458). Neither creates a pack, so
- * the operator's move is to try again — which the generic "could not…" toast
- * does not say. A delete never answers it: the API removes the pack
- * first and treats the stored file's cleanup as best-effort.
- */
+/** Upload/download storage outages are retryable; deletion removes metadata and cleans stored bytes best-effort. */
 function isStorageUnavailable(error: unknown): boolean {
   return error instanceof ApiError && error.reason === "storage_unavailable";
 }
@@ -138,9 +126,7 @@ export function ResourcePacksPage() {
         <p className="sub" role="status">
           {t("resourcePacks.loading")}
         </p>
-      ) : /* Error only when there is nothing to show (initial load failed).
-           A failed background refetch retains `data`, so the cached page
-           keeps rendering through transient API blips (#1805). */
+      ) : /* Retain cached content when only a background refetch fails. */
       listState.kind === "error" ? (
         <p className="field-error" role="alert">
           {t("resourcePacks.loadError")}

@@ -1,11 +1,6 @@
 import { t } from "../i18n/index.ts";
 
-// Styled file picker for selecting a file into form state (issue #539). The
-// bare browser file input renders unstyled, so it is visually hidden and driven
-// through a design-token button, with the chosen filename shown alongside. The
-// input keeps its `id` so an external <label htmlFor> still names it, and it
-// stays in the tab order — label association and keyboard operability are both
-// preserved.
+// Keep the hidden input labelled and keyboard-focusable while styling its picker separately.
 interface FilePickerProps {
   id: string;
   accept?: string;

@@ -1,19 +1,5 @@
-/**
- * Server detail — Schedules tab (WEBUI_SPEC.md 6.13, epic #649 / issue #1842).
- *
- * The Web UI for the general scheduler (#1837): a per-server table of schedules
- * (name / action / cadence / timezone / enabled / last-run / next-run), a
- * create-edit dialog, an enable/disable toggle, delete, and a run-history view.
- *
- * Authorization is two-layer and write-time only: reads need `schedule:read`;
- * writes need `schedule:manage` **and** the action's own permission
- * (`command`→`server:command`, `start/stop/restart`→`server:{start,stop,restart}`,
- * `backup`→`backup:schedule`). The create dialog offers only the actions the
- * caller may run; edit/toggle/delete of an existing row require the same gate on
- * that row's action. The action is immutable — to change it, delete and recreate
- * (so the action select is disabled when editing). Warning steps (stop/restart
- * only) broadcast a fixed `say`, so they need no extra permission.
- */
+/** Writes require schedule:manage plus the scheduled action's permission.
+ * Actions are immutable after creation; fixed stop/restart warnings need no extra command permission. */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
@@ -45,7 +31,6 @@ const ACTIONS: readonly ScheduleAction[] = [
   "backup",
 ];
 
-/** The action's own permission, the Layer-2 half of the write gate (#1837). */
 const ACTION_PERMISSION: Record<ScheduleAction, PermissionCode> = {
   command: "server:command",
   start: "server:start",
@@ -54,7 +39,6 @@ const ACTION_PERMISSION: Record<ScheduleAction, PermissionCode> = {
   backup: "backup:schedule",
 };
 
-/** Actions whose pre-action player warnings are editable (#1839). */
 const WARNING_ACTIONS: ReadonlySet<ScheduleAction> = new Set([
   "stop",
   "restart",
@@ -78,7 +62,6 @@ const OUTCOME_LABEL: Record<string, TranslationKey> = {
   skipped: "schedules.runs.outcome.skipped",
 };
 
-/** Curated short list of major IANA zones for the timezone select. */
 function supportedTimeZones(): readonly string[] {
   return [
     "UTC",
@@ -93,20 +76,15 @@ function supportedTimeZones(): readonly string[] {
 
 const TIMEZONES = supportedTimeZones();
 
-/** Schedules list query key — scoped to the server, invalidated on change. */
 function schedulesKey(communityId: string, serverId: string) {
   return ["schedules", communityId, serverId] as const;
 }
 
-/** Run-history query key for one schedule. */
 function runsKey(communityId: string, serverId: string, scheduleId: string) {
   return ["schedules", communityId, serverId, scheduleId, "runs"] as const;
 }
 
-/**
- * Day-of-week labels keyed by ISO number (1=Mon, 7=Sun) for both the builder
- * UI and the humanized cadence display.
- */
+/** Use ISO weekday numbers: Monday is 1 and Sunday is 7. */
 const DAY_LABELS: Record<number, TranslationKey> = {
   1: "schedules.dialog.day.mon",
   2: "schedules.dialog.day.tue",
@@ -117,14 +95,9 @@ const DAY_LABELS: Record<number, TranslationKey> = {
   7: "schedules.dialog.day.sun",
 };
 
-/** ISO day numbers in display order (Mon–Sun). */
 const DAY_NUMBERS: readonly number[] = [1, 2, 3, 4, 5, 6, 7];
 
-/**
- * Parse a cron expression that matches the Daily/Weekly pattern (`M H * * D`
- * where D is `*` or a comma-separated list of 0–7 day numbers). Returns null
- * for unrecognized patterns. Handles both 0 and 7 as Sunday.
- */
+/** Recognize daily/weekly cron patterns only; accept both 0 and 7 for Sunday. */
 function parseDailyWeeklyCron(
   expr: string,
 ): { minute: number; hour: number; days: number[] | null } | null {
@@ -137,23 +110,20 @@ function parseDailyWeeklyCron(
   if (!Number.isInteger(minute) || minute < 0 || minute > 59) return null;
   if (!Number.isInteger(hour) || hour < 0 || hour > 23) return null;
   if (dow === "*") {
-    return { minute, hour, days: null }; // every day
+    return { minute, hour, days: null };
   }
-  // Parse comma-separated day numbers (0–7, where 0 and 7 are Sunday).
   const dayStrs = dow.split(",");
   const days: number[] = [];
   for (const d of dayStrs) {
     const n = Number(d);
     if (!Number.isInteger(n) || n < 0 || n > 7) return null;
-    // Normalize: 0 → 7 (Sunday in ISO)
+    // Normalize cron's 0 to ISO's 7 for Sunday.
     days.push(n === 0 ? 7 : n);
   }
-  // Deduplicate and sort (ISO order).
   const unique = [...new Set(days)].sort((a, b) => a - b);
   return { minute, hour, days: unique };
 }
 
-/** Compose a cron expression from the Daily/Weekly builder state. */
 function composeDailyWeeklyCron(
   hour: number,
   minute: number,
@@ -163,7 +133,6 @@ function composeDailyWeeklyCron(
   return `${minute} ${hour} * * ${dow}`;
 }
 
-/** Join a list of strings with locale-aware separators (e.g. ", " for en, "、" for ja). */
 function joinDayNames(names: string[]): string {
   try {
     return new Intl.ListFormat(getLanguage(), { type: "conjunction" }).format(
@@ -174,12 +143,10 @@ function joinDayNames(names: string[]): string {
   }
 }
 
-/** Format hour:minute as HH:MM. */
 function formatTime(hour: number, minute: number): string {
   return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
 }
 
-/** Human-readable cadence: an interval as "every N …", or the cron expression. */
 function humanizeCadence(schedule: ScheduleResponse): string {
   if (schedule.cron !== null) {
     const parsed = parseDailyWeeklyCron(schedule.cron);
@@ -233,8 +200,7 @@ export function ServerSchedulesTab({
   const canManage = can("schedule:manage", { serverId });
   const canAction = (action: ScheduleAction) =>
     can(ACTION_PERMISSION[action], { serverId });
-  // The create dialog offers only actions the caller may run (anti-escalation),
-  // so a schedule:manage holder with no action permission cannot create at all.
+  // A manage-only caller cannot create a schedule without permission for its action.
   const permittedActions = ACTIONS.filter(canAction);
   const canCreate = canManage && permittedActions.length > 0;
 
@@ -316,8 +282,7 @@ export function ServerSchedulesTab({
   if (listQuery.isPending) {
     return <p className="sub">{t("schedules.loading")}</p>;
   }
-  // Error only when there is nothing to show (an initial load failed); a failed
-  // background refetch retains `data` so the cached page keeps rendering (#1805).
+  // Retain cached content when only a background refetch fails.
   if (listQuery.data === undefined) {
     return <p className="field-error">{t("schedules.loadError")}</p>;
   }
@@ -363,8 +328,6 @@ export function ServerSchedulesTab({
               schedules.map((schedule) => {
                 const action = schedule.action as ScheduleAction;
                 const canWrite = canManage && canAction(action);
-                // Fall back to the raw value for an action outside the known
-                // enum, mirroring the run-outcome badge.
                 const actionLabel = ACTION_LABEL[action];
                 return (
                   <tr key={schedule.id}>
@@ -497,14 +460,7 @@ interface WarningStepForm {
   message: string;
 }
 
-/**
- * Create/edit dialog. On create the action select is gated to the permitted
- * actions; on edit it is disabled (the action is immutable — delete and
- * recreate to change it). The cadence is a `cron` XOR `interval` choice; the
- * command line shows only for `command`; the warning-steps editor only for
- * `stop`/`restart`; the only-while-running option only for `backup`. Server
- * validation errors map to inline field messages.
- */
+/** Action is immutable on edit; cadence must choose cron or interval, and payload fields depend on action. */
 function ScheduleDialog({
   communityId,
   serverId,
@@ -529,8 +485,6 @@ function ScheduleDialog({
     : (permittedActions[0] ?? "backup");
   const [action, setAction] = useState<ScheduleAction>(initialAction);
   const [name, setName] = useState(existing?.name ?? "");
-  // Detect the initial cadence mode: if the existing cron matches the
-  // Daily/Weekly pattern, open in that mode; otherwise raw cron or interval.
   const existingParsed =
     existing?.cron != null ? parseDailyWeeklyCron(existing.cron) : null;
   const [cadenceMode, setCadenceMode] = useState<
@@ -551,7 +505,6 @@ function ScheduleDialog({
     initialInterval.unit,
   );
   const [cron, setCron] = useState(existing?.cron ?? "");
-  // Daily/Weekly builder state.
   const [dwRepeat, setDwRepeat] = useState<"everyDay" | "specificDays">(
     existingParsed?.days != null ? "specificDays" : "everyDay",
   );
@@ -563,7 +516,6 @@ function ScheduleDialog({
   const [timezone, setTimezone] = useState(existing?.timezone ?? "UTC");
   const [enabled, setEnabled] = useState(existing?.enabled ?? true);
   const [command, setCommand] = useState(existing?.command ?? "");
-  // Backup only (issue #2236): a new backup schedule defaults to on.
   const [onlyWhenRunning, setOnlyWhenRunning] = useState(
     existing?.only_when_running ?? true,
   );
@@ -585,8 +537,7 @@ function ScheduleDialog({
     cadenceMode === "dailyWeekly" &&
     dwRepeat === "specificDays" &&
     dwDays.size === 0;
-  // On create an unusual existing timezone can never occur; on edit surface the
-  // stored value even if the runtime zone list omits it.
+  // Retain an existing timezone even if the runtime's zone list omits it.
   const tzOptions = TIMEZONES.includes(timezone)
     ? TIMEZONES
     : [timezone, ...TIMEZONES];
@@ -663,8 +614,7 @@ function ScheduleDialog({
           setCommandError(t("schedules.error.invalidCommand"));
           return;
         }
-        // Neither payload field is rendered for this action (start/backup):
-        // fall through to the generic toast rather than an invisible error.
+        // Use a toast when the rejected payload field is not rendered for the selected action.
         break;
       case "validation_error": {
         const fields = fieldErrorsFromValidation(error.body, [
@@ -743,9 +693,7 @@ function ScheduleDialog({
 
   const submit = () => {
     clearErrors();
-    // Client-side floor: the API rejects interval_seconds < 60 (as a generic
-    // invalid_cadence), and the number input's min does not block a typed
-    // fractional/zero value — catch it here with a specific message.
+    // Validate the 60-second floor here; an input min does not reject typed fractions or zero.
     if (cadenceMode === "interval") {
       const seconds = buildCadence().interval_seconds;
       if (seconds === null || !Number.isFinite(seconds) || seconds < 60) {
@@ -804,9 +752,7 @@ function ScheduleDialog({
 
       <label className="field">
         {t("schedules.dialog.actionLabel")}
-        {/* aria-label: a select wrapped in a label otherwise computes its
-            accessible name from the label's text content INCLUDING its own
-            option texts — an unusable name for AT and tests alike. */}
+        {/* Set aria-label explicitly so option text does not become part of the select's accessible name. */}
         <select
           value={action}
           disabled={editing}
@@ -977,8 +923,7 @@ function ScheduleDialog({
 
       <label className="field">
         {t("schedules.dialog.timezoneLabel")}
-        {/* aria-label: see the action select — zone options would otherwise
-            pollute the computed accessible name. */}
+        {/* Keep zone options out of the select's accessible name. */}
         <select
           value={timezone}
           aria-label={t("schedules.dialog.timezoneLabel")}
@@ -1081,7 +1026,6 @@ function ScheduleDialog({
   );
 }
 
-/** Read-only run-history view: outcome + sanitized detail + timestamps (#1837). */
 function RunHistoryDialog({
   communityId,
   serverId,
@@ -1182,7 +1126,6 @@ function RunHistoryBody({
   );
 }
 
-/** Split an interval in seconds into a form value + unit (hours if clean). */
 function intervalToForm(seconds: number): {
   value: string;
   unit: "minutes" | "hours";
@@ -1193,20 +1136,12 @@ function intervalToForm(seconds: number): {
   return { value: String(seconds / 60), unit: "minutes" };
 }
 
-/**
- * Debounced preview of the next 5 schedule occurrences (issue #1867).
- *
- * Fetches from the preview API endpoint on cadence/timezone changes with a
- * 500ms debounce. Shows validation errors inline (reuses the cadenceError
- * pattern). The cadenceDeps array is used as the useEffect dependency to
- * trigger re-fetches.
- */
-/** Format an ISO datetime in the given IANA timezone (the schedule's zone). */
+/** Debounce cadence/timezone preview requests and display invalid cadence inline. */
 function formatInTimezone(iso: string, tz: string): string {
   try {
     return new Date(iso).toLocaleString(undefined, { timeZone: tz });
   } catch {
-    // Invalid zone (shouldn't happen, but fall back to browser-local).
+    // Fall back to browser-local time if the stored timezone is invalid.
     return new Date(iso).toLocaleString();
   }
 }
@@ -1220,12 +1155,8 @@ function NextRunsPreview({
 }: {
   communityId: string;
   serverId: string;
-  /** Pre-serialized JSON body for the preview request. Changes trigger a
-   *  debounced re-fetch. */
   cadenceBody: string;
-  /** The schedule's IANA timezone, for formatting the preview datetimes. */
   timezone: string;
-  /** Whether the cadence is interval (shows approximation note). */
   isInterval: boolean;
 }) {
   const [runs, setRuns] = useState<string[] | null>(null);

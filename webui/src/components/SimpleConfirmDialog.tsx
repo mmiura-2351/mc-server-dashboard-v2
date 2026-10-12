@@ -1,18 +1,12 @@
 import { t } from "../i18n/index.ts";
 import { Modal } from "./Modal.tsx";
 
-// Lightweight confirmation dialog for low-risk destructive actions. Unlike
-// ConfirmDialog (typed-confirm), this shows a warning and confirm/cancel
-// buttons without requiring the user to type a phrase.
-
 interface SimpleConfirmDialogProps {
   open: boolean;
   title: string;
   body: string;
   confirmLabel: string;
-  // Disables the confirm button while the triggered action is in flight, so a
-  // double-click can't fire the mutation twice (#1591). Call sites that close
-  // the dialog synchronously before mutating pass nothing.
+  // Disable confirmation while the action runs to prevent duplicate submissions.
   busy?: boolean;
   onConfirm: () => void;
   onClose: () => void;

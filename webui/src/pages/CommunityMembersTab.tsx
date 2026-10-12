@@ -15,11 +15,6 @@ import { classifyQueryResult } from "../queryState.ts";
 type MemberResponse = components["schemas"]["MemberResponse"];
 type RoleResponse = components["schemas"]["RoleResponse"];
 
-// Members tab (WEBUI_SPEC.md 6.10): table of username + role chips, add by
-// exact username, inline role assign/unassign, remove with a revocation
-// confirm. Role assign/unassign are gated by `role:manage` (the API gates them
-// there — assigning a role changes what a member can do), the choices come from
-// `role:read`, and add/remove use `member:add`/`member:remove`.
 export function CommunityMembersTab({
   communityId,
   can,
@@ -43,8 +38,6 @@ export function CommunityMembersTab({
       ),
   });
 
-  // Role choices for the assign picker; only fetched when the caller can both
-  // read roles and manage them (otherwise the picker is hidden anyway).
   const roles = useQuery({
     queryKey: rolesKeys.list(communityId),
     queryFn: ({ signal }) =>
@@ -92,9 +85,7 @@ export function CommunityMembersTab({
   if (membersState.kind === "pending") {
     return <p className="sub">{t("communitySettings.members.loading")}</p>;
   }
-  // Error only when there is nothing to show (the initial load failed). A
-  // failed background refetch retains `data`, so the cached list keeps
-  // rendering through transient API blips (#1797).
+  // Retain cached content when only a background refetch fails.
   if (membersState.kind === "error") {
     return (
       <p className="field-error">{t("communitySettings.members.loadError")}</p>
@@ -227,11 +218,7 @@ function MemberRow({
     onError: onRoleError,
   });
 
-  // Map a held role name back to its id so a chip can unassign it. A name with
-  // no matching role in the list (none expected in normal operation) is shown
-  // as a non-removable chip.
   const roleByName = new Map(roles.map((r) => [r.name, r]));
-  // Roles the member does not yet hold, offered in the assign picker.
   const held = new Set(member.role_names);
   const assignable = roles.filter((r) => !held.has(r.name));
   const busy = assign.isPending || unassign.isPending;
@@ -311,9 +298,6 @@ function MemberRow({
   );
 }
 
-// Map the add-member rejection reason to a specific inline message: a missing
-// user or a non-member username is 422 `user_not_found`; an existing membership
-// is 409 `already_member` (members.py; #355 contract).
 function addErrorMessage(error: unknown): string {
   if (error instanceof ApiError) {
     if (error.reason === "user_not_found") {

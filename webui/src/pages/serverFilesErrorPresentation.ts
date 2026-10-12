@@ -1,15 +1,5 @@
-/**
- * Files-tab error presentation contract.
- *
- * The Files API has file-system-specific reasons and one reason with a
- * targeted `key` extension. It deliberately stays separate from the Plugins
- * contract: their fallback status handling and presentation semantics differ.
- *
- * 403 is intentionally absent. It refreshes permissions through
- * `useOnForbidden`, and `content_dir_protected` changes the visible notice;
- * the component handles both control-flow cases before it asks this pure mapper
- * for a toast presentation.
- */
+/** Files errors have different status fallbacks from Plugins.
+ * Callers handle 403 capability refresh and content_dir_protected navigation before this mapper. */
 
 import { ApiError } from "../api/client.ts";
 import type { TranslationKey } from "../i18n/index.ts";
@@ -20,7 +10,6 @@ export interface FileErrorPresentation {
   params?: Record<string, string | number>;
 }
 
-/** Select the Files-tab toast presentation for a failed operation. */
 export function fileOperationErrorPresentation(
   error: unknown,
 ): FileErrorPresentation {
@@ -71,8 +60,7 @@ export function fileOperationErrorPresentation(
           return { key: "files.error.invalidInput" };
       }
     case 503:
-      // The store holding the files, not the server's Worker, did not answer.
-      // Without this case the message would blame an agent that is fine.
+      // Name the file store outage rather than blaming the server's Worker.
       return error.reason === "storage_unavailable"
         ? { key: "files.error.storageUnavailable" }
         : { key: "files.error.workerUnavailable" };

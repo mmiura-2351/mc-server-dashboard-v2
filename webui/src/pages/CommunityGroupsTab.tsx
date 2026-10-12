@@ -17,8 +17,7 @@ type GroupResponse = components["schemas"]["GroupResponse"];
 type PlayerResponse = components["schemas"]["PlayerResponse"];
 type ServerResponse = components["schemas"]["ServerResponse"];
 
-// `kind` is a free-form string on the wire; only op/whitelist have a localized
-// label (matching ServerPlayersTab), anything else falls back to its raw value.
+// Only op and whitelist have translated labels; preserve unknown group kinds verbatim.
 function kindLabel(kind: string): string {
   if (kind === "op") {
     return t("communitySettings.groups.kind.op");
@@ -34,10 +33,6 @@ const KIND_CLASS: Record<string, string> = {
   whitelist: "whitelist",
 };
 
-// Groups tab (WEBUI_SPEC.md 6.10): op/whitelist groups with create/rename/
-// delete; an expandable detail panel per group manages its players (uuid +
-// username) and its server attachments. Reads gate on `group:read`, every
-// mutation on `group:manage`.
 export function CommunityGroupsTab({
   communityId,
   can,
@@ -66,7 +61,7 @@ export function CommunityGroupsTab({
       ),
   });
 
-  // Community servers feed the attach picker; only needed to manage attachments.
+  // Fetch community servers only when the attach picker can be used.
   const servers = useQuery({
     queryKey: ["communities", communityId, "servers"],
     queryFn: ({ signal }) =>
@@ -93,8 +88,7 @@ export function CommunityGroupsTab({
     onSuccess: () => {
       showToast(t("communitySettings.groups.deleted"), "success");
       invalidateGroups();
-      // A deleted group also disappears from each server's attached-group list,
-      // which ServerPlayersTab reads under the attachments prefix (#473).
+      // Deleting a group also changes the attached-group lists displayed by the Players tab.
       queryClient.invalidateQueries({
         queryKey: attachmentsKeys.all(communityId),
       });
@@ -114,9 +108,7 @@ export function CommunityGroupsTab({
   if (groupsState.kind === "pending") {
     return <p className="sub">{t("communitySettings.groups.loading")}</p>;
   }
-  // Error only when there is nothing to show (the initial load failed). A
-  // failed background refetch retains `data`, so the cached list keeps
-  // rendering through transient API blips (#1797).
+  // Retain cached content when only a background refetch fails.
   if (groupsState.kind === "error") {
     return (
       <p className="field-error">{t("communitySettings.groups.loadError")}</p>
@@ -254,11 +246,7 @@ function GroupDetail({
   };
   const invalidateGroups = () =>
     queryClient.invalidateQueries({ queryKey: groupsKeys.list(communityId) });
-  // Attach/detach and player add/remove both change the relation rendered from
-  // both ends, so invalidate the whole attachment prefix: this refreshes this
-  // group's server list here and the server's group list (with its
-  // group.players.length count) in ServerPlayersTab wherever it is mounted
-  // (#473, #611).
+  // Invalidate both attachment projections so server group lists and player counts stay current.
   const invalidateAttachments = () =>
     queryClient.invalidateQueries({
       queryKey: attachmentsKeys.all(communityId),
@@ -342,7 +330,6 @@ function GroupDetail({
   const attachedServersState = classifyQueryResult(attachedServers);
   const attachedIds = attachedServers.data ?? [];
   const attachedSet = new Set(attachedIds);
-  // Picker = community servers not already attached.
   const candidates = servers.filter((s) => !attachedSet.has(s.id));
   const serverBusy = attach.isPending || detach.isPending;
 
@@ -383,9 +370,7 @@ function GroupDetail({
         <h3>{t("communitySettings.groups.serversHeading")}</h3>
         {attachedServersState.kind === "pending" ? (
           <p className="sub">{t("communitySettings.groups.serversLoading")}</p>
-        ) : /* Error only when there is nothing to show (the initial load
-               failed). A failed background refetch retains `data`, so the
-               cached list keeps rendering through transient blips (#1797). */
+        ) : /* Retain cached content when only a background refetch fails. */
         attachedServersState.kind === "error" ? (
           <p className="field-error">
             {t("communitySettings.groups.serversLoadError")}
@@ -500,8 +485,7 @@ function AddPlayerForm({
     onSuccess: () => {
       showToast(t("communitySettings.groups.playerAdded"), "success");
       queryClient.invalidateQueries({ queryKey: groupsKeys.list(communityId) });
-      // Refresh the server's-groups projection too so the Players tab's
-      // group.players.length count stops being stale (#611).
+      // Player edits also change counts in the server's attached-group projection.
       queryClient.invalidateQueries({
         queryKey: attachmentsKeys.all(communityId),
       });

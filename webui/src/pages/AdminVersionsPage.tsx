@@ -13,12 +13,7 @@ import { humanizeBytes } from "../format.ts";
 import { t } from "../i18n/index.ts";
 import { classifyQueryResult } from "../queryState.ts";
 
-// Platform admin Versions page (WEBUI_SPEC.md 6.12): per-type catalog freshness,
-// refresh (all or one type), and the shared JAR pool stats + GC. The catalog
-// endpoints carry no freshness timestamp — GET /versions returns only the type
-// names and GET /versions/{type} only the ordered version list (newest-first per
-// the adapters) — so this renders version count + latest, not an invented
-// "refreshed at" column (#478).
+// The catalog provides ordered versions but no freshness timestamp; show counts and latest versions only.
 
 export function AdminVersionsPage() {
   const typesQuery = useQuery({
@@ -40,9 +35,7 @@ export function AdminVersionsPage() {
         <p className="sub" role="status">
           {t("admin.versions.loading")}
         </p>
-      ) : /* Error only when there is nothing to show (initial load failed).
-           A failed background refetch retains `data`, so the cached page
-           keeps rendering through transient API blips (#1805). */
+      ) : /* Retain cached content when only a background refetch fails. */
       typesState.kind === "error" ? (
         <p className="field-error" role="alert">
           {t("admin.versions.loadError")}
@@ -60,8 +53,7 @@ function Catalog({ types }: { types: string[] }) {
   const queryClient = useQueryClient();
   const { showToast } = useToast();
 
-  // Per-type version lists feed the count + latest cells. They are independent of
-  // the type list query, so a refresh invalidates them by key.
+  // Per-type queries are independent of the type list; refresh must invalidate both.
   const versionQueries = useQueries({
     queries: types.map((type) => ({
       queryKey: ["versions", type],
@@ -80,10 +72,7 @@ function Catalog({ types }: { types: string[] }) {
           : `/api/versions/refresh?server_type=${encodeURIComponent(serverType)}`) as never,
       ),
     onSuccess: (_data, serverType) => {
-      // The catalog cache is invalidated server-side; drop the local copies so the
-      // next read refetches. Scope to the catalog keys (`["versions","types"]` and
-      // the per-type `["versions", <type>]`) so the JAR-pool stats key
-      // (`["versions","jar-pool","stats"]`) is left to GC's own invalidation.
+      // Invalidate catalog keys only; JAR-pool statistics are refreshed by garbage collection.
       void queryClient.invalidateQueries({
         predicate: (query) =>
           query.queryKey[0] === "versions" && query.queryKey[1] !== "jar-pool",
@@ -100,8 +89,6 @@ function Catalog({ types }: { types: string[] }) {
     },
   });
 
-  // The button busy state is per target: "all" while refreshing all, or the type
-  // name while refreshing one, so only the clicked button shows a busy label.
   const busyTarget =
     refresh.isPending && refresh.variables !== undefined
       ? (refresh.variables ?? "all")
@@ -218,9 +205,7 @@ function JarPool() {
         <p className="sub" role="status">
           {t("admin.versions.loading")}
         </p>
-      ) : /* Error only when there is nothing to show (initial load failed).
-           A failed background refetch retains `data`, so the cached page
-           keeps rendering through transient API blips (#1805). */
+      ) : /* Retain cached content when only a background refetch fails. */
       statsState.kind === "error" ? (
         <p className="field-error" role="alert">
           {t("admin.versions.loadError")}

@@ -1,15 +1,5 @@
-/**
- * Map a structural FastAPI/Pydantic 422 (problem `reason` "validation_error")
- * to inline per-field messages.
- *
- * Such a body carries an `errors` list (AUTH_API.md 2; entry shape `loc`/`msg`
- * after the #393/#395 scrub of `input`/`ctx`). Each entry's field is the tail of
- * its `loc` (`["body", "<field>"]`); the validator `msg` is used verbatim. The
- * caller supplies the set of form fields it knows how to surface, so an entry
- * for an unknown field is ignored. Returns the inline errors keyed by field, or
- * null when no entry maps to a known field — the caller then falls back to its
- * generic toast.
- */
+/** Map known fields from validation_error entries using each loc tail and msg.
+ * Return null when no field matches so the caller can use its generic error. */
 
 interface ValidationEntry {
   loc: unknown[];

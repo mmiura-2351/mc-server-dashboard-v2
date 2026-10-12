@@ -1,12 +1,8 @@
 // @vitest-environment node
-// DOM-free contract test: the Settings tab routes each presentation to the
-// slug field or a toast.
 import { describe, expect, it } from "vitest";
 import { serverSettingsErrorPresentation } from "./serverSettingsErrorPresentation.ts";
 
 describe("serverSettingsErrorPresentation", () => {
-  // Each reason names what to change. This editor reads every value as JSON,
-  // so all four config-blob rules (issue #94) are reachable from a row.
   it.each([
     ["server_not_stopped", "serverDetail.error.notStopped"],
     ["server_unsettled", "serverDetail.error.unsettled"],
@@ -27,7 +23,6 @@ describe("serverSettingsErrorPresentation", () => {
     });
   });
 
-  // A join-address refusal lands inline on the slug field (issue #961).
   it.each([
     ["invalid_slug", "serverDetail.settings.slugInvalid"],
     ["slug_taken", "serverDetail.settings.slugTaken"],

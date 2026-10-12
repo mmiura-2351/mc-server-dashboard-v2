@@ -15,16 +15,11 @@ import {
 } from "./download.ts";
 
 const MIB = 1024 * 1024;
-/** Chunk count that carries a 1 MiB-chunked body 1 MiB past the cap. */
+/** Stream one extra MiB beyond the download cap. */
 const MIB_OVER_CAP = MAX_DOWNLOAD_BYTES / MIB + 1;
 
-/**
- * A response with no Content-Length whose body streams `mib` × 1 MiB — the
- * shape the API's directory ZIP arrives in (a chunked StreamingResponse, no
- * length known up front; `files.py` `download_file`). The same 1 MiB buffer is
- * enqueued on every pull, so the fixture costs 1 MiB rather than the size it
- * streams. `pulls` counts the chunks the consumer actually asked for.
- */
+/** Reuse one MiB buffer to test oversized chunked responses without allocating the full download.
+ * Count pulls to verify the reader stops early. */
 function chunkedBody(mib: number, onCancel?: () => void) {
   const chunk = new Uint8Array(MIB);
   const state = { pulls: 0 };
@@ -53,16 +48,15 @@ describe("downloadFile", () => {
   beforeEach(() => {
     clicks.length = 0;
     setAccessToken("tok-1");
-    // jsdom has no object-URL plumbing; stub it.
+    // Stub object URLs because the test DOM does not implement them.
     URL.createObjectURL = vi.fn(() => "blob:fake");
     URL.revokeObjectURL = vi.fn();
-    // Capture the synthesised anchor click instead of navigating.
+    // Capture anchor clicks without navigating the test document.
     vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
       this: HTMLAnchorElement,
     ) {
       clicks.push(this);
     });
-    // Default refresher: no-op failure, so tests opt into a working refresh.
     setRefresher(() => Promise.resolve(false));
   });
 
@@ -110,8 +104,7 @@ describe("downloadFile", () => {
         "survival.zip",
       );
 
-      // The revoke is scheduled, not run synchronously, so the click-initiated
-      // download still has a live object URL.
+      // The save must retain a live object URL until the deferred revoke runs.
       expect(URL.revokeObjectURL).not.toHaveBeenCalled();
       vi.runAllTimers();
       expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:fake");
@@ -199,8 +192,6 @@ describe("downloadFile", () => {
       expect(clicks).toHaveLength(0);
     });
 
-    // A 401 belongs to the session the download was sent under; the refresh
-    // and the retry must not act for a session that replaced it (#3224).
     it("hands the refresher the epoch the download was sent in", async () => {
       let respond: (r: Response) => void = () => {};
       vi.stubGlobal(
@@ -283,8 +274,7 @@ describe("downloadFile", () => {
     });
 
     it("rejects with the abort error and saves nothing when aborted", async () => {
-      // Emulate fetch's abort contract: reject with an AbortError DOMException
-      // once the signal fires.
+      // Emulate fetch's AbortError rejection when its signal fires.
       const fetchMock = vi.fn(
         (_url: string, init: RequestInit) =>
           new Promise<Response>((_, reject) => {
@@ -411,7 +401,6 @@ describe("downloadFile", () => {
       await fetchFileBlob("/api/dir").catch(() => {});
 
       expect(onCancel).toHaveBeenCalled();
-      // Stopped once the cap was passed rather than reading to the end.
       expect(body.pulls).toBeLessThan(MIB_OVER_CAP + 16);
     });
   });

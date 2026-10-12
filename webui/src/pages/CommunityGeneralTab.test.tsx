@@ -38,7 +38,6 @@ vi.mock("../permissions/ActiveCommunityProvider.tsx", () => ({
 }));
 vi.mock("../permissions/useCan.ts", () => ({ useCan: () => mockCan }));
 
-// Spy on the rendered location so we can assert the post-delete navigation.
 let lastPath = "";
 function LocationProbe() {
   lastPath = useLocation().pathname;
@@ -150,7 +149,6 @@ describe("CommunityGeneralTab", () => {
         name: t("communitySettings.general.deleteButton"),
       }),
     );
-    // Typed-confirm uses the community name as the phrase.
     fireEvent.change(screen.getByPlaceholderText("Sakura"), {
       target: { value: "Sakura" },
     });
@@ -163,7 +161,6 @@ describe("CommunityGeneralTab", () => {
     await waitFor(() => {
       expect(mockApi.delete).toHaveBeenCalledWith(`/api/communities/${CID}`);
     });
-    // The deleted community must not stay active, and the user lands on "/".
     await waitFor(() => expect(setCommunityId).toHaveBeenCalledWith(null));
     await waitFor(() => expect(lastPath).toBe("/"));
   });
@@ -196,7 +193,6 @@ describe("CommunityGeneralTab", () => {
     expect(
       screen.queryByText(t("communitySettings.general.deleteError")),
     ).not.toBeInTheDocument();
-    // Nothing was deleted, so the community stays active and the page stays put.
     expect(setCommunityId).not.toHaveBeenCalled();
     expect(lastPath).toBe(`/communities/${CID}/settings`);
   });

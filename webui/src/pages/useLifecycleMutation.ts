@@ -1,23 +1,5 @@
-/**
- * The optimistic start/stop/restart mutation shared by the dashboard rows and
- * the server-detail controls (issue #3146).
- *
- * One state machine for both surfaces, applied to the server `serverId` in the
- * `cacheKey` entry — the dashboard's community list or the detail page's single
- * server:
- *
- * - on request, its `observed_state` becomes the transition the verb asks for,
- *   so the pill moves before the API answers (#1071);
- * - on failure, only that server's `observed_state` is rolled back, and only
- *   while the cache still holds the transitional value written here: a WS
- *   status frame that landed mid-flight is newer than the captured state and
- *   takes precedence (#1727);
- * - once settled either way, `invalidateKeys` refetch, so the server's own
- *   answer replaces whatever the cache holds.
- *
- * What a failure means to the operator (the 403 glue, the EULA prompt, the
- * toast) stays with each surface through `onError`.
- */
+/** Share optimistic lifecycle updates between list and detail caches.
+ * Roll back only our transition; newer live status wins, and every settled mutation invalidates its cache. */
 
 import {
   type QueryKey,
@@ -35,11 +17,10 @@ type ServerCache = ServerResponse | ServerResponse[];
 
 export interface LifecycleRequest {
   action: LifecycleAction;
-  // Query string for the verb's POST, without the `?` (e.g. `force=true`).
+  // POST query string without the leading ?, e.g. force=true.
   query?: string;
 }
 
-/** The transitional state a lifecycle verb requests. */
 export function transitionalState(action: LifecycleAction): ObservedState {
   if (action === "stop") {
     return "stopping";

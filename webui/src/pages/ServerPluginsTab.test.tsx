@@ -1,11 +1,3 @@
-/**
- * Tests for the dependency/compatibility validation checklist (issue #1307).
- *
- * Renders the plugins tab with a mocked API returning installed plugins and a
- * validation payload, and asserts the checklist surfaces each finding kind (or
- * the all-clear message when none).
- */
-
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
@@ -47,8 +39,7 @@ vi.mock("../api/client.ts", async () => {
   };
 });
 
-// Only `downloadFile` is stubbed; the rest of the module stays real so the
-// error classes it exports (`DownloadTooLargeError`) survive the mock (#2359).
+// Stub only downloadFile so the real module's exported error classes remain available.
 const mockDownload = vi.hoisted(() => ({ downloadFile: vi.fn() }));
 
 vi.mock("../api/download.ts", async () => {
@@ -133,7 +124,6 @@ function renderTab() {
   return { ...result, queryClient };
 }
 
-/** Route the tab's GET calls by URL suffix. */
 function mockGets({
   plugins,
   validation,
@@ -276,9 +266,7 @@ describe("ServerPluginsTab validation checklist", () => {
     await waitFor(() => {
       const el = screen.getByText(/Sodium requires Vault/);
       expect(el).toBeInTheDocument();
-      // Must NOT contain empty parentheses.
       expect(el.textContent).not.toContain("()");
-      // Must render without any parenthesized range portion.
       expect(el.textContent).toBe(
         "Sodium requires Vault, which is not installed.",
       );
@@ -313,7 +301,6 @@ describe("ServerPluginsTab validation checklist", () => {
     mockGets({ plugins: [], validation: EMPTY_VALIDATION });
     renderTab();
     await waitFor(() => {
-      // The fabric fixture manages mods, so the empty-state names "mods" (#1320).
       expect(screen.getByText("No mods installed.")).toBeInTheDocument();
     });
     expect(
@@ -400,7 +387,6 @@ describe("ServerPluginsTab action-button alignment (#1320)", () => {
     vi.clearAllMocks();
   });
 
-  /** A minimal latest_version payload to mark a plugin as update-available. */
   const LATEST_VERSION = {
     date_published: "2026-06-20T00:00:00Z",
     dependencies: [],
@@ -412,9 +398,6 @@ describe("ServerPluginsTab action-button alignment (#1320)", () => {
     version_number: "0.6.0",
   };
 
-  // One plugin has an update available, the other does not. The update row
-  // renders a real "Update" button; the other reserves an inert placeholder so
-  // the always-present actions stay column-aligned across rows.
   function mockGetsWithUpdate() {
     const updated = plugin({ id: "p1", display_name: "Sodium" });
     mockApi.get.mockImplementation((url: string) => {
@@ -443,14 +426,11 @@ describe("ServerPluginsTab action-button alignment (#1320)", () => {
       expect(screen.getByText("Lithium")).toBeInTheDocument();
     });
 
-    // The update-available row renders a real, clickable Update button.
     const updateButtons = screen
       .getAllByText("Update")
       .filter((el) => el.tagName === "BUTTON");
     expect(updateButtons).toHaveLength(1);
 
-    // The non-update row reserves an inert placeholder of the same width so the
-    // following Remove button stays column-aligned (not a clickable button).
     const updatePlaceholders = screen
       .getAllByText("Update")
       .filter(
@@ -594,7 +574,6 @@ describe("ServerPluginsTab dependency resolution (issue #1309)", () => {
     });
     fireEvent.click(screen.getByText("Resolve dependencies"));
 
-    // The plan modal lists the dep that will be imported from Modrinth.
     await waitFor(() => {
       expect(
         screen.getByText(/fabric-api → fabric-api 0.92.0/),
@@ -645,15 +624,13 @@ describe("ServerPluginsTab dependency resolution (issue #1309)", () => {
     await waitFor(() => {
       expect(screen.getByText("Blocked by conflicts")).toBeInTheDocument();
     });
-    // No importable deps -> the apply button is disabled.
     expect(
       screen.getByText("Install dependencies").closest("button"),
     ).toBeDisabled();
   });
 
   it("labels a catalog-incompatible block with the project slug", async () => {
-    // A catalog-incompatible block (issue #1318) carries a project_id as its
-    // dep_identifier; the readable label comes from will_import.slug.
+    // Use will_import.slug to label a catalog-incompatible project's opaque dependency identifier.
     mockGets({ plugins: [plugin()], validation: EMPTY_VALIDATION });
     mockApi.post.mockImplementation((url: string) => {
       if (url.endsWith("/plugins/resolve")) {
@@ -728,11 +705,9 @@ describe("ServerPluginsTab Paper: no side column, no download button (issue #134
     await waitFor(() => {
       expect(screen.getByText("Sodium")).toBeInTheDocument();
     });
-    // The Side column header should not be rendered.
     expect(
       screen.queryByText("Runs on", { selector: "th" }),
     ).not.toBeInTheDocument();
-    // The Side select should not be rendered.
     expect(screen.queryByLabelText("Runs on")).not.toBeInTheDocument();
   });
 
@@ -828,7 +803,6 @@ describe("Modrinth modal: popular mods on initial open (issue #1351)", () => {
 
   it("fires a search with empty query on open and shows popular results", async () => {
     mockGets({ plugins: [plugin()], validation: EMPTY_VALIDATION });
-    // The empty-query catalog search returns popular mods.
     mockApi.get.mockImplementation((url: string) => {
       if (url.includes("/catalog/search")) {
         return Promise.resolve({
@@ -867,15 +841,11 @@ describe("Modrinth modal: popular mods on initial open (issue #1351)", () => {
       expect(screen.getByText("Sodium")).toBeInTheDocument();
     });
 
-    // Open the Modrinth browse modal.
     fireEvent.click(screen.getByText("Browse Modrinth"));
 
-    // The popular results should appear without typing anything.
     await waitFor(() => {
-      // The search result hit shows the title "Sodium" in the search results.
       const hits = screen.getAllByText("Sodium");
-      // At least one is in the search results area (the others are in the
-      // installed plugins table).
+      // Scope Sodium to search results; the same name appears in installed rows.
       expect(hits.length).toBeGreaterThanOrEqual(2);
     });
   });
@@ -886,7 +856,6 @@ describe("Modrinth modal: installed version indicator (issue #1350)", () => {
     vi.clearAllMocks();
   });
 
-  /** Helper to open the browse modal and select a project. */
   function mockBrowseAndDetail({
     plugins: pluginsList,
     projectId,
@@ -989,7 +958,6 @@ describe("Modrinth modal: installed version indicator (issue #1350)", () => {
     });
     fireEvent.click(screen.getByText("Browse Modrinth"));
 
-    // Click the search result to view versions.
     await waitFor(() => {
       expect(screen.getByText("Rendering engine")).toBeInTheDocument();
     });
@@ -997,7 +965,6 @@ describe("Modrinth modal: installed version indicator (issue #1350)", () => {
       screen.getByText("Rendering engine").closest("button") as HTMLElement,
     );
 
-    // The installed version shows "Installed" badge, not a button.
     await waitFor(() => {
       expect(screen.getByText("Installed")).toBeInTheDocument();
     });
@@ -1040,9 +1007,7 @@ describe("Modrinth modal: installed version indicator (issue #1350)", () => {
       screen.getByText("Rendering engine").closest("button") as HTMLElement,
     );
 
-    // The other version shows "Update" button.
     await waitFor(() => {
-      // Find the Update button in the version list.
       const updateButtons = screen
         .getAllByText("Update")
         .filter((el) => el.tagName === "BUTTON");
@@ -1051,7 +1016,6 @@ describe("Modrinth modal: installed version indicator (issue #1350)", () => {
   });
 
   it("shows 'Install' on versions of a not-installed project", async () => {
-    // No plugin installed for this project.
     mockBrowseAndDetail({
       plugins: [plugin()],
       projectId: "PROJ1",
@@ -1077,14 +1041,12 @@ describe("Modrinth modal: installed version indicator (issue #1350)", () => {
       screen.getByText("Rendering engine").closest("button") as HTMLElement,
     );
 
-    // Version shows "Install" button.
     await waitFor(() => {
       const installButtons = screen
         .getAllByText("Install")
         .filter((el) => el.tagName === "BUTTON");
       expect(installButtons).toHaveLength(1);
     });
-    // No "Installed" badge or "Update" button.
     expect(screen.queryByText("Installed")).not.toBeInTheDocument();
   });
 });
@@ -1163,7 +1125,6 @@ describe("Modrinth modal: simplified version display (issue #1354)", () => {
     });
     fireEvent.click(screen.getByText("Browse Modrinth"));
 
-    // Click the search result to view versions.
     await waitFor(() => {
       expect(screen.getByText("Rendering engine")).toBeInTheDocument();
     });
@@ -1171,13 +1132,10 @@ describe("Modrinth modal: simplified version display (issue #1354)", () => {
       screen.getByText("Rendering engine").closest("button") as HTMLElement,
     );
 
-    // The version number is displayed.
     await waitFor(() => {
       expect(screen.getByText("0.8.12-beta.1")).toBeInTheDocument();
     });
-    // The game versions are displayed as secondary text.
     expect(screen.getByText("1.21, 1.21.1")).toBeInTheDocument();
-    // The verbose name is NOT displayed.
     expect(
       screen.queryByText("Sodium 0.8.12-beta.1 for Fabric 1.21.1"),
     ).not.toBeInTheDocument();
@@ -1223,11 +1181,8 @@ describe("ServerPluginsTab remove confirmation dialog (#1353)", () => {
     await waitFor(() => {
       expect(screen.getByText("Remove Sodium?")).toBeInTheDocument();
     });
-    // API should not have been called yet.
     expect(mockApi.delete).not.toHaveBeenCalled();
-    // Click the destructive "Remove" confirm button in the dialog footer.
-    // It is inside the modal-foot and does NOT have the .sm class (unlike the
-    // table row action button which has .btn.sm.danger).
+    // Target the modal footer's confirmation, not the table row's Remove action.
     const confirmBtn = screen
       .getAllByText("Remove")
       .find(
@@ -1278,10 +1233,8 @@ describe("ServerPluginsTab dependencies toggle active state (#1357)", () => {
       expect(screen.getByText("Sodium")).toBeInTheDocument();
     });
     const depsBtn = screen.getByText("Dependencies", { selector: "button" });
-    // Initially not active.
     expect(depsBtn.classList.contains("active")).toBe(false);
     fireEvent.click(depsBtn);
-    // After click, should have the active class.
     expect(depsBtn.classList.contains("active")).toBe(true);
   });
 });
@@ -1299,7 +1252,6 @@ describe("ServerPluginsTab download button position (#1360)", () => {
     });
     renderTab();
     const button = await screen.findByText("Download client modpack");
-    // The button should be inside the .plugins-toolbar wrapper (#1360).
     expect(button.closest(".plugins-toolbar")).not.toBeNull();
   });
 });
@@ -1324,7 +1276,6 @@ describe("ServerPluginsTab upload progress (issue #1419)", () => {
       expect(screen.getByText("Sodium")).toBeInTheDocument();
     });
 
-    // Trigger a file upload.
     const input = document.querySelector(
       'input[type="file"]',
     ) as HTMLInputElement;
@@ -1334,15 +1285,12 @@ describe("ServerPluginsTab upload progress (issue #1419)", () => {
     Object.defineProperty(file, "size", { value: 1024 });
     fireEvent.change(input, { target: { files: [file] } });
 
-    // The progress bar should appear.
     await waitFor(() => {
       expect(screen.getByRole("progressbar")).toBeInTheDocument();
     });
 
-    // Resolve the upload.
     resolveUpload({});
 
-    // The progress bar should disappear.
     await waitFor(() => {
       expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
     });
@@ -1350,9 +1298,6 @@ describe("ServerPluginsTab upload progress (issue #1419)", () => {
 
   it("hides the progress bar on upload error", async () => {
     mockGets({ plugins: [plugin()], validation: EMPTY_VALIDATION });
-    // The assertion is reason-agnostic — it only needs the mutation to reject —
-    // so this is the API's generic failure: a 500 always carries
-    // `internal_error` (http_problem.py INTERNAL_ERROR_REASON).
     mockPostFormWithProgress.mockRejectedValue(
       new ApiError(500, { reason: "internal_error" }),
     );
@@ -1370,7 +1315,6 @@ describe("ServerPluginsTab upload progress (issue #1419)", () => {
     Object.defineProperty(file, "size", { value: 1024 });
     fireEvent.change(input, { target: { files: [file] } });
 
-    // The progress bar should disappear after the error.
     await waitFor(() => {
       expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
     });
@@ -1386,8 +1330,7 @@ describe("ServerPluginsTab Bedrock discovery hint (issue #1543)", () => {
     "Bedrock players also need Floodgate. Install Floodgate-Spigot in one click from the plugin catalog, or download its jar from the";
   const HINT_LINK = "GeyserMC download page";
 
-  // A real Geyser-Spigot install: mixed-case manifest identifier and a null
-  // Modrinth project id. The gate must normalize case to detect it.
+  // Use mixed-case Geyser manifest data and no Modrinth ID to verify identifier normalization.
   const geyserByManifest = plugin({
     display_name: "Geyser-Spigot",
     mod_identifier: "Geyser-Spigot",
@@ -1413,11 +1356,7 @@ describe("ServerPluginsTab Bedrock discovery hint (issue #1543)", () => {
         return Promise.resolve({ plugins });
       }
       if (url === "/api/meta") {
-        // The API derives `bedrock_enabled` as `relay_enabled AND
-        // relay.bedrock_enabled` (core/api/meta.py), so `relay_enabled: true`
-        // is the one relay state legal for both values of `bedrockEnabled`.
-        // Pinning it keeps the fixture from also asserting "the relay is off"
-        // in the false case, which these tests are not about (issue #2598).
+        // Keep relay enabled when varying the Bedrock flag; the API cannot report Bedrock on with relay off.
         return Promise.resolve(
           meta({ relay_enabled: true, bedrock_enabled: bedrockEnabled }),
         );

@@ -56,8 +56,6 @@ function record(over: Record<string, unknown> = {}) {
   };
 }
 
-// Route `api.get` by path: the page reads the bare community, the Audit tab
-// reads the community audit endpoint (path + query string).
 function routeGet(opts: { records?: unknown[] }) {
   mockApi.get.mockImplementation((path: string) => {
     if (path.startsWith(`/api/communities/${CID}/audit`)) {
@@ -88,7 +86,6 @@ function renderPage(entry = `/communities/${CID}/settings`) {
   return { ...result, queryClient };
 }
 
-// Open the Audit tab (the default landing tab is Members).
 async function openAuditTab() {
   await screen.findAllByText("Sakura");
   fireEvent.click(
@@ -96,7 +93,6 @@ async function openAuditTab() {
   );
 }
 
-// Pull the audit-endpoint calls (the path carries the query string).
 function auditCalls(): string[] {
   return mockApi.get.mock.calls
     .map((c) => c[0] as string)
@@ -130,13 +126,11 @@ describe("CommunityAuditTab", () => {
     renderPage();
     await openAuditTab();
 
-    // Operation code humanized to its readable label (#643).
     expect(
       await screen.findByText(t("communitySettings.audit.op.server:start")),
     ).toBeInTheDocument();
     expect(screen.getByText("u1")).toBeInTheDocument();
     expect(screen.getByText("success")).toBeInTheDocument();
-    // Target prefix humanized; the id is kept ("<Type>: <id>", #643).
     expect(
       screen.getByText(`${t("communitySettings.audit.targetType.server")}: s1`),
     ).toBeInTheDocument();
@@ -157,7 +151,6 @@ describe("CommunityAuditTab", () => {
     renderPage();
     await openAuditTab();
 
-    // An unmapped operation falls back to its raw code, both as text and title.
     const op = await screen.findByText("community.permission_grant_revoke");
     expect(op.closest("td")).toHaveAttribute(
       "title",
@@ -167,7 +160,6 @@ describe("CommunityAuditTab", () => {
       "title",
       actor,
     );
-    // Target displays the humanized prefix; the title keeps the raw "type:id".
     expect(
       screen
         .getByText(`${t("communitySettings.audit.targetType.server")}: s1`)
@@ -236,8 +228,7 @@ describe("CommunityAuditTab", () => {
       const url = new URL(auditCalls().at(-1) as string, "http://x");
       expect(url.searchParams.get("operation")).toBe("member:add");
       expect(url.searchParams.get("actor")).toBe(ACTOR);
-      // since/until are sent as UTC instants; derive the expectation via the
-      // same local→UTC conversion so the test is timezone-independent.
+      // Convert expected local datetimes to UTC so the assertion is timezone-independent.
       expect(url.searchParams.get("since")).toBe(
         new Date(SINCE_LOCAL).toISOString(),
       );
@@ -251,19 +242,16 @@ describe("CommunityAuditTab", () => {
   it("restores filters from the URL query string on load (deep link / reload)", async () => {
     routeGet({ records: [record()] });
     const ACTOR = "11111111-1111-1111-1111-111111111111";
-    // Deep-link straight to the Audit tab (#audit) with persisted filters.
     renderPage(
       `/communities/${CID}/settings?operation=member%3Aadd&actor=${ACTOR}#audit`,
     );
     await screen.findByText(t("communitySettings.audit.op.server:start"));
 
-    // The persisted filters drive the first request without any Apply click.
     await waitFor(() => {
       const url = new URL(auditCalls().at(-1) as string, "http://x");
       expect(url.searchParams.get("operation")).toBe("member:add");
       expect(url.searchParams.get("actor")).toBe(ACTOR);
     });
-    // The inputs reflect the restored filters.
     expect(
       (
         screen.getByLabelText(
@@ -293,12 +281,10 @@ describe("CommunityAuditTab", () => {
     expect(
       await screen.findByText(t("communitySettings.audit.filterActorInvalid")),
     ).toBeInTheDocument();
-    // No new audit request carried the bad value.
     expect(auditCalls().length).toBe(before);
   });
 
   it("pages forward with an increased offset", async () => {
-    // A full page (50) signals there may be a next page.
     routeGet({
       records: Array.from({ length: 50 }, (_, i) => record({ id: `a${i}` })),
     });
@@ -306,7 +292,6 @@ describe("CommunityAuditTab", () => {
     await openAuditTab();
     await screen.findAllByText(t("communitySettings.audit.op.server:start"));
 
-    // First page requests offset 0.
     await waitFor(() => {
       const first = new URL(auditCalls()[0], "http://x");
       expect(first.searchParams.get("offset")).toBe("0");
@@ -320,7 +305,6 @@ describe("CommunityAuditTab", () => {
       expect(url.searchParams.get("offset")).toBe("50");
     });
 
-    // Prev becomes enabled once past the first page, to return toward offset 0.
     await waitFor(() =>
       expect(
         screen.getByRole("button", {

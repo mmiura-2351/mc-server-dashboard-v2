@@ -1,12 +1,5 @@
-// Global setup: assert the real API is up before any browser starts. The API
-// (uvicorn + Postgres + migrations + the seeded admin) is booted by the
-// orchestration that invokes Playwright (`make webui-e2e` / the e2e workflow);
-// here we just probe /healthz so a missing or degraded API fails the run with
-// one clear message rather than a cascade of UI timeouts.
-//
-// /healthz returns 200 even when the database is degraded (ok=false), so we
-// assert the body reports ok=true — the same readiness contract the api e2e
-// harness uses.
+// The caller boots the API and database; fail early if /healthz reports ok=false.
+// A 200 alone is insufficient because degraded health still returns 200.
 
 const API_URL = process.env.MCD_E2E_API_URL ?? "http://127.0.0.1:8000";
 

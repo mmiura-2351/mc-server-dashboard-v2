@@ -47,14 +47,10 @@ import {
 
 type ServerResponse = components["schemas"]["ServerResponse"];
 
-// Dashboard server-list layout. Cards remain the default (#541); the table view
-// is the compact alternative for many servers / narrow screens.
 type ViewMode = "cards" | "table";
 const VIEW_MODE_KEY = "mcsd.dashboard.viewMode";
 
-// Persist the chosen view across reloads, mirroring the column-width persistence
-// in ResizableColumns (best-effort localStorage, never break on corrupt/blocked
-// storage; fall back to the card default).
+// Persist view preference best-effort; unavailable or corrupt storage falls back to cards.
 function loadViewMode(): ViewMode {
   try {
     return localStorage.getItem(VIEW_MODE_KEY) === "table" ? "table" : "cards";
@@ -67,7 +63,7 @@ function saveViewMode(mode: ViewMode): void {
   try {
     localStorage.setItem(VIEW_MODE_KEY, mode);
   } catch {
-    // Best-effort persistence; ignore quota/availability failures.
+    // Ignore storage quota and availability failures.
   }
 }
 
@@ -80,7 +76,6 @@ function useViewMode(): [ViewMode, (mode: ViewMode) => void] {
   return [mode, select];
 }
 
-// Sort preference (#1123), persisted in localStorage like the view mode.
 type SortField = "name" | "state" | "type";
 type SortDir = "asc" | "desc";
 interface SortPref {
@@ -104,7 +99,7 @@ function loadSort(): SortPref {
       return { field, dir };
     }
   } catch {
-    // Corrupt/blocked storage.
+    // Unavailable or corrupt storage falls back to the default sort.
   }
   return DEFAULT_SORT;
 }
@@ -113,7 +108,7 @@ function saveSort(pref: SortPref): void {
   try {
     localStorage.setItem(SORT_KEY, JSON.stringify(pref));
   } catch {
-    // Best-effort.
+    // Sort persistence is best-effort when storage is unavailable or full.
   }
 }
 
@@ -126,7 +121,6 @@ function useSortPref(): [SortPref, (next: SortPref) => void] {
   return [pref, update];
 }
 
-// Toggle sort: clicking the same field flips direction; a new field resets to asc.
 function toggleSort(current: SortPref, field: SortField): SortPref {
   if (current.field === field) {
     return { field, dir: current.dir === "asc" ? "desc" : "asc" };
@@ -134,22 +128,15 @@ function toggleSort(current: SortPref, field: SortField): SortPref {
   return { field, dir: "asc" };
 }
 
-// URL-driven filter keys for the dashboard (#1123).
 const FILTER_KEYS = ["search", "state"] as const;
 
-// Parse the `state` URL param into the selected buckets, keeping only tokens
-// that are current bucket keys (STATE_BUCKETS is the single source). A stale
-// bookmark carrying a pre-#2239 raw state name (e.g. `state=starting`) thus
-// selects nothing rather than counting a phantom bucket over an empty list
-// (#2668). Canonical bucket order is preserved.
+// Accept current bucket keys only and preserve canonical order; ignore stale raw-state bookmarks.
 function parseStateBuckets(stateFilter: string): StateBucket[] {
   const tokens = stateFilter ? stateFilter.split(",").filter(Boolean) : [];
   return STATE_BUCKETS.filter((bucket) => tokens.includes(bucket));
 }
 
-// Apply client-side filtering to the server list. The `state` param holds a
-// comma-separated set of bucket keys (#2239); a server matches when the bucket
-// of its observed state is selected. An empty set shows all servers.
+// Filter by observed-state buckets; no selected buckets means all servers.
 function filterServers(
   servers: ServerResponse[],
   search: string,
@@ -168,7 +155,6 @@ function filterServers(
   });
 }
 
-// Apply client-side sorting to the server list.
 function sortServers(
   servers: ServerResponse[],
   pref: SortPref,
@@ -189,8 +175,7 @@ function sortServers(
         cmp = a.server_type.localeCompare(b.server_type);
         break;
     }
-    // Secondary sort by name (case-insensitive) for deterministic ordering
-    // when the primary field values are equal.
+    // Break primary-sort ties by case-insensitive name for stable ordering.
     if (cmp === 0 && pref.field !== "name") {
       cmp = a.name.localeCompare(b.name);
     }
@@ -200,14 +185,11 @@ function sortServers(
 }
 
 export function DashboardPage() {
-  // The community to list is the URL `:cid` (#784) — not the active community,
-  // which can disagree with the URL on a stale bookmark or a community the user
-  // has left. The active-community list (the caller's membership) is only used
-  // to confirm the URL cid is one the caller belongs to.
+  // Use the URL community ID; the active community may differ on stale bookmarks.
+  // Use memberships only to check access to that URL target.
   const { cid } = useParams();
   const { communities } = useActiveCommunity();
 
-  // Membership still loading: hold the chrome rather than flash a not-found.
   if (communities === undefined) {
     return (
       <DashboardChrome>
@@ -215,8 +197,6 @@ export function DashboardPage() {
       </DashboardChrome>
     );
   }
-  // The URL names a community the caller is not a member of (or no cid at all):
-  // show a clear not-found state instead of silently listing another community.
   if (cid === undefined || !communities.some((c) => c.id === cid)) {
     return (
       <DashboardChrome>
@@ -258,8 +238,6 @@ function DashboardChrome({
   );
 }
 
-// Card/table view switch (#541), persisted in localStorage. A segmented control
-// with `aria-pressed` so assistive tech reports the active view.
 function ViewToggle({
   view,
   onSelect,
@@ -296,9 +274,7 @@ function Loaded({ communityId }: { communityId: string }) {
   const [sort, setSort] = useSortPref();
   const [filters, setFilters] = useFilterParams(FILTER_KEYS);
 
-  // The search input uses a local draft so each keystroke does not push a
-  // history entry. Filtering applies the draft immediately for instant
-  // feedback; the URL is updated on blur / Enter.
+  // Filter immediately with a local draft; write the URL on blur or Enter to avoid a history entry per keystroke.
   const [searchDraft, setSearchDraft] = useState(filters.search);
   useEffect(() => {
     setSearchDraft(filters.search);
@@ -312,7 +288,7 @@ function Loaded({ communityId }: { communityId: string }) {
 
   const query = useQuery({
     queryKey: serversKey(communityId),
-    // Stamped so live status frames are ordered against each REST attempt.
+    // Stamp REST attempts so live frames can be ordered against them.
     queryFn: stampedQueryFn(({ signal }) =>
       api.get(
         apiPath("/api/communities/{community_id}/servers", {
@@ -324,9 +300,6 @@ function Loaded({ communityId }: { communityId: string }) {
   });
   const resultState = classifyQueryResult(query);
 
-  // Hooks must be called unconditionally (Rules of Hooks), so filter/sort are
-  // computed before the early-return branches. They operate on an empty array
-  // when the query has not resolved yet.
   const servers = resultState.kind === "data" ? resultState.data : [];
   const filtered = useMemo(
     () => filterServers(servers, searchDraft, filters.state),
@@ -341,10 +314,7 @@ function Loaded({ communityId }: { communityId: string }) {
       </DashboardChrome>
     );
   }
-  // Full-page error only when there is nothing to show (the initial load
-  // failed). A failed background refetch retains `data`, so the cached list
-  // keeps rendering through transient API blips; the WS-driven degraded pill
-  // already signals that live updates are down (#1724).
+  // Retain cached content when only a background refetch fails; stream status is reported separately.
   if (resultState.kind === "error") {
     return (
       <DashboardChrome>
@@ -419,10 +389,6 @@ function EmptyState({ communityId }: { communityId: string }) {
   );
 }
 
-// Filter and sort controls rendered above both card and table views (#1123).
-// The search input uses a local draft (owned by Loaded) to avoid pushing a
-// browser history entry per keystroke; the draft syncs to the URL on blur or
-// Enter (the audit pages use a separate "Apply" button for the same reason).
 function DashboardFilterBar({
   filters,
   searchDraft,
@@ -454,7 +420,7 @@ function DashboardFilterBar({
     } else {
       next.add(bucket);
     }
-    // Serialise in the canonical bucket order so the URL param is stable.
+    // Serialize bucket keys in canonical order to keep equivalent URLs stable.
     onFiltersChange({
       ...filters,
       state: STATE_BUCKETS.filter((b) => next.has(b)).join(","),
@@ -489,7 +455,6 @@ function DashboardFilterBar({
           <>
             {t("dashboard.filter.stateLabel")}
             <span aria-hidden="true"> ▾</span>
-            {/* Badge = number of selected buckets; hidden when zero (#2239). */}
             {activeBuckets.size > 0 && (
               <span className="badge count" aria-hidden="true">
                 {activeBuckets.size}
@@ -503,8 +468,7 @@ function DashboardFilterBar({
           aria-label={t("dashboard.filter.state")}
         >
           {STATE_BUCKETS.map((bucket) => {
-            // Reuse a representative state's pill color as the row affordance;
-            // statesForBucket keeps the 4→raw mapping the single source.
+            // Reuse a representative state's color; statesForBucket owns the bucket-to-state mapping.
             const pill = statePill(statesForBucket(bucket)[0]);
             return (
               <label key={bucket} className="filter-state-option">
@@ -529,7 +493,6 @@ function DashboardFilterBar({
           </button>
         </fieldset>
       </Popover>
-      {/* In card view, show an explicit sort control; table view uses column headers. */}
       {view === "cards" && (
         <SortControl sort={sort} onSortChange={onSortChange} />
       )}
@@ -575,9 +538,6 @@ function SortControl({
   );
 }
 
-// A sortable table column header that keeps the label text intact (for
-// getByText-style test queries) and renders the direction indicator in a
-// separate aria-hidden span.
 function SortableHeader({
   field,
   sort,
@@ -614,10 +574,6 @@ function SortableHeader({
   );
 }
 
-// The per-server lifecycle mutation plus the observed/optimistic state, shared by
-// the card and table rows so neither duplicates the start/stop/restart business
-// logic (#541). The optimistic list-cache patch, its #1727-safe rollback and the
-// settle refetch live in useLifecycleMutation, shared with the detail page.
 function useLifecycle(server: ServerResponse, communityId: string) {
   const { showToast } = useToast();
   const onForbidden = useOnForbidden();
@@ -630,14 +586,7 @@ function useLifecycle(server: ServerResponse, communityId: string) {
     cacheKey: serversKey(communityId),
     invalidateKeys: [serversKey(communityId)],
     onError: (error, action) => {
-      // 403 → the permission glue (toast + capability refetch). Everything
-      // else → the shared lifecycle mapping: known non-race 409 reasons get a
-      // specific toast, other 409s the "state changed — refresh" treatment
-      // (SPEC 7.4; the refetch already runs on settle), recognized 503
-      // reasons their own message, the rest a generic toast. The verb goes with
-      // it on both the 409 and the 503 path: for a few reasons what the failure
-      // left pending, or left unconfirmed, depends on it (issues #2435/#2440/
-      // #2441).
+      // Handle 403 through capability refresh; pass other failures and the requested verb to the shared mapper.
       if (onForbidden(error)) {
         return;
       }
@@ -667,8 +616,7 @@ function useLifecycle(server: ServerResponse, communityId: string) {
   }, [communityId, server.id, queryClient, onForbidden, showToast]);
 
   const state = normalizeState(server.observed_state);
-  // While a request is in flight, show the transition it requests so the pill
-  // moves immediately, before the list refetch returns.
+  // Show the requested transition immediately while the lifecycle request is pending.
   const displayState: ObservedState = mutation.isPending
     ? transitionalState(mutation.variables.action)
     : state;
@@ -683,7 +631,6 @@ function useLifecycle(server: ServerResponse, communityId: string) {
   };
 }
 
-// The state pill for an observed/optimistic state.
 function StatePill({ state }: { state: ObservedState }) {
   const pill = statePill(state);
   return (
@@ -693,14 +640,8 @@ function StatePill({ state }: { state: ObservedState }) {
   );
 }
 
-// The desired/observed drift affordance for a list row (issue #2443). Mirrors
-// the detail page header's rule and string exactly (ServerDetailPage's
-// `Header`): the reconciler has not yet converged when desired ≠ observed, so
-// show an "applying…" hint. Without it a pending intent is invisible on the
-// list — e.g. a stop whose dispatch failed leaves desired=stopped while the
-// process keeps running, yet the row would otherwise show only a green pill.
-// The mark rides on the row wherever the observed state's bucket passes the
-// filter; it does not change which rows `filterServers` keeps.
+// Show desired/observed drift beside the pill using the detail page's rule.
+// Filtering still follows observed state, including rows with pending intent.
 function DriftPill({ server }: { server: ServerResponse }) {
   if (server.desired_state === server.observed_state) {
     return null;
@@ -780,8 +721,6 @@ function ServerCard({ server, communityId, can }: ServerRowProps) {
   );
 }
 
-// Compact table view (#541): the same servers/data as the cards, reusing the
-// ResizableTable column affordances and the shared serverState helpers.
 function ServerTable({
   servers,
   communityId,
@@ -943,9 +882,6 @@ interface ActionProps {
   onRun: (action: LifecycleAction) => void;
 }
 
-// One lifecycle button. Rendered only when permitted (controls render from
-// permissions, WEBUI_SPEC.md 7.3); disabled while a request is in flight or the
-// action does not apply to the current state.
 function Action({ action, server, state, pending, can, onRun }: ActionProps) {
   if (!can(`server:${action}`, { serverId: server.id })) {
     return null;

@@ -1,9 +1,7 @@
 // @vitest-environment node
-// DOM-free logic test; runs under Node to skip per-file jsdom setup (issue #1734).
 import { describe, expect, it, vi } from "vitest";
 
-// Capture the factory that lazyRetry passes to React.lazy so we can invoke it
-// directly and verify the retry logic without a full render cycle.
+// Capture React.lazy's factory to exercise retries without rendering a lazy component.
 let capturedFactory: () => Promise<{ default: unknown }>;
 
 vi.mock("react", async (importOriginal) => {
@@ -17,7 +15,6 @@ vi.mock("react", async (importOriginal) => {
   };
 });
 
-// Import after the mock is set up.
 const { lazyRetry } = await import("./lazyRetry.ts");
 
 describe("lazyRetry", () => {

@@ -3,14 +3,7 @@ import { t } from "../i18n/index.ts";
 import { Modal } from "./Modal.tsx";
 import { PasswordInput } from "./PasswordInput.tsx";
 
-// Typed-confirm dialog for destructive operations (WEBUI_SPEC.md Section 7.4).
-// The destructive button stays disabled until the user types confirmPhrase
-// exactly (case-sensitive), guarding deletes and other irreversible actions.
-//
-// When passwordLabel is set, the dialog also re-authenticates: a password field
-// is rendered and the button additionally requires a non-empty password, which
-// is passed to onConfirm. Account deletion uses this (WEBUI_SPEC.md 6.11); the
-// other destructive flows omit it and the field never renders.
+// Require an exact confirmation phrase; optional password input is verified by the API.
 
 interface ConfirmDialogProps {
   open: boolean;
@@ -37,8 +30,6 @@ export function ConfirmDialog({
 }: ConfirmDialogProps) {
   const [typed, setTyped] = useState("");
   const [password, setPassword] = useState("");
-  // Both gates must pass: the typed phrase matches and, when re-auth is
-  // required, a password has been entered (the API verifies it server-side).
   const matches =
     typed === confirmPhrase && (passwordLabel === undefined || password !== "");
 

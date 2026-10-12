@@ -4,11 +4,6 @@ import { clearAccessToken } from "../auth/tokenStore.ts";
 import { t } from "../i18n/index.ts";
 import { renderApp } from "../test/render.tsx";
 
-// Gating + Overview tests (#474). The app is driven through the real router and
-// providers via renderApp; a fetch mock dispatches on URL so a single test can
-// stand up /users/me, the community list, and the platform-admin `[A]`
-// endpoints the Overview reads.
-
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), {
     status: 200,
@@ -33,8 +28,7 @@ const ADMIN = {
 };
 const MEMBER = { ...ADMIN, is_platform_admin: false };
 
-// Pinned "now" so heartbeatAge calls in the rendered table are deterministic
-// under load — same technique as AdminWorkersPage (#817).
+// Seed heartbeat fixtures from a fixed reference timestamp.
 const NOW = new Date("2026-01-01T00:00:00Z");
 
 const WORKERS = {
@@ -79,8 +73,6 @@ const BACKUP_STATS = {
 
 const JAR_POOL = { count: 14, total_bytes: 2_040_109_466 };
 
-// Wire the fetch mock for a signed-in user with the given admin flag. The
-// bootstrap refresh and any unmatched URL fall through to a token response.
 function signedInAs(user: typeof ADMIN) {
   fetchMock.mockImplementation((input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
@@ -106,8 +98,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
-  // Clear any pending fake timers (e.g. react-query refetchInterval) before
-  // restoring the real clock so vitest worker teardown does not time out (#817).
+  // Clear pending query timers before restoring the clock to avoid hanging worker teardown.
   vi.clearAllTimers();
   vi.useRealTimers();
 });
@@ -149,8 +140,7 @@ describe("admin overview stats", () => {
 
     renderApp({ path: "/admin" });
 
-    // Worker tile: 1 online / 3 total, with 1 draining · 1 offline. Scope by the
-    // metric-tile label so the nav "Workers" link does not collide.
+    // Scope to the metric tile so the Workers navigation link cannot match.
     const tileByLabel = (label: string): Element => {
       const tiles = Array.from(document.querySelectorAll(".metric-tile"));
       const tile = tiles.find(
@@ -160,7 +150,6 @@ describe("admin overview stats", () => {
       return tile;
     };
 
-    // Wait for the stats to load: the fleet heading only renders once Loaded.
     await screen.findByRole("heading", { name: t("admin.overview.fleet") });
     const workersTile = tileByLabel(t("admin.overview.workers"));
     expect(workersTile.querySelector(".value")?.textContent).toBe(
@@ -172,11 +161,9 @@ describe("admin overview stats", () => {
       ),
     ).toBeInTheDocument();
 
-    // Servers running = sum of assigned_count (2 + 1 + 0 = 3).
     const serversTile = tileByLabel(t("admin.overview.servers"));
     expect(serversTile.querySelector(".value")?.textContent).toBe("3");
 
-    // Backup count + size and jar-pool stats render.
     const backupsTile = tileByLabel(t("admin.overview.backups"));
     expect(backupsTile.querySelector(".value")?.textContent).toBe(
       "31 · 12.4 GiB",
@@ -185,7 +172,6 @@ describe("admin overview stats", () => {
       `${t("admin.overview.jarPool")}: 14 ${t("admin.overview.jars")} · 1.9 GiB`,
     );
 
-    // Worker fleet table lists every worker with its status pill.
     expect(screen.getByText("worker-a")).toBeInTheDocument();
     expect(screen.getByText("worker-b")).toBeInTheDocument();
     expect(screen.getByText("worker-c")).toBeInTheDocument();
@@ -217,16 +203,13 @@ describe("admin overview stats", () => {
   });
 
   it("re-fetches worker data after 12 s so heartbeat ages do not freeze (#791)", async () => {
-    // shouldAdvanceTime lets react-query timers fire while async utilities still
-    // resolve (mirrors the AdminWorkersPage timer pattern). Clock is restored in
-    // afterEach along with vi.clearAllTimers() to prevent timer leaks (#817).
+    // Advance fake time so query timers and async assertions can run together; clear timers during teardown.
     vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.setSystemTime(NOW);
     signedInAs(ADMIN);
 
     renderApp({ path: "/admin" });
 
-    // Wait for the initial render to settle.
     await screen.findByRole("heading", { name: t("admin.overview.fleet") });
 
     const callsBefore = fetchMock.mock.calls.filter((c) => {

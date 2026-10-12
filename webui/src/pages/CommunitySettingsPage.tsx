@@ -14,7 +14,6 @@ import { CommunityMembersTab } from "./CommunityMembersTab.tsx";
 import { CommunityRolesTab } from "./CommunityRolesTab.tsx";
 import { handleTabKeyDown, panelId, tabId, useTabHash } from "./urlState.ts";
 
-// Tab order mirrors the mockup (docs/ui/mockup/community-settings.html).
 const TABS = [
   "members",
   "roles",
@@ -44,8 +43,6 @@ export function CommunitySettingsPage() {
 
 function Loaded({ communityId }: { communityId: string }) {
   const can = useCan();
-  // Active tab lives in the URL hash (#514) so Back walks the tab history;
-  // #members is the default and keeps a clean URL.
   const [tab, setTab] = useTabHash(TABS);
   const query = useQuery({
     queryKey: ["communities", communityId],
@@ -63,9 +60,7 @@ function Loaded({ communityId }: { communityId: string }) {
   if (queryState.kind === "pending") {
     return <p className="sub">{t("communitySettings.loading")}</p>;
   }
-  // Full-page error only when there is nothing to show (the initial load
-  // failed). A failed background refetch retains `data`, so the cached page
-  // keeps rendering through transient API blips (#1797).
+  // Retain cached content when only a background refetch fails.
   if (queryState.kind === "error") {
     return <p className="field-error">{t("communitySettings.loadError")}</p>;
   }

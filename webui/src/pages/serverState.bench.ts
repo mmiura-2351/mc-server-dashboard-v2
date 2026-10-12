@@ -1,11 +1,3 @@
-/**
- * Benchmark: server observed-state logic (issue #1122).
- *
- * Measures the state-presentation functions that run on every render of the
- * server detail page. To add a new state benchmark, add a test with an
- * awaited bench().run().
- */
-
 import { describe, test } from "vitest";
 import {
   actionApplies,

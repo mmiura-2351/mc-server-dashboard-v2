@@ -1,6 +1,4 @@
 // @vitest-environment node
-// DOM-free contract test: the create wizard routes each presentation to the
-// field or toast it names.
 import { describe, expect, it } from "vitest";
 import {
   serverCreateErrorPresentation,
@@ -8,9 +6,6 @@ import {
 } from "./serverCreateErrorPresentation.ts";
 
 describe("serverCreateErrorPresentation", () => {
-  // Each reason names the one thing to change; the generic toast would not.
-  // `config_too_large` and `config_lone_surrogate` are the config-blob rules
-  // (issue #94) this wizard's flat string overrides can trip (issue #2838).
   it.each([
     ["port_taken", "serverCreate.error.port_taken"],
     ["port_out_of_range", "serverCreate.error.port_out_of_range"],
@@ -27,7 +22,6 @@ describe("serverCreateErrorPresentation", () => {
     });
   });
 
-  // A reason about a value the user typed lands on that field (issue #981).
   it.each([
     ["invalid_server_name", "name", "serverCreate.error.invalid_server_name"],
     ["invalid_slug", "slug", "serverCreate.error.invalid_slug"],
@@ -36,8 +30,6 @@ describe("serverCreateErrorPresentation", () => {
     expect(serverCreateErrorPresentation(reason)).toEqual({ target, key });
   });
 
-  // A structural validation_error the name field could not claim, or a failure
-  // with no reason at all, still shows a message rather than nothing.
   it.each([
     ["an unmapped reason", "validation_error"],
     ["a failure without a reason", undefined],
@@ -57,10 +49,7 @@ describe("serverImportErrorPresentation", () => {
     });
   });
 
-  // Import-only verdicts. `platform_managed_path` is not the Backups upload's
-  // string: a zip never yields a directory entry (issue #2979). `slug_taken` is
-  // the auto-assigned address raced mid-import, so it asks for a retry instead
-  // of the create tab's field complaint about an address never typed (#3022).
+  // ZIP import skips directory entries and allocates its own slug; collision feedback must ask for retry.
   it.each([
     [
       422,
@@ -97,8 +86,6 @@ describe("serverImportErrorPresentation", () => {
     });
   });
 
-  // The import form has no slug field, so a slug-field reason must be shown
-  // as a toast rather than routed somewhere it is discarded (#3022).
   it("toasts a create slug-field reason", () => {
     expect(serverImportErrorPresentation(422, "invalid_slug")).toEqual({
       target: "toast",

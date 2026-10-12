@@ -1,5 +1,4 @@
 // @vitest-environment node
-// DOM-free logic test; runs under Node to skip per-file jsdom setup.
 import { describe, expect, it } from "vitest";
 import { classifyQueryResult } from "./queryState.ts";
 

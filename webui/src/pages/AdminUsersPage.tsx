@@ -18,21 +18,11 @@ import { type TranslationKey, t } from "../i18n/index.ts";
 import { classifyQueryResult } from "../queryState.ts";
 import { useOffsetParam } from "./urlState.ts";
 
-// Platform admin Users page (WEBUI_SPEC.md 6.12 / 2.1): a paginated user table
-// with the full lifecycle an admin owns — deactivate/reactivate, grant/revoke
-// the platform-admin flag, delete (typed-confirm), and create. All routes are
-// the platform-admin `[A]` surface (admin_users.py).
-//
-// Self-action behaviour, surfaced honestly per the API guards (admin_users.py):
-// - deactivate / delete yourself → 409 `self_target` (refused; use the account
-//   page). The row hides those actions for your own account and a stray 409
-//   still surfaces as the mapped message.
-// - revoke your own admin flag → ALLOWED by the API (only the last active admin
-//   is protected). We confirm first, since it locks the operator out of /admin.
+// Hide self-deactivate and self-delete; the API refuses both.
+// Self-revocation is allowed but requires confirmation because it removes admin access.
 
 type AdminUserResponse = components["schemas"]["AdminUserResponse"];
 
-// The API caps a single page at 100 and defaults to 50 (admin_users.py).
 const PAGE_SIZE = 50;
 
 function usersUrl(offset: number): "/api/admin/users" {
@@ -43,9 +33,7 @@ function usersUrl(offset: number): "/api/admin/users" {
   return `/api/admin/users?${params.toString()}` as "/api/admin/users";
 }
 
-// Map an admin-create problem `reason` to the inline message + field. Password
-// policy reasons reuse the register copy (SECURITY.md Section 1 enumerates them,
-// shared with `POST /users`); duplicates/invalid map to their field.
+// Reuse registration's password-policy messages for admin-created users.
 const CREATE_REASON_KEY: Record<string, TranslationKey> = {
   too_short: "register.reason.too_short",
   too_long: "register.reason.too_long_for_bcrypt",
@@ -64,8 +52,6 @@ interface CreateFieldErrors {
   username?: string;
   email?: string;
   password?: string;
-  // Fallback for an unmapped reason or a non-problem failure (500/network) so
-  // the dialog never sits silent (#475).
   general?: string;
 }
 
@@ -79,8 +65,6 @@ function createFieldForReason(reason: string): keyof CreateFieldErrors {
   return "password";
 }
 
-// Conflict / not-found reasons the lifecycle routes return (admin_users.py);
-// anything unmapped falls back to the generic message.
 const LIFECYCLE_REASON_KEY: Record<string, TranslationKey> = {
   self_target: "admin.users.error.self_target",
   last_platform_admin: "admin.users.error.last_platform_admin",
@@ -102,15 +86,12 @@ export function AdminUsersPage() {
   const queryClient = useQueryClient();
   const { showToast } = useToast();
   const { data: me } = useCurrentUser();
-  // Page offset lives in `?offset=N` (#514) so Back restores the prior page.
   const [offset, setOffset] = useOffsetParam();
   const [createOpen, setCreateOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<AdminUserResponse | null>(
     null,
   );
   const [selfRevoke, setSelfRevoke] = useState(false);
-  // The user whose lifecycle mutation is in flight; its row's actions are
-  // disabled until it settles so a second click can't double-fire (#475).
   const [pendingUserId, setPendingUserId] = useState<string | null>(null);
 
   const usersQuery = useQuery({
@@ -122,7 +103,6 @@ export function AdminUsersPage() {
 
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ["users", "list"] });
-    // The current-user cache changes when an admin revokes their own flag.
     queryClient.invalidateQueries({ queryKey: ["users", "me"] });
   };
 
@@ -175,8 +155,7 @@ export function AdminUsersPage() {
   };
 
   const onToggleAdmin = (user: AdminUserResponse) => {
-    // Revoking your own flag is permitted by the API but locks you out of the
-    // admin area, so gate it behind a confirm.
+    // Confirm self-revocation because it removes access to the admin area.
     if (user.is_platform_admin && user.id === me?.id) {
       setSelfRevoke(true);
       return;
@@ -228,9 +207,7 @@ export function AdminUsersPage() {
         <p className="sub" role="status">
           {t("admin.users.loading")}
         </p>
-      ) : /* Error only when there is nothing to show (initial load failed).
-           A failed background refetch retains `data`, so the cached page
-           keeps rendering through transient API blips (#1805). */
+      ) : /* Retain cached content when only a background refetch fails. */
       usersState.kind === "error" ? (
         <p className="field-error" role="alert">
           {t("admin.users.loadError")}
@@ -400,8 +377,6 @@ function UserRow({
             ? t("admin.users.revokeAdmin")
             : t("admin.users.makeAdmin")}
         </button>
-        {/* Deactivate/delete of your own account are 409 self_target on the API;
-            hide them for your own row (reactivate is unreachable for self). */}
         {isSelf ? null : (
           <>
             <button
@@ -460,10 +435,6 @@ function CreateUserDialog({
       onCreated();
     },
     onError: (err) => {
-      // Map a problem `reason` to its inline field; structural 422s are not
-      // reachable here (all three fields are required and non-empty). An
-      // unmapped reason or a non-problem failure (500/network) falls back to a
-      // generic inline error so the dialog never sits silent.
       if (err instanceof ApiError && err.reason !== undefined) {
         const key = CREATE_REASON_KEY[err.reason];
         if (key !== undefined) {

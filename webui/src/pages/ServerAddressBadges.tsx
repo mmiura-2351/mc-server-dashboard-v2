@@ -12,12 +12,7 @@ import { t } from "../i18n/index.ts";
 
 type ServerResponse = components["schemas"]["ServerResponse"];
 
-// A server's join addresses as click-to-copy buttons, shared by the dashboard
-// card/table rows and the server detail header: the Java join hostname (issue
-// #961) and, when the server holds a Bedrock port, the Bedrock address:port
-// (issue #1543). `fallback` renders in place of the Java button when the server
-// has no join hostname (relay off). Returns a fragment so the buttons sit
-// directly in the caller's layout.
+// Render caller-provided fallback content when no Java join hostname is available.
 export function ServerAddressBadges({
   server,
   buttonClassName,
@@ -48,8 +43,7 @@ export function ServerAddressBadges({
         fallback
       )}
       {server.bedrock_address !== null && server.bedrock_port !== null && (
-        // Copy the host only: Bedrock's "Add Server" screen has a separate Port
-        // field, and pasting `host:port` into the address field fails validation.
+        // Copy only the host; Bedrock's Add Server screen rejects host:port in its address field.
         <CopyButton
           text={server.bedrock_address}
           title={t("dashboard.bedrockAddressCopyTitle", {
@@ -67,9 +61,7 @@ export function ServerAddressBadges({
   );
 }
 
-// One copy button with its own "Copied!" state, so the Java and Bedrock
-// feedback never share a flag or a reset timer. A failed copy drops the
-// feedback at once rather than leaving an earlier success showing (#976).
+// Keep copy feedback and timers independent for Java and Bedrock; clear earlier success on failure.
 function CopyButton({
   text,
   title,

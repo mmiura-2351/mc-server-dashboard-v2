@@ -85,7 +85,6 @@ function renderPage() {
   return { ...result, queryClient };
 }
 
-// The Roles tab is not the default; switch to it after the page loads.
 async function openRolesTab() {
   await screen.findAllByText("Sakura");
   fireEvent.click(
@@ -130,7 +129,6 @@ describe("CommunityRolesTab", () => {
     if (ownerRow === null || modRow === null) {
       throw new Error("rows missing");
     }
-    // Preset Owner shows the preset badge and offers no edit/delete affordances.
     expect(
       ownerRow.querySelector("button"),
       "preset role must have no action buttons",
@@ -141,13 +139,11 @@ describe("CommunityRolesTab", () => {
   it("renders the full 35-code matrix grouped by family, derived from the catalog", async () => {
     await openEditor([]);
 
-    // Every family has a select-all checkbox labelled from its family label,
-    // and every one of the catalog codes renders as a checkbox.
-    // Count tracks the catalog size; update when new families are added.
+    // Derive checkbox counts from the catalog, including one select-all checkbox per family.
     const total = ALL_CODES.length;
-    expect(total).toBe(35); // 30 original + session:read (#961) + plugin:read/manage (#1153) + schedule:read/manage (#1842)
+    expect(total).toBe(35);
     const checkboxes = await screen.findAllByRole("checkbox");
-    // One per code + one select-all per family.
+    // Include one checkbox per permission and one select-all per family.
     expect(checkboxes).toHaveLength(
       total + COMMUNITY_PERMISSION_FAMILIES.length,
     );
@@ -192,7 +188,6 @@ describe("CommunityRolesTab", () => {
       screen.getByLabelText(t("communitySettings.roles.nameLabel")),
       { target: { value: "Builder" } },
     );
-    // Tick one specific code via its checkbox (labelled by its full code).
     fireEvent.click(screen.getByLabelText("server:read"));
     fireEvent.click(
       screen.getByRole("button", { name: t("communitySettings.roles.save") }),
@@ -224,7 +219,6 @@ describe("CommunityRolesTab", () => {
         name: t("communitySettings.roles.edit"),
       }),
     );
-    // Existing permission is pre-checked.
     expect(
       (screen.getByLabelText("server:read") as HTMLInputElement).checked,
     ).toBe(true);
@@ -272,9 +266,6 @@ describe("CommunityRolesTab", () => {
 
   it("surfaces a delete failure with a toast", async () => {
     routeGet([role({ id: "r1", name: "Moderator" })]);
-    // The delete handler is reason-blind, so this only has to be a real
-    // failure: `conflict` is not a reason the API emits at any status, while a
-    // 500 always carries `internal_error` (issue #2421).
     mockApi.delete.mockRejectedValue(
       new ApiError(500, { reason: "internal_error" }),
     );

@@ -125,7 +125,6 @@ function run(overrides: Record<string, unknown> = {}) {
   };
 }
 
-// Route api.get by path: schedule list vs. run history.
 function routeGet(opts: { schedules?: object[]; runs?: object[] } = {}) {
   mockApi.get.mockImplementation((path: string) => {
     if (path.endsWith("/runs")) {
@@ -169,12 +168,10 @@ describe("ServerSchedulesTab table", () => {
 
     expect(await screen.findByText("nightly backup")).toBeInTheDocument();
     expect(screen.getByText(t("schedules.action.backup"))).toBeInTheDocument();
-    // 3600s interval humanizes to "Every 1 h".
     expect(
       screen.getByText(t("schedules.cadence.everyHours", { count: 1 })),
     ).toBeInTheDocument();
     expect(screen.getByText("UTC")).toBeInTheDocument();
-    // Enabled toggle reflects the schedule state.
     expect(
       screen.getByLabelText(
         t("schedules.enabledLabel", { name: "nightly backup" }),
@@ -215,7 +212,6 @@ describe("ServerSchedulesTab permissions", () => {
     renderTab(canFor(["schedule:read"]));
 
     await screen.findByText("nightly backup");
-    // No create / edit / delete affordances.
     expect(
       screen.queryByRole("button", { name: t("schedules.create") }),
     ).not.toBeInTheDocument();
@@ -225,7 +221,6 @@ describe("ServerSchedulesTab permissions", () => {
     expect(
       screen.queryByRole("button", { name: t("schedules.delete") }),
     ).not.toBeInTheDocument();
-    // Run history stays available; the enabled toggle is read-only.
     expect(
       screen.getByRole("button", { name: t("schedules.history") }),
     ).toBeInTheDocument();
@@ -262,7 +257,6 @@ describe("ServerSchedulesTab permissions", () => {
   });
 
   it("hides edit/delete for a row whose action the caller cannot run", async () => {
-    // Holds manage but only start — the backup-action row is not writable.
     routeGet();
     renderTab(canFor(["schedule:read", "schedule:manage", "server:start"]));
 
@@ -289,7 +283,6 @@ describe("ServerSchedulesTab create/edit dialog", () => {
     );
     const select = screen.getByLabelText(t("schedules.dialog.actionLabel"));
 
-    // Default action is "command": no warnings, but a command field.
     expect(
       screen.queryByText(t("schedules.dialog.warningsLabel")),
     ).not.toBeInTheDocument();
@@ -297,7 +290,6 @@ describe("ServerSchedulesTab create/edit dialog", () => {
       screen.getByLabelText(t("schedules.dialog.commandLabel")),
     ).toBeInTheDocument();
 
-    // Switch to stop: warnings editor appears, command field goes away.
     fireEvent.change(select, { target: { value: "stop" } });
     expect(
       screen.getByText(t("schedules.dialog.warningsLabel")),
@@ -306,7 +298,6 @@ describe("ServerSchedulesTab create/edit dialog", () => {
       screen.queryByLabelText(t("schedules.dialog.commandLabel")),
     ).not.toBeInTheDocument();
 
-    // Switch to start: warnings editor disappears again.
     fireEvent.change(select, { target: { value: "start" } });
     expect(
       screen.queryByText(t("schedules.dialog.warningsLabel")),
@@ -325,7 +316,6 @@ describe("ServerSchedulesTab create/edit dialog", () => {
     const option = () =>
       screen.queryByLabelText(t("schedules.dialog.onlyWhenRunningLabel"));
 
-    // Default action is "command": no backup option.
     expect(option()).not.toBeInTheDocument();
 
     fireEvent.change(select, { target: { value: "backup" } });
@@ -518,7 +508,6 @@ describe("ServerSchedulesTab create/edit dialog", () => {
       expect(button).not.toBeNull();
       fireEvent.click(button as HTMLElement);
     }
-    // Sixth add is not offered.
     expect(addButton()).toBeNull();
   });
 
@@ -600,8 +589,7 @@ describe("ServerSchedulesTab create/edit dialog", () => {
     fireEvent.change(screen.getByLabelText(t("schedules.dialog.nameLabel")), {
       target: { value: "too fast" },
     });
-    // The number input's min does not block a typed fractional value: 0.5
-    // minutes is 30s, below the API's 60s floor.
+    // Input min does not block typed fractions; 0.5 minutes is below the API's 60-second floor.
     fireEvent.change(
       screen.getByLabelText(t("schedules.dialog.intervalLabel")),
       { target: { value: "0.5" } },
@@ -613,7 +601,7 @@ describe("ServerSchedulesTab create/edit dialog", () => {
     expect(
       await screen.findByText(t("schedules.error.intervalTooShort")),
     ).toBeInTheDocument();
-    // Preview POSTs are expected; no create POST should have been made.
+    // Preview POSTs are expected; distinguish them from schedule creation.
     const createCalls = mockApi.post.mock.calls.filter(
       (call) => !(call[0] as string).includes("/preview"),
     );
@@ -673,7 +661,6 @@ describe("ServerSchedulesTab toggle/delete/history", () => {
   });
 });
 
-// Route api.post by path: preview vs. create.
 function routePost(
   opts: {
     create?: object;
@@ -714,12 +701,10 @@ describe("ServerSchedulesTab daily/weekly builder", () => {
     fireEvent.change(screen.getByLabelText(t("schedules.dialog.nameLabel")), {
       target: { value: "daily test" },
     });
-    // Switch to "Daily at a specific time".
     fireEvent.change(
       screen.getByLabelText(t("schedules.dialog.cadenceLabel")),
       { target: { value: "daily" } },
     );
-    // Set hour=4, minute=0 (defaults).
     fireEvent.change(screen.getByLabelText(t("schedules.dialog.hourLabel")), {
       target: { value: "4" },
     });
@@ -755,12 +740,10 @@ describe("ServerSchedulesTab daily/weekly builder", () => {
     fireEvent.change(screen.getByLabelText(t("schedules.dialog.nameLabel")), {
       target: { value: "weekday test" },
     });
-    // Switch to "Specific days of the week".
     fireEvent.change(
       screen.getByLabelText(t("schedules.dialog.cadenceLabel")),
       { target: { value: "weekly" } },
     );
-    // Check Mon (1), Wed (3), Fri (5) via their label text.
     fireEvent.click(screen.getByLabelText(t("schedules.dialog.day.mon")));
     fireEvent.click(screen.getByLabelText(t("schedules.dialog.day.wed")));
     fireEvent.click(screen.getByLabelText(t("schedules.dialog.day.fri")));
@@ -802,11 +785,9 @@ describe("ServerSchedulesTab daily/weekly builder", () => {
     await screen.findByText("nightly backup");
     fireEvent.click(screen.getByRole("button", { name: t("schedules.edit") }));
 
-    // The cadence select should show "daily" (every-day cron detected).
     expect(
       screen.getByLabelText(t("schedules.dialog.cadenceLabel")),
     ).toHaveValue("daily");
-    // The time fields should be prefilled from the parsed cron.
     expect(screen.getByLabelText(t("schedules.dialog.hourLabel"))).toHaveValue(
       4,
     );
@@ -830,11 +811,9 @@ describe("ServerSchedulesTab daily/weekly builder", () => {
     await screen.findByText("nightly backup");
     fireEvent.click(screen.getByRole("button", { name: t("schedules.edit") }));
 
-    // The cadence select should show "weekly" (specific days detected).
     expect(
       screen.getByLabelText(t("schedules.dialog.cadenceLabel")),
     ).toHaveValue("weekly");
-    // The builder fields should be prefilled from the parsed cron.
     expect(screen.getByLabelText(t("schedules.dialog.hourLabel"))).toHaveValue(
       18,
     );
@@ -864,7 +843,6 @@ describe("ServerSchedulesTab daily/weekly builder", () => {
     await screen.findByText("nightly backup");
     fireEvent.click(screen.getByRole("button", { name: t("schedules.edit") }));
 
-    // The cadence select should show "cron".
     expect(
       screen.getByLabelText(t("schedules.dialog.cadenceLabel")),
     ).toHaveValue("cron");
@@ -881,12 +859,10 @@ describe("ServerSchedulesTab daily/weekly builder", () => {
     fireEvent.change(screen.getByLabelText(t("schedules.dialog.nameLabel")), {
       target: { value: "all days" },
     });
-    // Switch to "Specific days of the week".
     fireEvent.change(
       screen.getByLabelText(t("schedules.dialog.cadenceLabel")),
       { target: { value: "weekly" } },
     );
-    // Check all 7 days.
     for (const key of DAY_LABEL_KEYS) {
       fireEvent.click(screen.getByLabelText(t(key)));
     }
@@ -921,7 +897,6 @@ describe("ServerSchedulesTab daily/weekly builder", () => {
     fireEvent.click(
       await screen.findByRole("button", { name: t("schedules.create") }),
     );
-    // Switch to "Specific days of the week" — zero days checked.
     fireEvent.change(
       screen.getByLabelText(t("schedules.dialog.cadenceLabel")),
       { target: { value: "weekly" } },
@@ -962,7 +937,6 @@ describe("ServerSchedulesTab humanized cadence", () => {
     const mon = t("schedules.dialog.day.mon");
     const wed = t("schedules.dialog.day.wed");
     const fri = t("schedules.dialog.day.fri");
-    // Intl.ListFormat produces locale-aware joins (e.g. "Mon, Wed, and Fri").
     const days = new Intl.ListFormat("en", { type: "conjunction" }).format([
       mon,
       wed,
@@ -999,7 +973,6 @@ describe("ServerSchedulesTab next-runs preview", () => {
       await screen.findByRole("button", { name: t("schedules.create") }),
     );
 
-    // Wait for the preview to render (debounced).
     const preview = await screen.findByTestId("next-runs-preview");
     await waitFor(() => {
       const items = within(preview).getAllByRole("listitem");
@@ -1016,7 +989,6 @@ describe("ServerSchedulesTab next-runs preview", () => {
       await screen.findByRole("button", { name: t("schedules.create") }),
     );
 
-    // Default mode is interval — wait for preview to render.
     const preview = await screen.findByTestId("next-runs-preview");
     await waitFor(() => {
       expect(
@@ -1027,7 +999,7 @@ describe("ServerSchedulesTab next-runs preview", () => {
 
   it("shows loading indicator immediately on dialog open", async () => {
     routeGet({ schedules: [] });
-    // Return a promise that never resolves so loading stays true.
+    // Keep the preview response pending so loading remains observable.
     mockApi.post.mockReturnValue(new Promise(() => {}));
     renderTab(canFor(ALL_CODES));
 
@@ -1035,7 +1007,6 @@ describe("ServerSchedulesTab next-runs preview", () => {
       await screen.findByRole("button", { name: t("schedules.create") }),
     );
 
-    // Loading indicator should be visible synchronously — no blank gap.
     const preview = screen.getByTestId("next-runs-preview");
     expect(
       within(preview).getByText(t("schedules.dialog.nextRunsLoading")),
@@ -1051,22 +1022,19 @@ describe("ServerSchedulesTab next-runs preview", () => {
       await screen.findByRole("button", { name: t("schedules.create") }),
     );
 
-    // The preview POST should fire synchronously on mount — not behind
-    // a 500ms setTimeout. A synchronous assertion discriminates the fix.
+    // Assert synchronously to distinguish the initial request from debounced subsequent changes.
     const previewCalls = () =>
       mockApi.post.mock.calls.filter((call) =>
         (call[0] as string).includes("/preview"),
       );
     expect(previewCalls().length).toBe(1);
 
-    // A subsequent cadence change should NOT fire immediately (debounced).
     fireEvent.change(
       screen.getByLabelText(t("schedules.dialog.cadenceLabel")),
       { target: { value: "daily" } },
     );
     expect(previewCalls().length).toBe(1);
 
-    // After debounce, a second call arrives.
     await waitFor(() => expect(previewCalls().length).toBe(2));
   });
 
@@ -1080,7 +1048,6 @@ describe("ServerSchedulesTab next-runs preview", () => {
     fireEvent.click(
       await screen.findByRole("button", { name: t("schedules.create") }),
     );
-    // Switch to cron mode and enter an invalid expression.
     fireEvent.change(
       screen.getByLabelText(t("schedules.dialog.cadenceLabel")),
       { target: { value: "cron" } },
@@ -1089,7 +1056,6 @@ describe("ServerSchedulesTab next-runs preview", () => {
       target: { value: "bad cron" },
     });
 
-    // Wait for the debounced preview error.
     const preview = await screen.findByTestId("next-runs-preview");
     await waitFor(() => {
       expect(

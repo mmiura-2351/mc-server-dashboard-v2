@@ -1,9 +1,6 @@
-// English dictionary (shipped). A second locale (e.g. Japanese) can be added as
-// a sibling object with the same keys; see WEBUI_SPEC.md Section 7.5.
 export const en = {
   "app.title": "mc-server-dashboard",
 
-  // Shell chrome
   "shell.brand": "MC Dashboard",
   "shell.account": "Account",
   "shell.switchCommunity": "Switch community",
@@ -15,7 +12,6 @@ export const en = {
   "shell.language.en": "English",
   "shell.language.ja": "日本語",
 
-  // Sidebar navigation (WEBUI_SPEC.md Section 5)
   "nav.community": "Community",
   "nav.dashboard": "Dashboard",
   "nav.createServer": "Create server",
@@ -29,7 +25,6 @@ export const en = {
   "nav.adminAudit": "Global audit",
   "nav.sharedResources": "Shared resources",
 
-  // Placeholder pages (Phase 1: routing skeleton only)
   "page.dashboard": "Servers",
   "page.serverCreate": "Create server",
   "page.account": "Account",
@@ -42,13 +37,9 @@ export const en = {
   "page.placeholder": "Placeholder page — content arrives in a later phase.",
   "page.notFound": "Page not found",
 
-  // Not-found (404) route: shown for any unmatched URL (#639). The body
-  // explains the state and the link returns the user to the landing route.
   "notFound.body": "The page you are looking for does not exist or has moved.",
   "notFound.home": "Back to home",
 
-  // No-community empty state (#584): shown on the landing route when the
-  // signed-in account belongs to zero communities.
   "noCommunity.title": "No community yet",
   "noCommunity.body":
     "Your account isn't a member of any community yet. Communities scope your servers, members, and settings.",
@@ -58,20 +49,13 @@ export const en = {
     "As a platform administrator, you can create the first community.",
   "noCommunity.adminCta": "Create a community",
 
-  // Community-not-found state (#784): shown when a URL `:cid` is not one the
-  // signed-in account belongs to (stale bookmark, or a community the user has
-  // left). The dashboard and server-create pages derive their community from the
-  // URL, so they render this instead of silently falling back to another one.
   "community.notFound.title": "Community not found",
   "community.notFound.body":
     "This community does not exist or you are not a member of it.",
 
-  // Auth links
   "auth.toRegister": "No account? Register",
   "auth.toLogin": "Have an account? Sign in",
 
-  // Login / register pages and route guards (issue #410). Kept as one
-  // contiguous block to minimize merge conflicts with sibling i18n PRs.
   "auth.loading": "Loading…",
   "auth.fieldUsername": "Username",
   "auth.fieldEmail": "Email",
@@ -93,7 +77,6 @@ export const en = {
   "register.success": "Account created. Please sign in.",
   "register.genericError": "Could not create your account. Please try again.",
   "register.errPasswordMismatch": "Passwords do not match.",
-  // Server-authoritative reason codes (AUTH_API.md 2; users.py register).
   "register.reason.too_short": "Password is too short.",
   "register.reason.too_long_for_bcrypt": "Password is too long.",
   "register.reason.insufficient_complexity":
@@ -108,7 +91,6 @@ export const en = {
   "register.reason.invalid_username": "That username is not allowed.",
   "register.reason.invalid_email": "Enter a valid email address.",
 
-  // UX primitives (WEBUI_SPEC.md Section 7.4)
   "common.cancel": "Cancel",
   "common.close": "Close",
   "common.showPassword": "Show password",
@@ -117,15 +99,12 @@ export const en = {
   "common.chooseFile": "Choose file",
   "common.noFileChosen": "No file chosen",
 
-  // Upload progress (issue #1207). `{loaded}`/`{total}` are humanized byte
-  // sizes; `{percent}` is an integer; `{seconds}` is the elapsed seconds.
+  // Byte placeholders are already formatted; percent is rounded and elapsed is m:ss.
   "upload.label": "Uploading",
   "upload.bytes": "{loaded} / {total}",
   "upload.percent": "{percent}%",
   "upload.elapsed": "{seconds}s elapsed",
 
-  // Account page (WEBUI_SPEC.md 6.11) — one contiguous block to minimise
-  // merge conflicts with sibling PRs adding keys under other prefixes.
   "account.subtitle": "Your profile, security, and memberships.",
   "account.signOut": "Sign out",
   "account.loading": "Loading…",
@@ -165,7 +144,6 @@ export const en = {
   "account.delete.prompt": "Type your username to enable deletion",
   "account.delete.password": "Confirm your password",
 
-  // API reason codes (RFC 9457 `reason`) surfaced inline / via toast.
   "account.error.username_taken": "That username is already taken.",
   "account.error.email_taken": "That email is already in use.",
   "account.error.invalid_username": "That username is not valid.",
@@ -187,8 +165,6 @@ export const en = {
     "You are the last platform admin and cannot delete your account.",
   "account.error.generic": "Something went wrong. Please try again.",
 
-  // Dashboard server cards (WEBUI_SPEC.md 6.2). One contiguous block to keep
-  // merge conflicts with sibling i18n PRs minimal.
   "dashboard.subtitle": "Servers in this community.",
   "dashboard.loading": "Loading servers…",
   "dashboard.loadError": "Could not load servers. Try refreshing.",
@@ -200,11 +176,9 @@ export const en = {
   "dashboard.startCrashed": "Restart",
   "dashboard.stop": "Stop",
   "dashboard.restart": "Restart",
-  // Card/table view toggle (#541); cards remain the default.
   "dashboard.view.label": "Server list view",
   "dashboard.view.cards": "Cards",
   "dashboard.view.table": "Table",
-  // Table-view column headers (#541): the same data as the cards.
   "dashboard.col.name": "Name",
   "dashboard.col.state": "State",
   "dashboard.col.type": "Type / version",
@@ -212,7 +186,6 @@ export const en = {
   "dashboard.col.address": "Address",
   "dashboard.col.worker": "Host",
   "dashboard.col.actions": "Actions",
-  // Observed-state pill labels (WEBUI_SPEC.md 2.3).
   "dashboard.state.starting": "starting",
   "dashboard.state.running": "running",
   "dashboard.state.stopping": "stopping",
@@ -220,104 +193,50 @@ export const en = {
   "dashboard.state.restarting": "restarting",
   "dashboard.state.crashed": "crashed",
   "dashboard.state.unknown": "unknown",
-  // Lifecycle action feedback.
   "dashboard.actionFailed": "Could not complete that action. Please try again.",
-  // Conflict-flavoured lifecycle races (SPEC 7.4).
   "dashboard.stateChanged": "State changed — refreshed.",
-  // Sanitized 409 start-failure reasons (issue #225); specific, actionable
-  // causes rather than the generic state-changed toast.
   "dashboard.lifecycle.portConflict":
     "Could not start: a port is already in use.",
   "dashboard.lifecycle.imageMissing":
     "Could not start: the server's files are not ready. Try again shortly.",
-  // 409 worker_busy / server_busy (issue #2400): another operation holds the
-  // server, so this one was refused without being applied. It clears on its own
-  // once that operation finishes, so the only remedy is to retry.
   "dashboard.lifecycle.busy":
     "Another operation on this server is in progress. Please wait a moment and try again.",
-  // 409 command_failed (issue #2420): the host took the command and could not
-  // apply it, for a cause it did not classify. Whether the server moved depends
-  // on the verb (a failed restart can leave it down), and a retry is not known
-  // to help, so the toast points at the server's state rather than promising
-  // one.
   "dashboard.lifecycle.commandFailed":
     "The server host could not carry out that action. Check the server's current state before trying again.",
-  // 409 command_failed / worker_busy on stop, and command_failed or
-  // server_not_running on restart (issues #2435/#2441): the API committed the
-  // intent before dispatching, so the failure leaves it pending rather than
-  // undone. These name what is still going to happen instead of asking the
-  // operator to work it out. The restart string covers both of its reasons: a
-  // restart the Worker could not carry out and one it refused because it was
-  // running nothing leave the same thing behind — desired_state=running.
   "dashboard.lifecycle.stopPending":
     "Could not stop the server: it is still running. The system will keep trying to stop it.",
   "dashboard.lifecycle.restartPending":
     "Could not restart the server: it may be stopped for now. The system will bring it back automatically.",
-  // 409 worker_busy on start (issue #2445). A start refused with worker_busy is
-  // ambiguous at the edge: a post-dispatch BUSY leaves the start pending for the
-  // reconciler, but a pre-dispatch one is undone back to stopped — both arrive
-  // identically, so this must not promise the start will happen. It says it MAY
-  // still come up and to start again only if it stays stopped, rather than the
-  // plain "try again" that on the pending path collides with invalid_transition.
+  // worker_busy can precede or follow dispatch; only the latter leaves a pending start.
   "dashboard.lifecycle.startPending":
     "Could not start the server right now: another operation on it is still in progress. The start may still be applied automatically — check the server's state, and start it again only if it stays stopped.",
-  // 409 invalid_transition on start (issue #2445): the server is already
-  // desired-running, so a retry after being told the start is pending gets this
-  // instead of the contradictory generic state-changed toast.
   "dashboard.lifecycle.startAlreadyRunning":
     "The server is already running or starting up, so there is nothing to start.",
-  // 409 failed_stop_orphan (issue #2466): the host could not confirm an earlier
-  // stop, so the server's process may still be running — it never went down, and
-  // repeating the same action is refused identically. Asking the operator to stop
-  // it again stopped being the honest remedy at issue #2475: the host now
-  // converges the orphan itself (probing the process, retrying the stop while it
-  // is alive, retiring the record once it is confirmed gone), so the message names
-  // the condition and says the work is already under way (issue #2476).
+  // A failed-stop orphan may still be running; the host is already retrying its stop.
   "dashboard.lifecycle.failedStopOrphan":
     "The server's previous stop did not finish, so its process may still be running. The system is shutting it down automatically; wait a moment and try again.",
-  // 503 service-unavailable reasons (issue #1092): post-restart scenarios where
-  // a host or the server files are not yet ready.
   "dashboard.lifecycle.noEligibleWorker":
     "No server host is available right now. If the system just restarted, wait a moment and try again.",
   "dashboard.lifecycle.workerUnavailable":
     "Could not reach the server host. Please wait a moment and try again.",
   "dashboard.lifecycle.jarUnavailable":
     "Could not prepare the server files. Please wait a moment and try again.",
-  // 503 worker_unavailable on stop / restart (issue #2440): the dispatch timed
-  // out or its session dropped AFTER the intent was committed, so nothing was
-  // undone and the outcome is simply unknown — a graceful stop outliving the
-  // dispatch deadline is the commonest case. Distinct from the *Pending pair
-  // above, which can say the server did not move; these can only say the
-  // result is unconfirmed. What still stands differs by verb: the stop intent
-  // is re-driven (the reconciler keeps retrying it), while restart keeps only
-  // desired=running — an undelivered restart is never re-sent, and the
-  // reconciler starts the server only if it does end up down, which is why that
-  // string is conditional rather than a promise to bring it back.
+  // A timeout leaves the outcome unknown: stop intent is retried; restart recovers only if the server is down.
   "dashboard.lifecycle.stopUnconfirmed":
     "Could not reach the server host to confirm the stop. The server may already be shutting down; the stop still stands and the system will keep trying.",
   "dashboard.lifecycle.restartUnconfirmed":
     "Could not reach the server host to confirm the restart. The server may already be coming back; if it stays down the system will start it again automatically.",
-  // Live-status degraded indicator: WS down, polling fallback (SPEC 6.2 / 7.2).
   "dashboard.liveDegraded": "Reconnecting — updates may lag",
-  // Clickable join-hostname copy feedback (ServerAddressBadges, shared by the
-  // dashboard and the server detail header).
   "dashboard.copiedJoinHostname": "Copied!",
-  // Bedrock address:port badge (issue #1543): shown alongside the Java
-  // join-hostname badge when the server holds a bedrock_port.
   "dashboard.bedrockLabel": "Bedrock",
   "dashboard.copiedBedrockAddress": "Copied!",
-  // Badge tooltip: the copy action yields the host only; Bedrock's "Add Server"
-  // screen has a separate Port field, so the port is not part of the copied value.
+  // Bedrock's Add Server screen takes host and port separately; copy only the host.
   "dashboard.bedrockAddressCopyTitle":
     "Copy address — enter port {port} in the separate Port field",
-  // Filter and sort controls (#1123).
   "dashboard.filter.search": "Search by name…",
   "dashboard.filter.state": "Filter by state",
-  // State filter dropdown: short trigger label, clear action, and the four
-  // semantic buckets (#2239).
   "dashboard.filter.stateLabel": "State",
-  // Accessible name for the state trigger when buckets are selected; the count
-  // badge itself is aria-hidden, so this is how the number reaches AT (#2668).
+  // The count badge is aria-hidden; include its value in the trigger's accessible name.
   "dashboard.filter.stateCount": "Filter by state ({count} selected)",
   "dashboard.filter.clear": "Clear",
   "dashboard.filter.bucket.running": "Running",
@@ -330,18 +249,13 @@ export const en = {
   "dashboard.sort.state": "State",
   "dashboard.sort.type": "Type",
 
-  // Server detail page (WEBUI_SPEC.md 6.4 / 6.9). One contiguous block to keep
-  // merge conflicts with sibling i18n PRs minimal.
   "serverDetail.loading": "Loading server…",
   "serverDetail.loadError": "Could not load this server. Try refreshing.",
   "serverDetail.breadcrumb": "Servers",
-  // Overview header.
   "serverDetail.crashDetail": "Crash reason:",
   "serverDetail.crashBanner.guidance":
     "The server has crashed. Click Restart to try again, or check the console for details.",
   "serverDetail.crashBanner.viewConsole": "View Console",
-  // Forge install diagnostics (#1093): the explanation of a crash the Worker
-  // classified, and the install-log viewer the crash banner offers for it.
   "serverDetail.crashReason.forgeInstallOutOfMemory":
     "The Forge installer ran out of memory. Stop the server, raise its memory limit in Settings, then start it again.",
   "serverDetail.crashReason.forgeInstallJavaIncompatible":
@@ -363,8 +277,6 @@ export const en = {
   "serverDetail.noWorker": "no host assigned",
   "serverDetail.worker": "Host",
   "serverDetail.noPort": "no port",
-  // Tabs (WEBUI_SPEC.md 6.4–6.9). Built tabs: Overview, Settings; the rest are
-  // placeholders pending later phases.
   "serverDetail.tab.overview": "Overview",
   "serverDetail.tab.console": "Console",
   "serverDetail.tab.files": "Files",
@@ -372,21 +284,17 @@ export const en = {
   "serverDetail.tab.schedules": "Schedules",
   "serverDetail.tab.players": "Players",
   "serverDetail.tab.settings": "Settings",
-  // Overview live metrics strip + log tail (issue #440, WEBUI_SPEC.md 6.4).
   "serverDetail.metric.cpu": "CPU",
   "serverDetail.metric.memory": "Memory",
   "serverDetail.metric.players": "Players",
   "serverDetail.metric.cores": "cores",
   "serverDetail.metric.mib": "MiB",
-  // Before the first metrics frame arrives, vs. no stream while not running.
   "serverDetail.metric.collecting": "Collecting…",
   "serverDetail.metric.idle": "No metrics while stopped",
   "serverDetail.logTailHeading": "Recent log",
   "serverDetail.openConsole": "Open Console",
   "serverDetail.logTailEmpty": "No log output yet.",
-  // Inline divider where the client fell behind and missed events (SPEC 7.2).
   "serverDetail.missedEvents": "— missed events —",
-  // Console tab (issue #440, WEBUI_SPEC.md 6.5).
   "serverDetail.console.follow": "Follow",
   "serverDetail.console.filter": "Filter…",
   "serverDetail.console.clear": "Clear",
@@ -395,8 +303,6 @@ export const en = {
   "serverDetail.console.notRunning":
     "Commands are available only while the server is running.",
   "serverDetail.commandFailed": "Command failed.",
-  // Console command failures by cause (issue #2450); see
-  // serverConsoleErrorPresentation.ts for what each reason means.
   "serverDetail.console.error.workerUnavailable":
     "Could not reach the server host, so it is unknown whether the command ran. Check the console output before sending it again.",
   "serverDetail.console.error.notRunning":
@@ -405,7 +311,6 @@ export const en = {
     "Command not sent: the server's previous stop did not finish, so its process may still be running. The system is shutting it down automatically.",
   "serverDetail.console.error.rconFailed":
     "The server's console connection (RCON) failed, so the command may not have run. Check the console output before sending it again.",
-  // Lifecycle controls.
   "serverDetail.start": "Start",
   "serverDetail.startCrashed": "Restart",
   "serverDetail.stop": "Stop",
@@ -418,7 +323,6 @@ export const en = {
   "serverDetail.restart": "Restart",
   "serverDetail.export": "Export",
   "serverDetail.delete": "Delete",
-  // Settings tab (WEBUI_SPEC.md 6.9).
   "serverDetail.settings.general": "General",
   "serverDetail.settings.name": "Server name",
   "serverDetail.settings.gamePort": "Game port",
@@ -429,23 +333,20 @@ export const en = {
   "serverDetail.settings.configRemove": "Remove",
   "serverDetail.settings.configHint":
     "Values are read as JSON: 12 is a number, true a boolean, anything else text.",
-  // Per-server memory limit (issue #709). Unset means the JVM picks its own
-  // default heap, so the field reads as "Default" rather than 0/blank.
+  // An unset memory limit uses the JVM's default heap.
   "serverDetail.settings.memoryLimit": "Memory limit (MiB)",
   "serverDetail.settings.memoryLimitDefault": "Default",
   "serverDetail.settings.memoryLimitHint":
     "Maximum memory for this server, in MiB. Leave blank to use the default.",
   "serverDetail.settings.memoryLimitRange":
     "Enter a whole number between 512 and 1048576 MiB, or leave blank for the default.",
-  // Per-server CPU allocation (issue #726). A soft, relative share of host CPU
-  // in millicores (1000 = one core), not a hard cap; unset reads as "auto".
+  // CPU allocation is a relative share in millicores, not a hard cap; unset means automatic.
   "serverDetail.settings.cpuAllocation": "CPU allocation (millicores)",
   "serverDetail.settings.cpuAllocationDefault": "Auto",
   "serverDetail.settings.cpuAllocationHint":
     "Soft share of CPU for this server, in millicores (1000 = one core). A relative weight under load, not a hard cap — the server can use more when the host is idle. Leave blank for auto.",
   "serverDetail.settings.cpuAllocationRange":
     "Enter a whole number between 100 and 128000 millicores, or leave blank for auto.",
-  // Relay join-address name field (issue #961): visible only when relay is enabled.
   "serverDetail.settings.slug": "Join address name",
   "serverDetail.settings.slugHint":
     "Lowercase letters, numbers and hyphens only. Cannot start or end with a hyphen. Leave unchanged to keep the current join address.",
@@ -457,13 +358,11 @@ export const en = {
   "serverDetail.settings.saved": "Settings saved.",
   "serverDetail.settings.atRestHint":
     "Name, game port and config changes need the server stopped.",
-  // On-blur game-port availability check (GET /ports/check/{port}).
   "serverDetail.port.available": "✓ available",
   "serverDetail.port.current": "✓ available (current)",
   "serverDetail.port.taken": "Port is already in use.",
   "serverDetail.port.outOfRange": "Port is outside the allowed range.",
   "serverDetail.port.checkError": "Could not check port availability.",
-  // Danger zone.
   "serverDetail.danger.heading": "Danger zone",
   "serverDetail.danger.exportTitle": "Export server",
   "serverDetail.danger.exportDesc":
@@ -478,13 +377,9 @@ export const en = {
     "This permanently deletes the server, its data and backups. This cannot be undone. Type the server name to confirm.",
   "serverDetail.delete.confirm": "Delete server",
   "serverDetail.delete.prompt": "Type the server name to enable deletion",
-  // Outcomes (toasts). 409/422 reasons surfaced specifically; otherwise generic.
   "serverDetail.exportStarted": "Export download started.",
   "serverDetail.deleted": "Server deleted.",
   "serverDetail.error.notStopped": "Stop the server before making this change.",
-  // The at-rest precondition (409 server_unsettled). Shared by the danger-zone
-  // and actions-bar surfaces via the lifecycle mapping, so it names no single
-  // action (issue #2360).
   "serverDetail.error.unsettled": "The server must be stopped for this action.",
   "serverDetail.error.portTaken": "That game port is already in use.",
   "serverDetail.error.portOutOfRange":
@@ -497,12 +392,7 @@ export const en = {
     "The memory limit must be a whole number between 512 and 1048576 MiB.",
   "serverDetail.error.invalidCpuAllocation":
     "The CPU allocation must be a whole number between 100 and 128000 millicores.",
-  // The config-blob guard (issue #94). All four of its reasons are reachable
-  // from this editor because it reads every value as JSON (`settings.configHint`):
-  // a typed `null`, a deeply nested literal, an oversized paste and an unpaired
-  // surrogate escape each survive the round trip to the API. Each string names
-  // the rule and its limit rather than the reason code, which is what the user
-  // needs in order to fix the row.
+  // The JSON editor can submit null, nested values, oversized content, and lone surrogates.
   "serverDetail.error.configTooLarge":
     "The config overrides are too large. Keep them under 64 KiB in total — shorten or remove some values.",
   "serverDetail.error.configNullValue":
@@ -512,32 +402,25 @@ export const en = {
   "serverDetail.error.configLoneSurrogate":
     "A config override key or value contains a broken character — often half of an emoji left behind by a copy-paste. Retype or remove that text.",
   "serverDetail.error.generic": "Something went wrong. Please try again.",
-  // EULA acceptance dialog (issue #1104).
   "serverDetail.eulaDialog.title": "Accept Minecraft EULA?",
   "serverDetail.eulaDialog.body":
     "You must accept the Minecraft End User License Agreement (EULA) before starting this server.",
   "serverDetail.eulaDialog.accept": "Accept and start",
   "serverDetail.eulaDialog.link": "View the Minecraft EULA",
 
-  // Backups tab (WEBUI_SPEC.md 6.7). One contiguous block to keep merge
-  // conflicts with sibling i18n PRs minimal.
   "backups.loading": "Loading backups…",
   "backups.loadError": "Could not load backups.",
-  // Statistics is the secondary query: when it fails alone the listing still
-  // renders, so its error shows in the stats slot only (#2554).
+  // Statistics can fail independently while the backup list remains usable.
   "backups.stats.loadError": "Could not load backup statistics.",
   "backups.noRead": "You do not have permission to view backups.",
   "backups.none": "—",
   "backups.empty": "No backups yet.",
-  // Stats header.
   "backups.stat.count": "Backups",
   "backups.stat.totalSize": "Total size",
-  // Shown beside the total when some backups have no recorded size (legacy
-  // NULL-size rows, #281): the figure sums only the known sizes (#640).
+  // The total sums known sizes only; legacy rows may have no recorded size.
   "backups.stat.totalSizePartial": "known only",
   "backups.stat.newest": "Newest",
   "backups.stat.oldest": "Oldest",
-  // Table.
   "backups.col.created": "Created",
   "backups.col.source": "Origin",
   "backups.col.condition": "Condition",
@@ -545,33 +428,25 @@ export const en = {
   "backups.col.creator": "By",
   "backups.unknownSize": "unknown",
   "backups.unknownCreator": "—",
-  // Condition badge (API `health`: healthy / quarantined / unreadable /
-  // unknown). Plain
-  // language — no internal jargon. A healthy backup shows nothing, keeping the
-  // row quiet; only the at-risk states are flagged.
+  // Only at-risk backup states get badges; healthy rows remain unmarked.
   "backups.health.quarantined": "Damaged",
   "backups.health.quarantinedTitle":
     "This backup's data is known to be damaged. Restoring it may produce a broken world.",
-  // Unreadable (#2374): the archive's bytes are gone, not the world damaged —
-  // nothing can restore it, and the remedy is on the storage side.
+  // Unreadable means the archive cannot be retrieved; it does not establish world corruption.
   "backups.health.unreadable": "Unreadable",
   "backups.health.unreadableTitle":
     "This backup's file could not be read back from storage, so it cannot be restored. The storage is likely damaged, not the world. It is re-checked the next time an administrator runs the backup integrity check.",
   "backups.health.unknown": "Unverified",
   "backups.health.unknownTitle":
     "This backup has not been checked, so its condition is unknown.",
-  // Actions.
   "backups.create": "+ Create backup",
   "backups.upload": "Upload",
   "backups.download": "Download",
   "backups.restore": "Restore",
   "backups.delete": "Delete",
-  // Scheduled backups moved to the general scheduler (#1840); point users there.
   "backups.schedule.movedNote":
     "Scheduled backups are now configured under Schedules.",
-  // Scheduled-backup retention policy editor (issue #1841 API / #1843 UI). The
-  // policy prunes ONLY scheduled backups; manual/uploaded/event backups are
-  // never auto-deleted (the source badge distinguishes the rows).
+  // Retention prunes scheduled backups only; manual, uploaded, and event backups are preserved.
   "backups.retention.modeLabel": "Scheduled-backup retention",
   "backups.retention.mode.none": "Keep all",
   "backups.retention.mode.keepLast": "Keep the last N",
@@ -591,7 +466,6 @@ export const en = {
   "backups.retention.error.tiered":
     "Enter whole numbers (0 or more), with at least one above 0.",
   "backups.retention.error.invalid": "That retention policy is not valid.",
-  // Restore dialog (stopped-only; two-step stop-then-restore).
   "backups.restoreDialog.title": "Restore backup",
   "backups.restoreDialog.blocked":
     "Restoring overwrites the server's data and requires the server to be stopped.",
@@ -603,30 +477,23 @@ export const en = {
   "backups.restoreDialog.stopping": "Stopping the server…",
   "backups.restoreDialog.body":
     "This overwrites the server's current data with this backup. This cannot be undone.",
-  // Hover title on the disabled restore action of an unreadable backup (#2374).
   "backups.restoreUnavailableUnreadable":
     "This backup's file could not be read back from storage, so it cannot be restored.",
   "backups.restoreDialog.prompt": "Type RESTORE to confirm",
   "backups.restoreDialog.phrase": "RESTORE",
   "backups.restoreDialog.confirm": "Restore backup",
-  // Force-restore warning shown only when the chosen backup is quarantined
-  // (health === "quarantined"). It restores anyway with force=true, so the copy
-  // makes the deliberate, damaged-data nature explicit (#745).
+  // Force restore requires explicit acknowledgement because it can publish known-damaged world data.
   "backups.restoreDialog.damagedWarning":
     "This backup's data is known to be damaged. Restoring it may leave the server with a broken world, and there is no way to repair it afterwards.",
   "backups.restoreDialog.damagedConfirm": "Restore the damaged backup anyway",
-  // Acknowledgement checkbox label gating the force-restore — affirmation phrased
-  // (the user asserts they accept the risk), not a restatement of the warning.
   "backups.restoreDialog.damagedAck":
     "I understand this backup is damaged and may leave a broken world that cannot be repaired.",
-  // Delete dialog (typed confirm).
   "backups.deleteDialog.title": "Delete backup",
   "backups.deleteDialog.body":
     "This permanently deletes the backup archive. This cannot be undone.",
   "backups.deleteDialog.prompt": "Type DELETE to confirm",
   "backups.deleteDialog.phrase": "DELETE",
   "backups.deleteDialog.confirm": "Delete backup",
-  // Outcomes (toasts).
   "backups.created": "Backup created.",
   "backups.uploaded": "Backup uploaded.",
   "backups.deleted": "Backup deleted.",
@@ -637,13 +504,7 @@ export const en = {
   "backups.error.unsettled":
     "The server is starting or stopping — try again once it is fully stopped or running.",
   "backups.error.invalidArchive": "That file is not a valid backup archive.",
-  // `_validate_backup_archive` (api backups.py) guards a tar's DIRECTORY member
-  // by its own name and a FILE member by its PARENT, so both shapes reach this
-  // one message: a `server.properties/` directory entry, and any entry stored
-  // under that path — including a plain `server.properties/x` file in an
-  // archive with no directory entry at all. Naming only the directory would
-  // send that operator looking for something their archive does not list
-  // (issue #3037).
+  // The archive guard rejects both a server.properties directory and files stored beneath that path.
   "backups.error.platformManagedPath":
     "That archive contains a server.properties directory or an entry under server.properties/, but the platform keeps a plain file at that path. Remove or move that entry and upload again.",
   "backups.error.workerUnavailable":
@@ -656,8 +517,6 @@ export const en = {
   "backups.error.tooLarge": "That file exceeds the 512 MiB upload limit.",
   "backups.error.generic": "Something went wrong. Please try again.",
 
-  // Schedules tab (WEBUI_SPEC.md 6.13, issue #1842). One contiguous block to
-  // keep merge conflicts with sibling tab PRs minimal.
   "schedules.noRead": "You do not have permission to view schedules.",
   "schedules.loading": "Loading schedules…",
   "schedules.loadError": "Could not load schedules.",
@@ -769,8 +628,6 @@ export const en = {
   "schedules.runs.outcome.failure": "Failure",
   "schedules.runs.outcome.skipped": "Skipped",
 
-  // Files tab (WEBUI_SPEC.md 6.6). One contiguous block to keep merge
-  // conflicts with sibling tab PRs minimal.
   "files.denied": "You do not have permission to view this server's files.",
   "files.runningNotice":
     "Server is running — file edits apply to the running server immediately. Upload and folder creation require stopping the server first.",
@@ -801,7 +658,6 @@ export const en = {
   "files.delete.dialogBody":
     "This permanently deletes the selected file or directory. Type its name to confirm.",
   "files.delete.confirm": "Delete permanently",
-  // Search (files/search).
   "files.search.label": "Search files",
   "files.search.placeholder": "Search by name…",
   "files.search.byName": "Name",
@@ -811,7 +667,6 @@ export const en = {
   "files.search.truncated":
     "Showing the first results — narrow your search to see more.",
   "files.search.error": "Search failed. Try again.",
-  // History drawer + rollback (files/history, files/rollback).
   "files.history": "History",
   "files.history.title": "Version history",
   "files.history.loading": "Loading versions…",
@@ -830,7 +685,6 @@ export const en = {
   "files.rollback.dialogBody":
     "This replaces the current file with the selected version. The server must be stopped.",
   "files.rollback.confirm": "Roll back now",
-  // Outcomes (toasts).
   "files.saved": "File saved.",
   "files.uploaded": "Upload complete.",
   "files.folderCreated": "Folder created.",
@@ -851,16 +705,12 @@ export const en = {
   "files.error.notDirectory": "The path is a file, not a directory.",
   "files.error.symlinkRefused": "Symbolic links are not allowed.",
   "files.error.nameTooLong": "The name is too long.",
-  // Platform-managed server.properties refusals (issues #2623, #2812, #2846).
-  // `{key}` is the offending key from the 422's `key` extension member. Both
-  // messages are worded for every door that raises them — save, delete, rename,
-  // upload and rollback — not the editor alone.
+  // The API supplies {key}; use wording that applies to save, delete, rename, upload, and rollback.
   "files.error.platformManagedKey":
     "“{key}” in server.properties is managed by the platform; this operation would change it.",
   "files.error.platformManagedPath":
     "server.properties is managed by the platform; a directory cannot stand at that path.",
-  // A save into a file read as latin-1: it is not UTF-8, or it is a pre-1.20
-  // server's server.properties (issue #2851).
+  // Latin-1 may be required by file bytes or pre-1.20 server.properties semantics.
   "files.error.unencodableText":
     "This file is saved as Latin-1 (ISO-8859-1), because it is not UTF-8 or because this Minecraft version reads it only as Latin-1, and Latin-1 cannot hold some of the characters you entered. Remove them and save again.",
   "files.error.invalidInput": "The request was invalid.",
@@ -873,11 +723,9 @@ export const en = {
     "The operation could not be completed due to a conflict.",
   "files.error.generic": "Something went wrong. Please try again.",
   "files.dropZone": "Drop files here to upload",
-  // Multi-select (issue #1462).
   "files.selectAll": "Select all",
   "files.deselectAll": "Deselect all",
   "files.selectedCount": "{count} selected",
-  // Bulk operations (issue #1463).
   "files.bulk.delete": "Delete selected",
   "files.bulk.delete.dialogTitle": "Delete selected items",
   "files.bulk.delete.dialogBody":
@@ -903,16 +751,13 @@ export const en = {
   "files.bulk.move.progress": "Moving {done}/{total}…",
   "files.bulk.move.done": "Moved {done} item(s).",
   "files.bulk.move.partial": "Moved {done}/{total} item(s). {failed} failed.",
-  // Drag-and-drop folder upload.
   "files.bulk.upload.progress": "Uploading {done}/{total}…",
   "files.bulk.upload.done": "{done} files uploaded.",
 
-  // Drag-and-drop file organization (issue #1464).
   "files.moved": "Moved.",
   "files.error.moveConflict":
     "Cannot move {name}: a file with that name already exists in the destination.",
 
-  // Context menu (issue #1465).
   "files.contextMenu.open": "Open",
   "files.contextMenu.download": "Download",
   "files.contextMenu.downloadZip": "Download as ZIP",
@@ -927,17 +772,14 @@ export const en = {
   "files.copied": "Copied to clipboard.",
   "files.pasted": "Pasted.",
 
-  // Navigation history (issue #1475).
   "files.nav.back": "Back",
   "files.nav.forward": "Forward",
 
-  // Unsaved changes guard (issue #1486).
   "files.unsaved.title": "Unsaved changes",
   "files.unsaved.body":
     "You have unsaved changes. Do you want to discard them?",
   "files.unsaved.discard": "Discard",
 
-  // Overwrite confirmation dialog.
   "files.overwrite.title": "File already exists",
   "files.overwrite.body":
     '"{name}" already exists in this directory. Do you want to overwrite it?',
@@ -946,26 +788,20 @@ export const en = {
   "files.overwrite.applyAll": "Apply to all remaining files",
   "files.overwrite.multipleFolders": "{count} folders",
 
-  // Players tab — attached op/whitelist groups (issue #453, WEBUI_SPEC.md 6.8).
-  // One contiguous block to keep merge conflicts with sibling i18n PRs minimal.
   "players.heading": "Applied groups",
   "players.loading": "Loading groups…",
   "players.loadError": "Could not load groups. Try refreshing.",
   "players.empty": "No groups are applied to this server yet.",
   "players.kind.op": "op",
   "players.kind.whitelist": "whitelist",
-  // Member count shown next to each group (the group's player list length).
   "players.memberCount": "members",
   "players.detach": "Remove",
   "players.detached": "Group removed.",
-  // Apply picker: community groups not yet applied to this server.
   "players.attachHeading": "Apply a group",
   "players.attachEmpty": "All of this community's groups are already applied.",
-  // Distinct from attachEmpty: the community has no groups at all (issue #642).
   "players.attachNoGroups": "This community has no groups yet.",
   "players.attach": "Apply",
   "players.attached": "Group applied.",
-  // Inline pointer to the full Groups management surface (Phase 6).
   "players.manageHint": "Create and edit groups in community settings.",
   "players.manageLink": "Community settings",
   "players.error.unsettled":
@@ -977,9 +813,7 @@ export const en = {
     "The server agent is disconnected. Please try again later.",
   "players.error.generic": "Something went wrong. Please try again.",
 
-  // Sessions view — relay game session history (issue #961).
-  // Rendered only for members holding session:read; identity columns are
-  // the claimed Login Start values (unverified).
+  // Relay Java identities are claimed Login Start values, not authenticated identities.
   "sessions.heading": "Sessions",
   "sessions.loading": "Loading sessions…",
   "sessions.loadError": "Could not load sessions. Try refreshing.",
@@ -992,32 +826,24 @@ export const en = {
   "sessions.col.end": "End",
   "sessions.valueUnknown": "—",
   "sessions.active": "active",
-  // Session source — the relay ingress path (issues #1912, #1904). Java carries
-  // the claimed Login Start identity; Bedrock is a Floodgate flow-session that
-  // records only the player's IP (username/UUID unavailable), so its badge says
-  // so honestly. Legacy rows are `unspecified` and render the neutral dash.
+  // Bedrock sessions record only the player's IP; legacy rows have unspecified source.
   "sessions.source.java": "Java",
   "sessions.source.bedrock": "Bedrock",
   "sessions.source.bedrockHint":
     "Flow-based Bedrock session: the player's identity (username and UUID) is unavailable — only their IP address is recorded.",
-  // Pagination controls.
   "sessions.prev": "Previous",
   "sessions.next": "Next",
 
-  // Server create wizard (WEBUI_SPEC.md 6.3). One contiguous block to keep
-  // merge conflicts with sibling i18n PRs minimal.
   "serverCreate.subtitle": "Set up a new Minecraft server.",
   "serverCreate.denied": "You do not have permission to create servers.",
   "serverCreate.tab.new": "New server",
   "serverCreate.tab.import": "Import ZIP",
-  // Wizard step rail.
   "serverCreate.step.type": "Type & version",
   "serverCreate.step.config": "Config & EULA",
   "serverCreate.next": "Next",
   "serverCreate.back": "Back",
   "serverCreate.create": "Create server",
   "serverCreate.creating": "Creating…",
-  // Step 1 — type & version.
   "serverCreate.typeHeading": "Server type",
   "serverCreate.typeLoading": "Loading server types…",
   "serverCreate.typeLoadError":
@@ -1033,7 +859,6 @@ export const en = {
   "serverCreate.typeSub.paper": "performance fork",
   "serverCreate.typeSub.fabric": "light modding",
   "serverCreate.typeSub.forge": "heavy modding",
-  // Step 2 — config & EULA (port field is direct-mode only).
   "serverCreate.portLabel": "Game port",
   "serverCreate.portHint": "Auto-suggested from the next free port.",
   "serverCreate.portChecking": "Checking port availability…",
@@ -1043,9 +868,6 @@ export const en = {
   "serverCreate.portCheckFailed": "Could not check that port.",
   "serverCreate.nameLabel": "Server name",
   "serverCreate.namePlaceholder": "survival",
-  // Per-server resource allocation in the create wizard (issue #715), mirroring
-  // the Settings tab: a memory limit (MiB) and a soft CPU share (millicores).
-  // Both are optional — blank means the default / auto.
   "serverCreate.memoryLimitLabel": "Memory limit (MiB)",
   "serverCreate.memoryLimitDefault": "Default",
   "serverCreate.memoryLimitHint":
@@ -1058,7 +880,6 @@ export const en = {
     "Soft share of CPU for this server, in millicores (1000 = one core). A relative weight under load, not a hard cap — the server can use more when the host is idle. Leave blank for auto.",
   "serverCreate.cpuAllocationRange":
     "Enter a whole number between 100 and 128000 millicores, or leave blank for auto.",
-  // Optional join address name (slug) at create time (issue #981).
   "serverCreate.slugLabel": "Join address name (optional)",
   "serverCreate.slugPlaceholder": "e.g. myserver",
   "serverCreate.slugHint":
@@ -1075,7 +896,6 @@ export const en = {
   "serverCreate.eulaLabel": "I accept the Minecraft EULA.",
   "serverCreate.eulaWarning":
     "Without accepting the EULA the server is created but cannot start until you accept it later.",
-  // Create error surfacing.
   "serverCreate.error.port_taken":
     "That game port is already in use. Pick another.",
   "serverCreate.error.port_out_of_range":
@@ -1093,18 +913,12 @@ export const en = {
     "That join address name is not valid. Use lowercase letters, digits and hyphens only.",
   "serverCreate.error.slug_taken":
     "That join address name is already in use. Choose another.",
-  // The config-blob guard (issue #94). Only two of its four reasons are
-  // reachable from this wizard: it posts a flat object whose values are the raw
-  // override strings plus the two range-checked numbers, so no value can be
-  // `null` and nothing nests — `config_null_value` and `config_invalid_shape`
-  // need a JSON-typed value, which only the Settings tab's editor parses. Size
-  // and lone surrogates ride through verbatim from what was typed or pasted.
+  // The wizard sends flat strings and validated numbers, so only size and surrogate config errors apply.
   "serverCreate.error.config_too_large":
     "The server.properties overrides are too large. Keep them under 64 KiB in total — shorten or remove some values.",
   "serverCreate.error.config_lone_surrogate":
     "An override key or value contains a broken character — often half of an emoji left behind by a copy-paste. Retype or remove that text.",
   "serverCreate.genericError": "Could not create the server. Please try again.",
-  // Import tab.
   "serverCreate.import.heading": "Import from a ZIP export",
   "serverCreate.import.hint":
     "Upload a ZIP exported from another instance. The name below applies; the EULA is never carried over.",
@@ -1114,26 +928,14 @@ export const en = {
   "serverCreate.import.noFile": "Choose a ZIP file to import.",
   "serverCreate.import.error.invalid_export_metadata":
     "That archive is not a valid server export.",
-  // The import guard refuses any member stored UNDER the root server.properties
-  // path (issue #2869); publishing it would stand a directory where the platform
-  // keeps a file. A zip's own directory entries are skipped before the guard, so
-  // the offending member is always a plain file. The Backups string has to name
-  // both shapes a tar can carry — a directory member and a file under it — so
-  // this one stays separate and names the single entry a zip can carry, which
-  // is the one the operator can see and delete.
+  // ZIP directory entries are skipped; this refusal always identifies a file under server.properties/.
   "serverCreate.import.error.platform_managed_path":
     "That archive stores a file under server.properties/, but the platform keeps a plain file at that path. Remove or move that entry and import again.",
-  // The import assigns the join address itself, so a 409 here is never the
-  // operator's input: another server claimed that address between the import
-  // picking it and the row committing (issue #3022). Nothing was created, and a
-  // fresh address is drawn on the next attempt — so the message asks for a plain
-  // retry rather than pointing at a field the import tab does not have.
+  // Import allocates the slug itself; a collision needs a retry rather than field correction.
   "serverCreate.import.error.slug_taken":
     "Another server took this server's join address while the import was running. Nothing was created — import again to get a new one.",
   "serverCreate.import.tooLarge": "That archive is too large to import.",
 
-  // Community settings (WEBUI_SPEC.md 6.10) — one contiguous block to minimise
-  // merge conflicts with the sibling Roles/Grants/Groups/Audit tab PRs.
   "communitySettings.loading": "Loading…",
   "communitySettings.loadError":
     "Could not load this community. Try refreshing.",
@@ -1145,7 +947,6 @@ export const en = {
   "communitySettings.tab.audit": "Audit log",
   "communitySettings.tab.general": "General",
 
-  // Members tab.
   "communitySettings.members.heading": "Members",
   "communitySettings.members.loading": "Loading members…",
   "communitySettings.members.loadError": "Could not load members.",
@@ -1181,7 +982,6 @@ export const en = {
   "communitySettings.members.roleError":
     "Could not update roles. Please try again.",
 
-  // Audit tab (WEBUI_SPEC.md 6.10).
   "communitySettings.audit.heading": "Audit log",
   "communitySettings.audit.loading": "Loading audit log…",
   "communitySettings.audit.loadError": "Could not load the audit log.",
@@ -1202,10 +1002,7 @@ export const en = {
   "communitySettings.audit.systemActor": "(system)",
   "communitySettings.audit.prev": "Previous",
   "communitySettings.audit.next": "Next",
-  // Human-readable labels for the audit `operation` codes (the `<resource>:<action>`
-  // constants in api audit/domain/operations.py) and the `target_type` prefixes.
-  // An unmapped code falls back to its raw value (auditShared.tsx), so the table
-  // never breaks if the backend adds a new code ahead of this dictionary (#643).
+  // Unknown audit operation and target-type codes fall back to their raw values.
   "communitySettings.audit.op.auth:login": "Sign in",
   "communitySettings.audit.op.auth:logout": "Sign out",
   "communitySettings.audit.op.auth:register": "Register account",
@@ -1279,7 +1076,6 @@ export const en = {
   "communitySettings.audit.targetType.file": "File",
   "communitySettings.audit.targetType.group": "Player group",
 
-  // Roles tab.
   "communitySettings.roles.heading": "Roles",
   "communitySettings.roles.loading": "Loading roles…",
   "communitySettings.roles.loadError": "Could not load roles.",
@@ -1310,11 +1106,9 @@ export const en = {
   "communitySettings.roles.deleteDialogBody":
     "Deleting this role removes it from every member who holds it. This cannot be undone.",
   "communitySettings.roles.deleteConfirm": "Delete role",
-  // Permission family group labels (WEBUI_SPEC.md 2.2).
   "communitySettings.roles.family.server": "Servers",
   "communitySettings.roles.family.file": "Files",
   "communitySettings.roles.family.backup": "Backups",
-  // Schedule family (issue #1842): the general scheduler CRUD surface.
   "communitySettings.roles.family.schedule": "Schedules",
   "communitySettings.roles.family.member": "Members",
   "communitySettings.roles.family.role": "Roles",
@@ -1322,9 +1116,7 @@ export const en = {
   "communitySettings.roles.family.group": "Groups",
   "communitySettings.roles.family.community": "Community",
   "communitySettings.roles.family.audit": "Audit log",
-  // Session family (issue #961): relay game session history.
   "communitySettings.roles.family.session": "Sessions",
-  // Permission code labels (the action within each family).
   "communitySettings.roles.code.server:create": "Create",
   "communitySettings.roles.code.server:read": "Read",
   "communitySettings.roles.code.server:update": "Update",
@@ -1357,10 +1149,8 @@ export const en = {
   "communitySettings.roles.code.community:update": "Update",
   "communitySettings.roles.code.community:delete": "Delete",
   "communitySettings.roles.code.audit:read": "Read",
-  // Session permission code label (issue #961).
   "communitySettings.roles.code.session:read": "Read",
 
-  // Grants tab (WEBUI_SPEC.md 6.10): per-server permission grants.
   "communitySettings.grants.heading": "Grants",
   "communitySettings.grants.loading": "Loading grants…",
   "communitySettings.grants.loadError": "Could not load grants.",
@@ -1395,7 +1185,6 @@ export const en = {
   "communitySettings.grants.createError":
     "Could not create the grant. Please try again.",
 
-  // General tab.
   "communitySettings.general.heading": "General",
   "communitySettings.general.nameLabel": "Community name",
   "communitySettings.general.save": "Save name",
@@ -1421,7 +1210,6 @@ export const en = {
   "communitySettings.general.deleteHasServers":
     "This community still has servers. Delete this community's servers first.",
 
-  // Community settings — Groups tab (WEBUI_SPEC.md 6.10, issue #464)
   "communitySettings.groups.heading": "Player groups",
   "communitySettings.groups.loading": "Loading groups…",
   "communitySettings.groups.loadError": "Could not load groups.",
@@ -1479,7 +1267,6 @@ export const en = {
   "communitySettings.groups.attached": "Group applied to the server.",
   "communitySettings.groups.unknownServer": "(unknown server)",
 
-  // Platform admin area (WEBUI_SPEC.md 6.12, Section 3) — #474
   "admin.denied.title": "Platform administrators only",
   "admin.denied.body": "You do not have access to the platform admin area.",
   "admin.overview.subtitle":
@@ -1515,7 +1302,6 @@ export const en = {
   "admin.versions.empty": "No server types catalogued.",
   "admin.versions.typeError": "unavailable",
   "admin.versions.refreshedAll": "Version lists will reload from upstream.",
-  // Interpolated with the server type, e.g. "Refreshed catalog: paper".
   "admin.versions.refreshedOne": "Refreshed catalog: {type}",
   "admin.versions.refreshError": "Could not refresh the catalog.",
   "admin.versions.jarPool": "Server downloads",
@@ -1529,11 +1315,8 @@ export const en = {
   "admin.versions.gcDialog.body":
     "This deletes downloaded server JARs that no live server uses. They are downloaded again when next needed.",
   "admin.versions.gcDialog.confirm": "Delete unused files",
-  // Interpolated with freed bytes + deleted count, e.g.
-  // "Freed 412 MiB by deleting 3 unused JARs.".
   "admin.versions.gcDone": "Freed {bytes} by deleting {count} unused JARs.",
   "admin.versions.gcError": "Could not free up disk space.",
-  // Communities (WEBUI_SPEC.md 6.12) — #476, #489
   "admin.communities.subtitle":
     "All communities on the platform. Provisioning is admin-only; self-service creation is not supported.",
   "admin.communities.loading": "Loading communities…",
@@ -1567,9 +1350,7 @@ export const en = {
   "admin.communities.ownerHint":
     "The owner gets the preset Owner role (all community permissions).",
   "admin.communities.usersLoadError": "Could not load the user list.",
-  // Truncation hint composed around the loaded/total counts, e.g.
-  // "Showing the first 100 of 150 users." The owner picker requests the API
-  // max page (100); when more accounts exist the later ones are omitted.
+  // The owner picker loads at most 100 accounts, so expose truncation when more exist.
   "admin.communities.usersTruncated": "Showing the first {n} of {total} users.",
   "admin.communities.provisioned": "Community provisioned.",
   "admin.communities.errNameRequired": "Enter a community name.",
@@ -1580,7 +1361,6 @@ export const en = {
   "admin.communities.errOwnerNotFound": "That owner account no longer exists.",
   "admin.communities.errGeneric": "Could not provision the community.",
 
-  // Workers fleet page (WEBUI_SPEC.md 6.12) — #477
   "admin.workers.subtitle":
     "Workers self-register over the control plane; drain to relocate servers before maintenance.",
   "admin.workers.loading": "Loading workers…",
@@ -1605,8 +1385,6 @@ export const en = {
     "Undraining lets this worker accept new placements again.",
   "admin.workers.undrainConfirm": "Undrain worker",
   "admin.workers.drained": "Worker draining.",
-  // Shown when servers_stopped > 0, interpolated with the count, e.g.
-  // "Worker draining. 3 servers marked — keep this worker connected until each is stopped and unassigned."
   "admin.workers.drainedCount":
     "Worker draining. {count} servers marked — keep this worker connected until each is stopped and unassigned.",
   "admin.workers.drainDialogConvergenceWarning":
@@ -1617,8 +1395,6 @@ export const en = {
   "admin.workers.notice":
     "Draining stops new placements on the worker; running servers are stopped with a final snapshot and can be restarted elsewhere. Offline workers reappear automatically when they reconnect.",
 
-  // Admin Users page (WEBUI_SPEC.md 6.12) — user lifecycle, admin flag,
-  // create-user dialog. One contiguous block (#475).
   "admin.users.loading": "Loading users…",
   "admin.users.loadError": "Could not load users.",
   "admin.users.empty": "No users.",
@@ -1646,8 +1422,7 @@ export const en = {
   "admin.users.adminGranted": "Platform admin granted.",
   "admin.users.adminRevoked": "Platform admin revoked.",
   "admin.users.deleted": "User deleted.",
-  // The API allows self-revoke of your own admin flag (only the last active
-  // admin is protected); confirm before the operator locks themselves out.
+  // The API permits self-revocation unless this is the last active admin; confirm the resulting lockout.
   "admin.users.selfRevokeTitle": "Revoke your own admin?",
   "admin.users.selfRevokeBody":
     "You are about to revoke your own platform-admin access. You will lose access to the admin area immediately.",
@@ -1657,7 +1432,6 @@ export const en = {
     "This permanently deletes the account. Type the username to confirm.",
   "admin.users.deletePrompt": "Username",
   "admin.users.deleteConfirm": "Delete user",
-  // Conflict reasons the lifecycle routes return (admin_users.py).
   "admin.users.error.self_target":
     "You cannot do that to your own account here — use the account page.",
   "admin.users.error.last_platform_admin":
@@ -1666,7 +1440,6 @@ export const en = {
     "This user owns a community and cannot be deleted.",
   "admin.users.error.not_found": "That user no longer exists.",
   "admin.users.error.generic": "The action could not be completed.",
-  // Create-user dialog (POST /admin/users).
   "admin.users.create": "Create user",
   "admin.users.createTitle": "Create user",
   "admin.users.createSubmit": "Create",
@@ -1678,25 +1451,16 @@ export const en = {
   "admin.users.passwordHint":
     "At least 12 characters, mixing cases, digits, and symbols.",
 
-  // Admin global Audit page (WEBUI_SPEC.md 6.12). The filter row, table and
-  // paging strings are shared with the community Audit tab
-  // (communitySettings.audit.*); only the community filter and column are new.
+  // Reuse community-audit strings for shared columns and filters.
   "admin.audit.filterCommunity": "Community",
   "admin.audit.filterCommunityAll": "All communities",
   "admin.audit.colCommunity": "Community",
-  // Truncation hint composed around the loaded/total counts, e.g. "Showing the
-  // first 100 of 150 communities." The picker requests the API max page (100);
-  // when more communities exist the later ones are omitted (#476/#488).
+  // The community picker loads at most 100 rows, so expose truncation when more exist.
   "admin.audit.communitiesTruncated":
     "Showing the first {n} of {total} communities.",
 
-  // Plugins tab (issue #1153). One contiguous block to keep merge conflicts
-  // with sibling i18n PRs minimal.
   "serverDetail.tab.plugins": "Plugins",
-  // Loader-aware tab label + noun (#1320): Fabric/Forge servers manage mods,
-  // Paper manages plugins. Three grammatical forms feed the `{…}` placeholders
-  // in the tab strings: `{nouns}` lowercase plural, `{noun}` lowercase
-  // singular, `{Noun}` capitalized singular (Japanese has one invariant form).
+  // Noun placeholders use lowercase plural, lowercase singular, and capitalized singular forms.
   "serverDetail.tab.mods": "Mods",
   "plugins.contentNoun.plural.plugins": "plugins",
   "plugins.contentNoun.plural.mods": "mods",
@@ -1710,15 +1474,10 @@ export const en = {
   "plugins.empty": "No {nouns} installed.",
   "plugins.unsupported": "This server type does not support plugins or mods.",
   "plugins.serverNotStopped": "Stop the server to manage {nouns}.",
-  // Bedrock companion hint (issue #1543): shown on Paper servers only when the
-  // deployment's Bedrock gate (/meta bedrock_enabled) is on AND Geyser is already
-  // installed. Floodgate-Spigot is now catalog-installable via the GeyserMC
-  // source (#1914, closing #1548 option 2), so the hint leads with the one-click
-  // install and keeps the manual jar download as a fallback.
+  // Show this hint only for Paper with Bedrock enabled and Geyser installed; offer catalog and manual Floodgate installs.
   "plugins.bedrockHint.text":
     "Bedrock players also need Floodgate. Install Floodgate-Spigot in one click from the plugin catalog, or download its jar from the",
   "plugins.bedrockHint.link": "GeyserMC download page",
-  // Table columns.
   "plugins.col.name": "Name",
   "plugins.col.version": "Version",
   "plugins.col.source": "Source",
@@ -1726,19 +1485,16 @@ export const en = {
   "plugins.col.status": "Status",
   "plugins.col.size": "Size",
   "plugins.col.actions": "Actions",
-  // Status / source labels.
   "plugins.status.enabled": "Enabled",
   "plugins.status.disabled": "Disabled",
   "plugins.source.local": "Local",
   "plugins.source.modrinth": "Modrinth",
   "plugins.source.geyser": "GeyserMC",
   "plugins.source.unknown": "Unknown",
-  // Side (server / client / both, issue #1308).
   "plugins.side.label": "Runs on",
   "plugins.side.server": "Server",
   "plugins.side.client": "Client",
   "plugins.side.both": "Both",
-  // Actions.
   "plugins.enable": "Enable",
   "plugins.disable": "Disable",
   "plugins.remove": "Remove",
@@ -1746,15 +1502,12 @@ export const en = {
   "plugins.install": "Upload JAR",
   "plugins.browse": "Browse Modrinth",
   "plugins.downloadClientModpack": "Download client modpack",
-  // Update indicators.
   "plugins.updateAvailable": "Update available: ",
-  // Remove dialog. `{name}` is the plugin's display_name; `{noun}` the
-  // lowercase loader-aware content noun (#1320, #1353).
+  // {name} is the display name; {noun} is the lowercase loader-specific content noun.
   "plugins.removeDialog.title": "Remove {name}?",
   "plugins.removeDialog.body":
     "This will permanently remove this {noun} from the server.",
   "plugins.removeDialog.confirm": "Remove",
-  // Dependencies.
   "plugins.dependencies": "Dependencies",
   "plugins.dependencies.loading": "Loading dependencies…",
   "plugins.dependencies.empty": "No dependencies.",
@@ -1762,7 +1515,6 @@ export const en = {
   "plugins.dependencies.optional": "optional",
   "plugins.dependencies.installed": "installed",
   "plugins.dependencies.missing": "missing",
-  // Modrinth search modal.
   "plugins.search.title": "Browse Modrinth",
   "plugins.search.placeholder": "Search plugins or mods…",
   "plugins.search.empty": "No results.",
@@ -1774,7 +1526,7 @@ export const en = {
   "plugins.search.update": "Update",
   "plugins.search.versions": "Versions",
   "plugins.search.back": "Back to search",
-  // Outcomes (toasts). `{Noun}` is the capitalized loader-aware noun (#1320).
+  // {Noun} is the capitalized loader-specific content noun.
   "plugins.enabled": "{Noun} enabled.",
   "plugins.disabled": "{Noun} disabled.",
   "plugins.removed": "{Noun} removed.",
@@ -1813,7 +1565,6 @@ export const en = {
   "plugins.error.downloadTooLarge":
     "The client modpack is too large to download in the browser ({size}). The limit is 512 MiB.",
   "plugins.error.generic": "Something went wrong. Please try again.",
-  // Dependency / compatibility validation checklist (issue #1307).
   "plugins.validation.heading": "Dependencies & compatibility",
   "plugins.validation.ok": "No issues found.",
   "plugins.validation.missingDep":
@@ -1825,7 +1576,6 @@ export const en = {
   "plugins.validation.conflict": "{mod} conflicts with {other}.",
   "plugins.validation.mcMismatch":
     "{mod} does not list MC {serverVersion} (supports {modVersions}).",
-  // Dependency auto-resolution (issue #1309).
   "plugins.resolve.action": "Resolve dependencies",
   "plugins.resolve.loading": "Computing resolution plan…",
   "plugins.resolve.title": "Resolve dependencies",
@@ -1845,11 +1595,9 @@ export const en = {
   "plugins.resolve.applied": "Dependencies installed.",
   "plugins.resolve.appliedWithFailures":
     "Some dependencies could not be installed.",
-  // Permission family and code labels for the role/grant matrix.
   "communitySettings.roles.family.plugin": "Plugins",
   "communitySettings.roles.code.plugin:read": "Read",
   "communitySettings.roles.code.plugin:manage": "Manage",
-  // Audit operation labels for plugin actions.
   "communitySettings.audit.op.plugin:install": "Install plugin",
   "communitySettings.audit.op.plugin:remove": "Remove plugin",
   "communitySettings.audit.op.plugin:enable": "Enable plugin",
@@ -1859,8 +1607,6 @@ export const en = {
   "communitySettings.audit.op.plugin:resolve": "Resolve plugin dependencies",
   "communitySettings.audit.targetType.plugin": "Plugin",
 
-  // Resource pack library (issue #1178). One contiguous block to keep merge
-  // conflicts with sibling i18n PRs minimal.
   "nav.resourcePacks": "Resource packs",
   "page.resourcePacks": "Resource packs",
   "resourcePacks.subtitle":
@@ -1899,8 +1645,6 @@ export const en = {
   "resourcePacks.error.storageUnavailable":
     "Resource pack storage is unavailable right now. Please try again shortly.",
 
-  // Server resource pack assignment (issue #1179). Displayed as a card in the
-  // server detail Settings tab.
   "serverDetail.resourcePack.heading": "Resource pack",
   "serverDetail.resourcePack.loadError":
     "Could not load the resource pack assignment.",
@@ -1940,19 +1684,14 @@ export const en = {
     "Remove the resource pack assignment from this server?",
   "serverDetail.resourcePack.removeDialog.confirm": "Remove",
 
-  // Permission / authorization feedback (WEBUI_SPEC.md 7.3 / 7.4)
   "permissions.denied": "You do not have permission to do that.",
-  // Interpolated with the missing permission code, e.g. "You lack: server:start".
   "permissions.deniedNamed": "You lack: {permission}",
 
-  // Error boundary (#1211): shown when an unhandled rendering error crashes a
-  // component subtree instead of the default white-screen unmount.
   "errorBoundary.title": "Something went wrong",
   "errorBoundary.body":
     "An unexpected error occurred. Reloading usually fixes it.",
   "errorBoundary.reload": "Reload page",
 
-  // Shared format strings — heartbeat age (#1214)
   "format.secondsAgo": "{value}s ago",
   "format.minutesAgo": "{value}m ago",
   "format.hoursAgo": "{value}h ago",

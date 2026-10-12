@@ -5,15 +5,11 @@ import { heartbeatAge, humanizeBytes, statusPill } from "../format.ts";
 import { t } from "../i18n/index.ts";
 import { classifyQueryResult } from "../queryState.ts";
 
-// Platform admin Overview (WEBUI_SPEC.md 6.12): worker count by status, total
-// servers running, global backup stats, jar-pool stats. All four read from the
-// platform-admin `[A]` endpoints; the worker tallies are derived client-side
-// from the fleet list (the API gives the list, not the counts) (#474).
+// Derive worker counts from the fleet list; the API does not return those aggregates.
 
 type WorkerResponse = components["schemas"]["WorkerResponse"];
 
-// Matches AdminWorkersPage's interval so heartbeat ages and load stay fresh
-// without a separate polling policy (#791).
+// Match the Workers page's polling interval so heartbeat ages and load stay fresh.
 const REFRESH_INTERVAL_MS = 12_000;
 
 export function AdminOverviewPage() {
@@ -53,10 +49,7 @@ export function AdminOverviewPage() {
         <p className="sub" role="status">
           {t("admin.overview.loading")}
         </p>
-      ) : /* Error only when there is nothing to show (an initial load
-           failed). A failed background refetch (including polling blips)
-           retains `data`, so the cached overview keeps rendering through
-           transient API outages (#1805). */
+      ) : /* Retain cached content when only a background refetch fails. */
       workersState.kind === "error" ||
         backupsState.kind === "error" ||
         jarPoolState.kind === "error" ? (

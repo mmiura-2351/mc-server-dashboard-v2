@@ -1,13 +1,5 @@
 // @vitest-environment jsdom
-// Pinned to jsdom: the WAI-ARIA tabpanel focus test relies on jsdom's focus
-// handling (happy-dom may not replicate tabIndex-based focusability faithfully).
-
-/**
- * Page-specific tab tests for the community-settings page (#514, #2058):
- * deep links land on the named tab, and a permission-denied panel remains
- * keyboard reachable. Generic URL and WAI-ARIA tab behavior lives in
- * urlState.test.tsx.
- */
+// Keep jsdom for tabpanel focus behavior.
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
@@ -48,8 +40,6 @@ vi.mock("../permissions/ActiveCommunityProvider.tsx", () => ({
 }));
 vi.mock("../permissions/useCan.ts", () => ({ useCan: () => mockCan }));
 
-// The page reads the community; each tab reads its own collection. Anything that
-// is not a known collection resolves to the bare community object.
 function routeGet() {
   mockApi.get.mockImplementation((path: string) => {
     if (path.startsWith(`/api/communities/${CID}/members`)) {
@@ -118,17 +108,12 @@ describe("CommunitySettingsPage page-specific tabs (#514, #2058)", () => {
   });
 
   it("a tabpanel whose content has no focusable element is focusable (#2058)", async () => {
-    // A user without member:read lands on a permission-denied message — a bare
-    // <p> with no focusable descendant. Without tabIndex={0} on the panel,
-    // activating the tab strands the keyboard user.
-    // APG tabs: the panel is focusable when it has no focusable element or its
-    // first element with content is not focusable.
+    // A denied panel has no focusable child; the panel itself must remain keyboard reachable.
     mockCan = () => false;
     renderPage();
     await screen.findAllByText("Sakura");
 
     const panel = screen.getByRole("tabpanel");
-    // Precondition: nothing inside the panel can take focus.
     expect(
       panel.querySelectorAll(
         "a[href], button, input, select, textarea, [tabindex]",

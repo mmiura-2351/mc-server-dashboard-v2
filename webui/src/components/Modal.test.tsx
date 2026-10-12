@@ -76,14 +76,12 @@ describe("Modal", () => {
     trigger.focus();
     fireEvent.click(trigger);
 
-    // Focus has moved into the dialog while open.
     expect(screen.getByRole("dialog")).toContainElement(
       document.activeElement as HTMLElement,
     );
 
     fireEvent.keyDown(document, { key: "Escape" });
 
-    // On close, focus returns to the element that opened the dialog.
     expect(document.activeElement).toBe(trigger);
   });
 

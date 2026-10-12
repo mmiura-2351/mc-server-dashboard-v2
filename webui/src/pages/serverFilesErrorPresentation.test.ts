@@ -1,5 +1,4 @@
 // @vitest-environment node
-// DOM-free contract test: the Files tab renders the selected presentation.
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../api/client.ts";
 import { UnencodableTextError } from "./fileText.ts";

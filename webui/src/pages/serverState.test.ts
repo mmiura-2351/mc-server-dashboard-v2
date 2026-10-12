@@ -1,5 +1,4 @@
 // @vitest-environment node
-// DOM-free logic test; runs under Node to skip per-file jsdom setup (issue #1734).
 import { describe, expect, it } from "vitest";
 import {
   actionApplies,
@@ -37,7 +36,6 @@ describe("normalizeState", () => {
 });
 
 describe("statePill", () => {
-  // The full state -> pill-color mapping (WEBUI_SPEC.md 6.2).
   const cases: Array<[ObservedState, string, boolean]> = [
     ["running", "running", false],
     ["starting", "starting", true],
@@ -115,8 +113,6 @@ describe("actionApplies", () => {
 });
 
 describe("atRest", () => {
-  // Export / delete / settings edits need the server at rest (the API answers
-  // 409 server_unsettled / server_not_stopped otherwise, SPEC 6.9).
   it("is true for the settled states", () => {
     expect(atRest("stopped")).toBe(true);
     expect(atRest("crashed")).toBe(true);
@@ -148,7 +144,6 @@ describe("atRest", () => {
 });
 
 describe("bucketOf", () => {
-  // The 4 semantic buckets shown in the dashboard state dropdown (#2239).
   const cases: Array<[ObservedState, StateBucket]> = [
     ["running", "running"],
     ["stopped", "stopped"],

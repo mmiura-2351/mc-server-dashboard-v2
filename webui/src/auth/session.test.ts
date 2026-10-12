@@ -1,5 +1,4 @@
 // @vitest-environment node
-// DOM-free logic test; runs under Node to skip per-file jsdom setup (issue #1734).
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   hardLogout,
@@ -166,10 +165,6 @@ describe("restoreSession", () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-    // The 401 on /login and after logout is the documented "no session" state;
-    // the app must resolve signed-out silently and never surface it as an
-    // application error (the browser's native "Failed to load resource ... 401"
-    // line is separate and not suppressible from JS).
     await expect(restoreSession()).resolves.toBe("signed-out");
     expect(errorSpy).not.toHaveBeenCalled();
     expect(warnSpy).not.toHaveBeenCalled();
@@ -332,10 +327,7 @@ describe("signIn", () => {
   });
 });
 
-/**
- * Hold every fetch pending and hand back its resolvers in call order, so a test
- * can let an authentication response land after the session has changed.
- */
+/** Hold responses so tests can release them after changing sessions. */
 function holdFetches(): ((response: Response) => void)[] {
   const resolvers: ((response: Response) => void)[] = [];
   fetchMock.mockImplementation(
@@ -347,9 +339,6 @@ function holdFetches(): ((response: Response) => void)[] {
   return resolvers;
 }
 
-// A response begun under one session must never act on a later one: logout and
-// sign-in start a new session, and anything still in flight from before is
-// discarded on arrival (#3224).
 describe("late authentication responses", () => {
   it("a refresh that lands after logout does not repopulate the token", async () => {
     const pending = holdFetches();
@@ -434,7 +423,7 @@ describe("late authentication responses", () => {
     signIn("session-B");
     pending[0](tokenResponse("late-session-A"));
 
-    // A retry would replay user A's request as user B.
+    // Retrying here would replay one user's request under another user's session.
     expect(await retry).toBe(false);
   });
 
@@ -487,22 +476,15 @@ describe("late authentication responses", () => {
   });
 });
 
-/** Let `n` microtasks run. */
 async function microtasks(n: number): Promise<void> {
   for (let i = 0; i < n; i++) {
     await Promise.resolve();
   }
 }
 
-/**
- * Every microtask count at which a session switch can land after the response
- * arrived: before the result is computed, between computing it and the caller
- * consuming it, and after.
- */
+/** Cover session switches before result computation, during delivery, and after consumption. */
 const SWITCH_POINTS = Array.from({ length: 12 }, (_, i) => i);
 
-// The response arrives first and the session changes only afterwards, at each
-// point while the result is still travelling back to the caller (#3224 review).
 describe("results consumed after the session changed", () => {
   it.each(SWITCH_POINTS)(
     "a refresh rejection never logs out a sign-in made %i microtasks after it arrived",
