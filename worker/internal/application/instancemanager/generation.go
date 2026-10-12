@@ -2,12 +2,18 @@ package instancemanager
 
 import (
 	"errors"
+	"fmt"
+	"io/fs"
+	"log/slog"
+	"math/rand/v2"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/scratchformat"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/nofollow"
 )
 
 // writeGeneration records gen as the working-set generation in workingDir. It is
@@ -47,39 +53,39 @@ func writeGeneration(workingDir string, gen uint64) error {
 }
 
 // writeGenerationGuarded is writeGeneration with an optional last-moment guard, run
-// immediately before the rename that publishes the marker. It exists for the running-id
+// immediately before and again after the rename that publishes the marker. It exists for the running-id
 // snapshot's stamp (issue #2284), whose caller must not publish a marker once the
 // working dir has stopped being the directory it packed; every other caller passes nil
 // and gets writeGeneration's behaviour byte for byte.
 //
-// The guard runs THERE rather than only in the caller because the caller's check is
-// check-then-act, and exactly ONE sub-window of that gap can publish a marker into the
-// wrong tree. Take T to be the instant a concurrent hydrate's swap completes:
+// Every step below the working-dir open acts on that one descriptor (issue #3336): the
+// directory is owned and written by the server's own code, and this is a root write into
+// it. The temp is created exclusively and without following a link, so a link planted at
+// its name is refused rather than written through; the rename replaces whatever sits at
+// the marker's name — a link included — instead of writing through it; and the sweep
+// unlinks names, never what they point at. Nothing is resolved by path below workingDir,
+// which is the Worker's own entry in the scratch root and so not the server's to replace.
 //
-//   - T before CreateTemp below (i.e. across the caller's check and MkdirAll): the temp
-//     is created inside the REPLACEMENT directory, every later path resolves there
-//     consistently, and the rename succeeds — the marker lands on a tree this caller
-//     never packed. This is the wrong-stamp window, and this guard is what closes it.
-//   - T after CreateTemp: the temp lives inside the pinned inode, which the swap has
-//     moved to .displaced-<id>. tmpName resolves through the path, so its lookup now
-//     enters the replacement directory, where that name does not exist: the rename
-//     fails ENOENT on its SOURCE and no marker can be published. Path semantics close
-//     this window on their own — including the whole fsync above, which is the slowest
-//     part of the gap. The guard's contribution here is not safety but classification:
-//     the caller reports a clean skip instead of an ENOENT marker-write error.
+// The guard runs HERE rather than only in the caller because the caller's check is
+// check-then-act. Take T to be the instant a concurrent hydrate's swap completes:
 //
-// So the residual is not "the fsync" and not "one rename": for any T that lands wholly
-// before or wholly after the rename below, a wrong stamp is impossible. What these path
-// semantics do not decide is a swap interleaved WITHIN that one rename's own resolution
-// of its two path arguments. That is the honest bound, and it is why the renameat-against-
-// the-pinned-descriptor rewrite is not worth its cost (see recordGenerationIfUnchanged).
+//   - T before the open below: the descriptor is the REPLACEMENT directory, and without
+//     the guard the marker would publish cleanly onto a tree this caller never packed.
+//     The guard before the rename refuses it. This is the wrong-stamp window.
+//   - T after the open, before that guard: the temp is in the pinned directory, which the
+//     swap has moved to .displaced-<id>. The guard refuses and the temp is unlinked there.
+//   - T after that guard, before the rename: the marker is published into the pinned
+//     directory, now at .displaced-<id> — the tree this caller packed, so the stamp is
+//     true of the tree it lands on, and the slot keeps the hydrate's own marker. What
+//     would be wrong is REPORTING it: the caller declares the generation as held, and the
+//     slot holds another tree. The guard is therefore run once more after the rename and
+//     the write is reported as refused. (STORAGE.md Section 4.6's manual recovery reads
+//     that displaced marker; it then names the generation that tree was published as.)
+//   - T after the second guard: the marker was in the slot's tree when it was checked,
+//     and the hydrate that replaced it since records its own.
 //
 // A refused write removes its temp — unlike the rename-failure path below, which strands
-// a complete marker on purpose, this temp is one nothing will ever publish. That cleanup
-// is effective in the first case above (the temp is in the replacement dir, at a path
-// that still resolves); in the second the temp has ridden the pinned inode into
-// .displaced-<id> and the Remove is a harmless ENOENT, leaving an inert temp that the
-// displaced tree's own reclaim covers.
+// a complete marker on purpose, this temp is one nothing will ever publish.
 func writeGenerationGuarded(workingDir string, gen uint64, guard func() bool) error {
 	// Ensure the working dir exists: a hydrate that served a 204 (no published
 	// snapshot) does not create it, but the generation (0) still needs recording so
@@ -87,19 +93,19 @@ func writeGenerationGuarded(workingDir string, gen uint64, guard func() bool) er
 	if err := os.MkdirAll(workingDir, 0o750); err != nil {
 		return err
 	}
-	// The pattern is DERIVED from the marker name, not spelled out: hasWorkingSet
-	// (issue #2279), the snapshot pack (issue #834) and sweepGenerationTemps
-	// (issue #2283) all recognise a temp by that same prefix, so a literal here
-	// would let a rename of the constant leave the creation site behind and strand
-	// temps no consumer matches (issue #2287).
-	tmp, err := os.CreateTemp(workingDir, scratchformat.GenerationMarkerFile+"-*")
+	dirFd, err := nofollow.OpenDir(workingDir)
 	if err != nil {
 		return err
 	}
-	tmpName := tmp.Name()
+	defer func() { _ = unix.Close(dirFd) }()
+
+	tmpName, tmp, err := createGenerationTemp(dirFd)
+	if err != nil {
+		return err
+	}
 	if _, err := tmp.WriteString(strconv.FormatUint(gen, 10)); err != nil {
 		_ = tmp.Close()
-		_ = os.Remove(tmpName)
+		_ = unix.Unlinkat(dirFd, tmpName, 0)
 		return err
 	}
 	// fsync the contents before the rename (the atomicWriteAt idiom in
@@ -107,15 +113,15 @@ func writeGenerationGuarded(workingDir string, gen uint64, guard func() bool) er
 	// zero-length marker.
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
-		_ = os.Remove(tmpName)
+		_ = unix.Unlinkat(dirFd, tmpName, 0)
 		return err
 	}
 	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpName)
+		_ = unix.Unlinkat(dirFd, tmpName, 0)
 		return err
 	}
 	if guard != nil && !guard() {
-		_ = os.Remove(tmpName)
+		_ = unix.Unlinkat(dirFd, tmpName, 0)
 		return errWorkingDirReplaced
 	}
 	// A failed rename deliberately leaves the temp in place instead of unlinking it
@@ -125,14 +131,49 @@ func writeGenerationGuarded(workingDir string, gen uint64, guard func() bool) er
 	// it is inert until reclaimed — by the next successful marker write's sweep
 	// (sweepGenerationTemps, issue #2283) or by the scratch GC's RemoveAll, the same two
 	// reclaims that cover a crash-stranded temp.
-	if err := os.Rename(tmpName, filepath.Join(workingDir, scratchformat.GenerationMarkerFile)); err != nil {
+	if err := unix.Renameat(dirFd, tmpName, dirFd, scratchformat.GenerationMarkerFile); err != nil {
 		return err
 	}
-	sweepGenerationTemps(workingDir)
+	if guard != nil && !guard() {
+		return errWorkingDirReplaced
+	}
+	sweepGenerationTemps(dirFd)
 	// fsync the dir so the rename (the marker's appearance) is itself durable, not
 	// just the file contents: the ordering guarantee (issue #787) requires the
 	// marker to become durable only AFTER the tree it describes.
-	return fsyncDir(workingDir)
+	return unix.Fsync(dirFd)
+}
+
+// generationTempSuffix names one marker temp. It is a variable so a test can predict
+// the name and plant something at it; production never reassigns it.
+var generationTempSuffix = func() string { return strconv.FormatUint(rand.Uint64(), 36) }
+
+// createGenerationTemp creates a marker temp in the directory behind dirFd and returns
+// its name and the open file. O_EXCL makes the create fail on ANY existing entry and
+// O_NOFOLLOW keeps it from resolving a link, so the file written is always one this
+// call created, inside that directory. A taken name is retried under another.
+//
+// The name is DERIVED from the marker name, not spelled out: hasWorkingSet (issue
+// #2279), the snapshot pack (issue #834) and sweepGenerationTemps (issue #2283) all
+// recognise a temp by that same prefix, so a literal here would let a rename of the
+// constant leave the creation site behind and strand temps no consumer matches (issue
+// #2287).
+func createGenerationTemp(dirFd int) (string, *os.File, error) {
+	var name string
+	var err error
+	for range 16 {
+		name = scratchformat.GenerationMarkerFile + "-" + generationTempSuffix()
+		var fd int
+		fd, err = nofollow.OpenAt(dirFd, name,
+			unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
+		if err == nil {
+			return name, os.NewFile(uintptr(fd), name), nil
+		}
+		if !errors.Is(err, unix.EEXIST) {
+			break
+		}
+	}
+	return "", nil, &os.PathError{Op: "create", Path: name, Err: err}
 }
 
 // sweepGenerationTemps removes the ".mcsd_generation-XXXX" temp siblings a crashed
@@ -146,7 +187,9 @@ func writeGenerationGuarded(workingDir string, gen uint64, guard func() bool) er
 // not merely the marker prefix that hasWorkingSet (issue #2279) and the snapshot pack
 // (issue #834) treat as non-content — those two only IGNORE what they match, while
 // this unlinks it, so an over-broad match here would delete real files. Directories
-// are skipped for the same reason.
+// are skipped for the same reason. Each name is unlinked relative to the directory's
+// descriptor, so a link planted under a temp name is removed as a link and what it
+// points at is untouched (issue #3336).
 //
 // The sweep CAN unlink a CONCURRENT writer's in-flight temp, and does so in practice
 // (8 goroutines x 50 writes on one dir: 0 rename errors without the sweep, ~300
@@ -157,10 +200,9 @@ func writeGenerationGuarded(workingDir string, gen uint64, guard func() bool) er
 // reservation (issue #829 item 4, handleSnapshot) though a hydrate and a stopped-id
 // snapshot do, so a dropped stream's post-upload snapshot tail can still run while a
 // NEW stream's hydrate records its own marker. What survives of that overlap after the
-// snapshot tail's identity guard (issue #2284) is (i) a concurrent hydrate that did NOT
-// replace the working dir — the 204 path leaves destDir untouched — and (ii) the
-// guard's own residual, the rename-sized window between its last check and the marker
-// rename.
+// snapshot tail's identity guard (issue #2284) is a concurrent hydrate that did NOT
+// replace the working dir — the 204 path leaves destDir untouched. (One that did
+// replace it leaves the two writers in different directories, issue #3336.)
 //
 // That is accepted rather than prevented, because what the loser loses is bounded: the
 // marker can never be absent or torn (the winner's rename precedes this sweep and its
@@ -168,18 +210,28 @@ func writeGenerationGuarded(workingDir string, gen uint64, guard func() bool) er
 // — which writeGeneration's contract already permits and recordGeneration logs without
 // propagating — and a lost update costs at most one extra hydrate. Which of two
 // concurrent writes wins was already last-rename-wins before this sweep existed. The
-// sweep is otherwise best-effort too: a ReadDir or Remove failure is ignored so it can
+// sweep is otherwise best-effort too: a listing or unlink failure is ignored so it can
 // never fail the marker write.
-func sweepGenerationTemps(workingDir string) {
-	entries, err := os.ReadDir(workingDir)
+func sweepGenerationTemps(dirFd int) {
+	dup, err := unix.Dup(dirFd)
 	if err != nil {
 		return
 	}
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasPrefix(entry.Name(), scratchformat.GenerationMarkerFile+"-") {
-			continue
+	dir := os.NewFile(uintptr(dup), ".")
+	defer func() { _ = dir.Close() }()
+	for {
+		// Listed in batches: the server decides how many entries its working-set root
+		// has, and the listing must not be held in memory whole.
+		names, err := dir.Readdirnames(256)
+		for _, name := range names {
+			if strings.HasPrefix(name, scratchformat.GenerationMarkerFile+"-") {
+				// Without AT_REMOVEDIR this fails on a directory, which is the skip.
+				_ = unix.Unlinkat(dirFd, name, 0)
+			}
 		}
-		_ = os.Remove(filepath.Join(workingDir, entry.Name()))
+		if err != nil || len(names) == 0 {
+			return
+		}
 	}
 }
 
@@ -301,18 +353,85 @@ func fsyncDir(dir string) error {
 	return d.Sync()
 }
 
-// readGeneration returns the generation recorded in workingDir, or 0 when the
-// marker is absent or unparseable (issue #763). A 0 means "held but at an unknown
-// generation": the API treats it as older than any published store generation and
-// hydrates, which is the safe direction (never skip a hydrate on an unknown set).
-func readGeneration(workingDir string) uint64 {
-	data, err := os.ReadFile(filepath.Join(workingDir, scratchformat.GenerationMarkerFile))
+// maxGenerationMarkerBytes is the largest marker a read accepts. A generation is a
+// uint64 in decimal — at most 20 digits — so 32 bytes leaves room for the trailing
+// newline a hand-written marker carries and nothing else.
+const maxGenerationMarkerBytes = 32
+
+// readGenerationMarker returns the generation recorded in workingDir.
+//
+// An absent marker (or working dir) is 0 with a nil error: a set that was never stamped
+// (issue #763). Anything else that is not a regular file of at most
+// maxGenerationMarkerBytes holding one decimal uint64 is REFUSED: 0 with a non-nil
+// error. The marker sits in a directory the server's own code owns and can write (issue
+// #3336), so it is opened relative to the working dir's descriptor without following a
+// link or blocking, judged on the opened descriptor and read up to the cap (nofollow):
+// a link to another file is never read, a FIFO never blocks the caller, and an endless
+// or huge file costs 33 bytes.
+//
+// Both outcomes are generation 0, which means "held but at an unknown generation": the
+// API treats it as older than any published store generation and hydrates, which is the
+// safe direction (never skip a hydrate on an unknown set).
+func readGenerationMarker(workingDir string) (uint64, error) {
+	dirFd, err := nofollow.OpenDir(workingDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0, nil
+	}
 	if err != nil {
-		return 0
+		return 0, fmt.Errorf("open working dir: %w", err)
+	}
+	defer func() { _ = unix.Close(dirFd) }()
+
+	data, err := nofollow.ReadFileAt(dirFd, scratchformat.GenerationMarkerFile, maxGenerationMarkerBytes)
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0, nil
+	}
+	var pathErr *fs.PathError
+	if errors.As(err, &pathErr) {
+		return 0, err // names the operation and the marker already
+	}
+	if err != nil {
+		return 0, fmt.Errorf("%s %w", scratchformat.GenerationMarkerFile, err)
 	}
 	gen, err := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64)
 	if err != nil {
-		return 0
+		// Neither %w nor the content: the bytes are the server's.
+		return 0, fmt.Errorf("%s does not hold a generation", scratchformat.GenerationMarkerFile)
+	}
+	return gen, nil
+}
+
+// recordedGeneration is readGenerationMarker for the callers that act on the value —
+// the held-set scans and the snapshot's base declaration. A refused marker is logged
+// and read as 0, exactly like an absent one, so one server's planted marker costs that
+// server a hydrate and nothing else.
+func recordedGeneration(workingDir, serverID string, log *slog.Logger) uint64 {
+	gen, err := readGenerationMarker(workingDir)
+	if err != nil && log != nil {
+		log.Warn("generation marker refused; treating the working set as generation 0, which forces a hydrate",
+			"server_id", serverID, "error", err)
 	}
 	return gen
+}
+
+// generationMarkerPresent reports whether workingDir holds a generation marker: a
+// regular file under exactly that name, judged without following a link. It is the
+// launch guard's predicate (launchReserved, issue #2802). Anything else at the name is
+// not a marker — readGenerationMarker refuses it — so it is not the held claim either.
+// A nil error is "present"; otherwise the error says why not, and satisfies
+// errors.Is(err, fs.ErrNotExist) when the marker or the working dir is simply absent.
+func generationMarkerPresent(workingDir string) error {
+	dirFd, err := nofollow.OpenDir(workingDir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = unix.Close(dirFd) }()
+	var st unix.Stat_t
+	if err := unix.Fstatat(dirFd, scratchformat.GenerationMarkerFile, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return err
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFREG {
+		return nofollow.ErrNotRegular
+	}
+	return nil
 }
