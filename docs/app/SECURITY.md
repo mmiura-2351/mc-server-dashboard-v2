@@ -616,7 +616,9 @@ its record of which store generation the set is at) is touched the same way
 generation is at most 20 digits): a marker replaced by a link, a FIFO, a
 directory, an oversized file or anything that is not one number is refused
 with a `WARN` and read as generation 0, the same as an absent marker, which
-makes the API hydrate that server. The worker reads every held server's marker
+makes the API hydrate that server whenever the store holds a published
+generation (against a store still at generation 0 there is nothing to hydrate
+and the start is not preceded by one). The worker reads every held server's marker
 at boot and before each registration, so the refusal is per server: one
 server's planted marker neither blocks nor fails the scan for the others. A
 launch is refused, and replayed with a hydrate, unless the marker is a regular
@@ -750,18 +752,27 @@ security model, and the following remain true:
     ([`CONTROL_PLANE.md`](CONTROL_PLANE.md) Section 5.1). A number forged **at or
     above** the store's makes the worker start the server on the working set it
     already holds instead of the store's copy; forged **below**, or made
-    unreadable, it forces a hydrate that replaces that working set (the replaced
-    tree is parked aside, [`STORAGE.md`](STORAGE.md) Section 4.6).
-  - as the base generation of a snapshot. The publish guard refuses a base
-    *below* the store's current generation when another worker published it;
-    a forged high base is never below, so it passes that guard, and a forged low
-    one can only get the server's own publish refused.
+    unreadable (which reads as 0), it forces a hydrate that replaces that
+    working set (the replaced tree is parked aside,
+    [`STORAGE.md`](STORAGE.md) Section 4.6). The comparison is `>=`, so 0 is
+    below only a store that has published: `held == store == 0` skips too.
+  - as the base generation of a snapshot. Before staging, the publish is
+    refused only when all of these hold: a base is declared (the worker sends
+    none for 0), it is *below* the store's current generation, both the
+    publishing worker and the worker that published current are known and
+    differ, and the publishing worker is not the one currently assigned to the
+    server. A forged high base is never below, so that guard cannot fire; a
+    forged low one can at most get the server's own publish refused, and not
+    even that while its worker is the assigned one.
 
   None of this reaches another server or the store's bookkeeping: both
-  comparisons are scoped to the one server, the generation a publish produces
-  is always the store's own `current + 1` and never the declared number, and
-  the commit-time check that the publisher is the assigned worker does not
-  read the marker. What a server gains is over **its own lineage**: it can keep
+  comparisons are scoped to the one server, and the generation a publish
+  produces is always the store's own `current + 1`, never the declared number
+  (the store's current is read before staging and re-checked at commit). The
+  remaining publish fence does not read the marker: at commit, a publish from
+  a known worker is refused when a *different* worker is assigned to the
+  server — and allowed when the server has no assignment at all, which is the
+  window a stopped server's final snapshot uses. What a server gains is over **its own lineage**: it can keep
   running the working set it holds where the store has moved on without it, and
   then publish that set as the newest generation. The store moves on without
   the worker when a backup is restored, a file is edited while the server is
@@ -770,8 +781,9 @@ security model, and the following remain true:
   snapshot was refused (a server can cause that: the region check refuses a
   torn world). So a hostile plugin can make a backup restore or an at-rest edit
   of its own server silently not take effect. Closing that needs the marker's
-  value to come from somewhere the container cannot write; it is open on issue
-  #3336 and not implemented.
+  value to come from somewhere the container cannot write; that is an open
+  decision (issue #3349), not an accepted residual, and nothing of it is
+  implemented.
 
 ---
 

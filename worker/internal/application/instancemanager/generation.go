@@ -386,6 +386,10 @@ func readGenerationMarker(workingDir string) (uint64, error) {
 	if errors.Is(err, fs.ErrNotExist) {
 		return 0, nil
 	}
+	var pathErr *fs.PathError
+	if errors.As(err, &pathErr) {
+		return 0, err // names the operation and the marker already
+	}
 	if err != nil {
 		return 0, fmt.Errorf("%s %w", scratchformat.GenerationMarkerFile, err)
 	}

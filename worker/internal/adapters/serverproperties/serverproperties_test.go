@@ -2,6 +2,7 @@ package serverproperties
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -249,6 +250,43 @@ func TestReadRefusesASymlinkedWorkingSet(t *testing.T) {
 	data, err := readWithin(t, work)
 	if err == nil || errors.Is(err, fs.ErrNotExist) || data != nil {
 		t.Fatalf("Read = %q, %v; want a refusal", data, err)
+	}
+}
+
+// The messages are what an operator reads in a failed start, tunnel dial or RCON
+// open; they name the operation that failed and the full path. Pinned so that the
+// reader behind Read (internal/nofollow) cannot change them unnoticed.
+func TestReadErrorMessages(t *testing.T) {
+	for name, tc := range map[string]struct {
+		plant func(t *testing.T, path string)
+		want  string // %s is the file's path
+	}{
+		"missing file": {func(*testing.T, string) {}, "open %s: no such file or directory"},
+		"symlink": {func(t *testing.T, path string) {
+			if err := os.Symlink(outsideFile(t), path); err != nil {
+				t.Fatal(err)
+			}
+		}, "serverproperties: %s is a symbolic link; refusing to follow it"},
+		"non-regular file": {func(t *testing.T, path string) {
+			if err := unix.Mkfifo(path, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, "serverproperties: %s is not a regular file; refusing to read it"},
+		"over the cap": {func(t *testing.T, path string) {
+			if err := os.WriteFile(path, make([]byte, MaxSize+1), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, "serverproperties: %s is larger than 4194304 bytes; refusing to read it"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, FileName)
+			tc.plant(t, path)
+			_, err := readWithin(t, dir)
+			if want := fmt.Sprintf(tc.want, path); err == nil || err.Error() != want {
+				t.Fatalf("Read error = %v, want %q", err, want)
+			}
+		})
 	}
 }
 

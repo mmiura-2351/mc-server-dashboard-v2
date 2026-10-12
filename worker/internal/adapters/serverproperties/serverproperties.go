@@ -78,6 +78,12 @@ func Read(workingDir string) ([]byte, error) {
 	case errors.Is(err, nofollow.ErrTooLarge):
 		return nil, fmt.Errorf("serverproperties: %s is larger than %d bytes; refusing to read it", path, MaxSize)
 	case err != nil:
+		// The reader names the stage that failed and the bare file name; report the
+		// same stage under the full path.
+		var pathErr *os.PathError
+		if errors.As(err, &pathErr) {
+			return nil, &os.PathError{Op: pathErr.Op, Path: path, Err: pathErr.Err}
+		}
 		return nil, &os.PathError{Op: "read", Path: path, Err: err}
 	}
 	return data, nil
