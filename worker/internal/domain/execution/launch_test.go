@@ -9,14 +9,32 @@ import (
 )
 
 // hostPaths is a PathResolver that maps relpaths onto the host working dir,
-// mirroring the now-removed host-process driver, and checks existence against it.
+// mirroring the now-removed host-process driver, and answers Exists and Files
+// from it. These fixtures hold regular files only, so a plain glob honours the
+// no-links contract.
 func hostPaths(workingDir string) PathResolver {
+	files := func(pattern string) ([]string, error) {
+		matches, err := filepath.Glob(filepath.Join(workingDir, filepath.FromSlash(pattern)))
+		if err != nil {
+			return nil, err
+		}
+		rels := make([]string, 0, len(matches))
+		for _, m := range matches {
+			rel, err := filepath.Rel(workingDir, m)
+			if err != nil {
+				return nil, err
+			}
+			rels = append(rels, filepath.ToSlash(rel))
+		}
+		return rels, nil
+	}
 	return PathResolver{
 		Resolve: func(rel string) string { return filepath.Join(workingDir, filepath.FromSlash(rel)) },
 		Exists: func(rel string) bool {
-			_, err := os.Stat(filepath.Join(workingDir, filepath.FromSlash(rel)))
-			return err == nil
+			matches, err := files(rel)
+			return err == nil && len(matches) == 1
 		},
+		Files: files,
 	}
 }
 
@@ -36,7 +54,7 @@ func TestBuildLaunchPlanJar(t *testing.T) {
 	dir := t.TempDir()
 	spec := InstanceSpec{ServerID: "s1", WorkingDir: dir, JarRelpath: "server.jar"}
 
-	plan, err := BuildLaunchPlan(spec, dir, hostPaths(dir))
+	plan, err := BuildLaunchPlan(spec, hostPaths(dir))
 	if err != nil {
 		t.Fatalf("BuildLaunchPlan: %v", err)
 	}
@@ -56,7 +74,7 @@ func TestBuildLaunchPlanJarHeap(t *testing.T) {
 	dir := t.TempDir()
 	spec := InstanceSpec{ServerID: "s1", WorkingDir: dir, JarRelpath: "server.jar", MemoryLimitMB: 2048}
 
-	plan, err := BuildLaunchPlan(spec, dir, hostPaths(dir))
+	plan, err := BuildLaunchPlan(spec, hostPaths(dir))
 	if err != nil {
 		t.Fatalf("BuildLaunchPlan: %v", err)
 	}
@@ -99,7 +117,7 @@ func TestBuildLaunchPlanForgeNeedsInstall(t *testing.T) {
 	dir := t.TempDir()
 	spec := InstanceSpec{ServerID: "s1", WorkingDir: dir, JarRelpath: "server.jar", LaunchMode: LaunchModeForgeArgsfile}
 
-	plan, err := BuildLaunchPlan(spec, dir, hostPaths(dir))
+	plan, err := BuildLaunchPlan(spec, hostPaths(dir))
 	if err != nil {
 		t.Fatalf("BuildLaunchPlan: %v", err)
 	}
@@ -121,7 +139,7 @@ func TestBuildLaunchPlanForgeLaunch(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "user_jvm_args.txt"))
 	spec := InstanceSpec{ServerID: "s1", WorkingDir: dir, JarRelpath: "server.jar", LaunchMode: LaunchModeForgeArgsfile}
 
-	plan, err := BuildLaunchPlan(spec, dir, hostPaths(dir))
+	plan, err := BuildLaunchPlan(spec, hostPaths(dir))
 	if err != nil {
 		t.Fatalf("BuildLaunchPlan: %v", err)
 	}
@@ -145,7 +163,7 @@ func TestBuildLaunchPlanForgeLaunchNoUserArgs(t *testing.T) {
 	writeFile(t, filepath.Join(dir, argsRel))
 	spec := InstanceSpec{ServerID: "s1", WorkingDir: dir, JarRelpath: "server.jar", LaunchMode: LaunchModeForgeArgsfile}
 
-	plan, err := BuildLaunchPlan(spec, dir, hostPaths(dir))
+	plan, err := BuildLaunchPlan(spec, hostPaths(dir))
 	if err != nil {
 		t.Fatalf("BuildLaunchPlan: %v", err)
 	}
@@ -166,7 +184,7 @@ func TestBuildLaunchPlanForgeAmbiguous(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "libraries/net/minecraftforge/forge/1.20.1-47.3.0/unix_args.txt"))
 	spec := InstanceSpec{ServerID: "s1", WorkingDir: dir, JarRelpath: "server.jar", LaunchMode: LaunchModeForgeArgsfile}
 
-	_, err := BuildLaunchPlan(spec, dir, hostPaths(dir))
+	_, err := BuildLaunchPlan(spec, hostPaths(dir))
 	if !errors.Is(err, ErrForgeArgsfileAmbiguous) {
 		t.Fatalf("err = %v, want ErrForgeArgsfileAmbiguous", err)
 	}
@@ -175,7 +193,7 @@ func TestBuildLaunchPlanForgeAmbiguous(t *testing.T) {
 // ResolveLegacyForgeJar returns not-found when no forge-*.jar exists.
 func TestResolveLegacyForgeJarNone(t *testing.T) {
 	dir := t.TempDir()
-	_, found, err := ResolveLegacyForgeJar(dir)
+	_, found, err := ResolveLegacyForgeJar(hostPaths(dir))
 	if err != nil {
 		t.Fatalf("ResolveLegacyForgeJar: %v", err)
 	}
@@ -190,7 +208,7 @@ func TestResolveLegacyForgeJarSingle(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "forge-1.12.2-14.23.5.2860.jar"))
 
-	rel, found, err := ResolveLegacyForgeJar(dir)
+	rel, found, err := ResolveLegacyForgeJar(hostPaths(dir))
 	if err != nil {
 		t.Fatalf("ResolveLegacyForgeJar: %v", err)
 	}
@@ -209,7 +227,7 @@ func TestResolveLegacyForgeJarAmbiguous(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "forge-1.12.2-14.23.5.2860.jar"))
 	writeFile(t, filepath.Join(dir, "forge-1.12.2-14.23.5.2861.jar"))
 
-	_, _, err := ResolveLegacyForgeJar(dir)
+	_, _, err := ResolveLegacyForgeJar(hostPaths(dir))
 	if !errors.Is(err, ErrLegacyForgeJarAmbiguous) {
 		t.Fatalf("err = %v, want ErrLegacyForgeJarAmbiguous", err)
 	}

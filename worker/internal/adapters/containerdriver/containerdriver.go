@@ -330,7 +330,7 @@ func (d *Driver) Start(ctx context.Context, spec execution.InstanceSpec) (execut
 		return nil, fmt.Errorf("containerdriver: select image: %w", err)
 	}
 
-	plan, err := execution.BuildLaunchPlan(spec, spec.WorkingDir, containerPathResolver(spec.WorkingDir))
+	plan, err := execution.BuildLaunchPlan(spec, containerPathResolver(spec.WorkingDir, d.logger.With("server_id", spec.ServerID)))
 	if err != nil {
 		return nil, fmt.Errorf("containerdriver: plan launch: %w", err)
 	}
@@ -361,7 +361,7 @@ func (d *Driver) Start(ctx context.Context, spec execution.InstanceSpec) (execut
 		// re-install starts from a clean slate and never hits ambiguous-match
 		// errors (issue #1127). A cleanup failure is logged but does not block
 		// the install.
-		if cleanErr := cleanForgeInstallArtifacts(spec.WorkingDir, d.logger); cleanErr != nil {
+		if cleanErr := cleanForgeInstallArtifacts(spec.WorkingDir, d.logger.With("server_id", spec.ServerID)); cleanErr != nil {
 			d.logger.Warn("failed to clean stale Forge artifacts before install",
 				"server_id", spec.ServerID, "err", cleanErr)
 		}
@@ -380,19 +380,6 @@ func (d *Driver) Start(ctx context.Context, spec execution.InstanceSpec) (execut
 	}
 	inst.beginLaunch(id)
 	return inst, nil
-}
-
-// containerPathResolver maps working-set-relative paths onto in-container paths
-// under /data and checks existence against the host working dir (the bind
-// source), for execution.BuildLaunchPlan.
-func containerPathResolver(workingDir string) execution.PathResolver {
-	return execution.PathResolver{
-		Resolve: func(rel string) string { return containerWorkDir + "/" + rel },
-		Exists: func(rel string) bool {
-			_, err := os.Stat(filepath.Join(workingDir, filepath.FromSlash(rel)))
-			return err == nil
-		},
-	}
 }
 
 // launchContainer creates and starts the server launch container, returning its
@@ -1225,7 +1212,7 @@ func (i *instance) superviseInstall(installID string) {
 		// blocks for the one Start call and then acts on the already-started retry
 		// container. There is therefore no published-but-unstarted sub-window for
 		// Stop to mishandle (issue #1987).
-		_ = cleanForgeInstallArtifacts(i.spec.WorkingDir, i.logger)
+		_ = cleanForgeInstallArtifacts(i.spec.WorkingDir, i.logger.With("server_id", i.spec.ServerID))
 		newID, err := i.createInstallRetryContainer()
 		if err != nil {
 			i.finishInstallCrash(execution.CrashReasonForgeInstallFailed, "forge install retry failed: "+err.Error())
@@ -1265,7 +1252,8 @@ func (i *instance) superviseInstall(installID string) {
 		return
 	}
 
-	plan, err := execution.BuildLaunchPlan(i.spec, i.spec.WorkingDir, containerPathResolver(i.spec.WorkingDir))
+	paths := containerPathResolver(i.spec.WorkingDir, i.logger.With("server_id", i.spec.ServerID))
+	plan, err := execution.BuildLaunchPlan(i.spec, paths)
 	if err != nil {
 		_ = i.docker.Remove(context.Background(), installID)
 		i.finishInstallCrash(execution.CrashReasonForgeInstallFailed, "forge re-plan after install failed: "+err.Error())
@@ -1274,7 +1262,7 @@ func (i *instance) superviseInstall(installID string) {
 	if plan.NeedsInstall {
 		// No args file: try legacy Forge jar fallback (MC <=1.16.x installers
 		// produce forge-<version>.jar instead of unix_args.txt).
-		rel, found, legacyErr := execution.ResolveLegacyForgeJar(i.spec.WorkingDir)
+		rel, found, legacyErr := execution.ResolveLegacyForgeJar(paths)
 		if legacyErr != nil || !found {
 			_ = i.docker.Remove(context.Background(), installID)
 			detail := "forge install produced no args file"
@@ -1408,8 +1396,16 @@ func (i *instance) installBackoffOrStopping(d time.Duration) bool {
 // but omits Start, like createLaunchContainer for the install→launch handoff
 // (issue #306).
 func (i *instance) createInstallRetryContainer() (string, error) {
-	plan, err := execution.BuildLaunchPlan(i.spec, i.spec.WorkingDir, containerPathResolver(i.spec.WorkingDir))
+	plan, err := execution.BuildLaunchPlan(i.spec, containerPathResolver(i.spec.WorkingDir, i.logger.With("server_id", i.spec.ServerID)))
 	if err != nil {
+		return "", err
+	}
+	if !plan.NeedsInstall {
+		// The cleanup before this re-plan removes every args file, so one is here
+		// only if it could not be removed. The plan then carries no installer
+		// command, and a container created from it would run a bare `java`.
+		err := errors.New("no installer command: the working set still holds a Forge args file after the failed attempt")
+		i.logger.Warn("forge install retry not started", "server_id", i.spec.ServerID, "err", err)
 		return "", err
 	}
 	create := CreateSpec{
