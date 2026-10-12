@@ -361,7 +361,7 @@ func (d *Driver) Start(ctx context.Context, spec execution.InstanceSpec) (execut
 		// re-install starts from a clean slate and never hits ambiguous-match
 		// errors (issue #1127). A cleanup failure is logged but does not block
 		// the install.
-		if cleanErr := execution.CleanForgeInstallArtifacts(spec.WorkingDir); cleanErr != nil {
+		if cleanErr := cleanForgeInstallArtifacts(spec.WorkingDir, d.logger); cleanErr != nil {
 			d.logger.Warn("failed to clean stale Forge artifacts before install",
 				"server_id", spec.ServerID, "err", cleanErr)
 		}
@@ -1225,7 +1225,7 @@ func (i *instance) superviseInstall(installID string) {
 		// blocks for the one Start call and then acts on the already-started retry
 		// container. There is therefore no published-but-unstarted sub-window for
 		// Stop to mishandle (issue #1987).
-		_ = execution.CleanForgeInstallArtifacts(i.spec.WorkingDir)
+		_ = cleanForgeInstallArtifacts(i.spec.WorkingDir, i.logger)
 		newID, err := i.createInstallRetryContainer()
 		if err != nil {
 			i.finishInstallCrash(execution.CrashReasonForgeInstallFailed, "forge install retry failed: "+err.Error())

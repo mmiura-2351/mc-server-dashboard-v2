@@ -727,7 +727,7 @@ func TestForgeInstallRetrySucceeds(t *testing.T) {
 	docker.waitGates[installID] <- waitResult{code: 1, err: installErr}
 	docker.waitGates[installID] <- waitResult{code: 0}
 	// Write the argsfile when the retry creates the second install container.
-	// This runs after CleanForgeInstallArtifacts and before Wait, so the
+	// This runs after cleanForgeInstallArtifacts and before Wait, so the
 	// re-plan finds the argsfile exactly as in production (the install container
 	// "produced" it).
 	var createCount atomic.Int32
