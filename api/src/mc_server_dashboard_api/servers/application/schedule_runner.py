@@ -105,6 +105,7 @@ from mc_server_dashboard_api.servers.domain.next_run_calculator import NextRunCa
 from mc_server_dashboard_api.servers.domain.notifier import ServerNotifier
 from mc_server_dashboard_api.servers.domain.schedule import (
     MAX_WARNING_OFFSET_MINUTES,
+    WARNING_COMMAND_PREFIX,
     Schedule,
     ScheduleAction,
     ScheduleId,
@@ -665,7 +666,7 @@ class RunScheduleTick:
                 await self.send_command(
                     community_id=server.community_id,
                     server_id=schedule.server_id,
-                    line=f"say {step.message}",
+                    line=f"{WARNING_COMMAND_PREFIX}{step.message}",
                 )
             except ServerError as exc:
                 # Offline/refused between the pre-check and dispatch: log and move

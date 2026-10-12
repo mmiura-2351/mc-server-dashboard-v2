@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -345,6 +346,60 @@ func TestFailedCommandResultIsLogged(t *testing.T) {
 
 	cancel()
 	<-done
+}
+
+// A handler's error text can quote caller-controlled input (a path, a daemon
+// error), so the WARN caps what it logs (issue #3363). The result sent to the API
+// keeps the full text: only the log line is bounded.
+func TestFailedCommandLogCapsTheErrorMessage(t *testing.T) {
+	atCap := strings.Repeat("a", maxLoggedErrorMessageBytes)
+	// "é" is two bytes, so the cap falls inside the last rune and must back off
+	// to a rune boundary rather than log half of it.
+	multibyte := strings.Repeat("a", maxLoggedErrorMessageBytes-1) + "é" + "tail"
+	for _, tc := range []struct {
+		name, message, want string
+	}{
+		{"at the cap", atCap, atCap},
+		{"over the cap", atCap + "b", atCap + loggedErrorMessageTruncationMarker},
+		{
+			"over the cap inside a rune",
+			multibyte,
+			strings.Repeat("a", maxLoggedErrorMessageBytes-1) + loggedErrorMessageTruncationMarker,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			transport := newFakeTransport(acceptedAck())
+			dialer := &fakeDialer{transports: []*fakeTransport{transport}}
+			logger, capture := captureLogger()
+			handler := newFakeHandler(CommandResult{
+				Success:      false,
+				ErrorCode:    CommandErrorInternal,
+				ErrorMessage: tc.message,
+			})
+			r := NewRunner(dialer, testCaps(), newFakeClock(), logger, WithCommandHandler(handler))
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan struct{})
+			go func() { _ = r.Run(ctx); close(done) }()
+
+			transport.commands <- Command{CommandID: "cmd-9", ServerID: "srv-1", Kind: "ServerCommand"}
+
+			waitFor(t, func() bool { return len(capture.recordsAtLevel(slog.LevelWarn)) == 1 })
+			rec := capture.recordsAtLevel(slog.LevelWarn)[0]
+			if got, _ := recordAttr(rec, "error_message"); got != tc.want {
+				t.Errorf("warn error_message is %d bytes, want %d (cap %d + marker)",
+					len(got), len(tc.want), maxLoggedErrorMessageBytes)
+			}
+			waitFor(t, func() bool { return len(transport.resultsCopy()) == 1 })
+			if got := transport.resultsCopy()[0].ErrorMessage; got != tc.message {
+				t.Errorf("result ErrorMessage is %d bytes, want the full %d", len(got), len(tc.message))
+			}
+
+			cancel()
+			<-done
+		})
+	}
 }
 
 func TestSuccessfulCommandResultIsNotWarnLogged(t *testing.T) {

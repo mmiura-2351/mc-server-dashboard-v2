@@ -111,16 +111,19 @@ from mc_server_dashboard_api.servers.domain.committed_resources import (
     committed_resources_by_worker,
 )
 from mc_server_dashboard_api.servers.domain.control_plane import (
+    MAX_CONSOLE_LINE_BYTES,
     CommandOutcome,
     CommandStatus,
     ControlPlane,
     WorkerUnavailableError,
+    console_line_bytes,
 )
 from mc_server_dashboard_api.servers.domain.cpu_allocation import (
     cpu_allocation_from_config,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
+    CommandDispatchError,
     EulaNotAcceptedError,
     InvalidLifecycleTransitionError,
     LifecycleTransitionConflictError,
@@ -2252,6 +2255,17 @@ class SendServerCommand:
     async def __call__(
         self, *, community_id: CommunityId, server_id: ServerId, line: str
     ) -> str:
+        size = console_line_bytes(line)
+        if size > MAX_CONSOLE_LINE_BYTES:
+            # The HTTP schemas refuse such a line when it is written, so this is a
+            # line stored before that bound existed -- a schedule's command or
+            # warning message (issue #3363). Nothing is sent: the game server
+            # would drop the RCON connection on it without answering.
+            raise CommandDispatchError(
+                f"console line is {size} bytes, over the "
+                f"{MAX_CONSOLE_LINE_BYTES}-byte limit",
+                reason="console_line_too_long",
+            )
         async with self.uow:
             server = await _load(self.uow, community_id, server_id)
             if (

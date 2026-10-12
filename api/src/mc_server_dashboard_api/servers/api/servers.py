@@ -73,6 +73,7 @@ from mc_server_dashboard_api.identity.domain.token_service import TokenService
 from mc_server_dashboard_api.identity.domain.value_objects import (
     UserId as IdentityUserId,
 )
+from mc_server_dashboard_api.servers.api.console_line import ConsoleLine
 from mc_server_dashboard_api.servers.application.export_import import (
     ExportServer,
     ImportServer,
@@ -240,7 +241,7 @@ class UpdateServerRequest(BaseModel):
 
 
 class ServerCommandRequest(BaseModel):
-    line: str = Field(min_length=1)
+    line: ConsoleLine = Field(min_length=1)
 
 
 class ServerCommandResponse(BaseModel):

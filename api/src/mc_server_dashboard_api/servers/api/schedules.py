@@ -55,6 +55,10 @@ from mc_server_dashboard_api.dependencies import (
 )
 from mc_server_dashboard_api.http_datetime import UtcDatetime
 from mc_server_dashboard_api.http_problem import ProblemException, problem
+from mc_server_dashboard_api.servers.api.console_line import (
+    ConsoleLine,
+    WarningMessage,
+)
 from mc_server_dashboard_api.servers.application.schedules import (
     CreateSchedule,
     DeleteSchedule,
@@ -95,7 +99,7 @@ class WarningStepBody(BaseModel):
     """A pre-action player-warning step for a stop/restart schedule (#1839)."""
 
     offset_minutes: int
-    message: str = Field(min_length=1)
+    message: WarningMessage = Field(min_length=1)
 
 
 class CreateScheduleRequest(BaseModel):
@@ -105,7 +109,7 @@ class CreateScheduleRequest(BaseModel):
     interval_seconds: int | None = None
     timezone: str = DEFAULT_TIMEZONE
     enabled: bool = True
-    command: str | None = None
+    command: ConsoleLine | None = None
     warning_steps: list[WarningStepBody] | None = None
     only_when_running: bool | None = Field(
         default=None,
@@ -126,7 +130,7 @@ class UpdateScheduleRequest(BaseModel):
     interval_seconds: int | None = None
     timezone: str | None = None
     enabled: bool | None = None
-    command: str | None = None
+    command: ConsoleLine | None = None
     warning_steps: list[WarningStepBody] | None = None
     only_when_running: bool | None = Field(
         default=None,

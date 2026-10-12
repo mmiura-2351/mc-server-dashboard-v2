@@ -50,6 +50,9 @@ from mc_server_dashboard_api.servers.application.schedules import (
     CreateSchedule,
     PreviewSchedule,
 )
+from mc_server_dashboard_api.servers.domain.control_plane import (
+    MAX_CONSOLE_LINE_BYTES,
+)
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     InvalidCronExpressionError,
@@ -61,6 +64,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerNotFoundError,
 )
 from mc_server_dashboard_api.servers.domain.schedule import (
+    MAX_WARNING_MESSAGE_BYTES,
     Cadence,
     Schedule,
     ScheduleAction,
@@ -608,3 +612,160 @@ def test_preview_member_without_read_permission_gets_403() -> None:
         json={"cron": "0 4 * * *"},
     )
     assert resp.status_code == 403
+
+
+# --- console line bound (issue #3363) ---------------------------------------
+#
+# A schedule's command, and a warning step's message (broadcast as
+# ``say <message>``), become console lines when they run, so both are held to
+# the console line's byte limit when they are written.
+
+# Three bytes per character.
+_WIDE = "あ"
+
+
+def _validation_problem(loc: list[object], limit: int, *, in_bytes: bool) -> object:
+    unit = "bytes in UTF-8" if in_bytes else "characters"
+    return {
+        "type": "urn:mcsd:error:validation_error",
+        "title": "Unprocessable Content",
+        "status": 422,
+        "reason": "validation_error",
+        "errors": [
+            {
+                "type": "string_too_long",
+                "loc": loc,
+                "msg": f"String should have at most {limit} {unit}",
+            }
+        ],
+    }
+
+
+def _command_body(command: str) -> dict[str, object]:
+    return {
+        "name": "broadcast",
+        "action": "command",
+        "command": command,
+        "interval_seconds": 3600,
+    }
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "a" * MAX_CONSOLE_LINE_BYTES,
+        _WIDE * (MAX_CONSOLE_LINE_BYTES // 3),
+    ],
+    ids=["ascii", "multi-byte"],
+)
+def test_schedule_command_at_the_limit_is_accepted(command: str) -> None:
+    server = uuid.uuid4()
+    create = _FakeUseCase(result=_schedule(server))
+    update = _FakeUseCase(result=_schedule(server))
+    app = _app(
+        member=True,
+        allow=True,
+        create=create,
+        update=update,
+        recorder=_RecordingRecorder(),
+    )
+    client = _client(app)
+
+    created = client.post(_url(uuid.uuid4(), server), json=_command_body(command))
+    updated = client.patch(
+        _url(uuid.uuid4(), server, schedule=uuid.uuid4()), json={"command": command}
+    )
+
+    assert (created.status_code, updated.status_code) == (201, 200)
+    assert create.calls[0]["command"] == command
+    assert update.calls[0]["command"] == command
+
+
+@pytest.mark.parametrize(
+    ("command", "in_bytes"),
+    [
+        ("a" * (MAX_CONSOLE_LINE_BYTES + 1), False),
+        (_WIDE * (MAX_CONSOLE_LINE_BYTES // 3 + 1), True),
+    ],
+    ids=["one-character-over", "under-in-characters-over-in-bytes"],
+)
+def test_schedule_command_past_the_limit_is_422(command: str, in_bytes: bool) -> None:
+    server = uuid.uuid4()
+    create = _FakeUseCase(result=_schedule(server))
+    update = _FakeUseCase(result=_schedule(server))
+    app = _app(
+        member=True,
+        allow=True,
+        create=create,
+        update=update,
+        recorder=_RecordingRecorder(),
+    )
+    client = _client(app)
+
+    created = client.post(_url(uuid.uuid4(), server), json=_command_body(command))
+    updated = client.patch(
+        _url(uuid.uuid4(), server, schedule=uuid.uuid4()), json={"command": command}
+    )
+
+    expected = _validation_problem(
+        ["body", "command"], MAX_CONSOLE_LINE_BYTES, in_bytes=in_bytes
+    )
+    assert (created.status_code, updated.status_code) == (422, 422)
+    assert created.json() == expected
+    assert updated.json() == expected
+    assert create.calls == [] and update.calls == []
+
+
+def _warning_body(message: str) -> dict[str, object]:
+    return {
+        **_create_body(),
+        "warning_steps": [{"offset_minutes": 5, "message": message}],
+    }
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "a" * MAX_WARNING_MESSAGE_BYTES,
+        _WIDE * (MAX_WARNING_MESSAGE_BYTES // 3)
+        + "a" * (MAX_WARNING_MESSAGE_BYTES % 3),
+    ],
+    ids=["ascii", "multi-byte"],
+)
+def test_warning_message_at_the_limit_is_accepted(message: str) -> None:
+    # The broadcast line ``say <message>`` is then exactly the console limit.
+    assert len(f"say {message}".encode()) == MAX_CONSOLE_LINE_BYTES
+    server = uuid.uuid4()
+    create = _FakeUseCase(result=_schedule(server))
+    app = _app(member=True, allow=True, create=create, recorder=_RecordingRecorder())
+    client = _client(app)
+
+    resp = client.post(_url(uuid.uuid4(), server), json=_warning_body(message))
+
+    assert resp.status_code == 201
+    assert create.calls[0]["warning_steps"] == [(5, message)]
+
+
+@pytest.mark.parametrize(
+    ("message", "in_bytes"),
+    [
+        ("a" * (MAX_WARNING_MESSAGE_BYTES + 1), False),
+        (_WIDE * (MAX_WARNING_MESSAGE_BYTES // 3 + 1), True),
+    ],
+    ids=["one-character-over", "under-in-characters-over-in-bytes"],
+)
+def test_warning_message_past_the_limit_is_422(message: str, in_bytes: bool) -> None:
+    server = uuid.uuid4()
+    create = _FakeUseCase(result=_schedule(server))
+    app = _app(member=True, allow=True, create=create, recorder=_RecordingRecorder())
+    client = _client(app)
+
+    resp = client.post(_url(uuid.uuid4(), server), json=_warning_body(message))
+
+    assert resp.status_code == 422
+    assert resp.json() == _validation_problem(
+        ["body", "warning_steps", 0, "message"],
+        MAX_WARNING_MESSAGE_BYTES,
+        in_bytes=in_bytes,
+    )
+    assert create.calls == []

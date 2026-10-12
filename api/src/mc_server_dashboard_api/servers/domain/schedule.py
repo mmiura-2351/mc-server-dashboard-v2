@@ -23,6 +23,9 @@ import uuid
 import zoneinfo
 from dataclasses import dataclass
 
+from mc_server_dashboard_api.servers.domain.control_plane import (
+    MAX_CONSOLE_LINE_BYTES,
+)
 from mc_server_dashboard_api.servers.domain.errors import (
     InvalidScheduleCadenceError,
     InvalidScheduleError,
@@ -38,6 +41,14 @@ DEFAULT_TIMEZONE = "UTC"
 # at most five steps, each a positive whole-minute offset of at most two hours.
 MAX_WARNING_STEPS = 5
 MAX_WARNING_OFFSET_MINUTES = 120
+
+# A warning step is broadcast as the console line ``say <message>``, so its
+# message may fill what that prefix leaves of the console line (issue #3363). The
+# HTTP schema holds a new message to it; the entity does not, because a row
+# written before the bound existed must still load — its broadcast is refused
+# when it runs instead (``SendServerCommand``).
+WARNING_COMMAND_PREFIX = "say "
+MAX_WARNING_MESSAGE_BYTES = MAX_CONSOLE_LINE_BYTES - len(WARNING_COMMAND_PREFIX)
 
 # The interval-cadence floor (issue #1838 review): one minute, matching cron's
 # granularity (the other cadence form cannot go finer either). A sub-minute

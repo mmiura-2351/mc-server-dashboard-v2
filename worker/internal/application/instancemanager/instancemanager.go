@@ -2907,9 +2907,26 @@ func (m *Manager) notRunningRefusal(serverID string) (session.CommandErrorCode, 
 	return session.CommandErrorServerNotFound, "instancemanager: server not running", true
 }
 
+// MaxConsoleLineBytes bounds a ServerCommand line, in bytes (issue #3363). It is
+// the largest command the game server's RCON listener accepts: vanilla (and so
+// Paper, Forge, Fabric, …) reads each request with one read() into a 1,460-byte
+// buffer and drops the connection, without answering, when the packet's length
+// prefix does not match what that read returned. A packet is the 4-byte length,
+// the 4-byte id, the 4-byte type, the body and two NUL terminators, so the body
+// tops out at 1,460 - 14 = 1,446 bytes. A longer line is refused here as that
+// command's failure instead of being written to RCON. The API holds the same
+// number (MAX_CONSOLE_LINE_BYTES) and refuses the line at its HTTP edge.
+const MaxConsoleLineBytes = 1446
+
 func (m *Manager) handleServerCommand(ctx context.Context, cmd session.Command) session.CommandResult {
 	if code, msg, refused := m.notRunningRefusal(cmd.ServerID); refused {
 		return fail(cmd.CommandID, code, msg)
+	}
+
+	if len(cmd.Line) > MaxConsoleLineBytes {
+		return fail(cmd.CommandID, session.CommandErrorInternal,
+			fmt.Sprintf("instancemanager: console line is %d bytes, over the %d-byte RCON limit",
+				len(cmd.Line), MaxConsoleLineBytes))
 	}
 
 	driverName, mcVersion := m.controlTargetFor(cmd.ServerID)
