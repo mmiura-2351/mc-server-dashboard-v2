@@ -394,6 +394,8 @@ export const en = {
   "serverDetail.console.commandPlaceholder": "Type a command…",
   "serverDetail.console.notRunning":
     "Commands are available only while the server is running.",
+  "serverDetail.console.tooLong":
+    "Commands are limited to {max} bytes; this one is {size}. Shorten it to send it.",
   "serverDetail.commandFailed": "Command failed.",
   // Console command failures by cause (issue #2450); see
   // serverConsoleErrorPresentation.ts for what each reason means.
@@ -750,6 +752,10 @@ export const en = {
   "schedules.error.invalidName": "That name is not valid.",
   "schedules.error.nameExists": "A schedule with that name already exists.",
   "schedules.error.invalidCommand": "Enter a command line to run.",
+  "schedules.error.commandTooLong":
+    "The command is longer than the {max} bytes a console command can be.",
+  "schedules.error.warningTooLong":
+    "A warning message can be at most {max} bytes.",
   "schedules.error.invalidWarnings":
     "Warnings need distinct offsets of 1–120 minutes (shorter than the interval) with a message.",
   "schedules.error.generic": "Something went wrong. Please try again.",
@@ -863,6 +869,8 @@ export const en = {
   // server's server.properties (issue #2851).
   "files.error.unencodableText":
     "This file is saved as Latin-1 (ISO-8859-1), because it is not UTF-8 or because this Minecraft version reads it only as Latin-1, and Latin-1 cannot hold some of the characters you entered. Remove them and save again.",
+  "files.error.editTooLarge":
+    "This file is larger than the 4 MiB the editor can save. Download it, edit it locally and upload it instead.",
   "files.error.invalidInput": "The request was invalid.",
   "files.error.workerUnavailable":
     "The server agent is disconnected. Please try again later.",

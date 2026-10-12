@@ -18,6 +18,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { ApiError, api } from "../api/client.ts";
+import {
+  MAX_CONSOLE_LINE_BYTES,
+  MAX_WARNING_MESSAGE_BYTES,
+  utf8ByteLength,
+} from "../api/limits.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
 import { fieldErrorsFromValidation } from "../api/validationErrors.ts";
@@ -752,6 +757,28 @@ function ScheduleDialog({
         setCadenceError(t("schedules.error.intervalTooShort"));
         return;
       }
+    }
+    // Both become console lines when the schedule runs, so the API holds them
+    // to the console line's byte limit (422); name the limit here instead.
+    if (
+      action === "command" &&
+      utf8ByteLength(command) > MAX_CONSOLE_LINE_BYTES
+    ) {
+      setCommandError(
+        t("schedules.error.commandTooLong", { max: MAX_CONSOLE_LINE_BYTES }),
+      );
+      return;
+    }
+    if (
+      showWarnings &&
+      warnings.some(
+        (step) => utf8ByteLength(step.message) > MAX_WARNING_MESSAGE_BYTES,
+      )
+    ) {
+      setWarningError(
+        t("schedules.error.warningTooLong", { max: MAX_WARNING_MESSAGE_BYTES }),
+      );
+      return;
     }
     save.mutate();
   };

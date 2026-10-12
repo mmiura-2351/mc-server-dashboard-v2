@@ -9,6 +9,10 @@ import {
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client.ts";
+import {
+  MAX_CONSOLE_LINE_BYTES,
+  MAX_WARNING_MESSAGE_BYTES,
+} from "../api/limits.ts";
 import { setAccessToken } from "../auth/tokenStore.ts";
 import { ToastProvider } from "../components/Toast.tsx";
 import { t } from "../i18n/index.ts";
@@ -455,6 +459,77 @@ describe("ServerSchedulesTab create/edit dialog", () => {
       warning_steps: null,
       only_when_running: true,
     });
+  });
+
+  it("refuses a command past the console limit before saving", async () => {
+    routeGet({ schedules: [] });
+    routePost({ create: schedule() });
+    renderTab(canFor(ALL_CODES));
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: t("schedules.create") }),
+    );
+    fireEvent.change(screen.getByLabelText(t("schedules.dialog.nameLabel")), {
+      target: { value: "broadcast" },
+    });
+    // 483 characters, but 1,449 UTF-8 bytes: the limit is in bytes.
+    fireEvent.change(
+      screen.getByLabelText(t("schedules.dialog.commandLabel")),
+      { target: { value: "あ".repeat(MAX_CONSOLE_LINE_BYTES / 3 + 1) } },
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: t("schedules.dialog.create") }),
+    );
+
+    expect(
+      await screen.findByText(
+        t("schedules.error.commandTooLong", { max: MAX_CONSOLE_LINE_BYTES }),
+      ),
+    ).toBeInTheDocument();
+    expect(
+      mockApi.post.mock.calls.filter(
+        (call) => !(call[0] as string).includes("/preview"),
+      ),
+    ).toEqual([]);
+  });
+
+  it("refuses a warning message past its limit before saving", async () => {
+    routeGet({ schedules: [] });
+    routePost({ create: schedule() });
+    renderTab(canFor(ALL_CODES));
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: t("schedules.create") }),
+    );
+    fireEvent.change(screen.getByLabelText(t("schedules.dialog.nameLabel")), {
+      target: { value: "nightly stop" },
+    });
+    fireEvent.change(screen.getByLabelText(t("schedules.dialog.actionLabel")), {
+      target: { value: "stop" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: t("schedules.dialog.warning.add") }),
+    );
+    fireEvent.change(
+      screen.getByLabelText(t("schedules.dialog.warning.message")),
+      { target: { value: "a".repeat(MAX_WARNING_MESSAGE_BYTES + 1) } },
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: t("schedules.dialog.create") }),
+    );
+
+    expect(
+      await screen.findByText(
+        t("schedules.error.warningTooLong", {
+          max: MAX_WARNING_MESSAGE_BYTES,
+        }),
+      ),
+    ).toBeInTheDocument();
+    expect(
+      mockApi.post.mock.calls.filter(
+        (call) => !(call[0] as string).includes("/preview"),
+      ),
+    ).toEqual([]);
   });
 
   it("creates a stop schedule carrying warning steps", async () => {
