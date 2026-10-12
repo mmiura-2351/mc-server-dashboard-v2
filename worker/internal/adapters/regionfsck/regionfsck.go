@@ -71,11 +71,14 @@ package regionfsck
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+
+	"golang.org/x/sys/unix"
 )
 
 // Region layout constants.
@@ -144,10 +147,14 @@ type Finding struct {
 
 // Report is the aggregate result of walking a working set's .mca files. Scanned
 // counts every region file examined; Corrupt lists one finding per corrupt file
-// (the first failing reason).
+// (the first failing reason). Skipped counts the entries that were listed in
+// their directory but gone by the time the walk looked at them, and so were
+// neither descended into nor examined; it is zero on a working set at rest, and
+// the caller logs it.
 type Report struct {
 	Scanned int
 	Corrupt []Finding
+	Skipped int
 }
 
 // Healthy reports whether nothing was flagged.
@@ -160,16 +167,36 @@ func (r Report) Healthy() bool { return len(r.Corrupt) == 0 }
 // per present chunk; region payloads are never loaded. A non-4096-aligned size is
 // the normal unpadded tail of a 26.x world, not corruption; the per-chunk EOF bound
 // is byte-precise (offset*4096 + 4 + length <= size). See the package doc.
+//
+// The path's last component is opened without following a link and without
+// blocking, and anything but a regular file there is an error (issue #3335).
+// CheckWorkingSet does not come through here: it never resolves a path below the
+// working-set root.
 func CheckRegionFile(path string) (Reason, error) {
-	f, err := os.Open(path)
+	fd, err := openAt(unix.AT_FDCWD, path, openFileFlags)
 	if err != nil {
-		return ReasonNone, err
+		return ReasonNone, &os.PathError{Op: "open", Path: path, Err: err}
 	}
+	return checkOpened(fd, path)
+}
+
+// checkOpened judges the region file behind fd, which it closes. path only labels
+// errors. What the descriptor refers to is decided here, by fstat on it, and the
+// same descriptor is then read: at most the location table and one 5-byte prefix
+// per present chunk — 1025 fixed-size reads — at offsets the table names, bounded
+// by the size fstat reported. Neither the size of the file (sparse, multi-GB) nor
+// its growing meanwhile adds a read.
+func checkOpened(fd int, path string) (Reason, error) {
+	// The descriptor keeps its O_NONBLOCK, which has no effect on a regular file.
+	f := os.NewFile(uintptr(fd), path)
 	defer func() { _ = f.Close() }()
 
 	info, err := f.Stat()
 	if err != nil {
 		return ReasonNone, err
+	}
+	if !info.Mode().IsRegular() {
+		return ReasonNone, fmt.Errorf("regionfsck: %s is not a regular file", path)
 	}
 	size := info.Size()
 
@@ -275,31 +302,145 @@ func CheckRegionFile(path string) (Reason, error) {
 // never returned as an error. A non-nil error is reserved for a real I/O failure
 // while walking or reading. The single rule set (issue #927; see CheckRegionFile)
 // applies to every region.
+//
+// The walk never resolves a path below root (issue #3335). It also runs on a
+// RUNNING server's working set, which that server's code — not the operator's —
+// has bind-mounted and can rearrange at any moment, while the Worker walking it
+// is root under the shipped topology. So, like the snapshot walk it precedes
+// (datatransfer.packTar): root is opened once, every directory is opened relative
+// to its parent's descriptor with O_NOFOLLOW|O_DIRECTORY and every region file
+// relative to its directory's descriptor with O_NOFOLLOW|O_NONBLOCK, and what was
+// opened is judged by fstat on that descriptor (checkOpened).
+//
+// The lstat before each open is only a hint that picks what to open: directories
+// are descended into (whatever their name), regular files named *.mca are
+// checked, and everything else — a symlink, to a file or a directory, dangling or
+// not; a FIFO, socket or device — is left out unopened, as the snapshot leaves it
+// out of the archive. Only names whose directory entry says "directory" or
+// "regular file named *.mca" are lstat'ed at all.
+//
+// An entry gone between its directory's listing and that lstat is skipped and
+// counted in Report.Skipped: a running server deletes files all the time, and one
+// deletion must not cost the scan and the findings it already holds. A hint the
+// open then contradicts (the entry vanished in that narrower window, or was
+// replaced by something of another kind) is an error and no report, as an entry
+// vanishing mid-walk always was: the caller logs it.
+//
+// On a filesystem whose listing carries no entry types, the os package fills them
+// in with an fstatat on the directory's descriptor (no path is resolved), and
+// drops an entry that vanished meanwhile without it reaching Report.Skipped.
 func CheckWorkingSet(root string) (Report, error) {
-	var report Report
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			if errors.Is(err, fs.ErrNotExist) && path == root {
-				// An absent working dir: nothing to scan.
-				return filepath.SkipAll
-			}
-			return err
-		}
-		if d.IsDir() || !strings.HasSuffix(d.Name(), ".mca") {
-			return nil
-		}
-		report.Scanned++
-		reason, err := CheckRegionFile(path)
-		if err != nil {
-			return err
-		}
-		if reason != ReasonNone {
-			report.Corrupt = append(report.Corrupt, Finding{Path: path, Reason: reason})
-		}
-		return nil
-	})
+	// The root is the one name resolved by path: it is the Worker's own entry in
+	// the scratch root, which the server (confined to what is beneath it) cannot
+	// replace.
+	rootFd, err := unix.Open(root, openDirFlags, 0)
+	if errors.Is(err, unix.ENOENT) {
+		// An absent working dir: nothing to scan.
+		return Report{}, nil
+	}
 	if err != nil {
+		return Report{}, &os.PathError{Op: "open", Path: root, Err: err}
+	}
+	var report Report
+	if err := walk(rootFd, root, 0, &report); err != nil {
 		return Report{}, err
 	}
 	return report, nil
+}
+
+// openDirFlags and openFileFlags are the only flags the check opens with.
+const (
+	openDirFlags  = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
+	openFileFlags = unix.O_RDONLY | unix.O_NOFOLLOW | unix.O_NONBLOCK | unix.O_NOCTTY | unix.O_CLOEXEC
+)
+
+// maxWalkDepth bounds how deep the walk descends, at the snapshot walk's bound
+// (datatransfer.maxPackDepth) and for its reason: the walk holds one descriptor
+// per level, in a descriptor table every server on the Worker shares, and the
+// tree's shape is the server's to choose. A deeper working set is an error here,
+// as it is for the snapshot that follows.
+const maxWalkDepth = 128
+
+// statAt lstats the entry name of the directory behind dirFd (the walk's hint),
+// and openAt opens it. Both act relative to a descriptor only. They are variables
+// so a test can replace an entry at an exact point of the walk without racing
+// real filesystem timings; production never reassigns them.
+var (
+	statAt = func(dirFd int, name string, st *unix.Stat_t) error {
+		return unix.Fstatat(dirFd, name, st, unix.AT_SYMLINK_NOFOLLOW)
+	}
+	openAt = func(dirFd int, name string, flags int) (int, error) {
+		for {
+			fd, err := unix.Openat(dirFd, name, flags, 0)
+			if !errors.Is(err, unix.EINTR) {
+				return fd, err
+			}
+		}
+	}
+)
+
+// walk checks every region file beneath the directory behind dirFd, which it
+// closes, in the lexical order filepath.WalkDir visited them. path is the
+// directory's path as the caller spelled root; it names findings and labels
+// errors and is never resolved. depth is the directory's level below root.
+func walk(dirFd int, path string, depth int, report *Report) error {
+	dir := os.NewFile(uintptr(dirFd), path)
+	defer func() { _ = dir.Close() }()
+	entries, err := dir.ReadDir(-1)
+	if err != nil {
+		return &os.PathError{Op: "readdir", Path: path, Err: err}
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	for _, entry := range entries {
+		name := entry.Name()
+		// The type the listing carries costs nothing and is used for one thing only:
+		// to leave alone, without a system call, the names that cannot matter — the
+		// bulk of a working set (logs, plugin files, temp files). It is never what
+		// an open is trusted on: a name it lets through gets the lstat below, and
+		// what is then opened is judged on its own descriptor.
+		if !entry.IsDir() && (!entry.Type().IsRegular() || !strings.HasSuffix(name, ".mca")) {
+			continue
+		}
+		entryPath := filepath.Join(path, name)
+		var hint unix.Stat_t
+		if err := statAt(dirFd, name, &hint); err != nil {
+			if errors.Is(err, unix.ENOENT) {
+				// Gone since the listing: a running server deletes files all the
+				// time, and one deletion must not cost the scan and its findings.
+				report.Skipped++
+				continue
+			}
+			return &os.PathError{Op: "lstat", Path: entryPath, Err: err}
+		}
+		switch hint.Mode & unix.S_IFMT {
+		case unix.S_IFDIR:
+			if depth+1 > maxWalkDepth {
+				return fmt.Errorf("regionfsck: working set is nested deeper than %d directories at %q", maxWalkDepth, entryPath)
+			}
+			fd, err := openAt(dirFd, name, openDirFlags)
+			if err != nil {
+				return &os.PathError{Op: "open", Path: entryPath, Err: err}
+			}
+			if err := walk(fd, entryPath, depth+1, report); err != nil {
+				return err
+			}
+		case unix.S_IFREG:
+			if !strings.HasSuffix(name, ".mca") {
+				continue
+			}
+			report.Scanned++
+			fd, err := openAt(dirFd, name, openFileFlags)
+			if err != nil {
+				return &os.PathError{Op: "open", Path: entryPath, Err: err}
+			}
+			reason, err := checkOpened(fd, entryPath)
+			if err != nil {
+				return err
+			}
+			if reason != ReasonNone {
+				report.Corrupt = append(report.Corrupt, Finding{Path: entryPath, Reason: reason})
+			}
+		}
+	}
+	return nil
 }
