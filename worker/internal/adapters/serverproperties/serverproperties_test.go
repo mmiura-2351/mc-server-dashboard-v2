@@ -174,15 +174,15 @@ func TestReadBoundsTheFileSize(t *testing.T) {
 // server has to replace either.
 func beforeOpeningTheFile(t *testing.T, swap func()) {
 	t.Helper()
-	orig := openAt
-	t.Cleanup(func() { openAt = orig })
+	orig := readFileAt
+	t.Cleanup(func() { readFileAt = orig })
 	done := false
-	openAt = func(dirFd int, name string, flags int) (int, error) {
+	readFileAt = func(dirFd int, name string, maxSize int) ([]byte, error) {
 		if !done {
 			done = true
 			swap()
 		}
-		return orig(dirFd, name, flags)
+		return orig(dirFd, name, maxSize)
 	}
 }
 

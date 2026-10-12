@@ -21,11 +21,12 @@ package serverproperties
 import (
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/nofollow"
 )
 
 // FileName is the name of the file in the working-set root.
@@ -44,17 +45,10 @@ const FileName = "server.properties"
 // allocation.
 const MaxSize = 4 << 20
 
-// openAt opens the entry name of the directory behind dirFd. It is a variable so
-// a test can replace the file, or the working set, at the exact point between the
-// two opens; production never reassigns it.
-var openAt = func(dirFd int, name string, flags int) (int, error) {
-	for {
-		fd, err := unix.Openat(dirFd, name, flags, 0)
-		if !errors.Is(err, unix.EINTR) {
-			return fd, err
-		}
-	}
-}
+// readFileAt reads the entry name of the directory behind dirFd. It is a variable
+// so a test can replace the file, or the working set, at the exact point between
+// the two opens; production never reassigns it.
+var readFileAt = nofollow.ReadFileAt
 
 // Read returns the content of the server.properties in the root of workingDir.
 //
@@ -71,40 +65,20 @@ func Read(workingDir string) ([]byte, error) {
 	// The root is the one name resolved by path: it is the Worker's own entry in
 	// the scratch root, which the server (confined to what is beneath it) cannot
 	// replace.
-	dirFd, err := unix.Open(workingDir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	dirFd, err := nofollow.OpenDir(workingDir)
 	if err != nil {
 		return nil, &os.PathError{Op: "open", Path: path, Err: err}
 	}
 	defer func() { _ = unix.Close(dirFd) }()
 
-	fd, err := openAt(dirFd, FileName, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_NOCTTY|unix.O_CLOEXEC)
-	if errors.Is(err, unix.ELOOP) {
-		return nil, fmt.Errorf("serverproperties: %s is a symbolic link; refusing to follow it", path)
-	}
-	if err != nil {
-		return nil, &os.PathError{Op: "open", Path: path, Err: err}
-	}
-	var st unix.Stat_t
-	if err := unix.Fstat(fd, &st); err != nil {
-		_ = unix.Close(fd)
-		return nil, &os.PathError{Op: "stat", Path: path, Err: err}
-	}
-	if st.Mode&unix.S_IFMT != unix.S_IFREG {
-		_ = unix.Close(fd)
-		return nil, fmt.Errorf("serverproperties: %s is not a regular file; refusing to read it", path)
-	}
-	// The descriptor keeps its O_NONBLOCK, which has no effect on a regular file.
-	f := os.NewFile(uintptr(fd), path)
-	defer func() { _ = f.Close() }()
-
-	// One byte past the cap tells an oversized file from one exactly at it, however
-	// large the file is or grows meanwhile.
-	data, err := io.ReadAll(io.LimitReader(f, MaxSize+1))
-	if err != nil {
-		return nil, &os.PathError{Op: "read", Path: path, Err: err}
-	}
-	if len(data) > MaxSize {
+	data, err := readFileAt(dirFd, FileName, MaxSize)
+	switch {
+	case errors.Is(err, nofollow.ErrSymlink), errors.Is(err, nofollow.ErrNotRegular):
+		return nil, fmt.Errorf("serverproperties: %s %w", path, err)
+	case errors.Is(err, nofollow.ErrTooLarge):
 		return nil, fmt.Errorf("serverproperties: %s is larger than %d bytes; refusing to read it", path, MaxSize)
+	case err != nil:
+		return nil, &os.PathError{Op: "read", Path: path, Err: err}
 	}
 	return data, nil
 }
