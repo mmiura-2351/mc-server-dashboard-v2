@@ -18,9 +18,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand/v2"
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -33,6 +35,7 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/scratchformat"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/nofollow"
 )
 
 // controlFunc opens an execution.ServerControl (RCON) for a running server,
@@ -3333,6 +3336,15 @@ var (
 	// (safeJoin), mapped by the handler to a FILE_ACCESS_DENIED response.
 	errPathDenied = errors.New("path rejected")
 )
+
+// readLeafAt reads the leaf of the directory behind the resolved parent
+// descriptor. It is a variable so a test can replace the leaf at the exact point
+// between the resolution and the open; production never reassigns it.
+var readLeafAt = nofollow.ReadFileAt
+
+// editTempSuffix names one edit temp. It is a variable so a test can predict the
+// name and plant something at it; production never reassigns it.
+var editTempSuffix = func() string { return strconv.FormatUint(rand.Uint64(), 36) }
 
 // readLeafNoFollow opens leaf relative to parentFd refusing to follow a final
 // symlink (O_NOFOLLOW yields ELOOP, which the handler maps to a denial), then
