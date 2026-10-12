@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -96,7 +97,7 @@ func TestReadFileAtRefusesWhatIsNotABoundedRegularFile(t *testing.T) {
 			if err := os.Mkdir(path, 0o700); err != nil {
 				t.Fatal(err)
 			}
-		}, ErrNotRegular},
+		}, ErrIsDir},
 		"one byte over the cap": {func(t *testing.T, path string) {
 			if err := os.WriteFile(path, make([]byte, maxSize+1), 0o600); err != nil {
 				t.Fatal(err)
@@ -118,6 +119,11 @@ func TestReadFileAtRefusesWhatIsNotABoundedRegularFile(t *testing.T) {
 			if !errors.Is(err, tc.want) || data != nil {
 				t.Fatalf("read = %q, %v; want no bytes and %v", data, err, tc.want)
 			}
+			// A directory is told apart, and is still "not a regular file" to a
+			// caller that does not care.
+			if isDir := name == "directory"; errors.Is(err, ErrIsDir) != isDir || (isDir && !errors.Is(err, ErrNotRegular)) {
+				t.Fatalf("read = %v; ErrIsDir must mark a directory and only that, as an ErrNotRegular", err)
+			}
 		})
 	}
 }
@@ -134,5 +140,49 @@ func TestOpenDirRefusesASymlinkedDirectory(t *testing.T) {
 	}
 	if data, err := readWithin(t, link); err == nil || errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("read = %q, %v; want a refusal", data, err)
+	}
+}
+
+// A file that is within the cap when it is opened and judged, and grows past it
+// before it is read, is refused — and the read stops at the cap however large the
+// file has become. A size taken at the stat says nothing about the read: the
+// server owns the file and can extend it under the open descriptor.
+func TestReadFileAtStopsAtTheCapWhenTheFileGrowsAfterItWasJudged(t *testing.T) {
+	const grownTo = 128 << 20
+	dir := t.TempDir()
+	path := filepath.Join(dir, fileName)
+	if err := os.WriteFile(path, make([]byte, maxSize), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	grew := false
+	t.Cleanup(func() { afterStat = func() {} })
+	afterStat = func() {
+		// Sparse: the file reads as 128 MiB of zeros without occupying them.
+		if err := os.Truncate(path, grownTo); err != nil {
+			t.Skipf("the filesystem cannot hold a sparse file: %v", err)
+		}
+		grew = true
+	}
+	dirFd, err := OpenDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = unix.Close(dirFd) }()
+
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	data, err := ReadFileAt(dirFd, fileName, maxSize)
+	runtime.ReadMemStats(&after)
+
+	if !grew {
+		t.Fatal("the file was never grown: the read did not pass the point after its stat")
+	}
+	if !errors.Is(err, ErrTooLarge) || data != nil {
+		t.Fatalf("read = %d bytes, %v; want no bytes and ErrTooLarge", len(data), err)
+	}
+	// Reading the cap costs a few times the cap; reading the file costs at least the
+	// file. The bound is far from both, so it does not depend on the allocator.
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated >= grownTo/2 {
+		t.Fatalf("the refused read allocated %d bytes, want it bounded by the %d-byte cap", allocated, maxSize)
 	}
 }
