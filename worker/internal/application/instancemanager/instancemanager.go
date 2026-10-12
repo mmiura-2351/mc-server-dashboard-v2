@@ -3058,6 +3058,10 @@ func (m *Manager) handleReadFile(cmd session.Command) session.CommandResult {
 	// (which the running MC process can plant inside its own working set) is
 	// refused rather than followed, and the open acts on the same resolved fd, so
 	// a concurrent symlink swap between resolution and open cannot redirect it.
+	// The leaf is the server's to replace at any moment (issue #3337), so it is
+	// opened without following a link or blocking, judged on the opened descriptor
+	// and read up to the cap (nofollow): a FIFO cannot stall the lane and a file
+	// growing under the read cannot exceed MaxFileBytes.
 	parentFd, leaf, err := openParentBeneath(root, target, false)
 	if err != nil {
 		if errors.Is(err, unix.ENOENT) {
@@ -3077,15 +3081,20 @@ func (m *Manager) handleReadFile(cmd session.Command) session.CommandResult {
 	}
 	defer func() { _ = unix.Close(parentFd) }()
 
-	content, err := readLeafNoFollow(parentFd, leaf)
+	content, err := readLeafAt(parentFd, leaf, MaxFileBytes)
 	switch {
-	case errors.Is(err, errIsDir):
+	case errors.Is(err, nofollow.ErrIsDir):
 		return failFileAccess(cmd.CommandID, session.FileAccessReasonIsADirectory,
 			fmt.Sprintf("instancemanager: %q is a directory", cmd.Path))
-	case errors.Is(err, errTooLarge):
+	case errors.Is(err, nofollow.ErrNotRegular), errors.Is(err, unix.ENXIO):
+		// A FIFO or device the server planted, or a socket (which cannot even be
+		// opened: ENXIO). It has no content to return, and none was read.
+		return fail(cmd.CommandID, session.CommandErrorFileAccessDenied,
+			fmt.Sprintf("instancemanager: read file: %q is not a regular file", cmd.Path))
+	case errors.Is(err, nofollow.ErrTooLarge):
 		return failFileAccess(cmd.CommandID, session.FileAccessReasonPayloadTooLarge,
 			fmt.Sprintf("instancemanager: %q exceeds the %d-byte read cap", cmd.Path, MaxFileBytes))
-	case errors.Is(err, unix.ELOOP):
+	case errors.Is(err, nofollow.ErrSymlink):
 		// O_NOFOLLOW refused a final-component symlink: the classic escape vector.
 		return failFileAccess(cmd.CommandID, session.FileAccessReasonSymlinkRefused,
 			fmt.Sprintf("instancemanager: refusing symlink %q", cmd.Path))
@@ -3327,11 +3336,10 @@ func safeJoin(root, name string) (string, error) {
 	return joined, nil
 }
 
-// errIsDir / errTooLarge are sentinel results from the leaf helpers, mapped by
-// the handlers to their coded FILE_ACCESS_DENIED responses.
+// errIsDir is the sentinel result of the edit's leaf helpers for a directory at
+// the target, mapped by the handler to its coded FILE_ACCESS_DENIED response.
 var (
-	errIsDir    = errors.New("path is a directory")
-	errTooLarge = errors.New("file exceeds the read cap")
+	errIsDir = errors.New("path is a directory")
 	// errPathDenied marks a ListFiles path rejected by the lexical traversal check
 	// (safeJoin), mapped by the handler to a FILE_ACCESS_DENIED response.
 	errPathDenied = errors.New("path rejected")
@@ -3342,35 +3350,6 @@ var (
 // between the resolution and the open; production never reassigns it.
 var readLeafAt = nofollow.ReadFileAt
 
-// editTempSuffix names one edit temp. It is a variable so a test can predict the
-// name and plant something at it; production never reassigns it.
-var editTempSuffix = func() string { return strconv.FormatUint(rand.Uint64(), 36) }
-
-// readLeafNoFollow opens leaf relative to parentFd refusing to follow a final
-// symlink (O_NOFOLLOW yields ELOOP, which the handler maps to a denial), then
-// reads the regular file. A directory or an oversized file yields the matching
-// sentinel; ENOENT surfaces for a missing file.
-func readLeafNoFollow(parentFd int, leaf string) ([]byte, error) {
-	fd, err := unix.Openat(parentFd, leaf, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return nil, err
-	}
-	f := os.NewFile(uintptr(fd), leaf)
-	defer func() { _ = f.Close() }()
-
-	info, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if info.IsDir() {
-		return nil, errIsDir
-	}
-	if info.Size() > MaxFileBytes {
-		return nil, errTooLarge
-	}
-	return io.ReadAll(f)
-}
-
 // atomicWriteAt writes data to a temp file created under parentFd, fsyncs it, and
 // renames it over leaf relative to the same dirfd, so a concurrent reader sees
 // either the old or the complete new content, never a partial write. The whole
@@ -3378,27 +3357,34 @@ func readLeafNoFollow(parentFd int, leaf string) ([]byte, error) {
 // redirected by a concurrently swapped intermediate symlink. An existing symlink
 // or directory at leaf is refused before the write (errIsDir / ELOOP) rather than
 // replaced silently.
-func atomicWriteAt(parentFd int, leaf string, data []byte) error {
+//
+// The directory is the server's to write (issue #3337), so nothing in it is ever
+// opened except the temp this call creates itself (createEditTemp). The rename
+// replaces the NAME leaf: a FIFO there is never opened, another name of a
+// hard-linked file keeps the old content, and a symlink swapped in after the check
+// above is replaced as a link, not written through. A directory swapped in is the
+// one thing a rename cannot replace, and is refused as one.
+func atomicWriteAt(parentFd int, leaf string, data []byte) (err error) {
 	if err := refuseExistingLeaf(parentFd, leaf); err != nil {
 		return err
 	}
 
-	tmpName := ".edit-" + filepath.Base(leaf) + "-tmp"
-	fd, err := unix.Openat(parentFd, tmpName,
-		unix.O_WRONLY|unix.O_CREAT|unix.O_TRUNC|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o640)
+	tmpName, tmp, err := createEditTemp(parentFd)
 	if err != nil {
 		return err
 	}
-	tmp := os.NewFile(uintptr(fd), tmpName)
+	// Until the rename has published it the temp is nothing but this call's litter.
 	defer func() {
-		_ = tmp.Close()
-		_ = unix.Unlinkat(parentFd, tmpName, 0)
+		if err != nil {
+			_ = tmp.Close()
+			_ = unix.Unlinkat(parentFd, tmpName, 0)
+		}
 	}()
 
 	// The replacement is the Worker's creation; give it the directory's owner
 	// before it is published, so a server running as another user can still read
 	// and rewrite its own file (issue #2600).
-	if err := inheritOwner(parentFd, fd); err != nil {
+	if err := inheritOwner(parentFd, int(tmp.Fd())); err != nil {
 		return fmt.Errorf("setting owner: %w", err)
 	}
 	if _, err := tmp.Write(data); err != nil {
@@ -3410,7 +3396,43 @@ func atomicWriteAt(parentFd int, leaf string, data []byte) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return unix.Renameat(parentFd, tmpName, parentFd, leaf)
+	if err := unix.Renameat(parentFd, tmpName, parentFd, leaf); err != nil {
+		if errors.Is(err, unix.EISDIR) {
+			return errIsDir
+		}
+		return err
+	}
+	return nil
+}
+
+// editTempSuffix names one edit temp. It is a variable so a test can predict the
+// name and plant something at it; production never reassigns it.
+var editTempSuffix = func() string { return strconv.FormatUint(rand.Uint64(), 36) }
+
+// createEditTemp creates the temp an edit writes, in the directory behind
+// parentFd, and returns its name and the open file. O_EXCL makes the create fail
+// on ANY existing entry and O_NOFOLLOW keeps it from resolving a link, so the file
+// written, re-owned and renamed is always one this call created: a FIFO planted
+// at the name cannot block the open, and a hard link or symlink planted there is
+// never truncated, written or re-owned through. The name is random so that a
+// server cannot hold it in advance, and a taken name is retried under another;
+// it does not carry the leaf, so it fits wherever the leaf does.
+func createEditTemp(parentFd int) (string, *os.File, error) {
+	var name string
+	var err error
+	for range 16 {
+		name = ".edit-" + editTempSuffix() + "-tmp"
+		var fd int
+		fd, err = nofollow.OpenAt(parentFd, name,
+			unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o640)
+		if err == nil {
+			return name, os.NewFile(uintptr(fd), name), nil
+		}
+		if !errors.Is(err, unix.EEXIST) {
+			break
+		}
+	}
+	return "", nil, &os.PathError{Op: "create", Path: name, Err: err}
 }
 
 // refuseExistingLeaf rejects an existing symlink or directory at leaf relative to

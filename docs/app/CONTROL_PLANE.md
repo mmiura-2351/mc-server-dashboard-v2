@@ -650,7 +650,7 @@ it — and a genuine path denial — both map to `invalid_path`.
 
 | `file_access_reason` | Worker condition (read / edit / list) | API result |
 |---|---|---|
-| `UNSPECIFIED` | A traversal-unsafe path (absolute, `..`), or an unrefined resolution denial. | 422 `invalid_path` |
+| `UNSPECIFIED` | A traversal-unsafe path (absolute, `..`), an unrefined resolution denial, or a read whose path is neither a regular file nor a directory (a FIFO, socket or device, which is refused unread). | 422 `invalid_path` |
 | `IS_A_DIRECTORY` | A read or edit whose path is a directory. | 422 `is_a_directory` |
 | `NOT_A_DIRECTORY` | A list whose path is a regular file. | 422 `not_a_directory` |
 | `SYMLINK_REFUSED` | A refused final/intermediate-component symlink (the FR-FILE-4 escape-vector defence). | 422 `symlink_refused` |

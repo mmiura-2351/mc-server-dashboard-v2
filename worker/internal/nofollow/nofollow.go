@@ -19,6 +19,7 @@ package nofollow
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -33,6 +34,9 @@ var (
 	ErrSymlink = errors.New("is a symbolic link; refusing to follow it")
 	// ErrNotRegular reports a FIFO, socket, device or directory.
 	ErrNotRegular = errors.New("is not a regular file; refusing to read it")
+	// ErrIsDir is the ErrNotRegular a directory is refused with (it satisfies
+	// errors.Is for both), for a caller that answers a directory differently.
+	ErrIsDir = fmt.Errorf("is a directory: %w", ErrNotRegular)
 	// ErrTooLarge reports a file larger than the caller's cap.
 	ErrTooLarge = errors.New("is larger than the read cap; refusing to read it")
 )
@@ -80,7 +84,11 @@ func ReadFileAt(dirFd int, name string, maxSize int) ([]byte, error) {
 	if err := unix.Fstat(fd, &st); err != nil {
 		return nil, &fs.PathError{Op: "stat", Path: name, Err: err}
 	}
-	if st.Mode&unix.S_IFMT != unix.S_IFREG {
+	switch st.Mode & unix.S_IFMT {
+	case unix.S_IFREG:
+	case unix.S_IFDIR:
+		return nil, ErrIsDir
+	default:
 		return nil, ErrNotRegular
 	}
 	// One byte past the cap tells an oversized file from one exactly at it, however

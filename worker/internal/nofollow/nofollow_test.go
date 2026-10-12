@@ -96,7 +96,7 @@ func TestReadFileAtRefusesWhatIsNotABoundedRegularFile(t *testing.T) {
 			if err := os.Mkdir(path, 0o700); err != nil {
 				t.Fatal(err)
 			}
-		}, ErrNotRegular},
+		}, ErrIsDir},
 		"one byte over the cap": {func(t *testing.T, path string) {
 			if err := os.WriteFile(path, make([]byte, maxSize+1), 0o600); err != nil {
 				t.Fatal(err)
@@ -117,6 +117,11 @@ func TestReadFileAtRefusesWhatIsNotABoundedRegularFile(t *testing.T) {
 			data, err := readWithin(t, dir)
 			if !errors.Is(err, tc.want) || data != nil {
 				t.Fatalf("read = %q, %v; want no bytes and %v", data, err, tc.want)
+			}
+			// A directory is told apart, and is still "not a regular file" to a
+			// caller that does not care.
+			if isDir := name == "directory"; errors.Is(err, ErrIsDir) != isDir || (isDir && !errors.Is(err, ErrNotRegular)) {
+				t.Fatalf("read = %v; ErrIsDir must mark a directory and only that, as an ErrNotRegular", err)
 			}
 		})
 	}
