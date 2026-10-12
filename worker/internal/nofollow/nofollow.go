@@ -41,6 +41,11 @@ var (
 	ErrTooLarge = errors.New("is larger than the read cap; refusing to read it")
 )
 
+// afterStat runs once ReadFileAt has judged the opened file and before it reads
+// it. It is a variable so a test can grow the file at that exact point; production
+// never reassigns it.
+var afterStat = func() {}
+
 // OpenDir opens the directory at path and returns its descriptor, which the
 // caller closes. The path is the one name resolved as a path, so it must be one
 // the other user cannot replace (a working-set root is the Worker's own entry in
@@ -91,6 +96,7 @@ func ReadFileAt(dirFd int, name string, maxSize int) ([]byte, error) {
 	default:
 		return nil, ErrNotRegular
 	}
+	afterStat()
 	// One byte past the cap tells an oversized file from one exactly at it, however
 	// large the file is or grows meanwhile.
 	data, err := io.ReadAll(io.LimitReader(f, int64(maxSize)+1))

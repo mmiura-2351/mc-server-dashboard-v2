@@ -227,8 +227,11 @@ func TestReadFileJudgesALeafSwappedInAfterResolution(t *testing.T) {
 }
 
 // A file that grows past the cap after the path was resolved is refused, and the
-// read stops at the cap however large the file has become: the Worker never holds
-// more than the cap of a file whose size the server controls.
+// handler reads it with MaxFileBytes as the bound: the Worker never holds more
+// than the cap of a file whose size the server controls. The file here is already
+// large when it is opened; growth AFTER the open descriptor was judged is pinned
+// where the read lives (nofollow,
+// TestReadFileAtStopsAtTheCapWhenTheFileGrowsAfterItWasJudged).
 func TestReadFileOfAFileGrownPastTheCapStopsAtTheCap(t *testing.T) {
 	const grownTo = 128 << 20
 	m := newManager(t, &fakeDriver{}, nil)

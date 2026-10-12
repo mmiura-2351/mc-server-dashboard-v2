@@ -3364,6 +3364,12 @@ var readLeafAt = nofollow.ReadFileAt
 // hard-linked file keeps the old content, and a symlink swapped in after the check
 // above is replaced as a link, not written through. A directory swapped in is the
 // one thing a rename cannot replace, and is refused as one.
+//
+// The boundary: the exclusive create protects what this call opens, re-owns and
+// writes — its own descriptor — not the later lookup of the temp's NAME. A server
+// that replaces that directory entry before the rename gets its replacement
+// published at leaf instead of the edit: an entry of its own directory moved to a
+// name it could already write, never followed, opened or re-owned by the Worker.
 func atomicWriteAt(parentFd int, leaf string, data []byte) (err error) {
 	if err := refuseExistingLeaf(parentFd, leaf); err != nil {
 		return err
@@ -3412,11 +3418,12 @@ var editTempSuffix = func() string { return strconv.FormatUint(rand.Uint64(), 36
 // createEditTemp creates the temp an edit writes, in the directory behind
 // parentFd, and returns its name and the open file. O_EXCL makes the create fail
 // on ANY existing entry and O_NOFOLLOW keeps it from resolving a link, so the file
-// written, re-owned and renamed is always one this call created: a FIFO planted
-// at the name cannot block the open, and a hard link or symlink planted there is
-// never truncated, written or re-owned through. The name is random so that a
-// server cannot hold it in advance, and a taken name is retried under another;
-// it does not carry the leaf, so it fits wherever the leaf does.
+// behind the returned descriptor — the one written and re-owned — is always one
+// this call created: a FIFO planted at the name cannot block the open, and a hard
+// link or symlink planted there is never truncated, written or re-owned through.
+// (The NAME stays the server's to replace; see atomicWriteAt.) The name is random
+// so that a server cannot hold it in advance, and a taken name is retried under
+// another; it does not carry the leaf, so it fits wherever the leaf does.
 func createEditTemp(parentFd int) (string, *os.File, error) {
 	var name string
 	var err error
