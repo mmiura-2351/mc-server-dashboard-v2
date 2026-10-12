@@ -44,6 +44,10 @@ from mc_server_dashboard_api.dependencies import (
     get_validate_plugin_set,
     require_permission,
 )
+from mc_server_dashboard_api.http_body_limit import (
+    MULTIPART_OVERHEAD_BYTES,
+    request_body_limit,
+)
 from mc_server_dashboard_api.http_datetime import UtcDatetime
 from mc_server_dashboard_api.http_head import head_response
 from mc_server_dashboard_api.http_problem import ProblemException, problem
@@ -460,6 +464,9 @@ async def list_plugins(
 @router.post(
     "/communities/{community_id}/servers/{server_id}/plugins",
     status_code=status.HTTP_201_CREATED,
+)
+@request_body_limit(
+    MAX_PLUGIN_BYTES + MULTIPART_OVERHEAD_BYTES, reason="file_too_large"
 )
 async def install_plugin(
     community_id: uuid.UUID,

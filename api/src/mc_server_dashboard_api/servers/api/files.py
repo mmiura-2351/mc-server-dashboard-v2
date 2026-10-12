@@ -108,6 +108,10 @@ from mc_server_dashboard_api.dependencies import (
     require_download_access,
     require_permission,
 )
+from mc_server_dashboard_api.http_body_limit import (
+    MULTIPART_OVERHEAD_BYTES,
+    request_body_limit,
+)
 from mc_server_dashboard_api.http_content_disposition import content_disposition
 from mc_server_dashboard_api.http_datetime import UtcDatetime
 from mc_server_dashboard_api.http_head import head_response
@@ -122,6 +126,7 @@ from mc_server_dashboard_api.identity.domain.value_objects import (
     UserId as IdentityUserId,
 )
 from mc_server_dashboard_api.servers.application.files import (
+    MAX_EDIT_BYTES,
     MAX_UPLOAD_BYTES,
     DeleteFile,
     DownloadFile,
@@ -168,6 +173,19 @@ _SERVER_RESOURCE_TYPE = "server"
 # upload cap (the bounded-read loop in ``_read_capped_upload``).
 _UPLOAD_CHUNK_BYTES = 1024 * 1024
 
+# The longest ``content_base64`` an edit may carry (issue #3363): the base64 of a
+# file at the edit cap, 4 characters per 3 bytes with the last group padded. The
+# decoder is strict (no whitespace, canonical padding), so nothing longer decodes
+# to a file within the cap, and a longer string is refused before it is decoded.
+# A file one or two bytes past the cap still encodes to this length; the use
+# case's byte check refuses those, as before.
+MAX_EDIT_BASE64_CHARS = 4 * ((MAX_EDIT_BYTES + 2) // 3)
+
+# The most request body the edit route reads: that string, plus room for the JSON
+# around it. Past it the body is refused while it is still streaming in, instead
+# of being buffered, parsed and decoded first.
+MAX_WRITE_BODY_BYTES = MAX_EDIT_BASE64_CHARS + 64 * 1024
+
 # The ``?path=`` default shared by the download and its grant mint. The two must
 # read the same value for an absent parameter, or a grant minted without a path
 # would not redeem the URL it names.
@@ -207,7 +225,12 @@ class FileContentResponse(BaseModel):
 
 
 class WriteFileRequest(BaseModel):
-    content_base64: str = Field(default="")
+    # ``maxLength`` is documented, not enforced by the schema: the route refuses a
+    # longer string itself, as the 413 ``file_too_large`` an over-size edit has
+    # always been rather than a 422 validation error.
+    content_base64: str = Field(
+        default="", json_schema_extra={"maxLength": MAX_EDIT_BASE64_CHARS}
+    )
 
 
 class DirEntryResponse(BaseModel):
@@ -356,6 +379,7 @@ async def read_or_list_files(
     "/communities/{community_id}/servers/{server_id}/files",
     status_code=status.HTTP_204_NO_CONTENT,
 )
+@request_body_limit(MAX_WRITE_BODY_BYTES, reason="file_too_large")
 async def write_file(
     community_id: uuid.UUID,
     server_id: uuid.UUID,
@@ -397,6 +421,8 @@ async def write_file(
     ``platform_managed_path``. Writing the file itself is unaffected.
     """
 
+    if len(body.content_base64) > MAX_EDIT_BASE64_CHARS:
+        raise _too_large()
     content = _decode(body.content_base64)
     try:
         await use_case(
@@ -611,6 +637,9 @@ async def rollback_file(
 @router.post(
     "/communities/{community_id}/servers/{server_id}/files/upload",
     status_code=status.HTTP_204_NO_CONTENT,
+)
+@request_body_limit(
+    MAX_UPLOAD_BYTES + MULTIPART_OVERHEAD_BYTES, reason="file_too_large"
 )
 async def upload_file(
     community_id: uuid.UUID,

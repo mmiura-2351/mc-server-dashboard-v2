@@ -46,6 +46,10 @@ from mc_server_dashboard_api.dependencies import (
     require_permission,
     require_server_update_in_any_community,
 )
+from mc_server_dashboard_api.http_body_limit import (
+    MULTIPART_OVERHEAD_BYTES,
+    request_body_limit,
+)
 from mc_server_dashboard_api.http_content_disposition import content_disposition
 from mc_server_dashboard_api.http_datetime import UtcDatetime
 from mc_server_dashboard_api.http_head import head_response
@@ -143,6 +147,9 @@ def _public_base_url(request: Request) -> str:
 @router.post(
     "/resource-packs",
     status_code=status.HTTP_201_CREATED,
+)
+@request_body_limit(
+    MAX_RESOURCE_PACK_BYTES + MULTIPART_OVERHEAD_BYTES, reason="too_large"
 )
 async def upload_resource_pack(
     file: UploadFile,

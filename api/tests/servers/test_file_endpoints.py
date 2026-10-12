@@ -76,10 +76,15 @@ from mc_server_dashboard_api.identity.application.authenticate_request import (
 )
 from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.servers.adapters.file_store import StorageFileStoreAdapter
+from mc_server_dashboard_api.servers.api.files import (
+    MAX_EDIT_BASE64_CHARS,
+    MAX_WRITE_BODY_BYTES,
+)
 from mc_server_dashboard_api.servers.application.export_import import (
     export_download_grant_resource,
 )
 from mc_server_dashboard_api.servers.application.files import (
+    MAX_EDIT_BYTES,
     DirListing,
     DownloadFile,
     SearchResult,
@@ -661,6 +666,80 @@ def test_read_disconnected_worker_is_503() -> None:
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4()), params={"path": "f"})
     assert resp.status_code == 503
     assert resp.json()["reason"] == "worker_unavailable"
+
+
+_FILE_TOO_LARGE = {
+    "type": "urn:mcsd:error:file_too_large",
+    "title": "Content Too Large",
+    "status": 413,
+    "reason": "file_too_large",
+}
+
+
+@pytest.mark.parametrize("size", [MAX_EDIT_BYTES, MAX_EDIT_BYTES + 1])
+def test_write_of_the_longest_base64_reaches_the_use_case(size: int) -> None:
+    # A file at the edit cap encodes to exactly MAX_EDIT_BASE64_CHARS, and is
+    # written. So does one a byte past the cap (base64 pads to a multiple of
+    # four): the string bound cannot tell them apart, and the use case's byte
+    # check -- the 413 pinned in test_files.py -- still refuses that one.
+    content = b"\xff" * size
+    encoded = base64.b64encode(content).decode("ascii")
+    assert len(encoded) == MAX_EDIT_BASE64_CHARS
+    write = _FakeUseCase()
+    app = _app(member=True, allow=True, write=write)
+    client = _client(app)
+
+    resp = client.put(
+        _url(uuid.uuid4(), uuid.uuid4()),
+        params={"path": "f"},
+        json={"content_base64": encoded},
+    )
+
+    assert resp.status_code == 204
+    assert write.calls[0]["content"] == content
+
+
+def test_write_of_a_longer_base64_is_413_undecoded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # One character past the bound (issue #3363): refused as the over-size edit
+    # it is, before the string is decoded.
+    def decode(*_args: object, **_kwargs: object) -> bytes:
+        raise AssertionError("an over-long content_base64 was decoded")
+
+    monkeypatch.setattr(base64, "b64decode", decode)
+    write = _FakeUseCase()
+    app = _app(member=True, allow=True, write=write)
+    client = _client(app)
+
+    resp = client.put(
+        _url(uuid.uuid4(), uuid.uuid4()),
+        params={"path": "f"},
+        json={"content_base64": "A" * (MAX_EDIT_BASE64_CHARS + 1)},
+    )
+
+    assert resp.status_code == 413
+    assert resp.headers["content-type"] == "application/problem+json"
+    assert resp.json() == _FILE_TOO_LARGE
+    assert write.calls == []
+
+
+def test_write_body_past_its_limit_is_413() -> None:
+    # Further past the cap the body itself is over the route's limit, and is
+    # refused while it streams in (test_http_body_limit.py) -- the same answer.
+    write = _FakeUseCase()
+    app = _app(member=True, allow=True, write=write)
+    client = _client(app)
+
+    resp = client.put(
+        _url(uuid.uuid4(), uuid.uuid4()),
+        params={"path": "f"},
+        json={"content_base64": "A" * MAX_WRITE_BODY_BYTES},
+    )
+
+    assert resp.status_code == 413
+    assert resp.json() == _FILE_TOO_LARGE
+    assert write.calls == []
 
 
 def test_write_oversized_is_413() -> None:
