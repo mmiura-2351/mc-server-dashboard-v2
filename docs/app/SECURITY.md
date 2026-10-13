@@ -637,7 +637,24 @@ wrote, it is done only once no container of that server — launch or install �
 is alive (a live or unaccounted-for one refuses the start, with no ownership
 change), and it walks the tree by directory descriptor without following
 links, so a directory swapped for a symlink cannot lead it outside the working
-set. A snapshot — which is also taken while the server runs — reads the tree
+set. Staying inside the tree does not settle a file with more than one name (a
+hard link), because an ownership change acts on the file, under every name it
+has, and one of them may be outside the working set. The hand-over therefore
+counts the names of each such file it meets and re-owns the file only once it
+has met as many as the file has links — every name is then inside the working
+set, as with a link a server made between two of its own files (a backup mod
+that keeps hard-linked copies of the world). A file with a name it never met
+keeps its owner, and one `WARN` per hand-over gives their number and an example
+path with the `server_id`; the start goes on, and the server may be unable to
+write that file until the operator breaks the link or re-owns the file. The
+rule does not rely on `fs.protected_hardlinks`, nor on who made the link: the
+container can only link within its own bind mount, and a hydrate refuses a
+link member and writes every file anew, so such a link is the doing of something
+else on the host — a hard-linked copy of a working set, say — and is treated
+the same whatever made it. The count is exact because nothing renames or links
+in the tree while it is walked (no container of the server is alive); a file
+whose link count moves during the walk is left alone as well (issue #3338).
+A snapshot — which is also taken while the server runs — reads the tree
 the same way (issue #3334): each directory and file is opened relative to its
 parent's descriptor without following links, and what goes into the archive is
 decided on the opened descriptor, so an entry swapped for a symlink or a FIFO

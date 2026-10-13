@@ -232,10 +232,10 @@ func (d *Driver) handOverNamed(dirFd int, name, path string, w *handOverWalk) (i
 // under the walk — which is what awaitQuiescent establishes for the server's
 // code. Short of that, a file whose link count is no longer what it was when the
 // walk first met it keeps its owner. That covers a name removed after it was
-// counted — the Worker's own file edit, the one other writer, does that when it
-// replaces a name with a new file — and a name added. A name moved from a
-// directory already walked into one still to come is counted twice, and nothing
-// here can tell.
+// counted — all the Worker's own writers (a file edit, the generation marker)
+// ever do to an existing name is replace it with a new file — and a name added.
+// A name moved from a directory already walked into one still to come is counted
+// twice, and nothing here can tell.
 //
 // The entry is opened without following a link (O_PATH: nothing is read, and a
 // FIFO or device is not really opened), and both the link count and the
