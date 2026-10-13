@@ -27,6 +27,25 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     WorkerId,
 )
 
+# The longest console line a server accepts, in UTF-8 bytes, inclusive (issue
+# #3363). The Worker forwards a line as one RCON command packet, and the game
+# server reads each packet with a single 1,460-byte read: 14 bytes of framing
+# (length, id, type, two NUL terminators) leave 1,446 for the line, and a longer
+# packet makes the server drop the connection without answering. The Worker holds
+# the same number (``MaxConsoleLineBytes``); both are pinned to
+# ``proto/contract/control_plane_limits.json``.
+MAX_CONSOLE_LINE_BYTES = 1446
+
+
+def console_line_bytes(line: str) -> int:
+    """The size the Worker measures ``line`` at: its UTF-8 encoding, in bytes.
+
+    ``surrogatepass`` so a lone surrogate is counted, not raised on: what such a
+    line does further down is not this bound's question.
+    """
+
+    return len(line.encode("utf-8", "surrogatepass"))
+
 
 class WorkerUnavailableError(ServerError):
     """The assigned Worker has no live session to dispatch a command on.

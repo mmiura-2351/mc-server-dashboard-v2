@@ -13,8 +13,17 @@
     "either side sends or accepts (inclusive); both sides set it as the gRPC max send",
     "AND max receive message size, and check it before sending. It is max_file_bytes",
     "plus 64 KiB for the envelope and the path, so a file at exactly the cap fits.",
-    "See docs/app/CONTROL_PLANE.md Section 3.1."
+    "See docs/app/CONTROL_PLANE.md Section 3.1.",
+    "",
+    "max_console_line_bytes is the cap on a ServerCommand line in UTF-8 bytes",
+    "(inclusive; issue #3363): the largest command body the game server's RCON",
+    "listener accepts in one packet (a 1,460-byte read minus 14 bytes of framing).",
+    "The API refuses a longer line at its HTTP edge and the Worker before it dials",
+    "RCON. Its tests:",
+    "  - api:    api/tests/servers/test_lifecycle_endpoints.py",
+    "  - worker: worker/internal/application/instancemanager/files_properties_cap_test.go"
   ],
   "max_file_bytes": 4194304,
-  "max_message_bytes": 4259840
+  "max_message_bytes": 4259840,
+  "max_console_line_bytes": 1446
 }

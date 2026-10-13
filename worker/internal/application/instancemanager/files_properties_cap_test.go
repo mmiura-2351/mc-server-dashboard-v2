@@ -39,3 +39,22 @@ func TestMaxFileBytesIsTheOneTheAPIHolds(t *testing.T) {
 		t.Fatalf("MaxFileBytes = %d, the contract says %d", MaxFileBytes, limits.MaxFileBytes)
 	}
 }
+
+// MaxConsoleLineBytes is the console-line cap the API holds too
+// (MAX_CONSOLE_LINE_BYTES): both are pinned to the shared contract file (issue
+// #3363).
+func TestMaxConsoleLineBytesIsTheOneTheAPIHolds(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "proto", "contract", "control_plane_limits.json"))
+	if err != nil {
+		t.Fatalf("read the limits contract: %v", err)
+	}
+	var limits struct {
+		MaxConsoleLineBytes int `json:"max_console_line_bytes"`
+	}
+	if err := json.Unmarshal(data, &limits); err != nil {
+		t.Fatalf("parse the limits contract: %v", err)
+	}
+	if MaxConsoleLineBytes != limits.MaxConsoleLineBytes {
+		t.Fatalf("MaxConsoleLineBytes = %d, the contract says %d", MaxConsoleLineBytes, limits.MaxConsoleLineBytes)
+	}
+}

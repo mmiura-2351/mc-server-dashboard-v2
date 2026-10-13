@@ -21,6 +21,7 @@ import base64
 import datetime as dt
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
+from pathlib import Path
 from urllib.parse import quote
 
 import httpx2
@@ -76,10 +77,15 @@ from mc_server_dashboard_api.identity.application.authenticate_request import (
 )
 from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.servers.adapters.file_store import StorageFileStoreAdapter
+from mc_server_dashboard_api.servers.api.files import (
+    MAX_EDIT_BASE64_CHARS,
+    MAX_WRITE_BODY_BYTES,
+)
 from mc_server_dashboard_api.servers.application.export_import import (
     export_download_grant_resource,
 )
 from mc_server_dashboard_api.servers.application.files import (
+    MAX_EDIT_BYTES,
     DirListing,
     DownloadFile,
     SearchResult,
@@ -661,6 +667,80 @@ def test_read_disconnected_worker_is_503() -> None:
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4()), params={"path": "f"})
     assert resp.status_code == 503
     assert resp.json()["reason"] == "worker_unavailable"
+
+
+_FILE_TOO_LARGE = {
+    "type": "urn:mcsd:error:file_too_large",
+    "title": "Content Too Large",
+    "status": 413,
+    "reason": "file_too_large",
+}
+
+
+@pytest.mark.parametrize("size", [MAX_EDIT_BYTES, MAX_EDIT_BYTES + 1])
+def test_write_of_the_longest_base64_reaches_the_use_case(size: int) -> None:
+    # A file at the edit cap encodes to exactly MAX_EDIT_BASE64_CHARS, and is
+    # written. So does one a byte past the cap (base64 pads to a multiple of
+    # four): the string bound cannot tell them apart, and the use case's byte
+    # check -- the 413 pinned in test_files.py -- still refuses that one.
+    content = b"\xff" * size
+    encoded = base64.b64encode(content).decode("ascii")
+    assert len(encoded) == MAX_EDIT_BASE64_CHARS
+    write = _FakeUseCase()
+    app = _app(member=True, allow=True, write=write)
+    client = _client(app)
+
+    resp = client.put(
+        _url(uuid.uuid4(), uuid.uuid4()),
+        params={"path": "f"},
+        json={"content_base64": encoded},
+    )
+
+    assert resp.status_code == 204
+    assert write.calls[0]["content"] == content
+
+
+def test_write_of_a_longer_base64_is_413_undecoded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # One character past the bound (issue #3363): refused as the over-size edit
+    # it is, before the string is decoded.
+    def decode(*_args: object, **_kwargs: object) -> bytes:
+        raise AssertionError("an over-long content_base64 was decoded")
+
+    monkeypatch.setattr(base64, "b64decode", decode)
+    write = _FakeUseCase()
+    app = _app(member=True, allow=True, write=write)
+    client = _client(app)
+
+    resp = client.put(
+        _url(uuid.uuid4(), uuid.uuid4()),
+        params={"path": "f"},
+        json={"content_base64": "A" * (MAX_EDIT_BASE64_CHARS + 1)},
+    )
+
+    assert resp.status_code == 413
+    assert resp.headers["content-type"] == "application/problem+json"
+    assert resp.json() == _FILE_TOO_LARGE
+    assert write.calls == []
+
+
+def test_write_body_past_its_limit_is_413() -> None:
+    # Further past the cap the body itself is over the route's limit, and is
+    # refused while it streams in (test_http_body_limit.py) -- the same answer.
+    write = _FakeUseCase()
+    app = _app(member=True, allow=True, write=write)
+    client = _client(app)
+
+    resp = client.put(
+        _url(uuid.uuid4(), uuid.uuid4()),
+        params={"path": "f"},
+        json={"content_base64": "A" * MAX_WRITE_BODY_BYTES},
+    )
+
+    assert resp.status_code == 413
+    assert resp.json() == _FILE_TOO_LARGE
+    assert write.calls == []
 
 
 def test_write_oversized_is_413() -> None:
@@ -1786,6 +1866,102 @@ def test_write_unicode_path_is_accepted(tmp_path: object) -> None:
         json={"content_base64": ""},
     )
     assert resp.status_code == 204
+
+
+# --- an edit at the cap, in the JSON serializations a client may send --------
+#
+# A JSON encoder may write the ``/`` of the base64 alphabet as ``\/`` (PHP's
+# does by default), which doubles that character on the wire. The body limit has
+# to carry the file cap in that serialization too (PR #3364 review, B1); the
+# bound on the PARSED string is the same either way. These run through the real
+# router, body limit and WriteFile, over real fs Storage.
+
+# Every byte value, so the base64 uses its whole alphabet -- "/" included.
+_MIXED_AT_CAP = bytes(range(256)) * (MAX_EDIT_BYTES // 256)
+# All 0xFF encodes to nothing but "/" (and padding): the most escaping can add.
+_ALL_SLASHES_AT_CAP = b"\xff" * MAX_EDIT_BYTES
+
+
+def _edit_body(content: bytes, *, escape_slashes: bool) -> bytes:
+    encoded = base64.b64encode(content).decode("ascii")
+    if escape_slashes:
+        encoded = encoded.replace("/", "\\/")
+    # Spaced like json.dumps' default separators: insignificant whitespace.
+    return ('{"content_base64": "' + encoded + '"}').encode("ascii")
+
+
+def _put_raw(client: TestClient, url: str, body: bytes) -> httpx2.Response:
+    return client.put(
+        url,
+        params={"path": "f.bin"},
+        content=body,
+        headers={"content-type": "application/json"},
+    )
+
+
+def _stored(tmp_path: object) -> list[bytes]:
+    return [p.read_bytes() for p in Path(str(tmp_path)).rglob("*") if p.is_file()]
+
+
+@pytest.mark.parametrize("escape_slashes", [False, True], ids=["plain", "escaped"])
+@pytest.mark.parametrize(
+    "content", [_MIXED_AT_CAP, _ALL_SLASHES_AT_CAP], ids=["mixed", "all-slashes"]
+)
+def test_write_at_the_cap_is_stored_in_either_serialization(
+    tmp_path: object, content: bytes, escape_slashes: bool
+) -> None:
+    assert len(content) == MAX_EDIT_BYTES
+    community, server = uuid.uuid4(), uuid.uuid4()
+    client = _client(_real_write_app(tmp_path, community, server))
+    body = _edit_body(content, escape_slashes=escape_slashes)
+    assert len(body) <= MAX_WRITE_BODY_BYTES
+
+    resp = _put_raw(client, _url(community, server), body)
+
+    assert resp.status_code == 204
+    assert content in _stored(tmp_path)
+
+
+def test_the_fully_escaped_cap_is_the_largest_supported_body() -> None:
+    # The worst case the limit is derived from: every character escaped.
+    body = _edit_body(_ALL_SLASHES_AT_CAP, escape_slashes=True)
+    assert 2 * (MAX_EDIT_BASE64_CHARS - 2) < len(body) <= MAX_WRITE_BODY_BYTES
+
+
+@pytest.mark.parametrize("escape_slashes", [False, True], ids=["plain", "escaped"])
+def test_write_one_byte_past_the_cap_is_413_in_either_serialization(
+    tmp_path: object, escape_slashes: bool
+) -> None:
+    community, server = uuid.uuid4(), uuid.uuid4()
+    client = _client(_real_write_app(tmp_path, community, server))
+    body = _edit_body(_MIXED_AT_CAP + b"\x00", escape_slashes=escape_slashes)
+
+    resp = _put_raw(client, _url(community, server), body)
+
+    assert resp.status_code == 413
+    assert resp.json() == _FILE_TOO_LARGE
+    assert _stored(tmp_path) == []
+
+
+@pytest.mark.parametrize("past", [0, 1])
+def test_write_body_limit_is_exact(tmp_path: object, past: int) -> None:
+    # Padding the JSON with insignificant whitespace sizes the body without
+    # changing the file in it: at exactly the limit it is read and stored, one
+    # byte past it the body limit refuses it.
+    community, server = uuid.uuid4(), uuid.uuid4()
+    client = _client(_real_write_app(tmp_path, community, server))
+    body = _edit_body(_MIXED_AT_CAP, escape_slashes=False)
+    body = body + b" " * (MAX_WRITE_BODY_BYTES + past - len(body))
+
+    resp = _put_raw(client, _url(community, server), body)
+
+    if past:
+        assert resp.status_code == 413
+        assert resp.json() == _FILE_TOO_LARGE
+        assert _stored(tmp_path) == []
+    else:
+        assert resp.status_code == 204
+        assert _MIXED_AT_CAP in _stored(tmp_path)
 
 
 # --- file download grants (issue #2352) ------------------------------------

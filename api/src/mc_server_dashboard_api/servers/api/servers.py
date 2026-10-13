@@ -65,6 +65,10 @@ from mc_server_dashboard_api.dependencies import (
     require_download_access,
     require_permission,
 )
+from mc_server_dashboard_api.http_body_limit import (
+    MULTIPART_OVERHEAD_BYTES,
+    request_body_limit,
+)
 from mc_server_dashboard_api.http_content_disposition import content_disposition
 from mc_server_dashboard_api.http_datetime import UtcDatetime
 from mc_server_dashboard_api.http_head import head_response
@@ -73,6 +77,7 @@ from mc_server_dashboard_api.identity.domain.token_service import TokenService
 from mc_server_dashboard_api.identity.domain.value_objects import (
     UserId as IdentityUserId,
 )
+from mc_server_dashboard_api.servers.api.console_line import ConsoleLine
 from mc_server_dashboard_api.servers.application.export_import import (
     ExportServer,
     ImportServer,
@@ -240,7 +245,7 @@ class UpdateServerRequest(BaseModel):
 
 
 class ServerCommandRequest(BaseModel):
-    line: str = Field(min_length=1)
+    line: ConsoleLine = Field(min_length=1)
 
 
 class ServerCommandResponse(BaseModel):
@@ -509,6 +514,9 @@ async def create_server(
 @router.post(
     "/communities/{community_id}/servers/import",
     status_code=status.HTTP_201_CREATED,
+)
+@request_body_limit(
+    MAX_UPLOAD_BYTES + MULTIPART_OVERHEAD_BYTES, reason="file_too_large"
 )
 async def import_server(
     community_id: uuid.UUID,

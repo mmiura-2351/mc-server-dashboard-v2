@@ -8,6 +8,7 @@ import (
 	"math/rand/v2"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // ErrTerminal marks a connection failure the run loop must not retry: the same
@@ -411,10 +412,33 @@ func (r *Runner) handle(ctx context.Context, cmd Command) outcome {
 			"server_id", cmd.ServerID,
 			"kind", cmd.Kind,
 			"error_code", result.ErrorCode,
-			"error_message", result.ErrorMessage,
+			"error_message", cappedForLog(result.ErrorMessage),
 		)
 	}
 	return outcome{result: result, serverID: cmd.ServerID, kind: cmd.Kind}
+}
+
+// maxLoggedErrorMessageBytes caps the error text the "command failed" WARN
+// carries (issue #3363). A handler's message can quote caller-controlled input (a
+// path, a daemon error), so without a cap one failed command writes a log line
+// as large as the control-plane message limit. The CommandResult sent to the API
+// keeps the full text.
+const maxLoggedErrorMessageBytes = 1024
+
+// loggedErrorMessageTruncationMarker ends a capped error message.
+const loggedErrorMessageTruncationMarker = "…[truncated]"
+
+// cappedForLog returns message cut to maxLoggedErrorMessageBytes on a rune
+// boundary, with the truncation marker appended when it was cut.
+func cappedForLog(message string) string {
+	if len(message) <= maxLoggedErrorMessageBytes {
+		return message
+	}
+	cut := maxLoggedErrorMessageBytes
+	for cut > 0 && !utf8.RuneStart(message[cut]) {
+		cut--
+	}
+	return message[:cut] + loggedErrorMessageTruncationMarker
 }
 
 // handleCommand produces the CommandResult for a command, dispatching to the

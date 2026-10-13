@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import logging
 import uuid
 from collections.abc import AsyncIterator
 
@@ -1004,6 +1005,46 @@ async def test_cancelled_fire_and_forget_logger_discards_pending_entry() -> None
         await task
 
     assert command_id not in state._pending
+
+
+@pytest.mark.parametrize(
+    ("message", "logged"),
+    [
+        ("a" * 1024, "a" * 1024),
+        ("a" * 1025, "a" * 1024 + "…[truncated]"),
+    ],
+    ids=["at-the-cap", "over-the-cap"],
+)
+async def test_fire_and_forget_failure_log_caps_the_error_message(
+    caplog: pytest.LogCaptureFixture, message: str, logged: str
+) -> None:
+    # The Worker's message can quote caller-controlled text and be as large as a
+    # control-plane message; the WARN carries at most 1,024 characters of it, with
+    # the Worker's truncation marker (issue #3363).
+    state = ControlPlaneState()
+    control_plane = GrpcControlPlane(state, clock=FakeClock(_T0), timeout_seconds=5.0)
+    worker = WorkerId(_WORKER)
+    queue = state.open_session(worker, 1)
+
+    await control_plane.dispatch_fire_and_forget(
+        worker_id=worker,
+        server_id=_SERVER,
+        command=TunnelDialCommand(endpoint="relay:443", token="t", tls_ca_pem="ca"),
+    )
+    command_id = (await queue.get()).api_command.command_id
+    (task,) = control_plane._background_tasks
+    failed = pb.CommandResult(
+        success=False,
+        error=pb.CommandError(code=pb.COMMAND_ERROR_CODE_INTERNAL, message=message),
+    )
+    with caplog.at_level(logging.WARNING):
+        await state.resolve(command_id, worker, failed)
+        await task
+
+    (record,) = [
+        r for r in caplog.records if r.getMessage() == "fire-and-forget command failed"
+    ]
+    assert record.__dict__["error"] == logged
 
 
 async def test_reconnect_sweeps_promoted_late_snapshot_from_prior_session() -> None:

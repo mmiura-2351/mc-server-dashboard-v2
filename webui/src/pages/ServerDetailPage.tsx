@@ -11,6 +11,7 @@ import {
 import { Link, useNavigate, useParams } from "react-router";
 import { ApiError, api } from "../api/client.ts";
 import { saveUrlAs } from "../api/download.ts";
+import { MAX_CONSOLE_LINE_BYTES, utf8ByteLength } from "../api/limits.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
 import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
@@ -1079,9 +1080,14 @@ function Console({
     },
   });
 
+  // The API refuses a line past what one RCON command carries (422); say so
+  // here instead, and keep the line so it can be shortened (issue #3363).
+  const commandBytes = utf8ByteLength(command.trim());
+  const commandTooLong = commandBytes > MAX_CONSOLE_LINE_BYTES;
+
   const submit = () => {
     const line = command.trim();
-    if (line.length === 0) {
+    if (line.length === 0 || commandTooLong) {
       return;
     }
     history.current = [...history.current, line];
@@ -1177,12 +1183,25 @@ function Console({
           <button
             type="button"
             className="btn primary"
-            disabled={!running || send.isPending || command.trim().length === 0}
+            disabled={
+              !running ||
+              send.isPending ||
+              command.trim().length === 0 ||
+              commandTooLong
+            }
             onClick={submit}
           >
             {t("serverDetail.console.send")}
           </button>
         </div>
+      )}
+      {canCommand && commandTooLong && (
+        <p className="field-error" role="alert">
+          {t("serverDetail.console.tooLong", {
+            max: MAX_CONSOLE_LINE_BYTES,
+            size: commandBytes,
+          })}
+        </p>
       )}
       {canCommand && !running && (
         <p className="field-hint">{t("serverDetail.console.notRunning")}</p>

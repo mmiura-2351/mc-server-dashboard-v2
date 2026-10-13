@@ -2,7 +2,7 @@
 // DOM-free contract test: the Files tab renders the selected presentation.
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../api/client.ts";
-import { UnencodableTextError } from "./fileText.ts";
+import { FileTooLargeToEditError, UnencodableTextError } from "./fileText.ts";
 import { fileOperationErrorPresentation } from "./serverFilesErrorPresentation.ts";
 
 describe("fileOperationErrorPresentation", () => {
@@ -11,6 +11,11 @@ describe("fileOperationErrorPresentation", () => {
       "maps a local encoding refusal",
       new UnencodableTextError(),
       { key: "files.error.unencodableText" },
+    ],
+    [
+      "maps a local over-size refusal",
+      new FileTooLargeToEditError(),
+      { key: "files.error.editTooLarge" },
     ],
     [
       "maps a missing file by status",

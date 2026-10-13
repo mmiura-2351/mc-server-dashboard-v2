@@ -21,6 +21,7 @@ import {
   vi,
 } from "vitest";
 import { ApiError } from "../api/client.ts";
+import { MAX_CONSOLE_LINE_BYTES } from "../api/limits.ts";
 import { setAccessToken } from "../auth/tokenStore.ts";
 import { ToastProvider } from "../components/Toast.tsx";
 import { t } from "../i18n/index.ts";
@@ -2734,6 +2735,54 @@ describe("ServerDetailPage Console tab", () => {
     );
     expect(await screen.findByText("There are 0 players")).toBeInTheDocument();
     expect(screen.getByText(/list/)).toBeInTheDocument();
+  });
+
+  it("sends a command of exactly the length limit", async () => {
+    mockApi.post.mockResolvedValue({ output: "ok" });
+    await openConsole({ observed_state: "running" });
+
+    // Three bytes per character: the limit is in UTF-8 bytes.
+    const line = "あ".repeat(MAX_CONSOLE_LINE_BYTES / 3);
+    fireEvent.change(
+      screen.getByPlaceholderText(t("serverDetail.console.commandPlaceholder")),
+      { target: { value: line } },
+    );
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.console.send") }),
+    );
+
+    await waitFor(() =>
+      expect(mockApi.post).toHaveBeenCalledWith(
+        `/api/communities/${CID}/servers/${SID}/command`,
+        { body: JSON.stringify({ line }) },
+      ),
+    );
+  });
+
+  it("refuses a command past the length limit before sending it", async () => {
+    await openConsole({ observed_state: "running" });
+
+    // 483 characters, under the limit as characters, but 1,449 bytes.
+    const line = "あ".repeat(MAX_CONSOLE_LINE_BYTES / 3 + 1);
+    const input = screen.getByPlaceholderText(
+      t("serverDetail.console.commandPlaceholder"),
+    );
+    fireEvent.change(input, { target: { value: line } });
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      t("serverDetail.console.tooLong", {
+        max: MAX_CONSOLE_LINE_BYTES,
+        size: MAX_CONSOLE_LINE_BYTES + 3,
+      }),
+    );
+    expect(
+      screen.getByRole("button", { name: t("serverDetail.console.send") }),
+    ).toBeDisabled();
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(mockApi.post).not.toHaveBeenCalled();
+    // The line is kept so it can be shortened.
+    expect(input).toHaveValue(line);
   });
 
   it("names the cause of a failed command in the transcript", async () => {

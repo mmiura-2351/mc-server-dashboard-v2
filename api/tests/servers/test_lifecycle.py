@@ -45,6 +45,7 @@ from mc_server_dashboard_api.servers.domain.committed_resources import (
     CommittedResources,
 )
 from mc_server_dashboard_api.servers.domain.control_plane import (
+    MAX_CONSOLE_LINE_BYTES,
     CommandOutcome,
     CommandStatus,
     WorkerUnavailableError,
@@ -3550,6 +3551,63 @@ async def test_command_when_not_running_is_conflict() -> None:
             server_id=ServerId(server_id),
             line="list",
         )
+
+
+def _running_for_command() -> tuple[FakeUnitOfWork, uuid.UUID, uuid.UUID]:
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+    return uow, community, server_id
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["a" * MAX_CONSOLE_LINE_BYTES, "あ" * (MAX_CONSOLE_LINE_BYTES // 3)],
+    ids=["ascii", "multi-byte"],
+)
+async def test_command_line_at_the_limit_is_dispatched(line: str) -> None:
+    uow, community, server_id = _running_for_command()
+    cp = FakeControlPlane(outcome=CommandOutcome(status=CommandStatus.OK, output="ok"))
+    use_case = SendServerCommand(uow=uow, control_plane=cp)
+
+    output = await use_case(
+        community_id=CommunityId(community), server_id=ServerId(server_id), line=line
+    )
+
+    assert output == "ok"
+    assert cp.commands == [(ServerId(server_id), line)]
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["a" * (MAX_CONSOLE_LINE_BYTES + 1), "あ" * (MAX_CONSOLE_LINE_BYTES // 3 + 1)],
+    ids=["ascii", "multi-byte"],
+)
+async def test_command_line_past_the_limit_is_refused_undispatched(line: str) -> None:
+    # The HTTP schemas refuse such a line when it is written; this is what a line
+    # stored before that bound existed (a schedule's command or warning) meets
+    # when it runs (issue #3363).
+    uow, community, server_id = _running_for_command()
+    cp = FakeControlPlane()
+    use_case = SendServerCommand(uow=uow, control_plane=cp)
+
+    with pytest.raises(CommandDispatchError) as excinfo:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            line=line,
+        )
+
+    assert excinfo.value.reason == "console_line_too_long"
+    assert cp.dispatched == []
 
 
 # --- reconciler re-dispatch paths (issue #101) -----------------------------

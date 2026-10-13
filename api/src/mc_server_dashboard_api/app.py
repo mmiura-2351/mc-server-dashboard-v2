@@ -66,6 +66,7 @@ from mc_server_dashboard_api.fleet.adapters.relay_state import (
 )
 from mc_server_dashboard_api.fleet.api import events as server_events
 from mc_server_dashboard_api.fleet.api import workers
+from mc_server_dashboard_api.http_body_limit import RequestBodyLimitMiddleware
 from mc_server_dashboard_api.http_problem import (
     install_problem_handlers,
     unhandled_exception_middleware,
@@ -1317,8 +1318,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Render every error response as RFC 9457 problem+json (issue #371): one body
     # shape for application errors, framework HTTPExceptions, and 422 validation.
     install_problem_handlers(app)
+    # Bound how much request body a route reads (issue #3363). Registered before
+    # everything below so it sits inside all of it, next to routing: it refuses by
+    # raising into the route's own body read, where the problem handlers above
+    # render the 413 as an ordinary response that leaves through every middleware.
+    app.add_middleware(RequestBodyLimitMiddleware)
     # Middleware is applied outermost-last: the catch-all exception middleware is
-    # registered FIRST so it is the innermost user middleware, just outside routing.
+    # registered FIRST of the ``http`` middlewares, so it is the innermost of them.
     # An unhandled exception caught here returns a problem+json 500 that flows
     # outward through correlation-ID, security-headers, and metrics middleware —
     # unlike the belt-and-braces add_exception_handler(Exception, ...) path, which

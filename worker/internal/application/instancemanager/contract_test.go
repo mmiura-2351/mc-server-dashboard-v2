@@ -345,6 +345,15 @@ func driveRow(t *testing.T, row contractRow) session.CommandResult {
 		m := newContractManager(t, &fakeDriver{})
 		return m.Handle(ctx, contractCmd(t, row.Kind, ""))
 
+	case "console_line_too_long":
+		// A running instance and a console line one byte past the RCON cap (issue
+		// #3363). Only ServerCommand carries a line, so only its row is driven.
+		m := newContractManager(t, &fakeDriver{})
+		startRunning(t, m)
+		cmd := contractCmd(t, row.Kind, serverID)
+		cmd.Line = strings.Repeat("a", MaxConsoleLineBytes+1)
+		return m.Handle(ctx, cmd)
+
 	default:
 		t.Fatalf("contract table: no fixture for precondition %q", row.Precondition)
 		return session.CommandResult{}

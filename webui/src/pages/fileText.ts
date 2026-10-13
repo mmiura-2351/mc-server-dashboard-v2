@@ -28,6 +28,7 @@
  * still edits and a `.txt`-named blob still does not.
  */
 
+import { MAX_EDIT_BYTES } from "../api/limits.ts";
 import { readsServerPropertiesAsUtf8 } from "../mcVersion.ts";
 
 /** Bytes of the decoded prefix inspected for the NUL-byte binary signal. */
@@ -100,25 +101,43 @@ export function decodeBase64Text(
   return { text: atob(base64), charset: "latin-1" };
 }
 
+/** Text encodes to more bytes than the API accepts in one edit. */
+export class FileTooLargeToEditError extends Error {
+  constructor() {
+    super("text is larger than the edit cap");
+    this.name = "FileTooLargeToEditError";
+  }
+}
+
 /** Encode UTF-8 text to a base64 payload. */
 export function encodeUtf8Base64(text: string): string {
   return bytesToBase64(new TextEncoder().encode(text));
 }
 
 /**
- * Encode text to a base64 payload in `charset`.
+ * Encode text to a base64 payload in `charset`, for saving as a file edit.
  *
  * @throws UnencodableTextError when `charset` is latin-1 and the text holds a
  *   character above U+00FF.
+ * @throws FileTooLargeToEditError when the encoded bytes exceed the edit cap,
+ *   which the API would refuse with a 413 (issue #3363).
  */
 export function encodeTextBase64(text: string, charset: TextCharset): string {
   if (charset === "utf-8") {
-    return encodeUtf8Base64(text);
+    const bytes = new TextEncoder().encode(text);
+    if (bytes.length > MAX_EDIT_BYTES) {
+      throw new FileTooLargeToEditError();
+    }
+    return bytesToBase64(bytes);
   }
   for (let i = 0; i < text.length; i++) {
     if (text.charCodeAt(i) > 0xff) {
       throw new UnencodableTextError();
     }
+  }
+  // Latin-1 is one byte per character.
+  if (text.length > MAX_EDIT_BYTES) {
+    throw new FileTooLargeToEditError();
   }
   return btoa(text);
 }

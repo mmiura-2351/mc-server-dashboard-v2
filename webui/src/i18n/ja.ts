@@ -372,6 +372,8 @@ export const ja: Record<TranslationKey, string> = {
   "serverDetail.console.commandPlaceholder": "コマンドを入力…",
   "serverDetail.console.notRunning":
     "コマンドはサーバーの稼働中のみ使用できます。",
+  "serverDetail.console.tooLong":
+    "コマンドは{max}バイトまでです（現在{size}バイト）。短くしてから送信してください。",
   "serverDetail.commandFailed": "コマンドが失敗しました。",
   "serverDetail.console.error.workerUnavailable":
     "サーバーホストと通信できなかったため、コマンドが実行されたかどうかは不明です。再送信する前にコンソールの出力を確認してください。",
@@ -709,6 +711,9 @@ export const ja: Record<TranslationKey, string> = {
   "schedules.error.invalidName": "名前が正しくありません。",
   "schedules.error.nameExists": "その名前のスケジュールは既に存在します。",
   "schedules.error.invalidCommand": "実行するコマンドを入力してください。",
+  "schedules.error.commandTooLong":
+    "コマンドが長すぎます。コンソールコマンドは{max}バイトまでです。",
+  "schedules.error.warningTooLong": "警告メッセージは{max}バイトまでです。",
   "schedules.error.invalidWarnings":
     "警告は1〜120分（間隔より短い）の重複しないオフセットとメッセージが必要です。",
   "schedules.error.generic": "問題が発生しました。もう一度お試しください。",
@@ -820,6 +825,8 @@ export const ja: Record<TranslationKey, string> = {
     "server.properties はプラットフォームが管理しているため、そのパスにディレクトリを置くことはできません。",
   "files.error.unencodableText":
     "このファイルは UTF-8 ではないか、このバージョンの Minecraft が Latin-1 でしか読まないため、Latin-1（ISO-8859-1）で保存します。入力された文字の一部は Latin-1 で表せません。該当する文字を削除してから保存し直してください。",
+  "files.error.editTooLarge":
+    "エディターで保存できるのは4 MiBまでです。ダウンロードして手元で編集し、アップロードしてください。",
   "files.error.invalidInput": "リクエストが無効です。",
   "files.error.workerUnavailable":
     "サーバーエージェントが切断されています。しばらくしてから再度お試しください。",

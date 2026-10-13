@@ -528,6 +528,18 @@ def _refuse_over_limit(msg: pb.ApiMessage) -> CommandResult | None:
     return CommandResult(code=CommandResultCode.INTERNAL, message=message)
 
 
+# How much of a Worker's error message a log line carries (issue #3363): the
+# message can quote caller-controlled text and be as large as a control-plane
+# message. The cap and marker are the ones the Worker's own WARN uses.
+_MAX_LOGGED_ERROR_MESSAGE_CHARS = 1024
+
+
+def _capped_for_log(message: str) -> str:
+    if len(message) <= _MAX_LOGGED_ERROR_MESSAGE_CHARS:
+        return message
+    return message[:_MAX_LOGGED_ERROR_MESSAGE_CHARS] + "…[truncated]"
+
+
 def _to_result(message: pb.CommandResult) -> CommandResult:
     if message.success:
         # command_output / file_content / file_listing share the result oneof;
@@ -731,6 +743,6 @@ class GrpcControlPlane(ControlPlane):
                 extra={
                     "command_id": command_id,
                     "server_id": server_id,
-                    "error": result.error.message,
+                    "error": _capped_for_log(result.error.message),
                 },
             )

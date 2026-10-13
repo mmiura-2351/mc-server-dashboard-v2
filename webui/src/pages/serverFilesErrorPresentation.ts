@@ -13,7 +13,7 @@
 
 import { ApiError } from "../api/client.ts";
 import type { TranslationKey } from "../i18n/index.ts";
-import { UnencodableTextError } from "./fileText.ts";
+import { FileTooLargeToEditError, UnencodableTextError } from "./fileText.ts";
 
 export interface FileErrorPresentation {
   key: TranslationKey;
@@ -26,6 +26,9 @@ export function fileOperationErrorPresentation(
 ): FileErrorPresentation {
   if (error instanceof UnencodableTextError) {
     return { key: "files.error.unencodableText" };
+  }
+  if (error instanceof FileTooLargeToEditError) {
+    return { key: "files.error.editTooLarge" };
   }
   if (!(error instanceof ApiError)) {
     return { key: "files.error.generic" };

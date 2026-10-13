@@ -10,7 +10,9 @@ command failure 409, not-running 409), and the success serialisation.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import uuid
+from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
@@ -36,7 +38,10 @@ from mc_server_dashboard_api.dependencies import (
     get_start_server,
     get_stop_server,
 )
-from mc_server_dashboard_api.servers.domain.control_plane import WorkerUnavailableError
+from mc_server_dashboard_api.servers.domain.control_plane import (
+    MAX_CONSOLE_LINE_BYTES,
+    WorkerUnavailableError,
+)
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     CommandDispatchError,
@@ -426,3 +431,77 @@ def test_command_not_running_is_409() -> None:
     )
     assert resp.status_code == 409
     assert resp.json()["reason"] == "server_not_running"
+
+
+# --- console line bound (issue #3363) ---------------------------------------
+
+
+def test_the_console_line_limit_is_the_one_the_worker_holds() -> None:
+    limits = json.loads(
+        (
+            Path(__file__).resolve().parents[3]
+            / "proto"
+            / "contract"
+            / "control_plane_limits.json"
+        ).read_text()
+    )
+
+    assert MAX_CONSOLE_LINE_BYTES == limits["max_console_line_bytes"]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        pytest.param("a" * MAX_CONSOLE_LINE_BYTES, id="ascii"),
+        # Three bytes per character: 482 characters are exactly the 1,446 bytes.
+        pytest.param("あ" * (MAX_CONSOLE_LINE_BYTES // 3), id="multi-byte"),
+    ],
+)
+def test_command_line_at_the_limit_is_forwarded_unchanged(line: str) -> None:
+    assert len(line.encode()) == MAX_CONSOLE_LINE_BYTES
+    command = _FakeUseCase(result="ok")
+    app = _app(member=True, allow=True, command=command)
+    client = _client(app)
+
+    resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "command"), json={"line": line})
+
+    assert resp.status_code == 200
+    assert resp.json() == {"output": "ok"}
+    assert command.kwargs["line"] == line
+
+
+@pytest.mark.parametrize(
+    ("line", "message"),
+    [
+        pytest.param(
+            "a" * (MAX_CONSOLE_LINE_BYTES + 1),
+            "String should have at most 1446 characters",
+            id="one-character-over",
+        ),
+        # 483 characters -- well under the character bound -- but 1,449 bytes.
+        pytest.param(
+            "あ" * (MAX_CONSOLE_LINE_BYTES // 3 + 1),
+            "String should have at most 1446 bytes in UTF-8",
+            id="under-in-characters-over-in-bytes",
+        ),
+    ],
+)
+def test_command_line_past_the_limit_is_422(line: str, message: str) -> None:
+    command = _FakeUseCase(result="ok")
+    app = _app(member=True, allow=True, command=command)
+    client = _client(app)
+
+    resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "command"), json={"line": line})
+
+    assert resp.status_code == 422
+    assert resp.headers["content-type"] == "application/problem+json"
+    assert resp.json() == {
+        "type": "urn:mcsd:error:validation_error",
+        "title": "Unprocessable Content",
+        "status": 422,
+        "reason": "validation_error",
+        "errors": [
+            {"type": "string_too_long", "loc": ["body", "line"], "msg": message}
+        ],
+    }
+    assert command.kwargs == {}

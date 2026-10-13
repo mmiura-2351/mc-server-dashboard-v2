@@ -56,6 +56,7 @@ from mc_server_dashboard_api.dependencies import (
     get_transfer_semaphore,
     get_worker_credential,
 )
+from mc_server_dashboard_api.http_body_limit import request_body_limit
 from mc_server_dashboard_api.http_problem import problem
 from mc_server_dashboard_api.storage.domain.errors import (
     IncompleteTransferError,
@@ -355,6 +356,7 @@ async def _jar_member(
     status_code=status.HTTP_204_NO_CONTENT,
     dependencies=[Depends(require_worker_credential)],
 )
+@request_body_limit(_MAX_SNAPSHOT_BYTES, reason="snapshot_too_large")
 async def publish_snapshot(
     community_id: uuid.UUID,
     server_id: uuid.UUID,

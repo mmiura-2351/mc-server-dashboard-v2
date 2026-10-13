@@ -15,7 +15,9 @@ from mc_server_dashboard_api.config import (
     Settings,
 )
 from mc_server_dashboard_api.logging import (
+    _TAG,
     JsonFormatter,
+    TextFormatter,
     configure_logging,
     correlation_id,
 )
@@ -234,6 +236,37 @@ def test_configure_logging_preserves_foreign_handlers() -> None:
         assert foreign in root.handlers, "foreign handler removed by configure_logging"
     finally:
         root.removeHandler(foreign)
+
+
+def test_text_formatter_renders_the_extra_fields() -> None:
+    # The text format used to print only level, logger and message, dropping
+    # the fields every structured WARN identifies its subject by -- e.g. the
+    # control plane's over-size refusal, which names the command only in
+    # ``kind`` / ``server_id`` (issue #3363).
+    record = _record("refusing to send an over-limit command")
+    record.kind = "ServerCommand"
+    record.server_id = "srv 1"
+    token = correlation_id.set("cid-123")
+    try:
+        line = TextFormatter().format(record)
+    finally:
+        correlation_id.reset(token)
+
+    assert line == (
+        "INFO test refusing to send an over-limit command "
+        "kind=ServerCommand server_id='srv 1' correlation_id=cid-123"
+    )
+
+
+def test_text_formatter_leaves_a_record_without_fields_unchanged() -> None:
+    assert TextFormatter().format(_record("hello")) == "INFO test hello"
+
+
+def test_text_format_is_the_text_formatter() -> None:
+    configure_logging("info", "text")
+    handlers = [h for h in logging.getLogger().handlers if getattr(h, _TAG, False)]
+
+    assert [type(h.formatter) for h in handlers] == [TextFormatter]
 
 
 def test_configure_logging_is_idempotent() -> None:

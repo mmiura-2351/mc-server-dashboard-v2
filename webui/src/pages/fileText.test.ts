@@ -1,10 +1,12 @@
 // @vitest-environment node
 // DOM-free logic test; runs under Node to skip per-file jsdom setup (issue #1734).
 import { describe, expect, it } from "vitest";
+import { MAX_EDIT_BYTES } from "../api/limits.ts";
 import {
   decodeBase64Text,
   encodeTextBase64,
   encodeUtf8Base64,
+  FileTooLargeToEditError,
   isProbablyText,
   UnencodableTextError,
 } from "./fileText.ts";
@@ -39,6 +41,33 @@ describe("fileText base64 ⇄ latin-1 fallback (#2851)", () => {
   it("refuses a character latin-1 cannot hold", () => {
     expect(() => encodeTextBase64("motd=Café 🐉", "latin-1")).toThrow(
       UnencodableTextError,
+    );
+  });
+});
+
+describe("fileText edit size cap (#3363)", () => {
+  // The cap is on the encoded bytes, which is what the API measures.
+  it("encodes text of exactly the cap in either charset", () => {
+    const text = "a".repeat(MAX_EDIT_BYTES);
+    expect(atob(encodeTextBase64(text, "utf-8")).length).toBe(MAX_EDIT_BYTES);
+    expect(atob(encodeTextBase64(text, "latin-1")).length).toBe(MAX_EDIT_BYTES);
+  });
+
+  it("refuses text one byte past the cap", () => {
+    const text = "a".repeat(MAX_EDIT_BYTES + 1);
+    expect(() => encodeTextBase64(text, "utf-8")).toThrow(
+      FileTooLargeToEditError,
+    );
+    expect(() => encodeTextBase64(text, "latin-1")).toThrow(
+      FileTooLargeToEditError,
+    );
+  });
+
+  it("measures UTF-8 text in bytes, not characters", () => {
+    // Under the cap as characters, over it as bytes (3 each).
+    const text = "あ".repeat(MAX_EDIT_BYTES / 2);
+    expect(() => encodeTextBase64(text, "utf-8")).toThrow(
+      FileTooLargeToEditError,
     );
   });
 });

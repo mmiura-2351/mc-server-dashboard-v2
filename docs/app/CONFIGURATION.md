@@ -425,7 +425,7 @@ clients via `GET /api/meta` so the create wizard can pre-fill and cap the value.
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
 | `log.level` | `info` | | Log verbosity. |
-| `log.format` | `json` | | Structured-log format; `json` keeps logs machine-parseable (REQUIREMENTS.md NFR-OBS-1). |
+| `log.format` | `json` | | Structured-log format; `json` keeps logs machine-parseable (REQUIREMENTS.md NFR-OBS-1). `text` prints `LEVEL logger message` followed by the same structured fields and correlation ID as `key=value`. |
 
 The Prometheus exposition is served on a **separate HTTP listener**, never on
 `server.http_port`: the bundled `cloudflared` service forwards the

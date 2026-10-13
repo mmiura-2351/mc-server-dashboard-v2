@@ -106,7 +106,7 @@ Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 | POST | `…/{sid}/export/download-grant` | Mint that grant: `{download_url, expires_at}`, `Cache-Control: no-store`. Same `file:read` gate as the export, and the same pre-flight — a running server is 409 `server_unsettled` and no grant is issued; `auth.token.download_grant_ttl_seconds`, 30 s by default (AUTH_API.md Section 3). |
 | GET / PATCH / DELETE | `…/{sid}` | Read / update (name, config, game_port) / delete. Every PATCH edit needs `server:update`. `backup_interval_hours` is not a config key; a PATCH carrying it is `422` (`retired_config_key`; DATABASE.md Section 7) — backup cadence is a `backup` schedule. A `config` breaking the blob's bounds is a `422` naming the rule it broke, the same four reasons create answers with — `config_invalid_shape` / `config_null_value` / `config_lone_surrogate` / `config_too_large` (rules and limits: DATABASE.md Section 7). A `game_port` change against a server whose `server.properties` is missing is a `409` (`server_properties_missing`): the rewrite preserves the file's other keys, so it refuses rather than republish one without `rcon.password`. |
 | POST | `…/{sid}/start` · `/stop?force=` · `/restart` | Lifecycle. Stop supports force. |
-| POST | `…/{sid}/command` | RCON line → `{output}`. |
+| POST | `…/{sid}/command` | RCON line → `{output}`. `line` is at most 1,446 UTF-8 bytes (`422`; "Console lines" below). |
 | GET | `…/{sid}/files?path=&list=` | Read file (base64) or list directory (entries + `truncated`). |
 | PUT / DELETE | `…/{sid}/files?path=` | Write (base64, versioned) / delete. The root `server.properties` is guarded on **every** files-API write path — `PUT`, `DELETE`, either end of a rename, an upload (direct or archive member), and a rollback: an operation that would change or drop a platform-managed key — `server-port`, the RCON triple, the resource-pack keys — is a `422` (`platform_managed_key`) naming it in the `key` member. The guard is over the keys, not the filename: editing the file's other keys is unaffected, and a root `server.properties` that carries none of those keys still deletes and still renames away. A `PUT` to a path **under** that name is a `422` (`platform_managed_path`) instead — the write creates the name as a directory, which the key guard cannot see and the platform's writes cannot survive. |
 | POST | `…/{sid}/files/directories?path=` | mkdir. The root `server.properties` path — and anything under it, whose missing parents are created — is a `422` (`platform_managed_path`): the platform's own writes publish a file there, so no directory may stand in its place. |
@@ -133,6 +133,38 @@ Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 | GET / POST | `…/{sid}/schedules` | List / create a per-server schedule (`name`, `action` ∈ command\|start\|stop\|restart\|backup, `cron` XOR `interval_seconds`, `timezone`, `enabled`, `command` for `command`, `warning_steps` for stop/restart, `only_when_running` for backup — defaults to `true`, skipping an occurrence that finds the server stopped; rejected on any other action). Reads need `schedule:read`; writes need `schedule:manage` **and** the action's own permission (`command`→`server:command`, `start/stop/restart`→`server:{start,stop,restart}`, `backup`→`backup:schedule`) — anti-escalation. Authorization is write-time only: the runner executes as the system, so revoking a permission does not stop existing schedules. `next_run_at` is null while disabled, recomputed on enable. |
 | GET / PATCH / DELETE | `…/{sid}/schedules/{scid}` | Read / edit (partial; action immutable) / delete a schedule. |
 | GET | `…/{sid}/schedules/{scid}/runs` | Execution history newest-first (`schedule:read`). |
+
+**Request body limits.** Every route reads at most a fixed amount of request
+body and answers a larger one **413**, by `Content-Length` before reading
+anything and by streamed size otherwise — so a body is never buffered, parsed or
+spooled to disk past its route's limit. The limits are constants:
+
+| Routes | Most body read | 413 `reason` |
+|---|---|---|
+| Every route not listed below (all JSON routes) | 1 MiB | `request_too_large` |
+| `PUT …/files` | 11,250,352 bytes: twice the base64 of a 4 MiB file (2 × 5,592,408 characters) + 64 KiB. Twice, because a JSON encoder may write the `/` of base64 as `\/`, and a file of all `0xFF` bytes is nothing but `/`; a body that `\uXXXX`-escapes its characters is not provided for | `file_too_large` |
+| `POST …/files/upload`, `POST …/servers/import` | 512 MiB file + 1 MiB of multipart envelope | `file_too_large` |
+| `POST …/backups/upload` | 512 MiB file + 1 MiB | `too_large` |
+| `POST …/plugins` | 512 MiB jar + 1 MiB | `file_too_large` |
+| `POST /resource-packs` | 256 MiB pack + 1 MiB | `too_large` |
+| `POST /data-plane/…/snapshot` (Worker only) | 50 GiB, with its own `Content-Length` gate | `snapshot_too_large` |
+
+Each listed limit is the route's own cap plus room for its envelope, so the
+route's own check still decides at the cap and the answer is the same reason
+however far past it the body was. `GET`, `HEAD` and `OPTIONS` requests are not
+read at all. An edit's `content_base64` longer than 5,592,408 characters is
+refused 413 `file_too_large` before it is decoded; one that decodes to more than
+4 MiB is refused the same way after.
+
+**Console lines.** A console line is one RCON command, and the game server
+accepts at most **1,446 UTF-8 bytes** of command (a longer packet makes it drop
+the connection without answering). `POST …/command`'s `line` and a schedule's
+`command` are held to that, and a schedule warning step's `message` to 1,442
+bytes (it is broadcast as `say <message>`); past it they are a `422`
+`validation_error` whose entry is `string_too_long`. The limit is in bytes, so
+non-ASCII text reaches it in fewer characters. A schedule stored before the
+limit existed is not rewritten: an over-long command fails its run with the
+detail `console_line_too_long`, and an over-long warning is not broadcast.
 
 **Storage outages on the working-set routes.** When the store holding a
 server's working set cannot serve the request, the routes whose failure is safe
@@ -518,7 +550,9 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 - Full log stream (stdout/stderr color-keyed), follow-mode toggle, text
   filter, clear.
 - RCON input (`POST …/command`) with local history (↑/↓); command + `output`
-  echoed into the stream view, distinct styling.
+  echoed into the stream view, distinct styling. A command past 1,446 UTF-8
+  bytes disables Send and shows the limit beside the input (Section 2.3,
+  "Console lines").
 - Disabled with hint when server not running.
 
 ### 6.6 Server detail — Files

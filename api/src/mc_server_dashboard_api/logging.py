@@ -61,6 +61,43 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload)
 
 
+class TextFormatter(logging.Formatter):
+    """Render a log record as ``LEVEL logger message key=value ...``.
+
+    The human-readable counterpart of :class:`JsonFormatter`, carrying the same
+    information: caller-supplied ``extra=`` fields and the correlation ID follow
+    the message. Without them a structured warning that names its subject only
+    in its fields (a command's ``kind`` and ``server_id``) says nothing in this
+    format (issue #3363). A value with a space or other ambiguity is ``repr``-ed.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("%(levelname)s %(name)s %(message)s")
+
+    def format(self, record: logging.LogRecord) -> str:
+        fields = {
+            key: value
+            for key, value in record.__dict__.items()
+            if key not in _RESERVED_KEYS
+        }
+        cid = correlation_id.get()
+        if cid is not None:
+            fields["correlation_id"] = cid
+        if not fields:
+            return super().format(record)
+        # The fields belong to the message line, ahead of any traceback.
+        first, sep, rest = super().format(record).partition("\n")
+        rendered = " ".join(
+            f"{key}={_text_value(value)}" for key, value in fields.items()
+        )
+        return f"{first} {rendered}{sep}{rest}"
+
+
+def _text_value(value: Any) -> str:
+    text = str(value)
+    return text if text and text.isprintable() and " " not in text else repr(value)
+
+
 _TAG = "_mcsd_app_handler"
 
 
@@ -75,7 +112,7 @@ def configure_logging(level: str, log_format: str) -> None:
     if log_format == "json":
         handler.setFormatter(JsonFormatter())
     else:
-        handler.setFormatter(logging.Formatter("%(levelname)s %(name)s %(message)s"))
+        handler.setFormatter(TextFormatter())
     setattr(handler, _TAG, True)
 
     root = logging.getLogger()

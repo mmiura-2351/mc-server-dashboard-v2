@@ -53,6 +53,7 @@ from mc_server_dashboard_api.servers.domain.backup import (
     BackupSource,
 )
 from mc_server_dashboard_api.servers.domain.control_plane import (
+    MAX_CONSOLE_LINE_BYTES,
     CommandOutcome,
     CommandStatus,
 )
@@ -1447,6 +1448,56 @@ async def test_warning_not_rebroadcast_on_a_later_tick() -> None:
     await env.runner.tick()  # still within grace, but already sent
 
     assert _warned_lines(env) == ["say soon"]
+
+
+async def test_a_stored_command_past_the_console_limit_fails_its_run() -> None:
+    # A command written before the console-line bound existed is not migrated; its
+    # occurrence fails with a reason that names the cause, and nothing is sent
+    # (issue #3363).
+    env = _env()
+    server = _running_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.COMMAND,
+        command="say " + "a" * MAX_CONSOLE_LINE_BYTES,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()
+
+    assert env.control_plane.dispatched == []
+    assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
+    assert _run_details(env, schedule) == ["console_line_too_long"]
+
+
+async def test_a_stored_warning_past_the_console_limit_is_skipped() -> None:
+    # The same for a warning step's message: its broadcast is skipped, the step
+    # beside it and the occurrence it heralds are unaffected (issue #3363).
+    env = _env()
+    server = _running_server()
+    occurrence = _NOW + dt.timedelta(minutes=5)
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.STOP,
+        next_run_at=occurrence,
+        warning_steps=(
+            WarningStep(offset_minutes=5, message="a" * MAX_CONSOLE_LINE_BYTES),
+            WarningStep(offset_minutes=1, message="1"),
+        ),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()  # T-5: over the limit, skipped
+    env.clock.set(occurrence - dt.timedelta(minutes=1))
+    await env.runner.tick()  # T-1
+    env.clock.set(occurrence)
+    await env.runner.tick()  # T: the stop occurrence fires
+
+    assert _warned_lines(env) == ["say 1"]
+    assert _runs(env, schedule) == [ScheduleRunOutcome.SUCCESS]
 
 
 async def test_warnings_broadcast_then_the_occurrence_stops_the_server() -> None:

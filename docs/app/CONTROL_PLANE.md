@@ -154,7 +154,7 @@ a WARN that names the command kind and server id (never the payload):
 | `EditFile` command | file cap + path (≤ 4,096 B on Linux) + ~150 B | Not sent; the dispatch returns `FILE_ACCESS_DENIED` / `PAYLOAD_TOO_LARGE` (413 `file_too_large`). `ReadFile` / `ListFiles` with an oversized path are refused the same way. |
 | `CommandResult.file_listing` (`ListFiles`) | 4,096 entries × ≤ ~275 B ≈ 1.1 MiB | The Worker halves the entries until the result fits and sets `truncated`. |
 | `CommandResult.command_output` (`ServerCommand`) | 1 MiB (the Worker's RCON reassembly cap) | The command fails `INTERNAL`. |
-| `ServerCommand` command (the console line) | unbounded by the API today | Not sent; the dispatch returns `INTERNAL`. Every other command kind is refused the same way. |
+| `ServerCommand` command (the console line) | 1,446 bytes (`max_console_line_bytes`, below) | Not sent; the dispatch returns `INTERNAL`. Every other command kind is refused the same way. |
 | `CommandError.message` | a short sentence, plus the command's quoted path | The failure keeps its code (and file-access reason); the text is replaced. |
 | `Event{LogLine}` | 8 KiB + a truncation marker (capped at the source) | The line is dropped. |
 | `Event{StatusChange}.detail` | a Worker-authored sentence or a daemon error (≤ a few KiB) | The transition is sent without its detail. |
@@ -164,6 +164,23 @@ a WARN that names the command kind and server id (never the payload):
 A command that arrives over the limit despite this — only a peer that does not
 hold this contract can send one — is still refused by the receiver's gRPC limit
 and ends the stream.
+
+**The console line has its own, much smaller limit: 1,446 UTF-8 bytes**,
+inclusive (`max_console_line_bytes` in the same contract file, pinned by a test
+on each side). It is what the game server accepts: the Worker forwards a line as
+one RCON command packet, and the server reads each packet with a single
+1,460-byte read and drops the connection, without answering, when the packet
+did not fit it — 14 bytes are the packet's framing (length, id, type, two NUL
+terminators). The API refuses a longer line before dispatch — at the HTTP schema
+for a line being written (422), and in `SendServerCommand` for one stored before
+the bound existed (a schedule's command or warning, which then fails with the
+reason `console_line_too_long`). The Worker refuses one that reaches it anyway
+with `INTERNAL`, before it dials RCON, so the cost is that one command.
+
+The Worker's "command failed" WARN logs at most 1,024 bytes of the error
+message, with a truncation marker; the `CommandError.message` sent to the API is
+not cut. The API's "fire-and-forget command failed" WARN caps the message it
+logs the same way, at 1,024 characters.
 
 ---
 

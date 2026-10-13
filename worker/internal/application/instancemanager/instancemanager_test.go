@@ -894,6 +894,53 @@ func TestServerCommandForwardsOutput(t *testing.T) {
 	}
 }
 
+// A console line at the RCON cap is forwarded unchanged (issue #3363).
+func TestServerCommandForwardsALineAtTheRCONCap(t *testing.T) {
+	ctrl := &fakeControl{reply: "ok"}
+	m := newManager(t, &fakeDriver{}, ctrl)
+	seedScratch(t, m, "s1")
+	_ = m.Handle(context.Background(), startCmd())
+
+	line := strings.Repeat("a", MaxConsoleLineBytes)
+	res := m.Handle(context.Background(), session.Command{CommandID: "c4", ServerID: "s1", Kind: "ServerCommand", Line: line})
+	if !res.Success || res.Output != "ok" {
+		t.Fatalf("ServerCommand at the cap = %+v, want success", res)
+	}
+	if len(ctrl.lines) != 1 || ctrl.lines[0] != line {
+		t.Fatalf("forwarded %d lines, want the one %d-byte line", len(ctrl.lines), len(line))
+	}
+}
+
+// One byte past the cap is refused as that command's failure without touching
+// RCON: the game server would drop the connection on such a packet without
+// answering (issue #3363). The cap is in bytes, so a multi-byte line under the
+// cap in characters is refused too.
+func TestServerCommandRefusesALinePastTheRCONCap(t *testing.T) {
+	for name, line := range map[string]string{
+		"ascii":      strings.Repeat("a", MaxConsoleLineBytes+1),
+		"multi-byte": strings.Repeat("あ", MaxConsoleLineBytes/3+1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctrl := &fakeControl{reply: "ok"}
+			m := newManager(t, &fakeDriver{}, ctrl)
+			seedScratch(t, m, "s1")
+			_ = m.Handle(context.Background(), startCmd())
+
+			res := m.Handle(context.Background(), session.Command{CommandID: "c4", ServerID: "s1", Kind: "ServerCommand", Line: line})
+			if res.Success || res.ErrorCode != session.CommandErrorInternal {
+				t.Fatalf("ServerCommand past the cap = %+v, want an INTERNAL failure", res)
+			}
+			want := fmt.Sprintf("instancemanager: console line is %d bytes, over the %d-byte RCON limit", len(line), MaxConsoleLineBytes)
+			if res.ErrorMessage != want {
+				t.Fatalf("ErrorMessage = %q, want %q", res.ErrorMessage, want)
+			}
+			if len(ctrl.lines) != 0 {
+				t.Fatalf("%d lines reached RCON, want none", len(ctrl.lines))
+			}
+		})
+	}
+}
+
 // TestOpenControlReceivesRunningServerDriver pins the per-server driver
 // resolution the RCON dial host depends on: on a worker that advertises both
 // drivers, the manager must hand openControl the driver that actually runs each
