@@ -237,10 +237,6 @@ func TestContainerRestartRecreatesContainer(t *testing.T) {
 	}
 }
 
-// freePort returns a currently-free TCP port on loopback as a string. There is a
-// small window between the probe and the container binding it, but the harness
-// runs one server at a time with fresh ports per run, so a collision is
-// improbable; a failure surfaces as a clear "port already allocated" start error.
 // assertNoCapabilities checks, on the real daemon, that the container the driver
 // created carries the hardening the unit tests pin on the create body: every
 // capability dropped, none added back, no-new-privileges, not privileged (issue
@@ -259,6 +255,10 @@ func assertNoCapabilities(t *testing.T, ctx context.Context, containerName strin
 	}
 }
 
+// freePort returns a currently-free TCP port on loopback as a string. There is a
+// small window between the probe and the container binding it, but the harness
+// runs one server at a time with fresh ports per run, so a collision is
+// improbable; a failure surfaces as a clear "port already allocated" start error.
 func freePort(t *testing.T) string {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")

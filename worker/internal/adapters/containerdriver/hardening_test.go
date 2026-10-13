@@ -154,10 +154,20 @@ func TestLaunchContainerRunsNonRootWithoutCapabilities(t *testing.T) {
 }
 
 // Every container the driver creates goes through createServerContainer, which is
-// what hardens it: nothing else reaches the Engine's create, so a new container
-// kind cannot be added without the run-as user, the empty capability set and
+// what hardens it, with the run-as user, the empty capability set and
 // no-new-privileges (issue #3343). The test reads the package source and pins
 // where each link of that chain is referred to, called or passed as a value.
+//
+// It is a regression guard for this package, not proof that every future Engine
+// create is hardened. It scans only this directory and matches selector and
+// function names without receiver types, so:
+//   - an unrelated selector named Create in non-test code (os.Create) fails it;
+//     match on the receiver type if that ever gets in the way;
+//   - a create made from another package, or through a method value that one of
+//     the allowed helpers returns or stores, escapes it.
+//
+// A method value taken anywhere else in the package is caught. The tests above
+// and below cover each existing container kind's create spec independently.
 func TestEveryContainerCreateGoesThroughCreateServerContainer(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {

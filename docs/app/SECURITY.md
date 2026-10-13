@@ -602,9 +602,17 @@ the image returns it (the shipped Java images carry `su`, `mount`, `umount`,
 
 The premise depends on the worker's container creation and on nothing in the
 image: all three restrictions are fields of the create request, every create
-the driver makes goes through the one function that sets them (a test pins
-that no other path reaches the Engine's create), and the worker never runs
-`docker exec` against these containers. The image is operator configuration —
+the driver makes goes through the one function that sets them, and the worker
+never runs `docker exec` against these containers. A test guards that single
+path against regression, within limits: it reads only the driver package's own
+source and matches names, not types, so it catches a new create added inside
+the driver but not one made from another package or through a function value
+an allowed helper hands out. Each existing container kind is covered
+independently by tests on its create request. The premise also assumes a host
+that lets a container start under `no-new-privileges`: with SELinux enforcing,
+the container policy must allow that domain transition
+([`../dev/DEPLOYMENT.md`](../dev/DEPLOYMENT.md), the caveat on unprivileged
+Minecraft containers). The image is operator configuration —
 `driver.container.images` maps a Java major to an image, and a server's
 Minecraft version only selects among those — so a tenant cannot bring one, but
 the restrictions would hold for an image that ships setuid binaries or declares
@@ -686,9 +694,9 @@ same container: the bounding set denies them, not just the uid. From one of
 those containers a TCP connect to the other's RCON port still succeeds — the
 residual stated below.
 
-Measured 2026-10-13 (issue #3343) in a container of each shipped Java image
-(`eclipse-temurin` 8, 17, 21 and 25 `-jre`, `eclipse-temurin:16-jdk`,
-`azul/zulu-openjdk:7`) created with the user and the two options above, each of
+Measured 2026-10-13 (issue #3343) in a container of each of the seven Java
+images `compose.yaml` configures (`eclipse-temurin` 8, 11, 17, 21 and 25
+`-jre`, `eclipse-temurin:16-jdk`, `azul/zulu-openjdk:7`) created with the user and the two options above, each of
 which then ran `java -version`:
 
 ```text

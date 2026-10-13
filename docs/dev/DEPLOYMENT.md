@@ -1318,9 +1318,14 @@ container was replaced, so the existing stamp still describes what is running.
 > change for a server: a plugin or mod that needs root in the container or a raw
 > socket no longer has either, and the JVM's `user.home` is `/tmp`, not `/root`.
 > Since issue #3343 the containers also hold no capability at all and run under
-> `no-new-privileges`, again with no action needed: a plugin or mod that shells
-> out to a setuid helper in the image (`su`, `mount`) no longer gains anything
-> from it.
+> `no-new-privileges`: a plugin or mod that shells out to a setuid helper in the
+> image (`su`, `mount`) no longer gains anything from it. That needs no action
+> on a host without SELinux, or with it permissive. **On a host with SELinux
+> enforcing**, the container policy must allow the domain transition under
+> `no-new-privileges` (`nnp_transition`); current `container-selinux` grants
+> it. If Minecraft containers fail to start there after the upgrade, update the
+> host's container policy package — the hardening is not optional and has no
+> switch. This was not exercised on an SELinux host.
 >
 > **A worker run as an unprivileged host process** (not the compose service)
 > runs the containers as its own `uid:gid` and cannot take over files it does
