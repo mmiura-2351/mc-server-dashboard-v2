@@ -156,6 +156,30 @@ read at all. An edit's `content_base64` longer than 5,592,408 characters is
 refused 413 `file_too_large` before it is decoded; one that decodes to more than
 4 MiB is refused the same way after.
 
+**Authentication precedes body reads.** On every route that requires a
+credential, the credential — and with it the route's membership and permission
+check — is decided from the request's headers and path before a byte of the body
+is read: a caller the route refuses gets the same `401` / `403` / `404` problem
+as ever, with nothing buffered, parsed or spooled to disk for it, and it gets
+that answer in preference to a `413`. The routes that take a body without a
+credential are `POST /users`, `POST /auth/login`, `/auth/refresh` and
+`/auth/logout`; the data-plane routes check the Worker credential before they
+stream. One consequence: a request that is both unauthorized and malformed is
+now answered for the former (it used to be a `422` when its JSON did not parse).
+
+**An answer given before the body was read through** — the refusals above, a
+`413`, or any response of a route that did not read what it was sent — is
+delivered in one of two ways. If at most **16 MiB** of the declared body is
+still unread, the server reads and drops it (for at most 10 seconds) and then
+answers, so the client finishes sending, receives the answer, and the connection
+stays usable. Otherwise — a longer rest, a chunked body (no declared length), a
+rest that does not arrive in time, or a body the client is holding back for
+`100 Continue` — nothing more is read: the response carries `Connection: close`
+and the connection is closed once it is sent, so a client does not decide how
+long it stays open. A client still writing a large body at that moment may see
+the connection reset before it reads the answer; a client that must have the
+answer for a large upload sends `Expect: 100-continue`, or reads while it writes.
+
 **Console lines.** A console line is one RCON command, and the game server
 accepts at most **1,446 UTF-8 bytes** of command (a longer packet makes it drop
 the connection without answering). `POST …/command`'s `line` and a schedule's
