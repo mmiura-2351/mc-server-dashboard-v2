@@ -512,18 +512,30 @@ func resolveRunAs(uid, gid, ownUID, ownGID int) (int, int) {
 	return DefaultRunAsUID, DefaultRunAsGID
 }
 
-// droppedCapabilities are the capabilities removed from every container the
-// driver creates. NET_RAW is what opens raw and packet sockets, the primitive
-// behind ARP spoofing and sniffing on the shared servers bridge; a Minecraft
-// server needs neither (issue #2600).
-var droppedCapabilities = []string{"NET_RAW"}
+// droppedCapabilities empties the capability bounding set of every container the
+// driver creates, and securityOptions keeps a process in it from gaining
+// privileges through execve. Together they make "server-controlled code holds no
+// capability" hold whatever the image ships: without them the unprivileged run-as
+// user has no effective capability, but a setuid-root or file-capability binary
+// in the image hands back whatever the bounding set still holds (CAP_MKNOD,
+// CAP_CHOWN, CAP_DAC_OVERRIDE, CAP_SETUID, …). A Minecraft server and the Forge
+// installer need none: they have run without an effective capability since issue
+// #2600, and a container's ports are unprivileged from 0 up (issue #3343).
+// Among the dropped ones is NET_RAW, which opens raw and packet sockets — the
+// primitive behind ARP spoofing and sniffing on the shared servers bridge (issue
+// #2600).
+var (
+	droppedCapabilities = []string{"ALL"}
+	securityOptions     = []string{"no-new-privileges"}
+)
 
-// createServerContainer is the one path every container that runs
-// server-controlled code is created through — the launch container and the Forge
-// install container, first attempt or retry. It makes the container run as the
-// unprivileged run-as user without NET_RAW, and first hands the bind-mounted
-// working set to that user, so the server can write its world, logs and config
-// (issue #2600). It then creates through createContainer.
+// createServerContainer is the one path every container the driver creates goes
+// through (TestEveryContainerCreateGoesThroughCreateServerContainer) — the launch
+// container and the Forge install container, first attempt or retry, all of which
+// run server-controlled code. It makes the container run as the unprivileged
+// run-as user with no capabilities and no-new-privileges, and first hands the
+// bind-mounted working set to that user, so the server can write its world, logs
+// and config (issue #2600). It then creates through createContainer.
 //
 // The hand-over runs before EVERY create rather than once at hydrate because the
 // working set gains Worker-owned entries in between: a hydrate or restore writes
@@ -547,6 +559,7 @@ func (d *Driver) createServerContainer(ctx context.Context, spec execution.Insta
 		"quiescence_wait", walk.Sub(begin), "duration", time.Since(walk))
 	create.User = fmt.Sprintf("%d:%d", d.runAsUID, d.runAsGID)
 	create.CapDrop = droppedCapabilities
+	create.SecurityOpt = securityOptions
 	return d.createContainer(ctx, create)
 }
 

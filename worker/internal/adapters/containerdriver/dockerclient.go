@@ -112,6 +112,9 @@ type hostConfig struct {
 	// CapDrop lists the capabilities removed from the container's default set
 	// (issue #2600).
 	CapDrop []string `json:"CapDrop,omitempty"`
+	// SecurityOpt lists the Engine security options, e.g. "no-new-privileges"
+	// (issue #3343).
+	SecurityOpt []string `json:"SecurityOpt,omitempty"`
 }
 
 type portBinding struct {
@@ -135,7 +138,10 @@ func (c *EngineClient) Create(ctx context.Context, spec CreateSpec) (string, err
 		User:       spec.User,
 		WorkingDir: spec.WorkingDir,
 		Labels:     spec.Labels,
-		HostConfig: hostConfig{Binds: spec.Binds, CPUShares: spec.CPUShares, Memory: spec.MemoryLimitBytes, CapDrop: spec.CapDrop},
+		HostConfig: hostConfig{
+			Binds: spec.Binds, CPUShares: spec.CPUShares, Memory: spec.MemoryLimitBytes,
+			CapDrop: spec.CapDrop, SecurityOpt: spec.SecurityOpt,
+		},
 	}
 	if len(spec.Ports) > 0 {
 		body.ExposedPorts = map[string]struct{}{}
