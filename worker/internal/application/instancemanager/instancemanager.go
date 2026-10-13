@@ -379,6 +379,26 @@ type Manager struct {
 	// files and take no reservation.
 	reserved map[string]bool
 
+	// workingSetLocks holds each server id's working-set lock (workingSetLock), which
+	// keeps the Worker's own renames out of the driver's hand-over walk (issue #3371).
+	// The reservation above cannot do that: a Forge install's supervisor walks the
+	// working set again, long after the start that launched it released the id, and
+	// the running-id snapshot's marker stamp holds no reservation at all.
+	//
+	// The walk proves a multiply-linked file is the working set's own by counting its
+	// names, so a name that moves under it is counted twice. Whatever publishes a name
+	// by renaming a temporary one therefore holds the lock from before the temporary
+	// name exists until after the rename: an EditFile, and both generation-marker
+	// stamps. Nothing else the Worker does moves a name inside a working set — a
+	// hydrate and the scratch GC replace or remove the whole tree, and only add or
+	// remove names within one, which the walk's link-count check already covers.
+	//
+	// It is a lock that is WAITED for, not a refusal like the reservation: what it
+	// excludes is one pass over the tree or one small file write, never a transfer or
+	// a daemon call, and the supervisor's walk has no command to refuse. A lock is
+	// created on first use and kept for the life of the manager.
+	workingSetLocks map[string]*sync.Mutex
+
 	// sweepingSlot marks a server id whose .displaced-<id> slot a displaced sweep is
 	// currently deciding about — from the Lstat that finds the tree through the rename
 	// out of the slot to the put-back or the commit to remove (issue #3118, PR #3121
@@ -446,6 +466,7 @@ func New(drivers map[string]execution.ExecutionDriver, scratchDir string, openCo
 		startCmds:          map[string]session.Command{},
 		orphans:            map[string]orphanEntry{},
 		reserved:           map[string]bool{},
+		workingSetLocks:    map[string]*sync.Mutex{},
 		sweepingSlot:       map[string]bool{},
 		events:             make(chan session.StatusEvent, 32),
 		logs:               make(chan session.LogEvent, 256),
@@ -843,6 +864,10 @@ func (m *Manager) handleHydrate(ctx context.Context, cmd session.Command) sessio
 // succeeded: a marker this call could not write is older than the tree, so declaring the
 // served generation anyway would let a later start skip the corrective hydrate.
 func (m *Manager) recordGeneration(workingDir, serverID string, gen uint64) bool {
+	// The marker is published by renaming a temporary name (workingSetLocks).
+	lock := m.workingSetLock(serverID)
+	lock.Lock()
+	defer lock.Unlock()
 	if err := writeGeneration(workingDir, gen); err != nil {
 		m.logger.Warn("could not record working-set generation",
 			"server_id", serverID, "generation", gen, "error", err)
@@ -883,6 +908,10 @@ func (m *Manager) recordGeneration(workingDir, serverID string, gen uint64) bool
 // it: every skip above returns false through the same statement that suppresses the write,
 // so no code path can report a generation this function did not stamp.
 func (m *Manager) recordGenerationIfUnchanged(ref *workingDirRef, workingDir, serverID string, gen uint64) bool {
+	// The marker is published by renaming a temporary name (workingSetLocks).
+	lock := m.workingSetLock(serverID)
+	lock.Lock()
+	defer lock.Unlock()
 	reason := ""
 	guard := func() bool {
 		ok, why := ref.current()
@@ -2097,6 +2126,8 @@ func (m *Manager) launchReserved(ctx context.Context, cmd session.Command, drive
 		// The CPU allocation (millicores, #723) is carried as-is onto the spec; no
 		// derivation. 0 stays 0 (unset -> default weight).
 		CPUMillis: cmd.CPUMillis,
+		// What the driver holds while it re-owns the working set (workingSetLocks).
+		WorkingSetLock: m.workingSetLock(cmd.ServerID),
 	})
 	if err != nil {
 		m.release(cmd.ServerID)
@@ -3154,6 +3185,13 @@ func (m *Manager) handleEditFile(cmd session.Command) session.CommandResult {
 	// refused rather than followed, the dir creation cannot traverse a link out of
 	// the root, and the temp-create + rename act on the same resolved fd, so a
 	// concurrent symlink swap between the walk and the rename cannot redirect it.
+	//
+	// The edit publishes by renaming a temporary name, so it holds the working-set
+	// lock for as long as that name exists and waits out a hand-over walk in
+	// progress (workingSetLocks, issue #3371).
+	lock := m.workingSetLock(cmd.ServerID)
+	lock.Lock()
+	defer lock.Unlock()
 	parentFd, leaf, err := openParentBeneath(root, target, true)
 	if err != nil {
 		// O_NOFOLLOW refused an intermediate-component symlink (ELOOP); any other
@@ -3538,6 +3576,18 @@ func (m *Manager) reserve(serverID string) (ok bool, code session.CommandErrorCo
 	}
 	m.reserved[serverID] = true
 	return true, 0, ""
+}
+
+// workingSetLock returns serverID's working-set lock (see workingSetLocks).
+func (m *Manager) workingSetLock(serverID string) *sync.Mutex {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	lock, ok := m.workingSetLocks[serverID]
+	if !ok {
+		lock = &sync.Mutex{}
+		m.workingSetLocks[serverID] = lock
+	}
+	return lock
 }
 
 // release drops serverID's in-flight reservation so a later command (a retry

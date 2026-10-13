@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -272,6 +273,107 @@ func TestHandOverLeavesAFileWhoseLinkCountMovedDuringTheWalk(t *testing.T) {
 				t.Fatalf("hand-over = %+v, %v, re-owned %v; want the file left alone", stats, err, rec.seen())
 			}
 		})
+	}
+}
+
+// A name that MOVES during the walk is what the link count cannot catch: it is
+// counted where it was and again where it went, at an unchanged link count. The
+// Worker's own writers move names — an edit publishes by renaming a temporary
+// name over its target — and a server can have put a file that is also named
+// outside the working set under such a temporary name before it stopped. So the
+// walk holds the working-set lock those writers hold while they publish, and none
+// of them can rename under it (issue #3371).
+//
+// The two names here are each a file named once outside, and whichever the walk
+// counts first plays the temporary name; the other is the not-yet-visited target
+// in the same directory. The edit is one that takes the lock if it is free, which
+// is when a real one would run.
+func TestCreateHoldsTheWorkingSetLockSoNoWriterRenamesUnderTheWalk(t *testing.T) {
+	dir, outside := linkedSet(t)
+	names := []string{filepath.Join(dir, "config", "a"), filepath.Join(dir, "config", "b")}
+	canaries := map[string]string{}
+	for _, name := range names {
+		canary := writeAt(t, filepath.Join(outside, filepath.Base(name)))
+		canaries[linkAt(t, canary, name)] = canary
+	}
+	d, rec := hardenedDriver(newFakeDocker())
+	lock := &sync.Mutex{}
+	s := specIn(dir)
+	s.WorkingSetLock = lock
+	counted, renamed := 0, false
+	t.Cleanup(func() { afterNameCounted = func(string) {} })
+	afterNameCounted = func(path string) {
+		if counted++; counted > 1 || !lock.TryLock() {
+			return
+		}
+		defer lock.Unlock()
+		other := names[0]
+		if path == other {
+			other = names[1]
+		}
+		if err := os.Rename(path, other); err != nil {
+			t.Error(err)
+		}
+		renamed = true
+	}
+
+	_, err := d.createServerContainer(context.Background(), s, CreateSpec{Name: "mcsd-s1"})
+
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if counted == 0 {
+		t.Fatal("the walk counted no name; the schedule was not driven")
+	}
+	if renamed {
+		t.Error("a writer took the working-set lock and renamed a name while the walk was running")
+	}
+	for name, canary := range canaries {
+		if n := reowned(t, rec, canary); n != 0 {
+			t.Errorf("the file outside the working set also named %s was re-owned (%v)", name, rec.seen())
+		}
+	}
+	if !lock.TryLock() {
+		t.Fatal("the working-set lock is still held after the create returned")
+	}
+}
+
+// A failed hand-over releases the lock.
+func TestCreateReleasesTheWorkingSetLockWhenTheHandOverFails(t *testing.T) {
+	dir, _ := linkedSet(t)
+	writeAt(t, filepath.Join(dir, "level.dat"))
+	d, rec := hardenedDriver(newFakeDocker())
+	rec.err = unix.EPERM
+	lock := &sync.Mutex{}
+	s := specIn(dir)
+	s.WorkingSetLock = lock
+
+	if _, err := d.createServerContainer(context.Background(), s, CreateSpec{Name: "mcsd-s1"}); err == nil {
+		t.Fatal("create succeeded, want the failed hand-over reported")
+	}
+
+	if !lock.TryLock() {
+		t.Fatal("the working-set lock is still held after the failed create returned")
+	}
+}
+
+// Without the lock nothing keeps the Worker's writers out of the walk, so a spec
+// that carries none is refused before anything is re-owned or created.
+func TestCreateRefusesASpecWithoutAWorkingSetLock(t *testing.T) {
+	dir, _ := linkedSet(t)
+	writeAt(t, filepath.Join(dir, "level.dat"))
+	docker := newFakeDocker()
+	d, rec := hardenedDriver(docker)
+	s := specIn(dir)
+	s.WorkingSetLock = nil
+
+	_, err := d.createServerContainer(context.Background(), s, CreateSpec{Name: "mcsd-s1"})
+
+	if err == nil || !strings.Contains(err.Error(), "working-set lock") {
+		t.Fatalf("create = %v, want it refused for the missing working-set lock", err)
+	}
+	if len(rec.seen()) != 0 || docker.createCalls != 0 {
+		t.Fatalf("re-owned %v and created %d containers, want neither", rec.seen(), docker.createCalls)
 	}
 }
 

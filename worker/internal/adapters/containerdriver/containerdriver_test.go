@@ -704,7 +704,8 @@ func newReadinessTestDriver(docker *fakeDocker, readinessTimeout time.Duration) 
 }
 
 func spec() execution.InstanceSpec {
-	return execution.InstanceSpec{ServerID: "s1", WorkingDir: "/scratch/s1", MinecraftVersion: "1.21", JarRelpath: "server.jar"}
+	return execution.InstanceSpec{ServerID: "s1", WorkingDir: "/scratch/s1", MinecraftVersion: "1.21", JarRelpath: "server.jar",
+		WorkingSetLock: &sync.Mutex{}}
 }
 
 // drainClosed reads ch until it closes, so any goroutine writing to it finishes.

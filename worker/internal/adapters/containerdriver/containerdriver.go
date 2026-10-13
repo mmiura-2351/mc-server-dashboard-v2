@@ -545,12 +545,19 @@ var (
 // is not one of them: openInstallLog gives it its directory's owner). The walk itself,
 // and the check that nothing is running against the tree, are in handover.go.
 func (d *Driver) createServerContainer(ctx context.Context, spec execution.InstanceSpec, create CreateSpec) (string, error) {
+	if spec.WorkingSetLock == nil {
+		return "", errors.New("containerdriver: not handing over the working set: the spec carries no working-set lock")
+	}
 	begin := time.Now()
 	if err := d.awaitQuiescent(ctx, spec.ServerID); err != nil {
 		return "", fmt.Errorf("containerdriver: not handing over the working set: %w", err)
 	}
+	// The server's code is gone; the lock keeps the Worker's own writers out of
+	// the tree for the length of the walk (handOverLinked, issue #3371).
+	spec.WorkingSetLock.Lock()
 	walk := time.Now()
 	stats, err := d.handOverWorkingSet(ctx, spec.WorkingDir)
+	spec.WorkingSetLock.Unlock()
 	if err != nil {
 		return "", fmt.Errorf("containerdriver: hand working set to uid:gid %d:%d: %w", d.runAsUID, d.runAsGID, err)
 	}
