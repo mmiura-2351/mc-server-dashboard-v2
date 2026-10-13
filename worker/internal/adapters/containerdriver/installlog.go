@@ -50,8 +50,9 @@ var (
 // What it creates takes the owner of the directory it is created in, which is the
 // run-as user once the driver has handed the working set over (issue #2600):
 // left as the Worker's, a logs/ made here would be closed to the unprivileged
-// server that writes its own logs there. An entry that already existed is never
-// re-owned.
+// server that writes its own logs there. So when the owner cannot be set, the
+// entry is removed again and the open refused (issue #3338). An entry that
+// already existed is never re-owned, and never removed.
 func openInstallLog(workingDir string) (*os.File, error) {
 	components := strings.Split(execution.ForgeInstallLogRelpath, "/")
 	dirs, leaf := components[:len(components)-1], components[len(components)-1]
@@ -73,6 +74,7 @@ func openInstallLog(workingDir string) (*os.File, error) {
 		}
 		if mkErr == nil {
 			if err := inheritInstallLogOwner(dirFd, next); err != nil {
+				err = errors.Join(err, removeCreatedInstallLogEntry(dirFd, name, next))
 				_ = unix.Close(next)
 				return nil, &os.PathError{Op: "chown", Path: name, Err: err}
 			}
@@ -87,6 +89,7 @@ func openInstallLog(workingDir string) (*os.File, error) {
 		unix.O_WRONLY|unix.O_APPEND|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o640)
 	if err == nil {
 		if err := inheritInstallLogOwner(dirFd, fd); err != nil {
+			err = errors.Join(err, removeCreatedInstallLogEntry(dirFd, leaf, fd))
 			_ = unix.Close(fd)
 			return nil, &os.PathError{Op: "chown", Path: leaf, Err: err}
 		}
@@ -116,6 +119,38 @@ func openInstallLog(workingDir string) (*os.File, error) {
 		return nil, &os.PathError{Op: "fcntl", Path: leaf, Err: err}
 	}
 	return os.NewFile(uintptr(fd), leaf), nil
+}
+
+// removeCreatedInstallLogEntry removes the entry name of the directory behind
+// dirFd, which this open created (it is open behind fd) and could not hand to the
+// working set's owner. It returns an error only if the entry is still there
+// afterwards.
+//
+// It removes nothing else: the name must still be the very inode behind fd, and
+// that inode still empty — the installer is running, and what it has put there
+// since, or in the entry's place, is the server's. Neither call follows a link.
+// (An entry swapped in between the two calls is one the installer could remove
+// itself, in a directory it owns.)
+func removeCreatedInstallLogEntry(dirFd int, name string, fd int) error {
+	var created, named unix.Stat_t
+	if err := unix.Fstat(fd, &created); err != nil {
+		return fmt.Errorf("left in place: %w", err)
+	}
+	if err := unix.Fstatat(dirFd, name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil ||
+		named.Dev != created.Dev || named.Ino != created.Ino {
+		return nil
+	}
+	flags := 0
+	if created.Mode&unix.S_IFMT == unix.S_IFDIR {
+		// rmdir refuses a directory that is not empty.
+		flags = unix.AT_REMOVEDIR
+	} else if created.Size != 0 {
+		return errors.New("left in place: no longer empty")
+	}
+	if err := unix.Unlinkat(dirFd, name, flags); err != nil {
+		return fmt.Errorf("left in place: %w", err)
+	}
+	return nil
 }
 
 // inheritInstallLogOwner gives the entry just created behind fd the owner of the
