@@ -207,7 +207,8 @@ type Driver struct {
 	scratchDir   string
 	// runAsUID and runAsGID are the uid:gid server containers run as, and chownAt
 	// the call that hands a working-set entry to them (chownAtNoFollow; a test
-	// seam, since only root can give a file away) (issue #2600).
+	// seam, since only root can give a file away) (issue #2600). With an empty
+	// name it hands over the file behind dirFd itself.
 	runAsUID int
 	runAsGID int
 	chownAt  func(dirFd int, name string, uid, gid int) error
@@ -557,6 +558,11 @@ func (d *Driver) createServerContainer(ctx context.Context, spec execution.Insta
 		"server_id", spec.ServerID, "container", create.Name,
 		"entries", stats.entries, "changed", stats.changed,
 		"quiescence_wait", walk.Sub(begin), "duration", time.Since(walk))
+	if stats.skipped > 0 {
+		d.logger.Warn("multiply-linked files not handed to the run-as user: not every name of theirs is in the working set",
+			"server_id", spec.ServerID, "container", create.Name,
+			"skipped", stats.skipped, "example", stats.skippedExample)
+	}
 	create.User = fmt.Sprintf("%d:%d", d.runAsUID, d.runAsGID)
 	create.CapDrop = droppedCapabilities
 	create.SecurityOpt = securityOptions
