@@ -680,6 +680,45 @@ async def test_a_request_without_a_body_is_answered_as_before(
     assert result.consumed == 0 or path == "/ignores-body"
 
 
+async def test_a_request_without_a_body_costs_no_read_and_no_timer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The hot path: nearly every request is a GET with no body. Its answer is
+    # sent without asking for a body that is not there and without arming the
+    # discard deadline for it.
+    def no_timer(*_: object) -> None:
+        raise AssertionError("a deadline was armed for a request with no body")
+
+    monkeypatch.setattr(asyncio, "timeout", no_timer)
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": "/plain",
+        "raw_path": b"/plain",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [],
+        "client": ("testclient", 50000),
+        "server": ("testserver", 80),
+    }
+    start: dict[str, Any] = {}
+
+    async def receive() -> Message:
+        raise AssertionError("a body was asked for on a request with none")
+
+    async def send(message: Message) -> None:
+        if message["type"] == "http.response.start":
+            start.update(message)
+
+    await _small_app()(scope, receive, send)
+
+    assert start["status"] == 200
+    assert b"connection" not in dict(start["headers"])
+
+
 async def test_a_stream_ends_when_a_client_that_sent_a_body_leaves() -> None:
     app = _small_app()
     started = asyncio.Event()

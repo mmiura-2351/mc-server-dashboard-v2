@@ -164,6 +164,9 @@ async def _discard(receive: Receive, rest: int | None) -> bool:
 
     if rest is None or rest > EARLY_ANSWER_DISCARD_BYTES:
         return False
+    if rest <= 0:
+        # Nothing unread -- nearly every request: no read, and no deadline armed.
+        return True
     try:
         async with asyncio.timeout(EARLY_ANSWER_DISCARD_SECONDS):
             while rest > 0:
