@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import logging
 import tarfile
 import uuid
 from collections.abc import AsyncIterator, Iterator
@@ -19,6 +20,7 @@ from pathlib import Path
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.types import Message
 
 from mc_server_dashboard_api.dependencies import (
     get_assigned_worker_lookup,
@@ -1660,6 +1662,95 @@ def test_hydrate_send_stall_releases_reader_lease(
     # The reader lease must have been released (the generator's finally ran).
     # FsStorage exposes _leases; an empty dict means all leases are released.
     assert storage._leases == {}
+
+
+def _published(storage: FsStorage, community: uuid.UUID, server: uuid.UUID) -> bytes:
+    async def _read() -> bytes:
+        return b"".join(
+            [
+                chunk
+                async for chunk in storage.open_hydrate_source(
+                    CommunityId(community), ServerId(server)
+                )
+            ]
+        )
+
+    return asyncio.run(_read())
+
+
+def test_snapshot_that_is_not_a_tar_is_refused_and_not_published(
+    tmp_path: Path,
+) -> None:
+    # A byte-complete body that does not frame as a tar used to escape as a raw
+    # ``tarfile.ReadError`` and answer 500 (issue #3365). It is the client's
+    # body that is wrong: 422 ``invalid_archive``, as for an uploaded backup.
+    client, storage = _setup(tmp_path)
+    community, server = _scope()
+    asyncio.run(_publish(storage, community, server, {"keep.txt": b"prior"}))
+
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"),
+            content=b"this is not a tar archive" * 100,
+            headers=_auth(),
+        )
+
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_archive"
+    assert _read_tar(_published(storage, community, server)) == {"keep.txt": b"prior"}
+    assert list(tmp_path.rglob("incoming/*")) == []
+
+
+def test_snapshot_disconnect_mid_upload_is_a_warning_and_leaves_no_staging(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The Worker going away mid-upload is an operational event, not a fault in
+    # the API: it used to escape the route as ``ClientDisconnect`` and be logged
+    # as an ERROR with a traceback (issue #3365).
+    _, storage = _setup(tmp_path)
+    community, server = _scope()
+    asyncio.run(_publish(storage, community, server, {"keep.txt": b"prior"}))
+    body = _tar_bytes({"world/level.dat": b"new"})
+    path = _url(community, server, "snapshot")
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"authorization", f"Bearer {_CREDENTIAL}".encode()),
+            (b"content-length", str(len(body)).encode()),
+        ],
+        "client": ("testclient", 50000),
+        "server": ("testserver", 80),
+    }
+    messages: Iterator[Message] = iter(
+        [{"type": "http.request", "body": body[:512], "more_body": True}]
+    )
+    statuses: list[int] = []
+
+    async def receive() -> Message:
+        return next(messages, {"type": "http.disconnect"})
+
+    async def send(message: Message) -> None:
+        if message["type"] == "http.response.start":
+            statuses.append(message["status"])
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(_shared_app(scope, receive, send))
+
+    # Answered (to nobody) as the truncated transfer it is, not left to crash.
+    assert statuses == [400]
+    records = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert [(r.levelno, r.exc_info) for r in records] == [(logging.WARNING, None)]
+    assert "disconnected" in records[0].getMessage()
+    assert _read_tar(_published(storage, community, server)) == {"keep.txt": b"prior"}
+    assert list(tmp_path.rglob("incoming/*")) == []
 
 
 def test_hydrate_send_no_false_positive(

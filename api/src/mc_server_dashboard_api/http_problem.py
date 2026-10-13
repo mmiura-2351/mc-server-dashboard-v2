@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import http
 import logging
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
 from fastapi import FastAPI, Request, status
@@ -205,13 +205,24 @@ async def validation_exception_handler(
     (WEBUI_SPEC.md Section 7.4, issue #393).
     """
 
+    return await problem_exception_handler(_request, validation_problem(exc.errors()))
+
+
+def validation_problem(errors: Sequence[Any]) -> ProblemException:
+    """The 422 :func:`validation_exception_handler` renders, as an exception.
+
+    For the one place that has to *raise* a validation failure rather than let
+    the framework's own error reach the handler: the credential check made
+    before a body is read (:mod:`mc_server_dashboard_api.http_body_auth`).
+    """
+
     from fastapi.encoders import jsonable_encoder
 
     scrubbed = [
         {key: value for key, value in error.items() if key not in ("input", "ctx")}
-        for error in exc.errors()
+        for error in errors
     ]
-    return problem_response(
+    return problem(
         status.HTTP_422_UNPROCESSABLE_CONTENT,
         VALIDATION_REASON,
         extensions={"errors": jsonable_encoder(scrubbed)},

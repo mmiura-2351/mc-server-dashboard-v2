@@ -12,6 +12,10 @@ a body past the route's limit with a 413 problem response:
 * by streamed size, as soon as the running count crosses the limit — which is
   what bounds a chunked body, or one that under-declares its length.
 
+A request that carries ``Transfer-Encoding`` has no declared length, whatever
+``Content-Length`` it also carries: the server (h11) frames such a body as
+chunked and ignores the length, so nothing here believes it either.
+
 The limit is :data:`DEFAULT_MAX_REQUEST_BODY_BYTES` unless the route declares its
 own with :func:`request_body_limit`. The declaration sits on the endpoint, beside
 the cap it derives from, and the middleware finds it through the ``endpoint`` the
@@ -19,18 +23,51 @@ router records in the request scope: by the time a route reads its body, routing
 has happened. A request no route matched has the default.
 
 It bounds what a route **reads**, and nothing else. A body the route never asks
-for is never buffered (uvicorn applies flow control and discards it), so ``GET``,
-``HEAD`` and ``OPTIONS`` requests — which no route reads a body for — are not
-wrapped at all, and once a response has started the middleware stands aside.
+for is never buffered (uvicorn applies flow control and discards it). ``GET``,
+``HEAD`` and ``OPTIONS`` requests — which no route reads a body for — are neither
+authorized nor limited here: their routes include the streaming downloads, and a
+streaming response calls ``receive`` itself, to watch for the client going away,
+before its first byte is sent — a call that cannot be told from a route reading
+its body. Once a response has started the middleware stands aside.
 
 It is the innermost middleware (``app.py``), and it refuses by raising: the
 exception surfaces in the route's own body read, and the problem handlers render
 it like any other error, so the 413 leaves through every other middleware with
 the headers every response carries.
+
+**Authentication precedes the body** (issue #3365). The first read of a request
+is also where the route's credential checks are made
+(:mod:`mc_server_dashboard_api.http_body_auth`), ahead of the limit: a caller the
+route refuses is answered before a byte of its body is read, whatever its size.
+
+**An answer given before the body was read through** (issue #3365) -- either
+refusal above, or any response to a request whose body was not read: a route
+that declares none, a request no route matched, any method -- finds the client
+possibly still sending. The server would go on reading and
+dropping whatever length the client declared, for as long as the client took;
+and for a client that asked for the connection to close, it closes with the body
+still arriving, which resets the connection and can cost the client the answer.
+So, when a response starts:
+
+* an unread rest of at most :data:`EARLY_ANSWER_DISCARD_BYTES` is read and
+  dropped first, for at most :data:`EARLY_ANSWER_DISCARD_SECONDS`: the client
+  finishes its request, receives the answer, and the connection stays usable;
+* a longer rest, one of undeclared length (a transfer-encoded body), one that
+  did not arrive in that time, one the client is holding back for a
+  ``100 Continue``, or any rest at all on a ``GET``, ``HEAD`` or ``OPTIONS``
+  (reading it here would race the streaming response's own watch on ``receive``)
+  is not read: the response carries ``Connection: close`` and the server closes
+  once it is sent. A client still writing then may see a reset before it reads
+  the answer; that is the price of not reading the body, and it is paid only by
+  bodies past the discard budget.
+
+A request with no body -- neither ``Content-Length`` nor ``Transfer-Encoding``,
+or a length of zero -- has nothing unread, and its response is never touched.
 """
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, TypeVar
@@ -38,6 +75,7 @@ from typing import Any, TypeVar
 from fastapi import status
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from mc_server_dashboard_api.http_body_auth import authorize_before_body
 from mc_server_dashboard_api.http_problem import problem
 
 # The limit of a route that declares none: every JSON route. The largest
@@ -52,12 +90,19 @@ DEFAULT_REASON = "request_too_large"
 # there.
 MULTIPART_OVERHEAD_BYTES = 1024 * 1024
 
+# How much unread body is read and dropped, and for how long, so that an answer
+# given before the body was read through reaches a client still sending it
+# (module docstring). 16 MiB covers a refused request to any JSON route, the
+# largest being a file edit a little past its 11 MB limit; an upload is larger
+# and is answered by closing instead.
+EARLY_ANSWER_DISCARD_BYTES = 16 * 1024 * 1024
+EARLY_ANSWER_DISCARD_SECONDS = 10.0
+
 _ATTRIBUTE = "__mcsd_request_body_limit__"
 
-# Methods no route reads a body for. They are passed through untouched: their
-# routes include the streaming downloads, and a streaming response calls
-# ``receive`` itself, to watch for the client going away, before its first byte
-# is sent -- a call this middleware could not tell from a route reading its body.
+# Methods no route reads a body for (module docstring): a ``receive`` call on
+# them is not a body read, so it is neither authorized nor limited, and a body
+# they do carry is never read and dropped.
 _BODYLESS_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 _Endpoint = TypeVar("_Endpoint", bound=Callable[..., Any])
@@ -103,14 +148,37 @@ def request_body_limit_of(endpoint: object) -> RequestBodyLimit:
     return limit
 
 
-def _declared_length(scope: Scope) -> int | None:
-    for name, value in scope["headers"]:
-        if name == b"content-length":
-            try:
-                return int(value)
-            except ValueError:
-                return None
-    return None
+def _declared_length(headers: dict[bytes, bytes]) -> int | None:
+    """The body's length, if the request's framing declares one."""
+
+    if b"transfer-encoding" in headers:
+        return None
+    try:
+        return int(headers[b"content-length"])
+    except (KeyError, ValueError):
+        return None
+
+
+async def _discard(receive: Receive, rest: int | None) -> bool:
+    """Read and drop ``rest`` unread body bytes; False if they were left unread."""
+
+    if rest is None or rest > EARLY_ANSWER_DISCARD_BYTES:
+        return False
+    if rest <= 0:
+        # Nothing unread -- nearly every request: no read, and no deadline armed.
+        return True
+    try:
+        async with asyncio.timeout(EARLY_ANSWER_DISCARD_SECONDS):
+            while rest > 0:
+                message = await receive()
+                if message["type"] != "http.request":
+                    break
+                rest -= len(message.get("body", b""))
+                if not message.get("more_body", False):
+                    break
+    except TimeoutError:
+        return False
+    return True
 
 
 class RequestBodyLimitMiddleware:
@@ -120,32 +188,64 @@ class RequestBodyLimitMiddleware:
         self._app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http" or scope["method"] in _BODYLESS_METHODS:
+        if scope["type"] != "http":
             await self._app(scope, receive, send)
             return
 
-        declared = _declared_length(scope)
+        reads_a_body = scope["method"] not in _BODYLESS_METHODS
+        headers = dict(scope["headers"])
+        declared = _declared_length(headers)
         received = 0
+        ended = False
+        authorized = False
         responding = False
 
+        def unread() -> int | None:
+            """How much body is still to come; ``None`` when that is not to be read."""
+
+            if ended:
+                return 0
+            if declared is None:
+                return None if b"transfer-encoding" in headers else 0
+            if declared == received:
+                return 0
+            if not reads_a_body:
+                return None
+            if received == 0 and headers.get(b"expect", b"").lower() == b"100-continue":
+                return None
+            return declared - received
+
         async def limited_receive() -> Message:
-            nonlocal received
+            nonlocal received, ended, authorized
             if responding:
                 return await receive()
-            limit = request_body_limit_of(scope.get("endpoint"))
-            if declared is not None and declared > limit.max_bytes:
-                raise problem(status.HTTP_413_CONTENT_TOO_LARGE, limit.reason)
+            if reads_a_body:
+                if not authorized:
+                    await authorize_before_body(scope)
+                    authorized = True
+                limit = request_body_limit_of(scope.get("endpoint"))
+                if declared is not None and declared > limit.max_bytes:
+                    raise problem(status.HTTP_413_CONTENT_TOO_LARGE, limit.reason)
             message = await receive()
+            ended = not message.get("more_body", False)
             if message["type"] == "http.request":
                 received += len(message.get("body", b""))
-                if received > limit.max_bytes:
+                if reads_a_body and received > limit.max_bytes:
                     raise problem(status.HTTP_413_CONTENT_TOO_LARGE, limit.reason)
             return message
 
         async def tracking_send(message: Message) -> None:
             nonlocal responding
-            if message["type"] == "http.response.start":
+            if message["type"] == "http.response.start" and not responding:
                 responding = True
+                if not await _discard(receive, unread()):
+                    message = {
+                        **message,
+                        "headers": [
+                            *message.get("headers", []),
+                            (b"connection", b"close"),
+                        ],
+                    }
             await send(message)
 
         await self._app(scope, limited_receive, tracking_send)

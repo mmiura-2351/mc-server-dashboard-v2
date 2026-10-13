@@ -1116,6 +1116,33 @@ def test_download_file_returns_bytes() -> None:
     assert cd.startswith("attachment; ")
     assert 'filename="level.dat"' in cd
     assert "filename*=UTF-8''level.dat" in cd
+    # An ordinary download carries no body, and its response is left alone by
+    # the early-answer policy (issue #3365).
+    assert "connection" not in resp.headers
+
+
+@pytest.mark.parametrize(
+    "framing", [{"Content-Length": "1024"}, {"Transfer-Encoding": "chunked"}]
+)
+def test_download_of_a_request_carrying_a_body_still_streams_whole(
+    framing: dict[str, str],
+) -> None:
+    # A GET may carry a body nobody reads; the early-answer policy (issue #3365)
+    # then closes the connection, and must not cost the download a byte.
+    raw = bytes(range(256))
+    app = _app(
+        member=True, allow=True, download=_FakeDownload(is_dir=False, file_content=raw)
+    )
+    client = _client(app)
+    resp = client.request(
+        "GET",
+        _url(uuid.uuid4(), uuid.uuid4(), "/download"),
+        params={"path": "level.dat"},
+        headers={**_bearer(), **framing},
+        content=iter([b"x" * 1024]),
+    )
+    assert resp.status_code == 200
+    assert resp.content == raw
 
 
 def test_download_dir_returns_zip_stream() -> None:
