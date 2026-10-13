@@ -203,37 +203,75 @@ func TestHandOverCountsEveryNameOfAHeavilyLinkedFile(t *testing.T) {
 }
 
 // The names found only prove a file is the working set's own while its link
-// count holds still. A name that goes away after it was counted — an edit
-// replacing it, say — leaves the count one too high for the names that remain,
-// so a file whose link count moved during the walk is left alone.
+// count holds still, so a file whose link count moved during the walk is left
+// alone. Both ways it can move would otherwise complete the count of a file that
+// is also named outside: a name that goes away after it was counted (an edit
+// replacing it, say) leaves as many names counted as there are links left, and a
+// name added inside stands in for the outside one.
 func TestHandOverLeavesAFileWhoseLinkCountMovedDuringTheWalk(t *testing.T) {
-	dir, outside := linkedSet(t)
-	canary := writeAt(t, filepath.Join(outside, "canary"))
-	names := map[string]string{
-		filepath.Join(dir, "a"): linkAt(t, canary, filepath.Join(dir, "a", "one")),
-		filepath.Join(dir, "b"): linkAt(t, canary, filepath.Join(dir, "b", "two")),
-	}
-	d, rec := hardenedDriver(newFakeDocker())
-	// Each directory is re-owned right before the walk enters it. When that
-	// happens to the second of the two, the first one's name has been counted:
-	// it is removed then, so the remaining name sees a link count of 2.
-	var entered []string
-	rec.before = func(path string) {
-		if _, ok := names[path]; !ok {
-			return
-		}
-		entered = append(entered, path)
-		if len(entered) == 2 {
-			if err := os.Remove(names[entered[0]]); err != nil {
-				t.Error(err)
+	// Each directory is re-owned right before the walk enters it, which is when
+	// the steps below run: first for one of a/ and b/, then for the other.
+	for _, tc := range []struct {
+		name          string
+		before        []string
+		first, second func(t *testing.T, canary, firstDir, secondDir string)
+	}{
+		{
+			name:   "a counted name removed",
+			before: []string{"a", "b"},
+			second: func(t *testing.T, _, firstDir, _ string) {
+				if err := os.Remove(filepath.Join(firstDir, "name")); err != nil {
+					t.Error(err)
+				}
+			},
+		},
+		{
+			name: "a name added",
+			first: func(t *testing.T, canary, firstDir, _ string) {
+				linkAt(t, canary, filepath.Join(firstDir, "name"))
+			},
+			second: func(t *testing.T, canary, _, secondDir string) {
+				linkAt(t, canary, filepath.Join(secondDir, "name"))
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, outside := linkedSet(t)
+			canary := writeAt(t, filepath.Join(outside, "canary"))
+			dirs := []string{filepath.Join(dir, "a"), filepath.Join(dir, "b")}
+			for _, p := range dirs {
+				if err := os.Mkdir(p, 0o750); err != nil {
+					t.Fatal(err)
+				}
 			}
-		}
-	}
+			for _, name := range tc.before {
+				linkAt(t, canary, filepath.Join(dir, name, "name"))
+			}
+			d, rec := hardenedDriver(newFakeDocker())
+			var entered []string
+			rec.before = func(path string) {
+				if path != dirs[0] && path != dirs[1] {
+					return
+				}
+				entered = append(entered, path)
+				if len(entered) == 1 && tc.first != nil {
+					other := dirs[0]
+					if path == other {
+						other = dirs[1]
+					}
+					tc.first(t, canary, path, other)
+				}
+				if len(entered) == 2 {
+					tc.second(t, canary, entered[0], path)
+				}
+			}
 
-	stats, err := d.handOverWorkingSet(context.Background(), dir)
+			stats, err := d.handOverWorkingSet(context.Background(), dir)
 
-	if err != nil || stats.skipped != 1 || reowned(t, rec, canary) != 0 {
-		t.Fatalf("hand-over = %+v, %v, re-owned %v; want the file left alone", stats, err, rec.seen())
+			if err != nil || stats.skipped != 1 || reowned(t, rec, canary) != 0 {
+				t.Fatalf("hand-over = %+v, %v, re-owned %v; want the file left alone", stats, err, rec.seen())
+			}
+		})
 	}
 }
 
