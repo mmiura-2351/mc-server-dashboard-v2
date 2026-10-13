@@ -231,11 +231,17 @@ func (d *Driver) handOverNamed(dirFd int, name, path string, w *handOverWalk) (i
 // The count is only proof while no name of the file is added, removed or moved
 // under the walk — which is what awaitQuiescent establishes for the server's
 // code. Short of that, a file whose link count is no longer what it was when the
-// walk first met it keeps its owner. That covers a name removed after it was
-// counted — all the Worker's own writers (a file edit, the generation marker)
-// ever do to an existing name is replace it with a new file — and a name added.
-// A name moved from a directory already walked into one still to come is counted
-// twice, and nothing here can tell.
+// walk first met it keeps its owner, which covers a name removed after it was
+// counted and a name added.
+//
+// What it does not cover is a name that MOVES during the walk, from where it was
+// counted to where the walk has yet to look: it is counted twice at an unchanged
+// link count. The Worker's own file edit is not held off while the walk runs and
+// publishes by renaming a temporary name, and a server can have put an
+// outside-linked file under that temporary name before it stopped — a schedule
+// that double-counts with no server code running (issue #3371). Nor does a count
+// of names mean anything where the host has mounted part of the working set a
+// second time inside it: the same names are then met twice (also #3371).
 //
 // The entry is opened without following a link (O_PATH: nothing is read, and a
 // FIFO or device is not really opened), and both the link count and the

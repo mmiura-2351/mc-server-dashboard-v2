@@ -651,9 +651,13 @@ rule does not rely on `fs.protected_hardlinks`, nor on who made the link: the
 container can only link within its own bind mount, and a hydrate refuses a
 link member and writes every file anew, so such a link is the doing of something
 else on the host — a hard-linked copy of a working set, say — and is treated
-the same whatever made it. The count is exact because nothing renames or links
-in the tree while it is walked (no container of the server is alive); a file
-whose link count moves during the walk is left alone as well (issue #3338).
+the same whatever made it (issue #3338). The count proves what it says only
+while no name of the file moves under the walk. No container of the server is
+alive then, and a file whose link count changes during the walk is left alone;
+but the worker's own file edit is not held off during the walk, and a name it
+renames into place mid-walk can be counted twice, so an edit overlapping a
+start is a known gap, as is a host that mounts part of a working set a second
+time inside it, where the same names are met twice (issue #3371).
 A snapshot — which is also taken while the server runs — reads the tree
 the same way (issue #3334): each directory and file is opened relative to its
 parent's descriptor without following links, and what goes into the archive is
