@@ -23,13 +23,26 @@ import asyncio
 import re
 import uuid
 from collections.abc import AsyncIterator, Iterator
-from typing import Annotated
+from typing import Annotated, Any
 
 import pytest
-from fastapi import Depends, FastAPI, Request, UploadFile
+from fastapi import (
+    APIRouter,
+    Depends,
+    FastAPI,
+    Path,
+    Query,
+    Request,
+    Security,
+    UploadFile,
+)
 from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.security import (
+    HTTPAuthorizationCredentials,
+    HTTPBearer,
+    SecurityScopes,
+)
 from pydantic import BaseModel
 
 from mc_server_dashboard_api.http_body_limit import RequestBodyLimitMiddleware
@@ -38,6 +51,7 @@ from mc_server_dashboard_api.servers.application.files import MAX_UPLOAD_BYTES
 from tests.test_http_body_limit import (
     _endless,
     _exactly,
+    _exchange,
     _multipart,
     _request,
     _served,
@@ -232,19 +246,230 @@ async def test_a_check_that_fails_unexpectedly_reads_no_body() -> None:
     assert result.consumed == 0
 
 
-async def test_a_malformed_request_is_reported_by_the_route_as_before() -> None:
-    # A validation error cannot be raised into a body read (the framework would
-    # answer 400 for it), so it is left for the dependency itself to report.
+async def test_a_check_that_reports_a_malformed_request_reads_no_body() -> None:
+    # The check's own 422, the one the route gave after reading the body.
     result = await _request(
-        _small_app(),
-        "POST",
-        "/malformed",
-        iter([b'{"value": "x"}']),
-        headers=_bearer("member"),
+        _small_app(), "POST", "/malformed", _endless(), headers=_bearer("member")
     )
 
     assert result.status == 422
     assert result.json()["errors"] == [{"type": "uuid_parsing", "loc": ["path", "id"]}]
+    assert result.consumed == 0
+
+
+async def test_a_chunked_refusal_with_a_length_beside_it_closes_the_connection() -> (
+    None
+):
+    # The round-1 review's probe, over a real socket: ``Content-Length: 0``
+    # beside the transfer encoding was believed, so the 401 neither closed the
+    # connection nor bounded how long the client could go on sending chunks.
+    async with _served(_small_app()) as port:
+        head, body = await _exchange(
+            port,
+            b"POST /json HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\n"
+            b"Transfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n1\r\nx\r\n",
+        )
+
+    assert head.startswith(b"HTTP/1.1 401 ")
+    assert b"\r\nconnection: close" in head.lower()
+    assert body == _INVALID_TOKEN
+
+
+# --- the contract with the dependencies it solves ------------------------------
+#
+# The check is whatever the route declares, so every shape a dependency can take
+# has to end one of two ways before the body: the credential was checked, or the
+# request is refused. A check that did not run is never a check that passed.
+
+
+class _Contract:
+    """A small app around one credential-checking dependency, counting its calls."""
+
+    def __init__(self) -> None:
+        self.app = FastAPI()
+        install_problem_handlers(self.app)
+        self.app.add_middleware(RequestBodyLimitMiddleware)
+        self.calls = 0
+
+    def check(self, credentials: HTTPAuthorizationCredentials | None) -> str:
+        self.calls += 1
+        if credentials is None or credentials.credentials != "member":
+            raise problem(401, "invalid_token", headers={"WWW-Authenticate": "Bearer"})
+        return credentials.credentials
+
+
+_Credentials = Annotated[HTTPAuthorizationCredentials | None, Depends(_scheme)]
+
+
+@pytest.mark.parametrize("token", [None, "member"])
+async def test_a_check_with_a_malformed_path_parameter_reads_no_body(
+    token: str | None,
+) -> None:
+    contract = _Contract()
+
+    async def auth(credentials: _Credentials, item: Annotated[int, Path()]) -> str:
+        return contract.check(credentials)
+
+    @contract.app.post("/items/{item}")
+    async def route(body: _Echo, user: str = Depends(auth)) -> str:
+        return user
+
+    headers = _CHUNKED if token is None else _bearer(token)
+    refused = await _request(
+        contract.app, "POST", "/items/nope", _endless(), headers=headers
+    )
+
+    # The check could not be made, so the body is not read: the request is
+    # answered with the validation error that kept it from being made.
+    assert refused.status == 422
+    assert [e["loc"] for e in refused.json()["errors"]] == [["path", "item"]]
+    assert refused.consumed == 0
+
+    unauthenticated = await _request(
+        contract.app, "POST", "/items/1", _endless(), headers=_CHUNKED
+    )
+    assert (unauthenticated.status, unauthenticated.consumed) == (401, 0)
+
+
+async def test_a_check_with_a_malformed_query_parameter_reads_no_body() -> None:
+    contract = _Contract()
+
+    async def auth(credentials: _Credentials, page: Annotated[int, Query()]) -> str:
+        return contract.check(credentials)
+
+    @contract.app.post("/items")
+    async def route(body: _Echo, user: str = Depends(auth)) -> str:
+        return user
+
+    result = await _request(
+        contract.app, "POST", "/items", _endless(), headers=_CHUNKED
+    )
+
+    assert result.status == 422
+    assert [e["loc"] for e in result.json()["errors"]] == [["query", "page"]]
+    assert (result.consumed, contract.calls) == (0, 0)
+
+
+async def test_a_check_that_wants_the_body_is_refused_rather_than_fed_it() -> None:
+    # A credential check cannot depend on the body it stands in front of. Such a
+    # route answers 422 to everyone, allowed or not, which no test of it survives.
+    contract = _Contract()
+
+    async def auth(credentials: _Credentials, payload: _Echo) -> str:
+        return contract.check(credentials)
+
+    @contract.app.post("/items")
+    async def route(user: str = Depends(auth)) -> str:
+        return user
+
+    result = await _request(
+        contract.app, "POST", "/items", _endless(), headers=_bearer("member")
+    )
+
+    assert result.status == 422
+    assert (result.consumed, contract.calls) == (0, 0)
+
+
+async def test_a_check_with_security_scopes_is_given_them() -> None:
+    contract = _Contract()
+    seen: list[list[str]] = []
+
+    async def auth(scopes: SecurityScopes, credentials: _Credentials) -> str:
+        seen.append(scopes.scopes)
+        return contract.check(credentials)
+
+    @contract.app.post("/items")
+    async def route(
+        body: _Echo, user: str = Security(auth, scopes=["items:write"])
+    ) -> str:
+        return user
+
+    refused = await _request(
+        contract.app, "POST", "/items", _endless(), headers=_CHUNKED
+    )
+    assert (refused.status, refused.consumed) == (401, 0)
+    assert seen == [["items:write"]]
+
+    allowed = await _request(
+        contract.app,
+        "POST",
+        "/items",
+        iter([b'{"value": "x"}']),
+        headers=_bearer("member"),
+    )
+    assert allowed.status == 200
+    # Before the body, and again by the handler: the same scopes each time.
+    assert seen == [["items:write"]] * 3
+
+
+@pytest.mark.parametrize(("token", "resolutions"), [(None, 1), ("member", 2)])
+async def test_a_check_that_yields_is_cleaned_up_once_per_resolution(
+    token: str | None, resolutions: int
+) -> None:
+    contract = _Contract()
+    opened = closed = 0
+
+    async def session() -> AsyncIterator[None]:
+        nonlocal opened, closed
+        opened += 1
+        try:
+            yield
+        finally:
+            closed += 1
+
+    async def auth(credentials: _Credentials, _: None = Depends(session)) -> str:
+        return contract.check(credentials)
+
+    @contract.app.post("/items")
+    async def route(body: _Echo, user: str = Depends(auth)) -> str:
+        return user
+
+    headers = _CHUNKED if token is None else _bearer(token)
+    await _request(
+        contract.app, "POST", "/items", iter([b'{"value": "x"}']), headers=headers
+    )
+
+    # Refused before the body: resolved once. Allowed: once more by the handler.
+    assert (opened, closed) == (resolutions, resolutions)
+
+
+async def test_a_check_that_is_a_class_reads_no_body() -> None:
+    contract = _Contract()
+
+    class Gate:
+        def __init__(self, credentials: _Credentials) -> None:
+            self.user = contract.check(credentials)
+
+    @contract.app.post("/items")
+    async def route(body: _Echo, gate: Any = Depends(Gate)) -> str:
+        return str(gate.user)
+
+    result = await _request(
+        contract.app, "POST", "/items", _endless(), headers=_CHUNKED
+    )
+
+    assert (result.status, result.consumed, contract.calls) == (401, 0, 1)
+
+
+async def test_a_check_declared_on_the_router_reads_no_body() -> None:
+    contract = _Contract()
+
+    async def auth(credentials: _Credentials) -> str:
+        return contract.check(credentials)
+
+    router = APIRouter(dependencies=[Depends(auth)])
+
+    @router.post("/items")
+    async def route(body: _Echo) -> str:
+        return body.value
+
+    contract.app.include_router(router)
+
+    result = await _request(
+        contract.app, "POST", "/items", _endless(), headers=_CHUNKED
+    )
+
+    assert (result.status, result.consumed, contract.calls) == (401, 0, 1)
 
 
 # --- the wiring: every route that requires authentication ----------------------
@@ -274,6 +499,10 @@ def _concrete(path: str) -> str:
     return re.sub(r"\{[^}]+\}", str(uuid.uuid4()), path)
 
 
+def _malformed_ids(path: str) -> str:
+    return re.sub(r"\{[^}]+\}", "not-an-id", path)
+
+
 def _body_routes(app: FastAPI) -> Iterator[tuple[str, str]]:
     for route in app.routes:
         if isinstance(route, APIRoute):
@@ -286,11 +515,14 @@ async def test_no_route_reads_a_body_before_authentication(live_app: FastAPI) ->
     assert routes >= _PUBLIC
 
     for method, path in sorted(routes - _PUBLIC):
-        result = await _request(
-            live_app, method, _concrete(path), _endless(), headers=_CHUNKED
-        )
+        # With well-formed ids and with malformed ones: a route whose check
+        # validated its path before the credential would answer the latter 422.
+        for concrete in (_concrete(path), _malformed_ids(path)):
+            result = await _request(
+                live_app, method, concrete, _endless(), headers=_CHUNKED
+            )
 
-        assert (result.status, result.consumed) == (401, 0), (method, path)
+            assert (result.status, result.consumed) == (401, 0), (method, concrete)
 
 
 _API = "/api/communities/{community_id}/servers"
@@ -385,3 +617,49 @@ async def test_a_caller_the_route_allows_has_the_body_read(
     # Past the gate the body is read, and found not to be the JSON it should be.
     assert result.status == 422
     assert result.consumed == 1024
+
+
+# --- every method, and no route at all -----------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "status"),
+    [
+        # An authenticated route, a public one, and a path nothing matches.
+        ("GET", "/api/users/me", 401),
+        ("GET", "/api/healthz", 200),
+        ("OPTIONS", "/api/users/me", 405),
+        ("GET", "/api/no-such-route", 404),
+        ("POST", "/api/no-such-route", 404),
+        ("DELETE", "/api/no-such-route", 404),
+    ],
+)
+@pytest.mark.parametrize(
+    "framing",
+    [{"content-length": str(64 * 1024 * 1024)}, {"transfer-encoding": "chunked"}],
+)
+async def test_an_unread_body_on_any_request_closes_the_connection(
+    live_app: FastAPI, method: str, path: str, status: int, framing: dict[str, str]
+) -> None:
+    result = await _request(live_app, method, path, _endless(), headers=framing)
+
+    assert result.status == status
+    assert result.consumed == 0
+    assert result.headers["connection"] == "close"
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "status"),
+    [
+        ("GET", "/api/users/me", 401),
+        ("GET", "/api/healthz", 200),
+        ("GET", "/api/no-such-route", 404),
+    ],
+)
+async def test_a_request_without_a_body_is_not_touched(
+    live_app: FastAPI, method: str, path: str, status: int
+) -> None:
+    result = await _request(live_app, method, path, iter([]))
+
+    assert result.status == status
+    assert "connection" not in result.headers

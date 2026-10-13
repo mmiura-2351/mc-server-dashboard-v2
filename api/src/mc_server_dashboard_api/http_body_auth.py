@@ -41,7 +41,11 @@ from starlette.exceptions import HTTPException
 from starlette.requests import Request
 from starlette.types import Scope
 
-from mc_server_dashboard_api.http_problem import INTERNAL_ERROR_REASON, problem
+from mc_server_dashboard_api.http_problem import (
+    INTERNAL_ERROR_REASON,
+    problem,
+    validation_problem,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -55,14 +59,20 @@ def _reads_a_credential(dependant: Dependant) -> bool:
 async def authorize_before_body(scope: Scope) -> None:
     """Raise the refusal of the matched route's credential checks, if any.
 
-    Raised into a body read, which the framework lets only an ``HTTPException``
-    out of (anything else becomes its own 400), so:
+    A check that could not be made is not a check that passed: whatever keeps
+    one from running to its end refuses the request, with the body unread. And
+    what is raised here is raised into a body read, which the framework lets only
+    an ``HTTPException`` out of (anything else becomes its own 400), so:
 
-    * a validation error -- a malformed path id, found once the caller is
-      authenticated -- is left for the dependency to report after the body, as
-      the 422 it always was;
-    * any other failure is logged and answered 500 here, with the body unread:
-      a check that could not be made is not a check that passed.
+    * a validation error -- one a check raises (a malformed path id), or one the
+      resolver finds in a check's own parameters, in which case the check was
+      never called -- is raised as the 422 problem it would have been rendered
+      as. It carries the checks' errors only: the body, unread, adds none;
+    * any other failure is logged and answered 500.
+
+    A check that declares a body parameter can never be made here, so its route
+    answers 422 to every request: a credential check must not depend on the body
+    it stands in front of.
     """
 
     route = scope.get("route")
@@ -74,7 +84,7 @@ async def authorize_before_body(scope: Scope) -> None:
     # No ``receive``: a check cannot read the body it stands in front of.
     request = Request(scope)
     try:
-        await solve_dependencies(
+        solved = await solve_dependencies(
             request=request,
             dependant=Dependant(dependencies=checks, path=route.path_format),
             dependency_overrides_provider=route.dependency_overrides_provider,
@@ -83,8 +93,8 @@ async def authorize_before_body(scope: Scope) -> None:
         )
     except HTTPException:
         raise
-    except RequestValidationError:
-        return
+    except RequestValidationError as exc:
+        raise validation_problem(exc.errors()) from None
     except Exception:
         _logger.exception(
             "unhandled exception authorizing %s %s", request.method, request.url.path
@@ -92,3 +102,5 @@ async def authorize_before_body(scope: Scope) -> None:
         raise problem(
             status.HTTP_500_INTERNAL_SERVER_ERROR, INTERNAL_ERROR_REASON
         ) from None
+    if solved.errors:
+        raise validation_problem(solved.errors)

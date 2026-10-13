@@ -152,7 +152,9 @@ spooled to disk past its route's limit. The limits are constants:
 Each listed limit is the route's own cap plus room for its envelope, so the
 route's own check still decides at the cap and the answer is the same reason
 however far past it the body was. `GET`, `HEAD` and `OPTIONS` requests are not
-read at all. An edit's `content_base64` longer than 5,592,408 characters is
+read at all. A request that carries `Transfer-Encoding` has no declared length,
+whatever `Content-Length` it also carries (the server frames it as chunked and
+ignores the length): it is bounded by streamed size only. An edit's `content_base64` longer than 5,592,408 characters is
 refused 413 `file_too_large` before it is decoded; one that decodes to more than
 4 MiB is refused the same way after.
 
@@ -166,17 +168,24 @@ credential are `POST /users`, `POST /auth/login`, `/auth/refresh` and
 `/auth/logout`; the data-plane routes check the Worker credential before they
 stream. One consequence: a request that is both unauthorized and malformed is
 now answered for the former (it used to be a `422` when its JSON did not parse).
+The check fails closed: if it cannot be made — a parameter the check itself
+reads does not validate, or it fails unexpectedly — the body is still not read,
+and the request is answered with that `422 validation_error` (carrying the
+check's errors only; the unread body contributes none) or a `500`.
 
 **An answer given before the body was read through** — the refusals above, a
-`413`, or any response of a route that did not read what it was sent — is
-delivered in one of two ways. If at most **16 MiB** of the declared body is
-still unread, the server reads and drops it (for at most 10 seconds) and then
-answers, so the client finishes sending, receives the answer, and the connection
-stays usable. Otherwise — a longer rest, a chunked body (no declared length), a
-rest that does not arrive in time, or a body the client is holding back for
-`100 Continue` — nothing more is read: the response carries `Connection: close`
-and the connection is closed once it is sent, so a client does not decide how
-long it stays open. A client still writing a large body at that moment may see
+`413`, or any response to a request whose body was not read, on any method and
+whether or not a route matched (a `404` or `405` included) — is delivered in one
+of two ways. If at most **16 MiB** of the declared body is still unread, the
+server reads and drops it (for at most 10 seconds) and then answers, so the
+client finishes sending, receives the answer, and the connection stays usable.
+Otherwise — a longer rest, a transfer-encoded body (no declared length, even
+beside a `Content-Length`), a rest that does not arrive in time, a body the
+client is holding back for `100 Continue`, or any unread body at all on a `GET`,
+`HEAD` or `OPTIONS` — nothing more is read: the response carries
+`Connection: close` and the connection is closed once it is sent, so a client
+does not decide how long it stays open. A request with no body (neither header,
+or a length of zero) is never affected. A client still writing a large body at that moment may see
 the connection reset before it reads the answer; a client that must have the
 answer for a large upload sends `Expect: 100-continue`, or reads while it writes.
 
