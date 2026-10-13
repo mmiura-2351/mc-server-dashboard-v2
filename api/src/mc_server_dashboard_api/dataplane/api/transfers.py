@@ -45,6 +45,7 @@ from fastapi import (
     status,
 )
 from fastapi.responses import StreamingResponse
+from starlette.requests import ClientDisconnect
 from starlette.types import Message, Send
 
 from mc_server_dashboard_api.dependencies import (
@@ -376,10 +377,12 @@ async def publish_snapshot(
     """Stage and atomically publish the Worker's working set (snapshot, FR-DATA-4).
 
     The "proven complete" gate: a missing Content-Length is 411, an oversized one
-    is 413, a streamed-byte count that does not match Content-Length is 400, and a
-    body that stages zero files (an empty working set) is 400 ``empty_snapshot`` —
-    in every reject path the staged transfer is aborted, so ``current/`` keeps the
-    prior authoritative copy (FR-DATA-6, STORAGE.md Section 4.1).
+    is 413, a streamed-byte count that does not match Content-Length is 400 (as is
+    a Worker that disconnects mid-upload), a body that does not read as a tar is
+    422 ``invalid_archive``, and a body that stages zero files (an empty working
+    set) is 400 ``empty_snapshot`` — in every reject path the staged transfer is
+    aborted, so ``current/`` keeps the prior authoritative copy (FR-DATA-6,
+    STORAGE.md Section 4.1).
 
     The cap and the declared length are both enforced *during* streaming, not only
     against the header: an under-declaring client (small Content-Length, longer
@@ -582,6 +585,33 @@ async def publish_snapshot(
             await storage.abort_snapshot(handle)
             raise problem(
                 status.HTTP_408_REQUEST_TIMEOUT, "chunk_idle_timeout"
+            ) from None
+        except ClientDisconnect:
+            # The Worker went away mid-upload (issue #3365): an operational event,
+            # not a fault here, so a line and no traceback. Nobody is left to read
+            # the answer; it is the truncated transfer's, for the access log.
+            await storage.abort_snapshot(handle)
+            _logger.warning(
+                "snapshot upload aborted: worker disconnected after %d of %d "
+                "bytes for server %s",
+                counter.count,
+                content_length,
+                server_id,
+            )
+            raise problem(status.HTTP_400_BAD_REQUEST, "length_mismatch") from None
+        except tarfile.TarError as exc:
+            # The byte-complete body does not read as a tar, or carries a member
+            # the extraction refuses (issue #3365): the body is at fault, as an
+            # uploaded backup's is (422 ``invalid_archive``), not the API.
+            await storage.abort_snapshot(handle)
+            _logger.warning(
+                "snapshot publish refused: body is not a readable tar for "
+                "server %s (%s)",
+                server_id,
+                exc,
+            )
+            raise problem(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_archive"
             ) from None
         except PrunedStoreError as exc:
             # A concurrent delete pruned the store DURING the upload window
