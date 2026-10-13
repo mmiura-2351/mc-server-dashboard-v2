@@ -70,9 +70,27 @@ const installLogDirFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | 
 // run-as user once the driver has handed the working set over (issue #2600):
 // left as the Worker's, a logs/ made here would be closed to the unprivileged
 // server that writes its own logs there. When that owner cannot be set (a root
-// Worker without CAP_CHOWN) the open is refused with nothing created
-// (createInstallLogDir, createInstallLog). An entry that already existed is never
-// re-owned, and nothing is ever removed.
+// Worker without CAP_CHOWN) the open is refused, and nothing is ever removed.
+//
+// Whether a refusal leaves an entry of the Worker's behind depends on the
+// filesystem (createInstallLogDir, createInstallLog):
+//
+//   - where a file can be created without a name (O_TMPFILE), nothing is: the
+//     owner is settled before anything is named. The one exception is a logs/
+//     whose ownership change fails although the trial before its mkdir
+//     succeeded; it is left in place;
+//   - elsewhere (NFS, some FUSE filesystems) the entries are named first, and
+//     one that cannot be handed over is left in place.
+//
+// A refusal that leaves an entry says so in its error (errInstallLogEntryLeft).
+// Naming an unnamed log goes through /proc/self/fd, and is itself refused where
+// that is not accessible, or where the kernel's protected hard links deny it to
+// a Worker that holds neither CAP_FOWNER nor CAP_DAC_OVERRIDE once the file has
+// been given away; no log is named then.
+//
+// An entry found already in place is never re-owned. The directory opened after
+// the mkdir may be one the installer put there in between; that one is given its
+// parent's owner (createInstallLogDir).
 func openInstallLog(workingDir string) (*os.File, error) {
 	components := strings.Split(execution.ForgeInstallLogRelpath, "/")
 	dirs, leaf := components[:len(components)-1], components[len(components)-1]
@@ -116,7 +134,10 @@ func openInstallLog(workingDir string) (*os.File, error) {
 //
 // A directory cannot exist without a name, so whether one made here could be
 // handed over is found out first, on a file that has none: if that file cannot
-// be given the parent's owner, no directory is created.
+// be given the parent's owner, no directory is created. Where the filesystem has
+// no such files there is nothing to find it out on, and where the answer changes
+// before the directory's own ownership change, the trial was wrong: either way
+// a directory that cannot be handed over is left in place and reported so.
 //
 // What is opened after the mkdir need not be the directory just made — the
 // installer may have put another in its place. That one is used all the same,
@@ -168,7 +189,10 @@ var errInstallLogEntryLeft = errors.New("the entry was created and is left in pl
 // The file is created without a name, given its owner, and only then linked in
 // at leaf, so a file that cannot be handed over never appears in the working
 // set and there is nothing to take back. The link cannot replace an entry and
-// does not follow one.
+// does not follow one. A link that is refused — no accessible /proc/self/fd, or
+// protected hard links against a Worker without CAP_FOWNER and CAP_DAC_OVERRIDE,
+// the file being no longer its own — fails the create with no log named. On a
+// filesystem without unnamed files none of this holds: createNamedInstallLog.
 func createInstallLog(dirFd int, leaf string) (int, error) {
 	fd, err := installLogOpenUnnamed(dirFd)
 	if unnamedFilesUnsupported(err) {

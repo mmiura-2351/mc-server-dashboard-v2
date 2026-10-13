@@ -631,7 +631,18 @@ file. Subsequent starts skip the install (the args file is already present).
 The first start therefore takes noticeably longer than a vanilla/Paper start while
 the installer downloads Forge's libraries. The installer's combined output is
 written to `logs/forge-install.log` in the server's working set, readable through
-the file API — check it if a Forge first start fails or stalls.
+the file API — check it if a Forge first start fails or stalls. The log is
+best-effort: when the worker cannot write it safely it logs
+`forge install log not written` at `WARN` with the reason and the install goes
+on without it. Besides something planted at `logs/`, that happens when the
+worker cannot give the log to the server's user (no `CAP_CHOWN`), when
+`/proc/self/fd` is not accessible to it, or when it lacks both `CAP_FOWNER`
+and `CAP_DAC_OVERRIDE` under `fs.protected_hardlinks=1`. On a scratch
+filesystem without `O_TMPFILE` (NFS, some FUSE filesystems) a worker without
+`CAP_CHOWN` leaves the worker-owned `logs/` or log it created in place — the
+`WARN` says so — and the server's user cannot write there until an operator
+re-owns or removes it ([`../app/SECURITY.md`](../app/SECURITY.md), "Container
+hardening").
 
 If the install fails, the server goes `crashed` with a reason. An installer that
 exits non-zero is retried twice (the usual cause is a failed download) before the

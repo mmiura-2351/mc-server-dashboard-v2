@@ -658,6 +658,25 @@ but the worker's own file edit is not held off during the walk, and a name it
 renames into place mid-walk can be counted twice, so an edit overlapping a
 start is a known gap, as is a host that mounts part of a working set a second
 time inside it, where the same names are met twice (issue #3371).
+The Forge install log (`logs/forge-install.log`) is the one thing the worker
+creates in a working set while the installer runs, and it never removes an
+entry there: the installer can replace any name at any moment, and a removal
+acts on a name (issue #3338). So the log is created without a name, given its
+directory's owner, and only then linked in, and a missing `logs/` is created
+only after an unnamed file could be given that owner; a worker that cannot
+change ownership (root without `CAP_CHOWN`) then creates nothing. Every refusal
+below is a `WARN` naming the server and the install continues without the log.
+The limits: on a filesystem without unnamed files (`O_TMPFILE`: NFS, some FUSE
+filesystems) the entries are named first, and one that cannot be handed over is
+left in place, owned by the worker, and the `WARN` says so; the same holds for
+a `logs/` whose ownership change fails after the trial succeeded. An entry
+found in place is never re-owned, with one qualification: the directory the
+worker opens after creating `logs/` may be one the installer put there in
+between, and that directory — one inside the working set, reached without
+following a link — is given its parent's owner. Linking the log in needs an
+accessible `/proc/self/fd`, and under the kernel's protected hard links a
+worker without `CAP_FOWNER` and `CAP_DAC_OVERRIDE` is denied it once the file
+is no longer its own; in both cases no log is named.
 A snapshot — which is also taken while the server runs — reads the tree
 the same way (issue #3334): each directory and file is opened relative to its
 parent's descriptor without following links, and what goes into the archive is
