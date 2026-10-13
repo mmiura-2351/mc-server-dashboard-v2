@@ -3185,13 +3185,6 @@ func (m *Manager) handleEditFile(cmd session.Command) session.CommandResult {
 	// refused rather than followed, the dir creation cannot traverse a link out of
 	// the root, and the temp-create + rename act on the same resolved fd, so a
 	// concurrent symlink swap between the walk and the rename cannot redirect it.
-	//
-	// The edit publishes by renaming a temporary name, so it holds the working-set
-	// lock for as long as that name exists and waits out a hand-over walk in
-	// progress (workingSetLocks, issue #3371).
-	lock := m.workingSetLock(cmd.ServerID)
-	lock.Lock()
-	defer lock.Unlock()
 	parentFd, leaf, err := openParentBeneath(root, target, true)
 	if err != nil {
 		// O_NOFOLLOW refused an intermediate-component symlink (ELOOP); any other
@@ -3205,7 +3198,14 @@ func (m *Manager) handleEditFile(cmd session.Command) session.CommandResult {
 	}
 	defer func() { _ = unix.Close(parentFd) }()
 
-	if err := atomicWriteAt(parentFd, leaf, cmd.Content); err != nil {
+	// The write publishes by renaming a temporary name, so it holds the working-set
+	// lock for as long as that name exists, and waits out a hand-over walk in
+	// progress (workingSetLocks, issue #3371).
+	lock := m.workingSetLock(cmd.ServerID)
+	lock.Lock()
+	err = atomicWriteAt(parentFd, leaf, cmd.Content)
+	lock.Unlock()
+	if err != nil {
 		switch {
 		case errors.Is(err, errIsDir):
 			return failFileAccess(cmd.CommandID, session.FileAccessReasonIsADirectory,

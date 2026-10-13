@@ -2737,7 +2737,7 @@ def _extract_member_capped(
 
     safe = _plain_member_filter(member, str(dest))
     if not safe.isfile():
-        tar.extract(safe, dest, filter=_plain_member_filter)
+        tar.extract(safe, dest, filter="data")
         return total
     handle = tar.extractfile(safe)
     if handle is None:  # pragma: no cover - a file member always yields a handle

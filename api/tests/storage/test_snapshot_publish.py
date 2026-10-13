@@ -16,6 +16,7 @@ import os
 import tarfile
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
@@ -375,6 +376,38 @@ async def test_write_snapshot_refuses_a_contained_link_member(
         await storage.write_snapshot(handle, stream_of(tar_with_link_member(link_type)))
 
     assert _links_under(tmp_path) == []
+
+
+def _tar_with_directory_member(mode: Literal["w", "w:gz"]) -> bytes:
+    """A file and an empty directory, the directory as a member of its own — what
+    the Worker's pack writes for every directory."""
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode=mode) as tar:
+        info = tarfile.TarInfo(name="keep.txt")
+        info.size = 4
+        tar.addfile(info, io.BytesIO(b"kept"))
+        directory = tarfile.TarInfo(name="plugins")
+        directory.type = tarfile.DIRTYPE
+        directory.mode = 0o755
+        tar.addfile(directory)
+    return buf.getvalue()
+
+
+async def test_snapshot_and_restore_keep_a_directory_member(tmp_path: Path) -> None:
+    # Refusing link members must not refuse the other bodiless member kind.
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    handle = await storage.begin_snapshot(community, server)
+    await storage.write_snapshot(handle, stream_of(_tar_with_directory_member("w")))
+    await storage.commit_snapshot(handle)
+    assert (snapshot_dir(tmp_path, community, server) / "plugins").is_dir()
+
+    key = await storage.put_backup(
+        community, server, stream_of(_tar_with_directory_member("w:gz"))
+    )
+    await storage.restore_backup(community, server, key)
+    assert (snapshot_dir(tmp_path, community, server) / "plugins").is_dir()
 
 
 @_LINK_TYPES
