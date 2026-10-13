@@ -202,6 +202,14 @@ def _small_app() -> FastAPI:
 
         return StreamingResponse(content())
 
+    @app.get("/plain")
+    async def plain() -> dict[str, bool]:
+        return {"ok": True}
+
+    @app.delete("/plain")
+    async def remove() -> dict[str, bool]:
+        return {"ok": True}
+
     return app
 
 
@@ -558,6 +566,218 @@ async def test_a_refusal_of_a_large_declared_body_closes_the_connection() -> Non
     assert head.startswith(b"HTTP/1.1 413 ")
     assert b"\r\nconnection: close" in head.lower()
     assert json.loads(body) == _problem("request_too_large")
+
+
+# --- framing: a transfer-encoded body has no declared length ---------------------
+#
+# The server frames a request that carries ``Transfer-Encoding`` as chunked
+# whatever ``Content-Length`` it also carries (h11 lets the former win), so that
+# length says nothing about the body and is not believed anywhere.
+
+_BOTH = {"transfer-encoding": "chunked", "content-length": "0"}
+
+
+async def test_a_length_beside_a_transfer_encoding_does_not_end_the_body() -> None:
+    result = await _request(_small_app(), "POST", "/default", _endless(), headers=_BOTH)
+
+    assert result.status == 413
+    assert result.consumed <= DEFAULT_MAX_REQUEST_BODY_BYTES + _CHUNK
+    assert result.headers["connection"] == "close"
+
+
+async def test_a_length_beside_a_transfer_encoding_does_not_refuse_the_body() -> None:
+    result = await _request(
+        _small_app(),
+        "POST",
+        "/default",
+        iter([b"x"]),
+        headers={
+            "transfer-encoding": "chunked",
+            "content-length": str(2 * DEFAULT_MAX_REQUEST_BODY_BYTES),
+        },
+    )
+
+    assert result.status == 200
+    assert result.json() == {"read": 1}
+
+
+# --- every method: a body nobody reads -----------------------------------------
+#
+# GET, HEAD and OPTIONS can carry a body too. No route reads one, so there is
+# nothing to authorize or to limit -- but the answer still comes with the body
+# unread. These are never read and dropped (their responses include the
+# streaming downloads, which watch ``receive`` themselves): a body on them closes
+# the connection. One with no body, which is all ordinary traffic, is untouched.
+
+_UNREAD = [
+    ("GET", "/plain", 200),
+    ("GET", "/ignores-body", 200),
+    ("HEAD", "/plain", 405),
+    ("OPTIONS", "/plain", 405),
+    ("GET", "/no-such-route", 404),
+]
+_LARGE = {"content-length": str(EARLY_ANSWER_DISCARD_BYTES + 1)}
+_SMALL = {"content-length": "1024"}
+_CHUNKED_BODY = {"transfer-encoding": "chunked"}
+
+
+@pytest.mark.parametrize(("method", "path", "status"), _UNREAD)
+@pytest.mark.parametrize("headers", [_LARGE, _SMALL, _CHUNKED_BODY, _BOTH])
+async def test_a_body_on_a_method_that_reads_none_closes_the_connection(
+    method: str, path: str, status: int, headers: dict[str, str]
+) -> None:
+    # A stream watches ``receive`` for the client going away, and that watch
+    # reads: here it has the whole (finite) body before the response starts, so
+    # nothing is left unread. Over a socket the body is still arriving then, and
+    # the connection closes (the real-socket test below).
+    streams = path == "/ignores-body"
+    chunks = _exactly(1024) if streams else _endless()
+
+    result = await _request(_small_app(), method, path, chunks, headers=headers)
+
+    assert result.status == status
+    if streams:
+        assert result.body == b"ok"
+    else:
+        assert result.headers["connection"] == "close"
+        assert result.consumed == 0
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "status"),
+    [
+        ("DELETE", "/plain", 200),
+        ("POST", "/no-such-route", 404),
+        ("POST", "/plain", 405),
+    ],
+)
+@pytest.mark.parametrize(
+    ("headers", "closes"),
+    [(_LARGE, True), (_CHUNKED_BODY, True), (_BOTH, True), (_SMALL, False)],
+)
+async def test_an_unread_body_meets_the_policy_whatever_route_answered(
+    method: str, path: str, status: int, headers: dict[str, str], closes: bool
+) -> None:
+    # A route that declares no body, and a request no route matched at all.
+    result = await _request(_small_app(), method, path, _endless(), headers=headers)
+
+    assert result.status == status
+    assert ("connection" in result.headers) == closes
+    if closes:
+        assert result.consumed == 0
+    else:
+        assert 1024 <= result.consumed < 1024 + _CHUNK
+
+
+@pytest.mark.parametrize(("method", "path", "status"), _UNREAD)
+async def test_a_request_without_a_body_is_answered_as_before(
+    method: str, path: str, status: int
+) -> None:
+    result = await _request(_small_app(), method, path, iter([]))
+
+    assert result.status == status
+    assert "connection" not in result.headers
+    assert result.consumed == 0 or path == "/ignores-body"
+
+
+async def test_a_stream_ends_when_a_client_that_sent_a_body_leaves() -> None:
+    app = _small_app()
+    started = asyncio.Event()
+    stopped = asyncio.Event()
+
+    @app.get("/endless")
+    async def endless() -> StreamingResponse:
+        async def content() -> Any:
+            try:
+                while True:
+                    started.set()
+                    yield b"x"
+                    await asyncio.sleep(0.01)
+            finally:
+                stopped.set()
+
+        return StreamingResponse(content())
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": "/endless",
+        "raw_path": b"/endless",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [(b"content-length", b"1024")],
+        "client": ("testclient", 50000),
+        "server": ("testserver", 80),
+    }
+    body = iter([{"type": "http.request", "body": b"x" * 1024, "more_body": False}])
+
+    async def receive() -> Message:
+        message = next(body, None)
+        if message is not None:
+            return message
+        await started.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message: Message) -> None:
+        pass
+
+    await asyncio.wait_for(app(scope, receive, send), timeout=5)
+
+    assert stopped.is_set()
+
+
+async def _exchange(port: int, request: bytes) -> tuple[bytes, bytes]:
+    """Send ``request`` and read to the end of the stream: (head, body)."""
+
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    writer.write(request)
+    await writer.drain()
+    # To end of stream: the server closed the connection, with no body sent.
+    response = await asyncio.wait_for(reader.read(), timeout=5)
+    writer.close()
+    head, _, body = response.partition(b"\r\n\r\n")
+    return head, body
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "status"),
+    [
+        ("GET", "/plain", b"200"),
+        ("GET", "/ignores-body", b"200"),
+        ("OPTIONS", "/plain", b"405"),
+    ],
+)
+async def test_a_large_body_declared_on_a_bodiless_method_closes_the_connection(
+    method: str, path: str, status: bytes
+) -> None:
+    # The round-1 review's probes: these used to leave the connection open for
+    # as long as the client took over the 16 MiB + 1 it had declared.
+    async with _served(_small_app()) as port:
+        head, _ = await _exchange(
+            port,
+            f"{method} {path} HTTP/1.1\r\nHost: t\r\n".encode()
+            + f"Content-Length: {EARLY_ANSWER_DISCARD_BYTES + 1}\r\n\r\n".encode(),
+        )
+
+    assert head.startswith(b"HTTP/1.1 " + status)
+    assert b"\r\nconnection: close" in head.lower()
+
+
+async def test_a_chunked_body_with_a_length_beside_it_closes_the_connection() -> None:
+    # The round-1 review's probe: ``Content-Length: 0`` beside the transfer
+    # encoding was believed, so the refusal neither closed nor timed out.
+    async with _served(_small_app()) as port:
+        head, body = await _exchange(
+            port,
+            b"POST /no-such-route HTTP/1.1\r\nHost: t\r\n"
+            b"Transfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n1\r\nx\r\n",
+        )
+
+    assert head.startswith(b"HTTP/1.1 404 ")
+    assert b"\r\nconnection: close" in head.lower()
 
 
 def test_a_limit_must_be_positive() -> None:

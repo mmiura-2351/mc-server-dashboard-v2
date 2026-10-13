@@ -836,6 +836,29 @@ def test_download_streams_archive_with_disposition() -> None:
     assert resp.headers["content-type"] == "application/gzip"
     assert "attachment" in resp.headers["content-disposition"]
     assert ".tar.gz" in resp.headers["content-disposition"]
+    # An ordinary download carries no body, and its response is left alone by
+    # the early-answer policy (issue #3365).
+    assert "connection" not in resp.headers
+
+
+@pytest.mark.parametrize(
+    "framing", [{"Content-Length": "1024"}, {"Transfer-Encoding": "chunked"}]
+)
+def test_download_of_a_request_carrying_a_body_still_streams_whole(
+    framing: dict[str, str],
+) -> None:
+    # A GET may carry a body nobody reads; the early-answer policy (issue #3365)
+    # then closes the connection, and must not cost the download a byte.
+    app = _app(member=True, allow=True, download=_FakeDownload(b"archive-bytes"))
+    client = _client(app)
+    resp = client.request(
+        "GET",
+        _url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/download"),
+        headers={**_bearer(), **framing},
+        content=iter([b"x" * 1024]),
+    )
+    assert resp.status_code == 200
+    assert resp.content == b"archive-bytes"
 
 
 def test_download_declares_content_length_matching_streamed_bytes() -> None:
