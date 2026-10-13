@@ -18,17 +18,21 @@ the app *consumed*, which no HTTP client reports.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
 import pytest
+import uvicorn
 from fastapi import FastAPI, Request, UploadFile
 from fastapi.routing import APIRoute
 from pydantic import BaseModel
 from starlette.responses import StreamingResponse
 from starlette.types import Message
 
+from mc_server_dashboard_api import http_body_limit
 from mc_server_dashboard_api.community.domain.permission_checker import (
     MembershipVisibility,
     PermissionChecker,
@@ -40,6 +44,7 @@ from mc_server_dashboard_api.dependencies import (
 )
 from mc_server_dashboard_api.http_body_limit import (
     DEFAULT_MAX_REQUEST_BODY_BYTES,
+    EARLY_ANSWER_DISCARD_BYTES,
     MULTIPART_OVERHEAD_BYTES,
     RequestBodyLimitMiddleware,
     request_body_limit,
@@ -244,7 +249,7 @@ async def test_a_declared_length_past_the_limit_is_refused_unread() -> None:
         "POST",
         "/default",
         _endless(),
-        headers={"content-length": str(DEFAULT_MAX_REQUEST_BODY_BYTES + 1)},
+        headers={"content-length": str(EARLY_ANSWER_DISCARD_BYTES + 1)},
     )
 
     assert result.status == 413
@@ -352,6 +357,207 @@ async def test_a_route_that_never_reads_its_body_is_left_alone() -> None:
 
     assert result.status == 200
     assert result.body == b"ok"
+
+
+# --- an answer given before the body was read through --------------------------
+#
+# A refusal -- over-size, or the route's credential check (issue #3365) -- leaves
+# the rest of the body unread, with the client possibly still sending it. Either
+# the rest is small enough to read and drop, so the client finishes and sees the
+# answer on a connection that stays usable, or the answer says the connection is
+# closing and nothing more is read.
+
+_REST = 4 * DEFAULT_MAX_REQUEST_BODY_BYTES
+
+
+async def test_a_refusal_drops_the_rest_of_a_small_body() -> None:
+    result = await _request(
+        _small_app(),
+        "POST",
+        "/default",
+        _endless(),
+        headers={"content-length": str(_REST)},
+    )
+
+    assert result.status == 413
+    assert result.json() == _problem("request_too_large")
+    # Read to its declared end and no further; none of it reached the route.
+    assert _REST <= result.consumed < _REST + _CHUNK
+    assert "connection" not in result.headers
+
+
+async def test_a_refusal_closes_rather_than_read_a_large_rest() -> None:
+    result = await _request(
+        _small_app(),
+        "POST",
+        "/default",
+        _endless(),
+        headers={"content-length": str(EARLY_ANSWER_DISCARD_BYTES + 1)},
+    )
+
+    assert result.status == 413
+    assert result.consumed == 0
+    assert result.headers["connection"] == "close"
+
+
+async def test_a_refusal_closes_when_the_rest_has_no_declared_end() -> None:
+    result = await _request(
+        _small_app(),
+        "POST",
+        "/default",
+        _endless(),
+        headers={"transfer-encoding": "chunked"},
+    )
+
+    assert result.status == 413
+    assert result.consumed <= DEFAULT_MAX_REQUEST_BODY_BYTES + _CHUNK
+    assert result.headers["connection"] == "close"
+
+
+async def test_a_refusal_does_not_invite_a_body_the_client_is_holding_back() -> None:
+    # ``Expect: 100-continue``: the client sends its body only once the server
+    # asks for it, and the first read is what asks.
+    result = await _request(
+        _small_app(),
+        "POST",
+        "/default",
+        _endless(),
+        headers={
+            "content-length": str(DEFAULT_MAX_REQUEST_BODY_BYTES + 1),
+            "expect": "100-continue",
+        },
+    )
+
+    assert result.status == 413
+    assert result.consumed == 0
+    assert result.headers["connection"] == "close"
+
+
+async def test_a_refusal_stops_waiting_for_a_rest_that_does_not_come(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(http_body_limit, "EARLY_ANSWER_DISCARD_SECONDS", 0.05)
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/default",
+        "raw_path": b"/default",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [(b"content-length", str(_REST).encode())],
+    }
+    start: dict[str, Any] = {}
+
+    async def receive() -> Message:
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    async def send(message: Message) -> None:
+        if message["type"] == "http.response.start":
+            start.update(message)
+
+    await _small_app()(scope, receive, send)
+
+    assert start["status"] == 413
+    assert (b"connection", b"close") in start["headers"]
+
+
+async def test_a_body_read_through_is_answered_as_before() -> None:
+    result = await _request(
+        _small_app(),
+        "POST",
+        "/default",
+        _exactly(1024),
+        headers={"content-length": "1024"},
+    )
+
+    assert result.status == 200
+    assert result.consumed == 1024
+    assert "connection" not in result.headers
+
+
+class _Server(uvicorn.Server):
+    """A uvicorn server that leaves the test process's signal handlers alone."""
+
+    @contextlib.contextmanager
+    def capture_signals(self) -> Iterator[None]:
+        yield
+
+
+@contextlib.asynccontextmanager
+async def _served(app: Any) -> AsyncIterator[int]:
+    """Serve ``app`` with the production server on a loopback port of the OS's choice.
+
+    What a client receives when the server answers before it has read the body
+    is decided by the server's socket handling, which no in-process ASGI call
+    shows.
+    """
+
+    server = _Server(
+        uvicorn.Config(
+            app,
+            host="127.0.0.1",
+            port=0,
+            http="h11",
+            ws="none",
+            lifespan="off",
+            log_config=None,
+            # Long, so a connection that closes soon after an answer was closed
+            # by the answer and not by idling out.
+            timeout_keep_alive=60,
+        )
+    )
+    task = asyncio.create_task(server.serve())
+    try:
+        while not server.started:
+            await asyncio.sleep(0.01)
+        yield server.servers[0].sockets[0].getsockname()[1]
+    finally:
+        server.should_exit = True
+        await task
+
+
+async def test_a_client_that_closes_after_its_request_receives_the_refusal() -> None:
+    # The lost 413 of the issue: a ``Connection: close`` client still writing
+    # its body when the server answered and closed was reset, and never saw the
+    # answer. The rest of this body is within what the server reads and drops.
+    async with _served(_small_app()) as port:
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        writer.write(
+            b"POST /default HTTP/1.1\r\nHost: t\r\nConnection: close\r\n"
+            + f"Content-Length: {_REST}\r\n\r\n".encode()
+        )
+        for _ in range(_REST // _CHUNK):
+            writer.write(b"x" * _CHUNK)
+            await writer.drain()
+
+        response = await asyncio.wait_for(reader.read(), timeout=10)
+        writer.close()
+
+    head, _, body = response.partition(b"\r\n\r\n")
+    assert head.startswith(b"HTTP/1.1 413 ")
+    assert json.loads(body) == _problem("request_too_large")
+
+
+async def test_a_refusal_of_a_large_declared_body_closes_the_connection() -> None:
+    # The connection used to stay open for as long as the client took to send
+    # the length it had declared, all of it read and thrown away.
+    async with _served(_small_app()) as port:
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        writer.write(
+            b"POST /default HTTP/1.1\r\nHost: t\r\n"
+            + f"Content-Length: {EARLY_ANSWER_DISCARD_BYTES + 1}\r\n\r\n".encode()
+        )
+        await writer.drain()
+
+        # To end of stream: the server closed, with none of the body sent.
+        response = await asyncio.wait_for(reader.read(), timeout=10)
+        writer.close()
+
+    head, _, body = response.partition(b"\r\n\r\n")
+    assert head.startswith(b"HTTP/1.1 413 ")
+    assert b"\r\nconnection: close" in head.lower()
+    assert json.loads(body) == _problem("request_too_large")
 
 
 def test_a_limit_must_be_positive() -> None:

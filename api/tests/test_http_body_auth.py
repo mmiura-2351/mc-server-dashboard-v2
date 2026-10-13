@@ -19,6 +19,7 @@ how much of the body the app *consumed*.
 
 from __future__ import annotations
 
+import asyncio
 import re
 import uuid
 from collections.abc import AsyncIterator, Iterator
@@ -39,6 +40,7 @@ from tests.test_http_body_limit import (
     _exactly,
     _multipart,
     _request,
+    _served,
     _sign_in,
 )
 
@@ -142,6 +144,47 @@ async def test_a_caller_the_route_does_not_allow_is_refused_unread(path: str) ->
     assert result.status == 403
     assert result.json()["reason"] == "forbidden"
     assert result.consumed == 0
+
+
+async def test_a_small_refused_body_is_dropped_and_the_connection_kept() -> None:
+    # The everyday refusal -- an expired token on a small JSON request -- is
+    # answered on a connection the client can go on using.
+    body = b'{"value": "x"}'
+
+    result = await _request(
+        _small_app(),
+        "POST",
+        "/json",
+        iter([body]),
+        headers={"content-type": "application/json", "content-length": str(len(body))},
+    )
+
+    assert result.status == 401
+    assert result.body == _INVALID_TOKEN
+    assert "connection" not in result.headers
+
+
+async def test_a_client_that_closes_after_its_request_receives_the_401() -> None:
+    # Over a real socket, as for the 413 (``test_http_body_limit.py``): a
+    # ``Connection: close`` client writing a body the route will not take.
+    size = 4 * 1024 * 1024
+    async with _served(_small_app()) as port:
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        writer.write(
+            b"POST /json HTTP/1.1\r\nHost: t\r\nConnection: close\r\n"
+            b"Content-Type: application/json\r\n"
+            + f"Content-Length: {size}\r\n\r\n".encode()
+        )
+        for _ in range(size // 65536):
+            writer.write(b"x" * 65536)
+            await writer.drain()
+
+        response = await asyncio.wait_for(reader.read(), timeout=10)
+        writer.close()
+
+    head, _, body = response.partition(b"\r\n\r\n")
+    assert head.startswith(b"HTTP/1.1 401 ")
+    assert body == _INVALID_TOKEN
 
 
 async def test_an_allowed_caller_has_the_body_read() -> None:
@@ -284,6 +327,8 @@ async def test_an_upload_without_a_valid_credential_is_refused_unread(
     assert result.body == _INVALID_TOKEN
     assert result.headers["www-authenticate"] == "Bearer"
     assert result.consumed == 0
+    # Nor is the upload read and dropped afterwards: the connection closes.
+    assert result.headers["connection"] == "close"
 
 
 @pytest.mark.parametrize("credential", [None, "Bearer nonsense"])

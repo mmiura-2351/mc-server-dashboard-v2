@@ -27,10 +27,34 @@ It is the innermost middleware (``app.py``), and it refuses by raising: the
 exception surfaces in the route's own body read, and the problem handlers render
 it like any other error, so the 413 leaves through every other middleware with
 the headers every response carries.
+
+**Authentication precedes the body** (issue #3365). The first read of a request
+is also where the route's credential checks are made
+(:mod:`mc_server_dashboard_api.http_body_auth`), ahead of the limit: a caller the
+route refuses is answered before a byte of its body is read, whatever its size.
+
+**An answer given before the body was read through** (issue #3365) -- either
+refusal above, or any response of a route that did not read what it was sent --
+finds the client possibly still sending. The server would go on reading and
+dropping whatever length the client declared, for as long as the client took;
+and for a client that asked for the connection to close, it closes with the body
+still arriving, which resets the connection and can cost the client the answer.
+So, when a response starts:
+
+* an unread rest of at most :data:`EARLY_ANSWER_DISCARD_BYTES` is read and
+  dropped first, for at most :data:`EARLY_ANSWER_DISCARD_SECONDS`: the client
+  finishes its request, receives the answer, and the connection stays usable;
+* a longer rest, one of undeclared length (a chunked body), one that did not
+  arrive in that time, or one the client is holding back for a ``100 Continue``
+  is not read: the response carries ``Connection: close`` and the server closes
+  once it is sent. A client still writing then may see a reset before it reads
+  the answer; that is the price of not reading the body, and it is paid only by
+  bodies past the discard budget.
 """
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, TypeVar
@@ -52,6 +76,14 @@ DEFAULT_REASON = "request_too_large"
 # a file of exactly the cap readable, so the route's own check still decides
 # there.
 MULTIPART_OVERHEAD_BYTES = 1024 * 1024
+
+# How much unread body is read and dropped, and for how long, so that an answer
+# given before the body was read through reaches a client still sending it
+# (module docstring). 16 MiB covers a refused request to any JSON route, the
+# largest being a file edit a little past its 11 MB limit; an upload is larger
+# and is answered by closing instead.
+EARLY_ANSWER_DISCARD_BYTES = 16 * 1024 * 1024
+EARLY_ANSWER_DISCARD_SECONDS = 10.0
 
 _ATTRIBUTE = "__mcsd_request_body_limit__"
 
@@ -114,6 +146,25 @@ def _declared_length(scope: Scope) -> int | None:
     return None
 
 
+async def _discard(receive: Receive, rest: int | None) -> bool:
+    """Read and drop ``rest`` unread body bytes; False if they were left unread."""
+
+    if rest is None or rest > EARLY_ANSWER_DISCARD_BYTES:
+        return False
+    try:
+        async with asyncio.timeout(EARLY_ANSWER_DISCARD_SECONDS):
+            while rest > 0:
+                message = await receive()
+                if message["type"] != "http.request":
+                    break
+                rest -= len(message.get("body", b""))
+                if not message.get("more_body", False):
+                    break
+    except TimeoutError:
+        return False
+    return True
+
+
 class RequestBodyLimitMiddleware:
     """Refuse a request body past its route's limit (module docstring)."""
 
@@ -126,12 +177,25 @@ class RequestBodyLimitMiddleware:
             return
 
         declared = _declared_length(scope)
+        headers = dict(scope["headers"])
         received = 0
+        ended = False
         authorized = False
         responding = False
 
+        def unread() -> int | None:
+            """How much body is still to come; ``None`` when that is not to be read."""
+
+            if ended:
+                return 0
+            if received == 0 and headers.get(b"expect", b"").lower() == b"100-continue":
+                return None
+            if declared is not None:
+                return declared - received
+            return None if b"transfer-encoding" in headers else 0
+
         async def limited_receive() -> Message:
-            nonlocal received, authorized
+            nonlocal received, ended, authorized
             if responding:
                 return await receive()
             if not authorized:
@@ -141,6 +205,7 @@ class RequestBodyLimitMiddleware:
             if declared is not None and declared > limit.max_bytes:
                 raise problem(status.HTTP_413_CONTENT_TOO_LARGE, limit.reason)
             message = await receive()
+            ended = not message.get("more_body", False)
             if message["type"] == "http.request":
                 received += len(message.get("body", b""))
                 if received > limit.max_bytes:
@@ -149,8 +214,16 @@ class RequestBodyLimitMiddleware:
 
         async def tracking_send(message: Message) -> None:
             nonlocal responding
-            if message["type"] == "http.response.start":
+            if message["type"] == "http.response.start" and not responding:
                 responding = True
+                if not await _discard(receive, unread()):
+                    message = {
+                        **message,
+                        "headers": [
+                            *message.get("headers", []),
+                            (b"connection", b"close"),
+                        ],
+                    }
             await send(message)
 
         await self._app(scope, limited_receive, tracking_send)
