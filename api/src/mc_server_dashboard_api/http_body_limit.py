@@ -38,6 +38,7 @@ from typing import Any, TypeVar
 from fastapi import status
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from mc_server_dashboard_api.http_body_auth import authorize_before_body
 from mc_server_dashboard_api.http_problem import problem
 
 # The limit of a route that declares none: every JSON route. The largest
@@ -126,12 +127,16 @@ class RequestBodyLimitMiddleware:
 
         declared = _declared_length(scope)
         received = 0
+        authorized = False
         responding = False
 
         async def limited_receive() -> Message:
-            nonlocal received
+            nonlocal received, authorized
             if responding:
                 return await receive()
+            if not authorized:
+                await authorize_before_body(scope)
+                authorized = True
             limit = request_body_limit_of(scope.get("endpoint"))
             if declared is not None and declared > limit.max_bytes:
                 raise problem(status.HTTP_413_CONTENT_TOO_LARGE, limit.reason)

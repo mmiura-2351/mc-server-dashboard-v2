@@ -29,6 +29,15 @@ from pydantic import BaseModel
 from starlette.responses import StreamingResponse
 from starlette.types import Message
 
+from mc_server_dashboard_api.community.domain.permission_checker import (
+    MembershipVisibility,
+    PermissionChecker,
+)
+from mc_server_dashboard_api.dependencies import (
+    get_current_user,
+    get_membership_visibility,
+    get_permission_checker,
+)
 from mc_server_dashboard_api.http_body_limit import (
     DEFAULT_MAX_REQUEST_BODY_BYTES,
     MULTIPART_OVERHEAD_BYTES,
@@ -49,6 +58,7 @@ from mc_server_dashboard_api.servers.application.plugins import MAX_PLUGIN_BYTES
 from mc_server_dashboard_api.servers.application.resource_packs import (
     MAX_RESOURCE_PACK_BYTES,
 )
+from tests.identity.fakes import make_user
 
 _CHUNK = 64 * 1024
 
@@ -397,6 +407,36 @@ def test_every_route_has_the_limit_the_inventory_says(shared_app: FastAPI) -> No
     assert overrides == _EXPECTED_OVERRIDES
 
 
+class _Visibility(MembershipVisibility):
+    def __init__(self, *, member: bool) -> None:
+        self._member = member
+
+    async def is_member(self, **_: Any) -> bool:
+        return self._member
+
+
+class _Checker(PermissionChecker):
+    def __init__(self, *, allow: bool) -> None:
+        self._allow = allow
+
+    async def can(self, **_: Any) -> bool:
+        return self._allow
+
+
+def _sign_in(app: FastAPI, *, member: bool = True, allow: bool = True) -> None:
+    """Make every request to ``app`` an authenticated one, allowed as given.
+
+    A route checks its caller before it reads a body (issue #3365), so a test of
+    what a route does with a body has to get past that first.
+    """
+
+    app.dependency_overrides[get_current_user] = make_user
+    app.dependency_overrides[get_membership_visibility] = lambda: _Visibility(
+        member=member
+    )
+    app.dependency_overrides[get_permission_checker] = lambda: _Checker(allow=allow)
+
+
 def test_the_write_body_limit_carries_a_file_at_the_edit_cap() -> None:
     # 4 * ceil(n / 3) characters of base64 for n bytes. On the wire each is one
     # byte, or two where an encoder escapes "/" as "\/" -- at worst all of them
@@ -410,8 +450,8 @@ async def test_the_real_app_refuses_an_endless_file_write_within_its_limit(
     shared_app: FastAPI,
 ) -> None:
     # The memory-shaped case of the issue: PUT .../files used to buffer and parse
-    # whatever it was sent before checking MAX_EDIT_BYTES. No credentials are
-    # needed to show it -- the body is read before the route's dependencies run.
+    # whatever it was sent before checking MAX_EDIT_BYTES.
+    _sign_in(shared_app)
     path = (
         "/api/communities/00000000-0000-0000-0000-000000000001"
         "/servers/00000000-0000-0000-0000-000000000002/files"
