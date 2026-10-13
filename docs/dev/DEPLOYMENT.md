@@ -1317,6 +1317,10 @@ container was replaced, so the existing stamp still describes what is running.
 > the worker restart, as in any worker update, and start hardened. What can
 > change for a server: a plugin or mod that needs root in the container or a raw
 > socket no longer has either, and the JVM's `user.home` is `/tmp`, not `/root`.
+> Since issue #3343 the containers also hold no capability at all and run under
+> `no-new-privileges`, again with no action needed: a plugin or mod that shells
+> out to a setuid helper in the image (`su`, `mount`) no longer gains anything
+> from it.
 >
 > **A worker run as an unprivileged host process** (not the compose service)
 > runs the containers as its own `uid:gid` and cannot take over files it does

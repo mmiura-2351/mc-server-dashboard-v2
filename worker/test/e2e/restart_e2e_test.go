@@ -32,7 +32,9 @@ import (
 	"errors"
 	"net"
 	"os"
+	"os/exec"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -198,6 +200,7 @@ func TestContainerRestartRecreatesContainer(t *testing.T) {
 	if !firstInfo.Running {
 		t.Fatalf("container %s not running after StartServer", name)
 	}
+	assertNoCapabilities(t, ctx, name)
 
 	// Restart through the worker's command path. This is the race: Stop triggers
 	// the async removal of firstInfo's container while Start re-creates the same
@@ -238,6 +241,24 @@ func TestContainerRestartRecreatesContainer(t *testing.T) {
 // small window between the probe and the container binding it, but the harness
 // runs one server at a time with fresh ports per run, so a collision is
 // improbable; a failure surfaces as a clear "port already allocated" start error.
+// assertNoCapabilities checks, on the real daemon, that the container the driver
+// created carries the hardening the unit tests pin on the create body: every
+// capability dropped, none added back, no-new-privileges, not privileged (issue
+// #3343). It shells out to `docker inspect` because the driver's own Inspect
+// reads only what the driver needs.
+func assertNoCapabilities(t *testing.T, ctx context.Context, containerName string) {
+	t.Helper()
+	const format = `{{json .HostConfig.CapDrop}} {{json .HostConfig.CapAdd}} {{json .HostConfig.SecurityOpt}} {{.HostConfig.Privileged}}`
+	out, err := exec.CommandContext(ctx, "docker", "inspect", "-f", format, containerName).CombinedOutput()
+	if err != nil {
+		t.Fatalf("docker inspect %s: %v: %s", containerName, err, out)
+	}
+	const want = `["ALL"] null ["no-new-privileges"] false`
+	if got := strings.TrimSpace(string(out)); got != want {
+		t.Fatalf("container %s: CapDrop CapAdd SecurityOpt Privileged = %s, want %s", containerName, got, want)
+	}
+}
+
 func freePort(t *testing.T) string {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")

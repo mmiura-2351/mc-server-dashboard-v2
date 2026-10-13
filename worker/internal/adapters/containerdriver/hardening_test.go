@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -125,8 +128,11 @@ func assertHardened(t *testing.T, got CreateSpec) {
 	if got.User != wantRunAs {
 		t.Errorf("%s: User = %q, want the run-as user %q", got.Name, got.User, wantRunAs)
 	}
-	if !reflect.DeepEqual(got.CapDrop, []string{"NET_RAW"}) {
-		t.Errorf("%s: CapDrop = %v, want [NET_RAW]", got.Name, got.CapDrop)
+	if !reflect.DeepEqual(got.CapDrop, []string{"ALL"}) {
+		t.Errorf("%s: CapDrop = %v, want [ALL]", got.Name, got.CapDrop)
+	}
+	if !reflect.DeepEqual(got.SecurityOpt, []string{"no-new-privileges"}) {
+		t.Errorf("%s: SecurityOpt = %v, want [no-new-privileges]", got.Name, got.SecurityOpt)
 	}
 	// The JVM is given a home: the run-as uid has no passwd entry in the image.
 	if len(got.Cmd) < 2 || got.Cmd[0] != "java" || got.Cmd[1] != "-Duser.home=/tmp" {
@@ -134,9 +140,9 @@ func assertHardened(t *testing.T, got CreateSpec) {
 	}
 }
 
-// The launch container runs as the configured unprivileged user and without
-// CAP_NET_RAW (issue #2600).
-func TestLaunchContainerRunsNonRootWithoutNetRaw(t *testing.T) {
+// The launch container runs as the configured unprivileged user (issue #2600),
+// with no capability left to regain and no way to gain privileges (issue #3343).
+func TestLaunchContainerRunsNonRootWithoutCapabilities(t *testing.T) {
 	docker := newFakeDocker()
 	d, _ := hardenedDriver(docker)
 
@@ -145,6 +151,66 @@ func TestLaunchContainerRunsNonRootWithoutNetRaw(t *testing.T) {
 	}
 
 	assertHardened(t, docker.createSpec)
+}
+
+// Every container the driver creates goes through createServerContainer, which is
+// what hardens it: nothing else reaches the Engine's create, so a new container
+// kind cannot be added without the run-as user, the empty capability set and
+// no-new-privileges (issue #3343). The test reads the package source and pins
+// where each link of that chain is referred to, called or passed as a value.
+func TestEveryContainerCreateGoesThroughCreateServerContainer(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	users := map[string][]string{}
+	endpoints := 0
+	fset := token.NewFileSet()
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, decl := range file.Decls {
+			fn := "(package level)"
+			if f, ok := decl.(*ast.FuncDecl); ok {
+				fn = f.Name.Name
+			}
+			ast.Inspect(decl, func(n ast.Node) bool {
+				switch n := n.(type) {
+				case *ast.SelectorExpr:
+					if !slices.Contains(users[n.Sel.Name], fn) {
+						users[n.Sel.Name] = append(users[n.Sel.Name], fn)
+					}
+				case *ast.BasicLit:
+					if strings.Contains(n.Value, "/containers/create") {
+						endpoints++
+					}
+				}
+				return true
+			})
+		}
+	}
+
+	for link, want := range map[string][]string{
+		// The Engine's create (dockerAPI.Create) is reached only by the two helpers
+		// that retry it.
+		"Create":              {"createContainer", "createPullingOnMiss"},
+		"createPullingOnMiss": {"createContainer"},
+		"createContainer":     {"createServerContainer"},
+	} {
+		got := slices.Clone(users[link])
+		slices.Sort(got)
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s is referred to in %v, want only %v: create containers through createServerContainer", link, got, want)
+		}
+	}
+	if endpoints != 1 {
+		t.Errorf("/containers/create appears %d times in the package, want once (EngineClient.Create)", endpoints)
+	}
 }
 
 // The driver never resolves its run-as user to root, whatever its caller left
@@ -191,7 +257,7 @@ func TestRunAsUnsetStillRunsNonRoot(t *testing.T) {
 
 // Every container of a Forge start — the install container, its retry, and the
 // launch container the supervisor creates afterwards — is hardened the same way
-// (issue #2600).
+// (issues #2600, #3343).
 func TestForgeInstallRetryAndLaunchContainersAreHardened(t *testing.T) {
 	prev := installRetryBackoff
 	installRetryBackoff = []time.Duration{time.Millisecond, time.Millisecond}

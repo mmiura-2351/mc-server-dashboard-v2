@@ -573,15 +573,53 @@ plugins can reach it.
 
 Independently of the topology, the worker creates every container that runs
 server-controlled code — the launch container and the supervised Forge install
-container — with two restrictions (issue #2600):
+container, first attempt or retry — with three restrictions (issues #2600,
+#3343):
 
-- **No `CAP_NET_RAW`** (`CapDrop: ["NET_RAW"]`). The capability is gone from the
-  container's bounding set, so no process in it can open a raw or packet socket,
-  whatever uid it reaches. That removes ARP spoofing and sniffing on
-  `mcsd-servers`.
 - **An unprivileged user**, never root in the container: `driver.container.user`
   ([`CONFIGURATION.md`](CONFIGURATION.md) Section 6.3), `25565:25565` under the
-  shipped root worker. The process holds no effective capabilities at all.
+  shipped root worker. The worker sets it on the create request, so it overrides
+  whatever user the image declares.
+- **No capabilities** (`CapDrop: ["ALL"]`, and nothing added back). The
+  container's bounding set is empty, so no process in it can hold a capability,
+  whatever uid it reaches. Among the ones gone is `CAP_NET_RAW`: no raw or
+  packet socket, which removes ARP spoofing and sniffing on `mcsd-servers`.
+- **`no-new-privileges`** (`SecurityOpt: ["no-new-privileges"]`). An `execve`
+  in the container never raises privileges: a setuid or setgid bit and a file
+  capability are ignored.
+
+**This is the premise the worker's own defences rest on**, stated exactly:
+server-controlled code runs as one unprivileged uid, with an empty capability
+bounding set, under `no-new-privileges`. It therefore cannot create a device
+node (`CAP_MKNOD`), give a file away or take one over (`CAP_CHOWN`,
+`CAP_FOWNER`), bypass file permissions (`CAP_DAC_OVERRIDE`), hard-link a file
+it neither owns nor can read and write (`CAP_FOWNER`, under the kernel's
+protected hard links), or change its uid (`CAP_SETUID`) — and it cannot get any of that back. "Runs as
+non-root" alone does not say this: with only the user set, the effective set is
+empty but the bounding set is Docker's default, and one setuid-root binary in
+the image returns it (the shipped Java images carry `su`, `mount`, `umount`,
+`passwd` and others, setuid root).
+
+The premise depends on the worker's container creation and on nothing in the
+image: all three restrictions are fields of the create request, every create
+the driver makes goes through the one function that sets them (a test pins
+that no other path reaches the Engine's create), and the worker never runs
+`docker exec` against these containers. The image is operator configuration —
+`driver.container.images` maps a Java major to an image, and a server's
+Minecraft version only selects among those — so a tenant cannot bring one, but
+the restrictions would hold for an image that ships setuid binaries or declares
+`USER root` all the same. An image whose entrypoint has to start as root and
+drop privileges itself is not supported: it would start as the run-as user and
+fail. What the premise does not cover is the host side of the Docker socket: an
+operator's own `docker exec --privileged`, or a container someone else creates.
+
+Nothing a Minecraft server or the Forge installer does needs a capability. They
+write only to the working set, which the run-as user owns; they bind the game,
+RCON and Geyser ports inside the container's own network namespace, where
+Docker makes every port unprivileged (`net.ipv4.ip_unprivileged_port_start=0`),
+so a game port below 1024 needs no `CAP_NET_BIND_SERVICE`; and JVM tooling that
+attaches to the server (`jcmd`, `jattach`) attaches to a process of the same
+uid.
 
 The worker hands the bind-mounted working set to that user before each
 container create, and still reads, snapshots and deletes everything in it
@@ -633,7 +671,7 @@ directory's owner on the open descriptor, so the server keeps access to it.
 
 Measured 2026-10-08 on a probe stack (its own compose project and networks),
 inside a booted Paper 1.21.4 container and a Forge 1.20.1 install and launch
-container:
+container, when only `CAP_NET_RAW` was dropped (issue #2600):
 
 ```text
 id -u: 25565
@@ -647,6 +685,20 @@ The two socket calls fail the same way from a `docker exec --user 0` into the
 same container: the bounding set denies them, not just the uid. From one of
 those containers a TCP connect to the other's RCON port still succeeds — the
 residual stated below.
+
+Measured 2026-10-13 (issue #3343) in a container of each shipped Java image
+(`eclipse-temurin` 8, 17, 21 and 25 `-jre`, `eclipse-temurin:16-jdk`,
+`azul/zulu-openjdk:7`) created with the user and the two options above, each of
+which then ran `java -version`:
+
+```text
+id: 25565:25565
+CapPrm: 0000000000000000
+CapEff: 0000000000000000
+CapBnd: 0000000000000000      # 00000000a80405fb with only NET_RAW dropped
+NoNewPrivs: 1                 # 0 before
+net.ipv4.ip_unprivileged_port_start: 0
+```
 
 ### What this deliberately does not close
 
@@ -669,11 +721,11 @@ security model, and the following remain true:
   and fetch a second stage.
 - **The host, not the network.** The worker holds the Docker socket, and
   container-level hardening is defence in depth underneath this boundary, not
-  part of it. Two items of it are in place (issue #2600, "Container hardening"
-  above): MC containers run as an unprivileged user and without `CAP_NET_RAW`.
-  The rest is not implemented — the other default capabilities stay in the
-  bounding set, and there is no `no-new-privileges`, read-only root filesystem,
-  custom seccomp profile or user namespace.
+  part of it. Three items of it are in place (issues #2600 and #3343,
+  "Container hardening" above): MC containers run as an unprivileged user, with
+  no capabilities, under `no-new-privileges`. The rest is not implemented —
+  there is no read-only root filesystem, process-count limit, custom seccomp or
+  AppArmor profile (Docker's defaults apply) or user namespace.
   **TLS on the control and data planes is deferred** (owner decision on issue
   #2600): with MC containers off `mcsd`, the remaining observers of those
   plaintext planes are the first-party services and the host itself, and a

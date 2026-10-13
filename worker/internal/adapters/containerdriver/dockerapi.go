@@ -141,12 +141,15 @@ type CreateSpec struct {
 	// throttled (issue #724). An unset allocation (CPUMillis == 0) falls back to
 	// the fixed default weight (issue #518).
 	CPUShares int64
-	// User is the numeric "uid:gid" the container's process runs as, and CapDrop the
-	// capabilities removed from its default set. The driver sets both on every
-	// container it creates (Driver.createServerContainer, issue #2600); empty leaves
-	// the Engine defaults (the image's user, the full default capability set).
-	User    string
-	CapDrop []string
+	// User is the numeric "uid:gid" the container's process runs as, CapDrop the
+	// capabilities removed from its default set, and SecurityOpt the Engine
+	// security options. The driver sets all three on every container it creates
+	// (Driver.createServerContainer, issues #2600 and #3343); empty leaves the
+	// Engine defaults (the image's user, the full default capability set, a process
+	// that may gain privileges through a setuid or file-capability binary).
+	User        string
+	CapDrop     []string
+	SecurityOpt []string
 }
 
 // PortMapping publishes a container TCP port on a host interface/port.

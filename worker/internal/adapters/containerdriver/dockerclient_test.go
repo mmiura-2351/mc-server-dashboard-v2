@@ -155,28 +155,29 @@ func TestEngineClientCreateOmitsMemoryWhenZero(t *testing.T) {
 	}
 }
 
-// The run-as user is encoded as the top-level User field and the dropped
-// capabilities as the host-config CapDrop list, which is where the Engine reads
-// them (issue #2600).
-func TestEngineClientCreateEncodesUserAndCapDrop(t *testing.T) {
+// The run-as user is encoded as the top-level User field, and the dropped
+// capabilities and security options as the host-config CapDrop and SecurityOpt
+// lists, which is where the Engine reads them (issues #2600, #3343). The host
+// config carries nothing else for this spec: no capability is added back and the
+// container is not privileged.
+func TestEngineClientCreateEncodesUserCapDropAndSecurityOpt(t *testing.T) {
 	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"Id": "abc123"})
 	})
 	c := d.client(t)
 
 	if _, err := c.Create(context.Background(), CreateSpec{
-		Name:    "mcsd-s1",
-		Image:   "img",
-		User:    "25565:25565",
-		CapDrop: []string{"NET_RAW"},
+		Name:        "mcsd-s1",
+		Image:       "img",
+		User:        "25565:25565",
+		CapDrop:     []string{"ALL"},
+		SecurityOpt: []string{"no-new-privileges"},
 	}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	var body struct {
-		User       string `json:"User"`
-		HostConfig struct {
-			CapDrop []string `json:"CapDrop"`
-		} `json:"HostConfig"`
+		User       string              `json:"User"`
+		HostConfig map[string][]string `json:"HostConfig"`
 	}
 	if err := json.Unmarshal([]byte(d.requests[0].body), &body); err != nil {
 		t.Fatalf("decode body: %v", err)
@@ -184,8 +185,9 @@ func TestEngineClientCreateEncodesUserAndCapDrop(t *testing.T) {
 	if body.User != "25565:25565" {
 		t.Fatalf("User = %q, want 25565:25565", body.User)
 	}
-	if len(body.HostConfig.CapDrop) != 1 || body.HostConfig.CapDrop[0] != "NET_RAW" {
-		t.Fatalf("HostConfig.CapDrop = %v, want [NET_RAW]", body.HostConfig.CapDrop)
+	want := map[string][]string{"CapDrop": {"ALL"}, "SecurityOpt": {"no-new-privileges"}}
+	if !reflect.DeepEqual(body.HostConfig, want) {
+		t.Fatalf("HostConfig = %v, want exactly %v", body.HostConfig, want)
 	}
 }
 
