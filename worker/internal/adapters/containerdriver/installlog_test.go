@@ -291,7 +291,9 @@ func TestInstallLogCreatedEntriesTakeTheDirectoryOwner(t *testing.T) {
 	calls := swapInstallLogOwner(t, 7, 7)
 
 	captureInstallLog(t, dir, "first attempt\n")
-	if got, want := strings.Join(*calls, ", "), "dir 7:7, file 7:7"; got != want {
+	// The leading file is the unnamed one the hand-over is tried on before logs/
+	// is created (issue #3338).
+	if got, want := strings.Join(*calls, ", "), "file 7:7, dir 7:7, file 7:7"; got != want {
 		t.Fatalf("owner changes on create = %q, want %q", got, want)
 	}
 
