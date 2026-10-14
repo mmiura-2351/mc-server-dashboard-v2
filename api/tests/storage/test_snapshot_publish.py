@@ -11,14 +11,18 @@ reach into the filesystem tree and so cannot be backend-neutral.
 
 from __future__ import annotations
 
+import io
 import os
+import tarfile
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
 from mc_server_dashboard_api.storage.domain.errors import (
+    ArchiveUnreadableError,
     IntegrityCheckError,
     MissingRegionsError,
     PrunedStoreError,
@@ -38,7 +42,9 @@ from tests.storage.helpers import (
     read_tar,
     region_targz,
     snapshot_dir,
+    stream_of,
     tar_stream,
+    tar_with_link_member,
 )
 
 
@@ -331,6 +337,179 @@ async def test_write_snapshot_rejects_symlink_escape_member(tmp_path: Path) -> N
     )
     staging_links = list((server_root / "incoming").rglob("escape_link"))
     assert staging_links == []
+
+
+# --- link members (issue #3371) ---------------------------------------------
+#
+# The Worker's hydrate refuses a hard-link or symlink member outright, so a store
+# that held a link would hand out an archive no Worker can unpack, on every
+# hydrate of that server. The fs store therefore takes in and gives out plain
+# files and directories only. (The object adapter cannot hold a link at all.)
+
+_LINK_TYPES = pytest.mark.parametrize(
+    "link_type", [tarfile.LNKTYPE, tarfile.SYMTYPE], ids=["hard-link", "symlink"]
+)
+
+
+def _links_under(root: Path) -> list[Path]:
+    """Every symlink and every multiply-linked file beneath ``root``."""
+
+    return [
+        p
+        for p in root.rglob("*")
+        if p.is_symlink() or (p.is_file() and p.stat().st_nlink > 1)
+    ]
+
+
+def _member_types(tar: tarfile.TarFile) -> dict[str, bytes]:
+    return {member.name: member.type for member in tar.getmembers()}
+
+
+@_LINK_TYPES
+async def test_write_snapshot_refuses_a_contained_link_member(
+    tmp_path: Path, link_type: bytes
+) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    handle = await storage.begin_snapshot(community, server)
+
+    with pytest.raises(tarfile.FilterError):
+        await storage.write_snapshot(handle, stream_of(tar_with_link_member(link_type)))
+
+    assert _links_under(tmp_path) == []
+
+
+def _tar_with_directory_member(mode: Literal["w", "w:gz"]) -> bytes:
+    """A file and an empty directory, the directory as a member of its own — what
+    the Worker's pack writes for every directory."""
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode=mode) as tar:
+        info = tarfile.TarInfo(name="keep.txt")
+        info.size = 4
+        tar.addfile(info, io.BytesIO(b"kept"))
+        directory = tarfile.TarInfo(name="plugins")
+        directory.type = tarfile.DIRTYPE
+        directory.mode = 0o755
+        tar.addfile(directory)
+    return buf.getvalue()
+
+
+async def test_snapshot_and_restore_keep_a_directory_member(tmp_path: Path) -> None:
+    # Refusing link members must not refuse the other bodiless member kind.
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    handle = await storage.begin_snapshot(community, server)
+    await storage.write_snapshot(handle, stream_of(_tar_with_directory_member("w")))
+    await storage.commit_snapshot(handle)
+    assert (snapshot_dir(tmp_path, community, server) / "plugins").is_dir()
+
+    key = await storage.put_backup(
+        community, server, stream_of(_tar_with_directory_member("w:gz"))
+    )
+    await storage.restore_backup(community, server, key)
+    assert (snapshot_dir(tmp_path, community, server) / "plugins").is_dir()
+
+
+@_LINK_TYPES
+async def test_restore_refuses_a_backup_with_a_contained_link_member(
+    tmp_path: Path, link_type: bytes
+) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await _publish(storage, community, server, {"keep.txt": b"prior"})
+    good_live = snapshot_dir(tmp_path, community, server)
+    key = await storage.put_backup(
+        community, server, stream_of(tar_with_link_member(link_type, mode="w:gz"))
+    )
+
+    # An archive the store will not restore is the modelled unreadable verdict,
+    # from the restore and from the health check alike, force or not.
+    for force in (False, True):
+        with pytest.raises(ArchiveUnreadableError):
+            await storage.restore_backup(community, server, key, force=force)
+    with pytest.raises(ArchiveUnreadableError):
+        await storage.check_backup_health(community, server, key)
+
+    assert snapshot_dir(tmp_path, community, server) == good_live
+    server_root = good_live.parent.parent
+    assert _links_under(server_root / "snapshots") == []
+    assert _links_under(server_root / "incoming") == []
+
+
+async def test_restore_of_a_backup_with_an_escaping_link_is_unreadable_too(
+    tmp_path: Path,
+) -> None:
+    # The same translation covers what ``data`` itself refuses: a member that is
+    # unsafe rather than merely a link used to leave restore as a raw tarfile
+    # error.
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await _publish(storage, community, server, {"keep.txt": b"prior"})
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        info = tarfile.TarInfo(name="escape_link")
+        info.type = tarfile.SYMTYPE
+        info.linkname = "/etc/passwd"
+        tar.addfile(info)
+    key = await storage.put_backup(community, server, stream_of(buf.getvalue()))
+
+    with pytest.raises(ArchiveUnreadableError):
+        await storage.restore_backup(community, server, key)
+    with pytest.raises(ArchiveUnreadableError):
+        await storage.check_backup_health(community, server, key)
+
+
+async def _publish_then_plant_links(
+    tmp_path: Path, storage: FsStorage, community: CommunityId, server: ServerId
+) -> None:
+    """Publish one file, then give the live snapshot a second name of it, a
+    symlink to it and a symlink to its directory — a store from before the
+    ingest refusal, or one written to out of band."""
+
+    await _publish(storage, community, server, {"world/level.dat": b"level"})
+    live = snapshot_dir(tmp_path, community, server)
+    os.link(live / "world" / "level.dat", live / "world" / "alias.dat")
+    (live / "world" / "soft.dat").symlink_to("level.dat")
+    (live / "world-link").symlink_to("world")
+
+
+_PLAIN_MEMBERS = {
+    "world": tarfile.DIRTYPE,
+    "world/alias.dat": tarfile.REGTYPE,
+    "world/level.dat": tarfile.REGTYPE,
+}
+_PLAIN_FILES = {"world/alias.dat": b"level", "world/level.dat": b"level"}
+
+
+async def test_hydrate_gives_out_plain_files_from_a_store_holding_links(
+    tmp_path: Path,
+) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await _publish_then_plant_links(tmp_path, storage, community, server)
+
+    blob = await drain(storage.open_hydrate_source(community, server))
+
+    with tarfile.open(fileobj=io.BytesIO(blob), mode="r:*") as tar:
+        assert _member_types(tar) == _PLAIN_MEMBERS
+    # Both names of the hard-linked file carry its bytes; the symlinks are left out.
+    assert read_tar(blob) == _PLAIN_FILES
+
+
+async def test_backup_archive_holds_plain_files_from_a_store_holding_links(
+    tmp_path: Path,
+) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await _publish_then_plant_links(tmp_path, storage, community, server)
+
+    key = await storage.create_backup_from_current(community, server)
+
+    archive = storage._backup_path(community, server, key)
+    with tarfile.open(archive, mode="r:gz") as tar:
+        assert _member_types(tar) == _PLAIN_MEMBERS
+    assert read_tar(archive.read_bytes()) == _PLAIN_FILES
 
 
 def _prune_server_root(

@@ -140,6 +140,11 @@ type InstanceSpec struct {
 	// the enforcement driver (#724) turns it into a relative CPUShares weight. 0
 	// means unset — the driver applies its default weight.
 	CPUMillis uint32
+	// WorkingSetLock is this server's working-set lock, which a driver that
+	// re-owns the working set holds while it walks the tree (issue #3371). A walk
+	// can happen long after Start returned, which is why the lock travels with the
+	// spec.
+	WorkingSetLock *WorkingSetLock
 }
 
 // StatusEvent is an observed state transition for a server instance. The
