@@ -355,6 +355,7 @@ func (d *Driver) Start(ctx context.Context, spec execution.InstanceSpec) (execut
 		state:            execution.StateStarting,
 		logPump:          execution.NewLogPump(spec.ServerID, logBufferLines),
 	}
+	inst.installCtx, inst.endInstall = context.WithCancel(context.Background())
 	inst.emit(execution.StateStarting, "")
 
 	if plan.NeedsInstall {
@@ -545,12 +546,22 @@ var (
 // is not one of them: openInstallLog gives it its directory's owner). The walk itself,
 // and the check that nothing is running against the tree, are in handover.go.
 func (d *Driver) createServerContainer(ctx context.Context, spec execution.InstanceSpec, create CreateSpec) (string, error) {
+	if spec.WorkingSetLock == nil {
+		return "", errors.New("containerdriver: not handing over the working set: the spec carries no working-set lock")
+	}
 	begin := time.Now()
 	if err := d.awaitQuiescent(ctx, spec.ServerID); err != nil {
 		return "", fmt.Errorf("containerdriver: not handing over the working set: %w", err)
 	}
+	// The server's code is gone; the lock keeps the Worker's own writers out of
+	// the tree for the length of the walk (handOverLinked, issue #3371). A caller
+	// that goes away while waiting for it hands nothing over.
+	if err := spec.WorkingSetLock.Lock(ctx); err != nil {
+		return "", fmt.Errorf("containerdriver: not handing over the working set: %w", err)
+	}
 	walk := time.Now()
 	stats, err := d.handOverWorkingSet(ctx, spec.WorkingDir)
+	spec.WorkingSetLock.Unlock()
 	if err != nil {
 		return "", fmt.Errorf("containerdriver: hand working set to uid:gid %d:%d: %w", d.runAsUID, d.runAsGID, err)
 	}
@@ -933,6 +944,16 @@ type instance struct {
 	labels      map[string]string
 	createFn    func(ctx context.Context, spec execution.InstanceSpec, create CreateSpec) (string, error)
 	openControl controlFunc
+	// installCtx is what superviseInstall creates its containers under — the
+	// install retry and the launch container, each of which first waits for the
+	// working-set lock and walks the working set (issue #3371). endInstall cancels
+	// it the moment a Stop is requested, so neither the wait nor the walk goes on
+	// for an instance that is being stopped; nothing else ends the supervisor
+	// early, as before. It carries no deadline: the same walk under Start has none
+	// either, and a working set that takes long to walk still has to be handed
+	// over before its server can run.
+	installCtx context.Context
+	endInstall context.CancelFunc
 	// rconHost is the host the graceful-stop RCON connection dials: empty for the
 	// host loopback, the container name when a user-defined network is configured.
 	rconHost    string
@@ -1234,6 +1255,11 @@ func (i *instance) superviseInstall(installID string) {
 		_ = cleanForgeInstallArtifacts(i.spec.WorkingDir, i.logger.With("server_id", i.spec.ServerID))
 		newID, err := i.createInstallRetryContainer()
 		if err != nil {
+			if i.stopWasRequested() {
+				// The Stop that cancelled the create is what ended it.
+				i.finishTerminal(execution.StateStopped, "")
+				return
+			}
 			i.finishInstallCrash(execution.CrashReasonForgeInstallFailed, "forge install retry failed: "+err.Error())
 			return
 		}
@@ -1305,6 +1331,11 @@ func (i *instance) superviseInstall(installID string) {
 	id, err := i.createLaunchContainer(plan.LaunchArgs)
 	if err != nil {
 		_ = i.docker.Remove(context.Background(), installID)
+		if i.stopWasRequested() {
+			// The Stop that cancelled the create is what ended it.
+			i.finishTerminal(execution.StateStopped, "")
+			return
+		}
 		i.finishTerminal(execution.StateCrashed, "forge launch after install failed: "+err.Error())
 		return
 	}
@@ -1350,6 +1381,13 @@ func (i *instance) superviseInstall(installID string) {
 	i.beginLaunchTail(id)
 }
 
+// stopWasRequested reports the sticky stop intent (stopRequested).
+func (i *instance) stopWasRequested() bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.stopRequested
+}
+
 // createLaunchContainer creates (but does not start) the launch container after a
 // successful install, reusing the driver's create helper through the captured
 // fields. Starting is deferred to the latch-guarded critical section so a Stop can
@@ -1378,7 +1416,7 @@ func (i *instance) createLaunchContainer(launchArgs []string) (string, error) {
 		MemoryLimitBytes: memoryLimitBytes(i.spec.MemoryLimitMB),
 		CPUShares:        cpuShares(i.spec.CPUMillis),
 	}
-	return i.createFn(context.Background(), i.spec, create)
+	return i.createFn(i.installCtx, i.spec, create)
 }
 
 // installBackoffOrStopping sleeps for d in small increments, checking the
@@ -1437,7 +1475,7 @@ func (i *instance) createInstallRetryContainer() (string, error) {
 		MemoryLimitBytes: memoryLimitBytes(i.spec.MemoryLimitMB),
 		CPUShares:        cpuShares(i.spec.CPUMillis),
 	}
-	return i.createFn(context.Background(), i.spec, create)
+	return i.createFn(i.installCtx, i.spec, create)
 }
 
 // captureInstallOutput follows the install container's log stream and writes it to
@@ -1720,6 +1758,8 @@ func (i *instance) Stop(ctx context.Context, graceful bool, preFallback ...func(
 	// Record the stop intent stickily so supervise reports the eventual exit as
 	// stopped even if the survived-kill failure path later clears stopping (#257).
 	i.stopRequested = true
+	// Nothing superviseInstall still means to create is wanted any more.
+	i.endInstall()
 	// Capture the pre-stop state before overwriting it with stopping: the
 	// survived-kill failure path (below) restores it rather than hardcoding running,
 	// so a stop escalation that hits the survived-kill error while the instance is
