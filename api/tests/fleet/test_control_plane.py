@@ -279,7 +279,19 @@ async def test_dispatch_list_files_carries_listing_back(harness: _Harness) -> No
     await call.done_writing()
 
 
-async def test_dispatch_failure_maps_typed_code(harness: _Harness) -> None:
+@pytest.mark.parametrize(
+    ("wire_code", "domain_code"),
+    [
+        (pb.COMMAND_ERROR_CODE_INVALID_STATE, CommandResultCode.INVALID_STATE),
+        # RCON dropped a console command without replying (issue #3366).
+        (pb.COMMAND_ERROR_CODE_COMMAND_DROPPED, CommandResultCode.COMMAND_DROPPED),
+    ],
+)
+async def test_dispatch_failure_maps_typed_code(
+    harness: _Harness,
+    wire_code: pb.CommandErrorCode.ValueType,
+    domain_code: CommandResultCode,
+) -> None:
     stub = await harness.start()
     call = await _registered_call(harness, stub)
 
@@ -290,9 +302,7 @@ async def test_dispatch_failure_maps_typed_code(harness: _Harness) -> None:
                 correlation_id=msg.api_command.command_id,
                 command_result=pb.CommandResult(
                     success=False,
-                    error=pb.CommandError(
-                        code=pb.COMMAND_ERROR_CODE_INVALID_STATE, message="running"
-                    ),
+                    error=pb.CommandError(code=wire_code, message="running"),
                 ),
             )
         )
@@ -310,7 +320,7 @@ async def test_dispatch_failure_maps_typed_code(harness: _Harness) -> None:
     await rejecter
 
     assert not result.success
-    assert result.code is CommandResultCode.INVALID_STATE
+    assert result.code is domain_code
     assert result.message == "running"
     await call.done_writing()
 

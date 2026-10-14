@@ -579,6 +579,13 @@ enum CommandErrorCode {
   // is not yet known, so the API must NOT converge an observed state on it — it
   // keeps the assignment/intent and retries on a later reconcile tick.
   COMMAND_ERROR_CODE_BUSY = 9;
+  // A ServerCommand was written to RCON and the game server closed the
+  // connection (EOF or reset) without replying to it (issue #3366). Vanilla does
+  // that, without running the command, to a packet that did not arrive in one
+  // read, so it most often means a command near the length limit on a network
+  // path that split it (CONTROL_PLANE.md Section 3.1). Distinct from INTERNAL so
+  // the API can tell a dropped command from a server it could not reach.
+  COMMAND_ERROR_CODE_COMMAND_DROPPED = 10;
 }
 
 // ---------------------------------------------------------------------------

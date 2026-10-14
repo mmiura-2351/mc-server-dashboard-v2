@@ -3086,8 +3086,11 @@ func (m *Manager) handleServerCommand(ctx context.Context, cmd session.Command) 
 
 	out, err := ctrl.Execute(ctx, cmd.Line)
 	if err != nil {
-		return fail(cmd.CommandID, session.CommandErrorInternal,
-			fmt.Sprintf("instancemanager: server command: %v", err))
+		code := session.CommandErrorInternal
+		if errors.Is(err, rcon.ErrCommandDropped) {
+			code = session.CommandErrorCommandDropped
+		}
+		return fail(cmd.CommandID, code, fmt.Sprintf("instancemanager: server command: %v", err))
 	}
 	return session.CommandResult{CommandID: cmd.CommandID, Success: true, Output: out}
 }

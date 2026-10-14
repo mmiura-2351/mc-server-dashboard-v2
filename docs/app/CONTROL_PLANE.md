@@ -177,6 +177,25 @@ the bound existed (a schedule's command or warning, which then fails with the
 reason `console_line_too_long`). The Worker refuses one that reaches it anyway
 with `INTERNAL`, before it dials RCON, so the cost is that one command.
 
+**That limit assumes the packet reaches the server in one TCP segment.**
+Vanilla's RCON listener takes a packet only from a single read. Measured on
+Minecraft 1.16.5 with a direct client (issue #3366), a packet written in two
+parts more than ~1 ms apart was dropped 100 times in 100, even a 114-byte one,
+and two back-to-back writes were dropped 23–37% of the time. The Worker
+therefore writes every RCON packet — the auth, the command and its
+end-of-response marker — with a single write (pinned by a test in
+`worker/internal/adapters/rcon`). A full 1,460-byte packet fits one segment
+when the path MSS is at least 1,460, as on Docker's default bridge (MTU 1500,
+MSS 1460), so 1,446 is exact there. A path with a smaller MSS — an overlay
+network, a VPN or tunnel MTU, a NIC without segmentation offloads — splits the
+packet, and a command near the limit can be dropped: on an MTU-1400 Docker
+network with offloads disabled, a 1,446-byte command was dropped 1 time in
+200, while commands of 1,334–1,400 bytes went through 200 times in 200. The
+limit stays at 1,446 because the default deployment carries it exactly; on
+such a path, a command that is dropped fails with `COMMAND_DROPPED`
+(Section 7), the API answers `409 command_dropped`, and the user can shorten it
+and resend. Other Minecraft versions were not measured for this.
+
 The Worker's "command failed" WARN logs at most 1,024 bytes of the error
 message, with a truncation marker; the `CommandError.message` sent to the API is
 not cut. The API's "fire-and-forget command failed" WARN caps the message it
@@ -642,6 +661,7 @@ classes a Worker can hit:
 | `TRANSFER_FAILED` | A hydrate/snapshot data-plane transfer failed. |
 | `PORT_CONFLICT` | A `StartServer` could not publish a host port already in use (the container driver classifies it from the Docker daemon's error message). |
 | `IMAGE_MISSING` | A `StartServer` could not find or pull the server's container image (the container driver classifies it from the Docker daemon's error message). |
+| `COMMAND_DROPPED` | A `ServerCommand` was written to RCON and the game server closed the connection (EOF or reset) without replying to it. Vanilla does that, without running the command, to a packet that did not arrive in one read, so it most often means a command near the length limit on a path that split it (Section 3.1). It is kept apart from `INTERNAL` — RCON could not be opened or authenticated, or the round trip timed out — so the user can tell a dropped command from a server that cannot be reached. The API answers it `409 command_dropped`. |
 | `INTERNAL` | An unclassified failure applying the command. |
 
 A registration refusal is reported differently, since it predates any command:

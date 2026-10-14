@@ -29,12 +29,16 @@ import type { TranslationKey } from "../i18n/index.ts";
 // - `failed_stop_orphan` (409) — the Worker holds an instance whose stop it
 //   could not confirm (issue #2466); the process may still be alive, so this
 //   must not read as "not running". Nothing was sent.
+// - `command_dropped` (409) — the game server closed its RCON connection without
+//   answering the command (issue #3366). It does that, without running it, to a
+//   packet that did not arrive in one read, so a long command on some networks
+//   meets it; the server itself was reached.
 // - `command_failed` (409) — the Worker reached a running server but its RCON
-//   connection failed (open, auth, or the round trip itself), which is the only
-//   unclassified failure `handleServerCommand` produces. A command the server
-//   understood and refused (an unknown command, bad syntax) is NOT this: the
-//   server answers it over RCON as ordinary output, which arrives as a 200 and
-//   is already shown verbatim.
+//   connection failed otherwise (open, auth, or a round trip that timed out),
+//   which is the only unclassified failure `handleServerCommand` produces. A
+//   command the server understood and refused (an unknown command, bad syntax)
+//   is NOT this: the server answers it over RCON as ordinary output, which
+//   arrives as a 200 and is already shown verbatim.
 //
 // Anything else (a 404 for a deleted server, a network error) keeps the generic
 // line.
@@ -42,6 +46,7 @@ const CONSOLE_REASON_PRESENTATION: Record<string, TranslationKey> = {
   worker_unavailable: "serverDetail.console.error.workerUnavailable",
   server_not_running: "serverDetail.console.error.notRunning",
   failed_stop_orphan: "serverDetail.console.error.failedStopOrphan",
+  command_dropped: "serverDetail.console.error.commandDropped",
   command_failed: "serverDetail.console.error.rconFailed",
 };
 

@@ -198,6 +198,11 @@ bytes (it is broadcast as `say <message>`); past it they are a `422`
 non-ASCII text reaches it in fewer characters. A schedule stored before the
 limit existed is not rewritten: an over-long command fails its run with the
 detail `console_line_too_long`, and an over-long warning is not broadcast.
+On a network path that splits the command packet (a smaller MTU than Docker's
+default bridge), the game server can drop a command near the limit by closing
+its console connection without answering; that command fails with `409`
+`command_dropped` (`CONTROL_PLANE.md` Section 3.1), and the Console tab says so
+instead of reporting a failed connection.
 
 **Storage outages on the working-set routes.** When the store holding a
 server's working set cannot serve the request, the routes whose failure is safe

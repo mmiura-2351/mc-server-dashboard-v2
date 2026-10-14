@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/rcon"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
@@ -154,6 +155,7 @@ func wantCode(t *testing.T, code string) (success bool, errCode session.CommandE
 		"port_conflict":      session.CommandErrorPortConflict,
 		"image_missing":      session.CommandErrorImageMissing,
 		"busy":               session.CommandErrorBusy,
+		"command_dropped":    session.CommandErrorCommandDropped,
 	}
 	c, ok := codes[code]
 	if !ok {
@@ -353,6 +355,18 @@ func driveRow(t *testing.T, row contractRow) session.CommandResult {
 		cmd := contractCmd(t, row.Kind, serverID)
 		cmd.Line = strings.Repeat("a", MaxConsoleLineBytes+1)
 		return m.Handle(ctx, cmd)
+
+	case "rcon_command_dropped":
+		// A running instance whose RCON server closes the connection after the
+		// command is written, without replying (issue #3366). The fake control
+		// returns the rcon adapter's sentinel wrapped the way Execute wraps it.
+		dropped := &fakeControl{err: fmt.Errorf("%w: rcon: read length: EOF", rcon.ErrCommandDropped)}
+		m := newManager(t, &fakeDriver{}, dropped).
+			WithTransfer(&fakeTransfer{}).
+			WithTunnelDialer(&fakeTunnelDialer{}).
+			WithBedrockTunneler(&fakeBedrockTunneler{})
+		startRunning(t, m)
+		return m.Handle(ctx, contractCmd(t, row.Kind, serverID))
 
 	default:
 		t.Fatalf("contract table: no fixture for precondition %q", row.Precondition)

@@ -228,6 +228,11 @@ const (
 	// not yet known, so the API must keep its assignment/intent and retry on a
 	// later tick rather than converge an observed state.
 	CommandErrorBusy
+	// CommandErrorCommandDropped marks a ServerCommand the game server's RCON
+	// listener dropped: it closed the connection after the command was written,
+	// without replying (issue #3366). Distinct from CommandErrorInternal so the
+	// user can tell a dropped command from a server that cannot be reached.
+	CommandErrorCommandDropped
 )
 
 // String renders the error code as a stable name for logs (issue #194).
@@ -251,6 +256,8 @@ func (c CommandErrorCode) String() string {
 		return "image_missing"
 	case CommandErrorBusy:
 		return "busy"
+	case CommandErrorCommandDropped:
+		return "command_dropped"
 	default:
 		return fmt.Sprintf("CommandErrorCode(%d)", int(c))
 	}

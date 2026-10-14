@@ -3610,6 +3610,28 @@ async def test_command_line_past_the_limit_is_refused_undispatched(line: str) ->
     assert cp.dispatched == []
 
 
+async def test_command_dropped_by_rcon_names_the_drop() -> None:
+    # The game server closed its RCON connection without replying to the command
+    # (issue #3366); the user must be able to tell that from a dead server.
+    uow, community, server_id = _running_for_command()
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(
+            status=worker_status("ServerCommand", "rcon_command_dropped"),
+            message="instancemanager: server command: rcon: dropped",
+        )
+    )
+    use_case = SendServerCommand(uow=uow, control_plane=cp)
+
+    with pytest.raises(CommandDispatchError) as excinfo:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            line="list",
+        )
+
+    assert excinfo.value.reason == "command_dropped"
+
+
 # --- reconciler re-dispatch paths (issue #101) -----------------------------
 
 
