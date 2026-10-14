@@ -52,6 +52,7 @@ from mc_server_dashboard_api.storage.adapters.failure_seam import (
 )
 from mc_server_dashboard_api.storage.domain.errors import (
     ArchiveTooLargeError,
+    ArchiveUnreadableError,
     IncompleteTransferError,
     IntegrityCheckError,
     MissingRegionsError,
@@ -2706,16 +2707,23 @@ def _extract_tar_gz_into(archive: Path, dest: Path, max_bytes: int) -> None:
     member header.
 
     An archive whose bytes cannot be read back — truncated, or damaged gzip / tar
-    framing — raises :class:`ArchiveUnreadableError` (issue #3230).
+    framing — raises :class:`ArchiveUnreadableError` (issue #3230). So does one
+    holding a member the filter refuses (issue #3371): it reads, but nothing can
+    be restored from it, override or not, which is the verdict that error models.
     """
 
     total = 0
-    with (
-        archive_read_errors_as_unreadable(),
-        tarfile.open(archive, mode="r:gz") as tar,
-    ):
-        for member in tar:
-            total = _extract_member_capped(tar, member, dest, total, max_bytes)
+    try:
+        with (
+            archive_read_errors_as_unreadable(),
+            tarfile.open(archive, mode="r:gz") as tar,
+        ):
+            for member in tar:
+                total = _extract_member_capped(tar, member, dest, total, max_bytes)
+    except tarfile.FilterError as exc:
+        raise ArchiveUnreadableError(
+            f"archive holds a member that cannot be restored: {exc}"
+        ) from exc
 
 
 def _extract_member_capped(

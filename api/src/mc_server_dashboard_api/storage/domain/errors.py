@@ -152,7 +152,9 @@ class ArchiveUnreadableError(StorageError):
     Also raised wherever an archive is extracted — ``restore_backup`` on both
     backends and the fs ``check_backup_health`` — when its bytes do not read back
     as a gzip-compressed tar: truncated, or damaged gzip / tar framing (issue
-    #3230).
+    #3230). The fs backend raises it as well for an archive that reads but holds
+    a member its extraction refuses — a link, or an unsafe path (issue #3371):
+    nothing can be restored from that either, override or not.
 
     Deliberately distinct from :class:`IntegrityCheckError` ("the archived world is
     structurally corrupt") and from :class:`ObjectStoreUnavailableError` ("the store

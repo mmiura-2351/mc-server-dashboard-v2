@@ -22,6 +22,7 @@ import pytest
 
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
 from mc_server_dashboard_api.storage.domain.errors import (
+    ArchiveUnreadableError,
     IntegrityCheckError,
     MissingRegionsError,
     PrunedStoreError,
@@ -422,13 +423,41 @@ async def test_restore_refuses_a_backup_with_a_contained_link_member(
         community, server, stream_of(tar_with_link_member(link_type, mode="w:gz"))
     )
 
-    with pytest.raises(tarfile.FilterError):
-        await storage.restore_backup(community, server, key)
+    # An archive the store will not restore is the modelled unreadable verdict,
+    # from the restore and from the health check alike, force or not.
+    for force in (False, True):
+        with pytest.raises(ArchiveUnreadableError):
+            await storage.restore_backup(community, server, key, force=force)
+    with pytest.raises(ArchiveUnreadableError):
+        await storage.check_backup_health(community, server, key)
 
     assert snapshot_dir(tmp_path, community, server) == good_live
     server_root = good_live.parent.parent
     assert _links_under(server_root / "snapshots") == []
     assert _links_under(server_root / "incoming") == []
+
+
+async def test_restore_of_a_backup_with_an_escaping_link_is_unreadable_too(
+    tmp_path: Path,
+) -> None:
+    # The same translation covers what ``data`` itself refuses: a member that is
+    # unsafe rather than merely a link used to leave restore as a raw tarfile
+    # error.
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await _publish(storage, community, server, {"keep.txt": b"prior"})
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        info = tarfile.TarInfo(name="escape_link")
+        info.type = tarfile.SYMTYPE
+        info.linkname = "/etc/passwd"
+        tar.addfile(info)
+    key = await storage.put_backup(community, server, stream_of(buf.getvalue()))
+
+    with pytest.raises(ArchiveUnreadableError):
+        await storage.restore_backup(community, server, key)
+    with pytest.raises(ArchiveUnreadableError):
+        await storage.check_backup_health(community, server, key)
 
 
 async def _publish_then_plant_links(
