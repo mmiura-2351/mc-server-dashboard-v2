@@ -1936,8 +1936,8 @@ func (m *Manager) drainPendingSaveOn(seal bool) map[string]saveOnTarget {
 // region writes have stopped. It gives up (false) after settleBudget so a world
 // that never settles refuses the periodic snapshot (quiesce_unavailable) instead of
 // waiting unbounded, and returns false on ctx cancellation. A scan I/O error is
-// transient (a region file being rewritten can momentarily vanish), so it is treated
-// as "not yet settled" and retried within the budget rather than aborting.
+// treated as "not yet settled" and retried within the budget rather than aborting;
+// an entry that vanishes or changes kind mid-scan is not an error (scanRegionState).
 func (m *Manager) settleWorkingSet(ctx context.Context, serverID, workingDir string) bool {
 	deadline := time.Now().Add(m.settleBudget)
 	prev, err := m.scanRegion(workingDir)
@@ -1969,32 +1969,111 @@ type regionState map[string]struct {
 
 // scanRegionState records the (mtime, size) of every .mca under root. An absent
 // root yields an empty map (a server with no published working set), not an error.
+//
+// It runs as root over a RUNNING server's working set, which that server's code can
+// rearrange at any moment, so it walks the way the region check and the snapshot
+// that follow it do (issue #3388; regionfsck.CheckWorkingSet): root is the one name
+// resolved by path, every directory below it is opened relative to its parent's
+// descriptor with O_NOFOLLOW|O_DIRECTORY, and a region file's (mtime, size) is an
+// lstat relative to its directory's descriptor. A directory swapped for a link
+// between the listing and the open is not followed out of the working set.
+//
+// An entry gone or of another kind by the time the scan opens or lstats it is
+// skipped rather than failing the scan. A failed scan counts as "not settled", so
+// failing would let a server refuse its own snapshots and skip its pre-stop flush by
+// flipping any one name. Skipping keeps the criterion: what the scan leaves out is
+// missing from its state, so a skipped directory that held region files, or a
+// region file deleted mid-scan, makes this scan differ from the last and the
+// settle-wait polls again; a skipped name that holds no region file changes
+// nothing. A region file replaced by something else is lstat'ed as whatever
+// replaced it, and compared as a rewrite of it would be.
 func scanRegionState(root string) (regionState, error) {
-	state := regionState{}
-	err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) && p == root {
-				return filepath.SkipAll
-			}
-			return err
-		}
-		if d.IsDir() || !strings.HasSuffix(d.Name(), ".mca") {
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-		state[p] = struct {
-			modTime time.Time
-			size    int64
-		}{info.ModTime(), info.Size()}
-		return nil
-	})
+	rootFd, err := unix.Open(root, settleDirFlags, 0)
+	if errors.Is(err, unix.ENOENT) {
+		return regionState{}, nil
+	}
 	if err != nil {
+		return nil, &os.PathError{Op: "open", Path: root, Err: err}
+	}
+	state := regionState{}
+	if err := scanRegionDir(rootFd, root, 0, state); err != nil {
 		return nil, err
 	}
 	return state, nil
+}
+
+// settleDirFlags opens a directory of the settle scan without following a link.
+const settleDirFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
+
+// settleScanMaxDepth bounds how deep the settle scan descends, at the bound of the
+// region check and the snapshot walk that follow it (regionfsck.maxWalkDepth,
+// datatransfer.maxPackDepth) and for their reason: the scan holds one descriptor per
+// level, in a descriptor table every server on the Worker shares, and the tree's
+// shape is the server's to choose.
+const settleScanMaxDepth = 128
+
+// settleOpenDirAt opens the directory name below dirFd, and settleStatAt lstats the
+// entry name below dirFd; both resolve that one name only. They are variables so a
+// test can swap an entry at an exact point of the scan without racing real
+// filesystem timings; production never reassigns them.
+var (
+	settleOpenDirAt = func(dirFd int, name string) (int, error) {
+		return unix.Openat(dirFd, name, settleDirFlags, 0)
+	}
+	settleStatAt = func(dirFd int, name string, st *unix.Stat_t) error {
+		return unix.Fstatat(dirFd, name, st, unix.AT_SYMLINK_NOFOLLOW)
+	}
+)
+
+// scanRegionDir records into state every .mca beneath the directory behind dirFd,
+// which it closes. path is the directory's path as the caller spelled root; it keys
+// state and labels errors and is never resolved. depth is the directory's level
+// below root.
+func scanRegionDir(dirFd int, path string, depth int, state regionState) error {
+	dir := os.NewFile(uintptr(dirFd), path)
+	defer func() { _ = dir.Close() }()
+	entries, err := dir.ReadDir(-1)
+	if err != nil {
+		return &os.PathError{Op: "readdir", Path: path, Err: err}
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		entryPath := filepath.Join(path, name)
+		if entry.IsDir() {
+			if depth+1 > settleScanMaxDepth {
+				return fmt.Errorf("instancemanager: working set is nested deeper than %d directories at %q", settleScanMaxDepth, entryPath)
+			}
+			fd, err := settleOpenDirAt(dirFd, name)
+			if errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ENOTDIR) {
+				// Gone, or replaced by anything else (a link included), since the
+				// listing.
+				continue
+			}
+			if err != nil {
+				return &os.PathError{Op: "open", Path: entryPath, Err: err}
+			}
+			if err := scanRegionDir(fd, entryPath, depth+1, state); err != nil {
+				return err
+			}
+			continue
+		}
+		if !strings.HasSuffix(name, ".mca") {
+			continue
+		}
+		var st unix.Stat_t
+		err := settleStatAt(dirFd, name, &st)
+		if errors.Is(err, unix.ENOENT) {
+			continue
+		}
+		if err != nil {
+			return &os.PathError{Op: "lstat", Path: entryPath, Err: err}
+		}
+		state[entryPath] = struct {
+			modTime time.Time
+			size    int64
+		}{time.Unix(st.Mtim.Unix()), st.Size}
+	}
+	return nil
 }
 
 // regionStateEqual reports whether two region-state scans are identical: the same
