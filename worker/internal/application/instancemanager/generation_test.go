@@ -637,22 +637,23 @@ func TestWriteGenerationKeepsTempFormDirectory(t *testing.T) {
 // leaves the creation site behind turns it red. The scratchformat contract pins the
 // persisted marker NAME; this guards the temp PATTERN against that name.
 //
-// The temp is stranded through the real creation site: a directory sitting at the
-// marker path makes the rename fail, leaving behind exactly what a crash between the
-// temp write and the rename leaves behind.
+// The temp is stranded through the real creation site, createGenerationTemp, and left
+// there unrenamed: exactly what a crash between the temp write and the rename leaves
+// behind. (Every failed write removes its own temp since issue #3350, so a failing
+// writeGeneration no longer strands one.)
 func TestStrandedGenerationTempMatchesTheMarkerTempPredicates(t *testing.T) {
 	dir := t.TempDir()
-	// The directory makes the rename fail with EISDIR, and writeGeneration's
-	// rename-error path returns WITHOUT unlinking its temp (unlike its write, sync and
-	// close paths, which do) — that omission is what leaves the temp here to inspect.
-	// Adding an inline unlink there would empty this dir and fail the test at
-	// strandedGenerationTemp, far from anything to do with drift.
-	if err := os.MkdirAll(filepath.Join(dir, generationFile), 0o750); err != nil {
+	dirFd, err := nofollow.OpenDir(dir)
+	if err != nil {
 		t.Fatal(err)
 	}
-
-	if err := writeGeneration(dir, 5); err == nil {
-		t.Fatal("writeGeneration = nil, want the rename onto a directory to fail so its temp is stranded")
+	defer func() { _ = unix.Close(dirFd) }()
+	_, tmp, err := createGenerationTemp(dirFd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tmp.Close(); err != nil {
+		t.Fatal(err)
 	}
 
 	stranded := strandedGenerationTemp(t, dir)
@@ -666,11 +667,6 @@ func TestStrandedGenerationTempMatchesTheMarkerTempPredicates(t *testing.T) {
 			"would advertise holding a world it does not hold (issue #2279)", stranded)
 	}
 
-	dirFd, err := nofollow.OpenDir(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = unix.Close(dirFd) }()
 	sweepGenerationTemps(dirFd)
 
 	if _, err := os.Stat(filepath.Join(dir, stranded)); !os.IsNotExist(err) {

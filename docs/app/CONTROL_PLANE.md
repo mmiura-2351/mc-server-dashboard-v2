@@ -511,7 +511,15 @@ deleting branch never reaches that write. A running-id snapshot whose marker sta
 refused because the working dir was replaced mid-flight likewise
 declares nothing, so the wire signal cannot claim a generation the marker does not
 carry. An absent declaration leaves the record untouched, the publish advances the
-store past it, and the next start hydrates. The store generation is a per-server counter the
+store past it, and the next start hydrates. On the stopped-id branch that record
+outlives the scratch it described, until the next registration replaces the map,
+and it stays harmless: it was at most the store generation when recorded, the
+publish before the deletion minted a greater one, and the counter never goes back,
+so `held >= store` — the only test the skip-hydrate gate and the reconciler's
+held-start grace apply — cannot pass for it. A forged registration value is the
+exception ([`SECURITY.md`](SECURITY.md) Section 6); there the launch guard
+(Section 7) refuses the hydrate-less start over the missing scratch and the API
+replays it with a hydrate. The store generation is a per-server counter the
 authoritative Storage bumps on each `commit_snapshot` and stamps onto each hydrate
 / snapshot transfer, so the Worker's reported generation and the store's share one
 number space. A fresh placement always hydrates: a first launch or a relocation

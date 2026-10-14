@@ -720,7 +720,11 @@ blocking the worker. The walk holds one descriptor per directory level and
 refuses a working set nested deeper than 128 directories. The region check
 that precedes a snapshot walks the tree the same way, under the same depth
 bound, and reads a fixed number of fixed-size pieces of each region file
-whatever its size (issue #3335). The worker's own reads of `server.properties`
+whatever its size (issue #3335). An entry that disappears or changes kind under
+it is skipped and counted, as the snapshot skips it, rather than failing the
+whole check — a snapshot goes ahead without a check that failed, so failing
+would let a server turn the check off by flipping any one name (issue #3350).
+The worker's own reads of `server.properties`
 — for the RCON password and port, the ports it publishes, and the port a relay
 tunnel dials — go through one reader that opens the file relative to the
 working-set root without following links or blocking, accepts only a regular
@@ -745,7 +749,12 @@ launch is refused, and replayed with a hydrate, unless the marker is a regular
 file. The marker is written to an exclusively created temporary file and
 renamed into place, both relative to the working-set root's descriptor, so
 whatever was planted at either name is replaced or refused, never written
-through. What this does not make trustworthy is the marker's *value* — see "The
+through. A directory at the marker's name cannot be renamed over, so every
+write fails while it stays; each failure removes its temporary file and logs a
+`WARN`, and the worker leaves the directory alone rather than remove, as root,
+a tree the server is still writing. It costs that server one hydrate: the set
+reads as generation 0, and a hydrate of a published generation replaces the
+working set whole, directory included (issue #3350). What this does not make trustworthy is the marker's *value* — see "The
 generation marker's value" below.
 A file the worker writes into a running server's working set (a file edit
 through the API, and any parent directory it has to create) is given its

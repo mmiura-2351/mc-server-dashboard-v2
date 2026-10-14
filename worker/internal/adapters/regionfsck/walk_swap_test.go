@@ -1,6 +1,7 @@
 package regionfsck
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -29,8 +30,7 @@ func beforeOpening(t *testing.T, name string, swap func()) {
 }
 
 // assertFailedWithoutAVerdict fails unless the check returned an error and no
-// report: an entry replaced under the walk yields no verdict at all, least of all
-// one about whatever replaced it.
+// report.
 func assertFailedWithoutAVerdict(t *testing.T, report Report, err error) {
 	t.Helper()
 	if err == nil {
@@ -53,31 +53,45 @@ func replace(t *testing.T, path string, plant func(path string) error) {
 	}
 }
 
-// A region file replaced after the walk has seen it as a regular file is not
-// followed, read or blocked on, whatever replaced it.
-func TestWalkerRefusesARegionFileSwappedMidWalk(t *testing.T) {
+// plantSocket binds a unix socket at path; the bind is what creates the entry.
+func plantSocket(path string) error {
+	l, err := net.Listen("unix", path)
+	if err != nil {
+		return err
+	}
+	l.(*net.UnixListener).SetUnlinkOnClose(false)
+	return l.Close()
+}
+
+// An entry replaced after the walk has decided what it is is skipped and counted,
+// as one gone before the walk looked at it is (issue #3350): the scan goes on and
+// keeps what it found elsewhere, so a server swapping one name cannot switch the
+// check off. Whatever replaced the entry is not followed, read or blocked on, and no
+// verdict is made about it (issue #3335).
+func TestWalkerSkipsARegionFileSwappedMidWalk(t *testing.T) {
 	outside := write(t, filepath.Join(t.TempDir(), "r.0.0.mca"), tornRegion())
 	for name, plant := range map[string]func(path string) error{
 		"for a symlink to a region outside": func(path string) error { return os.Symlink(outside, path) },
 		"for a dangling symlink":            func(path string) error { return os.Symlink(outside+".absent", path) },
 		"for a fifo":                        func(path string) error { return unix.Mkfifo(path, 0o600) },
+		"for a socket":                      plantSocket,
 		"for a directory":                   func(path string) error { return os.Mkdir(path, 0o700) },
 		"for nothing":                       func(string) error { return nil },
 	} {
 		t.Run(name, func(t *testing.T) {
-			root := t.TempDir()
-			path := write(t, filepath.Join(root, "region", "r.0.0.mca"), buildRegion(nil, 3, -1, 2))
-			beforeOpening(t, "r.0.0.mca", func() { replace(t, path, plant) })
+			root := tornThenHealthy(t)
+			path := filepath.Join(root, "region", "r.1.0.mca")
+			beforeOpening(t, "r.1.0.mca", func() { replace(t, path, plant) })
 
 			report, err := checkWithin(t, root)
-			assertFailedWithoutAVerdict(t, report, err)
+			assertKeptTheEarlierFinding(t, report, err, 3, 1)
 		})
 	}
 }
 
-// A directory replaced after the walk has seen it as a directory does not lead the
-// walk out of the working set.
-func TestWalkerRefusesADirectorySwappedMidWalk(t *testing.T) {
+// A directory replaced after the walk has seen it as a directory is skipped the same
+// way, and does not lead the walk out of the working set.
+func TestWalkerSkipsADirectorySwappedMidWalk(t *testing.T) {
 	outside := t.TempDir()
 	write(t, filepath.Join(outside, "r.0.0.mca"), tornRegion())
 	for name, plant := range map[string]func(path string) error{
@@ -86,13 +100,56 @@ func TestWalkerRefusesADirectorySwappedMidWalk(t *testing.T) {
 		"for nothing":                          func(string) error { return nil },
 	} {
 		t.Run(name, func(t *testing.T) {
-			root := t.TempDir()
-			write(t, filepath.Join(root, "region", "r.0.0.mca"), buildRegion(nil, 3, -1, 2))
-			beforeOpening(t, "region", func() { replace(t, filepath.Join(root, "region"), plant) })
+			root := tornThenHealthy(t)
+			beforeOpening(t, "zz", func() { replace(t, filepath.Join(root, "zz"), plant) })
 
 			report, err := checkWithin(t, root)
-			assertFailedWithoutAVerdict(t, report, err)
+			assertKeptTheEarlierFinding(t, report, err, 3, 1)
 		})
+	}
+}
+
+// Only a failure that says the entry changed is skipped. Any other failure to open
+// is a failed check, as before: the scan did not see what is there.
+func TestWalkerStillFailsOnAnOpenErrorThatIsNotASwap(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root opens a directory whatever its mode")
+	}
+	root := tornThenHealthy(t)
+	locked := filepath.Join(root, "zz")
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+
+	report, err := checkWithin(t, root)
+	assertFailedWithoutAVerdict(t, report, err)
+}
+
+// The shape issue #3350 was found with: a server flips a name in the working-set
+// root between a directory and a file while the snapshot's check runs. The flip
+// lands before the region directory is reached, and the torn region there is still
+// found.
+func TestWalkerStillFindsATornRegionWhenARootNameIsSwappedFirst(t *testing.T) {
+	root := t.TempDir()
+	flipped := filepath.Join(root, ".mcsd_generation")
+	if err := os.Mkdir(flipped, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	torn := write(t, filepath.Join(root, "region", "r.0.0.mca"), tornRegion())
+	beforeOpening(t, ".mcsd_generation", func() {
+		replace(t, flipped, func(path string) error { return os.WriteFile(path, []byte("7"), 0o600) })
+	})
+
+	report, err := checkWithin(t, root)
+	if err != nil {
+		t.Fatalf("CheckWorkingSet: %v; want the scan to complete", err)
+	}
+	if len(report.Corrupt) != 1 || report.Corrupt[0].Path != torn {
+		t.Errorf("Corrupt = %+v, want the torn region", report.Corrupt)
+	}
+	if report.Scanned != 1 || report.Skipped != 1 {
+		t.Errorf("Scanned, Skipped = %d, %d; want 1, 1", report.Scanned, report.Skipped)
 	}
 }
 
@@ -164,8 +221,8 @@ func TestWalkerLeavesNoDescriptorOpen(t *testing.T) {
 	beforeOpening(t, "r.0.0.mca", func() {
 		replace(t, path, func(path string) error { return unix.Mkfifo(path, 0o600) })
 	})
-	if _, err := checkWithin(t, swapped); err == nil {
-		t.Fatal("CheckWorkingSet = nil error on a region file swapped for a FIFO")
+	if report, err := checkWithin(t, swapped); err != nil || report.Skipped != 1 {
+		t.Fatalf("CheckWorkingSet = %+v, %v on a region file swapped for a FIFO; want it skipped", report, err)
 	}
 	if after := openFds(); after != before {
 		t.Errorf("open descriptors: %d before, %d after", before, after)

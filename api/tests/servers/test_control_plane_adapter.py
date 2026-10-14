@@ -994,6 +994,39 @@ async def test_snapshot_records_nothing_when_the_worker_declared_nothing() -> No
     assert adapter.held_generation(worker_id=worker_id, server_id=server_id) is None
 
 
+async def test_an_entry_the_final_snapshot_leaves_behind_cannot_skip_a_hydrate() -> (
+    None
+):
+    # Issue #3350: the stopped-id publish declares nothing, so an entry recorded
+    # earlier in the session outlives the scratch it described (held 33 after a
+    # publish of 34, observed in the runtime verification of PR #3348). It is
+    # harmless because of what the publish did: the entry was at most the store
+    # generation when it was recorded, the final publish minted a greater one, and
+    # the counter never goes back. Both readers of the inventory compare against
+    # the store, so neither can take it for a fresh working set.
+    worker_uuid, server_uuid = uuid.uuid4(), uuid.uuid4()
+    registry = InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT)
+    registry.register(make_worker(worker_id=str(worker_uuid), at=_T0))
+    worker_id, server_id = WorkerId(worker_uuid), ServerId(server_uuid)
+    community_id = CommunityId(uuid.uuid4())
+    # A periodic snapshot of the running server published 33 and kept the scratch.
+    await _snapshot_adapter(registry, held_generation=33).snapshot(
+        worker_id=worker_id, community_id=community_id, server_id=server_id
+    )
+    # The stop's final snapshot published 34 and the Worker deleted the scratch.
+    adapter = _snapshot_adapter(registry, held_generation=None)
+    await adapter.snapshot(
+        worker_id=worker_id, community_id=community_id, server_id=server_id, final=True
+    )
+    store_after_final = 34
+
+    held = adapter.held_generation(worker_id=worker_id, server_id=server_id)
+    assert held is None or held < store_after_final
+    assert not adapter.holds_fresh_working_set(
+        worker_id=worker_id, server_id=server_id, store_generation=store_after_final
+    )
+
+
 async def test_a_declaration_on_a_non_snapshot_command_is_not_recorded() -> None:
     # Only a snapshot outcome may refresh the inventory. Every other dispatch
     # shares the same _to_outcome plumbing, so the record must be attached to the

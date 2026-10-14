@@ -148,9 +148,9 @@ type Finding struct {
 // Report is the aggregate result of walking a working set's .mca files. Scanned
 // counts every region file examined; Corrupt lists one finding per corrupt file
 // (the first failing reason). Skipped counts the entries that were listed in
-// their directory but gone by the time the walk looked at them, and so were
-// neither descended into nor examined; it is zero on a working set at rest, and
-// the caller logs it.
+// their directory but gone, or no longer of the kind they were seen as, by the
+// time the walk opened them, and so were neither descended into nor examined; it
+// is zero on a working set at rest, and the caller logs it.
 type Report struct {
 	Scanned int
 	Corrupt []Finding
@@ -196,7 +196,7 @@ func checkOpened(fd int, path string) (Reason, error) {
 		return ReasonNone, err
 	}
 	if !info.Mode().IsRegular() {
-		return ReasonNone, fmt.Errorf("regionfsck: %s is not a regular file", path)
+		return ReasonNone, fmt.Errorf("regionfsck: %s: %w", path, errNotRegular)
 	}
 	size := info.Size()
 
@@ -321,10 +321,16 @@ func checkOpened(fd int, path string) (Reason, error) {
 //
 // An entry gone between its directory's listing and that lstat is skipped and
 // counted in Report.Skipped: a running server deletes files all the time, and one
-// deletion must not cost the scan and the findings it already holds. A hint the
-// open then contradicts (the entry vanished in that narrower window, or was
-// replaced by something of another kind) is an error and no report, as an entry
-// vanishing mid-walk always was: the caller logs it.
+// deletion must not cost the scan and the findings it already holds. So is an
+// entry the open then contradicts — gone in that narrower window, or replaced by
+// something of another kind (issue #3350). That was an error and no report, and
+// it let a server switch the whole check off for its own snapshots by flipping any
+// one name, the snapshot treating a failed check as no check. Skipping it gives
+// nothing away: an entry replaced a moment earlier, before the lstat, is already
+// left out or descended into as whatever replaced it, and a server that can swap
+// a name under the check can as well rewrite a region after it — the API's publish
+// gate, not this check, is what judges the packed bytes. A corrupt verdict stays
+// reserved for the bytes of a regular file the check opened.
 //
 // On a filesystem whose listing carries no entry types, the os package fills them
 // in with an fstatat on the directory's descriptor (no path is resolved), and
@@ -379,6 +385,19 @@ var (
 	}
 )
 
+// errNotRegular is checkOpened's refusal of a descriptor that is not a regular file.
+var errNotRegular = errors.New("not a regular file")
+
+// changedSinceTheHint reports whether an open's failure says the entry is gone or is
+// no longer of the kind its lstat said (issue #3350): ENOENT, gone; ENOTDIR, a
+// directory replaced by anything else, a link included; ELOOP, a file replaced by a
+// link; ENXIO, a file replaced by a socket. dirFd is a directory and the name a
+// single component, so none of these can come from anywhere but the entry itself.
+func changedSinceTheHint(err error) bool {
+	return errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ENOTDIR) ||
+		errors.Is(err, unix.ELOOP) || errors.Is(err, unix.ENXIO)
+}
+
 // walk checks every region file beneath the directory behind dirFd, which it
 // closes, in the lexical order filepath.WalkDir visited them. path is the
 // directory's path as the caller spelled root; it names findings and labels
@@ -418,6 +437,10 @@ func walk(dirFd int, path string, depth int, report *Report) error {
 				return fmt.Errorf("regionfsck: working set is nested deeper than %d directories at %q", maxWalkDepth, entryPath)
 			}
 			fd, err := openAt(dirFd, name, openDirFlags)
+			if changedSinceTheHint(err) {
+				report.Skipped++
+				continue
+			}
 			if err != nil {
 				return &os.PathError{Op: "open", Path: entryPath, Err: err}
 			}
@@ -428,15 +451,23 @@ func walk(dirFd int, path string, depth int, report *Report) error {
 			if !strings.HasSuffix(name, ".mca") {
 				continue
 			}
-			report.Scanned++
 			fd, err := openAt(dirFd, name, openFileFlags)
+			if changedSinceTheHint(err) {
+				report.Skipped++
+				continue
+			}
 			if err != nil {
 				return &os.PathError{Op: "open", Path: entryPath, Err: err}
 			}
 			reason, err := checkOpened(fd, entryPath)
+			if errors.Is(err, errNotRegular) {
+				report.Skipped++
+				continue
+			}
 			if err != nil {
 				return err
 			}
+			report.Scanned++
 			if reason != ReasonNone {
 				report.Corrupt = append(report.Corrupt, Finding{Path: entryPath, Reason: reason})
 			}

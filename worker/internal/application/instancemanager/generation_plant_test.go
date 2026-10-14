@@ -344,17 +344,40 @@ func TestRunningSnapshotDeclaresNoBaseForAPlantedMarkerAndRestampsIt(t *testing.
 }
 
 // A directory planted at the marker cannot be renamed over, so the write fails: the
-// set keeps reading as generation 0 and nothing is declared held.
+// set keeps reading as generation 0 and nothing is declared held. Each failed write
+// removes its own temp (issue #3350): a running server is stamped after every
+// periodic snapshot, so a temp left per failure would pile up for as long as the
+// directory stays. The directory itself, and what is in it, is left alone.
 func TestWriteGenerationFailsOnADirectoryAtTheMarker(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.Mkdir(filepath.Join(dir, generationFile), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeGeneration(dir, 7); err == nil {
-		t.Fatal("writeGeneration over a directory = nil, want an error")
+	inside := filepath.Join(dir, generationFile, "server-file")
+	if err := os.WriteFile(inside, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		err := writeGeneration(dir, 7)
+		if err == nil {
+			t.Fatal("writeGeneration over a directory = nil, want an error")
+		}
+		if !strings.Contains(err.Error(), generationFile) {
+			t.Errorf("writeGeneration error %q does not name the marker", err)
+		}
 	}
 	if gen, err := readGenerationMarker(dir); gen != 0 || err == nil {
 		t.Fatalf("readGenerationMarker = %d, %v; want 0 and a refusal", gen, err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != generationFile {
+		t.Fatalf("working-set root after three failed writes = %v, want only the planted directory", entries)
+	}
+	if _, err := os.Stat(inside); err != nil {
+		t.Fatalf("the planted directory's content: %v, want it untouched", err)
 	}
 }
 
