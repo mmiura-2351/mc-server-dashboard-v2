@@ -32,7 +32,8 @@ import (
 // Staying inside the tree is still not enough for a file with more than one
 // name, because re-owning acts on the inode and another name of it may be
 // outside the tree. Such a file is handed over only once every one of its names
-// has been found inside (handOverLinked, issue #3338).
+// has been found inside, while the Worker's own writers are kept from moving a
+// name (handOverLinked, issues #3338 and #3371).
 
 // quiescentStates are the Engine container states in which no process of the
 // container exists. Every other state — running, paused, restarting, removing,
@@ -229,19 +230,25 @@ func (d *Driver) handOverNamed(dirFd int, name, path string, w *handOverWalk) (i
 // fs.protected_hardlinks is set to, and whoever made the link.
 //
 // The count is only proof while no name of the file is added, removed or moved
-// under the walk — which is what awaitQuiescent establishes for the server's
-// code. Short of that, a file whose link count is no longer what it was when the
-// walk first met it keeps its owner, which covers a name removed after it was
-// counted and a name added.
+// under the walk. A file whose link count is no longer what it was when the walk
+// first met it keeps its owner, which covers a name removed after it was counted
+// and a name added. A name that MOVES — from where it was counted to where the
+// walk has yet to look — is counted twice at an unchanged link count, and nothing
+// in the walk can tell. So nothing may move one, and two things see to that:
 //
-// What it does not cover is a name that MOVES during the walk, from where it was
-// counted to where the walk has yet to look: it is counted twice at an unchanged
-// link count. The Worker's own file edit is not held off while the walk runs and
-// publishes by renaming a temporary name, and a server can have put an
-// outside-linked file under that temporary name before it stopped — a schedule
-// that double-counts with no server code running (issue #3371). Nor does a count
-// of names mean anything where the host has mounted part of the working set a
-// second time inside it: the same names are then met twice (also #3371).
+//   - the server's code is not running (awaitQuiescent);
+//   - the Worker's own writers are held off. They are what moves a name with no
+//     server code running: a file edit and a generation-marker write each publish
+//     by renaming a temporary name into place, and a server can have put a file
+//     that is also named outside under that temporary name before it stopped.
+//     Each holds the spec's WorkingSetLock for as long as its temporary name
+//     exists, and createServerContainer holds it across the walk (issue #3371).
+//
+// What the count cannot account for is a host that mounts part of a working set
+// a second time inside it: the same directory entries are then met twice with no
+// second link behind them. Nothing the Worker or a server does creates a mount
+// there, and a working set with one is outside the supported topology
+// (docs/app/SECURITY.md).
 //
 // The entry is opened without following a link (O_PATH: nothing is read, and a
 // FIFO or device is not really opened), and both the link count and the
@@ -265,6 +272,7 @@ func (d *Driver) handOverLinked(dirFd int, name, path string, w *handOverWalk) e
 	}
 	f.names++
 	if f.names != f.nlink || uint64(st.Nlink) != f.nlink {
+		afterNameCounted(path)
 		return nil
 	}
 	if err := d.chownAt(fd, "", d.runAsUID, d.runAsGID); err != nil {
@@ -274,6 +282,11 @@ func (d *Driver) handOverLinked(dirFd int, name, path string, w *handOverWalk) e
 	w.stats.changed++
 	return nil
 }
+
+// afterNameCounted runs once handOverLinked has counted a name of a file it
+// leaves with its owner for now, with that name's path. A test replaces it to act
+// between two entries of one walk; production never reassigns it.
+var afterNameCounted = func(string) {}
 
 // chownAtNoFollow re-owns the entry name of the directory behind dirFd, or —
 // given an empty name — the file behind dirFd itself. It never follows a
