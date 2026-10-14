@@ -214,8 +214,8 @@ type Manager struct {
 	// scanRegion reads the (mtime, size) of a working set's .mca files for the
 	// settle-wait. It is a field defaulted to scanRegionState in New so a test can
 	// inject a deterministic "still changing" / "now stable" sequence without racing
-	// the real filesystem. mem is shared by the scans of one settle-wait.
-	scanRegion func(root string, mem *settleMemory) (regionState, error)
+	// the real filesystem.
+	scanRegion func(root string) (regionState, error)
 
 	// snapshotAfterRunningCheck, when non-nil, runs between handleSnapshot's
 	// UNRESERVED running check and the stopped path's reserve() -- the window in
@@ -1936,27 +1936,34 @@ func (m *Manager) drainPendingSaveOn(seal bool) map[string]saveOnTarget {
 // region writes have stopped. It gives up (false) after settleBudget so a world
 // that never settles refuses the periodic snapshot (quiesce_unavailable) instead of
 // waiting unbounded, and returns false on ctx cancellation. A scan I/O error is
-// treated as "not yet settled" and retried within the budget rather than aborting.
-// So is a scan that may have missed region files (errSettleUncertain): it cannot be
-// either of the two identical scans. The scans of one call share a settleMemory,
-// which is what lets a skipped entry known to hold no region file count as certain.
+// treated as "not yet settled" and retried within the budget rather than aborting,
+// and so is a scan that met an entry swapped under it (errSettleUncertain): only
+// two consecutive complete scans can settle. The budget-exhausted WARN counts the
+// uncertain scans, so a refusal caused by entries changing under the scan says so.
 func (m *Manager) settleWorkingSet(ctx context.Context, serverID, workingDir string) bool {
 	deadline := time.Now().Add(m.settleBudget)
-	mem := newSettleMemory()
-	prev, err := m.scanRegion(workingDir, mem)
+	uncertain := 0
+	scan := func() (regionState, error) {
+		state, err := m.scanRegion(workingDir)
+		if errors.Is(err, errSettleUncertain) {
+			uncertain++
+		}
+		return state, err
+	}
+	prev, err := scan()
 	for {
 		select {
 		case <-ctx.Done():
 			return false
 		case <-time.After(m.settlePollInterval):
 		}
-		cur, curErr := m.scanRegion(workingDir, mem)
+		cur, curErr := scan()
 		if err == nil && curErr == nil && regionStateEqual(prev, cur) {
 			return true
 		}
 		if time.Now().After(deadline) {
 			m.logger.Warn("snapshot quiesce: working set did not settle within budget; refusing",
-				"server_id", serverID, "budget", m.settleBudget)
+				"server_id", serverID, "budget", m.settleBudget, "uncertain_scans", uncertain)
 			return false
 		}
 		prev, err = cur, curErr
@@ -1982,31 +1989,16 @@ type regionState map[string]struct {
 // between the listing and the open is not followed out of the working set.
 //
 // A directory gone or of another kind by the time the scan opens it, or a region
-// file gone by the time the scan lstats it, is skipped and the scan goes on. If
-// every swap failed the scan, a server could refuse its own snapshots and skip
-// its pre-stop flush by flipping any one name, because a failed scan counts as
-// "not settled". But a skip must not make an incomplete scan look stable either,
-// or a server could hide a region directory that is still being written behind a
-// swap at every open, and two scans that both missed it would match (issue #3388).
-// So a scan that skipped what may hold region files returns errSettleUncertain,
-// with the state it did record, and the settle-wait keeps polling. Such a skip
-// is:
-//   - a region file that vanished: that is region churn;
-//   - a directory that this settle-wait has not yet descended into, or whose
-//     subtree, when it last did, held a region file or skipped what may
-//     (mem.regionFree);
-//   - any skip while a region file an earlier scan of this settle-wait recorded is
-//     missing. Without this check, a region directory moved into a directory
-//     already seen empty, which is then skipped every time, would drop out of
-//     view.
-//
-// A skipped directory that was seen with no region file does not make the scan
-// uncertain. So a name the server keeps flipping between a file and a directory
-// stops mattering once one scan has seen it as a directory.
+// file gone by the time the scan lstats it, ends the scan with errSettleUncertain:
+// the scan is incomplete, and an incomplete scan must never be one of the two that
+// certify a settled save — a skipped directory may be a region directory still
+// being written. So server code that keeps swapping names under the scan keeps its
+// own settle-wait polling until the budget, as server code that keeps writing a
+// region file does; neither can be told apart from a save still in flight.
 //
 // A region file replaced by something else is lstat'ed as whatever replaced it,
 // and compared as a rewrite of it would be.
-func scanRegionState(root string, mem *settleMemory) (regionState, error) {
+func scanRegionState(root string) (regionState, error) {
 	rootFd, err := unix.Open(root, settleDirFlags, 0)
 	if errors.Is(err, unix.ENOENT) {
 		return regionState{}, nil
@@ -2014,51 +2006,17 @@ func scanRegionState(root string, mem *settleMemory) (regionState, error) {
 	if err != nil {
 		return nil, &os.PathError{Op: "open", Path: root, Err: err}
 	}
-	s := regionScan{mem: mem, state: regionState{}}
-	if _, err := s.dir(rootFd, root, 0); err != nil {
+	state := regionState{}
+	if err := scanRegionDir(rootFd, root, 0, state); err != nil {
 		return nil, err
 	}
-	if s.skipped {
-		for p := range mem.seen {
-			if _, ok := s.state[p]; !ok {
-				s.uncertain = true
-			}
-		}
-	}
-	for p := range s.state {
-		mem.seen[p] = true
-	}
-	if s.uncertain {
-		return s.state, errSettleUncertain
-	}
-	return s.state, nil
+	return state, nil
 }
 
-// errSettleUncertain is a scan that skipped what may hold region files: it says
-// nothing about whether the save has settled.
-var errSettleUncertain = errors.New("instancemanager: the settle scan skipped what may hold region files")
-
-// settleMemory is what the scans of one settle-wait learn about the working set
-// and pass on to the next: regionFree maps each directory the scan has descended
-// into to whether its subtree held no region file that time, and seen holds every
-// region file a scan recorded.
-type settleMemory struct {
-	regionFree map[string]bool
-	seen       map[string]bool
-}
-
-func newSettleMemory() *settleMemory {
-	return &settleMemory{regionFree: map[string]bool{}, seen: map[string]bool{}}
-}
-
-// regionScan is one scan in progress: the state it records, and whether it skipped
-// anything and whether any skip leaves it uncertain.
-type regionScan struct {
-	mem       *settleMemory
-	state     regionState
-	skipped   bool
-	uncertain bool
-}
+// errSettleUncertain is a scan that met an entry gone or of another kind since its
+// directory was listed: it is incomplete, and says nothing about whether the save
+// has settled.
+var errSettleUncertain = errors.New("instancemanager: an entry changed under the settle scan")
 
 // settleDirFlags opens a directory of the settle scan without following a link.
 const settleDirFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
@@ -2083,67 +2041,55 @@ var (
 	}
 )
 
-// dir records every .mca beneath the directory behind dirFd, which it closes, and
-// reports whether that subtree may hold one: it recorded one, or skipped what may.
-// path is the directory's path as the caller spelled root; it keys the state and
-// labels errors and is never resolved. depth is the directory's level below root.
-func (s *regionScan) dir(dirFd int, path string, depth int) (bool, error) {
+// scanRegionDir records into state every .mca beneath the directory behind dirFd,
+// which it closes. path is the directory's path as the caller spelled root; it keys
+// state and labels errors and is never resolved. depth is the directory's level
+// below root.
+func scanRegionDir(dirFd int, path string, depth int, state regionState) error {
 	dir := os.NewFile(uintptr(dirFd), path)
 	defer func() { _ = dir.Close() }()
 	entries, err := dir.ReadDir(-1)
 	if err != nil {
-		return false, &os.PathError{Op: "readdir", Path: path, Err: err}
+		return &os.PathError{Op: "readdir", Path: path, Err: err}
 	}
-	mayHold := false
 	for _, entry := range entries {
 		name := entry.Name()
 		entryPath := filepath.Join(path, name)
 		if entry.IsDir() {
 			if depth+1 > settleScanMaxDepth {
-				return false, fmt.Errorf("instancemanager: working set is nested deeper than %d directories at %q", settleScanMaxDepth, entryPath)
+				return fmt.Errorf("instancemanager: working set is nested deeper than %d directories at %q", settleScanMaxDepth, entryPath)
 			}
 			fd, err := settleOpenDirAt(dirFd, name)
 			if errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ENOTDIR) {
 				// Gone, or replaced by anything else (a link included), since the
 				// listing.
-				s.skipped = true
-				if !s.mem.regionFree[entryPath] {
-					s.uncertain = true
-					mayHold = true
-				}
-				continue
+				return errSettleUncertain
 			}
 			if err != nil {
-				return false, &os.PathError{Op: "open", Path: entryPath, Err: err}
+				return &os.PathError{Op: "open", Path: entryPath, Err: err}
 			}
-			sub, err := s.dir(fd, entryPath, depth+1)
-			if err != nil {
-				return false, err
+			if err := scanRegionDir(fd, entryPath, depth+1, state); err != nil {
+				return err
 			}
-			s.mem.regionFree[entryPath] = !sub
-			mayHold = mayHold || sub
 			continue
 		}
 		if !strings.HasSuffix(name, ".mca") {
 			continue
 		}
-		mayHold = true
 		var st unix.Stat_t
 		err := settleStatAt(dirFd, name, &st)
 		if errors.Is(err, unix.ENOENT) {
-			s.skipped = true
-			s.uncertain = true
-			continue
+			return errSettleUncertain
 		}
 		if err != nil {
-			return false, &os.PathError{Op: "lstat", Path: entryPath, Err: err}
+			return &os.PathError{Op: "lstat", Path: entryPath, Err: err}
 		}
-		s.state[entryPath] = struct {
+		state[entryPath] = struct {
 			modTime time.Time
 			size    int64
 		}{time.Unix(st.Mtim.Unix()), st.Size}
 	}
-	return mayHold, nil
+	return nil
 }
 
 // regionStateEqual reports whether two region-state scans are identical: the same
