@@ -17,6 +17,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -61,6 +62,14 @@ var ErrResponseTooLarge = errors.New("rcon: response too large")
 // is poisoned on such a failure so reuse fails fast and forces a redial rather
 // than reading a stale response off the broken stream.
 var ErrConnBroken = errors.New("rcon: connection poisoned by a prior I/O error")
+
+// ErrCommandDropped is returned by Execute when the server closed the connection
+// (EOF or reset) after the command was written and before any reply to it. That
+// is how vanilla answers a request packet that did not arrive in one read: it
+// drops the connection without running the command (issue #3366, CONTROL_PLANE.md
+// Section 3.1). It is told apart from a hung server (a timeout) and from a
+// failure to connect or authenticate.
+var ErrCommandDropped = errors.New("rcon: server closed the connection without replying to the command")
 
 // Client is a single authenticated RCON connection. It is not safe for
 // concurrent use; callers serialize commands per server.
@@ -113,8 +122,9 @@ func Dial(ctx context.Context, addr, password string) (*Client, error) {
 // It honours ctx's deadline for the round trip, and falls back to
 // defaultExecuteTimeout when ctx carries none, so a server that accepts the
 // connection but never replies cannot block the call forever. It returns
-// ctx.Err() when ctx cancellation caused the failure, and ErrConnBroken when
-// the connection was poisoned by a prior failed round trip.
+// ctx.Err() when ctx cancellation caused the failure, ErrConnBroken when the
+// connection was poisoned by a prior failed round trip, and ErrCommandDropped
+// when the server closed the connection without replying to the command.
 func (c *Client) Execute(ctx context.Context, line string) (string, error) {
 	if c.broken {
 		return "", ErrConnBroken
@@ -131,6 +141,9 @@ func (c *Client) Execute(ctx context.Context, line string) (string, error) {
 		for {
 			respID, typ, b, err := c.read()
 			if err != nil {
+				if !markerSent && isConnClosed(err) {
+					return fmt.Errorf("%w: %w", ErrCommandDropped, err)
+				}
 				return err
 			}
 			if !markerSent {
@@ -167,6 +180,13 @@ func (c *Client) Execute(ctx context.Context, line string) (string, error) {
 		return "", err
 	}
 	return body, nil
+}
+
+// isConnClosed reports whether a read failed because the peer closed the
+// connection: EOF when it had read everything sent, a reset when bytes it never
+// read were still queued.
+func isConnClosed(err error) bool {
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, syscall.ECONNRESET)
 }
 
 // withDeadline runs fn while a per-call deadline (ctx's, or defaultExecuteTimeout
