@@ -947,10 +947,11 @@ type instance struct {
 	// installCtx is what superviseInstall creates its containers under — the
 	// install retry and the launch container, each of which first waits for the
 	// working-set lock and walks the working set (issue #3371). endInstall cancels
-	// it the moment a Stop is requested and when the instance ends, so neither the
-	// wait nor the walk outlives the instance it is for. It carries no deadline:
-	// the same walk under Start has none either, and a working set that takes long
-	// to walk still has to be handed over before its server can run.
+	// it the moment a Stop is requested, so neither the wait nor the walk goes on
+	// for an instance that is being stopped; nothing else ends the supervisor
+	// early, as before. It carries no deadline: the same walk under Start has none
+	// either, and a working set that takes long to walk still has to be handed
+	// over before its server can run.
 	installCtx context.Context
 	endInstall context.CancelFunc
 	// rconHost is the host the graceful-stop RCON connection dials: empty for the
@@ -1599,7 +1600,6 @@ func (i *instance) finishInstallCrash(reason execution.CrashReason, detail strin
 }
 
 func (i *instance) finish(state execution.ServerState, detail string, reason execution.CrashReason) {
-	i.endInstall()
 	i.set(state)
 	i.mu.Lock()
 	i.emitLocked(state, detail, reason)

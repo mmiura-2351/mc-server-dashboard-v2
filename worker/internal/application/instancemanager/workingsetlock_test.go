@@ -77,6 +77,22 @@ func TestEditFileHoldsTheWorkingSetLockWhileItPublishes(t *testing.T) {
 	}
 }
 
+// With nothing holding the lock an edit does not wait, so it does not consult its
+// context either: it writes as it did before the lock existed.
+func TestEditFileWritesWithoutWaitingWhenTheLockIsFree(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	target := writeWorkingFile(t, m, "s1", "server.properties", []byte("motd=old"))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if res := m.Handle(ctx, editMotd()); !res.Success {
+		t.Fatalf("EditFile = %+v, want success", res)
+	}
+	if got, err := os.ReadFile(target); err != nil || string(got) != "motd=new" {
+		t.Fatalf("the target reads %q (%v), want the edit published", got, err)
+	}
+}
+
 // A refused edit releases the lock too: here the target is a directory.
 func TestEditFileReleasesTheWorkingSetLockWhenItFails(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
