@@ -481,6 +481,8 @@ func mapErrorCode(code session.CommandErrorCode) controlplanev1.CommandErrorCode
 		return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_IMAGE_MISSING
 	case session.CommandErrorBusy:
 		return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_BUSY
+	case session.CommandErrorCommandDropped:
+		return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_COMMAND_DROPPED
 	default:
 		return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_INTERNAL
 	}

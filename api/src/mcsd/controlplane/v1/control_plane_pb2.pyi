@@ -186,6 +186,14 @@ class _CommandErrorCodeEnumTypeWrapper(_enum_type_wrapper._EnumTypeWrapper[_Comm
     is not yet known, so the API must NOT converge an observed state on it — it
     keeps the assignment/intent and retries on a later reconcile tick.
     """
+    COMMAND_ERROR_CODE_COMMAND_DROPPED: _CommandErrorCode.ValueType  # 10
+    """A ServerCommand was written to RCON and the game server closed the
+    connection (EOF or reset) without replying to it (issue #3366). Vanilla does
+    that, without running the command, to a packet that did not arrive in one
+    read, so it most often means a command near the length limit on a network
+    path that split it (CONTROL_PLANE.md Section 3.1). Distinct from INTERNAL so
+    the API can tell a dropped command from a server it could not reach.
+    """
 
 class CommandErrorCode(_CommandErrorCode, metaclass=_CommandErrorCodeEnumTypeWrapper):
     """CommandErrorCode classifies a command failure."""
@@ -223,6 +231,14 @@ reconnect, or a detached stop still confirming termination), not in a
 settled state like "already running". The outcome of the in-flight command
 is not yet known, so the API must NOT converge an observed state on it — it
 keeps the assignment/intent and retries on a later reconcile tick.
+"""
+COMMAND_ERROR_CODE_COMMAND_DROPPED: CommandErrorCode.ValueType  # 10
+"""A ServerCommand was written to RCON and the game server closed the
+connection (EOF or reset) without replying to it (issue #3366). Vanilla does
+that, without running the command, to a packet that did not arrive in one
+read, so it most often means a command near the length limit on a network
+path that split it (CONTROL_PLANE.md Section 3.1). Distinct from INTERNAL so
+the API can tell a dropped command from a server it could not reach.
 """
 Global___CommandErrorCode: _TypeAlias = CommandErrorCode  # noqa: Y015
 

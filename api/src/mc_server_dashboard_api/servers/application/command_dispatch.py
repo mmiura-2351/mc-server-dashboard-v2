@@ -38,11 +38,17 @@ _LOG = logging.getLogger(__name__)
 # settled failure. It is not lifecycle-only: the backup-create route renders the
 # same reason for a SnapshotTrigger the Worker refused with BUSY (issue #2436),
 # which is the only sanitized status that kind can produce.
+#
+# ``command_dropped`` (issue #3366): the game server closed its RCON connection
+# without replying to a console command, which is how it answers a packet that did
+# not arrive in one read. Only a ServerCommand can produce it, and it tells the
+# user the server was reached but dropped the command -- not that it is down.
 WORKER_BUSY_REASON = "worker_busy"
 _SANITIZED_REASONS: dict[CommandStatus, str] = {
     CommandStatus.PORT_CONFLICT: "port_conflict",
     CommandStatus.IMAGE_MISSING: "image_missing",
     CommandStatus.BUSY: WORKER_BUSY_REASON,
+    CommandStatus.COMMAND_DROPPED: "command_dropped",
 }
 
 # The Worker refused the command because it holds a failed-stop orphan for the

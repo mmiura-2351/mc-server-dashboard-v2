@@ -66,6 +66,9 @@ class CommandResultCode(enum.Enum):
     # INVALID_STATE: the in-flight command's outcome is unknown, so the caller
     # keeps its assignment/intent and retries rather than converging a state.
     BUSY = "busy"
+    # The game server closed its RCON connection without replying to a console
+    # command (issue #3366): the command was dropped, the server was reached.
+    COMMAND_DROPPED = "command_dropped"
 
 
 class FileAccessReason(enum.Enum):

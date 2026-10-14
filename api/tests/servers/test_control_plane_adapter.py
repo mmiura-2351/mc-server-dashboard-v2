@@ -453,6 +453,20 @@ async def test_sanitized_start_failure_maps_to_status(
     assert outcome.status is status
 
 
+async def test_dropped_console_command_maps_to_status() -> None:
+    # RCON dropped the console command without replying (issue #3366); the
+    # Worker's dedicated code carries through to the servers-side status.
+    fleet = _CapturingFleetControlPlane(
+        result=CommandResult(code=CommandResultCode.COMMAND_DROPPED, message="x")
+    )
+    adapter = _adapter(fleet)
+
+    outcome = await adapter.command(
+        worker_id=WorkerId(uuid.uuid4()), server_id=ServerId(uuid.uuid4()), line="list"
+    )
+    assert outcome.status is CommandStatus.COMMAND_DROPPED
+
+
 @pytest.mark.parametrize(
     ("server_type", "launch_mode"),
     [

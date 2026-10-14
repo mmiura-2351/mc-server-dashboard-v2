@@ -23,6 +23,11 @@ describe("consoleCommandErrorPresentation", () => {
       "serverDetail.console.error.rconFailed",
     ],
     [
+      "names a command the server dropped without answering",
+      new ApiError(409, { reason: "command_dropped" }),
+      "serverDetail.console.error.commandDropped",
+    ],
+    [
       "names a server whose previous stop did not finish",
       new ApiError(409, { reason: "failed_stop_orphan" }),
       "serverDetail.console.error.failedStopOrphan",

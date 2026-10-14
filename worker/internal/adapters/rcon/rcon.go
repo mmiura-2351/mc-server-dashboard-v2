@@ -17,6 +17,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -62,12 +63,25 @@ var ErrResponseTooLarge = errors.New("rcon: response too large")
 // than reading a stale response off the broken stream.
 var ErrConnBroken = errors.New("rcon: connection poisoned by a prior I/O error")
 
+// ErrCommandDropped is returned by Execute when the server closed the connection
+// (EOF or reset) after the command was written and before a single response byte
+// arrived. That is how vanilla answers a request packet that did not arrive in
+// one read: it drops the connection without running the command (issue #3366,
+// CONTROL_PLANE.md Section 3.1). A server that ran the command and died before
+// answering looks the same, so whether it ran stays uncertain. It is told apart
+// from a hung server (a timeout), from a reply cut short (some bytes arrived), and
+// from a failure to connect or authenticate.
+var ErrCommandDropped = errors.New("rcon: server closed the connection without replying to the command")
+
 // Client is a single authenticated RCON connection. It is not safe for
 // concurrent use; callers serialize commands per server.
 type Client struct {
 	conn   net.Conn
 	nextID int32
 	broken bool
+	// received counts the bytes read off conn, so Execute can tell a close
+	// before any response byte (a dropped command) from a reply cut short.
+	received int
 }
 
 // Dial opens an RCON connection to addr and authenticates with password. It
@@ -113,8 +127,9 @@ func Dial(ctx context.Context, addr, password string) (*Client, error) {
 // It honours ctx's deadline for the round trip, and falls back to
 // defaultExecuteTimeout when ctx carries none, so a server that accepts the
 // connection but never replies cannot block the call forever. It returns
-// ctx.Err() when ctx cancellation caused the failure, and ErrConnBroken when
-// the connection was poisoned by a prior failed round trip.
+// ctx.Err() when ctx cancellation caused the failure, ErrConnBroken when the
+// connection was poisoned by a prior failed round trip, and ErrCommandDropped
+// when the server closed the connection before sending any response byte.
 func (c *Client) Execute(ctx context.Context, line string) (string, error) {
 	if c.broken {
 		return "", ErrConnBroken
@@ -126,11 +141,17 @@ func (c *Client) Execute(ctx context.Context, line string) (string, error) {
 		if err := c.write(cmdID, typeExecCommand, line); err != nil {
 			return err
 		}
+		written := c.received
 		var buf strings.Builder
 		markerSent := false
 		for {
 			respID, typ, b, err := c.read()
 			if err != nil {
+				// Dropped only if not one response byte arrived: once any has, the
+				// server was answering and may have run the command.
+				if c.received == written && isConnClosed(err) {
+					return fmt.Errorf("%w: %w", ErrCommandDropped, err)
+				}
 				return err
 			}
 			if !markerSent {
@@ -167,6 +188,13 @@ func (c *Client) Execute(ctx context.Context, line string) (string, error) {
 		return "", err
 	}
 	return body, nil
+}
+
+// isConnClosed reports whether a read failed because the peer closed the
+// connection: EOF when it had read everything sent, a reset when bytes it never
+// read were still queued.
+func isConnClosed(err error) bool {
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, syscall.ECONNRESET)
 }
 
 // withDeadline runs fn while a per-call deadline (ctx's, or defaultExecuteTimeout
@@ -268,16 +296,22 @@ func (c *Client) write(id, typ int32, body string) error {
 }
 
 // read decodes one packet.
+// It counts every byte it receives in c.received, whole packet or not.
 func (c *Client) read() (id, typ int32, body string, err error) {
-	var length int32
-	if err = binary.Read(c.conn, binary.LittleEndian, &length); err != nil {
+	var prefix [4]byte
+	n, err := io.ReadFull(c.conn, prefix[:])
+	c.received += n
+	if err != nil {
 		return 0, 0, "", fmt.Errorf("rcon: read length: %w", err)
 	}
+	length := int32(binary.LittleEndian.Uint32(prefix[:]))
 	if length < 10 || length > maxBodyLen {
 		return 0, 0, "", fmt.Errorf("rcon: invalid packet length %d", length)
 	}
 	buf := make([]byte, length)
-	if _, err = io.ReadFull(c.conn, buf); err != nil {
+	n, err = io.ReadFull(c.conn, buf)
+	c.received += n
+	if err != nil {
 		return 0, 0, "", fmt.Errorf("rcon: read body: %w", err)
 	}
 	id = int32(binary.LittleEndian.Uint32(buf[0:4]))

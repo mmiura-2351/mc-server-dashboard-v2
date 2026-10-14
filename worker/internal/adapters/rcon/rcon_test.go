@@ -1,14 +1,17 @@
 package rcon
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
 	"io"
 	"math"
 	"net"
+	"os"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -324,6 +327,211 @@ func TestExecuteEmptyReplyCompletes(t *testing.T) {
 	}
 	if out != "" {
 		t.Fatalf("Execute reply = %q, want empty", out)
+	}
+}
+
+// recordingConn records the bytes of every Write call, so a test can see how the
+// client split its traffic across writes.
+type recordingConn struct {
+	net.Conn
+	mu     sync.Mutex
+	writes [][]byte
+}
+
+func (r *recordingConn) Write(p []byte) (int, error) {
+	r.mu.Lock()
+	r.writes = append(r.writes, append([]byte(nil), p...))
+	r.mu.Unlock()
+	return r.Conn.Write(p)
+}
+
+// Vanilla RCON accepts a packet only when it arrives in ONE read (measured on
+// 1.16.5, issue #3366): a packet written in two parts more than ~1 ms apart was
+// dropped 100/100 times, even a 114-byte one, and two back-to-back writes were
+// dropped 23-37% of the time. So every packet the client sends -- the auth, the
+// command and the end-of-response marker -- must leave in a single Write that
+// carries exactly that packet. The command is the largest one the server accepts
+// (MaxConsoleLineBytes in instancemanager), so a split at any size shows here.
+func TestEveryPacketIsOneWrite(t *testing.T) {
+	srv, cli := net.Pipe()
+	rec := &recordingConn{Conn: cli}
+	t.Cleanup(func() { _ = cli.Close() })
+
+	go func() {
+		defer func() { _ = srv.Close() }()
+		authID, _, _, err := readPacket(srv)
+		if err != nil {
+			return
+		}
+		_ = writePacket(srv, authID, typeAuthResponse, "")
+		cmdID, _, _, err := readPacket(srv)
+		if err != nil {
+			return
+		}
+		_ = writePacket(srv, cmdID, typeResponseValue, "ok")
+		markerID, _, _, err := readPacket(srv)
+		if err != nil {
+			return
+		}
+		_ = writePacket(srv, markerID, typeResponseValue, "")
+	}()
+
+	c := &Client{conn: rec, nextID: 1}
+	if err := c.authenticate("secret"); err != nil {
+		t.Fatalf("authenticate: %v", err)
+	}
+	if _, err := c.Execute(context.Background(), strings.Repeat("a", 1446)); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.writes) != 3 {
+		t.Fatalf("client made %d Write calls for 3 packets (auth, command, marker), want exactly one each",
+			len(rec.writes))
+	}
+	for i, w := range rec.writes {
+		if len(w) < 4 || int(binary.LittleEndian.Uint32(w[0:4])) != len(w)-4 {
+			t.Fatalf("Write %d carried %d bytes that are not exactly one whole packet: vanilla RCON drops "+
+				"a packet that does not arrive in one read", i, len(w))
+		}
+	}
+}
+
+// A server that closes the connection without replying to a command dropped it:
+// vanilla does that, without running the command, to a packet that did not arrive
+// in one read (issue #3366). Execute names that case so it can be told apart from
+// any other RCON failure. A close shows up as EOF when the server had read
+// everything, and as a reset when bytes it never read were still queued -- the
+// tail of a packet split across TCP segments.
+func TestExecuteReportsADroppedCommand(t *testing.T) {
+	t.Run("eof", func(t *testing.T) {
+		srv, cli := net.Pipe()
+		t.Cleanup(func() { _ = cli.Close() })
+		go func() {
+			_, _, _, _ = readPacket(srv)
+			_ = srv.Close()
+		}()
+
+		c := &Client{conn: cli, nextID: 1}
+		if _, err := c.Execute(context.Background(), "list"); !errors.Is(err, ErrCommandDropped) {
+			t.Fatalf("Execute error = %v, want ErrCommandDropped", err)
+		}
+	})
+
+	t.Run("reset", func(t *testing.T) {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		t.Cleanup(func() { _ = ln.Close() })
+		go func() {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_, _, _, _ = readPacket(conn)
+			// Linger 0 makes Close send a RST, as a close with unread bytes does.
+			_ = conn.(*net.TCPConn).SetLinger(0)
+			_ = conn.Close()
+		}()
+
+		cli, err := net.Dial("tcp", ln.Addr().String())
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		t.Cleanup(func() { _ = cli.Close() })
+		c := &Client{conn: cli, nextID: 1}
+		if _, err := c.Execute(context.Background(), "list"); !errors.Is(err, ErrCommandDropped) {
+			t.Fatalf("Execute error = %v, want ErrCommandDropped", err)
+		}
+	})
+}
+
+// scriptedConn answers every Write and then serves reply byte by byte as the
+// server's response, failing with err once reply is used up. It pins exactly how
+// many response bytes reached the client before the connection ended.
+type scriptedConn struct {
+	net.Conn
+	reply []byte
+	err   error
+}
+
+func (s *scriptedConn) Write(p []byte) (int, error) { return len(p), nil }
+
+func (s *scriptedConn) Read(p []byte) (int, error) {
+	if len(s.reply) == 0 {
+		return 0, s.err
+	}
+	n := copy(p, s.reply)
+	s.reply = s.reply[n:]
+	return n, nil
+}
+
+func (s *scriptedConn) SetDeadline(time.Time) error { return nil }
+func (s *scriptedConn) Close() error                { return nil }
+
+// A command is dropped only when NO response byte arrived after it was written.
+// Once any byte has arrived the server was answering -- it may have run the
+// command and died mid-reply -- so the ordinary failure stands. The auth handshake
+// is never a dropped command either.
+func TestExecuteResponseBytesMeanNotDropped(t *testing.T) {
+	var reply bytes.Buffer
+	if err := writePacket(&reply, 1, typeResponseValue, "There are 2 players online"); err != nil {
+		t.Fatal(err)
+	}
+	full := reply.Bytes()
+	reset := &net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("read", syscall.ECONNRESET)}
+
+	cases := []struct {
+		name  string
+		reply []byte
+		err   error
+	}{
+		{"truncated length prefix", full[:2], io.EOF},
+		{"complete prefix, truncated body", full[:7], io.EOF},
+		{"reset after response bytes", full[:7], reset},
+		// The whole first reply arrived, so the marker went out; the connection
+		// then ended mid-stream (a lost marker reply or a later fragment).
+		{"close after the first reply", full, io.EOF},
+		{"reset after the first reply", full, reset},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &Client{conn: &scriptedConn{reply: tc.reply, err: tc.err}, nextID: 1}
+			_, err := c.Execute(context.Background(), "list")
+			if err == nil || errors.Is(err, ErrCommandDropped) {
+				t.Fatalf("Execute error = %v, want a failure that is not ErrCommandDropped", err)
+			}
+		})
+	}
+
+	t.Run("auth", func(t *testing.T) {
+		c := &Client{conn: &scriptedConn{err: io.EOF}, nextID: 1}
+		err := c.authenticate("secret")
+		if err == nil || errors.Is(err, ErrCommandDropped) {
+			t.Fatalf("authenticate error = %v, want a failure that is not ErrCommandDropped", err)
+		}
+	})
+}
+
+// A server that stays silent has not dropped the command, it is hung: the round
+// trip times out, and that must not read as a drop.
+func TestExecuteTimeoutIsNotADroppedCommand(t *testing.T) {
+	prev := defaultExecuteTimeout
+	defaultExecuteTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { defaultExecuteTimeout = prev })
+
+	fs := newSilentFakeServer(t, "secret")
+	c, err := Dial(context.Background(), fs.addr(), "secret")
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+
+	_, err = c.Execute(context.Background(), "list")
+	if err == nil || errors.Is(err, ErrCommandDropped) {
+		t.Fatalf("Execute error = %v, want a timeout that is not ErrCommandDropped", err)
 	}
 }
 
