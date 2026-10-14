@@ -200,7 +200,7 @@ func TestSnapshotTriggerRunningServerSettlesThenProceeds(t *testing.T) {
 	// scans match. Deterministic — no filesystem race.
 	seedWorkingSet(t, m, "s1", healthyRegion())
 	var calls int
-	m.scanRegion = func(string) (regionState, error) {
+	m.scanRegion = func(string, *settleMemory) (regionState, error) {
 		calls++
 		size := int64(calls)
 		if calls >= 4 {

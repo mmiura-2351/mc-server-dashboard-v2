@@ -644,7 +644,7 @@ func TestSnapshotTriggerRunningServerSettleTimeoutRefusesAndRestores(t *testing.
 	// grows), so no two consecutive scans ever match and the settle-wait is forced to
 	// hit its budget. Deterministic — no filesystem race.
 	var calls int
-	m.scanRegion = func(string) (regionState, error) {
+	m.scanRegion = func(string, *settleMemory) (regionState, error) {
 		calls++
 		return regionState{"r.0.0.mca": {modTime: time.Unix(0, 0), size: int64(calls)}}, nil
 	}
