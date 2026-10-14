@@ -573,8 +573,8 @@ plugins can reach it.
 
 Independently of the topology, the worker creates every container that runs
 server-controlled code — the launch container and the supervised Forge install
-container, first attempt or retry — with three restrictions (issues #2600,
-#3343):
+container, first attempt or retry — with these restrictions (issues #2600,
+#3343, #3369):
 
 - **An unprivileged user**, never root in the container: `driver.container.user`
   ([`CONFIGURATION.md`](CONFIGURATION.md) Section 6.3), `25565:25565` under the
@@ -587,6 +587,22 @@ container, first attempt or retry — with three restrictions (issues #2600,
 - **`no-new-privileges`** (`SecurityOpt: ["no-new-privileges"]`). An `execve`
   in the container never raises privileges: a setuid or setgid bit and a file
   capability are ignored.
+- **A task limit** (`PidsLimit: 4096`). Processes and threads together; a fork
+  or thread bomb in server code stops at its own container instead of using up
+  the host's pids under the worker and the other servers. A modded server runs
+  a few hundred threads. The limit is fixed, with no setting.
+- **A read-only root filesystem** (`ReadonlyRootfs`), with `/tmp` as the one
+  writable path outside the working set: a 256 MiB tmpfs mounted
+  `rw,exec,nosuid,nodev`. `/tmp` is the JVM's `user.home` and
+  `java.io.tmpdir`, so Java user preferences, temp files and the native
+  libraries JNA, Netty and profilers extract go there; loading those libraries
+  needs `exec`, which Docker's tmpfs default (`noexec`) would deny. What a
+  server keeps in `/tmp` is memory and counts against its memory limit. In the
+  shipped images the run-as user could already write nothing else on the root
+  filesystem apart from `/var/tmp`, `/run/lock` and an empty pebble state
+  directory, which neither the JVM nor the Forge installer uses (measured in
+  all seven images, with a JVM probe of each under these settings). A plugin
+  or mod that writes anywhere else outside `/data` and `/tmp` gets `EROFS`.
 
 **This is the premise the worker's own defences rest on**, stated exactly:
 server-controlled code runs as one unprivileged uid, with an empty capability
@@ -609,13 +625,14 @@ that code to files it owns or can read and write, which it cannot get around
 without `CAP_FOWNER`; no defence here depends on that setting.
 
 The premise depends on the worker's container creation and on nothing in the
-image: all three restrictions are fields of the create request, every create
+image: all of these restrictions are fields of the create request, every create
 the driver makes goes through the one function that sets them, and the worker
 never runs `docker exec` against these containers. A test guards that single
-path against regression, within limits: it reads only the driver package's own
-source and matches names, not types, so it catches a new create added inside
-the driver but not one made from another package or through a function value
-an allowed helper hands out. Each existing container kind is covered
+path against regression, within limits: it reads the driver package's source
+and every file of the worker module that imports it, the e2e harnesses
+included, and matches names, not types, so it catches a new create added inside
+the driver or made from another worker package, but not one made through a
+function value an allowed helper hands out. Each existing container kind is covered
 independently by tests on its create request. The premise also assumes a host
 that lets a container start under `no-new-privileges`: with SELinux enforcing,
 the container policy must allow that domain transition
@@ -630,7 +647,7 @@ fail. What the premise does not cover is the host side of the Docker socket: an
 operator's own `docker exec --privileged`, or a container someone else creates.
 
 Nothing a Minecraft server or the Forge installer does needs a capability. They
-write only to the working set, which the run-as user owns; they bind the game,
+write only to the working set, which the run-as user owns, and to `/tmp`; they bind the game,
 RCON and Geyser ports inside the container's own network namespace, where
 Docker makes every port unprivileged (`net.ipv4.ip_unprivileged_port_start=0`),
 so a game port below 1024 needs no `CAP_NET_BIND_SERVICE`; and JVM tooling that
@@ -819,10 +836,10 @@ security model, and the following remain true:
   and fetch a second stage.
 - **The host, not the network.** The worker holds the Docker socket, and
   container-level hardening is defence in depth underneath this boundary, not
-  part of it. Three items of it are in place (issues #2600 and #3343,
+  part of it. Five items of it are in place (issues #2600, #3343 and #3369,
   "Container hardening" above): MC containers run as an unprivileged user, with
-  no capabilities, under `no-new-privileges`. The rest is not implemented —
-  there is no read-only root filesystem, process-count limit, custom seccomp or
+  no capabilities, under `no-new-privileges`, with a task limit, on a read-only
+  root filesystem. The rest is not implemented — there is no custom seccomp or
   AppArmor profile (Docker's defaults apply) or user namespace.
   **TLS on the control and data planes is deferred** (owner decision on issue
   #2600): with MC containers off `mcsd`, the remaining observers of those

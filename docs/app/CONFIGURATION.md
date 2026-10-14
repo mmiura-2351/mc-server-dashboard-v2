@@ -660,6 +660,10 @@ a **hard ceiling** the process cannot exceed:
 |---|---|---|
 | `container` | **Hard ceiling — enforced.** The process cannot exceed the limit; the kernel OOM-kills it if it tries. | Docker `Memory` set to the limit, plus the derived `-Xmx`. |
 
+Files in the container's `/tmp`, a tmpfs of at most 256 MiB, are memory and
+count against the limit too ([`SECURITY.md`](SECURITY.md) Section 6,
+"Container hardening").
+
 #### Per-server CPU allocation: per-driver guarantee
 
 A server's `cpu_millis` (the operator-set per-server CPU allocation,
@@ -675,6 +679,12 @@ share.** What each driver does with it differs:
 
 These guarantees cover memory and CPU; disk quotas are deferred, not implemented
 (REQUIREMENTS.md Section 2.3).
+
+There is no disk I/O limit either, by decision (issue #3369). A relative I/O
+weight (`io.weight`) takes effect only where the host's block devices run the
+BFQ scheduler or otherwise support the cgroup v2 io controller's weights, which
+cannot be assumed. Throttling (`BlkioDeviceReadBps` and the like) needs a
+per-device `major:minor` and rate that only the operator could configure.
 
 ### 6.4 Observability
 
