@@ -32,6 +32,8 @@ type fakeDocker struct {
 	// container (issue #226). createCalls counts every Create call.
 	conflictsLeft int
 	createCalls   int
+	// onCreate, when set, runs at the start of every Create call.
+	onCreate func()
 	// createImageMissesLeft makes the next N Create calls fail with the daemon's
 	// "No such image" prose before a success, modelling a host that lacks the base
 	// image until the driver pulls it (issue #904). imagePulls records the images
@@ -156,6 +158,9 @@ func (f *fakeDocker) Create(_ context.Context, spec CreateSpec) (string, error) 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.createCalls++
+	if f.onCreate != nil {
+		f.onCreate()
+	}
 	if f.createErr != nil {
 		return "", f.createErr
 	}
@@ -704,7 +709,8 @@ func newReadinessTestDriver(docker *fakeDocker, readinessTimeout time.Duration) 
 }
 
 func spec() execution.InstanceSpec {
-	return execution.InstanceSpec{ServerID: "s1", WorkingDir: "/scratch/s1", MinecraftVersion: "1.21", JarRelpath: "server.jar"}
+	return execution.InstanceSpec{ServerID: "s1", WorkingDir: "/scratch/s1", MinecraftVersion: "1.21", JarRelpath: "server.jar",
+		WorkingSetLock: execution.NewWorkingSetLock()}
 }
 
 // drainClosed reads ch until it closes, so any goroutine writing to it finishes.
@@ -2322,8 +2328,10 @@ func TestStartFailureCleanupDetachedFromCancelledContext(t *testing.T) {
 	docker.startErr = context.Canceled
 	d := newTestDriver(docker, nil, nil)
 
+	// The stream drops while the container is being created: a context that is
+	// already gone gets no further than the working-set lock (issue #3371).
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+	docker.onCreate = cancel
 	if _, err := d.Start(ctx, spec()); err == nil {
 		t.Fatal("expected Start to fail when start fails")
 	}

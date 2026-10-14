@@ -379,6 +379,36 @@ type Manager struct {
 	// files and take no reservation.
 	reserved map[string]bool
 
+	// workingSetLocks holds each server id's working-set lock (workingSetLock), which
+	// keeps the Worker's own renames out of the driver's hand-over walk (issue #3371).
+	// The reservation above cannot do that: a Forge install's supervisor walks the
+	// working set again, long after the start that launched it released the id, and
+	// the running-id snapshot's marker stamp holds no reservation at all.
+	//
+	// The walk proves a multiply-linked file is the working set's own by counting its
+	// names, so a name that moves under it is counted twice. Whatever publishes a name
+	// by renaming a temporary one therefore holds the lock from before the temporary
+	// name exists until after the rename: an EditFile, and both generation-marker
+	// stamps. Nothing else the Worker does moves a name inside a working set — a
+	// hydrate and the scratch GC replace or remove the whole tree, and only add or
+	// remove names within one, which the walk's link-count check already covers.
+	//
+	// It is a lock that is WAITED for, not a refusal like the reservation: what it
+	// excludes is one pass over the tree or one small file write, never a transfer or
+	// a daemon call, and the supervisor's walk has no command to refuse. The wait is
+	// bounded all the same (lockWorkingSet): a walk over a huge or stalled tree must
+	// not keep a command, its lane and its command slot for as long as it runs. A lock
+	// is created on first use and kept for the life of the manager.
+	workingSetLocks map[string]*execution.WorkingSetLock
+	// workingSetLockWait bounds a command's wait for a working-set lock. A field (not
+	// the const it defaults to) so a test can shrink it, mirroring fsckRetryDelay.
+	workingSetLockWait time.Duration
+	// workingSetLockContended, when non-nil, runs once a command has found a
+	// working-set lock held and before it starts waiting. Production leaves it nil; a
+	// test sets it to act while the command is known to be waiting, mirroring
+	// snapshotAfterRunningCheck.
+	workingSetLockContended func(serverID string)
+
 	// sweepingSlot marks a server id whose .displaced-<id> slot a displaced sweep is
 	// currently deciding about — from the Lstat that finds the tree through the rename
 	// out of the slot to the put-back or the commit to remove (issue #3118, PR #3121
@@ -446,6 +476,8 @@ func New(drivers map[string]execution.ExecutionDriver, scratchDir string, openCo
 		startCmds:          map[string]session.Command{},
 		orphans:            map[string]orphanEntry{},
 		reserved:           map[string]bool{},
+		workingSetLocks:    map[string]*execution.WorkingSetLock{},
+		workingSetLockWait: defaultWorkingSetLockWait,
 		sweepingSlot:       map[string]bool{},
 		events:             make(chan session.StatusEvent, 32),
 		logs:               make(chan session.LogEvent, 256),
@@ -754,7 +786,7 @@ func (m *Manager) Handle(ctx context.Context, cmd session.Command) session.Comma
 	case "ReadFile":
 		return m.handleReadFile(cmd)
 	case "EditFile":
-		return m.handleEditFile(cmd)
+		return m.handleEditFile(ctx, cmd)
 	case "ListFiles":
 		return m.handleListFiles(cmd)
 	case "TunnelDial":
@@ -819,7 +851,7 @@ func (m *Manager) handleHydrate(ctx context.Context, cmd session.Command) sessio
 	// produced the tree, so no concurrent stream can have replaced it, and the marker
 	// write is the sole thing that can decline to declare.
 	var declaredGeneration *uint64
-	if m.recordGeneration(workingDir, cmd.ServerID, gen) {
+	if m.recordGeneration(ctx, workingDir, cmd.ServerID, gen) {
 		declaredGeneration = &gen
 	}
 	return session.CommandResult{
@@ -842,7 +874,16 @@ func (m *Manager) handleHydrate(ctx context.Context, cmd session.Command) sessio
 // declaration has to be the write's own outcome rather than the transfer merely having
 // succeeded: a marker this call could not write is older than the tree, so declaring the
 // served generation anyway would let a later start skip the corrective hydrate.
-func (m *Manager) recordGeneration(workingDir, serverID string, gen uint64) bool {
+func (m *Manager) recordGeneration(ctx context.Context, workingDir, serverID string, gen uint64) bool {
+	// The marker is published by renaming a temporary name (workingSetLocks). A
+	// stamp that cannot get the lock is not written, which is the safe direction.
+	unlock, err := m.lockWorkingSet(ctx, serverID)
+	if err != nil {
+		m.logger.Warn("could not record working-set generation",
+			"server_id", serverID, "generation", gen, "error", err)
+		return false
+	}
+	defer unlock()
 	if err := writeGeneration(workingDir, gen); err != nil {
 		m.logger.Warn("could not record working-set generation",
 			"server_id", serverID, "generation", gen, "error", err)
@@ -882,7 +923,16 @@ func (m *Manager) recordGeneration(workingDir, serverID string, gen uint64) bool
 // declaration has to be the marker write's own outcome rather than a second opinion about
 // it: every skip above returns false through the same statement that suppresses the write,
 // so no code path can report a generation this function did not stamp.
-func (m *Manager) recordGenerationIfUnchanged(ref *workingDirRef, workingDir, serverID string, gen uint64) bool {
+func (m *Manager) recordGenerationIfUnchanged(ctx context.Context, ref *workingDirRef, workingDir, serverID string, gen uint64) bool {
+	// The marker is published by renaming a temporary name (workingSetLocks). A
+	// stamp that cannot get the lock is not written, which is the safe direction.
+	unlock, err := m.lockWorkingSet(ctx, serverID)
+	if err != nil {
+		m.logger.Warn("could not record working-set generation",
+			"server_id", serverID, "generation", gen, "error", err)
+		return false
+	}
+	defer unlock()
 	reason := ""
 	guard := func() bool {
 		ok, why := ref.current()
@@ -1349,7 +1399,7 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		// so a declaration the marker does not back would defeat the guard above over the
 		// wire instead of on disk — hence the value is taken FROM the write's report, not
 		// from being in this branch.
-		if m.recordGenerationIfUnchanged(pin, workingDir, cmd.ServerID, gen) {
+		if m.recordGenerationIfUnchanged(ctx, pin, workingDir, cmd.ServerID, gen) {
 			declaredGeneration = &gen
 		}
 		// GC the displaced tree a prior hydrate kept aside (issue #906): a successful
@@ -2097,6 +2147,8 @@ func (m *Manager) launchReserved(ctx context.Context, cmd session.Command, drive
 		// The CPU allocation (millicores, #723) is carried as-is onto the spec; no
 		// derivation. 0 stays 0 (unset -> default weight).
 		CPUMillis: cmd.CPUMillis,
+		// What the driver holds while it re-owns the working set (workingSetLocks).
+		WorkingSetLock: m.workingSetLock(cmd.ServerID),
 	})
 	if err != nil {
 		m.release(cmd.ServerID)
@@ -3135,7 +3187,7 @@ func (m *Manager) handleReadFile(cmd session.Command) session.CommandResult {
 // write is atomic (temp sibling + rename) so a concurrent reader never sees a
 // torn file. It is executed on the server's per-server lane, issue #95 (a small,
 // interactive edit).
-func (m *Manager) handleEditFile(cmd session.Command) session.CommandResult {
+func (m *Manager) handleEditFile(ctx context.Context, cmd session.Command) session.CommandResult {
 	if len(cmd.Content) > MaxFileBytes {
 		return failFileAccess(cmd.CommandID, session.FileAccessReasonPayloadTooLarge,
 			fmt.Sprintf("instancemanager: edit exceeds the %d-byte cap", MaxFileBytes))
@@ -3167,7 +3219,18 @@ func (m *Manager) handleEditFile(cmd session.Command) session.CommandResult {
 	}
 	defer func() { _ = unix.Close(parentFd) }()
 
-	if err := atomicWriteAt(parentFd, leaf, cmd.Content); err != nil {
+	// The write publishes by renaming a temporary name, so it holds the working-set
+	// lock for as long as that name exists, and waits out a hand-over walk in
+	// progress (workingSetLocks, issue #3371). An edit that cannot get the lock —
+	// its command is gone, or the walk outlasts the wait — writes nothing.
+	unlock, err := m.lockWorkingSet(ctx, cmd.ServerID)
+	if err != nil {
+		return fail(cmd.CommandID, session.CommandErrorInternal,
+			fmt.Sprintf("instancemanager: edit file: waiting for the working set to be handed over: %v", err))
+	}
+	err = atomicWriteAt(parentFd, leaf, cmd.Content)
+	unlock()
+	if err != nil {
 		switch {
 		case errors.Is(err, errIsDir):
 			return failFileAccess(cmd.CommandID, session.FileAccessReasonIsADirectory,
@@ -3538,6 +3601,54 @@ func (m *Manager) reserve(serverID string) (ok bool, code session.CommandErrorCo
 	}
 	m.reserved[serverID] = true
 	return true, 0, ""
+}
+
+// defaultWorkingSetLockWait is how long a command waits for a working-set lock
+// before it gives up (issue #3371). The lock is held for one pass over a working
+// set or one small file write, so a healthy wait is far shorter; the bound is for a
+// walk over a huge or stalled tree: whatever the walk does, the command gives its
+// lane and its command slot back within it.
+//
+// It is NOT aligned with the API's command budget, and cannot be: that budget
+// (control.command_timeout_seconds, 30 s by default, configurable) starts at
+// dispatch, while this wait starts only once the command has its lane and slot and
+// has resolved the target's directory, and the Worker is handed the session's
+// context, not the dispatch deadline. 20 s sits below the default budget, so an
+// unqueued edit under the default usually gets the Worker's own answer; a queued
+// one, or a shorter budget, can time out at the API first — and that edit still
+// publishes if the lock frees within this wait.
+const defaultWorkingSetLockWait = 20 * time.Second
+
+// lockWorkingSet takes serverID's working-set lock for a command and returns the
+// call that releases it. It waits for a held lock no longer than ctx lives or
+// workingSetLockWait lasts, and then returns the context's error: the caller
+// must not write.
+func (m *Manager) lockWorkingSet(ctx context.Context, serverID string) (unlock func(), err error) {
+	lock := m.workingSetLock(serverID)
+	if lock.TryLock() {
+		return lock.Unlock, nil
+	}
+	if hook := m.workingSetLockContended; hook != nil {
+		hook(serverID)
+	}
+	ctx, cancel := context.WithTimeout(ctx, m.workingSetLockWait)
+	defer cancel()
+	if err := lock.Lock(ctx); err != nil {
+		return nil, err
+	}
+	return lock.Unlock, nil
+}
+
+// workingSetLock returns serverID's working-set lock (see workingSetLocks).
+func (m *Manager) workingSetLock(serverID string) *execution.WorkingSetLock {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	lock, ok := m.workingSetLocks[serverID]
+	if !ok {
+		lock = execution.NewWorkingSetLock()
+		m.workingSetLocks[serverID] = lock
+	}
+	return lock
 }
 
 // release drops serverID's in-flight reservation so a later command (a retry

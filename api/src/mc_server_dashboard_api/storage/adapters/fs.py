@@ -52,6 +52,7 @@ from mc_server_dashboard_api.storage.adapters.failure_seam import (
 )
 from mc_server_dashboard_api.storage.domain.errors import (
     ArchiveTooLargeError,
+    ArchiveUnreadableError,
     IncompleteTransferError,
     IntegrityCheckError,
     MissingRegionsError,
@@ -2298,7 +2299,7 @@ def _tar_into_fd(
                     continue
                 if member_hook is not None:
                     member_hook(child)
-                tar.add(child, arcname=child.name)
+                _add_plain(tar, directory, child)
     except BrokenPipeError:
         # The consumer closed early; nothing more to write.
         pass
@@ -2637,17 +2638,54 @@ def _leased_file_stream(
     return _gen()
 
 
+def _plain_member_filter(member: tarfile.TarInfo, dest: str) -> tarfile.TarInfo:
+    """The extraction filter of both ingest paths: ``data``, minus link members.
+
+    ``tarfile.data_filter`` (Python 3.12+) refuses absolute paths, ``..`` escapes,
+    devices and other unsafe members — the tar-side traversal defence — but admits
+    a hard link or symlink that stays inside ``dest``. The store holds plain files
+    and directories only (issue #3371): the Worker's hydrate refuses a link member
+    outright, so a link taken in here would come back out in an archive no Worker
+    can unpack, on every hydrate of the server. A link member is refused the way
+    ``data`` refuses its unsafe ones, with a :class:`tarfile.FilterError`.
+    """
+
+    safe = tarfile.data_filter(member, dest)
+    if not (safe.isfile() or safe.isdir()):
+        raise tarfile.FilterError(f"{member.name!r} is a link")
+    return safe
+
+
 def _extract_tar_into(spool: Path, dest: Path) -> None:
     """Stream-extract the tar at ``spool`` into ``dest``, sandboxed.
 
     Stream mode (``r|*``) reads the spool incrementally so the whole archive is
-    never held in memory at once. ``filter="data"`` (Python 3.12+) refuses absolute
-    paths, ``..`` escapes, devices and other unsafe members — the tar-side
-    traversal defence.
+    never held in memory at once. :func:`_plain_member_filter` refuses unsafe and
+    link members.
     """
 
     with open(spool, "rb") as fileobj, tarfile.open(fileobj=fileobj, mode="r|*") as tar:
-        tar.extractall(dest, filter="data")
+        tar.extractall(dest, filter=_plain_member_filter)
+
+
+def _add_plain(tar: tarfile.TarFile, directory: Path, child: Path) -> None:
+    """Add ``child`` of ``directory`` to ``tar`` as plain files and directories.
+
+    The emit-side half of :func:`_plain_member_filter` (issue #3371), for a store
+    that holds a link all the same — one written before the ingest refusal, or out
+    of band. ``tarfile`` writes the second name of a hard-linked file as a link
+    member; it goes out as a regular file with the file's bytes instead. A symlink
+    or special file is left out, as the Worker's own pack leaves it out.
+    """
+
+    def _plain(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
+        if info.islnk():
+            info.type = tarfile.REGTYPE
+            info.linkname = ""
+            info.size = os.lstat(directory / info.name).st_size
+        return info if info.isfile() or info.isdir() else None
+
+    tar.add(child, arcname=child.name, filter=_plain)
 
 
 def _write_tar_gz(directory: Path, archive: Path) -> None:
@@ -2655,14 +2693,13 @@ def _write_tar_gz(directory: Path, archive: Path) -> None:
 
     with tarfile.open(archive, mode="w:gz") as tar:
         for child in sorted(directory.iterdir(), key=lambda p: p.name):
-            tar.add(child, arcname=child.name)
+            _add_plain(tar, directory, child)
 
 
 def _extract_tar_gz_into(archive: Path, dest: Path, max_bytes: int) -> None:
     """Extract a restore ``tar.gz`` into ``dest``, traversal-safe and size-bounded.
 
-    ``filter="data"`` (Python 3.12+) refuses absolute paths, ``..`` escapes, devices
-    and other unsafe members — the tar-side traversal defence. On top of it, the
+    :func:`_plain_member_filter` refuses unsafe and link members. On top of it, the
     cumulative DECOMPRESSED bytes are counted as each file member is drained and
     bounded by ``max_bytes``: a gzip member can expand ~1000x past the compressed
     body, so the size cap aborts a bomb (:class:`ArchiveTooLargeError`) before it
@@ -2670,16 +2707,23 @@ def _extract_tar_gz_into(archive: Path, dest: Path, max_bytes: int) -> None:
     member header.
 
     An archive whose bytes cannot be read back — truncated, or damaged gzip / tar
-    framing — raises :class:`ArchiveUnreadableError` (issue #3230).
+    framing — raises :class:`ArchiveUnreadableError` (issue #3230). So does one
+    holding a member the filter refuses (issue #3371): it reads, but nothing can
+    be restored from it, override or not, which is the verdict that error models.
     """
 
     total = 0
-    with (
-        archive_read_errors_as_unreadable(),
-        tarfile.open(archive, mode="r:gz") as tar,
-    ):
-        for member in tar:
-            total = _extract_member_capped(tar, member, dest, total, max_bytes)
+    try:
+        with (
+            archive_read_errors_as_unreadable(),
+            tarfile.open(archive, mode="r:gz") as tar,
+        ):
+            for member in tar:
+                total = _extract_member_capped(tar, member, dest, total, max_bytes)
+    except tarfile.FilterError as exc:
+        raise ArchiveUnreadableError(
+            f"archive holds a member that cannot be restored: {exc}"
+        ) from exc
 
 
 def _extract_member_capped(
@@ -2689,18 +2733,17 @@ def _extract_member_capped(
     total: int,
     max_bytes: int,
 ) -> int:
-    """Extract one member under the data filter, counting drained file bytes.
+    """Extract one member under the ingest filter, counting drained file bytes.
 
     A file member's body is drained in bounded chunks and written out; the running
     decompressed total is checked after every chunk so a single high-ratio member
     aborts mid-write rather than being fully materialized first. Writing the body by
     hand bypasses ``extractall``, so the member's sanitized mode/mtime are reapplied
-    afterwards. Directory and other safe non-file members carry no body, so they
-    extract through the data filter with no contribution to the count. Returns the
-    updated running total.
+    afterwards. A directory member carries no body, so it extracts through the
+    filter with no contribution to the count. Returns the updated running total.
     """
 
-    safe = tarfile.data_filter(member, str(dest))
+    safe = _plain_member_filter(member, str(dest))
     if not safe.isfile():
         tar.extract(safe, dest, filter="data")
         return total

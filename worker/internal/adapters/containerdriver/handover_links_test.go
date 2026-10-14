@@ -2,14 +2,19 @@ package containerdriver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 )
 
 // The hand-over re-owns inodes, and a file with more than one name may have one
@@ -270,6 +275,235 @@ func TestHandOverLeavesAFileWhoseLinkCountMovedDuringTheWalk(t *testing.T) {
 
 			if err != nil || stats.skipped != 1 || reowned(t, rec, canary) != 0 {
 				t.Fatalf("hand-over = %+v, %v, re-owned %v; want the file left alone", stats, err, rec.seen())
+			}
+		})
+	}
+}
+
+// A name that MOVES during the walk is what the link count cannot catch: it is
+// counted where it was and again where it went, at an unchanged link count. The
+// Worker's own writers move names — an edit publishes by renaming a temporary
+// name over its target — and a server can have put a file that is also named
+// outside the working set under such a temporary name before it stopped. So the
+// walk holds the working-set lock those writers hold while they publish, and none
+// of them can rename under it (issue #3371).
+//
+// The two names here are each a file named once outside, and whichever the walk
+// counts first plays the temporary name; the other is the not-yet-visited target
+// in the same directory. The edit is one that takes the lock if it is free, which
+// is when a real one would run.
+func TestCreateHoldsTheWorkingSetLockSoNoWriterRenamesUnderTheWalk(t *testing.T) {
+	dir, outside := linkedSet(t)
+	names := []string{filepath.Join(dir, "config", "a"), filepath.Join(dir, "config", "b")}
+	canaries := map[string]string{}
+	for _, name := range names {
+		canary := writeAt(t, filepath.Join(outside, filepath.Base(name)))
+		canaries[linkAt(t, canary, name)] = canary
+	}
+	d, rec := hardenedDriver(newFakeDocker())
+	lock := execution.NewWorkingSetLock()
+	s := specIn(dir)
+	s.WorkingSetLock = lock
+	counted, renamed := 0, false
+	t.Cleanup(func() { afterNameCounted = func(string) {} })
+	afterNameCounted = func(path string) {
+		if counted++; counted > 1 || !lock.TryLock() {
+			return
+		}
+		defer lock.Unlock()
+		other := names[0]
+		if path == other {
+			other = names[1]
+		}
+		if err := os.Rename(path, other); err != nil {
+			t.Error(err)
+		}
+		renamed = true
+	}
+
+	_, err := d.createServerContainer(context.Background(), s, CreateSpec{Name: "mcsd-s1"})
+
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if counted == 0 {
+		t.Fatal("the walk counted no name; the schedule was not driven")
+	}
+	if renamed {
+		t.Error("a writer took the working-set lock and renamed a name while the walk was running")
+	}
+	for name, canary := range canaries {
+		if n := reowned(t, rec, canary); n != 0 {
+			t.Errorf("the file outside the working set also named %s was re-owned (%v)", name, rec.seen())
+		}
+	}
+	if !lock.TryLock() {
+		t.Fatal("the working-set lock is still held after the create returned")
+	}
+}
+
+// A failed hand-over releases the lock.
+func TestCreateReleasesTheWorkingSetLockWhenTheHandOverFails(t *testing.T) {
+	dir, _ := linkedSet(t)
+	writeAt(t, filepath.Join(dir, "level.dat"))
+	d, rec := hardenedDriver(newFakeDocker())
+	rec.err = unix.EPERM
+	lock := execution.NewWorkingSetLock()
+	s := specIn(dir)
+	s.WorkingSetLock = lock
+
+	if _, err := d.createServerContainer(context.Background(), s, CreateSpec{Name: "mcsd-s1"}); err == nil {
+		t.Fatal("create succeeded, want the failed hand-over reported")
+	}
+
+	if !lock.TryLock() {
+		t.Fatal("the working-set lock is still held after the failed create returned")
+	}
+}
+
+// Without the lock nothing keeps the Worker's writers out of the walk, so a spec
+// that carries none is refused before anything is re-owned or created.
+func TestCreateRefusesASpecWithoutAWorkingSetLock(t *testing.T) {
+	dir, _ := linkedSet(t)
+	writeAt(t, filepath.Join(dir, "level.dat"))
+	docker := newFakeDocker()
+	d, rec := hardenedDriver(docker)
+	s := specIn(dir)
+	s.WorkingSetLock = nil
+
+	_, err := d.createServerContainer(context.Background(), s, CreateSpec{Name: "mcsd-s1"})
+
+	if err == nil || !strings.Contains(err.Error(), "working-set lock") {
+		t.Fatalf("create = %v, want it refused for the missing working-set lock", err)
+	}
+	if len(rec.seen()) != 0 || docker.createCalls != 0 {
+		t.Fatalf("re-owned %v and created %d containers, want neither", rec.seen(), docker.createCalls)
+	}
+}
+
+// The wait for the working-set lock ends with the caller: a create whose context
+// is gone while a writer holds the lock hands nothing over and creates nothing,
+// and the lock stays the writer's.
+func TestCreateDoesNotOutwaitItsContextForTheWorkingSetLock(t *testing.T) {
+	dir, _ := linkedSet(t)
+	writeAt(t, filepath.Join(dir, "level.dat"))
+	docker := newFakeDocker()
+	d, rec := hardenedDriver(docker)
+	s := specIn(dir)
+	if !s.WorkingSetLock.TryLock() {
+		t.Fatal("a fresh working-set lock is held")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := d.createServerContainer(ctx, s, CreateSpec{Name: "mcsd-s1"})
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("create = %v, want the context's cancellation", err)
+	}
+	if len(rec.seen()) != 0 || docker.createCalls != 0 {
+		t.Fatalf("re-owned %v and created %d containers, want neither", rec.seen(), docker.createCalls)
+	}
+	if s.WorkingSetLock.TryLock() {
+		t.Fatal("the lock came free although its holder never released it")
+	}
+}
+
+// A create that finds the lock held waits for it and goes on once the writer
+// that holds it is done.
+func TestCreateGoesOnOnceTheWorkingSetLockIsReleased(t *testing.T) {
+	dir, _ := linkedSet(t)
+	file := writeAt(t, filepath.Join(dir, "level.dat"))
+	docker := newFakeDocker()
+	d, rec := hardenedDriver(docker)
+	s := specIn(dir)
+	if !s.WorkingSetLock.TryLock() {
+		t.Fatal("a fresh working-set lock is held")
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := d.createServerContainer(context.Background(), s, CreateSpec{Name: "mcsd-s1"})
+		done <- err
+	}()
+	if len(rec.seen()) != 0 {
+		t.Fatalf("re-owned %v while a writer held the lock", rec.seen())
+	}
+
+	s.WorkingSetLock.Unlock()
+
+	if err := <-done; err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if reowned(t, rec, file) != 1 || docker.createCalls != 1 {
+		t.Fatalf("re-owned %v and created %d containers, want the hand-over and the create", rec.seen(), docker.createCalls)
+	}
+}
+
+// The walks a Forge install's supervisor runs — before the install retry and
+// before the launch container — belong to the instance, not to a command, so a
+// Stop is what ends them: the walk under way stops at its next entry, nothing
+// more is created, the instance reports stopped rather than a failed launch, and
+// the lock is released.
+func TestStopEndsTheInstallSupervisorsHandOverWalk(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		installExit waitResult
+	}{
+		{"before the launch container", waitResult{code: 0}},
+		{"before the install retry", waitResult{code: 1, err: statusError{method: "POST", path: "/wait", code: 200, message: "install exited 1"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prev := installRetryBackoff
+			installRetryBackoff = []time.Duration{time.Millisecond, time.Millisecond}
+			t.Cleanup(func() { installRetryBackoff = prev })
+
+			dir, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range []string{"a", "b", "c"} {
+				writeAt(t, filepath.Join(dir, "world", name))
+			}
+			docker := newForgeFakeDocker()
+			installID := "mcsd-s1-install"
+			docker.waitGates[installID] = make(chan waitResult, 1)
+			d, rec := hardenedDriver(docker)
+			s := forgeSpec(dir)
+
+			started, err := d.Start(context.Background(), s)
+			if err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			inst := started.(*instance)
+			firstWalk := len(rec.seen())
+			stopped := make(chan error, 1)
+			// The supervisor's walk re-owns the root first; the Stop arrives then.
+			rec.mu.Lock()
+			rec.before = func(string) {
+				rec.mu.Lock()
+				rec.before = nil
+				rec.mu.Unlock()
+				go func() { stopped <- inst.Stop(context.Background(), false) }()
+				<-inst.installCtx.Done()
+			}
+			rec.mu.Unlock()
+			if tc.installExit.code == 0 {
+				writeArgsfile(t, dir)
+			}
+			docker.waitGates[installID] <- tc.installExit
+
+			if err := <-stopped; err != nil {
+				t.Fatalf("Stop: %v", err)
+			}
+			drainTo(t, inst.Events(), execution.StateStopped)
+			if got := len(rec.seen()) - firstWalk; got != 1 {
+				t.Fatalf("the supervisor's walk re-owned %d entries after the Stop arrived at its first, want it to stop there (%v)", got, rec.seen())
+			}
+			if got := docker.names(); !reflect.DeepEqual(got, []string{installID}) {
+				t.Fatalf("containers created = %v, want only the install container", got)
+			}
+			if !s.WorkingSetLock.TryLock() {
+				t.Fatal("the working-set lock is still held after the cancelled walk")
 			}
 		})
 	}
