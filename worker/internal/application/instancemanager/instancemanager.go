@@ -3606,10 +3606,17 @@ func (m *Manager) reserve(serverID string) (ok bool, code session.CommandErrorCo
 // defaultWorkingSetLockWait is how long a command waits for a working-set lock
 // before it gives up (issue #3371). The lock is held for one pass over a working
 // set or one small file write, so a healthy wait is far shorter; the bound is for a
-// walk over a huge or stalled tree. It sits below the API's default 30 s command
-// budget (control.command_timeout_seconds), so the caller of a file edit gets the
-// Worker's own answer rather than a dispatch timeout, and the command gives its
-// lane and its command slot back while the API is still listening.
+// walk over a huge or stalled tree: whatever the walk does, the command gives its
+// lane and its command slot back within it.
+//
+// It is NOT aligned with the API's command budget, and cannot be: that budget
+// (control.command_timeout_seconds, 30 s by default, configurable) starts at
+// dispatch, while this wait starts only once the command has its lane and slot and
+// has resolved the target's directory, and the Worker is handed the session's
+// context, not the dispatch deadline. 20 s sits below the default budget, so an
+// unqueued edit under the default usually gets the Worker's own answer; a queued
+// one, or a shorter budget, can time out at the API first — and that edit still
+// publishes if the lock frees within this wait.
 const defaultWorkingSetLockWait = 20 * time.Second
 
 // lockWorkingSet takes serverID's working-set lock for a command and returns the

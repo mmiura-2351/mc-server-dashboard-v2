@@ -671,7 +671,12 @@ walk: an edit waits for a walk in progress and a walk for an edit, so a file a
 server left under an edit's temporary name is met once, wherever the edit puts
 it (issue #3371). A wait for that lock is not open-ended: a command gives up
 when its stream is gone or after 20 seconds, and then writes nothing (an edit
-fails; a marker is simply not written, which costs one extra hydrate), and the
+fails; a marker is simply not written, which costs one extra hydrate). Those 20
+seconds are the worker's own, counted from when the command starts waiting, not
+from when the API dispatched it, and the API's command budget is separate and
+configurable: an edit that was queued, or that runs under a shorter budget, can
+time out at the API first and still be published by the worker, if the walk
+ends within the worker's wait. The
 walk a Forge install runs in the background before its retry and before its
 launch container is ended by a stop of that server. The lock is never taken
 from a writer or a walk that is still running. Its limits are these. It exists
