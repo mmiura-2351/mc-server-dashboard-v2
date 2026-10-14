@@ -660,9 +660,11 @@ a **hard ceiling** the process cannot exceed:
 |---|---|---|
 | `container` | **Hard ceiling — enforced.** The process cannot exceed the limit; the kernel OOM-kills it if it tries. | Docker `Memory` set to the limit, plus the derived `-Xmx`. |
 
-Files in the container's `/tmp`, a tmpfs of at most 256 MiB, are memory and
-count against the limit too ([`SECURITY.md`](SECURITY.md) Section 6,
-"Container hardening").
+Files in the container's `/tmp`, a tmpfs, are memory and count against the
+limit too ([`SECURITY.md`](SECURITY.md) Section 6, "Container hardening").
+Its 256 MiB size is a filesystem ceiling, not reserved memory: `/tmp` shares
+the `max(limit/5, 256 MiB)` headroom with all other non-heap use, so on a small
+server the container can be OOM-killed before `/tmp` fills and returns `ENOSPC`.
 
 #### Per-server CPU allocation: per-driver guarantee
 
