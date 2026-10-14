@@ -406,7 +406,7 @@ export const en = {
   "serverDetail.console.error.failedStopOrphan":
     "Command not sent: the server's previous stop did not finish, so its process may still be running. The system is shutting it down automatically.",
   "serverDetail.console.error.commandDropped":
-    "The server closed its console connection (RCON) without answering, so the command most likely did not run. Long commands can be dropped on some networks: shorten it and send it again.",
+    "The server closed its console connection (RCON) without answering, so it is unknown whether the command ran (the server may have run it and then crashed). Check the console output and the server's state before retrying. Long commands can be dropped on some networks: if it did not run, shorten it.",
   "serverDetail.console.error.rconFailed":
     "The server's console connection (RCON) failed, so the command may not have run. Check the console output before sending it again.",
   // Lifecycle controls.

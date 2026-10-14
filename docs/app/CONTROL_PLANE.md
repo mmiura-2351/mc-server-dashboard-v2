@@ -193,8 +193,10 @@ network with offloads disabled, a 1,446-byte command was dropped 1 time in
 200, while commands of 1,334–1,400 bytes went through 200 times in 200. The
 limit stays at 1,446 because the default deployment carries it exactly; on
 such a path, a command that is dropped fails with `COMMAND_DROPPED`
-(Section 7), the API answers `409 command_dropped`, and the user can shorten it
-and resend. Other Minecraft versions were not measured for this.
+(Section 7) and the API answers `409 command_dropped`. Whether the command ran
+is uncertain then (see Section 7), so the user checks the console output and
+the server's state before retrying, and shortens the command if it did not run.
+Other Minecraft versions were not measured for this.
 
 The Worker's "command failed" WARN logs at most 1,024 bytes of the error
 message, with a truncation marker; the `CommandError.message` sent to the API is
@@ -661,7 +663,7 @@ classes a Worker can hit:
 | `TRANSFER_FAILED` | A hydrate/snapshot data-plane transfer failed. |
 | `PORT_CONFLICT` | A `StartServer` could not publish a host port already in use (the container driver classifies it from the Docker daemon's error message). |
 | `IMAGE_MISSING` | A `StartServer` could not find or pull the server's container image (the container driver classifies it from the Docker daemon's error message). |
-| `COMMAND_DROPPED` | A `ServerCommand` was written to RCON and the game server closed the connection (EOF or reset) without replying to it. Vanilla does that, without running the command, to a packet that did not arrive in one read, so it most often means a command near the length limit on a path that split it (Section 3.1). It is kept apart from `INTERNAL` — RCON could not be opened or authenticated, or the round trip timed out — so the user can tell a dropped command from a server that cannot be reached. The API answers it `409 command_dropped`. |
+| `COMMAND_DROPPED` | A `ServerCommand` was written to RCON and the game server closed the connection (EOF or reset) before a single response byte arrived. Vanilla does that, without running the command, to a packet that did not arrive in one read, which is what a command near the length limit meets on a path that splits it (Section 3.1). A server that ran the command and then crashed before answering looks the same on the wire, so **whether the command ran is uncertain**: the user checks the console output and the server's state before retrying. A reply cut short — some response bytes arrived, then the connection ended — is not this code but `INTERNAL`, since the server was answering. It is kept apart from `INTERNAL` — RCON could not be opened or authenticated, the round trip timed out, or the reply was cut short — so the user can tell a dropped command from a server that cannot be reached. The API answers it `409 command_dropped`. |
 | `INTERNAL` | An unclassified failure applying the command. |
 
 A registration refusal is reported differently, since it predates any command:

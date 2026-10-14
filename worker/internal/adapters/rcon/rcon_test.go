@@ -1,14 +1,17 @@
 package rcon
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
 	"io"
 	"math"
 	"net"
+	"os"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -441,6 +444,73 @@ func TestExecuteReportsADroppedCommand(t *testing.T) {
 		c := &Client{conn: cli, nextID: 1}
 		if _, err := c.Execute(context.Background(), "list"); !errors.Is(err, ErrCommandDropped) {
 			t.Fatalf("Execute error = %v, want ErrCommandDropped", err)
+		}
+	})
+}
+
+// scriptedConn answers every Write and then serves reply byte by byte as the
+// server's response, failing with err once reply is used up. It pins exactly how
+// many response bytes reached the client before the connection ended.
+type scriptedConn struct {
+	net.Conn
+	reply []byte
+	err   error
+}
+
+func (s *scriptedConn) Write(p []byte) (int, error) { return len(p), nil }
+
+func (s *scriptedConn) Read(p []byte) (int, error) {
+	if len(s.reply) == 0 {
+		return 0, s.err
+	}
+	n := copy(p, s.reply)
+	s.reply = s.reply[n:]
+	return n, nil
+}
+
+func (s *scriptedConn) SetDeadline(time.Time) error { return nil }
+func (s *scriptedConn) Close() error                { return nil }
+
+// A command is dropped only when NO response byte arrived after it was written.
+// Once any byte has arrived the server was answering -- it may have run the
+// command and died mid-reply -- so the ordinary failure stands. The auth handshake
+// is never a dropped command either.
+func TestExecuteResponseBytesMeanNotDropped(t *testing.T) {
+	var reply bytes.Buffer
+	if err := writePacket(&reply, 1, typeResponseValue, "There are 2 players online"); err != nil {
+		t.Fatal(err)
+	}
+	full := reply.Bytes()
+	reset := &net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("read", syscall.ECONNRESET)}
+
+	cases := []struct {
+		name  string
+		reply []byte
+		err   error
+	}{
+		{"truncated length prefix", full[:2], io.EOF},
+		{"complete prefix, truncated body", full[:7], io.EOF},
+		{"reset after response bytes", full[:7], reset},
+		// The whole first reply arrived, so the marker went out; the connection
+		// then ended mid-stream (a lost marker reply or a later fragment).
+		{"close after the first reply", full, io.EOF},
+		{"reset after the first reply", full, reset},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &Client{conn: &scriptedConn{reply: tc.reply, err: tc.err}, nextID: 1}
+			_, err := c.Execute(context.Background(), "list")
+			if err == nil || errors.Is(err, ErrCommandDropped) {
+				t.Fatalf("Execute error = %v, want a failure that is not ErrCommandDropped", err)
+			}
+		})
+	}
+
+	t.Run("auth", func(t *testing.T) {
+		c := &Client{conn: &scriptedConn{err: io.EOF}, nextID: 1}
+		err := c.authenticate("secret")
+		if err == nil || errors.Is(err, ErrCommandDropped) {
+			t.Fatalf("authenticate error = %v, want a failure that is not ErrCommandDropped", err)
 		}
 	})
 }

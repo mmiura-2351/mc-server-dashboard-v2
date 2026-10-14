@@ -29,10 +29,11 @@ import type { TranslationKey } from "../i18n/index.ts";
 // - `failed_stop_orphan` (409) — the Worker holds an instance whose stop it
 //   could not confirm (issue #2466); the process may still be alive, so this
 //   must not read as "not running". Nothing was sent.
-// - `command_dropped` (409) — the game server closed its RCON connection without
-//   answering the command (issue #3366). It does that, without running it, to a
-//   packet that did not arrive in one read, so a long command on some networks
-//   meets it; the server itself was reached.
+// - `command_dropped` (409) — the game server closed its RCON connection before
+//   any reply byte (issue #3366). It does that, without running it, to a packet
+//   that did not arrive in one read, so a long command on some networks meets
+//   it; but a server that ran the command and then crashed looks the same, so
+//   whether it ran is unknown and the line asks for a check before a retry.
 // - `command_failed` (409) — the Worker reached a running server but its RCON
 //   connection failed otherwise (open, auth, or a round trip that timed out),
 //   which is the only unclassified failure `handleServerCommand` produces. A
