@@ -1,6 +1,7 @@
 package regionfsck
 
 import (
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -124,6 +125,32 @@ func TestWalkerStillFailsOnAnOpenErrorThatIsNotASwap(t *testing.T) {
 
 	report, err := checkWithin(t, root)
 	assertFailedWithoutAVerdict(t, report, err)
+}
+
+// The same, whoever runs the suite: an open failure injected at the seam that does
+// not say the entry changed fails the check, for a directory and a region file alike.
+func TestWalkerStillFailsOnAnInjectedOpenErrorThatIsNotASwap(t *testing.T) {
+	for _, entry := range []string{"zz", "r.1.0.mca"} {
+		for _, errno := range []unix.Errno{unix.EACCES, unix.EIO} {
+			t.Run(entry+" "+errno.Error(), func(t *testing.T) {
+				root := tornThenHealthy(t)
+				orig := openAt
+				t.Cleanup(func() { openAt = orig })
+				openAt = func(dirFd int, name string, flags int) (int, error) {
+					if name == entry {
+						return -1, errno
+					}
+					return orig(dirFd, name, flags)
+				}
+
+				report, err := checkWithin(t, root)
+				assertFailedWithoutAVerdict(t, report, err)
+				if !errors.Is(err, errno) {
+					t.Errorf("CheckWorkingSet error = %v, want it to carry %v", err, errno)
+				}
+			})
+		}
+	}
 }
 
 // The shape issue #3350 was found with: a server flips a name in the working-set
