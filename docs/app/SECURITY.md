@@ -592,13 +592,21 @@ container, first attempt or retry — with three restrictions (issues #2600,
 server-controlled code runs as one unprivileged uid, with an empty capability
 bounding set, under `no-new-privileges`. It therefore cannot create a device
 node (`CAP_MKNOD`), give a file away or take one over (`CAP_CHOWN`,
-`CAP_FOWNER`), bypass file permissions (`CAP_DAC_OVERRIDE`), hard-link a file
-it neither owns nor can read and write (`CAP_FOWNER`, under the kernel's
-protected hard links), or change its uid (`CAP_SETUID`) — and it cannot get any of that back. "Runs as
+`CAP_FOWNER`), bypass file permissions (`CAP_DAC_OVERRIDE`), or change its uid
+(`CAP_SETUID`) — and it cannot get any of that back. "Runs as
 non-root" alone does not say this: with only the user set, the effective set is
 empty but the bounding set is Docker's default, and one setuid-root binary in
 the image returns it (the shipped Java images carry `su`, `mount`, `umount`,
 `passwd` and others, setuid root).
+
+What keeps server-controlled code from giving a file outside its working set a
+second name inside it is not a capability but the mount: the working set is a
+bind mount, the only part of the host the container has, and `link(2)` does not
+cross a mount — it fails with `EXDEV` for any caller, privileged or not (seen
+at runtime in both directions as the run-as user, PR #3370). Within the mount
+the kernel's protected hard links (`fs.protected_hardlinks=1`) further limit
+that code to files it owns or can read and write, which it cannot get around
+without `CAP_FOWNER`; no defence here depends on that setting.
 
 The premise depends on the worker's container creation and on nothing in the
 image: all three restrictions are fields of the create request, every create
@@ -652,12 +660,38 @@ container can only link within its own bind mount, and a hydrate refuses a
 link member and writes every file anew, so such a link is the doing of something
 else on the host — a hard-linked copy of a working set, say — and is treated
 the same whatever made it (issue #3338). The count proves what it says only
-while no name of the file moves under the walk. No container of the server is
-alive then, and a file whose link count changes during the walk is left alone;
-but the worker's own file edit is not held off during the walk, and a name it
-renames into place mid-walk can be counted twice, so an edit overlapping a
-start is a known gap, as is a host that mounts part of a working set a second
-time inside it, where the same names are met twice (issue #3371).
+while no name of the file moves under the walk: a name that moves from where it
+was counted to where the walk has yet to look is counted twice, at an unchanged
+link count. Three things keep names still. No container of the server is alive.
+A file whose link count changes during the walk is left alone. And the worker's
+own writes that publish by renaming a temporary name into place — a file edit
+and the write of its generation marker — hold a per-server lock for as long as
+the temporary name exists, which the hand-over holds for the length of its
+walk: an edit waits for a walk in progress and a walk for an edit, so a file a
+server left under an edit's temporary name is met once, wherever the edit puts
+it (issue #3371). A wait for that lock is not open-ended: a command gives up
+when its stream is gone or after 20 seconds, and then writes nothing (an edit
+fails; a marker is simply not written, which costs one extra hydrate). Those 20
+seconds are the worker's own, counted from when the command starts waiting, not
+from when the API dispatched it, and the API's command budget is separate and
+configurable: an edit that was queued, or that runs under a shorter budget, can
+time out at the API first and still be published by the worker, if the walk
+ends within the worker's wait. The
+walk a Forge install runs in the background before its retry and before its
+launch container is ended by a stop of that server. The lock is never taken
+from a writer or a walk that is still running. Its limits are these. It exists
+only inside the worker process, so it excludes the worker's own writers and
+nothing else: a rename made inside a working set by anything else on the host
+during a walk is not held off. And the worker's writers that replace or remove
+a whole working set under the per-server command reservation — a hydrate, the
+snapshot after a stop, the scratch clean-up — do not take it; they move no name
+within a tree, only add or remove names, which the link-count rule above
+covers. What the count cannot account for is a mount inside a working
+set. A host that mounts part of one a second time inside it shows the same
+directory entries twice with no second link behind them, and a file named
+outside could then be counted complete. Neither the worker nor a server creates
+a mount there, and a working set that holds a host-made one is outside the
+supported topology.
 The Forge install log (`logs/forge-install.log`) is the one thing the worker
 creates in a working set while the installer runs, and it never removes an
 entry there: the installer can replace any name at any moment, and a removal
