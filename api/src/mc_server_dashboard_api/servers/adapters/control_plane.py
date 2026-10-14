@@ -384,6 +384,17 @@ class FleetControlPlaneAdapter(ControlPlane):
         # longer has would make a later start skip the hydrate it needs. A lost
         # declaration (dropped stream, dispatch timeout — both raise before this line)
         # is likewise safe: the inventory stays stale and the next start hydrates.
+        #
+        # Recording nothing leaves an entry from earlier in the session in place, so
+        # after a stopped-id publish the inventory names a scratch that is gone, until
+        # the next registration replaces the map (issue #3350). That entry cannot skip
+        # a hydrate or earn the short held-start grace: it was at most the store
+        # generation when recorded, the publish before the deletion minted a greater
+        # one, and the store's counter never goes back, so ``held >= store`` — the
+        # only test either reader applies — stays false for it. The one exception is
+        # a forged registration value (issue #3349); there the Worker's launch guard
+        # refuses the hydrate-less start over the missing scratch and the API replays
+        # it with a hydrate.
         if outcome.held_generation is not None:
             self.record_held_generation(
                 worker_id=worker_id,

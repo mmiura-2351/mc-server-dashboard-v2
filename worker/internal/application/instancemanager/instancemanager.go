@@ -1344,7 +1344,7 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 			fmt.Sprintf("instancemanager: snapshot refused: %d/%d region files corrupt (e.g. %s: %s)",
 				len(report.Corrupt), report.Scanned, filepath.Base(first.Path), first.Reason))
 	} else if report.Skipped > 0 {
-		m.logger.Info("snapshot pre-pack region fsck skipped entries that vanished mid-scan",
+		m.logger.Info("snapshot pre-pack region fsck skipped entries that vanished or changed type mid-scan",
 			"server_id", cmd.ServerID, "skipped", report.Skipped, "scanned", report.Scanned)
 	}
 

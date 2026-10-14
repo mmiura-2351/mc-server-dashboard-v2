@@ -84,8 +84,8 @@ func writeGeneration(workingDir string, gen uint64) error {
 //   - T after the second guard: the marker was in the slot's tree when it was checked,
 //     and the hydrate that replaced it since records its own.
 //
-// A refused write removes its temp — unlike the rename-failure path below, which strands
-// a complete marker on purpose, this temp is one nothing will ever publish.
+// A refused write removes its temp, as every failed write does: it is one nothing will
+// ever publish.
 func writeGenerationGuarded(workingDir string, gen uint64, guard func() bool) error {
 	// Ensure the working dir exists: a hydrate that served a 204 (no published
 	// snapshot) does not create it, but the generation (0) still needs recording so
@@ -124,15 +124,23 @@ func writeGenerationGuarded(workingDir string, gen uint64, guard func() bool) er
 		_ = unix.Unlinkat(dirFd, tmpName, 0)
 		return errWorkingDirReplaced
 	}
-	// A failed rename deliberately leaves the temp in place instead of unlinking it
-	// inline as the three paths above do. Those unlink because their temp holds torn or
-	// unflushed bytes; this one holds a complete, fsynced generation under the temp
-	// form, which every consumer already treats as non-content (issues #2279, #834), so
-	// it is inert until reclaimed — by the next successful marker write's sweep
-	// (sweepGenerationTemps, issue #2283) or by the scratch GC's RemoveAll, the same two
-	// reclaims that cover a crash-stranded temp.
+	// A failed rename removes its temp like every path above (issue #3350): nothing will
+	// ever publish it, and the failure need not be transient. A directory at the marker's
+	// name — the server can plant one — fails every rename until it goes, and a running
+	// server is stamped after every periodic snapshot, so a temp left per failure would
+	// accumulate until a later write succeeded and swept them.
+	//
+	// The directory is not removed here. It is the server's own tree inside its own
+	// working set, and taking it out as root is a recursive removal of whatever the
+	// server put there while the server keeps writing; it is also not needed. The failed
+	// write declares nothing and the directory reads as generation 0
+	// (readGenerationMarker), so the next start hydrates — one hydrate, which the error
+	// the caller logs explains — and a hydrate of a published generation swaps the whole
+	// working set out of the slot, directory included, by the path that already does so
+	// without traversing it.
 	if err := unix.Renameat(dirFd, tmpName, dirFd, scratchformat.GenerationMarkerFile); err != nil {
-		return err
+		_ = unix.Unlinkat(dirFd, tmpName, 0)
+		return &os.LinkError{Op: "rename", Old: tmpName, New: scratchformat.GenerationMarkerFile, Err: err}
 	}
 	if guard != nil && !guard() {
 		return errWorkingDirReplaced
