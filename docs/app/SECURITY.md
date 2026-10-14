@@ -669,7 +669,19 @@ and the write of its generation marker — hold a per-server lock for as long as
 the temporary name exists, which the hand-over holds for the length of its
 walk: an edit waits for a walk in progress and a walk for an edit, so a file a
 server left under an edit's temporary name is met once, wherever the edit puts
-it (issue #3371). What the count cannot account for is a mount inside a working
+it (issue #3371). A wait for that lock is not open-ended: a command gives up
+when its stream is gone or after 20 seconds, and then writes nothing (an edit
+fails; a marker is simply not written, which costs one extra hydrate), and the
+walk a Forge install runs in the background before its retry and before its
+launch container is ended by a stop of that server. The lock is never taken
+from a writer or a walk that is still running. Its limits are these. It exists
+only inside the worker process, so it excludes the worker's own writers and
+nothing else: a rename made inside a working set by anything else on the host
+during a walk is not held off. And the worker's writers that replace or remove
+a whole working set under the per-server command reservation — a hydrate, the
+snapshot after a stop, the scratch clean-up — do not take it; they move no name
+within a tree, only add or remove names, which the link-count rule above
+covers. What the count cannot account for is a mount inside a working
 set. A host that mounts part of one a second time inside it shows the same
 directory entries twice with no second link behind them, and a file named
 outside could then be counted complete. Neither the worker nor a server creates

@@ -220,7 +220,7 @@ func forgeSpec(dir string) execution.InstanceSpec {
 		MinecraftVersion: "1.21",
 		JarRelpath:       "server.jar",
 		LaunchMode:       execution.LaunchModeForgeArgsfile,
-		WorkingSetLock:   &sync.Mutex{},
+		WorkingSetLock:   execution.NewWorkingSetLock(),
 	}
 }
 
@@ -465,7 +465,7 @@ func TestJarContainerCmdParity(t *testing.T) {
 	docker := newForgeFakeDocker()
 	d := forgeDriver(docker)
 	s := execution.InstanceSpec{ServerID: "s1", WorkingDir: t.TempDir(), MinecraftVersion: "1.21", JarRelpath: "server.jar",
-		WorkingSetLock: &sync.Mutex{}}
+		WorkingSetLock: execution.NewWorkingSetLock()}
 
 	inst, err := d.Start(context.Background(), s)
 	if err != nil {

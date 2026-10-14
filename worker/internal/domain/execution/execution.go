@@ -10,7 +10,6 @@ package execution
 import (
 	"context"
 	"errors"
-	"sync"
 )
 
 // ServerState is the observed runtime state of a server instance. It mirrors the
@@ -141,13 +140,11 @@ type InstanceSpec struct {
 	// the enforcement driver (#724) turns it into a relative CPUShares weight. 0
 	// means unset — the driver applies its default weight.
 	CPUMillis uint32
-	// WorkingSetLock is held by whoever, on the Worker's side, publishes a name in
-	// this server's working set by renaming a temporary one into place, for as
-	// long as the temporary name exists. A driver that re-owns the working set
-	// holds it while it walks the tree, so no name moves under the walk — which a
-	// walk that counts a file's names relies on (issue #3371). A walk can happen
-	// long after Start returned, which is why the lock travels with the spec.
-	WorkingSetLock sync.Locker
+	// WorkingSetLock is this server's working-set lock, which a driver that
+	// re-owns the working set holds while it walks the tree (issue #3371). A walk
+	// can happen long after Start returned, which is why the lock travels with the
+	// spec.
+	WorkingSetLock *WorkingSetLock
 }
 
 // StatusEvent is an observed state transition for a server instance. The
