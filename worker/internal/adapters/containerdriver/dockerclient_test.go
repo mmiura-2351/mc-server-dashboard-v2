@@ -157,27 +157,32 @@ func TestEngineClientCreateOmitsMemoryWhenZero(t *testing.T) {
 
 // The run-as user is encoded as the top-level User field, and the dropped
 // capabilities and security options as the host-config CapDrop and SecurityOpt
-// lists, which is where the Engine reads them (issues #2600, #3343). The host
-// config carries nothing else for this spec: no capability is added back and the
-// container is not privileged.
-func TestEngineClientCreateEncodesUserCapDropAndSecurityOpt(t *testing.T) {
+// lists, which is where the Engine reads them (issues #2600, #3343); the process
+// limit, the read-only root filesystem and its tmpfs mounts as PidsLimit,
+// ReadonlyRootfs and Tmpfs (issue #3369). The host config carries nothing else
+// for this spec: no capability is added back and the container is not
+// privileged.
+func TestEngineClientCreateEncodesHardening(t *testing.T) {
 	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"Id": "abc123"})
 	})
 	c := d.client(t)
 
 	if _, err := c.Create(context.Background(), CreateSpec{
-		Name:        "mcsd-s1",
-		Image:       "img",
-		User:        "25565:25565",
-		CapDrop:     []string{"ALL"},
-		SecurityOpt: []string{"no-new-privileges"},
+		Name:           "mcsd-s1",
+		Image:          "img",
+		User:           "25565:25565",
+		CapDrop:        []string{"ALL"},
+		SecurityOpt:    []string{"no-new-privileges"},
+		PidsLimit:      4096,
+		ReadonlyRootfs: true,
+		Tmpfs:          map[string]string{"/tmp": "rw,exec,nosuid,nodev,size=256m"},
 	}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	var body struct {
-		User       string              `json:"User"`
-		HostConfig map[string][]string `json:"HostConfig"`
+		User       string                     `json:"User"`
+		HostConfig map[string]json.RawMessage `json:"HostConfig"`
 	}
 	if err := json.Unmarshal([]byte(d.requests[0].body), &body); err != nil {
 		t.Fatalf("decode body: %v", err)
@@ -185,9 +190,19 @@ func TestEngineClientCreateEncodesUserCapDropAndSecurityOpt(t *testing.T) {
 	if body.User != "25565:25565" {
 		t.Fatalf("User = %q, want 25565:25565", body.User)
 	}
-	want := map[string][]string{"CapDrop": {"ALL"}, "SecurityOpt": {"no-new-privileges"}}
-	if !reflect.DeepEqual(body.HostConfig, want) {
-		t.Fatalf("HostConfig = %v, want exactly %v", body.HostConfig, want)
+	got := map[string]string{}
+	for k, v := range body.HostConfig {
+		got[k] = string(v)
+	}
+	want := map[string]string{
+		"CapDrop":        `["ALL"]`,
+		"SecurityOpt":    `["no-new-privileges"]`,
+		"PidsLimit":      `4096`,
+		"ReadonlyRootfs": `true`,
+		"Tmpfs":          `{"/tmp":"rw,exec,nosuid,nodev,size=256m"}`,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("HostConfig = %v, want exactly %v", got, want)
 	}
 }
 

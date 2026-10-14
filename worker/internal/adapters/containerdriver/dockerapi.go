@@ -150,6 +150,14 @@ type CreateSpec struct {
 	User        string
 	CapDrop     []string
 	SecurityOpt []string
+	// PidsLimit caps the container's tasks (processes and threads), ReadonlyRootfs
+	// makes its root filesystem read-only, and Tmpfs maps the paths mounted as a
+	// tmpfs to their mount options. The driver sets them on every container it
+	// creates too (issue #3369); zero values leave the Engine defaults (no task
+	// limit, a writable root filesystem, no tmpfs).
+	PidsLimit      int64
+	ReadonlyRootfs bool
+	Tmpfs          map[string]string
 }
 
 // PortMapping publishes a container TCP port on a host interface/port.

@@ -134,6 +134,17 @@ func assertHardened(t *testing.T, got CreateSpec) {
 	if !reflect.DeepEqual(got.SecurityOpt, []string{"no-new-privileges"}) {
 		t.Errorf("%s: SecurityOpt = %v, want [no-new-privileges]", got.Name, got.SecurityOpt)
 	}
+	if got.PidsLimit != 4096 {
+		t.Errorf("%s: PidsLimit = %d, want 4096", got.Name, got.PidsLimit)
+	}
+	// A read-only root with one writable, executable /tmp: the JVM's home and
+	// temp dir, where JNA and Netty extract the native libraries they then load.
+	if !got.ReadonlyRootfs {
+		t.Errorf("%s: ReadonlyRootfs = false, want true", got.Name)
+	}
+	if want := map[string]string{"/tmp": "rw,exec,nosuid,nodev,size=256m"}; !reflect.DeepEqual(got.Tmpfs, want) {
+		t.Errorf("%s: Tmpfs = %v, want %v", got.Name, got.Tmpfs, want)
+	}
 	// The JVM is given a home: the run-as uid has no passwd entry in the image.
 	if len(got.Cmd) < 2 || got.Cmd[0] != "java" || got.Cmd[1] != "-Duser.home=/tmp" {
 		t.Errorf("%s: Cmd = %v, want it to start java -Duser.home=/tmp", got.Name, got.Cmd)

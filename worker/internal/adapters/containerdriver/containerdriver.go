@@ -531,11 +531,31 @@ var (
 	securityOptions     = []string{"no-new-privileges"}
 )
 
+// containerPidsLimit caps the tasks — processes and threads alike — in every
+// container the driver creates, so a fork or thread bomb in server code stops at
+// its own container instead of exhausting the host's pid space under the Worker
+// and every other server. A modded server runs a few hundred threads; 4096
+// leaves an order of magnitude of room (issue #3369).
+const containerPidsLimit = 4096
+
+// containerTmpfs is the one writable path outside the working set in a container
+// whose root filesystem is read-only (issue #3369). /tmp is the JVM's user.home
+// (containerHomeDir) and java.io.tmpdir, so it holds what the server and the
+// Forge installer write outside /data: Java user preferences, temp files, and
+// the native libraries JNA, Netty and profilers extract and then load. Loading
+// them needs exec, which Docker's tmpfs default (noexec) would deny. In the
+// shipped images the run-as user can write nothing else on the root filesystem
+// apart from /var/tmp, /run/lock and a pebble state dir, which neither the JVM
+// nor the installer use. A tmpfs is memory: what is in it counts against the
+// container's memory limit, and the size bounds it for a server without one.
+var containerTmpfs = map[string]string{containerHomeDir: "rw,exec,nosuid,nodev,size=256m"}
+
 // createServerContainer is the one path every container the driver creates goes
 // through (TestEveryContainerCreateGoesThroughCreateServerContainer) — the launch
 // container and the Forge install container, first attempt or retry, all of which
 // run server-controlled code. It makes the container run as the unprivileged
-// run-as user with no capabilities and no-new-privileges, and first hands the
+// run-as user with no capabilities and no-new-privileges, under a task limit on a
+// read-only root filesystem with a tmpfs /tmp (issue #3369), and first hands the
 // bind-mounted working set to that user, so the server can write its world, logs
 // and config (issue #2600). It then creates through createContainer.
 //
@@ -577,6 +597,9 @@ func (d *Driver) createServerContainer(ctx context.Context, spec execution.Insta
 	create.User = fmt.Sprintf("%d:%d", d.runAsUID, d.runAsGID)
 	create.CapDrop = droppedCapabilities
 	create.SecurityOpt = securityOptions
+	create.PidsLimit = containerPidsLimit
+	create.ReadonlyRootfs = true
+	create.Tmpfs = containerTmpfs
 	return d.createContainer(ctx, create)
 }
 
