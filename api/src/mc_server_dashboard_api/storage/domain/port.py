@@ -518,7 +518,9 @@ class BackupStore(abc.ABC):
         :class:`~.errors.NotFoundError` for an unknown key, and
         :class:`~.errors.ArchiveUnreadableError` — ``force`` or not, ``current``
         untouched — when the archive's bytes do not read back as a ``tar.gz``
-        (truncated, or damaged gzip / tar framing; issue #3230).
+        (truncated, or damaged gzip / tar framing; issue #3230), and on the fs
+        backend when the archive holds a member the extraction refuses (a link or
+        an unsafe path; issue #3371).
         """
 
     @abc.abstractmethod
@@ -538,8 +540,9 @@ class BackupStore(abc.ABC):
           decompressed-byte cap (the restore extractor), walks it for corrupt
           ``.mca`` region files (issue #738), discards the staging, and reports the
           findings in the returned :class:`~...integrity.region.WorkingSetReport`.
-          An archive that does not extract — truncated, or damaged gzip / tar
-          framing — raises :class:`~.errors.ArchiveUnreadableError` (issue #3230).
+          An archive that does not extract — truncated, damaged gzip / tar
+          framing, or holding a member the extraction refuses (issue #3371) —
+          raises :class:`~.errors.ArchiveUnreadableError` (issue #3230).
         - The **object** adapter streams the stored object end to end and proves the
           store can still *produce* the archive (issue #2371) — the precondition
           restore depends on, which a ``HEAD`` alone never tested. It does not
