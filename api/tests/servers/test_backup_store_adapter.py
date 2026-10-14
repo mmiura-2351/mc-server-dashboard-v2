@@ -17,6 +17,7 @@ from __future__ import annotations
 import errno
 import gzip
 import os
+import tarfile
 import tempfile
 import uuid
 from collections.abc import AsyncIterator, Callable
@@ -63,7 +64,9 @@ from tests.storage.helpers import (
     mode_invariant_corrupt_region_bytes,
     read_tar,
     region_targz,
+    stream_of,
     tar_stream,
+    tar_with_link_member,
 )
 
 
@@ -506,6 +509,34 @@ async def test_restore_unreadable_archive_translates_to_unreadable(
 
     with pytest.raises(BackupUnreadableError):
         await adapter.restore(
+            community_id=community, server_id=server, storage_ref=key.value
+        )
+
+
+@pytest.mark.parametrize(
+    "link_type", [tarfile.LNKTYPE, tarfile.SYMTYPE], ids=["hard-link", "symlink"]
+)
+@pytest.mark.parametrize("operation", ["restore", "check_backup_health"])
+async def test_archive_holding_a_link_member_translates_to_unreadable(
+    tmp_path: Path, link_type: bytes, operation: str
+) -> None:
+    """An archive the fs store refuses to extract for a link member (issue #3371)
+    — one its own backup writer could produce before — is the unreadable verdict
+    at the seam for the restore AND for the sweep's health check, so the sweep
+    records what a restore would answer."""
+
+    storage = FsStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+    await _publish(storage, community, server, {"server.properties": b"motd=original"})
+    key = await storage.put_backup(
+        StorageCommunityId(community.value),
+        StorageServerId(server.value),
+        stream_of(tar_with_link_member(link_type, mode="w:gz")),
+    )
+
+    with pytest.raises(BackupUnreadableError):
+        await getattr(adapter, operation)(
             community_id=community, server_id=server, storage_ref=key.value
         )
 
