@@ -11,6 +11,7 @@ import tarfile
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Literal
 
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
 from mc_server_dashboard_api.storage.domain.value_objects import (
@@ -107,6 +108,31 @@ def malicious_tar_with_symlink_escape() -> bytes:
         info.type = tarfile.SYMTYPE
         info.linkname = "/etc/passwd"
         tar.addfile(info)
+    return buf.getvalue()
+
+
+def tar_with_link_member(
+    link_type: bytes, *, mode: Literal["w", "w:gz"] = "w"
+) -> bytes:
+    """A tar with one regular file and one link member naming it, both contained.
+
+    ``link_type`` is ``tarfile.LNKTYPE`` (hard link) or ``tarfile.SYMTYPE``. Every
+    name stays inside the extraction root, so ``filter="data"`` alone admits the
+    archive (issue #3371). ``mode="w:gz"`` gives the backup-archive form.
+    """
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode=mode) as tar:
+        content = b"level"
+        info = tarfile.TarInfo(name="world/level.dat")
+        info.size = len(content)
+        tar.addfile(info, io.BytesIO(content))
+        link = tarfile.TarInfo(name="world/alias.dat")
+        link.type = link_type
+        link.linkname = (
+            "world/level.dat" if link_type == tarfile.LNKTYPE else "level.dat"
+        )
+        tar.addfile(link)
     return buf.getvalue()
 
 

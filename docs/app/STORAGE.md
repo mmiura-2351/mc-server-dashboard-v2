@@ -1470,7 +1470,12 @@ from the tar it buffered, so the count matches a complete upload exactly.
 **Worker side.** The Worker's `DataTransfer` client (Go) does the byte movement
 off the gRPC stream: hydrate = GET + stream-unpack into the instance working dir
 (members path-sanitized — absolute paths, `..`, and symlink/hardlink members are
-rejected, mirroring the API-side `filter="data"` discipline); snapshot = pack the
+rejected, as the API's fs adapter rejects them when it takes an archive in. A
+working set is plain files and directories on every leg: the Worker packs
+nothing else, and neither backend holds or gives out a link member — the fs
+adapter refuses one at snapshot and restore and writes any link its store holds
+regardless as a regular file (hard link) or leaves it out (symlink), and an
+object has no way to be one, issue #3371); snapshot = pack the
 working dir into a tar and POST it with a `Content-Length`. Before packing, the
 Worker runs a structural region fsck over the working set: if any
 `.mca` file is found corrupt, the snapshot is refused at source with a
