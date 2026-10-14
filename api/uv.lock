@@ -789,7 +789,7 @@ requires-dist = [
     { name = "alembic", specifier = ">=1.18.4,<2" },
     { name = "anyio", specifier = ">=4.14.2,<5" },
     { name = "argon2-cffi", specifier = ">=25.1.0,<26" },
-    { name = "asyncpg", specifier = ">=0.31.0,<0.32" },
+    { name = "asyncpg", specifier = ">=0.31.0,<0.33" },
     { name = "bcrypt", specifier = ">=5.0.0,<6" },
     { name = "cronsim", specifier = ">=2.7,<3" },
     { name = "fastapi", specifier = ">=0.136.3,<0.143" },
@@ -817,7 +817,7 @@ dev = [
     { name = "pytest-cov", specifier = ">=7.1.0,<8" },
     { name = "pytest-timeout", specifier = ">=2.4.0,<3" },
     { name = "pytest-xdist", specifier = ">=3.6.1,<4" },
-    { name = "ruff", specifier = ">=0.15.14,<0.16.10" },
+    { name = "ruff", specifier = ">=0.15.14,<0.16.11" },
 ]
 
 [[package]]

@@ -50,7 +50,7 @@ dependencies = [
     "python-multipart>=0.0.29,<0.0.33",  # 2026-05-17
     # Persistence adapter: async SQLAlchemy over asyncpg, migrations via Alembic.
     "sqlalchemy[asyncio]>=2.0.50,<3",   # 2026-05-24
-    "asyncpg>=0.31.0,<0.32",            # 2025-11-24
+    "asyncpg>=0.31.0,<0.33",            # 2025-11-24
     "alembic>=1.18.4,<2",               # 2026-02-10
     # Password-hashing adapters behind the PasswordHasher Port (FR-AUTH-3,
     # CONFIGURATION.md Section 5.3). argon2 is the default selector; bcrypt is
@@ -102,7 +102,7 @@ dependencies = [
 dev = [
     # ruff 0.15.15 (2026-05-28) is inside the 7-day cooldown as of this
     # change; cap below it. Lift the cap once it ages out (Section 3).
-    "ruff>=0.15.14,<0.16.10",
+    "ruff>=0.15.14,<0.16.11",
     "mypy>=2.1.0",
     "pytest>=9.0.3",
     "import-linter>=2.11",

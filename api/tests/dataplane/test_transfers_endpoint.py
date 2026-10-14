@@ -35,6 +35,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     RelPath,
     ServerId,
 )
+from tests.storage.helpers import tar_with_link_member
 
 _CREDENTIAL = "test-worker-credential"
 
@@ -1692,6 +1693,32 @@ def test_snapshot_that_is_not_a_tar_is_refused_and_not_published(
         resp = client.post(
             _url(community, server, "snapshot"),
             content=b"this is not a tar archive" * 100,
+            headers=_auth(),
+        )
+
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_archive"
+    assert _read_tar(_published(storage, community, server)) == {"keep.txt": b"prior"}
+    assert list(tmp_path.rglob("incoming/*")) == []
+
+
+@pytest.mark.parametrize(
+    "link_type", [tarfile.LNKTYPE, tarfile.SYMTYPE], ids=["hard-link", "symlink"]
+)
+def test_snapshot_with_a_link_member_is_refused_and_not_published(
+    tmp_path: Path, link_type: bytes
+) -> None:
+    # A link member that stays inside the working set is refused like any other
+    # member the extraction does not accept (issue #3371): published, it would
+    # come back in every hydrate, which the Worker refuses.
+    client, storage = _setup(tmp_path)
+    community, server = _scope()
+    asyncio.run(_publish(storage, community, server, {"keep.txt": b"prior"}))
+
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"),
+            content=tar_with_link_member(link_type),
             headers=_auth(),
         )
 
