@@ -35,6 +35,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidVersionIdError,
     ServerFileNotFoundError,
 )
+from mc_server_dashboard_api.servers.domain.file_store import FileEntryKind
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     DesiredState,
@@ -841,7 +842,7 @@ async def test_download_of_a_directory_link_answers_what_the_listing_showed(
     )
 
     listed = next(entry for entry in entries if entry.name == "alias")
-    assert listed.is_dir is False
+    assert listed.kind is FileEntryKind.FILE
     with pytest.raises(InvalidFilePathError) as caught:
         await use_case.is_dir(
             community_id=CommunityId(community),

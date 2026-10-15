@@ -75,6 +75,10 @@ func run(ctx context.Context) error {
 	// (issue #787): nothing else GCs them, and each leaks a world-sized file. Run
 	// before the held-server scan, which only walks directories and never sees them.
 	datatransfer.SweepSnapshotSpools(cfg.Worker.ScratchDir)
+	// Likewise the staged file of a files-API edit a crash left in the scratch root
+	// between writing it and publishing it (issue #3359). No edit is in flight yet:
+	// the session that dispatches them starts below.
+	instancemanager.ReclaimEditStaging(cfg.Worker.ScratchDir)
 	// Cancel on SIGINT/SIGTERM for a clean stream shutdown. Created before
 	// buildInstanceManager so the tunnel Dialer's splice-teardown (closeAll) is
 	// bound to a context that actually cancels on shutdown, not the never-cancelled

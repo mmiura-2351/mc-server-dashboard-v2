@@ -491,18 +491,38 @@ message FileListing {
   bool truncated = 2;
 }
 
-// FileEntry is one child of a listed directory. The shape mirrors the API's
-// authoritative-Storage listing (name, is_dir, size) so a running-server listing
-// and an at-rest listing unify into one response shape.
+// FileEntry is one child of a listed directory. The API unifies it with its
+// authoritative-Storage listing into one response shape (name, kind, size).
 message FileEntry {
+  reserved 2;
+  reserved "is_dir";
+
   // name is the entry's base name (no path separators).
   string name = 1;
 
-  // is_dir is true for a subdirectory, false for a regular file.
-  bool is_dir = 2;
-
-  // size is the file size in bytes; 0 for a directory.
+  // size is the entry's own size in bytes (a symlink's is the length of its
+  // target string, never followed); 0 for a directory.
   uint64 size = 3;
+
+  // kind is what the directory entry itself is, judged without following a
+  // link.
+  FileEntryKind kind = 4;
+}
+
+// FileEntryKind classifies a listed entry (issue #3359). Only a FILE can be read
+// or edited and only a DIRECTORY listed; the Worker refuses the others, so the
+// browse view does not offer them.
+enum FileEntryKind {
+  // Unspecified is never sent; the API treats it as OTHER.
+  FILE_ENTRY_KIND_UNSPECIFIED = 0;
+  // A regular file.
+  FILE_ENTRY_KIND_FILE = 1;
+  // A directory.
+  FILE_ENTRY_KIND_DIRECTORY = 2;
+  // A symbolic link, dangling or not.
+  FILE_ENTRY_KIND_SYMLINK = 3;
+  // Anything else: a FIFO, socket or device.
+  FILE_ENTRY_KIND_OTHER = 4;
 }
 
 // CommandError reports why a command failed (NFR-OBS-1 error reporting).

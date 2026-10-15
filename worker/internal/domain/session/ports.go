@@ -182,14 +182,29 @@ type FileListing struct {
 	Truncated bool
 }
 
-// FileEntry is one child of a listed directory. The shape mirrors the API's
-// authoritative-Storage listing (name / is_dir / size) so a running-server
-// listing unifies with an at-rest one.
+// FileEntry is one child of a listed directory. The API unifies it with its
+// authoritative-Storage listing (name / kind / size).
 type FileEntry struct {
-	Name  string
-	IsDir bool
-	Size  uint64
+	Name string
+	Kind FileEntryKind
+	Size uint64
 }
+
+// FileEntryKind is what a listed directory entry itself is, judged without
+// following a link (issue #3359). The adapter maps each value to the generated
+// enum.
+type FileEntryKind int
+
+const (
+	// FileEntryKindFile is a regular file.
+	FileEntryKindFile FileEntryKind = iota + 1
+	// FileEntryKindDirectory is a directory.
+	FileEntryKindDirectory
+	// FileEntryKindSymlink is a symbolic link, dangling or not.
+	FileEntryKindSymlink
+	// FileEntryKindOther is a FIFO, socket or device.
+	FileEntryKindOther
+)
 
 // CommandErrorCode mirrors the wire CommandErrorCode classes the session can
 // emit (CONTROL_PLANE.md Section 7); the adapter maps each to the generated enum.

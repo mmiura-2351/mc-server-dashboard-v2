@@ -428,9 +428,17 @@ Notes:
   `ReadFile`/`EditFile` (no 5.1 trigger completion to await — it touches no data
   plane). The listing is non-recursive (immediate children) and read-only, and is
   bounded to a per-listing cap (the Worker clips a pathological directory and sets
-  `file_listing.truncated`). Each `FileEntry` carries `name` / `is_dir` / `size`,
-  the same shape the API's authoritative-Storage listing uses, so the running and
-  at-rest sources unify into one response. History and rollback stay
+  `file_listing.truncated`). Each `FileEntry` carries `name` / `kind` / `size`,
+  and the API answers the at-rest listing in the same shape, so the running and
+  at-rest sources unify into one response. `kind` (`FileEntryKind`) is what the
+  directory entry itself is, judged without following a link: `FILE`,
+  `DIRECTORY`, `SYMLINK`, or `OTHER` (a FIFO, socket or device). Only a `FILE`
+  can be read or edited and only a `DIRECTORY` listed; the Worker refuses a
+  symlink at any path component and a non-regular file, so the browse view
+  shows the other two kinds without offering to open them (issue #3359). The
+  API reads an `UNSPECIFIED` or unknown value as `OTHER`. A symlink's `size` is
+  its own (the length of its target string). The at-rest listing reports only
+  `FILE` and `DIRECTORY`. History and rollback stay
   authoritative-only (versions exist only on the authoritative copy), so there is
   no live-version control-plane command.
 - **Delete and config edit are not control-plane commands.** Server delete and

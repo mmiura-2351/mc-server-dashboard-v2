@@ -40,6 +40,7 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
     CommandTimedOutError,
     EditFileCommand,
     FileAccessReason,
+    FileEntryKind,
     LaunchMode,
     ListFilesCommand,
     ReadFileCommand,
@@ -252,8 +253,23 @@ async def test_dispatch_list_files_carries_listing_back(harness: _Harness) -> No
                     success=True,
                     file_listing=pb.FileListing(
                         entries=[
-                            pb.FileEntry(name="config.yml", is_dir=False, size=128),
-                            pb.FileEntry(name="data", is_dir=True, size=0),
+                            pb.FileEntry(
+                                name="config.yml",
+                                kind=pb.FILE_ENTRY_KIND_FILE,
+                                size=128,
+                            ),
+                            pb.FileEntry(
+                                name="data", kind=pb.FILE_ENTRY_KIND_DIRECTORY, size=0
+                            ),
+                            pb.FileEntry(
+                                name="link", kind=pb.FILE_ENTRY_KIND_SYMLINK, size=4
+                            ),
+                            pb.FileEntry(
+                                name="fifo", kind=pb.FILE_ENTRY_KIND_OTHER, size=0
+                            ),
+                            # A kind the API does not know is never offered to
+                            # open.
+                            pb.FileEntry(name="unknown", size=0),
                         ],
                         truncated=True,
                     ),
@@ -272,9 +288,12 @@ async def test_dispatch_list_files_carries_listing_back(harness: _Harness) -> No
     assert result.success
     assert result.file_listing is not None
     assert result.file_listing.truncated is True
-    assert [(e.name, e.is_dir, e.size) for e in result.file_listing.entries] == [
-        ("config.yml", False, 128),
-        ("data", True, 0),
+    assert [(e.name, e.kind, e.size) for e in result.file_listing.entries] == [
+        ("config.yml", FileEntryKind.FILE, 128),
+        ("data", FileEntryKind.DIRECTORY, 0),
+        ("link", FileEntryKind.SYMLINK, 4),
+        ("fifo", FileEntryKind.OTHER, 0),
+        ("unknown", FileEntryKind.OTHER, 0),
     ]
     await call.done_writing()
 

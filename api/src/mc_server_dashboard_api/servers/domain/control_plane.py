@@ -20,6 +20,7 @@ from mc_server_dashboard_api.servers.domain.committed_resources import (
     CommittedResources,
 )
 from mc_server_dashboard_api.servers.domain.errors import ServerError
+from mc_server_dashboard_api.servers.domain.file_store import FileEntryKind
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     ServerId,
@@ -117,12 +118,12 @@ class FileAccessReason(enum.Enum):
 class FileEntry:
     """One child of a running server's directory listing (file:read).
 
-    The shape mirrors the authoritative-Storage listing (name / is_dir / size) so
-    a running-server listing unifies with an at-rest one (Section 6.9).
+    The shape is the file layer's listing entry (name / kind / size) so a
+    running-server listing unifies with an at-rest one (Section 6.9).
     """
 
     name: str
-    is_dir: bool
+    kind: FileEntryKind
     size: int
 
 

@@ -70,7 +70,11 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerNotFoundError,
     ServerNotStoppedError,
 )
-from mc_server_dashboard_api.servers.domain.file_store import FileEntry, FileStore
+from mc_server_dashboard_api.servers.domain.file_store import (
+    FileEntry,
+    FileEntryKind,
+    FileStore,
+)
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     DesiredState,
@@ -546,7 +550,7 @@ class FakeFileStore(FileStore):
                 )
                 for entry in entries:
                     child = f"{current}/{entry.name}" if current else entry.name
-                    if entry.is_dir:
+                    if entry.kind is FileEntryKind.DIRECTORY:
                         stack.append(child)
                         continue
                     key = _seeded_key(
@@ -780,7 +784,7 @@ async def test_file_store_list_dir_answers_every_spelling_of_a_directory(
     # infidelity either way.
     community, server_id = uuid.uuid4(), uuid.uuid4()
     store = FakeFileStore()
-    entry = FileEntry(name="level.dat", is_dir=False, size=1)
+    entry = FileEntry(name="level.dat", kind=FileEntryKind.FILE, size=1)
     store.dirs["world"] = [entry]
 
     assert await store.list_dir(
@@ -797,7 +801,7 @@ async def test_file_store_list_dir_answers_a_directory_seeded_under_an_alias() -
     # directory unanswerable under the name production resolves it to.
     community, server_id = uuid.uuid4(), uuid.uuid4()
     store = FakeFileStore()
-    entry = FileEntry(name="level.dat", is_dir=False, size=1)
+    entry = FileEntry(name="level.dat", kind=FileEntryKind.FILE, size=1)
     store.dirs["./world/"] = [entry]
 
     assert await store.list_dir(
@@ -846,7 +850,7 @@ async def test_file_store_delete_dir_answers_every_spelling_of_a_directory(
     # path stays the argument as passed, like every other observation list here.
     community, server_id = uuid.uuid4(), uuid.uuid4()
     store = FakeFileStore()
-    store.dirs["world"] = [FileEntry(name="level.dat", is_dir=False, size=1)]
+    store.dirs["world"] = [FileEntry(name="level.dat", kind=FileEntryKind.FILE, size=1)]
 
     await store.delete_dir(
         community_id=CommunityId(community),
@@ -865,7 +869,9 @@ async def test_file_store_delete_dir_answers_a_directory_seeded_under_an_alias()
     # undeletable under the name production resolves it to.
     community, server_id = uuid.uuid4(), uuid.uuid4()
     store = FakeFileStore()
-    store.dirs["./world/"] = [FileEntry(name="level.dat", is_dir=False, size=1)]
+    store.dirs["./world/"] = [
+        FileEntry(name="level.dat", kind=FileEntryKind.FILE, size=1)
+    ]
 
     await store.delete_dir(
         community_id=CommunityId(community),
@@ -885,7 +891,7 @@ async def test_file_store_rename_dir_answers_every_spelling_of_a_directory(
     # renames rather than 404ing (issue #2975).
     community, server_id = uuid.uuid4(), uuid.uuid4()
     store = FakeFileStore()
-    store.dirs["world"] = [FileEntry(name="level.dat", is_dir=False, size=1)]
+    store.dirs["world"] = [FileEntry(name="level.dat", kind=FileEntryKind.FILE, size=1)]
 
     await store.rename_dir(
         community_id=CommunityId(community),
@@ -903,7 +909,9 @@ async def test_file_store_rename_dir_answers_a_directory_seeded_under_an_alias()
     # The seeded-key half of the same rule, as for the listing and the delete.
     community, server_id = uuid.uuid4(), uuid.uuid4()
     store = FakeFileStore()
-    store.dirs["./world/"] = [FileEntry(name="level.dat", is_dir=False, size=1)]
+    store.dirs["./world/"] = [
+        FileEntry(name="level.dat", kind=FileEntryKind.FILE, size=1)
+    ]
 
     await store.rename_dir(
         community_id=CommunityId(community),
@@ -954,7 +962,7 @@ async def test_file_store_path_exists_answers_every_spelling_of_a_seeded_name(
     # the name occupied (issue #2975).
     community, server_id = uuid.uuid4(), uuid.uuid4()
     store = FakeFileStore()
-    store.dirs["world"] = [FileEntry(name="level.dat", is_dir=False, size=1)]
+    store.dirs["world"] = [FileEntry(name="level.dat", kind=FileEntryKind.FILE, size=1)]
     store.files["world/level.dat"] = b"x"
 
     assert (
@@ -1411,8 +1419,10 @@ async def test_file_store_refuses_a_directory_seeded_under_two_spellings(
     community, server_id = uuid.uuid4(), uuid.uuid4()
     store = FakeFileStore()
     first, second = spellings
-    store.dirs[first] = [FileEntry(name="level.dat", is_dir=False, size=1)]
-    store.dirs[second] = [FileEntry(name="session.lock", is_dir=False, size=1)]
+    store.dirs[first] = [FileEntry(name="level.dat", kind=FileEntryKind.FILE, size=1)]
+    store.dirs[second] = [
+        FileEntry(name="session.lock", kind=FileEntryKind.FILE, size=1)
+    ]
 
     with pytest.raises(AssertionError, match="ONE directory"):
         await store.list_dir(
@@ -1645,7 +1655,7 @@ async def test_file_store_dir_zip_answers_every_spelling_of_a_directory(
     # spelling but cannot be downloaded under it.
     community, server_id = uuid.uuid4(), uuid.uuid4()
     store = FakeFileStore()
-    store.dirs["world"] = [FileEntry(name="level.dat", is_dir=False, size=1)]
+    store.dirs["world"] = [FileEntry(name="level.dat", kind=FileEntryKind.FILE, size=1)]
 
     stream = open_zip(store, community, server_id, alias)
     assert [chunk async for chunk in stream] != []
@@ -1684,19 +1694,19 @@ async def test_file_store_dir_zip_streams_the_subtree_as_production_walks_it(
     community, server_id = uuid.uuid4(), uuid.uuid4()
     store = FakeFileStore()
     store.dirs["."] = [
-        FileEntry(name="a", is_dir=True, size=0),
-        FileEntry(name="z.txt", is_dir=False, size=7),
+        FileEntry(name="a", kind=FileEntryKind.DIRECTORY, size=0),
+        FileEntry(name="z.txt", kind=FileEntryKind.FILE, size=7),
     ]
     store.dirs["a"] = [
-        FileEntry(name="b.txt", is_dir=False, size=1),
-        FileEntry(name="empty", is_dir=True, size=0),
-        FileEntry(name="sub", is_dir=True, size=0),
-        FileEntry(name="sub2", is_dir=True, size=0),
-        FileEntry(name="y.txt", is_dir=False, size=1),
+        FileEntry(name="b.txt", kind=FileEntryKind.FILE, size=1),
+        FileEntry(name="empty", kind=FileEntryKind.DIRECTORY, size=0),
+        FileEntry(name="sub", kind=FileEntryKind.DIRECTORY, size=0),
+        FileEntry(name="sub2", kind=FileEntryKind.DIRECTORY, size=0),
+        FileEntry(name="y.txt", kind=FileEntryKind.FILE, size=1),
     ]
     store.dirs["a/empty"] = []
-    store.dirs["a/sub"] = [FileEntry(name="w.txt", is_dir=False, size=1)]
-    store.dirs["a/sub2"] = [FileEntry(name="v.txt", is_dir=False, size=1)]
+    store.dirs["a/sub"] = [FileEntry(name="w.txt", kind=FileEntryKind.FILE, size=1)]
+    store.dirs["a/sub2"] = [FileEntry(name="v.txt", kind=FileEntryKind.FILE, size=1)]
     store.files["a/b.txt"] = b"b"
     store.files["a/y.txt"] = b"y"
     store.files["a/sub/w.txt"] = b"w"
@@ -1728,8 +1738,8 @@ async def test_file_store_dir_zip_skips_a_listed_file_nothing_holds(
     community, server_id = uuid.uuid4(), uuid.uuid4()
     store = FakeFileStore()
     store.dirs["world"] = [
-        FileEntry(name="level.dat", is_dir=False, size=5),
-        FileEntry(name="session.lock", is_dir=False, size=1),
+        FileEntry(name="level.dat", kind=FileEntryKind.FILE, size=5),
+        FileEntry(name="session.lock", kind=FileEntryKind.FILE, size=1),
     ]
     store.files["world/level.dat"] = b"level"
 
@@ -1745,7 +1755,7 @@ async def test_file_store_export_dir_appends_extra_after_the_subtree() -> None:
     # (``test_export_dir_appends_extra_entries``), under their own arcnames.
     community, server_id = uuid.uuid4(), uuid.uuid4()
     store = FakeFileStore()
-    store.dirs["world"] = [FileEntry(name="level.dat", is_dir=False, size=5)]
+    store.dirs["world"] = [FileEntry(name="level.dat", kind=FileEntryKind.FILE, size=5)]
     store.files["world/level.dat"] = b"level"
 
     stream = store.export_dir(
@@ -1910,7 +1920,7 @@ async def test_crashed_observed_is_at_rest_for_read_write_and_list() -> None:
     )
     store = FakeFileStore()
     store.files["eula.txt"] = b"eula=false"
-    store.dirs[""] = [FileEntry(name="eula.txt", is_dir=False, size=10)]
+    store.dirs[""] = [FileEntry(name="eula.txt", kind=FileEntryKind.FILE, size=10)]
     cp = FakeControlPlane()
 
     read_out = await ReadFile(uow=uow, control_plane=cp, file_store=store)(
@@ -2850,7 +2860,7 @@ async def test_list_dir_at_rest_reads_storage() -> None:
         ),
     )
     store = FakeFileStore()
-    store.dirs["."] = [FileEntry(name="world", is_dir=True, size=0)]
+    store.dirs["."] = [FileEntry(name="world", kind=FileEntryKind.DIRECTORY, size=0)]
     cp = FakeControlPlane()
     use_case = ListDir(uow=uow, control_plane=cp, file_store=store)
     listing = await use_case(
@@ -2883,8 +2893,14 @@ async def test_list_dir_running_reads_control_plane() -> None:
             status=CommandStatus.OK,
             listing=OutcomeFileListing(
                 entries=(
-                    OutcomeFileEntry(name="server.properties", is_dir=False, size=42),
-                    OutcomeFileEntry(name="world", is_dir=True, size=0),
+                    OutcomeFileEntry(
+                        name="server.properties", kind=FileEntryKind.FILE, size=42
+                    ),
+                    OutcomeFileEntry(
+                        name="world", kind=FileEntryKind.DIRECTORY, size=0
+                    ),
+                    OutcomeFileEntry(name="link", kind=FileEntryKind.SYMLINK, size=6),
+                    OutcomeFileEntry(name="fifo", kind=FileEntryKind.OTHER, size=0),
                 ),
                 truncated=False,
             ),
@@ -2897,9 +2913,11 @@ async def test_list_dir_running_reads_control_plane() -> None:
         server_id=ServerId(server_id),
         rel_path=".",
     )
-    assert [(e.name, e.is_dir, e.size) for e in listing.entries] == [
-        ("server.properties", False, 42),
-        ("world", True, 0),
+    assert [(e.name, e.kind, e.size) for e in listing.entries] == [
+        ("server.properties", FileEntryKind.FILE, 42),
+        ("world", FileEntryKind.DIRECTORY, 0),
+        ("link", FileEntryKind.SYMLINK, 6),
+        ("fifo", FileEntryKind.OTHER, 0),
     ]
     assert listing.truncated is False
     assert [d[0] for d in cp.dispatched] == ["list_files"]
@@ -2922,7 +2940,11 @@ async def test_list_dir_running_passes_truncated_flag_through() -> None:
         outcome=CommandOutcome(
             status=CommandStatus.OK,
             listing=OutcomeFileListing(
-                entries=(OutcomeFileEntry(name="world", is_dir=True, size=0),),
+                entries=(
+                    OutcomeFileEntry(
+                        name="world", kind=FileEntryKind.DIRECTORY, size=0
+                    ),
+                ),
                 truncated=True,
             ),
         )
@@ -3728,7 +3750,9 @@ async def test_download_file_stream_is_chunked_for_a_multi_chunk_file() -> None:
 async def test_download_file_size_reads_parent_listing() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
     store = FakeFileStore()
-    store.dirs["world"] = [FileEntry(name="region.mca", is_dir=False, size=16)]
+    store.dirs["world"] = [
+        FileEntry(name="region.mca", kind=FileEntryKind.FILE, size=16)
+    ]
     use_case = DownloadFile(uow=_stopped_uow(community, server_id), file_store=store)
 
     size = await use_case.file_size(
@@ -3760,7 +3784,7 @@ async def test_download_dir_zip_at_rest() -> None:
     # the test reads back is the archive of THAT subtree. It used to assert the
     # fake's placeholder ``b"zip-bytes"``, which pinned the fake rather than a
     # download (issue #3091).
-    store.dirs["world"] = [FileEntry(name="level.dat", is_dir=False, size=5)]
+    store.dirs["world"] = [FileEntry(name="level.dat", kind=FileEntryKind.FILE, size=5)]
     store.files["world/level.dat"] = b"level"
     store.files["server.properties"] = b"motd=hi"
     use_case = DownloadFile(uow=_stopped_uow(community, server_id), file_store=store)
@@ -3824,7 +3848,7 @@ async def test_delete_file_at_rest_removes_file() -> None:
 async def test_delete_directory_at_rest_removes_subtree() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
     store = FakeFileStore()
-    store.dirs["world"] = [FileEntry(name="level.dat", is_dir=False, size=1)]
+    store.dirs["world"] = [FileEntry(name="level.dat", kind=FileEntryKind.FILE, size=1)]
     use_case = DeleteFile(uow=_stopped_uow(community, server_id), file_store=store)
 
     await use_case(
@@ -4199,7 +4223,9 @@ def test_rename_docstring_notes_atomic_rename() -> None:
 async def test_rename_dir_at_rest_moves_directory() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
     store = FakeFileStore()
-    store.dirs["old_world"] = [FileEntry(name="level.dat", is_dir=False, size=4)]
+    store.dirs["old_world"] = [
+        FileEntry(name="level.dat", kind=FileEntryKind.FILE, size=4)
+    ]
     store.files["old_world/level.dat"] = b"data"
     use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
 
@@ -4231,8 +4257,10 @@ async def test_rename_dir_missing_source_is_not_found() -> None:
 async def test_rename_dir_existing_destination_is_conflict() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
     store = FakeFileStore()
-    store.dirs["old_world"] = [FileEntry(name="level.dat", is_dir=False, size=4)]
-    store.dirs["taken"] = [FileEntry(name="x.dat", is_dir=False, size=1)]
+    store.dirs["old_world"] = [
+        FileEntry(name="level.dat", kind=FileEntryKind.FILE, size=4)
+    ]
+    store.dirs["taken"] = [FileEntry(name="x.dat", kind=FileEntryKind.FILE, size=1)]
     use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
 
     with pytest.raises(FileAlreadyExistsError):
@@ -4248,7 +4276,7 @@ async def test_rename_dir_existing_destination_is_conflict() -> None:
 async def test_rename_dir_self_is_noop() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
     store = FakeFileStore()
-    store.dirs["world"] = [FileEntry(name="level.dat", is_dir=False, size=4)]
+    store.dirs["world"] = [FileEntry(name="level.dat", kind=FileEntryKind.FILE, size=4)]
     use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
 
     await use_case(
@@ -4269,12 +4297,12 @@ def _search_store() -> FakeFileStore:
 
     store = FakeFileStore()
     store.dirs["."] = [
-        FileEntry(name="server.properties", is_dir=False, size=3),
-        FileEntry(name="config", is_dir=True, size=0),
+        FileEntry(name="server.properties", kind=FileEntryKind.FILE, size=3),
+        FileEntry(name="config", kind=FileEntryKind.DIRECTORY, size=0),
     ]
     store.dirs["config"] = [
-        FileEntry(name="ops.json", is_dir=False, size=2),
-        FileEntry(name="motd.txt", is_dir=False, size=5),
+        FileEntry(name="ops.json", kind=FileEntryKind.FILE, size=2),
+        FileEntry(name="motd.txt", kind=FileEntryKind.FILE, size=5),
     ]
     store.files["server.properties"] = b"motd=hello"
     store.files["config/ops.json"] = b"[]"
@@ -4320,8 +4348,8 @@ async def test_search_content_skips_oversized_files() -> None:
     store = _search_store()
     store.files["config/motd.txt"] = b"hello" + b"x" * 1000
     store.dirs["config"] = [
-        FileEntry(name="ops.json", is_dir=False, size=2),
-        FileEntry(name="motd.txt", is_dir=False, size=1005),
+        FileEntry(name="ops.json", kind=FileEntryKind.FILE, size=2),
+        FileEntry(name="motd.txt", kind=FileEntryKind.FILE, size=1005),
     ]
     use_case = SearchFiles(
         uow=_stopped_uow(community, server_id),
@@ -4347,8 +4375,8 @@ async def test_search_content_skips_oversized_file_without_reading_it() -> None:
     # the needle, so a read would match — proving the skip gates on size BEFORE
     # any read_file call rather than reading first and discarding.
     store.dirs["config"] = [
-        FileEntry(name="ops.json", is_dir=False, size=2),
-        FileEntry(name="motd.txt", is_dir=False, size=1000),
+        FileEntry(name="ops.json", kind=FileEntryKind.FILE, size=2),
+        FileEntry(name="motd.txt", kind=FileEntryKind.FILE, size=1000),
     ]
     use_case = SearchFiles(
         uow=_stopped_uow(community, server_id),
@@ -4381,7 +4409,7 @@ async def test_search_content_skips_a_listed_file_it_cannot_read() -> None:
     store = _search_store()
     store.dirs["config"] = [
         *store.dirs["config"],
-        FileEntry(name="broken", is_dir=False, size=7),
+        FileEntry(name="broken", kind=FileEntryKind.FILE, size=7),
     ]
     use_case = SearchFiles(uow=_stopped_uow(community, server_id), file_store=store)
 
@@ -4429,11 +4457,15 @@ async def test_search_skips_a_subdirectory_that_vanishes_mid_walk() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
     store = _VanishingDirFileStore(victim="plugins")
     store.dirs["."] = [
-        FileEntry(name="config", is_dir=True, size=0),
-        FileEntry(name="plugins", is_dir=True, size=0),
+        FileEntry(name="config", kind=FileEntryKind.DIRECTORY, size=0),
+        FileEntry(name="plugins", kind=FileEntryKind.DIRECTORY, size=0),
     ]
-    store.dirs["config"] = [FileEntry(name="motd.txt", is_dir=False, size=11)]
-    store.dirs["plugins"] = [FileEntry(name="greeting.txt", is_dir=False, size=5)]
+    store.dirs["config"] = [
+        FileEntry(name="motd.txt", kind=FileEntryKind.FILE, size=11)
+    ]
+    store.dirs["plugins"] = [
+        FileEntry(name="greeting.txt", kind=FileEntryKind.FILE, size=5)
+    ]
     store.files["config/motd.txt"] = b"hello world"
     store.files["plugins/greeting.txt"] = b"hello"
     use_case = SearchFiles(uow=_stopped_uow(community, server_id), file_store=store)
@@ -4471,7 +4503,7 @@ async def test_search_surfaces_a_subdirectory_it_cannot_list() -> None:
 
     community, server_id = uuid.uuid4(), uuid.uuid4()
     store = _UnreadableDirFileStore()
-    store.dirs["."] = [FileEntry(name="config", is_dir=True, size=0)]
+    store.dirs["."] = [FileEntry(name="config", kind=FileEntryKind.DIRECTORY, size=0)]
     use_case = SearchFiles(uow=_stopped_uow(community, server_id), file_store=store)
 
     with pytest.raises(PermissionError):
@@ -4505,10 +4537,12 @@ async def test_search_skips_a_subdirectory_whose_listing_is_refused() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
     store = _EscapingDirFileStore()
     store.dirs["."] = [
-        FileEntry(name="config", is_dir=True, size=0),
-        FileEntry(name="plugins", is_dir=True, size=0),
+        FileEntry(name="config", kind=FileEntryKind.DIRECTORY, size=0),
+        FileEntry(name="plugins", kind=FileEntryKind.DIRECTORY, size=0),
     ]
-    store.dirs["config"] = [FileEntry(name="motd.txt", is_dir=False, size=11)]
+    store.dirs["config"] = [
+        FileEntry(name="motd.txt", kind=FileEntryKind.FILE, size=11)
+    ]
     use_case = SearchFiles(uow=_stopped_uow(community, server_id), file_store=store)
 
     result = await use_case(
@@ -4548,14 +4582,14 @@ async def test_search_by_name_returns_a_dirent_no_download_can_fetch() -> None:
 
     community, server_id = uuid.uuid4(), uuid.uuid4()
     store = _RefusingLeafFileStore()
-    store.dirs["."] = [FileEntry(name="config", is_dir=True, size=0)]
+    store.dirs["."] = [FileEntry(name="config", kind=FileEntryKind.DIRECTORY, size=0)]
     store.dirs["config"] = [
         # A link resolving outside the working set: listed, but its read is
         # refused as an escape.
-        FileEntry(name="outside.txt", is_dir=False, size=9),
+        FileEntry(name="outside.txt", kind=FileEntryKind.FILE, size=9),
         # A link resolving inside it: listed, but nothing readable is behind
         # the dirent, so its read is the modelled miss.
-        FileEntry(name="dangling.txt", is_dir=False, size=7),
+        FileEntry(name="dangling.txt", kind=FileEntryKind.FILE, size=7),
     ]
     use_case = SearchFiles(uow=_stopped_uow(community, server_id), file_store=store)
 
@@ -4574,7 +4608,7 @@ async def test_search_content_aggregate_scan_cap_sets_truncated() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
     store = FakeFileStore()
     store.dirs["."] = [
-        FileEntry(name=f"f{i}.txt", is_dir=False, size=1) for i in range(5)
+        FileEntry(name=f"f{i}.txt", kind=FileEntryKind.FILE, size=1) for i in range(5)
     ]
     for i in range(5):
         store.files[f"f{i}.txt"] = b"x"  # no match for the needle

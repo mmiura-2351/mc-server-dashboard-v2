@@ -3282,7 +3282,7 @@ func (m *Manager) handleReadFile(cmd session.Command) session.CommandResult {
 
 // handleEditFile writes bytes to a working-set-relative file (Section 6.9, 7.2).
 // The path is sanitized against traversal and the payload is size-bounded; the
-// write is atomic (temp sibling + rename) so a concurrent reader never sees a
+// write is atomic (staged file + rename) so a concurrent reader never sees a
 // torn file. It is executed on the server's per-server lane, issue #95 (a small,
 // interactive edit).
 func (m *Manager) handleEditFile(ctx context.Context, cmd session.Command) session.CommandResult {
@@ -3302,7 +3302,7 @@ func (m *Manager) handleEditFile(ctx context.Context, cmd session.Command) sessi
 	// beneath the root via a per-component O_NOFOLLOW walk, then write relative to
 	// that fd. An intermediate-component symlink the MC process could plant is
 	// refused rather than followed, the dir creation cannot traverse a link out of
-	// the root, and the temp-create + rename act on the same resolved fd, so a
+	// the root, and the publishing rename acts on the same resolved fd, so a
 	// concurrent symlink swap between the walk and the rename cannot redirect it.
 	parentFd, leaf, err := openParentBeneath(root, target, true)
 	if err != nil {
@@ -3317,19 +3317,35 @@ func (m *Manager) handleEditFile(ctx context.Context, cmd session.Command) sessi
 	}
 	defer func() { _ = unix.Close(parentFd) }()
 
-	// The write publishes by renaming a temporary name, so it holds the working-set
-	// lock for as long as that name exists, and waits out a hand-over walk in
-	// progress (workingSetLocks, issue #3371). An edit that cannot get the lock —
-	// its command is gone, or the walk outlasts the wait — writes nothing.
+	// The replacement is staged under a name in the scratch root (atomicWriteAt),
+	// which is the operator's configured path and the Worker's own directory.
+	stageFd, err := nofollow.OpenAt(unix.AT_FDCWD, m.scratchDir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return fail(cmd.CommandID, session.CommandErrorInternal,
+			fmt.Sprintf("instancemanager: edit file: opening the scratch root: %v", err))
+	}
+	defer func() { _ = unix.Close(stageFd) }()
+
+	// The write publishes by a rename onto a name of the working set, so it holds
+	// the working-set lock from before its staged name exists until after the
+	// rename, and waits out a hand-over walk in progress (workingSetLocks, issue
+	// #3371). An edit that cannot get the lock — its command is gone, or the walk
+	// outlasts the wait — writes nothing.
 	unlock, err := m.lockWorkingSet(ctx, cmd.ServerID)
 	if err != nil {
 		return fail(cmd.CommandID, session.CommandErrorInternal,
 			fmt.Sprintf("instancemanager: edit file: waiting for the working set to be handed over: %v", err))
 	}
-	err = atomicWriteAt(parentFd, leaf, cmd.Content)
+	err = atomicWriteAt(stageFd, parentFd, leaf, cmd.Content)
 	unlock()
 	if err != nil {
 		switch {
+		case errors.Is(err, errPublishedNotDurable):
+			// The edit is in place and readable; only its survival of a host crash
+			// is unconfirmed. Failing it would report an edit the server already
+			// sees as not made, so it succeeds with a WARN (atomicWriteAt).
+			m.logger.Warn("file edit published but not confirmed durable",
+				"server_id", cmd.ServerID, "path", cmd.Path, "error", err)
 		case errors.Is(err, errIsDir):
 			return failFileAccess(cmd.CommandID, session.FileAccessReasonIsADirectory,
 				fmt.Sprintf("instancemanager: %q is a directory", cmd.Path))
@@ -3400,7 +3416,7 @@ func (m *Manager) handleListFiles(cmd session.Command) session.CommandResult {
 // redirect it. The caller owns the returned fd.
 func (m *Manager) openListDir(root, relPath string) (int, error) {
 	if relPath == "" || relPath == "." {
-		return unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		return nofollow.OpenDir(root)
 	}
 	target, err := safeJoin(root, relPath)
 	if err != nil {
@@ -3414,7 +3430,7 @@ func (m *Manager) openListDir(root, relPath string) (int, error) {
 
 	// O_DIRECTORY makes opening a regular file fail with ENOTDIR, and O_NOFOLLOW
 	// makes a final-component symlink fail with ELOOP; both surface as denials.
-	return unix.Openat(parentFd, leaf,
+	return nofollow.OpenAt(parentFd, leaf,
 		unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 }
 
@@ -3450,14 +3466,31 @@ func readDirEntries(dirFd int) (*session.FileListing, error) {
 			// is the documented contract.
 			continue
 		}
-		isDir := st.Mode&unix.S_IFMT == unix.S_IFDIR
+		kind := entryKind(st.Mode)
 		size := uint64(0)
-		if !isDir && st.Size > 0 {
+		if kind != session.FileEntryKindDirectory && st.Size > 0 {
 			size = uint64(st.Size)
 		}
-		entries = append(entries, session.FileEntry{Name: name, IsDir: isDir, Size: size})
+		entries = append(entries, session.FileEntry{Name: name, Kind: kind, Size: size})
 	}
 	return &session.FileListing{Entries: entries, Truncated: truncated}, nil
+}
+
+// entryKind classifies a listed entry by its lstat mode (issue #3359), so the
+// browse view offers to open only what ReadFile and ListFiles accept: a regular
+// file or a directory. A symlink is refused by both, and a FIFO, socket or device
+// is refused by ReadFile.
+func entryKind(mode uint32) session.FileEntryKind {
+	switch mode & unix.S_IFMT {
+	case unix.S_IFREG:
+		return session.FileEntryKindFile
+	case unix.S_IFDIR:
+		return session.FileEntryKindDirectory
+	case unix.S_IFLNK:
+		return session.FileEntryKindSymlink
+	default:
+		return session.FileEntryKindOther
+	}
 }
 
 // validateServerID rejects a ServerID that is unsafe to join into a scratch
@@ -3528,96 +3561,200 @@ var (
 // between the resolution and the open; production never reassigns it.
 var readLeafAt = nofollow.ReadFileAt
 
-// atomicWriteAt writes data to a temp file created under parentFd, fsyncs it, and
-// renames it over leaf relative to the same dirfd, so a concurrent reader sees
-// either the old or the complete new content, never a partial write. The whole
-// operation rides parentFd (already resolved beneath the root), so it cannot be
-// redirected by a concurrently swapped intermediate symlink. An existing symlink
-// or directory at leaf is refused before the write (errIsDir / ELOOP) rather than
-// replaced silently.
+// atomicWriteAt writes data to a new file and renames it over leaf of the
+// directory behind parentFd, so a concurrent reader sees either the old or the
+// complete new content, never a partial write. The publishing rename acts on
+// parentFd (already resolved beneath the root), so it cannot be redirected by a
+// concurrently swapped intermediate symlink. An existing symlink or directory at
+// leaf is refused before the write (errIsDir / ELOOP) rather than replaced
+// silently.
 //
 // The directory is the server's to write (issue #3337), so nothing in it is ever
-// opened except the temp this call creates itself (createEditTemp). The rename
-// replaces the NAME leaf: a FIFO there is never opened, another name of a
-// hard-linked file keeps the old content, and a symlink swapped in after the check
-// above is replaced as a link, not written through. A directory swapped in is the
-// one thing a rename cannot replace, and is refused as one.
+// opened, and no name is ever created in it (issue #3359). The file is created
+// without a name (O_TMPFILE) on parentFd and written there, and only then given a
+// name: one reserved for the Worker (editStagePrefix) in the directory
+// behind stageFd, the scratch root. That directory is not the server's — it is
+// outside every working set, so no container can see it — and so the name the
+// rename publishes is the file this call wrote: nothing can replace it in between.
+// A crash before the link leaves no name at all; a crash between the link and the
+// rename leaves the staged name in the scratch root, outside the working set, so
+// no snapshot packs it and no held-set scan counts it, and the next boot removes
+// it (ReclaimEditStaging).
 //
-// The boundary: the exclusive create protects what this call opens, re-owns and
-// writes — its own descriptor — not the later lookup of the temp's NAME. A server
-// that replaces that directory entry before the rename gets its replacement
-// published at leaf instead of the edit: an entry of its own directory moved to a
-// name it could already write, never followed, opened or re-owned by the Worker.
-func atomicWriteAt(parentFd int, leaf string, data []byte) (err error) {
+// Durability against a host crash: the file is fsynced once its content and owner
+// are final, before the rename, and both directories the rename changed are
+// fsynced after it. A failure of that last step is not a failed edit — the new
+// content is already what every reader sees — so it is returned as
+// errPublishedNotDurable, which the handler logs and answers as a success.
+//
+// The rename replaces the NAME leaf: a FIFO there is never opened, another name of
+// a hard-linked file keeps the old content, and a symlink swapped in after the
+// check above is replaced as a link, not written through. A directory swapped in
+// is the one thing a rename cannot replace, and is refused as one.
+//
+// The scratch root and the working set must be one mount: a rename (and the link)
+// cannot cross one, and the edit then fails with EXDEV. The hydrate's swap of
+// .hydrate-<id>-* trees into place rests on the same premise. Naming the unnamed
+// file goes through /proc/self/fd (as the install log does, containerdriver's
+// createInstallLog), so the edit fails where that is not accessible. On a
+// filesystem without unnamed files (EOPNOTSUPP, or EISDIR from a kernel that
+// predates them) the file is created under its staged name from the start
+// (createEditStage): the same private directory, so the same guarantees, except
+// that a crash while writing also leaves the staged name for the boot to remove.
+func atomicWriteAt(stageFd, parentFd int, leaf string, data []byte) (err error) {
 	if err := refuseExistingLeaf(parentFd, leaf); err != nil {
 		return err
 	}
 
-	tmpName, tmp, err := createEditTemp(parentFd)
-	if err != nil {
-		return err
+	var name string // the staged name, once this call has one
+	fd, err := editOpenUnnamed(parentFd)
+	unnamed := err == nil
+	if unnamedFilesUnsupported(err) {
+		name, fd, err = createEditStage(stageFd)
 	}
-	// Until the rename has published it the temp is nothing but this call's litter.
+	if err != nil {
+		return &os.PathError{Op: "create", Path: leaf, Err: err}
+	}
+	tmp := os.NewFile(uintptr(fd), leaf)
+	// Until the rename has published it the staged name is nothing but this call's
+	// litter.
 	defer func() {
 		if err != nil {
 			_ = tmp.Close()
-			_ = unix.Unlinkat(parentFd, tmpName, 0)
+			if name != "" {
+				_ = unix.Unlinkat(stageFd, name, 0)
+			}
 		}
 	}()
 
-	// The replacement is the Worker's creation; give it the directory's owner
-	// before it is published, so a server running as another user can still read
-	// and rewrite its own file (issue #2600).
-	if err := inheritOwner(parentFd, int(tmp.Fd())); err != nil {
-		return fmt.Errorf("setting owner: %w", err)
-	}
 	if _, err := tmp.Write(data); err != nil {
 		return err
 	}
+	if unnamed {
+		// The /proc form needs no capability; naming the descriptor directly
+		// (AT_EMPTY_PATH) would need CAP_DAC_READ_SEARCH. The file is still the
+		// Worker's own here, so protected hard links do not refuse the link.
+		proc := fmt.Sprintf("/proc/self/fd/%d", fd)
+		if name, err = stageEditName(func(n string) error {
+			return unix.Linkat(unix.AT_FDCWD, proc, stageFd, n, unix.AT_SYMLINK_FOLLOW)
+		}); err != nil {
+			return &os.PathError{Op: "link", Path: leaf, Err: err}
+		}
+	}
+	// The replacement is the Worker's creation; give it the directory's owner
+	// before it is published, so a server running as another user can still read
+	// and rewrite its own file (issue #2600).
+	if err := inheritOwner(parentFd, fd); err != nil {
+		return fmt.Errorf("setting owner: %w", err)
+	}
+	// Content and owner are final: make them durable before the name is.
 	if err := tmp.Sync(); err != nil {
 		return err
 	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := unix.Renameat(parentFd, tmpName, parentFd, leaf); err != nil {
+	if err := unix.Renameat(stageFd, name, parentFd, leaf); err != nil {
 		if errors.Is(err, unix.EISDIR) {
 			return errIsDir
 		}
-		return err
+		return &os.LinkError{Op: "rename", Old: name, New: leaf, Err: err}
+	}
+	name = "" // published: nothing of this call's is left to remove
+	// The rename moved a name between two directories; both must reach the disk
+	// for the edit to survive a host crash (and for no staged name to reappear).
+	// The edit is published by now, so a failure here is reported as such rather
+	// than as a failed edit (errPublishedNotDurable).
+	if err := errors.Join(syncEditDir(parentFd), syncEditDir(stageFd)); err != nil {
+		return fmt.Errorf("%w: %w", errPublishedNotDurable, err)
 	}
 	return nil
 }
 
-// editTempSuffix names one edit temp. It is a variable so a test can predict the
-// name and plant something at it; production never reassigns it.
+// errPublishedNotDurable marks an edit that atomicWriteAt published but whose
+// directory fsync failed: readers see the new content, but whether it survives a
+// host crash is unknown. handleEditFile answers it as a success with a WARN.
+var errPublishedNotDurable = errors.New("published, but syncing its directories failed")
+
+// syncEditDir fsyncs a directory an edit's rename changed; a variable so a test
+// can fail it.
+var syncEditDir = unix.Fsync
+
+// editStagePrefix starts the name an edit's file has in the scratch root between
+// being written and being published (atomicWriteAt). Server-id scratch dirs never
+// start with a dot, and ReclaimEditStaging removes what a crash left under it.
+const editStagePrefix = ".edit-"
+
+// editOpenUnnamed creates a file with no name on the filesystem of the directory
+// behind dirFd; replaced to stand in for a filesystem that has no such files.
+var editOpenUnnamed = func(dirFd int) (int, error) {
+	return nofollow.OpenAt(dirFd, ".", unix.O_TMPFILE|unix.O_WRONLY|unix.O_CLOEXEC, 0o640)
+}
+
+// unnamedFilesUnsupported reports whether err is a filesystem (EOPNOTSUPP) or a
+// kernel from before O_TMPFILE (EISDIR) declining to create a file with no name.
+func unnamedFilesUnsupported(err error) bool {
+	return errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, unix.EISDIR)
+}
+
+// editTempSuffix draws the random part of one staged name. It is a variable so a
+// test can predict the name, plant something at it, or act at the moment a name
+// is drawn; production never reassigns it.
 var editTempSuffix = func() string { return strconv.FormatUint(rand.Uint64(), 36) }
 
-// createEditTemp creates the temp an edit writes, in the directory behind
-// parentFd, and returns its name and the open file. O_EXCL makes the create fail
-// on ANY existing entry and O_NOFOLLOW keeps it from resolving a link, so the file
-// behind the returned descriptor — the one written and re-owned — is always one
-// this call created: a FIFO planted at the name cannot block the open, and a hard
-// link or symlink planted there is never truncated, written or re-owned through.
-// (The NAME stays the server's to replace; see atomicWriteAt.) The name is random
-// so that a server cannot hold it in advance, and a taken name is retried under
-// another; it does not carry the leaf, so it fits wherever the leaf does.
-func createEditTemp(parentFd int) (string, *os.File, error) {
-	var name string
+// stageEditName calls place with a fresh staged name until place does not report
+// the name taken (EEXIST), and returns the name place succeeded with. A name can
+// only be taken by another edit or a crashed one's leftover; nothing else writes
+// there. On failure it returns no name, so the caller never removes an entry that
+// is not its own.
+func stageEditName(place func(name string) error) (string, error) {
 	var err error
 	for range 16 {
-		name = ".edit-" + editTempSuffix() + "-tmp"
-		var fd int
-		fd, err = nofollow.OpenAt(parentFd, name,
-			unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o640)
-		if err == nil {
-			return name, os.NewFile(uintptr(fd), name), nil
+		name := editStagePrefix + editTempSuffix()
+		if err = place(name); err == nil {
+			return name, nil
 		}
 		if !errors.Is(err, unix.EEXIST) {
 			break
 		}
 	}
-	return "", nil, &os.PathError{Op: "create", Path: name, Err: err}
+	return "", err
+}
+
+// createEditStage creates an edit's file under a staged name in the directory
+// behind stageFd, for a filesystem without unnamed files, and returns the name and
+// the open descriptor. O_EXCL makes the create fail on any existing entry and
+// O_NOFOLLOW keeps it from resolving a link, so the file written is always one
+// this call created.
+func createEditStage(stageFd int) (string, int, error) {
+	fd := -1
+	name, err := stageEditName(func(n string) error {
+		var err error
+		fd, err = nofollow.OpenAt(stageFd, n,
+			unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o640)
+		return err
+	})
+	return name, fd, err
+}
+
+// ReclaimEditStaging removes the staged files a crashed edit left in scratchDir
+// (atomicWriteAt): a Worker death between naming an edit's file and publishing it
+// strands one. It runs once at boot, before the session exists, so no edit is in
+// flight and every staged name is a leftover. Only non-directory entries of the
+// scratch root carrying editStagePrefix are touched; the scratch root is not the
+// servers', so none of them is a server's file, and no working set is entered.
+// Best-effort: an unreadable root or a failed removal is ignored and retried at
+// the next boot.
+func ReclaimEditStaging(scratchDir string) {
+	entries, err := os.ReadDir(scratchDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasPrefix(e.Name(), editStagePrefix) {
+			_ = os.Remove(filepath.Join(scratchDir, e.Name()))
+		}
+	}
 }
 
 // refuseExistingLeaf rejects an existing symlink or directory at leaf relative to

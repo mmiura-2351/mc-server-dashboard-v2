@@ -3,11 +3,12 @@ package instancemanager
 import (
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/nofollow"
 )
 
 // openParentBeneath opens the parent directory of target as a dirfd that is
@@ -41,17 +42,20 @@ func openParentBeneath(root, target string, mkdir bool) (parentFd int, leaf stri
 	leaf = components[len(components)-1]
 	dirs := components[:len(components)-1]
 
-	// The working-set root is trusted (we own the scratch tree), so a plain open
-	// is fine; the per-component NOFOLLOW walk below is what enforces containment.
-	// For an edit, materialize the root first (a fresh server hydrated to nothing
-	// has no working dir yet); for a read, a missing root surfaces as ENOENT so
-	// the caller maps it to a not-found result.
+	// The working-set root is the one name resolved as a path: it is the Worker's
+	// own entry in the scratch root, which the server (confined to what is beneath
+	// it) cannot replace. It is opened like every directory below it all the same
+	// (nofollow.OpenDir: no link followed at it, EINTR retried); the per-component
+	// walk below is what enforces containment. For an edit, materialize the root
+	// first (a fresh server hydrated to nothing has no working dir yet) — the root
+	// alone, in the scratch root that already exists; for a read, a missing root
+	// surfaces as ENOENT so the caller maps it to a not-found result.
 	if mkdir {
-		if err := os.MkdirAll(root, 0o750); err != nil {
+		if err := unix.Mkdir(root, 0o750); err != nil && !errors.Is(err, unix.EEXIST) {
 			return -1, "", fmt.Errorf("creating root %q: %w", root, err)
 		}
 	}
-	rootFd, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	rootFd, err := nofollow.OpenDir(root)
 	if err != nil {
 		return -1, "", err
 	}
@@ -78,7 +82,7 @@ func openParentBeneath(root, target string, mkdir bool) (parentFd int, leaf stri
 
 	cur := rootFd
 	for _, comp := range dirs {
-		next, oerr := unix.Openat(cur, comp,
+		next, oerr := nofollow.OpenAt(cur, comp,
 			unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 		if oerr != nil {
 			if mkdir && errors.Is(oerr, unix.ENOENT) {
@@ -86,7 +90,7 @@ func openParentBeneath(root, target string, mkdir bool) (parentFd int, leaf stri
 					_ = unix.Close(cur)
 					return -1, "", fmt.Errorf("creating %q: %w", comp, mkErr)
 				}
-				next, oerr = unix.Openat(cur, comp,
+				next, oerr = nofollow.OpenAt(cur, comp,
 					unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 				if oerr == nil {
 					// The directory is the Worker's creation; give it its parent's

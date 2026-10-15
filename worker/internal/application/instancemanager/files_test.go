@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -209,7 +208,9 @@ func TestOpenParentBeneathWriteRidesDirfd(t *testing.T) {
 	}
 	target := filepath.Join(root, "sub", "f.txt")
 
-	parentFd, leaf, err := openParentBeneath(root, target, false)
+	// Resolved as the edit resolves it (mkdir), which yields a descriptor the
+	// write's directory fsync can use; the read path's O_PATH one cannot.
+	parentFd, leaf, err := openParentBeneath(root, target, true)
 	if err != nil {
 		t.Fatalf("openParentBeneath: %v", err)
 	}
@@ -225,7 +226,12 @@ func TestOpenParentBeneathWriteRidesDirfd(t *testing.T) {
 		t.Fatalf("symlink: %v", err)
 	}
 
-	if err := atomicWriteAt(parentFd, leaf, []byte("safe")); err != nil {
+	stageFd, err := unix.Open(m.scratchDir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = unix.Close(stageFd) }()
+	if err := atomicWriteAt(stageFd, parentFd, leaf, []byte("safe")); err != nil {
 		t.Fatalf("atomicWriteAt: %v", err)
 	}
 
@@ -505,13 +511,42 @@ func TestEditFileAtomicWriteLeavesNoTemp(t *testing.T) {
 	if !res.Success {
 		t.Fatalf("EditFile result = %+v, want success", res)
 	}
-	entries, err := os.ReadDir(filepath.Join(m.scratchDir, "s1"))
-	if err != nil {
-		t.Fatalf("readdir: %v", err)
+	assertNoEditTemp(t, m, filepath.Join(m.scratchDir, "s1"), "")
+}
+
+// The working-set root is opened without following a link like every directory
+// below it (issue #3359): a root that is a symlink is refused by read, edit and
+// list alike, and nothing behind it is read or written.
+func TestFileCommandsRefuseASymlinkedWorkingSetRoot(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "server.properties"), []byte("outside"), 0o640); err != nil {
+		t.Fatal(err)
 	}
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), ".edit-") {
-			t.Fatalf("leftover temp file %q after atomic write", e.Name())
+	if err := os.Mkdir(filepath.Join(outside, "sub"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(m.scratchDir, "s1")); err != nil {
+		t.Fatal(err)
+	}
+	for _, cmd := range []session.Command{
+		{CommandID: "c1", ServerID: "s1", Kind: "ReadFile", Path: "server.properties"},
+		{CommandID: "c2", ServerID: "s1", Kind: "EditFile", Path: "server.properties", Content: []byte("edited")},
+		{CommandID: "c3", ServerID: "s1", Kind: "EditFile", Path: "new/file.txt", Content: []byte("edited")},
+		{CommandID: "c4", ServerID: "s1", Kind: "ListFiles", Path: "."},
+		{CommandID: "c5", ServerID: "s1", Kind: "ListFiles", Path: "sub"},
+	} {
+		res := handleWithin(t, m, cmd)
+		// O_DIRECTORY|O_NOFOLLOW reports a link as ENOTDIR, so the reason is not
+		// pinned; the refusal is.
+		if res.Success || res.ErrorCode != session.CommandErrorFileAccessDenied {
+			t.Errorf("%s %q = %+v, want FileAccessDenied", cmd.Kind, cmd.Path, res)
 		}
+	}
+	if got, err := os.ReadFile(filepath.Join(outside, "server.properties")); err != nil || string(got) != "outside" {
+		t.Fatalf("the outside file = %q, %v; want it untouched", got, err)
+	}
+	if entries, err := os.ReadDir(outside); err != nil || len(entries) != 2 {
+		t.Fatalf("the outside directory holds %d entries (%v); want only its own two", len(entries), err)
 	}
 }

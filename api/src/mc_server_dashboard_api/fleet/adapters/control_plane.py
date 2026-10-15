@@ -37,6 +37,7 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
     EditFileCommand,
     FileAccessReason,
     FileEntry,
+    FileEntryKind,
     FileListing,
     HydrateCommand,
     LaunchMode,
@@ -124,6 +125,15 @@ _FILE_ACCESS_REASON_FROM_PROTO: dict[int, FileAccessReason] = {
     pb.FILE_ACCESS_REASON_NOT_A_DIRECTORY: FileAccessReason.NOT_A_DIRECTORY,
     pb.FILE_ACCESS_REASON_SYMLINK_REFUSED: FileAccessReason.SYMLINK_REFUSED,
     pb.FILE_ACCESS_REASON_PAYLOAD_TOO_LARGE: FileAccessReason.PAYLOAD_TOO_LARGE,
+}
+
+# Map the wire entry kind onto the domain kind (issue #3359). An unrecognized
+# value (UNSPECIFIED, or a kind this API does not know) is OTHER, which nothing
+# offers to open.
+_FILE_ENTRY_KIND_FROM_PROTO: dict[int, FileEntryKind] = {
+    pb.FILE_ENTRY_KIND_FILE: FileEntryKind.FILE,
+    pb.FILE_ENTRY_KIND_DIRECTORY: FileEntryKind.DIRECTORY,
+    pb.FILE_ENTRY_KIND_SYMLINK: FileEntryKind.SYMLINK,
 }
 
 
@@ -591,7 +601,11 @@ def _failure_detail(message: pb.CommandResult) -> str | None:
 def _to_listing(message: pb.FileListing) -> FileListing:
     return FileListing(
         entries=tuple(
-            FileEntry(name=e.name, is_dir=e.is_dir, size=e.size)
+            FileEntry(
+                name=e.name,
+                kind=_FILE_ENTRY_KIND_FROM_PROTO.get(e.kind, FileEntryKind.OTHER),
+                size=e.size,
+            )
             for e in message.entries
         ),
         truncated=message.truncated,

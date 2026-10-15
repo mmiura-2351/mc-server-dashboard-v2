@@ -104,17 +104,20 @@ func assertDenied(t *testing.T, res session.CommandResult, want session.FileAcce
 	}
 }
 
-// assertNoEditTemp fails when the directory still holds one of the edit's temps.
-// keep names an entry the test planted itself under that prefix.
-func assertNoEditTemp(t *testing.T, dir, keep string) {
+// assertNoEditTemp fails when the edited directory or the scratch root, where an
+// edit stages its file, still holds an entry under the edit's temp prefix. keep
+// names an entry the test planted itself under that prefix.
+func assertNoEditTemp(t *testing.T, m *Manager, dir, keep string) {
 	t.Helper()
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, e := range entries {
-		if e.Name() != keep && strings.HasPrefix(e.Name(), ".edit-") {
-			t.Fatalf("the edit left its temp %q behind", e.Name())
+	for _, d := range []string{dir, m.scratchDir} {
+		entries, err := os.ReadDir(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range entries {
+			if e.Name() != keep && strings.HasPrefix(e.Name(), ".edit-") {
+				t.Fatalf("the edit left its temp %q behind in %s", e.Name(), d)
+			}
 		}
 	}
 }
@@ -356,7 +359,7 @@ func editOverAPlant(t *testing.T, m *Manager, p editPlant, plantName string) {
 	if after := lstat(t, planted); after.Ino != plantBefore.Ino || after.Mode != plantBefore.Mode || after.Size != plantBefore.Size {
 		t.Errorf("the planted entry changed: %+v, was %+v", after, plantBefore)
 	}
-	assertNoEditTemp(t, root, plantName)
+	assertNoEditTemp(t, m, root, plantName)
 }
 
 // The temp name the edit used to take is predictable, so a server could plant
@@ -386,65 +389,187 @@ func editTempSuffixes(t *testing.T, suffixes ...string) *int {
 	return &drawn
 }
 
-// A server that does guess the temp name gains nothing: the temp is created
-// exclusively, so whatever already holds the name is left alone and the edit goes
-// on under another name.
-func TestEditFileRetriesUnderAnotherNameWhenItsTempNameIsTaken(t *testing.T) {
-	for _, p := range editPlants() {
-		t.Run(p.name, func(t *testing.T) {
-			m := newManager(t, &fakeDriver{}, nil)
-			drawn := editTempSuffixes(t, "taken", "free")
+// withoutUnnamedFiles makes the edit run as on a filesystem that has no unnamed
+// files (O_TMPFILE fails with EOPNOTSUPP), so it creates its staged name directly.
+func withoutUnnamedFiles(t *testing.T) {
+	t.Helper()
+	orig := editOpenUnnamed
+	t.Cleanup(func() { editOpenUnnamed = orig })
+	editOpenUnnamed = func(int) (int, error) { return -1, unix.EOPNOTSUPP }
+}
 
-			editOverAPlant(t, m, p, ".edit-taken-tmp")
+// stagingModes runs a test once with unnamed files and once without.
+func stagingModes(t *testing.T, test func(t *testing.T)) {
+	t.Helper()
+	t.Run("unnamed file", test)
+	t.Run("no unnamed files", func(t *testing.T) {
+		withoutUnnamedFiles(t)
+		test(t)
+	})
+}
 
-			if *drawn != 2 {
-				t.Fatalf("drew %d temp names, want the taken one and one more", *drawn)
-			}
+// A staged name already taken — only a crashed edit's leftover can take one —
+// is left alone, and the edit goes on under another name.
+func TestEditFileRetriesUnderAnotherNameWhenItsStagedNameIsTaken(t *testing.T) {
+	stagingModes(t, func(t *testing.T) {
+		m := newManager(t, &fakeDriver{}, nil)
+		target := writeWorkingFile(t, m, "s1", "server.properties", []byte("motd=old"))
+		taken := filepath.Join(m.scratchDir, ".edit-taken")
+		if err := os.WriteFile(taken, []byte("a leftover"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		drawn := editTempSuffixes(t, "taken", "free")
+
+		res := handleWithin(t, m, session.Command{
+			CommandID: "c1", ServerID: "s1", Kind: "EditFile",
+			Path: "server.properties", Content: []byte("motd=new"),
 		})
-	}
+
+		if !res.Success {
+			t.Fatalf("EditFile result = %+v, want success", res)
+		}
+		if *drawn != 2 {
+			t.Fatalf("drew %d staged names, want the taken one and one more", *drawn)
+		}
+		for path, want := range map[string]string{target: "motd=new", taken: "a leftover"} {
+			if got, err := os.ReadFile(path); err != nil || string(got) != want {
+				t.Errorf("%s reads %q (%v), want %q", path, got, err, want)
+			}
+		}
+		assertNoEditTemp(t, m, filepath.Dir(target), ".edit-taken")
+	})
 }
 
 // The retry is bounded: when every name is taken the edit fails, leaving the
 // target and the entry in its way as they were.
-func TestEditFileGivesUpWhenEveryTempNameIsTaken(t *testing.T) {
-	m := newManager(t, &fakeDriver{}, nil)
-	target := writeWorkingFile(t, m, "s1", "server.properties", []byte("motd=old"))
-	taken := writeWorkingFile(t, m, "s1", ".edit-taken-tmp", []byte("the server's own"))
-	drawn := editTempSuffixes(t, "taken")
-
-	res := handleWithin(t, m, session.Command{
-		CommandID: "c1", ServerID: "s1", Kind: "EditFile",
-		Path: "server.properties", Content: []byte("motd=new"),
-	})
-
-	if res.Success || res.ErrorCode != session.CommandErrorInternal {
-		t.Fatalf("EditFile result = %+v, want an internal failure", res)
-	}
-	if *drawn < 2 || *drawn > 64 {
-		t.Fatalf("drew %d temp names, want a bounded retry", *drawn)
-	}
-	for path, want := range map[string]string{target: "motd=old", taken: "the server's own"} {
-		if got, err := os.ReadFile(path); err != nil || string(got) != want {
-			t.Errorf("%s reads %q (%v), want it untouched %q", path, got, err, want)
+func TestEditFileGivesUpWhenEveryStagedNameIsTaken(t *testing.T) {
+	stagingModes(t, func(t *testing.T) {
+		m := newManager(t, &fakeDriver{}, nil)
+		target := writeWorkingFile(t, m, "s1", "server.properties", []byte("motd=old"))
+		taken := filepath.Join(m.scratchDir, ".edit-taken")
+		if err := os.WriteFile(taken, []byte("a leftover"), 0o600); err != nil {
+			t.Fatal(err)
 		}
-	}
+		drawn := editTempSuffixes(t, "taken")
+
+		res := handleWithin(t, m, session.Command{
+			CommandID: "c1", ServerID: "s1", Kind: "EditFile",
+			Path: "server.properties", Content: []byte("motd=new"),
+		})
+
+		if res.Success || res.ErrorCode != session.CommandErrorInternal {
+			t.Fatalf("EditFile result = %+v, want an internal failure", res)
+		}
+		if *drawn < 2 || *drawn > 64 {
+			t.Fatalf("drew %d staged names, want a bounded retry", *drawn)
+		}
+		for path, want := range map[string]string{target: "motd=old", taken: "a leftover"} {
+			if got, err := os.ReadFile(path); err != nil || string(got) != want {
+				t.Errorf("%s reads %q (%v), want it untouched %q", path, got, err, want)
+			}
+		}
+		assertNoEditTemp(t, m, filepath.Dir(target), ".edit-taken")
+	})
 }
 
-// A failed edit removes its temp: here the ownership cannot be set.
+// A failed edit removes its staged name: here the ownership cannot be set, which
+// happens after the file has its name.
 func TestEditFileRemovesItsTempWhenItFails(t *testing.T) {
+	stagingModes(t, func(t *testing.T) {
+		m := newManager(t, &fakeDriver{}, nil)
+		root := workingRoot(t, m)
+		asRootWorker(t)
+		fchownFd = func(int, int, int) error { return unix.EPERM }
+
+		res := handleWithin(t, m, session.Command{
+			CommandID: "c1", ServerID: "s1", Kind: "EditFile", Path: "server.properties", Content: []byte("motd=new"),
+		})
+
+		if res.Success {
+			t.Fatal("EditFile succeeded, want a failure")
+		}
+		assertNoEditTemp(t, m, root, "")
+	})
+}
+
+// The edit's file is written without a name and, once written, named only in the
+// scratch root (issue #3359): at no point does the working set hold an entry the
+// edit created other than the published leaf, and the name the rename publishes
+// is in a directory no server can write. Observed at the last step before the
+// rename (the ownership change).
+func TestEditFileStagesItsFileOutsideTheWorkingSet(t *testing.T) {
+	stagingModes(t, func(t *testing.T) {
+		m := newManager(t, &fakeDriver{}, nil)
+		root := workingRoot(t, m)
+		writeWorkingFile(t, m, "s1", "server.properties", []byte("motd=old"))
+		chowned := asRootWorker(t)
+		recordOwner := fchownFd
+		var staged []string
+		fchownFd = func(fd, uid, gid int) error {
+			if names := dirNames(t, root); len(names) != 1 || names[0] != "server.properties" {
+				t.Errorf("the working set holds %v before the publish, want only the old file", names)
+			}
+			for _, name := range dirNames(t, m.scratchDir) {
+				if strings.HasPrefix(name, ".edit-") {
+					staged = append(staged, name)
+					if got, err := os.ReadFile(filepath.Join(m.scratchDir, name)); err != nil || string(got) != "motd=new" {
+						t.Errorf("the staged file reads %q (%v), want the edit", got, err)
+					}
+				}
+			}
+			return recordOwner(fd, uid, gid)
+		}
+
+		res := handleWithin(t, m, session.Command{
+			CommandID: "c1", ServerID: "s1", Kind: "EditFile", Path: "server.properties", Content: []byte("motd=new"),
+		})
+
+		if !res.Success {
+			t.Fatalf("EditFile result = %+v, want success", res)
+		}
+		if len(staged) != 1 {
+			t.Fatalf("staged names in the scratch root before the publish = %v, want exactly one", staged)
+		}
+		if !chowned(filepath.Join(root, "server.properties")) {
+			t.Error("the published file is not the one that was re-owned")
+		}
+		assertNoEditTemp(t, m, root, "")
+	})
+}
+
+// Where the filesystem refuses an unnamed file for another reason than lacking
+// them, the edit fails without writing anything.
+func TestEditFileFailsWhenTheUnnamedFileCannotBeCreated(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	root := workingRoot(t, m)
-	asRootWorker(t)
-	fchownFd = func(int, int, int) error { return unix.EPERM }
+	target := writeWorkingFile(t, m, "s1", "server.properties", []byte("motd=old"))
+	orig := editOpenUnnamed
+	t.Cleanup(func() { editOpenUnnamed = orig })
+	editOpenUnnamed = func(int) (int, error) { return -1, unix.EACCES }
 
 	res := handleWithin(t, m, session.Command{
 		CommandID: "c1", ServerID: "s1", Kind: "EditFile", Path: "server.properties", Content: []byte("motd=new"),
 	})
 
-	if res.Success {
-		t.Fatal("EditFile succeeded, want a failure")
+	if res.Success || res.ErrorCode != session.CommandErrorInternal {
+		t.Fatalf("EditFile result = %+v, want an internal failure", res)
 	}
-	assertNoEditTemp(t, root, "")
+	if got, err := os.ReadFile(target); err != nil || string(got) != "motd=old" {
+		t.Fatalf("the target reads %q (%v), want it untouched", got, err)
+	}
+	assertNoEditTemp(t, m, filepath.Dir(target), "")
+}
+
+func dirNames(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
 }
 
 // A directory swapped in at the target after the edit checked it is still refused
@@ -474,7 +599,7 @@ func TestEditFileRefusesADirectorySwappedInAtTheTarget(t *testing.T) {
 	if st := lstat(t, target); st.Mode&unix.S_IFMT != unix.S_IFDIR {
 		t.Fatalf("the directory at the target was replaced (mode %o)", st.Mode)
 	}
-	assertNoEditTemp(t, root, "")
+	assertNoEditTemp(t, m, root, "")
 }
 
 // The edit replaces the NAME, never what is behind it: a FIFO at the target is not
@@ -575,7 +700,7 @@ func TestEditFileResultIsUnchangedForALegitimateEdit(t *testing.T) {
 			if tc.existing && st.Ino == oldIno {
 				t.Error("the file was rewritten in place, want it replaced by rename")
 			}
-			assertNoEditTemp(t, filepath.Dir(full), "")
+			assertNoEditTemp(t, m, filepath.Dir(full), "")
 
 			read := handleWithin(t, m, session.Command{CommandID: "c2", ServerID: "s1", Kind: "ReadFile", Path: tc.path})
 			if !read.Success || !bytes.Equal(read.FileContent, content) {

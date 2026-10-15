@@ -681,12 +681,13 @@ while no name of the file moves under the walk: a name that moves from where it
 was counted to where the walk has yet to look is counted twice, at an unchanged
 link count. Three things keep names still. No container of the server is alive.
 A file whose link count changes during the walk is left alone. And the worker's
-own writes that publish by renaming a temporary name into place — a file edit
-and the write of its generation marker — hold a per-server lock for as long as
-the temporary name exists, which the hand-over holds for the length of its
-walk: an edit waits for a walk in progress and a walk for an edit, so a file a
-server left under an edit's temporary name is met once, wherever the edit puts
-it (issue #3371). A wait for that lock is not open-ended: a command gives up
+own writes that publish by a rename — a file edit, which renames a file it
+staged outside the working set onto a name inside it, and the write of its
+generation marker, which renames a temporary name in the working-set root —
+hold a per-server lock from before the staged or temporary name exists until
+after the rename, which the hand-over holds for the length of its walk: an
+edit waits for a walk in progress and a walk for an edit, so no name the walk
+counts is replaced under it (issue #3371). A wait for that lock is not open-ended: a command gives up
 when its stream is gone or after 20 seconds, and then writes nothing (an edit
 fails; a marker is simply not written, which costs one extra hydrate). Those 20
 seconds are the worker's own, counted from when the command starts waiting, not
@@ -783,6 +784,26 @@ generation marker's value" below.
 A file the worker writes into a running server's working set (a file edit
 through the API, and any parent directory it has to create) is given its
 directory's owner on the open descriptor, so the server keeps access to it.
+A file edit never creates a name in the server's directory other than the one
+it publishes (issue #3359). The new content is written to a file with no name
+(`O_TMPFILE`) on the target's directory. Only then is the file named, under a
+worker-reserved `.edit-<random>` name in the scratch root, which is outside
+every working set and visible to no container. The file is then given its
+directory's owner and fsynced, renamed onto the target, and the target's
+directory and the scratch root are fsynced; if only those directory syncs fail,
+the edit, already visible, still succeeds and the worker logs a `WARN`. Nothing
+a server does can replace the name between
+the write and the rename, so the published file is the one the edit wrote. A
+worker crash before the link leaves nothing behind. A crash between the link
+and the rename leaves the staged name in the scratch root. No snapshot packs
+it and no held-set scan counts it, and the next worker boot removes it. That
+boot removal touches only non-directory entries of the scratch root with that
+prefix, never a server's file. The limits: the scratch root and the working
+sets must be one mount, as the hydrate's swap already requires, and the edit
+fails otherwise (`EXDEV`). Naming the unnamed file needs an accessible
+`/proc/self/fd`. On a filesystem without unnamed files the file is created
+under its staged name from the start, in the same private directory, so a
+crash while writing also leaves a staged name for the boot to remove.
 
 Measured 2026-10-08 on a probe stack (its own compose project and networks),
 inside a booted Paper 1.21.4 container and a Forge 1.20.1 install and launch

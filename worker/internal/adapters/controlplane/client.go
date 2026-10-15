@@ -610,12 +610,27 @@ func toFileListing(listing *session.FileListing) *controlplanev1.FileListing {
 	entries := make([]*controlplanev1.FileEntry, 0, len(listing.Entries))
 	for _, e := range listing.Entries {
 		entries = append(entries, &controlplanev1.FileEntry{
-			Name:  e.Name,
-			IsDir: e.IsDir,
-			Size:  e.Size,
+			Name: e.Name,
+			Kind: mapFileEntryKind(e.Kind),
+			Size: e.Size,
 		})
 	}
 	return &controlplanev1.FileListing{Entries: entries, Truncated: listing.Truncated}
+}
+
+// mapFileEntryKind translates a domain entry kind to the wire enum; a value the
+// domain does not define is sent as OTHER, which nothing offers to open.
+func mapFileEntryKind(kind session.FileEntryKind) controlplanev1.FileEntryKind {
+	switch kind {
+	case session.FileEntryKindFile:
+		return controlplanev1.FileEntryKind_FILE_ENTRY_KIND_FILE
+	case session.FileEntryKindDirectory:
+		return controlplanev1.FileEntryKind_FILE_ENTRY_KIND_DIRECTORY
+	case session.FileEntryKindSymlink:
+		return controlplanev1.FileEntryKind_FILE_ENTRY_KIND_SYMLINK
+	default:
+		return controlplanev1.FileEntryKind_FILE_ENTRY_KIND_OTHER
+	}
 }
 
 // driverName maps the wire driver enum to the configured driver name used by the
