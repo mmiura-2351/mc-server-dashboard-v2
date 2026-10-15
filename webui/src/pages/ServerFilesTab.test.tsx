@@ -284,6 +284,76 @@ describe("ServerFilesTab listing", () => {
     ).toBeNull();
   });
 
+  it("opens no context menu on a special row of a running server (#3396)", async () => {
+    routeGet({
+      detail: server({ observed_state: "running", desired_state: "running" }),
+      list: listing([
+        { name: "server.properties", kind: "file" },
+        { name: "alias.yml", kind: "symlink" },
+        { name: "pipe", kind: "other" },
+      ]),
+    });
+    renderPage();
+    await openFiles();
+
+    // Every item a special row could offer is at-rest only or needs a readable
+    // entry, so the menu would be an empty frame.
+    fireEvent.contextMenu(await screen.findByText(/alias\.yml/));
+    expect(screen.queryByRole("menu")).toBeNull();
+    fireEvent.contextMenu(screen.getByText(/pipe/));
+    expect(screen.queryByRole("menu")).toBeNull();
+
+    // A readable row still has items to offer.
+    fireEvent.contextMenu(screen.getByText(/server\.properties/));
+    expect(
+      within(screen.getByRole("menu")).getByRole("menuitem", {
+        name: t("files.contextMenu.open"),
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("offers no context-menu download on a running server (#3396)", async () => {
+    routeGet({
+      detail: server({ observed_state: "running", desired_state: "running" }),
+      list: listing([
+        { name: "world", kind: "directory" },
+        { name: "server.properties", kind: "file" },
+      ]),
+    });
+    renderPage();
+    await openFiles();
+
+    // The download API is at-rest only: a running server answers 409.
+    const itemNames = () =>
+      within(screen.getByRole("menu"))
+        .getAllByRole("menuitem")
+        .map((item) => item.textContent);
+
+    fireEvent.contextMenu(await screen.findByText(/world/));
+    expect(itemNames()).toEqual([t("files.contextMenu.open")]);
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    fireEvent.contextMenu(screen.getByText(/server\.properties/));
+    expect(itemNames()).toEqual([
+      t("files.contextMenu.open"),
+      t("files.contextMenu.copy"),
+    ]);
+  });
+
+  it("opens no context menu on empty space without anything to offer (#3396)", async () => {
+    mockCan = (code) => code !== "file:edit";
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "server.properties", kind: "file" }]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/server\.properties/);
+
+    fireEvent.contextMenu(document.querySelector(".file-list") as HTMLElement);
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+
   it("exposes the full file name via title on the truncating name cell", async () => {
     const longName = "a-very-long-file-name-that-the-ellipsis-truncates.txt";
     routeGet({
@@ -1272,6 +1342,30 @@ describe("ServerFilesTab running notice", () => {
     expect(
       await screen.findByText(t("files.runningNotice")),
     ).toBeInTheDocument();
+  });
+
+  it("disables the viewer's download while the server is running (#3396)", async () => {
+    routeGet({
+      detail: server({ observed_state: "running", desired_state: "running" }),
+      list: listing([{ name: "notes.txt", kind: "file" }]),
+      content: {
+        path: "notes.txt",
+        content_base64: encodeUtf8Base64("hello\n"),
+      },
+    });
+    renderPage();
+    await openFiles();
+    fireEvent.click(await screen.findByText(/notes\.txt/));
+
+    // The download API is at-rest only: a running server answers 409.
+    const downloadButton = await screen.findByRole("button", {
+      name: t("files.download"),
+    });
+    expect(downloadButton).toBeDisabled();
+    expect(downloadButton).toHaveAttribute(
+      "title",
+      t("files.error.serverMustBeStopped"),
+    );
   });
 });
 
@@ -2282,7 +2376,7 @@ describe("ServerFilesTab bulk operations", () => {
     });
   });
 
-  it("disables bulk delete and move when server is running", async () => {
+  it("disables bulk delete, download and move when server is running", async () => {
     routeGet({
       detail: server({ observed_state: "running", desired_state: "running" }),
       list: listing([
@@ -2308,8 +2402,12 @@ describe("ServerFilesTab bulk operations", () => {
 
     expect(deleteBtn).toBeDisabled();
     expect(moveBtn).toBeDisabled();
-    // Download should still be enabled (read-only operation).
-    expect(downloadBtn).not.toBeDisabled();
+    // The download API is at-rest only too: a running server answers 409 (#3396).
+    expect(downloadBtn).toBeDisabled();
+    expect(downloadBtn).toHaveAttribute(
+      "title",
+      t("files.error.serverMustBeStopped"),
+    );
   });
 
   it("reports partial failure on bulk delete", async () => {
