@@ -134,6 +134,17 @@ func assertHardened(t *testing.T, got CreateSpec) {
 	if !reflect.DeepEqual(got.SecurityOpt, []string{"no-new-privileges"}) {
 		t.Errorf("%s: SecurityOpt = %v, want [no-new-privileges]", got.Name, got.SecurityOpt)
 	}
+	if got.PidsLimit != 4096 {
+		t.Errorf("%s: PidsLimit = %d, want 4096", got.Name, got.PidsLimit)
+	}
+	// A read-only root with one writable, executable /tmp: the JVM's home and
+	// temp dir, where JNA and Netty extract the native libraries they then load.
+	if !got.ReadonlyRootfs {
+		t.Errorf("%s: ReadonlyRootfs = false, want true", got.Name)
+	}
+	if want := map[string]string{"/tmp": "rw,exec,nosuid,nodev,size=256m"}; !reflect.DeepEqual(got.Tmpfs, want) {
+		t.Errorf("%s: Tmpfs = %v, want %v", got.Name, got.Tmpfs, want)
+	}
 	// The JVM is given a home: the run-as uid has no passwd entry in the image.
 	if len(got.Cmd) < 2 || got.Cmd[0] != "java" || got.Cmd[1] != "-Duser.home=/tmp" {
 		t.Errorf("%s: Cmd = %v, want it to start java -Duser.home=/tmp", got.Name, got.Cmd)
@@ -158,13 +169,14 @@ func TestLaunchContainerRunsNonRootWithoutCapabilities(t *testing.T) {
 // no-new-privileges (issue #3343). The test reads the package source and pins
 // where each link of that chain is referred to, called or passed as a value.
 //
-// It is a regression guard for this package, not proof that every future Engine
-// create is hardened. It scans only this directory and matches selector and
-// function names without receiver types, so:
-//   - an unrelated selector named Create in non-test code (os.Create) fails it;
-//     match on the receiver type if that ever gets in the way;
-//   - a create made from another package, or through a method value that one of
-//     the allowed helpers returns or stores, escapes it.
+// It is a regression guard, not proof that every future Engine create is
+// hardened. It scans this directory, and the files of the worker module that
+// import it, and matches selector and function names without receiver types, so:
+//   - an unrelated selector named Create in this package's non-test code, or
+//     anywhere in a file that imports it (os.Create), fails it; match on the
+//     receiver type if that ever gets in the way;
+//   - a create made through a method value that one of the allowed helpers
+//     returns or stores, or by code outside the worker module, escapes it.
 //
 // A method value taken anywhere else in the package is caught. The tests above
 // and below cover each existing container kind's create spec independently.
@@ -220,6 +232,52 @@ func TestEveryContainerCreateGoesThroughCreateServerContainer(t *testing.T) {
 	}
 	if endpoints != 1 {
 		t.Errorf("/containers/create appears %d times in the package, want once (EngineClient.Create)", endpoints)
+	}
+
+	// Outside the package, the one way to an Engine create is EngineClient.Create.
+	// No file in the worker module that imports this package — the Worker's
+	// wiring and the e2e harnesses, test files included — refers to a Create:
+	// they start containers through Driver.Start like the Worker does (issue
+	// #3369).
+	const self = "github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/containerdriver"
+	here, err := filepath.Abs(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = filepath.WalkDir(filepath.Join("..", "..", ".."), func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			abs, err := filepath.Abs(path)
+			if err != nil {
+				return err
+			}
+			if abs == here || (path != filepath.Join("..", "..", "..") && strings.HasPrefix(entry.Name(), ".")) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+		file, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			return err
+		}
+		if !slices.ContainsFunc(file.Imports, func(spec *ast.ImportSpec) bool { return spec.Path.Value == `"`+self+`"` }) {
+			return nil
+		}
+		ast.Inspect(file, func(n ast.Node) bool {
+			if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == "Create" {
+				t.Errorf("%s refers to Create: start containers through the driver", fset.Position(sel.Pos()))
+			}
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 

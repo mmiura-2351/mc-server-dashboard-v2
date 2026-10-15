@@ -15,8 +15,9 @@
 // Worker's QUIC client; worker tests fake the relay AND the container's UDP
 // target). Here, a scripted "Bedrock client" -- a plain UDP socket sending a
 // RakNet Unconnected Ping -- proves, over REAL sockets throughout:
-//  1. a datagram reaches the container and the reply returns through the same
-//     flow (TestBedrockTunnelEndToEnd's initial round trip),
+//  1. a datagram reaches the container, which the driver started hardened like
+//     every server container, and the reply returns through the same flow
+//     (TestBedrockTunnelEndToEnd's initial round trip),
 //  2. two concurrent clients demux correctly (their pings never cross), and
 //  3. tunnel teardown on server stop unbinds the relay's public UDP port.
 //
@@ -41,6 +42,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -49,6 +51,7 @@ import (
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/bedrocktunnel"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/containerdriver"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 )
 
 // Shared test fixture. Kept in sync with
@@ -209,29 +212,52 @@ func TestBedrockTunnelEndToEnd(t *testing.T) {
 		t.Fatalf("docker engine client: %v", err)
 	}
 
-	// Created directly via EngineClient, bypassing containerdriver.Driver: the
-	// fake Geyser is not an MC server (no java shim, no working-dir bind, no
-	// RCON), so the Driver's MC-specific plumbing does not apply -- only its
-	// network-attach mechanics, exercised the same way the Driver's own Create
-	// uses them (dockerclient.go's CreateSpec.Network).
-	containerName := "bedrock-e2e-geyser-" + newServerID(t)
-	id, err := docker.Create(ctx, containerdriver.CreateSpec{
-		Name:    containerName,
-		Image:   image,
-		Network: networkName,
-		Labels:  map[string]string{"mcsd.bedrock-e2e": "1"},
+	// Started through the Driver, the Worker's own create path, so the fake
+	// Geyser runs in a container hardened exactly like a server's: run-as user,
+	// no capabilities, no-new-privileges, the task limit, a read-only root and a
+	// tmpfs /tmp (issues #3343, #3369), attached to the configured network. The
+	// Driver's `java ...` command reaches the image's ENTRYPOINT as arguments,
+	// which stub-geyser ignores. The worker-id prefix lets the e2e reaper reclaim
+	// a container a killed run leaves behind.
+	serverID := newServerID(t)
+	containerName := "mcsd-" + serverID
+	driver := containerdriver.New(
+		docker,
+		containerdriver.NewImageSelector(map[int]string{stubJavaMajor: image}),
+		func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
+			return nil, errNoRCON
+		},
+		containerdriver.Options{
+			WorkerID:    e2eWorkerIDPrefix + "bedrock-" + serverID,
+			StopTimeout: 5 * time.Second,
+			Network:     networkName,
+		},
+	)
+	// The driver publishes the game port it reads from server.properties; a free
+	// one keeps it off any other server's.
+	scratchDir := t.TempDir()
+	seedWorkingSet(t, scratchDir, serverID, map[string]string{
+		"server.properties": "server-port=" + freePort(t) + "\n",
+	})
+	inst, err := driver.Start(ctx, execution.InstanceSpec{
+		ServerID:         serverID,
+		WorkingDir:       filepath.Join(scratchDir, serverID),
+		MinecraftVersion: stubMCVersion,
+		JarRelpath:       "server.jar",
+		WorkingSetLock:   execution.NewWorkingSetLock(),
 	})
 	if err != nil {
-		t.Fatalf("docker create: %v", err)
+		t.Fatalf("driver start: %v", err)
 	}
 	t.Cleanup(func() {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		_ = docker.Remove(cleanupCtx, id)
+		_ = inst.Stop(cleanupCtx, false)
+		if info, err := docker.Inspect(cleanupCtx, containerName); err == nil {
+			_ = docker.Remove(cleanupCtx, info.ID)
+		}
 	})
-	if err := docker.Start(ctx, id); err != nil {
-		t.Fatalf("docker start: %v", err)
-	}
+	assertHardenedContainer(t, ctx, containerName)
 
 	containerIP := containerIPAddress(t, ctx, containerName, networkName)
 

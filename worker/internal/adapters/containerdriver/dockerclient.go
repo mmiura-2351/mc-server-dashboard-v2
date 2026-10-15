@@ -115,6 +115,12 @@ type hostConfig struct {
 	// SecurityOpt lists the Engine security options, e.g. "no-new-privileges"
 	// (issue #3343).
 	SecurityOpt []string `json:"SecurityOpt,omitempty"`
+	// PidsLimit, ReadonlyRootfs and Tmpfs bound the container's tasks and make its
+	// root filesystem read-only with tmpfs mounts as the writable exceptions
+	// (issue #3369).
+	PidsLimit      int64             `json:"PidsLimit,omitempty"`
+	ReadonlyRootfs bool              `json:"ReadonlyRootfs,omitempty"`
+	Tmpfs          map[string]string `json:"Tmpfs,omitempty"`
 }
 
 type portBinding struct {
@@ -141,6 +147,7 @@ func (c *EngineClient) Create(ctx context.Context, spec CreateSpec) (string, err
 		HostConfig: hostConfig{
 			Binds: spec.Binds, CPUShares: spec.CPUShares, Memory: spec.MemoryLimitBytes,
 			CapDrop: spec.CapDrop, SecurityOpt: spec.SecurityOpt,
+			PidsLimit: spec.PidsLimit, ReadonlyRootfs: spec.ReadonlyRootfs, Tmpfs: spec.Tmpfs,
 		},
 	}
 	if len(spec.Ports) > 0 {

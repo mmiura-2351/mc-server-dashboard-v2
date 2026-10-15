@@ -1338,6 +1338,12 @@ container was replaced, so the existing stamp still describes what is running.
 > host's container policy package — the hardening is not optional and has no
 > switch. This was not exercised on an SELinux host.
 >
+> Since issue #3369 a container also has a read-only root filesystem and holds
+> at most 4096 processes and threads. `/tmp` stays writable as a 256 MiB tmpfs,
+> and what a server keeps there counts against its memory limit. A plugin or mod
+> that writes outside the working set and `/tmp` fails with `EROFS`. This needs
+> no action and has no switch.
+>
 > **A worker run as an unprivileged host process** (not the compose service)
 > runs the containers as its own `uid:gid` and cannot take over files it does
 > not own. Working sets left in its scratch dir by a container that ran as root
