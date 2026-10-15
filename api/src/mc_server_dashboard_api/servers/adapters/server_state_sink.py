@@ -225,10 +225,10 @@ class ServersServerStateSink(ServerStateSink):
 
     async def existing_server_ids(self, *, server_ids: list[str]) -> set[str]:
         # Unparseable (non-UUID) IDs are treated as existing so the caller never
-        # classifies them as deleted. ScanHeldServers advertises any content-
-        # bearing dir in the scratch root (not just UUIDs), so a safety copy like
-        # "<id>.bak" could be advertised; misclassifying it would cause the worker
-        # to RemoveAll it (issue #924 review).
+        # classifies them as deleted. The Worker advertises only UUID-named
+        # scratch dirs (issue #3395), so one arriving here is an invariant
+        # violation; were it a safety copy like "<id>.bak", misclassifying it
+        # would cause the worker to RemoveAll it (issue #924 review).
         unparseable: set[str] = set()
         valid: list[uuid.UUID] = []
         for sid in server_ids:

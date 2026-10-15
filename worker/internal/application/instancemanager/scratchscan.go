@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/regionfsck"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/scratchformat"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
@@ -37,6 +38,18 @@ const sweepingPrefix = ".sweeping-"
 func isReservedScratchName(name string) bool {
 	return strings.HasPrefix(name, displacedPrefix) || strings.HasPrefix(name, scratchformat.HydratePrefix) ||
 		strings.HasPrefix(name, sweepingPrefix)
+}
+
+// isServerIDName reports whether a scratch-root entry name is a server id: the
+// canonical text form of a UUID, which is what the API sends and every working
+// set's directory is named after (issue #3395). Anything else under the scratch
+// root — a stray directory, a filesystem's lost+found — is not a server the Worker
+// holds, and the API logs every non-UUID id it is sent as an invariant violation. A
+// non-canonical spelling of a UUID is refused too: the API would parse it but answer
+// in canonical form, so the id would read as a deleted server whose dir gets removed.
+func isServerIDName(name string) bool {
+	id, err := uuid.Parse(name)
+	return err == nil && id.String() == name
 }
 
 // ScanHeldServers returns the working sets this Worker already holds in its
@@ -117,10 +130,9 @@ func isReservedScratchName(name string) bool {
 // A subdirectory whose only content is the generation marker is treated as EMPTY
 // and SKIPPED: it holds no real working set, so the API must still hydrate (never
 // silently boot a fresh/empty world). A missing or unreadable scratch root yields
-// an empty list (the Worker reports holding nothing). The scan does not recurse and
-// does not validate that a name is a server id — a non-server directory under
-// scratch is harmless to report because the API only consults this for ids it has
-// assigned to the Worker.
+// an empty list (the Worker reports holding nothing). The scan does not recurse, and
+// it skips a directory whose name is not a server id (isServerIDName, issue #3395)
+// silently: HeldServers logs those once, and its list is the one the API is told.
 func ScanHeldServers(scratchDir string, quiesced bool, log *slog.Logger) []session.HeldServer {
 	entries, err := os.ReadDir(scratchDir)
 	if err != nil {
@@ -136,7 +148,7 @@ func ScanHeldServers(scratchDir string, quiesced bool, log *slog.Logger) []sessi
 		// #2290) and a .sweeping-<id>-* one an interrupted displaced sweep's (issue
 		// #2799), not held servers: skip them so they are never reported (and never
 		// header-fsck'd per boot under a server_id=.displaced-<id> warning).
-		if isReservedScratchName(entry.Name()) {
+		if isReservedScratchName(entry.Name()) || !isServerIDName(entry.Name()) {
 			continue
 		}
 		workingDir := filepath.Join(scratchDir, entry.Name())
@@ -238,6 +250,10 @@ func heldGeneration(workingDir, serverID string, quiesced bool, log *slog.Logger
 // read here (issue #3178), so a torn set reads 0 until a hydrate replaces the tree and
 // rewrites the marker. Re-judging here would pay a region walk per held world on every
 // reconnect and, worse, read worlds this Worker is running mid-write.
+//
+// A directory whose name is not a server id is skipped (issue #3395) and logged at
+// INFO the first time this manager sees it, so a permanent stray is named once rather
+// than on every registration.
 func (m *Manager) HeldServers() []session.HeldServer {
 	entries, err := os.ReadDir(m.scratchDir)
 	if err != nil {
@@ -249,6 +265,13 @@ func (m *Manager) HeldServers() []session.HeldServer {
 			continue
 		}
 		if isReservedScratchName(entry.Name()) {
+			continue
+		}
+		if !isServerIDName(entry.Name()) {
+			if _, seen := m.skippedScratchNames.LoadOrStore(entry.Name(), struct{}{}); !seen {
+				m.logger.Info("not advertising a scratch-root directory as held: its name is not a server id",
+					"path", filepath.Join(m.scratchDir, entry.Name()))
+			}
 			continue
 		}
 		workingDir := filepath.Join(m.scratchDir, entry.Name())

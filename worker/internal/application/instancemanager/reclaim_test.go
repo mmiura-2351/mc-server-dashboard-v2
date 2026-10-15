@@ -407,18 +407,24 @@ func TestCloseStopsTheReclaimAtTheNextIDBoundary(t *testing.T) {
 // down the loop top stops the reclaim at the FIRST id, so "at most one id's
 // filesystem work" includes none at all.
 func TestStoppedReclaimLeavesSkippedIDsHeld(t *testing.T) {
+	// UUIDs: the held-set scan advertises only directories named by a server id (issue #3395).
+	const (
+		s0 = "e0000000-0000-4000-8000-000000000000"
+		s1 = "e0000000-0000-4000-8000-000000000001"
+		s2 = "e0000000-0000-4000-8000-000000000002"
+	)
 	m := newManager(t, &fakeDriver{}, nil)
-	ids := []string{"s1", "s2"}
+	ids := []string{s1, s2}
 	for _, id := range ids {
 		seedScratch(t, m, id)
 	}
-	seedScratch(t, m, "s0")
+	seedScratch(t, m, s0)
 
 	// The positive control (issue #3025): on a closed manager the loop top stops at
 	// the first id, so no id in the stopped call can be one it reclaims. Instead the
 	// same body on the same manager reclaims s0 before Close, which makes s1 and s2
 	// staying held below the stop rather than a reclaim that does nothing.
-	m.reclaimDeletedScratches([]string{"s0"})
+	m.reclaimDeletedScratches([]string{s0})
 	m.Close()
 
 	m.reclaimDeletedScratches(ids)
@@ -427,7 +433,7 @@ func TestStoppedReclaimLeavesSkippedIDsHeld(t *testing.T) {
 	for _, hs := range m.HeldServers() {
 		held[hs.ServerID] = true
 	}
-	if held["s0"] {
+	if held[s0] {
 		t.Fatalf("s0 is still advertised as held after the reclaim before Close, so the ids below staying held proves nothing about the stop: held = %v", held)
 	}
 	for _, id := range ids {

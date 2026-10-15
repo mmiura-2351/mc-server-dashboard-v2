@@ -1015,9 +1015,11 @@ func interruptDisplacedSweep(t *testing.T, m *Manager, serverID string) string {
 // server id the API never assigned and region-fscks a world-sized tree at every boot
 // until it is reclaimed.
 func TestInterruptedDisplacedSweepIsNotAdvertisedAsHeld(t *testing.T) {
+	// A UUID: the held-set scans advertise only directories named by a server id (issue #3395).
+	const s1 = "f0000000-0000-4000-8000-000000000001"
 	m := newManager(t, &fakeDriver{}, nil)
-	seedHydrateShapedTree(t, filepath.Join(m.scratchDir, "s1"), 7)
-	leftover := interruptDisplacedSweep(t, m, "s1")
+	seedHydrateShapedTree(t, filepath.Join(m.scratchDir, s1), 7)
+	leftover := interruptDisplacedSweep(t, m, s1)
 
 	for _, scan := range []struct {
 		name string
@@ -1026,7 +1028,7 @@ func TestInterruptedDisplacedSweepIsNotAdvertisedAsHeld(t *testing.T) {
 		{"ScanHeldServers", ScanHeldServers(m.scratchDir, true, nil)},
 		{"HeldServers", m.HeldServers()},
 	} {
-		if len(scan.got) != 1 || scan.got[0].ServerID != "s1" {
+		if len(scan.got) != 1 || scan.got[0].ServerID != s1 {
 			t.Fatalf("%s = %v, want only s1: the tree an interrupted displaced sweep left at %s "+
 				"must never be enumerated as a held server (issue #2799)",
 				scan.name, scan.got, filepath.Base(leftover))

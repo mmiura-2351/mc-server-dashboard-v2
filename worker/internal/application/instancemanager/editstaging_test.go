@@ -21,13 +21,18 @@ import (
 // errCrash stands in for a Worker death inside an edit.
 var errCrash = errors.New("the worker died here")
 
-// crashBeforePublish runs an edit of s1's server.properties that dies after its
-// file was given its staged name and before the rename: the panic skips every
-// clean-up an orderly failure runs, as a crash does.
+// editedServerID names the working set the stranded-edit test edits. It is a UUID
+// because the held-set scan advertises only directories named by a server id (issue
+// #3395).
+const editedServerID = "0e000000-0000-4000-8000-000000000001"
+
+// crashBeforePublish runs an edit of editedServerID's server.properties that dies
+// after its file was given its staged name and before the rename: the panic skips
+// every clean-up an orderly failure runs, as a crash does.
 func crashBeforePublish(t *testing.T, m *Manager) {
 	t.Helper()
-	parentFd, leaf, err := openParentBeneath(filepath.Join(m.scratchDir, "s1"),
-		filepath.Join(m.scratchDir, "s1", "server.properties"), true)
+	parentFd, leaf, err := openParentBeneath(filepath.Join(m.scratchDir, editedServerID),
+		filepath.Join(m.scratchDir, editedServerID, "server.properties"), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,8 +61,8 @@ func crashBeforePublish(t *testing.T, m *Manager) {
 func TestAStrandedEditStagingIsNotPackedAndIsReclaimedAtBoot(t *testing.T) {
 	stagingModes(t, func(t *testing.T) {
 		m := newManager(t, &fakeDriver{}, nil)
-		writeWorkingFile(t, m, "s1", "server.properties", []byte("motd=old"))
-		lookalike := writeWorkingFile(t, m, "s1", ".edit-lookalike", []byte("the server's own"))
+		writeWorkingFile(t, m, editedServerID, "server.properties", []byte("motd=old"))
+		lookalike := writeWorkingFile(t, m, editedServerID, ".edit-lookalike", []byte("the server's own"))
 		unrelated := filepath.Join(m.scratchDir, "unrelated")
 		if err := os.WriteFile(unrelated, nil, 0o600); err != nil {
 			t.Fatal(err)
@@ -75,10 +80,10 @@ func TestAStrandedEditStagingIsNotPackedAndIsReclaimedAtBoot(t *testing.T) {
 			t.Fatalf("staged names left in the scratch root = %v, want the one the crash stranded", stranded)
 		}
 
-		if got, want := packedNames(t, filepath.Join(m.scratchDir, "s1")), []string{".edit-lookalike", "server.properties"}; !reflect.DeepEqual(got, want) {
+		if got, want := packedNames(t, filepath.Join(m.scratchDir, editedServerID)), []string{".edit-lookalike", "server.properties"}; !reflect.DeepEqual(got, want) {
 			t.Fatalf("the snapshot packs %v, want %v", got, want)
 		}
-		if got, want := m.HeldServers(), []session.HeldServer{{ServerID: "s1"}}; !reflect.DeepEqual(got, want) {
+		if got, want := m.HeldServers(), []session.HeldServer{{ServerID: editedServerID}}; !reflect.DeepEqual(got, want) {
 			t.Fatalf("held servers = %v, want %v", got, want)
 		}
 
@@ -89,7 +94,7 @@ func TestAStrandedEditStagingIsNotPackedAndIsReclaimedAtBoot(t *testing.T) {
 		}
 		for path, want := range map[string]string{
 			lookalike: "the server's own",
-			filepath.Join(m.scratchDir, "s1", "server.properties"): "motd=old",
+			filepath.Join(m.scratchDir, editedServerID, "server.properties"): "motd=old",
 			unrelated: "",
 		} {
 			if got, err := os.ReadFile(path); err != nil || string(got) != want {
