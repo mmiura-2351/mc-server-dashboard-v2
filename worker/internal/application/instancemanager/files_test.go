@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -225,7 +224,12 @@ func TestOpenParentBeneathWriteRidesDirfd(t *testing.T) {
 		t.Fatalf("symlink: %v", err)
 	}
 
-	if err := atomicWriteAt(parentFd, leaf, []byte("safe")); err != nil {
+	stageFd, err := unix.Open(m.scratchDir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = unix.Close(stageFd) }()
+	if err := atomicWriteAt(stageFd, parentFd, leaf, []byte("safe")); err != nil {
 		t.Fatalf("atomicWriteAt: %v", err)
 	}
 
@@ -505,15 +509,7 @@ func TestEditFileAtomicWriteLeavesNoTemp(t *testing.T) {
 	if !res.Success {
 		t.Fatalf("EditFile result = %+v, want success", res)
 	}
-	entries, err := os.ReadDir(filepath.Join(m.scratchDir, "s1"))
-	if err != nil {
-		t.Fatalf("readdir: %v", err)
-	}
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), ".edit-") {
-			t.Fatalf("leftover temp file %q after atomic write", e.Name())
-		}
-	}
+	assertNoEditTemp(t, m, filepath.Join(m.scratchDir, "s1"), "")
 }
 
 // The working-set root is opened without following a link like every directory

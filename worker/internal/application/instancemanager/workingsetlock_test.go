@@ -188,12 +188,12 @@ func editMotd() session.Command {
 }
 
 // assertEditNotWritten fails if the edit has touched its directory at all.
-func assertEditNotWritten(t *testing.T, target string) {
+func assertEditNotWritten(t *testing.T, m *Manager, target string) {
 	t.Helper()
 	if got, err := os.ReadFile(target); err != nil || string(got) != "motd=old" {
 		t.Fatalf("the target reads %q (%v), want it untouched", got, err)
 	}
-	assertNoEditTemp(t, filepath.Dir(target), "")
+	assertNoEditTemp(t, m, filepath.Dir(target), "")
 }
 
 // An edit that meets a walk waits for it — creating nothing meanwhile — and
@@ -206,7 +206,7 @@ func TestEditFileWaitsForAHandOverAndThenPublishes(t *testing.T) {
 	go func() { done <- m.Handle(context.Background(), editMotd()) }()
 
 	<-waiting
-	assertEditNotWritten(t, target)
+	assertEditNotWritten(t, m, target)
 	lock.Unlock()
 
 	if res := <-done; !res.Success {
@@ -238,7 +238,7 @@ func TestEditFileGivesUpWaitingWhenItsCommandIsCancelled(t *testing.T) {
 		t.Fatal("the lock came free although the walk still holds it")
 	}
 	lock.Unlock()
-	assertEditNotWritten(t, target)
+	assertEditNotWritten(t, m, target)
 }
 
 // A walk that outlasts the wait does not keep the edit, or the lane behind it,
@@ -259,7 +259,7 @@ func TestEditFileWaitIsBoundedSoAStopBehindItIsHandled(t *testing.T) {
 	if res.Success || !strings.Contains(res.ErrorMessage, context.DeadlineExceeded.Error()) {
 		t.Fatalf("EditFile = %+v, want it failed once the wait ran out", res)
 	}
-	assertEditNotWritten(t, target)
+	assertEditNotWritten(t, m, target)
 	stop := handleWithin(t, m, session.Command{CommandID: "stop", ServerID: "s1", Kind: "StopServer"})
 	if !stop.Success {
 		t.Fatalf("StopServer after the edit = %+v, want it handled", stop)
