@@ -3400,7 +3400,7 @@ func (m *Manager) handleListFiles(cmd session.Command) session.CommandResult {
 // redirect it. The caller owns the returned fd.
 func (m *Manager) openListDir(root, relPath string) (int, error) {
 	if relPath == "" || relPath == "." {
-		return unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		return nofollow.OpenDir(root)
 	}
 	target, err := safeJoin(root, relPath)
 	if err != nil {
@@ -3414,7 +3414,7 @@ func (m *Manager) openListDir(root, relPath string) (int, error) {
 
 	// O_DIRECTORY makes opening a regular file fail with ENOTDIR, and O_NOFOLLOW
 	// makes a final-component symlink fail with ELOOP; both surface as denials.
-	return unix.Openat(parentFd, leaf,
+	return nofollow.OpenAt(parentFd, leaf,
 		unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 }
 

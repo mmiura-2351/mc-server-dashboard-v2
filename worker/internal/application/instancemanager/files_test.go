@@ -515,3 +515,40 @@ func TestEditFileAtomicWriteLeavesNoTemp(t *testing.T) {
 		}
 	}
 }
+
+// The working-set root is opened without following a link like every directory
+// below it (issue #3359): a root that is a symlink is refused by read, edit and
+// list alike, and nothing behind it is read or written.
+func TestFileCommandsRefuseASymlinkedWorkingSetRoot(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "server.properties"), []byte("outside"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(outside, "sub"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(m.scratchDir, "s1")); err != nil {
+		t.Fatal(err)
+	}
+	for _, cmd := range []session.Command{
+		{CommandID: "c1", ServerID: "s1", Kind: "ReadFile", Path: "server.properties"},
+		{CommandID: "c2", ServerID: "s1", Kind: "EditFile", Path: "server.properties", Content: []byte("edited")},
+		{CommandID: "c3", ServerID: "s1", Kind: "EditFile", Path: "new/file.txt", Content: []byte("edited")},
+		{CommandID: "c4", ServerID: "s1", Kind: "ListFiles", Path: "."},
+		{CommandID: "c5", ServerID: "s1", Kind: "ListFiles", Path: "sub"},
+	} {
+		res := handleWithin(t, m, cmd)
+		// O_DIRECTORY|O_NOFOLLOW reports a link as ENOTDIR, so the reason is not
+		// pinned; the refusal is.
+		if res.Success || res.ErrorCode != session.CommandErrorFileAccessDenied {
+			t.Errorf("%s %q = %+v, want FileAccessDenied", cmd.Kind, cmd.Path, res)
+		}
+	}
+	if got, err := os.ReadFile(filepath.Join(outside, "server.properties")); err != nil || string(got) != "outside" {
+		t.Fatalf("the outside file = %q, %v; want it untouched", got, err)
+	}
+	if entries, err := os.ReadDir(outside); err != nil || len(entries) != 2 {
+		t.Fatalf("the outside directory holds %d entries (%v); want only its own two", len(entries), err)
+	}
+}
