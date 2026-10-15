@@ -786,12 +786,13 @@ through the API, and any parent directory it has to create) is given its
 directory's owner on the open descriptor, so the server keeps access to it.
 A file edit never creates a name in the server's directory other than the one
 it publishes (issue #3359). The new content is written to a file with no name
-(`O_TMPFILE`) on the target's directory and fsynced. Only then is the file
-named, under a worker-reserved `.edit-<random>` name in the scratch root, which
-is outside every working set and visible to no container. That name is then
-renamed onto the target. The file is fsynced before the rename and both
-directories after it; if only those directory syncs fail, the edit, already
-visible, still succeeds and the worker logs a `WARN`. Nothing a server does can replace the name between
+(`O_TMPFILE`) on the target's directory. Only then is the file named, under a
+worker-reserved `.edit-<random>` name in the scratch root, which is outside
+every working set and visible to no container. The file is then given its
+directory's owner and fsynced, renamed onto the target, and the target's
+directory and the scratch root are fsynced; if only those directory syncs fail,
+the edit, already visible, still succeeds and the worker logs a `WARN`. Nothing
+a server does can replace the name between
 the write and the rename, so the published file is the one the edit wrote. A
 worker crash before the link leaves nothing behind. A crash between the link
 and the rename leaves the staged name in the scratch root. No snapshot packs
