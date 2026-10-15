@@ -2109,9 +2109,10 @@ function Listing({
 /**
  * Whether FileContextMenu would show any item for `entry` (`null` is empty
  * space); keep in step with its item conditions. A readable entry always has
- * Open, and every other item is an at-rest edit, so a special row or empty
- * space with no edit to offer (a running server, or no file:edit) would be an
- * empty frame, and the menu is not opened at all (issue #3396).
+ * Open; every other item is at-rest only (download and the edits) or needs a
+ * readable file (Copy). So a special row or empty space with no edit to offer
+ * (a running server, or no file:edit) would be an empty frame, and the menu is
+ * not opened at all (issue #3396).
  */
 function contextMenuHasItems(
   entry: DirEntry | null,
@@ -2194,7 +2195,7 @@ function FileContextMenu({
           {t("files.contextMenu.open")}
         </button>
       )}
-      {entry !== null && onDownload && (
+      {entry !== null && !running && onDownload && (
         <button type="button" role="menuitem" onClick={onDownload}>
           {entry.kind === "directory"
             ? t("files.contextMenu.downloadZip")

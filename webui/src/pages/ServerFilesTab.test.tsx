@@ -312,6 +312,34 @@ describe("ServerFilesTab listing", () => {
     ).toBeInTheDocument();
   });
 
+  it("offers no context-menu download on a running server (#3396)", async () => {
+    routeGet({
+      detail: server({ observed_state: "running", desired_state: "running" }),
+      list: listing([
+        { name: "world", kind: "directory" },
+        { name: "server.properties", kind: "file" },
+      ]),
+    });
+    renderPage();
+    await openFiles();
+
+    // The download API is at-rest only: a running server answers 409.
+    const itemNames = () =>
+      within(screen.getByRole("menu"))
+        .getAllByRole("menuitem")
+        .map((item) => item.textContent);
+
+    fireEvent.contextMenu(await screen.findByText(/world/));
+    expect(itemNames()).toEqual([t("files.contextMenu.open")]);
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    fireEvent.contextMenu(screen.getByText(/server\.properties/));
+    expect(itemNames()).toEqual([
+      t("files.contextMenu.open"),
+      t("files.contextMenu.copy"),
+    ]);
+  });
+
   it("opens no context menu on empty space without anything to offer (#3396)", async () => {
     mockCan = (code) => code !== "file:edit";
     routeGet({
