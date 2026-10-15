@@ -3340,6 +3340,12 @@ func (m *Manager) handleEditFile(ctx context.Context, cmd session.Command) sessi
 	unlock()
 	if err != nil {
 		switch {
+		case errors.Is(err, errPublishedNotDurable):
+			// The edit is in place and readable; only its survival of a host crash
+			// is unconfirmed. Failing it would report an edit the server already
+			// sees as not made, so it succeeds with a WARN (atomicWriteAt).
+			m.logger.Warn("file edit published but not confirmed durable",
+				"server_id", cmd.ServerID, "path", cmd.Path, "error", err)
 		case errors.Is(err, errIsDir):
 			return failFileAccess(cmd.CommandID, session.FileAccessReasonIsADirectory,
 				fmt.Sprintf("instancemanager: %q is a directory", cmd.Path))
@@ -3555,8 +3561,8 @@ var (
 // between the resolution and the open; production never reassigns it.
 var readLeafAt = nofollow.ReadFileAt
 
-// atomicWriteAt writes data to a new file, fsyncs it, and renames it over leaf of
-// the directory behind parentFd, so a concurrent reader sees either the old or the
+// atomicWriteAt writes data to a new file and renames it over leaf of the
+// directory behind parentFd, so a concurrent reader sees either the old or the
 // complete new content, never a partial write. The publishing rename acts on
 // parentFd (already resolved beneath the root), so it cannot be redirected by a
 // concurrently swapped intermediate symlink. An existing symlink or directory at
@@ -3565,8 +3571,8 @@ var readLeafAt = nofollow.ReadFileAt
 //
 // The directory is the server's to write (issue #3337), so nothing in it is ever
 // opened, and no name is ever created in it (issue #3359). The file is created
-// without a name (O_TMPFILE) on parentFd, written and fsynced there, and only then
-// given a name: one reserved for the Worker (editStagePrefix) in the directory
+// without a name (O_TMPFILE) on parentFd and written there, and only then given a
+// name: one reserved for the Worker (editStagePrefix) in the directory
 // behind stageFd, the scratch root. That directory is not the server's — it is
 // outside every working set, so no container can see it — and so the name the
 // rename publishes is the file this call wrote: nothing can replace it in between.
@@ -3574,6 +3580,12 @@ var readLeafAt = nofollow.ReadFileAt
 // rename leaves the staged name in the scratch root, outside the working set, so
 // no snapshot packs it and no held-set scan counts it, and the next boot removes
 // it (ReclaimEditStaging).
+//
+// Durability against a host crash: the file is fsynced once its content and owner
+// are final, before the rename, and both directories the rename changed are
+// fsynced after it. A failure of that last step is not a failed edit — the new
+// content is already what every reader sees — so it is returned as
+// errPublishedNotDurable, which the handler logs and answers as a success.
 //
 // The rename replaces the NAME leaf: a FIFO there is never opened, another name of
 // a hard-linked file keeps the old content, and a symlink swapped in after the
@@ -3618,9 +3630,6 @@ func atomicWriteAt(stageFd, parentFd int, leaf string, data []byte) (err error) 
 	if _, err := tmp.Write(data); err != nil {
 		return err
 	}
-	if err := tmp.Sync(); err != nil {
-		return err
-	}
 	if unnamed {
 		// The /proc form needs no capability; naming the descriptor directly
 		// (AT_EMPTY_PATH) would need CAP_DAC_READ_SEARCH. The file is still the
@@ -3638,6 +3647,10 @@ func atomicWriteAt(stageFd, parentFd int, leaf string, data []byte) (err error) 
 	if err := inheritOwner(parentFd, fd); err != nil {
 		return fmt.Errorf("setting owner: %w", err)
 	}
+	// Content and owner are final: make them durable before the name is.
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
@@ -3647,8 +3660,25 @@ func atomicWriteAt(stageFd, parentFd int, leaf string, data []byte) (err error) 
 		}
 		return &os.LinkError{Op: "rename", Old: name, New: leaf, Err: err}
 	}
+	name = "" // published: nothing of this call's is left to remove
+	// The rename moved a name between two directories; both must reach the disk
+	// for the edit to survive a host crash (and for no staged name to reappear).
+	// The edit is published by now, so a failure here is reported as such rather
+	// than as a failed edit (errPublishedNotDurable).
+	if err := errors.Join(syncEditDir(parentFd), syncEditDir(stageFd)); err != nil {
+		return fmt.Errorf("%w: %w", errPublishedNotDurable, err)
+	}
 	return nil
 }
+
+// errPublishedNotDurable marks an edit that atomicWriteAt published but whose
+// directory fsync failed: readers see the new content, but whether it survives a
+// host crash is unknown. handleEditFile answers it as a success with a WARN.
+var errPublishedNotDurable = errors.New("published, but syncing its directories failed")
+
+// syncEditDir fsyncs a directory an edit's rename changed; a variable so a test
+// can fail it.
+var syncEditDir = unix.Fsync
 
 // editStagePrefix starts the name an edit's file has in the scratch root between
 // being written and being published (atomicWriteAt). Server-id scratch dirs never

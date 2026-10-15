@@ -789,7 +789,9 @@ it publishes (issue #3359). The new content is written to a file with no name
 (`O_TMPFILE`) on the target's directory and fsynced. Only then is the file
 named, under a worker-reserved `.edit-<random>` name in the scratch root, which
 is outside every working set and visible to no container. That name is then
-renamed onto the target. Nothing a server does can replace the name between
+renamed onto the target. The file is fsynced before the rename and both
+directories after it; if only those directory syncs fail, the edit, already
+visible, still succeeds and the worker logs a `WARN`. Nothing a server does can replace the name between
 the write and the rename, so the published file is the one the edit wrote. A
 worker crash before the link leaves nothing behind. A crash between the link
 and the rename leaves the staged name in the scratch root. No snapshot packs

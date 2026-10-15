@@ -99,6 +99,45 @@ func TestAStrandedEditStagingIsNotPackedAndIsReclaimedAtBoot(t *testing.T) {
 	})
 }
 
+// After the rename both directories it changed — the target's and the scratch
+// root — are fsynced, once the new content is in place. A failure of that sync
+// does not undo or fail the published edit.
+func TestEditFileSyncsBothDirectoriesAfterThePublish(t *testing.T) {
+	for name, syncErr := range map[string]error{"sync succeeds": nil, "sync fails": unix.EIO} {
+		t.Run(name, func(t *testing.T) {
+			m := newManager(t, &fakeDriver{}, nil)
+			target := writeWorkingFile(t, m, "s1", "sub/server.properties", []byte("motd=old"))
+			orig := syncEditDir
+			t.Cleanup(func() { syncEditDir = orig })
+			var synced []uint64
+			syncEditDir = func(fd int) error {
+				if got, err := os.ReadFile(target); err != nil || string(got) != "motd=new" {
+					t.Errorf("a directory was synced before the publish: target reads %q (%v)", got, err)
+				}
+				var st unix.Stat_t
+				if err := unix.Fstat(fd, &st); err != nil {
+					t.Fatal(err)
+				}
+				synced = append(synced, st.Ino)
+				return syncErr
+			}
+
+			res := handleWithin(t, m, session.Command{
+				CommandID: "c1", ServerID: "s1", Kind: "EditFile", Path: "sub/server.properties", Content: []byte("motd=new"),
+			})
+
+			if !res.Success {
+				t.Fatalf("EditFile result = %+v, want success", res)
+			}
+			want := []uint64{lstat(t, filepath.Dir(target)).Ino, lstat(t, m.scratchDir).Ino}
+			if !reflect.DeepEqual(synced, want) {
+				t.Fatalf("synced directory inodes %v, want the target's and the scratch root's %v", synced, want)
+			}
+			assertNoEditTemp(t, m, filepath.Dir(target), "")
+		})
+	}
+}
+
 // packedNames packs workingDir as a snapshot does and returns the member names.
 func packedNames(t *testing.T, workingDir string) []string {
 	t.Helper()

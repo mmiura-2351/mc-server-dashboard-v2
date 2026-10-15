@@ -208,7 +208,9 @@ func TestOpenParentBeneathWriteRidesDirfd(t *testing.T) {
 	}
 	target := filepath.Join(root, "sub", "f.txt")
 
-	parentFd, leaf, err := openParentBeneath(root, target, false)
+	// Resolved as the edit resolves it (mkdir), which yields a descriptor the
+	// write's directory fsync can use; the read path's O_PATH one cannot.
+	parentFd, leaf, err := openParentBeneath(root, target, true)
 	if err != nil {
 		t.Fatalf("openParentBeneath: %v", err)
 	}
