@@ -107,7 +107,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     UnsupportedPluginServerTypeError,
     WorkingSetSeedFailedError,
 )
-from mc_server_dashboard_api.servers.domain.file_store import FileStore
+from mc_server_dashboard_api.servers.domain.file_store import FileEntryKind, FileStore
 from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
     LifecycleLock,
     NullLifecycleLock,
@@ -594,7 +594,7 @@ async def _reconcile_plugins(
 
         disk_jars: set[str] = set()
         for entry in entries:
-            if entry.is_dir:
+            if entry.kind is FileEntryKind.DIRECTORY:
                 continue
             lower = entry.name.lower()
             if lower.endswith(".jar") or lower.endswith(".jar.disabled"):

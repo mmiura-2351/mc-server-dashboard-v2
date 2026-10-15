@@ -84,6 +84,41 @@ supervised phase of the start, then launches via the now-present args file.
 """
 Global___LaunchMode: _TypeAlias = LaunchMode  # noqa: Y015
 
+class _FileEntryKind:
+    ValueType = _typing.NewType("ValueType", _builtins.int)
+    V: _TypeAlias = ValueType  # noqa: Y015
+
+class _FileEntryKindEnumTypeWrapper(_enum_type_wrapper._EnumTypeWrapper[_FileEntryKind.ValueType], _builtins.type):
+    DESCRIPTOR: _descriptor.EnumDescriptor
+    FILE_ENTRY_KIND_UNSPECIFIED: _FileEntryKind.ValueType  # 0
+    """Unspecified is never sent; the API treats it as OTHER."""
+    FILE_ENTRY_KIND_FILE: _FileEntryKind.ValueType  # 1
+    """A regular file."""
+    FILE_ENTRY_KIND_DIRECTORY: _FileEntryKind.ValueType  # 2
+    """A directory."""
+    FILE_ENTRY_KIND_SYMLINK: _FileEntryKind.ValueType  # 3
+    """A symbolic link, dangling or not."""
+    FILE_ENTRY_KIND_OTHER: _FileEntryKind.ValueType  # 4
+    """Anything else: a FIFO, socket or device."""
+
+class FileEntryKind(_FileEntryKind, metaclass=_FileEntryKindEnumTypeWrapper):
+    """FileEntryKind classifies a listed entry (issue #3359). Only a FILE can be read
+    or edited and only a DIRECTORY listed; the Worker refuses the others, so the
+    browse view does not offer them.
+    """
+
+FILE_ENTRY_KIND_UNSPECIFIED: FileEntryKind.ValueType  # 0
+"""Unspecified is never sent; the API treats it as OTHER."""
+FILE_ENTRY_KIND_FILE: FileEntryKind.ValueType  # 1
+"""A regular file."""
+FILE_ENTRY_KIND_DIRECTORY: FileEntryKind.ValueType  # 2
+"""A directory."""
+FILE_ENTRY_KIND_SYMLINK: FileEntryKind.ValueType  # 3
+"""A symbolic link, dangling or not."""
+FILE_ENTRY_KIND_OTHER: FileEntryKind.ValueType  # 4
+"""Anything else: a FIFO, socket or device."""
+Global___FileEntryKind: _TypeAlias = FileEntryKind  # noqa: Y015
+
 class _FileAccessReason:
     ValueType = _typing.NewType("ValueType", _builtins.int)
     V: _TypeAlias = ValueType  # noqa: Y015
@@ -1335,32 +1370,35 @@ Global___FileListing: _TypeAlias = FileListing  # noqa: Y015
 
 @_typing.final
 class FileEntry(_message.Message):
-    """FileEntry is one child of a listed directory. The shape mirrors the API's
-    authoritative-Storage listing (name, is_dir, size) so a running-server listing
-    and an at-rest listing unify into one response shape.
+    """FileEntry is one child of a listed directory. The API unifies it with its
+    authoritative-Storage listing into one response shape (name, kind, size).
     """
 
     DESCRIPTOR: _descriptor.Descriptor
 
     NAME_FIELD_NUMBER: _builtins.int
-    IS_DIR_FIELD_NUMBER: _builtins.int
     SIZE_FIELD_NUMBER: _builtins.int
+    KIND_FIELD_NUMBER: _builtins.int
     name: _builtins.str
     """name is the entry's base name (no path separators)."""
-    is_dir: _builtins.bool
-    """is_dir is true for a subdirectory, false for a regular file."""
     size: _builtins.int
-    """size is the file size in bytes; 0 for a directory."""
+    """size is the entry's own size in bytes (a symlink's is the length of its
+    target string, never followed); 0 for a directory.
+    """
+    kind: Global___FileEntryKind.ValueType
+    """kind is what the directory entry itself is, judged without following a
+    link.
+    """
     def __init__(
         self,
         *,
         name: _builtins.str = ...,
-        is_dir: _builtins.bool = ...,
         size: _builtins.int = ...,
+        kind: Global___FileEntryKind.ValueType = ...,
     ) -> None: ...
     _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["is_dir", b"is_dir", "name", b"name", "size", b"size"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["kind", b"kind", "name", b"name", "size", b"size"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
     def WhichOneof(self, oneof_group: _Never) -> None: ...
 

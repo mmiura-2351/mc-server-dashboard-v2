@@ -24,6 +24,7 @@ part or in whole.
 from __future__ import annotations
 
 import abc
+import enum
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
@@ -33,12 +34,26 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 )
 
 
+class FileEntryKind(enum.Enum):
+    """What a listed entry itself is, judged without following a link (#3359).
+
+    Only a ``FILE`` can be opened and only a ``DIRECTORY`` browsed into; a running
+    server's listing can also hold a ``SYMLINK`` or an ``OTHER`` (FIFO, socket,
+    device), which the Worker refuses to read.
+    """
+
+    FILE = "file"
+    DIRECTORY = "directory"
+    SYMLINK = "symlink"
+    OTHER = "other"
+
+
 @dataclass(frozen=True)
 class FileEntry:
-    """One entry in a directory listing of the authoritative working set."""
+    """One entry in a directory listing of a server's working set."""
 
     name: str
-    is_dir: bool
+    kind: FileEntryKind
     size: int
 
 

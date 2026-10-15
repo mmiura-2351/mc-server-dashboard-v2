@@ -162,7 +162,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerNotFoundError,
     ServerNotStoppedError,
 )
-from mc_server_dashboard_api.servers.domain.file_store import FileEntry
+from mc_server_dashboard_api.servers.domain.file_store import FileEntry, FileEntryKind
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
 
 router = APIRouter()
@@ -244,12 +244,15 @@ class WriteFileRequest(BaseModel):
 
 class DirEntryResponse(BaseModel):
     name: str
-    is_dir: bool
+    # What the entry itself is, never what a link points at (issue #3359): only a
+    # ``file`` can be opened and only a ``directory`` listed. ``symlink`` and
+    # ``other`` (FIFO, socket, device) appear in a running server's listing.
+    kind: FileEntryKind
     size: int
 
     @classmethod
     def from_entry(cls, entry: FileEntry) -> "DirEntryResponse":
-        return cls(name=entry.name, is_dir=entry.is_dir, size=entry.size)
+        return cls(name=entry.name, kind=entry.kind, size=entry.size)
 
 
 class DirListingResponse(BaseModel):

@@ -1925,6 +1925,14 @@ table.data.schedules-runs td {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.file-name-special {
+  cursor: default;
+  color: var(--text-dim);
+}
+.file-kind {
+  margin-left: 6px;
+  font-size: 12px;
+}
 .file-viewer-head {
   display: flex;
   align-items: center;

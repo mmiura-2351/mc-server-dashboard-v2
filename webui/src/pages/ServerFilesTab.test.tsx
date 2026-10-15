@@ -9,6 +9,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { unzipSync } from "fflate";
 import type { ComponentProps } from "react";
@@ -24,6 +25,7 @@ import {
 } from "vitest";
 import { ApiError } from "../api/client.ts";
 import { DownloadTooLargeError } from "../api/download.ts";
+import type { components } from "../api/schema.ts";
 import { setAccessToken } from "../auth/tokenStore.ts";
 import { ToastProvider } from "../components/Toast.tsx";
 import { humanizeBytes } from "../format.ts";
@@ -103,8 +105,10 @@ function server(overrides: Record<string, unknown> = {}) {
   };
 }
 
+type DirEntryKind = components["schemas"]["FileEntryKind"];
+
 function listing(
-  entries: { name: string; is_dir: boolean; size?: number }[],
+  entries: { name: string; kind: DirEntryKind; size?: number }[],
   truncated = false,
 ) {
   return {
@@ -222,8 +226,8 @@ describe("ServerFilesTab listing", () => {
     routeGet({
       detail: server(),
       list: listing([
-        { name: "world", is_dir: true },
-        { name: "server.properties", is_dir: false },
+        { name: "world", kind: "directory" },
+        { name: "server.properties", kind: "file" },
       ]),
     });
     renderPage();
@@ -239,11 +243,52 @@ describe("ServerFilesTab listing", () => {
     );
   });
 
+  it("shows a symlink and a special file with their kind and offers neither to open", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([
+        { name: "server.properties", kind: "file" },
+        { name: "alias.yml", kind: "symlink" },
+        { name: "pipe", kind: "other" },
+      ]),
+    });
+    renderPage();
+    await openFiles();
+
+    const link = await screen.findByText(/alias\.yml/);
+    const pipe = screen.getByText(/pipe/);
+    expect(link).toHaveTextContent(t("files.kind.symlink"));
+    expect(pipe).toHaveTextContent(t("files.kind.other"));
+    expect(link.closest("button")).toBeNull();
+    expect(pipe.closest("button")).toBeNull();
+    expect(
+      screen.getByText(/server\.properties/).closest("button.file-name"),
+    ).not.toBeNull();
+
+    fireEvent.contextMenu(link);
+    const menu = await screen.findByRole("menu");
+    expect(
+      within(menu).queryByRole("menuitem", {
+        name: t("files.contextMenu.open"),
+      }),
+    ).toBeNull();
+    expect(
+      within(menu).queryByRole("menuitem", {
+        name: t("files.contextMenu.download"),
+      }),
+    ).toBeNull();
+    expect(
+      within(menu).queryByRole("menuitem", {
+        name: t("files.contextMenu.copy"),
+      }),
+    ).toBeNull();
+  });
+
   it("exposes the full file name via title on the truncating name cell", async () => {
     const longName = "a-very-long-file-name-that-the-ellipsis-truncates.txt";
     routeGet({
       detail: server(),
-      list: listing([{ name: longName, is_dir: false }]),
+      list: listing([{ name: longName, kind: "file" }]),
     });
     renderPage();
     await openFiles();
@@ -255,7 +300,7 @@ describe("ServerFilesTab listing", () => {
   it("shows the truncated notice when the listing was clipped", async () => {
     routeGet({
       detail: server(),
-      list: listing([{ name: "a", is_dir: false }], true),
+      list: listing([{ name: "a", kind: "file" }], true),
     });
     renderPage();
     await openFiles();
@@ -266,10 +311,10 @@ describe("ServerFilesTab listing", () => {
   it("navigates into a directory and re-lists with the child path", async () => {
     mockApi.get.mockImplementation((path: string) => {
       if (path.includes("path=world")) {
-        return Promise.resolve(listing([{ name: "level.dat", is_dir: false }]));
+        return Promise.resolve(listing([{ name: "level.dat", kind: "file" }]));
       }
       if (path.includes("/files?path=")) {
-        return Promise.resolve(listing([{ name: "world", is_dir: true }]));
+        return Promise.resolve(listing([{ name: "world", kind: "directory" }]));
       }
       return Promise.resolve(server());
     });
@@ -291,7 +336,7 @@ describe("ServerFilesTab viewer / editor", () => {
     const original = "motd=ようこそ 🐉\n";
     routeGet({
       detail: server(),
-      list: listing([{ name: "server.properties", is_dir: false }]),
+      list: listing([{ name: "server.properties", kind: "file" }]),
       content: {
         path: "server.properties",
         content_base64: encodeUtf8Base64(original),
@@ -324,7 +369,7 @@ describe("ServerFilesTab viewer / editor", () => {
     // U+FFFD and saved EF BF BD in its place.
     routeGet({
       detail: server(),
-      list: listing([{ name: "server.properties", is_dir: false }]),
+      list: listing([{ name: "server.properties", kind: "file" }]),
       content: {
         path: "server.properties",
         content_base64: btoa("motd=Caf\xe9\nmax-players=20\n"),
@@ -355,7 +400,7 @@ describe("ServerFilesTab viewer / editor", () => {
   it("refuses to save a character a latin-1 file cannot hold (#2851)", async () => {
     routeGet({
       detail: server(),
-      list: listing([{ name: "server.properties", is_dir: false }]),
+      list: listing([{ name: "server.properties", kind: "file" }]),
       content: {
         path: "server.properties",
         content_base64: btoa("motd=Caf\xe9\n"),
@@ -381,7 +426,7 @@ describe("ServerFilesTab viewer / editor", () => {
   it("saves server.properties as latin-1 on a pre-1.20 server even when it was ASCII (#2851)", async () => {
     routeGet({
       detail: server({ mc_version: "1.19.4" }),
-      list: listing([{ name: "server.properties", is_dir: false }]),
+      list: listing([{ name: "server.properties", kind: "file" }]),
       content: {
         path: "server.properties",
         content_base64: btoa("motd=Cafe\n"),
@@ -408,7 +453,7 @@ describe("ServerFilesTab viewer / editor", () => {
     const binary = btoa(String.fromCharCode(0x50, 0x4b, 0x03, 0x04, 0x00));
     routeGet({
       detail: server(),
-      list: listing([{ name: "region.mca", is_dir: false, size: 2048 }]),
+      list: listing([{ name: "region.mca", kind: "file", size: 2048 }]),
       content: { path: "region.mca", content_base64: binary },
     });
     renderPage();
@@ -427,7 +472,7 @@ describe("ServerFilesTab viewer / editor", () => {
   it("shows the viewer when a file is selected and closes on close button", async () => {
     routeGet({
       detail: server(),
-      list: listing([{ name: "readme.txt", is_dir: false }]),
+      list: listing([{ name: "readme.txt", kind: "file" }]),
       content: {
         path: "readme.txt",
         content_base64: encodeUtf8Base64("hello"),
@@ -457,7 +502,7 @@ describe("ServerFilesTab operations", () => {
   it("uploads via context menu with extract=false", async () => {
     routeGet({
       detail: server(),
-      list: listing([{ name: "a.txt", is_dir: false }]),
+      list: listing([{ name: "a.txt", kind: "file" }]),
     });
     mockPostFormWithProgress.mockResolvedValue(undefined);
     renderPage();
@@ -488,7 +533,7 @@ describe("ServerFilesTab operations", () => {
   it("creates a directory via context menu", async () => {
     routeGet({
       detail: server(),
-      list: listing([{ name: "a.txt", is_dir: false }]),
+      list: listing([{ name: "a.txt", kind: "file" }]),
     });
     mockApi.post.mockResolvedValue(undefined);
     renderPage();
@@ -517,7 +562,7 @@ describe("ServerFilesTab operations", () => {
   it("disables the Create button while the folder-create request is in flight", async () => {
     routeGet({
       detail: server(),
-      list: listing([{ name: "a.txt", is_dir: false }]),
+      list: listing([{ name: "a.txt", kind: "file" }]),
     });
     // Keep the create request pending so the busy state stays observable.
     let resolveCreate: (() => void) | undefined;
@@ -555,7 +600,7 @@ describe("ServerFilesTab operations", () => {
   it("renames an entry via context menu with a {from, to} body", async () => {
     routeGet({
       detail: server(),
-      list: listing([{ name: "old.txt", is_dir: false }]),
+      list: listing([{ name: "old.txt", kind: "file" }]),
     });
     mockApi.post.mockResolvedValue(undefined);
     renderPage();
@@ -588,7 +633,7 @@ describe("ServerFilesTab operations", () => {
   it("deletes via context menu after confirm with ?path=", async () => {
     routeGet({
       detail: server(),
-      list: listing([{ name: "junk.txt", is_dir: false }]),
+      list: listing([{ name: "junk.txt", kind: "file" }]),
     });
     mockApi.delete.mockResolvedValue(undefined);
     renderPage();
@@ -616,7 +661,7 @@ describe("ServerFilesTab operations", () => {
   it("downloads a file via context menu", async () => {
     routeGet({
       detail: server(),
-      list: listing([{ name: "log.txt", is_dir: false }]),
+      list: listing([{ name: "log.txt", kind: "file" }]),
     });
     renderPage();
     await openFiles();
@@ -646,8 +691,8 @@ describe("ServerFilesTab operations", () => {
     routeGet({
       detail: server(),
       list: listing([
-        { name: "a.txt", is_dir: false },
-        { name: "b.txt", is_dir: false },
+        { name: "a.txt", kind: "file" },
+        { name: "b.txt", kind: "file" },
       ]),
     });
     // Emulate fetch's abort contract: stay pending until the signal fires.
@@ -703,7 +748,7 @@ describe("ServerFilesTab operations", () => {
         });
       }
       if (path.includes("/files?path=")) {
-        return Promise.resolve(listing([{ name: "notes.txt", is_dir: false }]));
+        return Promise.resolve(listing([{ name: "notes.txt", kind: "file" }]));
       }
       return Promise.resolve(server());
     });
@@ -749,7 +794,7 @@ describe("ServerFilesTab operations", () => {
         return new Promise(() => {}); // content GET stays in flight forever
       }
       if (path.includes("/files?path=")) {
-        return Promise.resolve(listing([{ name: "notes.txt", is_dir: false }]));
+        return Promise.resolve(listing([{ name: "notes.txt", kind: "file" }]));
       }
       return Promise.resolve(server());
     });
@@ -789,7 +834,7 @@ describe("ServerFilesTab permission gating", () => {
     mockCan = (code) => code !== "file:edit";
     routeGet({
       detail: server(),
-      list: listing([{ name: "server.properties", is_dir: false }]),
+      list: listing([{ name: "server.properties", kind: "file" }]),
     });
     renderPage();
     await openFiles();
@@ -820,7 +865,7 @@ describe("ServerFilesTab permission gating", () => {
   it("routes a 403 through onForbidden (named-permission toast)", async () => {
     routeGet({
       detail: server(),
-      list: listing([{ name: "x", is_dir: false }]),
+      list: listing([{ name: "x", kind: "file" }]),
     });
     mockApi.delete.mockRejectedValue(
       new ApiError(403, { reason: "forbidden", permission: "file:edit" }),
@@ -852,7 +897,7 @@ describe("ServerFilesTab search", () => {
     mockApi.get.mockImplementation((path: string) => {
       // After clicking a hit, the browser re-lists the hit's parent directory.
       if (path.includes("path=world") && path.includes("list=")) {
-        return Promise.resolve(listing([{ name: "level.dat", is_dir: false }]));
+        return Promise.resolve(listing([{ name: "level.dat", kind: "file" }]));
       }
       if (path.includes("/files/history")) {
         return Promise.resolve({ path: "world/level.dat", versions: [] });
@@ -961,7 +1006,7 @@ describe("ServerFilesTab history + rollback", () => {
         });
       }
       if (path.includes("/files?path=")) {
-        return Promise.resolve(listing([{ name: "a b.txt", is_dir: false }]));
+        return Promise.resolve(listing([{ name: "a b.txt", kind: "file" }]));
       }
       return Promise.resolve(server());
     });
@@ -1003,7 +1048,7 @@ describe("ServerFilesTab history + rollback", () => {
         });
       }
       if (path.includes("/files?path=")) {
-        return Promise.resolve(listing([{ name: "a b.txt", is_dir: false }]));
+        return Promise.resolve(listing([{ name: "a b.txt", kind: "file" }]));
       }
       return Promise.resolve(server());
     });
@@ -1051,7 +1096,7 @@ describe("ServerFilesTab history + rollback", () => {
         });
       }
       if (path.includes("/files?path=")) {
-        return Promise.resolve(listing([{ name: "a b.txt", is_dir: false }]));
+        return Promise.resolve(listing([{ name: "a b.txt", kind: "file" }]));
       }
       return Promise.resolve(server());
     });
@@ -1099,7 +1144,7 @@ describe("ServerFilesTab history + rollback", () => {
         });
       }
       if (path.includes("/files?path=")) {
-        return Promise.resolve(listing([{ name: "a b.txt", is_dir: false }]));
+        return Promise.resolve(listing([{ name: "a b.txt", kind: "file" }]));
       }
       return Promise.resolve(server());
     });
@@ -1131,7 +1176,7 @@ describe("ServerFilesTab history + rollback", () => {
         });
       }
       if (path.includes("/files?path=")) {
-        return Promise.resolve(listing([{ name: "a b.txt", is_dir: false }]));
+        return Promise.resolve(listing([{ name: "a b.txt", kind: "file" }]));
       }
       return Promise.resolve(server());
     });
@@ -1169,7 +1214,7 @@ describe("ServerFilesTab history + rollback", () => {
         });
       }
       if (path.includes("/files?path=")) {
-        return Promise.resolve(listing([{ name: "a.txt", is_dir: false }]));
+        return Promise.resolve(listing([{ name: "a.txt", kind: "file" }]));
       }
       return Promise.resolve(server());
     });
@@ -1196,7 +1241,7 @@ describe("ServerFilesTab history + rollback", () => {
         });
       }
       if (path.includes("/files?path=")) {
-        return Promise.resolve(listing([{ name: "a.txt", is_dir: false }]));
+        return Promise.resolve(listing([{ name: "a.txt", kind: "file" }]));
       }
       return Promise.resolve(server());
     });
@@ -1237,7 +1282,7 @@ describe("ServerFilesTab error presentation glue", () => {
     // the user was never told which line to revert.
     routeGet({
       detail: server(),
-      list: listing([{ name: "server.properties", is_dir: false }]),
+      list: listing([{ name: "server.properties", kind: "file" }]),
       content: {
         path: "server.properties",
         content_base64: encodeUtf8Base64("motd=hello\n"),
@@ -1272,7 +1317,7 @@ describe("ServerFilesTab protected content flow", () => {
   it("shows a redirect notice with a link to #plugins on content_dir_protected (paper)", async () => {
     routeGet({
       detail: server({ server_type: "paper" }),
-      list: listing([{ name: "a.txt", is_dir: false }]),
+      list: listing([{ name: "a.txt", kind: "file" }]),
     });
     mockPostFormWithProgress.mockRejectedValue(
       new ApiError(409, { reason: "content_dir_protected" }),
@@ -1302,7 +1347,7 @@ describe("ServerFilesTab protected content flow", () => {
   it("shows the mods tab noun in the redirect notice for a fabric server", async () => {
     routeGet({
       detail: server({ server_type: "fabric" }),
-      list: listing([{ name: "a.txt", is_dir: false }]),
+      list: listing([{ name: "a.txt", kind: "file" }]),
     });
     mockPostFormWithProgress.mockRejectedValue(
       new ApiError(409, { reason: "content_dir_protected" }),
@@ -1437,7 +1482,7 @@ describe("ServerFilesTab drag-and-drop upload", () => {
     mockCan = (code) => code !== "file:edit";
     routeGet({
       detail: server(),
-      list: listing([{ name: "a.txt", is_dir: false }]),
+      list: listing([{ name: "a.txt", kind: "file" }]),
     });
     renderPage();
     await openFiles();
@@ -1683,8 +1728,8 @@ describe("ServerFilesTab multi-select", () => {
     routeGet({
       detail: server(),
       list: listing([
-        { name: "a.txt", is_dir: false },
-        { name: "b.txt", is_dir: false },
+        { name: "a.txt", kind: "file" },
+        { name: "b.txt", kind: "file" },
       ]),
     });
     renderPage();
@@ -1700,7 +1745,7 @@ describe("ServerFilesTab multi-select", () => {
     mockCan = (code) => code !== "file:edit";
     routeGet({
       detail: server(),
-      list: listing([{ name: "a.txt", is_dir: false }]),
+      list: listing([{ name: "a.txt", kind: "file" }]),
     });
     renderPage();
     await openFiles();
@@ -1715,8 +1760,8 @@ describe("ServerFilesTab multi-select", () => {
     routeGet({
       detail: server(),
       list: listing([
-        { name: "a.txt", is_dir: false },
-        { name: "b.txt", is_dir: false },
+        { name: "a.txt", kind: "file" },
+        { name: "b.txt", kind: "file" },
       ]),
     });
     renderPage();
@@ -1739,10 +1784,10 @@ describe("ServerFilesTab multi-select", () => {
     routeGet({
       detail: server(),
       list: listing([
-        { name: "a.txt", is_dir: false },
-        { name: "b.txt", is_dir: false },
-        { name: "c.txt", is_dir: false },
-        { name: "d.txt", is_dir: false },
+        { name: "a.txt", kind: "file" },
+        { name: "b.txt", kind: "file" },
+        { name: "c.txt", kind: "file" },
+        { name: "d.txt", kind: "file" },
       ]),
     });
     renderPage();
@@ -1769,8 +1814,8 @@ describe("ServerFilesTab multi-select", () => {
     routeGet({
       detail: server(),
       list: listing([
-        { name: "a.txt", is_dir: false },
-        { name: "b.txt", is_dir: false },
+        { name: "a.txt", kind: "file" },
+        { name: "b.txt", kind: "file" },
       ]),
     });
     renderPage();
@@ -1796,8 +1841,8 @@ describe("ServerFilesTab multi-select", () => {
     routeGet({
       detail: server(),
       list: listing([
-        { name: "a.txt", is_dir: false },
-        { name: "b.txt", is_dir: false },
+        { name: "a.txt", kind: "file" },
+        { name: "b.txt", kind: "file" },
       ]),
     });
     renderPage();
@@ -1828,13 +1873,13 @@ describe("ServerFilesTab multi-select", () => {
   it("clears selection on directory change", async () => {
     mockApi.get.mockImplementation((path: string) => {
       if (path.includes("path=world")) {
-        return Promise.resolve(listing([{ name: "level.dat", is_dir: false }]));
+        return Promise.resolve(listing([{ name: "level.dat", kind: "file" }]));
       }
       if (path.includes("/files?path=")) {
         return Promise.resolve(
           listing([
-            { name: "world", is_dir: true },
-            { name: "a.txt", is_dir: false },
+            { name: "world", kind: "directory" },
+            { name: "a.txt", kind: "file" },
           ]),
         );
       }
@@ -1864,8 +1909,8 @@ describe("ServerFilesTab bulk operations", () => {
     routeGet({
       detail: server(),
       list: listing([
-        { name: "a.txt", is_dir: false },
-        { name: "b.txt", is_dir: false },
+        { name: "a.txt", kind: "file" },
+        { name: "b.txt", kind: "file" },
       ]),
     });
     renderPage();
@@ -1902,8 +1947,8 @@ describe("ServerFilesTab bulk operations", () => {
     routeGet({
       detail: server(),
       list: listing([
-        { name: "a.txt", is_dir: false },
-        { name: "b.txt", is_dir: false },
+        { name: "a.txt", kind: "file" },
+        { name: "b.txt", kind: "file" },
       ]),
     });
     mockApi.delete.mockResolvedValue(undefined);
@@ -1940,8 +1985,8 @@ describe("ServerFilesTab bulk operations", () => {
     routeGet({
       detail: server(),
       list: listing([
-        { name: "a.txt", is_dir: false },
-        { name: "b.txt", is_dir: false },
+        { name: "a.txt", kind: "file" },
+        { name: "b.txt", kind: "file" },
       ]),
     });
     mockDownload.fetchFileBlob.mockImplementation((path: string) =>
@@ -1997,9 +2042,9 @@ describe("ServerFilesTab bulk operations", () => {
     routeGet({
       detail: server(),
       list: listing([
-        { name: "world", is_dir: true },
-        { name: "world_nether", is_dir: true },
-        { name: "world_the_end", is_dir: true },
+        { name: "world", kind: "directory" },
+        { name: "world_nether", kind: "directory" },
+        { name: "world_the_end", kind: "directory" },
       ]),
     });
     // Each directory response is individually under the per-fetch cap (#2027),
@@ -2037,8 +2082,8 @@ describe("ServerFilesTab bulk operations", () => {
     routeGet({
       detail: server(),
       list: listing([
-        { name: "a.txt", is_dir: false },
-        { name: "b.txt", is_dir: false },
+        { name: "a.txt", kind: "file" },
+        { name: "b.txt", kind: "file" },
       ]),
     });
     // Emulate fetch's abort contract: stay pending until the signal fires.
@@ -2083,8 +2128,8 @@ describe("ServerFilesTab bulk operations", () => {
     routeGet({
       detail: server(),
       list: listing([
-        { name: "a.txt", is_dir: false },
-        { name: "b.txt", is_dir: false },
+        { name: "a.txt", kind: "file" },
+        { name: "b.txt", kind: "file" },
       ]),
     });
     renderPage();
@@ -2118,8 +2163,8 @@ describe("ServerFilesTab bulk operations", () => {
     routeGet({
       detail: server(),
       list: listing([
-        { name: "world", is_dir: true },
-        { name: "a.txt", is_dir: false },
+        { name: "world", kind: "directory" },
+        { name: "a.txt", kind: "file" },
       ]),
     });
     const blobs: Blob[] = [];
@@ -2155,8 +2200,8 @@ describe("ServerFilesTab bulk operations", () => {
     routeGet({
       detail: server(),
       list: listing([
-        { name: "world", is_dir: true },
-        { name: "world.zip", is_dir: false, size: 10 },
+        { name: "world", kind: "directory" },
+        { name: "world.zip", kind: "file", size: 10 },
       ]),
     });
     // Distinct bytes per path so an overwrite is visible, not just a key clash.
@@ -2198,8 +2243,8 @@ describe("ServerFilesTab bulk operations", () => {
     routeGet({
       detail: server(),
       list: listing([
-        { name: "a.txt", is_dir: false },
-        { name: "b.txt", is_dir: false },
+        { name: "a.txt", kind: "file" },
+        { name: "b.txt", kind: "file" },
       ]),
     });
     mockApi.post.mockResolvedValue(undefined);
@@ -2241,8 +2286,8 @@ describe("ServerFilesTab bulk operations", () => {
     routeGet({
       detail: server({ observed_state: "running", desired_state: "running" }),
       list: listing([
-        { name: "a.txt", is_dir: false },
-        { name: "b.txt", is_dir: false },
+        { name: "a.txt", kind: "file" },
+        { name: "b.txt", kind: "file" },
       ]),
     });
     renderPage();
@@ -2271,8 +2316,8 @@ describe("ServerFilesTab bulk operations", () => {
     routeGet({
       detail: server(),
       list: listing([
-        { name: "a.txt", is_dir: false },
-        { name: "b.txt", is_dir: false },
+        { name: "a.txt", kind: "file" },
+        { name: "b.txt", kind: "file" },
       ]),
     });
     mockApi.delete.mockImplementation((path: string) => {
@@ -2324,8 +2369,8 @@ describe("ServerFilesTab drag-and-drop file organization", () => {
     routeGet({
       detail: server(),
       list: listing([
-        { name: "world", is_dir: true },
-        { name: "readme.txt", is_dir: false },
+        { name: "world", kind: "directory" },
+        { name: "readme.txt", kind: "file" },
       ]),
     });
     mockApi.post.mockResolvedValue(undefined);
@@ -2354,11 +2399,13 @@ describe("ServerFilesTab drag-and-drop file organization", () => {
     mockApi.get.mockImplementation((path: string) => {
       if (path.includes("path=config") && path.includes("list=")) {
         return Promise.resolve(
-          listing([{ name: "settings.yml", is_dir: false }]),
+          listing([{ name: "settings.yml", kind: "file" }]),
         );
       }
       if (path.includes("/files?path=")) {
-        return Promise.resolve(listing([{ name: "config", is_dir: true }]));
+        return Promise.resolve(
+          listing([{ name: "config", kind: "directory" }]),
+        );
       }
       return Promise.resolve(server());
     });
@@ -2393,9 +2440,9 @@ describe("ServerFilesTab drag-and-drop file organization", () => {
     routeGet({
       detail: server(),
       list: listing([
-        { name: "world", is_dir: true },
-        { name: "a.txt", is_dir: false },
-        { name: "b.txt", is_dir: false },
+        { name: "world", kind: "directory" },
+        { name: "a.txt", kind: "file" },
+        { name: "b.txt", kind: "file" },
       ]),
     });
     mockApi.post.mockResolvedValue(undefined);
@@ -2431,8 +2478,8 @@ describe("ServerFilesTab drag-and-drop file organization", () => {
     routeGet({
       detail: server(),
       list: listing([
-        { name: "world", is_dir: true },
-        { name: "readme.txt", is_dir: false },
+        { name: "world", kind: "directory" },
+        { name: "readme.txt", kind: "file" },
       ]),
     });
     mockApi.post.mockResolvedValue(undefined);
@@ -2461,8 +2508,8 @@ describe("ServerFilesTab drag-and-drop file organization", () => {
     routeGet({
       detail: server(),
       list: listing([
-        { name: "world", is_dir: true },
-        { name: "a.txt", is_dir: false },
+        { name: "world", kind: "directory" },
+        { name: "a.txt", kind: "file" },
       ]),
     });
     mockApi.post.mockResolvedValue(undefined);
@@ -2492,8 +2539,8 @@ describe("ServerFilesTab drag-and-drop file organization", () => {
     routeGet({
       detail: server(),
       list: listing([
-        { name: "world", is_dir: true },
-        { name: "readme.txt", is_dir: false },
+        { name: "world", kind: "directory" },
+        { name: "readme.txt", kind: "file" },
       ]),
     });
     mockApi.post.mockRejectedValue(
@@ -2519,7 +2566,7 @@ describe("ServerFilesTab drag-and-drop file organization", () => {
     mockCan = (code) => code !== "file:edit";
     routeGet({
       detail: server(),
-      list: listing([{ name: "a.txt", is_dir: false }]),
+      list: listing([{ name: "a.txt", kind: "file" }]),
     });
     renderPage();
     await openFiles();
@@ -2532,7 +2579,7 @@ describe("ServerFilesTab drag-and-drop file organization", () => {
   it("does not make rows draggable when server is running", async () => {
     routeGet({
       detail: server({ observed_state: "running", desired_state: "running" }),
-      list: listing([{ name: "a.txt", is_dir: false }]),
+      list: listing([{ name: "a.txt", kind: "file" }]),
     });
     renderPage();
     await openFiles();
@@ -2545,7 +2592,7 @@ describe("ServerFilesTab drag-and-drop file organization", () => {
   it("does not show upload overlay for internal drags", async () => {
     routeGet({
       detail: server(),
-      list: listing([{ name: "a.txt", is_dir: false }]),
+      list: listing([{ name: "a.txt", kind: "file" }]),
     });
     renderPage();
     await openFiles();
@@ -2571,8 +2618,8 @@ describe("Keyboard shortcuts", () => {
     routeGet({
       detail: server(),
       list: listing([
-        { name: "a.txt", is_dir: false },
-        { name: "b.txt", is_dir: false },
+        { name: "a.txt", kind: "file" },
+        { name: "b.txt", kind: "file" },
       ]),
     });
     renderPage();
@@ -2590,7 +2637,7 @@ describe("Keyboard shortcuts", () => {
   it("Escape clears selection", async () => {
     routeGet({
       detail: server(),
-      list: listing([{ name: "a.txt", is_dir: false }]),
+      list: listing([{ name: "a.txt", kind: "file" }]),
     });
     renderPage();
     await openFiles();
@@ -2612,7 +2659,7 @@ describe("Keyboard shortcuts", () => {
     async (key) => {
       routeGet({
         detail: server(),
-        list: listing([{ name: "a.txt", is_dir: false }]),
+        list: listing([{ name: "a.txt", kind: "file" }]),
       });
       renderPage();
       await openFiles();
@@ -2635,7 +2682,7 @@ describe("Keyboard shortcuts", () => {
   it("Delete does nothing when no items are selected", async () => {
     routeGet({
       detail: server(),
-      list: listing([{ name: "a.txt", is_dir: false }]),
+      list: listing([{ name: "a.txt", kind: "file" }]),
     });
     renderPage();
     await openFiles();
@@ -2651,7 +2698,7 @@ describe("Keyboard shortcuts", () => {
   it("Delete does nothing when server is running", async () => {
     routeGet({
       detail: server({ observed_state: "running", desired_state: "running" }),
-      list: listing([{ name: "a.txt", is_dir: false }]),
+      list: listing([{ name: "a.txt", kind: "file" }]),
     });
     renderPage();
     await openFiles();
@@ -2674,7 +2721,7 @@ describe("Keyboard shortcuts", () => {
   it("F2 opens and cancels rename dialog for a single selected item", async () => {
     routeGet({
       detail: server(),
-      list: listing([{ name: "readme.txt", is_dir: false }]),
+      list: listing([{ name: "readme.txt", kind: "file" }]),
     });
     renderPage();
     await openFiles();
@@ -2696,8 +2743,8 @@ describe("Keyboard shortcuts", () => {
     routeGet({
       detail: server(),
       list: listing([
-        { name: "a.txt", is_dir: false },
-        { name: "b.txt", is_dir: false },
+        { name: "a.txt", kind: "file" },
+        { name: "b.txt", kind: "file" },
       ]),
     });
     renderPage();
@@ -2716,7 +2763,7 @@ describe("Keyboard shortcuts", () => {
   it("keyboard shortcuts are suppressed when typing in an input", async () => {
     routeGet({
       detail: server(),
-      list: listing([{ name: "a.txt", is_dir: false }]),
+      list: listing([{ name: "a.txt", kind: "file" }]),
     });
     renderPage();
     await openFiles();
@@ -2734,7 +2781,7 @@ describe("Keyboard shortcuts", () => {
   it("Escape on context menu dismisses menu but preserves selection", async () => {
     routeGet({
       detail: server(),
-      list: listing([{ name: "readme.txt", is_dir: false }]),
+      list: listing([{ name: "readme.txt", kind: "file" }]),
     });
     renderPage();
     await openFiles();
@@ -2765,10 +2812,10 @@ describe("ServerFilesTab navigation history", () => {
   it("goes back to root and then forward to the previous directory", async () => {
     mockApi.get.mockImplementation((path: string) => {
       if (path.includes("path=world") && path.includes("list=")) {
-        return Promise.resolve(listing([{ name: "level.dat", is_dir: false }]));
+        return Promise.resolve(listing([{ name: "level.dat", kind: "file" }]));
       }
       if (path.includes("/files?path=") && path.includes("list=")) {
-        return Promise.resolve(listing([{ name: "world", is_dir: true }]));
+        return Promise.resolve(listing([{ name: "world", kind: "directory" }]));
       }
       return Promise.resolve(server());
     });
@@ -2807,7 +2854,7 @@ describe("ServerFilesTab unsaved changes guard", () => {
   it("navigates on confirm and discards the draft", async () => {
     mockApi.get.mockImplementation((path: string) => {
       if (path.includes("path=world") && path.includes("list=")) {
-        return Promise.resolve(listing([{ name: "level.dat", is_dir: false }]));
+        return Promise.resolve(listing([{ name: "level.dat", kind: "file" }]));
       }
       if (path.includes("/files?path=") && !path.includes("list=")) {
         return Promise.resolve({
@@ -2818,8 +2865,8 @@ describe("ServerFilesTab unsaved changes guard", () => {
       if (path.includes("/files?path=")) {
         return Promise.resolve(
           listing([
-            { name: "world", is_dir: true },
-            { name: "server.properties", is_dir: false },
+            { name: "world", kind: "directory" },
+            { name: "server.properties", kind: "file" },
           ]),
         );
       }
@@ -2865,8 +2912,8 @@ describe("ServerFilesTab unsaved changes guard", () => {
       if (path.includes("/files?path=")) {
         return Promise.resolve(
           listing([
-            { name: "world", is_dir: true },
-            { name: "server.properties", is_dir: false },
+            { name: "world", kind: "directory" },
+            { name: "server.properties", kind: "file" },
           ]),
         );
       }
@@ -2901,7 +2948,7 @@ describe("ServerFilesTab overwrite confirmation", () => {
   it("uploads the file when user clicks overwrite", async () => {
     routeGet({
       detail: server(),
-      list: listing([{ name: "readme.txt", is_dir: false }]),
+      list: listing([{ name: "readme.txt", kind: "file" }]),
     });
     mockPostFormWithProgress.mockResolvedValue(undefined);
     renderPage();
@@ -2938,7 +2985,7 @@ describe("ServerFilesTab overwrite confirmation", () => {
     it("uploads on overwrite click in drop", async () => {
       routeGet({
         detail: server(),
-        list: listing([{ name: "readme.txt", is_dir: false }]),
+        list: listing([{ name: "readme.txt", kind: "file" }]),
       });
       mockPostFormWithProgress.mockResolvedValue(undefined);
       renderPage();
@@ -2960,7 +3007,7 @@ describe("ServerFilesTab overwrite confirmation", () => {
     it("skips a conflicting file on skip click in drop", async () => {
       routeGet({
         detail: server(),
-        list: listing([{ name: "readme.txt", is_dir: false }]),
+        list: listing([{ name: "readme.txt", kind: "file" }]),
       });
       mockPostFormWithProgress.mockResolvedValue(undefined);
       renderPage();
@@ -2989,8 +3036,8 @@ describe("ServerFilesTab overwrite confirmation", () => {
       routeGet({
         detail: server(),
         list: listing([
-          { name: "a.txt", is_dir: false },
-          { name: "b.txt", is_dir: false },
+          { name: "a.txt", kind: "file" },
+          { name: "b.txt", kind: "file" },
         ]),
       });
       mockPostFormWithProgress.mockResolvedValue(undefined);
@@ -3021,8 +3068,8 @@ describe("ServerFilesTab overwrite confirmation", () => {
       routeGet({
         detail: server(),
         list: listing([
-          { name: "a.txt", is_dir: false },
-          { name: "b.txt", is_dir: false },
+          { name: "a.txt", kind: "file" },
+          { name: "b.txt", kind: "file" },
         ]),
       });
       mockPostFormWithProgress.mockResolvedValue(undefined);
@@ -3060,7 +3107,7 @@ describe("ServerFilesTab overwrite confirmation", () => {
       // entries and silently skip the overwrite dialog.
       routeGet({
         detail: server(),
-        list: listing([{ name: "readme.txt", is_dir: false }]),
+        list: listing([{ name: "readme.txt", kind: "file" }]),
       });
       mockPostFormWithProgress.mockResolvedValue(undefined);
       renderPage();
@@ -3093,8 +3140,8 @@ describe("ServerFilesTab overwrite confirmation", () => {
       routeGet({
         detail: server(),
         list: listing([
-          { name: "a.txt", is_dir: false },
-          { name: "b.txt", is_dir: false },
+          { name: "a.txt", kind: "file" },
+          { name: "b.txt", kind: "file" },
         ]),
       });
       mockPostFormWithProgress.mockResolvedValue(undefined);
@@ -3122,7 +3169,7 @@ describe("ServerFilesTab overwrite confirmation", () => {
     it("skips folder files when user clicks skip on folder overwrite", async () => {
       routeGet({
         detail: server(),
-        list: listing([{ name: "myfolder", is_dir: true }]),
+        list: listing([{ name: "myfolder", kind: "directory" }]),
       });
       mockApi.post.mockResolvedValue(undefined);
       mockPostFormWithProgress.mockResolvedValue(undefined);
@@ -3178,7 +3225,7 @@ describe("ServerFilesTab overwrite confirmation", () => {
     it("uploads folder files when user clicks overwrite on folder overwrite", async () => {
       routeGet({
         detail: server(),
-        list: listing([{ name: "myfolder", is_dir: true }]),
+        list: listing([{ name: "myfolder", kind: "directory" }]),
       });
       mockApi.post.mockResolvedValue(undefined);
       mockPostFormWithProgress.mockResolvedValue(undefined);
@@ -3234,7 +3281,7 @@ describe("Copy/paste", () => {
   it("Ctrl+C copies selected files", async () => {
     routeGet({
       detail: server(),
-      list: listing([{ name: "readme.txt", is_dir: false }]),
+      list: listing([{ name: "readme.txt", kind: "file" }]),
     });
     renderPage();
     await openFiles();
@@ -3253,7 +3300,7 @@ describe("Copy/paste", () => {
   it("Ctrl+V pastes copied files (download + upload)", async () => {
     routeGet({
       detail: server(),
-      list: listing([{ name: "readme.txt", is_dir: false }]),
+      list: listing([{ name: "readme.txt", kind: "file" }]),
     });
     mockPostFormWithProgress.mockResolvedValue(undefined);
     renderPage();
@@ -3288,7 +3335,7 @@ describe("Copy/paste", () => {
   it("paste via context menu triggers download + upload", async () => {
     routeGet({
       detail: server(),
-      list: listing([{ name: "readme.txt", is_dir: false }]),
+      list: listing([{ name: "readme.txt", kind: "file" }]),
     });
     mockPostFormWithProgress.mockResolvedValue(undefined);
     renderPage();
@@ -3327,7 +3374,7 @@ describe("Copy/paste", () => {
   it("paste skips file when user clicks skip in overwrite dialog", async () => {
     routeGet({
       detail: server(),
-      list: listing([{ name: "readme.txt", is_dir: false }]),
+      list: listing([{ name: "readme.txt", kind: "file" }]),
     });
     renderPage();
     await openFiles();
@@ -3357,8 +3404,8 @@ describe("Copy/paste", () => {
     routeGet({
       detail: server(),
       list: listing([
-        { name: "world", is_dir: true },
-        { name: "readme.txt", is_dir: false },
+        { name: "world", kind: "directory" },
+        { name: "readme.txt", kind: "file" },
       ]),
     });
     mockPostFormWithProgress.mockResolvedValue(undefined);
@@ -3404,7 +3451,7 @@ describe("Move to... context menu", () => {
   it("opens a dialog and moves the file to the destination", async () => {
     routeGet({
       detail: server(),
-      list: listing([{ name: "readme.txt", is_dir: false }]),
+      list: listing([{ name: "readme.txt", kind: "file" }]),
     });
     mockApi.post.mockResolvedValue(undefined);
     renderPage();
@@ -3445,8 +3492,8 @@ describe("Arrow key navigation", () => {
     routeGet({
       detail: server(),
       list: listing([
-        { name: "a.txt", is_dir: false },
-        { name: "b.txt", is_dir: false },
+        { name: "a.txt", kind: "file" },
+        { name: "b.txt", kind: "file" },
       ]),
     });
     renderPage();
@@ -3518,7 +3565,7 @@ describe("ServerFilesTab directory downloads (minted grant, #2354)", () => {
   it("mints a grant for a row download and saves it as {name}.zip", async () => {
     routeGet({
       detail: server(),
-      list: listing([{ name: "world", is_dir: true }]),
+      list: listing([{ name: "world", kind: "directory" }]),
     });
     renderPage();
     await openFiles();
@@ -3542,8 +3589,8 @@ describe("ServerFilesTab directory downloads (minted grant, #2354)", () => {
     routeGet({
       detail: server(),
       list: listing([
-        { name: "world", is_dir: true },
-        { name: "a.txt", is_dir: false },
+        { name: "world", kind: "directory" },
+        { name: "a.txt", kind: "file" },
       ]),
     });
     renderPage();
@@ -3566,7 +3613,7 @@ describe("ServerFilesTab directory downloads (minted grant, #2354)", () => {
   it("keeps a row file download on the capped fetch, minting nothing", async () => {
     routeGet({
       detail: server(),
-      list: listing([{ name: "log.txt", is_dir: false }]),
+      list: listing([{ name: "log.txt", kind: "file" }]),
     });
     renderPage();
     await openFiles();
@@ -3593,7 +3640,7 @@ describe("ServerFilesTab directory downloads (minted grant, #2354)", () => {
     const size = 600 * 1024 * 1024;
     routeGet({
       detail: server(),
-      list: listing([{ name: "big.bin", is_dir: false, size }]),
+      list: listing([{ name: "big.bin", kind: "file", size }]),
     });
     mockDownload.downloadFile.mockRejectedValue(
       new DownloadTooLargeError(size),
@@ -3619,7 +3666,7 @@ describe("ServerFilesTab directory downloads (minted grant, #2354)", () => {
   it("shows the must-be-stopped toast when the mint 409s, and saves nothing", async () => {
     routeGet({
       detail: server(),
-      list: listing([{ name: "world", is_dir: true }]),
+      list: listing([{ name: "world", kind: "directory" }]),
     });
     mockApi.post.mockRejectedValue(
       new ApiError(409, { reason: "server_unsettled" }),
@@ -3639,7 +3686,7 @@ describe("ServerFilesTab directory downloads (minted grant, #2354)", () => {
   it("routes a mint 403 through the permission glue, and saves nothing", async () => {
     routeGet({
       detail: server(),
-      list: listing([{ name: "world", is_dir: true }]),
+      list: listing([{ name: "world", kind: "directory" }]),
     });
     mockApi.post.mockRejectedValue(
       new ApiError(403, { reason: "forbidden", permission: "file:read" }),

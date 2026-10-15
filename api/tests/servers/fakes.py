@@ -65,7 +65,11 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ResourcePackNotFoundError,
     ServerFileNotFoundError,
 )
-from mc_server_dashboard_api.servers.domain.file_store import FileEntry, FileStore
+from mc_server_dashboard_api.servers.domain.file_store import (
+    FileEntry,
+    FileEntryKind,
+    FileStore,
+)
 from mc_server_dashboard_api.servers.domain.game_session import GameSession
 from mc_server_dashboard_api.servers.domain.game_session_repository import (
     GameSessionRepository,
@@ -399,13 +403,15 @@ class FakeFileStore(FileStore):
         for path, content in members.items():
             rest = path[len(prefix) :]
             # A nested file is not a child of this level; the directory it sits
-            # under is, and both backends describe that one as ``is_dir=True``
+            # under is, and both backends describe that one as a directory
             # with size 0 (fs lstats it in ``_list_entries``, the object backend
             # collapses the shared key prefix in ``_entries_at_level``).
             entry = (
-                FileEntry(name=rest.split("/", 1)[0], is_dir=True, size=0)
+                FileEntry(
+                    name=rest.split("/", 1)[0], kind=FileEntryKind.DIRECTORY, size=0
+                )
                 if "/" in rest
-                else FileEntry(name=rest, is_dir=False, size=len(content))
+                else FileEntry(name=rest, kind=FileEntryKind.FILE, size=len(content))
             )
             if entry.name not in seen:
                 seen.add(entry.name)
@@ -420,7 +426,9 @@ class FakeFileStore(FileStore):
             name = rest.split("/", 1)[0]
             if name not in seen:
                 seen.add(name)
-                entries.append(FileEntry(name=name, is_dir=True, size=0))
+                entries.append(
+                    FileEntry(name=name, kind=FileEntryKind.DIRECTORY, size=0)
+                )
         return entries
 
     async def path_exists(

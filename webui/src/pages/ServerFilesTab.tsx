@@ -84,6 +84,11 @@ type SearchResult = components["schemas"]["SearchResponse"];
 type FileVersions = components["schemas"]["FileVersionsResponse"];
 type FileDownloadGrant = components["schemas"]["FileDownloadGrantResponse"];
 
+/** Only a regular file can be opened and only a directory browsed into. */
+function openable(entry: DirEntry): boolean {
+  return entry.kind === "file" || entry.kind === "directory";
+}
+
 /** True when the error is a 409 content_dir_protected rejection. */
 function isContentDirProtected(error: unknown): boolean {
   return (
@@ -775,7 +780,9 @@ export function ServerFilesTab({
       // current listing, warn the user that files inside will be merged.
       if (droppedDirs.length > 0) {
         const existingDirNames = new Set(
-          listingEntries.filter((e) => e.is_dir).map((e) => e.name),
+          listingEntries
+            .filter((e) => e.kind === "directory")
+            .map((e) => e.name),
         );
         const conflictingFolders = droppedDirs
           .map((d) => d.name)
@@ -825,7 +832,7 @@ export function ServerFilesTab({
       // Uses `listingEntries` (snapshotted before the first yield) instead of
       // reading the ref here, which could be stale after intervening renders.
       const existingNames = new Set(
-        listingEntries.filter((e) => !e.is_dir).map((e) => e.name),
+        listingEntries.filter((e) => e.kind !== "directory").map((e) => e.name),
       );
       const rootConflicts = filesToUpload.filter(
         ({ file, targetDir }) =>
@@ -994,7 +1001,9 @@ export function ServerFilesTab({
   pasteFilesRef.current = async () => {
     if (clipboard.length === 0) return;
     const existingNames = new Set(
-      (listing.data?.entries ?? []).filter((e) => !e.is_dir).map((e) => e.name),
+      (listing.data?.entries ?? [])
+        .filter((e) => e.kind !== "directory")
+        .map((e) => e.name),
     );
     const total = clipboard.length;
     let pasted = 0;
@@ -1108,7 +1117,9 @@ export function ServerFilesTab({
         if (selected.size > 0 && listing.data) {
           e.preventDefault();
           const dirNames = new Set(
-            listing.data.entries.filter((en) => en.is_dir).map((en) => en.name),
+            listing.data.entries
+              .filter((en) => en.kind === "directory")
+              .map((en) => en.name),
           );
           const files = Array.from(selected).filter((p) => {
             const name = p.split("/").at(-1) ?? p;
@@ -1169,7 +1180,7 @@ export function ServerFilesTab({
 
   const enter = (entry: DirEntry) => {
     const next = joinPath(dir, entry.name);
-    if (entry.is_dir) {
+    if (entry.kind === "directory") {
       guardedNavigate({ dir: next, openFile: null });
     } else {
       guardedNavigate({ dir, openFile: next });
@@ -1310,7 +1321,7 @@ export function ServerFilesTab({
               onPaste={() => void pasteFilesRef.current()}
               onBeforeUpload={async (fileName) => {
                 const exists = (listing.data?.entries ?? []).some(
-                  (e) => !e.is_dir && e.name === fileName,
+                  (e) => e.kind !== "directory" && e.name === fileName,
                 );
                 if (!exists) return true;
                 const { action } = await new Promise<{
@@ -1714,10 +1725,10 @@ function Listing({
   const download = useMutation({
     mutationFn: (entry: DirEntry) => {
       const path = joinPath(dir, entry.name);
-      const filename = downloadName(entry.name, entry.is_dir);
+      const filename = downloadName(entry.name, entry.kind === "directory");
       // A directory streams as an uncappable zip, so the browser saves it from
       // a minted URL instead of the tab buffering it (#2354).
-      return entry.is_dir
+      return entry.kind === "directory"
         ? saveDirViaGrant(communityId, serverId, path, filename)
         : downloadFile(
             `${apiPath(
@@ -1826,7 +1837,8 @@ function Listing({
         )}
         {listing.entries.map((entry, idx) => {
           const full = joinPath(dir, entry.name);
-          const isDropTarget = entry.is_dir && folderDropTarget === entry.name;
+          const isDropTarget =
+            entry.kind === "directory" && folderDropTarget === entry.name;
           return (
             <li
               key={entry.name}
@@ -1838,7 +1850,7 @@ function Listing({
                 e.stopPropagation();
                 setContextMenu({ entry, x: e.clientX, y: e.clientY });
               }}
-              {...(entry.is_dir
+              {...(entry.kind === "directory"
                 ? {
                     onDragOver: (e: React.DragEvent) =>
                       handleFolderDragOver(e, entry.name),
@@ -1875,15 +1887,39 @@ function Listing({
                   }}
                 />
               )}
-              <button
-                type="button"
-                className="file-name"
-                title={entry.name}
-                onClick={() => onEnter(entry)}
-              >
-                <span aria-hidden="true">{entry.is_dir ? "📁 " : "📄 "}</span>
-                {entry.name}
-              </button>
+              {openable(entry) ? (
+                <button
+                  type="button"
+                  className="file-name"
+                  title={entry.name}
+                  onClick={() => onEnter(entry)}
+                >
+                  <span aria-hidden="true">
+                    {entry.kind === "directory" ? "📁 " : "📄 "}
+                  </span>
+                  {entry.name}
+                </button>
+              ) : (
+                // A symlink or special file (FIFO, socket, device) of a running
+                // server: the Worker refuses to read it, so it is shown as what it
+                // is and not offered to open (issue #3359).
+                <span
+                  className="file-name file-name-special"
+                  title={entry.name}
+                >
+                  <span aria-hidden="true">
+                    {entry.kind === "symlink" ? "🔗 " : "⚙️ "}
+                  </span>
+                  {entry.name}
+                  <span className="file-kind">
+                    {t(
+                      entry.kind === "symlink"
+                        ? "files.kind.symlink"
+                        : "files.kind.other",
+                    )}
+                  </span>
+                </span>
+              )}
             </li>
           );
         })}
@@ -1939,7 +1975,7 @@ function Listing({
           const ctxEntry = contextMenu.entry;
           const isZip =
             ctxEntry !== null &&
-            !ctxEntry.is_dir &&
+            ctxEntry.kind === "file" &&
             ctxEntry.name.endsWith(".zip");
           return (
             <FileContextMenu
@@ -1950,7 +1986,7 @@ function Listing({
               running={running}
               onClose={() => setContextMenu(null)}
               onOpen={
-                ctxEntry
+                ctxEntry && openable(ctxEntry)
                   ? () => {
                       setContextMenu(null);
                       onEnter(ctxEntry);
@@ -1958,7 +1994,7 @@ function Listing({
                   : undefined
               }
               onDownload={
-                ctxEntry
+                ctxEntry && openable(ctxEntry)
                   ? () => {
                       setContextMenu(null);
                       download.mutate(ctxEntry);
@@ -1982,7 +2018,7 @@ function Listing({
                   : undefined
               }
               onCopy={
-                ctxEntry && !ctxEntry.is_dir
+                ctxEntry?.kind === "file"
                   ? () => {
                       setContextMenu(null);
                       onCopy([joinPath(dir, ctxEntry.name)]);
@@ -2128,7 +2164,7 @@ function FileContextMenu({
       )}
       {entry !== null && onDownload && (
         <button type="button" role="menuitem" onClick={onDownload}>
-          {entry.is_dir
+          {entry.kind === "directory"
             ? t("files.contextMenu.downloadZip")
             : t("files.contextMenu.download")}
         </button>
@@ -2666,7 +2702,9 @@ function Toolbar({
       entries.map((e) => [joinPath(dir, e.name), e.size]),
     );
     const dirPaths = new Set(
-      entries.filter((e) => e.is_dir).map((e) => joinPath(dir, e.name)),
+      entries
+        .filter((e) => e.kind === "directory")
+        .map((e) => joinPath(dir, e.name)),
     );
     const totalBytes = paths.reduce(
       (sum, p) => sum + (sizeByPath.get(p) ?? 0),

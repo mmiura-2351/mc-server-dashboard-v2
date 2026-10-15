@@ -144,20 +144,34 @@ func TestToCommandMapsPayload(t *testing.T) {
 func TestToFileListingMapsEntries(t *testing.T) {
 	wire := toFileListing(&session.FileListing{
 		Entries: []session.FileEntry{
-			{Name: "config.yml", IsDir: false, Size: 12},
-			{Name: "data", IsDir: true, Size: 0},
+			{Name: "config.yml", Kind: session.FileEntryKindFile, Size: 12},
+			{Name: "data", Kind: session.FileEntryKindDirectory, Size: 0},
+			{Name: "link", Kind: session.FileEntryKindSymlink, Size: 4},
+			{Name: "fifo", Kind: session.FileEntryKindOther, Size: 0},
 		},
 		Truncated: true,
 	})
 	if !wire.GetTruncated() {
 		t.Fatal("Truncated not carried onto the wire listing")
 	}
-	if len(wire.GetEntries()) != 2 {
-		t.Fatalf("entries = %d, want 2", len(wire.GetEntries()))
+	want := []struct {
+		name string
+		kind controlplanev1.FileEntryKind
+		size uint64
+	}{
+		{"config.yml", controlplanev1.FileEntryKind_FILE_ENTRY_KIND_FILE, 12},
+		{"data", controlplanev1.FileEntryKind_FILE_ENTRY_KIND_DIRECTORY, 0},
+		{"link", controlplanev1.FileEntryKind_FILE_ENTRY_KIND_SYMLINK, 4},
+		{"fifo", controlplanev1.FileEntryKind_FILE_ENTRY_KIND_OTHER, 0},
 	}
-	first := wire.GetEntries()[0]
-	if first.GetName() != "config.yml" || first.GetIsDir() || first.GetSize() != 12 {
-		t.Fatalf("first entry = %+v, want config.yml file size 12", first)
+	if len(wire.GetEntries()) != len(want) {
+		t.Fatalf("entries = %d, want %d", len(wire.GetEntries()), len(want))
+	}
+	for i, w := range want {
+		e := wire.GetEntries()[i]
+		if e.GetName() != w.name || e.GetKind() != w.kind || e.GetSize() != w.size {
+			t.Errorf("entry %d = %+v, want %s %v size %d", i, e, w.name, w.kind, w.size)
+		}
 	}
 }
 

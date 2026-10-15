@@ -107,7 +107,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerNotFoundError,
     ServerNotStoppedError,
 )
-from mc_server_dashboard_api.servers.domain.file_store import FileEntry
+from mc_server_dashboard_api.servers.domain.file_store import FileEntry, FileEntryKind
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId as ServerCommunityId,
 )
@@ -461,7 +461,9 @@ def test_read_returns_base64_content() -> None:
 
 def test_list_returns_entries() -> None:
     use_case = _FakeUseCase(
-        result=DirListing(entries=[FileEntry(name="world", is_dir=True, size=0)])
+        result=DirListing(
+            entries=[FileEntry(name="world", kind=FileEntryKind.DIRECTORY, size=0)]
+        )
     )
     app = _app(member=True, allow=True, list_=use_case)
     client = _client(app)
@@ -470,14 +472,15 @@ def test_list_returns_entries() -> None:
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["entries"] == [{"name": "world", "is_dir": True, "size": 0}]
+    assert body["entries"] == [{"name": "world", "kind": "directory", "size": 0}]
     assert body["truncated"] is False
 
 
 def test_list_surfaces_truncated_flag() -> None:
     use_case = _FakeUseCase(
         result=DirListing(
-            entries=[FileEntry(name="world", is_dir=True, size=0)], truncated=True
+            entries=[FileEntry(name="world", kind=FileEntryKind.DIRECTORY, size=0)],
+            truncated=True,
         )
     )
     app = _app(member=True, allow=True, list_=use_case)

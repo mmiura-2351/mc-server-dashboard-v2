@@ -3460,14 +3460,31 @@ func readDirEntries(dirFd int) (*session.FileListing, error) {
 			// is the documented contract.
 			continue
 		}
-		isDir := st.Mode&unix.S_IFMT == unix.S_IFDIR
+		kind := entryKind(st.Mode)
 		size := uint64(0)
-		if !isDir && st.Size > 0 {
+		if kind != session.FileEntryKindDirectory && st.Size > 0 {
 			size = uint64(st.Size)
 		}
-		entries = append(entries, session.FileEntry{Name: name, IsDir: isDir, Size: size})
+		entries = append(entries, session.FileEntry{Name: name, Kind: kind, Size: size})
 	}
 	return &session.FileListing{Entries: entries, Truncated: truncated}, nil
+}
+
+// entryKind classifies a listed entry by its lstat mode (issue #3359), so the
+// browse view offers to open only what ReadFile and ListFiles accept: a regular
+// file or a directory. A symlink is refused by both, and a FIFO, socket or device
+// is refused by ReadFile.
+func entryKind(mode uint32) session.FileEntryKind {
+	switch mode & unix.S_IFMT {
+	case unix.S_IFREG:
+		return session.FileEntryKindFile
+	case unix.S_IFDIR:
+		return session.FileEntryKindDirectory
+	case unix.S_IFLNK:
+		return session.FileEntryKindSymlink
+	default:
+		return session.FileEntryKindOther
+	}
 }
 
 // validateServerID rejects a ServerID that is unsafe to join into a scratch

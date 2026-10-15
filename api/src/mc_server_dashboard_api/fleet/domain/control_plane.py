@@ -87,16 +87,25 @@ class FileAccessReason(enum.Enum):
     PAYLOAD_TOO_LARGE = "payload_too_large"
 
 
-@dataclass(frozen=True)
-class FileEntry:
-    """One child of a listed directory in a running server's working set.
+class FileEntryKind(enum.Enum):
+    """What a listed entry itself is, mirroring the wire ``FileEntryKind`` (#3359).
 
-    The shape mirrors the API's authoritative-Storage listing (name / is_dir /
-    size) so a running-server listing unifies with an at-rest one.
+    The Worker judges it without following a link. Only a ``FILE`` can be read
+    and only a ``DIRECTORY`` listed.
     """
 
+    FILE = "file"
+    DIRECTORY = "directory"
+    SYMLINK = "symlink"
+    OTHER = "other"
+
+
+@dataclass(frozen=True)
+class FileEntry:
+    """One child of a listed directory in a running server's working set."""
+
     name: str
-    is_dir: bool
+    kind: FileEntryKind
     size: int
 
 

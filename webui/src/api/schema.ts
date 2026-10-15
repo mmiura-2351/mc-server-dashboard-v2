@@ -3271,8 +3271,7 @@ export interface components {
         };
         /** DirEntryResponse */
         DirEntryResponse: {
-            /** Is Dir */
-            is_dir: boolean;
+            kind: components["schemas"]["FileEntryKind"];
             /** Name */
             name: string;
             /** Size */
@@ -3333,6 +3332,16 @@ export interface components {
              */
             expires_at: string;
         };
+        /**
+         * FileEntryKind
+         * @description What a listed entry itself is, judged without following a link (#3359).
+         *
+         *     Only a ``FILE`` can be opened and only a ``DIRECTORY`` browsed into; a running
+         *     server's listing can also hold a ``SYMLINK`` or an ``OTHER`` (FIFO, socket,
+         *     device), which the Worker refuses to read.
+         * @enum {string}
+         */
+        FileEntryKind: "file" | "directory" | "symlink" | "other";
         /** FileVersionsResponse */
         FileVersionsResponse: {
             /** Path */

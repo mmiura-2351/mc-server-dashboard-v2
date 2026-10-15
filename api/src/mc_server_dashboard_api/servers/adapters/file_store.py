@@ -41,7 +41,11 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerFileNotFoundError,
     ServerFileStorageUnavailableError,
 )
-from mc_server_dashboard_api.servers.domain.file_store import FileEntry, FileStore
+from mc_server_dashboard_api.servers.domain.file_store import (
+    FileEntry,
+    FileEntryKind,
+    FileStore,
+)
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     ServerId,
@@ -216,8 +220,15 @@ class StorageFileStoreAdapter(FileStore):
             raise _refused(rel_path, exc) from exc
         except NotFoundError as exc:
             raise ServerFileNotFoundError(str(server_id.value)) from exc
+        # The store reports a directory or not. It takes in plain files and
+        # directories only (STORAGE.md Section 8), so "not" is a file; a link an
+        # older fs store still holds is listed as one, as it always was.
         return [
-            FileEntry(name=entry.name, is_dir=entry.is_dir, size=entry.size)
+            FileEntry(
+                name=entry.name,
+                kind=FileEntryKind.DIRECTORY if entry.is_dir else FileEntryKind.FILE,
+                size=entry.size,
+            )
             for entry in entries
         ]
 

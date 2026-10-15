@@ -748,6 +748,8 @@ export const ja: Record<TranslationKey, string> = {
   "files.noSelection": "表示または編集するファイルを選択してください。",
   "files.truncated":
     "一覧が省略されました — エントリが多すぎてすべては表示できません。",
+  "files.kind.symlink": "シンボリックリンク",
+  "files.kind.other": "特殊ファイル",
   "files.binary": "バイナリファイル — 表示するにはダウンロードしてください。",
   "files.cannotPreview": "このファイルはプレビューできません。",
   "files.fileSize": "サイズ: {size}",

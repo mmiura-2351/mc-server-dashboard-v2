@@ -3,8 +3,10 @@ package instancemanager
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"testing"
 
@@ -49,11 +51,47 @@ func TestListFilesReturnsEntries(t *testing.T) {
 	for _, e := range res.FileListing.Entries {
 		byName[e.Name] = e
 	}
-	if e := byName["server.properties"]; e.IsDir || e.Size != 7 {
+	if e := byName["server.properties"]; e.Kind != session.FileEntryKindFile || e.Size != 7 {
 		t.Fatalf("server.properties entry = %+v, want file size 7", e)
 	}
-	if e := byName["world"]; !e.IsDir || e.Size != 0 {
+	if e := byName["world"]; e.Kind != session.FileEntryKindDirectory || e.Size != 0 {
 		t.Fatalf("world entry = %+v, want dir size 0", e)
+	}
+}
+
+// Each entry carries its kind (issue #3359): a FIFO and a socket are "other", so
+// the browse view does not offer them as files a read would refuse.
+func TestListFilesReportsTheKindOfSpecialEntries(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	root := workingRoot(t, m)
+	want := map[string]session.FileEntryKind{
+		"fifo": session.FileEntryKindOther,
+		"sock": session.FileEntryKindOther,
+		"link": session.FileEntryKindSymlink,
+	}
+	plantFifo(t, filepath.Join(root, "fifo"))
+	if sock, err := net.Listen("unix", filepath.Join(root, "sock")); err != nil {
+		// A temp path can exceed a socket address's length limit.
+		t.Logf("no socket planted: %v", err)
+		delete(want, "sock")
+	} else {
+		t.Cleanup(func() { _ = sock.Close() })
+	}
+	if err := os.Symlink("server.properties", filepath.Join(root, "link")); err != nil {
+		t.Fatal(err)
+	}
+
+	res := handleWithin(t, m, session.Command{CommandID: "c1", ServerID: "s1", Kind: "ListFiles", Path: "."})
+	if !res.Success {
+		t.Fatalf("ListFiles result = %+v, want success", res)
+	}
+
+	got := map[string]session.FileEntryKind{}
+	for _, e := range res.FileListing.Entries {
+		got[e.Name] = e.Kind
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("kinds = %v, want %v", got, want)
 	}
 }
 
@@ -202,7 +240,7 @@ func TestListFilesSymlinkChildIsNotFollowed(t *testing.T) {
 	}
 	// A symlink child of the listed dir whose target is a directory. The listing
 	// must stat the link itself (AT_SYMLINK_NOFOLLOW), never follow it: the entry
-	// reports is_dir=false with the link's own size (the target path's length).
+	// reports a symlink with the link's own size (the target path's length).
 	target := t.TempDir() // a real directory, to prove it is not followed
 	if err := os.Symlink(target, filepath.Join(workingDir, "link")); err != nil {
 		t.Fatalf("symlink: %v", err)
@@ -222,8 +260,8 @@ func TestListFilesSymlinkChildIsNotFollowed(t *testing.T) {
 	if link == nil {
 		t.Fatalf("entries = %+v, want a 'link' entry", res.FileListing.Entries)
 	}
-	if link.IsDir {
-		t.Fatal("symlink child reported is_dir=true: the target was followed")
+	if link.Kind != session.FileEntryKindSymlink {
+		t.Fatalf("symlink child reported kind %v: want a symlink, the target not followed", link.Kind)
 	}
 	if link.Size != uint64(len(target)) {
 		t.Fatalf("symlink size = %d, want %d (the link's own target length)", link.Size, len(target))

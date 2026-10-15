@@ -37,6 +37,9 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
     FileEntry as FleetFileEntry,
 )
 from mc_server_dashboard_api.fleet.domain.control_plane import (
+    FileEntryKind as FleetFileEntryKind,
+)
+from mc_server_dashboard_api.fleet.domain.control_plane import (
     FileListing as FleetFileListing,
 )
 from mc_server_dashboard_api.fleet.domain.value_objects import HostResources
@@ -54,6 +57,7 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
 from mc_server_dashboard_api.servers.domain.control_plane import (
     FileAccessReason as OutcomeFileAccessReason,
 )
+from mc_server_dashboard_api.servers.domain.file_store import FileEntryKind
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     ServerId,
@@ -401,8 +405,16 @@ async def test_list_files_dispatches_and_carries_listing() -> None:
             code=CommandResultCode.OK,
             file_listing=FleetFileListing(
                 entries=(
-                    FleetFileEntry(name="config.yml", is_dir=False, size=12),
-                    FleetFileEntry(name="data", is_dir=True, size=0),
+                    FleetFileEntry(
+                        name="config.yml", kind=FleetFileEntryKind.FILE, size=12
+                    ),
+                    FleetFileEntry(
+                        name="data", kind=FleetFileEntryKind.DIRECTORY, size=0
+                    ),
+                    FleetFileEntry(
+                        name="link", kind=FleetFileEntryKind.SYMLINK, size=4
+                    ),
+                    FleetFileEntry(name="fifo", kind=FleetFileEntryKind.OTHER, size=0),
                 ),
                 truncated=True,
             ),
@@ -420,9 +432,11 @@ async def test_list_files_dispatches_and_carries_listing() -> None:
     assert outcome.success
     assert outcome.listing is not None
     assert outcome.listing.truncated is True
-    assert [(e.name, e.is_dir, e.size) for e in outcome.listing.entries] == [
-        ("config.yml", False, 12),
-        ("data", True, 0),
+    assert [(e.name, e.kind, e.size) for e in outcome.listing.entries] == [
+        ("config.yml", FileEntryKind.FILE, 12),
+        ("data", FileEntryKind.DIRECTORY, 0),
+        ("link", FileEntryKind.SYMLINK, 4),
+        ("fifo", FileEntryKind.OTHER, 0),
     ]
 
 

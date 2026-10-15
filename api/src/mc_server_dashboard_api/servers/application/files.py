@@ -68,7 +68,11 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerNotStoppedError,
     UnsupportedPluginServerTypeError,
 )
-from mc_server_dashboard_api.servers.domain.file_store import FileEntry, FileStore
+from mc_server_dashboard_api.servers.domain.file_store import (
+    FileEntry,
+    FileEntryKind,
+    FileStore,
+)
 from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
     LifecycleLock,
     NullLifecycleLock,
@@ -434,7 +438,7 @@ class ListDir:
     For a running server the listing comes from the Worker's live working set via
     ListFiles over the control plane (closing the RPO-stale-listing gap, issue
     #121); for a server at rest it reads the authoritative Storage copy. Both
-    sources yield the same :class:`FileEntry` shape (name / is_dir / size), so the
+    sources yield the same :class:`FileEntry` shape (name / kind / size), so the
     caller cannot tell them apart. A disconnected worker surfaces
     :class:`WorkerUnavailableError` (the edge returns 503), matching read/edit.
     """
@@ -467,8 +471,7 @@ class ListDir:
             cp_entries = () if listing is None else listing.entries
             return DirListing(
                 entries=[
-                    FileEntry(name=e.name, is_dir=e.is_dir, size=e.size)
-                    for e in cp_entries
+                    FileEntry(name=e.name, kind=e.kind, size=e.size) for e in cp_entries
                 ],
                 truncated=False if listing is None else listing.truncated,
             )
@@ -1120,7 +1123,7 @@ class DownloadFile:
         except ServerFileNotFoundError:
             return None
         for entry in entries:
-            if entry.name == name and not entry.is_dir:
+            if entry.name == name and entry.kind is not FileEntryKind.DIRECTORY:
                 return entry.size
         return None
 
@@ -1192,7 +1195,7 @@ async def _path_is_dir(
 
     ``treat_symlink_as_file`` is the one caller-picked exception (the DELETE route,
     issue #2429): a symlink dirent is not a directory (its listing shows
-    ``is_dir=False``), and delete is the one mutation it supports, so the DELETE
+    a file kind), and delete is the one mutation it supports, so the DELETE
     path asks to have the refusal reported as "not a directory" and dispatch to
     ``delete_file`` rather than propagate the 422. The path still resolves in the
     adapter, which enforces the real invariant: a leaf link is unlinked, but a path
@@ -1622,7 +1625,7 @@ class SearchFiles:
             base = "" if current == "." else current
             for entry in entries:
                 child = f"{base}/{entry.name}" if base else entry.name
-                if entry.is_dir:
+                if entry.kind is FileEntryKind.DIRECTORY:
                     stack.append(child)
                 else:
                     yield child, entry.name, entry.size

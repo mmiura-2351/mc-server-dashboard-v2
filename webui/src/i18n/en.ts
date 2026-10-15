@@ -789,6 +789,8 @@ export const en = {
   "files.empty": "This directory is empty.",
   "files.noSelection": "Select a file to view or edit.",
   "files.truncated": "Listing truncated — too many entries to show them all.",
+  "files.kind.symlink": "symlink",
+  "files.kind.other": "special file",
   "files.binary": "Binary file — download to view.",
   "files.cannotPreview": "This file cannot be previewed.",
   "files.fileSize": "Size: {size}",

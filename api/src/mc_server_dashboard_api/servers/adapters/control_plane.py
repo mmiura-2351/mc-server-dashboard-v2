@@ -39,6 +39,9 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
 from mc_server_dashboard_api.fleet.domain.control_plane import (
     FileAccessReason as FleetFileAccessReason,
 )
+from mc_server_dashboard_api.fleet.domain.control_plane import (
+    FileEntryKind as FleetFileEntryKind,
+)
 from mc_server_dashboard_api.fleet.domain.entities import WorkerStatus
 from mc_server_dashboard_api.fleet.domain.placement import PlacementCandidate, place
 from mc_server_dashboard_api.fleet.domain.registry import WorkerRegistry
@@ -62,6 +65,7 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
 from mc_server_dashboard_api.servers.domain.control_plane import (
     FileListing as OutcomeFileListing,
 )
+from mc_server_dashboard_api.servers.domain.file_store import FileEntryKind
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     ServerId,
@@ -95,6 +99,13 @@ _REASON_BY_FLEET_REASON: dict[FleetFileAccessReason, OutcomeFileAccessReason] = 
     FleetFileAccessReason.PAYLOAD_TOO_LARGE: OutcomeFileAccessReason.PAYLOAD_TOO_LARGE,
 }
 
+_KIND_BY_FLEET_KIND: dict[FleetFileEntryKind, FileEntryKind] = {
+    FleetFileEntryKind.FILE: FileEntryKind.FILE,
+    FleetFileEntryKind.DIRECTORY: FileEntryKind.DIRECTORY,
+    FleetFileEntryKind.SYMLINK: FileEntryKind.SYMLINK,
+    FleetFileEntryKind.OTHER: FileEntryKind.OTHER,
+}
+
 
 def _launch_mode_for(server_type: ServerType) -> LaunchMode:
     """Forge launches via the supervised installer + args file; all else via JAR.
@@ -113,7 +124,9 @@ def _to_outcome(result: CommandResult) -> CommandOutcome:
     if result.file_listing is not None:
         listing = OutcomeFileListing(
             entries=tuple(
-                OutcomeFileEntry(name=e.name, is_dir=e.is_dir, size=e.size)
+                OutcomeFileEntry(
+                    name=e.name, kind=_KIND_BY_FLEET_KIND[e.kind], size=e.size
+                )
                 for e in result.file_listing.entries
             ),
             truncated=result.file_listing.truncated,
