@@ -1343,6 +1343,30 @@ describe("ServerFilesTab running notice", () => {
       await screen.findByText(t("files.runningNotice")),
     ).toBeInTheDocument();
   });
+
+  it("disables the viewer's download while the server is running (#3396)", async () => {
+    routeGet({
+      detail: server({ observed_state: "running", desired_state: "running" }),
+      list: listing([{ name: "notes.txt", kind: "file" }]),
+      content: {
+        path: "notes.txt",
+        content_base64: encodeUtf8Base64("hello\n"),
+      },
+    });
+    renderPage();
+    await openFiles();
+    fireEvent.click(await screen.findByText(/notes\.txt/));
+
+    // The download API is at-rest only: a running server answers 409.
+    const downloadButton = await screen.findByRole("button", {
+      name: t("files.download"),
+    });
+    expect(downloadButton).toBeDisabled();
+    expect(downloadButton).toHaveAttribute(
+      "title",
+      t("files.error.serverMustBeStopped"),
+    );
+  });
 });
 
 describe("ServerFilesTab error presentation glue", () => {

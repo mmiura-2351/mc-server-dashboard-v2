@@ -2355,6 +2355,8 @@ function Viewer({
           <button
             type="button"
             className="btn sm"
+            disabled={running}
+            title={running ? t("files.error.serverMustBeStopped") : undefined}
             onClick={() =>
               void downloadFile(
                 `${apiPath(
