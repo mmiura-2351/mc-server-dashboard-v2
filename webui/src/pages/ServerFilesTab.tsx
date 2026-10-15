@@ -1107,7 +1107,11 @@ export function ServerFilesTab({
         if (listing.data) {
           e.preventDefault();
           setSelected(
-            new Set(listing.data.entries.map((en) => joinPath(dir, en.name))),
+            new Set(
+              listing.data.entries
+                .filter(openable)
+                .map((en) => joinPath(dir, en.name)),
+            ),
           );
         }
         return;
@@ -1116,14 +1120,15 @@ export function ServerFilesTab({
       if (e.key === "c" && (e.ctrlKey || e.metaKey)) {
         if (selected.size > 0 && listing.data) {
           e.preventDefault();
-          const dirNames = new Set(
+          // Only regular files can be copied (pasted by download + upload).
+          const fileNames = new Set(
             listing.data.entries
-              .filter((en) => en.kind === "directory")
+              .filter((en) => en.kind === "file")
               .map((en) => en.name),
           );
           const files = Array.from(selected).filter((p) => {
             const name = p.split("/").at(-1) ?? p;
-            return !dirNames.has(name);
+            return fileNames.has(name);
           });
           if (files.length > 0) {
             setClipboard(files);
@@ -1151,8 +1156,10 @@ export function ServerFilesTab({
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
         if (!listing.data || listing.data.entries.length === 0) return;
         e.preventDefault();
+        // Only the rows that open are focusable; a symlink or special file is
+        // shown as plain text and skipped (issue #3359).
         const buttons = Array.from(
-          document.querySelectorAll<HTMLElement>(".file-list .file-name"),
+          document.querySelectorAll<HTMLElement>(".file-list button.file-name"),
         );
         if (buttons.length === 0) return;
         const focused = document.activeElement;
@@ -1220,11 +1227,15 @@ export function ServerFilesTab({
         selected={selected}
         dir={dir}
         entries={listing.data?.entries ?? []}
-        totalCount={listing.data?.entries.length ?? 0}
+        totalCount={listing.data?.entries.filter(openable).length ?? 0}
         onSelectAll={() => {
           if (listing.data) {
             setSelected(
-              new Set(listing.data.entries.map((e) => joinPath(dir, e.name))),
+              new Set(
+                listing.data.entries
+                  .filter(openable)
+                  .map((e) => joinPath(dir, e.name)),
+              ),
             );
           }
         }}
@@ -1859,7 +1870,7 @@ function Listing({
                   }
                 : {})}
             >
-              {canEdit && (
+              {canEdit && openable(entry) && (
                 <input
                   type="checkbox"
                   className="file-select"
@@ -1874,7 +1885,9 @@ function Listing({
                       const hi = Math.max(lastClickedIdx.current, idx);
                       const next = new Set(selected);
                       for (let i = lo; i <= hi; i++) {
-                        next.add(joinPath(dir, listing.entries[i].name));
+                        if (openable(listing.entries[i])) {
+                          next.add(joinPath(dir, listing.entries[i].name));
+                        }
                       }
                       onSelectionChange(next);
                     } else {
@@ -2692,8 +2705,14 @@ function Toolbar({
   };
 
   const bulkDownload = async () => {
-    const paths = Array.from(selected);
+    // A symlink or special file has nothing to download (the read refuses it).
+    // Such rows are not selectable; they are left out here all the same.
+    const special = new Set(
+      entries.filter((e) => !openable(e)).map((e) => joinPath(dir, e.name)),
+    );
+    const paths = Array.from(selected).filter((p) => !special.has(p));
     const total = paths.length;
+    if (total === 0) return;
 
     // Pre-check: sum the sizes of selected files from the listing. Directories
     // are excluded because the API expands them server-side; their `size` field

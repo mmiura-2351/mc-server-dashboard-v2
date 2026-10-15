@@ -3520,6 +3520,164 @@ describe("Arrow key navigation", () => {
     fireEvent.keyDown(document, { key: "ArrowUp" });
     expect(document.activeElement).toBe(buttons[1]);
   });
+
+  it("steps over a symlink or special row, wherever it sits (#3359)", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([
+        { name: "first-link", kind: "symlink" },
+        { name: "a.txt", kind: "file" },
+        { name: "pipe", kind: "other" },
+        { name: "b.txt", kind: "file" },
+        { name: "last-link", kind: "symlink" },
+      ]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    const a = screen.getByText(/a\.txt/).closest("button");
+    const b = screen.getByText(/b\.txt/).closest("button");
+
+    // Entering from the top skips the leading special row.
+    fireEvent.keyDown(document, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(a);
+    // file -> special -> file: the special row is stepped over, not a dead end.
+    fireEvent.keyDown(document, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(b);
+    // The trailing special row is not a stop either: focus stays on b.txt.
+    fireEvent.keyDown(document, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(b);
+    fireEvent.keyDown(document, { key: "ArrowUp" });
+    expect(document.activeElement).toBe(a);
+    fireEvent.keyDown(document, { key: "ArrowUp" });
+    expect(document.activeElement).toBe(a);
+
+    // Entering from the bottom skips the trailing special row.
+    (a as HTMLElement).blur();
+    fireEvent.keyDown(document, { key: "ArrowUp" });
+    expect(document.activeElement).toBe(b);
+  });
+});
+
+// ── Symlink and special entries are not selectable (#3359) ────────────────────
+
+describe("ServerFilesTab symlink and special entries", () => {
+  const mixed = () =>
+    listing([
+      { name: "a.txt", kind: "file" },
+      { name: "link", kind: "symlink" },
+      { name: "pipe", kind: "other" },
+      { name: "b.txt", kind: "file" },
+    ]);
+
+  it("gives them no checkbox and leaves them out of every select-all", async () => {
+    routeGet({ detail: server(), list: mixed() });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    expect(screen.queryByRole("checkbox", { name: "link" })).toBeNull();
+    expect(screen.queryByRole("checkbox", { name: "pipe" })).toBeNull();
+
+    // A shift-range across them selects only the files.
+    fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "b.txt" }), {
+      shiftKey: true,
+    });
+    expect(
+      await screen.findByText(t("files.selectedCount", { count: 2 })),
+    ).toBeInTheDocument();
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    // Ctrl+A selects the two files, and the toolbar then counts all selected.
+    fireEvent.keyDown(document, { key: "a", ctrlKey: true });
+    expect(
+      await screen.findByText(t("files.selectedCount", { count: 2 })),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: t("files.deselectAll") }),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.deselectAll") }),
+    );
+
+    // The toolbar's Select all does the same.
+    fireEvent.click(screen.getByRole("button", { name: t("files.selectAll") }));
+    expect(
+      await screen.findByText(t("files.selectedCount", { count: 2 })),
+    ).toBeInTheDocument();
+  });
+
+  it("copies and bulk-downloads only the files of a mixed selection", async () => {
+    routeGet({ detail: server(), list: mixed() });
+    mockDownload.fetchFileBlob.mockResolvedValue(new Blob(["x"]));
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    fireEvent.keyDown(document, { key: "a", ctrlKey: true });
+    await screen.findByText(t("files.selectedCount", { count: 2 }));
+
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.bulk.download") }),
+    );
+    await screen.findByText(t("files.bulk.download.done", { done: 2 }));
+    const fetched = mockDownload.fetchFileBlob.mock.calls.map(([p]) => p);
+    expect(fetched.sort()).toEqual([
+      `${FILES_BASE}/download?path=a.txt`,
+      `${FILES_BASE}/download?path=b.txt`,
+    ]);
+
+    // Ctrl+C then Ctrl+V downloads (to re-upload) the same two files only.
+    mockDownload.fetchFileBlob.mockClear();
+    fireEvent.keyDown(document, { key: "c", ctrlKey: true });
+    await screen.findByText(t("files.copied"));
+    fireEvent.keyDown(document, { key: "v", ctrlKey: true });
+    // Both pasted names exist already: confirm each overwrite prompt.
+    for (const expected of [1, 2]) {
+      fireEvent.click(
+        await screen.findByRole("button", {
+          name: t("files.overwrite.overwrite"),
+        }),
+      );
+      await waitFor(() =>
+        expect(mockDownload.fetchFileBlob).toHaveBeenCalledTimes(expected),
+      );
+    }
+    expect(
+      mockDownload.fetchFileBlob.mock.calls.map(([p]) => p).sort(),
+    ).toEqual([
+      `${FILES_BASE}/download?path=a.txt`,
+      `${FILES_BASE}/download?path=b.txt`,
+    ]);
+  });
+
+  it("offers nothing to select or act on in a listing of special entries only", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([
+        { name: "link", kind: "symlink" },
+        { name: "pipe", kind: "other" },
+      ]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/pipe/);
+
+    expect(screen.queryByRole("checkbox")).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: t("files.selectAll") }),
+    ).toBeNull();
+    fireEvent.keyDown(document, { key: "a", ctrlKey: true });
+    fireEvent.keyDown(document, { key: "c", ctrlKey: true });
+    expect(
+      screen.queryByRole("button", { name: t("files.bulk.download") }),
+    ).toBeNull();
+    expect(screen.queryByText(t("files.copied"))).toBeNull();
+    expect(mockDownload.fetchFileBlob).not.toHaveBeenCalled();
+    expect(mockDownload.downloadFile).not.toHaveBeenCalled();
+  });
 });
 
 // ── Directory downloads via a minted grant (#2354) ────────────────────────────
