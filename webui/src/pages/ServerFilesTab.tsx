@@ -1838,7 +1838,9 @@ function Listing({
           // Only fire for empty space (not bubbled from a file row).
           if ((e.target as HTMLElement).closest(".file-row")) return;
           e.preventDefault();
-          setContextMenu({ entry: null, x: e.clientX, y: e.clientY });
+          if (contextMenuHasItems(null, canEdit, running)) {
+            setContextMenu({ entry: null, x: e.clientX, y: e.clientY });
+          }
         }}
       >
         {listing.entries.length === 0 && (
@@ -1859,7 +1861,9 @@ function Listing({
               onContextMenu={(e) => {
                 e.preventDefault();
                 e.stopPropagation();
-                setContextMenu({ entry, x: e.clientX, y: e.clientY });
+                if (contextMenuHasItems(entry, canEdit, running)) {
+                  setContextMenu({ entry, x: e.clientX, y: e.clientY });
+                }
               }}
               {...(entry.kind === "directory"
                 ? {
@@ -2101,6 +2105,21 @@ function Listing({
 }
 
 // ── Context menu ────────────────────────────────────────────────────────────
+
+/**
+ * Whether FileContextMenu would show any item for `entry` (`null` is empty
+ * space); keep in step with its item conditions. A readable entry always has
+ * Open, and every other item is an at-rest edit, so a special row or empty
+ * space with no edit to offer (a running server, or no file:edit) would be an
+ * empty frame, and the menu is not opened at all (issue #3396).
+ */
+function contextMenuHasItems(
+  entry: DirEntry | null,
+  canEdit: boolean,
+  running: boolean,
+): boolean {
+  return (canEdit && !running) || (entry !== null && openable(entry));
+}
 
 function FileContextMenu({
   entry,
@@ -2969,7 +2988,8 @@ function Toolbar({
             <button
               type="button"
               className="btn sm"
-              disabled={bulkBusy}
+              disabled={running || bulkBusy}
+              title={atRestTooltip}
               onClick={() => void bulkDownload()}
             >
               {t("files.bulk.download")}
