@@ -13,6 +13,22 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
 
+// The server ids the held-set scan fixtures below are named by. The scans advertise
+// only directories named by a server id, which is a UUID (issue #3395); within each
+// fixture the ids sort in the order its assertions list them.
+const (
+	heldNoMarkerID      = "1a000000-0000-4000-8000-000000000001"
+	heldServerID        = "1b000000-0000-4000-8000-000000000002"
+	emptyServerID       = "1c000000-0000-4000-8000-000000000003"
+	markerOnlyID        = "1d000000-0000-4000-8000-000000000004"
+	leftoverOnlyID      = "2a000000-0000-4000-8000-000000000005"
+	leftoverPlusWorldID = "2b000000-0000-4000-8000-000000000006"
+	soundServerID       = "3a000000-0000-4000-8000-000000000007"
+	tornServerID        = "3b000000-0000-4000-8000-000000000008"
+	liveServerID        = "4a000000-0000-4000-8000-000000000009"
+	srvAID              = "5a000000-0000-4000-8000-00000000000a"
+)
+
 // capturingSlogHandler is a minimal slog.Handler that captures log records for
 // test assertions, keeping tests off real I/O and making WarnOrphanDisplacedTrees
 // observable without depending on slog.Default() output.
@@ -37,7 +53,7 @@ func TestScanHeldServersReportsNonEmptyDirsWithGeneration(t *testing.T) {
 	scratch := t.TempDir()
 
 	// A non-empty server dir with a generation marker -> reported with that gen.
-	held := filepath.Join(scratch, "held-server")
+	held := filepath.Join(scratch, heldServerID)
 	if err := os.MkdirAll(held, 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -49,18 +65,18 @@ func TestScanHeldServersReportsNonEmptyDirsWithGeneration(t *testing.T) {
 	}
 
 	// A non-empty server dir WITHOUT a marker (predates #763) -> reported at gen 0.
-	heldNoMarker := filepath.Join(scratch, "held-nomarker")
+	heldNoMarker := filepath.Join(scratch, heldNoMarkerID)
 	if err := os.MkdirAll(filepath.Join(heldNoMarker, "world"), 0o750); err != nil {
 		t.Fatal(err)
 	}
 
 	// An empty server dir (scratch was wiped) -> skipped.
-	if err := os.MkdirAll(filepath.Join(scratch, "empty-server"), 0o750); err != nil {
+	if err := os.MkdirAll(filepath.Join(scratch, emptyServerID), 0o750); err != nil {
 		t.Fatal(err)
 	}
 
 	// A server dir holding ONLY the generation marker -> skipped (no working set).
-	markerOnly := filepath.Join(scratch, "marker-only")
+	markerOnly := filepath.Join(scratch, markerOnlyID)
 	if err := os.MkdirAll(markerOnly, 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -76,8 +92,8 @@ func TestScanHeldServersReportsNonEmptyDirsWithGeneration(t *testing.T) {
 	got := ScanHeldServers(scratch, true, nil)
 	sort.Slice(got, func(i, j int) bool { return got[i].ServerID < got[j].ServerID })
 	want := []session.HeldServer{
-		{ServerID: "held-nomarker", Generation: 0},
-		{ServerID: "held-server", Generation: 7},
+		{ServerID: heldNoMarkerID, Generation: 0},
+		{ServerID: heldServerID, Generation: 7},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("held = %v, want %v", got, want)
@@ -105,7 +121,7 @@ func TestScanHeldServersSkipsGenerationMarkerTempLeftover(t *testing.T) {
 	scratch := t.TempDir()
 
 	// A scratch dir holding ONLY a crashed-writeGeneration temp sibling -> skipped.
-	leftover := filepath.Join(scratch, "leftover-only")
+	leftover := filepath.Join(scratch, leftoverOnlyID)
 	if err := os.MkdirAll(leftover, 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +130,7 @@ func TestScanHeldServersSkipsGenerationMarkerTempLeftover(t *testing.T) {
 	}
 
 	// The same leftover alongside a real working set -> still reported held.
-	withWorld := filepath.Join(scratch, "leftover-plus-world")
+	withWorld := filepath.Join(scratch, leftoverPlusWorldID)
 	if err := os.MkdirAll(withWorld, 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +143,7 @@ func TestScanHeldServersSkipsGenerationMarkerTempLeftover(t *testing.T) {
 
 	// Both callers share hasWorkingSet, so both are asserted — non-fatally, so a
 	// regression names every caller it broke in one run.
-	want := session.HeldServer{ServerID: "leftover-plus-world", Generation: 0}
+	want := session.HeldServer{ServerID: leftoverPlusWorldID, Generation: 0}
 	if got := ScanHeldServers(scratch, true, nil); len(got) != 1 || got[0] != want {
 		t.Errorf("ScanHeldServers = %v, want [%v]", got, want)
 	}
@@ -168,35 +184,35 @@ func TestScanHeldServersTornRegionForcesHydrate(t *testing.T) {
 	// se; this fixture stays refused because healthyRegion()'s chunk declares a
 	// sector-filling length (4092) whose byte extent (offset 8192 + 4 + 4092 = 12288)
 	// now overruns the truncated size (12278) -> truncated_chunk.
-	torn := filepath.Join(scratch, "torn-server", "region")
+	torn := filepath.Join(scratch, tornServerID, "region")
 	if err := os.MkdirAll(torn, 0o750); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(torn, "r.0.0.mca"), healthyRegion()[:3*fsckSector-10], 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeGeneration(filepath.Join(scratch, "torn-server"), 9); err != nil {
+	if err := writeGeneration(filepath.Join(scratch, tornServerID), 9); err != nil {
 		t.Fatal(err)
 	}
 
 	// A held set whose region is structurally sound, with marker gen 4: untouched.
-	sound := filepath.Join(scratch, "sound-server", "region")
+	sound := filepath.Join(scratch, soundServerID, "region")
 	if err := os.MkdirAll(sound, 0o750); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(sound, "r.0.0.mca"), healthyRegion(), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeGeneration(filepath.Join(scratch, "sound-server"), 4); err != nil {
+	if err := writeGeneration(filepath.Join(scratch, soundServerID), 4); err != nil {
 		t.Fatal(err)
 	}
-	soundMarker := readMarkerBytes(t, filepath.Join(scratch, "sound-server"))
+	soundMarker := readMarkerBytes(t, filepath.Join(scratch, soundServerID))
 
 	got := ScanHeldServers(scratch, true, nil)
 	sort.Slice(got, func(i, j int) bool { return got[i].ServerID < got[j].ServerID })
 	want := []session.HeldServer{
-		{ServerID: "sound-server", Generation: 4},
-		{ServerID: "torn-server", Generation: 0},
+		{ServerID: soundServerID, Generation: 4},
+		{ServerID: tornServerID, Generation: 0},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("held = %v, want %v", got, want)
@@ -212,7 +228,7 @@ func TestScanHeldServersTornRegionForcesHydrate(t *testing.T) {
 	// no fsck, so a verdict held only in this return value never reaches the API. The torn
 	// set's marker therefore reads 0 from now on, and every later scan reports 0 until a
 	// hydrate's own marker write replaces it.
-	if gen := readGeneration(filepath.Join(scratch, "torn-server")); gen != 0 {
+	if gen := readGeneration(filepath.Join(scratch, tornServerID)); gen != 0 {
 		t.Errorf("torn-server marker = %d after the quiesced boot scan, want 0: the in-session "+
 			"scan every Register sends reads the marker, so a torn verdict that is not written "+
 			"there is advertised at the recorded generation and boots the torn world (issue #3178)", gen)
@@ -226,7 +242,7 @@ func TestScanHeldServersTornRegionForcesHydrate(t *testing.T) {
 			"carry the boot fsck's verdict (issue #3178)", inSession, want)
 	}
 	// A sound set is judged, not touched: its marker is the exact bytes it was.
-	if after := readMarkerBytes(t, filepath.Join(scratch, "sound-server")); string(after) != string(soundMarker) {
+	if after := readMarkerBytes(t, filepath.Join(scratch, soundServerID)); string(after) != string(soundMarker) {
 		t.Errorf("sound-server marker = %q after the boot scan, want it byte-identical %q", after, soundMarker)
 	}
 }
@@ -238,14 +254,14 @@ func TestScanHeldServersTornRegionForcesHydrate(t *testing.T) {
 // with the recorded generation so an operator can tell what the API was told.
 func TestScanHeldServersFailedTornMarkerRewriteIsBestEffort(t *testing.T) {
 	scratch := t.TempDir()
-	torn := filepath.Join(scratch, "torn-server", "region")
+	torn := filepath.Join(scratch, tornServerID, "region")
 	if err := os.MkdirAll(torn, 0o750); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(torn, "r.0.0.mca"), healthyRegion()[:3*fsckSector-10], 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeGeneration(filepath.Join(scratch, "torn-server"), 9); err != nil {
+	if err := writeGeneration(filepath.Join(scratch, tornServerID), 9); err != nil {
 		t.Fatal(err)
 	}
 	orig := rewriteTornMarker
@@ -255,11 +271,11 @@ func TestScanHeldServersFailedTornMarkerRewriteIsBestEffort(t *testing.T) {
 
 	got := ScanHeldServers(scratch, true, slog.New(h))
 
-	want := []session.HeldServer{{ServerID: "torn-server", Generation: 0}}
+	want := []session.HeldServer{{ServerID: tornServerID, Generation: 0}}
 	if len(got) != 1 || got[0] != want[0] {
 		t.Errorf("held = %v, want %v", got, want)
 	}
-	if gen := readGeneration(filepath.Join(scratch, "torn-server")); gen != 9 {
+	if gen := readGeneration(filepath.Join(scratch, tornServerID)); gen != 9 {
 		t.Errorf("torn-server marker = %d, want 9 untouched by the failed rewrite", gen)
 	}
 	var logged bool
@@ -286,7 +302,7 @@ func TestScanHeldServersFailedTornMarkerRewriteIsBestEffort(t *testing.T) {
 // hydrate for boot the torn world instead of being refused and replayed with the hydrate.
 func TestScanHeldServersTornSetWithoutAMarkerGainsNone(t *testing.T) {
 	scratch := t.TempDir()
-	torn := filepath.Join(scratch, "torn-server", "region")
+	torn := filepath.Join(scratch, tornServerID, "region")
 	if err := os.MkdirAll(torn, 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -296,11 +312,11 @@ func TestScanHeldServersTornSetWithoutAMarkerGainsNone(t *testing.T) {
 
 	got := ScanHeldServers(scratch, true, nil)
 
-	want := session.HeldServer{ServerID: "torn-server", Generation: 0}
+	want := session.HeldServer{ServerID: tornServerID, Generation: 0}
 	if len(got) != 1 || got[0] != want {
 		t.Errorf("held = %v, want [%v]", got, want)
 	}
-	if _, err := os.Stat(filepath.Join(scratch, "torn-server", generationFile)); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(scratch, tornServerID, generationFile)); !os.IsNotExist(err) {
 		t.Errorf("torn-server gained a generation marker (stat err = %v), want none: an absent "+
 			"marker is the launch guard's refusal predicate (issue #2802)", err)
 	}
@@ -345,32 +361,32 @@ func TestScanHeldServersAdvertisesTheRecordedGenerationWhenQuiescenceIsUnproven(
 	// region with a durable gen-9 marker, and a structurally sound one at gen 4. Only the
 	// quiescence argument differs between the two tests, so only it can explain the
 	// different answer.
-	torn := filepath.Join(scratch, "torn-server", "region")
+	torn := filepath.Join(scratch, tornServerID, "region")
 	if err := os.MkdirAll(torn, 0o750); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(torn, "r.0.0.mca"), healthyRegion()[:3*fsckSector-10], 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeGeneration(filepath.Join(scratch, "torn-server"), 9); err != nil {
+	if err := writeGeneration(filepath.Join(scratch, tornServerID), 9); err != nil {
 		t.Fatal(err)
 	}
-	sound := filepath.Join(scratch, "sound-server", "region")
+	sound := filepath.Join(scratch, soundServerID, "region")
 	if err := os.MkdirAll(sound, 0o750); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(sound, "r.0.0.mca"), healthyRegion(), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeGeneration(filepath.Join(scratch, "sound-server"), 4); err != nil {
+	if err := writeGeneration(filepath.Join(scratch, soundServerID), 4); err != nil {
 		t.Fatal(err)
 	}
 
 	got := ScanHeldServers(scratch, false, nil)
 	sort.Slice(got, func(i, j int) bool { return got[i].ServerID < got[j].ServerID })
 	want := []session.HeldServer{
-		{ServerID: "sound-server", Generation: 4},
-		{ServerID: "torn-server", Generation: 9},
+		{ServerID: soundServerID, Generation: 4},
+		{ServerID: tornServerID, Generation: 9},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("held = %v, want %v", got, want)
@@ -384,7 +400,7 @@ func TestScanHeldServersAdvertisesTheRecordedGenerationWhenQuiescenceIsUnproven(
 	}
 	// An unjudged set is not rewritten either (issue #3178): the marker is what every later
 	// Register reads, so a write here would carry the unproven verdict to the API anyway.
-	if gen := readGeneration(filepath.Join(scratch, "torn-server")); gen != 9 {
+	if gen := readGeneration(filepath.Join(scratch, tornServerID)); gen != 9 {
 		t.Errorf("torn-server marker = %d after an unquiesced boot scan, want 9 untouched: a boot "+
 			"that cannot prove no orphan is writing must not persist a torn verdict (issue #3171)", gen)
 	}
@@ -403,24 +419,24 @@ func TestScanHeldServersLiveFormatScratchAdvertisesHeldGeneration(t *testing.T) 
 
 	// A held set whose region is live-format: unaligned size, byte-precise-valid
 	// trailing chunk (offset*4096 + 4 + length == size). Marker records gen 11.
-	live := filepath.Join(scratch, "live-server", "region")
+	live := filepath.Join(scratch, liveServerID, "region")
 	if err := os.MkdirAll(live, 0o750); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(live, "r.0.0.mca"), unalignedLiveRegion(), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeGeneration(filepath.Join(scratch, "live-server"), 11); err != nil {
+	if err := writeGeneration(filepath.Join(scratch, liveServerID), 11); err != nil {
 		t.Fatal(err)
 	}
-	before := readMarkerBytes(t, filepath.Join(scratch, "live-server"))
+	before := readMarkerBytes(t, filepath.Join(scratch, liveServerID))
 
 	got := ScanHeldServers(scratch, true, nil)
-	want := []session.HeldServer{{ServerID: "live-server", Generation: 11}}
+	want := []session.HeldServer{{ServerID: liveServerID, Generation: 11}}
 	if len(got) != len(want) || got[0] != want[0] {
 		t.Fatalf("held = %v, want %v", got, want)
 	}
-	if after := readMarkerBytes(t, filepath.Join(scratch, "live-server")); string(after) != string(before) {
+	if after := readMarkerBytes(t, filepath.Join(scratch, liveServerID)); string(after) != string(before) {
 		t.Errorf("live-server marker = %q after the boot scan, want it byte-identical %q: only a "+
 			"torn verdict rewrites the marker (issue #3178)", after, before)
 	}
@@ -522,6 +538,59 @@ func TestWarnOrphanDisplacedTreesMissingScratchRootIsSafe(t *testing.T) {
 	}
 }
 
+// TestHeldSetScansReportOnlyServerIDDirectories verifies neither held-set scan
+// advertises a scratch-root directory whose name is not a server id (issue #3395),
+// even one holding content: a stray ".edit-dirprobe", a filesystem's "lost+found",
+// or a UUID in a non-canonical spelling. The API logs every non-UUID id it is sent
+// as an invariant violation, on every registration; and a non-canonical UUID parses
+// there but comes back canonicalized, so it would read as a deleted server whose
+// scratch the Worker then removes. The in-session scan logs each skipped name once,
+// below WARN, so a permanent stray does not repeat on every registration.
+func TestHeldSetScansReportOnlyServerIDDirectories(t *testing.T) {
+	const serverID = "0b6e1f4a-3c2d-4e5f-8a9b-1c2d3e4f5a6b"
+	scratch := t.TempDir()
+	for _, name := range []string{serverID, ".edit-dirprobe", "lost+found", strings.ToUpper(serverID)} {
+		dir := filepath.Join(scratch, name)
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "level.dat"), []byte("x"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	want := session.HeldServer{ServerID: serverID, Generation: 0}
+	if got := ScanHeldServers(scratch, true, nil); len(got) != 1 || got[0] != want {
+		t.Errorf("ScanHeldServers = %v, want [%v]", got, want)
+	}
+	h := &capturingSlogHandler{}
+	m := New(nil, scratch, nil).WithLogger(slog.New(h))
+	closeWithTest(t, m)
+	for range 2 {
+		if got := m.HeldServers(); len(got) != 1 || got[0] != want {
+			t.Errorf("HeldServers = %v, want [%v]", got, want)
+		}
+	}
+
+	skipped := map[string]int{}
+	for _, r := range h.records {
+		if r.Level >= slog.LevelWarn {
+			t.Errorf("logged %q at %v, want below WARN: a stray directory is not a fault", r.Message, r.Level)
+		}
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "path" {
+				skipped[filepath.Base(a.Value.String())]++
+			}
+			return true
+		})
+	}
+	for _, name := range []string{".edit-dirprobe", "lost+found", strings.ToUpper(serverID)} {
+		if skipped[name] != 1 {
+			t.Errorf("skipped %q logged %d times across two scans, want exactly 1", name, skipped[name])
+		}
+	}
+}
+
 // TestManagerHeldServersReadsCurrentGenerations verifies the Manager.HeldServers
 // method returns the current generation for each held working set (issue #1711).
 // Unlike the boot-time ScanHeldServers, HeldServers runs no region fsck: it reads
@@ -532,7 +601,7 @@ func TestManagerHeldServersReadsCurrentGenerations(t *testing.T) {
 	scratch := t.TempDir()
 
 	// A non-empty server dir with a generation marker.
-	srv := filepath.Join(scratch, "srv-a")
+	srv := filepath.Join(scratch, srvAID)
 	if err := os.MkdirAll(srv, 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -550,7 +619,7 @@ func TestManagerHeldServersReadsCurrentGenerations(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("held = %v, want 1 entry", got)
 	}
-	if got[0].ServerID != "srv-a" || got[0].Generation != 3 {
+	if got[0].ServerID != srvAID || got[0].Generation != 3 {
 		t.Fatalf("held = %+v, want {srv-a gen 3}", got[0])
 	}
 

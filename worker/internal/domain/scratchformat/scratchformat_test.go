@@ -20,6 +20,8 @@ import (
 const (
 	persistedGenerationMarkerFile = ".mcsd_generation"
 	persistedHydratePrefix        = ".hydrate-"
+	// The held-set scans advertise only directories named by a server id (issue #3395).
+	serverID = "7c6b5a49-3827-4165-9f4e-3d2c1b0a9f8e"
 )
 
 // These names are persisted in existing Worker scratch trees. Keep this oracle
@@ -35,7 +37,7 @@ func TestPersistedScratchNames(t *testing.T) {
 
 func TestExistingScratchTreeRemainsReadable(t *testing.T) {
 	scratch := t.TempDir()
-	workingDir := filepath.Join(scratch, "server")
+	workingDir := filepath.Join(scratch, serverID)
 	if err := os.MkdirAll(workingDir, 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +48,7 @@ func TestExistingScratchTreeRemainsReadable(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := []session.HeldServer{{ServerID: "server", Generation: 17}}
+	want := []session.HeldServer{{ServerID: serverID, Generation: 17}}
 	if got := instancemanager.ScanHeldServers(scratch, true, nil); !reflect.DeepEqual(got, want) {
 		t.Fatalf("existing scratch held = %v, want %v", got, want)
 	}
@@ -73,7 +75,7 @@ func TestHydrateScratchIsDiscoveredAndCrashLeftTreesAreReclaimed(t *testing.T) {
 	defer srv.Close()
 
 	scratch := t.TempDir()
-	workingDir := filepath.Join(scratch, "server")
+	workingDir := filepath.Join(scratch, serverID)
 	gen, err := datatransfer.New(srv.Client()).Hydrate(context.Background(), srv.URL, "tok", workingDir)
 	if err != nil {
 		t.Fatalf("Hydrate: %v", err)
@@ -82,14 +84,14 @@ func TestHydrateScratchIsDiscoveredAndCrashLeftTreesAreReclaimed(t *testing.T) {
 		t.Fatalf("Hydrate generation = %d, want %d", gen, servedGeneration)
 	}
 
-	wantHeld := []session.HeldServer{{ServerID: "server", Generation: servedGeneration}}
+	wantHeld := []session.HeldServer{{ServerID: serverID, Generation: servedGeneration}}
 	if got := instancemanager.ScanHeldServers(scratch, true, nil); !reflect.DeepEqual(got, wantHeld) {
 		t.Fatalf("held after Hydrate = %v, want %v", got, wantHeld)
 	}
 
 	leftovers := []string{
-		filepath.Join(scratch, persistedHydratePrefix+"server-123456"),
-		filepath.Join(scratch, persistedHydratePrefix+"server-superseded-654321"),
+		filepath.Join(scratch, persistedHydratePrefix+serverID+"-123456"),
+		filepath.Join(scratch, persistedHydratePrefix+serverID+"-superseded-654321"),
 	}
 	for _, dir := range leftovers {
 		if err := os.MkdirAll(dir, 0o750); err != nil {

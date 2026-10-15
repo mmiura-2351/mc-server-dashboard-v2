@@ -263,6 +263,10 @@ type Manager struct {
 	// older API, or before the first ack) leaves the transfer unbounded as before.
 	transferDeadlineNanos atomic.Int64
 
+	// skippedScratchNames records the scratch-root directory names HeldServers has
+	// already logged as not being server ids (issue #3395), so each is logged once.
+	skippedScratchNames sync.Map
+
 	mu        sync.Mutex
 	instances map[string]execution.Instance
 	// startCmds remembers the StartServer command per running server so a

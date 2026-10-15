@@ -276,6 +276,10 @@ func TestBootLeavesScratchLeftoversWhenTheOrphanSweepFails(t *testing.T) {
 	}
 }
 
+// s1 is the held server the boot tests below seed. The held-set scans advertise only
+// directories named by a server id, which is a UUID (issue #3395).
+const s1 = "5d3c2b1a-0f9e-4d8c-8b7a-6f5e4d3c2b1a"
+
 // The held-set scan's region fsck rests on the SAME premise as the two boot reclaims —
 // nobody is writing into what it reads — and the container orphan sweep is what
 // establishes it, so it is gated on the sweep too (issue #3171). The two tests below are
@@ -298,7 +302,7 @@ func TestBootLeavesScratchLeftoversWhenTheOrphanSweepFails(t *testing.T) {
 // of the marker's original generation (STORAGE.md Section 4.6).
 func TestBootDoesNotJudgeHeldWorldsWhenTheOrphanSweepFails(t *testing.T) {
 	scratch := t.TempDir()
-	seedTornWorkingSet(t, filepath.Join(scratch, "s1"), 9)
+	seedTornWorkingSet(t, filepath.Join(scratch, s1), 9)
 	cp := newRegistrationRecorder()
 	// A docker socket that does not exist: the sweep's container list fails, which
 	// buildInstanceManager logs and does not treat as fatal, so boot continues unquiesced.
@@ -313,11 +317,11 @@ func TestBootDoesNotJudgeHeldWorldsWhenTheOrphanSweepFails(t *testing.T) {
 	// The set must still be ENUMERATED, at its recorded generation: dropping it from the
 	// advertisement would report nothing held and make the API hydrate every server on this
 	// Worker, and a 0 would send a hydrate over what may be a running orphan's live world.
-	if want := map[string]uint64{"s1": 9}; !maps.Equal(first, want) {
+	if want := map[string]uint64{s1: 9}; !maps.Equal(first, want) {
 		t.Errorf("Register #1 held_servers = %v, want %v: a boot whose orphan sweep failed must "+
 			"advertise the recorded generation unjudged (issue #3171)", first, want)
 	}
-	if got, err := os.ReadFile(filepath.Join(scratch, "s1", ".mcsd_generation")); err != nil || string(got) != "9" {
+	if got, err := os.ReadFile(filepath.Join(scratch, s1, ".mcsd_generation")); err != nil || string(got) != "9" {
 		t.Errorf("s1 marker = %q (err %v) after an unquiesced boot, want \"9\" untouched: a boot "+
 			"that cannot prove no orphan is writing must not persist a torn verdict (issue #3171)", got, err)
 	}
@@ -327,7 +331,7 @@ func TestBootDoesNotJudgeHeldWorldsWhenTheOrphanSweepFails(t *testing.T) {
 			"sweep is what proves nothing is writing into it, and a mid-write read of a running "+
 			"orphan's live world reads as torn (issue #3171)\nboot log:\n%s", out)
 	}
-	for _, want := range []string{"skipping the held-set region fsck", `"server_id":"s1"`, `"generation":9`} {
+	for _, want := range []string{"skipping the held-set region fsck", `"server_id":"` + s1 + `"`, `"generation":9`} {
 		if !strings.Contains(out, want) {
 			t.Errorf("boot log does not contain %q: the scan must still advertise s1 at the "+
 				"generation its marker records (issue #3171)\nboot log:\n%s", want, out)
@@ -347,7 +351,7 @@ func TestBootDoesNotJudgeHeldWorldsWhenTheOrphanSweepFails(t *testing.T) {
 // passing vacuously.
 func TestBootJudgesATornHeldWorldWhenTheOrphanSweepSucceeds(t *testing.T) {
 	scratch := t.TempDir()
-	seedTornWorkingSet(t, filepath.Join(scratch, "s1"), 9)
+	seedTornWorkingSet(t, filepath.Join(scratch, s1), 9)
 	cp := newRegistrationRecorder()
 	// The sweep must SUCCEED here, so boot is given a docker socket that answers its
 	// container list — the same arrangement TestBootReclaimsScratchLeftovers needs.
@@ -362,7 +366,7 @@ func TestBootJudgesATornHeldWorldWhenTheOrphanSweepSucceeds(t *testing.T) {
 	second := cp.nextRegister(t)
 	stop()
 
-	want := map[string]uint64{"s1": 0}
+	want := map[string]uint64{s1: 0}
 	for i, got := range []map[string]uint64{first, second} {
 		if !maps.Equal(got, want) {
 			t.Errorf("Register #%d held_servers = %v, want %v: a torn held set must reach the API "+
@@ -374,7 +378,7 @@ func TestBootJudgesATornHeldWorldWhenTheOrphanSweepSucceeds(t *testing.T) {
 	out := logged()
 	for _, want := range []string{
 		"held set has a corrupt region; its generation marker now reads 0",
-		`"server_id":"s1"`,
+		`"server_id":"` + s1 + `"`,
 		// The rewrite erases the original generation from disk; this line is where an
 		// operator recovering a displaced torn tree finds it (STORAGE.md Section 4.6).
 		`"recorded_generation":9`,
@@ -397,7 +401,7 @@ func TestBootJudgesATornHeldWorldWhenTheOrphanSweepSucceeds(t *testing.T) {
 // that swaps in a sound tree and reports the generation the store served.
 func TestHydratedTornHeldSetIsAdvertisedAtItsServedGenerationWithoutAReboot(t *testing.T) {
 	scratch := t.TempDir()
-	seedTornWorkingSet(t, filepath.Join(scratch, "s1"), 9)
+	seedTornWorkingSet(t, filepath.Join(scratch, s1), 9)
 	boot := instancemanager.ScanHeldServers(scratch, true, nil)
 	manager := instancemanager.New(nil, scratch, nil).WithTransfer(soundTreeTransfer{gen: 9})
 	t.Cleanup(manager.Close)
@@ -414,7 +418,7 @@ func TestHydratedTornHeldSetIsAdvertisedAtItsServedGenerationWithoutAReboot(t *t
 			CorrelationId: "hydrate-s1",
 			Payload: &controlplanev1.ApiMessage_ApiCommand{ApiCommand: &controlplanev1.ApiCommand{
 				CommandId: "hydrate-s1",
-				ServerId:  "s1",
+				ServerId:  s1,
 				Command: &controlplanev1.ApiCommand_Hydrate{Hydrate: &controlplanev1.HydrateTrigger{
 					TransferUrl: "http://data-plane.invalid/hydrate", TransferToken: "token",
 				}},
@@ -450,7 +454,7 @@ func TestHydratedTornHeldSetIsAdvertisedAtItsServedGenerationWithoutAReboot(t *t
 	go func() { _ = runner.Run(ctx); close(done) }()
 	t.Cleanup(func() { cancel(); <-done })
 
-	if got, want := cp.nextRegister(t), map[string]uint64{"s1": 0}; !maps.Equal(got, want) {
+	if got, want := cp.nextRegister(t), map[string]uint64{s1: 0}; !maps.Equal(got, want) {
 		t.Fatalf("Register #1 held_servers = %v, want %v: the boot judged s1 torn (issue #3178)", got, want)
 	}
 	select {
@@ -461,7 +465,7 @@ func TestHydratedTornHeldSetIsAdvertisedAtItsServedGenerationWithoutAReboot(t *t
 	case <-time.After(30 * time.Second):
 		t.Fatal("no CommandResult for the hydrate reached the control plane")
 	}
-	if got, want := cp.nextRegister(t), map[string]uint64{"s1": 9}; !maps.Equal(got, want) {
+	if got, want := cp.nextRegister(t), map[string]uint64{s1: 9}; !maps.Equal(got, want) {
 		t.Errorf("Register #2 held_servers = %v, want %v: a hydrate that repaired the set must "+
 			"stop it being advertised as torn without a reboot (issue #3178)", got, want)
 	}

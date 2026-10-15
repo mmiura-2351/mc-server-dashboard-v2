@@ -205,6 +205,12 @@ func TestReadGenerationMarkerAcceptsTheLargestGeneration(t *testing.T) {
 // neither stall the scan nor change what is reported for the others: the planted
 // set is still held, at generation 0 (which makes the API hydrate it), with a WARN.
 func TestHeldServerScansSurviveAPlantedMarkerInOneServer(t *testing.T) {
+	// Server ids are UUIDs (issue #3395); they sort in the order the assertions list them.
+	const (
+		aHealthy = "a0000000-0000-4000-8000-000000000001"
+		bPlanted = "b0000000-0000-4000-8000-000000000002"
+		cHealthy = "c0000000-0000-4000-8000-000000000003"
+	)
 	seed := func(t *testing.T, scratch, id string) string {
 		t.Helper()
 		dir := filepath.Join(scratch, id)
@@ -221,17 +227,17 @@ func TestHeldServerScansSurviveAPlantedMarkerInOneServer(t *testing.T) {
 			m := newManager(t, &fakeDriver{}, nil)
 			h := &capturingSlogHandler{}
 			m.WithLogger(slog.New(h))
-			if err := writeGeneration(seed(t, m.scratchDir, "a-healthy"), 5); err != nil {
+			if err := writeGeneration(seed(t, m.scratchDir, aHealthy), 5); err != nil {
 				t.Fatal(err)
 			}
-			outside := plant.plant(t, filepath.Join(seed(t, m.scratchDir, "b-planted"), generationFile))
-			if err := writeGeneration(seed(t, m.scratchDir, "c-healthy"), 9); err != nil {
+			outside := plant.plant(t, filepath.Join(seed(t, m.scratchDir, bPlanted), generationFile))
+			if err := writeGeneration(seed(t, m.scratchDir, cHealthy), 9); err != nil {
 				t.Fatal(err)
 			}
 			want := []session.HeldServer{
-				{ServerID: "a-healthy", Generation: 5},
-				{ServerID: "b-planted", Generation: 0},
-				{ServerID: "c-healthy", Generation: 9},
+				{ServerID: aHealthy, Generation: 5},
+				{ServerID: bPlanted, Generation: 0},
+				{ServerID: cHealthy, Generation: 9},
 			}
 
 			for name, scan := range map[string]func() []session.HeldServer{
@@ -251,10 +257,10 @@ func TestHeldServerScansSurviveAPlantedMarkerInOneServer(t *testing.T) {
 						t.Errorf("%s reported %+v, want %+v", name, held[i], want[i])
 					}
 				}
-				if !warned(h, "generation marker", "b-planted") {
+				if !warned(h, "generation marker", bPlanted) {
 					t.Errorf("%s did not WARN about the refused marker", name)
 				}
-				if warned(h, "generation marker", "a-healthy") || warned(h, "generation marker", "c-healthy") {
+				if warned(h, "generation marker", aHealthy) || warned(h, "generation marker", cHealthy) {
 					t.Errorf("%s warned about a healthy server's marker", name)
 				}
 			}
@@ -469,10 +475,14 @@ func TestGenerationTempSweepRemovesAPlantedLinkNotItsTarget(t *testing.T) {
 // the two places the value goes, so that the trust-model statement cannot drift
 // from the code silently.
 func TestAForgedWellFormedMarkerIsBelieved(t *testing.T) {
+	// A UUID: the held-set scan advertises only directories named by a server id (issue #3395).
+	const serverID = "d0000000-0000-4000-8000-000000000004"
 	tr := &fakeTransfer{gen: 12}
 	m := newManager(t, &fakeDriver{}, &fakeControl{reply: "ok"}).WithTransfer(tr)
-	dir := seedScratch(t, m, "s1")
-	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+	dir := seedScratch(t, m, serverID)
+	start, snapshot := startCmd(), snapshotCmd()
+	start.ServerID, snapshot.ServerID = serverID, serverID
+	if res := m.Handle(context.Background(), start); !res.Success {
 		t.Fatalf("start = %+v, want success", res)
 	}
 	// What the server does from inside the container: unlink the Worker's marker
@@ -488,7 +498,7 @@ func TestAForgedWellFormedMarkerIsBelieved(t *testing.T) {
 	if held := m.HeldServers(); len(held) != 1 || held[0].Generation != 999 {
 		t.Fatalf("HeldServers = %+v, want the forged generation 999 advertised", held)
 	}
-	if res := m.Handle(context.Background(), snapshotCmd()); !res.Success {
+	if res := m.Handle(context.Background(), snapshot); !res.Success {
 		t.Fatalf("SnapshotTrigger = %+v, want success", res)
 	}
 	if got := tr.snapshotBaseGenerations; len(got) != 1 || got[0] != 999 {
