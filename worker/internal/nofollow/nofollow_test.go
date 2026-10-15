@@ -103,14 +103,6 @@ func TestReadFileAtRefusesWhatIsNotABoundedRegularFile(t *testing.T) {
 				t.Fatal(err)
 			}
 		}, ErrTooLarge},
-		"sparse and huge": {func(t *testing.T, path string) {
-			if err := os.WriteFile(path, nil, 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Truncate(path, 1<<40); err != nil {
-				t.Skipf("the filesystem cannot hold a sparse 1 TiB file: %v", err)
-			}
-		}, ErrTooLarge},
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -125,6 +117,36 @@ func TestReadFileAtRefusesWhatIsNotABoundedRegularFile(t *testing.T) {
 				t.Fatalf("read = %v; ErrIsDir must mark a directory and only that, as an ErrNotRegular", err)
 			}
 		})
+	}
+}
+
+// A file far larger than the cap is refused without being read past it. The
+// bound is pinned by what the read allocates, not by the file being too large to
+// read: a regressed bound then fails here instead of reading the whole file.
+func TestReadFileAtReadsNoFurtherThanTheCapOfAHugeFile(t *testing.T) {
+	const size = 128 << 20
+	dir := t.TempDir()
+	path := filepath.Join(dir, fileName)
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Sparse: the file reads as 128 MiB of zeros without occupying them.
+	if err := os.Truncate(path, size); err != nil {
+		t.Skipf("the filesystem cannot hold a sparse file: %v", err)
+	}
+
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	data, err := readWithin(t, dir)
+	runtime.ReadMemStats(&after)
+
+	if !errors.Is(err, ErrTooLarge) || data != nil {
+		t.Fatalf("read = %d bytes, %v; want no bytes and ErrTooLarge", len(data), err)
+	}
+	// Reading the cap costs a few times the cap; reading the file costs at least the
+	// file. The bound is far from both, so it does not depend on the allocator.
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated >= size/2 {
+		t.Fatalf("the refused read allocated %d bytes, want it bounded by the %d-byte cap", allocated, maxSize)
 	}
 }
 
