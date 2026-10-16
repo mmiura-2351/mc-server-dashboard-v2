@@ -371,13 +371,24 @@ killed from outside, which the Worker cannot tell apart) and an observed `unknow
 on a Worker that came back without it (a Worker restart force-removes its orphaned
 containers at boot and reports nothing for them). The restart is re-dispatched to
 the same Worker once the grace below lapses, measured from the last Worker report,
-and repeated crashes back off (`backoff_*`). If the Worker still holds a fresh
-working set, the short `held_start_grace_seconds` applies. Otherwise the restart hydrates and
-waits the full `grace_seconds` (660 s at stock values). That is the usual case
-after a crash, because the first periodic snapshot after it captures the crash-time
-world and the Worker then drops its scratch. Until then a `start` answers
-`409 invalid_transition`, because the intent already is running. To bring the
-server back sooner, stop it and start it again.
+and repeated crashes back off (`backoff_*`). Which grace applies depends on
+whether the Worker still holds a working set at least as fresh as the store:
+
+- **It does.** The restart reuses the scratch without a hydrate after the short
+  `held_start_grace_seconds` (90 s at stock values). A crash takes this path
+  when the restart comes before the server's next periodic snapshot, which at
+  the stock 3600 s interval is the usual order. The snapshot that follows then
+  finds a running server and keeps the scratch. A Worker that comes back
+  advertising its scratch at the store generation takes this path too.
+- **It does not.** The restart hydrates and waits the full `grace_seconds`
+  (660 s at stock values). A crash takes this path when the periodic snapshot
+  comes first. The snapshot captures the crash-time world, the store generation
+  moves past the held one, and the Worker drops its scratch. A Worker that comes
+  back advertising nothing for the server, an older generation, or generation 0
+  (its boot check judged the scratch torn) takes this path too.
+
+Until the restart, a `start` answers `409 invalid_transition`, because the intent
+already is running. To bring the server back sooner, stop it and start it again.
 
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
@@ -848,10 +859,11 @@ The effective periodic interval for a running server is its per-server override
 if set, otherwise the global default. The interval bounds the RPO: a crash may
 lose up to one interval of changes (REQUIREMENTS.md FR-DATA-5).
 
-A server that crashed under `desired=running` still gets its next periodic
-snapshot, which captures the crash-time world. The Worker then drops its scratch,
-so after that capture (or a `working_set_absent` refusal, which is how the Worker
-answers a trigger for a scratch it already dropped) no trigger is dispatched for
+A server that crashed under `desired=running` is not skipped. If its next
+periodic snapshot comes before the reconciler restarts it (Section 5.6), that
+snapshot captures the crash-time world, and the Worker then drops its scratch.
+After that capture, or after a `working_set_absent` refusal (how the Worker
+answers a trigger for a scratch it already dropped), no trigger is dispatched for
 the server until the Worker reports it again (for example, the reconciler's
 restart).
 

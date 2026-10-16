@@ -90,12 +90,13 @@ class RunSnapshotCadenceTick:
     oversight (issue #2480). The Worker has dropped the crashed instance from its
     map, so the trigger takes the at-rest branch over the retained working
     directory: it publishes, then GCs the scratch. Capturing that crash-time world
-    is the point — under ``desired=running`` this tick is the only path that
-    durably captures it. Everything else destroys or refuses it: the reconciler's
-    automatic ``redispatch_start`` hydrates over the crash-window scratch and the
-    displaced copy is swept on the next publish, a manual stop of a crashed server
-    unassigns without a snapshot, and a backup of an unsettled server refuses. So
-    skipping crashed servers here would leave their world captured by nothing.
+    is the point — under ``desired=running`` this tick is the only periodic path
+    that durably captures it. A backup of an unsettled server refuses. The
+    reconciler's ``redispatch_start`` reuses the crash-window scratch only while the
+    held inventory says it is current, and otherwise hydrates over it (the displaced
+    copy is swept on the next publish). A manual stop does take a final snapshot
+    (issue #2448), but only if an operator stops the server. So skipping crashed
+    servers here could leave their world captured by nothing.
 
     The scratch GC that follows is an intended consequence, and it is safe: the
     Worker removes the scratch only after the transfer reported success, which
