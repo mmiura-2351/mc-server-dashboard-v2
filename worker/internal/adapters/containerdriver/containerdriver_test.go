@@ -719,10 +719,12 @@ func drainClosed(ch <-chan execution.StatusEvent) {
 	}
 }
 
-// drainTo collects status events until it sees want or times out.
+// drainTo collects status events until it sees want or times out. The budget
+// only bounds a state that never comes; under a parallel `make check` the
+// install-to-launch path has outlasted two seconds (issue #3354).
 func drainTo(t *testing.T, ch <-chan execution.StatusEvent, want execution.ServerState) {
 	t.Helper()
-	deadline := time.After(2 * time.Second)
+	deadline := time.After(30 * time.Second)
 	for {
 		select {
 		case ev, ok := <-ch:
