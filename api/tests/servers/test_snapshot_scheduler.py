@@ -258,10 +258,8 @@ async def test_working_set_absent_refusal_advances_next_due() -> None:
 async def test_working_set_absent_refusal_is_not_logged_as_a_failure(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # Since issue #2485 every outcome advances next-due, so the discriminator's
-    # whole remaining effect is how the outcome is logged: nothing was lost, so the
-    # refusal must not WARN. Pinned here (with the guard below) so the
-    # discriminator cannot quietly become dead code.
+    # Nothing was lost, so the refusal must not WARN. Pinned here (with the guard
+    # below) so the discriminator cannot quietly start matching other refusals.
     uow = FakeUnitOfWork()
     server = _running_server(observed=ObservedState.CRASHED)
     uow.servers.seed(server)
@@ -280,6 +278,60 @@ async def test_working_set_absent_refusal_is_not_logged_as_a_failure(
         await scheduler.tick()
 
     assert [r.levelno for r in caplog.records] == [logging.INFO]
+
+
+async def test_working_set_absent_refusal_stops_further_dispatches() -> None:
+    # Issue #3387: once the Worker said it holds nothing for a crashed server, every
+    # later trigger is refused the same way until the Worker reports the server
+    # again, so none is dispatched while the row carries no newer report.
+    uow = FakeUnitOfWork()
+    server = _running_server(observed=ObservedState.CRASHED)
+    server.observed_at = _NOW
+    uow.servers.seed(server)
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(
+            status=worker_status("SnapshotTrigger", "working_set_absent"),
+            message=_WORKING_SET_ABSENT_MESSAGE,
+        )
+    )
+    clock = FakeClock(_NOW)
+    scheduler = _scheduler(uow, cp, clock)
+    await scheduler.tick()
+    clock.set(_NOW + dt.timedelta(seconds=3600))
+    await scheduler.tick()  # refused: the Worker holds nothing for this id
+    assert len(cp.dispatched) == 1
+    for intervals in range(3, 8):
+        clock.set(_NOW + dt.timedelta(seconds=3600 * intervals))
+        await scheduler.tick()
+    assert len(cp.dispatched) == 1
+
+
+async def test_newer_worker_report_resumes_dispatches_after_working_set_absent() -> (
+    None
+):
+    # A Worker report after the refusal (the reconciler restarted the server, which
+    # hydrated a working set, and it crashed again) means the Worker may hold a world
+    # worth capturing again, so the periodic trigger resumes.
+    uow = FakeUnitOfWork()
+    server = _running_server(observed=ObservedState.CRASHED)
+    server.observed_at = _NOW
+    uow.servers.seed(server)
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(
+            status=worker_status("SnapshotTrigger", "working_set_absent"),
+            message=_WORKING_SET_ABSENT_MESSAGE,
+        )
+    )
+    clock = FakeClock(_NOW)
+    scheduler = _scheduler(uow, cp, clock)
+    await scheduler.tick()
+    clock.set(_NOW + dt.timedelta(seconds=3600))
+    await scheduler.tick()  # refused
+    assert len(cp.dispatched) == 1
+    uow.servers.by_id[server.id].observed_at = _NOW + dt.timedelta(seconds=4000)
+    clock.set(_NOW + dt.timedelta(seconds=3600 * 3))  # past interval + jitter
+    await scheduler.tick()
+    assert len(cp.dispatched) == 2
 
 
 async def test_other_server_not_found_is_logged_as_a_failure(
