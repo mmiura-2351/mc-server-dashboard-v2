@@ -58,6 +58,9 @@ from mc_server_dashboard_api.servers.application.lifecycle import (
 )
 from mc_server_dashboard_api.servers.application.manage_server import CreateServer
 from mc_server_dashboard_api.servers.application.reconciler import RunReconcilerTick
+from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
+    RunSnapshotCadenceTick,
+)
 from mc_server_dashboard_api.servers.application.stop_dispatch_refusals import (
     StopDispatchRefusals,
 )
@@ -70,9 +73,13 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     CommandDispatchError,
+    InvalidLifecycleTransitionError,
     LifecycleTransitionConflictError,
 )
 from mc_server_dashboard_api.servers.domain.ports import PortRange
+from mc_server_dashboard_api.servers.domain.store_generation import (
+    StoreGenerationReader,
+)
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     DesiredState,
@@ -88,7 +95,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     ServerId as StorageServerId,
 )
 from tests.integration.migrate import downgrade_base, upgrade_head
-from tests.servers.contract_table import worker_status
+from tests.servers.contract_table import worker_message, worker_status
 from tests.servers.fakes import (
     FakeControlPlane,
     FakeFileStore,
@@ -129,6 +136,60 @@ class _AdvancingClock(Clock):
         current = self._next
         self._next = current + dt.timedelta(seconds=1)
         return current
+
+    def set(self, at: dt.datetime) -> None:
+        """Make the next ``now()`` return exactly ``at`` (a timed reconciler tick)."""
+
+        self._next = at
+
+
+class _StoreGeneration(StoreGenerationReader):
+    """A store generation a scenario can move, shared by every seam that reads it."""
+
+    def __init__(self, generation: int) -> None:
+        self.generation = generation
+
+    async def current_generation(
+        self, *, community_id: CommunityId, server_id: ServerId
+    ) -> int:
+        return self.generation
+
+
+class _PublishingControlPlane(FakeControlPlane):
+    """A fake whose successful snapshot publishes: the store generation advances.
+
+    The held inventory is left as it was, as the real registry leaves it for a
+    stopped-id publish (the Worker declares no held generation once it drops the
+    scratch, CONTROL_PLANE.md Section 5.1), so the entry goes stale.
+    """
+
+    def __init__(
+        self,
+        store: _StoreGeneration,
+        *,
+        place_to: WorkerId,
+        held: dict[tuple[WorkerId, ServerId], int],
+    ) -> None:
+        super().__init__(place_to=place_to, held=held)
+        self._store = store
+
+    async def snapshot(
+        self,
+        *,
+        worker_id: WorkerId,
+        community_id: CommunityId,
+        server_id: ServerId,
+        final: bool = False,
+    ) -> CommandOutcome:
+        outcome = await super().snapshot(
+            worker_id=worker_id,
+            community_id=community_id,
+            server_id=server_id,
+            final=final,
+        )
+        if outcome.success:
+            self._store.generation += 1
+        return outcome
 
 
 @pytest.fixture
@@ -175,7 +236,10 @@ def _create_server_use_case(
 
 
 def _start_server_use_case(
-    engine: AsyncEngine, control_plane: FakeControlPlane, clock: Clock
+    engine: AsyncEngine,
+    control_plane: FakeControlPlane,
+    clock: Clock,
+    store_generation: StoreGenerationReader | None = None,
 ) -> StartServer:
     return StartServer(
         uow=ServersUnitOfWork(
@@ -184,7 +248,7 @@ def _start_server_use_case(
         control_plane=control_plane,
         clock=clock,
         jar_provisioner=FakeJarProvisioner(),
-        store_generation=FakeStoreGenerationReader(),
+        store_generation=store_generation or FakeStoreGenerationReader(),
         file_store=FakeFileStore(seed_eula=True),
     )
 
@@ -222,22 +286,32 @@ def _sink(engine: AsyncEngine, clock: Clock) -> ServersServerStateSink:
 
 
 async def _reconciler_tick(
-    engine: AsyncEngine, control_plane: FakeControlPlane, clock: Clock
+    engine: AsyncEngine,
+    control_plane: FakeControlPlane,
+    clock: Clock,
+    *,
+    grace_seconds: int = 0,
+    held_start_grace_seconds: int = 0,
+    store_generation: StoreGenerationReader | None = None,
 ) -> None:
-    # grace_seconds=0 so a divergence is actionable immediately (the _AdvancingClock
-    # already moves time forward between each use case, so the wedged row is past its
-    # zero-second grace by the time the tick reads it).
+    # Graces default to 0 so a divergence is actionable immediately (the
+    # _AdvancingClock already moves time forward between each use case, so the
+    # wedged row is past its zero-second grace by the time the tick reads it). The
+    # timed scenarios pass the stock graces instead.
+    store = store_generation or FakeStoreGenerationReader()
     factory = create_session_factory(engine)
     await RunReconcilerTick(
         uow=ServersUnitOfWork(factory),
-        make_start_server=lambda: _start_server_use_case(engine, control_plane, clock),
+        make_start_server=lambda: _start_server_use_case(
+            engine, control_plane, clock, store
+        ),
         make_stop_server=lambda: _stop_server_use_case(engine, control_plane, clock),
         control_plane=control_plane,
-        store_generation=FakeStoreGenerationReader(),
+        store_generation=store,
         clock=clock,
         stop_refusals=StopDispatchRefusals(),
-        grace_seconds=0,
-        held_start_grace_seconds=0,
+        grace_seconds=grace_seconds,
+        held_start_grace_seconds=held_start_grace_seconds,
         refused_stop_grace_seconds=0,
         restart_timeout_seconds=0,
         backoff_base_seconds=30,
@@ -885,6 +959,328 @@ async def test_crash_then_operator_stop_snapshots_and_leaves_the_same_shape(
         engine, FakeControlPlane(place_to=WorkerId(next_worker)), clock
     )(community_id=community, server_id=server_id)
     assert restarted.assigned_worker_id == WorkerId(next_worker)
+
+
+async def test_crash_under_running_intent_is_restarted_by_the_reconciler(
+    engine: AsyncEngine,
+) -> None:
+    """start -> killed from outside (crashed) -> start 409s -> reconciler restarts.
+
+    Issue #3387. A server whose process exits while ``desired=running`` (a crash,
+    or a ``docker kill``, which the Worker cannot tell apart) is a divergence the
+    reconciler closes by re-dispatching the start to the same Worker. Until it does,
+    a user start is refused: the intent already is running.
+    """
+
+    clock = _AdvancingClock(_NOW)
+    server = await _create_server(engine, FakeFileStore(), clock)
+    server_id = server.id
+    community = server.community_id
+
+    worker = uuid.uuid4()
+    await _start_server_use_case(
+        engine, FakeControlPlane(place_to=WorkerId(worker)), clock
+    )(community_id=community, server_id=server_id)
+    await _sink(engine, clock).record_observed_state(
+        server_id=str(server_id.value), worker_id=str(worker), state="crashed"
+    )
+
+    with pytest.raises(InvalidLifecycleTransitionError):
+        await _start_server_use_case(
+            engine, FakeControlPlane(place_to=WorkerId(uuid.uuid4())), clock
+        )(community_id=community, server_id=server_id)
+
+    # Zero graces and no held inventory: this pins only that the restart is
+    # dispatched. Which grace it waits, and whether it hydrates, is pinned by the
+    # timed scenarios below.
+    reconcile_cp = FakeControlPlane()
+    await _reconciler_tick(engine, reconcile_cp, clock)
+    assert reconcile_cp.dispatched == [
+        ("hydrate", WorkerId(worker), server_id),
+        ("start", WorkerId(worker), server_id),
+    ]
+    await _sink(engine, clock).record_observed_state(
+        server_id=str(server_id.value), worker_id=str(worker), state="running"
+    )
+    healed = await _load(engine, server_id)
+    assert healed is not None
+    assert healed.desired_state is DesiredState.RUNNING
+    assert healed.observed_state is ObservedState.RUNNING
+    assert healed.assigned_worker_id == WorkerId(worker)
+
+
+async def test_stop_after_crash_and_scratch_gc_leaves_stopped_crashed(
+    engine: AsyncEngine,
+) -> None:
+    """start -> crash -> periodic capture GC'd the scratch -> operator stop.
+
+    Issue #3387, observation from the PR #3391 verification: the stop leaves
+    ``(stopped, crashed)`` and never ``(stopped, stopped)``. That is the documented
+    terminal shape (issue #2448): the Worker reports nothing for an instance it
+    already forgot, and ``crashed`` stays as why the server is down. The final
+    snapshot meets an empty scratch (``working_set_absent``) and the row is still
+    released, at rest and startable.
+    """
+
+    clock = _AdvancingClock(_NOW)
+    server = await _create_server(engine, FakeFileStore(), clock)
+    server_id = server.id
+    community = server.community_id
+
+    worker = uuid.uuid4()
+    await _start_server_use_case(
+        engine, FakeControlPlane(place_to=WorkerId(worker)), clock
+    )(community_id=community, server_id=server_id)
+    await _sink(engine, clock).record_observed_state(
+        server_id=str(server_id.value), worker_id=str(worker), state="crashed"
+    )
+
+    stop_cp = FakeControlPlane(
+        outcomes={
+            "stop": CommandOutcome(status=CommandStatus.SERVER_NOT_FOUND),
+            "snapshot": CommandOutcome(
+                status=worker_status("SnapshotTrigger", "working_set_absent"),
+                message=worker_message("working_set_absent.snapshot"),
+            ),
+        }
+    )
+    await _stop_server_use_case(engine, stop_cp, clock)(
+        community_id=community, server_id=server_id
+    )
+
+    released = await _load(engine, server_id)
+    assert released is not None
+    assert released.desired_state is DesiredState.STOPPED
+    assert released.observed_state is ObservedState.CRASHED
+    assert released.assigned_worker_id is None
+    assert released.is_at_rest()
+    restarted = await _start_server_use_case(
+        engine, FakeControlPlane(place_to=WorkerId(uuid.uuid4())), clock
+    )(community_id=community, server_id=server_id)
+    assert restarted.desired_state is DesiredState.RUNNING
+
+
+async def test_worker_restart_that_swept_the_orphan_is_restarted_by_the_reconciler(
+    engine: AsyncEngine,
+) -> None:
+    """running -> Worker killed (unknown) -> Worker back, orphan swept -> restart.
+
+    Issue #3394. The disconnect writes ``unknown`` and keeps the assignment. The
+    restarted Worker force-removes the orphaned container at boot and reports
+    nothing for it, so the row stays ``(running, unknown)`` until the reconciler,
+    seeing the Worker connected again, re-dispatches the start to it.
+    """
+
+    clock = _AdvancingClock(_NOW)
+    server = await _create_server(engine, FakeFileStore(), clock)
+    server_id = server.id
+    community = server.community_id
+
+    worker = uuid.uuid4()
+    await _start_server_use_case(
+        engine, FakeControlPlane(place_to=WorkerId(worker)), clock
+    )(community_id=community, server_id=server_id)
+    sink = _sink(engine, clock)
+    await sink.record_observed_state(
+        server_id=str(server_id.value), worker_id=str(worker), state="running"
+    )
+    await sink.mark_worker_servers_unknown(worker_id=str(worker))
+
+    # The Worker re-registered (connected again) without a report for the server.
+    # Zero graces and no held inventory, as above: the timed scenarios below pin
+    # the grace and the hydrate decision.
+    reconcile_cp = FakeControlPlane(connected={WorkerId(worker): True})
+    await _reconciler_tick(engine, reconcile_cp, clock)
+    assert [kind for kind, _, _ in reconcile_cp.dispatched] == ["hydrate", "start"]
+    assert {wid for _, wid, _ in reconcile_cp.dispatched} == {WorkerId(worker)}
+    await sink.record_observed_state(
+        server_id=str(server_id.value), worker_id=str(worker), state="running"
+    )
+    healed = await _load(engine, server_id)
+    assert healed is not None
+    assert healed.observed_state is ObservedState.RUNNING
+    assert healed.assigned_worker_id == WorkerId(worker)
+
+
+# --- Timed: which grace a crashed / orphan-swept restart waits (#3387) -----
+
+# The stock graces (CONFIGURATION.md Section 5.6).
+_STOCK_GRACE = 660
+_STOCK_HELD_GRACE = 90
+
+
+async def _go_down(
+    engine: AsyncEngine,
+    clock: _AdvancingClock,
+    server_id: ServerId,
+    worker: WorkerId,
+    how: str,
+) -> dt.datetime:
+    """Report the server running, then take it down; return the divergence instant.
+
+    ``crashed``: the process exited (crash or ``docker kill``). ``unknown``: the
+    Worker's session dropped (it was killed); its restart sweeps the orphan and
+    reports nothing for it.
+    """
+
+    sink = _sink(engine, clock)
+    await sink.record_observed_state(
+        server_id=str(server_id.value), worker_id=str(worker.value), state="running"
+    )
+    if how == "crashed":
+        await sink.record_observed_state(
+            server_id=str(server_id.value), worker_id=str(worker.value), state="crashed"
+        )
+    else:
+        await sink.mark_worker_servers_unknown(worker_id=str(worker.value))
+    row = await _load(engine, server_id)
+    assert row is not None
+    assert row.observed_at is not None
+    return max(row.updated_at, row.observed_at)
+
+
+async def _timed_tick(
+    engine: AsyncEngine,
+    cp: FakeControlPlane,
+    clock: _AdvancingClock,
+    store: _StoreGeneration,
+    at: dt.datetime,
+) -> None:
+    clock.set(at)
+    await _reconciler_tick(
+        engine,
+        cp,
+        clock,
+        grace_seconds=_STOCK_GRACE,
+        held_start_grace_seconds=_STOCK_HELD_GRACE,
+        store_generation=store,
+    )
+
+
+@pytest.mark.parametrize("how", ["crashed", "unknown"])
+async def test_current_held_scratch_restarts_command_only_after_the_held_grace(
+    engine: AsyncEngine, how: str
+) -> None:
+    """A Worker that still holds a current working set restarts it after 90 s.
+
+    The reconciler won the race with the periodic snapshot (stock interval
+    3600 s), or the Worker came back advertising its scratch at the store
+    generation. Either way the restart reuses that scratch without a hydrate.
+    """
+
+    clock = _AdvancingClock(_NOW)
+    server = await _create_server(engine, FakeFileStore(), clock)
+    worker = WorkerId(uuid.uuid4())
+    store = _StoreGeneration(2)
+    cp = FakeControlPlane(place_to=worker, held={(worker, server.id): 2})
+    await _start_server_use_case(engine, cp, clock, store)(
+        community_id=server.community_id, server_id=server.id
+    )
+    since = await _go_down(engine, clock, server.id, worker, how)
+    cp.dispatched.clear()
+
+    await _timed_tick(
+        engine, cp, clock, store, since + dt.timedelta(seconds=_STOCK_HELD_GRACE - 1)
+    )
+    assert cp.dispatched == []
+    await _timed_tick(
+        engine, cp, clock, store, since + dt.timedelta(seconds=_STOCK_HELD_GRACE)
+    )
+    assert cp.dispatched == [("start", worker, server.id)]
+
+
+@pytest.mark.parametrize(
+    "held",
+    [None, 0, 1],
+    ids=["absent", "torn-boot-generation-0", "stale"],
+)
+async def test_reconnect_without_a_current_scratch_waits_the_full_grace(
+    engine: AsyncEngine, held: int | None
+) -> None:
+    """A Worker back without a current scratch is restarted after 660 s, hydrated.
+
+    Issue #3394's shape when the scratch cannot be reused: the re-registration
+    advertises nothing for the server, a stale generation, or generation 0 (the
+    boot check judged the scratch torn), all below the store generation.
+    """
+
+    clock = _AdvancingClock(_NOW)
+    server = await _create_server(engine, FakeFileStore(), clock)
+    worker = WorkerId(uuid.uuid4())
+    store = _StoreGeneration(2)
+    await _start_server_use_case(
+        engine, FakeControlPlane(place_to=worker), clock, store
+    )(community_id=server.community_id, server_id=server.id)
+    since = await _go_down(engine, clock, server.id, worker, "unknown")
+    # The re-registration replaces the Worker's held inventory with what it
+    # advertises now.
+    registered = FakeControlPlane(
+        held={} if held is None else {(worker, server.id): held}
+    )
+
+    await _timed_tick(
+        engine, registered, clock, store, since + dt.timedelta(seconds=_STOCK_GRACE - 1)
+    )
+    assert registered.dispatched == []
+    await _timed_tick(
+        engine, registered, clock, store, since + dt.timedelta(seconds=_STOCK_GRACE)
+    )
+    assert registered.dispatched == [
+        ("hydrate", worker, server.id),
+        ("start", worker, server.id),
+    ]
+
+
+async def test_crash_time_snapshot_that_wins_the_race_moves_to_the_full_grace(
+    engine: AsyncEngine,
+) -> None:
+    """crash -> periodic snapshot publishes first -> restart waits 660 s, hydrated.
+
+    The sequence seen in the #3384 verification (short snapshot interval). The
+    capture publishes (store generation 2 -> 3) and the Worker drops the scratch
+    without declaring a held generation, so the held entry goes stale and the
+    held grace no longer applies.
+    """
+
+    clock = _AdvancingClock(_NOW)
+    server = await _create_server(engine, FakeFileStore(), clock)
+    worker = WorkerId(uuid.uuid4())
+    store = _StoreGeneration(2)
+    cp = _PublishingControlPlane(store, place_to=worker, held={(worker, server.id): 2})
+    await _start_server_use_case(engine, cp, clock, store)(
+        community_id=server.community_id, server_id=server.id
+    )
+    scheduler = RunSnapshotCadenceTick(
+        uow=ServersUnitOfWork(create_session_factory(engine)),
+        control_plane=cp,
+        clock=clock,
+        default_interval_seconds=300,
+        min_interval_seconds=300,
+    )
+    await scheduler.tick()  # first sight: due within the 30 s jitter
+    since = await _go_down(engine, clock, server.id, worker, "crashed")
+    cp.dispatched.clear()
+
+    clock.set(since + dt.timedelta(seconds=60))
+    await scheduler.tick()
+    assert cp.dispatched == [("snapshot", worker, server.id)]
+    assert store.generation == 3
+
+    await _timed_tick(
+        engine, cp, clock, store, since + dt.timedelta(seconds=_STOCK_HELD_GRACE)
+    )
+    await _timed_tick(
+        engine, cp, clock, store, since + dt.timedelta(seconds=_STOCK_GRACE - 1)
+    )
+    assert cp.dispatched == [("snapshot", worker, server.id)]
+    await _timed_tick(
+        engine, cp, clock, store, since + dt.timedelta(seconds=_STOCK_GRACE)
+    )
+    assert cp.dispatched == [
+        ("snapshot", worker, server.id),
+        ("hydrate", worker, server.id),
+        ("start", worker, server.id),
+    ]
 
 
 # --- Chain 7: stopped/stopping/assigned wedge recovery (issue #2452) -------

@@ -454,6 +454,12 @@ reports observed state). The values (`starting` / `running` / `stopping` /
 `ServerState` enum ([`CONTROL_PLANE.md`](CONTROL_PLANE.md)) exactly. `unknown` has
 two producers: the API infers it when the owning Worker disconnects,
 and a Worker reports it when it cannot currently confirm an instance's fate.
+`desired=running` with `observed=crashed` or `unknown` is closed by the
+reconciler restarting the server ([`CONFIGURATION.md`](CONFIGURATION.md)
+Section 5.6). A stop of a crashed server leaves `observed=crashed`. The Worker no
+longer holds the instance, so it reports nothing more, and the crash stays
+recorded as why the server is down. `(stopped, crashed)` with no assigned Worker is at rest and
+startable.
 
 **`assigned_worker_id` nullability and the missing FK.** A server is not
 permanently pinned to a Worker (FR-WRK-6). The column is null when stopped/unplaced,

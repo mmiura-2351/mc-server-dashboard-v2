@@ -29,6 +29,8 @@ the TICK period, which is the interval floor, so a persistent per-server failure
 re-dispatched (and re-WARNed) every 300s for as long as it lasted. The one refusal
 that is not a failure at all is the Worker's working_set_absent answer — it holds
 nothing for this id, so nothing was lost and it is logged as such (issue #2480).
+Nor is it retried: no trigger goes to that server again until the Worker reports
+it again (issue #3387), since only a start puts a working set back.
 
 The one skip that does not advance next-due is the pre-dispatch connectivity gate:
 nothing is dispatched and nothing is logged there, so retrying it every tick costs
@@ -72,6 +74,7 @@ from mc_server_dashboard_api.servers.domain.snapshot_cadence import (
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
+    ObservedState,
     ServerId,
 )
 
@@ -87,18 +90,28 @@ class RunSnapshotCadenceTick:
     oversight (issue #2480). The Worker has dropped the crashed instance from its
     map, so the trigger takes the at-rest branch over the retained working
     directory: it publishes, then GCs the scratch. Capturing that crash-time world
-    is the point — under ``desired=running`` this tick is the only path that
-    durably captures it. Everything else destroys or refuses it: the reconciler's
-    automatic ``redispatch_start`` hydrates over the crash-window scratch and the
-    displaced copy is swept on the next publish, a manual stop of a crashed server
-    unassigns without a snapshot, and a backup of an unsettled server refuses. So
-    skipping crashed servers here would leave their world captured by nothing.
+    is the point — under ``desired=running`` this tick is the only periodic path
+    that durably captures it. A backup of an unsettled server refuses. The
+    reconciler's ``redispatch_start`` reuses the crash-window scratch only while the
+    held inventory says it is current, and otherwise hydrates over it (the displaced
+    copy is swept on the next publish). A manual stop does take a final snapshot
+    (issue #2448), but only if an operator stops the server. So skipping crashed
+    servers here could leave their world captured by nothing.
 
     The scratch GC that follows is an intended consequence, and it is safe: the
     Worker removes the scratch only after the transfer reported success, which
     happens only once the API committed the snapshot (pinned Worker-side by
     ``TestStoppedSnapshotRemovesScratchAfterPublish`` and
     ``TestStoppedSnapshotFailureRetainsScratch``).
+
+    That capture is therefore a one-off (issue #3387). Once it publishes for a row
+    observed crashed, or the Worker answers working_set_absent, the server is
+    skipped until its row carries a newer Worker report than the one it had then
+    (``observed_at`` moved). Only a start puts a
+    working set back on the scratch, and every start the Worker runs is reported,
+    so an unchanged ``observed_at`` means there is still nothing to capture. A
+    hydrate whose start is then refused is the one exception, and it is harmless:
+    that scratch is a copy of the store.
 
     Not frozen: it owns the in-memory next-due map mutated across ticks. A single
     instance is reused for the lifetime of the lifespan loop.
@@ -111,6 +124,10 @@ class RunSnapshotCadenceTick:
     min_interval_seconds: int
     # Per-server next-due instant; absence means "not yet scheduled".
     _next_due: dict[ServerId, dt.datetime] = field(default_factory=dict)
+    # Per-server ``observed_at`` of the row when the Worker answered
+    # working_set_absent (issue #3387): no trigger is dispatched while the row
+    # still carries that same last report.
+    _nothing_held: dict[ServerId, dt.datetime | None] = field(default_factory=dict)
 
     async def tick(self) -> None:
         now = self.clock.now()
@@ -121,6 +138,8 @@ class RunSnapshotCadenceTick:
         # does not grow without bound; one that comes back is re-scheduled afresh.
         for stale in self._next_due.keys() - live_ids:
             del self._next_due[stale]
+        for stale in self._nothing_held.keys() - live_ids:
+            del self._nothing_held[stale]
         for server in servers:
             try:
                 await self._consider(server, now)
@@ -151,6 +170,13 @@ class RunSnapshotCadenceTick:
             return
         if now < due_at:
             return
+        if server.id in self._nothing_held:
+            if self._nothing_held[server.id] == server.observed_at:
+                # The Worker still holds nothing for this id: no report has
+                # arrived since it said so, and only a start (which the Worker
+                # reports) puts a working set back on its scratch.
+                return
+            del self._nothing_held[server.id]
         assert server.assigned_worker_id is not None  # desired-running-assigned
         if not self.control_plane.is_worker_connected(
             worker_id=server.assigned_worker_id
@@ -201,9 +227,11 @@ class RunSnapshotCadenceTick:
         branch here — publish, then scratch GC — which is the intended crash-time
         capture (issue #2480, see the class docstring). Its consequence is that the
         FIRST such tick captures the world and leaves the Worker holding nothing, so
-        every later dispatch for the same id is refused with working_set_absent.
-        That refusal is not a failure — there is nothing left to capture until the
-        server starts again — so it must not WARN like one.
+        the server is parked after it until a newer Worker report arrives (issue
+        #3387). A working_set_absent refusal (the capture's result was lost, or the
+        API restarted and forgot the mark) parks it the same way. That refusal is
+        not a failure — there is nothing left to capture until the server starts
+        again — so it must not WARN like one.
         """
 
         assert server.assigned_worker_id is not None
@@ -224,6 +252,7 @@ class RunSnapshotCadenceTick:
             # Only the pinned working_set_absent phrase may be read this way; the
             # SERVER_NOT_FOUND code alone must not (issue #1790), so any other
             # SERVER_NOT_FOUND still takes the retry branch below.
+            self._nothing_held[server.id] = server.observed_at
             _LOG.info(
                 "periodic snapshot for server %s found no working set to capture: "
                 "the Worker holds nothing for this id; not retrying until it runs "
@@ -238,6 +267,14 @@ class RunSnapshotCadenceTick:
                 server.id.value,
                 outcome.message or outcome.status.value,
             )
+            return
+        if server.observed_state is ObservedState.CRASHED:
+            # The crash-time capture published, and the at-rest branch it took
+            # drops the scratch after a publish, so the next trigger would only be
+            # refused working_set_absent (issue #3387). A start the reconciler
+            # raced in before this capture is reported, which moves observed_at
+            # and lifts the mark.
+            self._nothing_held[server.id] = server.observed_at
 
 
 @dataclass(frozen=True)
