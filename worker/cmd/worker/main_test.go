@@ -561,14 +561,15 @@ func (s *registrationRecorder) start(t *testing.T) string {
 
 // nextRegister returns the held_servers of the next Register the recorder received.
 // The budget only bounds a boot that never registers; it is generous because the
-// boot before the first Register fsyncs (the torn verdict's marker rewrite), and
-// under a parallel `make check` that has outlasted thirty seconds (issue #3354).
+// boot before the first Register fsyncs (the torn verdict's marker rewrite):
+// under a parallel `make check` that has outlasted thirty seconds, and under
+// artificial disk load a minute (issue #3354).
 func (s *registrationRecorder) nextRegister(t *testing.T) map[string]uint64 {
 	t.Helper()
 	select {
 	case held := <-s.registers:
 		return held
-	case <-time.After(2 * time.Minute):
+	case <-time.After(5 * time.Minute):
 		t.Fatal("no Register reached the control plane")
 		return nil
 	}
