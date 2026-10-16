@@ -61,7 +61,6 @@ func TestLaunchPlanMatchesThePathBasedReference(t *testing.T) {
 		missing bool // the working dir itself does not exist
 		// what the plan must be, so that agreeing on a wrong answer still fails
 		wantInstall []string // the installer step, when Forge is not installed
-		warns       bool     // the lookup passes over an entry, and says so
 		wantLaunch  []string
 		wantErr     error
 		wantLegacy  string
@@ -86,7 +85,7 @@ func TestLaunchPlanMatchesThePathBasedReference(t *testing.T) {
 		{name: "forge, version without an args file", mode: forge,
 			files: []string{forgeVersionsRel + "/1.20.1-47.2.0/win_args.txt", forgeVersionsRel + "/1.20.1-47.2.0/forge-1.20.1-47.2.0-server.jar"}, wantInstall: wantInstallArgs},
 		{name: "forge, a file beside the version directories", mode: forge,
-			files: []string{forgeVersionsRel + "/maven-metadata.xml"}, wantInstall: wantInstallArgs, warns: true},
+			files: []string{forgeVersionsRel + "/maven-metadata.xml"}, wantInstall: wantInstallArgs},
 
 		{name: "forge installed", mode: forge, files: []string{"server.jar", forgeArgsRel},
 			wantLaunch: []string{"@/data/" + forgeArgsRel, "nogui"}},
@@ -160,10 +159,10 @@ func TestLaunchPlanMatchesThePathBasedReference(t *testing.T) {
 			if rel != l.wantLegacy || found != (l.wantLegacy != "") {
 				t.Fatalf("legacy jar = %q, found = %v; want %q", rel, found, l.wantLegacy)
 			}
-			// The lookup warns only about an entry it passed over: here, a plain file
-			// where a version directory would be.
-			if (logged.String() != "") != l.warns {
-				t.Fatalf("worker log = %q, want a warning only for an entry passed over (%v)", logged.String(), l.warns)
+			// A legitimate layout is nothing to warn about — a plain file where a
+			// version directory would be included (issue #3354).
+			if logged.String() != "" {
+				t.Fatalf("worker log = %q, want nothing logged for a legitimate layout", logged.String())
 			}
 		})
 	}

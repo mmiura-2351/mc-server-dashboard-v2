@@ -75,6 +75,22 @@ func assertSkipLogged(t *testing.T, logged, rel string) {
 	}
 }
 
+// assertSkipWording fails unless a warning names rel, and it says a symlink was
+// not followed exactly when the entry is one (issue #3354).
+func assertSkipWording(t *testing.T, logged, rel string, symlink bool) {
+	t.Helper()
+	for _, line := range strings.Split(logged, "\n") {
+		if !strings.Contains(line, "level=WARN") || !strings.Contains(line+" ", " path="+rel+" ") {
+			continue
+		}
+		if strings.Contains(line, "symlink") != symlink {
+			t.Fatalf("warning %q about %s: mentions a symlink = %v, want %v", line, rel, !symlink, symlink)
+		}
+		return
+	}
+	t.Fatalf("worker log = %q, want a warning naming %s", logged, rel)
+}
+
 // Every stale args file (one per version directory) and every legacy jar is
 // removed, and nothing else is (issue #1127).
 func TestCleanForgeInstallArtifactsRemovesAll(t *testing.T) {
@@ -152,7 +168,7 @@ func TestCleanForgeInstallArtifactsNeverFollowsASymlinkedComponent(t *testing.T)
 				t.Fatalf("a planted link is nothing to clean, not a failure; got %v", err)
 			}
 			assertContent(t, outsideFile, outsideArgs)
-			assertSkipLogged(t, logged, linkRel)
+			assertSkipWording(t, logged, linkRel, true)
 			if target, err := os.Readlink(link); err != nil || target != outside {
 				t.Fatalf("the planted link must be left alone; readlink = %q, %v", target, err)
 			}
@@ -179,7 +195,10 @@ func TestCleanForgeInstallArtifactsCleansRealVersionBesideALinkedOne(t *testing.
 	assertContent(t, filepath.Join(outside, "unix_args.txt"), outsideArgs)
 }
 
-// A component that is a regular file is nothing to clean either.
+// A component that is a regular file is nothing to clean either. It plants
+// nothing — it cannot lead anywhere — so it is skipped without a warning: a
+// stray file beside the version directories is not worth an operator's attention
+// (issue #3354).
 func TestCleanForgeInstallArtifactsSkipsANonDirectoryComponent(t *testing.T) {
 	for _, rel := range []string{"libraries", forgeVersionsRel, forgeVersionsRel + "/1.20.1-47.2.0"} {
 		t.Run(rel, func(t *testing.T) {
@@ -190,9 +209,25 @@ func TestCleanForgeInstallArtifactsSkipsANonDirectoryComponent(t *testing.T) {
 				t.Fatalf("err = %v, want nil", err)
 			}
 			assertContent(t, filepath.Join(dir, rel), "x")
-			assertSkipLogged(t, logged, rel)
+			if logged != "" {
+				t.Fatalf("a plain-file component must be skipped quietly; got %q", logged)
+			}
 		})
 	}
+}
+
+// A FIFO where a directory is expected is skipped with a warning that does not
+// claim it is a symlink (issue #3354).
+func TestCleanForgeInstallArtifactsWarnsOfAFIFOComponentAsNotADirectory(t *testing.T) {
+	dir := t.TempDir()
+	rel := forgeVersionsRel + "/1.20.1-47.2.0"
+	mkfifo(t, filepath.Join(dir, filepath.FromSlash(rel)))
+
+	logged, err := cleanForge(t, dir)
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	assertSkipWording(t, logged, rel, false)
 }
 
 // A symlink planted as the artifact itself is removed — the link, never what it

@@ -120,7 +120,7 @@ func TestLaunchPlanNeverFollowsASymlinkedComponent(t *testing.T) {
 
 			plan, logged, err := planForge(t, dir)
 			assertNotInstalled(t, plan, err)
-			assertSkipLogged(t, logged, linked)
+			assertSkipWording(t, logged, linked, true)
 			if !strings.Contains(logged, "server_id=s1") {
 				t.Fatalf("worker log = %q, want the warning to name the server", logged)
 			}
@@ -128,15 +128,19 @@ func TestLaunchPlanNeverFollowsASymlinkedComponent(t *testing.T) {
 	}
 }
 
-// A regular file where a directory component is expected has nothing beneath it.
+// A regular file where a directory component is expected has nothing beneath it,
+// and is passed over without a warning (issue #3354).
 func TestLaunchPlanSkipsANonDirectoryComponent(t *testing.T) {
 	for _, rel := range []string{"libraries/net", forgeVersionsRel + "/1.20.1-47.2.0"} {
 		t.Run(rel, func(t *testing.T) {
 			dir := t.TempDir()
 			plant(t, filepath.Join(dir, filepath.FromSlash(rel)), "x")
 
-			plan, _, err := planForge(t, dir)
+			plan, logged, err := planForge(t, dir)
 			assertNotInstalled(t, plan, err)
+			if logged != "" {
+				t.Fatalf("a plain-file component must be skipped quietly; got %q", logged)
+			}
 		})
 	}
 }
@@ -166,7 +170,7 @@ func TestLaunchPlanCountsOnlyARegularArgsFile(t *testing.T) {
 
 			plan, logged, err := planForge(t, dir)
 			assertNotInstalled(t, plan, err)
-			assertSkipLogged(t, logged, forgeArgsRel)
+			assertSkipWording(t, logged, forgeArgsRel, strings.Contains(name, "symlink"))
 		})
 	}
 }
@@ -528,6 +532,16 @@ func TestForgeInstallRetryRefusesToRunWithoutAnInstallerCommand(t *testing.T) {
 	if log := logged.String(); !strings.Contains(log, "level=WARN") || !strings.Contains(log, "no installer command") || !strings.Contains(log, "server_id=s1") {
 		t.Fatalf("worker log = %q, want a warning naming the server and the reason", log)
 	}
+	// The cleanup failure that explains the refusal is logged too, as Start logs
+	// its own (issue #3354). Start found nothing to clean in the empty working set,
+	// so this line can only be the retry's.
+	for _, line := range strings.Split(logged.String(), "\n") {
+		if strings.Contains(line, "level=WARN") && strings.Contains(line, "failed to clean stale Forge artifacts before install") &&
+			strings.Contains(line, "server_id=s1") && strings.Contains(line, unix.EACCES.Error()) {
+			return
+		}
+	}
+	t.Fatalf("worker log = %q, want the retry's cleanup failure warned about against the server", logged.String())
 }
 
 // The cleanup's warnings about what it left alone name the server, so a tampered

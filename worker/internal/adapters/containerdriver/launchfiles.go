@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"path"
 	"strings"
 
 	"golang.org/x/sys/unix"
@@ -58,11 +57,11 @@ func containerPathResolver(workingDir string, logger *slog.Logger) execution.Pat
 // regularFiles returns the working-dir-relative slash paths of the regular files
 // of workingDir matching the slash-separated pattern.
 //
-// A component that is absent, a symlink or anything else that is not a directory
-// has nothing beneath it, and a final entry that is a symlink, a directory, a
-// FIFO or a device is not a file; all but the absent ones are logged. An absent
-// workingDir holds no files. Any other failure is returned: it is not evidence
-// that nothing is there.
+// A component that is absent, a plain file, a symlink or anything else that is
+// not a directory has nothing beneath it, and a final entry that is a symlink, a
+// directory, a FIFO or a device is not a file; all but the absent and plain-file
+// components are logged. An absent workingDir holds no files. Any other failure
+// is returned: it is not evidence that nothing is there.
 func regularFiles(workingDir, pattern string, logger *slog.Logger) ([]string, error) {
 	rootFd, err := nofollow.OpenDir(workingDir)
 	if errors.Is(err, unix.ENOENT) {
@@ -72,35 +71,13 @@ func regularFiles(workingDir, pattern string, logger *slog.Logger) ([]string, er
 		return nil, fmt.Errorf("open %s: %w", workingDir, err)
 	}
 	defer func() { _ = unix.Close(rootFd) }()
-	return regularFilesAt(rootFd, "", strings.Split(pattern, "/"), logger)
-}
-
-// regularFilesAt returns the regular files matching the slash-split pattern
-// components beneath the directory behind dirFd, whose working-dir-relative path
-// is prefix.
-func regularFilesAt(dirFd int, prefix string, components []string, logger *slog.Logger) ([]string, error) {
-	names := components[:1]
-	if strings.ContainsAny(names[0], `*?[\`) {
-		all, err := readDirNames(dirFd)
-		if err != nil {
-			return nil, fmt.Errorf("list %s: %w", prefix, err)
-		}
-		names = nil
-		for _, name := range all {
-			matched, err := path.Match(components[0], name)
-			if err != nil {
-				return nil, fmt.Errorf("match %s: %w", components[0], err)
-			}
-			if matched {
-				names = append(names, name)
-			}
-		}
-	}
 
 	var found []string
-	for _, name := range names {
-		rel := path.Join(prefix, name)
-		if len(components) == 1 {
+	w := globWalk{
+		openAt:  launchOpenAt,
+		skipped: "working-set entry ignored by the launch planning",
+		logger:  logger,
+		leaf: func(dirFd int, name, rel string) error {
 			// The type is that of the entry itself, never of a link's target, and
 			// nothing is opened: a FIFO cannot block this. The answer is only ever a
 			// name inside the working set, so an entry swapped afterwards changes what
@@ -110,29 +87,19 @@ func regularFilesAt(dirFd int, prefix string, components []string, logger *slog.
 			switch {
 			case errors.Is(err, unix.ENOENT):
 			case err != nil:
-				return nil, fmt.Errorf("stat %s: %w", rel, err)
+				return fmt.Errorf("stat %s: %w", rel, err)
 			case st.Mode&unix.S_IFMT == unix.S_IFREG:
 				found = append(found, rel)
+			case st.Mode&unix.S_IFMT == unix.S_IFLNK:
+				logger.Warn("working-set entry ignored by the launch planning: a symlink is not followed", "path", rel)
 			default:
-				logger.Warn("working-set entry ignored by the launch planning: not a regular file (a symlink is not followed)", "path", rel)
+				logger.Warn("working-set entry ignored by the launch planning: not a regular file", "path", rel)
 			}
-			continue
-		}
-		fd, err := launchOpenAt(dirFd, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-		switch {
-		case err == nil:
-			below, err := regularFilesAt(fd, rel, components[1:], logger)
-			_ = unix.Close(fd)
-			if err != nil {
-				return nil, err
-			}
-			found = append(found, below...)
-		case errors.Is(err, unix.ENOENT):
-		case errors.Is(err, unix.ELOOP), errors.Is(err, unix.ENOTDIR):
-			logger.Warn("working-set entry ignored by the launch planning: not a directory (a symlink is not followed)", "path", rel)
-		default:
-			return nil, fmt.Errorf("open %s: %w", rel, err)
-		}
+			return nil
+		},
+	}
+	if err := w.walkAt(rootFd, "", strings.Split(pattern, "/")); err != nil {
+		return nil, err
 	}
 	return found, nil
 }
