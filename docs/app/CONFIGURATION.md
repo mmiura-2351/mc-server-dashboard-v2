@@ -365,6 +365,20 @@ compensation-failure orphan (`desired=running` with no assigned Worker). The loo
 is gated on the control plane like the snapshot scheduler — with no Worker
 channel there is nothing to re-dispatch.
 
+The same loop restarts a server whose process went down on its own while
+`desired=running`. That covers an observed `crashed` (a crash, or a container
+killed from outside, which the Worker cannot tell apart) and an observed `unknown`
+on a Worker that came back without it (a Worker restart force-removes its orphaned
+containers at boot and reports nothing for them). The restart is re-dispatched to
+the same Worker once the grace below lapses, measured from the last Worker report,
+and repeated crashes back off (`backoff_*`). If the Worker still holds a fresh
+working set, the short `held_start_grace_seconds` applies. Otherwise the restart hydrates and
+waits the full `grace_seconds` (660 s at stock values). That is the usual case
+after a crash, because the first periodic snapshot after it captures the crash-time
+world and the Worker then drops its scratch. Until then a `start` answers
+`409 invalid_transition`, because the intent already is running. To bring the
+server back sooner, stop it and start it again.
+
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
 | `reconciler.interval_seconds` | `60` | | Loop resolution: how often the reconciler scans for diverged servers. Must be positive. |
@@ -833,6 +847,12 @@ behavioural, not configured.
 The effective periodic interval for a running server is its per-server override
 if set, otherwise the global default. The interval bounds the RPO: a crash may
 lose up to one interval of changes (REQUIREMENTS.md FR-DATA-5).
+
+A server that crashed under `desired=running` still gets its next periodic
+snapshot, which captures the crash-time world. The Worker then drops its scratch
+and refuses any later trigger as `working_set_absent`. After that refusal no
+trigger is dispatched for the server until the Worker reports it again (for
+example, the reconciler's restart).
 
 Scheduled backups do not follow this config-key pattern: a backup is a `backup`
 schedule on the general scheduler (DATABASE.md Section 8), polled at

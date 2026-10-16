@@ -70,6 +70,7 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     CommandDispatchError,
+    InvalidLifecycleTransitionError,
     LifecycleTransitionConflictError,
 )
 from mc_server_dashboard_api.servers.domain.ports import PortRange
@@ -88,7 +89,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     ServerId as StorageServerId,
 )
 from tests.integration.migrate import downgrade_base, upgrade_head
-from tests.servers.contract_table import worker_status
+from tests.servers.contract_table import worker_message, worker_status
 from tests.servers.fakes import (
     FakeControlPlane,
     FakeFileStore,
@@ -885,6 +886,144 @@ async def test_crash_then_operator_stop_snapshots_and_leaves_the_same_shape(
         engine, FakeControlPlane(place_to=WorkerId(next_worker)), clock
     )(community_id=community, server_id=server_id)
     assert restarted.assigned_worker_id == WorkerId(next_worker)
+
+
+async def test_crash_under_running_intent_is_restarted_by_the_reconciler(
+    engine: AsyncEngine,
+) -> None:
+    """start -> killed from outside (crashed) -> start 409s -> reconciler restarts.
+
+    Issue #3387. A server whose process exits while ``desired=running`` (a crash,
+    or a ``docker kill``, which the Worker cannot tell apart) is a divergence the
+    reconciler closes by re-dispatching the start to the same Worker. Until it does,
+    a user start is refused: the intent already is running.
+    """
+
+    clock = _AdvancingClock(_NOW)
+    server = await _create_server(engine, FakeFileStore(), clock)
+    server_id = server.id
+    community = server.community_id
+
+    worker = uuid.uuid4()
+    await _start_server_use_case(
+        engine, FakeControlPlane(place_to=WorkerId(worker)), clock
+    )(community_id=community, server_id=server_id)
+    await _sink(engine, clock).record_observed_state(
+        server_id=str(server_id.value), worker_id=str(worker), state="crashed"
+    )
+
+    with pytest.raises(InvalidLifecycleTransitionError):
+        await _start_server_use_case(
+            engine, FakeControlPlane(place_to=WorkerId(uuid.uuid4())), clock
+        )(community_id=community, server_id=server_id)
+
+    reconcile_cp = FakeControlPlane()
+    await _reconciler_tick(engine, reconcile_cp, clock)
+    # The periodic snapshot already captured the crash-time world and the Worker
+    # dropped its scratch, so the restart hydrates before it starts.
+    assert reconcile_cp.dispatched == [
+        ("hydrate", WorkerId(worker), server_id),
+        ("start", WorkerId(worker), server_id),
+    ]
+    await _sink(engine, clock).record_observed_state(
+        server_id=str(server_id.value), worker_id=str(worker), state="running"
+    )
+    healed = await _load(engine, server_id)
+    assert healed is not None
+    assert healed.desired_state is DesiredState.RUNNING
+    assert healed.observed_state is ObservedState.RUNNING
+    assert healed.assigned_worker_id == WorkerId(worker)
+
+
+async def test_stop_after_crash_and_scratch_gc_leaves_stopped_crashed(
+    engine: AsyncEngine,
+) -> None:
+    """start -> crash -> periodic capture GC'd the scratch -> operator stop.
+
+    Issue #3387, observation from the PR #3391 verification: the stop leaves
+    ``(stopped, crashed)`` and never ``(stopped, stopped)``. That is the documented
+    terminal shape (issue #2448): the Worker reports nothing for an instance it
+    already forgot, and ``crashed`` stays as why the server is down. The final
+    snapshot meets an empty scratch (``working_set_absent``) and the row is still
+    released, at rest and startable.
+    """
+
+    clock = _AdvancingClock(_NOW)
+    server = await _create_server(engine, FakeFileStore(), clock)
+    server_id = server.id
+    community = server.community_id
+
+    worker = uuid.uuid4()
+    await _start_server_use_case(
+        engine, FakeControlPlane(place_to=WorkerId(worker)), clock
+    )(community_id=community, server_id=server_id)
+    await _sink(engine, clock).record_observed_state(
+        server_id=str(server_id.value), worker_id=str(worker), state="crashed"
+    )
+
+    stop_cp = FakeControlPlane(
+        outcomes={
+            "stop": CommandOutcome(status=CommandStatus.SERVER_NOT_FOUND),
+            "snapshot": CommandOutcome(
+                status=worker_status("SnapshotTrigger", "working_set_absent"),
+                message=worker_message("working_set_absent.snapshot"),
+            ),
+        }
+    )
+    await _stop_server_use_case(engine, stop_cp, clock)(
+        community_id=community, server_id=server_id
+    )
+
+    released = await _load(engine, server_id)
+    assert released is not None
+    assert released.desired_state is DesiredState.STOPPED
+    assert released.observed_state is ObservedState.CRASHED
+    assert released.assigned_worker_id is None
+    assert released.is_at_rest()
+    restarted = await _start_server_use_case(
+        engine, FakeControlPlane(place_to=WorkerId(uuid.uuid4())), clock
+    )(community_id=community, server_id=server_id)
+    assert restarted.desired_state is DesiredState.RUNNING
+
+
+async def test_worker_restart_that_swept_the_orphan_is_restarted_by_the_reconciler(
+    engine: AsyncEngine,
+) -> None:
+    """running -> Worker killed (unknown) -> Worker back, orphan swept -> restart.
+
+    Issue #3394. The disconnect writes ``unknown`` and keeps the assignment. The
+    restarted Worker force-removes the orphaned container at boot and reports
+    nothing for it, so the row stays ``(running, unknown)`` until the reconciler,
+    seeing the Worker connected again, re-dispatches the start to it.
+    """
+
+    clock = _AdvancingClock(_NOW)
+    server = await _create_server(engine, FakeFileStore(), clock)
+    server_id = server.id
+    community = server.community_id
+
+    worker = uuid.uuid4()
+    await _start_server_use_case(
+        engine, FakeControlPlane(place_to=WorkerId(worker)), clock
+    )(community_id=community, server_id=server_id)
+    sink = _sink(engine, clock)
+    await sink.record_observed_state(
+        server_id=str(server_id.value), worker_id=str(worker), state="running"
+    )
+    await sink.mark_worker_servers_unknown(worker_id=str(worker))
+
+    # The Worker re-registered (connected again) without a report for the server.
+    reconcile_cp = FakeControlPlane(connected={WorkerId(worker): True})
+    await _reconciler_tick(engine, reconcile_cp, clock)
+    assert [kind for kind, _, _ in reconcile_cp.dispatched] == ["hydrate", "start"]
+    assert {wid for _, wid, _ in reconcile_cp.dispatched} == {WorkerId(worker)}
+    await sink.record_observed_state(
+        server_id=str(server_id.value), worker_id=str(worker), state="running"
+    )
+    healed = await _load(engine, server_id)
+    assert healed is not None
+    assert healed.observed_state is ObservedState.RUNNING
+    assert healed.assigned_worker_id == WorkerId(worker)
 
 
 # --- Chain 7: stopped/stopping/assigned wedge recovery (issue #2452) -------
