@@ -849,10 +849,11 @@ if set, otherwise the global default. The interval bounds the RPO: a crash may
 lose up to one interval of changes (REQUIREMENTS.md FR-DATA-5).
 
 A server that crashed under `desired=running` still gets its next periodic
-snapshot, which captures the crash-time world. The Worker then drops its scratch
-and refuses any later trigger as `working_set_absent`. After that refusal no
-trigger is dispatched for the server until the Worker reports it again (for
-example, the reconciler's restart).
+snapshot, which captures the crash-time world. The Worker then drops its scratch,
+so after that capture (or a `working_set_absent` refusal, which is how the Worker
+answers a trigger for a scratch it already dropped) no trigger is dispatched for
+the server until the Worker reports it again (for example, the reconciler's
+restart).
 
 Scheduled backups do not follow this config-key pattern: a backup is a `backup`
 schedule on the general scheduler (DATABASE.md Section 8), polled at

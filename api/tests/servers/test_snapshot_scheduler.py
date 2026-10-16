@@ -306,6 +306,27 @@ async def test_working_set_absent_refusal_stops_further_dispatches() -> None:
     assert len(cp.dispatched) == 1
 
 
+async def test_crash_time_capture_is_the_last_dispatch_for_a_crashed_server() -> None:
+    # Issue #3387: a crashed id takes the Worker's at-rest branch, which drops the
+    # scratch once the capture publishes, so no later trigger has anything to
+    # capture and none is sent — not even the one that would be refused.
+    uow = FakeUnitOfWork()
+    server = _running_server(observed=ObservedState.CRASHED)
+    server.observed_at = _NOW
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    scheduler = _scheduler(uow, cp, clock)
+    await scheduler.tick()
+    clock.set(_NOW + dt.timedelta(seconds=3600))
+    await scheduler.tick()  # the crash-time capture
+    assert len(cp.dispatched) == 1
+    for intervals in range(3, 8):
+        clock.set(_NOW + dt.timedelta(seconds=3600 * intervals))
+        await scheduler.tick()
+    assert len(cp.dispatched) == 1
+
+
 async def test_newer_worker_report_resumes_dispatches_after_working_set_absent() -> (
     None
 ):

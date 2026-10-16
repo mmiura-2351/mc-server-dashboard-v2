@@ -74,6 +74,7 @@ from mc_server_dashboard_api.servers.domain.snapshot_cadence import (
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
+    ObservedState,
     ServerId,
 )
 
@@ -102,9 +103,10 @@ class RunSnapshotCadenceTick:
     ``TestStoppedSnapshotRemovesScratchAfterPublish`` and
     ``TestStoppedSnapshotFailureRetainsScratch``).
 
-    That capture is therefore a one-off (issue #3387). Once the Worker answers
-    working_set_absent, the server is skipped until its row carries a newer Worker
-    report than the one it had then (``observed_at`` moved). Only a start puts a
+    That capture is therefore a one-off (issue #3387). Once it publishes for a row
+    observed crashed, or the Worker answers working_set_absent, the server is
+    skipped until its row carries a newer Worker report than the one it had then
+    (``observed_at`` moved). Only a start puts a
     working set back on the scratch, and every start the Worker runs is reported,
     so an unchanged ``observed_at`` means there is still nothing to capture. A
     hydrate whose start is then refused is the one exception, and it is harmless:
@@ -224,10 +226,11 @@ class RunSnapshotCadenceTick:
         branch here — publish, then scratch GC — which is the intended crash-time
         capture (issue #2480, see the class docstring). Its consequence is that the
         FIRST such tick captures the world and leaves the Worker holding nothing, so
-        a dispatch after it would be refused with working_set_absent. That refusal
-        is not a failure — there is nothing left to capture until the server starts
-        again — so it must not WARN like one, and it parks the server until a newer
-        Worker report arrives (issue #3387).
+        the server is parked after it until a newer Worker report arrives (issue
+        #3387). A working_set_absent refusal (the capture's result was lost, or the
+        API restarted and forgot the mark) parks it the same way. That refusal is
+        not a failure — there is nothing left to capture until the server starts
+        again — so it must not WARN like one.
         """
 
         assert server.assigned_worker_id is not None
@@ -263,6 +266,14 @@ class RunSnapshotCadenceTick:
                 server.id.value,
                 outcome.message or outcome.status.value,
             )
+            return
+        if server.observed_state is ObservedState.CRASHED:
+            # The crash-time capture published, and the at-rest branch it took
+            # drops the scratch after a publish, so the next trigger would only be
+            # refused working_set_absent (issue #3387). A start the reconciler
+            # raced in before this capture is reported, which moves observed_at
+            # and lifts the mark.
+            self._nothing_held[server.id] = server.observed_at
 
 
 @dataclass(frozen=True)
