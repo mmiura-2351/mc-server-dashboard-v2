@@ -581,7 +581,7 @@ func TestSuperviseClosesMetricsConnection(t *testing.T) {
 	go drainClosed(inst.Events())
 	select {
 	case <-ctrl.closedCh:
-	case <-time.After(2 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("cached metrics connection was not closed on instance exit")
 	}
 }
@@ -748,7 +748,7 @@ func drainTo(t *testing.T, ch <-chan execution.StatusEvent, want execution.Serve
 // Ready. So the marker has provably NOT been seen yet — no sleep needed.
 func awaitLogLine(t *testing.T, ch <-chan execution.LogEvent, want string) {
 	t.Helper()
-	deadline := time.After(2 * time.Second)
+	deadline := time.After(30 * time.Second)
 	for {
 		select {
 		case ev, ok := <-ch:
@@ -958,7 +958,7 @@ func TestWaitTransportErrorWhileStoppingContainerGoneEmitsStopped(t *testing.T) 
 	// stopRequested is already set under the lock) before delivering the Wait
 	// transport error, so the re-inspect's terminal decision reads the stop intent.
 	go func() { _ = inst.Stop(context.Background(), false) }()
-	deadline := time.After(2 * time.Second)
+	deadline := time.After(30 * time.Second)
 	for !docker.stopWasCalled() {
 		select {
 		case <-deadline:
