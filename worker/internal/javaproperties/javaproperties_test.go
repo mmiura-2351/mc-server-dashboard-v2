@@ -434,3 +434,62 @@ func TestParseHandlesLinesLongerThanTheScannerCap(t *testing.T) {
 		t.Errorf("server-port = %q, want %q (a long line must not truncate the parse)", props["server-port"], "26590")
 	}
 }
+
+// TestParseLongContinuedLogicalLine pins the parse of one logical line spread
+// over many continued lines, which the parser accumulates in a single buffer
+// rather than copying the whole line again per continuation (issue #3346). The
+// backslash-run rows pin that whether a continuation line continues is decided
+// by its own trailing run alone: the logical line it extends ends in an even
+// run, so an even run on the new line ends the value and an odd one continues.
+func TestParseLongContinuedLogicalLine(t *testing.T) {
+	const n = 10000
+	for _, tc := range []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "many short continued lines",
+			input: "motd=" + strings.Repeat("ab\\\n  ", n) + "end\n",
+			want:  strings.Repeat("ab", n) + "end",
+		},
+		{
+			name:  "many continued lines of an odd backslash run",
+			input: "motd=" + strings.Repeat("\\\\\\\n", n) + "end\n",
+			want:  strings.Repeat(`\`, n) + "end",
+		},
+		{
+			name:  "a continuation line of an even backslash run ends the value",
+			input: "motd=a\\\n\\\\\n",
+			want:  `a\`,
+		},
+		{
+			name:  "a continuation line of an odd backslash run continues",
+			input: "motd=a\\\n\\\\\\\nb\n",
+			want:  `a\b`,
+		},
+		{
+			name:  "a continuation line ending in an odd backslash run continues",
+			input: "motd=a\\\nb\\\\\\\nc\n",
+			want:  `ab\c`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := tc.input + "server-port=26590\n"
+			data := []byte(input)
+			for _, parse := range []func([]byte) map[string]string{Parse, ParseUTF8} {
+				props := parse(data)
+				if props["motd"] != tc.want {
+					t.Errorf("motd = %q (length %d), want %q (length %d)",
+						props["motd"], len(props["motd"]), tc.want, len(tc.want))
+				}
+				if props["server-port"] != "26590" {
+					t.Errorf("server-port = %q, want %q", props["server-port"], "26590")
+				}
+			}
+			if string(data) != input {
+				t.Error("parsing modified the caller's input")
+			}
+		})
+	}
+}

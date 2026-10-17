@@ -93,14 +93,27 @@ func parse(data []byte) map[string]string {
 			continue
 		}
 		logical := line
-		for endsWithOddBackslash(logical) {
+		continued := endsWithOddBackslash(line)
+		if continued {
+			// One buffer of its own for the whole logical line, so each
+			// continuation appends in place -- linear in the file, never a
+			// copy of the line so far per continuation (issue #3346) -- and
+			// never into data.
+			logical = append([]byte(nil), line...)
+		}
+		for continued {
 			logical = logical[:len(logical)-1]
 			if i >= len(data) {
 				break
 			}
 			line, next = naturalLine(data, i)
-			logical = append(append([]byte{}, logical...), trimLeadingBlanks(line)...)
+			line = trimLeadingBlanks(line)
+			logical = append(logical, line...)
 			i = next
+			// logical ended in an even run before line was appended, so
+			// line's own trailing run decides; rescanning logical would be
+			// quadratic on a file of backslash-run lines.
+			continued = endsWithOddBackslash(line)
 		}
 		key, value := splitKeyValue(logical)
 		out[key] = value
