@@ -38,6 +38,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -1042,10 +1043,10 @@ type instance struct {
 	// error, so access is serialized by metricsMu and a broken connection is
 	// discarded to force a redial on the next sample.
 	metricsControl execution.ServerControl
-	// metricsOpenErr is the cause of the last logged player-count RCON open failure,
-	// cleared by a successful open. A failure with the same cause is not logged
-	// again, so a persistent one (a refused server.properties, issue #3345) costs one
-	// line rather than one per metrics tick. Guarded by metricsMu.
+	// metricsOpenErr is the cause (openFailureCause) of the last logged player-count
+	// RCON open failure, cleared by a successful open. A failure with the same cause
+	// is not logged again, so a persistent one (a refused server.properties, issue
+	// #3345) costs one line rather than one per metrics tick. Guarded by metricsMu.
 	metricsOpenErr string
 	// metricsClosed latches once the instance terminates and closeMetricsControl has
 	// run, so a late in-flight sample does not redial a connection nobody would
@@ -1723,7 +1724,7 @@ func (i *instance) queryPlayerCount(ctx context.Context) uint32 {
 	if i.metricsControl == nil {
 		ctrl, err := i.openControl(ctx, i.spec, i.rconHost)
 		if err != nil {
-			if cause := err.Error(); cause != i.metricsOpenErr {
+			if cause := openFailureCause(err); cause != i.metricsOpenErr {
 				i.metricsOpenErr = cause
 				i.logger.Warn("player count: open rcon failed; reporting 0 players until it opens (logged once per cause)",
 					"server_id", i.spec.ServerID, "error", err)
@@ -1743,6 +1744,19 @@ func (i *instance) queryPlayerCount(ctx context.Context) uint32 {
 		return 0
 	}
 	return parsePlayerCount(reply)
+}
+
+// openFailureCause is the key queryPlayerCount de-duplicates RCON open failures
+// on. A network error is reduced to its operation and underlying error, because
+// its addresses include the client's ephemeral port, which differs on every
+// attempt even when the cause does not (a peer resetting each handshake, issue
+// #3345). Any other error keys on its text, which carries no per-attempt detail.
+func openFailureCause(err error) string {
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return opErr.Op + ": " + opErr.Err.Error()
+	}
+	return err.Error()
 }
 
 // closeMetricsControl closes the cached metrics RCON connection (if any) and

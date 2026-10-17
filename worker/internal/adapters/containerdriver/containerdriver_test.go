@@ -5,16 +5,20 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/rcon"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 )
 
@@ -554,6 +558,112 @@ func TestQueryPlayerCountLogsOpenFailureOncePerCause(t *testing.T) {
 	}
 	if !strings.Contains(out, "level=WARN") || !strings.Contains(out, "server_id=s1") {
 		t.Fatalf("log = %q, want a WARN carrying the server id", out)
+	}
+}
+
+// The once-per-cause key ignores per-connection detail: a peer that resets every
+// RCON handshake fails each open with the same cause but a different client
+// ephemeral port in the error text, and that must still be one log line, not one
+// per metrics tick (issue #3345).
+func TestQueryPlayerCountDedupsOpenFailureAcrossEphemeralPorts(t *testing.T) {
+	reset := func(localPort int) error {
+		return fmt.Errorf("rcon: read length: %w", &net.OpError{
+			Op: "read", Net: "tcp",
+			Source: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: localPort},
+			Addr:   &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 25575},
+			Err:    &os.SyscallError{Syscall: "read", Err: syscall.ECONNRESET},
+		})
+	}
+	refused := fmt.Errorf("rcon: dial 127.0.0.1:25575: %w", &net.OpError{
+		Op: "dial", Net: "tcp",
+		Addr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 25575},
+		Err:  &os.SyscallError{Syscall: "connect", Err: syscall.ECONNREFUSED},
+	})
+	results := []error{reset(40001), reset(40002), reset(40003), refused, refused}
+	var dials int
+	logged := &syncBuffer{}
+	inst := &instance{
+		spec:   execution.InstanceSpec{ServerID: "s1"},
+		logger: slog.New(slog.NewTextHandler(logged, nil)),
+		openControl: func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
+			err := results[dials]
+			dials++
+			return nil, err
+		},
+	}
+
+	for range results {
+		inst.queryPlayerCount(context.Background())
+	}
+
+	out := logged.String()
+	if got := strings.Count(out, "player count: open rcon failed"); got != 2 {
+		t.Fatalf("open-failure log lines = %d, want 2 (a reset on three ports, then a refusal); log:\n%s", got, out)
+	}
+}
+
+// writeRCONProperties writes body as workingDir's server.properties.
+func writeRCONProperties(t *testing.T, workingDir, body string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(workingDir, "server.properties"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// openRealControl opens RCON the way cmd/worker wires the driver: through the
+// real server.properties reader in the instance's working dir.
+func openRealControl(ctx context.Context, spec execution.InstanceSpec, rconHost string) (execution.ServerControl, error) {
+	return rcon.OpenFromWorkingDir(ctx, spec.WorkingDir, rconHost, spec.MinecraftVersion)
+}
+
+// malformedPortProperties are server.properties whose rcon.port the RCON open
+// refuses, each with what must never reach the Worker log: a backslash-continued
+// port line folds the password line after it into the port value, and a plain
+// non-numeric value is file content too (issue #3345).
+var malformedPortProperties = []struct {
+	name string
+	body string
+	leak []string
+}{
+	{
+		name: "continued port line",
+		body: "enable-rcon=true\nrcon.password=FIRST_SECRET\nrcon.port=25575\\\nrcon.password=SECOND_SECRET\n",
+		leak: []string{"SECRET", "rcon.password="},
+	},
+	{name: "non-numeric port", body: "enable-rcon=true\nrcon.password=pw\nrcon.port=notaport\n", leak: []string{"notaport"}},
+}
+
+// Neither the graceful-stop nor the player-count RCON open-failure log carries
+// server.properties content, through the real reader (issue #3345).
+func TestRCONOpenFailureLogsCarryNoPropertiesContent(t *testing.T) {
+	for _, tc := range malformedPortProperties {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeRCONProperties(t, dir, tc.body)
+			logged := &syncBuffer{}
+			inst := &instance{
+				spec:        execution.InstanceSpec{ServerID: "s1", WorkingDir: dir},
+				logger:      slog.New(slog.NewTextHandler(logged, nil)),
+				openControl: openRealControl,
+			}
+
+			if inst.tryRCONStop(context.Background()) {
+				t.Fatal("tryRCONStop = true, want false for a malformed rcon.port")
+			}
+			inst.queryPlayerCount(context.Background())
+
+			out := logged.String()
+			for _, want := range []string{"graceful stop: open rcon failed", "player count: open rcon failed", "rcon.port"} {
+				if !strings.Contains(out, want) {
+					t.Fatalf("log = %q, want it to contain %q", out, want)
+				}
+			}
+			for _, leak := range tc.leak {
+				if strings.Contains(out, leak) {
+					t.Fatalf("log = %q, must not contain %q", out, leak)
+				}
+			}
+		})
 	}
 }
 
