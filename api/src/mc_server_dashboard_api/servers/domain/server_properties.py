@@ -753,8 +753,15 @@ def changed_platform_managed_keys(current: bytes, incoming: bytes) -> list[str]:
     Storage copy at rest, the worker's live working set while running. Those two
     diverge in these very keys (Minecraft's boot rewrite fills in defaults the
     seeded file omits), so comparing against the wrong one refuses honest edits.
+
+    Byte-identical files change nothing and are not parsed at all: the parse is
+    a pure function of the bytes, so it could only read the same values twice
+    -- two full parses, at the edit size limit, for a save that changed nothing
+    (issue #3406).
     """
 
+    if current == incoming:
+        return []
     current_values = _platform_managed_values(current)
     incoming_values = _platform_managed_values(incoming)
     return sorted(
