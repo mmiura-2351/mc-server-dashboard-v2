@@ -971,6 +971,17 @@ def test_asymmetric_token_algorithm_fails_fast_with_a_clear_reason(
         load_settings(config_file=cfg)
 
 
+@pytest.mark.parametrize("algorithm", ["hs256", "HS512"])
+def test_wrong_symmetric_token_algorithm_does_not_blame_asymmetric_support(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, algorithm: str
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(tmp_path, f'[auth.token]\nalgorithm = "{algorithm}"\n')
+    with pytest.raises(ValidationError, match="must be HS256") as exc_info:
+        load_settings(config_file=cfg)
+    assert "asymmetric" not in str(exc_info.value)
+
+
 def test_short_hs256_signing_key_fails_fast(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

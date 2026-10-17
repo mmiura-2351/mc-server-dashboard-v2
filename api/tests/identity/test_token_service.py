@@ -150,6 +150,20 @@ def test_access_token_with_non_int_exp_is_rejected(exp: object) -> None:
         _service(clock).verify_access_token(_token_with_exp(exp))
 
 
+@pytest.mark.parametrize(
+    "exp",
+    [pytest.param(10**20, id="huge"), pytest.param(-(10**20), id="negative-huge")],
+)
+def test_access_token_with_out_of_range_exp_is_rejected(exp: int) -> None:
+    # An int too large for a datetime makes ``fromtimestamp`` raise
+    # OverflowError, not ValueError; it must still be an invalid token, not a 500.
+    # The resource-scoped verifiers only compare ``exp`` as an int, so they have
+    # no such conversion to fail.
+    clock = _FakeClock(dt.datetime(2026, 6, 4, tzinfo=dt.timezone.utc))
+    with pytest.raises(InvalidAccessTokenError):
+        _service(clock).verify_access_token(_token_with_exp(exp))
+
+
 def test_refresh_secret_is_opaque_not_its_hash() -> None:
     clock = _FakeClock(dt.datetime(2026, 6, 4, tzinfo=dt.timezone.utc))
     svc = _service(clock)

@@ -775,12 +775,21 @@ class TokenSettings(_Section):
         # optional ``cryptography`` package, which the API does not ship, so one
         # would pass load and then fail at the first token issue (#3327). Fail
         # here instead, naming the one accepted value; this runs before the
-        # Literal check so its generic message does not hide the reason.
+        # Literal check so its generic message does not hide the reason. The
+        # asymmetric explanation is added only for those families, so a typo
+        # such as "hs256" is not blamed on missing asymmetric support.
         if value != "HS256":
+            reason = ""
+            if isinstance(value, str) and value.upper().startswith(
+                ("RS", "PS", "ES", "ED")
+            ):
+                reason = (
+                    ": asymmetric algorithms are not supported (PyJWT needs the "
+                    "cryptography package for them, which the API does not ship)"
+                )
             raise ValueError(
-                f"auth.token.algorithm must be HS256, got {value!r}: asymmetric "
-                "algorithms are not supported (PyJWT needs the cryptography "
-                "package for them, which the API does not ship)"
+                "auth.token.algorithm must be HS256 (case-sensitive), "
+                f"got {value!r}{reason}"
             )
         return value
 
