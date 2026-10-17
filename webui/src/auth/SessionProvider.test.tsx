@@ -8,12 +8,19 @@ import {
   hardLogout,
   refreshForRetry,
   resetForTesting as resetSessionForTesting,
+  restoreSession,
 } from "./session.ts";
 import {
   clearAccessToken,
   getAccessToken,
   getAuthEpoch,
 } from "./tokenStore.ts";
+
+// The real restoreSession, wrapped so a test can make the bootstrap reject.
+vi.mock("./session.ts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./session.ts")>();
+  return { ...actual, restoreSession: vi.fn(actual.restoreSession) };
+});
 
 function tokenResponse(accessToken = "fresh"): Response {
   return new Response(
@@ -109,6 +116,17 @@ describe("SessionProvider bootstrap", () => {
       expect(screen.getByTestId("status")).toHaveTextContent("signed-out"),
     );
     // Bootstrap leaves routing to the guards (#410); it does not redirect.
+    expect(screen.getByTestId("path")).toHaveTextContent("/account");
+  });
+
+  it("signs out instead of staying bootstrapping when the restore rejects", async () => {
+    vi.mocked(restoreSession).mockRejectedValueOnce(new Error("boom"));
+
+    renderSession();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("status")).toHaveTextContent("signed-out"),
+    );
     expect(screen.getByTestId("path")).toHaveTextContent("/account");
   });
 });

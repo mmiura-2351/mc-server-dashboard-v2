@@ -30,6 +30,26 @@ function tokenResponse(accessToken = "fresh"): Response {
   );
 }
 
+/**
+ * 200 bodies that parse as JSON but carry no usable access token (#3356): the
+ * client must not adopt any of them.
+ */
+const INVALID_TOKEN_BODIES = [
+  ["an empty object", "{}"],
+  ["a null access_token", '{"access_token":null}'],
+  ["a numeric access_token", '{"access_token":123}'],
+  ["an empty access_token", '{"access_token":""}'],
+  ["a null body", "null"],
+  ["a string body", '"token"'],
+];
+
+function jsonResponse(body: string): Response {
+  return new Response(body, {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}
+
 const fetchMock = vi.fn();
 
 beforeEach(() => {
@@ -99,6 +119,19 @@ describe("refreshSession", () => {
     expect(result).toEqual({ status: "transient" });
     expect(getAccessToken()).toBeNull();
   });
+
+  it.each(INVALID_TOKEN_BODIES)(
+    "reports transient on a 200 with %s and keeps the current token",
+    async (_label, body) => {
+      signIn("existing-valid-token");
+      fetchMock.mockResolvedValue(jsonResponse(body));
+
+      const result = await refreshSession();
+
+      expect(result).toEqual({ status: "transient" });
+      expect(getAccessToken()).toBe("existing-valid-token");
+    },
+  );
 
   it("is single-flight: N concurrent calls share one refresh", async () => {
     let resolveFetch: (r: Response) => void = () => {};
@@ -194,6 +227,19 @@ describe("restoreSession", () => {
     expect(result).toBe("signed-out");
     expect(getAccessToken()).toBeNull();
   });
+
+  it.each(INVALID_TOKEN_BODIES)(
+    "resolves signed out on a 200 with %s and keeps the current token",
+    async (_label, body) => {
+      signIn("existing-valid-token");
+      fetchMock.mockResolvedValue(jsonResponse(body));
+
+      const result = await restoreSession();
+
+      expect(result).toBe("signed-out");
+      expect(getAccessToken()).toBe("existing-valid-token");
+    },
+  );
 
   it("never rotates: repeated restores each just POST /api/auth/session", async () => {
     fetchMock.mockImplementation(() => Promise.resolve(accessTokenResponse()));

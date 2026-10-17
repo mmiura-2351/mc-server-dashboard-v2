@@ -95,14 +95,18 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   // case that already set the status and the probe's result is stale (#3224).
   // The epoch is re-checked here, where the status is applied, because the
   // session can change after the result was computed but before this runs.
+  // An unexpected rejection is a failed restore like any other: it resolves
+  // signed-out rather than leaving the provider bootstrapping forever (#3356).
   useEffect(() => {
     let active = true;
     const epoch = getAuthEpoch();
-    restoreSession().then((result) => {
-      if (active && result !== "superseded" && epoch === getAuthEpoch()) {
-        setStatus(result);
-      }
-    });
+    restoreSession()
+      .catch(() => "signed-out" as const)
+      .then((result) => {
+        if (active && result !== "superseded" && epoch === getAuthEpoch()) {
+          setStatus(result);
+        }
+      });
     return () => {
       active = false;
     };
