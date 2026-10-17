@@ -41,10 +41,12 @@ through verbatim, so a file the platform did not write to is preserved exactly.
 
 from __future__ import annotations
 
+import re
 import secrets
 from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
+from typing import NamedTuple
 
 _PORT_KEY = "server-port"
 _ENABLE_RCON_KEY = "enable-rcon"
@@ -111,8 +113,7 @@ _RESOURCE_PACK_KEYS: frozenset[str] = frozenset(
 )
 
 
-@dataclass(frozen=True)
-class _Property:
+class _Property(NamedTuple):
     """One logical property line, as ``java.util.Properties.load`` sees it.
 
     ``start`` and ``end`` are byte offsets into the parsed content: the first byte
@@ -120,6 +121,9 @@ class _Property:
     terminator that ends it. A backslash continuation spans several natural lines
     yet is ONE property, so dropping ``content[start:end]`` drops all of them --
     leaving a tail behind would keep the value alive AND corrupt the next line.
+
+    A named tuple rather than a frozen dataclass: just as immutable, and about
+    half the cost to build, which a parse pays once per line (issue #3406).
     """
 
     key: str
@@ -133,8 +137,6 @@ class _Property:
 # names exactly these three, whether it reads an ``InputStream`` (a pre-1.20
 # server) or a ``Reader`` (1.20+), so the file's charset does not enter into it.
 _BLANKS = b" \t\f"
-
-_HEX_DIGITS = "0123456789abcdefABCDEF"
 
 # The escapes ``java.util.Properties.store`` emits for a character that would
 # otherwise be read as structure rather than text. A newline is the dangerous one
@@ -150,23 +152,91 @@ _ESCAPES = {"\\": "\\\\", "\n": "\\n", "\r": "\\r", "\t": "\\t", "\f": "\\f"}
 _SPECIALS = frozenset("=:#! ")
 
 
+# The reader below scans with compiled patterns and bytes methods, never a
+# Python loop per byte: the comparison guard parses a body of up to the edit
+# size limit on every guarded write, and a byte-at-a-time walk cost seconds of
+# CPU per request there (issue #3406). Each pattern is the bulk form of one
+# rule of the grammar, and every quantifier is possessive, so none of them
+# backtracks into what it has already matched.
+
+# A whole property line with no backslash in it -- the shape nearly every line
+# of a real file has -- read in one match: leading blanks, a key that does not
+# start a comment, the separator (as in :data:`_KEY_SEPARATOR`), the value and
+# the terminator. With no backslash, nothing continues and nothing is escaped,
+# so the key and value are their bytes as they stand; any other line fails the
+# match and takes the general path.
+_PLAIN_PROPERTY = re.compile(
+    rb"[ \t\f]*+([^\\=: \t\f\r\n#!][^\\=: \t\f\r\n]*+)"
+    rb"[ \t\f]*+(?:[=:][ \t\f]*+)?+([^\\\r\n]*+)(?:\r\n?+|\n|\Z)"
+)
+
+# One natural line: its text, then the terminator that ends it. ``\\r\\n``, a
+# lone ``\\r`` and a lone ``\\n`` all terminate a line, as they do for
+# ``Properties.load``, with ``\\r\\n`` taken whole; an unterminated final line
+# runs to the end.
+_NATURAL_LINE = re.compile(rb"([^\r\n]*+)(?:\r\n?+|\n)?+")
+
+# A run of lines ``Properties.load`` skips outright: blank ones and ``#`` / ``!``
+# comments, each with its terminator. A comment never continues, whatever it
+# ends in. An unterminated last line is left to the line-at-a-time path.
+_SKIPPED_LINES = re.compile(rb"(?:[ \t\f]*+(?:[#!][^\r\n]*+)?+(?:\r\n?+|\n))*+")
+
+# A run of terminated lines that are a lone backslash, blanks aside: each is a
+# zero-length continuation, so the next line is read as the START of the
+# logical line (issue #3041).
+_LONE_BACKSLASH_LINES = re.compile(rb"(?:[ \t\f]*+\\(?:\r\n?+|\n))*+")
+
+# A run of terminated lines that each end in an odd backslash run, so each
+# continues onto the next. A backslash pairs with the byte after it, so the
+# odd run's last backslash is the one left unpaired before the terminator.
+_CONTINUED_LINES = re.compile(rb"(?:(?:[^\\\r\n]++|\\[^\r\n])*+\\(?:\r\n?+|\n))*+")
+
+# Where one natural line continues onto the next: its odd run's last backslash,
+# the terminator, and the leading blanks of the line that follows -- all three
+# dropped from the logical line.
+_LINE_CONTINUATION = re.compile(rb"\\(?:\r\n?+|\n)[ \t\f]*+")
+
+# A key, then what separates it from its value. The key is everything up to
+# the first UNESCAPED ``=``, ``:`` or blank, where a backslash escapes whatever
+# byte follows it; the separator is blanks, then one optional ``=`` / ``:``,
+# then further blanks.
+_KEY_SEPARATOR = re.compile(
+    rb"((?:[^\\=: \t\f]++|\\.?+)*+)[ \t\f]*+(?:[=:][ \t\f]*+)?+", re.DOTALL
+)
+
+# One escape: ``\\uXXXX`` -- with the low-surrogate escape that may follow it --
+# or a backslash and whatever single character follows it, if any.
+_ESCAPE = re.compile(
+    r"\\(?:u([0-9a-fA-F]{4})(?:\\u([dD][c-fC-F][0-9a-fA-F]{2}))?+|(.?+))",
+    re.DOTALL,
+)
+
+# One escape that is a backslash and the single character it escapes, and what
+# each such character reads as: four name a control character, and every other
+# one -- ``\\``, ``=``, ``:``, a blank -- reads as itself.
+_SIMPLE_ESCAPE = re.compile(r"\\(.)", re.DOTALL)
+_SIMPLE_ESCAPES = str.maketrans({"t": "\t", "r": "\r", "n": "\n", "f": "\f"})
+
+
 def _natural_line(content: bytes, offset: int) -> tuple[bytes, int]:
     """Return the line at *offset* without its terminator, and the next offset.
 
-    ``\\r\\n``, a lone ``\\r`` and a lone ``\\n`` all terminate a line, as they do
-    for ``Properties.load``; an unterminated final line runs to the end. Splitting
-    on ``\\n`` alone would fold a CR-separated pair into one line and hide the
-    second half of it from every caller here.
+    See :data:`_NATURAL_LINE`. Splitting on ``\\n`` alone would fold a
+    CR-separated pair into one line and hide the second half of it from every
+    caller here.
     """
 
-    end = offset
-    while end < len(content) and content[end] not in b"\n\r":
-        end += 1
-    if end >= len(content):
-        return content[offset:end], end
-    if content[end : end + 2] == b"\r\n":
-        return content[offset:end], end + 2
-    return content[offset:end], end + 1
+    line = _NATURAL_LINE.match(content, offset)
+    assert line is not None  # every part of the pattern is optional
+    return line[1], line.end()
+
+
+def _match_end(pattern: re.Pattern[bytes], content: bytes, offset: int) -> int:
+    """Return how far *pattern*, a run that may be empty, reaches from *offset*."""
+
+    run = pattern.match(content, offset)
+    assert run is not None  # an empty run always matches
+    return run.end()
 
 
 def _ends_with_odd_backslash(line: bytes) -> bool:
@@ -178,31 +248,27 @@ def _ends_with_odd_backslash(line: bytes) -> bool:
     return (len(line) - len(line.rstrip(b"\\"))) % 2 == 1
 
 
-def _unicode_escape(text: str, offset: int) -> tuple[str, int] | None:
-    """Decode the ``\\uXXXX`` escape whose four hex digits start at *offset*.
+def _unescape(escape: re.Match[str]) -> str:
+    """Return the text one :data:`_ESCAPE` match spells.
 
-    Returns the character it spells and how many characters from *offset* were
-    consumed, or ``None`` when those four are not hex digits. A high-surrogate
-    escape IMMEDIATELY followed by a low-surrogate one spells ONE supplementary
-    character -- the pair of UTF-16 units ``Properties.store`` writes it as --
-    so both escapes are consumed and combined into it, which is what
+    A high-surrogate escape IMMEDIATELY followed by a low-surrogate one spells
+    ONE supplementary character -- the pair of UTF-16 units ``Properties.store``
+    writes it as -- so both escapes are combined into it, which is what
     ``Properties.load`` reads and what makes a :func:`_escape_char` write of an
     astral character round-trip (issue #3120). An unpaired half stays the lone
     surrogate a Java string holds; a Python string carries one, so the decode
     loses nothing and stays injective.
     """
 
-    digits = text[offset : offset + 4]
-    if len(digits) != 4 or not all(d in _HEX_DIGITS for d in digits):
-        return None
-    unit = int(digits, 16)
-    if 0xD800 <= unit <= 0xDBFF and text[offset + 4 : offset + 6] == "\\u":
-        low_digits = text[offset + 6 : offset + 10]
-        if len(low_digits) == 4 and all(d in _HEX_DIGITS for d in low_digits):
-            low = int(low_digits, 16)
-            if 0xDC00 <= low <= 0xDFFF:
-                return chr(0x10000 + ((unit - 0xD800) << 10) + (low - 0xDC00)), 10
-    return chr(unit), 4
+    unit, low, char = escape.groups()
+    if unit is None:
+        return char.translate(_SIMPLE_ESCAPES) if char else "\\"
+    high = int(unit, 16)
+    if low is None:
+        return chr(high)
+    if 0xD800 <= high <= 0xDBFF:
+        return chr(0x10000 + ((high - 0xD800) << 10) + (int(low, 16) - 0xDC00))
+    return chr(high) + chr(int(low, 16))
 
 
 def _load_convert(raw: bytes) -> str:
@@ -224,64 +290,36 @@ def _load_convert(raw: bytes) -> str:
     exception -- yields the literal ``u`` and whatever followed it, so the guard
     reads a hand-mangled file rather than turning an ordinary write into a 500.
     Such a file makes the Java server refuse to load it at all, so there is no
-    "right" value to agree on anyway.
+    "right" value to agree on anyway. A lone trailing backslash stays itself.
+
+    Text with no ``\\u`` in it, so that every escape is a single character, is
+    resolved without a Python call per escape: one split into literal runs and
+    escaped characters, one translation of the escaped characters together.
     """
 
     text = raw.decode("latin-1")
     if "\\" not in text:
         return text
-    out: list[str] = []
-    i = 0
-    while i < len(text):
-        char = text[i]
-        i += 1
-        if char != "\\" or i >= len(text):
-            out.append(char)
-            continue
-        char = text[i]
-        i += 1
-        if char == "u":
-            escape = _unicode_escape(text, i)
-            if escape is None:
-                out.append("u")
-            else:
-                decoded, consumed = escape
-                out.append(decoded)
-                i += consumed
-        else:
-            out.append({"t": "\t", "r": "\r", "n": "\n", "f": "\f"}.get(char, char))
-    return "".join(out)
+    if "\\u" in text:
+        return _ESCAPE.sub(_unescape, text)
+    parts = _SIMPLE_ESCAPE.split(text)
+    parts[1::2] = "".join(parts[1::2]).translate(_SIMPLE_ESCAPES)
+    return "".join(parts)
 
 
 def _split_key_value(line: bytes) -> tuple[str, str]:
     """Split one logical line (already left-trimmed) into its decoded key and value.
 
-    The key runs to the first UNESCAPED ``=``, ``:`` or blank. Blanks after it, then
-    one optional ``=`` / ``:``, then further blanks are skipped; everything left is
-    the value, TRAILING whitespace included -- Java keeps it, so ``25565 `` is not
-    ``25565`` and the guard must not pretend otherwise.
+    The key runs to the first UNESCAPED ``=``, ``:`` or blank. Blanks after it,
+    then one optional ``=`` / ``:``, then further blanks are skipped
+    (:data:`_KEY_SEPARATOR`); everything left is the value, TRAILING whitespace
+    included -- Java keeps it, so ``25565 `` is not ``25565`` and the guard must
+    not pretend otherwise.
     """
 
-    key_end = value_start = len(line)
-    has_sep = False
-    backslash = False
-    for i in range(len(line)):
-        char = line[i : i + 1]
-        if not backslash and char in b"=:":
-            key_end, value_start, has_sep = i, i + 1, True
-            break
-        if not backslash and char in _BLANKS:
-            key_end, value_start = i, i + 1
-            break
-        backslash = char == b"\\" and not backslash
-    while value_start < len(line):
-        char = line[value_start : value_start + 1]
-        if char not in _BLANKS:
-            if has_sep or char not in b"=:":
-                break
-            has_sep = True
-        value_start += 1
-    return _load_convert(line[:key_end]), _load_convert(line[value_start:])
+    match = _KEY_SEPARATOR.match(line)
+    assert match is not None  # the pattern matches the empty key
+    return _load_convert(match[1]), _load_convert(line[match.end() :])
 
 
 def _parse(content: bytes) -> list[_Property]:
@@ -306,36 +344,43 @@ def _parse(content: bytes) -> list[_Property]:
     offset = 0
     while offset < len(content):
         start = offset
+        plain = _PLAIN_PROPERTY.match(content, offset)
+        if plain is not None:
+            offset = plain.end()
+            key, value = plain[1].decode("latin-1"), plain[2].decode("latin-1")
+            props.append(_Property(key, value, start, offset))
+            continue
         line, offset = _natural_line(content, offset)
         line = line.lstrip(_BLANKS)
-        while line == b"\\" and offset < len(content):
-            line, offset = _natural_line(content, offset)
-            line = line.lstrip(_BLANKS)
+        if line == b"\\" and offset < len(content):
+            offset = _match_end(_LONE_BACKSLASH_LINES, content, offset)
+            # Past the run, a lone backslash is left only as the file's last
+            # line, so this is the line the logical line starts on.
+            if offset < len(content):
+                line, offset = _natural_line(content, offset)
+                line = line.lstrip(_BLANKS)
         if line == b"\\" and content.endswith(b"\r\n"):
             continue
         if not line or line[:1] in (b"#", b"!"):
+            offset = _match_end(_SKIPPED_LINES, content, offset)
             continue
         if _ends_with_odd_backslash(line):
-            # One buffer for the whole logical line, so each continuation
-            # appends in place -- linear in the file, never a copy of the line
-            # so far per continuation (issue #3346).
-            logical = bytearray(line)
-            continued = True
-            while continued:
-                del logical[-1]
-                if offset >= len(content):
-                    break
-                continuation, offset = _natural_line(content, offset)
-                continuation = continuation.lstrip(_BLANKS)
-                logical += continuation
-                # logical ended in an even run before continuation was
-                # appended, so continuation's own trailing run decides;
-                # rechecking logical would be quadratic on a file of
-                # backslash-run lines.
-                continued = _ends_with_odd_backslash(continuation)
-            line = bytes(logical)
+            # Every line that continues in turn is found in one scan and
+            # joined in one substitution -- linear in the file, never a copy
+            # of the line so far per continuation (issue #3346). The line the
+            # run stops at ends the logical line: it ends in an even run, or
+            # it is the file's last line, whose odd run has no next line to
+            # continue onto and is dropped.
+            continued_end = _match_end(_CONTINUED_LINES, content, offset)
+            last, end = _natural_line(content, continued_end)
+            last = last.lstrip(_BLANKS)
+            if _ends_with_odd_backslash(last):
+                last = last[:-1]
+            middle = _LINE_CONTINUATION.sub(b"", content[offset:continued_end])
+            line = line[:-1] + middle.lstrip(_BLANKS) + last
+            offset = end
         key, value = _split_key_value(line)
-        props.append(_Property(key=key, value=value, start=start, end=offset))
+        props.append(_Property(key, value, start, offset))
     return props
 
 
@@ -753,8 +798,15 @@ def changed_platform_managed_keys(current: bytes, incoming: bytes) -> list[str]:
     Storage copy at rest, the worker's live working set while running. Those two
     diverge in these very keys (Minecraft's boot rewrite fills in defaults the
     seeded file omits), so comparing against the wrong one refuses honest edits.
+
+    Byte-identical files change nothing and are not parsed at all: the parse is
+    a pure function of the bytes, so it could only read the same values twice
+    -- two full parses, at the edit size limit, for a save that changed nothing
+    (issue #3406).
     """
 
+    if current == incoming:
+        return []
     current_values = _platform_managed_values(current)
     incoming_values = _platform_managed_values(incoming)
     return sorted(
