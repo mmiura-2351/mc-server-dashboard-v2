@@ -1211,6 +1211,57 @@ async def test_crash_loop_start_backs_off_despite_successful_dispatch() -> None:
     assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start", "start"]
 
 
+async def test_first_crash_restart_logs_info_and_repeat_logs_crash_looping_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Issue #3402: a server that crashed ONCE is restarted by the reconciler; that
+    # first restart is routine recovery, not a loop, so it must log at INFO worded
+    # as a restart after a crash. Only a restart that follows an earlier counted
+    # failure — the backoff state already shows repetition — is "crash-looping" at
+    # WARNING. The backoff itself is armed both times (#343), unchanged.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.CRASHED,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock)
+
+    def crash_records() -> list[logging.LogRecord]:
+        return [
+            r
+            for r in caplog.records
+            if r.name == "mc_server_dashboard_api.servers.application.reconciler"
+            and "backing off" in r.getMessage()
+        ]
+
+    with caplog.at_level(logging.INFO):
+        await reconciler.tick()  # first restart after one crash -> 30s backoff
+    assert reconciler._attempts[server.id].failures == 1
+    [first] = crash_records()
+    assert first.levelno == logging.INFO
+    assert first.getMessage() == (
+        f"reconcile action redispatch_start restarted server {server.id.value} "
+        "after a crash; backing off"
+    )
+    assert "crash-looping" not in first.getMessage()
+
+    caplog.clear()
+    clock.set(_NOW + dt.timedelta(seconds=40))
+    with caplog.at_level(logging.INFO):
+        await reconciler.tick()  # crashed again past the backoff -> a loop
+    assert reconciler._attempts[server.id].failures == 2
+    [repeat] = crash_records()
+    assert repeat.levelno == logging.WARNING
+    assert repeat.getMessage() == (
+        "reconcile action redispatch_start dispatched for crash-looping server "
+        f"{server.id.value}; backing off"
+    )
+
+
 async def test_crash_loop_flapping_through_starting_keeps_backoff_growing() -> None:
     # Regression for the flap (#343 review): a boot-crash server cycles
     # observed crashed -> starting -> crashed. While observed=starting it drops out
