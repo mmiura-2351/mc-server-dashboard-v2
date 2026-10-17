@@ -493,3 +493,35 @@ func TestParseLongContinuedLogicalLine(t *testing.T) {
 		})
 	}
 }
+
+// TestParseContinuationsAllocateLinearly pins the allocation side of issue
+// #3346: a logical line of n continued lines is accumulated in one growing
+// buffer, so its allocations stay logarithmic in n. Copying the logical line
+// per continuation allocates at least once per line, which the generous n/10
+// ceiling catches. Rescanning the logical line's trailing backslash run
+// allocates nothing, so this test cannot see that path; the backslash-runs
+// rows of BenchmarkParseContinuations measure it.
+func TestParseContinuationsAllocateLinearly(t *testing.T) {
+	const n = 10000
+	for _, input := range []struct {
+		name string
+		data string
+	}{
+		{"short lines", strings.Repeat("k\\\n", n)},
+		{"backslash runs", "k" + strings.Repeat("\\\\\\\n", n)},
+	} {
+		data := []byte(input.data)
+		for _, parser := range []struct {
+			name  string
+			parse func([]byte) map[string]string
+		}{{"Parse", Parse}, {"ParseUTF8", ParseUTF8}} {
+			t.Run(input.name+"/"+parser.name, func(t *testing.T) {
+				allocs := testing.AllocsPerRun(5, func() { parser.parse(data) })
+				if allocs > n/10 {
+					t.Errorf("%s allocated %.0f times for %d continued lines, want at most %d",
+						parser.name, allocs, n, n/10)
+				}
+			})
+		}
+	}
+}

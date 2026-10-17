@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from mc_server_dashboard_api.servers.domain import server_properties
 from mc_server_dashboard_api.servers.domain.server_properties import (
     PLATFORM_MANAGED_KEYS,
     RCON_PORT,
@@ -919,6 +920,56 @@ def test_parses_like_java_properties_load(
 ) -> None:
     # Last occurrence wins, matching java.util.Properties.load.
     assert {prop.key: prop.value for prop in _parse(content)} == expected
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        pytest.param(
+            b"motd=" + b"ab\\\n  " * 2000 + b"end\n",
+            "ab" * 2000 + "end",
+            id="many short continued lines",
+        ),
+        pytest.param(
+            b"motd=" + b"\\\\\\\n" * 2000 + b"end\n",
+            "\\" * 2000 + "end",
+            id="many continued lines of an odd backslash run",
+        ),
+        pytest.param(
+            b"motd=a\\\n\\\\\n", "a\\", id="an even backslash run ends the value"
+        ),
+        pytest.param(
+            b"motd=a\\\n\\\\\\\nb\n", "a\\b", id="an odd backslash run continues"
+        ),
+        pytest.param(
+            b"motd=a\\\nb\\\\\\\nc\n", "ab\\c", id="an odd trailing run continues"
+        ),
+    ],
+)
+def test_continuation_checks_each_natural_line_once(
+    monkeypatch: pytest.MonkeyPatch, content: bytes, expected: str
+) -> None:
+    # Issue #3346: whether a continued line goes on is decided by the appended
+    # natural line's own trailing backslash run -- the logical line it extends
+    # ends in an even run -- so the trailing-run check reads each byte of the
+    # file at most once. Checking the whole logical line again per
+    # continuation, which also copies it (rstrip), is quadratic on a file of
+    # many continued lines. The logical line's own accumulation (a bytearray,
+    # not a bytes copy per continuation) has no deterministic counter to pin
+    # here; the Worker's mirror pins its allocations instead.
+    scanned = 0
+    check = server_properties._ends_with_odd_backslash
+
+    def counting_check(line: bytes) -> bool:
+        nonlocal scanned
+        scanned += len(line)
+        return check(line)
+
+    monkeypatch.setattr(server_properties, "_ends_with_odd_backslash", counting_check)
+    props = {prop.key: prop.value for prop in _parse(content + b"server-port=1\n")}
+
+    assert props == {"motd": expected, "server-port": "1"}
+    assert scanned <= len(content) + len(b"server-port=1\n")
 
 
 # --- the guard sees every Java spelling (issue #2811) -------------------------
