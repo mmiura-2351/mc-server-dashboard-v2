@@ -822,7 +822,7 @@ func TestForgeInstallRetryStopDuringBackoff(t *testing.T) {
 
 	// Wait for the first attempt to fail and enter backoff, then Stop.
 	// The first install is removed before backoff, so wait until that happens.
-	deadline := time.After(2 * time.Second)
+	deadline := time.After(30 * time.Second)
 	for !docker.wasRemoved(installID) {
 		select {
 		case <-deadline:
@@ -1000,7 +1000,7 @@ func TestForgeInstallRetryStopWinsLatchBeforeRetryStart(t *testing.T) {
 		// Signal the main goroutine to issue Stop.
 		close(hookCh)
 		// Wait for Stop to set the latch (give it plenty of time).
-		deadline := time.After(2 * time.Second)
+		deadline := time.After(30 * time.Second)
 		for {
 			contInst.mu.Lock()
 			sr := contInst.stopRequested
@@ -1096,7 +1096,7 @@ func TestInstallRetryResetsExitObservedForNewContainer(t *testing.T) {
 	// publish, we must wait for Start to complete — not just Create — otherwise
 	// Stop may win the lock before Start and abort the retry instead of racing
 	// the Wait). The install container name is reused, so count Start calls.
-	deadline := time.After(2 * time.Second)
+	deadline := time.After(30 * time.Second)
 	for {
 		docker.mu.Lock()
 		startCount := 0
@@ -1128,7 +1128,7 @@ func TestInstallRetryResetsExitObservedForNewContainer(t *testing.T) {
 // event so the caller can inspect its Detail field.
 func drainToEvent(t *testing.T, ch <-chan execution.StatusEvent, want execution.ServerState) execution.StatusEvent {
 	t.Helper()
-	deadline := time.After(2 * time.Second)
+	deadline := time.After(30 * time.Second)
 	for {
 		select {
 		case ev, ok := <-ch:

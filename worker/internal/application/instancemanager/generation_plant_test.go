@@ -115,7 +115,11 @@ func markerPlants() []markerPlant {
 }
 
 // within fails the test when fn has not returned in time: a marker touch that
-// blocks (a FIFO without a writer) must fail the test, not hang the suite.
+// blocks (a FIFO without a writer) must fail the test, not hang the suite. Such a
+// touch never returns, so any budget catches it; this one only has to outlast a
+// loaded host. The marker write fsyncs twice: under a parallel `make check` a
+// touch that cannot block has taken longer than five seconds, and under
+// artificial disk load longer than a minute (issue #3354).
 func within(t *testing.T, what string, fn func()) {
 	t.Helper()
 	done := make(chan struct{})
@@ -125,7 +129,7 @@ func within(t *testing.T, what string, fn func()) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(5 * time.Minute):
 		t.Fatalf("%s blocked", what)
 	}
 }

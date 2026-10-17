@@ -1275,7 +1275,10 @@ func (i *instance) superviseInstall(installID string) {
 		// blocks for the one Start call and then acts on the already-started retry
 		// container. There is therefore no published-but-unstarted sub-window for
 		// Stop to mishandle (issue #1987).
-		_ = cleanForgeInstallArtifacts(i.spec.WorkingDir, i.logger.With("server_id", i.spec.ServerID))
+		if cleanErr := cleanForgeInstallArtifacts(i.spec.WorkingDir, i.logger.With("server_id", i.spec.ServerID)); cleanErr != nil {
+			i.logger.Warn("failed to clean stale Forge artifacts before install",
+				"server_id", i.spec.ServerID, "err", cleanErr)
+		}
 		newID, err := i.createInstallRetryContainer()
 		if err != nil {
 			if i.stopWasRequested() {

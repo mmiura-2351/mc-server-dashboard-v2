@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"path"
 	"strings"
 
 	"golang.org/x/sys/unix"
@@ -38,12 +37,12 @@ var (
 // clean slate and the re-plan never sees a stale or ambiguous match (issue
 // #1127).
 //
-// A component that is absent, a symlink or anything else that is not a directory
-// has nothing to clean beneath it; the latter two are logged. A match is
-// unlinked whatever it is — a symlink planted as the artifact is itself removed,
-// never its target — except a directory, which is left in place and logged. An
-// absent workingDir is not an error. Any other failure is returned, joined, after
-// the rest of the cleanup has run.
+// A component that is absent, a plain file, a symlink or anything else that is
+// not a directory has nothing to clean beneath it; the latter two are logged. A
+// match is unlinked whatever it is — a symlink planted as the artifact is itself
+// removed, never its target — except a directory, which is left in place and
+// logged. An absent workingDir is not an error. Any other failure is returned,
+// joined, after the rest of the cleanup has run.
 func cleanForgeInstallArtifacts(workingDir string, logger *slog.Logger) error {
 	rootFd, err := nofollow.OpenDir(workingDir)
 	if errors.Is(err, unix.ENOENT) {
@@ -54,38 +53,11 @@ func cleanForgeInstallArtifacts(workingDir string, logger *slog.Logger) error {
 	}
 	defer func() { _ = unix.Close(rootFd) }()
 
-	var errs []error
-	for _, glob := range execution.ForgeInstallArtifactGlobs() {
-		errs = append(errs, removeGlobAt(rootFd, "", strings.Split(glob, "/"), logger))
-	}
-	return errors.Join(errs...)
-}
-
-// removeGlobAt unlinks the entries matching the slash-split glob components
-// beneath the directory behind dirFd, whose working-dir-relative path is prefix.
-func removeGlobAt(dirFd int, prefix string, components []string, logger *slog.Logger) error {
-	names := components[:1]
-	if strings.ContainsAny(names[0], `*?[\`) {
-		all, err := readDirNames(dirFd)
-		if err != nil {
-			return fmt.Errorf("list %s: %w", prefix, err)
-		}
-		names = nil
-		for _, name := range all {
-			matched, err := path.Match(components[0], name)
-			if err != nil {
-				return fmt.Errorf("match %s: %w", components[0], err)
-			}
-			if matched {
-				names = append(names, name)
-			}
-		}
-	}
-
-	var errs []error
-	for _, name := range names {
-		rel := path.Join(prefix, name)
-		if len(components) == 1 {
+	w := globWalk{
+		openAt:  forgeCleanOpenAt,
+		skipped: "stale Forge artifacts not cleaned",
+		logger:  logger,
+		leaf: func(dirFd int, name, rel string) error {
 			// unlinkat never follows a link at name and, without AT_REMOVEDIR, refuses
 			// a directory: no type is decided here that a swap could invalidate.
 			err := forgeCleanUnlinkAt(dirFd, name, 0)
@@ -94,21 +66,14 @@ func removeGlobAt(dirFd int, prefix string, components []string, logger *slog.Lo
 			case errors.Is(err, unix.EISDIR):
 				logger.Warn("stale Forge artifact not removed: it is a directory", "path", rel)
 			default:
-				errs = append(errs, fmt.Errorf("remove %s: %w", rel, err))
+				return fmt.Errorf("remove %s: %w", rel, err)
 			}
-			continue
-		}
-		fd, err := forgeCleanOpenAt(dirFd, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-		switch {
-		case err == nil:
-			errs = append(errs, removeGlobAt(fd, rel, components[1:], logger))
-			_ = unix.Close(fd)
-		case errors.Is(err, unix.ENOENT):
-		case errors.Is(err, unix.ELOOP), errors.Is(err, unix.ENOTDIR):
-			logger.Warn("stale Forge artifacts not cleaned: not a directory (a symlink is not followed)", "path", rel)
-		default:
-			errs = append(errs, fmt.Errorf("open %s: %w", rel, err))
-		}
+			return nil
+		},
+	}
+	var errs []error
+	for _, glob := range execution.ForgeInstallArtifactGlobs() {
+		errs = append(errs, w.walkAt(rootFd, "", strings.Split(glob, "/")))
 	}
 	return errors.Join(errs...)
 }

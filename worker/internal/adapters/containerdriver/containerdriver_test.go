@@ -581,7 +581,7 @@ func TestSuperviseClosesMetricsConnection(t *testing.T) {
 	go drainClosed(inst.Events())
 	select {
 	case <-ctrl.closedCh:
-	case <-time.After(2 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("cached metrics connection was not closed on instance exit")
 	}
 }
@@ -719,10 +719,12 @@ func drainClosed(ch <-chan execution.StatusEvent) {
 	}
 }
 
-// drainTo collects status events until it sees want or times out.
+// drainTo collects status events until it sees want or times out. The budget
+// only bounds a state that never comes; under a parallel `make check` the
+// install-to-launch path has outlasted two seconds (issue #3354).
 func drainTo(t *testing.T, ch <-chan execution.StatusEvent, want execution.ServerState) {
 	t.Helper()
-	deadline := time.After(2 * time.Second)
+	deadline := time.After(30 * time.Second)
 	for {
 		select {
 		case ev, ok := <-ch:
@@ -746,7 +748,7 @@ func drainTo(t *testing.T, ch <-chan execution.StatusEvent, want execution.Serve
 // Ready. So the marker has provably NOT been seen yet — no sleep needed.
 func awaitLogLine(t *testing.T, ch <-chan execution.LogEvent, want string) {
 	t.Helper()
-	deadline := time.After(2 * time.Second)
+	deadline := time.After(30 * time.Second)
 	for {
 		select {
 		case ev, ok := <-ch:
@@ -809,9 +811,10 @@ func TestStartHoldsStartingUntilReadyMarker(t *testing.T) {
 	pr, pw := io.Pipe()
 	docker := newFakeDocker()
 	docker.logBody = pr
-	// A long readiness timeout means only the Done marker can drive running here;
-	// the fallback path is covered by TestStartReachesRunningViaFallbackTimeout.
-	d := newReadinessTestDriver(docker, 10*time.Second)
+	// A readiness timeout beyond every wait in this test means only the Done
+	// marker can drive running here, however long drainTo is allowed to wait; the
+	// fallback path is covered by TestStartReachesRunningViaFallbackTimeout.
+	d := newReadinessTestDriver(docker, time.Hour)
 
 	inst, err := d.Start(context.Background(), spec())
 	if err != nil {
@@ -956,7 +959,7 @@ func TestWaitTransportErrorWhileStoppingContainerGoneEmitsStopped(t *testing.T) 
 	// stopRequested is already set under the lock) before delivering the Wait
 	// transport error, so the re-inspect's terminal decision reads the stop intent.
 	go func() { _ = inst.Stop(context.Background(), false) }()
-	deadline := time.After(2 * time.Second)
+	deadline := time.After(30 * time.Second)
 	for !docker.stopWasCalled() {
 		select {
 		case <-deadline:
@@ -1900,8 +1903,9 @@ func TestSurvivedKillFromStartingDoesNotReportRunning(t *testing.T) {
 	// Neither docker stop nor docker kill exits the container.
 	docker.stopNoExit = true
 	docker.killNoExit = true
-	// A long readiness timeout with no Done marker holds the instance in starting.
-	d := newReadinessTestDriver(docker, 10*time.Second)
+	// A readiness timeout beyond every wait in this test, with no Done marker,
+	// holds the instance in starting.
+	d := newReadinessTestDriver(docker, time.Hour)
 
 	inst, err := d.Start(context.Background(), spec())
 	if err != nil {
