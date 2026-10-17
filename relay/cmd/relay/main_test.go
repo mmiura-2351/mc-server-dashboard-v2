@@ -42,6 +42,29 @@ func TestMetricsHandlerHealthz(t *testing.T) {
 	}
 }
 
+// TestMetricsHandlerMethods pins both routes to GET (which also serves HEAD):
+// any other method, CONNECT included, gets a 405 instead of a 200 (issue #3331).
+func TestMetricsHandlerMethods(t *testing.T) {
+	h := metricsHandler(prometheus.NewRegistry())
+	for _, path := range []string{"/healthz", "/metrics"} {
+		for _, tc := range []struct {
+			method string
+			want   int
+		}{
+			{http.MethodGet, http.StatusOK},
+			{http.MethodHead, http.StatusOK},
+			{http.MethodPost, http.StatusMethodNotAllowed},
+			{http.MethodConnect, http.StatusMethodNotAllowed},
+		} {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest(tc.method, path, nil))
+			if rec.Code != tc.want {
+				t.Errorf("%s %s status = %d, want %d", tc.method, path, rec.Code, tc.want)
+			}
+		}
+	}
+}
+
 // TestMetricsHandlerExposesSeries asserts /metrics serves the registry's series,
 // including the build-info gauge and the Go collector.
 func TestMetricsHandlerExposesSeries(t *testing.T) {
