@@ -811,9 +811,10 @@ func TestStartHoldsStartingUntilReadyMarker(t *testing.T) {
 	pr, pw := io.Pipe()
 	docker := newFakeDocker()
 	docker.logBody = pr
-	// A long readiness timeout means only the Done marker can drive running here;
-	// the fallback path is covered by TestStartReachesRunningViaFallbackTimeout.
-	d := newReadinessTestDriver(docker, 10*time.Second)
+	// A readiness timeout beyond every wait in this test means only the Done
+	// marker can drive running here, however long drainTo is allowed to wait; the
+	// fallback path is covered by TestStartReachesRunningViaFallbackTimeout.
+	d := newReadinessTestDriver(docker, time.Hour)
 
 	inst, err := d.Start(context.Background(), spec())
 	if err != nil {
@@ -1902,8 +1903,9 @@ func TestSurvivedKillFromStartingDoesNotReportRunning(t *testing.T) {
 	// Neither docker stop nor docker kill exits the container.
 	docker.stopNoExit = true
 	docker.killNoExit = true
-	// A long readiness timeout with no Done marker holds the instance in starting.
-	d := newReadinessTestDriver(docker, 10*time.Second)
+	// A readiness timeout beyond every wait in this test, with no Done marker,
+	// holds the instance in starting.
+	d := newReadinessTestDriver(docker, time.Hour)
 
 	inst, err := d.Start(context.Background(), spec())
 	if err != nil {
