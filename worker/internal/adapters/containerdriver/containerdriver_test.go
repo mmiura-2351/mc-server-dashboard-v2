@@ -653,14 +653,14 @@ func TestRCONOpenFailureLogsCarryNoPropertiesContent(t *testing.T) {
 			inst.queryPlayerCount(context.Background())
 
 			out := logged.String()
-			for _, want := range []string{"graceful stop: open rcon failed", "player count: open rcon failed", "rcon.port"} {
-				if !strings.Contains(out, want) {
-					t.Fatalf("log = %q, want it to contain %q", out, want)
-				}
-			}
 			for _, leak := range tc.leak {
 				if strings.Contains(out, leak) {
 					t.Fatalf("log = %q, must not contain %q", out, leak)
+				}
+			}
+			for _, want := range []string{"graceful stop: open rcon failed", "player count: open rcon failed", "rcon.port"} {
+				if !strings.Contains(out, want) {
+					t.Fatalf("log = %q, want it to contain %q", out, want)
 				}
 			}
 		})
