@@ -12,8 +12,10 @@ import (
 // TestHandleRejectsUnsafeServerID covers the command-intake guard (issue #782):
 // an empty, traversal, or separator-bearing ServerID is rejected before any
 // handler joins it into a scratch path, so SnapshotTrigger never tars the
-// scratch ROOT and HydrateTrigger never escapes it. The reject must carry
-// FILE_ACCESS_DENIED and leave the scratch tree untouched.
+// scratch ROOT and HydrateTrigger never escapes it. Since issue #3399 the guard
+// accepts only a canonical UUID, the same rule the held-set scans apply
+// (isServerIDName), so a path-safe id in any other form is refused too. The
+// reject must carry FILE_ACCESS_DENIED and leave the scratch tree untouched.
 func TestHandleRejectsUnsafeServerID(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -26,6 +28,11 @@ func TestHandleRejectsUnsafeServerID(t *testing.T) {
 		{"backslash", `a\b`},
 		{"nul", "a\x00b"},
 		{"dot", "."},
+		{"not_uuid", "server-a"},
+		{"uppercase_uuid", "123E4567-E89B-12D3-A456-426614174000"},
+		{"braced_uuid", "{123e4567-e89b-12d3-a456-426614174000}"},
+		{"urn_uuid", "urn:uuid:123e4567-e89b-12d3-a456-426614174000"},
+		{"unhyphenated_uuid", "123e4567e89b12d3a456426614174000"},
 	}
 
 	// Every handled kind funnels through Manager.Handle, so the guard must reject

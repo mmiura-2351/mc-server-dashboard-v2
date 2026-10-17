@@ -33,11 +33,11 @@ func listNames(t *testing.T, res session.CommandResult) []string {
 
 func TestListFilesReturnsEntries(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	writeWorkingFile(t, m, "s1", "server.properties", []byte("motd=hi"))
-	writeWorkingFile(t, m, "s1", "world/level.dat", []byte("data"))
+	writeWorkingFile(t, m, s1, "server.properties", []byte("motd=hi"))
+	writeWorkingFile(t, m, s1, "world/level.dat", []byte("data"))
 
 	res := m.Handle(context.Background(), session.Command{
-		CommandID: "c1", ServerID: "s1", Kind: "ListFiles", Path: ".",
+		CommandID: "c1", ServerID: s1, Kind: "ListFiles", Path: ".",
 	})
 	if got := listNames(t, res); len(got) != 2 || got[0] != "server.properties" || got[1] != "world" {
 		t.Fatalf("entries = %v, want [server.properties world]", got)
@@ -81,7 +81,7 @@ func TestListFilesReportsTheKindOfSpecialEntries(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res := handleWithin(t, m, session.Command{CommandID: "c1", ServerID: "s1", Kind: "ListFiles", Path: "."})
+	res := handleWithin(t, m, session.Command{CommandID: "c1", ServerID: s1, Kind: "ListFiles", Path: "."})
 	if !res.Success {
 		t.Fatalf("ListFiles result = %+v, want success", res)
 	}
@@ -97,11 +97,11 @@ func TestListFilesReportsTheKindOfSpecialEntries(t *testing.T) {
 
 func TestListFilesEmptyDirReturnsEmptyListing(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	if err := os.MkdirAll(filepath.Join(m.scratchDir, "s1", "plugins"), 0o750); err != nil {
+	if err := os.MkdirAll(filepath.Join(m.scratchDir, s1, "plugins"), 0o750); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 	res := m.Handle(context.Background(), session.Command{
-		CommandID: "c1", ServerID: "s1", Kind: "ListFiles", Path: "plugins",
+		CommandID: "c1", ServerID: s1, Kind: "ListFiles", Path: "plugins",
 	})
 	if !res.Success || res.FileListing == nil {
 		t.Fatalf("ListFiles result = %+v, want success with a listing", res)
@@ -114,7 +114,7 @@ func TestListFilesEmptyDirReturnsEmptyListing(t *testing.T) {
 func TestListFilesMissingDirIsServerNotFound(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	res := m.Handle(context.Background(), session.Command{
-		CommandID: "c1", ServerID: "s1", Kind: "ListFiles", Path: "nope",
+		CommandID: "c1", ServerID: s1, Kind: "ListFiles", Path: "nope",
 	})
 	if res.Success {
 		t.Fatal("ListFiles of a missing dir should fail")
@@ -128,7 +128,7 @@ func TestListFilesMissingWorkingDirIsServerNotFound(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	// No working dir created at all: listing the root must not error internally.
 	res := m.Handle(context.Background(), session.Command{
-		CommandID: "c1", ServerID: "s1", Kind: "ListFiles", Path: ".",
+		CommandID: "c1", ServerID: s1, Kind: "ListFiles", Path: ".",
 	})
 	if res.Success {
 		t.Fatal("ListFiles of an absent working dir should fail")
@@ -140,10 +140,10 @@ func TestListFilesMissingWorkingDirIsServerNotFound(t *testing.T) {
 
 func TestListFilesOnRegularFileIsDenied(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	writeWorkingFile(t, m, "s1", "server.properties", []byte("motd=hi"))
+	writeWorkingFile(t, m, s1, "server.properties", []byte("motd=hi"))
 
 	res := m.Handle(context.Background(), session.Command{
-		CommandID: "c1", ServerID: "s1", Kind: "ListFiles", Path: "server.properties",
+		CommandID: "c1", ServerID: s1, Kind: "ListFiles", Path: "server.properties",
 	})
 	if res.Success {
 		t.Fatal("ListFiles of a regular file should be denied")
@@ -159,7 +159,7 @@ func TestListFilesOnRegularFileIsDenied(t *testing.T) {
 
 func TestListFilesIntermediateSymlinkReasonSymlinkRefused(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	workingDir := filepath.Join(m.scratchDir, "s1")
+	workingDir := filepath.Join(m.scratchDir, s1)
 	if err := os.MkdirAll(workingDir, 0o750); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestListFilesIntermediateSymlinkReasonSymlinkRefused(t *testing.T) {
 	}
 
 	res := m.Handle(context.Background(), session.Command{
-		CommandID: "c1", ServerID: "s1", Kind: "ListFiles", Path: "sub/child",
+		CommandID: "c1", ServerID: s1, Kind: "ListFiles", Path: "sub/child",
 	})
 	if res.Success || res.ErrorCode != session.CommandErrorFileAccessDenied {
 		t.Fatalf("ListFiles through an intermediate symlink result = %+v, want FileAccessDenied", res)
@@ -184,7 +184,7 @@ func TestListFilesIntermediateSymlinkReasonSymlinkRefused(t *testing.T) {
 func TestListFilesTraversalReasonUnspecified(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	res := m.Handle(context.Background(), session.Command{
-		CommandID: "c1", ServerID: "s1", Kind: "ListFiles", Path: "../escape",
+		CommandID: "c1", ServerID: s1, Kind: "ListFiles", Path: "../escape",
 	})
 	if res.Success || res.ErrorCode != session.CommandErrorFileAccessDenied {
 		t.Fatalf("ListFiles traversal result = %+v, want FileAccessDenied", res)
@@ -199,7 +199,7 @@ func TestListFilesTraversalIsDenied(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	for _, bad := range []string{"../escape", "/etc", "a/../../escape"} {
 		res := m.Handle(context.Background(), session.Command{
-			CommandID: "c1", ServerID: "s1", Kind: "ListFiles", Path: bad,
+			CommandID: "c1", ServerID: s1, Kind: "ListFiles", Path: bad,
 		})
 		if res.Success {
 			t.Fatalf("ListFiles %q should be denied", bad)
@@ -212,7 +212,7 @@ func TestListFilesTraversalIsDenied(t *testing.T) {
 
 func TestListFilesSymlinkDirEscapeIsDenied(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	workingDir := filepath.Join(m.scratchDir, "s1")
+	workingDir := filepath.Join(m.scratchDir, s1)
 	if err := os.MkdirAll(workingDir, 0o750); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -222,7 +222,7 @@ func TestListFilesSymlinkDirEscapeIsDenied(t *testing.T) {
 		t.Fatalf("symlink: %v", err)
 	}
 	res := m.Handle(context.Background(), session.Command{
-		CommandID: "c1", ServerID: "s1", Kind: "ListFiles", Path: "evil",
+		CommandID: "c1", ServerID: s1, Kind: "ListFiles", Path: "evil",
 	})
 	if res.Success {
 		t.Fatal("ListFiles through a symlink should be denied")
@@ -234,7 +234,7 @@ func TestListFilesSymlinkDirEscapeIsDenied(t *testing.T) {
 
 func TestListFilesSymlinkChildIsNotFollowed(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	workingDir := filepath.Join(m.scratchDir, "s1")
+	workingDir := filepath.Join(m.scratchDir, s1)
 	if err := os.MkdirAll(workingDir, 0o750); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -246,7 +246,7 @@ func TestListFilesSymlinkChildIsNotFollowed(t *testing.T) {
 		t.Fatalf("symlink: %v", err)
 	}
 	res := m.Handle(context.Background(), session.Command{
-		CommandID: "c1", ServerID: "s1", Kind: "ListFiles", Path: ".",
+		CommandID: "c1", ServerID: s1, Kind: "ListFiles", Path: ".",
 	})
 	if !res.Success || res.FileListing == nil {
 		t.Fatalf("ListFiles result = %+v, want success with a listing", res)
@@ -270,7 +270,7 @@ func TestListFilesSymlinkChildIsNotFollowed(t *testing.T) {
 
 func TestListFilesBoundedWithTruncationMarker(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	dir := filepath.Join(m.scratchDir, "s1", "many")
+	dir := filepath.Join(m.scratchDir, s1, "many")
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -282,7 +282,7 @@ func TestListFilesBoundedWithTruncationMarker(t *testing.T) {
 		}
 	}
 	res := m.Handle(context.Background(), session.Command{
-		CommandID: "c1", ServerID: "s1", Kind: "ListFiles", Path: "many",
+		CommandID: "c1", ServerID: s1, Kind: "ListFiles", Path: "many",
 	})
 	if !res.Success || res.FileListing == nil {
 		t.Fatalf("ListFiles result = %+v, want success with a listing", res)

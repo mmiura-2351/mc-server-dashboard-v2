@@ -206,7 +206,7 @@ func (d *relaunchFailDriver) Start(_ context.Context, spec execution.InstanceSpe
 // reaches them all.
 func driveRow(t *testing.T, row contractRow) session.CommandResult {
 	t.Helper()
-	const serverID = "s1"
+	const serverID = s1
 	ctx := context.Background()
 
 	switch row.Precondition {
@@ -379,7 +379,7 @@ func driveRow(t *testing.T, row contractRow) session.CommandResult {
 // RestartServer meets it on the relaunch, after a successful start it can restart.
 func driveStartError(t *testing.T, row contractRow, startErr error) session.CommandResult {
 	t.Helper()
-	const serverID = "s1"
+	const serverID = s1
 	ctx := context.Background()
 	if row.Kind == "RestartServer" {
 		m := newContractManager(t, &relaunchFailDriver{err: startErr})

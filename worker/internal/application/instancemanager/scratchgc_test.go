@@ -49,10 +49,10 @@ func seedScratch(t *testing.T, m *Manager, serverID string) string {
 func TestStopRetainsScratchForFinalSnapshot(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
-	dir := seedScratch(t, m, "s1")
+	dir := seedScratch(t, m, s1)
 	_ = m.Handle(context.Background(), startCmd())
 
-	res := m.Handle(context.Background(), session.Command{CommandID: "stop", ServerID: "s1", Kind: "StopServer"})
+	res := m.Handle(context.Background(), session.Command{CommandID: "stop", ServerID: s1, Kind: "StopServer"})
 	if !res.Success {
 		t.Fatalf("stop = %+v, want success", res)
 	}
@@ -70,10 +70,10 @@ func TestStopThenFinalSnapshotPacksWorkingSet(t *testing.T) {
 	tr := &fakeTransfer{}
 	d := &fakeDriver{}
 	m := newManager(t, d, nil).WithTransfer(tr)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	_ = m.Handle(context.Background(), startCmd())
 
-	if res := m.Handle(context.Background(), session.Command{CommandID: "stop", ServerID: "s1", Kind: "StopServer"}); !res.Success {
+	if res := m.Handle(context.Background(), session.Command{CommandID: "stop", ServerID: s1, Kind: "StopServer"}); !res.Success {
 		t.Fatalf("stop = %+v, want success", res)
 	}
 	// API ordering: final SnapshotTrigger AFTER the stop CommandResult.
@@ -92,7 +92,7 @@ func TestStopThenFinalSnapshotPacksWorkingSet(t *testing.T) {
 func TestStoppedSnapshotRemovesScratchAfterPublish(t *testing.T) {
 	tr := &fakeTransfer{}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
-	dir := seedScratch(t, m, "s1") // stopped id: no running instance
+	dir := seedScratch(t, m, s1) // stopped id: no running instance
 
 	if res := m.Handle(context.Background(), snapshotCmd()); !res.Success {
 		t.Fatalf("stopped-id snapshot = %+v, want success", res)
@@ -117,7 +117,7 @@ func TestStoppedSnapshotRemovesScratchAfterPublish(t *testing.T) {
 func TestStoppedSnapshotAbsentWorkingDirRefusedWithoutTransfer(t *testing.T) {
 	tr := &fakeTransfer{}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
-	seedScratch(t, m, "s1") // stopped id: no running instance
+	seedScratch(t, m, s1) // stopped id: no running instance
 
 	// The first final snapshot publishes and GCs the scratch.
 	if res := m.Handle(context.Background(), snapshotCmd()); !res.Success {
@@ -147,7 +147,7 @@ func TestStoppedSnapshotAbsentWorkingDirRefusedWithoutTransfer(t *testing.T) {
 func TestStoppedSnapshotFailureRetainsScratch(t *testing.T) {
 	tr := &fakeTransfer{err: errors.New("boom")}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
-	dir := seedScratch(t, m, "s1")
+	dir := seedScratch(t, m, s1)
 
 	if res := m.Handle(context.Background(), snapshotCmd()); res.Success {
 		t.Fatalf("snapshot = %+v, want failure", res)
@@ -164,7 +164,7 @@ func TestRunningSnapshotRetainsScratch(t *testing.T) {
 	tr := &fakeTransfer{}
 	ctrl := &fakeControl{reply: "ok"}
 	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
-	dir := seedScratch(t, m, "s1")
+	dir := seedScratch(t, m, s1)
 	_ = m.Handle(context.Background(), startCmd())
 
 	if res := m.Handle(context.Background(), snapshotCmd()); !res.Success {
@@ -185,15 +185,15 @@ func TestRunningSnapshotRetainsScratch(t *testing.T) {
 func TestFinalSnapshotSweepsHydrateLeftovers(t *testing.T) {
 	tr := &fakeTransfer{}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
-	dir := seedScratch(t, m, "s1") // stopped id: no running instance
+	dir := seedScratch(t, m, s1) // stopped id: no running instance
 
 	// A leftover temp/trash sibling for s1 from a crashed hydrate.
-	leftover := filepath.Join(m.scratchDir, ".hydrate-s1-stale")
+	leftover := filepath.Join(m.scratchDir, ".hydrate-"+s1+"-stale")
 	if err := os.MkdirAll(leftover, 0o750); err != nil {
 		t.Fatal(err)
 	}
 	// Another server's leftover must NOT be touched (exact-prefix match for s1 only).
-	otherLeftover := filepath.Join(m.scratchDir, ".hydrate-s2-stale")
+	otherLeftover := filepath.Join(m.scratchDir, ".hydrate-"+s2+"-stale")
 	if err := os.MkdirAll(otherLeftover, 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -230,8 +230,8 @@ func TestFinalSnapshotSweepsHydrateLeftovers(t *testing.T) {
 // the reclaim path — which Close does join.
 func TestStoppedIDGCSweepsHydrateLeftoversBeforeTheScratchDirGoes(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	dir := seedScratch(t, m, "s1")
-	leftover := filepath.Join(m.scratchDir, ".hydrate-s1-stale")
+	dir := seedScratch(t, m, s1)
+	leftover := filepath.Join(m.scratchDir, ".hydrate-"+s1+"-stale")
 	if err := os.MkdirAll(leftover, 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +253,7 @@ func TestStoppedIDGCSweepsHydrateLeftoversBeforeTheScratchDirGoes(t *testing.T) 
 	}
 	t.Cleanup(func() { removeScratchTree = restore })
 
-	m.removeScratch("s1")
+	m.removeScratch(s1)
 
 	if !removed {
 		t.Fatal("removeScratch did not remove the scratch dir through the seam this test " +
@@ -273,21 +273,21 @@ func TestSweepHydrateLeftovers(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
 
-	staleA := filepath.Join(m.scratchDir, ".hydrate-s1-stale")
-	staleB := filepath.Join(m.scratchDir, ".hydrate-s1-other")
+	staleA := filepath.Join(m.scratchDir, ".hydrate-"+s1+"-stale")
+	staleB := filepath.Join(m.scratchDir, ".hydrate-"+s1+"-other")
 	if err := os.MkdirAll(staleA, 0o750); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(staleB, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	keep := seedScratch(t, m, "s1") // the live working dir, must be retained
-	otherID := filepath.Join(m.scratchDir, ".hydrate-s11-stale")
+	keep := seedScratch(t, m, s1) // the live working dir, must be retained
+	otherID := filepath.Join(m.scratchDir, ".hydrate-"+s1+"1-stale")
 	if err := os.MkdirAll(otherID, 0o750); err != nil {
 		t.Fatal(err)
 	}
 
-	m.sweepHydrateLeftovers("s1")
+	m.sweepHydrateLeftovers(s1)
 
 	for _, p := range []string{staleA, staleB} {
 		if _, err := os.Stat(p); !os.IsNotExist(err) {
@@ -310,10 +310,10 @@ func TestSweepHydrateLeftovers(t *testing.T) {
 func TestRestartRetainsScratch(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
-	dir := seedScratch(t, m, "s1")
+	dir := seedScratch(t, m, s1)
 	_ = m.Handle(context.Background(), startCmd())
 
-	res := m.Handle(context.Background(), session.Command{CommandID: "restart", ServerID: "s1", Kind: "RestartServer"})
+	res := m.Handle(context.Background(), session.Command{CommandID: "restart", ServerID: s1, Kind: "RestartServer"})
 	if !res.Success {
 		t.Fatalf("restart = %+v, want success", res)
 	}
@@ -329,12 +329,12 @@ func TestRestartRetainsScratch(t *testing.T) {
 func TestFailedStopRetainsScratch(t *testing.T) {
 	d := &orphanDriver{stopAfter: 1} // first Stop fails, leaving an orphan
 	m := newManager(t, d, nil)
-	dir := seedScratch(t, m, "s1") // before the start: launchReserved refuses a marker-less dir
+	dir := seedScratch(t, m, s1) // before the start: launchReserved refuses a marker-less dir
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
 
-	res := m.Handle(context.Background(), session.Command{CommandID: "stop", ServerID: "s1", Kind: "StopServer"})
+	res := m.Handle(context.Background(), session.Command{CommandID: "stop", ServerID: s1, Kind: "StopServer"})
 	if res.Success {
 		t.Fatalf("first stop = %+v, want failure (driver could not confirm termination)", res)
 	}
@@ -372,8 +372,8 @@ func seedDisplaced(t *testing.T, m *Manager, serverID string) string {
 func TestStoppedSnapshotGCsDisplacedTree(t *testing.T) {
 	tr := &fakeTransfer{}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
-	seedScratch(t, m, "s1") // stopped id: no running instance
-	displaced := seedDisplaced(t, m, "s1")
+	seedScratch(t, m, s1) // stopped id: no running instance
+	displaced := seedDisplaced(t, m, s1)
 
 	if res := m.Handle(context.Background(), snapshotCmd()); !res.Success {
 		t.Fatalf("stopped-id snapshot = %+v, want success", res)
@@ -390,9 +390,9 @@ func TestRunningSnapshotGCsDisplacedTree(t *testing.T) {
 	tr := &fakeTransfer{}
 	ctrl := &fakeControl{reply: "ok"}
 	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
-	dir := seedScratch(t, m, "s1")
+	dir := seedScratch(t, m, s1)
 	_ = m.Handle(context.Background(), startCmd())
-	displaced := seedDisplaced(t, m, "s1")
+	displaced := seedDisplaced(t, m, s1)
 
 	if res := m.Handle(context.Background(), snapshotCmd()); !res.Success {
 		t.Fatalf("running-id snapshot = %+v, want success", res)
@@ -417,7 +417,7 @@ func TestRunningSnapshotSkipsDisplacedSweepWhenWorkingDirReplaced(t *testing.T) 
 	tr := &fakeTransfer{gen: 12}
 	ctrl := &fakeControl{reply: "ok"}
 	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	_ = m.Handle(context.Background(), startCmd())
 	tr.duringUpload = func(workingDir string) { replaceWorkingDirLikeHydrate(t, workingDir, 7) }
 
@@ -428,7 +428,7 @@ func TestRunningSnapshotSkipsDisplacedSweepWhenWorkingDirReplaced(t *testing.T) 
 	// seedScratch wrote this content, and replaceWorkingDirLikeHydrate renamed that very
 	// directory to .displaced-s1 — so reading it back proves the surviving tree is the
 	// racing hydrate's recovery copy and not some other leftover.
-	got, err := os.ReadFile(filepath.Join(m.scratchDir, ".displaced-s1", "level.dat"))
+	got, err := os.ReadFile(filepath.Join(m.scratchDir, ".displaced-"+s1, "level.dat"))
 	if err != nil {
 		t.Fatalf("displaced recovery tree removed by a snapshot of a working dir it no longer "+
 			"packed: the sweep is not gated on the identity pin (issue #2291): %v", err)
@@ -455,11 +455,11 @@ func TestHydrateDuringDisplacedSweepFindsTheSlotEmpty(t *testing.T) {
 	tr := &fakeTransfer{}
 	ctrl := &fakeControl{reply: "ok"}
 	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
-	live := seedScratch(t, m, "s1")
+	live := seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("start = %+v, want success", res)
 	}
-	slot := seedDisplaced(t, m, "s1")
+	slot := seedDisplaced(t, m, s1)
 	// A second entry, so removing one of them models a traversal already under way
 	// with the rest of the world still on disk.
 	if err := os.MkdirAll(filepath.Join(slot, "world", "region"), 0o750); err != nil {
@@ -512,7 +512,7 @@ func TestHydrateDuringDisplacedSweepFindsTheSlotEmpty(t *testing.T) {
 	for _, e := range entries {
 		names = append(names, e.Name())
 	}
-	if len(names) != 2 || names[0] != ".displaced-s1" || names[1] != "s1" {
+	if len(names) != 2 || names[0] != ".displaced-"+s1 || names[1] != s1 {
 		t.Fatalf("scratch root = %v, want [.displaced-s1 s1]: the swept tree must be removed in full", names)
 	}
 }
@@ -535,11 +535,11 @@ func TestDisplacedSweepKeepsARecoveryCopyParkedAfterThePinCheck(t *testing.T) {
 	ctrl := &fakeControl{reply: "ok"}
 	h := &capturingSlogHandler{}
 	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr).WithLogger(slog.New(h))
-	live := seedScratch(t, m, "s1")
+	live := seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("start = %+v, want success", res)
 	}
-	slot := filepath.Join(m.scratchDir, ".displaced-s1")
+	slot := filepath.Join(m.scratchDir, ".displaced-"+s1)
 	if err := os.MkdirAll(slot, 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -579,7 +579,7 @@ func TestDisplacedSweepKeepsARecoveryCopyParkedAfterThePinCheck(t *testing.T) {
 	}
 	// The hydrated tree is in place and nothing is left under a .sweeping-<id>-* name:
 	// the sweep put back what it took rather than stranding it for the boot reclaim.
-	assertScratchRoot(t, m, ".displaced-s1", "s1")
+	assertScratchRoot(t, m, ".displaced-"+s1, s1)
 	assertSweepInfo(t, h, "put back the displaced tree", "retained", slot)
 }
 
@@ -657,8 +657,8 @@ func TestOverlappingDisplacedSweepsKeepTheRecoveryCopy(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := newManager(t, &fakeDriver{}, nil)
-			live := seedScratch(t, m, "s1")
-			slot := filepath.Join(m.scratchDir, ".displaced-s1")
+			live := seedScratch(t, m, s1)
+			slot := filepath.Join(m.scratchDir, ".displaced-"+s1)
 			if err := os.MkdirAll(slot, 0o750); err != nil {
 				t.Fatal(err)
 			}
@@ -694,7 +694,7 @@ func TestOverlappingDisplacedSweepsKeepTheRecoveryCopy(t *testing.T) {
 				replaceWorkingDirLikeHydrate(t, live, 7)
 				aStarted = true
 				go func() {
-					m.sweepDisplaced("s1", replaced)
+					m.sweepDisplaced(s1, replaced)
 					close(aDone)
 				}()
 				select {
@@ -717,7 +717,7 @@ func TestOverlappingDisplacedSweepsKeepTheRecoveryCopy(t *testing.T) {
 			}
 			t.Cleanup(func() { renameSweptTree, readSweptTree = restoreRename, restoreRead })
 
-			m.sweepDisplaced("s1", replaced) // sweep B, holding what was in the slot
+			m.sweepDisplaced(s1, replaced) // sweep B, holding what was in the slot
 			close(bDecided)
 			if aStarted {
 				// Skipped when the first sweep never reached its rename, so a sweep that
@@ -744,7 +744,7 @@ func TestOverlappingDisplacedSweepsKeepTheRecoveryCopy(t *testing.T) {
 			}
 			// The first sweep's tree is where the boot reclaim expects it, and it is the only
 			// thing left there.
-			left, err := filepath.Glob(filepath.Join(m.scratchDir, sweepingPrefix+"s1-*"))
+			left, err := filepath.Glob(filepath.Join(m.scratchDir, sweepingPrefix+s1+"-*"))
 			if err != nil || len(left) != 1 {
 				t.Fatalf("renamed trees = %v (err %v), want exactly one", left, err)
 			}
@@ -834,18 +834,18 @@ func TestDisplacedSweepDoesNotPutBackASymlinkSlot(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	populated := filepath.Join(t.TempDir(), "elsewhere")
 	seedHydrateShapedTree(t, populated, 7)
-	slot := filepath.Join(m.scratchDir, ".displaced-s1")
+	slot := filepath.Join(m.scratchDir, ".displaced-"+s1)
 	if err := os.Symlink(populated, slot); err != nil {
 		t.Fatal(err)
 	}
 
-	m.sweepDisplaced("s1", func() (bool, string) { return false, "working_dir_replaced" })
+	m.sweepDisplaced(s1, func() (bool, string) { return false, "working_dir_replaced" })
 
 	if _, err := os.Lstat(slot); !os.IsNotExist(err) {
 		t.Fatalf(".displaced-s1 exists after the sweep (lstat err = %v), want the slot left empty: "+
 			"the sweep read THROUGH the symlink, called it a working set and put it back (issue #3118)", err)
 	}
-	left, err := filepath.Glob(filepath.Join(m.scratchDir, sweepingPrefix+"s1-*"))
+	left, err := filepath.Glob(filepath.Join(m.scratchDir, sweepingPrefix+s1+"-*"))
 	if err != nil || len(left) != 1 {
 		t.Fatalf("renamed entries = %v (err %v), want exactly one (the symlink)", left, err)
 	}
@@ -870,20 +870,20 @@ func TestDisplacedSweepDoesNotPutBackASymlinkSlot(t *testing.T) {
 // readable by root, so a chmod-based test silently stops asserting anything as root.
 func TestDisplacedSweepKeepsATreeItCannotClassify(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	slot := filepath.Join(m.scratchDir, ".displaced-s1")
+	slot := filepath.Join(m.scratchDir, ".displaced-"+s1)
 	seedHydrateShapedTree(t, slot, 7)
 
 	restore := readSweptTree
 	readSweptTree = func(string) ([]os.DirEntry, error) { return nil, errors.New("injected read failure") }
 	t.Cleanup(func() { readSweptTree = restore })
 
-	m.sweepDisplaced("s1", func() (bool, string) { return false, "working_dir_replaced" })
+	m.sweepDisplaced(s1, func() (bool, string) { return false, "working_dir_replaced" })
 
 	if got, err := os.ReadFile(filepath.Join(slot, "world", "level.dat")); err != nil || string(got) != "x" {
 		t.Fatalf("slot world/level.dat = %q (err %v), want %q: a tree the sweep could not read was "+
 			"classified as junk and left under .sweeping- for the next boot to delete (issue #3118)", got, err, "x")
 	}
-	assertScratchRoot(t, m, ".displaced-s1")
+	assertScratchRoot(t, m, ".displaced-"+s1)
 }
 
 // A tree the sweep cannot put back stays WHOLE under its .sweeping-<id>-* name for the
@@ -895,7 +895,7 @@ func TestDisplacedSweepKeepsATreeItCannotClassify(t *testing.T) {
 func TestDisplacedSweepLeavesATreeItCannotPutBack(t *testing.T) {
 	h := &capturingSlogHandler{}
 	m := newManager(t, &fakeDriver{}, nil).WithLogger(slog.New(h))
-	slot := filepath.Join(m.scratchDir, ".displaced-s1")
+	slot := filepath.Join(m.scratchDir, ".displaced-"+s1)
 	seedHydrateShapedTree(t, slot, 7)
 
 	removed := false
@@ -911,7 +911,7 @@ func TestDisplacedSweepLeavesATreeItCannotPutBack(t *testing.T) {
 	removeDisplacedTree = func(string) error { removed = true; return nil }
 	t.Cleanup(func() { renameSweptTree, removeDisplacedTree = restoreRename, restoreRemove })
 
-	m.sweepDisplaced("s1", func() (bool, string) { return false, "working_dir_replaced" })
+	m.sweepDisplaced(s1, func() (bool, string) { return false, "working_dir_replaced" })
 
 	if removed {
 		t.Fatal("the sweep removed the tree it had taken from the slot although the working dir " +
@@ -921,7 +921,7 @@ func TestDisplacedSweepLeavesATreeItCannotPutBack(t *testing.T) {
 		t.Fatalf(".displaced-s1 generation = %d, want 9: the put-back renamed over the copy that "+
 			"filled the slot instead of leaving the swept tree aside (issue #3118)", got)
 	}
-	left, err := filepath.Glob(filepath.Join(m.scratchDir, sweepingPrefix+"s1-*"))
+	left, err := filepath.Glob(filepath.Join(m.scratchDir, sweepingPrefix+s1+"-*"))
 	if err != nil || len(left) != 1 {
 		t.Fatalf("renamed trees = %v (err %v), want exactly one for the boot reclaim to take", left, err)
 	}
@@ -941,7 +941,7 @@ func TestDisplacedSweepLeavesATreeItCannotPutBack(t *testing.T) {
 // the order instead: one sync, with the tree already back in the slot, and no traversal.
 func TestDisplacedSweepSyncsTheTreeItPutsBack(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	slot := filepath.Join(m.scratchDir, ".displaced-s1")
+	slot := filepath.Join(m.scratchDir, ".displaced-"+s1)
 	seedHydrateShapedTree(t, slot, 7)
 
 	var syncedWithSlotBack []bool
@@ -958,7 +958,7 @@ func TestDisplacedSweepSyncsTheTreeItPutsBack(t *testing.T) {
 	removeDisplacedTree = func(string) error { removed = true; return nil }
 	t.Cleanup(func() { syncSweepScratchRoot, removeDisplacedTree = restoreSync, restoreRemove })
 
-	m.sweepDisplaced("s1", func() (bool, string) { return false, "working_dir_absent" })
+	m.sweepDisplaced(s1, func() (bool, string) { return false, "working_dir_absent" })
 
 	if removed {
 		t.Fatal("the sweep traversed a tree it had decided to put back (issue #3118)")
@@ -968,7 +968,7 @@ func TestDisplacedSweepSyncsTheTreeItPutsBack(t *testing.T) {
 			"tree already restored: an un-fsynced put-back can roll back into a .sweeping- name "+
 			"the next boot reclaims (issue #3118)", syncedWithSlotBack)
 	}
-	assertScratchRoot(t, m, ".displaced-s1")
+	assertScratchRoot(t, m, ".displaced-"+s1)
 }
 
 // interruptDisplacedSweep runs sweepDisplaced for serverID over a seeded displaced tree
@@ -1045,12 +1045,12 @@ func TestInterruptedDisplacedSweepIsNotAdvertisedAsHeld(t *testing.T) {
 // a crashed hydrate's leftover — is not this reclaim's to touch.
 func TestBootReclaimsInterruptedDisplacedSweeps(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	leftover := interruptDisplacedSweep(t, m, "s1")
-	hydrateLeftover := filepath.Join(m.scratchDir, ".hydrate-s1-123456")
+	leftover := interruptDisplacedSweep(t, m, s1)
+	hydrateLeftover := filepath.Join(m.scratchDir, ".hydrate-"+s1+"-123456")
 	if err := os.MkdirAll(hydrateLeftover, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	keep := []string{seedScratch(t, m, "s1"), seedDisplaced(t, m, "s2"), hydrateLeftover}
+	keep := []string{seedScratch(t, m, s1), seedDisplaced(t, m, s2), hydrateLeftover}
 
 	ReclaimInterruptedDisplacedSweeps(m.scratchDir)
 
@@ -1091,13 +1091,13 @@ func TestBootReclaimsHydrateLeftovers(t *testing.T) {
 	// is a FULL working set carrying a generation marker, indistinguishable from a server
 	// dir except by name.
 	leftovers := []string{
-		filepath.Join(m.scratchDir, scratchformat.HydratePrefix+"s1-123456"),
-		filepath.Join(m.scratchDir, scratchformat.HydratePrefix+"s1-superseded-654321"),
+		filepath.Join(m.scratchDir, scratchformat.HydratePrefix+s1+"-123456"),
+		filepath.Join(m.scratchDir, scratchformat.HydratePrefix+s1+"-superseded-654321"),
 	}
 	for _, dir := range leftovers {
 		seedHydrateShapedTree(t, dir, 7)
 	}
-	keep := []string{seedScratch(t, m, "s1"), seedDisplaced(t, m, "s2"), interruptDisplacedSweep(t, m, "s3")}
+	keep := []string{seedScratch(t, m, s1), seedDisplaced(t, m, s2), interruptDisplacedSweep(t, m, "s3")}
 
 	ReclaimHydrateLeftovers(m.scratchDir)
 
@@ -1122,7 +1122,7 @@ func TestBootReclaimsHydrateLeftovers(t *testing.T) {
 // can stage the power loss, so the sync and removal seams record the order instead.
 func TestDisplacedSweepSyncsTheRenameBeforeRemoving(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	slot := filepath.Join(m.scratchDir, ".displaced-s1")
+	slot := filepath.Join(m.scratchDir, ".displaced-"+s1)
 	seedHydrateShapedTree(t, slot, 7)
 
 	var calls []string
@@ -1141,10 +1141,10 @@ func TestDisplacedSweepSyncsTheRenameBeforeRemoving(t *testing.T) {
 	}
 	t.Cleanup(func() { syncSweepScratchRoot, removeDisplacedTree = restoreSync, restoreRemove })
 
-	m.sweepDisplaced("s1", nil)
+	m.sweepDisplaced(s1, nil)
 
 	if len(calls) != 2 || calls[0] != "sync "+m.scratchDir ||
-		!strings.HasPrefix(calls[1], "remove "+filepath.Join(m.scratchDir, sweepingPrefix+"s1-")) {
+		!strings.HasPrefix(calls[1], "remove "+filepath.Join(m.scratchDir, sweepingPrefix+s1+"-")) {
 		t.Fatalf("sweep calls = %q, want the scratch root synced and then the renamed tree removed: "+
 			"a traversal the rename is not yet durable under can leave a half-deleted tree in the "+
 			"slot after a power loss (issue #2799)", calls)
@@ -1157,7 +1157,7 @@ func TestDisplacedSweepSyncsTheRenameBeforeRemoving(t *testing.T) {
 // for the next boot's ReclaimInterruptedDisplacedSweeps to take.
 func TestDisplacedSweepSyncFailureLeavesTheTreeWhole(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	slot := filepath.Join(m.scratchDir, ".displaced-s1")
+	slot := filepath.Join(m.scratchDir, ".displaced-"+s1)
 	seedHydrateShapedTree(t, slot, 7)
 
 	removed := false
@@ -1169,7 +1169,7 @@ func TestDisplacedSweepSyncFailureLeavesTheTreeWhole(t *testing.T) {
 	}
 	t.Cleanup(func() { syncSweepScratchRoot, removeDisplacedTree = restoreSync, restoreRemove })
 
-	m.sweepDisplaced("s1", nil)
+	m.sweepDisplaced(s1, nil)
 
 	if removed {
 		t.Fatal("the sweep removed the tree although the scratch root sync failed: its rename " +
@@ -1178,7 +1178,7 @@ func TestDisplacedSweepSyncFailureLeavesTheTreeWhole(t *testing.T) {
 	if _, err := os.Lstat(slot); !os.IsNotExist(err) {
 		t.Fatalf("the .displaced-s1 slot survived the sweep's rename (lstat err = %v), want it empty", err)
 	}
-	left, err := filepath.Glob(filepath.Join(m.scratchDir, sweepingPrefix+"s1-*"))
+	left, err := filepath.Glob(filepath.Join(m.scratchDir, sweepingPrefix+s1+"-*"))
 	if err != nil || len(left) != 1 {
 		t.Fatalf("renamed trees = %v (err %v), want exactly one for the boot reclaim to take", left, err)
 	}
@@ -1195,8 +1195,8 @@ func TestDisplacedSweepSyncFailureLeavesTheTreeWhole(t *testing.T) {
 func TestSnapshotFailureRetainsDisplacedTree(t *testing.T) {
 	tr := &fakeTransfer{err: errors.New("boom")}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
-	seedScratch(t, m, "s1")
-	displaced := seedDisplaced(t, m, "s1")
+	seedScratch(t, m, s1)
+	displaced := seedDisplaced(t, m, s1)
 
 	if res := m.Handle(context.Background(), snapshotCmd()); res.Success {
 		t.Fatalf("snapshot = %+v, want failure", res)
@@ -1214,22 +1214,22 @@ func TestSnapshotFailureRetainsDisplacedTree(t *testing.T) {
 // corrupt warning.
 func TestDisplacedTreeNotTreatedAsLiveScratch(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	displaced := seedDisplaced(t, m, "s1")
+	displaced := seedDisplaced(t, m, s1)
 
 	// A held-server scan never reports the displaced tree at all: neither under the
-	// assigned id "s1" nor under its on-disk ".displaced-s1" name.
+	// assigned id s1 nor under its on-disk ".displaced-" + s1 name.
 	for _, h := range ScanHeldServers(m.scratchDir, true, nil) {
-		if h.ServerID == "s1" || strings.HasPrefix(h.ServerID, ".displaced-") {
+		if h.ServerID == s1 || strings.HasPrefix(h.ServerID, ".displaced-") {
 			t.Fatalf("displaced tree reported as held server id %q (issue #910: must be skipped)", h.ServerID)
 		}
 	}
 	// The hydrate-leftover sweep for s1 must not remove the displaced tree (different
 	// prefix), and a displaced sweep for a DIFFERENT id must not touch s1's displaced.
-	m.sweepHydrateLeftovers("s1")
+	m.sweepHydrateLeftovers(s1)
 	if _, err := os.Stat(displaced); err != nil {
 		t.Fatalf("displaced tree removed by the s1 hydrate-leftover sweep: %v", err)
 	}
-	m.sweepDisplaced("s2", nil)
+	m.sweepDisplaced(s2, nil)
 	if _, err := os.Stat(displaced); err != nil {
 		t.Fatalf("displaced tree for s1 removed by an s2 displaced sweep (wrong id): %v", err)
 	}

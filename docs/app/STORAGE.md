@@ -768,7 +768,9 @@ then fix its permissions or remove it.
 
 **Boot detection.** At Worker boot, after the held-server scan,
 `WarnOrphanDisplacedTrees` logs a `WARN` for each `.displaced-<id>` tree whose
-server id is **not** in the held-server set. The tree it names is the
+server id is **not** in the held-server set. It skips a `.displaced-*` directory whose
+suffix is not a canonical server id (CONTROL_PLANE.md Section 5): the Worker never
+creates one, so it is not a recovery tree. The tree it names is the
 **first-retained** branch, which can be frozen at a displacement much older than the last
 world this Worker held — read its mtime, not its existence, when judging how current it
 is. A tree is "assigned" (not logged) if

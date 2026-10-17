@@ -266,8 +266,17 @@ func closeWithTest(t *testing.T, m *Manager) {
 	t.Cleanup(m.Close)
 }
 
+// The server ids the tests call s1, s2 and ghost (a server the Worker does not
+// know). A server id is a canonical UUID: the Worker refuses a command for any
+// other id (validateServerID, issue #3399).
+const (
+	s1    = "51000000-0000-4000-8000-000000000001"
+	s2    = "52000000-0000-4000-8000-000000000002"
+	ghost = "9e000000-0000-4000-8000-000000000000"
+)
+
 func startCmd() session.Command {
-	return session.Command{CommandID: "c1", ServerID: "s1", Kind: "StartServer", Driver: "container", MinecraftVersion: "1.21"}
+	return session.Command{CommandID: "c1", ServerID: s1, Kind: "StartServer", Driver: "container", MinecraftVersion: "1.21"}
 }
 
 // A StartServer launches the driver against the id's working dir under scratch —
@@ -277,7 +286,7 @@ func startCmd() session.Command {
 func TestStartServerLaunchesAgainstTheWorkingDir(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
-	wantDir := seedScratch(t, m, "s1")
+	wantDir := seedScratch(t, m, s1)
 
 	res := m.Handle(context.Background(), startCmd())
 	if !res.Success {
@@ -324,7 +333,7 @@ func TestStartRefusedWhenWorkingDirAbsent(t *testing.T) {
 	}
 	// The refusal must not leave the empty directory behind either: launchReserved's
 	// MkdirAll is exactly what would have made the boot look healthy.
-	if _, err := os.Stat(filepath.Join(m.scratchDir, "s1")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(m.scratchDir, s1)); !os.IsNotExist(err) {
 		t.Fatalf("working dir stat err = %v, want it to still be absent", err)
 	}
 	// The refusal releases the reservation it took, so the corrective launch — the
@@ -333,13 +342,13 @@ func TestStartRefusedWhenWorkingDirAbsent(t *testing.T) {
 	// from a follow-up command's code: a command that fails BEFORE reserve() would
 	// make the inference vacuous.
 	m.mu.Lock()
-	leaked := m.reserved["s1"]
+	leaked := m.reserved[s1]
 	m.mu.Unlock()
 	if leaked {
 		t.Fatal("reserved[s1] leaked after the working-set refusal: the corrective start would be refused BUSY")
 	}
 	// And the corrective start itself succeeds once the working set is there.
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if start := m.Handle(context.Background(), startCmd()); !start.Success {
 		t.Fatalf("start after the refusal = %+v, want success once the working set is present", start)
 	}
@@ -354,7 +363,7 @@ func TestStartRefusedWhenWorkingDirAbsent(t *testing.T) {
 func TestStartAcceptsMarkerOnlyWorkingDir(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
-	dir := filepath.Join(m.scratchDir, "s1")
+	dir := filepath.Join(m.scratchDir, s1)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -401,7 +410,7 @@ func TestStartRefusedWhenScratchEmptiedInPlace(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			d := &fakeDriver{}
 			m := newManager(t, d, nil)
-			dir := filepath.Join(m.scratchDir, "s1")
+			dir := filepath.Join(m.scratchDir, s1)
 			if err := os.MkdirAll(dir, 0o750); err != nil {
 				t.Fatal(err)
 			}
@@ -422,7 +431,7 @@ func TestStartRefusedWhenScratchEmptiedInPlace(t *testing.T) {
 				t.Fatalf("driver started %d times, want 0: the refusal must precede driver.Start", d.startCount())
 			}
 			m.mu.Lock()
-			leaked := m.reserved["s1"]
+			leaked := m.reserved[s1]
 			m.mu.Unlock()
 			if leaked {
 				t.Fatal("reserved[s1] leaked after the working-set refusal: the corrective start would be refused BUSY")
@@ -443,12 +452,12 @@ func TestRestartRefusedWhenWorkingSetDestroyed(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, &fakeControl{reply: "ok"}).WithTransfer(&fakeTransfer{})
 	startRunning(t, m)
-	dir := filepath.Join(m.scratchDir, "s1")
+	dir := filepath.Join(m.scratchDir, s1)
 	if err := os.RemoveAll(dir); err != nil {
 		t.Fatal(err)
 	}
 
-	res := m.Handle(context.Background(), session.Command{CommandID: "r", ServerID: "s1", Kind: "RestartServer"})
+	res := m.Handle(context.Background(), session.Command{CommandID: "r", ServerID: s1, Kind: "RestartServer"})
 
 	if res.Success {
 		t.Fatalf("RestartServer over a destroyed working set = %+v, want a refusal", res)
@@ -475,8 +484,8 @@ func TestRestartRefusedWhenWorkingSetDestroyed(t *testing.T) {
 	// (the leak shape of issue #1950). Read both maps directly rather than inferring
 	// them from a follow-up command.
 	m.mu.Lock()
-	_, tracked := m.instances["s1"]
-	leaked := m.reserved["s1"]
+	_, tracked := m.instances[s1]
+	leaked := m.reserved[s1]
 	m.mu.Unlock()
 	if tracked {
 		t.Fatal("instances[s1] still tracked after the refused relaunch: the server is down, not running")
@@ -486,7 +495,7 @@ func TestRestartRefusedWhenWorkingSetDestroyed(t *testing.T) {
 	}
 	// And the corrective launch — the reconciler's redispatch_start after the API's
 	// own hydrate — succeeds once the working set is back.
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if start := m.Handle(context.Background(), startCmd()); !start.Success {
 		t.Fatalf("start after the refused relaunch = %+v, want success once the working set is present", start)
 	}
@@ -512,7 +521,7 @@ func TestStartCarriesResourceAllocationToSpec(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			d := &fakeDriver{}
 			m := newManager(t, d, nil)
-			seedScratch(t, m, "s1")
+			seedScratch(t, m, s1)
 			cmd := startCmd()
 			cmd.MemoryLimitBytes = tc.memoryLimitBytes
 			cmd.CPUMillis = tc.cpuMillis
@@ -539,7 +548,7 @@ func TestStartDefaultLaunchModeIsJar(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
 
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("StartServer = %+v, want success", res)
 	}
@@ -555,7 +564,7 @@ func TestStartDefaultLaunchModeIsJar(t *testing.T) {
 func TestStartJarLaunchMode(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	cmd := startCmd()
 	cmd.LaunchMode = "jar"
 
@@ -575,7 +584,7 @@ func TestStartJarLaunchMode(t *testing.T) {
 func TestStartForgeLaunchMode(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	cmd := startCmd()
 	cmd.LaunchMode = "forge-argsfile"
 
@@ -612,7 +621,7 @@ func TestStartTwiceIsInvalidState(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
 
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	_ = m.Handle(context.Background(), startCmd())
 	res := m.Handle(context.Background(), startCmd())
 	if res.Success || res.ErrorCode != session.CommandErrorInvalidState {
@@ -634,7 +643,7 @@ func TestStartUnknownDriver(t *testing.T) {
 
 func TestStopUnknownServer(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	res := m.Handle(context.Background(), session.Command{CommandID: "c2", ServerID: "ghost", Kind: "StopServer"})
+	res := m.Handle(context.Background(), session.Command{CommandID: "c2", ServerID: ghost, Kind: "StopServer"})
 	if res.Success || res.ErrorCode != session.CommandErrorServerNotFound {
 		t.Fatalf("stop unknown = %+v, want SERVER_NOT_FOUND", res)
 	}
@@ -643,10 +652,10 @@ func TestStopUnknownServer(t *testing.T) {
 func TestStopServerGraceful(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	_ = m.Handle(context.Background(), startCmd())
 
-	res := m.Handle(context.Background(), session.Command{CommandID: "c3", ServerID: "s1", Kind: "StopServer"})
+	res := m.Handle(context.Background(), session.Command{CommandID: "c3", ServerID: s1, Kind: "StopServer"})
 	if !res.Success {
 		t.Fatalf("stop = %+v, want success", res)
 	}
@@ -663,13 +672,13 @@ func TestStopServerGracefulRCONSuccessSkipsFlush(t *testing.T) {
 	d := &fakeDriver{}
 	ctrl := &fakeControl{reply: "ok", seq: &seq}
 	m := newManager(t, d, ctrl)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
 	d.inst.seq = &seq
 
-	res := m.Handle(context.Background(), session.Command{CommandID: "c3", ServerID: "s1", Kind: "StopServer"})
+	res := m.Handle(context.Background(), session.Command{CommandID: "c3", ServerID: s1, Kind: "StopServer"})
 	if !res.Success {
 		t.Fatalf("stop = %+v, want success", res)
 	}
@@ -690,13 +699,13 @@ func TestStopServerGracefulRCONFailureFlushesBeforeTerminate(t *testing.T) {
 	d := &rconFailDriver{}
 	ctrl := &fakeControl{reply: "ok", seq: &seq}
 	m := newManager(t, d, ctrl)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
 	d.inst.seq = &seq
 
-	res := m.Handle(context.Background(), session.Command{CommandID: "c3", ServerID: "s1", Kind: "StopServer"})
+	res := m.Handle(context.Background(), session.Command{CommandID: "c3", ServerID: s1, Kind: "StopServer"})
 	if !res.Success {
 		t.Fatalf("stop = %+v, want success", res)
 	}
@@ -714,13 +723,13 @@ func TestStopServerForceSkipsFlush(t *testing.T) {
 	d := &fakeDriver{}
 	ctrl := &fakeControl{reply: "ok", seq: &seq}
 	m := newManager(t, d, ctrl)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
 	d.inst.seq = &seq
 
-	res := m.Handle(context.Background(), session.Command{CommandID: "c3", ServerID: "s1", Kind: "StopServer", Force: true})
+	res := m.Handle(context.Background(), session.Command{CommandID: "c3", ServerID: s1, Kind: "StopServer", Force: true})
 	if !res.Success {
 		t.Fatalf("force stop = %+v, want success", res)
 	}
@@ -744,13 +753,13 @@ func TestStopServerGracefulProceedsWhenSaveFails(t *testing.T) {
 	d := &rconFailDriver{}
 	ctrl := &fakeControl{reply: "ok", seq: &seq, failLines: map[string]error{"save-all": fmt.Errorf("rcon down")}}
 	m := newManager(t, d, ctrl)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
 	d.inst.seq = &seq
 
-	res := m.Handle(context.Background(), session.Command{CommandID: "c3", ServerID: "s1", Kind: "StopServer"})
+	res := m.Handle(context.Background(), session.Command{CommandID: "c3", ServerID: s1, Kind: "StopServer"})
 	if !res.Success {
 		t.Fatalf("stop = %+v, want success even when the save-all flush failed", res)
 	}
@@ -767,13 +776,13 @@ func TestStopServerGracefulProceedsWhenSaveOffFails(t *testing.T) {
 	d := &rconFailDriver{}
 	ctrl := &fakeControl{reply: "ok", seq: &seq, failLines: map[string]error{"save-off": fmt.Errorf("rcon down")}}
 	m := newManager(t, d, ctrl)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
 	d.inst.seq = &seq
 
-	res := m.Handle(context.Background(), session.Command{CommandID: "c3", ServerID: "s1", Kind: "StopServer"})
+	res := m.Handle(context.Background(), session.Command{CommandID: "c3", ServerID: s1, Kind: "StopServer"})
 	if !res.Success {
 		t.Fatalf("stop = %+v, want success even when save-off failed", res)
 	}
@@ -810,13 +819,13 @@ func TestStopServerGracefulRedialsAfterPoisonedSaveOff(t *testing.T) {
 		})
 	closeWithTest(t, m)
 	m.settlePollInterval = 0
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
 	d.inst.seq = &seq
 
-	res := m.Handle(context.Background(), session.Command{CommandID: "c3", ServerID: "s1", Kind: "StopServer"})
+	res := m.Handle(context.Background(), session.Command{CommandID: "c3", ServerID: s1, Kind: "StopServer"})
 	if !res.Success {
 		t.Fatalf("stop = %+v, want success even when save-off failed on poisoned connection", res)
 	}
@@ -860,13 +869,13 @@ func TestStopServerGracefulCompletesWhenBothRCONCommandsFail(t *testing.T) {
 		})
 	closeWithTest(t, m)
 	m.settlePollInterval = 0
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
 	d.inst.seq = &seq
 
-	res := m.Handle(context.Background(), session.Command{CommandID: "c3", ServerID: "s1", Kind: "StopServer"})
+	res := m.Handle(context.Background(), session.Command{CommandID: "c3", ServerID: s1, Kind: "StopServer"})
 	if !res.Success {
 		t.Fatalf("stop = %+v, want success even when both RCON commands failed", res)
 	}
@@ -882,10 +891,10 @@ func TestServerCommandForwardsOutput(t *testing.T) {
 	d := &fakeDriver{}
 	ctrl := &fakeControl{reply: "There are 0 players"}
 	m := newManager(t, d, ctrl)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	_ = m.Handle(context.Background(), startCmd())
 
-	res := m.Handle(context.Background(), session.Command{CommandID: "c4", ServerID: "s1", Kind: "ServerCommand", Line: "list"})
+	res := m.Handle(context.Background(), session.Command{CommandID: "c4", ServerID: s1, Kind: "ServerCommand", Line: "list"})
 	if !res.Success || res.Output != "There are 0 players" {
 		t.Fatalf("ServerCommand = %+v, want output", res)
 	}
@@ -898,11 +907,11 @@ func TestServerCommandForwardsOutput(t *testing.T) {
 func TestServerCommandForwardsALineAtTheRCONCap(t *testing.T) {
 	ctrl := &fakeControl{reply: "ok"}
 	m := newManager(t, &fakeDriver{}, ctrl)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	_ = m.Handle(context.Background(), startCmd())
 
 	line := strings.Repeat("a", MaxConsoleLineBytes)
-	res := m.Handle(context.Background(), session.Command{CommandID: "c4", ServerID: "s1", Kind: "ServerCommand", Line: line})
+	res := m.Handle(context.Background(), session.Command{CommandID: "c4", ServerID: s1, Kind: "ServerCommand", Line: line})
 	if !res.Success || res.Output != "ok" {
 		t.Fatalf("ServerCommand at the cap = %+v, want success", res)
 	}
@@ -923,10 +932,10 @@ func TestServerCommandRefusesALinePastTheRCONCap(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			ctrl := &fakeControl{reply: "ok"}
 			m := newManager(t, &fakeDriver{}, ctrl)
-			seedScratch(t, m, "s1")
+			seedScratch(t, m, s1)
 			_ = m.Handle(context.Background(), startCmd())
 
-			res := m.Handle(context.Background(), session.Command{CommandID: "c4", ServerID: "s1", Kind: "ServerCommand", Line: line})
+			res := m.Handle(context.Background(), session.Command{CommandID: "c4", ServerID: s1, Kind: "ServerCommand", Line: line})
 			if res.Success || res.ErrorCode != session.CommandErrorInternal {
 				t.Fatalf("ServerCommand past the cap = %+v, want an INTERNAL failure", res)
 			}
@@ -961,12 +970,12 @@ func TestOpenControlReceivesRunningServerDriver(t *testing.T) {
 	closeWithTest(t, m)
 
 	// Start a container server on the mixed-driver worker.
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("StartServer = %+v, want success", res)
 	}
 
-	res := m.Handle(context.Background(), session.Command{CommandID: "c6", ServerID: "s1", Kind: "ServerCommand", Line: "list"})
+	res := m.Handle(context.Background(), session.Command{CommandID: "c6", ServerID: s1, Kind: "ServerCommand", Line: "list"})
 	if !res.Success {
 		t.Fatalf("ServerCommand = %+v, want success", res)
 	}
@@ -1030,10 +1039,10 @@ func TestOpenControlReceivesTheServerMinecraftVersion(t *testing.T) {
 		name string
 		cmd  session.Command
 	}{
-		{"console command", session.Command{CommandID: "c", ServerID: "s1", Kind: "ServerCommand", Line: "list"}},
+		{"console command", session.Command{CommandID: "c", ServerID: s1, Kind: "ServerCommand", Line: "list"}},
 		{"snapshot quiesce", snapshotCmd()},
-		{"graceful stop flush", session.Command{CommandID: "c", ServerID: "s1", Kind: "StopServer"}},
-		{"restart flush", session.Command{CommandID: "c", ServerID: "s1", Kind: "RestartServer"}},
+		{"graceful stop flush", session.Command{CommandID: "c", ServerID: s1, Kind: "StopServer"}},
+		{"restart flush", session.Command{CommandID: "c", ServerID: s1, Kind: "RestartServer"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m, rec := newVersionRecordingManager(t, &rconFailDriver{})
@@ -1049,13 +1058,13 @@ func TestOpenControlReceivesTheServerMinecraftVersion(t *testing.T) {
 func TestStatusEventsAreForwarded(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	_ = m.Handle(context.Background(), startCmd())
 
 	// The manager forwards the instance's events, mapping to session.StatusEvent.
 	select {
 	case ev := <-m.Events():
-		if ev.ServerID != "s1" || ev.State != "running" {
+		if ev.ServerID != s1 || ev.State != "running" {
 			t.Fatalf("forwarded event = %+v, want s1 running", ev)
 		}
 	case <-time.After(2 * time.Second):
@@ -1068,12 +1077,12 @@ func TestStatusEventsAreForwarded(t *testing.T) {
 func TestCrashReasonIsForwarded(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	_ = m.Handle(context.Background(), startCmd())
 	<-m.Events() // the seeded running event
 
 	d.inst.events <- execution.StatusEvent{
-		ServerID: "s1", State: execution.StateCrashed, Detail: "boom",
+		ServerID: s1, State: execution.StateCrashed, Detail: "boom",
 		CrashReason: execution.CrashReasonForgeInstallJavaIncompatible,
 	}
 
@@ -1090,11 +1099,11 @@ func TestCrashReasonIsForwarded(t *testing.T) {
 func TestRestartStopsAndStarts(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	_ = m.Handle(context.Background(), startCmd())
 	first := d.inst
 
-	res := m.Handle(context.Background(), session.Command{CommandID: "c5", ServerID: "s1", Kind: "RestartServer"})
+	res := m.Handle(context.Background(), session.Command{CommandID: "c5", ServerID: s1, Kind: "RestartServer"})
 	if !res.Success {
 		t.Fatalf("restart = %+v, want success", res)
 	}
@@ -1114,13 +1123,13 @@ func TestRestartRCONSuccessSkipsFlush(t *testing.T) {
 	d := &fakeDriver{}
 	ctrl := &fakeControl{reply: "ok", seq: &seq}
 	m := newManager(t, d, ctrl)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
 	d.inst.seq = &seq
 
-	res := m.Handle(context.Background(), session.Command{CommandID: "c5", ServerID: "s1", Kind: "RestartServer"})
+	res := m.Handle(context.Background(), session.Command{CommandID: "c5", ServerID: s1, Kind: "RestartServer"})
 	if !res.Success {
 		t.Fatalf("restart = %+v, want success", res)
 	}
@@ -1138,13 +1147,13 @@ func TestRestartRCONFailureFlushesBeforeTerminate(t *testing.T) {
 	d := &rconFailDriver{}
 	ctrl := &fakeControl{reply: "ok", seq: &seq}
 	m := newManager(t, d, ctrl)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
 	d.inst.seq = &seq
 
-	res := m.Handle(context.Background(), session.Command{CommandID: "c5", ServerID: "s1", Kind: "RestartServer"})
+	res := m.Handle(context.Background(), session.Command{CommandID: "c5", ServerID: s1, Kind: "RestartServer"})
 	if !res.Success {
 		t.Fatalf("restart = %+v, want success", res)
 	}
@@ -1160,10 +1169,10 @@ func TestRestartRCONFailureFlushesBeforeTerminate(t *testing.T) {
 func TestRestartResultCarriesOriginalCorrelationID(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	_ = m.Handle(context.Background(), startCmd())
 
-	res := m.Handle(context.Background(), session.Command{CommandID: "restart-id", ServerID: "s1", Kind: "RestartServer"})
+	res := m.Handle(context.Background(), session.Command{CommandID: "restart-id", ServerID: s1, Kind: "RestartServer"})
 	if !res.Success {
 		t.Fatalf("restart = %+v, want success", res)
 	}
@@ -1178,7 +1187,7 @@ func TestStartPortConflictSurfacesCode(t *testing.T) {
 	d := &fakeDriver{startErr: fmt.Errorf("containerdriver: start: %w", execution.ErrPortConflict)}
 	m := newManager(t, d, nil)
 
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	res := m.Handle(context.Background(), startCmd())
 	if res.Success || res.ErrorCode != session.CommandErrorPortConflict {
 		t.Fatalf("start = %+v, want PORT_CONFLICT failure", res)
@@ -1191,7 +1200,7 @@ func TestStartImageMissingSurfacesCode(t *testing.T) {
 	d := &fakeDriver{startErr: fmt.Errorf("containerdriver: create: %w", execution.ErrImageMissing)}
 	m := newManager(t, d, nil)
 
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	res := m.Handle(context.Background(), startCmd())
 	if res.Success || res.ErrorCode != session.CommandErrorImageMissing {
 		t.Fatalf("start = %+v, want IMAGE_MISSING failure", res)
@@ -1203,7 +1212,7 @@ func TestStartUnclassifiedFailureIsInternal(t *testing.T) {
 	d := &fakeDriver{startErr: fmt.Errorf("daemon unreachable")}
 	m := newManager(t, d, nil)
 
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	res := m.Handle(context.Background(), startCmd())
 	if res.Success || res.ErrorCode != session.CommandErrorInternal {
 		t.Fatalf("start = %+v, want INTERNAL failure", res)
@@ -1212,7 +1221,7 @@ func TestStartUnclassifiedFailureIsInternal(t *testing.T) {
 
 func TestUnknownKindIsInternalError(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	res := m.Handle(context.Background(), session.Command{CommandID: "c6", ServerID: "s1", Kind: "Mystery"})
+	res := m.Handle(context.Background(), session.Command{CommandID: "c6", ServerID: s1, Kind: "Mystery"})
 	if res.Success || res.ErrorCode != session.CommandErrorInternal {
 		t.Fatalf("unknown kind = %+v, want INTERNAL", res)
 	}

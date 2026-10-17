@@ -57,7 +57,7 @@ func plantFifo(t *testing.T, path string) {
 // workingRoot creates and returns the working-set root of server s1.
 func workingRoot(t *testing.T, m *Manager) string {
 	t.Helper()
-	root := filepath.Join(m.scratchDir, "s1")
+	root := filepath.Join(m.scratchDir, s1)
 	if err := os.MkdirAll(root, 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestReadFileRefusesAFifoWithoutBlocking(t *testing.T) {
 		m := newManager(t, &fakeDriver{}, nil)
 		plantFifo(t, filepath.Join(workingRoot(t, m), "pipe"))
 
-		res := handleWithin(t, m, session.Command{CommandID: "c1", ServerID: "s1", Kind: "ReadFile", Path: "pipe"})
+		res := handleWithin(t, m, session.Command{CommandID: "c1", ServerID: s1, Kind: "ReadFile", Path: "pipe"})
 
 		assertDenied(t, res, session.FileAccessReasonUnspecified)
 	})
@@ -150,7 +150,7 @@ func TestReadFileRefusesAFifoWithoutBlocking(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		res := handleWithin(t, m, session.Command{CommandID: "c1", ServerID: "s1", Kind: "ReadFile", Path: "pipe"})
+		res := handleWithin(t, m, session.Command{CommandID: "c1", ServerID: s1, Kind: "ReadFile", Path: "pipe"})
 
 		assertDenied(t, res, session.FileAccessReasonUnspecified)
 	})
@@ -169,7 +169,7 @@ func TestReadFileRefusesASocket(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = l.Close() })
 
-	res := handleWithin(t, m, session.Command{CommandID: "c1", ServerID: "s1", Kind: "ReadFile", Path: "sock"})
+	res := handleWithin(t, m, session.Command{CommandID: "c1", ServerID: s1, Kind: "ReadFile", Path: "sock"})
 
 	assertDenied(t, res, session.FileAccessReasonUnspecified)
 }
@@ -210,7 +210,7 @@ func TestReadFileJudgesALeafSwappedInAfterResolution(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			m := newManager(t, &fakeDriver{}, nil)
-			leaf := writeWorkingFile(t, m, "s1", "config/app.yml", []byte("inside"))
+			leaf := writeWorkingFile(t, m, s1, "config/app.yml", []byte("inside"))
 			outside := filepath.Join(t.TempDir(), "secret")
 			if err := os.WriteFile(outside, []byte("top-secret"), 0o600); err != nil {
 				t.Fatal(err)
@@ -222,7 +222,7 @@ func TestReadFileJudgesALeafSwappedInAfterResolution(t *testing.T) {
 				tc.swapIn(t, leaf, outside)
 			})
 
-			res := handleWithin(t, m, session.Command{CommandID: "c1", ServerID: "s1", Kind: "ReadFile", Path: "config/app.yml"})
+			res := handleWithin(t, m, session.Command{CommandID: "c1", ServerID: s1, Kind: "ReadFile", Path: "config/app.yml"})
 
 			assertDenied(t, res, tc.want)
 		})
@@ -238,7 +238,7 @@ func TestReadFileJudgesALeafSwappedInAfterResolution(t *testing.T) {
 func TestReadFileOfAFileGrownPastTheCapStopsAtTheCap(t *testing.T) {
 	const grownTo = 128 << 20
 	m := newManager(t, &fakeDriver{}, nil)
-	leaf := writeWorkingFile(t, m, "s1", "latest.log", []byte("small"))
+	leaf := writeWorkingFile(t, m, s1, "latest.log", []byte("small"))
 	beforeReadingTheLeaf(t, func() {
 		// Sparse: the file reads as 128 MiB of zeros without occupying them.
 		if err := os.Truncate(leaf, grownTo); err != nil {
@@ -248,7 +248,7 @@ func TestReadFileOfAFileGrownPastTheCapStopsAtTheCap(t *testing.T) {
 
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
-	res := handleWithin(t, m, session.Command{CommandID: "c1", ServerID: "s1", Kind: "ReadFile", Path: "latest.log"})
+	res := handleWithin(t, m, session.Command{CommandID: "c1", ServerID: s1, Kind: "ReadFile", Path: "latest.log"})
 	runtime.ReadMemStats(&after)
 
 	assertDenied(t, res, session.FileAccessReasonPayloadTooLarge)
@@ -263,9 +263,9 @@ func TestReadFileOfAFileGrownPastTheCapStopsAtTheCap(t *testing.T) {
 func TestReadFileAtTheCapReturnsEveryByte(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	want := bytes.Repeat([]byte("0123456789abcdef"), MaxFileBytes/16)
-	writeWorkingFile(t, m, "s1", "big.bin", want)
+	writeWorkingFile(t, m, s1, "big.bin", want)
 
-	res := handleWithin(t, m, session.Command{CommandID: "c1", ServerID: "s1", Kind: "ReadFile", Path: "big.bin"})
+	res := handleWithin(t, m, session.Command{CommandID: "c1", ServerID: s1, Kind: "ReadFile", Path: "big.bin"})
 
 	if !res.Success || !bytes.Equal(res.FileContent, want) {
 		t.Fatalf("ReadFile at the cap: success=%v code=%v, %d bytes; want all %d", res.Success, res.ErrorCode, len(res.FileContent), len(want))
@@ -320,8 +320,8 @@ func editPlants() []editPlant {
 func editOverAPlant(t *testing.T, m *Manager, p editPlant, plantName string) {
 	t.Helper()
 	root := workingRoot(t, m)
-	target := writeWorkingFile(t, m, "s1", "server.properties", []byte("motd=old"))
-	victim := writeWorkingFile(t, m, "s1", "ops.json", []byte("[victim]"))
+	target := writeWorkingFile(t, m, s1, "server.properties", []byte("motd=old"))
+	victim := writeWorkingFile(t, m, s1, "ops.json", []byte("[victim]"))
 	outside := filepath.Join(t.TempDir(), "outside")
 	if err := os.WriteFile(outside, []byte("outside"), 0o600); err != nil {
 		t.Fatal(err)
@@ -332,7 +332,7 @@ func editOverAPlant(t *testing.T, m *Manager, p editPlant, plantName string) {
 	chowned := asRootWorker(t)
 
 	res := handleWithin(t, m, session.Command{
-		CommandID: "c1", ServerID: "s1", Kind: "EditFile",
+		CommandID: "c1", ServerID: s1, Kind: "EditFile",
 		Path: "server.properties", Content: []byte("motd=new"),
 	})
 
@@ -413,7 +413,7 @@ func stagingModes(t *testing.T, test func(t *testing.T)) {
 func TestEditFileRetriesUnderAnotherNameWhenItsStagedNameIsTaken(t *testing.T) {
 	stagingModes(t, func(t *testing.T) {
 		m := newManager(t, &fakeDriver{}, nil)
-		target := writeWorkingFile(t, m, "s1", "server.properties", []byte("motd=old"))
+		target := writeWorkingFile(t, m, s1, "server.properties", []byte("motd=old"))
 		taken := filepath.Join(m.scratchDir, ".edit-taken")
 		if err := os.WriteFile(taken, []byte("a leftover"), 0o600); err != nil {
 			t.Fatal(err)
@@ -421,7 +421,7 @@ func TestEditFileRetriesUnderAnotherNameWhenItsStagedNameIsTaken(t *testing.T) {
 		drawn := editTempSuffixes(t, "taken", "free")
 
 		res := handleWithin(t, m, session.Command{
-			CommandID: "c1", ServerID: "s1", Kind: "EditFile",
+			CommandID: "c1", ServerID: s1, Kind: "EditFile",
 			Path: "server.properties", Content: []byte("motd=new"),
 		})
 
@@ -445,7 +445,7 @@ func TestEditFileRetriesUnderAnotherNameWhenItsStagedNameIsTaken(t *testing.T) {
 func TestEditFileGivesUpWhenEveryStagedNameIsTaken(t *testing.T) {
 	stagingModes(t, func(t *testing.T) {
 		m := newManager(t, &fakeDriver{}, nil)
-		target := writeWorkingFile(t, m, "s1", "server.properties", []byte("motd=old"))
+		target := writeWorkingFile(t, m, s1, "server.properties", []byte("motd=old"))
 		taken := filepath.Join(m.scratchDir, ".edit-taken")
 		if err := os.WriteFile(taken, []byte("a leftover"), 0o600); err != nil {
 			t.Fatal(err)
@@ -453,7 +453,7 @@ func TestEditFileGivesUpWhenEveryStagedNameIsTaken(t *testing.T) {
 		drawn := editTempSuffixes(t, "taken")
 
 		res := handleWithin(t, m, session.Command{
-			CommandID: "c1", ServerID: "s1", Kind: "EditFile",
+			CommandID: "c1", ServerID: s1, Kind: "EditFile",
 			Path: "server.properties", Content: []byte("motd=new"),
 		})
 
@@ -482,7 +482,7 @@ func TestEditFileRemovesItsTempWhenItFails(t *testing.T) {
 		fchownFd = func(int, int, int) error { return unix.EPERM }
 
 		res := handleWithin(t, m, session.Command{
-			CommandID: "c1", ServerID: "s1", Kind: "EditFile", Path: "server.properties", Content: []byte("motd=new"),
+			CommandID: "c1", ServerID: s1, Kind: "EditFile", Path: "server.properties", Content: []byte("motd=new"),
 		})
 
 		if res.Success {
@@ -501,7 +501,7 @@ func TestEditFileStagesItsFileOutsideTheWorkingSet(t *testing.T) {
 	stagingModes(t, func(t *testing.T) {
 		m := newManager(t, &fakeDriver{}, nil)
 		root := workingRoot(t, m)
-		writeWorkingFile(t, m, "s1", "server.properties", []byte("motd=old"))
+		writeWorkingFile(t, m, s1, "server.properties", []byte("motd=old"))
 		chowned := asRootWorker(t)
 		recordOwner := fchownFd
 		var staged []string
@@ -521,7 +521,7 @@ func TestEditFileStagesItsFileOutsideTheWorkingSet(t *testing.T) {
 		}
 
 		res := handleWithin(t, m, session.Command{
-			CommandID: "c1", ServerID: "s1", Kind: "EditFile", Path: "server.properties", Content: []byte("motd=new"),
+			CommandID: "c1", ServerID: s1, Kind: "EditFile", Path: "server.properties", Content: []byte("motd=new"),
 		})
 
 		if !res.Success {
@@ -541,13 +541,13 @@ func TestEditFileStagesItsFileOutsideTheWorkingSet(t *testing.T) {
 // them, the edit fails without writing anything.
 func TestEditFileFailsWhenTheUnnamedFileCannotBeCreated(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	target := writeWorkingFile(t, m, "s1", "server.properties", []byte("motd=old"))
+	target := writeWorkingFile(t, m, s1, "server.properties", []byte("motd=old"))
 	orig := editOpenUnnamed
 	t.Cleanup(func() { editOpenUnnamed = orig })
 	editOpenUnnamed = func(int) (int, error) { return -1, unix.EACCES }
 
 	res := handleWithin(t, m, session.Command{
-		CommandID: "c1", ServerID: "s1", Kind: "EditFile", Path: "server.properties", Content: []byte("motd=new"),
+		CommandID: "c1", ServerID: s1, Kind: "EditFile", Path: "server.properties", Content: []byte("motd=new"),
 	})
 
 	if res.Success || res.ErrorCode != session.CommandErrorInternal {
@@ -577,7 +577,7 @@ func dirNames(t *testing.T, dir string) []string {
 func TestEditFileRefusesADirectorySwappedInAtTheTarget(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	root := workingRoot(t, m)
-	target := writeWorkingFile(t, m, "s1", "server.properties", []byte("motd=old"))
+	target := writeWorkingFile(t, m, s1, "server.properties", []byte("motd=old"))
 	// The temp name is drawn after the target was checked and before the rename.
 	orig := editTempSuffix
 	t.Cleanup(func() { editTempSuffix = orig })
@@ -592,7 +592,7 @@ func TestEditFileRefusesADirectorySwappedInAtTheTarget(t *testing.T) {
 	}
 
 	res := handleWithin(t, m, session.Command{
-		CommandID: "c1", ServerID: "s1", Kind: "EditFile", Path: "server.properties", Content: []byte("motd=new"),
+		CommandID: "c1", ServerID: s1, Kind: "EditFile", Path: "server.properties", Content: []byte("motd=new"),
 	})
 
 	assertDenied(t, res, session.FileAccessReasonIsADirectory)
@@ -612,7 +612,7 @@ func TestEditFileReplacesTheTargetNameWithoutOpeningIt(t *testing.T) {
 		plantFifo(t, target)
 
 		res := handleWithin(t, m, session.Command{
-			CommandID: "c1", ServerID: "s1", Kind: "EditFile", Path: "server.properties", Content: []byte("motd=new"),
+			CommandID: "c1", ServerID: s1, Kind: "EditFile", Path: "server.properties", Content: []byte("motd=new"),
 		})
 
 		if !res.Success {
@@ -627,14 +627,14 @@ func TestEditFileReplacesTheTargetNameWithoutOpeningIt(t *testing.T) {
 	})
 	t.Run("hard-linked file", func(t *testing.T) {
 		m := newManager(t, &fakeDriver{}, nil)
-		target := writeWorkingFile(t, m, "s1", "server.properties", []byte("motd=old"))
+		target := writeWorkingFile(t, m, s1, "server.properties", []byte("motd=old"))
 		other := filepath.Join(filepath.Dir(target), "other-name")
 		if err := os.Link(target, other); err != nil {
 			t.Fatal(err)
 		}
 
 		res := handleWithin(t, m, session.Command{
-			CommandID: "c1", ServerID: "s1", Kind: "EditFile", Path: "server.properties", Content: []byte("motd=new"),
+			CommandID: "c1", ServerID: s1, Kind: "EditFile", Path: "server.properties", Content: []byte("motd=new"),
 		})
 
 		if !res.Success {
@@ -670,7 +670,7 @@ func TestEditFileResultIsUnchangedForALegitimateEdit(t *testing.T) {
 			full := filepath.Join(root, filepath.FromSlash(tc.path))
 			var oldIno uint64
 			if tc.existing {
-				writeWorkingFile(t, m, "s1", tc.path, []byte("motd=old"))
+				writeWorkingFile(t, m, s1, tc.path, []byte("motd=old"))
 				if err := os.Chmod(full, 0o600); err != nil {
 					t.Fatal(err)
 				}
@@ -678,7 +678,7 @@ func TestEditFileResultIsUnchangedForALegitimateEdit(t *testing.T) {
 			}
 
 			res := handleWithin(t, m, session.Command{
-				CommandID: "c1", ServerID: "s1", Kind: "EditFile", Path: tc.path, Content: content,
+				CommandID: "c1", ServerID: s1, Kind: "EditFile", Path: tc.path, Content: content,
 			})
 
 			if want := (session.CommandResult{CommandID: "c1", Success: true}); res.CommandID != want.CommandID ||
@@ -702,7 +702,7 @@ func TestEditFileResultIsUnchangedForALegitimateEdit(t *testing.T) {
 			}
 			assertNoEditTemp(t, m, filepath.Dir(full), "")
 
-			read := handleWithin(t, m, session.Command{CommandID: "c2", ServerID: "s1", Kind: "ReadFile", Path: tc.path})
+			read := handleWithin(t, m, session.Command{CommandID: "c2", ServerID: s1, Kind: "ReadFile", Path: tc.path})
 			if !read.Success || !bytes.Equal(read.FileContent, content) {
 				t.Fatalf("ReadFile after the edit = %+v, want the edit back", read)
 			}

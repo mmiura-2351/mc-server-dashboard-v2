@@ -106,21 +106,21 @@ func TestOrphanConvergesWithoutOperatorAction(t *testing.T) {
 	d := &orphanDriver{stopAfter: 1} // stop #1 fails; the converger's retry succeeds
 	m := newManager(t, d, nil)
 	shrinkOrphanConverger(m)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
 
-	first := m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+	first := m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"})
 	if first.Success {
 		t.Fatalf("first stop = %+v, want failure (driver could not confirm termination)", first)
 	}
 
 	// No further command is issued: every step below must be the manager's own work.
 	waitFor(t, func() bool { return d.inst.stopCount() >= 2 })
-	awaitStatus(t, m, "s1", "stopped")
+	awaitStatus(t, m, s1, "stopped")
 	waitFor(t, func() bool {
-		res := m.Handle(context.Background(), session.Command{CommandID: "probe", ServerID: "s1", Kind: "StopServer"})
+		res := m.Handle(context.Background(), session.Command{CommandID: "probe", ServerID: s1, Kind: "StopServer"})
 		return res.ErrorCode == session.CommandErrorServerNotFound
 	})
 }
@@ -136,21 +136,21 @@ func TestOrphanConvergesAcrossAFailedRetry(t *testing.T) {
 	d := &orphanDriver{stopAfter: 2}
 	m := newManager(t, d, nil)
 	shrinkOrphanConverger(m)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
 
-	first := m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+	first := m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"})
 	if first.Success {
 		t.Fatalf("first stop = %+v, want failure", first)
 	}
 
 	// No further command is issued: both retries below are the manager's own work.
 	waitFor(t, func() bool { return d.inst.stopCount() >= 3 })
-	awaitStatus(t, m, "s1", "stopped")
+	awaitStatus(t, m, s1, "stopped")
 	waitFor(t, func() bool {
-		res := m.Handle(context.Background(), session.Command{CommandID: "probe", ServerID: "s1", Kind: "StopServer"})
+		res := m.Handle(context.Background(), session.Command{CommandID: "probe", ServerID: s1, Kind: "StopServer"})
 		return res.ErrorCode == session.CommandErrorServerNotFound
 	})
 }
@@ -170,25 +170,25 @@ func TestOrphanConvergesAcrossAFailedRetry(t *testing.T) {
 // alone.
 func TestTakeOrphanReserveRefusesAnInstanceThatIsNoLongerTheOrphan(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	recorded := newFakeInstance("s1")
-	replaced := newFakeInstance("s1")
-	m.orphans["s1"] = orphanEntry{inst: recorded, driver: "container"}
-	m.instances["s1"] = replaced
+	recorded := newFakeInstance(s1)
+	replaced := newFakeInstance(s1)
+	m.orphans[s1] = orphanEntry{inst: recorded, driver: "container"}
+	m.instances[s1] = replaced
 
-	driver, _, outcome := m.takeOrphanReserve("s1", newFakeInstance("s1"))
+	driver, _, outcome := m.takeOrphanReserve(s1, newFakeInstance(s1))
 
 	if outcome != takeNotFound {
 		t.Fatalf("takeOrphanReserve with a stale instance = %v (driver %q), want takeNotFound", outcome, driver)
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.reserved["s1"] {
+	if m.reserved[s1] {
 		t.Fatal("a refused take claimed the reservation; the id is now wedged against every lifecycle command")
 	}
-	if m.instances["s1"] != replaced {
+	if m.instances[s1] != replaced {
 		t.Fatal("takeOrphanReserve evicted the registered instance: it must never fall through to m.instances")
 	}
-	if e := m.orphans["s1"]; e.inst != recorded {
+	if e := m.orphans[s1]; e.inst != recorded {
 		t.Fatal("a refused take consumed the orphan record")
 	}
 }
@@ -202,19 +202,19 @@ func TestFailedStopClosesBedrockTunnel(t *testing.T) {
 	bt := &fakeBedrockTunneler{}
 	m := newManager(t, d, nil).WithBedrockTunneler(bt)
 	shrinkOrphanConverger(m)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
 
-	first := m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+	first := m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"})
 	if first.Success {
 		t.Fatalf("first stop = %+v, want failure", first)
 	}
 	if got := bt.closeCalls(); len(got) == 0 {
 		t.Fatal("failed stop did not close the Bedrock tunnel; players can still reach the instance")
-	} else if got[0] != "s1" {
-		t.Fatalf("Bedrock tunnel closed for %q, want %q", got[0], "s1")
+	} else if got[0] != s1 {
+		t.Fatalf("Bedrock tunnel closed for %q, want %q", got[0], s1)
 	}
 
 	retireOrphan(t, m, d.inst.fakeInstance)
@@ -249,15 +249,15 @@ func TestUnknownEmittedWhileDaemonUnreachable(t *testing.T) {
 	d := &orphanDriver{stopAfter: 1000}
 	m := newManager(t, d, nil)
 	shrinkOrphanConverger(m)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
 	// The daemon goes unreachable: the probe can give no honest answer at all.
-	m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+	m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"})
 	d.inst.setAlive(false, errors.New("driver: daemon unreachable"))
 
-	awaitStatus(t, m, "s1", "unknown")
+	awaitStatus(t, m, s1, "unknown")
 
 	// Probing continues past the report.
 	before := d.inst.probeCount()
@@ -282,17 +282,17 @@ func TestUnknownEmittedWhileDaemonUnreachable(t *testing.T) {
 func TestStrandedOrphanRecordIsRetired(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	shrinkOrphanConverger(m)
-	inst := newFakeInstance("s1")
+	inst := newFakeInstance(s1)
 	// Terminal: the instance already exited, its event channel is closed, and its
 	// pump has already run forgetOrphanIf — so nothing else will clear the record.
 	close(inst.events)
 	inst.setAlive(false, nil)
 
-	m.recordOrphan("s1", inst, "container", "1.21")
+	m.recordOrphan(s1, inst, "container", "1.21")
 
-	awaitStatus(t, m, "s1", "stopped")
+	awaitStatus(t, m, s1, "stopped")
 	waitFor(t, func() bool {
-		res := m.Handle(context.Background(), session.Command{CommandID: "probe", ServerID: "s1", Kind: "StopServer"})
+		res := m.Handle(context.Background(), session.Command{CommandID: "probe", ServerID: s1, Kind: "StopServer"})
 		return res.ErrorCode == session.CommandErrorServerNotFound
 	})
 }
@@ -305,18 +305,18 @@ func TestConvergerAndOperatorStopDoNotDoubleDriveOrphan(t *testing.T) {
 	d := &gatedOrphanDriver{}
 	m := newManager(t, d, nil)
 	shrinkOrphanConverger(m)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
-	if first := m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"}); first.Success {
+	if first := m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"}); first.Success {
 		t.Fatalf("first stop = %+v, want failure", first)
 	}
 
 	// The converger's retry is now blocked inside the driver, holding the id.
 	awaitEnter(t, d.inst.stopEntered)
 
-	res := m.Handle(context.Background(), session.Command{CommandID: "stop2", ServerID: "s1", Kind: "StopServer"})
+	res := m.Handle(context.Background(), session.Command{CommandID: "stop2", ServerID: s1, Kind: "StopServer"})
 	if res.Success || res.ErrorCode != session.CommandErrorBusy {
 		t.Fatalf("operator stop during a converger retry = %+v, want BUSY", res)
 	}
@@ -325,7 +325,7 @@ func TestConvergerAndOperatorStopDoNotDoubleDriveOrphan(t *testing.T) {
 	}
 
 	close(d.inst.stopRelease)
-	awaitStatus(t, m, "s1", "stopped")
+	awaitStatus(t, m, s1, "stopped")
 }
 
 // The mirror case: while an OPERATOR stop holds the id, the converger skips the
@@ -343,13 +343,13 @@ func TestConvergerSkipsRoundWhileOperatorStopInFlight(t *testing.T) {
 		}).WithMetrics(clk, time.Hour)
 	closeWithTest(t, m)
 
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
 	// Stop #1 fails and records the orphan, spawning the converger. Both it and the
 	// metrics pump park on the fake clock; nothing advances until this test ticks.
-	if first := m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"}); first.Success {
+	if first := m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"}); first.Success {
 		t.Fatalf("first stop = %+v, want failure", first)
 	}
 	waitFor(t, func() bool { return clk.registered() >= 2 })
@@ -357,7 +357,7 @@ func TestConvergerSkipsRoundWhileOperatorStopInFlight(t *testing.T) {
 	// An operator retry now holds the id, blocked inside the driver.
 	stopped := make(chan session.CommandResult, 1)
 	go func() {
-		stopped <- m.Handle(context.Background(), session.Command{CommandID: "stop2", ServerID: "s1", Kind: "StopServer"})
+		stopped <- m.Handle(context.Background(), session.Command{CommandID: "stop2", ServerID: s1, Kind: "StopServer"})
 	}()
 	awaitEnter(t, d.inst.stopEntered)
 
@@ -383,10 +383,10 @@ func TestConvergerSkipsRoundWhileOperatorStopInFlight(t *testing.T) {
 func TestFailedStopThenRetryTerminatesOrphan(t *testing.T) {
 	d := &orphanDriver{stopAfter: 1} // first Stop fails, second succeeds
 	m := newManager(t, d, nil)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	_ = m.Handle(context.Background(), startCmd())
 
-	first := m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+	first := m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"})
 	if first.Success {
 		t.Fatalf("first stop = %+v, want failure (driver could not confirm termination)", first)
 	}
@@ -394,7 +394,7 @@ func TestFailedStopThenRetryTerminatesOrphan(t *testing.T) {
 		t.Fatalf("first stop error = %v, want a stop-failure code, not SERVER_NOT_FOUND", first.ErrorCode)
 	}
 
-	retry := m.Handle(context.Background(), session.Command{CommandID: "stop2", ServerID: "s1", Kind: "StopServer"})
+	retry := m.Handle(context.Background(), session.Command{CommandID: "stop2", ServerID: s1, Kind: "StopServer"})
 	if !retry.Success {
 		t.Fatalf("retry stop = %+v, want success once termination is confirmed", retry)
 	}
@@ -409,11 +409,11 @@ func TestFailedStopThenRetryTerminatesOrphan(t *testing.T) {
 func TestRetryStopStillFailingKeepsStopFailure(t *testing.T) {
 	d := &orphanDriver{stopAfter: 2} // both the initial stop and the retry fail
 	m := newManager(t, d, nil)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	_ = m.Handle(context.Background(), startCmd())
 
-	_ = m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
-	retry := m.Handle(context.Background(), session.Command{CommandID: "stop2", ServerID: "s1", Kind: "StopServer"})
+	_ = m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"})
+	retry := m.Handle(context.Background(), session.Command{CommandID: "stop2", ServerID: s1, Kind: "StopServer"})
 	if retry.Success {
 		t.Fatalf("retry stop = %+v, want failure", retry)
 	}
@@ -426,7 +426,7 @@ func TestRetryStopStillFailingKeepsStopFailure(t *testing.T) {
 // reserved for ids the worker never tracked, not for failed-stop orphans.
 func TestStopUnknownStillServerNotFound(t *testing.T) {
 	m := newManager(t, &orphanDriver{}, nil)
-	res := m.Handle(context.Background(), session.Command{CommandID: "c", ServerID: "ghost", Kind: "StopServer"})
+	res := m.Handle(context.Background(), session.Command{CommandID: "c", ServerID: ghost, Kind: "StopServer"})
 	if res.Success || res.ErrorCode != session.CommandErrorServerNotFound {
 		t.Fatalf("stop unknown = %+v, want SERVER_NOT_FOUND", res)
 	}
@@ -437,14 +437,14 @@ func TestStopUnknownStillServerNotFound(t *testing.T) {
 func TestOrphanClearedAfterSuccessfulRetry(t *testing.T) {
 	d := &orphanDriver{stopAfter: 1}
 	m := newManager(t, d, nil)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	_ = m.Handle(context.Background(), startCmd())
-	_ = m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
-	if retry := m.Handle(context.Background(), session.Command{CommandID: "stop2", ServerID: "s1", Kind: "StopServer"}); !retry.Success {
+	_ = m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"})
+	if retry := m.Handle(context.Background(), session.Command{CommandID: "stop2", ServerID: s1, Kind: "StopServer"}); !retry.Success {
 		t.Fatalf("retry stop = %+v, want success", retry)
 	}
 
-	again := m.Handle(context.Background(), session.Command{CommandID: "stop3", ServerID: "s1", Kind: "StopServer"})
+	again := m.Handle(context.Background(), session.Command{CommandID: "stop3", ServerID: s1, Kind: "StopServer"})
 	if again.Success || again.ErrorCode != session.CommandErrorServerNotFound {
 		t.Fatalf("stop after cleared orphan = %+v, want SERVER_NOT_FOUND", again)
 	}
@@ -462,9 +462,9 @@ func TestOrphanClearedAfterSuccessfulRetry(t *testing.T) {
 func TestStartOverOrphanRejected(t *testing.T) {
 	d := &orphanDriver{stopAfter: 1}
 	m := newManager(t, d, nil)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	_ = m.Handle(context.Background(), startCmd())
-	_ = m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+	_ = m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"})
 
 	res := m.Handle(context.Background(), startCmd())
 	if res.Success || res.ErrorCode != session.CommandErrorBusy {
@@ -483,11 +483,11 @@ func TestStartOverOrphanRejected(t *testing.T) {
 func TestHydrateOverOrphanRejected(t *testing.T) {
 	d := &orphanDriver{stopAfter: 1}
 	m := newManager(t, d, nil).WithTransfer(&fakeTransfer{})
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	_ = m.Handle(context.Background(), startCmd())
-	_ = m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+	_ = m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"})
 
-	res := m.Handle(context.Background(), session.Command{CommandID: "h", ServerID: "s1", Kind: "HydrateTrigger"})
+	res := m.Handle(context.Background(), session.Command{CommandID: "h", ServerID: s1, Kind: "HydrateTrigger"})
 	if res.Success || res.ErrorCode != session.CommandErrorBusy {
 		t.Fatalf("hydrate over orphan = %+v, want BUSY", res)
 	}
@@ -501,11 +501,11 @@ func TestHydrateOverOrphanRejected(t *testing.T) {
 func TestRestartOverOrphanRejected(t *testing.T) {
 	d := &orphanDriver{stopAfter: 1}
 	m := newManager(t, d, nil)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	_ = m.Handle(context.Background(), startCmd())
-	_ = m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+	_ = m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"})
 
-	res := m.Handle(context.Background(), session.Command{CommandID: "r", ServerID: "s1", Kind: "RestartServer"})
+	res := m.Handle(context.Background(), session.Command{CommandID: "r", ServerID: s1, Kind: "RestartServer"})
 	if res.Success || res.ErrorCode != session.CommandErrorInvalidState {
 		t.Fatalf("restart over orphan = %+v, want INVALID_STATE", res)
 	}
@@ -514,7 +514,7 @@ func TestRestartOverOrphanRejected(t *testing.T) {
 	}
 	// The refusal must not have consumed the orphan (taken it, or left the id
 	// reserved): the stop-retry path is still the only way the orphan is resolved.
-	if retry := m.Handle(context.Background(), session.Command{CommandID: "stop2", ServerID: "s1", Kind: "StopServer"}); !retry.Success {
+	if retry := m.Handle(context.Background(), session.Command{CommandID: "stop2", ServerID: s1, Kind: "StopServer"}); !retry.Success {
 		t.Fatalf("retry stop after refused restart = %+v, want success", retry)
 	}
 }
@@ -525,11 +525,11 @@ func TestRestartOverOrphanRejected(t *testing.T) {
 func TestServerCommandOverOrphanRejected(t *testing.T) {
 	d := &orphanDriver{stopAfter: 1}
 	m := newManager(t, d, &fakeControl{reply: "ok"})
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	_ = m.Handle(context.Background(), startCmd())
-	_ = m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+	_ = m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"})
 
-	res := m.Handle(context.Background(), session.Command{CommandID: "c", ServerID: "s1", Kind: "ServerCommand", Line: "list"})
+	res := m.Handle(context.Background(), session.Command{CommandID: "c", ServerID: s1, Kind: "ServerCommand", Line: "list"})
 	if res.Success || res.ErrorCode != session.CommandErrorInvalidState {
 		t.Fatalf("server command over orphan = %+v, want INVALID_STATE", res)
 	}
@@ -543,11 +543,11 @@ func TestServerCommandOverOrphanRejected(t *testing.T) {
 func TestTunnelDialOverOrphanRejected(t *testing.T) {
 	d := &orphanDriver{stopAfter: 1}
 	m := newManager(t, d, nil) // no tunnel dialer: the orphan refusal precedes it
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	_ = m.Handle(context.Background(), startCmd())
-	_ = m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+	_ = m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"})
 
-	res := m.Handle(context.Background(), session.Command{CommandID: "t", ServerID: "s1", Kind: "TunnelDial"})
+	res := m.Handle(context.Background(), session.Command{CommandID: "t", ServerID: s1, Kind: "TunnelDial"})
 	if res.Success || res.ErrorCode != session.CommandErrorInvalidState {
 		t.Fatalf("tunnel dial over orphan = %+v, want INVALID_STATE", res)
 	}
@@ -566,11 +566,11 @@ func TestTunnelDialOverOrphanRejected(t *testing.T) {
 func TestOpenBedrockTunnelOverOrphanRejected(t *testing.T) {
 	d := &orphanDriver{stopAfter: 1}
 	m := newManager(t, d, nil) // no bedrock tunneler: the orphan refusal precedes it
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	_ = m.Handle(context.Background(), startCmd())
-	_ = m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+	_ = m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"})
 
-	res := m.Handle(context.Background(), session.Command{CommandID: "b", ServerID: "s1", Kind: "OpenBedrockTunnel"})
+	res := m.Handle(context.Background(), session.Command{CommandID: "b", ServerID: s1, Kind: "OpenBedrockTunnel"})
 	if res.Success || res.ErrorCode != session.CommandErrorInvalidState {
 		t.Fatalf("open bedrock tunnel over orphan = %+v, want INVALID_STATE", res)
 	}
@@ -581,10 +581,10 @@ func TestOpenBedrockTunnelOverOrphanRejected(t *testing.T) {
 func TestRestartAndCommandForUnknownIDStillServerNotFound(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, &fakeControl{reply: "ok"})
 	for _, cmd := range []session.Command{
-		{CommandID: "r", ServerID: "ghost", Kind: "RestartServer"},
-		{CommandID: "c", ServerID: "ghost", Kind: "ServerCommand", Line: "list"},
-		{CommandID: "t", ServerID: "ghost", Kind: "TunnelDial"},
-		{CommandID: "b", ServerID: "ghost", Kind: "OpenBedrockTunnel"},
+		{CommandID: "r", ServerID: ghost, Kind: "RestartServer"},
+		{CommandID: "c", ServerID: ghost, Kind: "ServerCommand", Line: "list"},
+		{CommandID: "t", ServerID: ghost, Kind: "TunnelDial"},
+		{CommandID: "b", ServerID: ghost, Kind: "OpenBedrockTunnel"},
 	} {
 		res := m.Handle(context.Background(), cmd)
 		if res.Success || res.ErrorCode != session.CommandErrorServerNotFound {
@@ -600,9 +600,9 @@ func TestFailedStopLogsOrphanRecord(t *testing.T) {
 	h := &capturingSlogHandler{}
 	d := &orphanDriver{stopAfter: 1}
 	m := newManager(t, d, nil).WithLogger(slog.New(h))
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	_ = m.Handle(context.Background(), startCmd())
-	_ = m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+	_ = m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"})
 
 	var found bool
 	for _, r := range h.records {
@@ -610,7 +610,7 @@ func TestFailedStopLogsOrphanRecord(t *testing.T) {
 			continue
 		}
 		r.Attrs(func(a slog.Attr) bool {
-			if a.Key == "server_id" && a.Value.String() == "s1" {
+			if a.Key == "server_id" && a.Value.String() == s1 {
 				found = true
 			}
 			return true
@@ -628,13 +628,13 @@ func TestOrphanClearedWhenInstanceExitsOnItsOwn(t *testing.T) {
 	// the instance exiting on its own clears the orphan, via the pump.
 	d := &orphanDriver{stopAfter: 1000}
 	m := newManager(t, d, nil)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	_ = m.Handle(context.Background(), startCmd())
-	_ = m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+	_ = m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"})
 
 	// The lingering process finally dies: the instance emits a terminal event and
 	// closes its channel, which the pump observes.
-	d.inst.events <- execution.StatusEvent{ServerID: "s1", State: execution.StateStopped}
+	d.inst.events <- execution.StatusEvent{ServerID: s1, State: execution.StateStopped}
 	close(d.inst.events)
 
 	// Anchor on the pump's own progress rather than a fixed sleep: the pump
@@ -650,7 +650,7 @@ drain:
 	for {
 		select {
 		case ev := <-m.Events():
-			if ev.ServerID == "s1" && ev.State == execution.StateStopped.String() {
+			if ev.ServerID == s1 && ev.State == execution.StateStopped.String() {
 				break drain
 			}
 		case <-overall:
@@ -663,7 +663,7 @@ drain:
 	// converges within microseconds of the drain above once the deferred
 	// forgetOrphanIf runs.
 	for {
-		res := m.Handle(context.Background(), session.Command{CommandID: "stop2", ServerID: "s1", Kind: "StopServer"})
+		res := m.Handle(context.Background(), session.Command{CommandID: "stop2", ServerID: s1, Kind: "StopServer"})
 		if res.ErrorCode == session.CommandErrorServerNotFound {
 			break
 		}
@@ -738,13 +738,13 @@ func TestOrphanRetryStopPassesDriverToFlush(t *testing.T) {
 	m.settlePollInterval = 0
 	closeWithTest(t, m)
 
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
 
 	// Stop #1: driver is captured before take — flush runs with the correct driver.
-	first := m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+	first := m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"})
 	if first.Success {
 		t.Fatalf("first stop = %+v, want failure (driver could not confirm termination)", first)
 	}
@@ -752,7 +752,7 @@ func TestOrphanRetryStopPassesDriverToFlush(t *testing.T) {
 	// Stop #2 (retry): the orphan retry must still pass "container" to openControl,
 	// not an empty string.
 	drivers = nil // reset so we observe only the retry's flush
-	retry := m.Handle(context.Background(), session.Command{CommandID: "stop2", ServerID: "s1", Kind: "StopServer"})
+	retry := m.Handle(context.Background(), session.Command{CommandID: "stop2", ServerID: s1, Kind: "StopServer"})
 	if !retry.Success {
 		t.Fatalf("retry stop = %+v, want success", retry)
 	}
@@ -773,7 +773,7 @@ func TestOrphanRetryStopPassesDriverToFlush(t *testing.T) {
 // #3116).
 func TestFailedStopAndOrphanRetriesCarryTheMinecraftVersion(t *testing.T) {
 	stop := func(id string) session.Command {
-		return session.Command{CommandID: id, ServerID: "s1", Kind: "StopServer"}
+		return session.Command{CommandID: id, ServerID: s1, Kind: "StopServer"}
 	}
 
 	t.Run("failed stop and operator retry", func(t *testing.T) {
@@ -800,7 +800,7 @@ func TestFailedStopAndOrphanRetriesCarryTheMinecraftVersion(t *testing.T) {
 		}
 		// The converger's retry stop confirmed termination, and its flush dialed
 		// first: every graceful Stop of this driver runs the flush.
-		awaitStatus(t, m, "s1", "stopped")
+		awaitStatus(t, m, s1, "stopped")
 
 		assertDialsCarry(t, rec.dials(), startCmd().MinecraftVersion)
 	})
@@ -811,10 +811,10 @@ func TestFailedStopAndOrphanRetriesCarryTheMinecraftVersion(t *testing.T) {
 func TestRestartStopFailureLeavesOrphan(t *testing.T) {
 	d := &orphanDriver{stopAfter: 1}
 	m := newManager(t, d, nil)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	_ = m.Handle(context.Background(), startCmd())
 
-	res := m.Handle(context.Background(), session.Command{CommandID: "r", ServerID: "s1", Kind: "RestartServer"})
+	res := m.Handle(context.Background(), session.Command{CommandID: "r", ServerID: s1, Kind: "RestartServer"})
 	if res.Success {
 		t.Fatalf("restart with failing stop = %+v, want failure", res)
 	}
@@ -822,7 +822,7 @@ func TestRestartStopFailureLeavesOrphan(t *testing.T) {
 		t.Fatalf("restart stop error = %v, want a stop-failure code, not SERVER_NOT_FOUND", res.ErrorCode)
 	}
 
-	retry := m.Handle(context.Background(), session.Command{CommandID: "stop2", ServerID: "s1", Kind: "StopServer"})
+	retry := m.Handle(context.Background(), session.Command{CommandID: "stop2", ServerID: s1, Kind: "StopServer"})
 	if !retry.Success {
 		t.Fatalf("retry stop after failed restart = %+v, want success", retry)
 	}
@@ -845,12 +845,12 @@ func TestFailedStopRestoresSaveOn(t *testing.T) {
 	m.settlePollInterval = 0
 	closeWithTest(t, m)
 
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
 
-	first := m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+	first := m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"})
 	if first.Success {
 		t.Fatalf("first stop = %+v, want failure (driver could not confirm termination)", first)
 	}
@@ -890,17 +890,17 @@ func TestFailedStopSaveOnDialFailureStillReturnsStopFailure(t *testing.T) {
 	m.settlePollInterval = 0
 	closeWithTest(t, m)
 
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
 
-	first := m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+	first := m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"})
 	if first.Success {
 		t.Fatalf("first stop = %+v, want failure", first)
 	}
 	// The orphan must still be recorded so a retry can terminate it.
-	retry := m.Handle(context.Background(), session.Command{CommandID: "stop2", ServerID: "s1", Kind: "StopServer"})
+	retry := m.Handle(context.Background(), session.Command{CommandID: "stop2", ServerID: s1, Kind: "StopServer"})
 	if !retry.Success {
 		t.Fatalf("retry stop = %+v, want success (orphan must still be reachable)", retry)
 	}
@@ -920,12 +920,12 @@ func TestForcedFailedStopSkipsSaveOn(t *testing.T) {
 	m.settlePollInterval = 0
 	closeWithTest(t, m)
 
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
 
-	first := m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer", Force: true})
+	first := m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer", Force: true})
 	if first.Success {
 		t.Fatalf("first force stop = %+v, want failure", first)
 	}
@@ -947,12 +947,12 @@ func TestRestartStopFailureRestoresSaveOn(t *testing.T) {
 	m.settlePollInterval = 0
 	closeWithTest(t, m)
 
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
 
-	res := m.Handle(context.Background(), session.Command{CommandID: "r", ServerID: "s1", Kind: "RestartServer"})
+	res := m.Handle(context.Background(), session.Command{CommandID: "r", ServerID: s1, Kind: "RestartServer"})
 	if res.Success {
 		t.Fatalf("restart with failing stop = %+v, want failure", res)
 	}
@@ -1004,7 +1004,7 @@ func (i *gatedProbeInstance) ProbeAlive(ctx context.Context) (bool, error) {
 // Close that only stopped it between rounds could not pass.
 func TestCloseStopsAConvergerParkedOnItsProbeInterval(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	m.recordOrphan("s1", newFakeInstance("s1"), "container", "1.21")
+	m.recordOrphan(s1, newFakeInstance(s1), "container", "1.21")
 
 	closed := make(chan struct{})
 	go func() { m.Close(); close(closed) }()
@@ -1024,8 +1024,8 @@ func TestCloseStopsAConvergerParkedOnItsProbeInterval(t *testing.T) {
 func TestCloseWaitsForAConvergerMidRound(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	shrinkOrphanConverger(m)
-	inst := newGatedProbeInstance("s1")
-	m.recordOrphan("s1", inst, "container", "1.21")
+	inst := newGatedProbeInstance(s1)
+	m.recordOrphan(s1, inst, "container", "1.21")
 	awaitEnter(t, inst.probeEntered)
 
 	closed := make(chan struct{})
@@ -1052,14 +1052,14 @@ func TestRecordOrphanAfterCloseSpawnsNoConverger(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	m.Close()
 
-	m.recordOrphan("s1", newFakeInstance("s1"), "container", "1.21")
+	m.recordOrphan(s1, newFakeInstance(s1), "container", "1.21")
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.converging["s1"] {
+	if m.converging[s1] {
 		t.Fatal("a closed manager spawned a converger; nothing will ever join it")
 	}
-	if _, ok := m.orphans["s1"]; !ok {
+	if _, ok := m.orphans[s1]; !ok {
 		t.Fatal("recordOrphan dropped the record on a closed manager; the id must stay guarded")
 	}
 }
@@ -1116,8 +1116,8 @@ func (i *cancelledProbeInstance) ProbeAlive(ctx context.Context) (bool, error) {
 func TestConvergerLeavesQuietlyWhenTheShutdownCancelsItsProbe(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	shrinkOrphanConverger(m)
-	inst := newCancelledProbeInstance("s1")
-	m.recordOrphan("s1", inst, "container", "1.21")
+	inst := newCancelledProbeInstance(s1)
+	m.recordOrphan(s1, inst, "container", "1.21")
 	awaitEnter(t, inst.probeEntered)
 
 	closed := make(chan struct{})
@@ -1140,7 +1140,7 @@ drain:
 	for {
 		select {
 		case ev := <-m.Events():
-			if ev.ServerID == "s1" && ev.State == orphanUnknownState {
+			if ev.ServerID == s1 && ev.State == orphanUnknownState {
 				t.Fatalf("shutdown-cancelled probe reported as %q: the Worker's last word about the id is a state it never observed", ev.State)
 			}
 		default:
@@ -1150,7 +1150,7 @@ drain:
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, ok := m.orphans["s1"]; !ok {
+	if _, ok := m.orphans[s1]; !ok {
 		t.Fatal("the shutdown retired the orphan record; a cancelled probe resolves nothing")
 	}
 }

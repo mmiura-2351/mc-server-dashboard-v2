@@ -111,7 +111,7 @@ func TestEditFileSyncsBothDirectoriesAfterThePublish(t *testing.T) {
 	for name, syncErr := range map[string]error{"sync succeeds": nil, "sync fails": unix.EIO} {
 		t.Run(name, func(t *testing.T) {
 			m := newManager(t, &fakeDriver{}, nil)
-			target := writeWorkingFile(t, m, "s1", "sub/server.properties", []byte("motd=old"))
+			target := writeWorkingFile(t, m, s1, "sub/server.properties", []byte("motd=old"))
 			orig := syncEditDir
 			t.Cleanup(func() { syncEditDir = orig })
 			var synced []uint64
@@ -128,7 +128,7 @@ func TestEditFileSyncsBothDirectoriesAfterThePublish(t *testing.T) {
 			}
 
 			res := handleWithin(t, m, session.Command{
-				CommandID: "c1", ServerID: "s1", Kind: "EditFile", Path: "sub/server.properties", Content: []byte("motd=new"),
+				CommandID: "c1", ServerID: s1, Kind: "EditFile", Path: "sub/server.properties", Content: []byte("motd=new"),
 			})
 
 			if !res.Success {

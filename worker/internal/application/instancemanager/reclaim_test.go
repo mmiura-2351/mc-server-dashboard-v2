@@ -17,8 +17,8 @@ import (
 // deleted server id (issue #924).
 func TestReclaimDeletedScratchesRemovesScratchAndHydrateLeftovers(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	dir := seedScratch(t, m, "s1")
-	leftover := filepath.Join(m.scratchDir, ".hydrate-s1-stale")
+	dir := seedScratch(t, m, s1)
+	leftover := filepath.Join(m.scratchDir, ".hydrate-"+s1+"-stale")
 	if err := os.MkdirAll(leftover, 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +30,7 @@ func TestReclaimDeletedScratchesRemovesScratchAndHydrateLeftovers(t *testing.T) 
 	// #2933 also STOPS the reclaim at its loop top, so a spawn that has not reached
 	// its first id yet reclaims nothing. TestCloseJoinsAnInFlightReclaim covers the
 	// goroutine and its join; this test is about what one id's reclaim removes.
-	m.reclaimDeletedScratches([]string{"s1"})
+	m.reclaimDeletedScratches([]string{s1})
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("scratch dir not reclaimed for deleted server: stat err = %v", err)
 	}
@@ -64,13 +64,13 @@ func TestReclaimSweepsHydrateLeftoversBeforeTheScratchDirGoes(t *testing.T) {
 	// Registered AFTER newManager's Close, so cleanups run it FIRST (see
 	// TestCloseJoinsAnInFlightReclaim).
 	t.Cleanup(h.unpark)
-	seedScratch(t, m, "s1")
-	leftover := filepath.Join(m.scratchDir, ".hydrate-s1-stale")
+	seedScratch(t, m, s1)
+	leftover := filepath.Join(m.scratchDir, ".hydrate-"+s1+"-stale")
 	if err := os.MkdirAll(leftover, 0o750); err != nil {
 		t.Fatal(err)
 	}
 
-	m.ReclaimDeletedScratches([]string{"s1"})
+	m.ReclaimDeletedScratches([]string{s1})
 	// The parked record is emitted by the scratch removal itself, so reaching it
 	// means <scratch>/s1 is already gone — the exact instant after which no pass is
 	// ever offered this id again.
@@ -88,13 +88,13 @@ func TestReclaimSweepsHydrateLeftoversBeforeTheScratchDirGoes(t *testing.T) {
 // ReclaimDeletedScratches MUST NOT remove .displaced-<id> trees (issue #911).
 func TestReclaimDeletedScratchesRetainsDisplacedTree(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	dir := seedScratch(t, m, "s1")
-	displaced := seedDisplaced(t, m, "s1")
+	dir := seedScratch(t, m, s1)
+	displaced := seedDisplaced(t, m, s1)
 
 	// The synchronous body, so the scratch removal has provably run by the time the
 	// .displaced tree is checked and its survival is a decision, not a race (see
 	// TestReclaimDeletedScratchesRemovesScratchAndHydrateLeftovers).
-	m.reclaimDeletedScratches([]string{"s1"})
+	m.reclaimDeletedScratches([]string{s1})
 	// The scratch removal is asserted FIRST because it is what makes the retention
 	// below a decision: a reclaim that does nothing at all leaves the .displaced tree
 	// standing too, and without this check that no-op passes as #911 (issue #2984).
@@ -110,14 +110,14 @@ func TestReclaimDeletedScratchesRetainsDisplacedTree(t *testing.T) {
 func TestReclaimDeletedScratchesSkipsRunningServer(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
-	dir := seedScratch(t, m, "s1")
-	control := seedScratch(t, m, "s2")
+	dir := seedScratch(t, m, s1)
+	control := seedScratch(t, m, s2)
 	_ = m.Handle(context.Background(), startCmd())
 
 	// s2 is the positive control, listed AFTER the running id and asserted FIRST: a
 	// reclaim that does nothing at all leaves s1 standing too, and one that aborts
 	// the call at s1 instead of skipping it never reaches s2 (issue #3025).
-	m.reclaimDeletedScratches([]string{"s1", "s2"})
+	m.reclaimDeletedScratches([]string{s1, s2})
 	if _, err := os.Stat(control); !os.IsNotExist(err) {
 		t.Fatalf("scratch dir not reclaimed for the deleted server listed after the running one: stat err = %v", err)
 	}
@@ -135,12 +135,12 @@ func TestReclaimDeletedScratchesRefusesUnsafeID(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = os.RemoveAll(sibling) }()
-	control := seedScratch(t, m, "s1")
+	control := seedScratch(t, m, s1)
 
 	// s1 is the positive control, listed AFTER the unsafe ids and asserted FIRST, so
 	// the sibling's survival is a refusal rather than a reclaim that did nothing, and
 	// a refusal that skips the id rather than aborting the call (issue #3025).
-	m.reclaimDeletedScratches([]string{"../escaped", "", ".", "s1"})
+	m.reclaimDeletedScratches([]string{"../escaped", "", ".", s1})
 	if _, err := os.Stat(control); !os.IsNotExist(err) {
 		t.Fatalf("scratch dir not reclaimed for the safe id listed after the unsafe ones: stat err = %v", err)
 	}
@@ -152,33 +152,33 @@ func TestReclaimDeletedScratchesRefusesUnsafeID(t *testing.T) {
 // ReclaimDeletedScratches is idempotent on a missing dir (no error).
 func TestReclaimDeletedScratchesIdempotentOnMissingDir(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	// "no-such-server" has no scratch dir — the call should not panic.
-	m.reclaimDeletedScratches([]string{"no-such-server"})
+	// ghost has no scratch dir — the call should not panic.
+	m.reclaimDeletedScratches([]string{ghost})
 	// Reaching here without a panic is the assertion.
 }
 
 // ReclaimDeletedScratches skips a reserved id.
 func TestReclaimDeletedScratchesSkipsReservedServer(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	dir := seedScratch(t, m, "s1")
-	control := seedScratch(t, m, "s2")
+	dir := seedScratch(t, m, s1)
+	control := seedScratch(t, m, s2)
 
 	// Simulate s1 having an in-flight hydrate by reserving it.
-	ok, _, _ := m.reserve("s1")
+	ok, _, _ := m.reserve(s1)
 	if !ok {
 		t.Fatal("could not reserve s1 for test setup")
 	}
 
 	// s2 is the positive control, listed AFTER the reserved id and asserted FIRST
 	// (see TestReclaimDeletedScratchesSkipsRunningServer, issue #3025).
-	m.reclaimDeletedScratches([]string{"s1", "s2"})
+	m.reclaimDeletedScratches([]string{s1, s2})
 	if _, err := os.Stat(control); !os.IsNotExist(err) {
 		t.Fatalf("scratch dir not reclaimed for the deleted server listed after the reserved one: stat err = %v", err)
 	}
 	if _, err := os.Stat(dir); err != nil {
 		t.Fatalf("scratch dir removed for a reserved server: %v", err)
 	}
-	m.release("s1")
+	m.release(s1)
 }
 
 // blockingReclaimLogger parks the reclaim goroutine on one of the manager's own
@@ -237,9 +237,9 @@ func TestCloseJoinsAnInFlightReclaim(t *testing.T) {
 	// below would otherwise leave Close joining a reclaim nothing ever releases,
 	// and the package would hang instead of failing.
 	t.Cleanup(h.unpark)
-	dir := seedScratch(t, m, "s1")
+	dir := seedScratch(t, m, s1)
 
-	m.ReclaimDeletedScratches([]string{"s1"})
+	m.ReclaimDeletedScratches([]string{s1})
 	select {
 	case <-h.entered:
 	case <-time.After(5 * time.Second):
@@ -284,17 +284,18 @@ func TestCloseJoinsAnInFlightReclaim(t *testing.T) {
 // A reclaim requested AFTER Close is dropped whole: goBackground refuses on a
 // closed manager, so no goroutine starts and no id is touched (issue #2878).
 func TestReclaimDeletedScratchesAfterCloseIsDropped(t *testing.T) {
+	const s0 = "50000000-0000-4000-8000-000000000000"
 	awaitManagerGoroutines(t, 0)
 	m := newManager(t, &fakeDriver{}, nil)
-	control := seedScratch(t, m, "s0")
-	dir := seedScratch(t, m, "s1")
+	control := seedScratch(t, m, s0)
+	dir := seedScratch(t, m, s1)
 
 	// The positive control (issue #3025): no request after Close can reclaim anything,
 	// so it cannot share the dropped call. Instead the SAME entry point on the same
 	// manager reclaims s0 before Close, which makes the drop below Close's doing rather
 	// than a reclaim that does nothing. It waits on the removal itself, not on Close,
 	// which since issue #2933 stops a reclaim that has not reached its first id.
-	m.ReclaimDeletedScratches([]string{"s0"})
+	m.ReclaimDeletedScratches([]string{s0})
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		_, err := os.Stat(control)
@@ -308,7 +309,7 @@ func TestReclaimDeletedScratchesAfterCloseIsDropped(t *testing.T) {
 	}
 	m.Close()
 
-	m.ReclaimDeletedScratches([]string{"s1"})
+	m.ReclaimDeletedScratches([]string{s1})
 
 	// Two assertions covering each other, because a spawn is asynchronous: one
 	// still running is seen here, and one that already finished has removed the
@@ -338,12 +339,12 @@ func TestCloseStopsTheReclaimAtTheNextIDBoundary(t *testing.T) {
 	// TestCloseJoinsAnInFlightReclaim).
 	t.Cleanup(h.unpark)
 
-	ids := []string{"s1", "s2", "s3", "s4", "s5"}
+	ids := []string{s1, s2, "s3", "s4", "s5"}
 	dirs := make(map[string]string, len(ids))
 	for _, id := range ids {
 		dirs[id] = seedScratch(t, m, id)
 	}
-	leftover := filepath.Join(m.scratchDir, ".hydrate-s1-stale")
+	leftover := filepath.Join(m.scratchDir, ".hydrate-"+s1+"-stale")
 	if err := os.MkdirAll(leftover, 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -372,7 +373,7 @@ func TestCloseStopsTheReclaimAtTheNextIDBoundary(t *testing.T) {
 	}
 
 	// s1 was past the loop top when the shutdown landed, so it completes whole.
-	if _, err := os.Stat(dirs["s1"]); !os.IsNotExist(err) {
+	if _, err := os.Stat(dirs[s1]); !os.IsNotExist(err) {
 		t.Fatalf("the id in flight was left half-reclaimed: stat err = %v", err)
 	}
 	if _, err := os.Stat(leftover); !os.IsNotExist(err) {

@@ -35,7 +35,7 @@ func (f *fakeTunnelDialer) lastSpec() (TunnelSpec, int) {
 func tunnelCmd() session.Command {
 	return session.Command{
 		CommandID:      "t1",
-		ServerID:       "s1",
+		ServerID:       s1,
 		Kind:           "TunnelDial",
 		TunnelEndpoint: "relay.example:25665",
 		TunnelToken:    "tok-abc",
@@ -49,7 +49,7 @@ func startRunning(t *testing.T, m *Manager) {
 	// A start over an ABSENT working dir is refused since issue #2499, so a fixture
 	// that wants a running server must hold the working set the API's HydrateTrigger
 	// would have put there.
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("StartServer = %+v, want success", res)
 	}
@@ -72,7 +72,7 @@ func TestTunnelDialDelegatesToDialer(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("dialer called %d times, want 1", calls)
 	}
-	if spec.ServerID != "s1" || spec.Endpoint != "relay.example:25665" ||
+	if spec.ServerID != s1 || spec.Endpoint != "relay.example:25665" ||
 		spec.Token != "tok-abc" || spec.CAPEM != "ca-pem" {
 		t.Fatalf("dialer spec = %+v, missing command fields", spec)
 	}

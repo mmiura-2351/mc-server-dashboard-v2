@@ -41,7 +41,7 @@ func TestHandledKindsReachSessionFilter(t *testing.T) {
 
 		// The handler must actually recognize this kind (not hit the default
 		// "unhandled command" arm), confirming handledKinds tracks the switch.
-		res := m.Handle(context.Background(), session.Command{CommandID: "c", ServerID: "s", Kind: kind})
+		res := m.Handle(context.Background(), session.Command{CommandID: "c", ServerID: s1, Kind: kind})
 		if !res.Success && strings.HasPrefix(res.ErrorMessage, unhandledPrefix) {
 			t.Errorf("Manager.Handle(%q) hit the unhandled-command default; handledKinds is out of sync with the switch", kind)
 		}
@@ -58,7 +58,7 @@ func TestUnknownKindIsUnhandled(t *testing.T) {
 	if session.IsHandledKind(unknown) {
 		t.Errorf("session.IsHandledKind(%q) = true, want false", unknown)
 	}
-	res := m.Handle(context.Background(), session.Command{CommandID: "c", ServerID: "s", Kind: unknown})
+	res := m.Handle(context.Background(), session.Command{CommandID: "c", ServerID: s1, Kind: unknown})
 	if res.Success || !strings.HasPrefix(res.ErrorMessage, unhandledPrefix) {
 		t.Errorf("Manager.Handle(%q) = %+v, want unhandled-command failure", unknown, res)
 	}

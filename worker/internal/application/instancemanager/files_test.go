@@ -26,10 +26,10 @@ func writeWorkingFile(t *testing.T, m *Manager, serverID, rel string, data []byt
 
 func TestReadFileReturnsBytes(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	writeWorkingFile(t, m, "s1", "server.properties", []byte("motd=hi"))
+	writeWorkingFile(t, m, s1, "server.properties", []byte("motd=hi"))
 
 	res := m.Handle(context.Background(), session.Command{
-		CommandID: "c1", ServerID: "s1", Kind: "ReadFile", Path: "server.properties",
+		CommandID: "c1", ServerID: s1, Kind: "ReadFile", Path: "server.properties",
 	})
 	if !res.Success {
 		t.Fatalf("ReadFile result = %+v, want success", res)
@@ -41,10 +41,10 @@ func TestReadFileReturnsBytes(t *testing.T) {
 
 func TestReadFileEmptyFileRidesContentArm(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	writeWorkingFile(t, m, "s1", "empty.txt", []byte{})
+	writeWorkingFile(t, m, s1, "empty.txt", []byte{})
 
 	res := m.Handle(context.Background(), session.Command{
-		CommandID: "c1", ServerID: "s1", Kind: "ReadFile", Path: "empty.txt",
+		CommandID: "c1", ServerID: s1, Kind: "ReadFile", Path: "empty.txt",
 	})
 	if !res.Success {
 		t.Fatalf("ReadFile result = %+v, want success", res)
@@ -61,7 +61,7 @@ func TestReadFileEmptyFileRidesContentArm(t *testing.T) {
 func TestReadFileMissingIsServerNotFound(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	res := m.Handle(context.Background(), session.Command{
-		CommandID: "c1", ServerID: "s1", Kind: "ReadFile", Path: "nope.txt",
+		CommandID: "c1", ServerID: s1, Kind: "ReadFile", Path: "nope.txt",
 	})
 	if res.Success {
 		t.Fatal("ReadFile of a missing file should fail")
@@ -75,7 +75,7 @@ func TestReadFileTraversalIsDenied(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	for _, bad := range []string{"../escape", "/etc/passwd", "a/../../escape"} {
 		res := m.Handle(context.Background(), session.Command{
-			CommandID: "c1", ServerID: "s1", Kind: "ReadFile", Path: bad,
+			CommandID: "c1", ServerID: s1, Kind: "ReadFile", Path: bad,
 		})
 		if res.Success {
 			t.Fatalf("ReadFile %q should be denied", bad)
@@ -88,7 +88,7 @@ func TestReadFileTraversalIsDenied(t *testing.T) {
 
 func TestReadFileSymlinkEscapeIsDenied(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	workingDir := filepath.Join(m.scratchDir, "s1")
+	workingDir := filepath.Join(m.scratchDir, s1)
 	if err := os.MkdirAll(workingDir, 0o750); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -101,7 +101,7 @@ func TestReadFileSymlinkEscapeIsDenied(t *testing.T) {
 	}
 
 	res := m.Handle(context.Background(), session.Command{
-		CommandID: "c1", ServerID: "s1", Kind: "ReadFile", Path: "link",
+		CommandID: "c1", ServerID: s1, Kind: "ReadFile", Path: "link",
 	})
 	if res.Success {
 		t.Fatal("ReadFile through a symlink should be denied")
@@ -113,7 +113,7 @@ func TestReadFileSymlinkEscapeIsDenied(t *testing.T) {
 
 func TestReadFileIntermediateSymlinkEscapeIsDenied(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	workingDir := filepath.Join(m.scratchDir, "s1")
+	workingDir := filepath.Join(m.scratchDir, s1)
 	if err := os.MkdirAll(workingDir, 0o750); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestReadFileIntermediateSymlinkEscapeIsDenied(t *testing.T) {
 	}
 
 	res := m.Handle(context.Background(), session.Command{
-		CommandID: "c1", ServerID: "s1", Kind: "ReadFile", Path: "sub/secret",
+		CommandID: "c1", ServerID: s1, Kind: "ReadFile", Path: "sub/secret",
 	})
 	if res.Success {
 		t.Fatal("ReadFile through an intermediate symlink should be denied")
@@ -140,7 +140,7 @@ func TestReadFileIntermediateSymlinkEscapeIsDenied(t *testing.T) {
 
 func TestEditFileIntermediateSymlinkEscapeIsDenied(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	workingDir := filepath.Join(m.scratchDir, "s1")
+	workingDir := filepath.Join(m.scratchDir, s1)
 	if err := os.MkdirAll(workingDir, 0o750); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -150,7 +150,7 @@ func TestEditFileIntermediateSymlinkEscapeIsDenied(t *testing.T) {
 	}
 
 	res := m.Handle(context.Background(), session.Command{
-		CommandID: "c1", ServerID: "s1", Kind: "EditFile",
+		CommandID: "c1", ServerID: s1, Kind: "EditFile",
 		Path: "sub/escape", Content: []byte("pwned"),
 	})
 	if res.Success {
@@ -170,7 +170,7 @@ func TestEditFileIntermediateSymlinkViaNewDirsIsDenied(t *testing.T) {
 	// The escaping symlink is itself a deeper intermediate component that
 	// MkdirAll would have to create part of the path through.
 	m := newManager(t, &fakeDriver{}, nil)
-	workingDir := filepath.Join(m.scratchDir, "s1")
+	workingDir := filepath.Join(m.scratchDir, s1)
 	if err := os.MkdirAll(filepath.Join(workingDir, "a"), 0o750); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestEditFileIntermediateSymlinkViaNewDirsIsDenied(t *testing.T) {
 	}
 
 	res := m.Handle(context.Background(), session.Command{
-		CommandID: "c1", ServerID: "s1", Kind: "EditFile",
+		CommandID: "c1", ServerID: s1, Kind: "EditFile",
 		Path: "a/b/c/escape", Content: []byte("pwned"),
 	})
 	if res.Success {
@@ -202,7 +202,7 @@ func TestEditFileIntermediateSymlinkViaNewDirsIsDenied(t *testing.T) {
 // it lands on the original (now-renamed) inode and never touches the outside dir.
 func TestOpenParentBeneathWriteRidesDirfd(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	root := filepath.Join(m.scratchDir, "s1")
+	root := filepath.Join(m.scratchDir, s1)
 	if err := os.MkdirAll(filepath.Join(root, "sub"), 0o750); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -250,7 +250,7 @@ func TestOpenParentBeneathWriteRidesDirfd(t *testing.T) {
 // dirfd under which the leaf opens.
 func TestOpenParentBeneathResolvesCleanPath(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	root := filepath.Join(m.scratchDir, "s1")
+	root := filepath.Join(m.scratchDir, s1)
 	if err := os.MkdirAll(filepath.Join(root, "a", "b"), 0o750); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -276,10 +276,10 @@ func TestOpenParentBeneathResolvesCleanPath(t *testing.T) {
 
 func TestReadFileOversizedIsDenied(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	writeWorkingFile(t, m, "s1", "big.bin", make([]byte, MaxFileBytes+1))
+	writeWorkingFile(t, m, s1, "big.bin", make([]byte, MaxFileBytes+1))
 
 	res := m.Handle(context.Background(), session.Command{
-		CommandID: "c1", ServerID: "s1", Kind: "ReadFile", Path: "big.bin",
+		CommandID: "c1", ServerID: s1, Kind: "ReadFile", Path: "big.bin",
 	})
 	if res.Success {
 		t.Fatal("ReadFile of an oversized file should be denied")
@@ -296,10 +296,10 @@ func TestReadFileOversizedIsDenied(t *testing.T) {
 func TestReadFileDirectoryReasonIsADirectory(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	// Seed a directory at the path the read targets.
-	writeWorkingFile(t, m, "s1", "config/keep.txt", []byte("x"))
+	writeWorkingFile(t, m, s1, "config/keep.txt", []byte("x"))
 
 	res := m.Handle(context.Background(), session.Command{
-		CommandID: "c1", ServerID: "s1", Kind: "ReadFile", Path: "config",
+		CommandID: "c1", ServerID: s1, Kind: "ReadFile", Path: "config",
 	})
 	if res.Success || res.ErrorCode != session.CommandErrorFileAccessDenied {
 		t.Fatalf("ReadFile of a directory result = %+v, want FileAccessDenied", res)
@@ -311,7 +311,7 @@ func TestReadFileDirectoryReasonIsADirectory(t *testing.T) {
 
 func TestReadFileSymlinkReasonSymlinkRefused(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	workingDir := filepath.Join(m.scratchDir, "s1")
+	workingDir := filepath.Join(m.scratchDir, s1)
 	if err := os.MkdirAll(workingDir, 0o750); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -324,7 +324,7 @@ func TestReadFileSymlinkReasonSymlinkRefused(t *testing.T) {
 	}
 
 	res := m.Handle(context.Background(), session.Command{
-		CommandID: "c1", ServerID: "s1", Kind: "ReadFile", Path: "link",
+		CommandID: "c1", ServerID: s1, Kind: "ReadFile", Path: "link",
 	})
 	if res.Success || res.ErrorCode != session.CommandErrorFileAccessDenied {
 		t.Fatalf("ReadFile of a symlink result = %+v, want FileAccessDenied", res)
@@ -337,7 +337,7 @@ func TestReadFileSymlinkReasonSymlinkRefused(t *testing.T) {
 func TestReadFileTraversalReasonUnspecified(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	res := m.Handle(context.Background(), session.Command{
-		CommandID: "c1", ServerID: "s1", Kind: "ReadFile", Path: "../escape",
+		CommandID: "c1", ServerID: s1, Kind: "ReadFile", Path: "../escape",
 	})
 	if res.Success || res.ErrorCode != session.CommandErrorFileAccessDenied {
 		t.Fatalf("ReadFile traversal result = %+v, want FileAccessDenied", res)
@@ -351,13 +351,13 @@ func TestReadFileTraversalReasonUnspecified(t *testing.T) {
 func TestEditFileWritesBytes(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	res := m.Handle(context.Background(), session.Command{
-		CommandID: "c1", ServerID: "s1", Kind: "EditFile",
+		CommandID: "c1", ServerID: s1, Kind: "EditFile",
 		Path: "config/sub.properties", Content: []byte("k=v"),
 	})
 	if !res.Success {
 		t.Fatalf("EditFile result = %+v, want success", res)
 	}
-	got, err := os.ReadFile(filepath.Join(m.scratchDir, "s1", "config", "sub.properties"))
+	got, err := os.ReadFile(filepath.Join(m.scratchDir, s1, "config", "sub.properties"))
 	if err != nil {
 		t.Fatalf("read back: %v", err)
 	}
@@ -369,7 +369,7 @@ func TestEditFileWritesBytes(t *testing.T) {
 func TestEditFileTraversalIsDenied(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	res := m.Handle(context.Background(), session.Command{
-		CommandID: "c1", ServerID: "s1", Kind: "EditFile",
+		CommandID: "c1", ServerID: s1, Kind: "EditFile",
 		Path: "../escape", Content: []byte("x"),
 	})
 	if res.Success {
@@ -387,7 +387,7 @@ func TestEditFileTraversalIsDenied(t *testing.T) {
 func TestEditFileOversizedIsDenied(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	res := m.Handle(context.Background(), session.Command{
-		CommandID: "c1", ServerID: "s1", Kind: "EditFile",
+		CommandID: "c1", ServerID: s1, Kind: "EditFile",
 		Path: "big.bin", Content: make([]byte, MaxFileBytes+1),
 	})
 	if res.Success {
@@ -405,10 +405,10 @@ func TestEditFileOversizedIsDenied(t *testing.T) {
 func TestEditFileDirectoryReasonIsADirectory(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	// Seed a directory at the path the edit targets.
-	writeWorkingFile(t, m, "s1", "config/keep.txt", []byte("x"))
+	writeWorkingFile(t, m, s1, "config/keep.txt", []byte("x"))
 
 	res := m.Handle(context.Background(), session.Command{
-		CommandID: "c1", ServerID: "s1", Kind: "EditFile", Path: "config", Content: []byte("x"),
+		CommandID: "c1", ServerID: s1, Kind: "EditFile", Path: "config", Content: []byte("x"),
 	})
 	if res.Success || res.ErrorCode != session.CommandErrorFileAccessDenied {
 		t.Fatalf("EditFile of a directory result = %+v, want FileAccessDenied", res)
@@ -420,7 +420,7 @@ func TestEditFileDirectoryReasonIsADirectory(t *testing.T) {
 
 func TestEditFileSymlinkReasonSymlinkRefused(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	workingDir := filepath.Join(m.scratchDir, "s1")
+	workingDir := filepath.Join(m.scratchDir, s1)
 	if err := os.MkdirAll(workingDir, 0o750); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -433,7 +433,7 @@ func TestEditFileSymlinkReasonSymlinkRefused(t *testing.T) {
 	}
 
 	res := m.Handle(context.Background(), session.Command{
-		CommandID: "c1", ServerID: "s1", Kind: "EditFile", Path: "link", Content: []byte("pwned"),
+		CommandID: "c1", ServerID: s1, Kind: "EditFile", Path: "link", Content: []byte("pwned"),
 	})
 	if res.Success || res.ErrorCode != session.CommandErrorFileAccessDenied {
 		t.Fatalf("EditFile of a symlink result = %+v, want FileAccessDenied", res)
@@ -446,7 +446,7 @@ func TestEditFileSymlinkReasonSymlinkRefused(t *testing.T) {
 func TestEditFileTraversalReasonUnspecified(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	res := m.Handle(context.Background(), session.Command{
-		CommandID: "c1", ServerID: "s1", Kind: "EditFile", Path: "../escape", Content: []byte("x"),
+		CommandID: "c1", ServerID: s1, Kind: "EditFile", Path: "../escape", Content: []byte("x"),
 	})
 	if res.Success || res.ErrorCode != session.CommandErrorFileAccessDenied {
 		t.Fatalf("EditFile traversal result = %+v, want FileAccessDenied", res)
@@ -459,7 +459,7 @@ func TestEditFileTraversalReasonUnspecified(t *testing.T) {
 
 func TestEditFileSymlinkOverwriteIsDenied(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	workingDir := filepath.Join(m.scratchDir, "s1")
+	workingDir := filepath.Join(m.scratchDir, s1)
 	if err := os.MkdirAll(workingDir, 0o750); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -472,7 +472,7 @@ func TestEditFileSymlinkOverwriteIsDenied(t *testing.T) {
 	}
 
 	res := m.Handle(context.Background(), session.Command{
-		CommandID: "c1", ServerID: "s1", Kind: "EditFile",
+		CommandID: "c1", ServerID: s1, Kind: "EditFile",
 		Path: "link", Content: []byte("pwned"),
 	})
 	if res.Success {
@@ -495,7 +495,7 @@ func TestEditFileRejectsRoot(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	for _, root := range []string{".", ""} {
 		res := m.Handle(context.Background(), session.Command{
-			CommandID: "c1", ServerID: "s1", Kind: "EditFile", Path: root, Content: []byte("x"),
+			CommandID: "c1", ServerID: s1, Kind: "EditFile", Path: root, Content: []byte("x"),
 		})
 		if res.Success || res.ErrorCode != session.CommandErrorFileAccessDenied {
 			t.Fatalf("EditFile path %q result = %+v, want FileAccessDenied", root, res)
@@ -506,12 +506,12 @@ func TestEditFileRejectsRoot(t *testing.T) {
 func TestEditFileAtomicWriteLeavesNoTemp(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	res := m.Handle(context.Background(), session.Command{
-		CommandID: "c1", ServerID: "s1", Kind: "EditFile", Path: "f.txt", Content: []byte("x"),
+		CommandID: "c1", ServerID: s1, Kind: "EditFile", Path: "f.txt", Content: []byte("x"),
 	})
 	if !res.Success {
 		t.Fatalf("EditFile result = %+v, want success", res)
 	}
-	assertNoEditTemp(t, m, filepath.Join(m.scratchDir, "s1"), "")
+	assertNoEditTemp(t, m, filepath.Join(m.scratchDir, s1), "")
 }
 
 // The working-set root is opened without following a link like every directory
@@ -526,15 +526,15 @@ func TestFileCommandsRefuseASymlinkedWorkingSetRoot(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(outside, "sub"), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(outside, filepath.Join(m.scratchDir, "s1")); err != nil {
+	if err := os.Symlink(outside, filepath.Join(m.scratchDir, s1)); err != nil {
 		t.Fatal(err)
 	}
 	for _, cmd := range []session.Command{
-		{CommandID: "c1", ServerID: "s1", Kind: "ReadFile", Path: "server.properties"},
-		{CommandID: "c2", ServerID: "s1", Kind: "EditFile", Path: "server.properties", Content: []byte("edited")},
-		{CommandID: "c3", ServerID: "s1", Kind: "EditFile", Path: "new/file.txt", Content: []byte("edited")},
-		{CommandID: "c4", ServerID: "s1", Kind: "ListFiles", Path: "."},
-		{CommandID: "c5", ServerID: "s1", Kind: "ListFiles", Path: "sub"},
+		{CommandID: "c1", ServerID: s1, Kind: "ReadFile", Path: "server.properties"},
+		{CommandID: "c2", ServerID: s1, Kind: "EditFile", Path: "server.properties", Content: []byte("edited")},
+		{CommandID: "c3", ServerID: s1, Kind: "EditFile", Path: "new/file.txt", Content: []byte("edited")},
+		{CommandID: "c4", ServerID: s1, Kind: "ListFiles", Path: "."},
+		{CommandID: "c5", ServerID: s1, Kind: "ListFiles", Path: "sub"},
 	} {
 		res := handleWithin(t, m, cmd)
 		// O_DIRECTORY|O_NOFOLLOW reports a link as ENOTDIR, so the reason is not

@@ -3497,28 +3497,19 @@ func entryKind(mode uint32) session.FileEntryKind {
 	}
 }
 
-// validateServerID rejects a ServerID that is unsafe to join into a scratch
-// path before any handler does so (issue #782). The API sends the canonical
-// text form of a UUID (str(uuid)); every legitimate id is therefore a single
-// non-empty path component with no separator and no "." / ".." meaning. An
-// empty id would make a filepath.Join collapse onto the scratch ROOT (so
-// SnapshotTrigger would tar every server's world) and a "../x" id would escape
-// it. This is defense-in-depth on a trusted control plane: it rejects the
-// dangerous shapes without pinning to strict UUID syntax, so a future id scheme
-// that stays a sane single component keeps working. Mirrors safeJoin's lexical
-// discipline.
+// validateServerID rejects a ServerID that is not a server id before any handler
+// joins it into a scratch path (issue #782). A server id is the canonical text
+// form of a UUID (isServerIDName), the one rule the Worker applies to server ids:
+// the API sends str(uuid), and the held-set scans advertise only scratch dirs so
+// named (issue #3395), so a command for any other id would act on a working set
+// the Worker could never report holding (issue #3399). The rule also carries the
+// path safety this guard exists for: a canonical UUID is a single non-empty path
+// component with no separator, NUL byte or "." / ".." meaning, whereas an empty id
+// would make a filepath.Join collapse onto the scratch ROOT (so SnapshotTrigger
+// would tar every server's world) and a "../x" id would escape it.
 func validateServerID(id string) error {
-	if id == "" {
-		return errors.New("refusing empty server id")
-	}
-	if id == "." || id == ".." {
-		return fmt.Errorf("refusing server id %q", id)
-	}
-	if strings.ContainsAny(id, `/\`) {
-		return fmt.Errorf("refusing server id with a path separator %q", id)
-	}
-	if strings.ContainsRune(id, 0) {
-		return fmt.Errorf("refusing server id with a NUL byte %q", id)
+	if !isServerIDName(id) {
+		return fmt.Errorf("refusing server id that is not a canonical UUID %q", id)
 	}
 	return nil
 }

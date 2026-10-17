@@ -25,11 +25,11 @@ func TestRunningSnapshotDeclaresTheGenerationItStamped(t *testing.T) {
 	tr := &fakeTransfer{gen: 12}
 	ctrl := &fakeControl{reply: "ok"}
 	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("start = %+v, want success", res)
 	}
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 
 	res := m.Handle(context.Background(), snapshotCmd())
 
@@ -45,7 +45,7 @@ func TestRunningSnapshotDeclaresTheGenerationItStamped(t *testing.T) {
 			"the stamp wrote)", *res.HeldGeneration)
 	}
 	// The declaration must agree with what a re-registration would advertise.
-	if got := readGeneration(m.scratchDir + "/s1"); got != *res.HeldGeneration {
+	if got := readGeneration(m.scratchDir + "/" + s1); got != *res.HeldGeneration {
 		t.Fatalf("declared %d but the on-disk marker reads %d: the declaration is not the marker",
 			*res.HeldGeneration, got)
 	}
@@ -63,7 +63,7 @@ func TestRunningSnapshotDeclaresTheGenerationItStamped(t *testing.T) {
 func TestStoppedSnapshotDeclaresNoHeldGeneration(t *testing.T) {
 	tr := &fakeTransfer{gen: 12}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
-	dir := seedScratch(t, m, "s1") // stopped id: no running instance
+	dir := seedScratch(t, m, s1) // stopped id: no running instance
 
 	res := m.Handle(context.Background(), snapshotCmd())
 
@@ -92,11 +92,11 @@ func TestRunningSnapshotDeclaresNothingWhenTheStampWasSkipped(t *testing.T) {
 	tr := &fakeTransfer{gen: 12}
 	ctrl := &fakeControl{reply: "ok"}
 	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("start = %+v, want success", res)
 	}
-	dir := seedScratch(t, m, "s1")
+	dir := seedScratch(t, m, s1)
 	if err := writeGeneration(dir, 5); err != nil {
 		t.Fatal(err)
 	}

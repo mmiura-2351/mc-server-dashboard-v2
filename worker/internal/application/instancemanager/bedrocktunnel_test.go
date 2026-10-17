@@ -51,7 +51,7 @@ func (f *fakeBedrockTunneler) closeCalls() []string {
 func openBedrockCmd() session.Command {
 	return session.Command{
 		CommandID:            "b1",
-		ServerID:             "s1",
+		ServerID:             s1,
 		Kind:                 "OpenBedrockTunnel",
 		BedrockRelayEndpoint: "relay.example:25675",
 		BedrockPort:          19132,
@@ -61,7 +61,7 @@ func openBedrockCmd() session.Command {
 }
 
 func closeBedrockCmd() session.Command {
-	return session.Command{CommandID: "b2", ServerID: "s1", Kind: "CloseBedrockTunnel"}
+	return session.Command{CommandID: "b2", ServerID: s1, Kind: "CloseBedrockTunnel"}
 }
 
 // An OpenBedrockTunnel against a running server delegates to the tunneler with
@@ -81,7 +81,7 @@ func TestOpenBedrockTunnelDelegatesToTunneler(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("Open called %d times, want 1", calls)
 	}
-	if spec.ServerID != "s1" || spec.RelayEndpoint != "relay.example:25675" ||
+	if spec.ServerID != s1 || spec.RelayEndpoint != "relay.example:25675" ||
 		spec.BedrockPort != 19132 || spec.Token != "tok-abc" || spec.CAPEM != "ca-pem" {
 		t.Fatalf("Open spec = %+v, missing command fields", spec)
 	}
@@ -162,7 +162,7 @@ func TestCloseBedrockTunnelDelegatesToTunneler(t *testing.T) {
 	if !res.Success {
 		t.Fatalf("CloseBedrockTunnel = %+v, want success", res)
 	}
-	if calls := bt.closeCalls(); len(calls) != 1 || calls[0] != "s1" {
+	if calls := bt.closeCalls(); len(calls) != 1 || calls[0] != s1 {
 		t.Fatalf("Close calls = %v, want [s1]", calls)
 	}
 }
@@ -189,11 +189,11 @@ func TestStopServerClosesBedrockTunnel(t *testing.T) {
 	m := newManager(t, d, nil).WithBedrockTunneler(bt)
 	startRunning(t, m)
 
-	res := m.Handle(context.Background(), session.Command{CommandID: "s", ServerID: "s1", Kind: "StopServer"})
+	res := m.Handle(context.Background(), session.Command{CommandID: "s", ServerID: s1, Kind: "StopServer"})
 	if !res.Success {
 		t.Fatalf("StopServer = %+v, want success", res)
 	}
-	if calls := bt.closeCalls(); len(calls) != 1 || calls[0] != "s1" {
+	if calls := bt.closeCalls(); len(calls) != 1 || calls[0] != s1 {
 		t.Fatalf("Close calls = %v, want [s1]", calls)
 	}
 }
@@ -205,7 +205,7 @@ func TestStopServerWithoutBedrockTunnelerConfigured(t *testing.T) {
 	m := newManager(t, d, nil)
 	startRunning(t, m)
 
-	res := m.Handle(context.Background(), session.Command{CommandID: "s", ServerID: "s1", Kind: "StopServer"})
+	res := m.Handle(context.Background(), session.Command{CommandID: "s", ServerID: s1, Kind: "StopServer"})
 	if !res.Success {
 		t.Fatalf("StopServer = %+v, want success", res)
 	}

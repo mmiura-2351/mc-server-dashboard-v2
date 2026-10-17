@@ -288,7 +288,7 @@ func TestStartRefusedWhenTheMarkerIsNotARegularFile(t *testing.T) {
 		t.Run(plant.name, func(t *testing.T) {
 			d := &fakeDriver{}
 			m := newManager(t, d, nil)
-			dir := seedScratch(t, m, "s1")
+			dir := seedScratch(t, m, s1)
 			if err := os.Remove(filepath.Join(dir, generationFile)); err != nil {
 				t.Fatal(err)
 			}
@@ -320,7 +320,7 @@ func TestRunningSnapshotDeclaresNoBaseForAPlantedMarkerAndRestampsIt(t *testing.
 			tr := &fakeTransfer{gen: 12}
 			h := &capturingSlogHandler{}
 			m := newManager(t, &fakeDriver{}, &fakeControl{reply: "ok"}).WithTransfer(tr).WithLogger(slog.New(h))
-			dir := seedScratch(t, m, "s1")
+			dir := seedScratch(t, m, s1)
 			if res := m.Handle(context.Background(), startCmd()); !res.Success {
 				t.Fatalf("start = %+v, want success", res)
 			}
@@ -339,7 +339,7 @@ func TestRunningSnapshotDeclaresNoBaseForAPlantedMarkerAndRestampsIt(t *testing.
 			if got := tr.snapshotBaseGenerations; len(got) != 1 || got[0] != 0 {
 				t.Fatalf("declared base generations = %v, want [0]", got)
 			}
-			if !warned(h, "generation marker", "s1") {
+			if !warned(h, "generation marker", s1) {
 				t.Error("the snapshot did not WARN about the refused marker")
 			}
 			if info, err := os.Lstat(marker); err != nil || !info.Mode().IsRegular() {

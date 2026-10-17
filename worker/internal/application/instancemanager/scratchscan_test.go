@@ -450,11 +450,11 @@ func TestWarnOrphanDisplacedTreesLogsUnassigned(t *testing.T) {
 	scratch := t.TempDir()
 
 	// .displaced-s1: server s1 is NOT held -> must produce a WARN.
-	if err := os.MkdirAll(filepath.Join(scratch, ".displaced-s1"), 0o750); err != nil {
+	if err := os.MkdirAll(filepath.Join(scratch, ".displaced-"+s1), 0o750); err != nil {
 		t.Fatal(err)
 	}
 	// .displaced-s2: server s2 IS held -> must NOT produce a WARN.
-	if err := os.MkdirAll(filepath.Join(scratch, ".displaced-s2"), 0o750); err != nil {
+	if err := os.MkdirAll(filepath.Join(scratch, ".displaced-"+s2), 0o750); err != nil {
 		t.Fatal(err)
 	}
 	// A plain server dir: ignored (not a displaced prefix).
@@ -462,7 +462,7 @@ func TestWarnOrphanDisplacedTreesLogsUnassigned(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	held := []session.HeldServer{{ServerID: "s2", Generation: 1}}
+	held := []session.HeldServer{{ServerID: s2, Generation: 1}}
 	h := &capturingSlogHandler{}
 	log := slog.New(h)
 	WarnOrphanDisplacedTrees(scratch, held, log)
@@ -479,18 +479,18 @@ func TestWarnOrphanDisplacedTreesLogsUnassigned(t *testing.T) {
 	h.records[0].Attrs(func(a slog.Attr) bool {
 		switch a.Key {
 		case "path":
-			if a.Value.String() == filepath.Join(scratch, ".displaced-s1") {
+			if a.Value.String() == filepath.Join(scratch, ".displaced-"+s1) {
 				foundPath = true
 			}
 		case "server_id":
-			if a.Value.String() == "s1" {
+			if a.Value.String() == s1 {
 				foundID = true
 			}
 		}
 		return true
 	})
 	if !foundPath {
-		t.Fatalf("log record missing path=%q", filepath.Join(scratch, ".displaced-s1"))
+		t.Fatalf("log record missing path=%q", filepath.Join(scratch, ".displaced-"+s1))
 	}
 	if !foundID {
 		t.Fatalf("log record missing server_id=s1")
@@ -503,11 +503,11 @@ func TestWarnOrphanDisplacedTreesLogsUnassigned(t *testing.T) {
 func TestWarnOrphanDisplacedTreesSilentWhenAllAssigned(t *testing.T) {
 	scratch := t.TempDir()
 
-	if err := os.MkdirAll(filepath.Join(scratch, ".displaced-s1"), 0o750); err != nil {
+	if err := os.MkdirAll(filepath.Join(scratch, ".displaced-"+s1), 0o750); err != nil {
 		t.Fatal(err)
 	}
 
-	held := []session.HeldServer{{ServerID: "s1", Generation: 3}}
+	held := []session.HeldServer{{ServerID: s1, Generation: 3}}
 	h := &capturingSlogHandler{}
 	WarnOrphanDisplacedTrees(scratch, held, slog.New(h))
 
@@ -516,12 +516,34 @@ func TestWarnOrphanDisplacedTreesSilentWhenAllAssigned(t *testing.T) {
 	}
 }
 
+// TestWarnOrphanDisplacedTreesIgnoresNonServerIDSuffix verifies a .displaced-<x>
+// tree is reported as an orphaned server recovery tree only when <x> is a server id
+// (issue #3399). The Worker only ever displaces a working set under a canonical
+// UUID, so a lookalike with any other suffix is not one of its recovery trees and
+// is skipped, like every other stray name the boot scans meet.
+func TestWarnOrphanDisplacedTreesIgnoresNonServerIDSuffix(t *testing.T) {
+	const serverID = "0b6e1f4a-3c2d-4e5f-8a9b-1c2d3e4f5a6b"
+	scratch := t.TempDir()
+	for _, suffix := range []string{"server-a", "", strings.ToUpper(serverID)} {
+		if err := os.MkdirAll(filepath.Join(scratch, displacedPrefix+suffix), 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	h := &capturingSlogHandler{}
+	WarnOrphanDisplacedTrees(scratch, nil, slog.New(h))
+
+	if len(h.records) != 0 {
+		t.Fatalf("got %d log records, want 0 for non-server-id suffixes; records = %v", len(h.records), h.records)
+	}
+}
+
 // TestWarnOrphanDisplacedTreesNilLoggerIsSafe verifies that WarnOrphanDisplacedTrees
 // does not panic when log is nil (issue #911): callers that don't care about log
 // output (or tests that pass nil) must not crash.
 func TestWarnOrphanDisplacedTreesNilLoggerIsSafe(t *testing.T) {
 	scratch := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(scratch, ".displaced-s1"), 0o750); err != nil {
+	if err := os.MkdirAll(filepath.Join(scratch, ".displaced-"+s1), 0o750); err != nil {
 		t.Fatal(err)
 	}
 	// Must not panic.
