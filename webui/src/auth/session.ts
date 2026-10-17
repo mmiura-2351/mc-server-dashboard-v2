@@ -18,17 +18,6 @@ import {
   setAccessToken,
 } from "./tokenStore.ts";
 
-interface TokenResponse {
-  access_token: string;
-  refresh_token: string;
-  token_type: string;
-}
-
-interface AccessTokenResponse {
-  access_token: string;
-  token_type: string;
-}
-
 /**
  * The React layer registers what a hard logout does to its state (reset to
  * signed-out, navigate to /login). Kept as a hook so this module stays free of
@@ -113,16 +102,34 @@ async function requestRefresh(): Promise<RefreshOutcome> {
       status: isAuthDefinitive(response.status) ? "auth-rejected" : "transient",
     };
   }
-  let data: TokenResponse;
-  try {
-    data = (await response.json()) as TokenResponse;
-  } catch {
+  const accessToken = await readAccessToken(response);
+  if (accessToken === null) {
     // A 200 with a malformed/empty body yields no usable token; this is not an
     // auth rejection (the server said 200), so treat it as transient rather
     // than forcing a hard logout.
     return { status: "transient" };
   }
-  return { status: "ok", accessToken: data.access_token };
+  return { status: "ok", accessToken };
+}
+
+/**
+ * The access token in a 200 token response body, or null when the body is not
+ * JSON or does not carry a non-empty string `access_token` (#3356).
+ */
+async function readAccessToken(response: Response): Promise<string | null> {
+  let data: unknown;
+  try {
+    data = await response.json();
+  } catch {
+    return null;
+  }
+  if (typeof data !== "object" || data === null || !("access_token" in data)) {
+    return null;
+  }
+  const accessToken = data.access_token;
+  return typeof accessToken === "string" && accessToken !== ""
+    ? accessToken
+    : null;
 }
 
 /**
@@ -188,15 +195,10 @@ async function requestSessionToken(): Promise<string | null> {
   if (!response.ok) {
     return null;
   }
-  let data: AccessTokenResponse;
-  try {
-    data = (await response.json()) as AccessTokenResponse;
-  } catch {
-    // A 200 with a malformed/empty body yields no usable token; treat it as a
-    // failed restore so the bootstrap resolves signed-out rather than rejecting.
-    return null;
-  }
-  return data.access_token;
+  // A 200 with a malformed/empty body yields no usable token (null); treat it
+  // as a failed restore so the bootstrap resolves signed-out rather than
+  // rejecting.
+  return readAccessToken(response);
 }
 
 /**
