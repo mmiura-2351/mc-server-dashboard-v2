@@ -152,11 +152,20 @@ def test_access_token_with_non_int_exp_is_rejected(exp: object) -> None:
 
 @pytest.mark.parametrize(
     "exp",
-    [pytest.param(10**20, id="huge"), pytest.param(-(10**20), id="negative-huge")],
+    [
+        # Each fails ``fromtimestamp`` a different way on Linux/CPython: past
+        # year 9999 is ValueError, near 2**63 the C time call fails with OSError
+        # (EOVERFLOW), and beyond time_t it is OverflowError.
+        pytest.param(253402300800, id="year-10000"),
+        pytest.param(2**63 - 1, id="time-t-max"),
+        pytest.param(10**20, id="huge"),
+        # Negative ones are rejected as expired before any conversion.
+        pytest.param(-(2**63), id="time-t-min"),
+        pytest.param(-(10**20), id="negative-huge"),
+    ],
 )
 def test_access_token_with_out_of_range_exp_is_rejected(exp: int) -> None:
-    # An int too large for a datetime makes ``fromtimestamp`` raise
-    # OverflowError, not ValueError; it must still be an invalid token, not a 500.
+    # An int too large for a datetime must still be an invalid token, not a 500.
     # The resource-scoped verifiers only compare ``exp`` as an int, so they have
     # no such conversion to fail.
     clock = _FakeClock(dt.datetime(2026, 6, 4, tzinfo=dt.timezone.utc))

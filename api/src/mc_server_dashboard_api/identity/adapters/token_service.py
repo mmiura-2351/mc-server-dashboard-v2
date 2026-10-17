@@ -133,9 +133,16 @@ class JwtTokenService(TokenService):
                 user_id=UserId(uuid.UUID(claims["sub"])),
                 expires_at=dt.datetime.fromtimestamp(exp, tz=dt.timezone.utc),
             )
-        # OverflowError: an ``exp`` past the platform time_t range makes
-        # ``fromtimestamp`` raise it rather than ValueError (#3327).
-        except (jwt.InvalidTokenError, KeyError, ValueError, OverflowError) as exc:
+        # An ``exp`` too large for a datetime makes ``fromtimestamp`` raise
+        # ValueError, OSError (the C time call fails, e.g. near 2**63) or
+        # OverflowError (past time_t), depending on the value (#3327).
+        except (
+            jwt.InvalidTokenError,
+            KeyError,
+            ValueError,
+            OSError,
+            OverflowError,
+        ) as exc:
             raise InvalidAccessTokenError from exc
 
     def issue_refresh_token(self) -> IssuedRefreshToken:
