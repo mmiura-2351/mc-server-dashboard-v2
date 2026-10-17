@@ -38,7 +38,7 @@ linters:
             - pkg: github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/adapters
               desc: the relay core depends on interfaces it declares, never on an adapter; cmd/relay binds adapters (ARCHITECTURE.md Section 2.1)
         core-apiclient-exception:
-          # Exception recorded under issue #3345, to be removed by moving the
+          # Exception tracked by follow-up #3408, to be removed by moving the
           # relay's API value types (Intent, ResolveResult and its Decision,
           # SessionStart, SessionEnd, Source) out of adapters/apiclient into a core
           # package: these files name them in their port interfaces and calls.
