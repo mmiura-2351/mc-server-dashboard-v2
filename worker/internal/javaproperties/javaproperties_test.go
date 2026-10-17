@@ -434,3 +434,94 @@ func TestParseHandlesLinesLongerThanTheScannerCap(t *testing.T) {
 		t.Errorf("server-port = %q, want %q (a long line must not truncate the parse)", props["server-port"], "26590")
 	}
 }
+
+// TestParseLongContinuedLogicalLine pins the parse of one logical line spread
+// over many continued lines, which the parser accumulates in a single buffer
+// rather than copying the whole line again per continuation (issue #3346). The
+// backslash-run rows pin that whether a continuation line continues is decided
+// by its own trailing run alone: the logical line it extends ends in an even
+// run, so an even run on the new line ends the value and an odd one continues.
+func TestParseLongContinuedLogicalLine(t *testing.T) {
+	const n = 10000
+	for _, tc := range []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "many short continued lines",
+			input: "motd=" + strings.Repeat("ab\\\n  ", n) + "end\n",
+			want:  strings.Repeat("ab", n) + "end",
+		},
+		{
+			name:  "many continued lines of an odd backslash run",
+			input: "motd=" + strings.Repeat("\\\\\\\n", n) + "end\n",
+			want:  strings.Repeat(`\`, n) + "end",
+		},
+		{
+			name:  "a continuation line of an even backslash run ends the value",
+			input: "motd=a\\\n\\\\\n",
+			want:  `a\`,
+		},
+		{
+			name:  "a continuation line of an odd backslash run continues",
+			input: "motd=a\\\n\\\\\\\nb\n",
+			want:  `a\b`,
+		},
+		{
+			name:  "a continuation line ending in an odd backslash run continues",
+			input: "motd=a\\\nb\\\\\\\nc\n",
+			want:  `ab\c`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := tc.input + "server-port=26590\n"
+			data := []byte(input)
+			for _, parse := range []func([]byte) map[string]string{Parse, ParseUTF8} {
+				props := parse(data)
+				if props["motd"] != tc.want {
+					t.Errorf("motd = %q (length %d), want %q (length %d)",
+						props["motd"], len(props["motd"]), tc.want, len(tc.want))
+				}
+				if props["server-port"] != "26590" {
+					t.Errorf("server-port = %q, want %q", props["server-port"], "26590")
+				}
+			}
+			if string(data) != input {
+				t.Error("parsing modified the caller's input")
+			}
+		})
+	}
+}
+
+// TestParseContinuationsAllocateLinearly pins the allocation side of issue
+// #3346: a logical line of n continued lines is accumulated in one growing
+// buffer, so its allocations stay logarithmic in n. Copying the logical line
+// per continuation allocates at least once per line, which the generous n/10
+// ceiling catches. Rescanning the logical line's trailing backslash run
+// allocates nothing, so this test cannot see that path; the backslash-runs
+// rows of BenchmarkParseContinuations measure it.
+func TestParseContinuationsAllocateLinearly(t *testing.T) {
+	const n = 10000
+	for _, input := range []struct {
+		name string
+		data string
+	}{
+		{"short lines", strings.Repeat("k\\\n", n)},
+		{"backslash runs", "k" + strings.Repeat("\\\\\\\n", n)},
+	} {
+		data := []byte(input.data)
+		for _, parser := range []struct {
+			name  string
+			parse func([]byte) map[string]string
+		}{{"Parse", Parse}, {"ParseUTF8", ParseUTF8}} {
+			t.Run(input.name+"/"+parser.name, func(t *testing.T) {
+				allocs := testing.AllocsPerRun(5, func() { parser.parse(data) })
+				if allocs > n/10 {
+					t.Errorf("%s allocated %.0f times for %d continued lines, want at most %d",
+						parser.name, allocs, n, n/10)
+				}
+			})
+		}
+	}
+}

@@ -315,12 +315,25 @@ def _parse(content: bytes) -> list[_Property]:
             continue
         if not line or line[:1] in (b"#", b"!"):
             continue
-        while _ends_with_odd_backslash(line):
-            line = line[:-1]
-            if offset >= len(content):
-                break
-            continuation, offset = _natural_line(content, offset)
-            line += continuation.lstrip(_BLANKS)
+        if _ends_with_odd_backslash(line):
+            # One buffer for the whole logical line, so each continuation
+            # appends in place -- linear in the file, never a copy of the line
+            # so far per continuation (issue #3346).
+            logical = bytearray(line)
+            continued = True
+            while continued:
+                del logical[-1]
+                if offset >= len(content):
+                    break
+                continuation, offset = _natural_line(content, offset)
+                continuation = continuation.lstrip(_BLANKS)
+                logical += continuation
+                # logical ended in an even run before continuation was
+                # appended, so continuation's own trailing run decides;
+                # rechecking logical would be quadratic on a file of
+                # backslash-run lines.
+                continued = _ends_with_odd_backslash(continuation)
+            line = bytes(logical)
         key, value = _split_key_value(line)
         props.append(_Property(key=key, value=value, start=start, end=offset))
     return props
