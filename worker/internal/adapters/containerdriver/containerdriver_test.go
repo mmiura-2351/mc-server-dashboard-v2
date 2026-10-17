@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/rcon"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 )
 
@@ -459,11 +458,11 @@ func TestQueryPlayerCountReusesConnection(t *testing.T) {
 	}
 }
 
-// A metrics connection poisoned by an Execute error (rcon.ErrConnBroken) is
+// A metrics connection poisoned by an Execute error (execution.ErrConnBroken) is
 // discarded and redialed on the next sample — exactly once, not in a hot loop
 // (issue #1622).
 func TestQueryPlayerCountRedialsAfterPoison(t *testing.T) {
-	broken := &fakeMetricsControl{execErr: rcon.ErrConnBroken}
+	broken := &fakeMetricsControl{execErr: execution.ErrConnBroken}
 	fresh := &fakeMetricsControl{listReply: "There are 2 of a max of 20 players online: a, b"}
 	controls := []execution.ServerControl{broken, fresh}
 	var dials int

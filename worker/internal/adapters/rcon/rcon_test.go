@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 )
 
 // mcReadSettle is how long the fake server waits for the wire to go quiet before
@@ -414,8 +416,8 @@ func TestExecuteReportsADroppedCommand(t *testing.T) {
 		}()
 
 		c := &Client{conn: cli, nextID: 1}
-		if _, err := c.Execute(context.Background(), "list"); !errors.Is(err, ErrCommandDropped) {
-			t.Fatalf("Execute error = %v, want ErrCommandDropped", err)
+		if _, err := c.Execute(context.Background(), "list"); !errors.Is(err, execution.ErrCommandDropped) {
+			t.Fatalf("Execute error = %v, want execution.ErrCommandDropped", err)
 		}
 	})
 
@@ -442,8 +444,8 @@ func TestExecuteReportsADroppedCommand(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = cli.Close() })
 		c := &Client{conn: cli, nextID: 1}
-		if _, err := c.Execute(context.Background(), "list"); !errors.Is(err, ErrCommandDropped) {
-			t.Fatalf("Execute error = %v, want ErrCommandDropped", err)
+		if _, err := c.Execute(context.Background(), "list"); !errors.Is(err, execution.ErrCommandDropped) {
+			t.Fatalf("Execute error = %v, want execution.ErrCommandDropped", err)
 		}
 	})
 }
@@ -500,8 +502,8 @@ func TestExecuteResponseBytesMeanNotDropped(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			c := &Client{conn: &scriptedConn{reply: tc.reply, err: tc.err}, nextID: 1}
 			_, err := c.Execute(context.Background(), "list")
-			if err == nil || errors.Is(err, ErrCommandDropped) {
-				t.Fatalf("Execute error = %v, want a failure that is not ErrCommandDropped", err)
+			if err == nil || errors.Is(err, execution.ErrCommandDropped) {
+				t.Fatalf("Execute error = %v, want a failure that is not execution.ErrCommandDropped", err)
 			}
 		})
 	}
@@ -509,8 +511,8 @@ func TestExecuteResponseBytesMeanNotDropped(t *testing.T) {
 	t.Run("auth", func(t *testing.T) {
 		c := &Client{conn: &scriptedConn{err: io.EOF}, nextID: 1}
 		err := c.authenticate("secret")
-		if err == nil || errors.Is(err, ErrCommandDropped) {
-			t.Fatalf("authenticate error = %v, want a failure that is not ErrCommandDropped", err)
+		if err == nil || errors.Is(err, execution.ErrCommandDropped) {
+			t.Fatalf("authenticate error = %v, want a failure that is not execution.ErrCommandDropped", err)
 		}
 	})
 }
@@ -530,8 +532,8 @@ func TestExecuteTimeoutIsNotADroppedCommand(t *testing.T) {
 	t.Cleanup(func() { _ = c.Close() })
 
 	_, err = c.Execute(context.Background(), "list")
-	if err == nil || errors.Is(err, ErrCommandDropped) {
-		t.Fatalf("Execute error = %v, want a timeout that is not ErrCommandDropped", err)
+	if err == nil || errors.Is(err, execution.ErrCommandDropped) {
+		t.Fatalf("Execute error = %v, want a timeout that is not execution.ErrCommandDropped", err)
 	}
 }
 
@@ -617,8 +619,8 @@ func TestDialDefaultDeadlineUnblocksSilentAuthServer(t *testing.T) {
 }
 
 // After a round trip fails mid-stream, the connection is poisoned: a subsequent
-// Execute on the same Client fails fast with ErrConnBroken instead of reading a
-// stale, mis-framed response. This forces the only reuser (instancemanager's
+// Execute on the same Client fails fast with execution.ErrConnBroken instead of
+// reading a stale, mis-framed response. This forces the only reuser (instancemanager's
 // quiesce save-on, on the next snapshot) to redial rather than act on garbage.
 func TestExecutePoisonsConnAfterIOError(t *testing.T) {
 	prev := defaultExecuteTimeout
@@ -639,8 +641,8 @@ func TestExecutePoisonsConnAfterIOError(t *testing.T) {
 	// The connection is now poisoned; the next Execute must fail fast without
 	// touching the wire.
 	_, err = c.Execute(context.Background(), "save-on")
-	if !errors.Is(err, ErrConnBroken) {
-		t.Fatalf("second Execute error = %v, want ErrConnBroken", err)
+	if !errors.Is(err, execution.ErrConnBroken) {
+		t.Fatalf("second Execute error = %v, want execution.ErrConnBroken", err)
 	}
 }
 
