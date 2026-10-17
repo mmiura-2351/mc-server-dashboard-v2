@@ -13,6 +13,59 @@ linters:
     - unused
     - misspell
     - revive
+    - depguard
+  settings:
+    depguard:
+      # Import direction (docs/app/ARCHITECTURE.md Section 2.2):
+      #
+      #   edge (cmd/)  ->  application  ->  domain  <-  adapters
+      #
+      # Each rule covers one layer's non-test files. Tests are exempt: a test may
+      # reach across layers for a real collaborator (domain/scratchformat's test
+      # checks the datatransfer adapter and instancemanager agree on the format).
+      # internal/nofollow and internal/javaproperties are shared helpers outside
+      # the layers. cmd/ is the edge and may import anything; nothing can import it.
+      rules:
+        domain:
+          # Pure core: the standard library and other domain packages only.
+          list-mode: strict
+          files:
+            - "**/internal/domain/**"
+            - "!$test"
+          allow:
+            - $gostd
+            - github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain
+        application:
+          files:
+            - "**/internal/application/**"
+            - "!$test"
+            # Covered by application-regionfsck-exception below instead.
+            - "!**/internal/application/instancemanager/instancemanager.go"
+            - "!**/internal/application/instancemanager/scratchscan.go"
+          deny: &application-deny
+            - pkg: github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters
+              desc: application depends on domain Ports, never on an adapter; cmd/worker binds adapters to Ports (ARCHITECTURE.md Section 2.1)
+            - pkg: github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/controlplane
+              desc: generated gRPC stubs belong to adapters/controlplane, not to the application (ARCHITECTURE.md Section 2.1)
+        application-regionfsck-exception:
+          # Exception recorded under issue #3345, to be removed by moving the region
+          # check behind a domain Port: instancemanager calls
+          # regionfsck.CheckWorkingSet directly (pre-snapshot fsck and the held-set
+          # scan) and reads its Report type. Every other adapter stays denied here.
+          list-mode: lax
+          files:
+            - "**/internal/application/instancemanager/instancemanager.go"
+            - "**/internal/application/instancemanager/scratchscan.go"
+          allow:
+            - github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/regionfsck$
+          deny: *application-deny
+        adapters:
+          files:
+            - "**/internal/adapters/**"
+            - "!$test"
+          deny:
+            - pkg: github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/application
+              desc: adapters implement domain Ports and depend on domain only (ARCHITECTURE.md Section 2.2)
   exclusions:
     # Agent worktrees are created inside the repo at .claude/worktrees/<agent>/,
     # so a sibling checkout's worker/ is a full, mid-edit Go tree. golangci-lint
