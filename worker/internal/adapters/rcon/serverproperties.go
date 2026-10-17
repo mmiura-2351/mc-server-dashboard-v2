@@ -11,10 +11,6 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/javaproperties"
 )
 
-// defaultRCONPort is the Minecraft default RCON port when server.properties does
-// not override it.
-const defaultRCONPort = 25575
-
 // defaultRCONHost is the dial host when the caller passes an empty host: the host
 // loopback, preserving the historical bare-metal behavior.
 const defaultRCONHost = "127.0.0.1"
@@ -26,9 +22,9 @@ const defaultRCONHost = "127.0.0.1"
 // container's name when its containers run on a user-defined network, so RCON is
 // reached over that network instead of the unreachable host loopback (issue
 // #218). mcVersion is the server's Minecraft version, which decides the charset
-// the file is read in (issue #3116). An rcon.port that is missing or not an
-// integer dials the default port, since the server itself listens there then; an
-// integer outside 1-65535 is an error. It errors when RCON is not
+// the file is read in (issue #3116). rcon.port is resolved as the server resolves
+// it (serverproperties.RCONPort): missing or not an integer dials the default
+// port, an integer outside 1-65535 is an error. It errors when RCON is not
 // enabled/configured; the graceful-stop path then falls back to signals. No error
 // carries a value read from the file, because the container driver logs them
 // (issue #3345).
@@ -44,24 +40,16 @@ func OpenFromWorkingDir(ctx context.Context, workingDir, host, mcVersion string)
 	if password == "" {
 		return nil, fmt.Errorf("rcon: no rcon.password in server.properties")
 	}
-	// Minecraft reads rcon.port with Integer.parseInt and takes the default when
-	// that throws, so a value that is not a 32-bit integer -- absent, or a
-	// backslash-continued line that folded the next line (a password, say) into it
-	// -- means the server listens on the default port (issue #3345). The address
-	// is always built from the number, never from the text read: Dial's errors
-	// repeat the address and the caller logs them, and for the same reason an
-	// out-of-range port is refused without naming it.
-	port, err := strconv.ParseInt(props["rcon.port"], 10, 32)
+	// The address is built from the resolved number, never from the text read:
+	// Dial's errors repeat the address and the caller logs them (issue #3345).
+	port, err := serverproperties.RCONPort(props["rcon.port"])
 	if err != nil {
-		port = defaultRCONPort
-	}
-	if port < 1 || port > 65535 {
-		return nil, fmt.Errorf("rcon: rcon.port in server.properties is not a port number (1-65535)")
+		return nil, fmt.Errorf("rcon: %w", err)
 	}
 	if host == "" {
 		host = defaultRCONHost
 	}
-	return Dial(ctx, net.JoinHostPort(host, strconv.FormatInt(port, 10)), password)
+	return Dial(ctx, net.JoinHostPort(host, strconv.Itoa(port)), password)
 }
 
 // readProperties reads and parses the server.properties of workingDir with the

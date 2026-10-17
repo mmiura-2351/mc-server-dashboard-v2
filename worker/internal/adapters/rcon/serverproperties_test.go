@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/serverproperties"
 )
 
 // writeRCONProps writes a server.properties enabling RCON on the given port with
@@ -184,7 +186,7 @@ func TestOpenFromWorkingDirUsesHostOverride(t *testing.T) {
 func listenOnDefaultRCONPort(t *testing.T) net.Listener {
 	t.Helper()
 	for _, host := range []string{"127.0.83.45", "127.0.83.46", "127.0.83.47"} {
-		ln, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(defaultRCONPort)))
+		ln, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(serverproperties.DefaultRCONPort)))
 		if err == nil {
 			return ln
 		}
@@ -224,7 +226,7 @@ func TestOpenFromWorkingDirDialsTheDefaultPortForANonIntegerPort(t *testing.T) {
 			defer cancel()
 			client, err := OpenFromWorkingDir(ctx, dir, host, "")
 			if err != nil {
-				t.Fatalf("OpenFromWorkingDir = %v, want it to dial %s:%d and authenticate", err, host, defaultRCONPort)
+				t.Fatalf("OpenFromWorkingDir = %v, want it to dial %s:%d and authenticate", err, host, serverproperties.DefaultRCONPort)
 			}
 			_ = client.Close()
 		})

@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/rcon"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/serverproperties"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 )
 
@@ -602,13 +604,8 @@ func TestQueryPlayerCountDedupsOpenFailureAcrossEphemeralPorts(t *testing.T) {
 	}
 }
 
-// writeRCONProperties writes body as workingDir's server.properties.
-func writeRCONProperties(t *testing.T, workingDir, body string) {
-	t.Helper()
-	if err := os.WriteFile(filepath.Join(workingDir, "server.properties"), []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
+// defaultRCONPort is the default RCON port as the container port mappings spell it.
+var defaultRCONPort = strconv.Itoa(serverproperties.DefaultRCONPort)
 
 // openRealControl opens RCON the way cmd/worker wires the driver: through the
 // real server.properties reader in the instance's working dir.
@@ -667,7 +664,7 @@ func TestRCONOpenWithANonIntegerPortDialsTheDefaultAndLogsNoPropertiesContent(t 
 		t.Run(tc.name, func(t *testing.T) {
 			host, dialed := hangUpOnDefaultRCONPort(t)
 			dir := t.TempDir()
-			writeRCONProperties(t, dir, tc.body)
+			writeProperties(t, dir, tc.body)
 			logged := &syncBuffer{}
 			inst := &instance{
 				spec:        execution.InstanceSpec{ServerID: "s1", WorkingDir: dir},
@@ -707,7 +704,7 @@ func TestRCONOpenWithANonIntegerPortDialsTheDefaultAndLogsNoPropertiesContent(t 
 // line naming rcon.port but not the value (issue #3345).
 func TestRCONOpenWithAnOutOfRangePortLogsNoPropertiesContent(t *testing.T) {
 	dir := t.TempDir()
-	writeRCONProperties(t, dir, "enable-rcon=true\nrcon.password=pw\nrcon.port=70000\n")
+	writeProperties(t, dir, "enable-rcon=true\nrcon.password=pw\nrcon.port=70000\n")
 	logged := &syncBuffer{}
 	inst := &instance{
 		spec:        execution.InstanceSpec{ServerID: "s1", WorkingDir: dir},
@@ -1577,6 +1574,64 @@ func TestStartPublishesColonSpelledGamePort(t *testing.T) {
 	}
 	if hasPort(docker.createSpec.Ports, defaultGamePort) {
 		t.Errorf("Ports = %v, want NO fallback to the default game port", docker.createSpec.Ports)
+	}
+}
+
+// A non-integer rcon.port is published as the default RCON port, the port the
+// Minecraft server falls back to and the RCON dial uses; the mapping is built
+// from that number, so no text from the file -- not the password a
+// backslash-continued port line folds into the value -- reaches the container
+// create (issue #3345).
+func TestStartPublishesTheDefaultRCONPortForANonIntegerPort(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		leak string
+	}{
+		{name: "continued port line", body: "rcon.password=FIRST_SECRET\nrcon.port=25575\\\nrcon.password=SECOND_SECRET\n", leak: "SECRET"},
+		{name: "non-numeric port", body: "rcon.port=notaport\n", leak: "notaport"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeProperties(t, dir, tc.body)
+			docker := newFakeDocker()
+			d := newTestDriver(docker, nil, errors.New("no rcon"))
+
+			s := spec()
+			s.WorkingDir = dir
+			if _, err := d.Start(context.Background(), s); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+
+			if !hasPort(docker.createSpec.Ports, defaultRCONPort) {
+				t.Errorf("Ports = %v, want the default RCON port %s published", docker.createSpec.Ports, defaultRCONPort)
+			}
+			if got := fmt.Sprintf("%+v", docker.createSpec.Ports); strings.Contains(got, tc.leak) {
+				t.Errorf("Ports = %s, must not carry %q", got, tc.leak)
+			}
+		})
+	}
+}
+
+// An integer rcon.port no server can bind fails the start before any container
+// is created, with an error naming rcon.port but not the value (issue #3345).
+func TestStartRefusesAnOutOfRangeRCONPortWithoutEchoingIt(t *testing.T) {
+	dir := t.TempDir()
+	writeProperties(t, dir, "rcon.port=70000\n")
+	docker := newFakeDocker()
+	d := newTestDriver(docker, nil, errors.New("no rcon"))
+
+	s := spec()
+	s.WorkingDir = dir
+	_, err := d.Start(context.Background(), s)
+	if err == nil {
+		t.Fatal("Start = nil error, want an out-of-range rcon.port refused")
+	}
+	if !strings.Contains(err.Error(), "rcon.port") || strings.Contains(err.Error(), "70000") {
+		t.Errorf("Start error = %q, want it to name rcon.port and not the value", err)
+	}
+	if docker.createCalls != 0 {
+		t.Errorf("createCalls = %d, want 0", docker.createCalls)
 	}
 }
 
