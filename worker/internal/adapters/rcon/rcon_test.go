@@ -76,6 +76,12 @@ func newFakeServer(t *testing.T, password string) *fakeServer {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
+	return serveFake(t, ln, password)
+}
+
+// serveFake runs a fakeServer on ln, which it closes at test cleanup.
+func serveFake(t *testing.T, ln net.Listener, password string) *fakeServer {
+	t.Helper()
 	fs := &fakeServer{
 		ln:               ln,
 		password:         password,

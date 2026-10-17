@@ -616,54 +616,118 @@ func openRealControl(ctx context.Context, spec execution.InstanceSpec, rconHost 
 	return rcon.OpenFromWorkingDir(ctx, spec.WorkingDir, rconHost, spec.MinecraftVersion)
 }
 
-// malformedPortProperties are server.properties whose rcon.port the RCON open
-// refuses, each with what must never reach the Worker log: a backslash-continued
-// port line folds the password line after it into the port value, and a plain
-// non-numeric value is file content too (issue #3345).
-var malformedPortProperties = []struct {
-	name string
-	body string
-	leak []string
-}{
-	{
-		name: "continued port line",
-		body: "enable-rcon=true\nrcon.password=FIRST_SECRET\nrcon.port=25575\\\nrcon.password=SECOND_SECRET\n",
-		leak: []string{"SECRET", "rcon.password="},
-	},
-	{name: "non-numeric port", body: "enable-rcon=true\nrcon.password=pw\nrcon.port=notaport\n", leak: []string{"notaport"}},
+// hangUpOnDefaultRCONPort listens on the default RCON port (25575) at a loopback
+// address other than 127.0.0.1, which a real server on this host may hold, and
+// hangs up on every connection, so an RCON open that dials it fails during the
+// handshake. It returns the host and a channel that receives once per connection.
+// It skips the test when no candidate address is free.
+func hangUpOnDefaultRCONPort(t *testing.T) (string, <-chan struct{}) {
+	t.Helper()
+	for _, host := range []string{"127.0.84.45", "127.0.84.46", "127.0.84.47"} {
+		ln, err := net.Listen("tcp", net.JoinHostPort(host, defaultRCONPort))
+		if err != nil {
+			continue
+		}
+		t.Cleanup(func() { _ = ln.Close() })
+		dialed := make(chan struct{}, 8)
+		go func() {
+			for {
+				conn, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				dialed <- struct{}{}
+				_ = conn.Close()
+			}
+		}()
+		return host, dialed
+	}
+	t.Skip("no loopback address free on the default RCON port")
+	return "", nil
 }
 
-// Neither the graceful-stop nor the player-count RCON open-failure log carries
-// server.properties content, through the real reader (issue #3345).
-func TestRCONOpenFailureLogsCarryNoPropertiesContent(t *testing.T) {
-	for _, tc := range malformedPortProperties {
+// A non-integer rcon.port is dialed at the default port, as Minecraft itself
+// falls back to it, on both the graceful-stop and the player-count path, through
+// the real server.properties reader; and whatever the open then logs carries no
+// properties content -- not the second password a backslash-continued port line
+// folds into the value, not a plain non-numeric value (issue #3345).
+func TestRCONOpenWithANonIntegerPortDialsTheDefaultAndLogsNoPropertiesContent(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		leak []string
+	}{
+		{
+			name: "continued port line",
+			body: "enable-rcon=true\nrcon.password=FIRST_SECRET\nrcon.port=25575\\\nrcon.password=SECOND_SECRET\n",
+			leak: []string{"SECRET", "rcon.password="},
+		},
+		{name: "non-numeric port", body: "enable-rcon=true\nrcon.password=pw\nrcon.port=notaport\n", leak: []string{"notaport"}},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
+			host, dialed := hangUpOnDefaultRCONPort(t)
 			dir := t.TempDir()
 			writeRCONProperties(t, dir, tc.body)
 			logged := &syncBuffer{}
 			inst := &instance{
 				spec:        execution.InstanceSpec{ServerID: "s1", WorkingDir: dir},
+				rconHost:    host,
 				logger:      slog.New(slog.NewTextHandler(logged, nil)),
 				openControl: openRealControl,
 			}
 
 			if inst.tryRCONStop(context.Background()) {
-				t.Fatal("tryRCONStop = true, want false for a malformed rcon.port")
+				t.Fatal("tryRCONStop = true, want false: the peer hangs up during the handshake")
 			}
 			inst.queryPlayerCount(context.Background())
 
+			for path := range 2 {
+				select {
+				case <-dialed:
+				default:
+					t.Fatalf("connections to %s:%s = %d, want 2 (stop and poll both dial the default port)", host, defaultRCONPort, path)
+				}
+			}
 			out := logged.String()
 			for _, leak := range tc.leak {
 				if strings.Contains(out, leak) {
 					t.Fatalf("log = %q, must not contain %q", out, leak)
 				}
 			}
-			for _, want := range []string{"graceful stop: open rcon failed", "player count: open rcon failed", "rcon.port"} {
+			for _, want := range []string{"graceful stop: open rcon failed", "player count: open rcon failed"} {
 				if !strings.Contains(out, want) {
 					t.Fatalf("log = %q, want it to contain %q", out, want)
 				}
 			}
 		})
+	}
+}
+
+// An integer rcon.port no server can bind is refused on both paths with a log
+// line naming rcon.port but not the value (issue #3345).
+func TestRCONOpenWithAnOutOfRangePortLogsNoPropertiesContent(t *testing.T) {
+	dir := t.TempDir()
+	writeRCONProperties(t, dir, "enable-rcon=true\nrcon.password=pw\nrcon.port=70000\n")
+	logged := &syncBuffer{}
+	inst := &instance{
+		spec:        execution.InstanceSpec{ServerID: "s1", WorkingDir: dir},
+		logger:      slog.New(slog.NewTextHandler(logged, nil)),
+		openControl: openRealControl,
+	}
+
+	if inst.tryRCONStop(context.Background()) {
+		t.Fatal("tryRCONStop = true, want false for an out-of-range rcon.port")
+	}
+	inst.queryPlayerCount(context.Background())
+
+	out := logged.String()
+	if strings.Contains(out, "70000") {
+		t.Fatalf("log = %q, must not contain the port value", out)
+	}
+	for _, want := range []string{"graceful stop: open rcon failed", "player count: open rcon failed", "rcon.port"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("log = %q, want it to contain %q", out, want)
+		}
 	}
 }
 
