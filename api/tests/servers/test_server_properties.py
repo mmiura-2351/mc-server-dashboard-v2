@@ -526,6 +526,20 @@ def test_unchanged_platform_keys_report_no_change() -> None:
     assert changed_platform_managed_keys(current, incoming) == []
 
 
+def test_byte_identical_files_report_no_change_without_parsing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Issue #3406: the parse is deterministic, so identical bytes cannot give a
+    # key two different value lists. A save of an unchanged file -- the size
+    # limit's worth of it included -- costs a byte compare, not two parses.
+    def no_parse(content: bytes) -> list[object]:
+        raise AssertionError("parsed")
+
+    monkeypatch.setattr(server_properties, "_parse", no_parse)
+    content = b"server-port=25565\nrcon.password=tok\n"
+    assert changed_platform_managed_keys(content, bytes(content)) == []
+
+
 def test_changed_platform_key_is_reported() -> None:
     current = b"server-port=25565\nrcon.password=tok\n"
     incoming = b"server-port=25999\nrcon.password=tok\n"
@@ -954,9 +968,10 @@ def test_continuation_checks_each_natural_line_once(
     # ends in an even run -- so the trailing-run check reads each byte of the
     # file at most once. Checking the whole logical line again per
     # continuation, which also copies it (rstrip), is quadratic on a file of
-    # many continued lines. The logical line's own accumulation (a bytearray,
-    # not a bytes copy per continuation) has no deterministic counter to pin
-    # here; the Worker's mirror pins its allocations instead.
+    # many continued lines. The logical line's own accumulation (one join of
+    # the continued lines, not a bytes copy per continuation) has no
+    # deterministic counter to pin here; the Worker's mirror pins its
+    # allocations instead.
     scanned = 0
     check = server_properties._ends_with_odd_backslash
 

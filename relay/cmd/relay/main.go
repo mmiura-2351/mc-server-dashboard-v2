@@ -308,11 +308,12 @@ func run(ctx context.Context) error {
 const metricsShutdownTimeout = 5 * time.Second
 
 // metricsHandler builds the metrics/health mux: /metrics exposes reg's series
-// via promhttp; /healthz is a static liveness 200.
+// via promhttp; /healthz is a static liveness 200. Both answer GET (and so
+// HEAD) only; any other method, CONNECT included, gets a 405 (issue #3331).
 func metricsHandler(reg *prometheus.Registry) http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+	mux.Handle("GET /metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
 	return mux
