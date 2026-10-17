@@ -1042,6 +1042,11 @@ type instance struct {
 	// error, so access is serialized by metricsMu and a broken connection is
 	// discarded to force a redial on the next sample.
 	metricsControl execution.ServerControl
+	// metricsOpenErr is the cause of the last logged player-count RCON open failure,
+	// cleared by a successful open. A failure with the same cause is not logged
+	// again, so a persistent one (a refused server.properties, issue #3345) costs one
+	// line rather than one per metrics tick. Guarded by metricsMu.
+	metricsOpenErr string
 	// metricsClosed latches once the instance terminates and closeMetricsControl has
 	// run, so a late in-flight sample does not redial a connection nobody would
 	// close.
@@ -1704,7 +1709,7 @@ func (i *instance) Sample(ctx context.Context) (execution.MetricsSample, error) 
 // Execute error, so a failed sample discards the connection and the next sample
 // redials a fresh one — at most one redial per tick, never a hot loop. Access is
 // serialized by metricsMu so the terminal close (closeMetricsControl) cannot race
-// a sample.
+// a sample. An open failure is logged once per cause (metricsOpenErr).
 func (i *instance) queryPlayerCount(ctx context.Context) uint32 {
 	i.metricsMu.Lock()
 	defer i.metricsMu.Unlock()
@@ -1718,8 +1723,14 @@ func (i *instance) queryPlayerCount(ctx context.Context) uint32 {
 	if i.metricsControl == nil {
 		ctrl, err := i.openControl(ctx, i.spec, i.rconHost)
 		if err != nil {
+			if cause := err.Error(); cause != i.metricsOpenErr {
+				i.metricsOpenErr = cause
+				i.logger.Warn("player count: open rcon failed; reporting 0 players until it opens (logged once per cause)",
+					"server_id", i.spec.ServerID, "error", err)
+			}
 			return 0
 		}
+		i.metricsOpenErr = ""
 		i.metricsControl = ctrl
 	}
 
@@ -2018,13 +2029,16 @@ func rconStopDeadline(ctx context.Context) time.Time {
 
 // tryRCONStop opens RCON and sends "stop", reporting whether the in-band stop was
 // issued successfully. A failure returns false so Stop falls back to `docker
-// stop`. The exchange runs under a phase deadline so a hung peer cannot consume
-// the whole stop budget (issue #832).
+// stop`; an open failure is logged with its cause (issue #3345). The exchange
+// runs under a phase deadline so a hung peer cannot consume the whole stop budget
+// (issue #832).
 func (i *instance) tryRCONStop(ctx context.Context) bool {
 	ctx, cancel := context.WithDeadline(ctx, rconStopDeadline(ctx))
 	defer cancel()
 	ctrl, err := i.openControl(ctx, i.spec, i.rconHost)
 	if err != nil {
+		i.logger.Warn("graceful stop: open rcon failed; falling back to a stop signal",
+			"server_id", i.spec.ServerID, "error", err)
 		return false
 	}
 	defer func() { _ = ctrl.Close() }()

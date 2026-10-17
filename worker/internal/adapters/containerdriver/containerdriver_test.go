@@ -498,7 +498,8 @@ func TestQueryPlayerCountRedialsAfterPoison(t *testing.T) {
 func TestQueryPlayerCountDegradesToZeroOnDialFailure(t *testing.T) {
 	var dials int
 	inst := &instance{
-		spec: execution.InstanceSpec{ServerID: "s1"},
+		spec:   execution.InstanceSpec{ServerID: "s1"},
+		logger: slog.New(slog.DiscardHandler),
 		openControl: func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
 			dials++
 			return nil, errors.New("rcon not ready")
@@ -512,6 +513,72 @@ func TestQueryPlayerCountDegradesToZeroOnDialFailure(t *testing.T) {
 	}
 	if dials != 2 {
 		t.Fatalf("dials = %d, want 2 (a failed dial is retried next tick, not cached)", dials)
+	}
+}
+
+// A player-count RCON open failure is logged once per cause, not on every metrics
+// tick: a refused server.properties (issue #3345) or any other persistent cause is
+// visible in the Worker log without one line per sample. A different cause is
+// logged again, and so is a cause that comes back after an open succeeded.
+func TestQueryPlayerCountLogsOpenFailureOncePerCause(t *testing.T) {
+	refused := errors.New("rcon: read server.properties: serverproperties: /scratch/s1/server.properties is larger than 65536 bytes; refusing to read it")
+	refusedDial := errors.New("rcon: dial 127.0.0.1:25575: connect: connection refused")
+	ctrl := &fakeMetricsControl{execErr: errors.New("poisoned")}
+	results := []error{refused, refused, refused, refusedDial, refusedDial, nil, refused}
+	var dials int
+	logged := &syncBuffer{}
+	inst := &instance{
+		spec:   execution.InstanceSpec{ServerID: "s1"},
+		logger: slog.New(slog.NewTextHandler(logged, nil)),
+		openControl: func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
+			err := results[dials]
+			dials++
+			if err != nil {
+				return nil, err
+			}
+			// The open succeeds; the poisoned connection is discarded so the next tick
+			// opens again.
+			return ctrl, nil
+		},
+	}
+
+	for range results {
+		inst.queryPlayerCount(context.Background())
+	}
+
+	out := logged.String()
+	if got := strings.Count(out, "player count: open rcon failed"); got != 3 {
+		t.Fatalf("open-failure log lines = %d, want 3 (one per cause, again after a success); log:\n%s", got, out)
+	}
+	if got := strings.Count(out, "refusing to read it"); got != 2 {
+		t.Fatalf("refused-file log lines = %d, want 2; log:\n%s", got, out)
+	}
+	if !strings.Contains(out, "level=WARN") || !strings.Contains(out, "server_id=s1") {
+		t.Fatalf("log = %q, want a WARN carrying the server id", out)
+	}
+}
+
+// A graceful stop whose RCON open fails falls back to a signal, and says so in the
+// Worker log with the cause, so a refused server.properties (issue #3345) does not
+// degrade the stop silently.
+func TestTryRCONStopLogsOpenFailure(t *testing.T) {
+	logged := &syncBuffer{}
+	inst := &instance{
+		spec:   execution.InstanceSpec{ServerID: "s1"},
+		logger: slog.New(slog.NewTextHandler(logged, nil)),
+		openControl: func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
+			return nil, errors.New("rcon: read server.properties: serverproperties: /scratch/s1/server.properties too many levels of symbolic links")
+		},
+	}
+
+	if inst.tryRCONStop(context.Background()) {
+		t.Fatal("tryRCONStop = true, want false when RCON cannot be opened")
+	}
+	out := logged.String()
+	for _, want := range []string{"level=WARN", "graceful stop: open rcon failed", "server_id=s1", "symbolic links"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("log = %q, want it to contain %q", out, want)
+		}
 	}
 }
 
