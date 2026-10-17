@@ -614,6 +614,17 @@ class RunReconcilerTick:
             # and the action fully succeeded. Counting it here would log a false
             # "crash-looping" WARN and arm a backoff for a completed recovery.
             self._record_failure(server.id, now)
+            # A first restart after a single crash is routine recovery, not a loop
+            # (issue #3402): only once the backoff entry already counted an earlier
+            # failure does the restart read as crash-looping, at WARNING.
+            if self._attempts[server.id].failures == 1:
+                _LOG.info(
+                    "reconcile action %s restarted server %s after a crash; "
+                    "backing off",
+                    action,
+                    server.id.value,
+                )
+                return
             _LOG.warning(
                 "reconcile action %s dispatched for crash-looping server %s; "
                 "backing off",
