@@ -152,8 +152,9 @@ Reading aids:
   assignment is a plain `assigned_worker_id` uuid with no FK; there is no durable
   `worker` table (Section 7).
 - **`resource_grant`** ties a `user` to a specific resource with an extra
-  permission set (FR-AUTHZ-2); the resource is a server (or a
-  community-level resource).
+  permission set (FR-AUTHZ-2); the resource is always a `server`, the only
+  `resource_type` the schema admits. Section 6 covers its FK to `server` and
+  what adding a second resource type would require.
 
 ---
 
