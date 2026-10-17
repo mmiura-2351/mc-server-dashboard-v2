@@ -119,7 +119,7 @@ func settleFor(t *testing.T, root string, budget time.Duration, h *capturingSlog
 	t.Helper()
 	m := newManager(t, &fakeDriver{}, nil).WithLogger(slog.New(h))
 	m.settleBudget = budget
-	return m.settleWorkingSet(context.Background(), "s1", root)
+	return m.settleWorkingSet(context.Background(), s1, root)
 }
 
 func always(int) bool { return true }
@@ -430,7 +430,7 @@ func TestSettleWorkingSetNeedsTwoCompleteScans(t *testing.T) {
 		return state, err
 	}
 
-	if !m.settleWorkingSet(context.Background(), "s1", root) {
+	if !m.settleWorkingSet(context.Background(), s1, root) {
 		t.Fatal("settleWorkingSet = false")
 	}
 	if scans != 4 {
@@ -455,7 +455,7 @@ func TestSettleWorkingSetSettlesAfterARegionFileIsDeleted(t *testing.T) {
 		return state, err
 	}
 
-	if !m.settleWorkingSet(context.Background(), "s1", root) {
+	if !m.settleWorkingSet(context.Background(), s1, root) {
 		t.Fatal("settleWorkingSet = false after a region file was deleted once")
 	}
 	if scans != 3 {

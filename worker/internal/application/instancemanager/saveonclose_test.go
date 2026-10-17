@@ -311,11 +311,11 @@ func TestCloseRestoresSaveOnForAConvergerStopStillInFlight(t *testing.T) {
 	rec := &saveOnRecorder{}
 	m := newSaveOnManager(t, &fakeDriver{}, rec.open)
 	shrinkOrphanConverger(m)
-	seedScratch(t, m, "s1")
-	inst := newFlushGatedInstance("s1", errors.New("driver: process survived kill"))
+	seedScratch(t, m, s1)
+	inst := newFlushGatedInstance(s1, errors.New("driver: process survived kill"))
 	t.Cleanup(func() { inst.releaseStop(); m.Close() })
 
-	m.recordOrphan("s1", inst, "container", "1.21")
+	m.recordOrphan(s1, inst, "container", "1.21")
 	awaitEnter(t, inst.stopEntered)
 	if !rec.has("save-off") {
 		t.Fatalf("rcon lines = %v, want the retry stop's flush to have issued save-off", rec.all())
@@ -349,7 +349,7 @@ func TestCloseRestoresSaveOnForAnOperatorStopStillInFlight(t *testing.T) {
 	rec := &saveOnRecorder{}
 	d := &flushGatedDriver{}
 	m := newSaveOnManager(t, d, rec.open)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -359,7 +359,7 @@ func TestCloseRestoresSaveOnForAnOperatorStopStillInFlight(t *testing.T) {
 	stopped := make(chan session.CommandResult, 1)
 	go func() {
 		stopped <- m.Handle(context.Background(),
-			session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+			session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"})
 	}()
 	awaitEnter(t, inst.stopEntered)
 	if !rec.has("save-off") {
@@ -403,7 +403,7 @@ func TestCloseWaitsForTheShutdownRestoreToLand(t *testing.T) {
 	gate := newGatedDialControl(rec)
 	d := &flushGatedDriver{}
 	m := newSaveOnManager(t, d, gate.open)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -413,7 +413,7 @@ func TestCloseWaitsForTheShutdownRestoreToLand(t *testing.T) {
 	stopped := make(chan session.CommandResult, 1)
 	go func() {
 		stopped <- m.Handle(context.Background(),
-			session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+			session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"})
 	}()
 	awaitEnter(t, inst.stopEntered)
 	// From here every dial blocks: the flush already has its connection, so the next
@@ -471,7 +471,7 @@ func TestCloseBoundsTheWaitForAnUnreachableRestore(t *testing.T) {
 	d := &flushGatedDriver{}
 	m := newSaveOnManager(t, d, gate.open)
 	m.closingSaveOnTimeout = time.Millisecond
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -481,7 +481,7 @@ func TestCloseBoundsTheWaitForAnUnreachableRestore(t *testing.T) {
 	stopped := make(chan session.CommandResult, 1)
 	go func() {
 		stopped <- m.Handle(context.Background(),
-			session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+			session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"})
 	}()
 	awaitEnter(t, inst.stopEntered)
 	gate.arm()
@@ -521,12 +521,12 @@ func TestCloseIssuesNoSaveOnOnceTheStopResolved(t *testing.T) {
 	rec := &saveOnRecorder{}
 	d := &flushOrphanDriver{stopAfter: 0} // the first Stop confirms termination
 	m := newSaveOnManager(t, d, rec.open)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
 	if res := m.Handle(context.Background(),
-		session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"}); !res.Success {
+		session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"}); !res.Success {
 		t.Fatalf("stop = %+v, want success (confirmed termination)", res)
 	}
 	if !rec.has("save-off") {
@@ -556,11 +556,11 @@ func TestCloseRestoresSaveOnWhenTheFlushSaveOffReportedFailure(t *testing.T) {
 	rec := &saveOnRecorder{failLines: map[string]error{"save-off": errors.New("rcon read timeout")}}
 	m := newSaveOnManager(t, &fakeDriver{}, rec.open)
 	shrinkOrphanConverger(m)
-	seedScratch(t, m, "s1")
-	inst := newFlushGatedInstance("s1", nil) // the released Stop confirms termination
+	seedScratch(t, m, s1)
+	inst := newFlushGatedInstance(s1, nil) // the released Stop confirms termination
 	t.Cleanup(func() { inst.releaseStop(); m.Close() })
 
-	m.recordOrphan("s1", inst, "container", "1.21")
+	m.recordOrphan(s1, inst, "container", "1.21")
 	awaitEnter(t, inst.stopEntered)
 
 	closed := make(chan struct{})
@@ -600,19 +600,19 @@ func TestFailedStopKeepsTheDebtUntilItsRestoreRan(t *testing.T) {
 		if dials == 2 { // dial 1 is the flush's; dial 2 is the failed-stop restore's
 			sawRestoreDial = true
 			m.mu.Lock()
-			_, debtAtRestoreDial = m.pendingSaveOn["s1"]
+			_, debtAtRestoreDial = m.pendingSaveOn[s1]
 			m.mu.Unlock()
 		}
 		return recordedControl{rec: rec}, nil
 	})
 	closeWithTest(t, m)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
 
 	if res := m.Handle(context.Background(),
-		session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"}); res.Success {
+		session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"}); res.Success {
 		t.Fatalf("stop = %+v, want failure (driver could not confirm termination)", res)
 	}
 
@@ -623,7 +623,7 @@ func TestFailedStopKeepsTheDebtUntilItsRestoreRan(t *testing.T) {
 		t.Fatal("the outstanding save-off was forgotten before its restore ran: a Close draining in that window exits under a survivor with auto-save off")
 	}
 	m.mu.Lock()
-	_, stillOutstanding := m.pendingSaveOn["s1"]
+	_, stillOutstanding := m.pendingSaveOn[s1]
 	m.mu.Unlock()
 	if stillOutstanding {
 		t.Fatal("the outstanding save-off outlived the stop that settled it; a later Close would dial a server whose stop is long resolved")
@@ -644,23 +644,23 @@ func TestFailedStopKeepsTheDebtUntilItsRestoreRan(t *testing.T) {
 func TestCloseRestoresSaveOnForADebtArmedAfterItsFirstDrain(t *testing.T) {
 	rec := &saveOnRecorder{}
 	gate := newGatedDialControl(rec)
-	gate.onlyServer = "s1" // only the operator stop's dial is held; the converger's runs
+	gate.onlyServer = s1 // only the operator stop's dial is held; the converger's runs
 	gate.arm()
 	d := &flushGatedDriver{}
 	m := newSaveOnManager(t, d, gate.open)
 	shrinkOrphanConverger(m)
-	seedScratch(t, m, "s1")
-	seedScratch(t, m, "s2")
+	seedScratch(t, m, s1)
+	seedScratch(t, m, s2)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
 	operator := d.inst
-	converger := newFlushGatedInstance("s2", errors.New("driver: process survived kill"))
+	converger := newFlushGatedInstance(s2, errors.New("driver: process survived kill"))
 	t.Cleanup(func() { gate.releaseDial(); operator.releaseStop(); converger.releaseStop(); m.Close() })
 
 	// The converger's retry runs its flush and parks in the escalation, which is what
 	// Close will be joining.
-	m.recordOrphan("s2", converger, "container", "1.21")
+	m.recordOrphan(s2, converger, "container", "1.21")
 	awaitEnter(t, converger.stopEntered)
 
 	// The operator stop is dispatched now and parks in its flush's DIAL, before any
@@ -668,11 +668,11 @@ func TestCloseRestoresSaveOnForADebtArmedAfterItsFirstDrain(t *testing.T) {
 	stopped := make(chan session.CommandResult, 1)
 	go func() {
 		stopped <- m.Handle(context.Background(),
-			session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+			session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"})
 	}()
 	awaitEnter(t, gate.dialEntered)
-	if rec.hasFor("s1", "save-off") {
-		t.Fatalf("s1 rcon lines = %v, want the flush to still be dialing", rec.allFor("s1"))
+	if rec.hasFor(s1, "save-off") {
+		t.Fatalf("s1 rcon lines = %v, want the flush to still be dialing", rec.allFor(s1))
 	}
 
 	closed := make(chan struct{})
@@ -689,8 +689,8 @@ func TestCloseRestoresSaveOnForADebtArmedAfterItsFirstDrain(t *testing.T) {
 	// bracket is opened after the first drain.
 	gate.releaseDial()
 	awaitEnter(t, operator.stopEntered)
-	if !rec.hasFor("s1", "save-off") {
-		t.Fatalf("s1 rcon lines = %v, want the late flush to have issued save-off", rec.allFor("s1"))
+	if !rec.hasFor(s1, "save-off") {
+		t.Fatalf("s1 rcon lines = %v, want the late flush to have issued save-off", rec.allFor(s1))
 	}
 
 	// Let the join finish. Close must not return before settling the late bracket.
@@ -700,8 +700,8 @@ func TestCloseRestoresSaveOnForADebtArmedAfterItsFirstDrain(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Close did not return once the parked converger finished")
 	}
-	if !rec.hasFor("s1", "save-on") {
-		t.Fatalf("s1 rcon lines = %v, want save-on: the Worker exited leaving a survivor with auto-save off", rec.allFor("s1"))
+	if !rec.hasFor(s1, "save-on") {
+		t.Fatalf("s1 rcon lines = %v, want save-on: the Worker exited leaving a survivor with auto-save off", rec.allFor(s1))
 	}
 
 	operator.releaseStop()
@@ -725,11 +725,11 @@ func TestCloseRestoresSaveOnForADebtArmedAfterItsFirstDrain(t *testing.T) {
 func TestFlushSkipsSaveOffOnceTheSaveOnLedgerIsSealed(t *testing.T) {
 	rec := &saveOnRecorder{}
 	gate := newGatedDialControl(rec)
-	gate.onlyServer = "s1"
+	gate.onlyServer = s1
 	gate.arm()
 	d := &flushGatedDriver{}
 	m := newSaveOnManager(t, d, gate.open)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -739,7 +739,7 @@ func TestFlushSkipsSaveOffOnceTheSaveOnLedgerIsSealed(t *testing.T) {
 	stopped := make(chan session.CommandResult, 1)
 	go func() {
 		stopped <- m.Handle(context.Background(),
-			session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+			session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"})
 	}()
 	awaitEnter(t, gate.dialEntered)
 
@@ -755,11 +755,11 @@ func TestFlushSkipsSaveOffOnceTheSaveOnLedgerIsSealed(t *testing.T) {
 	// The flush gets its connection only now, with the ledger sealed.
 	gate.releaseDial()
 	awaitEnter(t, inst.stopEntered)
-	if rec.hasFor("s1", "save-off") {
-		t.Fatalf("s1 rcon lines = %v: a bracket was opened after the ledger was sealed, and nothing is left to close it", rec.allFor("s1"))
+	if rec.hasFor(s1, "save-off") {
+		t.Fatalf("s1 rcon lines = %v: a bracket was opened after the ledger was sealed, and nothing is left to close it", rec.allFor(s1))
 	}
-	if !rec.hasFor("s1", "save-all") {
-		t.Fatalf("s1 rcon lines = %v, want save-all: skipping the quiesce must not skip the flush", rec.allFor("s1"))
+	if !rec.hasFor(s1, "save-all") {
+		t.Fatalf("s1 rcon lines = %v, want save-all: skipping the quiesce must not skip the flush", rec.allFor(s1))
 	}
 
 	inst.releaseStop()
@@ -784,7 +784,7 @@ func TestCloseWaitsForAnInFlightSaveOffBeforeRestoring(t *testing.T) {
 	rec := &saveOnRecorder{blockLines: map[string]chan struct{}{"save-off": make(chan struct{})}}
 	d := &flushGatedDriver{}
 	m := newSaveOnManager(t, d, rec.open)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -794,7 +794,7 @@ func TestCloseWaitsForAnInFlightSaveOffBeforeRestoring(t *testing.T) {
 	stopped := make(chan session.CommandResult, 1)
 	go func() {
 		stopped <- m.Handle(context.Background(),
-			session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+			session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"})
 	}()
 	// The flush has registered its debt and is inside the save-off write.
 	awaitBlockedLine(t, rec, "save-off")
@@ -805,11 +805,11 @@ func TestCloseWaitsForAnInFlightSaveOffBeforeRestoring(t *testing.T) {
 	// The drain has the entry and must be holding, not dialing.
 	select {
 	case <-closed:
-		t.Fatalf("Close returned while a save-off was still on the wire; s1 rcon lines = %v", rec.allFor("s1"))
+		t.Fatalf("Close returned while a save-off was still on the wire; s1 rcon lines = %v", rec.allFor(s1))
 	case <-time.After(50 * time.Millisecond):
 	}
-	if rec.hasFor("s1", "save-on") {
-		t.Fatalf("s1 rcon lines = %v: save-on was issued before the save-off it is meant to undo", rec.allFor("s1"))
+	if rec.hasFor(s1, "save-on") {
+		t.Fatalf("s1 rcon lines = %v: save-on was issued before the save-off it is meant to undo", rec.allFor(s1))
 	}
 
 	rec.release("save-off")
@@ -820,12 +820,12 @@ func TestCloseWaitsForAnInFlightSaveOffBeforeRestoring(t *testing.T) {
 		t.Fatal("Close did not return once the save-off completed")
 	}
 
-	off, on := rec.indexFor("s1", "save-off"), rec.indexFor("s1", "save-on")
+	off, on := rec.indexFor(s1, "save-off"), rec.indexFor(s1, "save-on")
 	if on < 0 {
-		t.Fatalf("s1 rcon lines = %v, want a save-on once the write returned", rec.allFor("s1"))
+		t.Fatalf("s1 rcon lines = %v, want a save-on once the write returned", rec.allFor(s1))
 	}
 	if off < 0 || off > on {
-		t.Fatalf("s1 rcon lines = %v, want save-off before save-on: a restore that lands first leaves auto-save off", rec.allFor("s1"))
+		t.Fatalf("s1 rcon lines = %v, want save-off before save-on: a restore that lands first leaves auto-save off", rec.allFor(s1))
 	}
 
 	select {
@@ -847,7 +847,7 @@ func TestCloseDeclinesToRestoreAnUnconfirmedSaveOff(t *testing.T) {
 	d := &flushGatedDriver{}
 	m := newSaveOnManager(t, d, rec.open)
 	m.closingSaveOnTimeout = 50 * time.Millisecond
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -857,7 +857,7 @@ func TestCloseDeclinesToRestoreAnUnconfirmedSaveOff(t *testing.T) {
 	stopped := make(chan session.CommandResult, 1)
 	go func() {
 		stopped <- m.Handle(context.Background(),
-			session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+			session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"})
 	}()
 	awaitBlockedLine(t, rec, "save-off")
 
@@ -868,8 +868,8 @@ func TestCloseDeclinesToRestoreAnUnconfirmedSaveOff(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Close never returned: the hold on an unconfirmed save-off is unbounded")
 	}
-	if rec.hasFor("s1", "save-on") {
-		t.Fatalf("s1 rcon lines = %v: a save-on was issued over a save-off the Worker never saw return", rec.allFor("s1"))
+	if rec.hasFor(s1, "save-on") {
+		t.Fatalf("s1 rcon lines = %v: a save-on was issued over a save-off the Worker never saw return", rec.allFor(s1))
 	}
 
 	rec.release("save-off")
@@ -895,7 +895,7 @@ func TestCloseRestoresOnceTheSaveOffReturnsWithoutAwaitingTheRestOfTheFlush(t *t
 	// Short enough that a hold released only at the flush's return could not survive it,
 	// so the assertion below is about WHICH event releases the hold.
 	m.closingSaveOnTimeout = 200 * time.Millisecond
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -905,12 +905,12 @@ func TestCloseRestoresOnceTheSaveOffReturnsWithoutAwaitingTheRestOfTheFlush(t *t
 	stopped := make(chan session.CommandResult, 1)
 	go func() {
 		stopped <- m.Handle(context.Background(),
-			session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+			session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"})
 	}()
 	// save-off is through; the flush is now held on save-all, so it will not return.
 	awaitBlockedLine(t, rec, "save-all")
-	if !rec.hasFor("s1", "save-off") {
-		t.Fatalf("s1 rcon lines = %v, want save-off to have returned before save-all was entered", rec.allFor("s1"))
+	if !rec.hasFor(s1, "save-off") {
+		t.Fatalf("s1 rcon lines = %v, want save-off to have returned before save-all was entered", rec.allFor(s1))
 	}
 
 	closed := make(chan struct{})
@@ -920,8 +920,8 @@ func TestCloseRestoresOnceTheSaveOffReturnsWithoutAwaitingTheRestOfTheFlush(t *t
 	case <-time.After(5 * time.Second):
 		t.Fatal("Close did not return")
 	}
-	if !rec.hasFor("s1", "save-on") {
-		t.Fatalf("s1 rcon lines = %v, want save-on: the save-off returned, so the hold had nothing left to wait for", rec.allFor("s1"))
+	if !rec.hasFor(s1, "save-on") {
+		t.Fatalf("s1 rcon lines = %v, want save-on: the save-off returned, so the hold had nothing left to wait for", rec.allFor(s1))
 	}
 
 	rec.releaseAll()

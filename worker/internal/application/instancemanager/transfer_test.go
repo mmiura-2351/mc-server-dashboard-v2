@@ -180,14 +180,14 @@ func containsLine(lines []string, line string) bool {
 
 func hydrateCmd() session.Command {
 	return session.Command{
-		CommandID: "h1", ServerID: "s1", Kind: "HydrateTrigger",
+		CommandID: "h1", ServerID: s1, Kind: "HydrateTrigger",
 		TransferURL: "https://api/working-set", TransferToken: "tok",
 	}
 }
 
 func snapshotCmd() session.Command {
 	return session.Command{
-		CommandID: "p1", ServerID: "s1", Kind: "SnapshotTrigger",
+		CommandID: "p1", ServerID: s1, Kind: "SnapshotTrigger",
 		TransferURL: "https://api/snapshot", TransferToken: "tok",
 	}
 }
@@ -200,7 +200,7 @@ func TestHydrateTriggerPullsIntoWorkingDir(t *testing.T) {
 	if !res.Success {
 		t.Fatalf("HydrateTrigger result = %+v, want success", res)
 	}
-	want := filepath.Join(m.scratchDir, "s1")
+	want := filepath.Join(m.scratchDir, s1)
 	if len(tr.hydrated) != 1 || tr.hydrated[0] != want {
 		t.Fatalf("hydrated = %v, want [%q]", tr.hydrated, want)
 	}
@@ -210,7 +210,7 @@ func TestHydrateTriggerOnRunningServerIsInvalidState(t *testing.T) {
 	tr := &fakeTransfer{}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
 
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("start failed: %+v", res)
 	}
@@ -244,13 +244,13 @@ func TestHydrateTriggerWithoutTransferClientFails(t *testing.T) {
 func TestSnapshotTriggerPacksWorkingDir(t *testing.T) {
 	tr := &fakeTransfer{}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
-	seedScratch(t, m, "s1") // an at-rest working set; absent is refused (#1713)
+	seedScratch(t, m, s1) // an at-rest working set; absent is refused (#1713)
 
 	res := m.Handle(context.Background(), snapshotCmd())
 	if !res.Success {
 		t.Fatalf("SnapshotTrigger result = %+v, want success", res)
 	}
-	want := filepath.Join(m.scratchDir, "s1")
+	want := filepath.Join(m.scratchDir, s1)
 	if len(tr.snapshots) != 1 || tr.snapshots[0] != want {
 		t.Fatalf("snapshots = %v, want [%q]", tr.snapshots, want)
 	}
@@ -259,7 +259,7 @@ func TestSnapshotTriggerPacksWorkingDir(t *testing.T) {
 func TestSnapshotTriggerTransferFailureIsCoded(t *testing.T) {
 	tr := &fakeTransfer{err: errors.New("boom")}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
-	seedScratch(t, m, "s1") // an at-rest working set; absent is refused (#1713)
+	seedScratch(t, m, s1) // an at-rest working set; absent is refused (#1713)
 
 	res := m.Handle(context.Background(), snapshotCmd())
 	if res.Success || res.ErrorCode != session.CommandErrorTransferFailed {
@@ -311,7 +311,7 @@ func TestSnapshotTriggerRefusedWhenScratchHoldsNoWorkingSet(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			tr := &fakeTransfer{}
 			m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
-			dir := filepath.Join(m.scratchDir, "s1")
+			dir := filepath.Join(m.scratchDir, s1)
 			if err := os.MkdirAll(dir, 0o750); err != nil {
 				t.Fatal(err)
 			}
@@ -344,7 +344,7 @@ func TestSnapshotTriggerRefusedWhenScratchHoldsNoWorkingSet(t *testing.T) {
 			// The stopped path's reservation is released, so the corrective hydrate is not
 			// refused BUSY behind this refusal (the leak shape of issue #1950).
 			m.mu.Lock()
-			leaked := m.reserved["s1"]
+			leaked := m.reserved[s1]
 			m.mu.Unlock()
 			if leaked {
 				t.Fatal("reserved[s1] leaked after the working-set refusal: the corrective hydrate would be refused BUSY")
@@ -364,7 +364,7 @@ func TestSnapshotTriggerRefusedWhenScratchHoldsNoWorkingSet(t *testing.T) {
 func TestSnapshotTriggerPacksContentWithoutGenerationMarker(t *testing.T) {
 	tr := &fakeTransfer{}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
-	dir := filepath.Join(m.scratchDir, "s1")
+	dir := filepath.Join(m.scratchDir, s1)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +402,7 @@ func TestSnapshotTriggerPacksContentWithoutGenerationMarker(t *testing.T) {
 func TestSnapshotTriggerUnreadableScratchIsNotTheWorkingSetRefusal(t *testing.T) {
 	tr := &fakeTransfer{}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
-	dir := seedScratch(t, m, "s1")
+	dir := seedScratch(t, m, s1)
 	if err := os.Chmod(dir, 0o000); err != nil {
 		t.Fatal(err)
 	}
@@ -441,7 +441,7 @@ func TestSnapshotTriggerRunningServerBracketsCopyWithSaveOffOn(t *testing.T) {
 	tr := &fakeTransfer{}
 	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
 
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -463,7 +463,7 @@ func TestSnapshotTriggerRunningServerSaveOffBracketsTheTransfer(t *testing.T) {
 	tr := &fakeTransfer{seq: &seq}
 	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
 
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -485,7 +485,7 @@ func TestSnapshotTriggerRunningServerSaveOnRunsOnTransferError(t *testing.T) {
 	tr := &fakeTransfer{seq: &seq, uploadErr: errors.New("boom")}
 	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
 
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -509,7 +509,7 @@ func TestSnapshotTriggerRunningServerSaveOnRunsWhenContextCancelled(t *testing.T
 	ctrl := &fakeControl{reply: "ok", failOnCancelled: true}
 	m := newManager(t, &fakeDriver{}, ctrl)
 
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -542,7 +542,7 @@ func TestSnapshotTriggerRunningServerSaveOffFailureRefusesQuiesceUnavailable(t *
 	tr := &fakeTransfer{}
 	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
 
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -604,7 +604,7 @@ func TestSnapshotTriggerRunningServerSaveAllFailureRefusesButRestoresSaveOnViaRe
 	tr := &fakeTransfer{}
 	m := newManagerWithControls(t, &fakeDriver{}, quiesce, fresh).WithTransfer(tr)
 
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -649,7 +649,7 @@ func TestSnapshotTriggerRunningServerSettleTimeoutRefusesAndRestores(t *testing.
 		return regionState{"r.0.0.mca": {modTime: time.Unix(0, 0), size: int64(calls)}}, nil
 	}
 
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -678,7 +678,7 @@ func TestSnapshotTriggerUploadExceedingDeadlineAborts(t *testing.T) {
 	tr := &fakeTransfer{blockUntilCtxDone: true}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
 	m.SetTransferDeadline(20 * time.Millisecond)
-	seedScratch(t, m, "s1") // an at-rest working set; absent is refused (#1713)
+	seedScratch(t, m, s1) // an at-rest working set; absent is refused (#1713)
 
 	res := m.Handle(context.Background(), snapshotCmd())
 	if res.Success || res.ErrorCode != session.CommandErrorTransferFailed {
@@ -717,7 +717,7 @@ func TestHydrateTriggerDownloadExceedingDeadlineAborts(t *testing.T) {
 func TestSnapshotTriggerWithoutDeadlineRunsUnbounded(t *testing.T) {
 	tr := &fakeTransfer{blockUntilCtxDone: true}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
-	seedScratch(t, m, "s1") // an at-rest working set; absent is refused (#1713)
+	seedScratch(t, m, s1) // an at-rest working set; absent is refused (#1713)
 	// No SetTransferDeadline call: the bound is 0 (unbounded).
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -753,7 +753,7 @@ func TestSnapshotTriggerUploadFailureSaveOnAlreadyRestored(t *testing.T) {
 	tr := &fakeTransfer{seq: &seq, uploadErr: errors.New("upload boom")}
 	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
 
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -790,7 +790,7 @@ func TestSnapshotTriggerPackFailureRestoresSaveOnAndSkipsUpload(t *testing.T) {
 	tr := &fakeTransfer{seq: &seq, packErr: errors.New("pack boom")}
 	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
 
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}

@@ -61,17 +61,17 @@ func assertHeldThenReleased(t *testing.T, m *Manager, serverID string, held []bo
 
 func TestEditFileHoldsTheWorkingSetLockWhileItPublishes(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	target := writeWorkingFile(t, m, "s1", "server.properties", []byte("motd=old"))
-	held := heldWhenTempDrawn(t, m, "s1", &editTempSuffix)
+	target := writeWorkingFile(t, m, s1, "server.properties", []byte("motd=old"))
+	held := heldWhenTempDrawn(t, m, s1, &editTempSuffix)
 
 	res := handleWithin(t, m, session.Command{
-		CommandID: "c1", ServerID: "s1", Kind: "EditFile", Path: "server.properties", Content: []byte("motd=new"),
+		CommandID: "c1", ServerID: s1, Kind: "EditFile", Path: "server.properties", Content: []byte("motd=new"),
 	})
 
 	if !res.Success {
 		t.Fatalf("EditFile = %+v, want success", res)
 	}
-	assertHeldThenReleased(t, m, "s1", *held)
+	assertHeldThenReleased(t, m, s1, *held)
 	if got, err := os.ReadFile(target); err != nil || string(got) != "motd=new" {
 		t.Fatalf("the target reads %q (%v), want the edit published", got, err)
 	}
@@ -81,7 +81,7 @@ func TestEditFileHoldsTheWorkingSetLockWhileItPublishes(t *testing.T) {
 // context either: it writes as it did before the lock existed.
 func TestEditFileWritesWithoutWaitingWhenTheLockIsFree(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	target := writeWorkingFile(t, m, "s1", "server.properties", []byte("motd=old"))
+	target := writeWorkingFile(t, m, s1, "server.properties", []byte("motd=old"))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -96,16 +96,16 @@ func TestEditFileWritesWithoutWaitingWhenTheLockIsFree(t *testing.T) {
 // A refused edit releases the lock too: here the target is a directory.
 func TestEditFileReleasesTheWorkingSetLockWhenItFails(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	writeWorkingFile(t, m, "s1", "world/level.dat", []byte("x"))
+	writeWorkingFile(t, m, s1, "world/level.dat", []byte("x"))
 
 	res := handleWithin(t, m, session.Command{
-		CommandID: "c1", ServerID: "s1", Kind: "EditFile", Path: "world", Content: []byte("x"),
+		CommandID: "c1", ServerID: s1, Kind: "EditFile", Path: "world", Content: []byte("x"),
 	})
 
 	if res.Success {
 		t.Fatalf("EditFile = %+v, want the directory refused", res)
 	}
-	lock := m.workingSetLock("s1")
+	lock := m.workingSetLock(s1)
 	if !lock.TryLock() {
 		t.Fatal("the working-set lock is still held after the refused edit returned")
 	}
@@ -114,28 +114,28 @@ func TestEditFileReleasesTheWorkingSetLockWhenItFails(t *testing.T) {
 
 func TestHydrateStampHoldsTheWorkingSetLock(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(&fakeTransfer{gen: 11})
-	held := heldWhenTempDrawn(t, m, "s1", &generationTempSuffix)
+	held := heldWhenTempDrawn(t, m, s1, &generationTempSuffix)
 
 	if res := m.Handle(context.Background(), hydrateCmd()); !res.Success {
 		t.Fatalf("HydrateTrigger = %+v, want success", res)
 	}
 
-	assertHeldThenReleased(t, m, "s1", *held)
+	assertHeldThenReleased(t, m, s1, *held)
 }
 
 func TestRunningSnapshotStampHoldsTheWorkingSetLock(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, &fakeControl{reply: "ok"}).WithTransfer(&fakeTransfer{gen: 12})
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("start = %+v, want success", res)
 	}
-	held := heldWhenTempDrawn(t, m, "s1", &generationTempSuffix)
+	held := heldWhenTempDrawn(t, m, s1, &generationTempSuffix)
 
 	if res := m.Handle(context.Background(), snapshotCmd()); !res.Success {
 		t.Fatalf("SnapshotTrigger = %+v, want success", res)
 	}
 
-	assertHeldThenReleased(t, m, "s1", *held)
+	assertHeldThenReleased(t, m, s1, *held)
 }
 
 // The driver walks the working set in places the manager cannot see — a Forge
@@ -145,7 +145,7 @@ func TestRunningSnapshotStampHoldsTheWorkingSetLock(t *testing.T) {
 func TestStartHandsTheDriverTheServersWorkingSetLock(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("StartServer = %+v, want success", res)
@@ -154,10 +154,10 @@ func TestStartHandsTheDriverTheServersWorkingSetLock(t *testing.T) {
 	d.mu.Lock()
 	got := d.started[0].WorkingSetLock
 	d.mu.Unlock()
-	if got != m.workingSetLock("s1") {
-		t.Fatalf("spec.WorkingSetLock = %p, want server s1's working-set lock %p", got, m.workingSetLock("s1"))
+	if got != m.workingSetLock(s1) {
+		t.Fatalf("spec.WorkingSetLock = %p, want server s1's working-set lock %p", got, m.workingSetLock(s1))
 	}
-	if m.workingSetLock("s1") == m.workingSetLock("s2") {
+	if m.workingSetLock(s1) == m.workingSetLock(s2) {
 		t.Fatal("two servers share one working-set lock; a hand-over of one would hold up edits to the other")
 	}
 }
@@ -172,7 +172,7 @@ func TestStartHandsTheDriverTheServersWorkingSetLock(t *testing.T) {
 // receives once per command that found it held.
 func walkInProgress(t *testing.T, m *Manager) (*execution.WorkingSetLock, <-chan struct{}) {
 	t.Helper()
-	lock := m.workingSetLock("s1")
+	lock := m.workingSetLock(s1)
 	if !lock.TryLock() {
 		t.Fatal("s1's working-set lock is already held")
 	}
@@ -183,7 +183,7 @@ func walkInProgress(t *testing.T, m *Manager) (*execution.WorkingSetLock, <-chan
 
 func editMotd() session.Command {
 	return session.Command{
-		CommandID: "c1", ServerID: "s1", Kind: "EditFile", Path: "server.properties", Content: []byte("motd=new"),
+		CommandID: "c1", ServerID: s1, Kind: "EditFile", Path: "server.properties", Content: []byte("motd=new"),
 	}
 }
 
@@ -200,7 +200,7 @@ func assertEditNotWritten(t *testing.T, m *Manager, target string) {
 // publishes once the walk is done.
 func TestEditFileWaitsForAHandOverAndThenPublishes(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	target := writeWorkingFile(t, m, "s1", "server.properties", []byte("motd=old"))
+	target := writeWorkingFile(t, m, s1, "server.properties", []byte("motd=old"))
 	lock, waiting := walkInProgress(t, m)
 	done := make(chan session.CommandResult, 1)
 	go func() { done <- m.Handle(context.Background(), editMotd()) }()
@@ -221,7 +221,7 @@ func TestEditFileWaitsForAHandOverAndThenPublishes(t *testing.T) {
 // then, and writes nothing, then or later.
 func TestEditFileGivesUpWaitingWhenItsCommandIsCancelled(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	target := writeWorkingFile(t, m, "s1", "server.properties", []byte("motd=old"))
+	target := writeWorkingFile(t, m, s1, "server.properties", []byte("motd=old"))
 	lock, waiting := walkInProgress(t, m)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan session.CommandResult, 1)
@@ -246,8 +246,8 @@ func TestEditFileGivesUpWaitingWhenItsCommandIsCancelled(t *testing.T) {
 // command that ends a supervisor's walk — is handled.
 func TestEditFileWaitIsBoundedSoAStopBehindItIsHandled(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	seedScratch(t, m, "s1")
-	target := writeWorkingFile(t, m, "s1", "server.properties", []byte("motd=old"))
+	seedScratch(t, m, s1)
+	target := writeWorkingFile(t, m, s1, "server.properties", []byte("motd=old"))
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("start = %+v, want success", res)
 	}
@@ -260,7 +260,7 @@ func TestEditFileWaitIsBoundedSoAStopBehindItIsHandled(t *testing.T) {
 		t.Fatalf("EditFile = %+v, want it failed once the wait ran out", res)
 	}
 	assertEditNotWritten(t, m, target)
-	stop := handleWithin(t, m, session.Command{CommandID: "stop", ServerID: "s1", Kind: "StopServer"})
+	stop := handleWithin(t, m, session.Command{CommandID: "stop", ServerID: s1, Kind: "StopServer"})
 	if !stop.Success {
 		t.Fatalf("StopServer after the edit = %+v, want it handled", stop)
 	}
@@ -282,14 +282,14 @@ func TestHydrateStampIsSkippedWhenItsCommandIsCancelledWhileWaiting(t *testing.T
 	if res := <-done; !res.Success || res.HeldGeneration != nil {
 		t.Fatalf("HydrateTrigger = %+v, want success declaring no generation", res)
 	}
-	if _, err := os.Lstat(generationMarkerPath(m, "s1")); !os.IsNotExist(err) {
+	if _, err := os.Lstat(generationMarkerPath(m, s1)); !os.IsNotExist(err) {
 		t.Fatalf("the marker: lstat err = %v, want it never written", err)
 	}
 }
 
 func TestRunningSnapshotStampIsSkippedWhenItsCommandIsCancelledWhileWaiting(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, &fakeControl{reply: "ok"}).WithTransfer(&fakeTransfer{gen: 12})
-	dir := seedScratch(t, m, "s1")
+	dir := seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("start = %+v, want success", res)
 	}

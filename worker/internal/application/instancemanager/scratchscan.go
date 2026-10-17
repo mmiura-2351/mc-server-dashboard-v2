@@ -292,7 +292,8 @@ func (m *Manager) HeldServers() []session.HeldServer {
 // snapshot failed (STORAGE.md Section 4.6). When the server id is in heldServers
 // the tree will be GC'd on the next successful snapshot (sweepDisplaced); when it
 // is NOT in heldServers the server was deleted or re-placed elsewhere and the tree
-// is an orphan the operator should be aware of.
+// is an orphan the operator should be aware of. A .displaced-<x> whose <x> is not
+// a server id (isServerIDName) is no recovery tree and is not logged (issue #3399).
 //
 // One WARN line is logged per orphaned tree. The function is best-effort: a scan
 // error is ignored (the scratchDir may not yet exist on a first boot). If log is
@@ -318,6 +319,12 @@ func WarnOrphanDisplacedTrees(scratchDir string, held []session.HeldServer, log 
 			continue
 		}
 		serverID := strings.TrimPrefix(name, displacedPrefix)
+		if !isServerIDName(serverID) {
+			// Not a recovery tree: the Worker only displaces a working set under a
+			// server id (validateServerID), so this is a stray lookalike, skipped
+			// like every other stray name the boot scans meet (issue #3399).
+			continue
+		}
 		if heldIDs[serverID] {
 			// This server still has a held working set; sweepDisplaced will reclaim
 			// the tree on its next successful snapshot. No WARN needed.

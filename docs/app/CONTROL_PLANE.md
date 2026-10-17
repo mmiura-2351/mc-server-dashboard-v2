@@ -395,6 +395,12 @@ All commands are `ApiCommand` payloads with a `command_id` and `server_id`. Each
 maps to a lifecycle operation, RCON forwarding, a data-plane trigger, or a
 running-server file access.
 
+The `server_id` is the canonical text form of the server's UUID (`str(uuid)`).
+It is the only form the Worker accepts: it refuses a command naming any other id
+with `FILE_ACCESS_DENIED` before any handler runs. The Worker names each server's
+scratch directory after this id, and `held_servers` (Section 4.1) reports only
+directories named this way.
+
 | Command | Meaning | Result payload | Req. ref |
 |---|---|---|---|
 | `StartServer` | Launch the server (after a preceding hydrate). Carries the driver, JAR relpath, MC version (Worker picks the Java runtime), launch mode (`jar` is the default JAR launch; `forge-argsfile` launches Forge via its generated args file, running a supervised installer first when the working set is uninstalled), optional `memory_limit_bytes` (per-server memory ceiling; 0/unset = driver default), and optional `cpu_millis` (soft CPU allocation in millicores; 0/unset = driver default). The "after a preceding hydrate" is enforced, not assumed: a launch whose working set is not held at the scratch root is refused `SERVER_NOT_FOUND` rather than launched into an empty directory (Section 7). The check is the presence of the generation marker `.mcsd_generation`, so a scratch emptied in place is refused as well as an absent one, and it guards `RestartServer`'s relaunch too — both launches go through the same code path. | none | FR-SRV-2, FR-EXE-5, ARCHITECTURE.md Section 7.3 |

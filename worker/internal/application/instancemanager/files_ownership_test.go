@@ -55,11 +55,11 @@ func asRootWorker(t *testing.T) (chowned func(path string) bool) {
 // another user and must still read and rewrite its own file (issue #2600).
 func TestEditFileOverwriteKeepsWorkingSetOwner(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	full := writeWorkingFile(t, m, "s1", "server.properties", []byte("motd=old"))
+	full := writeWorkingFile(t, m, s1, "server.properties", []byte("motd=old"))
 	chowned := asRootWorker(t)
 
 	res := m.Handle(context.Background(), session.Command{
-		CommandID: "c1", ServerID: "s1", Kind: "EditFile",
+		CommandID: "c1", ServerID: s1, Kind: "EditFile",
 		Path: "server.properties", Content: []byte("motd=new"),
 	})
 	if !res.Success {
@@ -76,14 +76,14 @@ func TestEditFileOverwriteKeepsWorkingSetOwner(t *testing.T) {
 // directory that already existed is not touched (issue #2600).
 func TestEditFileNewNestedFileInheritsWorkingSetOwner(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	root := filepath.Join(m.scratchDir, "s1")
+	root := filepath.Join(m.scratchDir, s1)
 	if err := os.MkdirAll(filepath.Join(root, "plugins"), 0o750); err != nil {
 		t.Fatal(err)
 	}
 	chowned := asRootWorker(t)
 
 	res := m.Handle(context.Background(), session.Command{
-		CommandID: "c1", ServerID: "s1", Kind: "EditFile",
+		CommandID: "c1", ServerID: s1, Kind: "EditFile",
 		Path: "plugins/Essentials/userdata/x.yml", Content: []byte("a: b"),
 	})
 	if !res.Success {
@@ -104,12 +104,12 @@ func TestEditFileNewNestedFileInheritsWorkingSetOwner(t *testing.T) {
 // than publishing a file the server cannot read (issue #2600).
 func TestEditFileFailsWhenOwnershipCannotBeSet(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	full := writeWorkingFile(t, m, "s1", "server.properties", []byte("motd=old"))
+	full := writeWorkingFile(t, m, s1, "server.properties", []byte("motd=old"))
 	asRootWorker(t)
 	fchownFd = func(int, int, int) error { return unix.EPERM }
 
 	res := m.Handle(context.Background(), session.Command{
-		CommandID: "c1", ServerID: "s1", Kind: "EditFile",
+		CommandID: "c1", ServerID: s1, Kind: "EditFile",
 		Path: "server.properties", Content: []byte("motd=new"),
 	})
 

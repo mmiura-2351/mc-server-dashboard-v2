@@ -141,7 +141,7 @@ func TestManagerForwardsLogs(t *testing.T) {
 	d := &richDriver{}
 	m := newRichManager(t, d, &fakeClock{})
 
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	res := m.Handle(context.Background(), startCmd())
 	if !res.Success {
 		t.Fatalf("start = %+v", res)
@@ -149,11 +149,11 @@ func TestManagerForwardsLogs(t *testing.T) {
 	// drain the initial running status so the pump does not block.
 	drainStatus(m)
 
-	d.inst.logs <- execution.LogEvent{ServerID: "s1", Line: "boot", Stream: execution.LogStreamStderr}
+	d.inst.logs <- execution.LogEvent{ServerID: s1, Line: "boot", Stream: execution.LogStreamStderr}
 
 	select {
 	case ev := <-m.Logs():
-		if ev.ServerID != "s1" || ev.Line != "boot" || ev.Stream != session.LogStreamStderr {
+		if ev.ServerID != s1 || ev.Line != "boot" || ev.Stream != session.LogStreamStderr {
 			t.Fatalf("log = %+v", ev)
 		}
 	case <-time.After(2 * time.Second):
@@ -167,7 +167,7 @@ func TestManagerEmitsMetricsOnCadence(t *testing.T) {
 	clk := &fakeClock{}
 	m := newRichManager(t, d, clk)
 
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	res := m.Handle(context.Background(), startCmd())
 	if !res.Success {
 		t.Fatalf("start = %+v", res)
@@ -184,7 +184,7 @@ func TestManagerEmitsMetricsOnCadence(t *testing.T) {
 
 	select {
 	case ev := <-m.Metrics():
-		if ev.ServerID != "s1" || ev.CPUMillis != 100 || ev.MemoryBytes != 2048 {
+		if ev.ServerID != s1 || ev.CPUMillis != 100 || ev.MemoryBytes != 2048 {
 			t.Fatalf("metrics = %+v", ev)
 		}
 	case <-time.After(2 * time.Second):
@@ -204,7 +204,7 @@ func TestManagerEmitsUpOnlyMetricsWithoutStatsSource(t *testing.T) {
 		WithMetrics(clk, time.Hour)
 	closeWithTest(t, m)
 
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	res := m.Handle(context.Background(), startCmd())
 	if !res.Success {
 		t.Fatalf("start = %+v", res)
@@ -220,7 +220,7 @@ func TestManagerEmitsUpOnlyMetricsWithoutStatsSource(t *testing.T) {
 
 	select {
 	case ev := <-m.Metrics():
-		if ev.ServerID != "s1" || ev.CPUMillis != 0 || ev.MemoryBytes != 0 {
+		if ev.ServerID != s1 || ev.CPUMillis != 0 || ev.MemoryBytes != 0 {
 			t.Fatalf("up-only metrics = %+v, want zero stats", ev)
 		}
 	case <-time.After(2 * time.Second):
@@ -235,7 +235,7 @@ func TestMetricsPumpStopsAfterInstanceExit(t *testing.T) {
 	clk := &fakeClock{}
 	m := newRichManager(t, d, clk)
 
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("start = %+v", res)
 	}
@@ -249,7 +249,7 @@ func TestMetricsPumpStopsAfterInstanceExit(t *testing.T) {
 		return len(clk.chs) > 0
 	})
 
-	stop := session.Command{CommandID: "c2", ServerID: "s1", Kind: "StopServer"}
+	stop := session.Command{CommandID: "c2", ServerID: s1, Kind: "StopServer"}
 	if res := m.Handle(context.Background(), stop); !res.Success {
 		t.Fatalf("stop = %+v", res)
 	}
@@ -323,7 +323,7 @@ func TestMetricsSampleCancelledOnTeardown(t *testing.T) {
 		WithMetrics(clk, time.Hour)
 	closeWithTest(t, m)
 
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("start = %+v", res)
 	}
@@ -345,7 +345,7 @@ func TestMetricsSampleCancelledOnTeardown(t *testing.T) {
 
 	// Terminate the instance: this closes the status pump's done channel, which
 	// must cancel the in-flight Sample.
-	stop := session.Command{CommandID: "c2", ServerID: "s1", Kind: "StopServer"}
+	stop := session.Command{CommandID: "c2", ServerID: s1, Kind: "StopServer"}
 	if res := m.Handle(context.Background(), stop); !res.Success {
 		t.Fatalf("stop = %+v", res)
 	}
@@ -513,20 +513,20 @@ func TestLogPumpAggregatesDropsIntoOneSummaryOnExit(t *testing.T) {
 	src := fakeLogSource{ch: make(chan execution.LogEvent)}
 	done := make(chan struct{})
 	go func() {
-		m.logPump("s1", src)
+		m.logPump(s1, src)
 		close(done)
 	}()
 
 	// Fill the sink to capacity; nothing drains it (the control plane is "down").
 	fill := cap(m.Logs())
 	for i := 0; i < fill; i++ {
-		src.ch <- execution.LogEvent{ServerID: "s1", Line: fmt.Sprintf("line-%d", i), Stream: execution.LogStreamStdout}
+		src.ch <- execution.LogEvent{ServerID: s1, Line: fmt.Sprintf("line-%d", i), Stream: execution.LogStreamStdout}
 	}
 	waitFor(t, func() bool { return len(m.Logs()) == fill })
 
 	// Three more lines arrive against the full sink; every one is dropped.
 	for i := 0; i < 3; i++ {
-		src.ch <- execution.LogEvent{ServerID: "s1", Line: "overflow", Stream: execution.LogStreamStdout}
+		src.ch <- execution.LogEvent{ServerID: s1, Line: "overflow", Stream: execution.LogStreamStdout}
 	}
 
 	// Terminal state: the stream ends and the pump flushes its drop count.
@@ -537,7 +537,7 @@ func TestLogPumpAggregatesDropsIntoOneSummaryOnExit(t *testing.T) {
 		t.Fatal("log pump did not exit after its source closed")
 	}
 
-	assertOneDropWarn(t, h, "s1", 3)
+	assertOneDropWarn(t, h, s1, 3)
 
 	// The sink still holds exactly the fill lines: dropped lines are gone and no
 	// marker was forced into a full sink.
@@ -564,11 +564,11 @@ func TestLogPumpReportsDropsOnceOnRecovery(t *testing.T) {
 
 	src := fakeLogSource{ch: make(chan execution.LogEvent)}
 	defer close(src.ch)
-	go m.logPump("s1", src)
+	go m.logPump(s1, src)
 
 	pushed := 0
 	push := func(line string) {
-		src.ch <- execution.LogEvent{ServerID: "s1", Line: line, Stream: execution.LogStreamStdout}
+		src.ch <- execution.LogEvent{ServerID: s1, Line: line, Stream: execution.LogStreamStdout}
 		pushed++
 	}
 
@@ -613,7 +613,7 @@ func TestLogPumpReportsDropsOnceOnRecovery(t *testing.T) {
 			t.Fatal("no drop marker observed on the merged stream after recovery")
 		}
 	}
-	if marker.ServerID != "s1" || marker.Stream != session.LogStreamStderr {
+	if marker.ServerID != s1 || marker.Stream != session.LogStreamStderr {
 		t.Fatalf("marker event = %+v, want server s1 on stderr", marker)
 	}
 	var dropped int
@@ -642,7 +642,7 @@ func TestLogPumpReportsDropsOnceOnRecovery(t *testing.T) {
 		t.Fatalf("unexpected extra event: %+v", ev)
 	default:
 	}
-	assertOneDropWarn(t, h, "s1", dropped)
+	assertOneDropWarn(t, h, s1, dropped)
 }
 
 // tickAndSettle fires one metrics tick and waits until the pump has finished
@@ -680,7 +680,7 @@ func TestMetricsPumpAggregatesDropsIntoOneSummaryOnExit(t *testing.T) {
 	done := make(chan struct{})
 	exited := make(chan struct{})
 	go func() {
-		m.metricsPump("s1", newRichInstance("s1"), done)
+		m.metricsPump(s1, newRichInstance(s1), done)
 		close(exited)
 	}()
 
@@ -706,7 +706,7 @@ func TestMetricsPumpAggregatesDropsIntoOneSummaryOnExit(t *testing.T) {
 		t.Fatal("metrics pump did not exit after done closed")
 	}
 
-	assertOneDropWarn(t, h, "s1", 3)
+	assertOneDropWarn(t, h, s1, 3)
 
 	// The sink still holds exactly the fill samples: dropped samples are gone
 	// and nothing was forced into a full sink.
@@ -727,7 +727,7 @@ func TestMetricsPumpReportsDropsOnceOnRecovery(t *testing.T) {
 	done := make(chan struct{})
 	exited := make(chan struct{})
 	go func() {
-		m.metricsPump("s1", newRichInstance("s1"), done)
+		m.metricsPump(s1, newRichInstance(s1), done)
 		close(exited)
 	}()
 
@@ -748,7 +748,7 @@ func TestMetricsPumpReportsDropsOnceOnRecovery(t *testing.T) {
 	// flushes the accumulated count.
 	<-m.Metrics()
 	tickAndSettle(t, clk)
-	assertOneDropWarn(t, h, "s1", 3)
+	assertOneDropWarn(t, h, s1, 3)
 
 	// The episode is over: a later successful send and the pump's exit add no
 	// second summary.
@@ -760,5 +760,5 @@ func TestMetricsPumpReportsDropsOnceOnRecovery(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("metrics pump did not exit after done closed")
 	}
-	assertOneDropWarn(t, h, "s1", 3)
+	assertOneDropWarn(t, h, s1, 3)
 }

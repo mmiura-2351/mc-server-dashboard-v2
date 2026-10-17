@@ -52,7 +52,7 @@ func TestStalledSinkCoalescesToLatest(t *testing.T) {
 
 	states := []string{"starting", "running", "stopping", "stopped"}
 	for _, s := range states {
-		m.sendStatus(session.StatusEvent{ServerID: "s1", State: s})
+		m.sendStatus(session.StatusEvent{ServerID: s1, State: s})
 	}
 
 	// Drain the filler so the dispatcher's blocked send can complete.
@@ -72,7 +72,7 @@ func TestStalledSinkCoalescesToLatest(t *testing.T) {
 	for {
 		select {
 		case ev := <-m.events:
-			if ev.ServerID == "s1" {
+			if ev.ServerID == s1 {
 				latest = ev.State
 			}
 		case <-time.After(100 * time.Millisecond):
@@ -144,11 +144,11 @@ func TestUnstalledDeliversEveryTransitionInOrder(t *testing.T) {
 
 	states := []string{"starting", "running", "stopping", "stopped"}
 	for _, s := range states {
-		m.sendStatus(session.StatusEvent{ServerID: "s1", State: s})
+		m.sendStatus(session.StatusEvent{ServerID: s1, State: s})
 	}
 
 	for i, want := range states {
-		got := drainState(t, m, "s1")
+		got := drainState(t, m, s1)
 		if got != want {
 			t.Fatalf("transition %d = %q, want %q", i, got, want)
 		}
@@ -165,7 +165,7 @@ func TestTeardownWithPendingCoalescedDoesNotHang(t *testing.T) {
 		m := newManager(t, &fakeDriver{}, nil)
 		fillSink(t, m)
 		for _, s := range []string{"starting", "running", "stopped"} {
-			m.sendStatus(session.StatusEvent{ServerID: "s1", State: s})
+			m.sendStatus(session.StatusEvent{ServerID: s1, State: s})
 		}
 		// Intentionally do not drain: the dispatcher stays blocked, but
 		// sendStatus and this goroutine must return.
@@ -204,7 +204,7 @@ func TestCoalesceAcrossFastToStalledBoundary(t *testing.T) {
 	const fastCount = 4
 	seq := 0
 	for ; seq < fastCount; seq++ {
-		m.sendStatus(session.StatusEvent{ServerID: "s1", State: "v" + strconv.Itoa(seq)})
+		m.sendStatus(session.StatusEvent{ServerID: s1, State: "v" + strconv.Itoa(seq)})
 	}
 
 	// Boundary: fill the remaining buffer capacity. The next s1 send finds the
@@ -214,7 +214,7 @@ func TestCoalesceAcrossFastToStalledBoundary(t *testing.T) {
 
 	// Phase 2 (coalescing): a rapid burst that must collapse to the latest.
 	for ; seq < fastCount+5; seq++ {
-		m.sendStatus(session.StatusEvent{ServerID: "s1", State: "v" + strconv.Itoa(seq)})
+		m.sendStatus(session.StatusEvent{ServerID: s1, State: "v" + strconv.Itoa(seq)})
 	}
 	latest := seq - 1
 
@@ -227,7 +227,7 @@ func TestCoalesceAcrossFastToStalledBoundary(t *testing.T) {
 	for {
 		select {
 		case ev := <-m.events:
-			if ev.ServerID != "s1" {
+			if ev.ServerID != s1 {
 				continue // filler
 			}
 			delivered = append(delivered, seqOf(t, ev.State))
@@ -255,7 +255,7 @@ check:
 	// No stray s1 event remains: intermediates past the boundary coalesced away.
 	select {
 	case ev := <-m.events:
-		if ev.ServerID == "s1" {
+		if ev.ServerID == s1 {
 			t.Fatalf("unexpected extra s1 event %+v after latest", ev)
 		}
 	case <-time.After(100 * time.Millisecond):

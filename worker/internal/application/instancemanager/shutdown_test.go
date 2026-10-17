@@ -40,7 +40,7 @@ func TestMain(m *testing.M) {
 func TestCloseEndsThePumpsOfALiveInstance(t *testing.T) {
 	awaitManagerGoroutines(t, 0)
 	m := newManager(t, &fakeDriver{}, nil)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("start failed: %+v", res)
 	}
@@ -81,11 +81,11 @@ func TestCloseEndsAStatusDispatcherBlockedOnAFullSink(t *testing.T) {
 	for i := 0; i < cap(m.Events()); i++ {
 		m.sendStatus(session.StatusEvent{ServerID: fmt.Sprintf("filler-%d", i), State: "running"})
 	}
-	m.sendStatus(session.StatusEvent{ServerID: "s1", State: "running"})
+	m.sendStatus(session.StatusEvent{ServerID: s1, State: "running"})
 	waitFor(t, func() bool {
 		m.statusMu.Lock()
 		defer m.statusMu.Unlock()
-		return m.coalescing["s1"] && len(m.dirtyStatus) == 0 && len(m.pendingStatus) == 0
+		return m.coalescing[s1] && len(m.dirtyStatus) == 0 && len(m.pendingStatus) == 0
 	})
 
 	closed := make(chan struct{})
@@ -106,7 +106,7 @@ func TestCloseEndsAStatusDispatcherBlockedOnAFullSink(t *testing.T) {
 func TestStartAfterCloseSpawnsNoPumps(t *testing.T) {
 	awaitManagerGoroutines(t, 0)
 	m := newManager(t, &fakeDriver{}, nil)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	m.Close()
 
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {

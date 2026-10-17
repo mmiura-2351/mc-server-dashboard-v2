@@ -81,7 +81,7 @@ func TestSnapshotTriggerCorruptWorkingSetRefusedPrePack(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
 
 	// A torn region (size not a 4096 multiple) — the #703 reproduction shape.
-	seedWorkingSet(t, m, "s1", healthyRegion()[:3*fsckSector-10])
+	seedWorkingSet(t, m, s1, healthyRegion()[:3*fsckSector-10])
 
 	res := m.Handle(context.Background(), snapshotCmd())
 	if res.Success || res.ErrorCode != session.CommandErrorTransferFailed {
@@ -98,7 +98,7 @@ func TestSnapshotTriggerHealthyWorkingSetProceeds(t *testing.T) {
 	tr := &fakeTransfer{}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
 
-	seedWorkingSet(t, m, "s1", healthyRegion())
+	seedWorkingSet(t, m, s1, healthyRegion())
 
 	res := m.Handle(context.Background(), snapshotCmd())
 	if !res.Success {
@@ -121,11 +121,11 @@ func TestSnapshotTriggerCorruptRunningServerRefusesAndRestoresSaveOn(t *testing.
 	m.fsckRetryDelay = 0
 	m.settlePollInterval = 0
 
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
-	seedWorkingSet(t, m, "s1", healthyRegion()[:3*fsckSector-10])
+	seedWorkingSet(t, m, s1, healthyRegion()[:3*fsckSector-10])
 
 	res := m.Handle(context.Background(), snapshotCmd())
 	if res.Success || res.ErrorCode != session.CommandErrorTransferFailed {
@@ -155,13 +155,13 @@ func TestSnapshotTriggerRunningServerFsckRetriesPastTransientCorruption(t *testi
 	// fsck retry — not the settle-wait — is what absorbs the transient corruption.
 	m.settlePollInterval = 0
 
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
 	// Seed a torn region so the first fsck attempt fails.
-	region := filepath.Join(m.scratchDir, "s1", "region", "r.0.0.mca")
-	seedWorkingSet(t, m, "s1", healthyRegion()[:3*fsckSector-10])
+	region := filepath.Join(m.scratchDir, s1, "region", "r.0.0.mca")
+	seedWorkingSet(t, m, s1, healthyRegion()[:3*fsckSector-10])
 
 	// Repair the region mid-backoff (after the first attempt, before a later one), as
 	// an in-flight write completing would. The 10ms lead vs the 50ms backoff gives the
@@ -198,7 +198,7 @@ func TestSnapshotTriggerRunningServerSettlesThenProceeds(t *testing.T) {
 	// first few scans (size growing, the async save still draining), then stable — so
 	// the settle-wait must wait out the changes and proceed only once two consecutive
 	// scans match. Deterministic — no filesystem race.
-	seedWorkingSet(t, m, "s1", healthyRegion())
+	seedWorkingSet(t, m, s1, healthyRegion())
 	var calls int
 	m.scanRegion = func(string) (regionState, error) {
 		calls++
@@ -237,7 +237,7 @@ func TestSnapshotTriggerStoppedServerFsckNotRetried(t *testing.T) {
 	// test would block on it. The stopped path must not wait at all.
 	m.fsckRetryDelay = time.Hour
 
-	seedWorkingSet(t, m, "s1", healthyRegion()[:3*fsckSector-10])
+	seedWorkingSet(t, m, s1, healthyRegion()[:3*fsckSector-10])
 
 	res := m.Handle(context.Background(), snapshotCmd())
 	if res.Success || res.ErrorCode != session.CommandErrorTransferFailed {
@@ -259,11 +259,11 @@ func TestSnapshotTriggerRunningServerUnalignedTailProceeds(t *testing.T) {
 	m.fsckRetryDelay = 0
 	m.settlePollInterval = 0
 
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
-	seedWorkingSet(t, m, "s1", unalignedLiveRegion())
+	seedWorkingSet(t, m, s1, unalignedLiveRegion())
 
 	res := m.Handle(context.Background(), snapshotCmd())
 	if !res.Success {
@@ -283,7 +283,7 @@ func TestSnapshotTriggerStoppedServerUnalignedTailProceeds(t *testing.T) {
 	tr := &fakeTransfer{}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
 
-	seedWorkingSet(t, m, "s1", unalignedLiveRegion())
+	seedWorkingSet(t, m, s1, unalignedLiveRegion())
 
 	res := m.Handle(context.Background(), snapshotCmd())
 	if !res.Success {
@@ -308,11 +308,11 @@ func TestSnapshotTriggerRunningServerRconUnavailableRefusesQuiesceUnavailable(t 
 		WithTransfer(tr)
 	closeWithTest(t, m)
 
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
-	seedWorkingSet(t, m, "s1", healthyRegion())
+	seedWorkingSet(t, m, s1, healthyRegion())
 
 	res := m.Handle(context.Background(), snapshotCmd())
 	if res.Success || res.ErrorCode != session.CommandErrorTransferFailed {

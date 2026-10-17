@@ -44,7 +44,7 @@ func TestSuccessfulHydrateDeclaresTheGenerationItServed(t *testing.T) {
 			"the stamp wrote)", *res.HeldGeneration)
 	}
 	// The declaration must agree with what a re-registration would advertise.
-	if got := readGeneration(filepath.Join(m.scratchDir, "s1")); got != *res.HeldGeneration {
+	if got := readGeneration(filepath.Join(m.scratchDir, s1)); got != *res.HeldGeneration {
 		t.Fatalf("declared %d but the on-disk marker reads %d: the declaration is not the marker",
 			*res.HeldGeneration, got)
 	}
@@ -64,7 +64,7 @@ func TestHydrateDeclaresNothingWhenTheMarkerWriteFailed(t *testing.T) {
 	// A regular file at the working-dir path makes writeGeneration's MkdirAll fail with
 	// ENOTDIR, so the marker is never stamped. The fake transfer does not touch disk, so
 	// this file survives the (no-op) hydrate.
-	workingDir := filepath.Join(m.scratchDir, "s1")
+	workingDir := filepath.Join(m.scratchDir, s1)
 	if err := os.WriteFile(workingDir, []byte("not a dir"), 0o600); err != nil {
 		t.Fatal(err)
 	}

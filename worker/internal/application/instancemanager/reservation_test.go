@@ -108,7 +108,7 @@ func TestConcurrentDuplicateStartStartsDriverOnce(t *testing.T) {
 	m := newManager(t, d, nil)
 
 	firstDone := make(chan session.CommandResult, 1)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	go func() { firstDone <- m.Handle(context.Background(), startCmd()) }()
 
 	// The first start is now blocked inside driver.Start; the reservation is held.
@@ -137,7 +137,7 @@ func TestReservationReleasedAfterStartFailure(t *testing.T) {
 	d.startErr = context.DeadlineExceeded
 	m := newManager(t, d, nil)
 
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	go func() { _ = m.Handle(context.Background(), startCmd()) }()
 	awaitEnter(t, d.entered)
 	close(d.release) // first start fails
@@ -207,12 +207,12 @@ func TestResentStopDuringDetachedStopRejectedBusy(t *testing.T) {
 	d := &gatedStopDriver{}
 	m := newManager(t, d, nil).WithTransfer(&fakeTransfer{})
 
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
 
-	stopCmd := session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"}
+	stopCmd := session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"}
 	firstDone := make(chan session.CommandResult, 1)
 	go func() { firstDone <- m.Handle(context.Background(), stopCmd) }()
 
@@ -220,7 +220,7 @@ func TestResentStopDuringDetachedStopRejectedBusy(t *testing.T) {
 	// instances but reserved across the eviction -> stop-confirmed window.
 	awaitEnter(t, d.inst.stopEntered)
 
-	dup := m.Handle(context.Background(), session.Command{CommandID: "stop2", ServerID: "s1", Kind: "StopServer"})
+	dup := m.Handle(context.Background(), session.Command{CommandID: "stop2", ServerID: s1, Kind: "StopServer"})
 	if dup.Success {
 		t.Fatalf("re-sent stop during detached stop = %+v, want failure", dup)
 	}
@@ -239,7 +239,7 @@ func TestResentStopDuringDetachedStopRejectedBusy(t *testing.T) {
 	}
 	// Once the detached stop has confirmed, the id is genuinely gone: a later stop
 	// is SERVER_NOT_FOUND (the reservation was released), so the API converges.
-	after := m.Handle(context.Background(), session.Command{CommandID: "stop3", ServerID: "s1", Kind: "StopServer"})
+	after := m.Handle(context.Background(), session.Command{CommandID: "stop3", ServerID: s1, Kind: "StopServer"})
 	if after.Success || after.ErrorCode != session.CommandErrorServerNotFound {
 		t.Fatalf("stop after detached stop confirmed = %+v, want SERVER_NOT_FOUND", after)
 	}
@@ -253,7 +253,7 @@ func TestConcurrentDuplicateHydrateRunsOnce(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
 
 	hydrateCmd := session.Command{
-		CommandID: "h1", ServerID: "s1", Kind: "HydrateTrigger",
+		CommandID: "h1", ServerID: s1, Kind: "HydrateTrigger",
 		TransferURL: "https://api/working-set", TransferToken: "tok",
 	}
 	firstDone := make(chan session.CommandResult, 1)
@@ -337,19 +337,19 @@ func TestResentStopDuringOrphanRetryRejectedBusy(t *testing.T) {
 	d := &gatedOrphanDriver{}
 	m := newManager(t, d, nil).WithTransfer(&fakeTransfer{})
 
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
 	// First stop fails -> the id is now a recorded failed-stop orphan, reservation released.
-	if res := m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"}); res.Success {
+	if res := m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"}); res.Success {
 		t.Fatalf("first stop unexpectedly succeeded: %+v", res)
 	}
 
 	// Retry stop walks the orphan branch (reserving the id) and blocks inside inst.Stop.
 	retryDone := make(chan session.CommandResult, 1)
 	go func() {
-		retryDone <- m.Handle(context.Background(), session.Command{CommandID: "stop2", ServerID: "s1", Kind: "StopServer"})
+		retryDone <- m.Handle(context.Background(), session.Command{CommandID: "stop2", ServerID: s1, Kind: "StopServer"})
 	}()
 	awaitEnter(t, d.inst.stopEntered)
 
@@ -360,7 +360,7 @@ func TestResentStopDuringOrphanRetryRejectedBusy(t *testing.T) {
 	// and BLOCK inside inst.Stop, so a clean timeout failure beats a 10-minute hang.
 	dupDone := make(chan session.CommandResult, 1)
 	go func() {
-		dupDone <- m.Handle(context.Background(), session.Command{CommandID: "stop3", ServerID: "s1", Kind: "StopServer"})
+		dupDone <- m.Handle(context.Background(), session.Command{CommandID: "stop3", ServerID: s1, Kind: "StopServer"})
 	}()
 	var dup session.CommandResult
 	select {
@@ -385,7 +385,7 @@ func TestResentStopDuringOrphanRetryRejectedBusy(t *testing.T) {
 		t.Fatalf("driver Stop called %d times, want exactly 2 (first fail + retry); the re-sent stop must not have taken the orphan", d.inst.stopCount())
 	}
 	// The retry released the reservation on success: the id is now genuinely unknown.
-	after := m.Handle(context.Background(), session.Command{CommandID: "stop4", ServerID: "s1", Kind: "StopServer"})
+	after := m.Handle(context.Background(), session.Command{CommandID: "stop4", ServerID: s1, Kind: "StopServer"})
 	if after.Success || after.ErrorCode != session.CommandErrorServerNotFound {
 		t.Fatalf("stop after orphan retry confirmed = %+v, want SERVER_NOT_FOUND", after)
 	}
@@ -398,7 +398,7 @@ func TestResentStopDuringOrphanRetryRejectedBusy(t *testing.T) {
 func TestRestartUnavailableDriverLeavesInstanceTracked(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, &fakeControl{reply: "ok"}).WithTransfer(&fakeTransfer{})
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -406,20 +406,20 @@ func TestRestartUnavailableDriverLeavesInstanceTracked(t *testing.T) {
 	// Drop the driver the recorded StartServer used so the restart's resolution fails.
 	delete(m.drivers, "container")
 
-	res := m.Handle(context.Background(), session.Command{CommandID: "r", ServerID: "s1", Kind: "RestartServer"})
+	res := m.Handle(context.Background(), session.Command{CommandID: "r", ServerID: s1, Kind: "RestartServer"})
 	if res.Success || res.ErrorCode != session.CommandErrorDriverUnavailable {
 		t.Fatalf("restart with unavailable driver = %+v, want DRIVER_UNAVAILABLE", res)
 	}
 
 	// The instance must still be tracked and live: a ServerCommand reaches it (a
 	// running instance), proving the failed restart restored it after eviction.
-	if sc := m.Handle(context.Background(), session.Command{CommandID: "c", ServerID: "s1", Kind: "ServerCommand", Line: "list"}); sc.ErrorCode == session.CommandErrorServerNotFound {
+	if sc := m.Handle(context.Background(), session.Command{CommandID: "c", ServerID: s1, Kind: "ServerCommand", Line: "list"}); sc.ErrorCode == session.CommandErrorServerNotFound {
 		t.Fatalf("ServerCommand after failed restart = %+v, want the instance still tracked (not evicted)", sc)
 	}
 	// And the id must not be left reserved: restore the driver and confirm a stop
 	// still cleanly terminates the still-tracked instance.
 	m.drivers["container"] = d
-	if stop := m.Handle(context.Background(), session.Command{CommandID: "stop", ServerID: "s1", Kind: "StopServer"}); !stop.Success {
+	if stop := m.Handle(context.Background(), session.Command{CommandID: "stop", ServerID: s1, Kind: "StopServer"}); !stop.Success {
 		t.Fatalf("stop after failed restart = %+v, want success (instance was still tracked, id not wedged)", stop)
 	}
 }
@@ -434,21 +434,21 @@ func TestRestartNeverLeaksReservation(t *testing.T) {
 	m := newManager(t, d, nil)
 
 	// Restart for an id that was never started: must return SERVER_NOT_FOUND.
-	res := m.Handle(context.Background(), session.Command{CommandID: "r1", ServerID: "s1", Kind: "RestartServer"})
+	res := m.Handle(context.Background(), session.Command{CommandID: "r1", ServerID: s1, Kind: "RestartServer"})
 	if res.Success || res.ErrorCode != session.CommandErrorServerNotFound {
 		t.Fatalf("restart unknown id = %+v, want SERVER_NOT_FOUND", res)
 	}
 
 	// The reserved map must be empty: no leaked reservation.
 	m.mu.Lock()
-	leaked := m.reserved["s1"]
+	leaked := m.reserved[s1]
 	m.mu.Unlock()
 	if leaked {
 		t.Fatal("reserved[s1] leaked after restart of unknown id (issue #1950)")
 	}
 
 	// The id must not be leaked as reserved: a StartServer must succeed (not BUSY).
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	start := m.Handle(context.Background(), startCmd())
 	if !start.Success {
 		t.Fatalf("start after restart of unknown id = %+v, want success (reservation must not leak)", start)
@@ -464,12 +464,12 @@ func TestRestartRacingStartCompletion(t *testing.T) {
 
 	// Start a server but hold it inside driver.Start.
 	startDone := make(chan session.CommandResult, 1)
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	go func() { startDone <- m.Handle(context.Background(), startCmd()) }()
 	awaitEnter(t, d.entered)
 
 	// Restart while the start is in flight: must return BUSY.
-	res := m.Handle(context.Background(), session.Command{CommandID: "r1", ServerID: "s1", Kind: "RestartServer"})
+	res := m.Handle(context.Background(), session.Command{CommandID: "r1", ServerID: s1, Kind: "RestartServer"})
 	if res.Success || res.ErrorCode != session.CommandErrorBusy {
 		t.Fatalf("restart during in-flight start = %+v, want BUSY", res)
 	}
@@ -482,7 +482,7 @@ func TestRestartRacingStartCompletion(t *testing.T) {
 	}
 
 	// The id must not be permanently wedged: a StopServer must succeed.
-	stop := m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+	stop := m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"})
 	if !stop.Success {
 		t.Fatalf("stop after restart+start completion = %+v, want success (no permanent BUSY leak)", stop)
 	}
@@ -495,12 +495,12 @@ func TestRestartMidStartStillBusy(t *testing.T) {
 	m := newManager(t, d, nil)
 
 	// Hold a StartServer mid-driver.Start.
-	seedScratch(t, m, "s1")
+	seedScratch(t, m, s1)
 	go func() { _ = m.Handle(context.Background(), startCmd()) }()
 	awaitEnter(t, d.entered)
 
 	// Restart while reservation is held: BUSY expected.
-	res := m.Handle(context.Background(), session.Command{CommandID: "r1", ServerID: "s1", Kind: "RestartServer"})
+	res := m.Handle(context.Background(), session.Command{CommandID: "r1", ServerID: s1, Kind: "RestartServer"})
 	if res.Success || res.ErrorCode != session.CommandErrorBusy {
 		t.Fatalf("restart mid-start = %+v, want BUSY", res)
 	}
@@ -523,7 +523,7 @@ func TestRestartConcurrentStartNeverLeaksReservation(t *testing.T) {
 	m := newManager(t, d, nil)
 
 	for i := 0; i < iterations; i++ {
-		id := fmt.Sprintf("srv-%d", i)
+		id := fmt.Sprintf("53000000-0000-4000-8000-%012d", i)
 		// The window only exists if the start actually COMMITS an instance, so the id
 		// needs a working set: since issue #2499 a start over one this Worker does not
 		// hold is refused before driver.Start, which would make every iteration a no-op
