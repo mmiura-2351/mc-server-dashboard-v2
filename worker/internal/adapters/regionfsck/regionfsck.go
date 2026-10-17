@@ -163,8 +163,8 @@ func (r Report) Healthy() bool { return len(r.Corrupt) == 0 }
 // CheckRegionFile structurally validates one .mca region file (issue #927: ONE
 // rule set, no source-keyed mode split). It returns ReasonNone if the file is
 // structurally sound, or the first Reason that fails. A non-nil error is returned
-// only on a real I/O failure. It reads at most the 8 KiB header plus a 5-byte prefix
-// per present chunk; region payloads are never loaded. A non-4096-aligned size is
+// only on a real I/O failure. It reads at most the 4 KiB location table plus a 5-byte
+// prefix per present chunk; region payloads are never loaded. A non-4096-aligned size is
 // the normal unpadded tail of a 26.x world, not corruption; the per-chunk EOF bound
 // is byte-precise (offset*4096 + 4 + length <= size). See the package doc.
 //
