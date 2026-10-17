@@ -27,7 +27,9 @@ const defaultRCONHost = "127.0.0.1"
 // reached over that network instead of the unreachable host loopback (issue
 // #218). mcVersion is the server's Minecraft version, which decides the charset
 // the file is read in (issue #3116). It errors when RCON is not
-// enabled/configured; the graceful-stop path then falls back to signals.
+// enabled/configured; the graceful-stop path then falls back to signals. No error
+// carries a value read from the file, because the container driver logs them
+// (issue #3345).
 func OpenFromWorkingDir(ctx context.Context, workingDir, host, mcVersion string) (*Client, error) {
 	props, err := readProperties(workingDir, mcVersion)
 	if err != nil {
@@ -44,6 +46,15 @@ func OpenFromWorkingDir(ctx context.Context, workingDir, host, mcVersion string)
 	if port == "" {
 		port = defaultRCONPort
 	}
+	// The value is checked here, not left to Dial, whose errors repeat it: a
+	// backslash-continued line folds the next line (a password, say) into it, and
+	// the caller logs the error (issue #3345). So the refusal never names the value,
+	// and the port dialed is the number re-rendered, not the text read.
+	n, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || n == 0 {
+		return nil, fmt.Errorf("rcon: rcon.port in server.properties is not a port number (1-65535)")
+	}
+	port = strconv.FormatUint(n, 10)
 	if host == "" {
 		host = defaultRCONHost
 	}

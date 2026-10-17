@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -175,4 +176,50 @@ func TestOpenFromWorkingDirUsesHostOverride(t *testing.T) {
 		t.Fatalf("OpenFromWorkingDir(host=\"localhost\") error = %v", err)
 	}
 	_ = client.Close()
+}
+
+// TestOpenFromWorkingDirRefusesAMalformedPortWithoutEchoingIt pins that an
+// rcon.port that is not a port number is refused before any dial, with an error
+// that does not repeat the value: the container driver logs the error, and a
+// backslash-continued port line folds the following line into the value, so
+// echoing it would put that line -- here a password -- into the Worker log
+// (issue #3345).
+func TestOpenFromWorkingDirRefusesAMalformedPortWithoutEchoingIt(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		// leak lists what the error must not contain.
+		leak []string
+	}{
+		{
+			name: "continued line folds a password into the port",
+			body: "enable-rcon=true\nrcon.password=FIRST_SECRET\nrcon.port=25575\\\nrcon.password=SECOND_SECRET\n",
+			leak: []string{"SECRET", "rcon.password", "25575rcon"},
+		},
+		{name: "not a number", body: "enable-rcon=true\nrcon.password=pw\nrcon.port=notaport\n", leak: []string{"notaport"}},
+		{name: "out of range", body: "enable-rcon=true\nrcon.password=pw\nrcon.port=70000\n", leak: []string{"70000"}},
+		{name: "zero", body: "enable-rcon=true\nrcon.password=pw\nrcon.port=0\n", leak: []string{":0"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "server.properties"), []byte(tc.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			client, err := OpenFromWorkingDir(ctx, dir, "", "")
+			if err == nil {
+				_ = client.Close()
+				t.Fatal("OpenFromWorkingDir = nil error, want the malformed rcon.port refused")
+			}
+			if !strings.Contains(err.Error(), "rcon.port") || strings.Contains(err.Error(), "dial") {
+				t.Fatalf("error = %q, want a refusal naming rcon.port, before any dial", err)
+			}
+			for _, leak := range tc.leak {
+				if strings.Contains(err.Error(), leak) {
+					t.Fatalf("error = %q, must not contain %q", err, leak)
+				}
+			}
+		})
+	}
 }
