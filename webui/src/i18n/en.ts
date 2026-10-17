@@ -886,6 +886,15 @@ export const en = {
     "Another change to this server is in progress. Try again in a moment.",
   "files.error.conflict":
     "The operation could not be completed due to a conflict.",
+  // Viewer read refusals (issue #3361). A read is served from the Worker while
+  // the server runs and from storage while it is stopped; in between (starting,
+  // stopping, restarting, crashed) it is 409 server_unsettled. Only the running
+  // read is capped, at the Worker's 4 MiB (instancemanager.MaxFileBytes); a
+  // stopped server's read has no cap.
+  "files.error.readUnsettled":
+    "The server is between states (for example starting or stopping), so this file cannot be read right now. Try again once it is running or stopped.",
+  "files.error.readTooLarge":
+    "This file is larger than the 4 MiB that can be opened while the server is running. Stop the server to open it.",
   "files.error.generic": "Something went wrong. Please try again.",
   "files.dropZone": "Drop files here to upload",
   // Multi-select (issue #1462).

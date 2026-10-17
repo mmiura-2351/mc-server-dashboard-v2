@@ -154,14 +154,14 @@ describe("fileReadErrorPresentation", () => {
       { key: "files.error.isDirectory" },
     ],
     [
-      "maps an oversized file",
+      "maps an oversized file to the running-read cap, not the edit cap",
       new ApiError(413, { reason: "file_too_large" }),
-      { key: "files.error.fileTooLarge" },
+      { key: "files.error.readTooLarge" },
     ],
     [
-      "maps a server in transition",
+      "maps a server in transition to the read wording",
       new ApiError(409, { reason: "server_unsettled" }),
-      { key: "files.error.serverMustBeStopped" },
+      { key: "files.error.readUnsettled" },
     ],
     [
       "maps an unavailable worker",

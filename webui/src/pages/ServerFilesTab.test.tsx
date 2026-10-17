@@ -1401,7 +1401,12 @@ describe("ServerFilesTab viewer read errors (#3361)", () => {
     [
       "an oversized file",
       new ApiError(413, { reason: "file_too_large" }),
-      "files.error.fileTooLarge",
+      "files.error.readTooLarge",
+    ],
+    [
+      "a server in transition",
+      new ApiError(409, { reason: "server_unsettled" }),
+      "files.error.readUnsettled",
     ],
     [
       "a missing file",
@@ -1431,10 +1436,12 @@ describe("ServerFilesTab viewer read errors (#3361)", () => {
     },
   );
 
-  it("keeps the generic open message for an unclassified failure", async () => {
+  it("routes a 403 read through onForbidden and keeps the open message", async () => {
     mockApi.get.mockImplementation((path: string) => {
       if (path.includes("/files?path=") && !path.includes("list=")) {
-        return Promise.reject(new ApiError(403, {}));
+        return Promise.reject(
+          new ApiError(403, { reason: "forbidden", permission: "file:read" }),
+        );
       }
       if (path.includes("/files?path=")) {
         return Promise.resolve(listing([{ name: "data.bin", kind: "file" }]));
@@ -1447,6 +1454,11 @@ describe("ServerFilesTab viewer read errors (#3361)", () => {
     fireEvent.click(await screen.findByText(/data\.bin/));
 
     expect(await screen.findByText(t("files.openError"))).toBeInTheDocument();
+    expect(
+      await screen.findByText(
+        t("permissions.deniedNamed", { permission: "file:read" }),
+      ),
+    ).toBeInTheDocument();
   });
 });
 

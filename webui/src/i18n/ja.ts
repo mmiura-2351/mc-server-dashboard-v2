@@ -839,6 +839,10 @@ export const ja: Record<TranslationKey, string> = {
   "files.error.serverBusy":
     "このサーバーでは別の変更が進行中です。しばらくしてからもう一度お試しください。",
   "files.error.conflict": "競合が発生したため、操作を完了できませんでした。",
+  "files.error.readUnsettled":
+    "サーバーが起動中・停止中などの移行状態にあるため、現在このファイルを読み込めません。稼働中または停止済みになってから再度お試しください。",
+  "files.error.readTooLarge":
+    "サーバーの稼働中に開けるのは4 MiBまでのファイルです。このファイルを開くにはサーバーを停止してください。",
   "files.error.generic": "問題が発生しました。もう一度お試しください。",
   "files.dropZone": "ここにファイルをドロップしてアップロード",
   // Multi-select (issue #1462).
