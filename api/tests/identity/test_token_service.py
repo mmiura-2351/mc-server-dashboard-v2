@@ -123,6 +123,33 @@ def test_token_with_a_deeply_nested_header_is_rejected() -> None:
         _service(clock).verify_access_token(f"{header}.e30.eA")
 
 
+# A validly signed ``exp`` that is not an int: only self-issued tokens can carry
+# one, but the decode contract still rejects it as invalid rather than letting
+# ``int()`` raise a TypeError (a 500) or coerce it (issue #3327). ``True`` is an
+# int subclass and ``1.5`` a numeric date PyJWT itself would accept; both are
+# rejected because the service only ever issues a whole-second int.
+_NON_INT_EXPS = [
+    pytest.param(None, id="null"),
+    pytest.param([4102444800], id="list"),
+    pytest.param("4102444800", id="string"),
+    pytest.param(True, id="bool"),
+    pytest.param(4102444800.5, id="float"),
+]
+
+
+def _token_with_exp(exp: object, **extra: object) -> str:
+    now = dt.datetime(2026, 6, 4, tzinfo=dt.timezone.utc)
+    claims = {"sub": str(_USER.value), "iat": int(now.timestamp()), "exp": exp}
+    return jwt.encode({**claims, **extra}, _KEY, algorithm="HS256")
+
+
+@pytest.mark.parametrize("exp", _NON_INT_EXPS)
+def test_access_token_with_non_int_exp_is_rejected(exp: object) -> None:
+    clock = _FakeClock(dt.datetime(2026, 6, 4, tzinfo=dt.timezone.utc))
+    with pytest.raises(InvalidAccessTokenError):
+        _service(clock).verify_access_token(_token_with_exp(exp))
+
+
 def test_refresh_secret_is_opaque_not_its_hash() -> None:
     clock = _FakeClock(dt.datetime(2026, 6, 4, tzinfo=dt.timezone.utc))
     svc = _service(clock)
@@ -219,6 +246,14 @@ def test_token_without_res_claim_is_not_a_download_grant() -> None:
     )
     with pytest.raises(InvalidDownloadGrantError):
         _service(_FakeClock(now)).verify_download_grant(token, _RESOURCE)
+
+
+@pytest.mark.parametrize("exp", _NON_INT_EXPS)
+def test_download_grant_with_non_int_exp_is_rejected(exp: object) -> None:
+    clock = _FakeClock(dt.datetime(2026, 6, 4, tzinfo=dt.timezone.utc))
+    token = _token_with_exp(exp, purpose="download", res=_RESOURCE)
+    with pytest.raises(InvalidDownloadGrantError):
+        _service(clock).verify_download_grant(token, _RESOURCE)
 
 
 def test_download_grant_is_not_an_access_token() -> None:
