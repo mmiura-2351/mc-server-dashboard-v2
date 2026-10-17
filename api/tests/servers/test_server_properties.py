@@ -968,9 +968,10 @@ def test_continuation_checks_each_natural_line_once(
     # ends in an even run -- so the trailing-run check reads each byte of the
     # file at most once. Checking the whole logical line again per
     # continuation, which also copies it (rstrip), is quadratic on a file of
-    # many continued lines. The logical line's own accumulation (a bytearray,
-    # not a bytes copy per continuation) has no deterministic counter to pin
-    # here; the Worker's mirror pins its allocations instead.
+    # many continued lines. The logical line's own accumulation (one join of
+    # the continued lines, not a bytes copy per continuation) has no
+    # deterministic counter to pin here; the Worker's mirror pins its
+    # allocations instead.
     scanned = 0
     check = server_properties._ends_with_odd_backslash
 
