@@ -64,7 +64,10 @@ import {
   encodeTextBase64,
   isProbablyText,
 } from "./fileText.ts";
-import { fileOperationErrorPresentation } from "./serverFilesErrorPresentation.ts";
+import {
+  fileOperationErrorPresentation,
+  fileReadErrorPresentation,
+} from "./serverFilesErrorPresentation.ts";
 import { atRest, normalizeState } from "./serverState.ts";
 import { useFileBrowserParams } from "./urlState.ts";
 import { type NavState, useNavHistory } from "./useNavHistory.ts";
@@ -2338,7 +2341,10 @@ function Viewer({
   // background refetch retains `data`, so the cached content keeps rendering
   // through transient API blips (#1805).
   if (contentState.kind === "error") {
-    return <p className="field-error">{t("files.openError")}</p>;
+    const presentation = fileReadErrorPresentation(content.error);
+    return (
+      <p className="field-error">{t(presentation.key, presentation.params)}</p>
+    );
   }
 
   const decoded = isProbablyText(contentState.data.content_base64)

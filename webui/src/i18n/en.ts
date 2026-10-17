@@ -880,7 +880,10 @@ export const en = {
     "The server agent is disconnected. Please try again later.",
   "files.error.storageUnavailable":
     "File storage is unavailable right now. Please try again shortly.",
-  "files.error.serverBusy": "Another operation is in progress. Please wait.",
+  // 409 server_busy: refused without being applied, so the remedy is to retry
+  // (issue #3361). Every files route that raises it is a change.
+  "files.error.serverBusy":
+    "Another change to this server is in progress. Try again in a moment.",
   "files.error.conflict":
     "The operation could not be completed due to a conflict.",
   "files.error.generic": "Something went wrong. Please try again.",

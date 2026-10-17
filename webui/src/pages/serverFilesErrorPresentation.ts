@@ -83,3 +83,17 @@ export function fileOperationErrorPresentation(
       return { key: "files.error.generic" };
   }
 }
+
+/**
+ * Select the viewer's inline message for a file that could not be read
+ * (#3361). The read shares the operations' reasons; only the fallback names
+ * the failed open instead of the generic "something went wrong".
+ */
+export function fileReadErrorPresentation(
+  error: unknown,
+): FileErrorPresentation {
+  const presentation = fileOperationErrorPresentation(error);
+  return presentation.key === "files.error.generic"
+    ? { key: "files.openError" }
+    : presentation;
+}

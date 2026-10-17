@@ -3,7 +3,10 @@
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../api/client.ts";
 import { FileTooLargeToEditError, UnencodableTextError } from "./fileText.ts";
-import { fileOperationErrorPresentation } from "./serverFilesErrorPresentation.ts";
+import {
+  fileOperationErrorPresentation,
+  fileReadErrorPresentation,
+} from "./serverFilesErrorPresentation.ts";
 
 describe("fileOperationErrorPresentation", () => {
   it.each([
@@ -125,5 +128,67 @@ describe("fileOperationErrorPresentation", () => {
     ],
   ])("%s", (_name, error, expected) => {
     expect(fileOperationErrorPresentation(error)).toEqual(expected);
+  });
+});
+
+describe("fileReadErrorPresentation", () => {
+  it.each([
+    [
+      "maps a missing file",
+      new ApiError(404, { reason: "not_found" }),
+      { key: "files.error.notFound" },
+    ],
+    [
+      "maps a special file the API refuses to read",
+      new ApiError(422, { reason: "invalid_path" }),
+      { key: "files.error.invalidPath" },
+    ],
+    [
+      "maps a refused symlink",
+      new ApiError(422, { reason: "symlink_refused" }),
+      { key: "files.error.symlinkRefused" },
+    ],
+    [
+      "maps a directory opened as a file",
+      new ApiError(422, { reason: "is_a_directory" }),
+      { key: "files.error.isDirectory" },
+    ],
+    [
+      "maps an oversized file",
+      new ApiError(413, { reason: "file_too_large" }),
+      { key: "files.error.fileTooLarge" },
+    ],
+    [
+      "maps a server in transition",
+      new ApiError(409, { reason: "server_unsettled" }),
+      { key: "files.error.serverMustBeStopped" },
+    ],
+    [
+      "maps an unavailable worker",
+      new ApiError(503, { reason: "worker_unavailable" }),
+      { key: "files.error.workerUnavailable" },
+    ],
+    [
+      "maps unavailable storage",
+      new ApiError(503, { reason: "storage_unavailable" }),
+      { key: "files.error.storageUnavailable" },
+    ],
+    [
+      "falls back to the open message for an unclassified API failure",
+      new ApiError(500, { reason: "internal_error" }),
+      { key: "files.openError" },
+    ],
+    [
+      "falls back to the open message for a denied read",
+      new ApiError(403, { reason: "permission_denied" }),
+      { key: "files.openError" },
+    ],
+    [
+      "falls back to the open message for a non-API error",
+      new Error("boom"),
+      { key: "files.openError" },
+    ],
+  ])("%s", (_name, error, expected) => {
+    expect(fileReadErrorPresentation(error)).toEqual(expected);
   });
 });

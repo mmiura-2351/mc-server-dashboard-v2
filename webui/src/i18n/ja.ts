@@ -837,7 +837,7 @@ export const ja: Record<TranslationKey, string> = {
   "files.error.storageUnavailable":
     "現在、ファイルストレージを利用できません。しばらくしてから再度お試しください。",
   "files.error.serverBusy":
-    "別の操作が進行中です。完了するまでお待ちください。",
+    "このサーバーでは別の変更が進行中です。しばらくしてからもう一度お試しください。",
   "files.error.conflict": "競合が発生したため、操作を完了できませんでした。",
   "files.error.generic": "問題が発生しました。もう一度お試しください。",
   "files.dropZone": "ここにファイルをドロップしてアップロード",

@@ -31,6 +31,7 @@ import { ToastProvider } from "../components/Toast.tsx";
 import { humanizeBytes } from "../format.ts";
 import { t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
+import { createQueryClient } from "../queryClient.ts";
 import { installMockWebSocket } from "../test/mockWebSocket.ts";
 import { encodeUtf8Base64 } from "./fileText.ts";
 import { ServerDetailPage } from "./ServerDetailPage.tsx";
@@ -135,10 +136,12 @@ function routeGet(handlers: {
   });
 }
 
-function renderPage(entry = `/communities/${CID}/servers/${SID}`) {
-  const queryClient = new QueryClient({
+function renderPage(
+  entry = `/communities/${CID}/servers/${SID}`,
+  queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-  });
+  }),
+) {
   const result = render(
     <MemoryRouter initialEntries={[entry]}>
       <QueryClientProvider client={queryClient}>
@@ -1369,7 +1372,114 @@ describe("ServerFilesTab running notice", () => {
   });
 });
 
+describe("ServerFilesTab viewer read errors (#3361)", () => {
+  // Rendered with the app's own query client, so its retry policy is the one
+  // under test: the message appears only once the query has stopped retrying.
+  const contentGets = () =>
+    mockApi.get.mock.calls.filter(
+      ([path]) =>
+        (path as string).includes("/files?path=") &&
+        !(path as string).includes("list="),
+    );
+
+  it.each([
+    [
+      "a special file",
+      new ApiError(422, { reason: "invalid_path" }),
+      "files.error.invalidPath",
+    ],
+    [
+      "a symlink",
+      new ApiError(422, { reason: "symlink_refused" }),
+      "files.error.symlinkRefused",
+    ],
+    [
+      "a directory",
+      new ApiError(422, { reason: "is_a_directory" }),
+      "files.error.isDirectory",
+    ],
+    [
+      "an oversized file",
+      new ApiError(413, { reason: "file_too_large" }),
+      "files.error.fileTooLarge",
+    ],
+    [
+      "a missing file",
+      new ApiError(404, { reason: "not_found" }),
+      "files.error.notFound",
+    ],
+  ] as const)(
+    "shows the specific message for %s after a single fetch",
+    async (_name, error, key) => {
+      mockApi.get.mockImplementation((path: string) => {
+        if (path.includes("/files?path=") && !path.includes("list=")) {
+          return Promise.reject(error);
+        }
+        if (path.includes("/files?path=")) {
+          return Promise.resolve(listing([{ name: "data.bin", kind: "file" }]));
+        }
+        return Promise.resolve(server());
+      });
+      renderPage(undefined, createQueryClient());
+      await openFiles();
+
+      fireEvent.click(await screen.findByText(/data\.bin/));
+
+      expect(await screen.findByText(t(key))).toBeInTheDocument();
+      expect(screen.queryByText(t("files.openError"))).not.toBeInTheDocument();
+      expect(contentGets()).toHaveLength(1);
+    },
+  );
+
+  it("keeps the generic open message for an unclassified failure", async () => {
+    mockApi.get.mockImplementation((path: string) => {
+      if (path.includes("/files?path=") && !path.includes("list=")) {
+        return Promise.reject(new ApiError(403, {}));
+      }
+      if (path.includes("/files?path=")) {
+        return Promise.resolve(listing([{ name: "data.bin", kind: "file" }]));
+      }
+      return Promise.resolve(server());
+    });
+    renderPage();
+    await openFiles();
+
+    fireEvent.click(await screen.findByText(/data\.bin/));
+
+    expect(await screen.findByText(t("files.openError"))).toBeInTheDocument();
+  });
+});
+
 describe("ServerFilesTab error presentation glue", () => {
+  it("keeps the edit and names the change in progress when a save hits server_busy (#3361)", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "server.properties", kind: "file" }]),
+      content: {
+        path: "server.properties",
+        content_base64: encodeUtf8Base64("motd=hello\n"),
+      },
+    });
+    mockApi.put.mockRejectedValue(new ApiError(409, { reason: "server_busy" }));
+    renderPage(undefined, createQueryClient());
+    await openFiles();
+
+    fireEvent.click(await screen.findByText(/server\.properties/));
+    const editor = (await screen.findByLabelText(
+      t("files.editorLabel"),
+    )) as HTMLTextAreaElement;
+    fireEvent.change(editor, { target: { value: "motd=edited\n" } });
+    fireEvent.click(screen.getByRole("button", { name: t("files.save") }));
+
+    expect(
+      await screen.findByText(t("files.error.serverBusy")),
+    ).toBeInTheDocument();
+    // Not retried behind the user's back; the draft stays for a manual retry.
+    expect(mockApi.put).toHaveBeenCalledTimes(1);
+    expect(editor.value).toBe("motd=edited\n");
+    expect(screen.getByRole("button", { name: t("files.save") })).toBeEnabled();
+  });
+
   it("names the platform-managed key a refused save would change (#2790)", async () => {
     // The 422 carries the offending key in a `key` extension member; without an
     // arm for the reason it collapsed into the generic invalid-input toast and
