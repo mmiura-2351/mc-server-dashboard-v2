@@ -546,6 +546,12 @@ _SCALAR_INVALID_CASES = [
     ),
     pytest.param(
         "auth.token",
+        'algorithm = "RS256"',
+        "algorithm",
+        id="asymmetric-token-algorithm",
+    ),
+    pytest.param(
+        "auth.token",
         "access_ttl_seconds = 0",
         "access_ttl_seconds",
         id="zero-access-ttl",
@@ -707,9 +713,6 @@ _SCALAR_VALID_CASES = [
     ),
     pytest.param(
         "auth.brute_force", "delay_ms = 0", "delay_ms", 0, id="disabled-login-delay"
-    ),
-    pytest.param(
-        "auth.token", 'algorithm = "RS256"', "algorithm", "RS256", id="rs256-selector"
     ),
     pytest.param(
         "auth.token",
@@ -951,6 +954,32 @@ def test_unknown_key_in_toml_fails_fast(
     cfg = _write_toml(tmp_path, "[server]\nbogus_key = 1\n")
     with pytest.raises(ValueError):
         load_settings(config_file=cfg)
+
+
+@pytest.mark.parametrize("algorithm", ["RS256", "ES256", "PS256", "EdDSA"])
+def test_asymmetric_token_algorithm_fails_fast_with_a_clear_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, algorithm: str
+) -> None:
+    # PyJWT signs these only with the optional ``cryptography`` package, which
+    # the API does not ship; admitting one would boot an API whose first token
+    # issue raises (issue #3327). The error must say what is accepted and why.
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(tmp_path, f'[auth.token]\nalgorithm = "{algorithm}"\n')
+    with pytest.raises(
+        ValidationError, match="must be HS256.*asymmetric algorithms are not supported"
+    ):
+        load_settings(config_file=cfg)
+
+
+@pytest.mark.parametrize("algorithm", ["hs256", "HS512"])
+def test_wrong_symmetric_token_algorithm_does_not_blame_asymmetric_support(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, algorithm: str
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(tmp_path, f'[auth.token]\nalgorithm = "{algorithm}"\n')
+    with pytest.raises(ValidationError, match="must be HS256") as exc_info:
+        load_settings(config_file=cfg)
+    assert "asymmetric" not in str(exc_info.value)
 
 
 def test_short_hs256_signing_key_fails_fast(
