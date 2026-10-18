@@ -419,10 +419,10 @@ family is unsupported on `vanilla` servers (422 `unsupported_server_type`).
 | GET | `…/{sid}/plugins/{pid}/updates` | Check a single plugin for a newer catalog version (`plugin:read`). |
 | POST | `…/{sid}/plugins/{pid}/update` | Update a plugin to a specific catalog `version_id` (`plugin:manage`); missing project 404 `catalog_project_not_found`, checksum drift 502 `checksum_mismatch`. |
 | GET | `…/{sid}/plugins/{pid}/dependencies` | List a Modrinth-sourced plugin's declared dependencies, each flagged installed/missing (`plugin:read`). |
-| POST | `…/{sid}/plugins/{pid}/enable` · `/disable` | Toggle a plugin on/off (`plugin:manage`). |
-| POST | `…/{sid}/plugins/{pid}/side` | Override a mod's side — `both` / `server` / `client` (`plugin:manage`); re-materializes the working set. Invalid side is 422 `invalid_side`. |
+| POST | `…/{sid}/plugins/{pid}/enable` · `/disable` | Toggle a plugin on/off (`plugin:manage`). A jar missing from the cache when the working set needs it is 409 `plugin_jar_missing` over the committed toggle (see **Missing jars** below). |
+| POST | `…/{sid}/plugins/{pid}/side` | Override a mod's side — `both` / `server` / `client` (`plugin:manage`); re-materializes the working set. Invalid side is 422 `invalid_side`; a jar missing from the cache when the working set needs it is 409 `plugin_jar_missing` over the committed side (see **Missing jars** below). |
 | GET | `…/{sid}/client-mods` | List the server's enabled client-relevant plugins (side `client` / `both`; `plugin:read`). |
-| GET / HEAD | `…/{sid}/client-mods/download` | Download those client mods bundled as `mods.zip` (`plugin:read`). The response declares `Cache-Control: no-store` — a per-server body gated by `plugin:read` must never be served from a shared cache. `HEAD` is the metadata probe: the same gate and headers with no body, and it neither builds the zip nor pulls a jar; the zip is streamed with no `Content-Length` (assembled on the fly from a variable jar set), so the probe learns existence rather than size. |
+| GET / HEAD | `…/{sid}/client-mods/download` | Download those client mods bundled as `mods.zip` (`plugin:read`). The response declares `Cache-Control: no-store` — a per-server body gated by `plugin:read` must never be served from a shared cache. `HEAD` is the metadata probe: the same gate and headers with no body, and it neither builds the zip nor pulls a jar; the zip is streamed with no `Content-Length` (assembled on the fly from a variable jar set), so the probe learns existence rather than size. The `GET` opens the first jar before the response headers: a jar missing from the content-addressed cache answers 409 `plugin_jar_missing` (see **Missing jars** below) and a cache outage 503 `storage_unavailable` (see **Storage outages** below); a later jar missing or unreachable aborts the transfer. |
 | GET | `…/{sid}/catalog/search` | Search the Modrinth catalog with auto-applied server facets (`plugin:read`): `q` query + `limit` (1–100, default 20) / `offset` paging. Catalog upstream failure is 502 `catalog_upstream_failed`. |
 | GET | `…/{sid}/catalog/projects/{id_or_slug}` | Fetch a catalog project's detail + its server-compatible versions (`plugin:read`); an unknown project is 404 `catalog_project_not_found`, catalog upstream failure 502 `catalog_upstream_failed`. |
 | POST | `…/{sid}/catalog/install` | Install a plugin/mod from the catalog by `project_id` + `version_id` (`plugin:manage`). Returns `201`; a missing project is 404 `catalog_project_not_found`, checksum drift 502 `checksum_mismatch`, and a duplicate 409 `plugin_already_exists`. |
@@ -440,6 +440,16 @@ any of these routes, nor on remove / enable / disable / side: the record is
 already committed, a repeat would answer 409 or 404 instead of finishing, and
 the routes answer the generic 500. The plugin list then shows the recorded
 state; the jar in the working set may not match it.
+
+**Missing jars.** A plugin row can outlive its jar in the content-addressed
+cache (a garbage-collection race or an external deletion). Wherever a route
+needs that jar it answers **409 `plugin_jar_missing`**: the client-mods
+download (for its first jar, before the headers — nothing changes), and enable /
+disable / side when the working set has no file for the plugin and has to be
+rebuilt from the cache. Those three commit the new state first, so it stands:
+the plugin list shows it, the working set holds no file for the plugin, and
+repeating the request is a no-op. Removing the plugin and installing it again
+(upload or catalog install) restores its jar.
 
 The `…/{sid}/catalog/*` rows are a separate route family (`catalog.py`) —
 the Modrinth browse/install that backs the same `#plugins` tab — folded in here

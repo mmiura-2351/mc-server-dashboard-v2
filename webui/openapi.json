@@ -7759,7 +7759,7 @@
     },
     "/api/communities/{community_id}/servers/{server_id}/client-mods/download": {
       "get": {
-        "description": "Download a server's client mods as a zip (plugin:read, issue #1308).\n\n**Probe** (issue #2560): a ``HEAD`` answers with the ``GET``'s status and\nheaders and no body, so a client learns the modpack is available under the\nsame ``plugin:read`` gate without building it. The zip is assembled on the fly\nfrom a variable jar set, so its size is not known ahead of the stream: neither\nthe ``GET`` nor the probe declares a ``Content-Length``, and the probe learns\nexistence rather than size.",
+        "description": "Download a server's client mods as a zip (plugin:read, issue #1308).\n\n**Probe** (issue #2560): a ``HEAD`` answers with the ``GET``'s status and\nheaders and no body, so a client learns the modpack is available under the\nsame ``plugin:read`` gate without building it. The zip is assembled on the fly\nfrom a variable jar set, so its size is not known ahead of the stream: neither\nthe ``GET`` nor the probe declares a ``Content-Length``, and the probe learns\nexistence rather than size.\n\nA jar the modpack needs that is missing from the content-addressed cache\nanswers ``409`` ``plugin_jar_missing`` (issue #3323), and a cache outage\n``503`` ``storage_unavailable`` (issue #3233) -- both for the first jar, which\nthe ``GET`` opens before the headers. Nothing changes either way; removing the\nplugin and installing it again restores its jar. The probe opens no jar, so it\nanswers neither.",
         "operationId": "download_client_modpack_api_communities__community_id__servers__server_id__client_mods_download_get",
         "parameters": [
           {
@@ -7811,7 +7811,7 @@
         "summary": "Download Client Modpack"
       },
       "head": {
-        "description": "Download a server's client mods as a zip (plugin:read, issue #1308).\n\n**Probe** (issue #2560): a ``HEAD`` answers with the ``GET``'s status and\nheaders and no body, so a client learns the modpack is available under the\nsame ``plugin:read`` gate without building it. The zip is assembled on the fly\nfrom a variable jar set, so its size is not known ahead of the stream: neither\nthe ``GET`` nor the probe declares a ``Content-Length``, and the probe learns\nexistence rather than size.",
+        "description": "Download a server's client mods as a zip (plugin:read, issue #1308).\n\n**Probe** (issue #2560): a ``HEAD`` answers with the ``GET``'s status and\nheaders and no body, so a client learns the modpack is available under the\nsame ``plugin:read`` gate without building it. The zip is assembled on the fly\nfrom a variable jar set, so its size is not known ahead of the stream: neither\nthe ``GET`` nor the probe declares a ``Content-Length``, and the probe learns\nexistence rather than size.\n\nA jar the modpack needs that is missing from the content-addressed cache\nanswers ``409`` ``plugin_jar_missing`` (issue #3323), and a cache outage\n``503`` ``storage_unavailable`` (issue #3233) -- both for the first jar, which\nthe ``GET`` opens before the headers. Nothing changes either way; removing the\nplugin and installing it again restores its jar. The probe opens no jar, so it\nanswers neither.",
         "operationId": "download_client_modpack_api_communities__community_id__servers__server_id__client_mods_download_head",
         "parameters": [
           {
@@ -9616,7 +9616,7 @@
     },
     "/api/communities/{community_id}/servers/{server_id}/plugins/{plugin_id}/disable": {
       "post": {
-        "description": "Disable an enabled plugin (plugin:manage).",
+        "description": "Disable an enabled plugin (plugin:manage).\n\nThe new state is committed before the working set is reconciled. When that\nstep needs the plugin's jar -- the working-set file is gone -- and the jar is\nmissing from the content-addressed cache too, the route answers ``409``\n``plugin_jar_missing`` (issue #3323) over the committed state: the plugin\nlist shows it, the working set holds no file for the plugin, and repeating the\nrequest is a no-op. Removing the plugin and installing it again restores its\njar.",
         "operationId": "disable_plugin_api_communities__community_id__servers__server_id__plugins__plugin_id__disable_post",
         "parameters": [
           {
@@ -9682,7 +9682,7 @@
     },
     "/api/communities/{community_id}/servers/{server_id}/plugins/{plugin_id}/enable": {
       "post": {
-        "description": "Enable a disabled plugin (plugin:manage).",
+        "description": "Enable a disabled plugin (plugin:manage).\n\nThe new state is committed before the working set is reconciled. When that\nstep needs the plugin's jar -- the working-set file is gone -- and the jar is\nmissing from the content-addressed cache too, the route answers ``409``\n``plugin_jar_missing`` (issue #3323) over the committed state: the plugin\nlist shows it, the working set holds no file for the plugin, and repeating the\nrequest is a no-op. Removing the plugin and installing it again restores its\njar.",
         "operationId": "enable_plugin_api_communities__community_id__servers__server_id__plugins__plugin_id__enable_post",
         "parameters": [
           {
@@ -9748,7 +9748,7 @@
     },
     "/api/communities/{community_id}/servers/{server_id}/plugins/{plugin_id}/side": {
       "post": {
-        "description": "Override an installed plugin's side (plugin:manage, issue #1308).\n\nChanging the side re-materializes the working set: a client-only jar is\nremoved from the running server, and a server-relevant jar is materialized\nfrom the content-addressed cache. At-rest gated (409 ``server_unsettled``).",
+        "description": "Override an installed plugin's side (plugin:manage, issue #1308).\n\nChanging the side re-materializes the working set: a client-only jar is\nremoved from the running server, and a server-relevant jar is materialized\nfrom the content-addressed cache. At-rest gated (409 ``server_unsettled``).\n\nThe new side is committed before the working set is reconciled. When the jar\nto materialize is missing from the cache, the route answers ``409``\n``plugin_jar_missing`` (issue #3323) over the committed side: the plugin list\nshows it, the working set holds no file for the plugin, and repeating the\nrequest is a no-op. Removing the plugin and installing it again restores its\njar.",
         "operationId": "set_plugin_side_api_communities__community_id__servers__server_id__plugins__plugin_id__side_post",
         "parameters": [
           {

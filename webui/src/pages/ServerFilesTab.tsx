@@ -65,6 +65,7 @@ import {
   isProbablyText,
 } from "./fileText.ts";
 import {
+  fileListErrorPresentation,
   fileOperationErrorPresentation,
   fileReadErrorPresentation,
 } from "./serverFilesErrorPresentation.ts";
@@ -1305,7 +1306,9 @@ export function ServerFilesTab({
                the cached listing keeps rendering through transient API
                blips (#1805). */
           listingState.kind === "error" ? (
-            <p className="field-error">{t("files.listError")}</p>
+            <p className="field-error">
+              {t(fileListErrorPresentation(listing.error).key)}
+            </p>
           ) : (
             <Listing
               listing={listingState.data}

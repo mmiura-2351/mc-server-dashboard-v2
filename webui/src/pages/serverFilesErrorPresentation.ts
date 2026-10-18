@@ -107,3 +107,19 @@ export function fileReadErrorPresentation(
     ? { key: "files.openError" }
     : presentation;
 }
+
+/**
+ * Select the listing's inline message for a directory that could not be
+ * listed (#3323). A storage outage gets the operations' storage message, so
+ * the tab names the store the same way its operations do. Anything else keeps
+ * the generic list message.
+ */
+export function fileListErrorPresentation(
+  error: unknown,
+): FileErrorPresentation {
+  return error instanceof ApiError &&
+    error.status === 503 &&
+    error.reason === "storage_unavailable"
+    ? { key: "files.error.storageUnavailable" }
+    : { key: "files.listError" };
+}
