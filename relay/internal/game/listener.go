@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/adapters/apiclient"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/domain/ingress"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/ipcaps"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/mc"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/metrics"
@@ -49,13 +49,13 @@ const statusFlightWaitTimeout = resolveJoinTimeout + dialBackTimeout + preRouteD
 // Resolver is the API surface the listener needs. Narrowed to an interface so
 // tests inject a fake.
 type Resolver interface {
-	ResolveJoin(ctx context.Context, slug, playerIP string, intent apiclient.Intent) (apiclient.ResolveResult, error)
+	ResolveJoin(ctx context.Context, slug, playerIP string, intent ingress.Intent) (ingress.ResolveResult, error)
 	BaseDomain() string
 }
 
 // SessionRecorder records accepted login sessions (RELAY.md Section 8).
 type SessionRecorder interface {
-	Start(serverID, slug, playerIP, username, playerUUID string, source apiclient.Source) string
+	Start(serverID, slug, playerIP, username, playerUUID string, source ingress.Source) string
 	End(id string)
 }
 
@@ -285,7 +285,7 @@ func (l *Listener) waitStatusFlight(ctx context.Context, f *statusFlight, timeou
 func (l *Listener) resolveStatus(ctx context.Context, hs mc.Handshake, slug, ip string) string {
 	rctx, cancel := context.WithTimeout(ctx, resolveJoinTimeout)
 	defer cancel()
-	res, err := l.resolver.ResolveJoin(rctx, slug, ip, apiclient.IntentStatus)
+	res, err := l.resolver.ResolveJoin(rctx, slug, ip, ingress.IntentStatus)
 	if err != nil {
 		// API unreachable: no cache entry (we are here on a miss), so synthesize an
 		// "unavailable" response (RELAY.md Section 10).
@@ -294,7 +294,7 @@ func (l *Listener) resolveStatus(ctx context.Context, hs mc.Handshake, slug, ip 
 	}
 
 	switch res.Decision {
-	case apiclient.DecisionTunnel:
+	case ingress.DecisionTunnel:
 		statusJSON, ok := l.fetchStatusThroughTunnel(ctx, hs, res.Token)
 		if !ok {
 			// Could not complete the live status exchange; fall back to unavailable
@@ -303,7 +303,7 @@ func (l *Listener) resolveStatus(ctx context.Context, hs mc.Handshake, slug, ip 
 		}
 		l.cache.Put(slug, statusJSON)
 		return statusJSON
-	case apiclient.DecisionStopped:
+	case ingress.DecisionStopped:
 		return mc.SynthesizedStatus(mc.StoppedMOTD(res.DisplayName))
 	default:
 		// NOT_FOUND or unknown: drop silently.
@@ -363,7 +363,7 @@ func (l *Listener) handleLogin(ctx context.Context, conn net.Conn, r *bufio.Read
 	_ = conn.SetReadDeadline(time.Time{})
 
 	rctx, cancel := context.WithTimeout(ctx, resolveJoinTimeout)
-	res, err := l.resolver.ResolveJoin(rctx, slug, ip, apiclient.IntentLogin)
+	res, err := l.resolver.ResolveJoin(rctx, slug, ip, ingress.IntentLogin)
 	cancel()
 	if err != nil {
 		l.metrics.GameDrop(metrics.DropResolveUnavailable)
@@ -372,9 +372,9 @@ func (l *Listener) handleLogin(ctx context.Context, conn net.Conn, r *bufio.Read
 	}
 
 	switch res.Decision {
-	case apiclient.DecisionTunnel:
+	case ingress.DecisionTunnel:
 		l.spliceLogin(ctx, conn, r, hs, login, res.ServerID, slug, ip, res.Token)
-	case apiclient.DecisionStopped:
+	case ingress.DecisionStopped:
 		l.disconnect(conn, mc.StoppedMOTD(res.DisplayName))
 	default:
 		// NOT_FOUND or unknown: drop silently.
@@ -425,7 +425,7 @@ func (l *Listener) spliceLogin(ctx context.Context, conn net.Conn, r *bufio.Read
 	// serverID is the API's server identifier from the ResolveJoin decision; the
 	// slug is recorded separately as the historical hostname label (RELAY.md
 	// Section 8).
-	sessionID := l.sessions.Start(serverID, slug, ip, login.Name, login.UUID, apiclient.SourceJava)
+	sessionID := l.sessions.Start(serverID, slug, ip, login.Name, login.UUID, ingress.SourceJava)
 	defer l.sessions.End(sessionID)
 
 	// A login has spliced: count it and hold the active-sessions gauge at +1 for

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/regionfsck"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
@@ -337,7 +338,7 @@ func TestConvergerAndOperatorStopDoNotDoubleDriveOrphan(t *testing.T) {
 func TestConvergerSkipsRoundWhileOperatorStopInFlight(t *testing.T) {
 	clk := &fakeClock{}
 	d := &gatedOrphanDriver{}
-	m := New(map[string]execution.ExecutionDriver{"container": d}, t.TempDir(),
+	m := New(map[string]execution.ExecutionDriver{"container": d}, t.TempDir(), regionfsck.Checker{},
 		func(context.Context, string, string, string) (execution.ServerControl, error) {
 			return nil, errors.New("test: no rcon control configured")
 		}).WithMetrics(clk, time.Hour)
@@ -730,7 +731,7 @@ func TestOrphanRetryStopPassesDriverToFlush(t *testing.T) {
 	d := &flushOrphanDriver{stopAfter: 1} // first Stop fails, second succeeds
 	var drivers []string
 	scratch := t.TempDir()
-	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch,
+	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch, regionfsck.Checker{},
 		func(_ context.Context, _, driver, _ string) (execution.ServerControl, error) {
 			drivers = append(drivers, driver)
 			return &fakeControl{reply: "ok"}, nil
@@ -837,7 +838,7 @@ func TestFailedStopRestoresSaveOn(t *testing.T) {
 	var seq []string
 	var drivers []string
 	scratch := t.TempDir()
-	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch,
+	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch, regionfsck.Checker{},
 		func(_ context.Context, _, driver, _ string) (execution.ServerControl, error) {
 			drivers = append(drivers, driver)
 			return &fakeControl{reply: "ok", seq: &seq}, nil
@@ -878,7 +879,7 @@ func TestFailedStopSaveOnDialFailureStillReturnsStopFailure(t *testing.T) {
 	d := &flushOrphanDriver{stopAfter: 1}
 	var dialCount int
 	scratch := t.TempDir()
-	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch,
+	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch, regionfsck.Checker{},
 		func(_ context.Context, _, _, _ string) (execution.ServerControl, error) {
 			dialCount++
 			// The flush dial succeeds (save-off + save-all); the restore dial fails.
@@ -913,7 +914,7 @@ func TestForcedFailedStopSkipsSaveOn(t *testing.T) {
 	d := &flushOrphanDriver{stopAfter: 1}
 	var seq []string
 	scratch := t.TempDir()
-	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch,
+	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch, regionfsck.Checker{},
 		func(_ context.Context, _, _, _ string) (execution.ServerControl, error) {
 			return &fakeControl{reply: "ok", seq: &seq}, nil
 		})
@@ -940,7 +941,7 @@ func TestRestartStopFailureRestoresSaveOn(t *testing.T) {
 	d := &flushOrphanDriver{stopAfter: 1}
 	var seq []string
 	scratch := t.TempDir()
-	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch,
+	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch, regionfsck.Checker{},
 		func(_ context.Context, _, _, _ string) (execution.ServerControl, error) {
 			return &fakeControl{reply: "ok", seq: &seq}, nil
 		})

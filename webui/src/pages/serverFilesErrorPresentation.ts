@@ -83,3 +83,27 @@ export function fileOperationErrorPresentation(
       return { key: "files.error.generic" };
   }
 }
+
+/**
+ * Select the viewer's inline message for a file that could not be read
+ * (#3361). The read shares the operations' reasons except two whose operation
+ * wording is about changes: an unsettled server (the operations say "stop the
+ * server") and the size cap (the operations quote the upload and edit caps).
+ * The fallback names the failed open instead of "something went wrong".
+ */
+export function fileReadErrorPresentation(
+  error: unknown,
+): FileErrorPresentation {
+  if (error instanceof ApiError) {
+    if (error.status === 409 && error.reason === "server_unsettled") {
+      return { key: "files.error.readUnsettled" };
+    }
+    if (error.status === 413) {
+      return { key: "files.error.readTooLarge" };
+    }
+  }
+  const presentation = fileOperationErrorPresentation(error);
+  return presentation.key === "files.error.generic"
+    ? { key: "files.openError" }
+    : presentation;
+}

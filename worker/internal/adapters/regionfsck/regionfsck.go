@@ -79,6 +79,8 @@ import (
 	"strings"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/regioncheck"
 )
 
 // Region layout constants.
@@ -100,66 +102,6 @@ const externalFlag = 0x80
 // 3=none, 4=lz4.
 var knownCompressionSchemes = map[byte]bool{1: true, 2: true, 3: true, 4: true}
 
-// Reason is a machine-readable reason a region file failed the structural check.
-type Reason int
-
-const (
-	// ReasonNone marks a structurally sound region file.
-	ReasonNone Reason = iota
-	// ReasonNotAligned marks a non-zero file shorter than the two header sectors
-	// (a torn save). The reason name is retained from when it also covered a
-	// non-4096-aligned size; that case is no longer corruption (issue #927).
-	ReasonNotAligned
-	// ReasonSectorOutOfBounds marks a present chunk whose sector offset/count sits
-	// inside a header sector or reaches past EOF.
-	ReasonSectorOutOfBounds
-	// ReasonBadCompression marks a present chunk with an unknown compression scheme.
-	ReasonBadCompression
-	// ReasonTruncatedChunk marks a present chunk whose 5-byte prefix is missing or
-	// whose declared length is empty or overruns its reserved sectors.
-	ReasonTruncatedChunk
-)
-
-// String renders the reason as a stable name (matching the Python validator's
-// reason codes) for log/error messages.
-func (r Reason) String() string {
-	switch r {
-	case ReasonNone:
-		return "none"
-	case ReasonNotAligned:
-		return "not_4096_aligned"
-	case ReasonSectorOutOfBounds:
-		return "sector_out_of_bounds"
-	case ReasonBadCompression:
-		return "bad_compression"
-	case ReasonTruncatedChunk:
-		return "truncated_chunk"
-	default:
-		return "unknown"
-	}
-}
-
-// Finding is one corrupt region file and the first structural reason it failed.
-type Finding struct {
-	Path   string
-	Reason Reason
-}
-
-// Report is the aggregate result of walking a working set's .mca files. Scanned
-// counts every region file examined; Corrupt lists one finding per corrupt file
-// (the first failing reason). Skipped counts the entries that were listed in
-// their directory but gone, or no longer of the kind they were seen as, by the
-// time the walk opened them, and so were neither descended into nor examined; it
-// is zero on a working set at rest, and the caller logs it.
-type Report struct {
-	Scanned int
-	Corrupt []Finding
-	Skipped int
-}
-
-// Healthy reports whether nothing was flagged.
-func (r Report) Healthy() bool { return len(r.Corrupt) == 0 }
-
 // CheckRegionFile structurally validates one .mca region file (issue #927: ONE
 // rule set, no source-keyed mode split). It returns ReasonNone if the file is
 // structurally sound, or the first Reason that fails. A non-nil error is returned
@@ -172,10 +114,10 @@ func (r Report) Healthy() bool { return len(r.Corrupt) == 0 }
 // blocking, and anything but a regular file there is an error (issue #3335).
 // CheckWorkingSet does not come through here: it never resolves a path below the
 // working-set root.
-func CheckRegionFile(path string) (Reason, error) {
+func CheckRegionFile(path string) (regioncheck.Reason, error) {
 	fd, err := openAt(unix.AT_FDCWD, path, openFileFlags)
 	if err != nil {
-		return ReasonNone, &os.PathError{Op: "open", Path: path, Err: err}
+		return regioncheck.ReasonNone, &os.PathError{Op: "open", Path: path, Err: err}
 	}
 	return checkOpened(fd, path)
 }
@@ -186,17 +128,17 @@ func CheckRegionFile(path string) (Reason, error) {
 // per present chunk — 1025 fixed-size reads — at offsets the table names, bounded
 // by the size fstat reported. Neither the size of the file (sparse, multi-GB) nor
 // its growing meanwhile adds a read.
-func checkOpened(fd int, path string) (Reason, error) {
+func checkOpened(fd int, path string) (regioncheck.Reason, error) {
 	// The descriptor keeps its O_NONBLOCK, which has no effect on a regular file.
 	f := os.NewFile(uintptr(fd), path)
 	defer func() { _ = f.Close() }()
 
 	info, err := f.Stat()
 	if err != nil {
-		return ReasonNone, err
+		return regioncheck.ReasonNone, err
 	}
 	if !info.Mode().IsRegular() {
-		return ReasonNone, fmt.Errorf("regionfsck: %s: %w", path, errNotRegular)
+		return regioncheck.ReasonNone, fmt.Errorf("regionfsck: %s: %w", path, errNotRegular)
 	}
 	size := info.Size()
 
@@ -204,7 +146,7 @@ func checkOpened(fd int, path string) (Reason, error) {
 	// these (e.g. fresh poi/r.*.mca with no chunks yet) — so it is structurally
 	// sound, not a torn save (issue #905).
 	if size == 0 {
-		return ReasonNone, nil
+		return regioncheck.ReasonNone, nil
 	}
 
 	// A valid region carries both header tables (location + timestamp), so the
@@ -214,12 +156,12 @@ func checkOpened(fd int, path string) (Reason, error) {
 	// floor is enforced; the per-chunk byte-precise EOF bound below catches a real
 	// overrun.
 	if size < headerSectors*sectorSize {
-		return ReasonNotAligned, nil
+		return regioncheck.ReasonNotAligned, nil
 	}
 
 	table := make([]byte, locationTableSize)
 	if _, err := f.ReadAt(table, 0); err != nil {
-		return ReasonNone, err
+		return regioncheck.ReasonNone, err
 	}
 
 	prefix := make([]byte, chunkPrefix)
@@ -237,12 +179,12 @@ func checkOpened(fd int, path string) (Reason, error) {
 		// would drop that partial sector and wrongly reject a valid trailing chunk. The
 		// byte-precise per-chunk overrun is checked below.
 		if offset < headerSectors || sectorCount == 0 {
-			return ReasonSectorOutOfBounds, nil
+			return regioncheck.ReasonSectorOutOfBounds, nil
 		}
 		if offset*sectorSize >= size {
 			// The chunk's first sector starts at or past EOF: a real out-of-bounds
 			// pointer even by byte-precise bounds.
-			return ReasonSectorOutOfBounds, nil
+			return regioncheck.ReasonSectorOutOfBounds, nil
 		}
 
 		if _, err := f.ReadAt(prefix, offset*sectorSize); err != nil {
@@ -253,9 +195,9 @@ func checkOpened(fd int, path string) (Reason, error) {
 			// ReasonTruncatedChunk to mirror the Python validator (region.py). Any other
 			// I/O error is a real read fault.
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-				return ReasonTruncatedChunk, nil
+				return regioncheck.ReasonTruncatedChunk, nil
 			}
-			return ReasonNone, err
+			return regioncheck.ReasonNone, err
 		}
 		length := int64(binary.BigEndian.Uint32(prefix[0:4]))
 		compression := prefix[4]
@@ -265,7 +207,7 @@ func checkOpened(fd int, path string) (Reason, error) {
 			scheme = compression &^ externalFlag
 		}
 		if !knownCompressionSchemes[scheme] {
-			return ReasonBadCompression, nil
+			return regioncheck.ReasonBadCompression, nil
 		}
 
 		// The length prefix counts the compression byte plus the compressed stream and
@@ -276,21 +218,31 @@ func checkOpened(fd int, path string) (Reason, error) {
 		// allocation into a neighbor chunk is a torn-header signature — at zero
 		// false-reject cost.
 		if length < 1 {
-			return ReasonTruncatedChunk, nil
+			return regioncheck.ReasonTruncatedChunk, nil
 		}
 		if length > sectorCount*sectorSize-4 {
-			return ReasonTruncatedChunk, nil
+			return regioncheck.ReasonTruncatedChunk, nil
 		}
 		// The trailing chunk may sit in a partial final sector, so its length must
 		// ALSO fit byte-precisely within the real file (offset*4096 + 4 + length <=
 		// size): this keeps a valid unpadded trailing chunk passing AND still catches a
 		// trailing chunk whose declared length overruns the actual EOF (a genuine tear).
 		if offset*sectorSize+4+length > size {
-			return ReasonTruncatedChunk, nil
+			return regioncheck.ReasonTruncatedChunk, nil
 		}
 	}
 
-	return ReasonNone, nil
+	return regioncheck.ReasonNone, nil
+}
+
+// Checker is the regioncheck.Checker Port backed by CheckWorkingSet.
+type Checker struct{}
+
+var _ regioncheck.Checker = Checker{}
+
+// CheckWorkingSet runs the package-level CheckWorkingSet on root.
+func (Checker) CheckWorkingSet(root string) (regioncheck.Report, error) {
+	return CheckWorkingSet(root)
 }
 
 // CheckWorkingSet walks root recursively and validates every *.mca file beneath
@@ -335,21 +287,21 @@ func checkOpened(fd int, path string) (Reason, error) {
 // On a filesystem whose listing carries no entry types, the os package fills them
 // in with an fstatat on the directory's descriptor (no path is resolved), and
 // drops an entry that vanished meanwhile without it reaching Report.Skipped.
-func CheckWorkingSet(root string) (Report, error) {
+func CheckWorkingSet(root string) (regioncheck.Report, error) {
 	// The root is the one name resolved by path: it is the Worker's own entry in
 	// the scratch root, which the server (confined to what is beneath it) cannot
 	// replace.
 	rootFd, err := unix.Open(root, openDirFlags, 0)
 	if errors.Is(err, unix.ENOENT) {
 		// An absent working dir: nothing to scan.
-		return Report{}, nil
+		return regioncheck.Report{}, nil
 	}
 	if err != nil {
-		return Report{}, &os.PathError{Op: "open", Path: root, Err: err}
+		return regioncheck.Report{}, &os.PathError{Op: "open", Path: root, Err: err}
 	}
-	var report Report
+	var report regioncheck.Report
 	if err := walk(rootFd, root, 0, &report); err != nil {
-		return Report{}, err
+		return regioncheck.Report{}, err
 	}
 	return report, nil
 }
@@ -402,7 +354,7 @@ func changedSinceTheHint(err error) bool {
 // closes, in the lexical order filepath.WalkDir visited them. path is the
 // directory's path as the caller spelled root; it names findings and labels
 // errors and is never resolved. depth is the directory's level below root.
-func walk(dirFd int, path string, depth int, report *Report) error {
+func walk(dirFd int, path string, depth int, report *regioncheck.Report) error {
 	dir := os.NewFile(uintptr(dirFd), path)
 	defer func() { _ = dir.Close() }()
 	entries, err := dir.ReadDir(-1)
@@ -468,8 +420,8 @@ func walk(dirFd int, path string, depth int, report *Report) error {
 				return err
 			}
 			report.Scanned++
-			if reason != ReasonNone {
-				report.Corrupt = append(report.Corrupt, Finding{Path: entryPath, Reason: reason})
+			if reason != regioncheck.ReasonNone {
+				report.Corrupt = append(report.Corrupt, regioncheck.Finding{Path: entryPath, Reason: reason})
 			}
 		}
 	}

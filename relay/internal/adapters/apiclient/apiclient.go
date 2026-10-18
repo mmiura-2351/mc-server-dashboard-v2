@@ -2,96 +2,25 @@
 // (docs/app/RELAY.md Section 6). It attaches the relay credential as call
 // metadata ("authorization: Bearer <credential>"), mirroring the Worker's
 // posture, and translates the generated relay.v1 messages to and from the
-// relay's transport-neutral types. Transport security (TLS) is built by the
+// relay's domain types (domain/ingress). Transport security (TLS) is built by the
 // wiring layer (cmd/relay) and injected as a ready ClientConn.
 package apiclient
 
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/domain/ingress"
 	relayv1 "github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/genproto/mcsd/relay/v1"
 )
 
 // authMetadataKey carries the relay credential. The API's RelayService reads it
 // to authenticate the call (RELAY.md Section 6).
 const authMetadataKey = "authorization"
-
-// Decision mirrors relayv1.JoinDecision in a transport-neutral form so the game
-// listener does not import the generated package.
-type Decision int
-
-const (
-	// DecisionUnknown is an unrecognised or unspecified decision; treated as a
-	// drop.
-	DecisionUnknown Decision = iota
-	// DecisionTunnel means the server is running and a TunnelDial was dispatched.
-	DecisionTunnel
-	// DecisionStopped means the slug resolves to a stopped server.
-	DecisionStopped
-	// DecisionNotFound means the slug does not resolve.
-	DecisionNotFound
-)
-
-// Intent mirrors relayv1.JoinIntent.
-type Intent int
-
-const (
-	// IntentStatus is a server-list status ping.
-	IntentStatus Intent = iota
-	// IntentLogin is a full login attempt.
-	IntentLogin
-)
-
-// Source mirrors relayv1.SessionSource in a transport-neutral form: the relay
-// ingress path a session was accepted on, so the API can label the history
-// row honestly (issue #1912).
-type Source int
-
-const (
-	// SourceUnspecified is the zero value; the API stores it as legacy.
-	SourceUnspecified Source = iota
-	// SourceJava is a Java Edition login-session from the game listener.
-	SourceJava
-	// SourceBedrock is a Bedrock (Geyser) flow-session from the tunnel path.
-	SourceBedrock
-)
-
-// ResolveResult is the outcome of a ResolveJoin call.
-type ResolveResult struct {
-	Decision Decision
-	// Token is the single-use tunnel token, set only when Decision is Tunnel.
-	Token string
-	// ServerID is the API's identifier for the resolved server, set only when
-	// Decision is Tunnel (carried into SessionStart.server_id).
-	ServerID string
-	// DisplayName is the server's name, set only when Decision is Stopped.
-	DisplayName string
-}
-
-// SessionStart and SessionEnd are the session lifecycle events the relay
-// batches to the API (RELAY.md Sections 6 and 8).
-type SessionStart struct {
-	SessionID string
-	ServerID  string
-	Slug      string
-	PlayerIP  string
-	Username  string
-	PlayerUID string
-	StartedAt time.Time
-	Source    Source
-}
-
-// SessionEnd is the closing of a player session (RELAY.md Section 8).
-type SessionEnd struct {
-	SessionID string
-	EndedAt   time.Time
-}
 
 // Client wraps the generated RelayService client and attaches the relay
 // credential to every call.
@@ -126,16 +55,16 @@ func (c *Client) Register(ctx context.Context, tunnelEndpoint, tunnelCAPEM strin
 
 // ResolveJoin asks the API for a routing decision for one incoming connection
 // (RELAY.md Sections 4 and 6).
-func (c *Client) ResolveJoin(ctx context.Context, slug, playerIP string, intent Intent) (ResolveResult, error) {
+func (c *Client) ResolveJoin(ctx context.Context, slug, playerIP string, intent ingress.Intent) (ingress.ResolveResult, error) {
 	resp, err := c.rpc.ResolveJoin(c.authCtx(ctx), &relayv1.ResolveJoinRequest{
 		Slug:     slug,
 		PlayerIp: playerIP,
 		Intent:   toProtoIntent(intent),
 	})
 	if err != nil {
-		return ResolveResult{}, fmt.Errorf("apiclient: resolve join: %w", err)
+		return ingress.ResolveResult{}, fmt.Errorf("apiclient: resolve join: %w", err)
 	}
-	return ResolveResult{
+	return ingress.ResolveResult{
 		Decision:    fromProtoDecision(resp.GetDecision()),
 		Token:       resp.GetToken(),
 		ServerID:    resp.GetServerId(),
@@ -145,7 +74,7 @@ func (c *Client) ResolveJoin(ctx context.Context, slug, playerIP string, intent 
 
 // ReportSessions delivers a batch of session lifecycle events. Idempotent
 // server-side, so retries are safe (RELAY.md Section 6).
-func (c *Client) ReportSessions(ctx context.Context, starts []SessionStart, ends []SessionEnd) error {
+func (c *Client) ReportSessions(ctx context.Context, starts []ingress.SessionStart, ends []ingress.SessionEnd) error {
 	events := make([]*relayv1.SessionEvent, 0, len(starts)+len(ends))
 	for _, s := range starts {
 		events = append(events, &relayv1.SessionEvent{
@@ -197,33 +126,33 @@ func (c *Client) ValidateBedrockTunnel(ctx context.Context, serverID string, bed
 	return resp.GetValid(), nil
 }
 
-func toProtoIntent(intent Intent) relayv1.JoinIntent {
-	if intent == IntentLogin {
+func toProtoIntent(intent ingress.Intent) relayv1.JoinIntent {
+	if intent == ingress.IntentLogin {
 		return relayv1.JoinIntent_JOIN_INTENT_LOGIN
 	}
 	return relayv1.JoinIntent_JOIN_INTENT_STATUS
 }
 
-func toProtoSource(source Source) relayv1.SessionSource {
+func toProtoSource(source ingress.Source) relayv1.SessionSource {
 	switch source {
-	case SourceJava:
+	case ingress.SourceJava:
 		return relayv1.SessionSource_SESSION_SOURCE_JAVA
-	case SourceBedrock:
+	case ingress.SourceBedrock:
 		return relayv1.SessionSource_SESSION_SOURCE_BEDROCK
 	default:
 		return relayv1.SessionSource_SESSION_SOURCE_UNSPECIFIED
 	}
 }
 
-func fromProtoDecision(d relayv1.JoinDecision) Decision {
+func fromProtoDecision(d relayv1.JoinDecision) ingress.Decision {
 	switch d {
 	case relayv1.JoinDecision_JOIN_DECISION_TUNNEL:
-		return DecisionTunnel
+		return ingress.DecisionTunnel
 	case relayv1.JoinDecision_JOIN_DECISION_STOPPED:
-		return DecisionStopped
+		return ingress.DecisionStopped
 	case relayv1.JoinDecision_JOIN_DECISION_NOT_FOUND:
-		return DecisionNotFound
+		return ingress.DecisionNotFound
 	default:
-		return DecisionUnknown
+		return ingress.DecisionUnknown
 	}
 }

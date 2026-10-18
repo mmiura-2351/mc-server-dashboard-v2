@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/regionfsck"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/regioncheck"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/scratchformat"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
@@ -63,7 +63,7 @@ func isServerIDName(name string) bool {
 // world back, while a STALE held generation (e.g. an A->B->A leftover scratch) must
 // still hydrate.
 //
-// A held set is structurally fsck'd before its generation is advertised (issue
+// A held set is structurally fsck'd by regions before its generation is advertised (issue
 // #834): a periodic running-id snapshot records the gen-N marker durably while the
 // live world files are written by the Minecraft process and never fsynced by the
 // Worker, so a power loss right after a snapshot can leave a durable gen-N marker
@@ -133,7 +133,7 @@ func isServerIDName(name string) bool {
 // an empty list (the Worker reports holding nothing). The scan does not recurse, and
 // it skips a directory whose name is not a server id (isServerIDName, issue #3395)
 // silently: HeldServers logs those once, and its list is the one the API is told.
-func ScanHeldServers(scratchDir string, quiesced bool, log *slog.Logger) []session.HeldServer {
+func ScanHeldServers(scratchDir string, regions regioncheck.Checker, quiesced bool, log *slog.Logger) []session.HeldServer {
 	entries, err := os.ReadDir(scratchDir)
 	if err != nil {
 		return nil
@@ -157,7 +157,7 @@ func ScanHeldServers(scratchDir string, quiesced bool, log *slog.Logger) []sessi
 		}
 		held = append(held, session.HeldServer{
 			ServerID:   entry.Name(),
-			Generation: heldGeneration(workingDir, entry.Name(), quiesced, log),
+			Generation: heldGeneration(workingDir, entry.Name(), regions, quiesced, log),
 		})
 	}
 	return held
@@ -188,7 +188,7 @@ var rewriteTornMarker = writeGeneration
 // generation is what the Worker can honestly say there, and the fsck resumes at the
 // next boot that can prove the premise. ScanHeldServers' doc has the full argument,
 // including why skipping the advertisement instead is worse.
-func heldGeneration(workingDir, serverID string, quiesced bool, log *slog.Logger) uint64 {
+func heldGeneration(workingDir, serverID string, regions regioncheck.Checker, quiesced bool, log *slog.Logger) uint64 {
 	gen := recordedGeneration(workingDir, serverID, log)
 	if !quiesced {
 		if log != nil {
@@ -200,7 +200,7 @@ func heldGeneration(workingDir, serverID string, quiesced bool, log *slog.Logger
 		}
 		return gen
 	}
-	report, err := regionfsck.CheckWorkingSet(workingDir)
+	report, err := regions.CheckWorkingSet(workingDir)
 	if err != nil {
 		if log != nil {
 			log.Warn("held-set region fsck failed; advertising recorded generation",

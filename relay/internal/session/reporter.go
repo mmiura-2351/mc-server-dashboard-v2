@@ -15,7 +15,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/adapters/apiclient"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/domain/ingress"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/metrics"
 )
 
@@ -59,7 +59,7 @@ const maxEventsPerReportRPC = 3000
 // reportClient is the subset of the API client the reporter needs. Narrowed to
 // an interface so tests inject a fake.
 type reportClient interface {
-	ReportSessions(ctx context.Context, starts []apiclient.SessionStart, ends []apiclient.SessionEnd) error
+	ReportSessions(ctx context.Context, starts []ingress.SessionStart, ends []ingress.SessionEnd) error
 }
 
 // Reporter mints session ids, tracks open sessions, and batches lifecycle
@@ -76,8 +76,8 @@ type Reporter struct {
 	flightMu sync.Mutex // held during flush and SnapshotActive to serialize them
 
 	mu            sync.Mutex
-	pendStarts    []apiclient.SessionStart
-	pendEnds      []apiclient.SessionEnd
+	pendStarts    []ingress.SessionStart
+	pendEnds      []ingress.SessionEnd
 	openIDs       map[string]struct{}
 	droppedStarts map[string]struct{} // tombstones for starts dropped by capOldest
 	flushSignal   chan struct{}
@@ -113,10 +113,10 @@ func (r *Reporter) WithFlushInterval(d time.Duration) *Reporter {
 // Start records a new accepted login session and returns its minted id. The
 // SessionStart event is buffered for the next flush; the id is tracked as open
 // until End is called.
-func (r *Reporter) Start(serverID, slug, playerIP, username, playerUUID string, source apiclient.Source) string {
+func (r *Reporter) Start(serverID, slug, playerIP, username, playerUUID string, source ingress.Source) string {
 	id := uuid.NewString()
 	r.mu.Lock()
-	r.pendStarts = append(r.pendStarts, apiclient.SessionStart{
+	r.pendStarts = append(r.pendStarts, ingress.SessionStart{
 		SessionID: id,
 		ServerID:  serverID,
 		Slug:      slug,
@@ -146,7 +146,7 @@ func (r *Reporter) End(id string) {
 		r.mu.Unlock()
 		return
 	}
-	r.pendEnds = append(r.pendEnds, apiclient.SessionEnd{SessionID: id, EndedAt: r.now()})
+	r.pendEnds = append(r.pendEnds, ingress.SessionEnd{SessionID: id, EndedAt: r.now()})
 	over := len(r.pendStarts)+len(r.pendEnds) >= FlushMaxEvents
 	r.mu.Unlock()
 	if over {
@@ -288,7 +288,7 @@ func (r *Reporter) flush(ctx context.Context) {
 // are re-sent when the caller restores and retries the batch, which is safe
 // because ReportSessions is idempotent server-side (RELAY.md Section 6). A
 // flush at/under the chunk size sends exactly one RPC.
-func (r *Reporter) reportChunked(ctx context.Context, starts []apiclient.SessionStart, ends []apiclient.SessionEnd) error {
+func (r *Reporter) reportChunked(ctx context.Context, starts []ingress.SessionStart, ends []ingress.SessionEnd) error {
 	for len(starts) > 0 || len(ends) > 0 {
 		nStarts := min(len(starts), maxEventsPerReportRPC)
 		nEnds := min(len(ends), maxEventsPerReportRPC-nStarts)
@@ -305,7 +305,7 @@ func (r *Reporter) reportChunked(ctx context.Context, starts []apiclient.Session
 // returns the set of session ids that were dropped (the tombstones). These
 // tombstones are used to suppress matching Ends so an orphan End never reaches
 // the API.
-func capOldestStarts(buf []apiclient.SessionStart, logger *slog.Logger) ([]apiclient.SessionStart, map[string]struct{}) {
+func capOldestStarts(buf []ingress.SessionStart, logger *slog.Logger) ([]ingress.SessionStart, map[string]struct{}) {
 	if len(buf) <= MaxBufferedEvents {
 		return buf, nil
 	}
@@ -320,7 +320,7 @@ func capOldestStarts(buf []apiclient.SessionStart, logger *slog.Logger) ([]apicl
 
 // dropOrphanEnds removes buffered ends whose start was just dropped
 // (tombstoned), preventing orphan Ends from reaching the API.
-func dropOrphanEnds(ends []apiclient.SessionEnd, tombstones map[string]struct{}) []apiclient.SessionEnd {
+func dropOrphanEnds(ends []ingress.SessionEnd, tombstones map[string]struct{}) []ingress.SessionEnd {
 	if len(tombstones) == 0 {
 		return ends
 	}

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/adapters/apiclient"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/domain/ingress"
 	bedrocktunnelv1 "github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/genproto/mcsd/bedrocktunnel/v1"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/ipcaps"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/session"
@@ -19,10 +19,10 @@ import (
 // flushes from its own Run goroutine while the test goroutine reads.
 type recordingReportClient struct {
 	mu   sync.Mutex
-	ends []apiclient.SessionEnd
+	ends []ingress.SessionEnd
 }
 
-func (c *recordingReportClient) ReportSessions(_ context.Context, _ []apiclient.SessionStart, ends []apiclient.SessionEnd) error {
+func (c *recordingReportClient) ReportSessions(_ context.Context, _ []ingress.SessionStart, ends []ingress.SessionEnd) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.ends = append(c.ends, ends...)
@@ -50,7 +50,7 @@ type gatedRecorder struct {
 	release    chan struct{} // closed to let a blocked End return
 }
 
-func (g *gatedRecorder) Start(serverID, slug, playerIP, username, playerUUID string, source apiclient.Source) string {
+func (g *gatedRecorder) Start(serverID, slug, playerIP, username, playerUUID string, source ingress.Source) string {
 	return g.inner.Start(serverID, slug, playerIP, username, playerUUID, source)
 }
 

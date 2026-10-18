@@ -111,6 +111,22 @@ Keeping the Worker Hexagonal means a Kubernetes driver
 and lets the Worker's lifecycle logic be unit-tested with a fake driver
 (NFR-TEST-1).
 
+### 2.4 How `relay/` applies it
+
+`relay/` follows the same direction with a flatter core. `cmd/relay` is the edge
+and the only place adapters are bound. `internal/adapters/` holds the adapters
+(`apiclient`, the `RelayService` gRPC client; `config`). Every other package
+under `internal/` is core: it declares the interfaces it needs and never imports
+an adapter.
+
+`internal/domain/` is the pure part of that core, standard library only, like
+the Worker's `internal/domain/`. Its one package, `ingress`, owns the values the
+core and `apiclient` exchange: the join `Intent`, the API's `ResolveResult` and
+its `Decision`, and the `SessionStart` / `SessionEnd` events with their `Source`.
+`apiclient` maps them to and from the generated `relay.v1` messages. An adapter
+may import `domain` and the generated stubs, but no other core package.
+`relay/.golangci.yml` enforces this with depguard.
+
 ---
 
 ## 3. Monorepo module boundaries
@@ -223,6 +239,7 @@ here.
 | Java-major selection (FR-EXE-5) | Pick the Java major a server's MC version needs | container `ImageSelector` resolves the major to a `driver.container.images` base image (version-to-Java table in Section 7.3) |
 | `WorkingDir` | Manage the local scratch working set per server; path-traversal-safe file access (FR-DATA-4, FR-FILE-4) | local-filesystem adapter |
 | `DataTransfer` | Pull (hydrate) / push (snapshot) the working set via the API HTTP data-plane (FR-DATA-3, FR-DATA-4) | HTTP client to the API |
+| Region check (`regioncheck.Checker`) | Structurally validate a working set's `.mca` region files before a snapshot packs it and before the boot scan advertises a held generation (FR-DATA-4) | `regionfsck` adapter |
 | `ServerControl` (RCON) | `save-all`, commands, graceful stop on the running process (FR-SRV-5, REQUIREMENTS.md Section 6.9) | RCON client |
 | `APIClient` (control-plane) | Maintain the bidi stream; emit events; accept commands | gRPC stream client (`proto/`) |
 

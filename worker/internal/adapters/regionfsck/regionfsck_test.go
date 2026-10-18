@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/regioncheck"
 )
 
 const testSector = 4096
@@ -68,7 +70,7 @@ func TestHealthySingleChunkRegionIsClean(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if reason != ReasonNone {
+	if reason != regioncheck.ReasonNone {
 		t.Fatalf("reason = %v, want ReasonNone", reason)
 	}
 }
@@ -80,7 +82,7 @@ func TestHealthyEmptyRegionIsClean(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if reason != ReasonNone {
+	if reason != regioncheck.ReasonNone {
 		t.Fatalf("reason = %v, want ReasonNone", reason)
 	}
 }
@@ -92,7 +94,7 @@ func TestKnownCompressionSchemesAreAccepted(t *testing.T) {
 		if err != nil {
 			t.Fatalf("compression %#x: unexpected error: %v", compression, err)
 		}
-		if reason != ReasonNone {
+		if reason != regioncheck.ReasonNone {
 			t.Fatalf("compression %#x: reason = %v, want ReasonNone", compression, reason)
 		}
 	}
@@ -106,7 +108,7 @@ func TestTornMidChunkIsTruncatedChunk(t *testing.T) {
 	image := buildRegion(nil, 3, -1, 2)
 	path := write(t, filepath.Join(t.TempDir(), "r.mca"), image[:len(image)-10]) // torn mid-write.
 	reason, _ := CheckRegionFile(path)
-	if reason != ReasonTruncatedChunk {
+	if reason != regioncheck.ReasonTruncatedChunk {
 		t.Fatalf("reason = %v, want ReasonTruncatedChunk", reason)
 	}
 }
@@ -120,7 +122,7 @@ func TestZeroSizeRegionIsClean(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if reason != ReasonNone {
+	if reason != regioncheck.ReasonNone {
 		t.Fatalf("reason = %v, want ReasonNone", reason)
 	}
 }
@@ -131,7 +133,7 @@ func TestShortNonZeroRegionIsFlagged(t *testing.T) {
 	for _, size := range []int{100, testSector} {
 		path := write(t, filepath.Join(t.TempDir(), "r.mca"), make([]byte, size))
 		reason, _ := CheckRegionFile(path)
-		if reason != ReasonNotAligned {
+		if reason != regioncheck.ReasonNotAligned {
 			t.Fatalf("size %d: reason = %v, want ReasonNotAligned", size, reason)
 		}
 	}
@@ -142,7 +144,7 @@ func TestSingleHeaderSectorRegionIsFlagged(t *testing.T) {
 	// required header sector), so it is structurally corrupt.
 	path := write(t, filepath.Join(t.TempDir(), "r.mca"), make([]byte, testSector))
 	reason, _ := CheckRegionFile(path)
-	if reason != ReasonNotAligned {
+	if reason != regioncheck.ReasonNotAligned {
 		t.Fatalf("reason = %v, want ReasonNotAligned", reason)
 	}
 }
@@ -151,7 +153,7 @@ func TestLocationEntryPastEOFIsSectorOutOfBounds(t *testing.T) {
 	// offset+count reaches sector 5 but the file is only 3 sectors long.
 	path := write(t, filepath.Join(t.TempDir(), "r.mca"), buildRegion(map[int][2]int{0: {4, 1}}, 3, -1, 2))
 	reason, _ := CheckRegionFile(path)
-	if reason != ReasonSectorOutOfBounds {
+	if reason != regioncheck.ReasonSectorOutOfBounds {
 		t.Fatalf("reason = %v, want ReasonSectorOutOfBounds", reason)
 	}
 }
@@ -160,7 +162,7 @@ func TestChunkInsideHeaderIsSectorOutOfBounds(t *testing.T) {
 	// A present chunk pointing into a header sector (offset 1) is invalid.
 	path := write(t, filepath.Join(t.TempDir(), "r.mca"), buildRegion(map[int][2]int{0: {1, 1}}, 3, -1, 2))
 	reason, _ := CheckRegionFile(path)
-	if reason != ReasonSectorOutOfBounds {
+	if reason != regioncheck.ReasonSectorOutOfBounds {
 		t.Fatalf("reason = %v, want ReasonSectorOutOfBounds", reason)
 	}
 }
@@ -168,7 +170,7 @@ func TestChunkInsideHeaderIsSectorOutOfBounds(t *testing.T) {
 func TestUnknownCompressionByteIsBadCompression(t *testing.T) {
 	path := write(t, filepath.Join(t.TempDir(), "r.mca"), buildRegion(nil, 3, -1, 9))
 	reason, _ := CheckRegionFile(path)
-	if reason != ReasonBadCompression {
+	if reason != regioncheck.ReasonBadCompression {
 		t.Fatalf("reason = %v, want ReasonBadCompression", reason)
 	}
 }
@@ -177,7 +179,7 @@ func TestChunkLengthExceedingSectorsIsTruncated(t *testing.T) {
 	// Declared length overruns the single sector the entry reserves.
 	path := write(t, filepath.Join(t.TempDir(), "r.mca"), buildRegion(map[int][2]int{0: {2, 1}}, 3, testSector*5, 2))
 	reason, _ := CheckRegionFile(path)
-	if reason != ReasonTruncatedChunk {
+	if reason != regioncheck.ReasonTruncatedChunk {
 		t.Fatalf("reason = %v, want ReasonTruncatedChunk", reason)
 	}
 }
@@ -185,7 +187,7 @@ func TestChunkLengthExceedingSectorsIsTruncated(t *testing.T) {
 func TestZeroLengthChunkIsTruncated(t *testing.T) {
 	path := write(t, filepath.Join(t.TempDir(), "r.mca"), buildRegion(nil, 3, 0, 2))
 	reason, _ := CheckRegionFile(path)
-	if reason != ReasonTruncatedChunk {
+	if reason != regioncheck.ReasonTruncatedChunk {
 		t.Fatalf("reason = %v, want ReasonTruncatedChunk", reason)
 	}
 }
@@ -222,7 +224,7 @@ func TestUnalignedTrailingChunkIsHealthy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if reason != ReasonNone {
+	if reason != regioncheck.ReasonNone {
 		t.Fatalf("reason = %v, want ReasonNone", reason)
 	}
 }
@@ -236,7 +238,7 @@ func TestUnalignedTrailingChunkOverrunningEOFIsTruncated(t *testing.T) {
 	binary.BigEndian.PutUint32(image[offset*testSector:offset*testSector+4], uint32(testSector*5))
 	path := write(t, filepath.Join(t.TempDir(), "r.0.0.mca"), image)
 
-	if reason, _ := CheckRegionFile(path); reason != ReasonTruncatedChunk {
+	if reason, _ := CheckRegionFile(path); reason != regioncheck.ReasonTruncatedChunk {
 		t.Fatalf("reason = %v, want ReasonTruncatedChunk", reason)
 	}
 }
@@ -246,7 +248,7 @@ func TestAlignedChunkOverrunningEOFIsTruncated(t *testing.T) {
 	// truncated, proving the byte-precise bound still catches a real overrun.
 	path := write(t, filepath.Join(t.TempDir(), "r.0.0.mca"),
 		buildRegion(map[int][2]int{0: {2, 1}}, 3, testSector*5, 2))
-	if reason, _ := CheckRegionFile(path); reason != ReasonTruncatedChunk {
+	if reason, _ := CheckRegionFile(path); reason != regioncheck.ReasonTruncatedChunk {
 		t.Fatalf("reason = %v, want ReasonTruncatedChunk", reason)
 	}
 }
@@ -259,7 +261,7 @@ func TestAlignedHealthyRegionIsClean(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if reason != ReasonNone {
+	if reason != regioncheck.ReasonNone {
 		t.Fatalf("reason = %v, want ReasonNone", reason)
 	}
 }
@@ -289,7 +291,7 @@ func TestInteriorChunkOverrunningSectorAllocationIsTruncated(t *testing.T) {
 	// does not short-circuit.
 	image := buildRegion(map[int][2]int{0: {2, 1}}, 4, testSector*2-4, 2)
 	path := write(t, filepath.Join(t.TempDir(), "r.0.0.mca"), image)
-	if reason, _ := CheckRegionFile(path); reason != ReasonTruncatedChunk {
+	if reason, _ := CheckRegionFile(path); reason != regioncheck.ReasonTruncatedChunk {
 		t.Fatalf("reason = %v, want ReasonTruncatedChunk", reason)
 	}
 }
@@ -314,7 +316,7 @@ func TestShortPrefixReadIsTruncatedChunk(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if reason != ReasonTruncatedChunk {
+	if reason != regioncheck.ReasonTruncatedChunk {
 		t.Fatalf("reason = %v, want ReasonTruncatedChunk", reason)
 	}
 }
@@ -417,11 +419,11 @@ func TestWalkerAggregatesMixedHealthAcrossDimensions(t *testing.T) {
 	if len(report.Corrupt) != 3 {
 		t.Fatalf("corrupt count = %d, want 3 (%v)", len(report.Corrupt), report.Corrupt)
 	}
-	reasons := map[Reason]bool{}
+	reasons := map[regioncheck.Reason]bool{}
 	for _, f := range report.Corrupt {
 		reasons[f.Reason] = true
 	}
-	for _, want := range []Reason{ReasonNotAligned, ReasonBadCompression, ReasonSectorOutOfBounds} {
+	for _, want := range []regioncheck.Reason{regioncheck.ReasonNotAligned, regioncheck.ReasonBadCompression, regioncheck.ReasonSectorOutOfBounds} {
 		if !reasons[want] {
 			t.Fatalf("missing reason %v in %v", want, report.Corrupt)
 		}

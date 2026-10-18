@@ -11,6 +11,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/regionfsck"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
 
@@ -245,9 +246,13 @@ func TestHeldServerScansSurviveAPlantedMarkerInOneServer(t *testing.T) {
 			}
 
 			for name, scan := range map[string]func() []session.HeldServer{
-				"the quiesced boot scan":   func() []session.HeldServer { return ScanHeldServers(m.scratchDir, true, slog.New(h)) },
-				"the unquiesced boot scan": func() []session.HeldServer { return ScanHeldServers(m.scratchDir, false, slog.New(h)) },
-				"the per-Register scan":    m.HeldServers,
+				"the quiesced boot scan": func() []session.HeldServer {
+					return ScanHeldServers(m.scratchDir, regionfsck.Checker{}, true, slog.New(h))
+				},
+				"the unquiesced boot scan": func() []session.HeldServer {
+					return ScanHeldServers(m.scratchDir, regionfsck.Checker{}, false, slog.New(h))
+				},
+				"the per-Register scan": m.HeldServers,
 			} {
 				h.records = nil
 				var held []session.HeldServer

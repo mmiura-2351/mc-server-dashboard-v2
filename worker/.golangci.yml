@@ -39,26 +39,11 @@ linters:
           files:
             - "**/internal/application/**"
             - "!$test"
-            # Covered by application-regionfsck-exception below instead.
-            - "!**/internal/application/instancemanager/instancemanager.go"
-            - "!**/internal/application/instancemanager/scratchscan.go"
-          deny: &application-deny
+          deny:
             - pkg: github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters
               desc: application depends on domain Ports, never on an adapter; cmd/worker binds adapters to Ports (ARCHITECTURE.md Section 2.1)
             - pkg: github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/controlplane
               desc: generated gRPC stubs belong to adapters/controlplane, not to the application (ARCHITECTURE.md Section 2.1)
-        application-regionfsck-exception:
-          # Exception tracked by follow-up #3408, to be removed by moving the region
-          # check behind a domain Port: instancemanager calls
-          # regionfsck.CheckWorkingSet directly (pre-snapshot fsck and the held-set
-          # scan) and reads its Report type. Every other adapter stays denied here.
-          list-mode: lax
-          files:
-            - "**/internal/application/instancemanager/instancemanager.go"
-            - "**/internal/application/instancemanager/scratchscan.go"
-          allow:
-            - github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/regionfsck$
-          deny: *application-deny
         adapters:
           files:
             - "**/internal/adapters/**"
