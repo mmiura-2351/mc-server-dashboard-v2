@@ -11,10 +11,6 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/javaproperties"
 )
 
-// defaultRCONPort is the Minecraft default RCON port when server.properties does
-// not override it.
-const defaultRCONPort = "25575"
-
 // defaultRCONHost is the dial host when the caller passes an empty host: the host
 // loopback, preserving the historical bare-metal behavior.
 const defaultRCONHost = "127.0.0.1"
@@ -26,8 +22,12 @@ const defaultRCONHost = "127.0.0.1"
 // container's name when its containers run on a user-defined network, so RCON is
 // reached over that network instead of the unreachable host loopback (issue
 // #218). mcVersion is the server's Minecraft version, which decides the charset
-// the file is read in (issue #3116). It errors when RCON is not
-// enabled/configured; the graceful-stop path then falls back to signals.
+// the file is read in (issue #3116). rcon.port is resolved as the server resolves
+// it (serverproperties.RCONPort): missing or not an integer dials the default
+// port, an integer outside 1-65535 is an error. It errors when RCON is not
+// enabled/configured; the graceful-stop path then falls back to signals. No error
+// carries a value read from the file, because the container driver logs them
+// (issue #3345).
 func OpenFromWorkingDir(ctx context.Context, workingDir, host, mcVersion string) (*Client, error) {
 	props, err := readProperties(workingDir, mcVersion)
 	if err != nil {
@@ -40,14 +40,16 @@ func OpenFromWorkingDir(ctx context.Context, workingDir, host, mcVersion string)
 	if password == "" {
 		return nil, fmt.Errorf("rcon: no rcon.password in server.properties")
 	}
-	port := props["rcon.port"]
-	if port == "" {
-		port = defaultRCONPort
+	// The address is built from the resolved number, never from the text read:
+	// Dial's errors repeat the address and the caller logs them (issue #3345).
+	port, err := serverproperties.RCONPort(props["rcon.port"])
+	if err != nil {
+		return nil, fmt.Errorf("rcon: %w", err)
 	}
 	if host == "" {
 		host = defaultRCONHost
 	}
-	return Dial(ctx, net.JoinHostPort(host, port), password)
+	return Dial(ctx, net.JoinHostPort(host, strconv.Itoa(port)), password)
 }
 
 // readProperties reads and parses the server.properties of workingDir with the
