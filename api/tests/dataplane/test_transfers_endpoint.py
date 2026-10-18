@@ -674,9 +674,10 @@ def test_snapshot_refused_when_delete_prunes_store_during_upload_window(
 ) -> None:
     # Issue #921: a concurrent delete prunes the store DURING the upload window. The
     # pre-stream guard passes (the worker declares the store's current base), then a
-    # delete removes the generation marker and discards the working set before the
-    # commit's re-check. The re-check reads generation 0 while expected_base is >= 1,
-    # so the commit raises PrunedStoreError — a distinct 409 ``deleted_during_upload``
+    # delete advances the generation and discards the working set before the
+    # commit's re-check (#3434). The re-check finds the generation moved and no live
+    # snapshot, so the commit raises PrunedStoreError — a distinct 409
+    # ``deleted_during_upload``
     # that names the concurrent delete, NOT the misleading ``stale_generation``
     # ("generation advanced") the generic advance path uses.
     import asyncio
@@ -692,8 +693,8 @@ def test_snapshot_refused_when_delete_prunes_store_during_upload_window(
 
     # Simulate the concurrent delete landing in the upload window by hooking the
     # guard's current_generation read: the FIRST call (the guard) returns the base,
-    # then prunes the store (as DeleteServer's retention prune does) so the marker is
-    # gone and the store reads generation 0 before the commit's re-check.
+    # then prunes the store (as DeleteServer's retention prune does) before the
+    # commit's re-check.
     real_current_generation = storage.current_generation
     pruned = False
 

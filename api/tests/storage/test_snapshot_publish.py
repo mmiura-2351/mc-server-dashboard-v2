@@ -569,8 +569,8 @@ async def test_prune_failclosed_keeps_tree_when_pack_fails(
 async def test_commit_refuses_when_generation_marker_removed(
     tmp_path: Path,
 ) -> None:
-    # Issue #1704: after prune (or any path that removes the generation marker),
-    # _read_generation returns 0. A late commit whose expected_base was the
+    # Issue #1704: once the generation marker is gone (as a pre-#3434 prune left
+    # it), _read_generation returns 0. A late commit whose expected_base was the
     # pre-prune generation (>0) must fail with StaleGenerationError, not
     # silently resurrect the snapshot tree. The fix changes the stale check
     # from ``current > expected_base`` to ``current != expected_base``.
@@ -595,29 +595,35 @@ async def test_commit_refuses_when_generation_marker_removed(
 
 
 async def test_commit_pruned_store_error_identifies_concurrent_delete(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Issue #921: a post-prune commit refusal must be identifiable as a concurrent
-    # delete, not a generic "generation advanced". When a concurrent prune removes
-    # the marker mid-flight, the store's current REGRESSES to 0 while expected_base
-    # is >= 1 — the unambiguous prune signature. The commit raises PrunedStoreError,
-    # a StaleGenerationError subclass, so the edge can map it to a distinct code
-    # while any existing ``except StaleGenerationError`` still catches it.
+    # delete, not a generic "generation advanced". A concurrent prune advances the
+    # generation and unlinks ``current`` (#3434) — the unambiguous prune signature.
+    # The commit raises PrunedStoreError, a StaleGenerationError subclass, so the
+    # edge can map it to a distinct code while any existing
+    # ``except StaleGenerationError`` still catches it.
+    import mc_server_dashboard_api.storage.adapters.fs as fs_mod
+
     storage = FsStorage(tmp_path)
     community, server = new_scope()
     await _publish(storage, community, server, {"f": b"v1"})
     base = await storage.current_generation(community, server)
     assert base >= 1
 
-    # Stage a new snapshot at the pre-removal base...
+    # Stage a new snapshot at the pre-prune base...
     handle = await storage.begin_snapshot(community, server)
     await storage.write_snapshot(handle, tar_stream({"f": b"late-upload"}))
 
-    # ...then remove the generation marker (as a concurrent prune does).
-    root = _prune_server_root(tmp_path, community, server)
-    marker = root / "generation"
-    assert marker.is_file()
-    marker.unlink()
+    # ...and land a real prune between the commit's pre-lock fsync and its locked
+    # re-check, as a concurrent delete can.
+    real_fsync_tree = fs_mod._fsync_tree
+
+    def _fsync_then_prune(path: Path) -> None:
+        real_fsync_tree(path)
+        storage._prune_to_final_snapshot(community, server)
+
+    monkeypatch.setattr(fs_mod, "_fsync_tree", _fsync_then_prune)
 
     with pytest.raises(PrunedStoreError):
         await storage.commit_snapshot(handle, expected_base=base)

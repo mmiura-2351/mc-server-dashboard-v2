@@ -579,13 +579,14 @@ async def test_missing_region_refusal_keeps_pointer_and_cleans_staging() -> None
 async def test_prune_uploads_final_targz_and_drops_working_set_objects() -> None:
     # Object realization of the DeleteServer reclaim (#777): the live snapshot is
     # packed into a single final.tar.gz object at the server prefix, and the
-    # snapshots/, incoming/, versions/ objects plus the pointer/generation markers
-    # are deleted. backups/ is left untouched.
+    # snapshots/, incoming/, versions/ objects plus the pointer are deleted. The
+    # generation marker is advanced, not deleted (#3434). backups/ is left untouched.
     store, storage = _store_and_storage()
     community, server = new_scope()
     files = {"server.properties": b"motd=hi", "world/level.dat": b"w"}
     await _publish(storage, community, server, files)
     backup_key = await storage.create_backup_from_current(community, server)
+    before = await storage.current_generation(community, server)
 
     await storage.prune_to_final_snapshot(community, server)
 
@@ -593,11 +594,11 @@ async def test_prune_uploads_final_targz_and_drops_working_set_objects() -> None
     final_key = prefix + "final.tar.gz"
     assert final_key in store.objects
     assert read_tar(store.objects[final_key]) == files
-    # Working-set objects and markers are gone; the backup object survives.
+    # Working-set objects and the pointer are gone; the backup object survives.
     assert not any(k.startswith(prefix + "snapshots/") for k in store.objects)
     assert not any(k.startswith(prefix + "incoming/") for k in store.objects)
     assert (prefix + _POINTER) not in store.objects
-    assert (prefix + _GENERATION) not in store.objects
+    assert await storage.current_generation(community, server) > before
     assert (prefix + f"backups/{backup_key.value}.tar.gz") in store.objects
 
 
@@ -1290,8 +1291,8 @@ async def test_restore_single_pass_counts_cumulative_bytes() -> None:
 
 
 async def test_commit_refuses_when_generation_marker_removed() -> None:
-    """Issue #1704: after prune (or any path that removes the generation marker),
-    _read_generation returns 0. A late commit whose expected_base was the
+    """Issue #1704: once the generation marker is gone (as a pre-#3434 prune left
+    it), _read_generation returns 0. A late commit whose expected_base was the
     pre-prune generation (>0) must fail with StaleGenerationError, not
     silently resurrect the snapshot tree. The fix changes the stale check
     from ``current > expected_base`` to ``current != expected_base``."""
@@ -1315,28 +1316,36 @@ async def test_commit_refuses_when_generation_marker_removed() -> None:
         await storage.commit_snapshot(handle, expected_base=base)
 
 
-async def test_commit_pruned_store_error_identifies_concurrent_delete() -> None:
+async def test_commit_pruned_store_error_identifies_concurrent_delete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Issue #921: a post-prune commit refusal must be identifiable as a concurrent
-    delete, not a generic "generation advanced". When a concurrent prune removes the
-    marker mid-flight the store's current REGRESSES to 0 while expected_base is >= 1
-    — the unambiguous prune signature. The commit raises PrunedStoreError, a
-    StaleGenerationError subclass, so the edge can map it to a distinct code while any
-    existing ``except StaleGenerationError`` still catches it."""
+    delete, not a generic "generation advanced". A concurrent prune advances the
+    generation and deletes the pointer (#3434) — the unambiguous prune signature. The
+    commit raises PrunedStoreError, a StaleGenerationError subclass, so the edge can
+    map it to a distinct code while any existing ``except StaleGenerationError``
+    still catches it."""
 
-    store, storage = _store_and_storage()
+    _, storage = _store_and_storage()
     community, server = new_scope()
     await _publish(storage, community, server, {"f": b"v1"})
     base = await storage.current_generation(community, server)
     assert base >= 1
 
-    # Stage a new snapshot at the pre-removal base...
+    # Stage a new snapshot at the pre-prune base...
     handle = await storage.begin_snapshot(community, server)
     await storage.write_snapshot(handle, tar_stream({"f": b"late-upload"}))
 
-    # ...then remove the generation marker (as a concurrent prune does).
-    generation_key = _server_prefix(community, server) + _GENERATION
-    assert generation_key in store.objects
-    del store.objects[generation_key]
+    # ...and land a real prune between the commit's pre-lock copy and its locked
+    # re-check, as a concurrent delete can.
+    real_copy = storage._copy_into_snapshot
+
+    async def _copy_then_prune(*args: Any, **kwargs: Any) -> str:
+        new_prefix = await real_copy(*args, **kwargs)
+        await storage.prune_to_final_snapshot(community, server)
+        return new_prefix
+
+    monkeypatch.setattr(storage, "_copy_into_snapshot", _copy_then_prune)
 
     with pytest.raises(PrunedStoreError):
         await storage.commit_snapshot(handle, expected_base=base)

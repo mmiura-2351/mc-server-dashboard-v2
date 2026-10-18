@@ -888,8 +888,8 @@ class ObjectStorage(Storage):
                     if current != expected_base:
                         # The store diverged from the guard's base during the upload
                         # window: an at-rest edit or restore landed after the
-                        # pre-stream guard passed, or a prune removed the generation
-                        # marker (issue #1704). Discard the staging AND the copied
+                        # pre-stream guard passed, or a prune advanced the generation
+                        # (issues #1704, #3434). Discard the staging AND the copied
                         # (never-pointed-at) snapshot prefix exactly as the other
                         # refusal paths do (the prior ``current`` keeps the newer
                         # copy, no bump) and raise so the edge maps it to 409.
@@ -897,14 +897,14 @@ class ObjectStorage(Storage):
                         await _delete_prefix(client, incoming)
                         self._release_staging(incoming)
                         h.consumed = True
-                        # ``current == 0`` with ``expected_base > 0`` is the
-                        # unambiguous prune signature (issue #921): generation is
-                        # monotonic and only a concurrent delete/prune deletes the
-                        # marker, so it regressed to 0 rather than advancing. Raise
-                        # the distinct subclass so the edge names the concurrent
-                        # delete instead of "generation advanced"; the Worker
-                        # re-bases on next start either way.
-                        if current == 0 and expected_base > 0:
+                        # A moved generation with no pointer is the unambiguous
+                        # prune signature (issue #921): every other mover (a publish,
+                        # a restore, an edit) leaves the pointer in place, and only a
+                        # concurrent delete/prune advances the generation while
+                        # deleting it (#3434). Raise the distinct subclass so the edge
+                        # names the concurrent delete instead of "generation
+                        # advanced"; the Worker re-bases on next start either way.
+                        if await self._read_pointer(client, server_prefix) is None:
                             raise PrunedStoreError(expected_base, current)
                         raise StaleGenerationError(expected_base, current)
                 # Missing-region gate (issue #854): the structural check above only
@@ -998,14 +998,15 @@ class ObjectStorage(Storage):
     ) -> None:
         # The DeleteServer reclaim path (issue #777): pack the live snapshot into a
         # single retained ``final.tar.gz`` object at the server prefix, then drop the
-        # working-set objects (snapshots/, incoming/, versions/) plus the pointer and
-        # generation markers. ``backups/`` is left untouched — the caller prunes
-        # archives through its own seam.
+        # working-set objects (snapshots/, incoming/, versions/) plus the pointer,
+        # advancing the generation marker rather than deleting it (issue #3434).
+        # ``backups/`` is left untouched — the caller prunes archives through its own
+        # seam.
         #
         # Hold the per-server lock for the entire prune (issue #1704): this
         # serializes against ``commit_snapshot`` which takes the same lock, so a
         # late commit cannot land while the prune is removing the working-set
-        # objects and generation marker.
+        # objects and advancing the generation marker.
         async with self._server_lock(community_id, server_id):
             server_prefix = self._server_prefix(community_id, server_id)
             async with self._client_factory() as client:
@@ -1033,6 +1034,22 @@ class ObjectStorage(Storage):
                         )
                     finally:
                         await asyncio.to_thread(spool.unlink, missing_ok=True)
+                    # Advance the generation BEFORE the pointer goes (issue #3434):
+                    # this is where the prune guarantees it never lowers the store
+                    # generation. DeleteServer commits the row delete only AFTER this
+                    # prune, so a failed commit leaves a live row on this store; had
+                    # the marker gone, its generation would read 0 and the next publish
+                    # would mint one at or below what a Worker still holds, whose start
+                    # would then skip the hydrate and boot that stale scratch.
+                    # Advancing it, rather than carrying it forward unchanged, also
+                    # keeps a late commit whose guard read the pre-prune generation
+                    # failing its re-check (#921/#1704), since the prune replaced the
+                    # published world. No publisher produced the pruned state, so none
+                    # is recorded and the publish-time guard stays permissive. Bumped
+                    # before the pointer delete so a crash between the two re-packs and
+                    # bumps again on retry (still monotonic) rather than leaving a
+                    # pointer-less store at the old value.
+                    await self._bump_generation(client, server_prefix, None)
                     # Invalidate the pointer FIRST, the instant final.tar.gz is
                     # durable: it is the one marker that says the working set is still
                     # live and re-packable. A crash after this point leaves no pointer,
@@ -1042,13 +1059,13 @@ class ObjectStorage(Storage):
                     # empty/partial pack (#777).
                     await client.delete_object(server_prefix + _POINTER)
                 # The final archive is durable and the pointer is gone (or nothing was
-                # published); reclaim the remaining working-set objects and the
-                # generation marker. Idempotent: a retry that found no pointer arrives
-                # here directly and completes the GC without re-packing.
+                # published); reclaim the remaining working-set objects. The
+                # generation marker stays (see the bump above). Idempotent: a retry
+                # that found no pointer arrives here directly and completes the GC
+                # without re-packing.
                 await _delete_prefix(client, server_prefix + "snapshots/")
                 await _delete_prefix(client, server_prefix + "incoming/")
                 await _delete_prefix(client, server_prefix + "versions/")
-                await client.delete_object(server_prefix + _GENERATION)
 
     async def _check_staged_regions(
         self,
