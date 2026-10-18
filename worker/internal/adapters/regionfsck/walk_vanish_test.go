@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/regioncheck"
 )
 
 // These tests pin what the walk does with a name that is gone by the time it is
@@ -43,7 +45,7 @@ func tornThenHealthy(t *testing.T) string {
 
 // assertKeptTheEarlierFinding fails unless the scan completed with the corrupt
 // region found before the vanish still reported, and the given counts.
-func assertKeptTheEarlierFinding(t *testing.T, report Report, err error, scanned, skipped int) {
+func assertKeptTheEarlierFinding(t *testing.T, report regioncheck.Report, err error, scanned, skipped int) {
 	t.Helper()
 	if err != nil {
 		t.Fatalf("CheckWorkingSet: %v; want the scan to complete", err)

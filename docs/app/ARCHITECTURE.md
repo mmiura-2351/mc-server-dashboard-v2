@@ -223,6 +223,7 @@ here.
 | Java-major selection (FR-EXE-5) | Pick the Java major a server's MC version needs | container `ImageSelector` resolves the major to a `driver.container.images` base image (version-to-Java table in Section 7.3) |
 | `WorkingDir` | Manage the local scratch working set per server; path-traversal-safe file access (FR-DATA-4, FR-FILE-4) | local-filesystem adapter |
 | `DataTransfer` | Pull (hydrate) / push (snapshot) the working set via the API HTTP data-plane (FR-DATA-3, FR-DATA-4) | HTTP client to the API |
+| Region check (`regioncheck.Checker`) | Structurally validate a working set's `.mca` region files before a snapshot packs it and before the boot scan advertises a held generation (FR-DATA-4) | `regionfsck` adapter |
 | `ServerControl` (RCON) | `save-all`, commands, graceful stop on the running process (FR-SRV-5, REQUIREMENTS.md Section 6.9) | RCON client |
 | `APIClient` (control-plane) | Maintain the bidi stream; emit events; accept commands | gRPC stream client (`proto/`) |
 

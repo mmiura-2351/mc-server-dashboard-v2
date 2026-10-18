@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/containerdriver"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/regionfsck"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/application/instancemanager"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
@@ -102,6 +103,7 @@ func TestContainerForgeInstallThenLaunch(t *testing.T) {
 	mgr := instancemanager.New(
 		map[string]execution.ExecutionDriver{"container": driver},
 		scratchDir,
+		regionfsck.Checker{},
 		func(context.Context, string, string, string) (execution.ServerControl, error) {
 			return nil, errNoRCON
 		},
@@ -233,6 +235,7 @@ func TestContainerForgeInstalledSkipsInstall(t *testing.T) {
 	mgr := instancemanager.New(
 		map[string]execution.ExecutionDriver{"container": driver},
 		scratchDir,
+		regionfsck.Checker{},
 		func(context.Context, string, string, string) (execution.ServerControl, error) {
 			return nil, errNoRCON
 		},

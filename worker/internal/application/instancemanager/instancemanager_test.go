@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/regionfsck"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
@@ -227,7 +228,7 @@ func (d *rconFailDriver) Start(_ context.Context, spec execution.InstanceSpec) (
 func newManager(t *testing.T, d execution.ExecutionDriver, ctrl execution.ServerControl) *Manager {
 	t.Helper()
 	scratch := t.TempDir()
-	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch,
+	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch, regionfsck.Checker{},
 		func(context.Context, string, string, string) (execution.ServerControl, error) {
 			// The real openControl never yields a nil control without an error (main.go).
 			// Tests that don't wire one exercise RCON-free paths; surface that as a dial
@@ -808,7 +809,7 @@ func TestStopServerGracefulRedialsAfterPoisonedSaveOff(t *testing.T) {
 	freshCtrl := &fakeControl{reply: "ok", seq: &seq}
 	var dialCount int
 	scratch := t.TempDir()
-	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch,
+	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch, regionfsck.Checker{},
 		func(context.Context, string, string, string) (execution.ServerControl, error) {
 			dialCount++
 			if dialCount == 1 {
@@ -858,7 +859,7 @@ func TestStopServerGracefulCompletesWhenBothRCONCommandsFail(t *testing.T) {
 	}
 	var dialCount int
 	scratch := t.TempDir()
-	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch,
+	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch, regionfsck.Checker{},
 		func(context.Context, string, string, string) (execution.ServerControl, error) {
 			dialCount++
 			if dialCount == 1 {
@@ -962,7 +963,7 @@ func TestOpenControlReceivesRunningServerDriver(t *testing.T) {
 		"container": &fakeDriver{},
 		"docker":    &fakeDriver{},
 	}
-	m := New(drivers, scratch, func(_ context.Context, _, driver, _ string) (execution.ServerControl, error) {
+	m := New(drivers, scratch, regionfsck.Checker{}, func(_ context.Context, _, driver, _ string) (execution.ServerControl, error) {
 		gotDriver = driver
 		return &fakeControl{reply: "ok"}, nil
 	})
@@ -1008,7 +1009,7 @@ func (r *versionRecorder) dials() []string {
 func newVersionRecordingManager(t *testing.T, d execution.ExecutionDriver) (*Manager, *versionRecorder) {
 	t.Helper()
 	rec := &versionRecorder{}
-	m := New(map[string]execution.ExecutionDriver{"container": d}, t.TempDir(), rec.open).WithTransfer(&fakeTransfer{})
+	m := New(map[string]execution.ExecutionDriver{"container": d}, t.TempDir(), regionfsck.Checker{}, rec.open).WithTransfer(&fakeTransfer{})
 	m.settlePollInterval = 0
 	closeWithTest(t, m)
 	return m, rec

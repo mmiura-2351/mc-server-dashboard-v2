@@ -10,6 +10,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/regioncheck"
 )
 
 // referenceCheckRegionFile and referenceCheckWorkingSet are the path-based region
@@ -18,16 +20,16 @@ import (
 // verdict. The descriptor-relative walk that replaced it must return the same
 // Report for a working set nobody is changing.
 
-func referenceCheckRegionFile(path string) (Reason, error) {
+func referenceCheckRegionFile(path string) (regioncheck.Reason, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return ReasonNone, err
+		return regioncheck.ReasonNone, err
 	}
 	defer func() { _ = f.Close() }()
 
 	info, err := f.Stat()
 	if err != nil {
-		return ReasonNone, err
+		return regioncheck.ReasonNone, err
 	}
 	size := info.Size()
 
@@ -35,7 +37,7 @@ func referenceCheckRegionFile(path string) (Reason, error) {
 	// these (e.g. fresh poi/r.*.mca with no chunks yet) — so it is structurally
 	// sound, not a torn save (issue #905).
 	if size == 0 {
-		return ReasonNone, nil
+		return regioncheck.ReasonNone, nil
 	}
 
 	// A valid region carries both header tables (location + timestamp), so the
@@ -45,12 +47,12 @@ func referenceCheckRegionFile(path string) (Reason, error) {
 	// floor is enforced; the per-chunk byte-precise EOF bound below catches a real
 	// overrun.
 	if size < headerSectors*sectorSize {
-		return ReasonNotAligned, nil
+		return regioncheck.ReasonNotAligned, nil
 	}
 
 	table := make([]byte, locationTableSize)
 	if _, err := f.ReadAt(table, 0); err != nil {
-		return ReasonNone, err
+		return regioncheck.ReasonNone, err
 	}
 
 	prefix := make([]byte, chunkPrefix)
@@ -68,12 +70,12 @@ func referenceCheckRegionFile(path string) (Reason, error) {
 		// would drop that partial sector and wrongly reject a valid trailing chunk. The
 		// byte-precise per-chunk overrun is checked below.
 		if offset < headerSectors || sectorCount == 0 {
-			return ReasonSectorOutOfBounds, nil
+			return regioncheck.ReasonSectorOutOfBounds, nil
 		}
 		if offset*sectorSize >= size {
 			// The chunk's first sector starts at or past EOF: a real out-of-bounds
 			// pointer even by byte-precise bounds.
-			return ReasonSectorOutOfBounds, nil
+			return regioncheck.ReasonSectorOutOfBounds, nil
 		}
 
 		if _, err := f.ReadAt(prefix, offset*sectorSize); err != nil {
@@ -84,9 +86,9 @@ func referenceCheckRegionFile(path string) (Reason, error) {
 			// ReasonTruncatedChunk to mirror the Python validator (region.py). Any other
 			// I/O error is a real read fault.
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-				return ReasonTruncatedChunk, nil
+				return regioncheck.ReasonTruncatedChunk, nil
 			}
-			return ReasonNone, err
+			return regioncheck.ReasonNone, err
 		}
 		length := int64(binary.BigEndian.Uint32(prefix[0:4]))
 		compression := prefix[4]
@@ -96,7 +98,7 @@ func referenceCheckRegionFile(path string) (Reason, error) {
 			scheme = compression &^ externalFlag
 		}
 		if !knownCompressionSchemes[scheme] {
-			return ReasonBadCompression, nil
+			return regioncheck.ReasonBadCompression, nil
 		}
 
 		// The length prefix counts the compression byte plus the compressed stream and
@@ -107,21 +109,21 @@ func referenceCheckRegionFile(path string) (Reason, error) {
 		// allocation into a neighbor chunk is a torn-header signature — at zero
 		// false-reject cost.
 		if length < 1 {
-			return ReasonTruncatedChunk, nil
+			return regioncheck.ReasonTruncatedChunk, nil
 		}
 		if length > sectorCount*sectorSize-4 {
-			return ReasonTruncatedChunk, nil
+			return regioncheck.ReasonTruncatedChunk, nil
 		}
 		// The trailing chunk may sit in a partial final sector, so its length must
 		// ALSO fit byte-precisely within the real file (offset*4096 + 4 + length <=
 		// size): this keeps a valid unpadded trailing chunk passing AND still catches a
 		// trailing chunk whose declared length overruns the actual EOF (a genuine tear).
 		if offset*sectorSize+4+length > size {
-			return ReasonTruncatedChunk, nil
+			return regioncheck.ReasonTruncatedChunk, nil
 		}
 	}
 
-	return ReasonNone, nil
+	return regioncheck.ReasonNone, nil
 }
 
 // CheckWorkingSet walks root recursively and validates every *.mca file beneath
@@ -133,8 +135,8 @@ func referenceCheckRegionFile(path string) (Reason, error) {
 // never returned as an error. A non-nil error is reserved for a real I/O failure
 // while walking or reading. The single rule set (issue #927; see CheckRegionFile)
 // applies to every region.
-func referenceCheckWorkingSet(root string) (Report, error) {
-	var report Report
+func referenceCheckWorkingSet(root string) (regioncheck.Report, error) {
+	var report regioncheck.Report
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) && path == root {
@@ -151,13 +153,13 @@ func referenceCheckWorkingSet(root string) (Report, error) {
 		if err != nil {
 			return err
 		}
-		if reason != ReasonNone {
-			report.Corrupt = append(report.Corrupt, Finding{Path: path, Reason: reason})
+		if reason != regioncheck.ReasonNone {
+			report.Corrupt = append(report.Corrupt, regioncheck.Finding{Path: path, Reason: reason})
 		}
 		return nil
 	})
 	if err != nil {
-		return Report{}, err
+		return regioncheck.Report{}, err
 	}
 	return report, nil
 }
@@ -248,11 +250,11 @@ func TestVerdictOnAWorkingSetAtRestMatchesThePathBasedWalk(t *testing.T) {
 		t.Fatalf("reference walk: %v", err)
 	}
 	// The fixture must exercise the check, or the comparison proves nothing.
-	reasons := map[Reason]int{}
+	reasons := map[regioncheck.Reason]int{}
 	for _, f := range want.Corrupt {
 		reasons[f.Reason]++
 	}
-	for _, r := range []Reason{ReasonNotAligned, ReasonSectorOutOfBounds, ReasonBadCompression, ReasonTruncatedChunk} {
+	for _, r := range []regioncheck.Reason{regioncheck.ReasonNotAligned, regioncheck.ReasonSectorOutOfBounds, regioncheck.ReasonBadCompression, regioncheck.ReasonTruncatedChunk} {
 		if reasons[r] == 0 {
 			t.Fatalf("the fixture holds no %v region; reference report = %+v", r, want)
 		}
