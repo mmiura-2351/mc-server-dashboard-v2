@@ -5650,3 +5650,26 @@ async def test_delete_a_marker_named_file_at_rest_is_allowed() -> None:
         rel_path=_MARKER,
     )
     assert store.deleted_files == [_MARKER]
+
+
+@pytest.mark.parametrize("rel_path", [_MARKER, f"{_MARKER}/stray.txt"])
+async def test_rollback_to_a_legacy_version_at_the_reserved_marker_name_is_refused(
+    rel_path: str,
+) -> None:
+    # A version retained before the guard existed would republish the reserved
+    # entry -- the child path recreating the directory on the way.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.versions[rel_path] = ["v1"]
+    store.version_bytes[(rel_path, "v1")] = b"legacy"
+    use_case = RollbackFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(InvalidFilePathError) as caught:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path=rel_path,
+            version_id="v1",
+        )
+    assert caught.value.reason == "reserved_name"
+    assert store.rollbacks == []

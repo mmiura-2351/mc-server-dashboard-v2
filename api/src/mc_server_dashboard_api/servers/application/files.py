@@ -766,6 +766,9 @@ class RollbackFile:
         rel_path: str,
         version_id: str,
     ) -> None:
+        # A version retained before the guard would republish a reserved root
+        # entry, a child path recreating the directory (issue #3433).
+        _refuse_reserved_root_name(rel_path)
         # Hold the per-server lifecycle lock across the at-rest check and the
         # republish so a concurrent start cannot race the rollback (issue #827).
         async with self.lifecycle_lock.hold(server_id):

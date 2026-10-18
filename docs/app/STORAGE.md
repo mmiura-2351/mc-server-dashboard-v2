@@ -376,7 +376,9 @@ snapshot leaves such entries out, and a hydrate does not unpack them. So no
 operator entry may be created there, and the application refuses one above this
 Port on every door that writes into `current/`: the files-API write (running too,
 where it would overwrite the live marker), make-dir, upload and its archive
-members, a rename's destination, a server import and a backup upload — each a
+members, a rename's destination, a rollback (a version retained before the
+guard included), a server import (directory-only members too) and a backup
+upload — each a
 `422` `reserved_name` (issue #3433). Only the root name is reserved; a
 same-named entry deeper in the tree is ordinary user data. Reads, deletes and a
 rename *away* stay open, so an entry planted before the guard can be cleared
