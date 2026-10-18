@@ -1193,9 +1193,12 @@ def ws_accept_subprotocol(websocket: WebSocket) -> str | None:
 # refused or closed ``1013`` (#3313, #3426): the handshake's authentication and
 # gate, and the relay's re-checks, snapshots and membership lookups. Each is a
 # few indexed queries that answer in milliseconds; one still waiting after this
-# long is waiting on a frozen database. Unbounded, a handshake would outlast the
-# client giving up (and be accepted, dead, once the database thaws), and an open
-# socket would deliver nothing for as long as the freeze lasts.
+# long is waiting on a frozen database. The bound is per read, so a handshake's
+# authentication and gate together can take up to twice it. Unbounded, a
+# handshake would outlast the client giving up (and be accepted, dead, once the
+# database thaws), and an open socket would deliver nothing for as long as the
+# freeze lasts. It bounds the wait, not the abandoned read's cleanup
+# (:func:`ws_database_read`).
 WS_DATABASE_TIMEOUT_SECONDS = 10.0
 
 
@@ -1220,8 +1223,10 @@ async def ws_database_read[T](read: Callable[[], Awaitable[T]], *, outcome: str)
     awaited — and so is it when the caller is cancelled. Against a frozen
     database a cancelled query does not end: the driver's cleanup (a cancel
     request, a rollback) waits on the same database, so awaiting it would last
-    as long as the freeze does (#3426). The abandoned task ends once the
-    database answers or the connection drops.
+    as long as the freeze does (#3426). Only the caller's wait is bounded, not
+    the cleanup: the abandoned task, and the pooled connection it holds, live
+    on until the database answers or the connection's transport fails, which
+    for a database that stays unreachable can be indefinitely.
     """
 
     task = asyncio.ensure_future(read())
@@ -1251,15 +1256,30 @@ async def ws_database_read[T](read: Callable[[], Awaitable[T]], *, outcome: str)
         raise WsDatabaseUnavailableError from None
 
 
+# Abandoned reads still running (:func:`ws_database_read`). The event loop keeps
+# only weak references to tasks, so nothing else is guaranteed to keep one alive
+# until it finishes; each is removed once its outcome has been consumed.
+_abandoned_reads: set[asyncio.Future[Any]] = set()
+
+
 def _abandon(task: asyncio.Future[Any]) -> None:
-    """Cancel ``task`` without awaiting it; its eventual outcome is discarded.
+    """Cancel ``task`` without awaiting it; hold it until it finishes."""
+
+    task.cancel()
+    _abandoned_reads.add(task)
+    task.add_done_callback(_forget_abandoned)
+
+
+def _forget_abandoned(task: asyncio.Future[Any]) -> None:
+    """Release a finished abandoned read, discarding its outcome.
 
     Retrieving it keeps the event loop from logging an error the abandoned
     read raised on its way out as never retrieved.
     """
 
-    task.cancel()
-    task.add_done_callback(lambda t: t.cancelled() or t.exception())
+    _abandoned_reads.discard(task)
+    if not task.cancelled():
+        task.exception()
 
 
 async def get_current_user_ws(websocket: WebSocket) -> Authentication | None:
