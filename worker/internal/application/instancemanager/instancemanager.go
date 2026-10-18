@@ -1627,11 +1627,13 @@ func (m *Manager) flushBeforeStopWithDriver(ctx context.Context, serverID, drive
 	if errors.Is(err, execution.ErrServerPropertiesUnreadable) {
 		// RCON's credentials are in the refused file, so there is nothing to dial.
 		// The stop is not failed for it and the API is not told (issue #3347). The
-		// driver falls back to its stop signal, and the server may be killed before
-		// its own shutdown save completes (issue #3436), so the WARN promises none.
+		// driver falls back to its stop signal and waits while the server's own
+		// shutdown save keeps writing, but a server killed after the idle window or at
+		// the cap is left with a partial save (issue #3436), so the WARN promises none.
 		m.logger.Warn("stop flush: server.properties is not a regular file or is too large, so RCON cannot be opened; "+
-			"skipping the final save-all and falling back to a stop signal, which may end the server before "+
-			"its own shutdown save completes: changes since the last autosave can be lost",
+			"skipping the final save-all and falling back to a stop signal: the server's own shutdown save is "+
+			"waited for while it keeps writing, but a server killed after the idle window or at the cap is left "+
+			"with a partial save",
 			"server_id", serverID, "error", err)
 		return false
 	}
@@ -2355,7 +2357,7 @@ func (m *Manager) handleStop(ctx context.Context, cmd session.Command, graceful 
 		// A lifecycle command is already reserved in flight for this id (issue #780):
 		// most importantly, a DETACHED stop from a dropped stream's lane is still
 		// confirming termination — takeStoppableReserve evicted the instance and holds
-		// the reservation across inst.Stop (up to ~3x stopTimeout). A re-sent StopServer
+		// the reservation across inst.Stop (up to the stop cap). A re-sent StopServer
 		// on the reconnected stream must NOT get SERVER_NOT_FOUND here: that makes the
 		// API converge observed=stopped and unassign while the old process is still
 		// alive and writing, after which a re-placed start's HydrateTrigger would clobber

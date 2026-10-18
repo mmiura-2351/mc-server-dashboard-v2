@@ -223,9 +223,10 @@ at all, and the Files tab refuses to recreate the platform-managed keys
 says a stopped server can still be backed up, since that backup needs no
 console connection. A graceful **stop** of such a server is not refused: it
 skips the final save-all the platform sends first, which needs RCON, and falls
-back to a stop signal, which may end the server before its own shutdown save
-completes (issue #3436), so changes since the last autosave can be lost. The
-stop answers `200` as usual; only the host log says the flush was skipped.
+back to a stop signal. The Worker waits while the server's own shutdown save
+keeps writing, but a server killed after the idle window or at the cap is left
+with a partial save (issue #3436). The stop answers `200` as usual; only the
+host log says the flush was skipped.
 
 **Storage outages on the working-set routes.** When the store holding a
 server's working set cannot serve the request, the routes whose failure is safe
