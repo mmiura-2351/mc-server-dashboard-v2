@@ -159,6 +159,12 @@ def _validate_import_archive(
         # The Worker's generation-marker name (issue #3433): refused, not
         # dropped, so the operator learns why the archive did not import.
         _refuse_reserved_root_name(entry_path)
+    # ``_archive_entries`` skips directory headers, so a directory-only member at
+    # the marker's name never reaches the loop above; refuse it the same way.
+    with zipfile.ZipFile(io.BytesIO(content)) as zf:
+        for info in zf.infolist():
+            if info.is_dir():
+                _refuse_reserved_root_name(info.filename)
 
 
 async def _load(
