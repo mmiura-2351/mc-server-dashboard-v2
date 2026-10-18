@@ -145,16 +145,17 @@ func wantCode(t *testing.T, code string) (success bool, errCode session.CommandE
 		return true, 0
 	}
 	codes := map[string]session.CommandErrorCode{
-		"internal":           session.CommandErrorInternal,
-		"server_not_found":   session.CommandErrorServerNotFound,
-		"invalid_state":      session.CommandErrorInvalidState,
-		"driver_unavailable": session.CommandErrorDriverUnavailable,
-		"transfer_failed":    session.CommandErrorTransferFailed,
-		"file_access_denied": session.CommandErrorFileAccessDenied,
-		"port_conflict":      session.CommandErrorPortConflict,
-		"image_missing":      session.CommandErrorImageMissing,
-		"busy":               session.CommandErrorBusy,
-		"command_dropped":    session.CommandErrorCommandDropped,
+		"internal":                     session.CommandErrorInternal,
+		"server_not_found":             session.CommandErrorServerNotFound,
+		"invalid_state":                session.CommandErrorInvalidState,
+		"driver_unavailable":           session.CommandErrorDriverUnavailable,
+		"transfer_failed":              session.CommandErrorTransferFailed,
+		"file_access_denied":           session.CommandErrorFileAccessDenied,
+		"port_conflict":                session.CommandErrorPortConflict,
+		"image_missing":                session.CommandErrorImageMissing,
+		"busy":                         session.CommandErrorBusy,
+		"command_dropped":              session.CommandErrorCommandDropped,
+		"server_properties_unreadable": session.CommandErrorServerPropertiesUnreadable,
 	}
 	c, ok := codes[code]
 	if !ok {
@@ -365,6 +366,30 @@ func driveRow(t *testing.T, row contractRow) session.CommandResult {
 			WithTunnelDialer(&fakeTunnelDialer{}).
 			WithBedrockTunneler(&fakeBedrockTunneler{})
 		startRunning(t, m)
+		return m.Handle(ctx, contractCmd(t, row.Kind, serverID))
+
+	case "server_properties_unreadable":
+		// The server's server.properties is refused by the no-follow reader (issue
+		// #3347). Every collaborator that reads it fails the way the adapters do:
+		// the driver's Start (the relaunch, for a restart), the RCON open and the
+		// tunnel dial each return an error wrapping the sentinel.
+		refused := fmt.Errorf("serverproperties: /scratch/%s/server.properties is a symbolic link; refusing to follow it: %w",
+			serverID, execution.ErrServerPropertiesUnreadable)
+		var d execution.ExecutionDriver = &fakeDriver{startErr: refused}
+		if row.Kind != "StartServer" {
+			d = &relaunchFailDriver{err: refused}
+		}
+		m := newManager(t, d, nil).
+			WithTransfer(&fakeTransfer{}).
+			WithTunnelDialer(&fakeTunnelDialer{err: fmt.Errorf("tunnel: %w", refused)}).
+			WithBedrockTunneler(&fakeBedrockTunneler{})
+		m.openControl = func(context.Context, string, string, string) (execution.ServerControl, error) {
+			return nil, fmt.Errorf("rcon: read server.properties: %w", refused)
+		}
+		seedScratch(t, m, serverID)
+		if row.Kind != "StartServer" {
+			startRunning(t, m)
+		}
 		return m.Handle(ctx, contractCmd(t, row.Kind, serverID))
 
 	default:
