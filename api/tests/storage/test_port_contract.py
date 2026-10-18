@@ -1085,6 +1085,54 @@ async def test_restore_healthy_backup_reports_healthy(
     assert read_tar(blob) == original
 
 
+async def test_restore_drops_reserved_marker_members_of_a_legacy_archive(
+    harness: StorageHarness, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A backup stored before the generation-marker name was reserved (issue
+    #3433) still restores, without its root ``.mcsd_generation*`` entries.
+
+    Refusing it would leave a legacy backup unrestorable; the entries are the
+    Worker's by name, which a hydrate never unpacks, so they are dropped before
+    publication with one WARNING naming how many. A nested same-named entry is
+    world data and survives."""
+
+    import io
+    import logging
+    import tarfile
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        reserved_dir = tarfile.TarInfo(".mcsd_generation")
+        reserved_dir.type = tarfile.DIRTYPE
+        tar.addfile(reserved_dir)
+        for name, data in {
+            ".mcsd_generation/stray.txt": b"operator",
+            "./.mcsd_generation-cache": b"temp",
+            "server.properties": b"k=v",
+            "world/.mcsd_generation/kept.txt": b"world data",
+        }.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    community, server = new_scope()
+    key = await harness.storage.put_backup(community, server, stream_of(buf.getvalue()))
+
+    with caplog.at_level(logging.WARNING):
+        await harness.storage.restore_backup(community, server, key)
+
+    blob = await drain(harness.storage.open_hydrate_source(community, server))
+    with tarfile.open(fileobj=io.BytesIO(blob), mode="r:*") as tar:
+        roots = {m.name.removeprefix("./").split("/")[0] for m in tar.getmembers()}
+    assert not any(root.startswith(".mcsd_generation") for root in roots)
+    assert read_tar(blob) == {
+        "server.properties": b"k=v",
+        "world/.mcsd_generation/kept.txt": b"world data",
+    }
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "3" in warnings[0].getMessage()
+
+
 # A gzip member header (no flags, no mtime) for hand-framed damaged archives.
 _GZIP_HEADER = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xff"
 

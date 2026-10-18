@@ -105,6 +105,23 @@ _VERSION_ID_RE = re.compile(r"\A[a-zA-Z0-9_-]+\Z")
 _RING_MEMBER_RE = re.compile(r"\A\d{20}-[0-9a-f]{8}\Z")
 
 
+# The Worker's generation marker (worker scratchformat.GenerationMarkerFile). The
+# Worker treats every working-set ROOT entry carrying this prefix as its own: a
+# snapshot leaves it out and a hydrate does not unpack it (issue #3433).
+_GENERATION_MARKER_PREFIX = ".mcsd_generation"
+
+
+def is_reserved_root_member(name: str) -> bool:
+    """True if archive member ``name`` is, or lies under, a reserved root entry.
+
+    The working-set root name carrying the Worker's generation-marker prefix
+    (issue #3433). A same-named entry deeper in the tree is world data.
+    """
+
+    parts = PurePosixPath(name).parts
+    return bool(parts) and parts[0].startswith(_GENERATION_MARKER_PREFIX)
+
+
 def is_version_ring_member(name: str) -> bool:
     """True if ``name`` matches the version-id format minted by ``_new_version_id``."""
 

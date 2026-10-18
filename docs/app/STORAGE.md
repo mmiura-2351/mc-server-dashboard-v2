@@ -386,6 +386,15 @@ while the server is stopped. Before the Worker skipped these members on
 unpack, such an entry as a directory took the marker's name and made every
 hydrate, and so every start, fail on the marker write.
 
+Restoring a backup **already stored** — one created or uploaded before the name
+was reserved — is not refused for such an entry: refusing would leave that backup
+unrestorable. Instead `restore_backup` leaves out every archive member at, or
+under, a root name starting `.mcsd_generation` before publication, on both
+backends, and logs one `WARNING` naming the backup and how many members it
+dropped. A nested same-named member is restored as usual. The dropped entries are
+inert anyway — the Worker would skip them on unpack — so dropping them only keeps
+them out of `current/`.
+
 ### 3.5 File version retention / rollback
 
 Serve versioned edits (FR-FILE-3). See Section 5 for the retention scheme.

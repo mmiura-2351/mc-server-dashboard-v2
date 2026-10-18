@@ -101,6 +101,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     ServerId,
     SnapshotId,
     VersionId,
+    is_reserved_root_member,
     is_version_ring_member,
 )
 from mc_server_dashboard_api.storage.integrity.archive import (
@@ -1364,11 +1365,22 @@ class ObjectStorage(Storage):
                     # archive for every member, re-decompressing the entire
                     # gzip stream each time — O(n * total_decompressed_bytes).
                     budget = _RestoreBudget(self._max_restore_bytes)
+                    # A backup stored before the generation-marker name was
+                    # reserved can carry root members at it; they are left out
+                    # rather than refused, so it stays restorable (issue #3433).
+                    dropped: list[str] = []
                     async for name, parts in _archive_file_member_streams(
-                        spool, "r|gz"
+                        spool, "r|gz", dropped=dropped
                     ):
                         await client.upload_multipart(
                             incoming + name, budget.count(parts)
+                        )
+                    if dropped:
+                        _LOG.warning(
+                            "restore of backup %s dropped %d archive member(s) at "
+                            "the reserved generation-marker name .mcsd_generation*",
+                            key.value,
+                            len(dropped),
                         )
                     staged = await client.list_objects(incoming)
                     # Restore-direction integrity gate (issue #750), mirroring the fs
@@ -2390,7 +2402,7 @@ def _open_member(
 
 
 async def _archive_file_member_streams(
-    spool: Path, mode: Literal["r|*", "r|gz"]
+    spool: Path, mode: Literal["r|*", "r|gz"], *, dropped: list[str] | None = None
 ) -> AsyncIterator[tuple[str, AsyncIterator[bytes]]]:
     """Single-pass streaming extraction of an archive's file members (#1945).
 
@@ -2403,6 +2415,9 @@ async def _archive_file_member_streams(
     An archive whose bytes cannot be read back — truncated, or damaged gzip / tar
     framing — raises :class:`ArchiveUnreadableError` (issue #3230), from the
     member walk or from a member's chunk stream.
+
+    With ``dropped``, a member at or under the reserved generation-marker root
+    name — of any type — is not yielded but its name appended (issue #3433).
     """
 
     with archive_read_errors_as_unreadable():
@@ -2413,6 +2428,9 @@ async def _archive_file_member_streams(
                 member = await asyncio.to_thread(tar.next)
             if member is None:
                 return
+            if dropped is not None and is_reserved_root_member(member.name):
+                dropped.append(member.name)
+                continue
             if not member.isfile():
                 continue
             pure = PurePosixPath(member.name)
