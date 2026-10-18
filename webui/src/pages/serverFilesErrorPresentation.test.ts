@@ -98,6 +98,11 @@ describe("fileOperationErrorPresentation", () => {
       { key: "files.error.platformManagedPath" },
     ],
     [
+      "maps the reserved generation-marker name (#3433)",
+      new ApiError(422, { reason: "reserved_name" }),
+      { key: "files.error.reservedName" },
+    ],
+    [
       "maps an otherwise invalid input",
       new ApiError(422, { reason: "unknown_validation_reason" }),
       { key: "files.error.invalidInput" },

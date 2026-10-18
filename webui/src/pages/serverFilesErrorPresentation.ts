@@ -70,6 +70,8 @@ export function fileOperationErrorPresentation(
               };
         case "platform_managed_path":
           return { key: "files.error.platformManagedPath" };
+        case "reserved_name":
+          return { key: "files.error.reservedName" };
         default:
           return { key: "files.error.invalidInput" };
       }

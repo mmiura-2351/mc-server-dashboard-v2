@@ -369,6 +369,21 @@ persists as a `.dir` marker throughout the working-set lifecycle rather than as 
 true directory entry. On both backends `make_dir` bumps the generation marker
 (Section 4.4), so the store generation stays in lockstep across adapters.
 
+**The Worker's generation-marker name is reserved at the root.** The Worker
+stamps `.mcsd_generation` in the working-set root on every hydrate and treats
+every root entry whose name starts with `.mcsd_generation` as its own: a
+snapshot leaves such entries out, and a hydrate does not unpack them. So no
+operator entry may be created there, and the application refuses one above this
+Port on every door that writes into `current/`: the files-API write (running too,
+where it would overwrite the live marker), make-dir, upload and its archive
+members, a rename's destination, a server import and a backup upload — each a
+`422` `reserved_name` (issue #3433). Only the root name is reserved; a
+same-named entry deeper in the tree is ordinary user data. Reads, deletes and a
+rename *away* stay open, so an entry planted before the guard can be cleared
+while the server is stopped. Before the Worker skipped these members on
+unpack, such an entry as a directory took the marker's name and made every
+hydrate, and so every start, fail on the marker write.
+
 ### 3.5 File version retention / rollback
 
 Serve versioned edits (FR-FILE-3). See Section 5 for the retention scheme.
