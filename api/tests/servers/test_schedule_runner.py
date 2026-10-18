@@ -2066,3 +2066,48 @@ async def test_advance_does_not_clobber_a_concurrently_edited_cadence() -> None:
     # next_run_at is still the patched value, not a stale hourly advance.
     final = env.uow.schedules.by_id[schedule.id]
     assert final.next_run_at == patched_next
+
+
+# --- claim before dispatch (issue #3314) ------------------------------------
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        pytest.param({"enabled": False, "next_run_at": None}, id="disabled"),
+        pytest.param({"next_run_at": _NOW + dt.timedelta(hours=5)}, id="rescheduled"),
+    ],
+)
+async def test_schedule_edited_after_the_poll_is_not_dispatched(
+    edit: dict[str, object], caplog: pytest.LogCaptureFixture
+) -> None:
+    env = _env()
+    server = _running_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.COMMAND,
+        command="say hi",
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+    poll = env.uow.schedules.list_due
+
+    async def list_then_edit(now: dt.datetime) -> list[Schedule]:
+        due = await poll(now)
+        # A PATCH committing between the poll and the claim.
+        stored = env.uow.schedules.by_id[schedule.id]
+        env.uow.schedules.by_id[schedule.id] = replace(stored, **edit)  # type: ignore[arg-type]
+        return due
+
+    env.uow.schedules.list_due = list_then_edit  # type: ignore[method-assign]
+
+    with caplog.at_level(logging.INFO):
+        await env.runner.tick()
+
+    # The occurrence the poll read no longer exists: nothing ran or was recorded.
+    assert env.control_plane.dispatched == []
+    assert _runs(env, schedule) == []
+    assert [r.levelno for r in caplog.records if "not dispatched" in r.message] == [
+        logging.INFO
+    ]

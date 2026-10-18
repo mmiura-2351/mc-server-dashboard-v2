@@ -1628,6 +1628,10 @@ class FakeScheduleRepository(ScheduleRepository):
         schedule = self.by_id.get(schedule_id)
         return None if schedule is None else self._copy(schedule)
 
+    async def lock(self, schedule_id: ScheduleId) -> Schedule | None:
+        # No concurrency in memory: the row lock is the real adapter's concern.
+        return await self.get_by_id(schedule_id)
+
     async def get_ref(self, schedule_id: ScheduleId) -> ScheduleRef | None:
         # The un-hydrated lookup. A fake holds entities, so it can never carry a
         # corrupt row; the adapter's behaviour on one is pinned against the real
