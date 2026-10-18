@@ -10,6 +10,7 @@ package execution
 import (
 	"context"
 	"errors"
+	"time"
 )
 
 // ServerState is the observed runtime state of a server instance. It mirrors the
@@ -145,6 +146,24 @@ type InstanceSpec struct {
 	// can happen long after Start returned, which is why the lock travels with the
 	// spec.
 	WorkingSetLock *WorkingSetLock
+	// WorldProgress fingerprints the server's on-disk world for a graceful stop's
+	// wait (issue #3436): a fingerprint that keeps changing between polls is a
+	// shutdown save still writing, so the driver waits instead of escalating to the
+	// next signal. An error means the scan could not tell, which the driver counts
+	// as progress (its hard cap still bounds the wait). Nil gives the driver nothing
+	// to observe: it escalates after its idle window, as if nothing changed.
+	WorldProgress func() (WorldProgress, error)
+}
+
+// WorldProgress is a cheap fingerprint of a world on disk: the count, total size
+// and newest modification time of its region files (issue #3436). Every chunk
+// write moves Newest (and a new chunk also Bytes), so two equal fingerprints mean
+// nothing was written between them. It is built from metadata alone, never file
+// contents.
+type WorldProgress struct {
+	Files  int
+	Bytes  int64
+	Newest time.Time
 }
 
 // StatusEvent is an observed state transition for a server instance. The

@@ -1998,6 +1998,29 @@ func (m *Manager) settleWorkingSet(ctx context.Context, serverID, workingDir str
 	}
 }
 
+// worldProgress is the probe a graceful stop's wait polls (issue #3436,
+// InstanceSpec.WorldProgress): the count, total size and newest mtime of the
+// working set's .mca files. It comes from the settle-wait's own scan, so it reads
+// metadata alone and walks a running server's tree the way that scan does, and an
+// incomplete or failed scan is an error the driver counts as progress.
+func (m *Manager) worldProgress(root string) func() (execution.WorldProgress, error) {
+	return func() (execution.WorldProgress, error) {
+		state, err := m.scanRegion(root)
+		if err != nil {
+			return execution.WorldProgress{}, err
+		}
+		var p execution.WorldProgress
+		for _, f := range state {
+			p.Files++
+			p.Bytes += f.size
+			if f.modTime.After(p.Newest) {
+				p.Newest = f.modTime
+			}
+		}
+		return p, nil
+	}
+}
+
 // regionState is a region file's identity for settle detection: its path mapped to
 // (mtime, size). Two scans are equal when every file matches on both.
 type regionState map[string]struct {
@@ -2272,6 +2295,9 @@ func (m *Manager) launchReserved(ctx context.Context, cmd session.Command, drive
 		CPUMillis: cmd.CPUMillis,
 		// What the driver holds while it re-owns the working set (workingSetLocks).
 		WorkingSetLock: m.workingSetLock(cmd.ServerID),
+		// What a graceful stop watches to tell a shutdown save still writing from a
+		// hung server (issue #3436).
+		WorldProgress: m.worldProgress(workingDir),
 	})
 	if err != nil {
 		m.release(cmd.ServerID)

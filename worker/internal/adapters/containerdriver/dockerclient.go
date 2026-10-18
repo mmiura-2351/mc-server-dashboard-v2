@@ -313,6 +313,13 @@ func (c *EngineClient) Stop(ctx context.Context, id string, timeout time.Duratio
 	return c.do(ctx, http.MethodPost, "/containers/"+id+"/stop", q, nil, nil)
 }
 
+// Terminate sends SIGTERM through the kill endpoint and returns without waiting
+// for the container to exit (issue #3436).
+func (c *EngineClient) Terminate(ctx context.Context, id string) error {
+	q := url.Values{"signal": {"SIGTERM"}}
+	return c.do(ctx, http.MethodPost, "/containers/"+id+"/kill", q, nil, nil)
+}
+
 // Kill force-terminates a container.
 func (c *EngineClient) Kill(ctx context.Context, id string) error {
 	return c.do(ctx, http.MethodPost, "/containers/"+id+"/kill", nil, nil, nil)
