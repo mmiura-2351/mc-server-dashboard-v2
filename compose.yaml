@@ -265,7 +265,7 @@ services:
     restart: unless-stopped
     # NO stop_grace_period, and this is the one service where that is the answer
     # (issue #2934, owner decision 2026-09-23). The worker and the relay each got
-    # a value because each has a FINITE code-level bound to cover — ~280 s and
+    # a value because each has a FINITE code-level bound to cover — 550 s and
     # ~40 s. The api has none to match: uvicorn keeps its defaults (serve.py
     # passes only the bind), so its graceful shutdown waits on in-flight requests
     # indefinitely, and a data-plane snapshot upload outlives any value worth
@@ -434,16 +434,19 @@ services:
     build: ./worker
     image: mcsd-worker:dev
     restart: unless-stopped
-    # Covers Manager.Close's own worst case, which is ~280 s (issue #2934, owner
-    # decision 2026-09-23). SIGTERM ends the control-plane session and then runs
-    # Close, which JOINS the manager's background goroutines; Docker's 10 s
-    # default cut that join, and the code-level bound is far longer: 90 s flush +
-    # 100 s escalation + 30 s kill call + 30 s exit confirmation + 30 s save-on
-    # restore, at the containerdriver defaults. The last three each run on a
-    # context detached from the deadline before them, so they ADD rather than
-    # share — see Manager.Close's doc comment
+    # Covers Manager.Close's own worst case, which is 550 s (issue #2934, owner
+    # decision 2026-09-23; lengthened by the progress-aware stop, issue #3436).
+    # SIGTERM ends the control-plane session and then runs Close, which JOINS the
+    # manager's background goroutines; Docker's 10 s default cut that join, and
+    # the code-level bound is far longer: 90 s flush + 370 s escalation (the
+    # stop's 360 s cap + 10 s) + 30 s kill call + 30 s exit confirmation + 30 s
+    # save-on restore, at the containerdriver defaults. The last three each run
+    # on a context detached from the deadline before them, so they ADD rather
+    # than share — see Manager.Close's doc comment
     # (worker/internal/application/instancemanager/instancemanager.go), which
-    # carries the leg-by-leg derivation. 300s is that bound plus headroom.
+    # carries the leg-by-leg derivation. 600s is that bound plus headroom, and
+    # TestComposeWorkerStopGraceCoversClose (worker/cmd/worker) fails if it ever
+    # drops below instancemanager.CloseBound(containerdriver.MaxStopDuration).
     #
     # WHAT IT BUYS is one leg: the stop escalation a Close finds in flight gets to
     # finish instead of being cut half-issued. The other legs never needed it — the
@@ -458,8 +461,8 @@ services:
     # larger number here. That drain is bounded by closingSaveOnTimeout (5 s,
     # instancemanager.go): it is the only latency the fix can add, it is paid once
     # however many servers are draining and only when one does not answer, and it
-    # sits well inside the 30 s save-on leg the 300 s above already counts — so this
-    # value did not move and does not need to. The boot repair stays the backstop,
+    # sits well inside the 30 s save-on leg the bound above already counts — so it
+    # did not move this value and does not need to. The boot repair stays the backstop,
     # not the plan: containerdriver.sweepSaveOn (#1710) issues an RCON save-on to
     # every running orphan before stopping it, but only at the NEXT Worker boot, and
     # `restart: unless-stopped` does not restart a container after an explicit stop,
@@ -468,9 +471,9 @@ services:
     #
     # The cost is bounded and rarely paid: the timer is a CEILING, not a wait, so
     # a Close that finds nothing in flight still exits in milliseconds. The full
-    # ~5 min is only reachable while a converger is inside a retry stop against a
-    # wedged daemon.
-    stop_grace_period: 300s
+    # ~9 min is only reachable while a converger is inside a retry stop against a
+    # wedged daemon or a server that keeps writing until the stop's cap.
+    stop_grace_period: 600s
     environment:
       MCD_WORKER_API_GRPC_ENDPOINT: api:50051
       MCD_WORKER_API_CREDENTIAL: ${MCD_API_CONTROL__WORKER_CREDENTIAL}

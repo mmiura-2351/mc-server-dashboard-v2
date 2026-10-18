@@ -70,7 +70,9 @@ const defaultStopTimeout = 30 * time.Second
 // (control.stop_timeout_seconds=600) together with the flush, the kill call and
 // the kill confirm: defaultFlushTimeout (90) + defaultStopCap (360) +
 // stopDeadlineGrace (10) + stopKillCallTimeout (30) + defaultStopTimeout (30) =
-// 520 s, 80 s inside it.
+// 520 s (MaxStopDuration). A stop that fails adds the manager's 30 s save-on
+// restore, 550 s, still 50 s inside it, and the Worker's own shutdown grace in
+// compose.yaml covers the same 550 s (instancemanager.CloseBound).
 const defaultStopCap = 360 * time.Second
 
 // defaultStopPollInterval is how often a stop's wait fingerprints the world
@@ -82,6 +84,14 @@ const defaultStopPollInterval = 5 * time.Second
 // stopKillCallTimeout bounds the docker kill call that ends an escalated stop.
 // It is detached from the stop deadline so the kill always reaches the daemon.
 const stopKillCallTimeout = 30 * time.Second
+
+// MaxStopDuration is the longest a graceful Stop can take at the defaults the
+// Worker runs with (cmd/worker sets none of these timeouts): the pre-stop flush,
+// the escalation deadline (stopDeadline), the kill call and the kill confirm. They
+// run one after another, each on its own detached context, so they add (issue
+// #3436). The Worker's shutdown grace in compose.yaml (instancemanager.CloseBound)
+// and the API's control.stop_timeout_seconds are both sized from it.
+const MaxStopDuration = defaultFlushTimeout + defaultStopCap + stopDeadlineGrace + stopKillCallTimeout + defaultStopTimeout
 
 // defaultFlushTimeout bounds the pre-stop flush (#1007): the RCON save-off /
 // save-all plus the settle-wait that drives the live world's dirty chunks to
@@ -1895,8 +1905,8 @@ func (i *instance) Stop(ctx context.Context, graceful bool, preFallback ...func(
 	// the killed-instead-of-stopped failure this whole path exists to prevent
 	// (issue #2622). The worst case for a graceful stop is flushTimeout +
 	// stopDeadline + the kill call + the kill confirm (90 + 370 + 30 + 30 = 520 s
-	// by default, see defaultStopCap), inside the API's stop dispatch budget
-	// (control.stop_timeout_seconds=600).
+	// by default, MaxStopDuration; see defaultStopCap), inside the API's stop
+	// dispatch budget (control.stop_timeout_seconds=600).
 	//
 	// When the flush succeeds (returns true), RCON "stop" and docker stop
 	// (SIGTERM) are SKIPPED: both trigger MC's own shutdown save, which

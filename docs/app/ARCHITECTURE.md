@@ -246,7 +246,9 @@ here.
 A graceful stop through `ExecutionDriver` uses `ServerControl` for the in-band
 `stop` and falls back to SIGTERM, then SIGKILL. Each step waits while the
 server's world files keep being written, and escalates after an idle window or
-at a hard cap (issue #3436; values and their basis in
+at a hard cap (issue #3436). A `StopServer` round trip is then at most 550 s,
+inside the API's 600 s stop budget and the Worker's 600 s shutdown grace in
+`compose.yaml` (values, the derivation and the test that pins them in
 [`CONFIGURATION.md`](CONFIGURATION.md) Section 6.3).
 
 The Worker side deliberately has **no `Storage` Port**: it never sees the
