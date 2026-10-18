@@ -788,13 +788,15 @@ class FsStorage(Storage):
             if expected_base is not None:
                 current = self._read_generation(server_root)
                 if current != expected_base:
-                    # ``current == 0`` with ``expected_base > 0`` is the unambiguous
-                    # signature of a concurrent delete/prune that removed the
-                    # generation marker under this same lock during the upload window
-                    # (issue #921): generation is monotonic, so it regressed to 0
-                    # rather than advancing. Raise the distinct subclass so the edge
-                    # names the concurrent delete instead of "generation advanced".
-                    if current == 0 and expected_base > 0:
+                    # A moved generation with no ``current`` symlink is the
+                    # unambiguous signature of a concurrent delete/prune that ran
+                    # under this same lock during the upload window (issue #921):
+                    # every other mover (a publish, a restore, an edit) leaves the
+                    # symlink in place, and only the prune advances the generation
+                    # while removing it (#3434). Raise the distinct subclass so the
+                    # edge names the concurrent delete instead of "generation
+                    # advanced".
+                    if not self._current_link(community_id, server_id).is_symlink():
                         raise PrunedStoreError(expected_base, current)
                     raise StaleGenerationError(expected_base, current)
             # Missing-region gate (issue #854, #921 item 2): compare the staged
@@ -1286,8 +1288,9 @@ class FsStorage(Storage):
         # Hold the per-server lock for the entire prune (issue #1704): this
         # serializes against ``_publish_and_bump`` (commit_snapshot) which takes
         # the same lock, so a late commit cannot land while the prune is removing
-        # the working-set tree and generation marker. The method already runs on
-        # a worker thread via ``asyncio.to_thread``, so blocking is fine.
+        # the working-set tree and advancing the generation marker. The method
+        # already runs on a worker thread via ``asyncio.to_thread``, so blocking is
+        # fine.
         with self._server_lock(community_id, server_id):
             self._prune_to_final_snapshot_inner(community_id, server_id)
 
@@ -1310,12 +1313,15 @@ class FsStorage(Storage):
             # No live ``current`` symlink: nothing to pack. This is also the no-op
             # branch a retried delete lands in (the symlink is unlinked the instant
             # final.tar.gz is durable, below), so it must never re-pack — it only GCs
-            # any leftover working-set tree and the generation marker, leaving exactly
-            # backups/ + the (possibly already-written) final archive. Idempotent.
+            # any leftover working-set tree, leaving exactly backups/ + the (possibly
+            # already-written) final archive + the generation marker. Idempotent. The
+            # marker is KEPT: an earlier attempt already advanced it before unlinking
+            # ``current`` (below), and removing it would lower the generation (issue
+            # #3434).
             for sub in ("snapshots", "incoming", "versions"):
                 _rmtree(server_root / sub)
             _rmtree(server_root / "current")
-            _rmtree(self._marker_path(server_root))
+            self._drop_publisher(server_root)
             return
         # Pack to a temp sibling first, then atomically rename into place: the tree
         # is removed ONLY after a complete final.tar.gz exists, so a pack failure
@@ -1346,6 +1352,26 @@ class FsStorage(Storage):
             tmp.unlink(missing_ok=True)
             raise
         _fsync_dir(server_root)
+        # Advance the generation BEFORE ``current`` goes (issue #3434): this is where
+        # the prune guarantees it never lowers the store generation. DeleteServer
+        # commits the row delete only AFTER this prune, so a failed commit leaves a
+        # live row on this store; had the marker gone, its generation would read 0 and
+        # the next publish would mint one at or below what a Worker still holds, whose
+        # start would then skip the hydrate and boot that stale scratch. Advancing it,
+        # rather than carrying it forward unchanged, also keeps a late commit whose
+        # guard read the pre-prune generation failing its re-check (#921/#1704), since
+        # the prune replaced the published world. Bumped before the unlink so a crash
+        # between the two re-packs and bumps again on retry (still monotonic) rather
+        # than leaving a pointer-less store at the old value.
+        #
+        # The bump carries the current publisher forward: while ``current`` may still
+        # survive (the unlink below fails, or the process dies first), the row and the
+        # live working set survive too, and only that publisher claim keeps the
+        # publish-time guard refusing a stale different-publisher upload — whose
+        # commit re-check would otherwise pass against the advanced generation and
+        # overwrite the live set (PR #3435 review). It is dropped once ``current`` is
+        # gone (below).
+        self._bump_marker(server_root, self._read_publisher(server_root))
         # Unlink the ``current`` symlink FIRST, the instant final.tar.gz is durable:
         # it is the one marker that says the working set is still live and re-packable.
         # A crash after this point leaves no symlink, so a retried delete raises
@@ -1353,10 +1379,24 @@ class FsStorage(Storage):
         # never re-packs a half-removed snapshot tree over the good final.tar.gz (#777).
         _rmtree(server_root / "current")
         # The final archive is durable and ``current`` is gone; reclaim the unpacked
-        # working-set tree and the generation+publisher marker.
+        # working-set tree. The generation marker stays (see the bump above).
         for sub in ("snapshots", "incoming", "versions"):
             _rmtree(server_root / sub)
-        _rmtree(self._marker_path(server_root))
+        self._drop_publisher(server_root)
+
+    def _drop_publisher(self, server_root: Path) -> None:
+        """Clear the marker's publisher claim once a prune removed ``current``.
+
+        No Worker produced the pruned (empty) store, so a surviving row's next
+        publish — whose base is the 0 an empty hydrate reports — must not be refused
+        as a different-publisher stale publish. The generation is rewritten
+        unchanged, never lowered (issue #3434). A no-op when no claim is recorded,
+        including a never-published server, which has no marker to create.
+        """
+
+        generation, publisher = self._read_marker(server_root)
+        if publisher is not None:
+            self._write_marker(server_root, generation, None)
 
     @_translate_io_faults
     async def delete_backup(

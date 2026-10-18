@@ -383,10 +383,20 @@ class WorkingSetStore(abc.ABC):
         (``current/``) into a single self-contained ``tar.gz`` retained at the
         server root, then remove everything else under the server prefix that is not
         a backup archive — the unpacked working-set tree (``snapshots/``,
-        ``incoming/``, ``versions/``), the ``current`` pointer, and the generation
-        marker. ``backups/`` is left untouched — the caller prunes archives (keep
-        newest, delete the rest) through its own seam. After return, the server's
-        only non-backup artifact is the final tar.gz, which carries no DB row.
+        ``incoming/``, ``versions/``) and the ``current`` pointer. ``backups/`` is
+        left untouched — the caller prunes archives (keep newest, delete the rest)
+        through its own seam. After return, the server's only non-backup artifacts
+        are the final tar.gz, which carries no DB row, and the generation marker.
+
+        The generation is ADVANCED, never removed or lowered (issue #3434), and the
+        advance is durable before the pointer goes: the caller commits its row delete
+        only after this prune, so a failed commit leaves a live row whose next
+        publish must mint a generation above anything a Worker may still hold. A
+        moved generation with no pointer is also how a late commit recognises the
+        prune (:class:`~.errors.PrunedStoreError`). The publisher claim is kept until
+        the pointer is gone, then cleared: a pointer that survives a failed prune
+        still keeps the publish-time guard refusing a stale different-publisher
+        upload.
 
         Packing is mandatory and fail-closed: if the pack fails the working-set tree
         is left intact and the error propagates, so a failed delete never silently
