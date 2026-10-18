@@ -359,7 +359,8 @@ func driveRow(t *testing.T, row contractRow) session.CommandResult {
 	case "rcon_command_dropped":
 		// A running instance whose RCON server closes the connection after the
 		// command is written, without replying (issue #3366). The fake control
-		// returns the rcon adapter's sentinel wrapped the way Execute wraps it.
+		// returns the rcon adapter's sentinel wrapped the way Execute wraps it, for
+		// every line, so a running snapshot's save-off/save-all quiesce meets it too.
 		dropped := &fakeControl{err: fmt.Errorf("%w: rcon: read length: EOF", execution.ErrCommandDropped)}
 		m := newManager(t, &fakeDriver{}, dropped).
 			WithTransfer(&fakeTransfer{}).

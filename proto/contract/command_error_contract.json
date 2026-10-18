@@ -82,8 +82,10 @@
     "API may match them for a friendlier 409 reason (issue #225).",
     "This table pins the deterministic per-kind precondition codes only; the",
     "environment-dependent 'internal' and 'transfer_failed' codes are intentionally",
-    "left unpinned -- no row carries them, and a handler answering one is reporting a",
-    "failed operation, not a precondition."
+    "left unpinned where a handler answering one is reporting a failed operation, not",
+    "a precondition. A row carries one only where a precondition alone determines it:",
+    "an over-long console line ('internal') and a running snapshot whose quiesce RCON",
+    "drops ('transfer_failed')."
   ],
   "kinds": [
     "StartServer",
@@ -263,8 +265,11 @@
         "That is how vanilla answers a packet that did not arrive in one read -- it drops",
         "the connection without running the command (issue #3366) -- so a line near",
         "max_console_line_bytes can meet it on a path whose MSS splits the packet",
-        "(CONTROL_PLANE.md Section 3.1). Only handleServerCommand decides its answer on",
-        "an RCON round trip"
+        "(CONTROL_PLANE.md Section 3.1). The fixture drops every round trip on the",
+        "connection, so two handlers decide their answer on it: handleServerCommand",
+        "names the drop, and a running snapshot, whose save-off/save-all quiesce then",
+        "fails, is refused unquiesced. The stop and restart flush is best-effort and",
+        "decides nothing"
       ]
     },
     {
@@ -401,7 +406,7 @@
     {"kind": "SnapshotTrigger", "precondition": "unsafe_path", "code": "unaffected", "why": "SnapshotTrigger carries no path; its handler never resolves one, so the path axis is not consulted"},
     {"kind": "SnapshotTrigger", "precondition": "unsafe_server_id", "code": "file_access_denied", "api": "command_failed"},
     {"kind": "SnapshotTrigger", "precondition": "console_line_too_long", "code": "unaffected", "why": "SnapshotTrigger carries no console line; only handleServerCommand reads one"},
-    {"kind": "SnapshotTrigger", "precondition": "rcon_command_dropped", "code": "unaffected", "why": "the running path's save-off/save-all quiesce is best-effort: a failed round trip, a dropped one included, is logged and the pack proceeds unquiesced, so it never decides the answer"},
+    {"kind": "SnapshotTrigger", "precondition": "rcon_command_dropped", "code": "transfer_failed", "api": "command_failed", "why": "the running path's quiesce is NOT best-effort: a dropped save-off or save-all leaves quiesceRunning reporting the world unquiesced, and handleSnapshot refuses the snapshot with TRANSFER_FAILED quiesce_unavailable before packing rather than pack a live world (issue #907). No API site matches it: the scheduler retries on its next tick, and a manual backup renders the catch-all command_failed"},
     {"kind": "SnapshotTrigger", "precondition": "server_properties_unreadable", "code": "server_properties_unreadable", "api": ["command_dispatch.py:_SANITIZED_REASONS"], "why": "the running path's save-off/save-all quiesce cannot open RCON, and a running snapshot that cannot be quiesced is refused rather than packed live (issue #907); the refusal names the cause instead of TRANSFER_FAILED quiesce_unavailable, so a manual backup of the running server reports it (issue #3347). A stopped-id snapshot needs no RCON and is not affected"},
 
     {"kind": "ReadFile", "precondition": "instance_running", "code": "unaffected", "why": "the file handlers take no instance / orphan / reservation / driver check at all: they resolve a path under the scratch root and nothing else, so no state outside the path axis changes their answer"},
