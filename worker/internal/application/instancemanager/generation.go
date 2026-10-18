@@ -138,6 +138,19 @@ func writeGenerationGuarded(workingDir string, gen uint64, guard func() bool) er
 	// the caller logs explains — and a hydrate of a published generation swaps the whole
 	// working set out of the slot, directory included, by the path that already does so
 	// without traversing it.
+	//
+	// What does the swapping is a 200 hydrate, not the generation. A 204 hydrate leaves
+	// the slot as it is and lands back here, so a 204 in front of every start would fail
+	// this rename every time and block the server for good (issue #3385). That case is
+	// left unrecoverable on purpose, because no start reaches it. The data plane answers
+	// 204 only when the store has no published working set AND the server has no
+	// resolved JAR (hydrate, api dataplane/api/transfers.py), and the API's start has
+	// both before it dispatches: its EULA gate reads eula.txt from the published working
+	// set or publishes it there, and it commits the resolved JAR (StartServer,
+	// lifecycle.py), which the JAR pool GC never reclaims while the row references it.
+	// A creation-time seed failure, a never-snapshotted store or a lost generation bump
+	// therefore all still meet a 200. If a start ever can get a 204, resolve it in the
+	// API, not by removing the directory here.
 	if err := unix.Renameat(dirFd, tmpName, dirFd, scratchformat.GenerationMarkerFile); err != nil {
 		_ = unix.Unlinkat(dirFd, tmpName, 0)
 		return &os.LinkError{Op: "rename", Old: tmpName, New: scratchformat.GenerationMarkerFile, Err: err}
