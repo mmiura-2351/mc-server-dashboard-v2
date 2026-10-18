@@ -19,6 +19,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 )
 
 // Packet types from the Source RCON protocol.
@@ -56,22 +58,6 @@ const maxResponseSize = 1 << 20 // 1 MiB
 // ErrResponseTooLarge is returned when the reassembled response exceeds
 // maxResponseSize.
 var ErrResponseTooLarge = errors.New("rcon: response too large")
-
-// ErrConnBroken is returned by Execute when a prior round trip failed mid-stream
-// (timeout or cancel), which can leave the connection mis-framed. The connection
-// is poisoned on such a failure so reuse fails fast and forces a redial rather
-// than reading a stale response off the broken stream.
-var ErrConnBroken = errors.New("rcon: connection poisoned by a prior I/O error")
-
-// ErrCommandDropped is returned by Execute when the server closed the connection
-// (EOF or reset) after the command was written and before a single response byte
-// arrived. That is how vanilla answers a request packet that did not arrive in
-// one read: it drops the connection without running the command (issue #3366,
-// CONTROL_PLANE.md Section 3.1). A server that ran the command and died before
-// answering looks the same, so whether it ran stays uncertain. It is told apart
-// from a hung server (a timeout), from a reply cut short (some bytes arrived), and
-// from a failure to connect or authenticate.
-var ErrCommandDropped = errors.New("rcon: server closed the connection without replying to the command")
 
 // Client is a single authenticated RCON connection. It is not safe for
 // concurrent use; callers serialize commands per server.
@@ -127,12 +113,13 @@ func Dial(ctx context.Context, addr, password string) (*Client, error) {
 // It honours ctx's deadline for the round trip, and falls back to
 // defaultExecuteTimeout when ctx carries none, so a server that accepts the
 // connection but never replies cannot block the call forever. It returns
-// ctx.Err() when ctx cancellation caused the failure, ErrConnBroken when the
-// connection was poisoned by a prior failed round trip, and ErrCommandDropped
-// when the server closed the connection before sending any response byte.
+// ctx.Err() when ctx cancellation caused the failure, execution.ErrConnBroken
+// when the connection was poisoned by a prior failed round trip, and
+// execution.ErrCommandDropped when the server closed the connection before
+// sending any response byte.
 func (c *Client) Execute(ctx context.Context, line string) (string, error) {
 	if c.broken {
-		return "", ErrConnBroken
+		return "", execution.ErrConnBroken
 	}
 	var body string
 	err := c.withDeadline(ctx, func() error {
@@ -150,7 +137,7 @@ func (c *Client) Execute(ctx context.Context, line string) (string, error) {
 				// Dropped only if not one response byte arrived: once any has, the
 				// server was answering and may have run the command.
 				if c.received == written && isConnClosed(err) {
-					return fmt.Errorf("%w: %w", ErrCommandDropped, err)
+					return fmt.Errorf("%w: %w", execution.ErrCommandDropped, err)
 				}
 				return err
 			}

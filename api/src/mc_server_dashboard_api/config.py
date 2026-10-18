@@ -716,24 +716,24 @@ class TokenSettings(_Section):
     """Token issuing/verification (CONFIGURATION.md Section 5.3).
 
     Parameters of the single ``TokenService`` JWT adapter (Section 4 note):
-    ``algorithm`` is HS256 by default (RS256 supported by supplying the matching
-    key); ``signing_key`` is the secret used to sign access tokens. The key is
+    ``algorithm`` is HS256, the only algorithm the API can sign with;
+    ``signing_key`` is the secret used to sign access tokens. The key is
     declared optional here so the loader does not force it on processes that
     mount no auth endpoints; the app factory fails fast when it mounts the auth
     routers without a key (Section 3, fail-fast on a missing required secret).
     """
 
-    # Constrained to the supported algorithms so a miscased/typo value fails at
+    # Constrained to the supported algorithm so a miscased/typo value fails at
     # load rather than slipping past the HS256 key-length floor below and only
     # failing at first JWT use (CONFIGURATION.md Section 5.3).
-    algorithm: Literal["HS256", "RS256"] = "HS256"
+    algorithm: Literal["HS256"] = "HS256"
     signing_key: str | None = None
     access_ttl_seconds: int = Field(default=900, gt=0)
 
     # A blank ``${MCD_API_AUTH__TOKEN__SIGNING_KEY}`` arrives as "" rather than
     # unset; collapse it to None so the app factory's fail-fast (signing key
     # required to mount auth) treats a blank as missing rather than booting with
-    # an empty key — an empty RS256 key otherwise slips past every guard (#939).
+    # an empty key (#939).
     _blank_signing_key = field_validator("signing_key")(_blank_to_none)
     refresh_ttl_seconds: int = Field(default=1209600, gt=0)
     # Grace window after a refresh token is rotated within which re-presenting the
@@ -768,16 +768,38 @@ class TokenSettings(_Section):
     download_cookie_ttl_seconds: int = Field(default=900, gt=0)
     download_cookie_secure: bool = True
 
+    @field_validator("algorithm", mode="before")
+    @classmethod
+    def _reject_unsupported_algorithm(cls, value: object) -> object:
+        # PyJWT signs the asymmetric algorithms (RS*/PS*/ES*/EdDSA) only with the
+        # optional ``cryptography`` package, which the API does not ship, so one
+        # would pass load and then fail at the first token issue (#3327). Fail
+        # here instead, naming the one accepted value; this runs before the
+        # Literal check so its generic message does not hide the reason. The
+        # asymmetric explanation is added only for those families, so a typo
+        # such as "hs256" is not blamed on missing asymmetric support.
+        if value != "HS256":
+            reason = ""
+            if isinstance(value, str) and value.upper().startswith(
+                ("RS", "PS", "ES", "ED")
+            ):
+                reason = (
+                    ": asymmetric algorithms are not supported (PyJWT needs the "
+                    "cryptography package for them, which the API does not ship)"
+                )
+            raise ValueError(
+                "auth.token.algorithm must be HS256 (case-sensitive), "
+                f"got {value!r}{reason}"
+            )
+        return value
+
     @model_validator(mode="after")
     def _enforce_hs256_key_length(self) -> TokenSettings:
         # For the symmetric HS256 the signing key is shared-secret entropy; a key
         # shorter than the 256-bit (32-byte) digest weakens the MAC. Reject a
-        # too-short key at load (CONFIGURATION.md Section 5.3, fail-fast). RS256
-        # keys are asymmetric PEM material, not raw entropy, so this floor does
-        # not apply to them.
+        # too-short key at load (CONFIGURATION.md Section 5.3, fail-fast).
         if (
-            self.algorithm == "HS256"
-            and self.signing_key is not None
+            self.signing_key is not None
             and len(self.signing_key.encode("utf-8")) < _HS256_MIN_KEY_BYTES
         ):
             raise ValueError(

@@ -2,7 +2,8 @@
 // set for the adapters that need values from it: the RCON credentials (rcon), the
 // container driver's published ports (containerdriver) and the tunnel's game port
 // (tunnel). It returns the file's bytes; parsing stays with
-// internal/javaproperties, in the charset each caller needs.
+// internal/javaproperties, in the charset each caller needs. RCONPort resolves
+// the one value two of them must agree on, rcon.port.
 //
 // The file sits in a working set the server's own code — which the operator does
 // not control — has bind-mounted and can rewrite at any moment, and under the
