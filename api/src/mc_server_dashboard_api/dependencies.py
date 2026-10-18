@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from functools import lru_cache, partial
 from typing import Annotated, NamedTuple
 
-from fastapi import Depends, Request, WebSocket, status
+from fastapi import Depends, Request, WebSocket, WebSocketException, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import TypeAdapter, ValidationError
@@ -104,6 +105,12 @@ from mc_server_dashboard_api.config import (
 from mc_server_dashboard_api.core.adapters.database import (
     SqlAlchemyDatabasePing,
     create_session_factory,
+)
+
+# Re-exported for the events relay, which outlives its handshake and must tell
+# a database outage from a bug on its own re-checks (#3313).
+from mc_server_dashboard_api.core.adapters.database import (
+    is_transient_database_error as is_transient_database_error,
 )
 from mc_server_dashboard_api.core.adapters.readiness import (
     FlagControlPlaneReadiness,
@@ -395,6 +402,8 @@ from mc_server_dashboard_api.versions.domain.catalog import VersionCatalog
 from mc_server_dashboard_api.versions.domain.value_objects import (
     ServerType as CatalogServerType,
 )
+
+_logger = logging.getLogger(__name__)
 
 
 def get_engine(connection: HTTPConnection) -> AsyncEngine:
@@ -1193,7 +1202,29 @@ async def get_current_user_ws(websocket: WebSocket) -> Authentication | None:
     (it cannot return an HTTP status once the upgrade is in flight), so the route
     decides the close, not an exception (Section 6.13). The result carries the
     token's expiry, at which the route ends the session (#1862).
+
+    The one exception is a transient database failure while loading the user
+    (#3313): it says nothing about the token, so it is not ``None`` (``4401``)
+    but a refusal with ``1013`` (Try Again Later), logged as one line rather
+    than surfacing as an unhandled-exception traceback. It is raised as
+    ``WebSocketException``, which the framework turns into a close before
+    accept — the route body never runs.
     """
+
+    try:
+        return await _authenticate_ws(websocket)
+    except Exception as exc:
+        if not is_transient_database_error(exc):
+            raise
+        _logger.warning(
+            "events socket handshake refused (1013): database unavailable (%s)",
+            type(exc).__name__,
+        )
+        raise WebSocketException(code=status.WS_1013_TRY_AGAIN_LATER) from None
+
+
+async def _authenticate_ws(websocket: WebSocket) -> Authentication | None:
+    """Authenticate the token a WebSocket was opened with, as REST does per request."""
 
     token = _ws_access_token(websocket)
     if token is None:
@@ -1219,10 +1250,11 @@ def get_ws_reauthentication(websocket: WebSocket) -> WsReauthentication:
     REST authenticates every request, so a deactivated or deleted account is
     rejected on its next call; an events WebSocket outlives its handshake, so
     it calls this on every re-authorization to apply the very same check to
-    the token it was opened with (#3227). ``None`` is REST's 401.
+    the token it was opened with (#3227). ``None`` is REST's 401. A database
+    failure propagates as raised: the relay decides what it means mid-stream.
     """
 
-    return partial(get_current_user_ws, websocket)
+    return partial(_authenticate_ws, websocket)
 
 
 # --- authorization (community context, Section 6.4) ------------------------

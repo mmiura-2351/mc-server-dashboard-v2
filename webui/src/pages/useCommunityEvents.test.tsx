@@ -103,6 +103,7 @@ describe("useCommunityEvents", () => {
   afterEach(() => {
     restore();
     clearAccessToken();
+    vi.unstubAllGlobals();
     vi.useRealTimers();
   });
 
@@ -331,6 +332,56 @@ describe("useCommunityEvents", () => {
     });
     expect(invalidateSpy).toHaveBeenCalledTimes(1);
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: serversKey(CID) });
+  });
+
+  // Removed from the community, the community deleted, or `server:read`
+  // revoked mid-stream (#3313): the socket stops and the page reloads its list
+  // (reset, so the cached rows do not stay on screen) and the communities
+  // list, which drops a community the user left.
+  it.each([4403, 4404])(
+    "resets the list, refetches the communities and stops on a mid-stream %i",
+    (code) => {
+      const { queryClient, invalidateSpy } = setup([
+        serverRow("s1", "running"),
+      ]);
+      act(() => {
+        MockWebSocket.last().open();
+      });
+      act(() => {
+        MockWebSocket.last().serverClose(code);
+        vi.advanceTimersByTime(60000);
+      });
+      expect(queryClient.getQueryData(serversKey(CID))).toBeUndefined();
+      expect(invalidateSpy).toHaveBeenCalledWith({
+        queryKey: ["communities"],
+        exact: true,
+      });
+      expect(MockWebSocket.instances).toHaveLength(1);
+    },
+  );
+
+  // The same loss found by the probe after refused handshakes: the socket was
+  // down, so the degraded poll was running, and it stops too.
+  it("stops the degraded poll when the probe finds the community gone", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(null, { status: 404 })),
+    );
+    const { queryClient, refetchSpy } = setup([serverRow("s1", "running")]);
+    for (let i = 0; i < 3; i++) {
+      await act(async () => {
+        MockWebSocket.last().fail();
+        await vi.advanceTimersByTimeAsync(30000);
+      });
+    }
+    expect(queryClient.getQueryData(serversKey(CID))).toBeUndefined();
+
+    refetchSpy.mockClear();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60000);
+    });
+    expect(refetchSpy).not.toHaveBeenCalled();
+    expect(MockWebSocket.instances).toHaveLength(3);
   });
 });
 

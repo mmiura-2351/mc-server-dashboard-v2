@@ -8,6 +8,8 @@ layer owns and the liveness probe behind the :class:`DatabasePing` Port.
 
 from __future__ import annotations
 
+import asyncpg
+import sqlalchemy.exc
 from sqlalchemy import MetaData, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -72,6 +74,36 @@ def create_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSessi
     """Build the async session factory the persistence adapters open sessions from."""
 
     return async_sessionmaker(engine, expire_on_commit=False)
+
+
+# What a database outage raises, by when it hits (#3313). asyncpg's connect is
+# not translated by SQLAlchemy, so a refused or timed-out connect is the raw
+# ``OSError`` and a server starting up, shutting down or full is asyncpg's raw
+# class 08 / 57 / ``TooManyConnections`` error; a pool that cannot hand out a
+# connection is SQLAlchemy's ``TimeoutError``; a connection lost mid-query is a
+# translated error (see :func:`is_transient_database_error`).
+_TRANSIENT_ERRORS: tuple[type[Exception], ...] = (
+    OSError,
+    sqlalchemy.exc.TimeoutError,
+    sqlalchemy.exc.OperationalError,
+    sqlalchemy.exc.InterfaceError,
+    asyncpg.PostgresConnectionError,
+    asyncpg.OperatorInterventionError,
+    asyncpg.TooManyConnectionsError,
+)
+
+
+def is_transient_database_error(exc: BaseException) -> bool:
+    """Whether ``exc`` means the database is unavailable for now, not a bug.
+
+    Retrying later may succeed. A connection lost mid-query is the generic
+    ``DBAPIError`` asyncpg's errors translate to, told apart by SQLAlchemy
+    having invalidated the connection.
+    """
+
+    if isinstance(exc, _TRANSIENT_ERRORS):
+        return True
+    return isinstance(exc, sqlalchemy.exc.DBAPIError) and exc.connection_invalidated
 
 
 class SqlAlchemyDatabasePing(DatabasePing):

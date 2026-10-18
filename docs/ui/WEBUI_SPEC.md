@@ -348,6 +348,13 @@ subprotocols `["access_token", "<jwt>"]`; the server echoes `access_token` as
 the accepted subprotocol (RFC 6455). The `Authorization: Bearer` header is also
 honored for non-browser clients. Close codes mirror REST: 4400 bad `streams`,
 4401 unauthenticated, 4403 forbidden, 4404 not found / not a member.
+A check the database cannot answer — a transient database error (refused or
+lost connection, exhausted pool, server starting up or shutting down) — is
+none of those: the socket is closed with the standard **1013** (Try Again
+Later) and the API logs one WARNING line, no traceback. At the handshake the
+socket is refused with it before accept, like the denials above (so a browser
+sees a failed handshake); mid-stream see the re-check below. Any other error is
+not masked.
 Delivery is best-effort; REST keeps working if the socket dies (FR-MON-4).
 
 Re-check: every 60 s mid-stream the server repeats, for the token the socket
@@ -363,6 +370,9 @@ the code the handshake would have used:
   expires, on REST and here alike.
 - It re-authorizes the user as just loaded: a member removed (4404), a
   permission or grant revoked (4403), a deleted server (4404).
+- It is bounded: a re-check that fails on a transient database error, or has
+  no answer within 10 s (a frozen database), closes the socket with **1013**
+  rather than leaving the stream silent while it waits.
 
 Lifetime: a socket's only credential is the access token it was opened with,
 so it lives no longer than that token. At the instant that token
@@ -377,7 +387,9 @@ too, so one that runs just as the token lapses can win the race against the
 expiry timer and close 4401 instead of 4419, which the shared remedy makes
 harmless. The remedy differs only for a rejection at the handshake, which a
 browser never observes as a close code at all (a close before accept reaches
-it as a failed handshake) and retries on the reconnect backoff.
+it as a failed handshake) and retries on the reconnect backoff, asking REST
+after repeated failures whether it is being refused (Section 7.1). A
+mid-stream 4403 / 4404 has no remedy to retry: the client stops (Section 7.1).
 Consequence: a dashboard left open sees its sockets cut and
 re-established once per access-token lifetime; the `snapshot` frame on
 reconnect is what keeps that seamless.
@@ -830,6 +842,28 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   refresh on the reconnect backoff; an auth-definitive one hard-logs-out,
   exactly as for REST — which is how a deactivated or deleted user with an
   open dashboard ends up signed out rather than reconnecting forever.
+  The rest of the WS close policy:
+  - **4403 / 4404 mid-stream** (a grant or permission revoked, the member
+    removed, the server or community deleted): not an auth problem, so no
+    refresh, and every reconnect would be refused at the handshake. The
+    client stops reconnecting for good and resets the page's resource query —
+    the server detail, or the dashboard's servers list (refetching the
+    communities list too, which drops a community the user left) — so the
+    page shows its own no-access / not-found state instead of a cached copy.
+  - **1013** (Try Again Later: the API's database could not answer, Section
+    2.6) and any other close: an ordinary backoff reconnect with the same token.
+  - **Repeated failed handshakes.** A handshake the API refuses reaches the
+    browser as a bare 1006, the same as a network failure. After 3 consecutive
+    handshakes that fail before opening, the client makes one authenticated
+    REST read gated like the socket, through the shared API client: the
+    server read (`GET /communities/{cid}/servers/{sid}`) for the per-server
+    stream, the caller's permissions (`GET /communities/{cid}/me/permissions`,
+    membership-gated) for the community stream. A 401 goes through the
+    transparent refresh like any REST 401 — a rotated token reconnects the
+    socket, an auth-definitive failure hard-logs-out; a 403 / 404 stops the
+    client as above; success, a network error or a 5xx keeps the backoff. The
+    count restarts after each probe and on every successful open, so a long
+    outage costs one REST read per three reconnect attempts.
 - **Authenticated downloads.** An in-memory access token cannot ride a plain
   `<a href>`, so single-file / resource-pack / plugin downloads fetch the URL
   with the Authorization header and buffer the response as a Blob, capped at
