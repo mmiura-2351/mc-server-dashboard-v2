@@ -28,6 +28,12 @@ describe("consoleCommandErrorPresentation", () => {
       "serverDetail.console.error.commandDropped",
     ],
     [
+      // A symlinked or oversized server.properties (issue #3347).
+      "names a server.properties the host refuses to read",
+      new ApiError(409, { reason: "server_properties_unreadable" }),
+      "serverDetail.console.error.serverPropertiesUnreadable",
+    ],
+    [
       "names a server whose previous stop did not finish",
       new ApiError(409, { reason: "failed_stop_orphan" }),
       "serverDetail.console.error.failedStopOrphan",

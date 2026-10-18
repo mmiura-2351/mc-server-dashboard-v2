@@ -230,6 +230,10 @@ export const en = {
     "Could not start: a port is already in use.",
   "dashboard.lifecycle.imageMissing":
     "Could not start: the server's files are not ready. Try again shortly.",
+  // 409 server_properties_unreadable (issue #3347): a symlinked, special or
+  // oversized server.properties. Start and restart's relaunch.
+  "dashboard.lifecycle.serverPropertiesUnreadable":
+    "Could not start: the server's server.properties is not a regular file (for example, a symbolic link) or is larger than 4 MiB. With the server stopped, restore a regular server.properties, for example by restoring a backup taken before it was replaced, then start the server again.",
   // 409 worker_busy / server_busy (issue #2400): another operation holds the
   // server, so this one was refused without being applied. It clears on its own
   // once that operation finishes, so the only remedy is to retry.
@@ -412,6 +416,8 @@ export const en = {
     "Command not sent: the server's previous stop did not finish, so its process may still be running. The system is shutting it down automatically.",
   "serverDetail.console.error.commandDropped":
     "The server closed its console connection (RCON) without answering, so it is unknown whether the command ran (the server may have run it and then crashed). Check the console output and the server's state before retrying. Long commands can be dropped on some networks: if it did not run, shorten it.",
+  "serverDetail.console.error.serverPropertiesUnreadable":
+    "Command not sent: the server's server.properties is not a regular file (for example, a symbolic link) or is larger than 4 MiB, so its console connection (RCON) cannot be opened. Stop the server and restore a regular server.properties, for example by restoring a backup taken before it was replaced.",
   "serverDetail.console.error.rconFailed":
     "The server's console connection (RCON) failed, so the command may not have run. Check the console output before sending it again.",
   // Lifecycle controls.
@@ -662,6 +668,8 @@ export const en = {
   "backups.error.serverMustBeStopped":
     "The server must be stopped for this operation.",
   "backups.error.serverBusy": "Another operation is in progress. Please wait.",
+  "backups.error.serverPropertiesUnreadable":
+    "Backup not taken: the server's server.properties is not a regular file (for example, a symbolic link) or is larger than 4 MiB, so the running world could not be paused for the backup. A stopped server can be backed up; restore a regular server.properties before starting it again.",
   "backups.error.tooLarge": "That file exceeds the 512 MiB upload limit.",
   "backups.error.generic": "Something went wrong. Please try again.",
 

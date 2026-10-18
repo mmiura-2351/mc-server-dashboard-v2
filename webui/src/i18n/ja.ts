@@ -238,6 +238,9 @@ export const ja: Record<TranslationKey, string> = {
     "起動できませんでした: ポートがすでに使用されています。",
   "dashboard.lifecycle.imageMissing":
     "起動できませんでした: サーバーのファイルが準備できていません。しばらくしてから再試行してください。",
+  // 409 server_properties_unreadable (issue #3347).
+  "dashboard.lifecycle.serverPropertiesUnreadable":
+    "起動できませんでした: server.properties が通常のファイルではない（シンボリックリンクなど）か、4 MiB を超えています。サーバーを停止した状態で、置き換えられる前に取得したバックアップを復元するなどして通常の server.properties に戻し、もう一度起動してください。",
   // 409 worker_busy / server_busy (issue #2400); retry is the only remedy.
   "dashboard.lifecycle.busy":
     "このサーバーで別の操作が進行中です。しばらく待ってから再試行してください。",
@@ -385,6 +388,8 @@ export const ja: Record<TranslationKey, string> = {
     "サーバーの前回の停止が完了しておらず、プロセスがまだ動作している可能性があるため、コマンドは送信されませんでした。システムが自動的に停止処理を進めています。",
   "serverDetail.console.error.commandDropped":
     "サーバーが応答せずにコンソール接続（RCON）を切断したため、コマンドが実行されたかどうかは不明です（実行後にサーバーがクラッシュした可能性もあります）。再試行する前に、コンソールの出力とサーバーの状態を確認してください。長いコマンドはネットワークによって破棄されることがあります。実行されていなかった場合は、コマンドを短くしてください。",
+  "serverDetail.console.error.serverPropertiesUnreadable":
+    "コマンドは送信されませんでした: server.properties が通常のファイルではない（シンボリックリンクなど）か、4 MiB を超えているため、コンソール接続（RCON）を開けません。サーバーを停止し、置き換えられる前に取得したバックアップを復元するなどして通常の server.properties に戻してください。",
   "serverDetail.console.error.rconFailed":
     "サーバーのコンソール接続（RCON）でエラーが発生したため、コマンドが実行されていない可能性があります。再送信する前にコンソールの出力を確認してください。",
   // Lifecycle controls.
@@ -619,6 +624,8 @@ export const ja: Record<TranslationKey, string> = {
   "backups.error.serverMustBeStopped": "この操作にはサーバーの停止が必要です。",
   "backups.error.serverBusy":
     "別の操作が進行中です。完了するまでお待ちください。",
+  "backups.error.serverPropertiesUnreadable":
+    "バックアップを取得できませんでした: server.properties が通常のファイルではない（シンボリックリンクなど）か、4 MiB を超えているため、稼働中のワールドの保存を一時停止できません。停止中のサーバーはバックアップできます。再度起動する前に、通常の server.properties に戻してください。",
   "backups.error.tooLarge":
     "ファイルサイズが512 MiBのアップロード上限を超えています。",
   "backups.error.generic": "問題が発生しました。もう一度お試しください。",

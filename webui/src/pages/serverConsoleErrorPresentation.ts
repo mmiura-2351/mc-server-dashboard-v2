@@ -34,6 +34,11 @@ import type { TranslationKey } from "../i18n/index.ts";
 //   that did not arrive in one read, so a long command on some networks meets
 //   it; but a server that ran the command and then crashed looks the same, so
 //   whether it ran is unknown and the line asks for a check before a retry.
+// - `server_properties_unreadable` (409) — the Worker refuses the server's
+//   `server.properties` (a symlink, a special file, or over its 4 MiB read cap),
+//   and RCON's credentials are in it, so nothing was dialled and the command was
+//   not sent (issue #3347). The file cannot be repaired while the server runs,
+//   so the line says to stop it first.
 // - `command_failed` (409) — the Worker reached a running server but its RCON
 //   connection failed otherwise (open, auth, or a round trip that timed out),
 //   which is the only unclassified failure `handleServerCommand` produces. A
@@ -48,6 +53,8 @@ const CONSOLE_REASON_PRESENTATION: Record<string, TranslationKey> = {
   server_not_running: "serverDetail.console.error.notRunning",
   failed_stop_orphan: "serverDetail.console.error.failedStopOrphan",
   command_dropped: "serverDetail.console.error.commandDropped",
+  server_properties_unreadable:
+    "serverDetail.console.error.serverPropertiesUnreadable",
   command_failed: "serverDetail.console.error.rconFailed",
 };
 
