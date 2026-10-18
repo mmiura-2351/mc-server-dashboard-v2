@@ -3,8 +3,8 @@
 The single M1 ``TokenService`` adapter (ARCHITECTURE.md Section 5.1), wired at the
 edge from ``auth.token.*`` (CONFIGURATION.md Section 5.3):
 
-- **Access tokens** are JWTs signed with ``auth.token.algorithm`` (HS256 default;
-  RS256 supported by passing the matching key material). Claims: ``sub`` (the
+- **Access tokens** are JWTs signed with ``auth.token.algorithm`` (HS256, the
+  only algorithm config admits — #3327). Claims: ``sub`` (the
   user id), ``iat``, and ``exp`` (``access_ttl`` after issue). No ``iss``/``aud``
   — this is a single-issuer, single-audience system, so they would add no check.
 - **Refresh tokens** are opaque high-entropy random secrets, never JWTs. Only
@@ -34,6 +34,7 @@ import datetime as dt
 import hashlib
 import secrets
 import uuid
+from typing import Any
 
 import jwt
 
@@ -61,6 +62,23 @@ _DOWNLOAD_PURPOSE = "download"
 # The ``purpose`` claim marking a JWT as a download cookie — the same authority as
 # a grant on a longer TTL, admissible only from the cookie header (issue #2373).
 _DOWNLOAD_COOKIE_PURPOSE = "download-cookie"
+
+
+def _exp_claim(claims: dict[str, Any]) -> int:
+    """Return the ``exp`` claim, raising ``ValueError`` unless it is an ``int``.
+
+    Stricter than PyJWT's own NumericDate check on purpose: this service only
+    ever issues whole-second ints, so a float, a numeric string, or a ``bool``
+    (an ``int`` subclass, hence ``type`` rather than ``isinstance``) is not a
+    token it minted. ``int()`` would instead coerce those and raise
+    ``TypeError`` — a 500 — on ``null`` or a list (#3327). Callers already map
+    ``ValueError`` (and ``KeyError`` for a missing claim) to their domain error.
+    """
+
+    exp = claims["exp"]
+    if type(exp) is not int:
+        raise ValueError("exp claim is not an integer")
+    return exp
 
 
 class JwtTokenService(TokenService):
@@ -103,7 +121,8 @@ class JwtTokenService(TokenService):
                 algorithms=[self._algorithm],
                 options={"verify_exp": False},
             )
-            if int(self._clock.now().timestamp()) >= int(claims["exp"]):
+            exp = _exp_claim(claims)
+            if int(self._clock.now().timestamp()) >= exp:
                 raise InvalidAccessTokenError
             # An access token never carries a ``purpose``; anything that does is
             # a narrower credential (today: a download grant) and must not be
@@ -112,11 +131,18 @@ class JwtTokenService(TokenService):
                 raise InvalidAccessTokenError
             return VerifiedAccessToken(
                 user_id=UserId(uuid.UUID(claims["sub"])),
-                expires_at=dt.datetime.fromtimestamp(
-                    int(claims["exp"]), tz=dt.timezone.utc
-                ),
+                expires_at=dt.datetime.fromtimestamp(exp, tz=dt.timezone.utc),
             )
-        except (jwt.InvalidTokenError, KeyError, ValueError) as exc:
+        # An ``exp`` too large for a datetime makes ``fromtimestamp`` raise
+        # ValueError, OSError (the C time call fails, e.g. near 2**63) or
+        # OverflowError (past time_t), depending on the value (#3327).
+        except (
+            jwt.InvalidTokenError,
+            KeyError,
+            ValueError,
+            OSError,
+            OverflowError,
+        ) as exc:
             raise InvalidAccessTokenError from exc
 
     def issue_refresh_token(self) -> IssuedRefreshToken:
@@ -210,7 +236,7 @@ class JwtTokenService(TokenService):
                 algorithms=[self._algorithm],
                 options={"verify_exp": False},
             )
-            if int(self._clock.now().timestamp()) >= int(claims["exp"]):
+            if int(self._clock.now().timestamp()) >= _exp_claim(claims):
                 raise error
             if claims.get("purpose") != purpose:
                 raise error
