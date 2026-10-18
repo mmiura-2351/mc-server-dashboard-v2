@@ -1507,6 +1507,10 @@ export interface paths {
          *     ``server-port`` or ``rcon.password`` — is 422 ``platform_managed_key`` with
          *     the offending key in the ``key`` member. A version differing only in the
          *     user's own keys rolls back normally.
+         *
+         *     A path at a root name starting ``.mcsd_generation`` — the Worker's generation
+         *     marker — or under one is 422 ``reserved_name`` (issue #3433), even for a
+         *     version retained before the name was reserved.
          */
         post: operations["rollback_file_api_communities__community_id__servers__server_id__files_rollback_post"];
         delete?: never;
