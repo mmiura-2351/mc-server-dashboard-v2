@@ -304,6 +304,11 @@ async def test_dispatch_list_files_carries_listing_back(harness: _Harness) -> No
         (pb.COMMAND_ERROR_CODE_INVALID_STATE, CommandResultCode.INVALID_STATE),
         # RCON dropped a console command without replying (issue #3366).
         (pb.COMMAND_ERROR_CODE_COMMAND_DROPPED, CommandResultCode.COMMAND_DROPPED),
+        # server.properties is not a regular file or is too large (issue #3347).
+        (
+            pb.COMMAND_ERROR_CODE_SERVER_PROPERTIES_UNREADABLE,
+            CommandResultCode.SERVER_PROPERTIES_UNREADABLE,
+        ),
     ],
 )
 async def test_dispatch_failure_maps_typed_code(

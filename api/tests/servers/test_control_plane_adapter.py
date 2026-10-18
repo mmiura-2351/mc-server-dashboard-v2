@@ -445,6 +445,11 @@ async def test_list_files_dispatches_and_carries_listing() -> None:
     [
         (CommandResultCode.PORT_CONFLICT, CommandStatus.PORT_CONFLICT),
         (CommandResultCode.IMAGE_MISSING, CommandStatus.IMAGE_MISSING),
+        # server.properties is not a regular file or is too large (issue #3347).
+        (
+            CommandResultCode.SERVER_PROPERTIES_UNREADABLE,
+            CommandStatus.SERVER_PROPERTIES_UNREADABLE,
+        ),
     ],
 )
 async def test_sanitized_start_failure_maps_to_status(
@@ -465,6 +470,21 @@ async def test_sanitized_start_failure_maps_to_status(
         cpu_millis=0,
     )
     assert outcome.status is status
+
+
+async def test_refused_server_properties_on_a_console_command_maps_to_status() -> None:
+    # The RCON open read a server.properties the Worker refused (issue #3347).
+    fleet = _CapturingFleetControlPlane(
+        result=CommandResult(
+            code=CommandResultCode.SERVER_PROPERTIES_UNREADABLE, message="x"
+        )
+    )
+    adapter = _adapter(fleet)
+
+    outcome = await adapter.command(
+        worker_id=WorkerId(uuid.uuid4()), server_id=ServerId(uuid.uuid4()), line="list"
+    )
+    assert outcome.status is CommandStatus.SERVER_PROPERTIES_UNREADABLE
 
 
 async def test_dropped_console_command_maps_to_status() -> None:

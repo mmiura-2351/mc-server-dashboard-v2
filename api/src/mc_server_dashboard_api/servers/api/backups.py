@@ -324,11 +324,13 @@ async def create_backup(
         # Worker refuses it with BUSY -> ``worker_busy`` when another mutating
         # command for this id is already in flight. That is a retryable
         # contention, and flattening it to the catch-all threw the retryable-ness
-        # away at the edge. Only ``worker_busy`` can arrive here — the other
-        # sanitized categories (port_conflict / image_missing) are start-only —
-        # and the raw Worker message is never the reason (log-only), so nothing
-        # leaks. ``command_failed`` stays the catch-all for a dispatch failure the
-        # Worker did not classify.
+        # away at the edge. ``server_properties_unreadable`` arrives here too:
+        # the Worker refuses a running snapshot it cannot quiesce because RCON's
+        # credentials are in a server.properties it will not read (issue #3347).
+        # The other sanitized categories (port_conflict / image_missing) are
+        # start-only, and the raw Worker message is never the reason (log-only),
+        # so nothing leaks. ``command_failed`` stays the catch-all for a dispatch
+        # failure the Worker did not classify.
         raise _conflict(exc.reason or "command_failed") from exc
     except BackupCorruptError as exc:
         # The working set is structurally corrupt (a crash-during-save truncation,

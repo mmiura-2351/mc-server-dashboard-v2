@@ -43,12 +43,20 @@ _LOG = logging.getLogger(__name__)
 # without replying to a console command, which is how it answers a packet that did
 # not arrive in one read. Only a ServerCommand can produce it, and it tells the
 # user the server was reached but dropped the command -- not that it is down.
+#
+# ``server_properties_unreadable`` (issue #3347): the Worker refused the server's
+# ``server.properties`` because it is not a regular file (a symlink, a FIFO, ...)
+# or is larger than its read cap, so it could not take the ports for a start or a
+# restart's relaunch, the RCON credentials for a console command, or quiesce a
+# running snapshot (a manual backup). The user restores a regular file; which
+# refusal it was, and where, stays in the log with the rest of the message.
 WORKER_BUSY_REASON = "worker_busy"
 _SANITIZED_REASONS: dict[CommandStatus, str] = {
     CommandStatus.PORT_CONFLICT: "port_conflict",
     CommandStatus.IMAGE_MISSING: "image_missing",
     CommandStatus.BUSY: WORKER_BUSY_REASON,
     CommandStatus.COMMAND_DROPPED: "command_dropped",
+    CommandStatus.SERVER_PROPERTIES_UNREADABLE: "server_properties_unreadable",
 }
 
 # The Worker refused the command because it holds a failed-stop orphan for the
