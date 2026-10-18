@@ -280,6 +280,22 @@ type ServerControl interface {
 	Close() error
 }
 
+// ErrConnBroken is returned by ServerControl.Execute when a prior round trip
+// failed mid-stream (timeout or cancel), which can leave the connection
+// mis-framed. The connection is poisoned on such a failure so reuse fails fast and
+// forces a redial rather than reading a stale response off the broken stream.
+var ErrConnBroken = errors.New("rcon: connection poisoned by a prior I/O error")
+
+// ErrCommandDropped is returned by ServerControl.Execute when the server closed
+// the connection (EOF or reset) after the command was written and before a single
+// response byte arrived. That is how vanilla answers a request packet that did not
+// arrive in one read: it drops the connection without running the command (issue
+// #3366, CONTROL_PLANE.md Section 3.1). A server that ran the command and died
+// before answering looks the same, so whether it ran stays uncertain. It is told
+// apart from a hung server (a timeout), from a reply cut short (some bytes
+// arrived), and from a failure to connect or authenticate.
+var ErrCommandDropped = errors.New("rcon: server closed the connection without replying to the command")
+
 // ErrNoRuntime is returned by the container driver's image selector when no
 // configured image matches the Java major the requested Minecraft version needs.
 var ErrNoRuntime = errors.New("execution: no Java runtime for Minecraft version")

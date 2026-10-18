@@ -12,7 +12,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/rcon"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
@@ -360,7 +359,7 @@ func driveRow(t *testing.T, row contractRow) session.CommandResult {
 		// A running instance whose RCON server closes the connection after the
 		// command is written, without replying (issue #3366). The fake control
 		// returns the rcon adapter's sentinel wrapped the way Execute wraps it.
-		dropped := &fakeControl{err: fmt.Errorf("%w: rcon: read length: EOF", rcon.ErrCommandDropped)}
+		dropped := &fakeControl{err: fmt.Errorf("%w: rcon: read length: EOF", execution.ErrCommandDropped)}
 		m := newManager(t, &fakeDriver{}, dropped).
 			WithTransfer(&fakeTransfer{}).
 			WithTunnelDialer(&fakeTunnelDialer{}).
