@@ -14,6 +14,7 @@ import asyncio
 import dataclasses
 import datetime as dt
 import json
+import logging
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -35,7 +36,9 @@ from mc_server_dashboard_api.community.domain.value_objects import (
     ResourceRef,
     UserId,
 )
+from mc_server_dashboard_api.core.adapters.database import create_engine
 from mc_server_dashboard_api.dependencies import (
+    _build_token_service,
     get_current_user_ws,
     get_membership_visibility,
     get_permission_checker,
@@ -52,6 +55,7 @@ from mc_server_dashboard_api.fleet.domain.real_time_events import (
     RealTimeEvents,
     notification_event,
 )
+from mc_server_dashboard_api.identity.adapters.clock import SystemClock
 from mc_server_dashboard_api.identity.application.authenticate_request import (
     Authentication,
 )
@@ -1356,3 +1360,156 @@ async def test_cancellation_while_parked_leaves_no_orphan_tasks() -> None:
             break
         await asyncio.wait(leftovers, timeout=1)
     assert {t for t in asyncio.all_tasks() if t is not current} == set()
+
+
+# --- transient database failures (#3313) -----------------------------------
+
+
+def _assert_one_line(caplog: pytest.LogCaptureFixture) -> None:
+    """The failure was logged once, as a WARNING without a traceback."""
+
+    records = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(records) == 1, [r.getMessage() for r in records]
+    assert records[0].levelno == logging.WARNING
+    assert records[0].exc_info is None
+
+
+def test_handshake_authentication_database_failure_refuses_1013(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The real handshake authentication, against an unreachable database.
+
+    The token verifies, so the user load is what fails: the handshake is
+    refused with 1013 and logged as one line, not an unhandled ASGI error.
+    """
+
+    app = _shared_app
+    app.dependency_overrides.clear()  # the real get_current_user_ws
+    client = _client(app)
+    monkeypatch.setattr(
+        app.state, "engine", create_engine("postgresql+asyncpg://u:p@127.0.0.1:5/x")
+    )
+    token = _build_token_service(
+        app.state.settings.auth.token, SystemClock()
+    ).issue_access_token(make_user().id)
+
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(WebSocketDisconnect) as exc:
+            with client.websocket_connect(
+                _url(uuid.uuid4(), uuid.uuid4()),
+                headers={"Authorization": f"Bearer {token}"},
+            ):
+                pass
+    assert exc.value.code == 1013
+    _assert_one_line(caplog)
+
+
+class _UnreachableVisibility(MembershipVisibility):
+    async def is_member(self, *, user_id: UserId, community_id: CommunityId) -> bool:
+        raise ConnectionRefusedError(111, "Connect call failed")
+
+
+def test_handshake_authorization_database_failure_refuses_1013(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    app = _app()
+    app.dependency_overrides[get_membership_visibility] = _UnreachableVisibility  # type: ignore[attr-defined]
+    with caplog.at_level(logging.WARNING):
+        _assert_rejected(app, 1013)
+    _assert_one_line(caplog)
+
+
+class _ConnectedSocket:
+    """A client that stays connected and records the close codes it is sent."""
+
+    def __init__(self) -> None:
+        self.closed: list[int] = []
+
+    async def receive(self) -> dict[str, object]:
+        await asyncio.Event().wait()  # the client never leaves
+        raise AssertionError("unreachable")
+
+    async def send_text(self, text: str) -> None:
+        pass
+
+    async def close(self, code: int) -> None:
+        self.closed.append(code)
+
+
+async def _relay_reauthorizing(
+    reauthorize: Callable[[], Awaitable[int | None]],
+) -> _ConnectedSocket:
+    from mc_server_dashboard_api.fleet.api import events as events_module
+
+    socket = _ConnectedSocket()
+    bus = InProcessRealTimeEvents()
+    subscription = bus.subscribe(server_id="s", streams=frozenset({EventStream.STATUS}))
+
+    async def _encode(event: RealTimeEvent) -> str | None:
+        raise AssertionError("no events are published in this test")
+
+    try:
+        await asyncio.wait_for(
+            events_module._relay(
+                socket,  # type: ignore[arg-type]
+                subscription,
+                reauthorize=reauthorize,
+                encode=_encode,
+                snapshot=None,
+                expires_at=make_authentication().expires_at,
+            ),
+            timeout=5,
+        )
+    finally:
+        await subscription.aclose()
+    return socket
+
+
+async def test_a_hung_reauthorization_closes_1013_at_its_bound(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A frozen database cannot park the relay in the re-check."""
+
+    from mc_server_dashboard_api.fleet.api import events as events_module
+
+    monkeypatch.setattr(events_module, "_REAUTHZ_INTERVAL_SECONDS", 0.05)
+    monkeypatch.setattr(events_module, "_REAUTHZ_TIMEOUT_SECONDS", 0.1)
+
+    async def _hung() -> int | None:
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    with caplog.at_level(logging.WARNING):
+        socket = await _relay_reauthorizing(_hung)
+    assert socket.closed == [1013]
+    _assert_one_line(caplog)
+
+
+async def test_a_reauthorization_database_failure_closes_1013(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from mc_server_dashboard_api.fleet.api import events as events_module
+
+    monkeypatch.setattr(events_module, "_REAUTHZ_INTERVAL_SECONDS", 0.05)
+
+    async def _unreachable() -> int | None:
+        raise ConnectionRefusedError(111, "Connect call failed")
+
+    with caplog.at_level(logging.WARNING):
+        socket = await _relay_reauthorizing(_unreachable)
+    assert socket.closed == [1013]
+    _assert_one_line(caplog)
+
+
+async def test_a_reauthorization_bug_is_not_masked_as_transient(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mc_server_dashboard_api.fleet.api import events as events_module
+
+    monkeypatch.setattr(events_module, "_REAUTHZ_INTERVAL_SECONDS", 0.05)
+
+    async def _bug() -> int | None:
+        raise ValueError("bug")
+
+    with pytest.raises(ValueError, match="bug"):
+        await _relay_reauthorizing(_bug)
