@@ -77,10 +77,14 @@ type fakeDocker struct {
 	// stopped records the ids passed to Stop (in order), and stopErr forces a Stop
 	// failure. Used by the Sweep tests to assert the graceful-stop-before-remove
 	// ordering for running orphans (issue #336).
-	stopped    []string
-	stopErr    error
-	killCalled bool
-	killCalls  int
+	stopped []string
+	stopErr error
+	// daemonStops counts Stop calls (`docker stop`, daemon-side SIGKILL) and
+	// terminates Terminate calls (SIGTERM alone) (issue #3436).
+	daemonStops int
+	terminates  int
+	killCalled  bool
+	killCalls   int
 	// killNoExit models a container that survives docker kill: Kill records the
 	// call but does not release Wait, so the post-Kill waitExit times out.
 	killNoExit bool
@@ -215,14 +219,34 @@ func (f *fakeDocker) Start(_ context.Context, _ string) error {
 }
 
 func (f *fakeDocker) Stop(ctx context.Context, id string, _ time.Duration) error {
+	f.mu.Lock()
+	f.daemonStops++
+	f.mu.Unlock()
 	return f.term(ctx, id)
 }
 
-// Terminate shares Stop's fields: both are the SIGTERM a stop sends, the Sweep's
-// through `docker stop` and an instance's through the kill endpoint (issue #3436),
-// so stopCalled, stopNoExit, stopErr and the rest model either.
+// Terminate shares Stop's behaviour fields: both are the SIGTERM a stop sends, the
+// Sweep's through `docker stop` and an instance's through the kill endpoint (issue
+// #3436), so stopCalled, stopNoExit, stopErr and the rest model either. Which of
+// the two was used is counted apart (daemonStops, terminates), since only the kill
+// endpoint leaves the SIGKILL to the driver.
 func (f *fakeDocker) Terminate(ctx context.Context, id string) error {
+	f.mu.Lock()
+	f.terminates++
+	f.mu.Unlock()
 	return f.term(ctx, id)
+}
+
+func (f *fakeDocker) daemonStopCalled() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.daemonStops > 0
+}
+
+func (f *fakeDocker) terminateCalled() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.terminates > 0
 }
 
 func (f *fakeDocker) term(ctx context.Context, id string) error {

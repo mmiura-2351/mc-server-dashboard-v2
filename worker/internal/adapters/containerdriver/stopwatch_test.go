@@ -121,19 +121,27 @@ const (
 )
 
 // startStopRun starts a running instance on a driver with the production idle
-// window, poll and cap on a fake clock, and begins a graceful Stop of it.
+// window, poll and cap on a fake clock, and begins a graceful Stop of it. Scans
+// run inline, so each poll sees its own scan's result deterministically.
 func startStopRun(t *testing.T, docker *fakeDocker, ctrl execution.ServerControl, ctrlErr error, world *fakeWorld) *stopRun {
+	t.Helper()
+	return startStopRunWith(t, docker, ctrl, ctrlErr, world.probe, func(f func()) { f() })
+}
+
+// startStopRunWith is startStopRun with the probe and the scan runner given.
+func startStopRunWith(t *testing.T, docker *fakeDocker, ctrl execution.ServerControl, ctrlErr error,
+	probe func() (execution.WorldProgress, error), runScan func(func())) *stopRun {
 	t.Helper()
 	d := New(docker, images(), func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
 		return ctrl, ctrlErr
 	}, Options{WorkerID: "w1", StopTimeout: testIdle, GameBindIP: "0.0.0.0", ReadinessTimeout: 20 * time.Millisecond})
 	clock := newStopClock()
-	d.now, d.after = clock.Now, clock.After
+	d.now, d.after, d.runScan = clock.Now, clock.After, runScan
 	if d.stopPoll != testPoll || d.stopCap != testCap {
 		t.Fatalf("driver poll/cap = %v/%v, want the production %v/%v", d.stopPoll, d.stopCap, testPoll, testCap)
 	}
 	s := spec()
-	s.WorldProgress = world.probe
+	s.WorldProgress = probe
 	inst, err := d.Start(context.Background(), s)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
@@ -289,5 +297,112 @@ func TestRCONPhaseWaitsWhileTheWorldIsWrittenThenSendsSIGTERM(t *testing.T) {
 	}
 	if r.err != nil || docker.killWasCalled() {
 		t.Fatalf("Stop = %v, kill = %v; want SIGTERM to have ended the server", r.err, docker.killWasCalled())
+	}
+}
+
+// stalledProbe is a probe whose calls from the n-th on block until the test ends,
+// modelling a scan wedged on the filesystem (issue #3436 review).
+func stalledProbe(t *testing.T, from int) func() (execution.WorldProgress, error) {
+	t.Helper()
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	var calls atomic.Int64
+	return func() (execution.WorldProgress, error) {
+		if calls.Add(1) >= int64(from) {
+			<-release
+		}
+		return execution.WorldProgress{}, nil
+	}
+}
+
+// runToCap steps the clock until Stop returns and checks it was killed at the cap,
+// at most one scan timeout late.
+func runToCap(t *testing.T, r *stopRun, docker *fakeDocker) {
+	t.Helper()
+	elapsed := time.Duration(0)
+	for !r.step(testPoll) {
+		elapsed += testPoll
+		if elapsed > 2*testCap {
+			t.Fatalf("Stop still waiting %v into the stop, past the %v cap", elapsed, testCap)
+		}
+	}
+	elapsed += testPoll
+	if elapsed < testCap || elapsed > testCap+testPoll {
+		t.Fatalf("Stop returned %v into the stop, want the %v cap (at most one scan timeout late)", elapsed, testCap)
+	}
+	if r.err != nil || !docker.killWasCalled() {
+		t.Fatalf("Stop = %v, kill = %v; want the kill at the cap", r.err, docker.killWasCalled())
+	}
+}
+
+// A baseline scan that never answers does not hold back the stop signal, and the
+// stop is still killed at the cap: an unanswered scan counts as a write, so it
+// keeps the wait alive, but only until the cap.
+func TestStalledBaselineScanStillSignalsAndKillsAtTheCap(t *testing.T) {
+	docker := newFakeDocker()
+	docker.stopNoExit = true
+	r := startStopRunWith(t, docker, nil, errors.New("rcon unavailable"), stalledProbe(t, 1), func(f func()) { go f() })
+
+	if r.awaitWaiting() {
+		t.Fatalf("Stop returned before waiting: %v", r.err)
+	}
+	if !docker.terminateCalled() {
+		t.Fatal("no SIGTERM while the baseline scan is outstanding")
+	}
+	runToCap(t, r, docker)
+}
+
+// A later scan that stalls does not stall the wait: the stop is still killed at
+// the cap rather than hanging with no daemon-side SIGKILL to end it.
+func TestStalledLaterScanStillKillsAtTheCap(t *testing.T) {
+	docker := newFakeDocker()
+	docker.stopNoExit = true
+	r := startStopRunWith(t, docker, nil, errors.New("rcon unavailable"), stalledProbe(t, 2), func(f func()) { go f() })
+
+	if r.awaitWaiting() {
+		t.Fatalf("Stop returned before waiting: %v", r.err)
+	}
+	runToCap(t, r, docker)
+}
+
+// The exit is still seen while a scan is outstanding: the stop ends cleanly at
+// once, with no kill.
+func TestExitDuringAStalledScanEndsTheStop(t *testing.T) {
+	docker := newFakeDocker()
+	docker.stopNoExit = true
+	r := startStopRunWith(t, docker, nil, errors.New("rcon unavailable"), stalledProbe(t, 1), func(f func()) { go f() })
+	r.awaitWaiting()
+	if r.step(testPoll) {
+		t.Fatalf("Stop returned %v with the server still running", r.err)
+	}
+
+	// The clock is not advanced: the exit alone must end the wait on the scan.
+	docker.exit(143, nil)
+	select {
+	case r.err = <-r.done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Stop still waiting on a stalled scan after the server exited")
+	}
+	if r.err != nil || docker.killWasCalled() {
+		t.Fatalf("Stop = %v, kill = %v; want a clean stop", r.err, docker.killWasCalled())
+	}
+}
+
+// An instance stop sends SIGTERM through the kill endpoint and never through
+// `docker stop`, whose daemon-side grace would SIGKILL a save the driver is still
+// watching (issue #3436).
+func TestInstanceStopSignalsWithoutDockerStop(t *testing.T) {
+	docker := newFakeDocker()
+	world := &fakeWorld{}
+	r := startStopRun(t, docker, nil, errors.New("rcon unavailable"), world)
+	if !r.awaitWaiting() && !r.step(testPoll) {
+		t.Fatal("Stop still waiting after SIGTERM ended the server")
+	}
+	if r.err != nil {
+		t.Fatalf("Stop: %v", r.err)
+	}
+	if !docker.terminateCalled() || docker.daemonStopCalled() {
+		t.Fatalf("terminate = %v, docker stop = %v; want SIGTERM via the kill endpoint only",
+			docker.terminateCalled(), docker.daemonStopCalled())
 	}
 }

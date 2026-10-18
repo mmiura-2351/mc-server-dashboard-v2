@@ -230,6 +230,9 @@ type Driver struct {
 	stopPoll time.Duration
 	now      func() time.Time
 	after    func(time.Duration) <-chan time.Time
+	// runScan runs a stop's world scan off the wait's goroutine (stopWatch); a test
+	// runs it inline to keep the fake clock deterministic.
+	runScan func(func())
 	// flushTimeout bounds the pre-stop flush (issue #2622).
 	flushTimeout time.Duration
 	gameBindIP   string
@@ -302,6 +305,7 @@ func New(docker dockerAPI, images *ImageSelector, openControl controlFunc, opts 
 		stopPoll:         defaultStopPollInterval,
 		now:              time.Now,
 		after:            time.After,
+		runScan:          func(f func()) { go f() },
 		flushTimeout:     flushTimeout,
 		gameBindIP:       gameBindIP,
 		network:          opts.Network,
@@ -385,6 +389,7 @@ func (d *Driver) Start(ctx context.Context, spec execution.InstanceSpec) (execut
 		stopPoll:         d.stopPoll,
 		now:              d.now,
 		after:            d.after,
+		runScan:          d.runScan,
 		flushTimeout:     d.flushTimeout,
 		readinessTimeout: d.readinessTimeout,
 		logger:           d.logger,
@@ -1026,6 +1031,7 @@ type instance struct {
 	stopPoll    time.Duration
 	now         func() time.Time
 	after       func(time.Duration) <-chan time.Time
+	runScan     func(func())
 	// flushTimeout bounds the pre-stop flush preFallback (issue #2622).
 	flushTimeout time.Duration
 	// readinessTimeout bounds the hold-on-starting wait before falling back to
@@ -2083,6 +2089,14 @@ const (
 // A server writing its shutdown save — which can take minutes when every chunk
 // write is synchronous — keeps its grace; a hung server, which writes nothing, is
 // escalated as soon as the fixed grace used to.
+//
+// The probe walks a filesystem, which can stall, and since the daemon no longer
+// escalates on its own a stalled probe must not hold the stop: every scan runs off
+// the wait's goroutine (runScan), the wait gives it at most stopScanTimeout while
+// still watching for the exit and ctx, and a scan that has not answered is
+// "unknown", counted as a write. A second scan is never started while one is
+// outstanding. So the cap and the stop deadline fire whatever the probe does, at
+// most one scan timeout late, and a stop leaks at most one stalled scan.
 type stopWatch struct {
 	i *instance
 	// probe fingerprints the world (InstanceSpec.WorldProgress); nil observes
@@ -2093,20 +2107,42 @@ type stopWatch struct {
 	start     time.Time
 	idleFrom  time.Time
 	lastWrite time.Time
+	// scan carries the outstanding scan's result, nil when none is in flight. The
+	// first result taken is the baseline the later ones are compared with.
+	scan      chan stopScan
+	baselined bool
 	prev      execution.WorldProgress
 	havePrev  bool
 }
 
-// newStopWatch starts a watch now, taking the world's baseline fingerprint.
+// stopScan is one probe result.
+type stopScan struct {
+	progress execution.WorldProgress
+	err      error
+}
+
+// newStopWatch starts a watch now and starts the baseline scan, which the first
+// poll takes; nothing waits for it here, so a stalled scan never delays the step
+// the caller takes next.
 func (i *instance) newStopWatch(probe func() (execution.WorldProgress, error)) *stopWatch {
 	now := i.now()
 	w := &stopWatch{i: i, probe: probe, start: now, idleFrom: now}
-	if probe != nil {
-		if p, err := probe(); err == nil {
-			w.prev, w.havePrev = p, true
-		}
-	}
+	w.startScan()
 	return w
+}
+
+// startScan starts a scan unless the watch has no probe or one is outstanding.
+func (w *stopWatch) startScan() {
+	if w.probe == nil || w.scan != nil {
+		return
+	}
+	ch := make(chan stopScan, 1)
+	probe := w.probe
+	w.i.runScan(func() {
+		p, err := probe()
+		ch <- stopScan{progress: p, err: err}
+	})
+	w.scan = ch
 }
 
 // restartIdle gives the next step its full idle window: a server that has just
@@ -2127,10 +2163,17 @@ func (w *stopWatch) wait(ctx context.Context) string {
 			return stopReasonDeadline
 		case <-w.i.after(w.i.stopPollInterval()):
 		}
-		now := w.i.now()
-		if w.written() {
-			w.lastWrite, w.idleFrom = now, now
+		if w.probe != nil {
+			written, ended, reason := w.observe(ctx)
+			if ended {
+				return reason
+			}
+			if written {
+				now := w.i.now()
+				w.lastWrite, w.idleFrom = now, now
+			}
 		}
+		now := w.i.now()
 		select {
 		case <-w.i.exited:
 			return ""
@@ -2145,19 +2188,48 @@ func (w *stopWatch) wait(ctx context.Context) string {
 	}
 }
 
-// written reports whether the world changed since the previous poll. A scan that
-// cannot tell counts as a write: a save may be under way, and the cap still bounds
-// a scan that never succeeds.
-func (w *stopWatch) written() bool {
-	if w.probe == nil {
+// observe takes one poll's observation: it starts a scan unless one is still
+// outstanding and waits at most stopScanTimeout for it, reporting whether the
+// world was written. A scan that does not answer in time is unknown and counts as
+// a write. When the container exits or ctx ends meanwhile, ended is set and
+// reason is what wait returns ("" for the exit).
+func (w *stopWatch) observe(ctx context.Context) (written, ended bool, reason string) {
+	w.startScan()
+	select {
+	case r := <-w.scan:
+		return w.take(r), false, ""
+	default:
+	}
+	select {
+	case r := <-w.scan:
+		return w.take(r), false, ""
+	case <-w.i.exited:
+		return false, true, ""
+	case <-ctx.Done():
+		return false, true, stopReasonDeadline
+	case <-w.i.after(w.i.stopScanTimeout()):
+		return true, false, ""
+	}
+}
+
+// take consumes the outstanding scan's result and reports whether the world
+// changed since the previous one. The first result is the baseline (no change); a
+// failed scan cannot tell, so it counts as a write.
+func (w *stopWatch) take(r stopScan) bool {
+	w.scan = nil
+	if !w.baselined {
+		w.baselined = true
+		if r.err != nil {
+			return true
+		}
+		w.prev, w.havePrev = r.progress, true
 		return false
 	}
-	p, err := w.probe()
-	if err != nil {
+	if r.err != nil {
 		return true
 	}
-	changed := !w.havePrev || p != w.prev
-	w.prev, w.havePrev = p, true
+	changed := !w.havePrev || r.progress != w.prev
+	w.prev, w.havePrev = r.progress, true
 	return changed
 }
 
@@ -2165,6 +2237,12 @@ func (w *stopWatch) written() bool {
 // unless the idle window is shorter, so the window is never overshot by a poll.
 func (i *instance) stopPollInterval() time.Duration {
 	return min(i.stopPoll, i.stopTimeout)
+}
+
+// stopScanTimeout is how long a poll waits for its scan before counting it
+// unknown: one poll interval, which also bounds how late the cap can fire.
+func (i *instance) stopScanTimeout() time.Duration {
+	return i.stopPollInterval()
 }
 
 // logEscalation records one escalation step at WARN (issue #3436): the step it
