@@ -317,7 +317,7 @@ post-final-snapshot scratch GC sweeps in that same order, and for the same reaso
 Sweeping first makes an interruption **anywhere** in the
 per-id body recoverable — at any shutdown budget, and for a crash or a power loss
 too. That is why this leg needs no budget of its own: the Worker's
-`stop_grace_period` (`compose.yaml`, 300 s) is sized for `Manager.Close`'s
+`stop_grace_period` (`compose.yaml`, 600 s) is sized for `Manager.Close`'s
 retry-stop leg, not for this one. The list is
 fail-safe: a DB error on the API side yields an empty list rather than misclassifying
 a live server as deleted.

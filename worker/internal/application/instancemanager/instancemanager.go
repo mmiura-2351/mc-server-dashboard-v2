@@ -572,9 +572,10 @@ func (m *Manager) goBackground(fn func()) bool {
 // long between SIGTERM and SIGKILL, and the two numbers are a pair: change this
 // bound and the compose value is wrong, and vice versa.
 //
-// The bound is roughly 280 s. A retry stop already inside inst.Stop costs
+// The bound is 550 s (CloseBound). A retry stop already inside inst.Stop costs
 // flushTimeout + stopDeadline + the kill call + the post-kill exit confirmation +
-// restoreSaveTimeout (90 + 100 + 30 + 30 + 30 s at the containerdriver defaults).
+// restoreSaveTimeout (90 + 370 + 30 + 30 + 30 s at the containerdriver defaults;
+// stopDeadline is the progress-aware stop's 360 s cap plus 10 s, issue #3436).
 // Those last three ADD rather than share: the kill runs on a context detached from
 // stopDeadline so it reaches the daemon even when the earlier phases consumed the
 // whole budget, and waitExitDone honours no context at all. The one reclaim id in
@@ -585,7 +586,7 @@ func (m *Manager) goBackground(fn func()) bool {
 // it:
 //
 //   - reserved, orphans and converging are in-memory and die with the process
-//     either way — at 10 s or at 280 s.
+//     either way — at 10 s or at 550 s.
 //   - a reclaim cut anywhere in its per-id body leaves <scratch>/<id> on disk, and
 //     that dir IS the advertisement that re-offers the id: the held-set scans
 //     report it, the API re-derives unknown_held_server_ids from that report, and
@@ -663,7 +664,7 @@ func (m *Manager) Close() {
 	// THE WHOLE ADDED LATENCY OF THIS CHANGE IS THAT ONE BOUND, paid once however
 	// many servers are draining, and only when a server does not answer.
 	//
-	// Close's ~280 s worst case is therefore unchanged, and so is the compose value
+	// Close's 550 s worst case is therefore unchanged, and so is the compose value
 	// paired with it: 5 s is well inside the restoreSaveTimeout leg that bound already
 	// counts. What CAN get slower is the best case — a quiesced stop that resolves in
 	// the same instant leaves no join for its restore to hide behind, so a Close that
@@ -973,6 +974,15 @@ func (m *Manager) recordGenerationIfUnchanged(ctx context.Context, ref *workingD
 // deadline so the call cannot hang the goroutine forever.
 const restoreSaveTimeout = 30 * time.Second
 
+// CloseBound is Manager.Close's worst case on a driver whose longest stop is
+// maxStop: a retry stop already inside inst.Stop, then the save-on restore a
+// failed stop runs after it (restoreSaveTimeout). compose.yaml's
+// stop_grace_period on the Worker must cover it (issues #2934, #3436); a test in
+// cmd/worker pins that against containerdriver.MaxStopDuration.
+func CloseBound(maxStop time.Duration) time.Duration {
+	return maxStop + restoreSaveTimeout
+}
+
 // closingSaveOnTimeout bounds the SAME RCON call when Close issues it for a stop
 // bracket still outstanding at shutdown (issue #3166). It is deliberately far
 // shorter than restoreSaveTimeout above, and the reason is what the two budgets
@@ -997,7 +1007,7 @@ const restoreSaveTimeout = 30 * time.Second
 // default grace, so the drain can never be what an unconfigured deployment is
 // SIGKILLed for. It is also the WHOLE of the latency this change can add to a
 // shutdown: Close's restores run concurrently, so a drain of any size costs at most
-// this once, and Close's ~280 s worst case — which compose's stop_grace_period is
+// this once, and Close's 550 s worst case — which compose's stop_grace_period is
 // sized for — is untouched, since 5 s is well inside the restoreSaveTimeout leg that
 // bound already counts.
 //
