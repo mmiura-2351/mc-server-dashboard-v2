@@ -872,12 +872,13 @@ class StartServer:
         if not skip_hydrate:
             # Read the authoritative generation BEFORE the transfer (issue #2477): the
             # data plane serves the store's generation at PULL time, and the counter is
-            # monotonic (commit_snapshot, a restore #873 and an at-rest edit #889 all
-            # bump it; nothing lowers it), so this read is at or below what the Worker
-            # ends up holding. Recording it therefore never overstates the held set —
-            # the one thing that would be unsafe, because a later start would then skip
-            # a hydrate it needs. A failed read costs only the refresh (the entry stays
-            # as it was, so the next start hydrates), so it must not fail the launch.
+            # monotonic (commit_snapshot, a restore #873, an at-rest edit #889 and the
+            # delete prune #3434 all bump it; nothing lowers it), so this read is at or
+            # below what the Worker ends up holding. Recording it therefore never
+            # overstates the held set — the one thing that would be unsafe, because a
+            # later start would then skip a hydrate it needs. A failed read costs only
+            # the refresh (the entry stays as it was, so the next start hydrates), so
+            # it must not fail the launch.
             hydrated_generation = await self._generation_before_hydrate(
                 community_id, server_id
             )

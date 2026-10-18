@@ -421,9 +421,9 @@ async def publish_snapshot(
     is discarded and the newer ``current`` is kept, so the Worker re-bases on its next
     start — the same convergence as the pre-stream refusal. One re-check outcome is
     NOT an advance: a concurrent delete's retention prune (issue #777) can run under
-    the same per-server lock during the upload window and remove the generation
-    marker, so the re-check reads generation 0 while ``expected_base`` is >= 1 — the
-    store REGRESSED. That case is refused with a DISTINCT 409 ``deleted_during_upload``
+    the same per-server lock during the upload window, advancing the generation and
+    removing the live snapshot, so the re-check finds the generation moved and no
+    working set left. That case is refused with a DISTINCT 409 ``deleted_during_upload``
     (issue #921) so the outcome names the concurrent delete rather than the misleading
     "generation advanced"; the staging is discarded and the delete wins.
 
@@ -616,10 +616,10 @@ async def publish_snapshot(
         except PrunedStoreError as exc:
             # A concurrent delete pruned the store DURING the upload window
             # (issue #921): the delete-retention prune ran under the same
-            # per-server lock the commit takes, removed the generation marker,
-            # and discarded the working set — so the commit's re-check read a
-            # generation of 0 while its expected base was >= 1. This is NOT the
-            # generic "generation advanced" case (the store REGRESSED to 0), so
+            # per-server lock the commit takes, advanced the generation, and
+            # discarded the working set — so the commit's re-check found the
+            # generation moved and no live snapshot. This is NOT the generic
+            # "generation advanced" case (the working set is gone), so
             # surface a DISTINCT 409 that names the concurrent delete and log it
             # accurately, rather than the misleading "advanced during upload".
             # Caught BEFORE StaleGenerationError because it is a subclass of it.
