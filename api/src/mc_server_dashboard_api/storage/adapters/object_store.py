@@ -1044,12 +1044,24 @@ class ObjectStorage(Storage):
                     # Advancing it, rather than carrying it forward unchanged, also
                     # keeps a late commit whose guard read the pre-prune generation
                     # failing its re-check (#921/#1704), since the prune replaced the
-                    # published world. No publisher produced the pruned state, so none
-                    # is recorded and the publish-time guard stays permissive. Bumped
-                    # before the pointer delete so a crash between the two re-packs and
-                    # bumps again on retry (still monotonic) rather than leaving a
-                    # pointer-less store at the old value.
-                    await self._bump_generation(client, server_prefix, None)
+                    # published world. Bumped before the pointer delete so a crash
+                    # between the two re-packs and bumps again on retry (still
+                    # monotonic) rather than leaving a pointer-less store at the old
+                    # value.
+                    #
+                    # The bump carries the current publisher forward: while the
+                    # pointer may still survive (the delete below fails, or the process
+                    # dies first), the row and the live working set survive too, and
+                    # only that publisher claim keeps the publish-time guard refusing a
+                    # stale different-publisher upload — whose commit re-check would
+                    # otherwise pass against the advanced generation and overwrite the
+                    # live set (PR #3435 review). It is dropped once the pointer is
+                    # gone (below).
+                    await self._bump_generation(
+                        client,
+                        server_prefix,
+                        await self._read_publisher(client, server_prefix),
+                    )
                     # Invalidate the pointer FIRST, the instant final.tar.gz is
                     # durable: it is the one marker that says the working set is still
                     # live and re-packable. A crash after this point leaves no pointer,
@@ -1066,6 +1078,17 @@ class ObjectStorage(Storage):
                 await _delete_prefix(client, server_prefix + "snapshots/")
                 await _delete_prefix(client, server_prefix + "incoming/")
                 await _delete_prefix(client, server_prefix + "versions/")
+                # With the pointer gone, drop the publisher claim: no Worker produced
+                # the pruned (empty) store, so a surviving row's next publish — whose
+                # base is the 0 an empty hydrate reports — must not be refused as a
+                # different-publisher stale publish. The generation is rewritten
+                # unchanged, never lowered (#3434); nothing is written when no claim
+                # is recorded, including for a never-published server.
+                generation, publisher = await self._read_marker(client, server_prefix)
+                if publisher is not None:
+                    await client.put_object(
+                        server_prefix + _GENERATION, str(generation).encode()
+                    )
 
     async def _check_staged_regions(
         self,

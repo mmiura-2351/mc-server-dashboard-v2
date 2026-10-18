@@ -293,12 +293,13 @@ async def test_prune_fsyncs_final_before_unlinking_current(
 async def test_prune_advances_generation_marker(tmp_path: Path) -> None:
     # Issue #3434: the prune advances the generation instead of dropping its marker,
     # so a row that survives a failed delete commit never reads a lower generation
-    # than a Worker may hold. The working-set tree still goes.
+    # than a Worker may hold. The working-set tree still goes, and with ``current``
+    # gone the publisher claim is dropped (no Worker produced the pruned store).
     storage = FsStorage(tmp_path)
     community, server = new_scope()
     handle = await storage.begin_snapshot(community, server)
     await storage.write_snapshot(handle, tar_stream(NEW))
-    await storage.commit_snapshot(handle)
+    await storage.commit_snapshot(handle, publisher="worker-a")
     server_root = _prune_server_root(tmp_path, community, server)
     before = await storage.current_generation(community, server)
 
@@ -306,6 +307,7 @@ async def test_prune_advances_generation_marker(tmp_path: Path) -> None:
 
     assert (server_root / "final.tar.gz").exists()
     assert await storage.current_generation(community, server) > before
+    assert await storage.current_publisher(community, server) is None
     assert not (server_root / "snapshots").exists()
     assert not (server_root / "current").exists()
 

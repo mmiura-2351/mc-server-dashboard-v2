@@ -580,11 +580,12 @@ async def test_prune_uploads_final_targz_and_drops_working_set_objects() -> None
     # Object realization of the DeleteServer reclaim (#777): the live snapshot is
     # packed into a single final.tar.gz object at the server prefix, and the
     # snapshots/, incoming/, versions/ objects plus the pointer are deleted. The
-    # generation marker is advanced, not deleted (#3434). backups/ is left untouched.
+    # generation marker is advanced, not deleted (#3434), and its publisher claim is
+    # dropped once the pointer is gone. backups/ is left untouched.
     store, storage = _store_and_storage()
     community, server = new_scope()
     files = {"server.properties": b"motd=hi", "world/level.dat": b"w"}
-    await _publish(storage, community, server, files)
+    await _publish(storage, community, server, files, publisher="worker-a")
     backup_key = await storage.create_backup_from_current(community, server)
     before = await storage.current_generation(community, server)
 
@@ -599,6 +600,7 @@ async def test_prune_uploads_final_targz_and_drops_working_set_objects() -> None
     assert not any(k.startswith(prefix + "incoming/") for k in store.objects)
     assert (prefix + _POINTER) not in store.objects
     assert await storage.current_generation(community, server) > before
+    assert await storage.current_publisher(community, server) is None
     assert (prefix + f"backups/{backup_key.value}.tar.gz") in store.objects
 
 

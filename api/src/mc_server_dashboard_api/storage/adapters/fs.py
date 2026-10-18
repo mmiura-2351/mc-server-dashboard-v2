@@ -1321,6 +1321,7 @@ class FsStorage(Storage):
             for sub in ("snapshots", "incoming", "versions"):
                 _rmtree(server_root / sub)
             _rmtree(server_root / "current")
+            self._drop_publisher(server_root)
             return
         # Pack to a temp sibling first, then atomically rename into place: the tree
         # is removed ONLY after a complete final.tar.gz exists, so a pack failure
@@ -1359,11 +1360,18 @@ class FsStorage(Storage):
         # start would then skip the hydrate and boot that stale scratch. Advancing it,
         # rather than carrying it forward unchanged, also keeps a late commit whose
         # guard read the pre-prune generation failing its re-check (#921/#1704), since
-        # the prune replaced the published world. No publisher produced the pruned
-        # state, so none is recorded and the publish-time guard stays permissive. Bumped
-        # before the unlink so a crash between the two re-packs and bumps again on retry
-        # (still monotonic) rather than leaving a pointer-less store at the old value.
-        self._bump_marker(server_root, None)
+        # the prune replaced the published world. Bumped before the unlink so a crash
+        # between the two re-packs and bumps again on retry (still monotonic) rather
+        # than leaving a pointer-less store at the old value.
+        #
+        # The bump carries the current publisher forward: while ``current`` may still
+        # survive (the unlink below fails, or the process dies first), the row and the
+        # live working set survive too, and only that publisher claim keeps the
+        # publish-time guard refusing a stale different-publisher upload — whose
+        # commit re-check would otherwise pass against the advanced generation and
+        # overwrite the live set (PR #3435 review). It is dropped once ``current`` is
+        # gone (below).
+        self._bump_marker(server_root, self._read_publisher(server_root))
         # Unlink the ``current`` symlink FIRST, the instant final.tar.gz is durable:
         # it is the one marker that says the working set is still live and re-packable.
         # A crash after this point leaves no symlink, so a retried delete raises
@@ -1374,6 +1382,21 @@ class FsStorage(Storage):
         # working-set tree. The generation marker stays (see the bump above).
         for sub in ("snapshots", "incoming", "versions"):
             _rmtree(server_root / sub)
+        self._drop_publisher(server_root)
+
+    def _drop_publisher(self, server_root: Path) -> None:
+        """Clear the marker's publisher claim once a prune removed ``current``.
+
+        No Worker produced the pruned (empty) store, so a surviving row's next
+        publish — whose base is the 0 an empty hydrate reports — must not be refused
+        as a different-publisher stale publish. The generation is rewritten
+        unchanged, never lowered (issue #3434). A no-op when no claim is recorded,
+        including a never-published server, which has no marker to create.
+        """
+
+        generation, publisher = self._read_marker(server_root)
+        if publisher is not None:
+            self._write_marker(server_root, generation, None)
 
     @_translate_io_faults
     async def delete_backup(

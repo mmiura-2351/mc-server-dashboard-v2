@@ -393,7 +393,10 @@ class WorkingSetStore(abc.ABC):
         only after this prune, so a failed commit leaves a live row whose next
         publish must mint a generation above anything a Worker may still hold. A
         moved generation with no pointer is also how a late commit recognises the
-        prune (:class:`~.errors.PrunedStoreError`).
+        prune (:class:`~.errors.PrunedStoreError`). The publisher claim is kept until
+        the pointer is gone, then cleared: a pointer that survives a failed prune
+        still keeps the publish-time guard refusing a stale different-publisher
+        upload.
 
         Packing is mandatory and fail-closed: if the pack fails the working-set tree
         is left intact and the error propagates, so a failed delete never silently

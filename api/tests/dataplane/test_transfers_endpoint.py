@@ -14,7 +14,7 @@ import io
 import logging
 import tarfile
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -30,11 +30,17 @@ from mc_server_dashboard_api.dependencies import (
     get_worker_credential,
 )
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
+from mc_server_dashboard_api.storage.adapters.object_store import (
+    _POINTER,
+    ObjectStorage,
+)
+from mc_server_dashboard_api.storage.domain.port import Storage
 from mc_server_dashboard_api.storage.domain.value_objects import (
     CommunityId,
     RelPath,
     ServerId,
 )
+from tests.storage.fake_s3 import FakeS3Client, FakeS3Store, fake_s3_factory
 from tests.storage.helpers import tar_with_link_member
 
 _CREDENTIAL = "test-worker-credential"
@@ -726,6 +732,94 @@ def test_snapshot_refused_when_delete_prunes_store_during_upload_window(
     assert resp.json()["reason"] == "deleted_during_upload"
 
     storage.current_generation = real_current_generation  # type: ignore[method-assign]
+
+
+class _PointerRemovalFailed(Exception):
+    """The injected failure of a prune's live-pointer removal."""
+
+
+def _fs_storage_failing_pointer_removal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Storage:
+    import mc_server_dashboard_api.storage.adapters.fs as fs_mod
+
+    real_rmtree = fs_mod._rmtree
+
+    def _rmtree(path: Path) -> None:
+        if path.name == "current":
+            raise _PointerRemovalFailed
+        real_rmtree(path)
+
+    monkeypatch.setattr(fs_mod, "_rmtree", _rmtree)
+    return FsStorage(tmp_path)
+
+
+def _object_storage_failing_pointer_removal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Storage:
+    del tmp_path
+    real_delete_object = FakeS3Client.delete_object
+
+    async def _delete_object(self: FakeS3Client, key: str) -> None:
+        if key.endswith(_POINTER):
+            raise _PointerRemovalFailed
+        await real_delete_object(self, key)
+
+    monkeypatch.setattr(FakeS3Client, "delete_object", _delete_object)
+    return ObjectStorage(fake_s3_factory(FakeS3Store()))
+
+
+@pytest.mark.parametrize(
+    "make_storage",
+    [_fs_storage_failing_pointer_removal, _object_storage_failing_pointer_removal],
+    ids=["fs", "object"],
+)
+def test_stale_publisher_refused_after_prune_failed_to_remove_pointer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_storage: Callable[[Path, pytest.MonkeyPatch], Storage],
+) -> None:
+    # A delete's prune that advanced the generation but then failed to remove the
+    # live pointer (a failed unlink/DeleteObject, or a crash between the two) leaves
+    # the row and B's live working set in place. An unassigned A still holding its
+    # older scratch must keep getting the different-publisher refusal, or its upload
+    # passes the commit re-check against the advanced generation and overwrites B's
+    # working set (PR #3435 review).
+    import asyncio
+
+    worker_a, worker_b = str(uuid.uuid4()), str(uuid.uuid4())
+    client, _ = _setup(tmp_path, assigned_worker_id=None)
+    storage = make_storage(tmp_path, monkeypatch)
+    _shared_app.dependency_overrides[get_storage] = lambda: storage
+    community, server = _scope()
+    c, s = CommunityId(community), ServerId(server)
+
+    async def _publish_as(publisher: str, content: bytes) -> int:
+        handle = await storage.begin_snapshot(c, s)
+
+        async def _stream() -> AsyncIterator[bytes]:
+            yield _tar_bytes({"k": content})
+
+        await storage.write_snapshot(handle, _stream())
+        return await storage.commit_snapshot(handle, publisher=publisher)
+
+    held_by_a = asyncio.run(_publish_as(worker_a, b"from-a"))
+    asyncio.run(_publish_as(worker_b, b"from-b"))
+    with pytest.raises(_PointerRemovalFailed):
+        asyncio.run(storage.prune_to_final_snapshot(c, s))
+
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"),
+            content=_tar_bytes({"k": b"stale-from-a"}),
+            headers={
+                **_auth(),
+                "X-Working-Set-Base-Generation": str(held_by_a),
+                "X-Worker-Id": worker_a,
+            },
+        )
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "stale_generation"
 
 
 def test_snapshot_length_mismatch_is_not_published(tmp_path: Path) -> None:
