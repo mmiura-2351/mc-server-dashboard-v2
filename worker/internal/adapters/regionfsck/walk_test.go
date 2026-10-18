@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/regioncheck"
 )
 
 // These tests pin the region check against what a server can plant in its working
@@ -20,10 +22,10 @@ func tornRegion() []byte { return make([]byte, 100) }
 
 // checkWithin runs CheckWorkingSet under a deadline: a check that blocks (a FIFO
 // without a writer) must fail the test, not hang the suite.
-func checkWithin(t *testing.T, root string) (Report, error) {
+func checkWithin(t *testing.T, root string) (regioncheck.Report, error) {
 	t.Helper()
 	type result struct {
-		report Report
+		report regioncheck.Report
 		err    error
 	}
 	done := make(chan result, 1)
@@ -36,13 +38,13 @@ func checkWithin(t *testing.T, root string) (Report, error) {
 		return r.report, r.err
 	case <-time.After(5 * time.Second):
 		t.Fatal("CheckWorkingSet blocked")
-		return Report{}, nil
+		return regioncheck.Report{}, nil
 	}
 }
 
 // assertScannedOnly fails unless the check succeeded having scanned exactly want
 // region files, all of them healthy.
-func assertScannedOnly(t *testing.T, report Report, err error, want int) {
+func assertScannedOnly(t *testing.T, report regioncheck.Report, err error, want int) {
 	t.Helper()
 	if err != nil {
 		t.Fatalf("CheckWorkingSet: %v", err)
@@ -110,7 +112,7 @@ func TestCheckRegionFileRefusesWhatIsNotARegularFile(t *testing.T) {
 				t.Fatal(err)
 			}
 			type result struct {
-				reason Reason
+				reason regioncheck.Reason
 				err    error
 			}
 			done := make(chan result, 1)
@@ -120,7 +122,7 @@ func TestCheckRegionFileRefusesWhatIsNotARegularFile(t *testing.T) {
 			}()
 			select {
 			case r := <-done:
-				if r.err == nil || r.reason != ReasonNone {
+				if r.err == nil || r.reason != regioncheck.ReasonNone {
 					t.Fatalf("CheckRegionFile = %v, %v; want an error and no verdict", r.reason, r.err)
 				}
 			case <-time.After(5 * time.Second):

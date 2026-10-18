@@ -14,7 +14,7 @@ import (
 
 	"google.golang.org/grpc/connectivity"
 
-	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/adapters/apiclient"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/domain/ingress"
 )
 
 // Backoff bounds the Register retry cadence: exponential growth with full
@@ -38,7 +38,7 @@ var registerTimeout = 10 * time.Second
 // registrar is the subset of the API client relaysvc needs. Narrowed for tests.
 type registrar interface {
 	Register(ctx context.Context, tunnelEndpoint, tunnelCAPEM string, activeSessionIDs []string) (string, error)
-	ResolveJoin(ctx context.Context, slug, playerIP string, intent apiclient.Intent) (apiclient.ResolveResult, error)
+	ResolveJoin(ctx context.Context, slug, playerIP string, intent ingress.Intent) (ingress.ResolveResult, error)
 }
 
 // activeSessionSource yields the still-open session ids for re-registration
@@ -97,7 +97,7 @@ func (s *Service) BaseDomain() string {
 }
 
 // ResolveJoin proxies to the API client.
-func (s *Service) ResolveJoin(ctx context.Context, slug, playerIP string, intent apiclient.Intent) (apiclient.ResolveResult, error) {
+func (s *Service) ResolveJoin(ctx context.Context, slug, playerIP string, intent ingress.Intent) (ingress.ResolveResult, error) {
 	return s.client.ResolveJoin(ctx, slug, playerIP, intent)
 }
 

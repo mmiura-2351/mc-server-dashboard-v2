@@ -11,7 +11,7 @@ import (
 
 	"google.golang.org/grpc/connectivity"
 
-	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/adapters/apiclient"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/domain/ingress"
 )
 
 type fakeRegistrar struct {
@@ -50,8 +50,8 @@ func (f *fakeRegistrar) calls() int {
 	return f.regCalls
 }
 
-func (f *fakeRegistrar) ResolveJoin(_ context.Context, _, _ string, _ apiclient.Intent) (apiclient.ResolveResult, error) {
-	return apiclient.ResolveResult{Decision: apiclient.DecisionTunnel, Token: "tok"}, nil
+func (f *fakeRegistrar) ResolveJoin(_ context.Context, _, _ string, _ ingress.Intent) (ingress.ResolveResult, error) {
+	return ingress.ResolveResult{Decision: ingress.DecisionTunnel, Token: "tok"}, nil
 }
 
 type fakeSessions struct{ ids []string }
@@ -120,11 +120,11 @@ func TestRunReRegistersPeriodically(t *testing.T) {
 
 func TestResolveJoinProxies(t *testing.T) {
 	svc := New(&fakeRegistrar{}, nil, fakeSessions{}, "", "", discardLogger())
-	res, err := svc.ResolveJoin(context.Background(), "amber", "1.2.3.4", apiclient.IntentLogin)
+	res, err := svc.ResolveJoin(context.Background(), "amber", "1.2.3.4", ingress.IntentLogin)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Decision != apiclient.DecisionTunnel || res.Token != "tok" {
+	if res.Decision != ingress.DecisionTunnel || res.Token != "tok" {
 		t.Errorf("ResolveJoin proxy returned %+v", res)
 	}
 }
@@ -316,8 +316,8 @@ func (tr *trackingRegistrar) Register(_ context.Context, _, _ string, _ []string
 	return tr.base, nil
 }
 
-func (tr *trackingRegistrar) ResolveJoin(_ context.Context, _, _ string, _ apiclient.Intent) (apiclient.ResolveResult, error) {
-	return apiclient.ResolveResult{}, nil
+func (tr *trackingRegistrar) ResolveJoin(_ context.Context, _, _ string, _ ingress.Intent) (ingress.ResolveResult, error) {
+	return ingress.ResolveResult{}, nil
 }
 
 // TestRegisterOnceBarrierOrdering asserts that RegisterOnce acquires the barrier

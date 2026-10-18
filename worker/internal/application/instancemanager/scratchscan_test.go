@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/regionfsck"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
 
@@ -89,7 +90,7 @@ func TestScanHeldServersReportsNonEmptyDirsWithGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := ScanHeldServers(scratch, true, nil)
+	got := ScanHeldServers(scratch, regionfsck.Checker{}, true, nil)
 	sort.Slice(got, func(i, j int) bool { return got[i].ServerID < got[j].ServerID })
 	want := []session.HeldServer{
 		{ServerID: heldNoMarkerID, Generation: 0},
@@ -144,10 +145,10 @@ func TestScanHeldServersSkipsGenerationMarkerTempLeftover(t *testing.T) {
 	// Both callers share hasWorkingSet, so both are asserted — non-fatally, so a
 	// regression names every caller it broke in one run.
 	want := session.HeldServer{ServerID: leftoverPlusWorldID, Generation: 0}
-	if got := ScanHeldServers(scratch, true, nil); len(got) != 1 || got[0] != want {
+	if got := ScanHeldServers(scratch, regionfsck.Checker{}, true, nil); len(got) != 1 || got[0] != want {
 		t.Errorf("ScanHeldServers = %v, want [%v]", got, want)
 	}
-	m := New(nil, scratch, nil)
+	m := New(nil, scratch, regionfsck.Checker{}, nil)
 	closeWithTest(t, m)
 	if got := m.HeldServers(); len(got) != 1 || got[0] != want {
 		t.Errorf("HeldServers = %v, want [%v]", got, want)
@@ -157,7 +158,7 @@ func TestScanHeldServersSkipsGenerationMarkerTempLeftover(t *testing.T) {
 // TestScanHeldServersMissingScratchRoot verifies an absent scratch root yields an
 // empty list (a fresh Worker holds nothing), not a panic or error.
 func TestScanHeldServersMissingScratchRoot(t *testing.T) {
-	got := ScanHeldServers(filepath.Join(t.TempDir(), "does-not-exist"), true, nil)
+	got := ScanHeldServers(filepath.Join(t.TempDir(), "does-not-exist"), regionfsck.Checker{}, true, nil)
 	if len(got) != 0 {
 		t.Fatalf("held = %v, want empty", got)
 	}
@@ -208,7 +209,7 @@ func TestScanHeldServersTornRegionForcesHydrate(t *testing.T) {
 	}
 	soundMarker := readMarkerBytes(t, filepath.Join(scratch, soundServerID))
 
-	got := ScanHeldServers(scratch, true, nil)
+	got := ScanHeldServers(scratch, regionfsck.Checker{}, true, nil)
 	sort.Slice(got, func(i, j int) bool { return got[i].ServerID < got[j].ServerID })
 	want := []session.HeldServer{
 		{ServerID: soundServerID, Generation: 4},
@@ -233,7 +234,7 @@ func TestScanHeldServersTornRegionForcesHydrate(t *testing.T) {
 			"scan every Register sends reads the marker, so a torn verdict that is not written "+
 			"there is advertised at the recorded generation and boots the torn world (issue #3178)", gen)
 	}
-	m := New(nil, scratch, nil)
+	m := New(nil, scratch, regionfsck.Checker{}, nil)
 	closeWithTest(t, m)
 	inSession := m.HeldServers()
 	sort.Slice(inSession, func(i, j int) bool { return inSession[i].ServerID < inSession[j].ServerID })
@@ -269,7 +270,7 @@ func TestScanHeldServersFailedTornMarkerRewriteIsBestEffort(t *testing.T) {
 	t.Cleanup(func() { rewriteTornMarker = orig })
 	h := &capturingSlogHandler{}
 
-	got := ScanHeldServers(scratch, true, slog.New(h))
+	got := ScanHeldServers(scratch, regionfsck.Checker{}, true, slog.New(h))
 
 	want := []session.HeldServer{{ServerID: tornServerID, Generation: 0}}
 	if len(got) != 1 || got[0] != want[0] {
@@ -310,7 +311,7 @@ func TestScanHeldServersTornSetWithoutAMarkerGainsNone(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := ScanHeldServers(scratch, true, nil)
+	got := ScanHeldServers(scratch, regionfsck.Checker{}, true, nil)
 
 	want := session.HeldServer{ServerID: tornServerID, Generation: 0}
 	if len(got) != 1 || got[0] != want {
@@ -382,7 +383,7 @@ func TestScanHeldServersAdvertisesTheRecordedGenerationWhenQuiescenceIsUnproven(
 		t.Fatal(err)
 	}
 
-	got := ScanHeldServers(scratch, false, nil)
+	got := ScanHeldServers(scratch, regionfsck.Checker{}, false, nil)
 	sort.Slice(got, func(i, j int) bool { return got[i].ServerID < got[j].ServerID })
 	want := []session.HeldServer{
 		{ServerID: soundServerID, Generation: 4},
@@ -431,7 +432,7 @@ func TestScanHeldServersLiveFormatScratchAdvertisesHeldGeneration(t *testing.T) 
 	}
 	before := readMarkerBytes(t, filepath.Join(scratch, liveServerID))
 
-	got := ScanHeldServers(scratch, true, nil)
+	got := ScanHeldServers(scratch, regionfsck.Checker{}, true, nil)
 	want := []session.HeldServer{{ServerID: liveServerID, Generation: 11}}
 	if len(got) != len(want) || got[0] != want[0] {
 		t.Fatalf("held = %v, want %v", got, want)
@@ -582,11 +583,11 @@ func TestHeldSetScansReportOnlyServerIDDirectories(t *testing.T) {
 	}
 
 	want := session.HeldServer{ServerID: serverID, Generation: 0}
-	if got := ScanHeldServers(scratch, true, nil); len(got) != 1 || got[0] != want {
+	if got := ScanHeldServers(scratch, regionfsck.Checker{}, true, nil); len(got) != 1 || got[0] != want {
 		t.Errorf("ScanHeldServers = %v, want [%v]", got, want)
 	}
 	h := &capturingSlogHandler{}
-	m := New(nil, scratch, nil).WithLogger(slog.New(h))
+	m := New(nil, scratch, regionfsck.Checker{}, nil).WithLogger(slog.New(h))
 	closeWithTest(t, m)
 	for range 2 {
 		if got := m.HeldServers(); len(got) != 1 || got[0] != want {
@@ -634,7 +635,7 @@ func TestManagerHeldServersReadsCurrentGenerations(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m := New(nil, scratch, nil)
+	m := New(nil, scratch, regionfsck.Checker{}, nil)
 	closeWithTest(t, m)
 
 	got := m.HeldServers()

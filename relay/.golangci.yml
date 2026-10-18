@@ -16,43 +16,32 @@ linters:
     - depguard
   settings:
     depguard:
-      # Import direction (docs/app/ARCHITECTURE.md Section 2.2), as the relay
+      # Import direction (docs/app/ARCHITECTURE.md Section 2.4), as the relay
       # applies it (relay/README.md "Layout"): cmd/relay is the edge and binds the
       # adapters under internal/adapters/; the other internal packages are the
-      # relay's core and never import an adapter; an adapter imports no core
-      # package, only the generated stubs it speaks. Tests are exempt, as in worker/.
+      # relay's core and never import an adapter; internal/domain/ is the pure part
+      # of the core whose types both sides name; an adapter imports no other core
+      # package, only domain and the generated stubs it speaks. Tests are exempt,
+      # as in worker/.
       rules:
+        domain:
+          # Pure core: the standard library and other domain packages only.
+          list-mode: strict
+          files:
+            - "**/internal/domain/**"
+            - "!$test"
+          allow:
+            - $gostd
+            - github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/domain
         core:
           files:
             - "**/internal/**"
             - "!**/internal/adapters/**"
             - "!**/internal/genproto/**"
             - "!$test"
-            # Covered by core-apiclient-exception below instead.
-            - "!**/internal/bedrock/listener.go"
-            - "!**/internal/bedrock/tunnel.go"
-            - "!**/internal/game/listener.go"
-            - "!**/internal/relaysvc/relaysvc.go"
-            - "!**/internal/session/reporter.go"
-          deny: &core-deny
+          deny:
             - pkg: github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/adapters
               desc: the relay core depends on interfaces it declares, never on an adapter; cmd/relay binds adapters (ARCHITECTURE.md Section 2.1)
-        core-apiclient-exception:
-          # Exception tracked by follow-up #3408, to be removed by moving the
-          # relay's API value types (Intent, ResolveResult and its Decision,
-          # SessionStart, SessionEnd, Source) out of adapters/apiclient into a core
-          # package: these files name them in their port interfaces and calls.
-          # Every other adapter stays denied here.
-          list-mode: lax
-          files:
-            - "**/internal/bedrock/listener.go"
-            - "**/internal/bedrock/tunnel.go"
-            - "**/internal/game/listener.go"
-            - "**/internal/relaysvc/relaysvc.go"
-            - "**/internal/session/reporter.go"
-          allow:
-            - github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/adapters/apiclient$
-          deny: *core-deny
         adapters:
           list-mode: lax
           files:
@@ -60,6 +49,7 @@ linters:
             - "!$test"
           allow:
             - github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/adapters
+            - github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/domain
             - github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/genproto
           deny:
             - pkg: github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal

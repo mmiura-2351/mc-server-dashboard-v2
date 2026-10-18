@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/regionfsck"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
@@ -572,7 +573,7 @@ func newManagerWithControls(t *testing.T, d execution.ExecutionDriver, ctrls ...
 	t.Helper()
 	scratch := t.TempDir()
 	var i int
-	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch,
+	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch, regionfsck.Checker{},
 		func(context.Context, string, string, string) (execution.ServerControl, error) {
 			c := ctrls[i]
 			if i < len(ctrls)-1 {

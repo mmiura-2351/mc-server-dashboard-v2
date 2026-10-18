@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/regionfsck"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/scratchformat"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
@@ -1025,7 +1026,7 @@ func TestInterruptedDisplacedSweepIsNotAdvertisedAsHeld(t *testing.T) {
 		name string
 		got  []session.HeldServer
 	}{
-		{"ScanHeldServers", ScanHeldServers(m.scratchDir, true, nil)},
+		{"ScanHeldServers", ScanHeldServers(m.scratchDir, regionfsck.Checker{}, true, nil)},
 		{"HeldServers", m.HeldServers()},
 	} {
 		if len(scan.got) != 1 || scan.got[0].ServerID != s1 {
@@ -1218,7 +1219,7 @@ func TestDisplacedTreeNotTreatedAsLiveScratch(t *testing.T) {
 
 	// A held-server scan never reports the displaced tree at all: neither under the
 	// assigned id s1 nor under its on-disk ".displaced-" + s1 name.
-	for _, h := range ScanHeldServers(m.scratchDir, true, nil) {
+	for _, h := range ScanHeldServers(m.scratchDir, regionfsck.Checker{}, true, nil) {
 		if h.ServerID == s1 || strings.HasPrefix(h.ServerID, ".displaced-") {
 			t.Fatalf("displaced tree reported as held server id %q (issue #910: must be skipped)", h.ServerID)
 		}

@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/datatransfer"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/regionfsck"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/application/instancemanager"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/scratchformat"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
@@ -49,7 +50,7 @@ func TestExistingScratchTreeRemainsReadable(t *testing.T) {
 	}
 
 	want := []session.HeldServer{{ServerID: serverID, Generation: 17}}
-	if got := instancemanager.ScanHeldServers(scratch, true, nil); !reflect.DeepEqual(got, want) {
+	if got := instancemanager.ScanHeldServers(scratch, regionfsck.Checker{}, true, nil); !reflect.DeepEqual(got, want) {
 		t.Fatalf("existing scratch held = %v, want %v", got, want)
 	}
 }
@@ -85,7 +86,7 @@ func TestHydrateScratchIsDiscoveredAndCrashLeftTreesAreReclaimed(t *testing.T) {
 	}
 
 	wantHeld := []session.HeldServer{{ServerID: serverID, Generation: servedGeneration}}
-	if got := instancemanager.ScanHeldServers(scratch, true, nil); !reflect.DeepEqual(got, wantHeld) {
+	if got := instancemanager.ScanHeldServers(scratch, regionfsck.Checker{}, true, nil); !reflect.DeepEqual(got, wantHeld) {
 		t.Fatalf("held after Hydrate = %v, want %v", got, wantHeld)
 	}
 
@@ -105,10 +106,10 @@ func TestHydrateScratchIsDiscoveredAndCrashLeftTreesAreReclaimed(t *testing.T) {
 		}
 	}
 
-	if got := instancemanager.ScanHeldServers(scratch, true, nil); !reflect.DeepEqual(got, wantHeld) {
+	if got := instancemanager.ScanHeldServers(scratch, regionfsck.Checker{}, true, nil); !reflect.DeepEqual(got, wantHeld) {
 		t.Fatalf("held with crash-left hydrate trees = %v, want %v", got, wantHeld)
 	}
-	m := instancemanager.New(nil, scratch, nil)
+	m := instancemanager.New(nil, scratch, regionfsck.Checker{}, nil)
 	t.Cleanup(m.Close)
 	if got := m.HeldServers(); !reflect.DeepEqual(got, wantHeld) {
 		t.Fatalf("manager held with crash-left hydrate trees = %v, want %v", got, wantHeld)
@@ -120,7 +121,7 @@ func TestHydrateScratchIsDiscoveredAndCrashLeftTreesAreReclaimed(t *testing.T) {
 			t.Fatalf("crash-left hydrate tree %q remains: %v", dir, err)
 		}
 	}
-	if got := instancemanager.ScanHeldServers(scratch, true, nil); !reflect.DeepEqual(got, wantHeld) {
+	if got := instancemanager.ScanHeldServers(scratch, regionfsck.Checker{}, true, nil); !reflect.DeepEqual(got, wantHeld) {
 		t.Fatalf("held after reclaim = %v, want %v", got, wantHeld)
 	}
 }

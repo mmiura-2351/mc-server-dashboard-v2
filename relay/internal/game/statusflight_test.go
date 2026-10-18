@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/adapters/apiclient"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/domain/ingress"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/mc"
 )
 
@@ -19,14 +19,14 @@ import (
 type blockingResolver struct {
 	started chan struct{} // receives one send per ResolveJoin call
 	release chan struct{} // ResolveJoin blocks until this closes
-	result  apiclient.ResolveResult
+	result  ingress.ResolveResult
 	err     error
 
 	mu    sync.Mutex
 	calls int
 }
 
-func (b *blockingResolver) ResolveJoin(_ context.Context, _, _ string, _ apiclient.Intent) (apiclient.ResolveResult, error) {
+func (b *blockingResolver) ResolveJoin(_ context.Context, _, _ string, _ ingress.Intent) (ingress.ResolveResult, error) {
 	b.mu.Lock()
 	b.calls++
 	b.mu.Unlock()
@@ -59,7 +59,7 @@ func TestCoalesceStatusConcurrentMissesSingleExchange(t *testing.T) {
 	resolver := &blockingResolver{
 		started: make(chan struct{}, 1),
 		release: make(chan struct{}),
-		result:  apiclient.ResolveResult{Decision: apiclient.DecisionStopped, DisplayName: "X"},
+		result:  ingress.ResolveResult{Decision: ingress.DecisionStopped, DisplayName: "X"},
 	}
 	l := statusFlightListener(resolver)
 
@@ -145,7 +145,7 @@ func TestCoalesceStatusDifferentSlugsDoNotSerialize(t *testing.T) {
 	resolver := &blockingResolver{
 		started: make(chan struct{}, 2),
 		release: make(chan struct{}),
-		result:  apiclient.ResolveResult{Decision: apiclient.DecisionStopped, DisplayName: "X"},
+		result:  ingress.ResolveResult{Decision: ingress.DecisionStopped, DisplayName: "X"},
 	}
 	l := statusFlightListener(resolver)
 
