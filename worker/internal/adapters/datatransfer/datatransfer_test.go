@@ -1585,6 +1585,71 @@ func TestGenerationMarkerPresentAtSwapTime(t *testing.T) {
 	}
 }
 
+// TestHydrateSkipsRootGenerationMarkerMembers pins issue #3433. A stored working set
+// can hold an operator-created entry at the generation marker's name — a directory,
+// planted at rest through the files API, an upload or an import. Unpacked as-is, the
+// directory took the marker's name and the marker write that follows failed with
+// EISDIR, so every hydrate, and every start, failed. The unpack now leaves out every
+// root member the snapshot walk leaves out (walkInto's prefix exclusion): such a
+// member is Worker-private by name and never part of the world, so the hydrate stamps
+// the marker as usual. A same-named entry deeper in the tree is ordinary world data
+// and is still unpacked.
+func TestHydrateSkipsRootGenerationMarkerMembers(t *testing.T) {
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	add := func(name string, typ byte, content string) {
+		t.Helper()
+		if err := tw.WriteHeader(&tar.Header{Name: name, Typeflag: typ, Mode: 0o750, Size: int64(len(content))}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write([]byte(content)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add(generationMarkerFile, tar.TypeDir, "")
+	add(generationMarkerFile+"/stray.txt", tar.TypeReg, "operator")
+	add(generationMarkerFile+"-123456", tar.TypeReg, "temp")
+	add("server.properties", tar.TypeReg, "motd=hi")
+	add("world/"+generationMarkerFile, tar.TypeDir, "")
+	add("world/"+generationMarkerFile+"/kept.txt", tar.TypeReg, "world data")
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	body := buf.Bytes()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Working-Set-Generation", "42")
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	dest := filepath.Join(t.TempDir(), "server")
+	c := New(srv.Client())
+	gen, err := c.Hydrate(context.Background(), srv.URL, "tok", dest)
+	if err != nil {
+		t.Fatalf("Hydrate: %v", err)
+	}
+	if gen != 42 {
+		t.Fatalf("generation = %d, want 42", gen)
+	}
+
+	marker, err := os.ReadFile(filepath.Join(dest, generationMarkerFile))
+	if err != nil || string(marker) != "42" {
+		t.Fatalf("marker = %q, %v; want the stamped generation 42", marker, err)
+	}
+	if _, err := os.Lstat(filepath.Join(dest, generationMarkerFile+"-123456")); !os.IsNotExist(err) {
+		t.Fatalf("root %q-123456 member must be left out, lstat err = %v", generationMarkerFile, err)
+	}
+	got, err := os.ReadFile(filepath.Join(dest, "server.properties"))
+	if err != nil || string(got) != "motd=hi" {
+		t.Fatalf("server.properties = %q, %v", got, err)
+	}
+	got, err = os.ReadFile(filepath.Join(dest, "world", generationMarkerFile, "kept.txt"))
+	if err != nil || string(got) != "world data" {
+		t.Fatalf("nested world/%s/kept.txt = %q, %v; a nested same-named entry is world data", generationMarkerFile, got, err)
+	}
+}
+
 // Prior displaced tree must survive a swap failure when both destDir and
 // .displaced-<id> exist (issue #917 bug 2): the prior displaced must not be deleted
 // before the swap-in succeeds, so a swap failure leaves both the old destDir and the
