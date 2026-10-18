@@ -2,6 +2,7 @@ import { type FormEvent, useState } from "react";
 import { Link, useLocation, useNavigate, useSearchParams } from "react-router";
 import { ApiError, api } from "../api/client.ts";
 import { useSession } from "../auth/SessionProvider.tsx";
+import { accessTokenFromBody } from "../auth/session.ts";
 import { PasswordInput } from "../components/PasswordInput.tsx";
 import { t } from "../i18n/index.ts";
 import { postLoginPath, safeNextPath } from "../routes.ts";
@@ -31,10 +32,16 @@ export function LoginPage() {
     setError(null);
     setSubmitting(true);
     try {
-      const tokens = await api.post("/api/auth/login", {
-        body: JSON.stringify({ username, password }),
-      });
-      signIn(tokens.access_token);
+      const accessToken = accessTokenFromBody(
+        await api.post("/api/auth/login", {
+          body: JSON.stringify({ username, password }),
+        }),
+      );
+      if (accessToken === null) {
+        // A 200 without a usable token (#3418) is a generic fault below.
+        throw new Error("login response carried no access token");
+      }
+      signIn(accessToken);
       // A validated `next` (session-expiry return-to) wins over the #424 guard
       // stash; both fall back to the post-login landing.
       navigate(nextPath ?? postLoginPath(from), { replace: true });
