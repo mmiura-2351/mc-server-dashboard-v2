@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/regioncheck"
 )
 
 // These tests replace an entry between the moment the walk decides what it is and
@@ -32,7 +34,7 @@ func beforeOpening(t *testing.T, name string, swap func()) {
 
 // assertFailedWithoutAVerdict fails unless the check returned an error and no
 // report.
-func assertFailedWithoutAVerdict(t *testing.T, report Report, err error) {
+func assertFailedWithoutAVerdict(t *testing.T, report regioncheck.Report, err error) {
 	t.Helper()
 	if err == nil {
 		t.Fatalf("CheckWorkingSet = %+v, nil; want an error", report)

@@ -123,6 +123,16 @@ async function readAccessToken(response: Response): Promise<string | null> {
   } catch {
     return null;
   }
+  return accessTokenFromBody(data);
+}
+
+/**
+ * The access token in a parsed token response body, or null when it does not
+ * carry a non-empty string `access_token` (#3356, #3418). Login and
+ * registration run the typed client's `/api/auth/login` body through this
+ * before signing in, since the client only casts the body.
+ */
+export function accessTokenFromBody(data: unknown): string | null {
   if (typeof data !== "object" || data === null || !("access_token" in data)) {
     return null;
   }

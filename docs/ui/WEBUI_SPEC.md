@@ -902,6 +902,9 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   `permission` member are enumerated in [`AUTH_API.md`](../app/AUTH_API.md)
   Section 2.
 - API error surfaced via toast + inline field errors (422 `errors` list).
+- A failed read retries only what can clear on its own — a network failure, a
+  5xx, 408 or 429 — up to three times; any other 4xx is the API's answer and is
+  surfaced at once instead of after the backoff.
 - Conflict-flavored errors get a "state changed — refresh" treatment, not a raw
   error dump: the lifecycle races `invalid_transition` (except on **start**,
   where it means the server is already desired-running — a pending start, not a

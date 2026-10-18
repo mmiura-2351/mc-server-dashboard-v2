@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/domain/ingress"
 	relayv1 "github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/genproto/mcsd/relay/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -17,14 +18,14 @@ func TestFromProtoDecision(t *testing.T) {
 	tests := []struct {
 		name string
 		in   relayv1.JoinDecision
-		want Decision
+		want ingress.Decision
 	}{
-		{"tunnel", relayv1.JoinDecision_JOIN_DECISION_TUNNEL, DecisionTunnel},
-		{"stopped", relayv1.JoinDecision_JOIN_DECISION_STOPPED, DecisionStopped},
-		{"not found", relayv1.JoinDecision_JOIN_DECISION_NOT_FOUND, DecisionNotFound},
-		{"unspecified", relayv1.JoinDecision_JOIN_DECISION_UNSPECIFIED, DecisionUnknown},
+		{"tunnel", relayv1.JoinDecision_JOIN_DECISION_TUNNEL, ingress.DecisionTunnel},
+		{"stopped", relayv1.JoinDecision_JOIN_DECISION_STOPPED, ingress.DecisionStopped},
+		{"not found", relayv1.JoinDecision_JOIN_DECISION_NOT_FOUND, ingress.DecisionNotFound},
+		{"unspecified", relayv1.JoinDecision_JOIN_DECISION_UNSPECIFIED, ingress.DecisionUnknown},
 		// A future enum value the relay does not know about falls to DecisionUnknown.
-		{"unrecognised", relayv1.JoinDecision(99), DecisionUnknown},
+		{"unrecognised", relayv1.JoinDecision(99), ingress.DecisionUnknown},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -40,11 +41,11 @@ func TestFromProtoDecision(t *testing.T) {
 func TestToProtoIntent(t *testing.T) {
 	tests := []struct {
 		name string
-		in   Intent
+		in   ingress.Intent
 		want relayv1.JoinIntent
 	}{
-		{"status", IntentStatus, relayv1.JoinIntent_JOIN_INTENT_STATUS},
-		{"login", IntentLogin, relayv1.JoinIntent_JOIN_INTENT_LOGIN},
+		{"status", ingress.IntentStatus, relayv1.JoinIntent_JOIN_INTENT_STATUS},
+		{"login", ingress.IntentLogin, relayv1.JoinIntent_JOIN_INTENT_LOGIN},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -73,7 +74,7 @@ func TestReportSessionsProtoConstruction(t *testing.T) {
 	c := &Client{rpc: fake, credential: "test-cred"}
 
 	now := time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC)
-	starts := []SessionStart{
+	starts := []ingress.SessionStart{
 		{
 			SessionID: "s1",
 			ServerID:  "srv-1",
@@ -82,10 +83,10 @@ func TestReportSessionsProtoConstruction(t *testing.T) {
 			Username:  "Steve",
 			PlayerUID: "uuid-1",
 			StartedAt: now,
-			Source:    SourceJava,
+			Source:    ingress.SourceJava,
 		},
 	}
-	ends := []SessionEnd{
+	ends := []ingress.SessionEnd{
 		{
 			SessionID: "s2",
 			EndedAt:   now.Add(5 * time.Minute),

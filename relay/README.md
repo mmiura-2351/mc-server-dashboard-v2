@@ -29,6 +29,8 @@ relay/
     ├── relaysvc/          # Register-with-backoff loop + learned base_domain
     ├── ipcaps/            # per-IP hygiene caps shared by the internet-exposed listeners
     ├── metrics/           # Prometheus registry + Java-path metric handles (RELAY.md Section 17)
+    ├── domain/            # pure core: standard library only (ARCHITECTURE.md Section 2.4)
+    │   └── ingress/       # join intent/decision and session events, shared by core and apiclient
     ├── genproto/          # generated mcsd.relay.v1 / mcsd.bedrocktunnel.v1 stubs (see below)
     └── adapters/
         ├── apiclient/     # gRPC client for the API's RelayService

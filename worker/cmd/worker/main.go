@@ -31,6 +31,7 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/datatransfer"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/hostresources"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/rcon"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/regionfsck"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/tunnel"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/application/instancemanager"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
@@ -186,7 +187,7 @@ func run(ctx context.Context) error {
 	// which is how it reaches the API on the first Register and on every reconnect
 	// after it, until a hydrate rewrites the marker. The returned list still feeds the
 	// displaced-tree check below and the boot Capabilities.
-	heldServers := instancemanager.ScanHeldServers(cfg.Worker.ScratchDir, quiesced, logger)
+	heldServers := instancemanager.ScanHeldServers(cfg.Worker.ScratchDir, regionfsck.Checker{}, quiesced, logger)
 	// Log a WARN for each .displaced-<id> tree whose server id is not in the held
 	// set (issue #911): those trees are orphaned recovery copies — the server was
 	// deleted or re-placed elsewhere — and will never be GC'd automatically. The
@@ -314,7 +315,7 @@ func buildInstanceManager(ctx context.Context, cfg config.Config, logger *slog.L
 	// GameBindIP), so it shares ctx with the TCP tunnel dialer: cancelling it on
 	// SIGINT/SIGTERM gracefully closes every open Bedrock tunnel too.
 	bedrockTunnel := bedrocktunnel.New(ctx, cfg.Driver.Container.GameBindIP, containerGameHost, logger)
-	return instancemanager.New(drivers, wc.ScratchDir, openControl).
+	return instancemanager.New(drivers, wc.ScratchDir, regionfsck.Checker{}, openControl).
 		WithLogger(logger).
 		WithWorkerID(wc.ID).
 		WithTunnelDialer(tunnelDialerAdapter{tunnelDialer}).

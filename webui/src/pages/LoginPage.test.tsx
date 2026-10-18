@@ -119,6 +119,33 @@ describe("LoginPage", () => {
     expect(getAccessToken()).toBe("issued");
   });
 
+  // A 200 whose body carries no usable access token (#3418) must not sign in.
+  it.each([
+    ["an empty object", "{}"],
+    ["a numeric access_token", '{"access_token":123}'],
+    ["an empty access_token", '{"access_token":""}'],
+  ])(
+    "rejects a 200 with %s: stores nothing and shows an error",
+    async (_, body) => {
+      bootstrapSignedOut();
+      renderLogin();
+
+      fetchMock.mockResolvedValueOnce(
+        new Response(body, {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      await submitCredentials();
+
+      expect(
+        await screen.findByText(t("login.genericError")),
+      ).toBeInTheDocument();
+      expect(getAccessToken()).toBeNull();
+      expect(screen.queryByTestId("path")).toBeNull();
+    },
+  );
+
   it("returns to the stashed deep link (path + query) after login", async () => {
     bootstrapSignedOut();
     renderLogin({

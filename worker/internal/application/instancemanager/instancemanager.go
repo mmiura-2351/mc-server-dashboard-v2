@@ -30,8 +30,8 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/regionfsck"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/regioncheck"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/scratchformat"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/nofollow"
@@ -179,6 +179,7 @@ const defaultMetricsInterval = 15 * time.Second
 type Manager struct {
 	drivers     map[string]execution.ExecutionDriver
 	scratchDir  string
+	regions     regioncheck.Checker
 	openControl controlFunc
 	transfer    Transfer
 	tunnel      TunnelDialer
@@ -461,12 +462,14 @@ type Manager struct {
 }
 
 // New builds a Manager. drivers maps an advertised driver name to its adapter;
-// scratchDir is the working-set root (worker.scratch_dir); openControl opens RCON
-// for ServerCommand forwarding.
-func New(drivers map[string]execution.ExecutionDriver, scratchDir string, openControl controlFunc) *Manager {
+// scratchDir is the working-set root (worker.scratch_dir); regions is the region
+// check a snapshot runs before it packs; openControl opens RCON for ServerCommand
+// forwarding.
+func New(drivers map[string]execution.ExecutionDriver, scratchDir string, regions regioncheck.Checker, openControl controlFunc) *Manager {
 	m := &Manager{
 		drivers:            drivers,
 		scratchDir:         scratchDir,
+		regions:            regions,
 		openControl:        openControl,
 		logger:             slog.Default(),
 		clock:              systemClock{},
@@ -1476,14 +1479,14 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 // refuses the snapshot. A fsck I/O error is returned as-is (the caller treats it as
 // best-effort) and is not retried. On ctx cancellation it returns ctx.Err() (not the
 // last corrupt report) so a cancelled snapshot is not misclassified as corruption.
-func (m *Manager) checkWorkingSet(ctx context.Context, serverID, workingDir string, running bool) (regionfsck.Report, error) {
+func (m *Manager) checkWorkingSet(ctx context.Context, serverID, workingDir string, running bool) (regioncheck.Report, error) {
 	if !running {
-		return regionfsck.CheckWorkingSet(workingDir)
+		return m.regions.CheckWorkingSet(workingDir)
 	}
-	var report regionfsck.Report
+	var report regioncheck.Report
 	for attempt := 1; ; attempt++ {
 		var err error
-		report, err = regionfsck.CheckWorkingSet(workingDir)
+		report, err = m.regions.CheckWorkingSet(workingDir)
 		if err != nil || report.Healthy() || attempt >= snapshotFsckAttempts {
 			return report, err
 		}
