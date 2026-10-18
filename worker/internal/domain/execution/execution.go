@@ -257,10 +257,12 @@ type ExecutionDriver interface { //nolint:revive // documented Port name (FR-EXE
 type Instance interface {
 	// Stop ends the instance. A graceful stop tries the in-band shutdown (RCON
 	// "stop") and falls back to signals; a non-graceful stop forces termination.
-	// It returns once the process has exited or the stop deadline elapsed.
+	// It returns once the process has exited or the stop deadline elapsed. A
+	// graceful stop waits on each step while InstanceSpec.WorldProgress shows the
+	// world still being written (issue #3436).
 	//
 	// preFallback, when supplied, is called always before stop on the graceful
-	// path (before tryRCONStop and before docker stop) so the caller can flush
+	// path (before tryRCONStop and before SIGTERM) so the caller can flush
 	// the live world to disk while the process is still alive. It is NOT called
 	// on a force stop (graceful=false). At most one callback is accepted.
 	// When the callback returns true the world data is fully flushed; Stop then

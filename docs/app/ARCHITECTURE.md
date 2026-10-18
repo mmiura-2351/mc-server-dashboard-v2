@@ -243,6 +243,12 @@ here.
 | `ServerControl` (RCON) | `save-all`, commands, graceful stop on the running process (FR-SRV-5, REQUIREMENTS.md Section 6.9) | RCON client |
 | `APIClient` (control-plane) | Maintain the bidi stream; emit events; accept commands | gRPC stream client (`proto/`) |
 
+A graceful stop through `ExecutionDriver` uses `ServerControl` for the in-band
+`stop` and falls back to SIGTERM, then SIGKILL. Each step waits while the
+server's world files keep being written, and escalates after an idle window or
+at a hard cap (issue #3436; values and their basis in
+[`CONFIGURATION.md`](CONFIGURATION.md) Section 6.3).
+
 The Worker side deliberately has **no `Storage` Port**: it never sees the
 authoritative backend (FR-DATA-3). It reaches authoritative data only through
 `DataTransfer` to the API.

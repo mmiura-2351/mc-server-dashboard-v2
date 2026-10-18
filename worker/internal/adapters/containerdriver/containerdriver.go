@@ -15,8 +15,10 @@
 //
 // Stop semantics (ARCHITECTURE.md Section 5.2): a graceful stop prefers the
 // in-band RCON "stop" command (reusing the ServerControl seam), then falls back
-// to `docker stop` (SIGTERM with a timeout, escalating to SIGKILL inside the
-// daemon), then a direct `docker kill`. A forced stop skips the RCON step.
+// to SIGTERM, then a direct `docker kill`. A forced stop skips the RCON step.
+// Each wait lasts while the server's world files keep being written — its
+// shutdown save — and escalates after an idle window or at a hard cap (issue
+// #3436, stopWatch).
 //
 // Memory is enforced as a hard container limit: the create path sets the Docker
 // host-config Memory field from InstanceSpec.MemoryLimitMB (MiB→bytes) so the
@@ -159,7 +161,7 @@ const (
 // graceful-stop "stop" command. rconHost is the host to dial RCON at — empty for
 // the host loopback (no network), or the container name when a user-defined
 // network is configured (issue #218). It returns an error when RCON is
-// unavailable; the driver then falls back to `docker stop`.
+// unavailable; the driver then falls back to SIGTERM.
 type controlFunc func(ctx context.Context, spec execution.InstanceSpec, rconHost string) (execution.ServerControl, error)
 
 // Options tunes the driver.
@@ -1977,7 +1979,7 @@ func (i *instance) Stop(ctx context.Context, graceful bool, preFallback ...func(
 
 	// Use a detached context for the kill call so it is never starved by
 	// the stopDeadline — a kill MUST reach the daemon even when the prior
-	// RCON + docker-stop phases consumed the entire budget (observed with
+	// RCON and SIGTERM phases consumed the entire budget (observed with
 	// MC 26.1.2 shutdown-save hangs under relay/tunnel connections).
 	killCtx, killCancel := context.WithTimeout(context.WithoutCancel(stopCtx), stopKillCallTimeout)
 	defer killCancel()
