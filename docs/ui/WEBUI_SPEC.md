@@ -566,9 +566,14 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   reconciler converges), worker id, port.
 - Crash banner: while crashed, the `detail`, a guidance line with a link to the
   Console tab, and — keyed on the status event's `reason` — the Forge install
-  diagnostics. `forge_install_out_of_memory` and
-  `forge_install_java_incompatible` each add a specific, localised explanation
-  of what to change. Any `forge_install_*` reason adds a **View install log**
+  diagnostics. The guidance line follows the desired state. Under a running
+  intent the API refuses start and restart (the Worker holds no live
+  instance) and the reconciler restarts the server on its own, so the line says
+  the system will restart it automatically and that the operator can stop it
+  instead; it names no delay. Under a stopped intent the line points to the
+  Start button, which reads **Restart** for a crashed server.
+  `forge_install_out_of_memory` and `forge_install_java_incompatible` each add
+  a specific, localised explanation of what to change. Any `forge_install_*` reason adds a **View install log**
   toggle (hidden without `file:read`) that reads `logs/forge-install.log`
   through the files API on demand and shows its last 200 lines. The files API
   serves a server only at rest or running (REQUIREMENTS.md Section 6.9), and a server that crashed
@@ -579,7 +584,9 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   open when the crash was reported.
 - Controls: Start / Stop (dropdown: graceful · force) / Restart / Export /
   Delete — each disabled by state machine (e.g. Start hidden while running)
-  and permission.
+  and permission. A server crashed under a running intent offers Stop only:
+  Start and Restart are hidden, since the API refuses both there. The dashboard
+  card quick actions follow the same rule and disable them.
 - Metrics strip: CPU / memory / players from the `metrics` stream (sparkline,
   last N samples, client-side only).
 - Log tail: last ~200 lines, link to Console tab.
@@ -903,9 +910,9 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   where it means the server is already desired-running — a pending start, not a
   race — and gets a verb-specific message below), `transition_conflict`
   and `server_not_running` (the last only away from **restart**, which offers
-  the action for a crashed server on purpose and so gets a verb-specific message
-  below). A 409 that reports something other than a race is
-  named instead, since refreshing is not the remedy: `server_unsettled` says the
+  the action for a server observed unknown under a running intent on purpose
+  and so gets a verb-specific message below). A 409 that reports something
+  other than a race is named instead, since refreshing is not the remedy: `server_unsettled` says the
   server must be stopped, on every surface that can receive it;
   `worker_busy` / `server_busy` say another operation on the server is still
   running and the request was refused without being applied, so the operator
@@ -939,9 +946,12 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   the Worker took down comes back on its own, and the message says so.
   `server_not_running` on restart — the Worker holding no live instance for the
   id — shares that message: the lifecycle controls offer restart for a
-  server observed crashed or unknown under a running intent, so this refusal is
+  server observed unknown under a running intent, so this refusal is
   not the race it is on the command surface, and what it leaves behind is the
-  same `desired_state=running` the reconciler acts on.
+  same `desired_state=running` the reconciler acts on. A crash that lands just
+  before a restart of a running server gets the same answer. The controls no
+  longer offer restart for a server observed crashed under a running intent,
+  since the API always refuses it there.
 - The same verb-specific treatment extends to the **503 `worker_unavailable`** —
   the API's rendering of a dispatch that timed out or lost the Worker session,
   where the generic "wait a moment and try again" invites a retry of an

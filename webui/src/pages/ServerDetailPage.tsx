@@ -397,7 +397,13 @@ function Header({
               </div>
             )}
             <div>
-              {t("serverDetail.crashBanner.guidance")}{" "}
+              {/* Under a running intent the API refuses start and restart and
+                  the reconciler restarts the server itself (issue #3419). */}
+              {t(
+                server.desired_state === "running"
+                  ? "serverDetail.crashBanner.autoRestart"
+                  : "serverDetail.crashBanner.guidance",
+              )}{" "}
               <button type="button" className="link" onClick={onOpenConsole}>
                 {t("serverDetail.crashBanner.viewConsole")}
               </button>

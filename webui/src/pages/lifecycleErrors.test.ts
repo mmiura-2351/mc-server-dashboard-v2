@@ -76,8 +76,8 @@ describe("lifecycleErrorMessage", () => {
   });
 
   // Restart is the one verb for which server_not_running is not a race: the
-  // dashboard deliberately offers restart for a crashed server that is still
-  // desired-running, so "state changed" names nothing that changed (issue
+  // dashboard deliberately offers restart for a server observed unknown that is
+  // still desired-running, so "state changed" names nothing that changed (issue
   // #2441). What is left pending is what a failed restart always leaves —
   // desired_state=running — so it shares that message.
   it("maps a 409 server_not_running on restart to the pending-restart message", () => {

@@ -96,9 +96,15 @@ describe("actionApplies", () => {
     expect(actionApplies("start", "unknown", "running")).toBe(false);
   });
 
-  it("crash-looping: stop/restart allowed when desired=running and observed=crashed", () => {
+  // The Worker holds no live instance for a crashed server, so the API refuses
+  // restart (409 server_not_running) and the reconciler restarts the server on
+  // its own; stop stays the operator's one manual move (issue #3419).
+  it("crash-looping: stop allowed but restart not when desired=running and observed=crashed", () => {
     expect(actionApplies("stop", "crashed", "running")).toBe(true);
-    expect(actionApplies("restart", "crashed", "running")).toBe(true);
+    expect(actionApplies("restart", "crashed", "running")).toBe(false);
+  });
+
+  it("stop/restart allowed when desired=running and observed=unknown", () => {
     expect(actionApplies("stop", "unknown", "running")).toBe(true);
     expect(actionApplies("restart", "unknown", "running")).toBe(true);
   });
