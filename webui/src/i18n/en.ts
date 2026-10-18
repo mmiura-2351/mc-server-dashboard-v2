@@ -339,6 +339,11 @@ export const en = {
   "serverDetail.crashDetail": "Crash reason:",
   "serverDetail.crashBanner.guidance":
     "The server has crashed. Click Restart to try again, or check the console for details.",
+  // A crash under a running intent (issue #3419): the API refuses start and
+  // restart there, and the reconciler restarts the server on its own. No delay
+  // is named, since the grace length may change (#3401).
+  "serverDetail.crashBanner.autoRestart":
+    "The server has crashed. The system will restart it automatically, or you can stop it instead. Check the console for details.",
   "serverDetail.crashBanner.viewConsole": "View Console",
   // Forge install diagnostics (#1093): the explanation of a crash the Worker
   // classified, and the install-log viewer the crash banner offers for it.

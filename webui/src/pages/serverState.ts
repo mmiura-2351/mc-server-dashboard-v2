@@ -128,6 +128,12 @@ export function statePill(state: ObservedState): PillSpec {
  * Whether a lifecycle action applies to the current observed state. While
  * transitional, nothing applies; otherwise start needs an at-rest/crashed
  * server, and stop/restart need a running one.
+ *
+ * Under a running intent, stop also applies to a crashed or unknown server, and
+ * restart to an unknown one. Restart does not apply to a crashed one: the
+ * Worker holds no live instance, so the API refuses it (409
+ * `server_not_running`) and the reconciler restarts the server on its own
+ * (issue #3419).
  */
 export function actionApplies(
   action: "start" | "stop" | "restart",
@@ -142,8 +148,11 @@ export function actionApplies(
     return state === "stopped" || state === "crashed" || state === "unknown";
   }
   // stop / restart
-  if (desired === "running" && (state === "crashed" || state === "unknown")) {
+  if (desired === "running" && state === "unknown") {
     return true;
+  }
+  if (desired === "running" && state === "crashed") {
+    return action === "stop";
   }
   return state === "running";
 }

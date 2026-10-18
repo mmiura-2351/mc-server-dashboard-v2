@@ -16,9 +16,9 @@
  * `transition_conflict` and `server_not_running` each mean the server really
  * did move, or was never in the state the caller assumed, so refreshing is the
  * right response. `server_not_running` is that only away from restart — the
- * dashboard offers restart for a crashed server on purpose, so there the
- * refusal is no race at all and it takes a verb-specific message (issue
- * #2441).
+ * dashboard offers restart for a server observed unknown under a running intent
+ * on purpose, so there the refusal is no race at all and it takes a
+ * verb-specific message (issue #2441).
  *
  * 503 responses with a recognized `reason` (`no_eligible_worker`,
  * `worker_unavailable`, `jar_unavailable`) get their own message (issue #1092).
@@ -184,9 +184,11 @@ const SPECIFIC_409_MESSAGE: Record<string, TranslationKey> = {
 // instance for the id (lifecycle.py, RestartServer and SendServerCommand). On
 // the command surface it genuinely is a race — the caller had just been told
 // the server was running — but the dashboard offers restart for a server
-// observed crashed or unknown under a running intent ON PURPOSE
-// (serverState.ts `actionApplies`), so there the refusal is the expected answer
-// and "state changed" names nothing that changed (issue #2441). What it leaves
+// observed unknown under a running intent ON PURPOSE (serverState.ts
+// `actionApplies`; no longer for a crashed one, which the API always refuses,
+// issue #3419), so there the refusal is the expected answer and "state changed"
+// names nothing that changed (issue #2441). A crash that lands just before a
+// restart of a running server gets the same answer. What it leaves
 // behind is what every failed restart leaves: desired=running stands, so the
 // reconciler starts the server back up once its observed state reflects that it
 // is down (reconciler.py `_NOT_RUNNING` -> redispatch_start). That is exactly

@@ -801,7 +801,7 @@ describe("ServerDetailPage lifecycle controls", () => {
         screen.getByRole("button", { name: t("serverDetail.export") }),
       ).toBeDisabled();
 
-      // The server crashes mid-flight: restart applies again, but the open
+      // The server crashes mid-flight: stop applies again, but the open
       // request still holds it.
       act(() => {
         MockWebSocket.last().open();
@@ -813,9 +813,7 @@ describe("ServerDetailPage lifecycle controls", () => {
           }),
         );
       });
-      expect(
-        screen.getByRole("button", { name: t("serverDetail.restart") }),
-      ).toBeDisabled();
+      expect(screen.getByRole("button", { name: /Stop/ })).toBeDisabled();
 
       // Hang the settle refetch so the pill below is the cache, not a reload.
       mockApi.get.mockReturnValue(new Promise(() => {}));
@@ -826,9 +824,7 @@ describe("ServerDetailPage lifecycle controls", () => {
       ).toBeInTheDocument();
       // The failed restart does not roll the newer crash back to "running".
       expect(statePill()).toBe(t("dashboard.state.crashed"));
-      expect(
-        screen.getByRole("button", { name: t("serverDetail.restart") }),
-      ).toBeEnabled();
+      expect(screen.getByRole("button", { name: /Stop/ })).toBeEnabled();
       expect(queryClient.getQueryState(serversKey(CID))?.isInvalidated).toBe(
         true,
       );
@@ -2477,7 +2473,7 @@ describe("ServerDetailPage Overview live streams", () => {
     });
 
     expect(
-      screen.getByText(t("serverDetail.crashBanner.guidance")),
+      screen.getByText(t("serverDetail.crashBanner.autoRestart")),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", {
@@ -2559,7 +2555,7 @@ describe("ServerDetailPage Overview live streams", () => {
       await crashWithReason(reason);
 
       expect(
-        screen.getByText(t("serverDetail.crashBanner.guidance")),
+        screen.getByText(t("serverDetail.crashBanner.autoRestart")),
       ).toBeInTheDocument();
       expect(
         screen.queryByRole("button", {
@@ -2593,6 +2589,53 @@ describe("ServerDetailPage Overview live streams", () => {
         name: t("serverDetail.startCrashed"),
       }),
     ).toBeInTheDocument();
+  });
+
+  // A crash under a running intent: the API refuses both start and restart
+  // (the Worker holds no live instance), and the reconciler restarts the server
+  // on its own, so the banner says so and only Stop is offered (issue #3419).
+  it("tells the operator a crash under a running intent restarts automatically and offers only Stop", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ observed_state: "crashed", desired_state: "running" }),
+    );
+    renderPage();
+    await screen.findByText("survival");
+
+    expect(
+      screen.getByText(t("serverDetail.crashBanner.autoRestart")),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("serverDetail.crashBanner.guidance")),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Stop/ })).toBeInTheDocument();
+    // serverDetail.restart and serverDetail.startCrashed share one label, so
+    // this asserts neither a Restart nor a relabelled Start is offered.
+    expect(
+      screen.queryByRole("button", { name: t("serverDetail.restart") }),
+    ).not.toBeInTheDocument();
+  });
+
+  // A crash after an operator stop: Start (labelled Restart) is accepted, so the
+  // banner keeps sending the operator to it.
+  it("keeps the Restart guidance for a crash under a stopped intent", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ observed_state: "crashed", desired_state: "stopped" }),
+    );
+    renderPage();
+    await screen.findByText("survival");
+
+    expect(
+      screen.getByText(t("serverDetail.crashBanner.guidance")),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("serverDetail.crashBanner.autoRestart")),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: t("serverDetail.startCrashed") }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Stop/ }),
+    ).not.toBeInTheDocument();
   });
 });
 
