@@ -78,6 +78,10 @@ type dockerAPI interface {
 	Start(ctx context.Context, id string) error
 	// Stop sends SIGTERM and, after timeout, SIGKILL (the `docker stop` semantics).
 	Stop(ctx context.Context, id string, timeout time.Duration) error
+	// Terminate sends SIGTERM and returns at once, leaving the wait and any SIGKILL
+	// to the caller: a graceful stop escalates on the world's write progress
+	// rather than a fixed grace (issue #3436).
+	Terminate(ctx context.Context, id string) error
 	// Kill force-terminates a container (SIGKILL).
 	Kill(ctx context.Context, id string) error
 	// Wait blocks until the container exits and returns its exit code.

@@ -51,9 +51,35 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/javaproperties"
 )
 
-// defaultStopTimeout bounds the `docker stop` SIGTERM grace period before the
-// daemon escalates to SIGKILL.
+// defaultStopTimeout is a stop's idle window (issue #3436): once the server has
+// been asked to stop (RCON "stop", then SIGTERM), the driver escalates to the
+// next step only after the server's world files have gone this long without a
+// write — a server still writing its shutdown save keeps its grace. It is also
+// the grace the startup Sweep's `docker stop` gives an orphan and the wait for a
+// SIGKILLed container to be confirmed gone.
 const defaultStopTimeout = 30 * time.Second
+
+// defaultStopCap bounds how long a graceful stop may keep waiting on a server
+// that keeps writing, measured from the moment the escalation starts (after the
+// pre-stop flush). It is the stop's hard cap (issue #3436): a vanilla 1.20.1
+// shutdown save measured 85-143 s on a host whose synchronous 4 KiB writes take
+// ~124 ms (`sync-chunk-writes=true` opens region files O_DSYNC), and 360 s
+// leaves 2.5x that. The cap has to fit the API's stop dispatch budget
+// (control.stop_timeout_seconds=600) together with the flush, the kill call and
+// the kill confirm: defaultFlushTimeout (90) + defaultStopCap (360) +
+// stopDeadlineGrace (10) + stopKillCallTimeout (30) + defaultStopTimeout (30) =
+// 520 s, 80 s inside it.
+const defaultStopCap = 360 * time.Second
+
+// defaultStopPollInterval is how often a stop's wait fingerprints the world
+// (InstanceSpec.WorldProgress): a metadata-only walk of the working set, cheap
+// enough to repeat on an I/O-constrained host. A wait never polls less often
+// than its idle window allows (stopPollInterval).
+const defaultStopPollInterval = 5 * time.Second
+
+// stopKillCallTimeout bounds the docker kill call that ends an escalated stop.
+// It is detached from the stop deadline so the kill always reaches the daemon.
+const stopKillCallTimeout = 30 * time.Second
 
 // defaultFlushTimeout bounds the pre-stop flush (#1007): the RCON save-off /
 // save-all plus the settle-wait that drives the live world's dirty chunks to
@@ -141,8 +167,9 @@ type Options struct {
 	// WorkerID labels every container so a startup sweep can find and remove this
 	// Worker's orphaned containers (crash-orphan recovery).
 	WorkerID string
-	// StopTimeout bounds the `docker stop` grace period. Zero uses
-	// defaultStopTimeout.
+	// StopTimeout is a stop's idle window: how long the server's world files may
+	// go unwritten before the stop escalates to its next signal (issue #3436). Zero
+	// uses defaultStopTimeout.
 	StopTimeout time.Duration
 	// FlushTimeout bounds the pre-stop flush the caller supplies to Stop. Zero uses
 	// defaultFlushTimeout; tests set a short value to keep the suite fast.
@@ -194,6 +221,13 @@ type Driver struct {
 	openControl controlFunc
 	workerID    string
 	stopTimeout time.Duration
+	// stopCap and stopPoll are a graceful stop's hard cap and world-poll interval,
+	// and now and after its clock (issue #3436). They are fields so a test can drive
+	// the stop's wait with a fake clock; production keeps the defaults New sets.
+	stopCap  time.Duration
+	stopPoll time.Duration
+	now      func() time.Time
+	after    func(time.Duration) <-chan time.Time
 	// flushTimeout bounds the pre-stop flush (issue #2622).
 	flushTimeout time.Duration
 	gameBindIP   string
@@ -262,6 +296,10 @@ func New(docker dockerAPI, images *ImageSelector, openControl controlFunc, opts 
 		openControl:      openControl,
 		workerID:         opts.WorkerID,
 		stopTimeout:      timeout,
+		stopCap:          defaultStopCap,
+		stopPoll:         defaultStopPollInterval,
+		now:              time.Now,
+		after:            time.After,
 		flushTimeout:     flushTimeout,
 		gameBindIP:       gameBindIP,
 		network:          opts.Network,
@@ -341,6 +379,10 @@ func (d *Driver) Start(ctx context.Context, spec execution.InstanceSpec) (execut
 		openControl:      d.openControl,
 		rconHost:         d.RconHost(spec.ServerID),
 		stopTimeout:      d.stopTimeout,
+		stopCap:          d.stopCap,
+		stopPoll:         d.stopPoll,
+		now:              d.now,
+		after:            d.after,
 		flushTimeout:     d.flushTimeout,
 		readinessTimeout: d.readinessTimeout,
 		logger:           d.logger,
@@ -973,8 +1015,15 @@ type instance struct {
 	endInstall context.CancelFunc
 	// rconHost is the host the graceful-stop RCON connection dials: empty for the
 	// host loopback, the container name when a user-defined network is configured.
-	rconHost    string
+	rconHost string
+	// stopTimeout is the stop's idle window, stopCap its hard cap, stopPoll how
+	// often its wait fingerprints the world, and now/after its clock (issue #3436;
+	// see stopWatch).
 	stopTimeout time.Duration
+	stopCap     time.Duration
+	stopPoll    time.Duration
+	now         func() time.Time
+	after       func(time.Duration) <-chan time.Time
 	// flushTimeout bounds the pre-stop flush preFallback (issue #2622).
 	flushTimeout time.Duration
 	// readinessTimeout bounds the hold-on-starting wait before falling back to
@@ -988,7 +1037,7 @@ type instance struct {
 
 	events chan execution.StatusEvent
 	// exited is closed by supervise once the container has reached a terminal
-	// state; waitExit selects on it.
+	// state; a stop's wait (stopWatch.wait) selects on it.
 	exited chan struct{}
 
 	// logPump captures the demuxed container log stream; logWG tracks the capture
@@ -1382,7 +1431,7 @@ func (i *instance) superviseInstall(installID string) {
 		// A Stop won the latch after the install exited but before the launch
 		// started. The current container is still the (exited) install container, so
 		// Stop acts on a valid target; remove the unstarted launch container we
-		// created and the install container, then report stopped. Stop's waitExit is
+		// created and the install container, then report stopped. Stop's wait is
 		// released by finishTerminal closing i.exited (issue #306).
 		i.mu.Unlock()
 		_ = i.docker.Remove(context.Background(), id)
@@ -1788,10 +1837,10 @@ func parsePlayerCount(reply string) uint32 {
 	return uint32(n)
 }
 
-// Stop ends the instance. A graceful stop tries RCON "stop", then `docker stop`
-// (which SIGTERMs then SIGKILLs after stopTimeout inside the daemon), then a
-// direct `docker kill`; a forced stop skips the RCON step. Any terminal state
-// makes Stop a prompt no-op success.
+// Stop ends the instance. A graceful stop tries RCON "stop", then SIGTERM, then a
+// direct `docker kill`; a forced stop skips the RCON step. Each wait escalates on
+// the world's write progress rather than a fixed grace (issue #3436, stopWatch).
+// Any terminal state makes Stop a prompt no-op success.
 func (i *instance) Stop(ctx context.Context, graceful bool, preFallback ...func(context.Context) bool) error {
 	i.mu.Lock()
 	if i.stopping || isTerminal(i.state) {
@@ -1819,6 +1868,7 @@ func (i *instance) Stop(ctx context.Context, graceful bool, preFallback ...func(
 	id := i.containerID
 	i.mu.Unlock()
 	i.emit(execution.StateStopping, "")
+	requested := i.now()
 
 	// Always flush before stop on the graceful path (#1007/#1008): MC's own
 	// shutdown save (via RCON "stop") does NOT reliably flush dirty region
@@ -1831,13 +1881,14 @@ func (i *instance) Stop(ctx context.Context, graceful bool, preFallback ...func(
 	// stop already under way, #770) and bounded by its own flushTimeout — and it
 	// runs BEFORE the escalation deadline starts. The two budgets are therefore
 	// additive, not shared: however long the flush takes, up to flushTimeout, the
-	// escalation still gets the whole stopDeadline for the RCON wait, the SIGTERM
-	// grace and the post-Stop wait. Charging the flush to the escalation instead
-	// left a wedged-RCON flush ~10 s of a 100 s budget for a 30 s SIGTERM grace,
-	// which is the killed-instead-of-stopped failure this whole path exists to
-	// prevent (issue #2622). The worst case for a graceful stop is thus
-	// flushTimeout + stopDeadline (90 s + 100 s by default), well inside the
-	// API's stop dispatch budget (control.stop_timeout_seconds=600).
+	// escalation still gets the whole stopDeadline for the RCON wait and the
+	// SIGTERM wait. Charging the flush to the escalation instead left a
+	// wedged-RCON flush ~10 s of a 100 s budget for a 30 s SIGTERM grace, which is
+	// the killed-instead-of-stopped failure this whole path exists to prevent
+	// (issue #2622). The worst case for a graceful stop is flushTimeout +
+	// stopDeadline + the kill call + the kill confirm (90 + 370 + 30 + 30 = 520 s
+	// by default, see defaultStopCap), inside the API's stop dispatch budget
+	// (control.stop_timeout_seconds=600).
 	//
 	// When the flush succeeds (returns true), RCON "stop" and docker stop
 	// (SIGTERM) are SKIPPED: both trigger MC's own shutdown save, which
@@ -1870,41 +1921,65 @@ func (i *instance) Stop(ctx context.Context, graceful bool, preFallback ...func(
 	stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), i.stopDeadline())
 	defer cancel()
 
+	// The shutdown save Minecraft runs on RCON "stop" and on SIGTERM alike writes
+	// every unsaved chunk, and with sync-chunk-writes=true (the vanilla default)
+	// each write waits for the disk: measured at 85-143 s for a small vanilla 1.20.1
+	// world on a host with slow synchronous writes, against the 30 s fixed grace
+	// that used to SIGKILL it mid-save (issue #3436). So each wait below lasts as
+	// long as the world keeps being written, and escalates only once it has gone
+	// stopTimeout without a write or the stop's cap is reached (stopWatch). Only a
+	// graceful stop observes the world: a forced one escalates after the idle
+	// window, as the fixed grace did.
 	if !flushed {
-		if graceful && i.tryRCONStop(stopCtx) && i.waitExit(stopCtx, i.stopTimeout) {
-			return nil
+		progress := i.spec.WorldProgress
+		if !graceful {
+			progress = nil
 		}
-
-		if err := i.docker.Stop(stopCtx, id, i.stopTimeout); err == nil && i.waitExit(stopCtx, i.stopTimeout) {
-			return nil
+		w := i.newStopWatch(progress)
+		reason := ""
+		if graceful && i.tryRCONStop(stopCtx) {
+			if reason = w.wait(stopCtx); reason == "" {
+				i.logStopExit(requested)
+				return nil
+			}
+			if reason != stopReasonCap {
+				i.logEscalation("rcon stop", "SIGTERM", requested, w, reason)
+			}
 		}
-	}
-
-	// The stop did not confirm the container's exit within the stop timeout, so it is
-	// escalating to a direct kill. This is exactly the case where Minecraft's shutdown
-	// may not have finished sector-padding its region files, so the stop-leg snapshot
-	// captures an unpadded (live-format) world — diagnosable here at WARN with the
-	// server id and the timeout, so an unpadded-scratch cause traces back to a stop
-	// timeout (issue #927). The message distinguishes the two arrival paths: only the
-	// graceful path actually attempted (and timed out) a clean shutdown, while a
-	// forced stop (graceful=false) skips RCON/docker-stop by design and kills
-	// directly, so "graceful stop timed out" would misdescribe it.
-	if flushed {
+		if reason != stopReasonCap {
+			if err := i.docker.Terminate(stopCtx, id); err != nil {
+				reason = stopReasonSignalFailed
+			} else {
+				w.restartIdle()
+				if reason = w.wait(stopCtx); reason == "" {
+					i.logStopExit(requested)
+					return nil
+				}
+			}
+		}
+		// The stop is escalating to a direct kill, which is exactly the case where
+		// Minecraft's shutdown save may be cut short: the world is left partly saved
+		// and the stop-leg snapshot may capture unpadded (live-format) regions
+		// (issue #927). The one line says why (idle or cap), how long the stop had
+		// run and when the world was last written, so a partial save traces back to
+		// it. A forced stop (graceful=false) skips RCON by design, so "graceful stop"
+		// would misdescribe it.
+		if graceful {
+			i.logEscalation("graceful stop", "kill", requested, w, reason)
+		} else {
+			i.logger.Warn("forced stop; killing container directly",
+				"server_id", i.spec.ServerID, "idle_window", i.stopTimeout, "reason", reason)
+		}
+	} else {
 		i.logger.Info("flush succeeded; terminating container",
 			"server_id", i.spec.ServerID)
-	} else if graceful {
-		i.logger.Warn("graceful stop timed out; escalating to kill",
-			"server_id", i.spec.ServerID, "timeout", i.stopTimeout)
-	} else {
-		i.logger.Warn("forced stop; killing container directly",
-			"server_id", i.spec.ServerID, "timeout", i.stopTimeout)
 	}
 
 	// Use a detached context for the kill call so it is never starved by
 	// the stopDeadline — a kill MUST reach the daemon even when the prior
 	// RCON + docker-stop phases consumed the entire budget (observed with
 	// MC 26.1.2 shutdown-save hangs under relay/tunnel connections).
-	killCtx, killCancel := context.WithTimeout(context.WithoutCancel(stopCtx), 30*time.Second)
+	killCtx, killCancel := context.WithTimeout(context.WithoutCancel(stopCtx), stopKillCallTimeout)
 	defer killCancel()
 	if err := i.docker.Kill(killCtx, id); err != nil {
 		// The kill call itself errored (e.g. a hung or erroring daemon), so this Stop
@@ -1972,23 +2047,147 @@ func (i *instance) Stop(ctx context.Context, graceful bool, preFallback ...func(
 	return nil
 }
 
-// stopDeadlineGrace pads the detached stop-escalation deadline beyond the
-// stopTimeout-bounded steps, leaving headroom for the RCON open/"stop" and the
-// docker Kill call so a healthy stop never trips the bound; it only caps a hung
-// daemon call.
+// stopDeadlineGrace pads the detached stop-escalation deadline beyond the stop's
+// cap, leaving headroom for the RCON open/"stop" and the SIGTERM call so a healthy
+// stop never trips the bound; it only caps a hung daemon call.
 const stopDeadlineGrace = 10 * time.Second
 
-// stopDeadline bounds the detached escalation context (issue #770). The
-// graceful path runs an RCON wait (stopTimeout), a docker Stop whose daemon-side
-// SIGTERM grace is itself stopTimeout, a post-Stop wait (stopTimeout), then a
-// docker Kill — so 3*stopTimeout plus a grace covers the whole sequence without
-// cutting an in-progress stop short, while still capping a hung daemon call.
+// stopDeadline bounds the detached escalation context (issue #770). Both waits —
+// after RCON "stop" and after SIGTERM — end by the stop's cap, which runs from the
+// start of the escalation (stopWatch), so the cap plus a grace for the daemon and
+// RCON calls bounds the whole sequence; the docker kill that may follow carries its
+// own stopKillCallTimeout, and its confirm waits stopTimeout. This replaces the
+// fixed-grace 3*stopTimeout bound, which counted a daemon-side `docker stop` grace
+// and a post-stop wait the sequence never spent in full (issue #3436).
 //
 // The pre-stop flush is deliberately NOT part of this budget: Stop starts the
 // deadline after the flush has returned or its own flushTimeout has expired, so
 // this value is sized for the escalation alone (issue #2622).
 func (i *instance) stopDeadline() time.Duration {
-	return 3*i.stopTimeout + stopDeadlineGrace
+	return i.stopCap + stopDeadlineGrace
+}
+
+// Why a stop wait gave up on the server exiting by itself (stopWatch.wait).
+const (
+	stopReasonIdle         = "idle"
+	stopReasonCap          = "cap"
+	stopReasonDeadline     = "deadline"
+	stopReasonSignalFailed = "sigterm_failed"
+)
+
+// stopWatch applies a stop's escalation rule (issue #3436): wait while the world's
+// files keep being written, escalate once they have gone the idle window
+// (stopTimeout) without a write or the stop's cap has passed since the watch began.
+// A server writing its shutdown save — which can take minutes when every chunk
+// write is synchronous — keeps its grace; a hung server, which writes nothing, is
+// escalated as soon as the fixed grace used to.
+type stopWatch struct {
+	i *instance
+	// probe fingerprints the world (InstanceSpec.WorldProgress); nil observes
+	// nothing, so the wait escalates after the idle window.
+	probe func() (execution.WorldProgress, error)
+	// start is the cap's origin, idleFrom the idle window's (the last write seen or
+	// the last escalation step), and lastWrite the last write seen (zero if none).
+	start     time.Time
+	idleFrom  time.Time
+	lastWrite time.Time
+	prev      execution.WorldProgress
+	havePrev  bool
+}
+
+// newStopWatch starts a watch now, taking the world's baseline fingerprint.
+func (i *instance) newStopWatch(probe func() (execution.WorldProgress, error)) *stopWatch {
+	now := i.now()
+	w := &stopWatch{i: i, probe: probe, start: now, idleFrom: now}
+	if probe != nil {
+		if p, err := probe(); err == nil {
+			w.prev, w.havePrev = p, true
+		}
+	}
+	return w
+}
+
+// restartIdle gives the next step its full idle window: a server that has just
+// been sent SIGTERM gets stopTimeout to show it is saving.
+func (w *stopWatch) restartIdle() {
+	w.idleFrom = w.i.now()
+}
+
+// wait blocks until the container exits (returning "") or the rule gives up,
+// returning why: stopReasonIdle, stopReasonCap, or stopReasonDeadline when ctx
+// ends first.
+func (w *stopWatch) wait(ctx context.Context) string {
+	for {
+		select {
+		case <-w.i.exited:
+			return ""
+		case <-ctx.Done():
+			return stopReasonDeadline
+		case <-w.i.after(w.i.stopPollInterval()):
+		}
+		now := w.i.now()
+		if w.written() {
+			w.lastWrite, w.idleFrom = now, now
+		}
+		select {
+		case <-w.i.exited:
+			return ""
+		default:
+		}
+		if now.Sub(w.start) >= w.i.stopCap {
+			return stopReasonCap
+		}
+		if now.Sub(w.idleFrom) >= w.i.stopTimeout {
+			return stopReasonIdle
+		}
+	}
+}
+
+// written reports whether the world changed since the previous poll. A scan that
+// cannot tell counts as a write: a save may be under way, and the cap still bounds
+// a scan that never succeeds.
+func (w *stopWatch) written() bool {
+	if w.probe == nil {
+		return false
+	}
+	p, err := w.probe()
+	if err != nil {
+		return true
+	}
+	changed := !w.havePrev || p != w.prev
+	w.prev, w.havePrev = p, true
+	return changed
+}
+
+// stopPollInterval is how often a stop's wait polls: defaultStopPollInterval
+// unless the idle window is shorter, so the window is never overshot by a poll.
+func (i *instance) stopPollInterval() time.Duration {
+	return min(i.stopPoll, i.stopTimeout)
+}
+
+// logEscalation records one escalation step at WARN (issue #3436): the step it
+// leaves and the one it takes, why (idle or cap), how long since the stop was
+// requested, and when the world was last seen written.
+func (i *instance) logEscalation(from, to string, requested time.Time, w *stopWatch, reason string) {
+	now := i.now()
+	args := []any{"server_id", i.spec.ServerID, "from", from, "to", to, "reason", reason,
+		"elapsed", now.Sub(requested), "idle_window", i.stopTimeout, "cap", i.stopCap}
+	if w.lastWrite.IsZero() {
+		args = append(args, "last_write", "none observed")
+	} else {
+		args = append(args, "last_write", w.lastWrite, "since_last_write", now.Sub(w.lastWrite))
+	}
+	i.logger.Warn("graceful stop escalating: the server did not exit", args...)
+}
+
+// logStopExit records a stop that outlasted the idle window and still ended with
+// the server exiting by itself at INFO: the shutdown save finished, however long
+// it took (issue #3436).
+func (i *instance) logStopExit(requested time.Time) {
+	if elapsed := i.now().Sub(requested); elapsed >= i.stopTimeout {
+		i.logger.Info("server exited after its shutdown save",
+			"server_id", i.spec.ServerID, "elapsed", elapsed)
+	}
 }
 
 // waitExitDone reports whether the container reached a terminal state within d,
@@ -2055,23 +2254,6 @@ func (i *instance) tryRCONStop(ctx context.Context) bool {
 	return true
 }
 
-// waitExit reports whether the container reached a terminal state within d. The
-// supervisor goroutine observes the actual exit and closes i.exited; the wait is
-// released by that close regardless of the recorded terminal state. It returns
-// false if the stop timeout elapses or ctx is cancelled first.
-func (i *instance) waitExit(ctx context.Context, d time.Duration) bool {
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	select {
-	case <-i.exited:
-		return true
-	case <-ctx.Done():
-		return false
-	case <-timer.C:
-		return false
-	}
-}
-
 // supervise blocks on the container exit and emits the terminal state: stopped
 // when a stop was requested, crashed otherwise (FR-SRV-4). It removes the
 // container afterwards and closes the event and log streams.
@@ -2122,7 +2304,7 @@ func (i *instance) supervise() {
 		i.set(execution.StateCrashed)
 		i.emit(execution.StateCrashed, detail)
 	}
-	// Release any in-flight waitExit now the terminal state is set.
+	// Release any in-flight stop wait now the terminal state is set.
 	close(i.exited)
 
 	// End the log follow and wait for the capture goroutine before closing the

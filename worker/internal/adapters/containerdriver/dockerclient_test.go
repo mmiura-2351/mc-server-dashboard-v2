@@ -307,6 +307,26 @@ func TestEngineClientWaitDecodesStatusCode(t *testing.T) {
 	}
 }
 
+// Terminate is SIGTERM through the kill endpoint, with no grace the daemon would
+// end in a SIGKILL of its own: the driver owns the wait (issue #3436).
+func TestEngineClientTerminateSendsSIGTERM(t *testing.T) {
+	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	c := d.client(t)
+
+	if err := c.Terminate(context.Background(), "abc123"); err != nil {
+		t.Fatalf("Terminate: %v", err)
+	}
+	if len(d.requests) != 1 {
+		t.Fatalf("requests = %+v, want one", d.requests)
+	}
+	r := d.requests[0]
+	if r.method != http.MethodPost || !strings.HasSuffix(r.path, "/containers/abc123/kill") || r.query != "signal=SIGTERM" {
+		t.Fatalf("request = %s %s?%s, want POST .../containers/abc123/kill?signal=SIGTERM", r.method, r.path, r.query)
+	}
+}
+
 func TestEngineClientListFiltersByLabel(t *testing.T) {
 	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode([]map[string]any{
