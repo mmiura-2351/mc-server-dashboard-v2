@@ -607,6 +607,9 @@ func TestQueryPlayerCountDedupsOpenFailureAcrossEphemeralPorts(t *testing.T) {
 // defaultRCONPort is the default RCON port as the container port mappings spell it.
 var defaultRCONPort = strconv.Itoa(serverproperties.DefaultRCONPort)
 
+// defaultGamePort is the default game port as the container port mappings spell it.
+var defaultGamePort = strconv.Itoa(serverproperties.DefaultGamePort)
+
 // openRealControl opens RCON the way cmd/worker wires the driver: through the
 // real server.properties reader in the instance's working dir.
 func openRealControl(ctx context.Context, spec execution.InstanceSpec, rconHost string) (execution.ServerControl, error) {
@@ -1574,6 +1577,68 @@ func TestStartPublishesColonSpelledGamePort(t *testing.T) {
 	}
 	if hasPort(docker.createSpec.Ports, defaultGamePort) {
 		t.Errorf("Ports = %v, want NO fallback to the default game port", docker.createSpec.Ports)
+	}
+}
+
+// server-port is resolved as the Minecraft server and the tunnel resolve it
+// (serverproperties.GamePort) and the game mapping is built from the number, so
+// no text from the file -- not the password a backslash-continued server-port
+// line folds into the value -- reaches the container create. A non-integer value
+// publishes the default 25565 the server falls back to; an out-of-range one fails
+// the start before any container is created, naming server-port but not the
+// value (issue #3417).
+func TestStartResolvesServerPortAsANumber(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		body     string
+		wantPort string // empty: the start is refused
+		leak     string
+	}{
+		{name: "normal", body: "server-port=26590\n", wantPort: "26590"},
+		{name: "continued port line", body: "server-port=26590\\\nrcon.password=SECRET\n", wantPort: "25565", leak: "SECRET"},
+		{name: "non-numeric", body: "server-port=notaport\n", wantPort: "25565", leak: "notaport"},
+		{name: "out of range", body: "server-port=70000\n", leak: "70000"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeProperties(t, dir, tc.body)
+			docker := newFakeDocker()
+			d := newTestDriver(docker, nil, errors.New("no rcon"))
+
+			s := spec()
+			s.WorkingDir = dir
+			_, err := d.Start(context.Background(), s)
+
+			if tc.wantPort == "" {
+				if err == nil {
+					t.Fatal("Start = nil error, want an out-of-range server-port refused")
+				}
+				if !strings.Contains(err.Error(), "server-port") || strings.Contains(err.Error(), tc.leak) {
+					t.Errorf("Start error = %q, want it to name server-port and not the value", err)
+				}
+				if docker.createCalls != 0 {
+					t.Errorf("createCalls = %d, want 0", docker.createCalls)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			var game *PortMapping
+			for i := range docker.createSpec.Ports {
+				if docker.createSpec.Ports[i].HostIP == "0.0.0.0" {
+					game = &docker.createSpec.Ports[i]
+				}
+			}
+			if game == nil || game.ContainerPort != tc.wantPort || game.HostPort != tc.wantPort {
+				t.Errorf("Ports = %+v, want the game port %s published", docker.createSpec.Ports, tc.wantPort)
+			}
+			if tc.leak != "" {
+				if got := fmt.Sprintf("%+v", docker.createSpec.Ports); strings.Contains(got, tc.leak) {
+					t.Errorf("Ports = %s, must not carry %q", got, tc.leak)
+				}
+			}
+		})
 	}
 }
 

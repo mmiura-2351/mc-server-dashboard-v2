@@ -20,6 +20,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -41,11 +42,6 @@ const handshakeOK = "OK\n"
 // Section 5 — the relay drops a tunnel that sends nothing within 5 s; the Worker
 // applies the symmetric bound to its own attempt).
 const handshakeTimeout = 5 * time.Second
-
-// defaultGamePort is the Minecraft default game port, used when the server's
-// server.properties does not set server-port. It mirrors the container driver's
-// default (the published loopback port the relay path dials).
-const defaultGamePort = "25565"
 
 // Dialer dials the relay tunnel and splices it to a local server's game port.
 // One Dialer serves the whole Worker; each Dial handles one player session. The
@@ -163,7 +159,7 @@ func (d *Dialer) Dial(ctx context.Context, spec Spec) error {
 		_ = relayConn.Close()
 		return err
 	}
-	gameAddr := net.JoinHostPort(d.dialHost(spec.ServerID), port)
+	gameAddr := net.JoinHostPort(d.dialHost(spec.ServerID), strconv.Itoa(port))
 	// Dial under setupCtx so a blackholing non-loopback game_bind_ip fails fast
 	// (within the 5 s setup budget) instead of stalling the lane for the kernel
 	// connect timeout while the relay's player window has already expired.
@@ -345,7 +341,7 @@ func (d *Dialer) closeAll() {
 
 // gamePort reads server-port from the server's working-dir server.properties,
 // falling back to the Minecraft default when the file is absent or the key is
-// unset — mirroring the container driver's published-port resolution, which
+// unset or not an integer (an out-of-range one is an error) — mirroring the container driver's published-port resolution, which
 // reads the same file through the same parser (containerdriver.ports). Keep the
 // two resolutions in sync: if the driver ever maps a host port that differs from
 // the container port, the tunnel must dial the host port, not server-port.
@@ -362,14 +358,17 @@ func (d *Dialer) closeAll() {
 // The file is parsed with the shared Java-compatible parser
 // (internal/javaproperties), so the port dialed is the one the Minecraft server
 // bound even when the file spells it "server-port:25599" or "server-port 25599"
-// (issue #2811).
-func gamePort(workingDir string) (string, error) {
+// (issue #2811). The value is resolved by serverproperties.GamePort, as the
+// driver resolves it, and the dial address is built from the number: the value
+// read can carry the next line of the file (issue #3417).
+func gamePort(workingDir string) (int, error) {
 	data, err := serverproperties.Read(workingDir)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return "", fmt.Errorf("tunnel: %w", err)
+		return 0, fmt.Errorf("tunnel: %w", err)
 	}
-	if port := javaproperties.Parse(data)["server-port"]; port != "" {
-		return port, nil
+	port, err := serverproperties.GamePort(javaproperties.Parse(data)["server-port"])
+	if err != nil {
+		return 0, fmt.Errorf("tunnel: %w", err)
 	}
-	return defaultGamePort, nil
+	return port, nil
 }

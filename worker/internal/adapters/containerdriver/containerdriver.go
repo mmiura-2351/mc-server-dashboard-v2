@@ -51,10 +51,6 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/javaproperties"
 )
 
-// defaultGamePort is the Minecraft server port when server.properties does not
-// override server-port.
-const defaultGamePort = "25565"
-
 // defaultStopTimeout bounds the `docker stop` SIGTERM grace period before the
 // daemon escalates to SIGKILL.
 const defaultStopTimeout = 30 * time.Second
@@ -2289,8 +2285,8 @@ var (
 
 // ports reads the server's game and RCON ports from its working-dir
 // server.properties, falling back to the Minecraft defaults when the file is
-// absent or a key is unset (for rcon.port also when it is not an integer, as the
-// server does; an out-of-range one is an error). Start publishes the game port on the configured host
+// absent or a key is unset or not an integer, as the server does (an
+// out-of-range one is an error). Start publishes the game port on the configured host
 // interface and RCON on loopback. The file itself is read by the shared no-follow
 // reader (adapters/serverproperties) and parsed by the shared Java-compatible
 // parser (internal/javaproperties), both of which tunnel.gamePort
@@ -2311,16 +2307,17 @@ func ports(workingDir string) (game, rcon string, err error) {
 		return "", "", fmt.Errorf("containerdriver: %w", err)
 	}
 	props := javaproperties.Parse(data)
-	game = props["server-port"]
-	if game == "" {
-		game = defaultGamePort
+	// Each port is resolved as its dial resolves it (the tunnel for the game port,
+	// RCON for rcon.port), so the port published is the one dialed, and built from
+	// the number: the value read can carry the next line of the file (issues #3345,
+	// #3417).
+	gamePort, err := serverproperties.GamePort(props["server-port"])
+	if err != nil {
+		return "", "", fmt.Errorf("containerdriver: %w", err)
 	}
-	// Resolved as the RCON dial resolves it, so the port published is the one
-	// dialed, and built from the number: the value read can carry the next line of
-	// the file (issue #3345).
 	rconPort, err := serverproperties.RCONPort(props["rcon.port"])
 	if err != nil {
 		return "", "", fmt.Errorf("containerdriver: %w", err)
 	}
-	return game, strconv.Itoa(rconPort), nil
+	return strconv.Itoa(gamePort), strconv.Itoa(rconPort), nil
 }

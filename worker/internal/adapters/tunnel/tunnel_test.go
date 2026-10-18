@@ -705,6 +705,60 @@ func TestDialReadsGamePortPastAnOverlongLine(t *testing.T) {
 	}
 }
 
+// TestDialResolvesServerPortAsANumber: server-port is resolved as the Minecraft
+// server resolves it (serverproperties.GamePort) and the game address is built
+// from the number, so no text from the file reaches the dial or its error -- not
+// the password a backslash-continued server-port line folds into the value. A
+// non-integer value dials the default 25565 the server falls back to; an
+// out-of-range one fails before any dial, naming server-port but not the value
+// (issue #3417).
+func TestDialResolvesServerPortAsANumber(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		body     string
+		wantAddr string // empty: the dial is refused before the game port is dialed
+		leak     string
+	}{
+		{name: "normal", body: "server-port=26590\n", wantAddr: "127.0.0.1:26590"},
+		{name: "continued port line", body: "server-port=26590\\\nrcon.password=SECRET\n", wantAddr: "127.0.0.1:25565", leak: "SECRET"},
+		{name: "non-numeric", body: "server-port=notaport\n", wantAddr: "127.0.0.1:25565", leak: "notaport"},
+		{name: "out of range", body: "server-port=70000\n", leak: "70000"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			relay := newFakeRelay(t, "tok")
+			workingDir := t.TempDir()
+			writeProperties(t, workingDir, tc.body)
+			d := New(ctx, "0.0.0.0", nil, discardLogger(t))
+
+			var gotAddr string
+			d.gameDial = func(_ context.Context, addr string) (net.Conn, error) {
+				gotAddr = addr
+				return nil, io.ErrUnexpectedEOF
+			}
+
+			err := d.Dial(ctx, Spec{
+				ServerID: "s1", WorkingDir: workingDir,
+				Endpoint: relay.addr(), Token: "tok", CAPEM: relay.caPEM,
+			})
+			if err == nil {
+				t.Fatal("Dial = nil error, want the stubbed game dial (or the port) to fail it")
+			}
+			if gotAddr != tc.wantAddr {
+				t.Errorf("game dial target = %q, want %q", gotAddr, tc.wantAddr)
+			}
+			if tc.leak != "" && strings.Contains(err.Error(), tc.leak) {
+				t.Errorf("Dial error = %q, must not carry %q", err, tc.leak)
+			}
+			if tc.wantAddr == "" && !strings.Contains(err.Error(), "server-port") {
+				t.Errorf("Dial error = %q, want it to name server-port", err)
+			}
+		})
+	}
+}
+
 // readN reads exactly n bytes from conn under a short deadline.
 func readN(t *testing.T, conn net.Conn, n int) string {
 	t.Helper()

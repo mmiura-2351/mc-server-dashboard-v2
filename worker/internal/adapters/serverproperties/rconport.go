@@ -22,12 +22,19 @@ const DefaultRCONPort = 25575
 // error built from server.properties text may: callers log and report it. Callers
 // build what they dial or publish from the returned number, never from the text.
 func RCONPort(value string) (int, error) {
-	port, err := strconv.ParseInt(value, 10, 32)
+	return port("rcon.port", value, DefaultRCONPort)
+}
+
+// port resolves a server.properties port value as RCONPort documents: fallback
+// when the value is not a 32-bit decimal integer, an error naming key but not
+// the value when it is an integer outside 1-65535.
+func port(key, value string, fallback int) (int, error) {
+	p, err := strconv.ParseInt(value, 10, 32)
 	if err != nil {
-		return DefaultRCONPort, nil
+		return fallback, nil
 	}
-	if port < 1 || port > 65535 {
-		return 0, errors.New("rcon.port in server.properties is not a port number (1-65535)")
+	if p < 1 || p > 65535 {
+		return 0, errors.New(key + " in server.properties is not a port number (1-65535)")
 	}
-	return int(port), nil
+	return int(p), nil
 }

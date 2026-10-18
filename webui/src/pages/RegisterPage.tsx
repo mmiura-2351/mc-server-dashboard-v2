@@ -3,6 +3,7 @@ import { Link, useNavigate } from "react-router";
 import { ApiError, api } from "../api/client.ts";
 import { fieldErrorsFromValidation } from "../api/validationErrors.ts";
 import { useSession } from "../auth/SessionProvider.tsx";
+import { accessTokenFromBody } from "../auth/session.ts";
 import { PasswordInput } from "../components/PasswordInput.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { type TranslationKey, t } from "../i18n/index.ts";
@@ -108,10 +109,16 @@ export function RegisterPage() {
       // If this step fails (e.g. a registration-policy race), fall back to the
       // route-to-login-with-notice path so the user can sign in manually.
       try {
-        const tokens = await api.post("/api/auth/login", {
-          body: JSON.stringify({ username, password }),
-        });
-        signIn(tokens.access_token);
+        const accessToken = accessTokenFromBody(
+          await api.post("/api/auth/login", {
+            body: JSON.stringify({ username, password }),
+          }),
+        );
+        if (accessToken === null) {
+          // A 200 without a usable token (#3418) takes the fallback below.
+          throw new Error("login response carried no access token");
+        }
+        signIn(accessToken);
         navigate(LANDING_PATH, { replace: true });
       } catch {
         showToast(t("register.success"), "success");

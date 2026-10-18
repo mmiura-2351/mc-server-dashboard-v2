@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/regionfsck"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
@@ -290,7 +291,7 @@ func (g *gatedDialControl) releaseDial() { g.releaseOnce.Do(func() { close(g.rel
 // first, so the cleanup is per-test.
 func newSaveOnManager(t *testing.T, d execution.ExecutionDriver, open controlFunc) *Manager {
 	t.Helper()
-	m := New(map[string]execution.ExecutionDriver{"container": d}, t.TempDir(), open)
+	m := New(map[string]execution.ExecutionDriver{"container": d}, t.TempDir(), regionfsck.Checker{}, open)
 	m.settlePollInterval = 0
 	return m
 }

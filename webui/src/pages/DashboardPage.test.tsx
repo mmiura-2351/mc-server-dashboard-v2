@@ -403,6 +403,30 @@ describe("DashboardPage lifecycle actions", () => {
     expect(startButton).toBeDefined();
   });
 
+  // The API refuses both start and restart for a crash under a running intent
+  // and the reconciler restarts the server on its own, so only Stop stays
+  // enabled (issue #3419).
+  it("enables only Stop for a server crashed under a running intent", async () => {
+    mockApi.get.mockResolvedValue([
+      server({ observed_state: "crashed", desired_state: "running" }),
+    ]);
+    renderPage();
+
+    await screen.findByText("survival");
+    expect(
+      screen.getByRole("button", { name: t("dashboard.stop") }),
+    ).toBeEnabled();
+    // dashboard.restart and dashboard.startCrashed share one label: both the
+    // restart button and the relabelled start button are held.
+    const restartButtons = screen.getAllByRole("button", {
+      name: t("dashboard.restart"),
+    });
+    expect(restartButtons).toHaveLength(2);
+    for (const button of restartButtons) {
+      expect(button).toBeDisabled();
+    }
+  });
+
   it("drives only the clicked row through the optimistic lifecycle", async () => {
     // The transition state machine itself is covered in
     // useLifecycleMutation.test.tsx; this pins the dashboard's wiring: the row's

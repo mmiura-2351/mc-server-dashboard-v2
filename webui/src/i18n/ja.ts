@@ -320,6 +320,8 @@ export const ja: Record<TranslationKey, string> = {
   "serverDetail.crashDetail": "クラッシュ理由:",
   "serverDetail.crashBanner.guidance":
     "サーバーがクラッシュしました。再起動をクリックして再試行するか、コンソールで詳細を確認してください。",
+  "serverDetail.crashBanner.autoRestart":
+    "サーバーがクラッシュしました。システムが自動的に再起動します。代わりに停止することもできます。詳細はコンソールで確認してください。",
   "serverDetail.crashBanner.viewConsole": "コンソールを表示",
   "serverDetail.crashReason.forgeInstallOutOfMemory":
     "Forge インストーラーがメモリ不足で終了しました。サーバーを停止し、設定でメモリ上限を引き上げてから、もう一度起動してください。",
@@ -837,8 +839,12 @@ export const ja: Record<TranslationKey, string> = {
   "files.error.storageUnavailable":
     "現在、ファイルストレージを利用できません。しばらくしてから再度お試しください。",
   "files.error.serverBusy":
-    "別の操作が進行中です。完了するまでお待ちください。",
+    "このサーバーでは別の変更が進行中です。しばらくしてからもう一度お試しください。",
   "files.error.conflict": "競合が発生したため、操作を完了できませんでした。",
+  "files.error.readUnsettled":
+    "サーバーがファイルを読み込める状態にありません（起動中・停止中、またはクラッシュしている場合など）。サーバーが稼働中または停止済みになると、このファイルを読み込めます。",
+  "files.error.readTooLarge":
+    "サーバーの稼働中に開けるのは4 MiBまでのファイルです。このファイルを開くにはサーバーを停止してください。",
   "files.error.generic": "問題が発生しました。もう一度お試しください。",
   "files.dropZone": "ここにファイルをドロップしてアップロード",
   // Multi-select (issue #1462).

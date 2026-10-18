@@ -23,6 +23,7 @@ worker/
 └── internal/
     ├── domain/            # pure core: entities, value objects, Ports
     │   ├── execution/     # ExecutionDriver + ServerControl Ports and their value types
+    │   ├── regioncheck/   # region-check Port and its Report/Finding/Reason verdict types
     │   ├── scratchformat/ # persisted Worker scratch entry names shared across layers
     │   └── session/       # control-plane session state machine + backoff
     ├── application/       # use cases, depending only on domain

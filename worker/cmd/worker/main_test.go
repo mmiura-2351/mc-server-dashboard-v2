@@ -23,6 +23,7 @@ import (
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/clock"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/controlplane"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/regionfsck"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/application/instancemanager"
 	controlplanev1 "github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/controlplane/mcsd/controlplane/v1"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
@@ -402,8 +403,8 @@ func TestBootJudgesATornHeldWorldWhenTheOrphanSweepSucceeds(t *testing.T) {
 func TestHydratedTornHeldSetIsAdvertisedAtItsServedGenerationWithoutAReboot(t *testing.T) {
 	scratch := t.TempDir()
 	seedTornWorkingSet(t, filepath.Join(scratch, s1), 9)
-	boot := instancemanager.ScanHeldServers(scratch, true, nil)
-	manager := instancemanager.New(nil, scratch, nil).WithTransfer(soundTreeTransfer{gen: 9})
+	boot := instancemanager.ScanHeldServers(scratch, regionfsck.Checker{}, true, nil)
+	manager := instancemanager.New(nil, scratch, regionfsck.Checker{}, nil).WithTransfer(soundTreeTransfer{gen: 9})
 	t.Cleanup(manager.Close)
 
 	cp := newRegistrationRecorder()

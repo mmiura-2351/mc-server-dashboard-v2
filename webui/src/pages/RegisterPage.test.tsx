@@ -4,6 +4,7 @@ import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionProvider } from "../auth/SessionProvider.tsx";
 import { resetForTesting } from "../auth/session.ts";
+import { clearAccessToken, getAccessToken } from "../auth/tokenStore.ts";
 import { ToastProvider } from "../components/Toast.tsx";
 import { t } from "../i18n/index.ts";
 import { RegisterPage } from "./RegisterPage.tsx";
@@ -98,6 +99,7 @@ beforeEach(() => {
   fetchMock.mockClear();
   usersQueue.length = 0;
   loginQueue.length = 0;
+  clearAccessToken();
 });
 
 afterEach(() => {
@@ -260,6 +262,7 @@ describe("RegisterPage", () => {
       expect(screen.getByTestId("path")).toHaveTextContent("/"),
     );
     expect(screen.queryByTestId("path")).not.toHaveTextContent("/login");
+    expect(getAccessToken()).toBe("tok");
     // The login was performed with the just-entered credentials.
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/auth/login",
@@ -285,5 +288,30 @@ describe("RegisterPage", () => {
       expect(screen.getByTestId("path")).toHaveTextContent("/login"),
     );
     expect(screen.getByText(t("register.success"))).toBeInTheDocument();
+  });
+
+  // A 200 login whose body carries no usable access token (#3418) is a failed
+  // auto-login: nothing is stored and the user lands on /login with the notice.
+  it.each([
+    ["an empty object", "{}"],
+    ["a numeric access_token", '{"access_token":123}'],
+    ["an empty access_token", '{"access_token":""}'],
+  ])("does not sign in on a 200 login with %s", async (_, body) => {
+    queueUsers(registeredResponse());
+    queueLogin(
+      new Response(body, {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    renderRegister();
+    fillValid();
+    submit();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("path")).toHaveTextContent("/login"),
+    );
+    expect(screen.getByText(t("register.success"))).toBeInTheDocument();
+    expect(getAccessToken()).toBeNull();
   });
 });

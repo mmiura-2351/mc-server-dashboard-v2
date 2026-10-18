@@ -14,7 +14,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 
-	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/adapters/apiclient"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/domain/ingress"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/ipcaps"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/mc"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/metrics"
@@ -140,7 +140,7 @@ func TestGameUnknownHostDropIncrementsMetric(t *testing.T) {
 func TestGameLoginNotFoundDropIncrementsMetric(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	l := &Listener{
-		resolver: &fakeResolver{result: apiclient.ResolveResult{Decision: apiclient.DecisionNotFound}, domain: "mc.example.com"},
+		resolver: &fakeResolver{result: ingress.ResolveResult{Decision: ingress.DecisionNotFound}, domain: "mc.example.com"},
 		caps:     ipcaps.NewIPCaps(32, 100, 0, time.Now, nil),
 		metrics:  metrics.New(reg, "test"),
 		logger:   nopLogger(),

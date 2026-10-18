@@ -339,6 +339,11 @@ export const en = {
   "serverDetail.crashDetail": "Crash reason:",
   "serverDetail.crashBanner.guidance":
     "The server has crashed. Click Restart to try again, or check the console for details.",
+  // A crash under a running intent (issue #3419): the API refuses start and
+  // restart there, and the reconciler restarts the server on its own. No delay
+  // is named, since the grace length may change (#3401).
+  "serverDetail.crashBanner.autoRestart":
+    "The server has crashed. The system will restart it automatically, or you can stop it instead. Check the console for details.",
   "serverDetail.crashBanner.viewConsole": "View Console",
   // Forge install diagnostics (#1093): the explanation of a crash the Worker
   // classified, and the install-log viewer the crash banner offers for it.
@@ -880,9 +885,23 @@ export const en = {
     "The server agent is disconnected. Please try again later.",
   "files.error.storageUnavailable":
     "File storage is unavailable right now. Please try again shortly.",
-  "files.error.serverBusy": "Another operation is in progress. Please wait.",
+  // 409 server_busy: refused without being applied, so the remedy is to retry
+  // (issue #3361). Every files route that raises it is a change.
+  "files.error.serverBusy":
+    "Another change to this server is in progress. Try again in a moment.",
   "files.error.conflict":
     "The operation could not be completed due to a conflict.",
+  // Viewer read refusals (issue #3361). A read is served from the Worker while
+  // the server runs and from storage while it is stopped; in any other state it
+  // is 409 server_unsettled. That includes starting, stopping and restarting,
+  // and also a crashed server still desired running, which can last
+  // indefinitely, so the message is not worded as a passing transition. Only
+  // the running read is capped, at the Worker's 4 MiB
+  // (instancemanager.MaxFileBytes); a stopped server's read has no cap.
+  "files.error.readUnsettled":
+    "The server is not in a state that allows reading its files (for example, it is starting, stopping or has crashed). This file can be read once the server is running or stopped.",
+  "files.error.readTooLarge":
+    "This file is larger than the 4 MiB that can be opened while the server is running. Stop the server to open it.",
   "files.error.generic": "Something went wrong. Please try again.",
   "files.dropZone": "Drop files here to upload",
   // Multi-select (issue #1462).
