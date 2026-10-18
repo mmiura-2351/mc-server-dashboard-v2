@@ -233,10 +233,11 @@ class _CommandErrorCodeEnumTypeWrapper(_enum_type_wrapper._EnumTypeWrapper[_Comm
     """The server's server.properties cannot be read as it is: it is not a regular
     file (a symlink, FIFO, socket, device or directory the server's own code put
     there) or it is larger than the Worker's read cap (issue #3347). A
-    StartServer and a RestartServer's relaunch publish its ports and a
-    ServerCommand dials RCON with its password, so each fails on it. Distinct
-    from INTERNAL so the user is told to restore a regular file; the message
-    names the refusal but never carries the file's content.
+    StartServer and a RestartServer's relaunch publish its ports, a
+    ServerCommand and a running SnapshotTrigger's quiesce open RCON with its
+    password, and a TunnelDial resolves its game port, so each fails on it.
+    Distinct from INTERNAL so the user is told to restore a regular file; the
+    message names the refusal but never carries the file's content.
     """
 
 class CommandErrorCode(_CommandErrorCode, metaclass=_CommandErrorCodeEnumTypeWrapper):
@@ -288,10 +289,11 @@ COMMAND_ERROR_CODE_SERVER_PROPERTIES_UNREADABLE: CommandErrorCode.ValueType  # 1
 """The server's server.properties cannot be read as it is: it is not a regular
 file (a symlink, FIFO, socket, device or directory the server's own code put
 there) or it is larger than the Worker's read cap (issue #3347). A
-StartServer and a RestartServer's relaunch publish its ports and a
-ServerCommand dials RCON with its password, so each fails on it. Distinct
-from INTERNAL so the user is told to restore a regular file; the message
-names the refusal but never carries the file's content.
+StartServer and a RestartServer's relaunch publish its ports, a
+ServerCommand and a running SnapshotTrigger's quiesce open RCON with its
+password, and a TunnelDial resolves its game port, so each fails on it.
+Distinct from INTERNAL so the user is told to restore a regular file; the
+message names the refusal but never carries the file's content.
 """
 Global___CommandErrorCode: _TypeAlias = CommandErrorCode  # noqa: Y015
 

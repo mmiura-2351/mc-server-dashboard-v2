@@ -248,10 +248,11 @@ const (
 	// without replying (issue #3366). Distinct from CommandErrorInternal so the
 	// user can tell a dropped command from a server that cannot be reached.
 	CommandErrorCommandDropped
-	// CommandErrorServerPropertiesUnreadable marks a StartServer, a RestartServer's
-	// relaunch or a ServerCommand that failed because the server's server.properties
-	// is not a regular file or is too large to read (issue #3347). Distinct from
-	// CommandErrorInternal so the user is told to restore a regular file.
+	// CommandErrorServerPropertiesUnreadable marks a command that failed because the
+	// server's server.properties is not a regular file or is too large to read
+	// (issue #3347): a StartServer, a RestartServer's relaunch, a ServerCommand, a
+	// running SnapshotTrigger or a TunnelDial. Distinct from CommandErrorInternal so
+	// the user is told to restore a regular file.
 	CommandErrorServerPropertiesUnreadable
 )
 

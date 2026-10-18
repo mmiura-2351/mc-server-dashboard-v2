@@ -325,7 +325,8 @@ var ErrImageMissing = errors.New("execution: container image missing")
 // device or directory, or a file larger than the read cap (issue #3335). The
 // server's own code can put any of those at the name. The instance manager
 // matches it with errors.Is to emit a server_properties_unreadable failure code
-// for a start, a restart's relaunch or a console command, so the user is told
-// to restore a regular file instead of seeing a generic failure (issue #3347).
+// for every command the refusal fails (a start, a restart's relaunch, a console
+// command, a running snapshot, a tunnel dial), so the user is told to restore a
+// regular file instead of seeing a generic failure (issue #3347).
 // An absent file is not this error.
 var ErrServerPropertiesUnreadable = errors.New("execution: server.properties is not a regular file or is too large")
