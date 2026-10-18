@@ -19,7 +19,7 @@ import (
 
 	"github.com/quic-go/quic-go"
 
-	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/adapters/apiclient"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/domain/ingress"
 	bedrocktunnelv1 "github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/genproto/mcsd/bedrocktunnel/v1"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/ipcaps"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/metrics"
@@ -64,7 +64,7 @@ type Validator interface {
 // relay cannot see Floodgate identity, so username/uuid are empty and only
 // player_ip (the true UDP source) is populated. *session.Reporter satisfies it.
 type SessionRecorder interface {
-	Start(serverID, slug, playerIP, username, playerUUID string, source apiclient.Source) string
+	Start(serverID, slug, playerIP, username, playerUUID string, source ingress.Source) string
 	End(id string)
 }
 

@@ -15,7 +15,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/adapters/apiclient"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/domain/ingress"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/ipcaps"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/mc"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/metrics"
@@ -203,13 +203,13 @@ func TestDisconnectSetsWriteDeadline(t *testing.T) {
 // --- fakeResolver ---
 
 type fakeResolver struct {
-	result apiclient.ResolveResult
+	result ingress.ResolveResult
 	err    error
 	domain string
 	calls  atomic.Int32
 }
 
-func (f *fakeResolver) ResolveJoin(_ context.Context, _, _ string, _ apiclient.Intent) (apiclient.ResolveResult, error) {
+func (f *fakeResolver) ResolveJoin(_ context.Context, _, _ string, _ ingress.Intent) (ingress.ResolveResult, error) {
 	f.calls.Add(1)
 	return f.result, f.err
 }
@@ -223,7 +223,7 @@ type fakeSessionRecorder struct {
 	ended   int
 }
 
-func (f *fakeSessionRecorder) Start(_, _, _, _, _ string, _ apiclient.Source) string {
+func (f *fakeSessionRecorder) Start(_, _, _, _, _ string, _ ingress.Source) string {
 	f.started++
 	return "sess-1"
 }
@@ -398,8 +398,8 @@ func TestResolveStatusAPIError(t *testing.T) {
 func TestHandleLoginStoppedDecision(t *testing.T) {
 	const displayName = "Test Server"
 	resolver := &fakeResolver{
-		result: apiclient.ResolveResult{
-			Decision:    apiclient.DecisionStopped,
+		result: ingress.ResolveResult{
+			Decision:    ingress.DecisionStopped,
 			DisplayName: displayName,
 		},
 		domain: "mc.example.com",
@@ -484,7 +484,7 @@ func pingPacket(payload int64) []byte {
 // calling ResolveJoin.
 func TestHandleStatusCacheMissRateCapped(t *testing.T) {
 	resolver := &fakeResolver{
-		result: apiclient.ResolveResult{Decision: apiclient.DecisionStopped, DisplayName: "X"},
+		result: ingress.ResolveResult{Decision: ingress.DecisionStopped, DisplayName: "X"},
 		domain: "mc.example.com",
 	}
 	cache := NewStatusCache(5*time.Second, 1024, time.Now)
@@ -578,7 +578,7 @@ func TestHandleStatusCacheHitNotRateCapped(t *testing.T) {
 // with sufficient join-rate budget proceeds to resolve.
 func TestHandleStatusCacheMissAllowedResolves(t *testing.T) {
 	resolver := &fakeResolver{
-		result: apiclient.ResolveResult{Decision: apiclient.DecisionStopped, DisplayName: "X"},
+		result: ingress.ResolveResult{Decision: ingress.DecisionStopped, DisplayName: "X"},
 		domain: "mc.example.com",
 	}
 	cache := NewStatusCache(5*time.Second, 1024, time.Now)
@@ -742,7 +742,7 @@ func TestServeReturnEndsEstablishedSession(t *testing.T) {
 	l := &Listener{
 		ln: sl,
 		resolver: &fakeResolver{
-			result: apiclient.ResolveResult{Decision: apiclient.DecisionTunnel, Token: "tok", ServerID: "srv"},
+			result: ingress.ResolveResult{Decision: ingress.DecisionTunnel, Token: "tok", ServerID: "srv"},
 			domain: "mc.example.com",
 		},
 		tokens:   tokens,
