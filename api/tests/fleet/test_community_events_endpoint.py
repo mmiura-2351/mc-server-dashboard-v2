@@ -219,6 +219,20 @@ def test_member_without_permission_is_closed() -> None:
     _assert_rejected(_app(member=True, allow=False), 4403)
 
 
+def test_database_failure_in_the_gate_refuses_1013() -> None:
+    """An outage is no denial code and no unhandled error (#3313)."""
+
+    class _UnreachableChecker(PermissionChecker):
+        async def can(
+            self, *, user: AuthUser, operation: Permission, resource: ResourceRef
+        ) -> bool:
+            raise ConnectionRefusedError(111, "Connect call failed")
+
+    app = _app()
+    app.dependency_overrides[get_permission_checker] = _UnreachableChecker  # type: ignore[attr-defined]
+    _assert_rejected(app, 1013)
+
+
 # --- frame shape + fan-out -------------------------------------------------
 
 

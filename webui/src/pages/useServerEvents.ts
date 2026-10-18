@@ -345,6 +345,13 @@ export function useServerEvents(
         // state while the socket is down (no log/metrics polling, SPEC 7.2).
         refetch();
       },
+      onAccessLost: () => {
+        // The user lost read access to this server, or it is gone, and the
+        // socket stopped for good (#3313). Reset the detail query so the page
+        // shows its own load-error state: a failed refetch alone would keep
+        // the cached server on screen.
+        queryClient.resetQueries({ queryKey: key });
+      },
     });
     client.start();
 

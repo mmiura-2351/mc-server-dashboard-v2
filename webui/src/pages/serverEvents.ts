@@ -16,6 +16,8 @@
  * each tab's consumer (WEBUI_SPEC.md 7.2).
  */
 
+import { api } from "../api/client.ts";
+import { apiPath } from "../api/path.ts";
 import { EventsSocketClient, wsOrigin } from "./eventsSocket.ts";
 
 /** The subscribable streams (the GAP marker is always delivered, never asked). */
@@ -78,6 +80,8 @@ export interface ServerEventsCallbacks {
   onOpen: () => void;
   /** The connection went down and a reconnect is pending (enter degraded). */
   onDown: () => void;
+  /** The user lost read access to the server, or it is gone; the socket stopped. */
+  onAccessLost: () => void;
 }
 
 /**
@@ -201,6 +205,16 @@ export class ServerEventsClient {
         },
         onOpen: callbacks.onOpen,
         onDown: callbacks.onDown,
+        onAccessLost: callbacks.onAccessLost,
+        // The server read: the same two-layer gate as the socket (membership,
+        // `server:read` on this server, the server in this community).
+        probeAccess: () =>
+          api.get(
+            apiPath("/api/communities/{community_id}/servers/{server_id}", {
+              community_id: communityId,
+              server_id: serverId,
+            }),
+          ),
       },
       random,
     );

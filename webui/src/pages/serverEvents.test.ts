@@ -130,6 +130,7 @@ describe("ServerEventsClient", () => {
   afterEach(() => {
     restore();
     clearAccessToken();
+    vi.unstubAllGlobals();
     vi.useRealTimers();
   });
 
@@ -137,13 +138,14 @@ describe("ServerEventsClient", () => {
     const onFrame = vi.fn();
     const onOpen = vi.fn();
     const onDown = vi.fn();
+    const onAccessLost = vi.fn();
     const client = new ServerEventsClient(
       CID,
       SID,
-      { onFrame, onOpen, onDown },
+      { onFrame, onOpen, onDown, onAccessLost },
       () => 0.5,
     );
-    return { client, onFrame, onOpen, onDown };
+    return { client, onFrame, onOpen, onDown, onAccessLost };
   }
 
   it("subscribes to all three streams with the token in subprotocol", () => {
@@ -203,5 +205,34 @@ describe("ServerEventsClient", () => {
     vi.advanceTimersByTime(60000);
     expect(MockWebSocket.instances).toHaveLength(1);
     expect(onDown).not.toHaveBeenCalled();
+  });
+
+  // A refused handshake is a bare 1006 to the browser (#3313): after three in
+  // a row the client reads the server through REST, whose gate is the
+  // socket's, and stops once that says the server is gone.
+  it("probes the server read after three failed handshakes and stops on its 404", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ status: 404 }), {
+          status: 404,
+          headers: { "content-type": "application/problem+json" },
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const { client, onAccessLost } = makeClient();
+    client.start();
+
+    for (let i = 0; i < 3; i++) {
+      MockWebSocket.last().fail();
+      await vi.advanceTimersByTimeAsync(30000);
+    }
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]).toEqual([
+      `/api/communities/${CID}/servers/${SID}`,
+      expect.objectContaining({ method: "GET" }),
+    ]);
+    expect(onAccessLost).toHaveBeenCalledTimes(1);
+    expect(MockWebSocket.instances).toHaveLength(3);
   });
 });

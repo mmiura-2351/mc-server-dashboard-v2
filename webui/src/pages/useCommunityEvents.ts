@@ -195,6 +195,20 @@ export function useCommunityEvents(communityId: string): boolean {
         setDegraded(true);
         startPolling();
       },
+      onAccessLost: () => {
+        // The user lost access to this community's servers (removed, the
+        // community deleted, or `server:read` revoked) and the socket stopped
+        // for good (#3313). Reload from REST so the page shows its own state:
+        // the list is reset, not just refetched — a failed refetch keeps the
+        // cached rows on screen — and the communities list drops one the
+        // user is no longer in.
+        stopPolling();
+        queryClient.resetQueries({ queryKey: key });
+        queryClient.invalidateQueries({
+          queryKey: ["communities"],
+          exact: true,
+        });
+      },
     });
     client.start();
 
