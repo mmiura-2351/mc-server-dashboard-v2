@@ -53,9 +53,15 @@ from mc_server_dashboard_api.dependencies import (
     get_update_plugin,
     get_validate_plugin_set,
 )
+from mc_server_dashboard_api.servers.adapters.plugin_cache_store import (
+    ObjectPluginCacheStore,
+)
 from mc_server_dashboard_api.servers.application.catalog import (
     PluginDependencyInfo,
     PluginUpdateInfo,
+)
+from mc_server_dashboard_api.servers.application.client_modpack_zip import (
+    stream_client_modpack,
 )
 from mc_server_dashboard_api.servers.application.plugin_resolution import (
     ResolutionPlan,
@@ -94,6 +100,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import ServerId
 from tests.audit.fakes import RecordingAuditRecorder
 from tests.client_utils import enter_client
 from tests.identity.fakes import make_user
+from tests.storage.fake_s3 import FakeS3Store, fake_s3_factory
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 
@@ -1157,3 +1164,21 @@ def test_download_client_modpack_cache_outage_on_open_is_503() -> None:
 
     assert resp.status_code == 503
     assert resp.json()["reason"] == "storage_unavailable"
+
+
+def test_download_client_modpack_jar_missing_from_the_cache_is_404() -> None:
+    # A plugin row whose cached jar is gone (a GC race or an external deletion,
+    # issue #3323): the real cache adapter over a store without the key, so the
+    # miss travels the production path from ``NoSuchKey`` to the route. Like an
+    # orphaned resource-pack row (issue #2321) it is not retrievable rather than
+    # a degraded backend, and the body names no storage key or content address.
+    cache = ObjectPluginCacheStore(fake_s3_factory(FakeS3Store()))
+    stream = stream_client_modpack(cache, [_plugin(side="client")])
+
+    app = _app(member=True, allow=True, download_modpack=_FakeUseCase(result=stream))
+    resp = _client(app).get(_client_url(uuid.uuid4(), uuid.uuid4(), "/download"))
+
+    assert resp.status_code == 404
+    assert resp.json()["reason"] == "not_found"
+    assert "plugin-cache" not in resp.text
+    assert "def456" not in resp.text

@@ -654,8 +654,12 @@ class PluginCacheBlobNotFoundError(ServerError):
     resolver catches it and falls back to downloading the jar -- the cache is an
     optimisation there (issue #2346). Every other caller opens a blob a plugin
     row still references, where a miss is a storage-consistency fault (a GC race
-    or an external deletion) with no local recovery, not a client error: no route
-    maps it, and the edge reports it as a 500.
+    or an external deletion) with no local recovery. The client-modpack download
+    opens its first jar before the headers and answers 404 ``not_found`` there
+    (issue #3323): the jar is not retrievable, as an orphaned resource pack is
+    not (issue #2321). Where a jar is read after a plugin row was committed (an
+    enable or a side change materializing it) no route maps it, and the edge
+    reports it as a 500.
     """
 
 

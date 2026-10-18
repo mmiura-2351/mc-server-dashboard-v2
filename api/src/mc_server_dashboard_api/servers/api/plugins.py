@@ -94,6 +94,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidFilePathError,
     InvalidPluginSideError,
     PluginAlreadyExistsError,
+    PluginCacheBlobNotFoundError,
     PluginCacheStorageUnavailableError,
     PluginNotFoundError,
     PortAlreadyTakenError,
@@ -1216,6 +1217,12 @@ async def download_client_modpack(
     from a variable jar set, so its size is not known ahead of the stream: neither
     the ``GET`` nor the probe declares a ``Content-Length``, and the probe learns
     existence rather than size.
+
+    A jar the modpack needs that is missing from the content-addressed cache
+    answers ``404`` ``not_found`` (issue #3323), and a cache outage ``503``
+    ``storage_unavailable`` (issue #3233) -- both for the first jar, which the
+    ``GET`` opens before the headers. The probe opens no jar, so it answers
+    neither.
     """
 
     try:
@@ -1234,6 +1241,12 @@ async def download_client_modpack(
         # outage on a later jar still is — the status is committed by then.
         try:
             stream = await started(stream)
+        except PluginCacheBlobNotFoundError as exc:
+            # A plugin row whose cached jar is gone (issue #3323): like an
+            # orphaned resource-pack row (#2321) it is not retrievable, not a
+            # degraded backend, so the 404 rather than a 500. A missing later
+            # jar still aborts the transfer, as an outage there does.
+            raise _not_found() from exc
         except PluginCacheStorageUnavailableError as exc:
             raise _service_unavailable("storage_unavailable") from exc
     if request.method == "HEAD":

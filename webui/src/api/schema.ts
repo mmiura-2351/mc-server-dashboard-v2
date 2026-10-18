@@ -1027,6 +1027,12 @@ export interface paths {
          *     from a variable jar set, so its size is not known ahead of the stream: neither
          *     the ``GET`` nor the probe declares a ``Content-Length``, and the probe learns
          *     existence rather than size.
+         *
+         *     A jar the modpack needs that is missing from the content-addressed cache
+         *     answers ``404`` ``not_found`` (issue #3323), and a cache outage ``503``
+         *     ``storage_unavailable`` (issue #3233) -- both for the first jar, which the
+         *     ``GET`` opens before the headers. The probe opens no jar, so it answers
+         *     neither.
          */
         get: operations["download_client_modpack_api_communities__community_id__servers__server_id__client_mods_download_get"];
         put?: never;
@@ -1043,6 +1049,12 @@ export interface paths {
          *     from a variable jar set, so its size is not known ahead of the stream: neither
          *     the ``GET`` nor the probe declares a ``Content-Length``, and the probe learns
          *     existence rather than size.
+         *
+         *     A jar the modpack needs that is missing from the content-addressed cache
+         *     answers ``404`` ``not_found`` (issue #3323), and a cache outage ``503``
+         *     ``storage_unavailable`` (issue #3233) -- both for the first jar, which the
+         *     ``GET`` opens before the headers. The probe opens no jar, so it answers
+         *     neither.
          */
         head: operations["download_client_modpack_api_communities__community_id__servers__server_id__client_mods_download_head"];
         patch?: never;

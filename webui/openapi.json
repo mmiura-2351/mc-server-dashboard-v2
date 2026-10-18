@@ -7759,7 +7759,7 @@
     },
     "/api/communities/{community_id}/servers/{server_id}/client-mods/download": {
       "get": {
-        "description": "Download a server's client mods as a zip (plugin:read, issue #1308).\n\n**Probe** (issue #2560): a ``HEAD`` answers with the ``GET``'s status and\nheaders and no body, so a client learns the modpack is available under the\nsame ``plugin:read`` gate without building it. The zip is assembled on the fly\nfrom a variable jar set, so its size is not known ahead of the stream: neither\nthe ``GET`` nor the probe declares a ``Content-Length``, and the probe learns\nexistence rather than size.",
+        "description": "Download a server's client mods as a zip (plugin:read, issue #1308).\n\n**Probe** (issue #2560): a ``HEAD`` answers with the ``GET``'s status and\nheaders and no body, so a client learns the modpack is available under the\nsame ``plugin:read`` gate without building it. The zip is assembled on the fly\nfrom a variable jar set, so its size is not known ahead of the stream: neither\nthe ``GET`` nor the probe declares a ``Content-Length``, and the probe learns\nexistence rather than size.\n\nA jar the modpack needs that is missing from the content-addressed cache\nanswers ``404`` ``not_found`` (issue #3323), and a cache outage ``503``\n``storage_unavailable`` (issue #3233) -- both for the first jar, which the\n``GET`` opens before the headers. The probe opens no jar, so it answers\nneither.",
         "operationId": "download_client_modpack_api_communities__community_id__servers__server_id__client_mods_download_get",
         "parameters": [
           {
@@ -7811,7 +7811,7 @@
         "summary": "Download Client Modpack"
       },
       "head": {
-        "description": "Download a server's client mods as a zip (plugin:read, issue #1308).\n\n**Probe** (issue #2560): a ``HEAD`` answers with the ``GET``'s status and\nheaders and no body, so a client learns the modpack is available under the\nsame ``plugin:read`` gate without building it. The zip is assembled on the fly\nfrom a variable jar set, so its size is not known ahead of the stream: neither\nthe ``GET`` nor the probe declares a ``Content-Length``, and the probe learns\nexistence rather than size.",
+        "description": "Download a server's client mods as a zip (plugin:read, issue #1308).\n\n**Probe** (issue #2560): a ``HEAD`` answers with the ``GET``'s status and\nheaders and no body, so a client learns the modpack is available under the\nsame ``plugin:read`` gate without building it. The zip is assembled on the fly\nfrom a variable jar set, so its size is not known ahead of the stream: neither\nthe ``GET`` nor the probe declares a ``Content-Length``, and the probe learns\nexistence rather than size.\n\nA jar the modpack needs that is missing from the content-addressed cache\nanswers ``404`` ``not_found`` (issue #3323), and a cache outage ``503``\n``storage_unavailable`` (issue #3233) -- both for the first jar, which the\n``GET`` opens before the headers. The probe opens no jar, so it answers\nneither.",
         "operationId": "download_client_modpack_api_communities__community_id__servers__server_id__client_mods_download_head",
         "parameters": [
           {
