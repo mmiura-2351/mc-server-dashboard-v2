@@ -1757,6 +1757,8 @@ export const ja: Record<TranslationKey, string> = {
     "Bedrock ポートはすでに使用されています。もう一度お試しください。",
   "plugins.error.notFound":
     "{Noun}が見つかりません。削除された可能性があります。",
+  "plugins.error.jarMissing":
+    "{noun}の保存済みファイルが見つかりません。{noun}を削除して、もう一度インストールしてください。",
   "plugins.error.workerUnavailable":
     "サーバーエージェントが切断されています。しばらくしてから再度お試しください。",
   "plugins.error.storageUnavailable":

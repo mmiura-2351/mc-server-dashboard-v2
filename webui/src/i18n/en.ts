@@ -1845,6 +1845,10 @@ export const en = {
   "plugins.error.bedrockPortTaken":
     "The Bedrock port is already in use. Please try again.",
   "plugins.error.notFound": "{Noun} not found. It may have been removed.",
+  // 409 plugin_jar_missing (#3323): a row whose stored jar is gone. An enable,
+  // disable or side change is already saved when this is answered.
+  "plugins.error.jarMissing":
+    "A {noun}'s stored file is missing. Remove the {noun} and install it again.",
   "plugins.error.workerUnavailable":
     "The server agent is disconnected. Please try again later.",
   "plugins.error.storageUnavailable":

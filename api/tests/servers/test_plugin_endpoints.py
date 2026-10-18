@@ -53,9 +53,15 @@ from mc_server_dashboard_api.dependencies import (
     get_update_plugin,
     get_validate_plugin_set,
 )
+from mc_server_dashboard_api.servers.adapters.plugin_cache_store import (
+    ObjectPluginCacheStore,
+)
 from mc_server_dashboard_api.servers.application.catalog import (
     PluginDependencyInfo,
     PluginUpdateInfo,
+)
+from mc_server_dashboard_api.servers.application.client_modpack_zip import (
+    stream_client_modpack,
 )
 from mc_server_dashboard_api.servers.application.plugin_resolution import (
     ResolutionPlan,
@@ -66,6 +72,11 @@ from mc_server_dashboard_api.servers.application.plugin_validation import (
     MissingDependency,
     PluginValidation,
 )
+from mc_server_dashboard_api.servers.application.plugins import (
+    SetPluginSide,
+    TogglePlugin,
+)
+from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     CatalogChecksumMismatchError,
     FileTooLargeError,
@@ -90,10 +101,18 @@ from mc_server_dashboard_api.servers.domain.plugin import (
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId as ServersCommunityId,
 )
-from mc_server_dashboard_api.servers.domain.value_objects import ServerId
+from mc_server_dashboard_api.servers.domain.value_objects import (
+    DesiredState,
+    ObservedState,
+    ServerId,
+    ServerName,
+    ServerType,
+)
 from tests.audit.fakes import RecordingAuditRecorder
 from tests.client_utils import enter_client
 from tests.identity.fakes import make_user
+from tests.servers.fakes import FakeClock, FakeFileStore, FakeUnitOfWork
+from tests.storage.fake_s3 import FakeS3Store, fake_s3_factory
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 
@@ -1157,3 +1176,107 @@ def test_download_client_modpack_cache_outage_on_open_is_503() -> None:
 
     assert resp.status_code == 503
     assert resp.json()["reason"] == "storage_unavailable"
+
+
+def test_download_client_modpack_jar_missing_from_the_cache_is_409() -> None:
+    # A plugin row whose cached jar is gone (a GC race or an external deletion,
+    # issue #3323): the real cache adapter over a store without the key, so the
+    # miss travels the production path from ``NoSuchKey`` to the route. The body
+    # names no storage key or content address.
+    cache = ObjectPluginCacheStore(fake_s3_factory(FakeS3Store()))
+    stream = stream_client_modpack(cache, [_plugin(side="client")])
+
+    app = _app(member=True, allow=True, download_modpack=_FakeUseCase(result=stream))
+    resp = _client(app).get(_client_url(uuid.uuid4(), uuid.uuid4(), "/download"))
+
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "plugin_jar_missing"
+    assert "plugin-cache" not in resp.text
+    assert "def456" not in resp.text
+
+
+class _MissingJarRig:
+    """A stopped Fabric server with one mod whose jar is in neither the working
+    set nor the cache: the real use cases over the real cache adapter on an
+    empty store, so the miss reaches the route by the production path."""
+
+    def __init__(self, *, enabled: bool, side: str) -> None:
+        self.uow = FakeUnitOfWork()
+        self.server = Server(
+            id=ServerId.new(),
+            community_id=ServersCommunityId(uuid.uuid4()),
+            name=ServerName("survival"),
+            mc_edition="java",
+            mc_version="1.21.1",
+            server_type=ServerType.FABRIC,
+            config={},
+            desired_state=DesiredState.STOPPED,
+            observed_state=ObservedState.STOPPED,
+            observed_at=_NOW,
+            assigned_worker_id=None,
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
+        self.uow.servers.seed(self.server)
+        plugin = _plugin(server_id=self.server.id.value, side=side)
+        plugin.enabled = enabled
+        plugin.rel_path = "mods/test.jar" if enabled else "mods/test.jar.disabled"
+        self.plugin_id = plugin.id
+        self.uow.plugins.seed(plugin)
+        deps = {
+            "uow": self.uow,
+            "file_store": FakeFileStore(),
+            "cache": ObjectPluginCacheStore(fake_s3_factory(FakeS3Store())),
+            "clock": FakeClock(_NOW),
+        }
+        self.toggle = TogglePlugin(**deps)  # type: ignore[arg-type]
+        self.set_side = SetPluginSide(**deps)  # type: ignore[arg-type]
+
+    def url(self, suffix: str) -> str:
+        return _url(
+            self.server.community_id.value,
+            self.server.id.value,
+            f"/{self.plugin_id.value}{suffix}",
+        )
+
+    async def recorded(self) -> ServerPlugin:
+        plugin = await self.uow.plugins.get_by_id(self.server.id, self.plugin_id)
+        assert plugin is not None
+        return plugin
+
+
+@pytest.mark.parametrize(
+    ("enabled", "action"), [(False, "/enable"), (True, "/disable")]
+)
+async def test_toggle_whose_jar_is_missing_everywhere_is_409(
+    enabled: bool, action: str
+) -> None:
+    # The working-set file is gone too, so the reconcile falls back to the cache
+    # (issue #1331) and misses there (issue #3323). The toggle is already
+    # committed by then, which is what the 409 has to say -- a 404 would tell
+    # the client the plugin does not exist while its new state stands.
+    rig = _MissingJarRig(enabled=enabled, side="both")
+    app = _app(member=True, allow=True)
+    app.dependency_overrides[get_toggle_plugin] = lambda: rig.toggle  # type: ignore[attr-defined]
+
+    resp = _client(app).post(rig.url(action))
+
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "plugin_jar_missing"
+    assert "plugin-cache" not in resp.text
+    assert (await rig.recorded()).enabled is not enabled
+
+
+async def test_set_side_whose_jar_is_missing_from_the_cache_is_409() -> None:
+    # An enabled client-only mod has no working-set file, so moving it to the
+    # server side materializes straight from the cache, after the commit.
+    rig = _MissingJarRig(enabled=True, side="client")
+    app = _app(member=True, allow=True)
+    app.dependency_overrides[get_set_plugin_side] = lambda: rig.set_side  # type: ignore[attr-defined]
+
+    resp = _client(app).post(rig.url("/side"), json={"side": "server"})
+
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "plugin_jar_missing"
+    assert "plugin-cache" not in resp.text
+    assert (await rig.recorded()).side == "server"

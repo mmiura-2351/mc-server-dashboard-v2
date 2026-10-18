@@ -381,6 +381,33 @@ describe("ServerFilesTab listing", () => {
     expect(await screen.findByText(t("files.truncated"))).toBeInTheDocument();
   });
 
+  it("names the storage outage when the listing answers 503 storage_unavailable (#3323)", async () => {
+    mockApi.get.mockImplementation((path: string) =>
+      path.includes("/files?path=")
+        ? Promise.reject(new ApiError(503, { reason: "storage_unavailable" }))
+        : Promise.resolve(server()),
+    );
+    renderPage();
+    await openFiles();
+
+    expect(
+      await screen.findByText(t("files.error.storageUnavailable")),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(t("files.listError"))).not.toBeInTheDocument();
+  });
+
+  it("keeps the generic list message for any other listing failure", async () => {
+    mockApi.get.mockImplementation((path: string) =>
+      path.includes("/files?path=")
+        ? Promise.reject(new ApiError(500, { reason: "internal_error" }))
+        : Promise.resolve(server()),
+    );
+    renderPage();
+    await openFiles();
+
+    expect(await screen.findByText(t("files.listError"))).toBeInTheDocument();
+  });
+
   it("navigates into a directory and re-lists with the child path", async () => {
     mockApi.get.mockImplementation((path: string) => {
       if (path.includes("path=world")) {

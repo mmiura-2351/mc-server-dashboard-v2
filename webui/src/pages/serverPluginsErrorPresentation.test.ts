@@ -77,6 +77,11 @@ describe("pluginErrorPresentation", () => {
       "plugins.error.notFound",
     ],
     [
+      "maps plugin_jar_missing apart from other conflicts",
+      new ApiError(409, { reason: "plugin_jar_missing" }),
+      "plugins.error.jarMissing",
+    ],
+    [
       "maps file_too_large by status",
       new ApiError(413, { reason: "file_too_large" }),
       "plugins.error.tooLarge",

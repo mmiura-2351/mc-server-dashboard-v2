@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { ApiError } from "../api/client.ts";
 import { FileTooLargeToEditError, UnencodableTextError } from "./fileText.ts";
 import {
+  fileListErrorPresentation,
   fileOperationErrorPresentation,
   fileReadErrorPresentation,
 } from "./serverFilesErrorPresentation.ts";
@@ -190,5 +191,32 @@ describe("fileReadErrorPresentation", () => {
     ],
   ])("%s", (_name, error, expected) => {
     expect(fileReadErrorPresentation(error)).toEqual(expected);
+  });
+});
+
+describe("fileListErrorPresentation (#3323)", () => {
+  it.each([
+    [
+      "maps unavailable storage to the operations' storage message",
+      new ApiError(503, { reason: "storage_unavailable" }),
+      { key: "files.error.storageUnavailable" },
+    ],
+    [
+      "keeps the list message for an unavailable worker",
+      new ApiError(503, { reason: "worker_unavailable" }),
+      { key: "files.listError" },
+    ],
+    [
+      "keeps the list message for an unclassified API failure",
+      new ApiError(500, { reason: "internal_error" }),
+      { key: "files.listError" },
+    ],
+    [
+      "keeps the list message for a non-API error",
+      new Error("boom"),
+      { key: "files.listError" },
+    ],
+  ])("%s", (_name, error, expected) => {
+    expect(fileListErrorPresentation(error)).toEqual(expected);
   });
 });
