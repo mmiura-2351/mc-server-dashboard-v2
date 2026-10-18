@@ -6,8 +6,11 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/serverproperties"
 )
 
 // writeRCONProps writes a server.properties enabling RCON on the given port with
@@ -175,4 +178,95 @@ func TestOpenFromWorkingDirUsesHostOverride(t *testing.T) {
 		t.Fatalf("OpenFromWorkingDir(host=\"localhost\") error = %v", err)
 	}
 	_ = client.Close()
+}
+
+// listenOnDefaultRCONPort listens on the default RCON port at a loopback address
+// other than 127.0.0.1, which a real server on this host may hold, and returns
+// the listener for the caller to serve. It skips the test when none is free.
+func listenOnDefaultRCONPort(t *testing.T) net.Listener {
+	t.Helper()
+	for _, host := range []string{"127.0.83.45", "127.0.83.46", "127.0.83.47"} {
+		ln, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(serverproperties.DefaultRCONPort)))
+		if err == nil {
+			return ln
+		}
+	}
+	t.Skip("no loopback address free on the default RCON port")
+	return nil
+}
+
+// TestOpenFromWorkingDirDialsTheDefaultPortForANonIntegerPort pins that an
+// rcon.port that is not an integer dials the default port, as Minecraft itself
+// falls back to it (Integer.parseInt fails, the default is taken). That includes
+// a backslash-continued port line, which folds the next line -- here a second
+// password -- into the value; the address dialed is built from the number, so
+// that text never reaches an error the container driver would log (issue #3345).
+func TestOpenFromWorkingDirDialsTheDefaultPortForANonIntegerPort(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		body     string
+		password string
+	}{
+		{
+			name:     "continued line folds a password into the port",
+			body:     "enable-rcon=true\nrcon.password=FIRST_SECRET\nrcon.port=25575\\\nrcon.password=SECOND_SECRET\n",
+			password: "FIRST_SECRET",
+		},
+		{name: "not a number", body: "enable-rcon=true\nrcon.password=pw\nrcon.port=notaport\n", password: "pw"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ln := listenOnDefaultRCONPort(t)
+			serveFake(t, ln, tc.password)
+			host, _, _ := net.SplitHostPort(ln.Addr().String())
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "server.properties"), []byte(tc.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			client, err := OpenFromWorkingDir(ctx, dir, host, "")
+			if err != nil {
+				t.Fatalf("OpenFromWorkingDir = %v, want it to dial %s:%d and authenticate", err, host, serverproperties.DefaultRCONPort)
+			}
+			_ = client.Close()
+		})
+	}
+}
+
+// TestOpenFromWorkingDirRefusesAnOutOfRangePortWithoutEchoingIt pins that an
+// integer rcon.port no server can bind is refused before any dial, with an error
+// that does not repeat the value, because the container driver logs it (issue
+// #3345).
+func TestOpenFromWorkingDirRefusesAnOutOfRangePortWithoutEchoingIt(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		// leak lists what the error must not contain.
+		leak []string
+	}{
+		{name: "above 65535", body: "enable-rcon=true\nrcon.password=pw\nrcon.port=70000\n", leak: []string{"70000"}},
+		{name: "zero", body: "enable-rcon=true\nrcon.password=pw\nrcon.port=0\n", leak: []string{":0"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "server.properties"), []byte(tc.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			client, err := OpenFromWorkingDir(ctx, dir, "", "")
+			if err == nil {
+				_ = client.Close()
+				t.Fatal("OpenFromWorkingDir = nil error, want the malformed rcon.port refused")
+			}
+			if !strings.Contains(err.Error(), "rcon.port") || strings.Contains(err.Error(), "dial") {
+				t.Fatalf("error = %q, want a refusal naming rcon.port, before any dial", err)
+			}
+			for _, leak := range tc.leak {
+				if strings.Contains(err.Error(), leak) {
+					t.Fatalf("error = %q, must not contain %q", err, leak)
+				}
+			}
+		})
+	}
 }

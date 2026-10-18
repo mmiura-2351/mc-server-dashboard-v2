@@ -38,6 +38,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -51,11 +52,8 @@ import (
 )
 
 // defaultGamePort is the Minecraft server port when server.properties does not
-// override server-port; defaultRCONPort mirrors the RCON adapter's default.
-const (
-	defaultGamePort = "25565"
-	defaultRCONPort = "25575"
-)
+// override server-port.
+const defaultGamePort = "25565"
 
 // defaultStopTimeout bounds the `docker stop` SIGTERM grace period before the
 // daemon escalates to SIGKILL.
@@ -1042,6 +1040,11 @@ type instance struct {
 	// error, so access is serialized by metricsMu and a broken connection is
 	// discarded to force a redial on the next sample.
 	metricsControl execution.ServerControl
+	// metricsOpenErr is the cause (openFailureCause) of the last logged player-count
+	// RCON open failure, cleared by a successful open. A failure with the same cause
+	// is not logged again, so a persistent one (a refused server.properties, issue
+	// #3345) costs one line rather than one per metrics tick. Guarded by metricsMu.
+	metricsOpenErr string
 	// metricsClosed latches once the instance terminates and closeMetricsControl has
 	// run, so a late in-flight sample does not redial a connection nobody would
 	// close.
@@ -1704,7 +1707,7 @@ func (i *instance) Sample(ctx context.Context) (execution.MetricsSample, error) 
 // Execute error, so a failed sample discards the connection and the next sample
 // redials a fresh one — at most one redial per tick, never a hot loop. Access is
 // serialized by metricsMu so the terminal close (closeMetricsControl) cannot race
-// a sample.
+// a sample. An open failure is logged once per cause (metricsOpenErr).
 func (i *instance) queryPlayerCount(ctx context.Context) uint32 {
 	i.metricsMu.Lock()
 	defer i.metricsMu.Unlock()
@@ -1718,8 +1721,14 @@ func (i *instance) queryPlayerCount(ctx context.Context) uint32 {
 	if i.metricsControl == nil {
 		ctrl, err := i.openControl(ctx, i.spec, i.rconHost)
 		if err != nil {
+			if cause := openFailureCause(err); cause != i.metricsOpenErr {
+				i.metricsOpenErr = cause
+				i.logger.Warn("player count: open rcon failed; reporting 0 players until it opens (logged once per cause)",
+					"server_id", i.spec.ServerID, "error", err)
+			}
 			return 0
 		}
+		i.metricsOpenErr = ""
 		i.metricsControl = ctrl
 	}
 
@@ -1732,6 +1741,19 @@ func (i *instance) queryPlayerCount(ctx context.Context) uint32 {
 		return 0
 	}
 	return parsePlayerCount(reply)
+}
+
+// openFailureCause is the key queryPlayerCount de-duplicates RCON open failures
+// on. A network error is reduced to its operation and underlying error, because
+// its addresses include the client's ephemeral port, which differs on every
+// attempt even when the cause does not (a peer resetting each handshake, issue
+// #3345). Any other error keys on its text, which carries no per-attempt detail.
+func openFailureCause(err error) string {
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return opErr.Op + ": " + opErr.Err.Error()
+	}
+	return err.Error()
 }
 
 // closeMetricsControl closes the cached metrics RCON connection (if any) and
@@ -2018,13 +2040,16 @@ func rconStopDeadline(ctx context.Context) time.Time {
 
 // tryRCONStop opens RCON and sends "stop", reporting whether the in-band stop was
 // issued successfully. A failure returns false so Stop falls back to `docker
-// stop`. The exchange runs under a phase deadline so a hung peer cannot consume
-// the whole stop budget (issue #832).
+// stop`; an open failure is logged with its cause (issue #3345). The exchange
+// runs under a phase deadline so a hung peer cannot consume the whole stop budget
+// (issue #832).
 func (i *instance) tryRCONStop(ctx context.Context) bool {
 	ctx, cancel := context.WithDeadline(ctx, rconStopDeadline(ctx))
 	defer cancel()
 	ctrl, err := i.openControl(ctx, i.spec, i.rconHost)
 	if err != nil {
+		i.logger.Warn("graceful stop: open rcon failed; falling back to a stop signal",
+			"server_id", i.spec.ServerID, "error", err)
 		return false
 	}
 	defer func() { _ = ctrl.Close() }()
@@ -2264,7 +2289,8 @@ var (
 
 // ports reads the server's game and RCON ports from its working-dir
 // server.properties, falling back to the Minecraft defaults when the file is
-// absent or a key is unset. Start publishes the game port on the configured host
+// absent or a key is unset (for rcon.port also when it is not an integer, as the
+// server does; an out-of-range one is an error). Start publishes the game port on the configured host
 // interface and RCON on loopback. The file itself is read by the shared no-follow
 // reader (adapters/serverproperties) and parsed by the shared Java-compatible
 // parser (internal/javaproperties), both of which tunnel.gamePort
@@ -2289,9 +2315,12 @@ func ports(workingDir string) (game, rcon string, err error) {
 	if game == "" {
 		game = defaultGamePort
 	}
-	rcon = props["rcon.port"]
-	if rcon == "" {
-		rcon = defaultRCONPort
+	// Resolved as the RCON dial resolves it, so the port published is the one
+	// dialed, and built from the number: the value read can carry the next line of
+	// the file (issue #3345).
+	rconPort, err := serverproperties.RCONPort(props["rcon.port"])
+	if err != nil {
+		return "", "", fmt.Errorf("containerdriver: %w", err)
 	}
-	return game, rcon, nil
+	return game, strconv.Itoa(rconPort), nil
 }

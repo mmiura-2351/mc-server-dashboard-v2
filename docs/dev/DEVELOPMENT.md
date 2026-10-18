@@ -145,9 +145,15 @@ cd api && uv run lint-imports   # just the import contracts
 Each bounded context carries its own contracts — a layered contract
 (`domain ← application ← api`) plus forbidden-import contracts that keep
 `adapters` out of `domain` / `application` and keep contexts independent of
-each other; a new context adds its own. On the `worker/` (Go) side the inward
-direction is a convention checked in review; `go vet` and golangci-lint run via
-`make lint`.
+each other; a new context adds its own.
+
+On the Go side (`worker/` and `relay/`) the same direction is enforced by
+golangci-lint's `depguard` linter, configured per module in
+`worker/.golangci.yml` and `relay/.golangci.yml` and run by `make worker-lint` /
+`make relay-lint` (both part of `make lint`). One rule per layer covers that
+layer's non-test files. An existing violation that is not yet behind a Port is
+a narrowly scoped exception rule naming the exact files, with a comment saying
+what has to move for it to go.
 
 ## 6. Proto regeneration
 

@@ -30,7 +30,6 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/rcon"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/regionfsck"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/scratchformat"
@@ -63,7 +62,7 @@ type resilientControl struct {
 
 func (r *resilientControl) Execute(ctx context.Context, line string) (string, error) {
 	reply, err := r.inner.Execute(ctx, line)
-	if err == nil || !errors.Is(err, rcon.ErrConnBroken) {
+	if err == nil || !errors.Is(err, execution.ErrConnBroken) {
 		return reply, err
 	}
 	r.logger.Warn("rcon connection poisoned; redialing for next command",
@@ -3091,7 +3090,7 @@ func (m *Manager) handleServerCommand(ctx context.Context, cmd session.Command) 
 	out, err := ctrl.Execute(ctx, cmd.Line)
 	if err != nil {
 		code := session.CommandErrorInternal
-		if errors.Is(err, rcon.ErrCommandDropped) {
+		if errors.Is(err, execution.ErrCommandDropped) {
 			code = session.CommandErrorCommandDropped
 		}
 		return fail(cmd.CommandID, code, fmt.Sprintf("instancemanager: server command: %v", err))

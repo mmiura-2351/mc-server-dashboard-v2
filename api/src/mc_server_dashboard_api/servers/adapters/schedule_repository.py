@@ -157,6 +157,18 @@ class SqlAlchemyScheduleRepository(ScheduleRepository):
         hydrated, _ = _safe_hydrate([row])
         return hydrated[0] if hydrated else None
 
+    async def lock(self, schedule_id: ScheduleId) -> Schedule | None:
+        stmt = (
+            select(ScheduleModel)
+            .where(ScheduleModel.id == schedule_id.value)
+            .with_for_update()
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return None
+        hydrated, _ = _safe_hydrate([row])
+        return hydrated[0] if hydrated else None
+
     async def get_ref(self, schedule_id: ScheduleId) -> ScheduleRef | None:
         # Identity, owning server and action straight off the row, with no
         # domain hydration, so the delete path resolves a corrupt row too

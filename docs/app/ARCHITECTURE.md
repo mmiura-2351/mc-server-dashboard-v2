@@ -95,8 +95,8 @@ place. Dependency inversion is the mechanism: a use case receives the Ports it
 needs as constructor/struct arguments and never instantiates a concrete adapter
 itself.
 
-These rules are mechanically checkable and should be enforced by import-direction
-contracts in CI (e.g. import-linter on the Python side, an equivalent guard on
+These rules are mechanically checkable and are enforced by import-direction
+contracts in CI (import-linter on the Python side, golangci-lint's `depguard` on
 the Go side). The exact tooling and how to run it locally are in
 [`../dev/DEVELOPMENT.md`](../dev/DEVELOPMENT.md) Section 5.
 

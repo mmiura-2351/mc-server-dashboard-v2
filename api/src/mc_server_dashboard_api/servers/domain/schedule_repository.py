@@ -55,6 +55,18 @@ class ScheduleRepository(abc.ABC):
         """
 
     @abc.abstractmethod
+    async def lock(self, schedule_id: ScheduleId) -> Schedule | None:
+        """Return the schedule with its row locked, or ``None`` if absent.
+
+        :meth:`get_by_id` under ``SELECT ... FOR UPDATE`` (issue #3314): the row
+        stays locked until the enclosing transaction ends, and the read waits
+        for a concurrent delete or edit of it to commit, so it returns the
+        row's committed state rather than the snapshot before that write. The
+        runner's claim and run record use it to serialize with a concurrent
+        delete. A corrupt row reads as absent, as with :meth:`get_by_id`.
+        """
+
+    @abc.abstractmethod
     async def get_ref(self, schedule_id: ScheduleId) -> ScheduleRef | None:
         """Return the schedule's :class:`ScheduleRef`, or ``None`` if absent.
 

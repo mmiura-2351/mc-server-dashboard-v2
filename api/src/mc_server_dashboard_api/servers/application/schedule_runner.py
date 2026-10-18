@@ -58,7 +58,25 @@ a replayed lifecycle/command occurrence is bounded by the same
 :data:`LATE_RUN_GRACE` staleness gate (a restart later than the grace advances
 without executing).
 
-One schedule's exception never stops the tick — each is isolated and logged.
+A schedule edited or deleted mid-run (issue #3314): the runner claims a due
+schedule just before dispatching it, re-reading its row under ``SELECT ... FOR
+UPDATE`` in a short transaction. A schedule deleted, disabled, or rescheduled
+since the poll is not dispatched — one INFO line, no run row; the lock makes the
+claim wait for a delete still in flight rather than read the row it is removing.
+The run is then recorded and ``next_run_at`` advanced in one short transaction
+that locks the row first: a delete arriving meanwhile waits for it and cascades
+the run away, and one that committed earlier leaves nothing to record on — the
+action is still audited, the run row skipped with one INFO line. Neither lock is
+held across the dispatch: start, stop and backup can take minutes (hydrate,
+final snapshot, archive), and a transaction open that long would block the
+schedule's delete and edit and contend with the per-server lifecycle lock. So a
+delete that commits between the claim and the dispatch is serialized after the
+run, like one arriving during it: the action runs and is audited. The claim
+advances nothing, so the at-least-once crash semantics above are unchanged.
+
+One schedule's exception never stops the tick — each is isolated and logged, and
+each schedule's run record and advance commit in a transaction of their own, so
+a failure in one never rolls back another's.
 """
 
 from __future__ import annotations
@@ -527,8 +545,25 @@ class RunScheduleTick:
                 ScheduleRunOutcome.SKIPPED, "occurrence too stale", None
             )
             async with self._bookkeeping_lock:
-                await self._record(schedule, stale_result, stale_now, stale_now)
-                await self._advance(schedule, last_run_at=schedule.last_run_at)
+                await self._record(
+                    schedule,
+                    stale_result,
+                    stale_now,
+                    stale_now,
+                    advance=True,
+                    last_run_at=schedule.last_run_at,
+                )
+            return
+        async with self._bookkeeping_lock:
+            current = await self._claim(schedule.id, "run")
+        if current is None:
+            return
+        if not current.enabled or current.next_run_at != schedule.next_run_at:
+            _LOG.info(
+                "schedule %s was disabled or rescheduled before its run; "
+                "not dispatched",
+                schedule.id.value,
+            )
             return
         # A warning step still unsent now can never fire (a warning broadcasts
         # only strictly before its occurrence): its window fell between two
@@ -541,9 +576,15 @@ class RunScheduleTick:
                     self._log_missed_step(schedule, step)
         result, started_at, finished_at = await self._execute(schedule)
         async with self._bookkeeping_lock:
-            await self._record(schedule, result, started_at, finished_at)
-            await self._advance(schedule, last_run_at=started_at)
-        if schedule.action is ScheduleAction.BACKUP:
+            recorded = await self._record(
+                schedule,
+                result,
+                started_at,
+                finished_at,
+                advance=True,
+                last_run_at=started_at,
+            )
+        if recorded and schedule.action is ScheduleAction.BACKUP:
             self._reschedule_retry(schedule.id, result, finished_at)
         async with self._bookkeeping_lock:
             await self._prune_after_backup(schedule, result)
@@ -554,8 +595,7 @@ class RunScheduleTick:
         # occurrence takes over. A retry-of-the-retry chain is exactly the
         # unbounded tail the owner-confirmed "retry once" bound excludes.
         self._backup_retry.pop(schedule_id, None)
-        async with self.uow:
-            schedule = await self.uow.schedules.get_by_id(schedule_id)
+        schedule = await self._claim(schedule_id, "backup retry")
         if (
             schedule is None
             or not schedule.enabled
@@ -565,8 +605,34 @@ class RunScheduleTick:
         result, started_at, finished_at = await self._execute(schedule)
         # The retry records (and notifies on failure) but never moves next_run_at:
         # it is a catch-up for the failed occurrence, not a new occurrence.
-        await self._record(schedule, result, started_at, finished_at)
+        await self._record(schedule, result, started_at, finished_at, advance=False)
         await self._prune_after_backup(schedule, result)
+
+    async def _claim(self, schedule_id: ScheduleId, what: str) -> Schedule | None:
+        """Re-read the schedule under its row lock just before dispatching it.
+
+        Returns its current state, or ``None`` — logged once at INFO — when it
+        was deleted since the poll. The lock is released when the read's
+        transaction ends; it only makes the read wait for a delete or edit
+        still in flight (module docstring).
+        """
+
+        async with self.uow:
+            current = await self.uow.schedules.lock(schedule_id)
+        if current is None:
+            _LOG.info(
+                "schedule %s was deleted before its %s; not dispatched",
+                schedule_id.value,
+                what,
+            )
+            self._forget(schedule_id)
+        return current
+
+    def _forget(self, schedule_id: ScheduleId) -> None:
+        """Drop the in-memory state of a schedule that no longer exists."""
+
+        self._notifying.discard(schedule_id)
+        self._backup_retry.pop(schedule_id, None)
 
     async def _prune_after_backup(
         self, schedule: Schedule, result: ActionResult
@@ -700,7 +766,17 @@ class RunScheduleTick:
         result: ActionResult,
         started_at: dt.datetime,
         finished_at: dt.datetime,
-    ) -> None:
+        *,
+        advance: bool,
+        last_run_at: dt.datetime | None = None,
+    ) -> bool:
+        """Record the run (and advance it when ``advance``), then audit/notify.
+
+        Returns whether the run was recorded: ``False`` when the schedule was
+        deleted before the record could lock its row (module docstring). The
+        audit and notification still go out — the action did run.
+        """
+
         run = ScheduleRun(
             id=ScheduleRunId.new(),
             schedule_id=schedule.id,
@@ -710,11 +786,20 @@ class RunScheduleTick:
             detail=result.detail,
         )
         async with self.uow:
-            await self.uow.schedule_runs.add(run)
-            await self.uow.schedule_runs.prune_for_schedule(
-                schedule.id, keep=self.history_cap
+            recorded = await self.uow.schedules.lock(schedule.id) is not None
+            if recorded:
+                await self.uow.schedule_runs.add(run)
+                await self.uow.schedule_runs.prune_for_schedule(
+                    schedule.id, keep=self.history_cap
+                )
+                if advance:
+                    await self._advance(schedule, last_run_at=last_run_at)
+                await self.uow.commit()
+        if not recorded:
+            _LOG.info(
+                "schedule %s was deleted during its run; run not recorded",
+                schedule.id.value,
             )
-            await self.uow.commit()
         if result.outcome is ScheduleRunOutcome.SUCCESS:
             await self._audit(schedule, result.community_id, Outcome.SUCCESS)
             # A success that ends a run of failures clears the notifying state and
@@ -740,28 +825,31 @@ class RunScheduleTick:
                     title=f"Scheduled {schedule.action.value} failed",
                     detail=result.detail or "",
                 )
+        if not recorded:
+            self._forget(schedule.id)
+        return recorded
 
     async def _advance(
         self, schedule: Schedule, *, last_run_at: dt.datetime | None
     ) -> None:
-        # Recompute now HERE, not at tick start: after a long execution the next
-        # occurrence must be strictly in the future of the advance instant, or a
-        # slow run could land next_run_at already in the past. The write goes
-        # through the narrow bookkeeping UPDATE (guarded WHERE enabled AND
-        # next_run_at = fired_occurrence) so a concurrent CRUD edit that changed
-        # the cadence is never clobbered and a concurrently disabled schedule
-        # stays disabled — 0 rows matched is the silent-skip contract.
+        # Staged inside _record's transaction, so the run row and the advance
+        # commit together. Recompute now HERE, not at tick start: after a long
+        # execution the next occurrence must be strictly in the future of the
+        # advance instant, or a slow run could land next_run_at already in the
+        # past. The write goes through the narrow bookkeeping UPDATE (guarded
+        # WHERE enabled AND next_run_at = fired_occurrence) so a concurrent CRUD
+        # edit that changed the cadence is never clobbered and a concurrently
+        # disabled schedule stays disabled — 0 rows matched is the silent-skip
+        # contract.
         fired = schedule.next_run_at
         assert fired is not None  # list_due predicate guarantees non-None
         now = self.clock.now()
-        async with self.uow:
-            await self.uow.schedules.advance_run_state(
-                schedule.id,
-                fired_occurrence=fired,
-                next_run_at=self._next_after(schedule, now),
-                last_run_at=last_run_at,
-            )
-            await self.uow.commit()
+        await self.uow.schedules.advance_run_state(
+            schedule.id,
+            fired_occurrence=fired,
+            next_run_at=self._next_after(schedule, now),
+            last_run_at=last_run_at,
+        )
 
     async def _audit(
         self,
