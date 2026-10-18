@@ -2,6 +2,7 @@ package rcon
 
 import (
 	"context"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/serverproperties"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 )
 
 // These tests pin what OpenFromWorkingDir does with a server.properties the
@@ -79,6 +81,11 @@ func assertRefusedWithoutDialing(t *testing.T, l *rconListener, workingDir, secr
 	}
 	if !strings.Contains(r.err.Error(), "server.properties") {
 		t.Errorf("error = %v, want it to name server.properties", r.err)
+	}
+	// The console command, the restart and the stop flush that open RCON tell the
+	// refusal apart by this sentinel (issue #3347).
+	if !errors.Is(r.err, execution.ErrServerPropertiesUnreadable) {
+		t.Errorf("error = %v, want it to be execution.ErrServerPropertiesUnreadable", r.err)
 	}
 	if secret != "" && strings.Contains(r.err.Error(), secret) {
 		t.Errorf("error leaks the file's content: %v", r.err)

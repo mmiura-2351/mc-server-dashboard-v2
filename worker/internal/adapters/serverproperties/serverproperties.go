@@ -27,6 +27,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/nofollow"
 )
 
@@ -60,6 +61,11 @@ var readFileAt = nofollow.ReadFileAt
 // not, never followed), a FIFO, socket, device or directory (never read, never
 // blocked on), a larger file, and a working set that is itself a symlink. No
 // error carries any of the file's content.
+//
+// A refusal of the file itself — everything above but the symlinked working set,
+// which is the Worker's own entry and not the server's to replace — also
+// satisfies errors.Is(err, execution.ErrServerPropertiesUnreadable), so the
+// operation it fails can tell the user why (issue #3347).
 func Read(workingDir string) ([]byte, error) {
 	path := filepath.Join(workingDir, FileName)
 
@@ -73,11 +79,15 @@ func Read(workingDir string) ([]byte, error) {
 	defer func() { _ = unix.Close(dirFd) }()
 
 	data, err := readFileAt(dirFd, FileName, MaxSize)
+	if errors.Is(err, unix.ENXIO) {
+		// A socket cannot even be opened; it is refused like any other special file.
+		err = nofollow.ErrNotRegular
+	}
 	switch {
 	case errors.Is(err, nofollow.ErrSymlink), errors.Is(err, nofollow.ErrNotRegular):
-		return nil, fmt.Errorf("serverproperties: %s %w", path, err)
+		return nil, refusal{fmt.Errorf("serverproperties: %s %w", path, err)}
 	case errors.Is(err, nofollow.ErrTooLarge):
-		return nil, fmt.Errorf("serverproperties: %s is larger than %d bytes; refusing to read it", path, MaxSize)
+		return nil, refusal{fmt.Errorf("serverproperties: %s is larger than %d bytes; refusing to read it", path, MaxSize)}
 	case err != nil:
 		// The reader names the stage that failed and the bare file name; report the
 		// same stage under the full path.
@@ -89,3 +99,14 @@ func Read(workingDir string) ([]byte, error) {
 	}
 	return data, nil
 }
+
+// refusal is Read's error for a file it refused. Its message is the reader's own,
+// and it is execution.ErrServerPropertiesUnreadable to errors.Is besides
+// whatever the wrapped error is.
+type refusal struct{ err error }
+
+func (r refusal) Error() string { return r.err.Error() }
+
+func (r refusal) Unwrap() error { return r.err }
+
+func (refusal) Is(target error) bool { return target == execution.ErrServerPropertiesUnreadable }

@@ -10,6 +10,9 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/serverproperties"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 )
 
 // A server.properties the server planted — a link (to a file outside the working
@@ -25,6 +28,9 @@ func TestStartRefusesAPlantedServerProperties(t *testing.T) {
 		"symlink to an outside file": func(path string) error { return os.Symlink(outside, path) },
 		"dangling symlink":           func(path string) error { return os.Symlink(outside+".absent", path) },
 		"fifo":                       func(path string) error { return unix.Mkfifo(path, 0o600) },
+		"over the size cap": func(path string) error {
+			return os.WriteFile(path, []byte("server-port=26999\n#"+strings.Repeat("x", serverproperties.MaxSize)), 0o600)
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -52,6 +58,11 @@ func TestStartRefusesAPlantedServerProperties(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), "server.properties") {
 				t.Errorf("Start error = %v, want it to name server.properties", err)
+			}
+			// The instance manager answers the start with its own code on this
+			// sentinel (issue #3347).
+			if !errors.Is(err, execution.ErrServerPropertiesUnreadable) {
+				t.Errorf("Start error = %v, want it to be execution.ErrServerPropertiesUnreadable", err)
 			}
 			if docker.createCalls != 0 {
 				t.Errorf("createCalls = %d, want 0 (no container created on a refused file)", docker.createCalls)
