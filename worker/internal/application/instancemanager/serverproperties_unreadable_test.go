@@ -108,9 +108,10 @@ func TestServerCommandNamesARefusedServerProperties(t *testing.T) {
 }
 
 // A graceful stop cannot flush the world first (RCON's credentials are in the
-// refused file), but it is not failed for that: the driver's stop signal still
-// triggers the server's own shutdown save. The skipped flush is told to the
-// operator in one WARN that says so (issue #3347).
+// refused file), but it is not failed for that: the driver falls back to its stop
+// signal. That signal may end the server before its own shutdown save completes
+// (issue #3436), so the one WARN telling the operator about the skipped flush says
+// changes can be lost and promises no save (issue #3347).
 func TestStopWithARefusedServerPropertiesWarnsOnceAndStops(t *testing.T) {
 	for name, plant := range refusedServerProperties {
 		t.Run(name, func(t *testing.T) {
@@ -139,10 +140,13 @@ func TestStopWithARefusedServerPropertiesWarnsOnceAndStops(t *testing.T) {
 			if len(flushWarns) != 1 {
 				t.Fatalf("stop flush WARNs = %q, want exactly one", flushWarns)
 			}
-			for _, want := range []string{"server.properties", "shutdown save"} {
+			for _, want := range []string{"server.properties", "skipping the final save-all", "can be lost"} {
 				if !strings.Contains(flushWarns[0], want) {
 					t.Errorf("stop flush WARN = %q, want it to mention %q", flushWarns[0], want)
 				}
+			}
+			if strings.Contains(flushWarns[0], "still triggers") {
+				t.Errorf("stop flush WARN = %q promises a shutdown save the signal may not complete", flushWarns[0])
 			}
 		})
 	}

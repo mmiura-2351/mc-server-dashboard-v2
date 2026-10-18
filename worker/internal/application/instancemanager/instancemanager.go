@@ -1626,10 +1626,12 @@ func (m *Manager) flushBeforeStopWithDriver(ctx context.Context, serverID, drive
 	raw, err := m.openControl(ctx, serverID, driverName, mcVersion)
 	if errors.Is(err, execution.ErrServerPropertiesUnreadable) {
 		// RCON's credentials are in the refused file, so there is nothing to dial.
-		// The stop is not failed for it and the API is not told: the driver's stop
-		// signal still triggers the server's own shutdown save (issue #3347).
+		// The stop is not failed for it and the API is not told (issue #3347). The
+		// driver falls back to its stop signal, and the server may be killed before
+		// its own shutdown save completes (issue #3436), so the WARN promises none.
 		m.logger.Warn("stop flush: server.properties is not a regular file or is too large, so RCON cannot be opened; "+
-			"stopping without the final save-all (the stop signal still triggers the server's own shutdown save)",
+			"skipping the final save-all and falling back to a stop signal, which may end the server before "+
+			"its own shutdown save completes: changes since the last autosave can be lost",
 			"server_id", serverID, "error", err)
 		return false
 	}
