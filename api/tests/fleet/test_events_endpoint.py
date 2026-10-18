@@ -19,12 +19,14 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import NoReturn
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
+from mc_server_dashboard_api import dependencies as dependencies_module
 from mc_server_dashboard_api.community.domain.permission_checker import (
     MembershipVisibility,
     PermissionChecker,
@@ -1473,7 +1475,7 @@ async def test_a_hung_reauthorization_closes_1013_at_its_bound(
     from mc_server_dashboard_api.fleet.api import events as events_module
 
     monkeypatch.setattr(events_module, "_REAUTHZ_INTERVAL_SECONDS", 0.05)
-    monkeypatch.setattr(events_module, "_REAUTHZ_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(dependencies_module, "WS_DATABASE_TIMEOUT_SECONDS", 0.1)
 
     async def _hung() -> int | None:
         await asyncio.Event().wait()
@@ -1513,3 +1515,135 @@ async def test_a_reauthorization_bug_is_not_masked_as_transient(
 
     with pytest.raises(ValueError, match="bug"):
         await _relay_reauthorizing(_bug)
+
+
+# --- bounded handshake, snapshot and stuck reads (#3426) -------------------
+
+
+async def _no_answer(*_args: object, **_kwargs: object) -> NoReturn:
+    """A read waiting on a frozen database: no answer within the bound under test."""
+
+    await asyncio.sleep(5)
+    raise AssertionError("the read was not bounded")
+
+
+async def _refused(*_args: object, **_kwargs: object) -> NoReturn:
+    raise ConnectionRefusedError(111, "Connect call failed")
+
+
+async def _snapshot_bug(*_args: object, **_kwargs: object) -> NoReturn:
+    raise ValueError("bug")
+
+
+def test_handshake_authentication_with_no_answer_refuses_1013(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A frozen database cannot park the handshake past the client giving up.
+
+    Unbounded, the handshake would be accepted once the database thawed, long
+    after the browser abandoned it.
+    """
+
+    monkeypatch.setattr(dependencies_module, "WS_DATABASE_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(dependencies_module, "_authenticate_ws", _no_answer)
+    app = _shared_app
+    app.dependency_overrides.clear()  # the real get_current_user_ws
+    client = _client(app)
+
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(WebSocketDisconnect) as exc:
+            with client.websocket_connect(_url(uuid.uuid4(), uuid.uuid4())):
+                pass
+    assert exc.value.code == 1013
+    _assert_one_line(caplog)
+
+
+class _NoAnswerVisibility(MembershipVisibility):
+    async def is_member(self, *, user_id: UserId, community_id: CommunityId) -> bool:
+        return await _no_answer()
+
+
+def test_handshake_authorization_with_no_answer_refuses_1013(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(dependencies_module, "WS_DATABASE_TIMEOUT_SECONDS", 0.1)
+    app = _app()
+    app.dependency_overrides[get_membership_visibility] = _NoAnswerVisibility  # type: ignore[attr-defined]
+    with caplog.at_level(logging.WARNING):
+        _assert_rejected(app, 1013)
+    _assert_one_line(caplog)
+
+
+class _SnapshotFails(_FakeReadServer):
+    """Answers the handshake's ownership check, then fails the snapshot read."""
+
+    def __init__(self, failure: Callable[[], Awaitable[object]]) -> None:
+        super().__init__(found=True)
+        self._failure = failure
+        self._reads = 0
+
+    async def __call__(self, **kwargs: object) -> object:
+        self._reads += 1
+        if self._reads == 1:
+            return await super().__call__(**kwargs)
+        return await self._failure()
+
+
+@pytest.mark.parametrize(
+    "failure", [_no_answer, _refused], ids=["no-answer", "transient-error"]
+)
+def test_snapshot_database_failure_closes_1013(
+    failure: Callable[[], Awaitable[object]],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(dependencies_module, "WS_DATABASE_TIMEOUT_SECONDS", 0.1)
+    client = _client(_app(read_server=_SnapshotFails(failure)))
+
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(WebSocketDisconnect) as exc:
+            with client.websocket_connect(_url(uuid.uuid4(), uuid.uuid4())) as ws:
+                ws.receive_json()
+    assert exc.value.code == 1013
+    _assert_one_line(caplog)
+
+
+def test_a_snapshot_bug_is_not_masked_as_transient() -> None:
+    client = _client(_app(read_server=_SnapshotFails(_snapshot_bug)))
+
+    with pytest.raises(ValueError, match="bug"):
+        with client.websocket_connect(_url(uuid.uuid4(), uuid.uuid4())) as ws:
+            ws.receive_json()
+
+
+async def test_a_read_stuck_past_its_cancellation_still_closes_1013_at_its_bound(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The bound does not wait for a cancelled read to finish.
+
+    Against a frozen database, cancelling a query does not end it: the
+    driver's cleanup (a cancel request, a rollback) waits on the same
+    database. Awaiting it would wait as long as the freeze does.
+    """
+
+    from mc_server_dashboard_api.fleet.api import events as events_module
+
+    monkeypatch.setattr(events_module, "_REAUTHZ_INTERVAL_SECONDS", 0.05)
+    monkeypatch.setattr(dependencies_module, "WS_DATABASE_TIMEOUT_SECONDS", 0.1)
+    thawed = asyncio.Event()
+
+    async def _stuck() -> int | None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await thawed.wait()  # the cleanup waits on the database too
+            raise
+        raise AssertionError("unreachable")
+
+    try:
+        with caplog.at_level(logging.WARNING):
+            socket = await _relay_reauthorizing(_stuck)
+    finally:
+        thawed.set()
+    assert socket.closed == [1013]
+    _assert_one_line(caplog)

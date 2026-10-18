@@ -18,15 +18,19 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import json
+import logging
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import NoReturn
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
+from mc_server_dashboard_api import dependencies as dependencies_module
 from mc_server_dashboard_api.community.domain.permission_checker import (
     MembershipVisibility,
     PermissionChecker,
@@ -751,6 +755,70 @@ async def test_client_gone_during_the_membership_lookup_ends_the_relay_quietly()
 
     await asyncio.wait_for(handler, timeout=5)
     assert [json.loads(text)["stream"] for text in socket.sent] == ["snapshot"]
+
+
+# --- a membership lookup the database cannot answer (#3426) ----------------
+
+
+async def _no_answer(*_args: object, **_kwargs: object) -> NoReturn:
+    """A lookup waiting on a frozen database: no answer within the bound under test."""
+
+    await asyncio.sleep(5)
+    raise AssertionError("the lookup was not bounded")
+
+
+async def _refused(*_args: object, **_kwargs: object) -> NoReturn:
+    raise ConnectionRefusedError(111, "Connect call failed")
+
+
+async def _bug(*_args: object, **_kwargs: object) -> NoReturn:
+    raise ValueError("bug")
+
+
+def _deliver_through_lookup(
+    lookup: Callable[..., Awaitable[uuid.UUID | None]],
+) -> None:
+    """Open a community stream and publish one event its membership lookup reads."""
+
+    bus = InProcessRealTimeEvents()
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(bus=bus)
+    app.dependency_overrides[get_server_community_lookup] = lambda: lookup  # type: ignore[attr-defined]
+    client = _client(app)
+    with client.websocket_connect(_url(community)) as ws:
+        _skip_snapshot(ws)
+        bus.publish(
+            server_id=str(server),
+            event=RealTimeEvent(
+                stream=EventStream.STATUS, payload={"state": "running"}
+            ),
+        )
+        ws.receive_json()
+
+
+@pytest.mark.parametrize(
+    "lookup", [_no_answer, _refused], ids=["no-answer", "transient-error"]
+)
+def test_membership_lookup_database_failure_closes_1013(
+    lookup: Callable[..., Awaitable[uuid.UUID | None]],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(dependencies_module, "WS_DATABASE_TIMEOUT_SECONDS", 0.1)
+
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(WebSocketDisconnect) as exc:
+            _deliver_through_lookup(lookup)
+    assert exc.value.code == 1013
+    records = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(records) == 1, [r.getMessage() for r in records]
+    assert records[0].levelno == logging.WARNING
+    assert records[0].exc_info is None
+
+
+def test_a_membership_lookup_bug_is_not_masked_as_transient() -> None:
+    with pytest.raises(ValueError, match="bug"):
+        _deliver_through_lookup(_bug)
 
 
 # --- connection lifecycle --------------------------------------------------

@@ -14,7 +14,7 @@ import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from functools import lru_cache, partial
-from typing import Annotated, NamedTuple
+from typing import Annotated, Any, NamedTuple
 
 from fastapi import Depends, Request, WebSocket, WebSocketException, status
 from fastapi.exceptions import RequestValidationError
@@ -105,12 +105,7 @@ from mc_server_dashboard_api.config import (
 from mc_server_dashboard_api.core.adapters.database import (
     SqlAlchemyDatabasePing,
     create_session_factory,
-)
-
-# Re-exported for the events relay, which outlives its handshake and must tell
-# a database outage from a bug on its own re-checks (#3313).
-from mc_server_dashboard_api.core.adapters.database import (
-    is_transient_database_error as is_transient_database_error,
+    is_transient_database_error,
 )
 from mc_server_dashboard_api.core.adapters.readiness import (
     FlagControlPlaneReadiness,
@@ -1194,6 +1189,99 @@ def ws_accept_subprotocol(websocket: WebSocket) -> str | None:
     return None
 
 
+# How long one database read of an events socket may take before the socket is
+# refused or closed ``1013`` (#3313, #3426): the handshake's authentication and
+# gate, and the relay's re-checks, snapshots and membership lookups. Each is a
+# few indexed queries that answer in milliseconds; one still waiting after this
+# long is waiting on a frozen database. The bound is per read, so a handshake's
+# authentication and gate together can take up to twice it. Unbounded, a
+# handshake would outlast the client giving up (and be accepted, dead, once the
+# database thaws), and an open socket would deliver nothing for as long as the
+# freeze lasts. It bounds the wait, not the abandoned read's cleanup
+# (:func:`ws_database_read`).
+WS_DATABASE_TIMEOUT_SECONDS = 10.0
+
+
+class WsDatabaseUnavailableError(Exception):
+    """An events socket's database read could not be answered; already logged.
+
+    The socket is refused (at the handshake) or closed (mid-stream) ``1013``.
+    """
+
+
+async def ws_database_read[T](read: Callable[[], Awaitable[T]], *, outcome: str) -> T:
+    """Await an events socket's database ``read``, bounded and outage-aware.
+
+    A transient database failure, or no answer within
+    :data:`WS_DATABASE_TIMEOUT_SECONDS`, raises
+    :class:`WsDatabaseUnavailableError` after one WARNING line with no
+    traceback: an outage says nothing about the user's access and is not a bug
+    (#3313). Any other error propagates. ``outcome`` names what the ``1013``
+    does.
+
+    The read runs as its own task, abandoned at the bound — cancelled, not
+    awaited — and so is it when the caller is cancelled. Against a frozen
+    database a cancelled query does not end: the driver's cleanup (a cancel
+    request, a rollback) waits on the same database, so awaiting it would last
+    as long as the freeze does (#3426). Only the caller's wait is bounded, not
+    the cleanup: the abandoned task, and the pooled connection it holds, live
+    on until the database answers or the connection's transport fails, which
+    for a database that stays unreachable can be indefinitely.
+    """
+
+    task = asyncio.ensure_future(read())
+    try:
+        done, _pending = await asyncio.wait({task}, timeout=WS_DATABASE_TIMEOUT_SECONDS)
+    except BaseException:
+        _abandon(task)
+        raise
+    if not done:
+        _abandon(task)
+        _logger.warning(
+            "events socket %s (1013): no answer within %g s",
+            outcome,
+            WS_DATABASE_TIMEOUT_SECONDS,
+        )
+        raise WsDatabaseUnavailableError
+    try:
+        return task.result()
+    except Exception as exc:
+        if not is_transient_database_error(exc):
+            raise
+        _logger.warning(
+            "events socket %s (1013): database unavailable (%s)",
+            outcome,
+            type(exc).__name__,
+        )
+        raise WsDatabaseUnavailableError from None
+
+
+# Abandoned reads still running (:func:`ws_database_read`). The event loop keeps
+# only weak references to tasks, so nothing else is guaranteed to keep one alive
+# until it finishes; each is removed once its outcome has been consumed.
+_abandoned_reads: set[asyncio.Future[Any]] = set()
+
+
+def _abandon(task: asyncio.Future[Any]) -> None:
+    """Cancel ``task`` without awaiting it; hold it until it finishes."""
+
+    task.cancel()
+    _abandoned_reads.add(task)
+    task.add_done_callback(_forget_abandoned)
+
+
+def _forget_abandoned(task: asyncio.Future[Any]) -> None:
+    """Release a finished abandoned read, discarding its outcome.
+
+    Retrieving it keeps the event loop from logging an error the abandoned
+    read raised on its way out as never retrieved.
+    """
+
+    _abandoned_reads.discard(task)
+    if not task.cancelled():
+        task.exception()
+
+
 async def get_current_user_ws(websocket: WebSocket) -> Authentication | None:
     """The authentication behind a WebSocket handshake, or ``None``.
 
@@ -1203,23 +1291,21 @@ async def get_current_user_ws(websocket: WebSocket) -> Authentication | None:
     decides the close, not an exception (Section 6.13). The result carries the
     token's expiry, at which the route ends the session (#1862).
 
-    The one exception is a transient database failure while loading the user
-    (#3313): it says nothing about the token, so it is not ``None`` (``4401``)
-    but a refusal with ``1013`` (Try Again Later), logged as one line rather
-    than surfacing as an unhandled-exception traceback. It is raised as
-    ``WebSocketException``, which the framework turns into a close before
-    accept — the route body never runs.
+    The one exception is a database that cannot answer while loading the user
+    — a transient failure (#3313) or no answer within
+    :data:`WS_DATABASE_TIMEOUT_SECONDS` (#3426): it says nothing about the
+    token, so it is not ``None`` (``4401``) but a refusal with ``1013`` (Try
+    Again Later), logged as one line rather than surfacing as an
+    unhandled-exception traceback. It is raised as ``WebSocketException``,
+    which the framework turns into a close before accept — the route body
+    never runs.
     """
 
     try:
-        return await _authenticate_ws(websocket)
-    except Exception as exc:
-        if not is_transient_database_error(exc):
-            raise
-        _logger.warning(
-            "events socket handshake refused (1013): database unavailable (%s)",
-            type(exc).__name__,
+        return await ws_database_read(
+            partial(_authenticate_ws, websocket), outcome="handshake refused"
         )
+    except WsDatabaseUnavailableError:
         raise WebSocketException(code=status.WS_1013_TRY_AGAIN_LATER) from None
 
 

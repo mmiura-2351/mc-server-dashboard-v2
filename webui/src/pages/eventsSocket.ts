@@ -100,17 +100,19 @@ export interface EventsSocketCallbacks {
   onDown: () => void;
   /**
    * The user can no longer read the stream's resource (a 4403 / 4404 close,
-   * or a probe answering 403 / 404). The client has stopped for good; the page
-   * reloads its resource to show its own no-access / not-found state.
+   * or a probe answering 403 / 404 or resolving `false`). The client has
+   * stopped for good; the page reloads its resource to show its own
+   * no-access / not-found state.
    */
   onAccessLost: () => void;
   /**
-   * An authenticated REST read of the stream's resource, gated as the socket
-   * is, through the shared API client. Called after repeated failed
-   * handshakes: a 403 / 404 means the handshake is being refused, a 401 runs
-   * the session refresh like any REST 401, anything else keeps the backoff.
+   * An authenticated REST read through the shared API client, resolving
+   * whether the socket's gate admits the user. Called after repeated failed
+   * handshakes: `false` or a 403 / 404 means the handshake is being refused,
+   * a 401 runs the session refresh like any REST 401, anything else keeps the
+   * backoff.
    */
-  probeAccess: () => Promise<unknown>;
+  probeAccess: () => Promise<boolean>;
 }
 
 /**
@@ -226,27 +228,27 @@ export class EventsSocketClient {
   }
 
   // Repeated failed handshakes: a refused one looks exactly like a network
-  // failure, so ask REST, whose gate is the socket's (#3313). The backoff keeps
-  // running meanwhile. A 401 never reaches here as such: the API client runs
-  // the shared refresh on it, which rotates the token (reconnect-on-rotate) or
-  // hard-logs-out (which closes this client). A 403 / 404 means every
-  // handshake will be refused. Success, a network error or a 5xx says the
-  // handshake failures were the network's or the API's, so the backoff goes on.
-  // An answer that lands after a later handshake opened describes access as it
-  // was before that open, so it is ignored: the open is the newer evidence.
+  // failure, so ask REST what the socket's gate decides (#3313). The backoff
+  // keeps running meanwhile. A 401 never reaches here as such: the API client
+  // runs the shared refresh on it, which rotates the token (reconnect-on-rotate)
+  // or hard-logs-out (which closes this client). A `false` or a 403 / 404 means
+  // every handshake will be refused. A `true`, a network error or a 5xx says
+  // the handshake failures were the network's or the API's, so the backoff goes
+  // on. An answer that lands after a later handshake opened describes access as
+  // it was before that open, so it is ignored: the open is the newer evidence.
   private async probe(): Promise<void> {
     const opens = this.opens;
+    let allowed: boolean;
     try {
-      await this.callbacks.probeAccess();
+      allowed = await this.callbacks.probeAccess();
     } catch (error) {
-      if (
-        !this.stopped &&
-        this.opens === opens &&
+      allowed = !(
         error instanceof ApiError &&
         (error.status === 403 || error.status === 404)
-      ) {
-        this.loseAccess();
-      }
+      );
+    }
+    if (!allowed && !this.stopped && this.opens === opens) {
+      this.loseAccess();
     }
   }
 

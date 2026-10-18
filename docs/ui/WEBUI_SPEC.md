@@ -369,13 +369,18 @@ subprotocols `["access_token", "<jwt>"]`; the server echoes `access_token` as
 the accepted subprotocol (RFC 6455). The `Authorization: Bearer` header is also
 honored for non-browser clients. Close codes mirror REST: 4400 bad `streams`,
 4401 unauthenticated, 4403 forbidden, 4404 not found / not a member.
-A check the database cannot answer — a transient database error (refused or
-lost connection, exhausted pool, server starting up or shutting down) — is
-none of those: the socket is closed with the standard **1013** (Try Again
-Later) and the API logs one WARNING line, no traceback. At the handshake the
-socket is refused with it before accept, like the denials above (so a browser
-sees a failed handshake); mid-stream see the re-check below. Any other error is
-not masked.
+A database read the socket cannot get answered — a transient database error
+(refused or lost connection, exhausted pool, server starting up or shutting
+down), or no answer within 10 s (a frozen database) — is none of those: the
+socket is closed with the standard **1013** (Try Again Later) and the API logs
+one WARNING line, no traceback. At the handshake the socket is refused with it
+before accept, like the denials above, so a browser sees a failed handshake.
+Authentication and the gate each have their own 10 s bound, so a handshake can
+take up to about 20 s in all, but a phase that times out is refused rather
+than accepted once the database thaws, after the browser gave up. Mid-stream
+the same applies to the
+status snapshot, the community stream's per-server membership lookup and the
+re-check below. Any other error is not masked.
 Delivery is best-effort; REST keeps working if the socket dies (FR-MON-4).
 
 Re-check: every 60 s mid-stream the server repeats, for the token the socket
@@ -393,7 +398,10 @@ the code the handshake would have used:
   permission or grant revoked (4403), a deleted server (4404).
 - It is bounded: a re-check that fails on a transient database error, or has
   no answer within 10 s (a frozen database), closes the socket with **1013**
-  rather than leaving the stream silent while it waits.
+  rather than leaving the stream silent while it waits. The bound limits the
+  wait only: the abandoned query's cleanup, and the pooled connection it
+  holds, last until the database answers or the connection's transport fails
+  — indefinitely, for a database that stays unreachable.
 
 Lifetime: a socket's only credential is the access token it was opened with,
 so it lives no longer than that token. At the instant that token
@@ -889,7 +897,12 @@ backend support; the tab body also self-guards with an "unsupported" notice).
     REST read gated like the socket, through the shared API client: the
     server read (`GET /communities/{cid}/servers/{sid}`) for the per-server
     stream, the caller's permissions (`GET /communities/{cid}/me/permissions`,
-    membership-gated) for the community stream. A 401 goes through the
+    membership-gated) for the community stream. The permissions read answers
+    200 to any member, so the client applies the community stream's gate to
+    it: community-level `server:read`, i.e. the code in `permissions` (the
+    member's roles); a per-server grant does not count, exactly as in the
+    API's check (Section 7.3 resolution with no resource). A member without it
+    is treated like a 403. A 401 goes through the
     transparent refresh like any REST 401 — a rotated token reconnects the
     socket, an auth-definitive failure hard-logs-out; a 403 / 404 stops the
     client as above; success, a network error or a 5xx keeps the backoff. The

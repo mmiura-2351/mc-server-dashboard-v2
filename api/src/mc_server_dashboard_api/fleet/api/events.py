@@ -21,11 +21,13 @@ same condition would produce:
 - ``4404`` — not a member, or the server does not exist in this community;
 - ``4419`` — the access token the socket was opened with has expired (mid-stream
   only; see below);
-- ``1013`` — the standard Try Again Later: the database was unavailable, so the
-  check could not be made (#3313). At the handshake the socket is refused with
-  it before accept; mid-stream a re-check that failed on a transient database
-  error, or got no answer within :data:`_REAUTHZ_TIMEOUT_SECONDS`, closes with
-  it. Either is logged as one WARNING line; any other error still propagates.
+- ``1013`` — the standard Try Again Later: a database read failed on a
+  transient database error, or got no answer within
+  :data:`~mc_server_dashboard_api.dependencies.WS_DATABASE_TIMEOUT_SECONDS`
+  (#3313, #3426). At the handshake (authentication or the gate) the socket is
+  refused with it before accept; mid-stream a re-check, a status snapshot or a
+  community-stream membership lookup that fails this way closes with it.
+  Either is logged as one WARNING line; any other error still propagates.
 
 The socket lives no longer than the access token it was opened with (#1862):
 that token is its only credential, so at the instant it would stop
@@ -71,7 +73,6 @@ import asyncio
 import datetime as dt
 import functools
 import json
-import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Annotated, Any
@@ -94,6 +95,7 @@ from mc_server_dashboard_api.community.domain.value_objects import (
 )
 from mc_server_dashboard_api.dependencies import (
     ServerCommunityLookup,
+    WsDatabaseUnavailableError,
     WsReauthentication,
     get_current_user_ws,
     get_list_servers,
@@ -103,8 +105,8 @@ from mc_server_dashboard_api.dependencies import (
     get_real_time_events,
     get_server_community_lookup,
     get_ws_reauthentication,
-    is_transient_database_error,
     ws_accept_subprotocol,
+    ws_database_read,
 )
 from mc_server_dashboard_api.fleet.domain.real_time_events import (
     EventStream,
@@ -128,8 +130,6 @@ from mc_server_dashboard_api.servers.domain.value_objects import ServerId
 
 router = APIRouter()
 
-_logger = logging.getLogger(__name__)
-
 _SERVER_RESOURCE_TYPE = "server"
 _SERVER_READ = Permission("server:read")
 
@@ -148,12 +148,6 @@ _CLOSE_TRY_AGAIN_LATER = 1013
 # deactivated account or a removed member can keep receiving without adding
 # query load.
 _REAUTHZ_INTERVAL_SECONDS = 60.0
-
-# How long one re-check may take before the socket is closed ``1013`` (#3313).
-# Those few indexed queries answer in milliseconds; a check still waiting after
-# this long is waiting on a frozen database, and every socket would otherwise
-# deliver nothing for as long as it stays frozen.
-_REAUTHZ_TIMEOUT_SECONDS = 10.0
 
 # The ``stream`` of the status snapshot frame (#1795). Synthesised by this
 # endpoint from persisted state, never published on the bus, so it is not an
@@ -437,11 +431,15 @@ async def _relay(
     which may await). The same rule applies to it: a client gone while it was
     awaited is sent nothing (#3225).
 
+    Every database read of the relay — the snapshot, the membership lookup and
+    the re-check — is bounded by :func:`ws_database_read`: one that fails on a
+    transient database error or gets no answer in time closes the socket
+    ``1013`` (#3313, #3426).
+
     Each turn of the loop races four outcomes: the next buffered event (encoded
     and sent), the wall-clock re-authz deadline expiring (``reauthorize``
     re-authenticates and re-runs the accept-time gate; a denial closes the
-    socket with its code, and so does a database outage, with ``1013`` —
-    :func:`_recheck`), the
+    socket with its code), the
     access token reaching ``expires_at`` (the socket closes ``4419`` before any
     further delivery, #1862), and the client disconnecting. Both deadlines are
     absolute wall-clock time so a busy stream cannot postpone either. The expiry
@@ -475,7 +473,7 @@ async def _relay(
         if snapshot is None:
             return None
         subscription.discard_buffered(_SNAPSHOT_SUPERSEDES)
-        text = await snapshot()
+        text = await ws_database_read(snapshot, outcome="closed at snapshot")
         if disconnected.done():
             # The client left during the read: nothing may be sent any more.
             return None
@@ -536,7 +534,9 @@ async def _relay(
             # Check the wall-clock deadline unconditionally: a busy stream must
             # not prevent re-authorization from running.
             if loop.time() >= deadline:
-                denied = await _recheck(reauthorize)
+                denied = await ws_database_read(
+                    reauthorize, outcome="closed at re-authorization"
+                )
                 if denied is not None:
                     return denied
                 deadline = loop.time() + _REAUTHZ_INTERVAL_SECONDS
@@ -554,6 +554,8 @@ async def _relay(
             if not lapse.expired():
                 raise
             close_code = _CLOSE_TOKEN_EXPIRED
+        except WsDatabaseUnavailableError:
+            close_code = _CLOSE_TRY_AGAIN_LATER
         # The one close, outside the lapse: a close once started is never
         # cancelled by the expiry nor followed by a second one (Starlette
         # rejects any send after a close). A client already gone (its
@@ -604,7 +606,10 @@ async def _in_community(
         return False
     cached = membership.get(server_id)
     if cached is None:
-        owner = await lookup(server_id=server_id)
+        owner = await ws_database_read(
+            functools.partial(lookup, server_id=server_id),
+            outcome="closed at membership lookup",
+        )
         cached = owner == community_id
         membership[server_id] = cached
     return cached
@@ -625,44 +630,15 @@ async def _unless_unavailable(
 ) -> int | None:
     """Run an access ``check``; return its close code, or ``1013`` on an outage.
 
-    A transient database failure says nothing about the user's access, so it is
-    no denial code, and it is an outage, not a bug, so it is logged as one line
-    rather than raised as an unhandled exception with its traceback (#3313).
-    Any other error propagates. ``outcome`` names what the ``1013`` does.
+    A database that cannot answer — a transient failure, or no answer within
+    the bound — says nothing about the user's access, so it is no denial code
+    (#3313, #3426; :func:`ws_database_read` logs it). Any other error
+    propagates. ``outcome`` names what the ``1013`` does.
     """
 
     try:
-        return await check()
-    except Exception as exc:
-        if not is_transient_database_error(exc):
-            raise
-        _logger.warning(
-            "events socket %s (1013): database unavailable (%s)",
-            outcome,
-            type(exc).__name__,
-        )
-        return _CLOSE_TRY_AGAIN_LATER
-
-
-async def _recheck(reauthorize: Callable[[], Awaitable[int | None]]) -> int | None:
-    """The mid-stream re-check, bounded by :data:`_REAUTHZ_TIMEOUT_SECONDS`.
-
-    A check with no answer by then closes ``1013`` like a failed one: the relay
-    delivers nothing while it waits, so a frozen database must not park it.
-    The token expiry still bounds the whole check — the expiry cancels it from
-    outside this timeout, which lets that cancellation through.
-    """
-
-    try:
-        async with asyncio.timeout(_REAUTHZ_TIMEOUT_SECONDS):
-            return await _unless_unavailable(
-                reauthorize, outcome="closed at re-authorization"
-            )
-    except TimeoutError:
-        _logger.warning(
-            "events socket closed at re-authorization (1013): no answer within %g s",
-            _REAUTHZ_TIMEOUT_SECONDS,
-        )
+        return await ws_database_read(check, outcome=outcome)
+    except WsDatabaseUnavailableError:
         return _CLOSE_TRY_AGAIN_LATER
 
 

@@ -16,6 +16,7 @@
  */
 
 import { fetchCapabilities } from "../permissions/capabilities.ts";
+import { resolvePermission } from "../permissions/resolve.ts";
 import {
   backoffDelayMs,
   EventsSocketClient,
@@ -224,9 +225,16 @@ export class CommunityEventsClient {
         onOpen: callbacks.onOpen,
         onDown: callbacks.onDown,
         onAccessLost: callbacks.onAccessLost,
-        // The caller's permissions in the community: its cheapest gated read,
-        // refused 404 to a non-member as the socket's handshake is.
-        probeAccess: () => fetchCapabilities(communityId),
+        // The caller's permissions in the community: refused 404 to a
+        // non-member as the socket's handshake is. Membership-gated only, so
+        // it answers a member without `server:read` too: the socket's gate is
+        // community-level `server:read`, i.e. the member's role codes, never a
+        // per-server grant — what `resolvePermission` with no resource
+        // decides, as the API's checker does for a community-wide check.
+        probeAccess: () =>
+          fetchCapabilities(communityId).then((permissions) =>
+            resolvePermission(permissions, "server:read"),
+          ),
       },
       random,
     );
