@@ -3632,6 +3632,92 @@ async def test_command_dropped_by_rcon_names_the_drop() -> None:
     assert excinfo.value.reason == "command_dropped"
 
 
+# --- a refused server.properties (issue #3347) -------------------------------
+
+# What the Worker's reader says about the two refusals the issue names, under the
+# prefix each command adds. It names the file under the Worker's scratch root and
+# never the file's content.
+_REFUSED_PROPERTIES = {
+    "symlink": (
+        "serverproperties: /var/lib/mcsd/scratch/s1/server.properties is a symbolic "
+        "link; refusing to follow it"
+    ),
+    "oversized": (
+        "serverproperties: /var/lib/mcsd/scratch/s1/server.properties is larger "
+        "than 4194304 bytes; refusing to read it"
+    ),
+}
+
+
+@pytest.mark.parametrize("refusal", sorted(_REFUSED_PROPERTIES))
+async def test_start_names_a_refused_server_properties(refusal: str) -> None:
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    cp = FakeControlPlane(
+        place_to=WorkerId(worker),
+        outcomes={
+            "start": CommandOutcome(
+                status=worker_status("StartServer", "server_properties_unreadable"),
+                message=(
+                    "instancemanager: start: containerdriver: "
+                    + _REFUSED_PROPERTIES[refusal]
+                ),
+            )
+        },
+    )
+
+    with pytest.raises(CommandDispatchError) as excinfo:
+        await _start_server(uow, cp)(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert excinfo.value.reason == "server_properties_unreadable"
+
+
+@pytest.mark.parametrize("refusal", sorted(_REFUSED_PROPERTIES))
+async def test_restart_names_a_refused_server_properties(refusal: str) -> None:
+    # Reached on the relaunch, after the restart's own stop (the contract row).
+    uow, community, server_id = _running_for_command()
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(
+            status=worker_status("RestartServer", "server_properties_unreadable"),
+            message="instancemanager: start: containerdriver: "
+            + _REFUSED_PROPERTIES[refusal],
+        )
+    )
+    use_case = RestartServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+
+    with pytest.raises(CommandDispatchError) as excinfo:
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert excinfo.value.reason == "server_properties_unreadable"
+
+
+@pytest.mark.parametrize("refusal", sorted(_REFUSED_PROPERTIES))
+async def test_command_names_a_refused_server_properties(refusal: str) -> None:
+    uow, community, server_id = _running_for_command()
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(
+            status=worker_status("ServerCommand", "server_properties_unreadable"),
+            message="instancemanager: open rcon: rcon: read server.properties: "
+            + _REFUSED_PROPERTIES[refusal],
+        )
+    )
+    use_case = SendServerCommand(uow=uow, control_plane=cp)
+
+    with pytest.raises(CommandDispatchError) as excinfo:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            line="list",
+        )
+
+    assert excinfo.value.reason == "server_properties_unreadable"
+
+
 # --- reconciler re-dispatch paths (issue #101) -----------------------------
 
 

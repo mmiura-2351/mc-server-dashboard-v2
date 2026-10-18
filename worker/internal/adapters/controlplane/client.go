@@ -483,6 +483,8 @@ func mapErrorCode(code session.CommandErrorCode) controlplanev1.CommandErrorCode
 		return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_BUSY
 	case session.CommandErrorCommandDropped:
 		return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_COMMAND_DROPPED
+	case session.CommandErrorServerPropertiesUnreadable:
+		return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_SERVER_PROPERTIES_UNREADABLE
 	default:
 		return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_INTERNAL
 	}

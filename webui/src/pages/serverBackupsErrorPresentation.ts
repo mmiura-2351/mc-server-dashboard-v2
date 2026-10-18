@@ -37,6 +37,11 @@ export function backupErrorPresentation(
       // Naming which layer was busy would be internals they cannot act on, the
       // same call the lifecycle surfaces made (lifecycleErrors.ts).
       return "backups.error.serverBusy";
+    case "server_properties_unreadable":
+      // A running server's backup quiesces the world over RCON, whose
+      // credentials are in a server.properties the Worker refuses (issue
+      // #3347). A stopped server's backup needs no RCON, so the message says so.
+      return "backups.error.serverPropertiesUnreadable";
     case "invalid_archive":
       return "backups.error.invalidArchive";
     case "platform_managed_path":

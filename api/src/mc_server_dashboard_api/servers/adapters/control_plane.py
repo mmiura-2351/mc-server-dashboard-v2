@@ -87,6 +87,9 @@ _STATUS_BY_CODE: dict[CommandResultCode, CommandStatus] = {
     CommandResultCode.IMAGE_MISSING: CommandStatus.IMAGE_MISSING,
     CommandResultCode.BUSY: CommandStatus.BUSY,
     CommandResultCode.COMMAND_DROPPED: CommandStatus.COMMAND_DROPPED,
+    CommandResultCode.SERVER_PROPERTIES_UNREADABLE: (
+        CommandStatus.SERVER_PROPERTIES_UNREADABLE
+    ),
 }
 
 # Map the fleet file-access reason to the servers outcome reason (issue #548;

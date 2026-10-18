@@ -115,6 +115,9 @@ _CODE_FROM_PROTO: dict[int, CommandResultCode] = {
     pb.COMMAND_ERROR_CODE_IMAGE_MISSING: CommandResultCode.IMAGE_MISSING,
     pb.COMMAND_ERROR_CODE_BUSY: CommandResultCode.BUSY,
     pb.COMMAND_ERROR_CODE_COMMAND_DROPPED: CommandResultCode.COMMAND_DROPPED,
+    pb.COMMAND_ERROR_CODE_SERVER_PROPERTIES_UNREADABLE: (
+        CommandResultCode.SERVER_PROPERTIES_UNREADABLE
+    ),
 }
 
 # Map the wire file-access reason onto the domain reason (issue #548). An

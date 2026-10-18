@@ -622,6 +622,32 @@ async def test_on_demand_snapshot_over_failed_stop_orphan_is_worker_busy() -> No
     assert excinfo.value.reason == "worker_busy"
 
 
+async def test_on_demand_snapshot_names_a_refused_server_properties() -> None:
+    # A manual backup of a running server whose server.properties the Worker
+    # refuses (issue #3347): RCON cannot be opened to quiesce the world, so the
+    # snapshot is refused, and the reason names the file instead of the
+    # unclassified ``command_failed`` catch-all.
+    uow = FakeUnitOfWork()
+    server = _running_server()
+    uow.servers.seed(server)
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(
+            status=worker_status("SnapshotTrigger", "server_properties_unreadable"),
+            message="instancemanager: snapshot refused: could not quiesce running "
+            "world: rcon: read server.properties: serverproperties: "
+            "/var/lib/mcsd/scratch/s1/server.properties is a symbolic link; "
+            "refusing to follow it",
+        )
+    )
+
+    with pytest.raises(CommandDispatchError) as excinfo:
+        await SnapshotServer(uow=uow, control_plane=cp)(
+            community_id=server.community_id, server_id=server.id
+        )
+
+    assert excinfo.value.reason == "server_properties_unreadable"
+
+
 async def test_on_demand_snapshot_failure_logs_warning_with_server_and_kind(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

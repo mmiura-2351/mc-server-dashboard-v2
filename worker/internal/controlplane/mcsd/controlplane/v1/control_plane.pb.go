@@ -316,6 +316,15 @@ const (
 	// path that split it (CONTROL_PLANE.md Section 3.1). Distinct from INTERNAL so
 	// the API can tell a dropped command from a server it could not reach.
 	CommandErrorCode_COMMAND_ERROR_CODE_COMMAND_DROPPED CommandErrorCode = 10
+	// The server's server.properties cannot be read as it is: it is not a regular
+	// file (a symlink, FIFO, socket, device or directory the server's own code put
+	// there) or it is larger than the Worker's read cap (issue #3347). A
+	// StartServer and a RestartServer's relaunch publish its ports, a
+	// ServerCommand and a running SnapshotTrigger's quiesce open RCON with its
+	// password, and a TunnelDial resolves its game port, so each fails on it.
+	// Distinct from INTERNAL so the user is told to restore a regular file; the
+	// message names the refusal but never carries the file's content.
+	CommandErrorCode_COMMAND_ERROR_CODE_SERVER_PROPERTIES_UNREADABLE CommandErrorCode = 11
 )
 
 // Enum value maps for CommandErrorCode.
@@ -332,19 +341,21 @@ var (
 		8:  "COMMAND_ERROR_CODE_IMAGE_MISSING",
 		9:  "COMMAND_ERROR_CODE_BUSY",
 		10: "COMMAND_ERROR_CODE_COMMAND_DROPPED",
+		11: "COMMAND_ERROR_CODE_SERVER_PROPERTIES_UNREADABLE",
 	}
 	CommandErrorCode_value = map[string]int32{
-		"COMMAND_ERROR_CODE_UNSPECIFIED":        0,
-		"COMMAND_ERROR_CODE_SERVER_NOT_FOUND":   1,
-		"COMMAND_ERROR_CODE_INVALID_STATE":      2,
-		"COMMAND_ERROR_CODE_DRIVER_UNAVAILABLE": 3,
-		"COMMAND_ERROR_CODE_FILE_ACCESS_DENIED": 4,
-		"COMMAND_ERROR_CODE_TRANSFER_FAILED":    5,
-		"COMMAND_ERROR_CODE_INTERNAL":           6,
-		"COMMAND_ERROR_CODE_PORT_CONFLICT":      7,
-		"COMMAND_ERROR_CODE_IMAGE_MISSING":      8,
-		"COMMAND_ERROR_CODE_BUSY":               9,
-		"COMMAND_ERROR_CODE_COMMAND_DROPPED":    10,
+		"COMMAND_ERROR_CODE_UNSPECIFIED":                  0,
+		"COMMAND_ERROR_CODE_SERVER_NOT_FOUND":             1,
+		"COMMAND_ERROR_CODE_INVALID_STATE":                2,
+		"COMMAND_ERROR_CODE_DRIVER_UNAVAILABLE":           3,
+		"COMMAND_ERROR_CODE_FILE_ACCESS_DENIED":           4,
+		"COMMAND_ERROR_CODE_TRANSFER_FAILED":              5,
+		"COMMAND_ERROR_CODE_INTERNAL":                     6,
+		"COMMAND_ERROR_CODE_PORT_CONFLICT":                7,
+		"COMMAND_ERROR_CODE_IMAGE_MISSING":                8,
+		"COMMAND_ERROR_CODE_BUSY":                         9,
+		"COMMAND_ERROR_CODE_COMMAND_DROPPED":              10,
+		"COMMAND_ERROR_CODE_SERVER_PROPERTIES_UNREADABLE": 11,
 	}
 )
 
@@ -3057,7 +3068,7 @@ const file_mcsd_controlplane_v1_control_plane_proto_rawDesc = "" +
 	"!FILE_ACCESS_REASON_IS_A_DIRECTORY\x10\x01\x12&\n" +
 	"\"FILE_ACCESS_REASON_NOT_A_DIRECTORY\x10\x02\x12&\n" +
 	"\"FILE_ACCESS_REASON_SYMLINK_REFUSED\x10\x03\x12(\n" +
-	"$FILE_ACCESS_REASON_PAYLOAD_TOO_LARGE\x10\x04*\xb5\x03\n" +
+	"$FILE_ACCESS_REASON_PAYLOAD_TOO_LARGE\x10\x04*\xea\x03\n" +
 	"\x10CommandErrorCode\x12\"\n" +
 	"\x1eCOMMAND_ERROR_CODE_UNSPECIFIED\x10\x00\x12'\n" +
 	"#COMMAND_ERROR_CODE_SERVER_NOT_FOUND\x10\x01\x12$\n" +
@@ -3070,7 +3081,8 @@ const file_mcsd_controlplane_v1_control_plane_proto_rawDesc = "" +
 	" COMMAND_ERROR_CODE_IMAGE_MISSING\x10\b\x12\x1b\n" +
 	"\x17COMMAND_ERROR_CODE_BUSY\x10\t\x12&\n" +
 	"\"COMMAND_ERROR_CODE_COMMAND_DROPPED\x10\n" +
-	"*\xb2\x01\n" +
+	"\x123\n" +
+	"/COMMAND_ERROR_CODE_SERVER_PROPERTIES_UNREADABLE\x10\v*\xb2\x01\n" +
 	"\vCrashReason\x12\x1c\n" +
 	"\x18CRASH_REASON_UNSPECIFIED\x10\x00\x12%\n" +
 	"!CRASH_REASON_FORGE_INSTALL_FAILED\x10\x01\x12,\n" +

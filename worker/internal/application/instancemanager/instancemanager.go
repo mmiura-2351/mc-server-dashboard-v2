@@ -1219,7 +1219,8 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		// reservation item 4 declined, so that decision still stands.
 		var quiesced bool
 		var rawRestore func()
-		quiesced, rawRestore = m.quiesceRunning(ctx, cmd.ServerID, workingDir)
+		var openErr error
+		quiesced, rawRestore, openErr = m.quiesceRunning(ctx, cmd.ServerID, workingDir)
 		var once sync.Once
 		restore = func() { once.Do(rawRestore) }
 		defer restore()
@@ -1233,6 +1234,14 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 			// stopped-id path needs no RCON).
 			m.logger.Warn("snapshot refused: could not quiesce running world",
 				"server_id", cmd.ServerID, "reason", "quiesce_unavailable")
+			if errors.Is(openErr, execution.ErrServerPropertiesUnreadable) {
+				// RCON could not be opened because server.properties is refused: a
+				// cause the user can fix, so it is named rather than retried in
+				// silence. A manual backup of the running server reports it (issue
+				// #3347).
+				return fail(cmd.CommandID, session.CommandErrorServerPropertiesUnreadable,
+					fmt.Sprintf("instancemanager: snapshot refused: could not quiesce running world: %v", openErr))
+			}
 			return fail(cmd.CommandID, session.CommandErrorTransferFailed,
 				"instancemanager: snapshot refused: quiesce_unavailable (could not quiesce running world)")
 		}
@@ -1509,10 +1518,12 @@ func (m *Manager) checkWorkingSet(ctx context.Context, serverID, workingDir stri
 // (save-off), issues a plain non-blocking save-all, then waits for the
 // asynchronous save to settle (settleWorkingSet: the region files' (mtime, size)
 // stop changing across a quiet window) so the fsck/copy reads a fully-written
-// world. It returns (quiesced, restore). quiesced is true only when the on-disk
-// state is actually quiesced — RCON opened AND save-off AND save-all succeeded AND
-// the save settled within the budget; the caller refuses the periodic snapshot
-// otherwise rather than packing a live world (#907).
+// world. It returns (quiesced, restore, openErr). quiesced is true only when the
+// on-disk state is actually quiesced — RCON opened AND save-off AND save-all
+// succeeded AND the save settled within the budget; the caller refuses the
+// periodic snapshot otherwise rather than packing a live world (#907). openErr is
+// the RCON open failure when that is why it is not quiesced, so the caller can
+// name a refused server.properties (issue #3347).
 //
 // It deliberately uses a non-blocking save-all, NOT save-all flush: the
 // synchronous flush runs on the Minecraft main thread and crashed survival-main in
@@ -1532,12 +1543,12 @@ func (m *Manager) checkWorkingSet(ctx context.Context, serverID, workingDir stri
 // running server would be left with auto-save permanently OFF (#694 hard
 // requirement). A final failure is logged loudly: auto-save stuck off is
 // operator-actionable.
-func (m *Manager) quiesceRunning(ctx context.Context, serverID, workingDir string) (bool, func()) {
+func (m *Manager) quiesceRunning(ctx context.Context, serverID, workingDir string) (bool, func(), error) {
 	driverName, mcVersion := m.controlTargetFor(serverID)
 	raw, err := m.openControl(ctx, serverID, driverName, mcVersion)
 	if err != nil {
 		m.logger.Warn("snapshot quiesce: open rcon failed", "server_id", serverID, "error", err)
-		return false, func() {}
+		return false, func() {}, err
 	}
 	// Wrap in resilientControl (#919): a mid-bracket Execute error poisons the
 	// rcon connection, so save-all after a timed-out save-off (or save-on after
@@ -1574,7 +1585,7 @@ func (m *Manager) quiesceRunning(ctx context.Context, serverID, workingDir strin
 			return
 		}
 		m.restoreSaveOn(ctx, serverID, ctrl)
-	}
+	}, nil
 }
 
 // flushBeforeStopWithDriver drives the live world's dirty chunks to disk before
@@ -1613,6 +1624,17 @@ func (m *Manager) quiesceRunning(ctx context.Context, serverID, workingDir strin
 // #3166).
 func (m *Manager) flushBeforeStopWithDriver(ctx context.Context, serverID, driverName, mcVersion string) bool {
 	raw, err := m.openControl(ctx, serverID, driverName, mcVersion)
+	if errors.Is(err, execution.ErrServerPropertiesUnreadable) {
+		// RCON's credentials are in the refused file, so there is nothing to dial.
+		// The stop is not failed for it and the API is not told (issue #3347). The
+		// driver falls back to its stop signal, and the server may be killed before
+		// its own shutdown save completes (issue #3436), so the WARN promises none.
+		m.logger.Warn("stop flush: server.properties is not a regular file or is too large, so RCON cannot be opened; "+
+			"skipping the final save-all and falling back to a stop signal, which may end the server before "+
+			"its own shutdown save completes: changes since the last autosave can be lost",
+			"server_id", serverID, "error", err)
+		return false
+	}
 	if err != nil {
 		m.logger.Warn("stop flush: open rcon failed; stopping without a final save",
 			"server_id", serverID, "error", err)
@@ -3085,7 +3107,7 @@ func (m *Manager) handleServerCommand(ctx context.Context, cmd session.Command) 
 	driverName, mcVersion := m.controlTargetFor(cmd.ServerID)
 	ctrl, err := m.openControl(ctx, cmd.ServerID, driverName, mcVersion)
 	if err != nil {
-		return fail(cmd.CommandID, session.CommandErrorInternal,
+		return fail(cmd.CommandID, serverPropertiesErrorCode(err),
 			fmt.Sprintf("instancemanager: open rcon: %v", err))
 	}
 	defer func() { _ = ctrl.Close() }()
@@ -3135,7 +3157,7 @@ func (m *Manager) handleTunnelDial(ctx context.Context, cmd session.Command) ses
 		Token:      cmd.TunnelToken,
 		CAPEM:      cmd.TunnelCAPEM,
 	}); err != nil {
-		return fail(cmd.CommandID, session.CommandErrorInternal,
+		return fail(cmd.CommandID, serverPropertiesErrorCode(err),
 			fmt.Sprintf("instancemanager: tunnel dial: %v", err))
 	}
 	return session.CommandResult{CommandID: cmd.CommandID, Success: true}
@@ -4276,16 +4298,32 @@ func launchModeFor(name string) (execution.LaunchMode, bool) {
 // startErrorCode classifies a driver Start failure into a CommandResult error
 // code. A driver (the container driver) wraps a known operational failure with a
 // sanitized execution sentinel so the API can surface a friendlier 409 reason
-// than the generic one; any other failure stays internal (issue #225).
+// than the generic one; any other failure stays internal (issue #225). A
+// server.properties the driver refused to read is one such failure (issue
+// #3347).
 func startErrorCode(err error) session.CommandErrorCode {
 	switch {
 	case errors.Is(err, execution.ErrPortConflict):
 		return session.CommandErrorPortConflict
 	case errors.Is(err, execution.ErrImageMissing):
 		return session.CommandErrorImageMissing
+	case errors.Is(err, execution.ErrServerPropertiesUnreadable):
+		return session.CommandErrorServerPropertiesUnreadable
 	default:
 		return session.CommandErrorInternal
 	}
+}
+
+// serverPropertiesErrorCode classifies the failure of a step that reads the
+// server's server.properties before it can act: the RCON open (its credentials)
+// and the relay tunnel dial (its game port). A refused file is reported with its
+// own code so the user is told to restore a regular one (issue #3347); anything
+// else stays internal.
+func serverPropertiesErrorCode(err error) session.CommandErrorCode {
+	if errors.Is(err, execution.ErrServerPropertiesUnreadable) {
+		return session.CommandErrorServerPropertiesUnreadable
+	}
+	return session.CommandErrorInternal
 }
 
 // fail builds a failed CommandResult.

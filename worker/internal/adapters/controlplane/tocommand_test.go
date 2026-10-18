@@ -193,6 +193,7 @@ func TestMapErrorCode(t *testing.T) {
 		{"image missing", session.CommandErrorImageMissing, controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_IMAGE_MISSING},
 		{"busy", session.CommandErrorBusy, controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_BUSY},
 		{"command dropped", session.CommandErrorCommandDropped, controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_COMMAND_DROPPED},
+		{"server.properties unreadable", session.CommandErrorServerPropertiesUnreadable, controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_SERVER_PROPERTIES_UNREADABLE},
 		{"unrecognized", session.CommandErrorCode(99), controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_INTERNAL},
 	}
 	for _, tc := range tests {

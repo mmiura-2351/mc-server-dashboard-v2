@@ -19,6 +19,21 @@ describe("lifecycleErrorMessage", () => {
     );
   });
 
+  // server.properties is a symlink, a special file or over the Worker's 4 MiB
+  // read cap (issue #3347). Both refusals arrive as this one reason, and the
+  // message is the same on start and on restart (whose relaunch meets it).
+  it.each([undefined, "start", "restart"] as const)(
+    "maps a 409 server_properties_unreadable to its message (action %s)",
+    (action) => {
+      const error = new ApiError(409, {
+        reason: "server_properties_unreadable",
+      });
+      expect(lifecycleErrorMessage(error, action)).toBe(
+        "dashboard.lifecycle.serverPropertiesUnreadable",
+      );
+    },
+  );
+
   it("maps a 409 server_unsettled to the at-rest precondition message", () => {
     const error = new ApiError(409, { reason: "server_unsettled" });
     expect(lifecycleErrorMessage(error)).toBe("serverDetail.error.unsettled");
