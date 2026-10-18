@@ -81,7 +81,7 @@ across servers (FR-VER-3) and contain no Community data.
 │       └── servers/
 │           └── <server-id>/
 │               ├── current -> snapshots/<snapshot-id>/  # symlink to the live snapshot; the publish pointer (Section 4)
-│               ├── generation                # combined marker (Section 3.1): line 1 the monotonic working-set generation counter (bumped on each authoritative publish: commit_snapshot, restore_backup, and authoritative file edits), line 2 (optional) the publishing Worker id
+│               ├── generation                # combined marker (Section 3.1): line 1 the monotonic working-set generation counter (bumped on each authoritative publish: commit_snapshot, restore_backup, and authoritative file edits; also by the post-delete prune, which never removes it), line 2 (optional) the publishing Worker id
 │               ├── snapshots/                # published working-set snapshots; current points at the live one
 │               │   └── <snapshot-id>/        # the full working directory for one published state
 │               │       ├── world/
@@ -175,8 +175,12 @@ Notes:
   Worker id omits line 2 (no publisher claim, so the guard stays permissive). A
   server with no published snapshot has no `generation` marker; reading it in that
   state returns generation 0 / no publisher. On object backends it is a single key
-  `generation` under the server prefix. Removed together with the rest of the
-  working-set tree by the post-delete prune (Section 2.1).
+  `generation` under the server prefix. The post-delete prune (Section 2.1)
+  **advances** it rather than removing it, so nothing ever lowers the generation:
+  `DeleteServer` commits its row delete only after the prune, and a row that
+  survives a failed commit must never read a generation below one a Worker may
+  still hold, or that Worker's next start would skip the hydrate and boot stale
+  scratch over a newer publish (issue #3434).
 - On object backends the tree above is a **key prefix scheme**, not real
   directories (Section 7.3); the same logical layout applies.
 
@@ -199,7 +203,8 @@ state, `DeleteServer` retains **exactly two** artifacts under the server directo
 2. **The current working set, packed as `final.tar.gz`** — mandatory. The live
    `current/` snapshot is packed into a single self-contained `tar.gz` at the server
    root, then the unpacked working-set tree (`snapshots/`, `incoming/`, `versions/`,
-   the `current` pointer, and the generation marker) is removed. Packing is
+   and the `current` pointer) is removed and the generation marker is advanced
+   (Section 2, generation marker). Packing is
    **fail-closed**: if it fails, the working set is left intact and the delete fails,
    so a deletion never silently loses the latest state. A server that never published
    a snapshot has no `final.tar.gz`. The pack deliberately **bypasses the `.mca`
@@ -207,9 +212,11 @@ state, `DeleteServer` retains **exactly two** artifacts under the server directo
    server must still be deletable, so torn regions are packed as-is.
 
 Everything else for the server is removed; after the prune the server directory
-holds only `backups/<newest-id>.tar.gz` (if any) and `final.tar.gz` (if published) —
-no `snapshots/`, `incoming/`, `versions/`, `current` pointer, or generation marker
-remain. The retained archives are unreferenced orphans by design (not the bug the
+holds only `backups/<newest-id>.tar.gz` (if any), `final.tar.gz` and the
+`generation` marker (both if published) — no `snapshots/`, `incoming/`,
+`versions/`, or `current` pointer remain. Nothing removes the server directory
+after a successful delete, so the few-byte marker is retained with the archives
+until an operator reclaims the directory. The retained archives are unreferenced orphans by design (not the bug the
 `delete_backup` ordering guards against).
 
 **Crash-retry safety.** A `DeleteServer` retry is the advertised recovery path, so
@@ -257,7 +264,7 @@ authoritative-side stream and the atomic-publish handshake.
 | `current_generation(community_id, server_id) -> int` | Return the current authoritative working-set generation | The counter `commit_snapshot` bumps, read back so the hydrate data plane can stamp the generation it serves (Section 8). Returns 0 when no snapshot has been published. |
 | `current_publisher(community_id, server_id) -> str \| None` | Return the Worker id that published `current` | Read back from the combined `generation` marker so the publish-time generation guard (Section 8) can allow a same-Worker re-publish (lost-response self-heal) while refusing a different-Worker stale publish (A→B→A). `None` when no snapshot has been published, or the last publish declared no id (a Worker that sent no `X-Worker-Id`) — in which case the guard cannot prove a foreign publisher and stays permissive. |
 | `check_current_health(community_id, server_id) -> WorkingSetReport \| None` | Structurally fsck the on-disk authoritative snapshot | Walk `current/` for corrupt `.mca` region files. Read-only — never mutates `current/`. Raises `NotFoundError` if no snapshot has been published. `None` means the backend **examined nothing** — the answer of an adapter with no local working set to walk (object, the Section 7.3 limitation), deliberately not a healthy report, so the sweep can tell "nothing was looked at" from "looked at and clean". A backend answering `None` answers it for every server, published or not, since it reads nothing that would tell the two apart; the `NotFoundError` clause is the contract of an adapter that does examine. |
-| `prune_to_final_snapshot(community_id, server_id)` | Collapse the working set to one retained `final.tar.gz` and drop the tree | The `DeleteServer` reclaim path (Section 2.1). Packs `current/` then removes `snapshots/`, `incoming/`, `versions/`, the `current` pointer, and the combined `generation`+publisher marker; leaves `backups/`. The pointer/symlink is invalidated the instant `final.tar.gz` is durable, so a crash-retry is idempotent and never re-packs over a good final. Fail-closed on a pack failure; bypasses the `.mca` gate so a corrupt server stays deletable; no-op if nothing is published. |
+| `prune_to_final_snapshot(community_id, server_id)` | Collapse the working set to one retained `final.tar.gz` and drop the tree | The `DeleteServer` reclaim path (Section 2.1). Packs `current/` then removes `snapshots/`, `incoming/`, `versions/`, and the `current` pointer; advances the generation (recording no publisher) before the pointer goes, so the generation never goes down even when the caller's row delete then fails; leaves `backups/`. The pointer/symlink is invalidated the instant `final.tar.gz` is durable, so a crash-retry is idempotent and never re-packs over a good final. Fail-closed on a pack failure; bypasses the `.mca` gate so a corrupt server stays deletable; no-op if nothing is published. |
 
 The hydrate/snapshot **wire transport** (how `ReadStream`/`WriteStream` bytes
 cross the API↔Worker boundary) is the data plane (Section 8). `Storage` only
@@ -1428,7 +1435,7 @@ whatever path the API emits:
 | Method & path | Meaning | Success | Errors |
 |---|---|---|---|
 | `GET /api/data-plane/communities/{c}/servers/{s}/working-set` | Hydrate: stream the authoritative working set as a tar (with the resolved `server.jar` injected when present). Response always carries `X-Working-Set-Generation: <n>` (the generation of the snapshot served; 0 when no snapshot has been published). | `200` tar body | `204` no published snapshot *and* no resolved JAR (Worker starts from an empty dir, generation header still present); `401` |
-| `POST /api/data-plane/communities/{c}/servers/{s}/snapshot` | Snapshot: stream a tar into staging and atomically publish it. The request MAY carry `X-Working-Set-Base-Generation: <n>` (the store generation this set was hydrated from) and `X-Worker-Id: <id>` (the publishing Worker), both read by the publish-time generation guard; a never-hydrated Worker omits them and the guard stays permissive. The content-integrity gate uses the single region rule set (below): a non-4096-aligned tail is the normal on-disk format of a 26.x world, not corruption (byte-precise per-chunk bounds), on any source — no request header declares a snapshot source. On success the response carries `X-Working-Set-Generation: <n>` (the new generation minted by the publish). | `204` | `400` length mismatch / incomplete; `400` `empty_snapshot` (staged an empty working set); `422` `invalid_archive` (the byte-complete body does not read as a tar, or carries a member extraction refuses); `409` `stale_generation` + `base_generation` + `current` (the declared base is older than the store's current generation AND that current was published by a *different* Worker — an A→B→A stale-scratch publish; a same-Worker lag is a lost response and is allowed to self-heal); `409` `deleted_during_upload` + `base_generation` + `current` (a concurrent delete's retention prune removed the generation marker under the per-server lock during the upload window, so the commit's re-check read generation 0 while the base was ≥1 — the delete wins and the staging is discarded); `411` no `Content-Length`; `413` over the size cap; `422` `working_set_corrupt` + `corrupt_count` (integrity gate refused the staged set); `422` `working_set_incomplete` + `affected_count` + `directories` + `truncated` (the missing-region gate refused a staged set that dropped some-but-not-all region files of a still-live dimension; `directories` is a **bounded** per-directory list of the lost `.mca` names — `{directory, missing[]}`, capped — so the operator can drive the recovery in Section 4.5, `truncated` flags that the list was capped); `401` |
+| `POST /api/data-plane/communities/{c}/servers/{s}/snapshot` | Snapshot: stream a tar into staging and atomically publish it. The request MAY carry `X-Working-Set-Base-Generation: <n>` (the store generation this set was hydrated from) and `X-Worker-Id: <id>` (the publishing Worker), both read by the publish-time generation guard; a never-hydrated Worker omits them and the guard stays permissive. The content-integrity gate uses the single region rule set (below): a non-4096-aligned tail is the normal on-disk format of a 26.x world, not corruption (byte-precise per-chunk bounds), on any source — no request header declares a snapshot source. On success the response carries `X-Working-Set-Generation: <n>` (the new generation minted by the publish). | `204` | `400` length mismatch / incomplete; `400` `empty_snapshot` (staged an empty working set); `422` `invalid_archive` (the byte-complete body does not read as a tar, or carries a member extraction refuses); `409` `stale_generation` + `base_generation` + `current` (the declared base is older than the store's current generation AND that current was published by a *different* Worker — an A→B→A stale-scratch publish; a same-Worker lag is a lost response and is allowed to self-heal); `409` `deleted_during_upload` + `base_generation` + `current` (a concurrent delete's retention prune ran under the per-server lock during the upload window, so the commit's re-check found the generation advanced and no live snapshot — the delete wins and the staging is discarded); `411` no `Content-Length`; `413` over the size cap; `422` `working_set_corrupt` + `corrupt_count` (integrity gate refused the staged set); `422` `working_set_incomplete` + `affected_count` + `directories` + `truncated` (the missing-region gate refused a staged set that dropped some-but-not-all region files of a still-live dimension; `directories` is a **bounded** per-directory list of the lost `.mca` names — `{directory, missing[]}`, capped — so the operator can drive the recovery in Section 4.5, `truncated` flags that the list was capped); `401` |
 
 **`X-Worker-Id` trust.** The `X-Worker-Id` the guard reads is **not**
 authenticated within the shared-credential data plane: any Worker holding the

@@ -922,7 +922,11 @@ class DeleteServer:
                     raise ServerBusyError(str(server_id.value))
             # Pack the working set into the retained final tar.gz first. This is
             # mandatory and fail-closed (#777): if it raises, the row is untouched
-            # and the whole delete fails rather than dropping the latest state.
+            # and the whole delete fails rather than dropping the latest state. The
+            # prune advances the store generation, never lowers it (#3434; the
+            # adapters' prune_to_final_snapshot guarantees it), so if the commit
+            # below fails the surviving row's next publish still mints a generation
+            # above any scratch a Worker holds.
             await self.backup_store.prune_to_final_snapshot(
                 community_id=community_id, server_id=server_id
             )
