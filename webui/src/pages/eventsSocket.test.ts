@@ -124,6 +124,33 @@ describe("EventsSocketClient close policy", () => {
     },
   );
 
+  // A probe answers about the moment it was sent: a denial that lands after a
+  // later handshake opened is stale and must not stop the recovered socket.
+  it.each([403, 404])(
+    "ignores a %i probe answer that lands after the socket recovered",
+    async (status) => {
+      let deny: () => void = () => {};
+      const { client, onAccessLost } = makeClient(
+        () =>
+          new Promise((_resolve, reject) => {
+            deny = () => reject(new ApiError(status, undefined));
+          }),
+      );
+
+      await failHandshakes(3); // the probe is pending; the backoff reconnected
+      MockWebSocket.last().open();
+      deny();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(onAccessLost).not.toHaveBeenCalled();
+      expect(MockWebSocket.last().closed).toBe(false);
+      // Still live: a rotation reconnects it with the fresh token.
+      setAccessToken("tok-2");
+      expect(MockWebSocket.last().protocols).toEqual(["access_token", "tok-2"]);
+      client.close();
+    },
+  );
+
   it.each([
     ["succeeds", async () => ({})],
     [

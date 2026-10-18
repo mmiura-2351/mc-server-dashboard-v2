@@ -124,6 +124,8 @@ export class EventsSocketClient {
   private attempt = 0;
   /** Handshakes failed (closed before opening) since the last open or probe. */
   private handshakeFailures = 0;
+  /** Successful opens so far; a probe answer predating the latest is stale. */
+  private opens = 0;
   /** The token the live socket was opened with, to detect a stale connection. */
   private connectedToken: string | null = null;
   /** The token the API last closed a socket for as expired or rejected; never reused. */
@@ -177,6 +179,7 @@ export class EventsSocketClient {
     let opened = false;
     socket.onopen = () => {
       opened = true;
+      this.opens += 1;
       this.attempt = 0;
       this.handshakeFailures = 0;
       this.callbacks.onOpen();
@@ -229,12 +232,16 @@ export class EventsSocketClient {
   // hard-logs-out (which closes this client). A 403 / 404 means every
   // handshake will be refused. Success, a network error or a 5xx says the
   // handshake failures were the network's or the API's, so the backoff goes on.
+  // An answer that lands after a later handshake opened describes access as it
+  // was before that open, so it is ignored: the open is the newer evidence.
   private async probe(): Promise<void> {
+    const opens = this.opens;
     try {
       await this.callbacks.probeAccess();
     } catch (error) {
       if (
         !this.stopped &&
+        this.opens === opens &&
         error instanceof ApiError &&
         (error.status === 403 || error.status === 404)
       ) {
