@@ -8,8 +8,10 @@
  * exponential backoff + jitter on loss (reset on a successful open), reconnect
  * with the fresh token after a session refresh rotates it (reconnect-on-rotate),
  * refresh the session first when the API closes the socket because its token
- * expired, and tear down cleanly. This module owns that machinery once; the two clients
- * are thin wrappers supplying a URL builder and a raw-frame handler.
+ * expired, stop when it closes the socket because access was lost, probe REST
+ * after repeated failed handshakes to tell a refusal from a network failure,
+ * and tear down cleanly. This module owns that machinery once; the two clients
+ * are thin wrappers supplying a URL builder, a raw-frame handler and the probe.
  *
  * The token rides the `Sec-WebSocket-Protocol` header as
  * `["access_token", "<jwt>"]`: browsers cannot set `Authorization` on a
@@ -21,7 +23,7 @@
  * so a hook can patch the query cache without entangling this core.
  */
 
-import { getRefresher } from "../api/client.ts";
+import { ApiError, getRefresher } from "../api/client.ts";
 import {
   getAccessToken,
   getAuthEpoch,
@@ -42,6 +44,24 @@ export const TOKEN_EXPIRED_CLOSE_CODE = 4419;
  * a rejected session into a logout instead of an endless reconnect loop.
  */
 export const UNAUTHENTICATED_CLOSE_CODE = 4401;
+
+/**
+ * The close codes the API sends when a mid-stream re-check finds the user no
+ * longer allowed to read the stream's resource (4403: a permission or grant
+ * revoked) or the resource gone for them (4404: removed from the community, or
+ * the server or community deleted) — WEBUI_SPEC.md 2.6. Neither is an auth
+ * problem a refresh could fix, and every reconnect would only be refused at
+ * the handshake, so the client stops and reports the lost access (#3313).
+ */
+const ACCESS_LOST_CLOSE_CODES: ReadonlySet<number> = new Set([4403, 4404]);
+
+/**
+ * Consecutive failed handshakes after which the client probes REST. A refused
+ * handshake reaches the browser as a bare 1006, indistinguishable from a
+ * network failure; the probe's status tells them apart (#3313). Not on every
+ * failure: a network outage would otherwise add a REST call to each retry.
+ */
+const HANDSHAKE_FAILURES_BEFORE_PROBE = 3;
 
 /**
  * Backoff bounds (WEBUI_SPEC.md 7.2). Exponential from a small base, capped, so
@@ -78,6 +98,19 @@ export interface EventsSocketCallbacks {
   onOpen: () => void;
   /** The connection went down and a reconnect is pending (enter degraded). */
   onDown: () => void;
+  /**
+   * The user can no longer read the stream's resource (a 4403 / 4404 close,
+   * or a probe answering 403 / 404). The client has stopped for good; the page
+   * reloads its resource to show its own no-access / not-found state.
+   */
+  onAccessLost: () => void;
+  /**
+   * An authenticated REST read of the stream's resource, gated as the socket
+   * is, through the shared API client. Called after repeated failed
+   * handshakes: a 403 / 404 means the handshake is being refused, a 401 runs
+   * the session refresh like any REST 401, anything else keeps the backoff.
+   */
+  probeAccess: () => Promise<unknown>;
 }
 
 /**
@@ -89,6 +122,8 @@ export class EventsSocketClient {
   private socket: WebSocket | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private attempt = 0;
+  /** Handshakes failed (closed before opening) since the last open or probe. */
+  private handshakeFailures = 0;
   /** The token the live socket was opened with, to detect a stale connection. */
   private connectedToken: string | null = null;
   /** The token the API last closed a socket for as expired or rejected; never reused. */
@@ -139,25 +174,32 @@ export class EventsSocketClient {
     this.connectedToken = token;
     const socket = new WebSocket(this.buildUrl(), ["access_token", token]);
     this.socket = socket;
+    let opened = false;
     socket.onopen = () => {
+      opened = true;
       this.attempt = 0;
+      this.handshakeFailures = 0;
       this.callbacks.onOpen();
     };
     socket.onmessage = (event) => {
       this.callbacks.onMessage(String(event.data));
     };
-    socket.onclose = (event) => this.onClosed(socket, event.code);
+    socket.onclose = (event) => this.onClosed(socket, event.code, opened);
     socket.onerror = () => {
       // `error` is always followed by `close`; let `close` drive the reconnect
       // so a single failure is not counted twice.
     };
   }
 
-  private onClosed(socket: WebSocket, code: number): void {
+  private onClosed(socket: WebSocket, code: number, opened: boolean): void {
     if (socket !== this.socket || this.stopped) {
       return;
     }
     this.socket = null;
+    if (ACCESS_LOST_CLOSE_CODES.has(code)) {
+      this.loseAccess();
+      return;
+    }
     this.callbacks.onDown();
     if (
       code === TOKEN_EXPIRED_CLOSE_CODE ||
@@ -167,7 +209,45 @@ export class EventsSocketClient {
       this.connect();
       return;
     }
+    // Anything else — a network loss, a failed handshake, or the API's 1013
+    // (Try Again Later, its database could not answer a check) — retries on
+    // the backoff.
     this.scheduleReconnect();
+    if (!opened) {
+      this.handshakeFailures += 1;
+      if (this.handshakeFailures >= HANDSHAKE_FAILURES_BEFORE_PROBE) {
+        this.handshakeFailures = 0;
+        void this.probe();
+      }
+    }
+  }
+
+  // Repeated failed handshakes: a refused one looks exactly like a network
+  // failure, so ask REST, whose gate is the socket's (#3313). The backoff keeps
+  // running meanwhile. A 401 never reaches here as such: the API client runs
+  // the shared refresh on it, which rotates the token (reconnect-on-rotate) or
+  // hard-logs-out (which closes this client). A 403 / 404 means every
+  // handshake will be refused. Success, a network error or a 5xx says the
+  // handshake failures were the network's or the API's, so the backoff goes on.
+  private async probe(): Promise<void> {
+    try {
+      await this.callbacks.probeAccess();
+    } catch (error) {
+      if (
+        !this.stopped &&
+        error instanceof ApiError &&
+        (error.status === 403 || error.status === 404)
+      ) {
+        this.loseAccess();
+      }
+    }
+  }
+
+  // The user can no longer read this stream: stop for good and let the page
+  // reload its resource. No refresh — it is not an auth problem.
+  private loseAccess(): void {
+    this.close();
+    this.callbacks.onAccessLost();
   }
 
   // The API closed a socket because its token expired or is no longer

@@ -218,6 +218,7 @@ describe("CommunityEventsClient", () => {
     const onSnapshot = vi.fn();
     const onOpen = vi.fn();
     const onDown = vi.fn();
+    const onAccessLost = vi.fn();
     return {
       callbacks: {
         onStatus,
@@ -226,6 +227,7 @@ describe("CommunityEventsClient", () => {
         onSnapshot,
         onOpen,
         onDown,
+        onAccessLost,
       },
       onStatus,
       onSnapshot,
@@ -233,6 +235,7 @@ describe("CommunityEventsClient", () => {
       onNotification,
       onOpen,
       onDown,
+      onAccessLost,
     };
   }
 
@@ -507,6 +510,43 @@ describe("CommunityEventsClient", () => {
     expect(refresher).not.toHaveBeenCalled();
     expect(MockWebSocket.instances).toHaveLength(2);
     expect(MockWebSocket.last().protocols).toEqual(["access_token", "tok-1"]);
+    client.close();
+  });
+
+  // A handshake refused for a rejected token is a bare 1006 to the browser
+  // (#3313): after three in a row the client reads its community permissions
+  // through the API client, whose 401 runs the shared refresh — a rotated token
+  // then reconnects the socket, as for any refresh.
+  it("probes the community permissions after three failed handshakes; their 401 refreshes the session", async () => {
+    const fetchMock = vi.fn(async (_path: string, init: RequestInit) => {
+      const auth = (init.headers as Record<string, string>).authorization;
+      return auth === "Bearer tok-2"
+        ? new Response(JSON.stringify({ permissions: [], grants: [] }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          })
+        : new Response(null, { status: 401 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const refresher = vi.fn(async () => {
+      setAccessToken("tok-2");
+      return true;
+    });
+    setRefresher(refresher);
+    const { client, onAccessLost } = makeClient();
+    client.start();
+
+    for (let i = 0; i < 3; i++) {
+      MockWebSocket.last().fail();
+      await vi.advanceTimersByTimeAsync(30000);
+    }
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      `/api/communities/${CID}/me/permissions`,
+    );
+    expect(refresher).toHaveBeenCalledTimes(1);
+    expect(MockWebSocket.last().protocols).toEqual(["access_token", "tok-2"]);
+    expect(onAccessLost).not.toHaveBeenCalled();
     client.close();
   });
 

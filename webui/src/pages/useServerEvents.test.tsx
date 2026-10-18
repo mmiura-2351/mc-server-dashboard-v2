@@ -56,11 +56,19 @@ describe("useServerEvents", () => {
     vi.useFakeTimers();
     restore = installMockWebSocket();
     setAccessToken("tok-1");
+    // Repeated failed handshakes probe REST (#3313); keep it off the network.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError("Failed to fetch");
+      }),
+    );
   });
 
   afterEach(() => {
     restore();
     clearAccessToken();
+    vi.unstubAllGlobals();
     vi.useRealTimers();
   });
 
@@ -507,6 +515,29 @@ describe("useServerEvents", () => {
     });
     expect(MockWebSocket.instances).toHaveLength(1);
   });
+
+  // Access revoked or the server deleted mid-stream (#3313): the socket stops
+  // and the detail query is reset, so the page leaves the cached server for
+  // its own load-error state instead of reconnecting forever.
+  it.each([4403, 4404])(
+    "resets the detail query and stops on a mid-stream %i",
+    (code) => {
+      const { queryClient } = setup();
+      queryClient.setQueryData(serverKey(CID, SID), {
+        id: SID,
+        observed_state: "running",
+      });
+      act(() => {
+        MockWebSocket.last().open();
+      });
+      act(() => {
+        MockWebSocket.last().serverClose(code);
+        vi.advanceTimersByTime(60000);
+      });
+      expect(queryClient.getQueryData(serverKey(CID, SID))).toBeUndefined();
+      expect(MockWebSocket.instances).toHaveLength(1);
+    },
+  );
 
   it("appends local RCON echoes into the buffer", () => {
     setup();

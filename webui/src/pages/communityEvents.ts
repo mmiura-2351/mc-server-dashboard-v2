@@ -15,6 +15,7 @@
  * patch the query cache without entangling this client.
  */
 
+import { fetchCapabilities } from "../permissions/capabilities.ts";
 import {
   backoffDelayMs,
   EventsSocketClient,
@@ -68,6 +69,8 @@ export interface CommunityEventsCallbacks {
   onOpen: () => void;
   /** The connection went down and a reconnect is pending (enter degraded). */
   onDown: () => void;
+  /** The user lost access to the community's servers; the socket stopped. */
+  onAccessLost: () => void;
 }
 
 /** Build the `wss?://…/api/communities/{cid}/events` URL for `cid`. */
@@ -220,6 +223,10 @@ export class CommunityEventsClient {
         },
         onOpen: callbacks.onOpen,
         onDown: callbacks.onDown,
+        onAccessLost: callbacks.onAccessLost,
+        // The caller's permissions in the community: its cheapest gated read,
+        // refused 404 to a non-member as the socket's handshake is.
+        probeAccess: () => fetchCapabilities(communityId),
       },
       random,
     );
