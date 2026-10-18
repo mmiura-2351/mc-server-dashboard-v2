@@ -5,17 +5,22 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/rcon"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/serverproperties"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 )
 
@@ -459,11 +464,11 @@ func TestQueryPlayerCountReusesConnection(t *testing.T) {
 	}
 }
 
-// A metrics connection poisoned by an Execute error (rcon.ErrConnBroken) is
+// A metrics connection poisoned by an Execute error (execution.ErrConnBroken) is
 // discarded and redialed on the next sample — exactly once, not in a hot loop
 // (issue #1622).
 func TestQueryPlayerCountRedialsAfterPoison(t *testing.T) {
-	broken := &fakeMetricsControl{execErr: rcon.ErrConnBroken}
+	broken := &fakeMetricsControl{execErr: execution.ErrConnBroken}
 	fresh := &fakeMetricsControl{listReply: "There are 2 of a max of 20 players online: a, b"}
 	controls := []execution.ServerControl{broken, fresh}
 	var dials int
@@ -498,7 +503,8 @@ func TestQueryPlayerCountRedialsAfterPoison(t *testing.T) {
 func TestQueryPlayerCountDegradesToZeroOnDialFailure(t *testing.T) {
 	var dials int
 	inst := &instance{
-		spec: execution.InstanceSpec{ServerID: "s1"},
+		spec:   execution.InstanceSpec{ServerID: "s1"},
+		logger: slog.New(slog.DiscardHandler),
 		openControl: func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
 			dials++
 			return nil, errors.New("rcon not ready")
@@ -512,6 +518,237 @@ func TestQueryPlayerCountDegradesToZeroOnDialFailure(t *testing.T) {
 	}
 	if dials != 2 {
 		t.Fatalf("dials = %d, want 2 (a failed dial is retried next tick, not cached)", dials)
+	}
+}
+
+// A player-count RCON open failure is logged once per cause, not on every metrics
+// tick: a refused server.properties (issue #3345) or any other persistent cause is
+// visible in the Worker log without one line per sample. A different cause is
+// logged again, and so is a cause that comes back after an open succeeded.
+func TestQueryPlayerCountLogsOpenFailureOncePerCause(t *testing.T) {
+	refused := errors.New("rcon: read server.properties: serverproperties: /scratch/s1/server.properties is larger than 65536 bytes; refusing to read it")
+	refusedDial := errors.New("rcon: dial 127.0.0.1:25575: connect: connection refused")
+	ctrl := &fakeMetricsControl{execErr: errors.New("poisoned")}
+	results := []error{refused, refused, refused, refusedDial, refusedDial, nil, refused}
+	var dials int
+	logged := &syncBuffer{}
+	inst := &instance{
+		spec:   execution.InstanceSpec{ServerID: "s1"},
+		logger: slog.New(slog.NewTextHandler(logged, nil)),
+		openControl: func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
+			err := results[dials]
+			dials++
+			if err != nil {
+				return nil, err
+			}
+			// The open succeeds; the poisoned connection is discarded so the next tick
+			// opens again.
+			return ctrl, nil
+		},
+	}
+
+	for range results {
+		inst.queryPlayerCount(context.Background())
+	}
+
+	out := logged.String()
+	if got := strings.Count(out, "player count: open rcon failed"); got != 3 {
+		t.Fatalf("open-failure log lines = %d, want 3 (one per cause, again after a success); log:\n%s", got, out)
+	}
+	if got := strings.Count(out, "refusing to read it"); got != 2 {
+		t.Fatalf("refused-file log lines = %d, want 2; log:\n%s", got, out)
+	}
+	if !strings.Contains(out, "level=WARN") || !strings.Contains(out, "server_id=s1") {
+		t.Fatalf("log = %q, want a WARN carrying the server id", out)
+	}
+}
+
+// The once-per-cause key ignores per-connection detail: a peer that resets every
+// RCON handshake fails each open with the same cause but a different client
+// ephemeral port in the error text, and that must still be one log line, not one
+// per metrics tick (issue #3345).
+func TestQueryPlayerCountDedupsOpenFailureAcrossEphemeralPorts(t *testing.T) {
+	reset := func(localPort int) error {
+		return fmt.Errorf("rcon: read length: %w", &net.OpError{
+			Op: "read", Net: "tcp",
+			Source: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: localPort},
+			Addr:   &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 25575},
+			Err:    &os.SyscallError{Syscall: "read", Err: syscall.ECONNRESET},
+		})
+	}
+	refused := fmt.Errorf("rcon: dial 127.0.0.1:25575: %w", &net.OpError{
+		Op: "dial", Net: "tcp",
+		Addr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 25575},
+		Err:  &os.SyscallError{Syscall: "connect", Err: syscall.ECONNREFUSED},
+	})
+	results := []error{reset(40001), reset(40002), reset(40003), refused, refused}
+	var dials int
+	logged := &syncBuffer{}
+	inst := &instance{
+		spec:   execution.InstanceSpec{ServerID: "s1"},
+		logger: slog.New(slog.NewTextHandler(logged, nil)),
+		openControl: func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
+			err := results[dials]
+			dials++
+			return nil, err
+		},
+	}
+
+	for range results {
+		inst.queryPlayerCount(context.Background())
+	}
+
+	out := logged.String()
+	if got := strings.Count(out, "player count: open rcon failed"); got != 2 {
+		t.Fatalf("open-failure log lines = %d, want 2 (a reset on three ports, then a refusal); log:\n%s", got, out)
+	}
+}
+
+// defaultRCONPort is the default RCON port as the container port mappings spell it.
+var defaultRCONPort = strconv.Itoa(serverproperties.DefaultRCONPort)
+
+// openRealControl opens RCON the way cmd/worker wires the driver: through the
+// real server.properties reader in the instance's working dir.
+func openRealControl(ctx context.Context, spec execution.InstanceSpec, rconHost string) (execution.ServerControl, error) {
+	return rcon.OpenFromWorkingDir(ctx, spec.WorkingDir, rconHost, spec.MinecraftVersion)
+}
+
+// hangUpOnDefaultRCONPort listens on the default RCON port (25575) at a loopback
+// address other than 127.0.0.1, which a real server on this host may hold, and
+// hangs up on every connection, so an RCON open that dials it fails during the
+// handshake. It returns the host and a channel that receives once per connection.
+// It skips the test when no candidate address is free.
+func hangUpOnDefaultRCONPort(t *testing.T) (string, <-chan struct{}) {
+	t.Helper()
+	for _, host := range []string{"127.0.84.45", "127.0.84.46", "127.0.84.47"} {
+		ln, err := net.Listen("tcp", net.JoinHostPort(host, defaultRCONPort))
+		if err != nil {
+			continue
+		}
+		t.Cleanup(func() { _ = ln.Close() })
+		dialed := make(chan struct{}, 8)
+		go func() {
+			for {
+				conn, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				dialed <- struct{}{}
+				_ = conn.Close()
+			}
+		}()
+		return host, dialed
+	}
+	t.Skip("no loopback address free on the default RCON port")
+	return "", nil
+}
+
+// A non-integer rcon.port is dialed at the default port, as Minecraft itself
+// falls back to it, on both the graceful-stop and the player-count path, through
+// the real server.properties reader; and whatever the open then logs carries no
+// properties content -- not the second password a backslash-continued port line
+// folds into the value, not a plain non-numeric value (issue #3345).
+func TestRCONOpenWithANonIntegerPortDialsTheDefaultAndLogsNoPropertiesContent(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		leak []string
+	}{
+		{
+			name: "continued port line",
+			body: "enable-rcon=true\nrcon.password=FIRST_SECRET\nrcon.port=25575\\\nrcon.password=SECOND_SECRET\n",
+			leak: []string{"SECRET", "rcon.password="},
+		},
+		{name: "non-numeric port", body: "enable-rcon=true\nrcon.password=pw\nrcon.port=notaport\n", leak: []string{"notaport"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			host, dialed := hangUpOnDefaultRCONPort(t)
+			dir := t.TempDir()
+			writeProperties(t, dir, tc.body)
+			logged := &syncBuffer{}
+			inst := &instance{
+				spec:        execution.InstanceSpec{ServerID: "s1", WorkingDir: dir},
+				rconHost:    host,
+				logger:      slog.New(slog.NewTextHandler(logged, nil)),
+				openControl: openRealControl,
+			}
+
+			if inst.tryRCONStop(context.Background()) {
+				t.Fatal("tryRCONStop = true, want false: the peer hangs up during the handshake")
+			}
+			inst.queryPlayerCount(context.Background())
+
+			for path := range 2 {
+				select {
+				case <-dialed:
+				default:
+					t.Fatalf("connections to %s:%s = %d, want 2 (stop and poll both dial the default port)", host, defaultRCONPort, path)
+				}
+			}
+			out := logged.String()
+			for _, leak := range tc.leak {
+				if strings.Contains(out, leak) {
+					t.Fatalf("log = %q, must not contain %q", out, leak)
+				}
+			}
+			for _, want := range []string{"graceful stop: open rcon failed", "player count: open rcon failed"} {
+				if !strings.Contains(out, want) {
+					t.Fatalf("log = %q, want it to contain %q", out, want)
+				}
+			}
+		})
+	}
+}
+
+// An integer rcon.port no server can bind is refused on both paths with a log
+// line naming rcon.port but not the value (issue #3345).
+func TestRCONOpenWithAnOutOfRangePortLogsNoPropertiesContent(t *testing.T) {
+	dir := t.TempDir()
+	writeProperties(t, dir, "enable-rcon=true\nrcon.password=pw\nrcon.port=70000\n")
+	logged := &syncBuffer{}
+	inst := &instance{
+		spec:        execution.InstanceSpec{ServerID: "s1", WorkingDir: dir},
+		logger:      slog.New(slog.NewTextHandler(logged, nil)),
+		openControl: openRealControl,
+	}
+
+	if inst.tryRCONStop(context.Background()) {
+		t.Fatal("tryRCONStop = true, want false for an out-of-range rcon.port")
+	}
+	inst.queryPlayerCount(context.Background())
+
+	out := logged.String()
+	if strings.Contains(out, "70000") {
+		t.Fatalf("log = %q, must not contain the port value", out)
+	}
+	for _, want := range []string{"graceful stop: open rcon failed", "player count: open rcon failed", "rcon.port"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("log = %q, want it to contain %q", out, want)
+		}
+	}
+}
+
+// A graceful stop whose RCON open fails falls back to a signal, and says so in the
+// Worker log with the cause, so a refused server.properties (issue #3345) does not
+// degrade the stop silently.
+func TestTryRCONStopLogsOpenFailure(t *testing.T) {
+	logged := &syncBuffer{}
+	inst := &instance{
+		spec:   execution.InstanceSpec{ServerID: "s1"},
+		logger: slog.New(slog.NewTextHandler(logged, nil)),
+		openControl: func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
+			return nil, errors.New("rcon: read server.properties: serverproperties: /scratch/s1/server.properties too many levels of symbolic links")
+		},
+	}
+
+	if inst.tryRCONStop(context.Background()) {
+		t.Fatal("tryRCONStop = true, want false when RCON cannot be opened")
+	}
+	out := logged.String()
+	for _, want := range []string{"level=WARN", "graceful stop: open rcon failed", "server_id=s1", "symbolic links"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("log = %q, want it to contain %q", out, want)
+		}
 	}
 }
 
@@ -1337,6 +1574,64 @@ func TestStartPublishesColonSpelledGamePort(t *testing.T) {
 	}
 	if hasPort(docker.createSpec.Ports, defaultGamePort) {
 		t.Errorf("Ports = %v, want NO fallback to the default game port", docker.createSpec.Ports)
+	}
+}
+
+// A non-integer rcon.port is published as the default RCON port, the port the
+// Minecraft server falls back to and the RCON dial uses; the mapping is built
+// from that number, so no text from the file -- not the password a
+// backslash-continued port line folds into the value -- reaches the container
+// create (issue #3345).
+func TestStartPublishesTheDefaultRCONPortForANonIntegerPort(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		leak string
+	}{
+		{name: "continued port line", body: "rcon.password=FIRST_SECRET\nrcon.port=25575\\\nrcon.password=SECOND_SECRET\n", leak: "SECRET"},
+		{name: "non-numeric port", body: "rcon.port=notaport\n", leak: "notaport"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeProperties(t, dir, tc.body)
+			docker := newFakeDocker()
+			d := newTestDriver(docker, nil, errors.New("no rcon"))
+
+			s := spec()
+			s.WorkingDir = dir
+			if _, err := d.Start(context.Background(), s); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+
+			if !hasPort(docker.createSpec.Ports, defaultRCONPort) {
+				t.Errorf("Ports = %v, want the default RCON port %s published", docker.createSpec.Ports, defaultRCONPort)
+			}
+			if got := fmt.Sprintf("%+v", docker.createSpec.Ports); strings.Contains(got, tc.leak) {
+				t.Errorf("Ports = %s, must not carry %q", got, tc.leak)
+			}
+		})
+	}
+}
+
+// An integer rcon.port no server can bind fails the start before any container
+// is created, with an error naming rcon.port but not the value (issue #3345).
+func TestStartRefusesAnOutOfRangeRCONPortWithoutEchoingIt(t *testing.T) {
+	dir := t.TempDir()
+	writeProperties(t, dir, "rcon.port=70000\n")
+	docker := newFakeDocker()
+	d := newTestDriver(docker, nil, errors.New("no rcon"))
+
+	s := spec()
+	s.WorkingDir = dir
+	_, err := d.Start(context.Background(), s)
+	if err == nil {
+		t.Fatal("Start = nil error, want an out-of-range rcon.port refused")
+	}
+	if !strings.Contains(err.Error(), "rcon.port") || strings.Contains(err.Error(), "70000") {
+		t.Errorf("Start error = %q, want it to name rcon.port and not the value", err)
+	}
+	if docker.createCalls != 0 {
+		t.Errorf("createCalls = %d, want 0", docker.createCalls)
 	}
 }
 

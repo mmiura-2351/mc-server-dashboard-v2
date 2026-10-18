@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/rcon"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
@@ -143,7 +142,7 @@ func (i *fakeInstance) wasStopped() (stopped, graceful bool) {
 // test can fail one step of the quiesce bracket (e.g. save-all) while others
 // succeed (#907 partial-quiesce path). When poison is set, fakeControl models the
 // real rcon client: the FIRST Execute error marks the connection broken, and every
-// subsequent Execute returns rcon.ErrConnBroken until the client is redialed — the
+// subsequent Execute returns execution.ErrConnBroken until the client is redialed — the
 // data-loss interaction the poisoned-restore fix addresses.
 type fakeControl struct {
 	reply           string
@@ -160,7 +159,7 @@ func (c *fakeControl) Execute(ctx context.Context, line string) (string, error) 
 	if c.poison && c.broken {
 		// A prior Execute error poisoned the connection: every reuse fails fast,
 		// exactly as rcon.Client does, so the quiesce restore must redial.
-		return "", rcon.ErrConnBroken
+		return "", execution.ErrConnBroken
 	}
 	if c.failOnCancelled {
 		if err := ctx.Err(); err != nil {
