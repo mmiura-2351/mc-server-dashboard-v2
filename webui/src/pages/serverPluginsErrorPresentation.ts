@@ -33,6 +33,7 @@ const PLUGIN_REASON_PRESENTATION: Record<string, TranslationKey> = {
   // fallback below would blame an agent that is fine.
   storage_unavailable: "plugins.error.storageUnavailable",
   not_found: "plugins.error.notFound",
+  plugin_jar_missing: "plugins.error.jarMissing",
 };
 
 /** Select the Plugins-tab toast key for a failed operation. */

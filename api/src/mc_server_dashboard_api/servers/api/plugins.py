@@ -1011,7 +1011,16 @@ async def enable_plugin(
     use_case: Annotated[TogglePlugin, Depends(get_toggle_plugin)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> PluginResponse:
-    """Enable a disabled plugin (plugin:manage)."""
+    """Enable a disabled plugin (plugin:manage).
+
+    The new state is committed before the working set is reconciled. When that
+    step needs the plugin's jar -- the working-set file is gone -- and the jar is
+    missing from the content-addressed cache too, the route answers ``409``
+    ``plugin_jar_missing`` (issue #3323) over the committed state: the plugin
+    list shows it, the working set holds no file for the plugin, and repeating the
+    request is a no-op. Removing the plugin and installing it again restores its
+    jar.
+    """
 
     try:
         plugin = await use_case(
@@ -1036,6 +1045,8 @@ async def enable_plugin(
             recorder, ops.PLUGIN_ENABLE, authorized, community_id, plugin_id
         )
         raise _conflict("server_busy") from exc
+    except PluginCacheBlobNotFoundError as exc:
+        raise _jar_missing() from exc
     await _record_plugin(
         recorder, ops.PLUGIN_ENABLE, authorized, community_id, plugin_id
     )
@@ -1062,7 +1073,16 @@ async def disable_plugin(
     use_case: Annotated[TogglePlugin, Depends(get_toggle_plugin)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> PluginResponse:
-    """Disable an enabled plugin (plugin:manage)."""
+    """Disable an enabled plugin (plugin:manage).
+
+    The new state is committed before the working set is reconciled. When that
+    step needs the plugin's jar -- the working-set file is gone -- and the jar is
+    missing from the content-addressed cache too, the route answers ``409``
+    ``plugin_jar_missing`` (issue #3323) over the committed state: the plugin
+    list shows it, the working set holds no file for the plugin, and repeating the
+    request is a no-op. Removing the plugin and installing it again restores its
+    jar.
+    """
 
     try:
         plugin = await use_case(
@@ -1087,6 +1107,8 @@ async def disable_plugin(
             recorder, ops.PLUGIN_DISABLE, authorized, community_id, plugin_id
         )
         raise _conflict("server_busy") from exc
+    except PluginCacheBlobNotFoundError as exc:
+        raise _jar_missing() from exc
     await _record_plugin(
         recorder, ops.PLUGIN_DISABLE, authorized, community_id, plugin_id
     )
@@ -1119,6 +1141,13 @@ async def set_plugin_side(
     Changing the side re-materializes the working set: a client-only jar is
     removed from the running server, and a server-relevant jar is materialized
     from the content-addressed cache. At-rest gated (409 ``server_unsettled``).
+
+    The new side is committed before the working set is reconciled. When the jar
+    to materialize is missing from the cache, the route answers ``409``
+    ``plugin_jar_missing`` (issue #3323) over the committed side: the plugin list
+    shows it, the working set holds no file for the plugin, and repeating the
+    request is a no-op. Removing the plugin and installing it again restores its
+    jar.
     """
 
     try:
@@ -1146,6 +1175,8 @@ async def set_plugin_side(
             recorder, ops.PLUGIN_SET_SIDE, authorized, community_id, plugin_id
         )
         raise _conflict("server_busy") from exc
+    except PluginCacheBlobNotFoundError as exc:
+        raise _jar_missing() from exc
     await _record_plugin(
         recorder, ops.PLUGIN_SET_SIDE, authorized, community_id, plugin_id
     )
@@ -1219,10 +1250,11 @@ async def download_client_modpack(
     existence rather than size.
 
     A jar the modpack needs that is missing from the content-addressed cache
-    answers ``404`` ``not_found`` (issue #3323), and a cache outage ``503``
-    ``storage_unavailable`` (issue #3233) -- both for the first jar, which the
-    ``GET`` opens before the headers. The probe opens no jar, so it answers
-    neither.
+    answers ``409`` ``plugin_jar_missing`` (issue #3323), and a cache outage
+    ``503`` ``storage_unavailable`` (issue #3233) -- both for the first jar, which
+    the ``GET`` opens before the headers. Nothing changes either way; removing the
+    plugin and installing it again restores its jar. The probe opens no jar, so it
+    answers neither.
     """
 
     try:
@@ -1242,11 +1274,10 @@ async def download_client_modpack(
         try:
             stream = await started(stream)
         except PluginCacheBlobNotFoundError as exc:
-            # A plugin row whose cached jar is gone (issue #3323): like an
-            # orphaned resource-pack row (#2321) it is not retrievable, not a
-            # degraded backend, so the 404 rather than a 500. A missing later
+            # A plugin row whose cached jar is gone (issue #3323): the same 409
+            # the enable / disable / side routes answer for it. A missing later
             # jar still aborts the transfer, as an outage there does.
-            raise _not_found() from exc
+            raise _jar_missing() from exc
         except PluginCacheStorageUnavailableError as exc:
             raise _service_unavailable("storage_unavailable") from exc
     if request.method == "HEAD":
@@ -1357,6 +1388,18 @@ def _service_unavailable(reason: str) -> ProblemException:
 
 def _conflict(reason: str) -> ProblemException:
     return problem(status.HTTP_409_CONFLICT, reason)
+
+
+def _jar_missing() -> ProblemException:
+    """A plugin row whose jar is missing from the content-addressed cache (#3323).
+
+    Stored state that is not what the platform expects, so the same 409 posture as
+    ``server_properties_missing`` -- not a 404, which would deny a plugin that
+    exists and whose enable / disable / side change may already be committed, and
+    not a 503, since repeating the request cannot bring the jar back.
+    """
+
+    return _conflict("plugin_jar_missing")
 
 
 def _not_found() -> ProblemException:

@@ -1029,10 +1029,11 @@ export interface paths {
          *     existence rather than size.
          *
          *     A jar the modpack needs that is missing from the content-addressed cache
-         *     answers ``404`` ``not_found`` (issue #3323), and a cache outage ``503``
-         *     ``storage_unavailable`` (issue #3233) -- both for the first jar, which the
-         *     ``GET`` opens before the headers. The probe opens no jar, so it answers
-         *     neither.
+         *     answers ``409`` ``plugin_jar_missing`` (issue #3323), and a cache outage
+         *     ``503`` ``storage_unavailable`` (issue #3233) -- both for the first jar, which
+         *     the ``GET`` opens before the headers. Nothing changes either way; removing the
+         *     plugin and installing it again restores its jar. The probe opens no jar, so it
+         *     answers neither.
          */
         get: operations["download_client_modpack_api_communities__community_id__servers__server_id__client_mods_download_get"];
         put?: never;
@@ -1051,10 +1052,11 @@ export interface paths {
          *     existence rather than size.
          *
          *     A jar the modpack needs that is missing from the content-addressed cache
-         *     answers ``404`` ``not_found`` (issue #3323), and a cache outage ``503``
-         *     ``storage_unavailable`` (issue #3233) -- both for the first jar, which the
-         *     ``GET`` opens before the headers. The probe opens no jar, so it answers
-         *     neither.
+         *     answers ``409`` ``plugin_jar_missing`` (issue #3323), and a cache outage
+         *     ``503`` ``storage_unavailable`` (issue #3233) -- both for the first jar, which
+         *     the ``GET`` opens before the headers. Nothing changes either way; removing the
+         *     plugin and installing it again restores its jar. The probe opens no jar, so it
+         *     answers neither.
          */
         head: operations["download_client_modpack_api_communities__community_id__servers__server_id__client_mods_download_head"];
         patch?: never;
@@ -1778,6 +1780,14 @@ export interface paths {
         /**
          * Disable Plugin
          * @description Disable an enabled plugin (plugin:manage).
+         *
+         *     The new state is committed before the working set is reconciled. When that
+         *     step needs the plugin's jar -- the working-set file is gone -- and the jar is
+         *     missing from the content-addressed cache too, the route answers ``409``
+         *     ``plugin_jar_missing`` (issue #3323) over the committed state: the plugin
+         *     list shows it, the working set holds no file for the plugin, and repeating the
+         *     request is a no-op. Removing the plugin and installing it again restores its
+         *     jar.
          */
         post: operations["disable_plugin_api_communities__community_id__servers__server_id__plugins__plugin_id__disable_post"];
         delete?: never;
@@ -1798,6 +1808,14 @@ export interface paths {
         /**
          * Enable Plugin
          * @description Enable a disabled plugin (plugin:manage).
+         *
+         *     The new state is committed before the working set is reconciled. When that
+         *     step needs the plugin's jar -- the working-set file is gone -- and the jar is
+         *     missing from the content-addressed cache too, the route answers ``409``
+         *     ``plugin_jar_missing`` (issue #3323) over the committed state: the plugin
+         *     list shows it, the working set holds no file for the plugin, and repeating the
+         *     request is a no-op. Removing the plugin and installing it again restores its
+         *     jar.
          */
         post: operations["enable_plugin_api_communities__community_id__servers__server_id__plugins__plugin_id__enable_post"];
         delete?: never;
@@ -1822,6 +1840,13 @@ export interface paths {
          *     Changing the side re-materializes the working set: a client-only jar is
          *     removed from the running server, and a server-relevant jar is materialized
          *     from the content-addressed cache. At-rest gated (409 ``server_unsettled``).
+         *
+         *     The new side is committed before the working set is reconciled. When the jar
+         *     to materialize is missing from the cache, the route answers ``409``
+         *     ``plugin_jar_missing`` (issue #3323) over the committed side: the plugin list
+         *     shows it, the working set holds no file for the plugin, and repeating the
+         *     request is a no-op. Removing the plugin and installing it again restores its
+         *     jar.
          */
         post: operations["set_plugin_side_api_communities__community_id__servers__server_id__plugins__plugin_id__side_post"];
         delete?: never;
