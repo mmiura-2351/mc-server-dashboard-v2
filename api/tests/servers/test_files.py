@@ -5419,3 +5419,234 @@ async def test_upload_extract_member_under_a_nested_properties_dir_is_allowed() 
         extract=True,
     )
     assert store.writes == [("backups/server.properties/notes.txt", b"X")]
+
+
+# --- the generation marker's name is reserved at the root (issue #3433) -----
+#
+# ``.mcsd_generation`` is the Worker's generation marker. The Worker stamps it at
+# the working-set root on every hydrate and leaves every root entry carrying that
+# prefix out of a snapshot, so an operator entry there is lost at best and, as a
+# directory, fails the marker write and with it every hydrate and start. Every
+# creation door refuses a destination whose FIRST component carries the prefix,
+# at rest and running alike, with 422 ``reserved_name``; a same-named entry
+# deeper in the tree is ordinary user data. Reads, deletes and a rename AWAY
+# stay open: they are how an operator clears an entry planted before the guard.
+
+_MARKER = ".mcsd_generation"
+
+
+@pytest.mark.parametrize(
+    "rel_path", [_MARKER, f"{_MARKER}/stray", f"./{_MARKER}", f"{_MARKER}-1234"]
+)
+async def test_mkdir_at_the_reserved_marker_name_is_refused(rel_path: str) -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = MakeDir(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(InvalidFilePathError) as caught:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path=rel_path,
+        )
+    assert caught.value.reason == "reserved_name"
+    assert store.made_dirs == []
+
+
+async def test_mkdir_of_a_nested_marker_name_is_allowed() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = MakeDir(uow=_stopped_uow(community, server_id), file_store=store)
+
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path=f"world/{_MARKER}",
+    )
+    assert store.made_dirs == [f"world/{_MARKER}"]
+
+
+@pytest.mark.parametrize("rel_path", [_MARKER, f"{_MARKER}/notes.txt"])
+async def test_write_at_the_reserved_marker_name_is_refused(rel_path: str) -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = WriteFile(
+        uow=_stopped_uow(community, server_id),
+        control_plane=FakeControlPlane(),
+        file_store=store,
+    )
+
+    with pytest.raises(InvalidFilePathError) as caught:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path=rel_path,
+            content=b"999",
+        )
+    assert caught.value.reason == "reserved_name"
+    assert store.writes == []
+
+
+async def test_running_write_at_the_reserved_marker_name_is_refused() -> None:
+    # On a running server the write lands in the live working set, where it would
+    # overwrite the Worker's own marker and misstate the generation it holds.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    cp = FakeControlPlane()
+    use_case = WriteFile(
+        uow=_running_uow(community, server_id), control_plane=cp, file_store=store
+    )
+
+    with pytest.raises(InvalidFilePathError) as caught:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path=_MARKER,
+            content=b"999",
+        )
+    assert caught.value.reason == "reserved_name"
+    assert cp.dispatched == []
+
+
+@pytest.mark.parametrize(
+    ("dir_path", "filename"), [(".", _MARKER), (_MARKER, "notes.txt")]
+)
+async def test_upload_at_the_reserved_marker_name_is_refused(
+    dir_path: str, filename: str
+) -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = UploadFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(InvalidFilePathError) as caught:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            dir_path=dir_path,
+            filename=filename,
+            content=b"X",
+            extract=False,
+        )
+    assert caught.value.reason == "reserved_name"
+    assert store.writes == []
+
+
+@pytest.mark.parametrize("member", [_MARKER, f"{_MARKER}/stray.txt"])
+async def test_upload_extract_member_at_the_reserved_marker_name_is_refused(
+    member: str,
+) -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = UploadFile(uow=_stopped_uow(community, server_id), file_store=store)
+    archive = _zip_bytes({"ops.json": b"[]", member: b"X"})
+
+    with pytest.raises(InvalidFilePathError) as caught:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            dir_path=".",
+            filename="bundle.zip",
+            content=archive,
+            extract=True,
+        )
+    assert caught.value.reason == "reserved_name"
+    # Refused in the pre-write scan, so nothing of the archive is written.
+    assert store.writes == []
+
+
+async def test_upload_extract_of_a_nested_marker_name_is_allowed() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = UploadFile(uow=_stopped_uow(community, server_id), file_store=store)
+    archive = _zip_bytes({f"{_MARKER}/stray.txt": b"X"})
+
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        dir_path="world",
+        filename="bundle.zip",
+        content=archive,
+        extract=True,
+    )
+    assert store.writes == [(f"world/{_MARKER}/stray.txt", b"X")]
+
+
+@pytest.mark.parametrize("to_path", [_MARKER, f"{_MARKER}/ops.json"])
+async def test_rename_file_onto_the_reserved_marker_name_is_refused(
+    to_path: str,
+) -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.files["ops.json"] = b"[]"
+    use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(InvalidFilePathError) as caught:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            from_path="ops.json",
+            to_path=to_path,
+        )
+    assert caught.value.reason == "reserved_name"
+    assert store.files == {"ops.json": b"[]"}
+
+
+async def test_rename_dir_onto_the_reserved_marker_name_is_refused() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.dirs["staged"] = []
+    use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(InvalidFilePathError) as caught:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            from_path="staged",
+            to_path=_MARKER,
+        )
+    assert caught.value.reason == "reserved_name"
+    assert store.renamed_dirs == []
+
+
+async def test_rename_a_marker_named_dir_away_is_allowed() -> None:
+    # The recovery path for an entry planted before the guard stays open.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.dirs[_MARKER] = []
+    use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        from_path=_MARKER,
+        to_path="recovered",
+    )
+    assert store.renamed_dirs == [(_MARKER, "recovered")]
+
+
+async def test_delete_a_marker_named_dir_at_rest_is_allowed() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.dirs[_MARKER] = []
+    use_case = DeleteFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path=_MARKER,
+    )
+    assert store.deleted_dirs == [_MARKER]
+
+
+async def test_delete_a_marker_named_file_at_rest_is_allowed() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    store.files[_MARKER] = b"7"
+    use_case = DeleteFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path=_MARKER,
+    )
+    assert store.deleted_files == [_MARKER]

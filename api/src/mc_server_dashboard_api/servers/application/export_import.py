@@ -57,6 +57,7 @@ from mc_server_dashboard_api.servers.application.files import (
     MAX_UPLOAD_BYTES,
     _archive_entries,
     _refuse_dir_at_root_properties,
+    _refuse_reserved_root_name,
 )
 from mc_server_dashboard_api.servers.application.manage_server import CreateServer
 from mc_server_dashboard_api.servers.application.plugins import (
@@ -155,6 +156,9 @@ def _validate_import_archive(
         # ``server.properties`` ITSELF is the legitimate member the platform-key
         # re-apply handles, and its parent is the root, which matches nothing.
         _refuse_dir_at_root_properties(str(PurePosixPath(entry_path).parent))
+        # The Worker's generation-marker name (issue #3433): refused, not
+        # dropped, so the operator learns why the archive did not import.
+        _refuse_reserved_root_name(entry_path)
 
 
 async def _load(

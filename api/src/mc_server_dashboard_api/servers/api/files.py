@@ -47,6 +47,11 @@ every denial into ``invalid_path``. The file-API problem-reason catalog is:
   UNDER it (issue #2846) all reach the same directory, and all five answer
   identically. The platform's own writes need a file there; the sibling
   ``platform_managed_key`` guards the file's contents.
+- ``reserved_name`` (422) — a mutation whose destination is, or lies under, a
+  root name starting ``.mcsd_generation``: the Worker's generation marker, which
+  a snapshot leaves out and a hydrate stamps (issue #3433). Every creation door
+  answers it, a running write included; reads, deletes and a rename away stay
+  open, so an entry planted before the guard can still be cleared.
 - ``destination_exists`` (409) — a non-directory occupies the target, or a
   component the mutation needs as a directory (make_dir / write / rename, issue
   #2433); the same never-clobber conflict a rename onto an existing destination
@@ -431,6 +436,11 @@ async def write_file(
     the way, which the key guard above cannot see (a directory carries no keys)
     and the platform's own writes cannot survive; it is 422
     ``platform_managed_path``. Writing the file itself is unaffected.
+
+    **The generation marker's name is reserved (issue #3433).** A write, at rest
+    or running, to a root name starting ``.mcsd_generation`` — the Worker's
+    generation marker — or under one is 422 ``reserved_name``. A same-named entry
+    deeper in the tree is ordinary user data.
     """
 
     if len(body.content_base64) > MAX_EDIT_BASE64_CHARS:
@@ -693,6 +703,11 @@ async def upload_file(
     ``platform_managed_path``, refused in the same pre-write scan (nothing
     written). The check is on the resulting path, so the same member extracted
     into a subdirectory is ordinary user data.
+
+    **The generation marker's name is reserved (issue #3433).** An upload or
+    archive member landing at a root name starting ``.mcsd_generation`` — the
+    Worker's generation marker — or under one is 422 ``reserved_name``, refused in
+    the same pre-write scan on the resulting path.
     """
 
     filename = file.filename or ""
@@ -1047,6 +1062,11 @@ async def rename_file(
     is 422 ``platform_managed_path``: the platform's writes need a file there.
     Moving a directory already standing at that name away is the cleanup path and
     still works.
+
+    **The generation marker's name is reserved (issue #3433).** A destination at
+    a root name starting ``.mcsd_generation`` — the Worker's generation marker —
+    or under one is 422 ``reserved_name``. The source is not guarded, so an entry
+    planted there before the guard can still be moved away.
     """
 
     try:
@@ -1182,7 +1202,9 @@ async def make_directory(
     ``platform_managed_path``: the platform's writes need a file there, not a
     directory (issue #2812). Both backends materialize the directory
     (fs: real empty directory; object storage: zero-byte ``.dir`` marker,
-    issue #1125).
+    issue #1125). A root name starting ``.mcsd_generation`` — the Worker's
+    generation marker — or a path under one is 422 ``reserved_name`` (issue
+    #3433); a same-named directory deeper in the tree is ordinary user data.
     """
 
     try:

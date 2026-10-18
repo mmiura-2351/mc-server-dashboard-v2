@@ -284,7 +284,10 @@ class InvalidFilePathError(ServerError):
     parents every write door creates (issue #2846), and an archive member that
     would publish it as a whole working set — a server import or a backup upload
     (issue #2869). The platform-managed-key guard compares bytes and a directory
-    has none, so the path itself is refused. The oversized case is not carried
+    has none, so the path itself is refused. A mutation whose destination is, or
+    lies under, a root name starting ``.mcsd_generation`` — the Worker's
+    generation marker — carries ``"reserved_name"`` on the same doors (issue
+    #3433). The oversized case is not carried
     here — it is raised as :class:`FileTooLargeError` (413) instead.
     """
 

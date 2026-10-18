@@ -61,6 +61,7 @@ from mc_server_dashboard_api.servers.application.files import (
     MAX_DECOMPRESSED_BYTES,
     MAX_UPLOAD_BYTES,
     _refuse_dir_at_root_properties,
+    _refuse_reserved_root_name,
 )
 from mc_server_dashboard_api.servers.application.platform_properties import (
     assigned_resource_pack,
@@ -1383,6 +1384,9 @@ def _validate_backup_archive(
                     if member.isdir()
                     else str(PurePosixPath(member.name).parent)
                 )
+                # The Worker's generation-marker name (issue #3433), whether the
+                # member is that entry or lies under it.
+                _refuse_reserved_root_name(member.name)
                 if member.isfile():
                     handle = tar.extractfile(member)
                     if handle is not None:

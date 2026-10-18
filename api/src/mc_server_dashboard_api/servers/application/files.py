@@ -104,6 +104,12 @@ MAX_EDIT_BYTES = 4 * 1024 * 1024
 # this path is checked against the platform-managed key set before it lands.
 _PROPERTIES_REL_PATH = "server.properties"
 
+# The Worker's generation marker (worker scratchformat.GenerationMarkerFile). The
+# Worker stamps it at the working-set root on every hydrate and treats every root
+# entry carrying this prefix as its own: a snapshot leaves them out and a hydrate
+# does not unpack them (issue #3433). So the prefix is reserved at the root.
+_GENERATION_MARKER_PREFIX = ".mcsd_generation"
+
 # The upload-size cap. Unlike an interactive edit (which rides the control plane,
 # hence the small MAX_EDIT_BYTES), an upload is an at-rest Storage-side operation
 # that bypasses the control-plane edit path, so it carries a much larger cap:
@@ -253,6 +259,27 @@ def _refuse_dir_at_root_properties(rel_path: str) -> None:
         f"{_PROPERTIES_REL_PATH}/"
     ):
         raise InvalidFilePathError(rel_path, reason="platform_managed_path")
+
+
+def _refuse_reserved_root_name(rel_path: str) -> None:
+    """Refuse a mutation creating an entry at the Worker's marker name (#3433).
+
+    ``rel_path`` is the full destination: the path a write, upload, rename,
+    make-dir, import or backup member lands at. Its FIRST component is the root
+    entry the mutation creates or writes into, whether the destination itself or
+    a parent created on the way, so a root name carrying
+    :data:`_GENERATION_MARKER_PREFIX` is refused whatever lies below it. An entry
+    there is never the operator's: a snapshot leaves it out, so a file is lost on
+    the next stop, and a directory made every hydrate fail on the marker write
+    before the Worker skipped it on unpack. A same-named entry deeper in the tree
+    is ordinary user data. Reads, deletes and a rename AWAY are not mutations
+    TO the name, so they stay open: they are how an operator clears an entry
+    planted before this guard.
+    """
+
+    parts = PurePosixPath(rel_path).parts
+    if parts and parts[0].startswith(_GENERATION_MARKER_PREFIX):
+        raise InvalidFilePathError(rel_path, reason="reserved_name")
 
 
 async def _current_properties(
@@ -505,6 +532,9 @@ class WriteFile:
         # The write creates the target's missing parents, so a path UNDER the root
         # server.properties name leaves a DIRECTORY at the name (issue #2846).
         _refuse_dir_at_root_properties(str(PurePosixPath(rel_path).parent))
+        # Before the running/at-rest branch: a running write would overwrite the
+        # Worker's own marker in the live working set (issue #3433).
+        _refuse_reserved_root_name(rel_path)
 
         # Hold the per-server lifecycle lock across the at-rest check and the
         # Storage write (issue #827): a start that flips desired=running must
@@ -1014,6 +1044,7 @@ class UploadFile:
                     # member name: the same member under a subdirectory is
                     # ordinary user data.
                     _refuse_dir_at_root_properties(str(PurePosixPath(target).parent))
+                    _refuse_reserved_root_name(target)
                     if _is_root_server_properties(target):
                         if properties_baseline is None:
                             properties_baseline = await _current_properties(
@@ -1036,6 +1067,7 @@ class UploadFile:
             _refuse_dir_at_root_properties(
                 str(PurePosixPath(_join(dir_path, filename)).parent)
             )
+            _refuse_reserved_root_name(_join(dir_path, filename))
             await _guard_at_rest_properties(
                 self.file_store,
                 community_id=community_id,
@@ -1367,6 +1399,7 @@ class MakeDir:
         if not cleaned:
             raise InvalidFilePathError(rel_path)
         _refuse_dir_at_root_properties(rel_path)
+        _refuse_reserved_root_name(rel_path)
         # Hold the per-server lifecycle lock across the at-rest check and the
         # make-dir so a concurrent start cannot race the mutation (issue #827).
         async with self.lifecycle_lock.hold(server_id):
@@ -1416,6 +1449,9 @@ class RenameFile:
     ) -> None:
         self.file_store.validate_rel_path(from_path)
         self.file_store.validate_rel_path(to_path)
+        # Only the destination: moving a marker-named entry AWAY is how one planted
+        # before the guard is cleared (issue #3433).
+        _refuse_reserved_root_name(to_path)
         # Hold the per-server lifecycle lock across the at-rest check and the
         # write+delete republish so a concurrent start cannot race it (issue #827).
         async with self.lifecycle_lock.hold(server_id):

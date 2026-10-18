@@ -1039,3 +1039,54 @@ async def test_import_member_under_a_nested_properties_dir_is_published() -> Non
         content=archive,
     )
     assert dst_store.files["backups/server.properties/notes.txt"] == b"X"
+
+
+# --- the generation marker's name is reserved at the root (issue #3433) -----
+#
+# ``.mcsd_generation`` is the Worker's generation marker. A member at that root
+# name -- or under it, or carrying its prefix -- would publish a Worker-private
+# entry into the new server's store, and as a directory it fails every hydrate.
+# The archive is refused with 422 ``reserved_name`` in the pre-commit validate
+# pass rather than the member being dropped silently, so no row is left behind.
+
+
+@pytest.mark.parametrize(
+    "member", [".mcsd_generation", ".mcsd_generation/stray.txt", ".mcsd_generation-1"]
+)
+async def test_import_member_at_the_reserved_marker_name_creates_no_row(
+    member: str,
+) -> None:
+    community = uuid.uuid4()
+    dst_uow, dst_store = FakeUnitOfWork(), FakeFileStore()
+    imp = ImportServer(
+        create_server=_create_server(dst_uow, dst_store), file_store=dst_store
+    )
+    archive = _zip({EXPORT_METADATA_FILENAME: _metadata(), member: b"X"})
+
+    with pytest.raises(InvalidFilePathError) as caught:
+        await imp(
+            community_id=CommunityId(community),
+            name="fresh",
+            content=archive,
+        )
+    assert caught.value.reason == "reserved_name"
+    assert len(dst_uow.servers.by_id) == 0
+    assert dst_store.files == {}
+
+
+async def test_import_member_under_a_nested_marker_name_is_published() -> None:
+    community = uuid.uuid4()
+    dst_uow, dst_store = FakeUnitOfWork(), FakeFileStore()
+    imp = ImportServer(
+        create_server=_create_server(dst_uow, dst_store), file_store=dst_store
+    )
+    archive = _zip(
+        {EXPORT_METADATA_FILENAME: _metadata(), "world/.mcsd_generation": b"X"}
+    )
+
+    await imp(
+        community_id=CommunityId(community),
+        name="fresh",
+        content=archive,
+    )
+    assert dst_store.files["world/.mcsd_generation"] == b"X"
