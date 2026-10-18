@@ -1,4 +1,4 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { StrictMode, useSyncExternalStore } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router";
@@ -6,12 +6,13 @@ import { App } from "./App.tsx";
 import { SessionProvider } from "./auth/SessionProvider.tsx";
 import { getLanguage, initLanguage, subscribeLanguage } from "./i18n/index.ts";
 import { ActiveCommunityProvider } from "./permissions/ActiveCommunityProvider.tsx";
+import { createQueryClient } from "./queryClient.ts";
 import "./styles/global.css";
 import "./styles/shell.css";
 
 initLanguage();
 
-const queryClient = new QueryClient();
+const queryClient = createQueryClient();
 
 const rootElement = document.getElementById("root");
 if (rootElement === null) {
