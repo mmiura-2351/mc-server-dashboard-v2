@@ -893,7 +893,12 @@ backend support; the tab body also self-guards with an "unsupported" notice).
     REST read gated like the socket, through the shared API client: the
     server read (`GET /communities/{cid}/servers/{sid}`) for the per-server
     stream, the caller's permissions (`GET /communities/{cid}/me/permissions`,
-    membership-gated) for the community stream. A 401 goes through the
+    membership-gated) for the community stream. The permissions read answers
+    200 to any member, so the client applies the community stream's gate to
+    it: community-level `server:read`, i.e. the code in `permissions` (the
+    member's roles); a per-server grant does not count, exactly as in the
+    API's check (Section 7.3 resolution with no resource). A member without it
+    is treated like a 403. A 401 goes through the
     transparent refresh like any REST 401 — a rotated token reconnects the
     socket, an auth-definitive failure hard-logs-out; a 403 / 404 stops the
     client as above; success, a network error or a 5xx keeps the backoff. The

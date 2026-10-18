@@ -207,14 +207,17 @@ export class ServerEventsClient {
         onDown: callbacks.onDown,
         onAccessLost: callbacks.onAccessLost,
         // The server read: the same two-layer gate as the socket (membership,
-        // `server:read` on this server, the server in this community).
+        // `server:read` on this server, the server in this community), so
+        // its success admits the user and its 403 / 404 refuses them.
         probeAccess: () =>
-          api.get(
-            apiPath("/api/communities/{community_id}/servers/{server_id}", {
-              community_id: communityId,
-              server_id: serverId,
-            }),
-          ),
+          api
+            .get(
+              apiPath("/api/communities/{community_id}/servers/{server_id}", {
+                community_id: communityId,
+                server_id: serverId,
+              }),
+            )
+            .then(() => true),
       },
       random,
     );

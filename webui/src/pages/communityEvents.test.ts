@@ -181,6 +181,21 @@ describe("parseCommunityFrame", () => {
   });
 });
 
+/** A `GET /communities/{cid}/me/permissions` 200 with the given set. */
+function permissionsResponse(
+  permissions: string[],
+  grants: {
+    resource_type: string;
+    resource_id: string;
+    permissions: string[];
+  }[] = [],
+) {
+  return new Response(JSON.stringify({ permissions, grants }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}
+
 describe("CommunityEventsClient", () => {
   let restore: () => void;
 
@@ -521,10 +536,7 @@ describe("CommunityEventsClient", () => {
     const fetchMock = vi.fn(async (_path: string, init: RequestInit) => {
       const auth = (init.headers as Record<string, string>).authorization;
       return auth === "Bearer tok-2"
-        ? new Response(JSON.stringify({ permissions: [], grants: [] }), {
-            status: 200,
-            headers: { "content-type": "application/json" },
-          })
+        ? permissionsResponse(["server:read"])
         : new Response(null, { status: 401 });
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -549,6 +561,49 @@ describe("CommunityEventsClient", () => {
     expect(onAccessLost).not.toHaveBeenCalled();
     client.close();
   });
+
+  // The permissions read is membership-gated, so a member who lost
+  // `server:read` still gets a 200 (#3426). The socket's gate is community-level
+  // `server:read`: the member's role codes, never a per-server grant.
+  it.each([
+    ["holds community-level server:read", ["server:read"], [], "keeps it"],
+    ["lacks server:read", ["member:read"], [], "loses it"],
+    [
+      "holds server:read only through a per-server grant",
+      [],
+      [
+        {
+          resource_type: "server",
+          resource_id: "s1",
+          permissions: ["server:read"],
+        },
+      ],
+      "loses it",
+    ],
+  ])(
+    "the probe after three failed handshakes: a member who %s %s",
+    async (_label, permissions, grants, outcome) => {
+      const accessLost = outcome === "loses it";
+      const fetchMock = vi.fn(async () =>
+        permissionsResponse(permissions, grants),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+      const { client, onAccessLost } = makeClient();
+      client.start();
+
+      for (let i = 0; i < 3; i++) {
+        MockWebSocket.last().fail();
+        await vi.advanceTimersByTimeAsync(30000);
+      }
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(onAccessLost).toHaveBeenCalledTimes(accessLost ? 1 : 0);
+      // Lost access stops after the three refused handshakes; kept access
+      // goes on reconnecting on the backoff.
+      expect(MockWebSocket.instances).toHaveLength(accessLost ? 3 : 4);
+      client.close();
+    },
+  );
 
   it("ignores a rotation to the same token", () => {
     const { client } = makeClient();

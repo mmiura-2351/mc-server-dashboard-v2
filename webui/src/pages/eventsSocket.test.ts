@@ -22,7 +22,7 @@ describe("EventsSocketClient close policy", () => {
     vi.useRealTimers();
   });
 
-  function makeClient(probeAccess: () => Promise<unknown> = async () => ({})) {
+  function makeClient(probeAccess: () => Promise<boolean> = async () => true) {
     const callbacks = {
       onMessage: vi.fn(),
       onOpen: vi.fn(),
@@ -124,6 +124,19 @@ describe("EventsSocketClient close policy", () => {
     },
   );
 
+  // A probe can answer 200 and still say the stream is refused: the community
+  // stream's permissions read does, for a member without `server:read`.
+  it("stops reconnecting when the probe resolves that access is gone", async () => {
+    const { client, onAccessLost } = makeClient(async () => false);
+
+    await failHandshakes(3);
+    await vi.advanceTimersByTimeAsync(120000);
+
+    expect(onAccessLost).toHaveBeenCalledTimes(1);
+    expect(MockWebSocket.instances).toHaveLength(3);
+    client.close();
+  });
+
   // A probe answers about the moment it was sent: a denial that lands after a
   // later handshake opened is stale and must not stop the recovered socket.
   it.each([403, 404])(
@@ -152,7 +165,7 @@ describe("EventsSocketClient close policy", () => {
   );
 
   it.each([
-    ["succeeds", async () => ({})],
+    ["succeeds", async () => true],
     [
       "fails on the network",
       async () => {
