@@ -206,6 +206,27 @@ instead of reporting a failed connection. A server that ran the command and
 then crashed looks the same, so the line says the outcome is unknown and asks
 the user to check the console output and server state before retrying.
 
+**A refused `server.properties`.** The server's own code can replace its
+`server.properties` with a symbolic link, a FIFO or other special file, or a
+file over 4 MiB, and the host then refuses to read it (`SECURITY.md`
+Section 6). A start, a restart (on its relaunch), a console command and a
+backup of the running server each need that file, and each fails with `409`
+`server_properties_unreadable` (`CONTROL_PLANE.md` Section 7) instead of
+`command_failed`. The response carries only the reason: which refusal it was,
+and the host path, stay in the logs, and nothing of the file's content is ever
+sent. The lifecycle toast and the Console line tell the user to restore a
+regular `server.properties` while the server is stopped, giving a backup
+restore as the example. They do not point at the Files tab: a snapshot leaves a
+link or special file out, so the stored copy then has no `server.properties`
+at all, and the Files tab refuses to recreate the platform-managed keys
+(`rcon.password` among them) that a backup restore re-applies. The Backups tab
+says a stopped server can still be backed up, since that backup needs no
+console connection. A graceful **stop** of such a server is not refused: it
+skips the final save-all the platform sends first, which needs RCON, and falls
+back to a stop signal, which may end the server before its own shutdown save
+completes (issue #3436), so changes since the last autosave can be lost. The
+stop answers `200` as usual; only the host log says the flush was skipped.
+
 **Storage outages on the working-set routes.** When the store holding a
 server's working set cannot serve the request, the routes whose failure is safe
 to retry answer **503 `storage_unavailable`** — retry the same request
@@ -961,7 +982,10 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   `worker_busy` / `server_busy` say another operation on the server is still
   running and the request was refused without being applied, so the operator
   retries in a moment; the sanitized start/restart-failure categories
-  `port_conflict` / `image_missing` name the cause the Worker classified;
+  `port_conflict` / `image_missing` name the cause the Worker classified, and
+  `server_properties_unreadable` says the server's `server.properties` is not a
+  regular file or is too large and must be restored (Section 2, "A refused
+  `server.properties`");
   `command_failed`, the catch-all for a dispatch failure the Worker did not
   classify, says the action did not go through and sends the operator to check
   the server's state — a failed start is compensated back, but a failed stop or

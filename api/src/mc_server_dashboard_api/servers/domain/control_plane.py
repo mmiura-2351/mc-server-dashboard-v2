@@ -95,6 +95,10 @@ class CommandStatus(enum.Enum):
     # The game server closed its RCON connection without replying to a console
     # command (issue #3366): the command was dropped, the server was reached.
     COMMAND_DROPPED = "command_dropped"
+    # The server's server.properties is not a regular file or is too large for the
+    # Worker to read (issue #3347), so a start, a restart's relaunch, a console
+    # command or a running snapshot could not use it.
+    SERVER_PROPERTIES_UNREADABLE = "server_properties_unreadable"
 
 
 class FileAccessReason(enum.Enum):

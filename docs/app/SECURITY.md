@@ -755,7 +755,14 @@ accepted is never refused for its size): a `server.properties` replaced by a lin
 another server's file is refused rather than read, so that server's RCON
 password is never sent to the container that planted the link, and the refusal
 fails the operation (a start, a tunnel dial, an RCON open) instead of falling
-back to a default port or password.
+back to a default port or password. That failure is reported as its own error
+code, `SERVER_PROPERTIES_UNREADABLE` ([`CONTROL_PLANE.md`](CONTROL_PLANE.md)
+Section 7), which the API answers `409 server_properties_unreadable` without
+the message: the reason reaches the user, while the host path the message names
+stays in the logs and nothing of the file's content is sent anywhere. A graceful
+stop is the exception: it is not refused, but it skips the RCON flush and stops
+the server by signal, which may end the server before its own shutdown save
+completes (issue #3436), so changes since the last autosave can be lost.
 The worker's generation marker (`.mcsd_generation`, in the working-set root —
 its record of which store generation the set is at) is touched the same way
 (issue #3336). It is read through that same reader with a 32-byte cap (a

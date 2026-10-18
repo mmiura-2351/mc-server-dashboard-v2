@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 )
 
 // These tests pin the reader against what a server can plant at
@@ -312,4 +314,60 @@ func TestReadLeavesNoDescriptorOpen(t *testing.T) {
 	if after := openFds(); after != before {
 		t.Errorf("open descriptors: %d before, %d after", before, after)
 	}
+}
+
+// Every refusal of the file itself is one condition for the callers that report
+// it (issue #3347): a start, a restart's relaunch or a console command answers it
+// with its own error code, so the user is told why instead of seeing a generic
+// failure. An absent file is not that condition: callers with defaults take them.
+func TestReadRefusalsAreServerPropertiesUnreadable(t *testing.T) {
+	for name, plant := range map[string]func(t *testing.T, path string){
+		"symlink": func(t *testing.T, path string) {
+			if err := os.Symlink(outsideFile(t), path); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"fifo": func(t *testing.T, path string) {
+			if err := unix.Mkfifo(path, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"socket": func(t *testing.T, path string) {
+			fd, err := unix.Socket(unix.AF_UNIX, unix.SOCK_STREAM, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = unix.Close(fd) })
+			if err := unix.Bind(fd, &unix.SockaddrUnix{Name: path}); err != nil {
+				t.Skipf("cannot bind a socket at %s: %v", path, err)
+			}
+		},
+		"directory": func(t *testing.T, path string) {
+			if err := os.Mkdir(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"over the cap": func(t *testing.T, path string) {
+			if err := os.WriteFile(path, make([]byte, MaxSize+1), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			plant(t, filepath.Join(dir, FileName))
+			data, err := readWithin(t, dir)
+			assertRefused(t, data, err)
+			if !errors.Is(err, execution.ErrServerPropertiesUnreadable) {
+				t.Errorf("Read error = %v, want it to be execution.ErrServerPropertiesUnreadable", err)
+			}
+		})
+	}
+
+	t.Run("absent", func(t *testing.T) {
+		_, err := readWithin(t, t.TempDir())
+		if errors.Is(err, execution.ErrServerPropertiesUnreadable) {
+			t.Errorf("Read error = %v; an absent file is not a refused one", err)
+		}
+	})
 }

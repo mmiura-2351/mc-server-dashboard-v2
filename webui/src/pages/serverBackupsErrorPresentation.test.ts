@@ -15,6 +15,13 @@ describe("backupErrorPresentation", () => {
     [409, "server_not_stopped", "backups.error.serverMustBeStopped"],
     [409, "server_busy", "backups.error.serverBusy"],
     [409, "worker_busy", "backups.error.serverBusy"],
+    // A running server's backup cannot quiesce the world when its
+    // server.properties is refused (issue #3347).
+    [
+      409,
+      "server_properties_unreadable",
+      "backups.error.serverPropertiesUnreadable",
+    ],
     [422, "invalid_archive", "backups.error.invalidArchive"],
     [422, "platform_managed_path", "backups.error.platformManagedPath"],
     [503, "worker_unavailable", "backups.error.workerUnavailable"],

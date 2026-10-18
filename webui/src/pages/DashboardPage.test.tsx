@@ -366,6 +366,30 @@ describe("DashboardPage lifecycle actions", () => {
     ).toBeInTheDocument();
   });
 
+  // A symlinked or oversized server.properties (issue #3347): the user is told
+  // to restore a regular file, not left with the generic state-changed toast.
+  it("surfaces a specific message for a 409 server_properties_unreadable start failure", async () => {
+    mockApi.get.mockResolvedValue([
+      server({ observed_state: "stopped", desired_state: "stopped" }),
+    ]);
+    mockApi.post.mockRejectedValue(
+      new ApiError(409, { reason: "server_properties_unreadable" }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    fireEvent.click(screen.getByRole("button", { name: t("dashboard.start") }));
+
+    expect(
+      await screen.findByText(
+        t("dashboard.lifecycle.serverPropertiesUnreadable"),
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("dashboard.stateChanged")),
+    ).not.toBeInTheDocument();
+  });
+
   it("falls back to a generic toast for other errors", async () => {
     mockApi.get.mockResolvedValue([server({ observed_state: "running" })]);
     mockApi.post.mockRejectedValue(

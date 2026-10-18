@@ -8,9 +8,10 @@
  * `port_conflict` / `image_missing` (issue #225), `server_unsettled` — the
  * at-rest precondition on the export mint (issue #2360) — the two contention
  * reasons `worker_busy` / `server_busy` (issue #2400), the unclassified
- * dispatch failure `command_failed` (issue #2420), and `failed_stop_orphan` —
+ * dispatch failure `command_failed` (issue #2420), `failed_stop_orphan` —
  * a Worker that could not confirm an earlier stop, so the server's process is
- * probably still running (issue #2466).
+ * probably still running (issue #2466) — and `server_properties_unreadable`,
+ * a `server.properties` the Worker refuses to read (issue #3347).
  *
  * Three reasons keep the state-changed treatment: `invalid_transition`,
  * `transition_conflict` and `server_not_running` each mean the server really
@@ -96,6 +97,16 @@ export type LifecycleAction = "start" | "stop" | "restart";
 // converging it on its own (issue #2475), and that holds whichever verb was
 // refused, so it lives here rather than in VERB_SPECIFIC_409_MESSAGE.
 //
+// `server_properties_unreadable` is the Worker refusing the server's
+// `server.properties` — a symlink, a FIFO or other special file, or a file over
+// its 4 MiB read cap — so it could not take the ports for a start or a restart's
+// relaunch (issue #3347). The two refusals arrive as this one reason. The remedy
+// is the same whatever the verb: restore a regular file while the server is
+// stopped. The message suggests a backup restore rather than the Files tab: a
+// snapshot leaves a symlink or special file out, so the stored copy then has no
+// server.properties at all, and the Files tab refuses to recreate the
+// platform-managed keys (rcon.password among them) a backup restore re-applies.
+//
 // The refetch is deliberately kept (issue #2420): it is not a side effect of
 // this mapping — every lifecycle mutation invalidates in `onSettled` regardless
 // of outcome (useLifecycleMutation.ts) — and for the stop and
@@ -109,6 +120,8 @@ const SPECIFIC_409_MESSAGE: Record<string, TranslationKey> = {
   server_busy: "dashboard.lifecycle.busy",
   command_failed: "dashboard.lifecycle.commandFailed",
   failed_stop_orphan: "dashboard.lifecycle.failedStopOrphan",
+  server_properties_unreadable:
+    "dashboard.lifecycle.serverPropertiesUnreadable",
 };
 
 // Reasons whose honest message depends on the verb, consulted before

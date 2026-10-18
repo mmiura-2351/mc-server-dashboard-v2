@@ -9,11 +9,13 @@ command failure 409, not-running 409), and the success serialisation.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import json
 import uuid
 from pathlib import Path
 
+import httpx2
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -38,8 +40,13 @@ from mc_server_dashboard_api.dependencies import (
     get_start_server,
     get_stop_server,
 )
+from mc_server_dashboard_api.servers.application.lifecycle import (
+    SendServerCommand,
+    StartServer,
+)
 from mc_server_dashboard_api.servers.domain.control_plane import (
     MAX_CONSOLE_LINE_BYTES,
+    CommandOutcome,
     WorkerUnavailableError,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
@@ -63,8 +70,18 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerId,
     ServerName,
     ServerType,
+    WorkerId,
 )
 from tests.client_utils import enter_client
+from tests.servers.contract_table import worker_status
+from tests.servers.fakes import (
+    FakeClock,
+    FakeControlPlane,
+    FakeFileStore,
+    FakeJarProvisioner,
+    FakeStoreGenerationReader,
+    FakeUnitOfWork,
+)
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 
@@ -431,6 +448,104 @@ def test_command_not_running_is_409() -> None:
     )
     assert resp.status_code == 409
     assert resp.json()["reason"] == "server_not_running"
+
+
+# --- a refused server.properties (issue #3347) -------------------------------
+
+# The planted file's content and where the Worker found it. The Worker's message
+# names the path (never the content); neither may reach the HTTP response.
+_SCRATCH_PATH = "/var/lib/mcsd/scratch/s1/server.properties"
+_PLANTED_CONTENT = "rcon.password=the-other-servers-password"
+
+# The Worker's reader message for the two refusals the issue names. A message
+# that carried file content would be a Worker bug; the API must not echo even
+# that, so one case embeds the content to prove the response drops it.
+_REFUSED_PROPERTIES = {
+    "symlink": f"serverproperties: {_SCRATCH_PATH} is a symbolic link; "
+    "refusing to follow it",
+    "oversized": f"serverproperties: {_SCRATCH_PATH} is larger than 4194304 "
+    f"bytes; refusing to read it ({_PLANTED_CONTENT})",
+}
+
+
+def _assert_names_the_refusal_only(resp: httpx2.Response) -> None:
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["reason"] == "server_properties_unreadable"
+    assert body["type"] == "urn:mcsd:error:server_properties_unreadable"
+    # Nothing of the Worker's message: no path outside the working set, no content.
+    assert _SCRATCH_PATH not in resp.text
+    assert "scratch" not in resp.text
+    assert _PLANTED_CONTENT not in resp.text
+    assert "symbolic link" not in resp.text
+
+
+@pytest.mark.parametrize("refusal", sorted(_REFUSED_PROPERTIES))
+def test_start_with_a_refused_server_properties_is_409_naming_it(
+    refusal: str,
+) -> None:
+    # The real StartServer use case behind the route, the Worker answering the
+    # start with the code it emits for this precondition (the contract row).
+    community = uuid.uuid4()
+    server = dataclasses.replace(
+        _server(community),
+        desired_state=DesiredState.STOPPED,
+        observed_state=ObservedState.STOPPED,
+    )
+    uow = FakeUnitOfWork()
+    uow.servers.seed(server)
+    cp = FakeControlPlane(
+        place_to=WorkerId(uuid.uuid4()),
+        outcomes={
+            "start": CommandOutcome(
+                status=worker_status("StartServer", "server_properties_unreadable"),
+                message="instancemanager: start: containerdriver: "
+                + _REFUSED_PROPERTIES[refusal],
+            )
+        },
+    )
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
+    )
+    app = _app(member=True, allow=True)
+    _shared_app.dependency_overrides[get_start_server] = lambda: use_case
+
+    resp = _client(app).post(_url(community, server.id.value, "start"))
+
+    _assert_names_the_refusal_only(resp)
+
+
+@pytest.mark.parametrize("refusal", sorted(_REFUSED_PROPERTIES))
+def test_command_with_a_refused_server_properties_is_409_naming_it(
+    refusal: str,
+) -> None:
+    community = uuid.uuid4()
+    server = dataclasses.replace(
+        _server(community), assigned_worker_id=WorkerId(uuid.uuid4())
+    )
+    uow = FakeUnitOfWork()
+    uow.servers.seed(server)
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(
+            status=worker_status("ServerCommand", "server_properties_unreadable"),
+            message="instancemanager: open rcon: rcon: read server.properties: "
+            + _REFUSED_PROPERTIES[refusal],
+        )
+    )
+    use_case = SendServerCommand(uow=uow, control_plane=cp)
+    app = _app(member=True, allow=True)
+    _shared_app.dependency_overrides[get_send_server_command] = lambda: use_case
+
+    resp = _client(app).post(
+        _url(community, server.id.value, "command"), json={"line": "list"}
+    )
+
+    _assert_names_the_refusal_only(resp)
 
 
 # --- console line bound (issue #3363) ---------------------------------------
