@@ -18,7 +18,7 @@ dependencies = [
     # next minor; 1.x+/2.x cap the next major (docs/dev/DEPENDENCIES.md Section 1). All
     # versions respect the 7-day cooldown (Section 3): released on/before
     # 2026-05-28 as of this change.
-    "fastapi>=0.136.3,<0.143",          # 2026-05-23
+    "fastapi>=0.136.3,<0.144",          # 2026-05-23
     "uvicorn>=0.48.0,<0.55",            # 2026-05-24
     # Structured-concurrency primitives. Already in the tree through Starlette,
     # which cancels a streaming response through an anyio cancel scope when the
