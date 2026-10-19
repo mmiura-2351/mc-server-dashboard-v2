@@ -388,10 +388,15 @@ hydrate, and so every start, fail on the marker write.
 
 Restoring a backup **already stored** — one created or uploaded before the name
 was reserved — is not refused for such an entry: refusing would leave that backup
-unrestorable. Instead `restore_backup` leaves out every archive member at, or
-under, a root name starting `.mcsd_generation` before publication, on both
-backends, and logs one `WARNING` naming the backup and how many members it
-dropped. A nested same-named member is restored as usual. The dropped entries are
+unrestorable. Instead `restore_backup` leaves out every archive member that
+lands at, or under, a root name starting `.mcsd_generation` before publication,
+on both backends, and logs one `WARNING` naming the backup and how many members
+it dropped. "Lands" is decided after the member passes the extraction's safety
+check, on the name as extraction resolves it: the fs extractor strips a leading
+`/` and admits an in-tree `..`, so `/.mcsd_generation/x` and
+`world/../.mcsd_generation/x` are dropped too (the object backend refuses both
+spellings outright as traversal). The fs backup health check shares that
+extractor, so it judges exactly what a restore would publish. A nested same-named member is restored as usual. The dropped entries are
 inert anyway — the Worker would skip them on unpack — so dropping them only keeps
 them out of `current/`.
 

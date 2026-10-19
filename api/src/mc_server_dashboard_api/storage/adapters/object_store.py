@@ -2416,8 +2416,10 @@ async def _archive_file_member_streams(
     framing — raises :class:`ArchiveUnreadableError` (issue #3230), from the
     member walk or from a member's chunk stream.
 
-    With ``dropped``, a member at or under the reserved generation-marker root
-    name — of any type — is not yielded but its name appended (issue #3433).
+    With ``dropped``, a member landing at or under the reserved generation-marker
+    root name — of any type — is not yielded but its name appended (issue #3433).
+    A file member's name is traversal-checked first, so only a relative,
+    ``..``-free name reaches that decision.
     """
 
     with archive_read_errors_as_unreadable():
@@ -2428,16 +2430,19 @@ async def _archive_file_member_streams(
                 member = await asyncio.to_thread(tar.next)
             if member is None:
                 return
+            if member.isfile():
+                pure = PurePosixPath(member.name)
+                if pure.is_absolute() or ".." in pure.parts:
+                    raise PathTraversalError(
+                        f"tar member escapes the server prefix: {member.name!r}"
+                    )
+            # Decided after the traversal check, on the name the member resolves
+            # to, so an absolute or ``..`` file member is refused, not dropped.
             if dropped is not None and is_reserved_root_member(member.name):
                 dropped.append(member.name)
                 continue
             if not member.isfile():
                 continue
-            pure = PurePosixPath(member.name)
-            if pure.is_absolute() or ".." in pure.parts:
-                raise PathTraversalError(
-                    f"tar member escapes the server prefix: {member.name!r}"
-                )
             member_file = tar.extractfile(member)
             if member_file is None:
                 continue

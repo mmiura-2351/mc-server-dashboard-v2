@@ -2782,10 +2782,14 @@ def _extract_tar_gz_into(archive: Path, dest: Path, max_bytes: int) -> int:
             tarfile.open(archive, mode="r:gz") as tar,
         ):
             for member in tar:
-                if is_reserved_root_member(member.name):
+                # Filtered first, so the decision is on the name the extractor
+                # resolves (``data_filter`` strips a leading slash and admits an
+                # in-tree ``..``), not on the raw member name.
+                safe = _plain_member_filter(member, str(dest))
+                if is_reserved_root_member(safe.name):
                     dropped += 1
                     continue
-                total = _extract_member_capped(tar, member, dest, total, max_bytes)
+                total = _extract_member_capped(tar, safe, dest, total, max_bytes)
     except tarfile.FilterError as exc:
         raise ArchiveUnreadableError(
             f"archive holds a member that cannot be restored: {exc}"
@@ -2795,12 +2799,12 @@ def _extract_tar_gz_into(archive: Path, dest: Path, max_bytes: int) -> int:
 
 def _extract_member_capped(
     tar: tarfile.TarFile,
-    member: tarfile.TarInfo,
+    safe: tarfile.TarInfo,
     dest: Path,
     total: int,
     max_bytes: int,
 ) -> int:
-    """Extract one member under the ingest filter, counting drained file bytes.
+    """Extract one already-filtered member, counting drained file bytes.
 
     A file member's body is drained in bounded chunks and written out; the running
     decompressed total is checked after every chunk so a single high-ratio member
@@ -2808,9 +2812,9 @@ def _extract_member_capped(
     hand bypasses ``extractall``, so the member's sanitized mode/mtime are reapplied
     afterwards. A directory member carries no body, so it extracts through the
     filter with no contribution to the count. Returns the updated running total.
+    ``safe`` has passed :func:`_plain_member_filter` already.
     """
 
-    safe = _plain_member_filter(member, str(dest))
     if not safe.isfile():
         tar.extract(safe, dest, filter="data")
         return total

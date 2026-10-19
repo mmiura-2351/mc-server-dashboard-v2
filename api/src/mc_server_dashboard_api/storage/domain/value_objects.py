@@ -16,6 +16,7 @@ job (it needs real I/O), so it lives in :mod:`...adapters.fs`.
 
 from __future__ import annotations
 
+import posixpath
 import re
 import uuid
 from dataclasses import dataclass
@@ -112,13 +113,20 @@ _GENERATION_MARKER_PREFIX = ".mcsd_generation"
 
 
 def is_reserved_root_member(name: str) -> bool:
-    """True if archive member ``name`` is, or lies under, a reserved root entry.
+    """True if archive member ``name`` lands at, or under, a reserved root entry.
 
     The working-set root name carrying the Worker's generation-marker prefix
     (issue #3433). A same-named entry deeper in the tree is world data.
+
+    The decision is on where the member LANDS, normalised the way the restore
+    extraction (``tarfile.data_filter``) resolves it: leading slashes stripped and
+    in-tree ``..`` collapsed, so ``/.mcsd_generation/x`` and
+    ``world/../.mcsd_generation/x`` are reserved too. Call it only on a name the
+    caller's traversal check has accepted: a name escaping the root normalises
+    to a leading ``..``, which this does not call reserved.
     """
 
-    parts = PurePosixPath(name).parts
+    parts = PurePosixPath(posixpath.normpath(name.lstrip("/") or ".")).parts
     return bool(parts) and parts[0].startswith(_GENERATION_MARKER_PREFIX)
 
 
