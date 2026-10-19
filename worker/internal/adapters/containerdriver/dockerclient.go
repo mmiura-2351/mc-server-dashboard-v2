@@ -9,8 +9,10 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -318,6 +320,33 @@ func (c *EngineClient) Stop(ctx context.Context, id string, timeout time.Duratio
 func (c *EngineClient) Terminate(ctx context.Context, id string) error {
 	q := url.Values{"signal": {"SIGTERM"}}
 	return c.do(ctx, http.MethodPost, "/containers/"+id+"/kill", q, nil, nil)
+}
+
+// HandOff sends `docker stop` with grace and returns once the request is on the
+// wire (or answered, or ctx ends), leaving the call running on a detached context
+// until the daemon answers or the process exits. Docker Engine finishes a stop
+// whose client disconnects — verified on 29.5.3: a stop?t=6 whose client hung up
+// after 1 s still SIGKILLed its container at 6 s — so once the daemon has the
+// request, the SIGKILL is the daemon's to send (issue #3436).
+func (c *EngineClient) HandOff(ctx context.Context, id string, grace time.Duration) error {
+	written := make(chan struct{})
+	var once sync.Once
+	trace := &httptrace.ClientTrace{WroteRequest: func(info httptrace.WroteRequestInfo) {
+		if info.Err == nil {
+			once.Do(func() { close(written) })
+		}
+	}}
+	reqCtx := httptrace.WithClientTrace(context.WithoutCancel(ctx), trace)
+	answered := make(chan error, 1)
+	go func() { answered <- c.Stop(reqCtx, id, grace) }()
+	select {
+	case <-written:
+		return nil
+	case err := <-answered:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // Kill force-terminates a container.

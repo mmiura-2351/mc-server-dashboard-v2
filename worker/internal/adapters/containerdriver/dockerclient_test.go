@@ -327,6 +327,35 @@ func TestEngineClientTerminateSendsSIGTERM(t *testing.T) {
 	}
 }
 
+// HandOff returns as soon as the daemon has the stop request, without waiting for
+// its answer (which comes only when the container exits), so a Worker that is
+// shutting down can leave the SIGKILL with the daemon (issue #3436).
+func TestEngineClientHandOffReturnsOnceTheDaemonHasTheRequest(t *testing.T) {
+	release := make(chan struct{})
+	got := make(chan string, 1)
+	d := startFakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		got <- r.Method + " " + r.URL.Path + "?" + r.URL.RawQuery
+		<-release
+		w.WriteHeader(http.StatusNoContent)
+	})
+	t.Cleanup(func() { close(release) })
+	c := d.client(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := c.HandOff(ctx, "abc123", 345*time.Second); err != nil {
+		t.Fatalf("HandOff: %v", err)
+	}
+	select {
+	case req := <-got:
+		if !strings.HasPrefix(req, "POST ") || !strings.HasSuffix(req, "/containers/abc123/stop?t=345") {
+			t.Fatalf("request = %q, want POST .../containers/abc123/stop?t=345", req)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the daemon never received the stop request")
+	}
+}
+
 func TestEngineClientListFiltersByLabel(t *testing.T) {
 	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode([]map[string]any{

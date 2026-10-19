@@ -83,8 +83,11 @@ type fakeDocker struct {
 	// terminates Terminate calls (SIGTERM alone) (issue #3436).
 	daemonStops int
 	terminates  int
-	killCalled  bool
-	killCalls   int
+	// handOffs records each HandOff (a Worker shutdown giving a stop to the
+	// daemon, issue #3436) with the grace it passed.
+	handOffs   []handOffCall
+	killCalled bool
+	killCalls  int
 	// killNoExit models a container that survives docker kill: Kill records the
 	// call but does not release Wait, so the post-Kill waitExit times out.
 	killNoExit bool
@@ -235,6 +238,27 @@ func (f *fakeDocker) Terminate(ctx context.Context, id string) error {
 	f.terminates++
 	f.mu.Unlock()
 	return f.term(ctx, id)
+}
+
+// handOffCall is one recorded HandOff.
+type handOffCall struct {
+	id    string
+	grace time.Duration
+}
+
+// HandOff records the hand-off and leaves the container as it is: the daemon's
+// kill lands only once the grace runs out, which no test waits for.
+func (f *fakeDocker) HandOff(_ context.Context, id string, grace time.Duration) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.handOffs = append(f.handOffs, handOffCall{id: id, grace: grace})
+	return nil
+}
+
+func (f *fakeDocker) handOffCalls() []handOffCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]handOffCall(nil), f.handOffs...)
 }
 
 func (f *fakeDocker) daemonStopCalled() bool {
