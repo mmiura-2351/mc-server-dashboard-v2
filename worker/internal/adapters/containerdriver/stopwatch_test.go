@@ -505,3 +505,33 @@ func TestStopStartedAfterShutdownHandsItselfOff(t *testing.T) {
 		t.Fatalf("hand-offs = %+v, want one for container-1 with about the %v cap", got, defaultStopCap)
 	}
 }
+
+// Once the escalation starts, the hand-off grace narrows to the cap from there:
+// the flush's unspent budget is no longer something the Worker's stop could use.
+func TestHandOffAfterTheFlushNarrowsToTheCap(t *testing.T) {
+	docker := newFakeDocker()
+	docker.stopNoExit = true
+	release := make(chan struct{})
+	flushing := make(chan struct{})
+	flush := func(context.Context) bool {
+		close(flushing)
+		<-release
+		return false // the flush could not settle; the stop escalates
+	}
+	r := startStopRunWith(t, docker, nil, errors.New("rcon unavailable"), (&fakeWorld{}).probe,
+		func(f func()) { f() }, flush)
+	<-flushing
+	r.clock.advance(30 * time.Second) // the flush spends 30 s of its 90 s budget
+	close(release)
+	if r.awaitWaiting() {
+		t.Fatalf("Stop returned before waiting: %v", r.err)
+	}
+
+	if err := r.d.HandOffStops(context.Background()); err != nil {
+		t.Fatalf("HandOffStops: %v", err)
+	}
+	want := handOffCall{id: "container-1", grace: testCap}
+	if got := docker.handOffCalls(); len(got) != 1 || got[0] != want {
+		t.Fatalf("hand-offs = %+v, want %+v (the cap from the escalation's start)", got, want)
+	}
+}

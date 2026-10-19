@@ -725,6 +725,27 @@ over RCON (up to 30 s), so the full round trip of a `StopServer` is at most
 A test (`TestComposeWorkerStopGraceCoversClose`, `worker/cmd/worker`) fails if
 the compose value ever falls below the Worker's computed bound.
 
+**When the Worker shuts down mid-stop.** The final SIGKILL is the Worker's to
+send, and an operator's stop is not one the Worker's shutdown waits for (only a
+retry stop is). So at shutdown, before anything else, the Worker hands every
+stop still in flight to the Docker daemon. It sends `docker stop` with the grace
+that stop had left: up to the flush budget plus the cap while the flush is
+running, and the cap's remainder once the escalation has started. Docker
+finishes a stop even after the client that sent it has gone (verified on Docker
+29.5.3). So whatever happens to the Worker afterwards, the daemon SIGKILLs a
+server that has not exited when that grace runs out. A stop that starts after
+the hand-off hands itself off at once. One `WARN` line per stop,
+`worker shutting down mid-stop: the docker daemon now owns the kill`, records
+the grace it was given. While the Worker process is still up, its own stop keeps
+running and may still end the server sooner.
+
+Two cases are not covered. A hand-off that fails (the daemon is unreachable, or
+it does not answer within 5 s) is logged, and the server is then left to the
+next Worker boot's sweep. A Worker that is SIGKILLed or crashes runs no shutdown
+at all, so the same sweep is the backstop. A server that keeps running past the
+hand-off is not lost: its stop's result just never reaches the API, which
+converges the server's row through the reconciler once the Worker reconnects.
+
 #### Per-server memory limit: per-driver guarantee
 
 A server's `memory_limit_mb` (the operator-set per-server limit,

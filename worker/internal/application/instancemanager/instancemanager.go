@@ -616,7 +616,9 @@ func (m *Manager) goBackground(fn func()) bool {
 // returns, at any value. Closing that one is a change to the lanes, not to this
 // timer (#3168) — though the auto-save half of it is already covered, because the
 // drain above is keyed on the outstanding save-off rather than on which lane
-// issued it.
+// issued it, and so is its kill: Close hands every stop in flight, joined or not,
+// to the driver's backend first (StopHandOff, issue #3436), so the daemon still
+// SIGKILLs a server that never finishes after the Worker is gone.
 //
 // TWO CASES REMAIN UNCOVERED, by the drain and by the timer alike, because neither
 // is a shutdown: a host power loss inside the bracket, and the MC server crashing
