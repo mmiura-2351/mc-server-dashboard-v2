@@ -82,6 +82,12 @@ type dockerAPI interface {
 	// to the caller: a graceful stop escalates on the world's write progress
 	// rather than a fixed grace (issue #3436).
 	Terminate(ctx context.Context, id string) error
+	// HandOff asks the daemon to stop the container with the given grace (the
+	// `docker stop` semantics: SIGTERM, then SIGKILL once grace runs out) and
+	// returns as soon as the daemon has the request, without waiting for the exit.
+	// The daemon finishes a stop whose client has gone away, so the kill no longer
+	// depends on the Worker staying up (issue #3436).
+	HandOff(ctx context.Context, id string, grace time.Duration) error
 	// Kill force-terminates a container (SIGKILL).
 	Kill(ctx context.Context, id string) error
 	// Wait blocks until the container exits and returns its exit code.

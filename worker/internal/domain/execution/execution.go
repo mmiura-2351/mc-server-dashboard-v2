@@ -250,6 +250,17 @@ type ExecutionDriver interface { //nolint:revive // documented Port name (FR-EXE
 	Start(ctx context.Context, spec InstanceSpec) (Instance, error)
 }
 
+// StopHandOff is implemented by a driver that escalates a stop from inside the
+// Worker process (issue #3436): once the Worker exits, nothing of its own is left
+// to send the final kill. HandOffStops gives every stop still in flight to the
+// backend instead, so the backend kills the server when the stop's remaining grace
+// runs out even if the Worker is gone by then, and every stop that starts later
+// hands itself off at once. It returns once each hand-off has reached the backend
+// or ctx ends. Manager.Close calls it as the Worker shuts down.
+type StopHandOff interface {
+	HandOffStops(ctx context.Context) error
+}
+
 // Instance is a launched server handle. Its Events channel delivers state
 // transitions including the crash notification (process exit → StateCrashed
 // unless a Stop is in flight). The channel closes when the instance reaches a

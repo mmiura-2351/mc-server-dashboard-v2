@@ -635,6 +635,16 @@ func (m *Manager) Close() {
 	m.mu.Lock()
 	m.closed = true
 	m.mu.Unlock()
+	// Hand every stop still in flight to its backend FIRST (issue #3436). A driver
+	// that escalates a stop from inside this process would otherwise take the final
+	// SIGKILL down with it: an operator stop rides a session lane nothing joins
+	// (#3168), so the Worker can exit seconds into it, and a hung server would stay
+	// up until the next boot's Sweep. The hand-off runs beside the rest of Close and
+	// is bounded by stopHandOffTimeout, so it adds nothing to CloseBound; Close
+	// returns only once it is done, so the request reaches the daemon before the
+	// process exits.
+	handOffs := m.handOffStops()
+	defer handOffs.Wait()
 	m.stopBackground()
 	// Settle the outstanding save-off debts BESIDE the join, never in front of it
 	// (issue #3166). Started here, each restore overlaps the escalation Close is
@@ -973,6 +983,36 @@ func (m *Manager) recordGenerationIfUnchanged(ctx context.Context, ref *workingD
 // timed-out request still re-enables auto-save), and must therefore carry its own
 // deadline so the call cannot hang the goroutine forever.
 const restoreSaveTimeout = 30 * time.Second
+
+// stopHandOffTimeout bounds the hand-off Close asks of each driver (issue #3436):
+// one Engine API request per stop in flight, which a healthy daemon receives in
+// milliseconds. It runs beside Close's join, so it never lengthens CloseBound.
+const stopHandOffTimeout = 5 * time.Second
+
+// handOffStops starts, for each driver that implements execution.StopHandOff, the
+// hand-off of its stops in flight, and returns the group to join. A failure is
+// logged: the stop goes on in this process for as long as it lives, and the next
+// boot's Sweep is the backstop.
+func (m *Manager) handOffStops() *sync.WaitGroup {
+	var wg sync.WaitGroup
+	for name, d := range m.drivers {
+		h, ok := d.(execution.StopHandOff)
+		if !ok {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), stopHandOffTimeout)
+			defer cancel()
+			if err := h.HandOffStops(ctx); err != nil {
+				m.logger.Warn("shutdown: could not hand every stop in flight to the driver's backend",
+					"driver", name, "error", err)
+			}
+		}()
+	}
+	return &wg
+}
 
 // CloseBound is Manager.Close's worst case on a driver whose longest stop is
 // maxStop: a retry stop already inside inst.Stop, then the save-on restore a

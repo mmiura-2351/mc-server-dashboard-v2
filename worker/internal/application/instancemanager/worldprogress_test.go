@@ -1,9 +1,11 @@
 package instancemanager
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -65,5 +67,39 @@ func TestWorldProgressReportsAFailedScan(t *testing.T) {
 
 	if _, err := m.worldProgress(t.TempDir())(); !errors.Is(err, boom) {
 		t.Fatalf("probe error = %v, want %v", err, boom)
+	}
+}
+
+// handOffDriver is a fakeDriver whose stops escalate in-process, so the manager
+// must hand them to the backend when it closes (execution.StopHandOff).
+type handOffDriver struct {
+	fakeDriver
+	calls    atomic.Int32
+	deadline atomic.Bool
+}
+
+func (d *handOffDriver) HandOffStops(ctx context.Context) error {
+	d.calls.Add(1)
+	if dl, ok := ctx.Deadline(); ok && time.Until(dl) <= stopHandOffTimeout {
+		d.deadline.Store(true)
+	}
+	return nil
+}
+
+// Close hands the driver's stops in flight to its backend (issue #3436 review): an
+// operator stop rides a lane Close never joins (#3168), so without the hand-off a
+// Worker shutdown mid-stop took the stop's final SIGKILL down with the process.
+// The hand-off is bounded, so a wedged daemon cannot hold the shutdown.
+func TestCloseHandsStopsInFlightToTheDriver(t *testing.T) {
+	d := &handOffDriver{}
+	m := newManager(t, d, nil)
+	startRunning(t, m)
+
+	m.Close()
+	if d.calls.Load() == 0 {
+		t.Fatal("Close did not hand the driver's stops in flight to its backend")
+	}
+	if !d.deadline.Load() {
+		t.Fatalf("Close's hand-off carries no deadline within %v", stopHandOffTimeout)
 	}
 }

@@ -67,6 +67,7 @@ func (c *stopClock) advance(d time.Duration) {
 // poll and reports whether Stop has returned.
 type stopRun struct {
 	t     *testing.T
+	d     *Driver
 	clock *stopClock
 	done  chan error
 	err   error
@@ -125,12 +126,12 @@ const (
 // run inline, so each poll sees its own scan's result deterministically.
 func startStopRun(t *testing.T, docker *fakeDocker, ctrl execution.ServerControl, ctrlErr error, world *fakeWorld) *stopRun {
 	t.Helper()
-	return startStopRunWith(t, docker, ctrl, ctrlErr, world.probe, func(f func()) { f() })
+	return startStopRunWith(t, docker, ctrl, ctrlErr, world.probe, func(f func()) { f() }, nil)
 }
 
 // startStopRunWith is startStopRun with the probe and the scan runner given.
 func startStopRunWith(t *testing.T, docker *fakeDocker, ctrl execution.ServerControl, ctrlErr error,
-	probe func() (execution.WorldProgress, error), runScan func(func())) *stopRun {
+	probe func() (execution.WorldProgress, error), runScan func(func()), flush func(context.Context) bool) *stopRun {
 	t.Helper()
 	d := New(docker, images(), func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
 		return ctrl, ctrlErr
@@ -147,8 +148,8 @@ func startStopRunWith(t *testing.T, docker *fakeDocker, ctrl execution.ServerCon
 		t.Fatalf("Start: %v", err)
 	}
 	drainTo(t, inst.Events(), execution.StateRunning)
-	r := &stopRun{t: t, clock: clock, done: make(chan error, 1)}
-	go func() { r.done <- inst.Stop(context.Background(), true) }()
+	r := &stopRun{t: t, d: d, clock: clock, done: make(chan error, 1)}
+	go func() { r.done <- inst.Stop(context.Background(), true, flush) }()
 	return r
 }
 
@@ -341,7 +342,7 @@ func runToCap(t *testing.T, r *stopRun, docker *fakeDocker) {
 func TestStalledBaselineScanStillSignalsAndKillsAtTheCap(t *testing.T) {
 	docker := newFakeDocker()
 	docker.stopNoExit = true
-	r := startStopRunWith(t, docker, nil, errors.New("rcon unavailable"), stalledProbe(t, 1), func(f func()) { go f() })
+	r := startStopRunWith(t, docker, nil, errors.New("rcon unavailable"), stalledProbe(t, 1), func(f func()) { go f() }, nil)
 
 	if r.awaitWaiting() {
 		t.Fatalf("Stop returned before waiting: %v", r.err)
@@ -357,7 +358,7 @@ func TestStalledBaselineScanStillSignalsAndKillsAtTheCap(t *testing.T) {
 func TestStalledLaterScanStillKillsAtTheCap(t *testing.T) {
 	docker := newFakeDocker()
 	docker.stopNoExit = true
-	r := startStopRunWith(t, docker, nil, errors.New("rcon unavailable"), stalledProbe(t, 2), func(f func()) { go f() })
+	r := startStopRunWith(t, docker, nil, errors.New("rcon unavailable"), stalledProbe(t, 2), func(f func()) { go f() }, nil)
 
 	if r.awaitWaiting() {
 		t.Fatalf("Stop returned before waiting: %v", r.err)
@@ -370,7 +371,7 @@ func TestStalledLaterScanStillKillsAtTheCap(t *testing.T) {
 func TestExitDuringAStalledScanEndsTheStop(t *testing.T) {
 	docker := newFakeDocker()
 	docker.stopNoExit = true
-	r := startStopRunWith(t, docker, nil, errors.New("rcon unavailable"), stalledProbe(t, 1), func(f func()) { go f() })
+	r := startStopRunWith(t, docker, nil, errors.New("rcon unavailable"), stalledProbe(t, 1), func(f func()) { go f() }, nil)
 	r.awaitWaiting()
 	if r.step(testPoll) {
 		t.Fatalf("Stop returned %v with the server still running", r.err)
@@ -404,5 +405,103 @@ func TestInstanceStopSignalsWithoutDockerStop(t *testing.T) {
 	if !docker.terminateCalled() || docker.daemonStopCalled() {
 		t.Fatalf("terminate = %v, docker stop = %v; want SIGTERM via the kill endpoint only",
 			docker.terminateCalled(), docker.daemonStopCalled())
+	}
+}
+
+// A Worker that shuts down in the middle of a stop hands the stop to the daemon
+// (issue #3436 review): `docker stop` with the grace the Worker's own stop had
+// left, so the daemon still SIGKILLs a server that never finishes even after the
+// Worker has exited. Before this, the kill lived only in the Worker process.
+func TestShutdownMidStopHandsTheKillToTheDaemon(t *testing.T) {
+	docker := newFakeDocker()
+	docker.stopNoExit = true
+	world := &fakeWorld{}
+	r := startStopRun(t, docker, nil, errors.New("rcon unavailable"), world)
+	r.awaitWaiting()
+	for range 3 {
+		world.write()
+		if r.step(testPoll) {
+			t.Fatalf("Stop returned %v while the world was being written", r.err)
+		}
+	}
+
+	if err := r.d.HandOffStops(context.Background()); err != nil {
+		t.Fatalf("HandOffStops: %v", err)
+	}
+	want := []handOffCall{{id: "container-1", grace: testCap - 3*testPoll}}
+	if got := docker.handOffCalls(); len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("hand-offs = %+v, want %+v (the cap's remaining grace)", got, want)
+	}
+
+	// The Worker's own stop keeps running while the process does.
+	docker.exit(143, nil)
+	if !r.awaitWaiting() && !r.step(testPoll) {
+		t.Fatal("Stop still waiting after the server exited")
+	}
+	if r.err != nil || docker.killWasCalled() {
+		t.Fatalf("Stop = %v, kill = %v; want a clean stop", r.err, docker.killWasCalled())
+	}
+}
+
+// A shutdown that comes while the pre-stop flush is still running hands the stop
+// off with the flush's budget on top of the cap: the Worker's own stop could still
+// run that long.
+func TestShutdownDuringTheFlushHandsOffTheWholeBudget(t *testing.T) {
+	docker := newFakeDocker()
+	release := make(chan struct{})
+	flushing := make(chan struct{})
+	flush := func(context.Context) bool {
+		close(flushing)
+		<-release
+		return true // the flushed path kills the container at once
+	}
+	r := startStopRunWith(t, docker, nil, errors.New("rcon unavailable"), (&fakeWorld{}).probe,
+		func(f func()) { f() }, flush)
+	<-flushing
+
+	if err := r.d.HandOffStops(context.Background()); err != nil {
+		t.Fatalf("HandOffStops: %v", err)
+	}
+	want := handOffCall{id: "container-1", grace: defaultFlushTimeout + testCap}
+	if got := docker.handOffCalls(); len(got) != 1 || got[0] != want {
+		t.Fatalf("hand-offs = %+v, want %+v", got, want)
+	}
+	close(release)
+	select {
+	case r.err = <-r.done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Stop did not return after the flush")
+	}
+	if r.err != nil {
+		t.Fatalf("Stop: %v", r.err)
+	}
+}
+
+// With no stop in flight a shutdown hands nothing off, and a stop that starts
+// after the shutdown began hands itself off at once: nothing else would.
+func TestStopStartedAfterShutdownHandsItselfOff(t *testing.T) {
+	docker := newFakeDocker()
+	d := New(docker, images(), func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
+		return nil, errors.New("rcon unavailable")
+	}, Options{WorkerID: "w1", StopTimeout: 50 * time.Millisecond, GameBindIP: "0.0.0.0", ReadinessTimeout: 20 * time.Millisecond})
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	if err := d.HandOffStops(context.Background()); err != nil {
+		t.Fatalf("HandOffStops: %v", err)
+	}
+	if got := docker.handOffCalls(); len(got) != 0 {
+		t.Fatalf("hand-offs with no stop in flight = %+v, want none", got)
+	}
+
+	if err := inst.Stop(context.Background(), true); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	got := docker.handOffCalls()
+	if len(got) != 1 || got[0].id != "container-1" || got[0].grace < defaultStopCap-time.Second || got[0].grace > defaultStopCap {
+		t.Fatalf("hand-offs = %+v, want one for container-1 with about the %v cap", got, defaultStopCap)
 	}
 }

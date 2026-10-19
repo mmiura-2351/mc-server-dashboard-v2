@@ -40,12 +40,14 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/serverproperties"
@@ -266,6 +268,9 @@ type Driver struct {
 	imagePullTimeout time.Duration
 	// logger records the lazy base-image pull at INFO (issue #904).
 	logger *slog.Logger
+	// handOffs tracks the stops in flight on this driver's instances, so a Worker
+	// shutdown can give each to the daemon (issue #3436, HandOffStops).
+	handOffs *stopHandOffs
 }
 
 // New builds a container Driver. docker is the Engine seam; images resolves a
@@ -305,7 +310,7 @@ func New(docker dockerAPI, images *ImageSelector, openControl controlFunc, opts 
 		logger = slog.New(slog.DiscardHandler)
 	}
 	runAsUID, runAsGID := resolveRunAs(opts.RunAsUID, opts.RunAsGID, os.Getuid(), os.Getgid())
-	return &Driver{
+	d := &Driver{
 		docker:           docker,
 		images:           images,
 		openControl:      openControl,
@@ -330,6 +335,8 @@ func New(docker dockerAPI, images *ImageSelector, openControl controlFunc, opts 
 		imagePullTimeout: defaultImagePullTimeout,
 		logger:           logger,
 	}
+	d.handOffs = &stopHandOffs{d: d, stops: map[*inflightStop]struct{}{}}
+	return d
 }
 
 // RconHost returns the host that RCON for serverID is dialed at. It is empty when no
@@ -400,6 +407,7 @@ func (d *Driver) Start(ctx context.Context, spec execution.InstanceSpec) (execut
 		now:              d.now,
 		after:            d.after,
 		runScan:          d.runScan,
+		handOffs:         d.handOffs,
 		flushTimeout:     d.flushTimeout,
 		readinessTimeout: d.readinessTimeout,
 		logger:           d.logger,
@@ -1042,6 +1050,8 @@ type instance struct {
 	now         func() time.Time
 	after       func(time.Duration) <-chan time.Time
 	runScan     func(func())
+	// handOffs is the driver's registry of stops in flight (HandOffStops).
+	handOffs *stopHandOffs
 	// flushTimeout bounds the pre-stop flush preFallback (issue #2622).
 	flushTimeout time.Duration
 	// readinessTimeout bounds the hold-on-starting wait before falling back to
@@ -1887,6 +1897,17 @@ func (i *instance) Stop(ctx context.Context, graceful bool, preFallback ...func(
 	i.mu.Unlock()
 	i.emit(execution.StateStopping, "")
 	requested := i.now()
+	// Until this Stop returns, a Worker shutdown hands it to the daemon (issue
+	// #3436): the Worker sends the final SIGKILL itself now, so a Worker that exits
+	// mid-stop must leave that kill with someone. killBy is the latest the Worker's
+	// own stop would kill — the flush's budget (when one runs) plus the cap, until
+	// the escalation starts and narrows it.
+	killBy := requested.Add(i.stopCap)
+	if graceful && len(preFallback) > 0 && preFallback[0] != nil {
+		killBy = killBy.Add(i.flushTimeout)
+	}
+	inflight := i.handOffs.register(i.spec.ServerID, id, killBy)
+	defer i.handOffs.unregister(inflight)
 
 	// Always flush before stop on the graceful path (#1007/#1008): MC's own
 	// shutdown save (via RCON "stop") does NOT reliably flush dirty region
@@ -1938,6 +1959,7 @@ func (i *instance) Stop(ctx context.Context, graceful bool, preFallback ...func(
 	// it was sized for (issue #2622).
 	stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), i.stopDeadline())
 	defer cancel()
+	inflight.setKillBy(i.now().Add(i.stopCap))
 
 	// The shutdown save Minecraft runs on RCON "stop" and on SIGTERM alike writes
 	// every unsaved chunk, and with sync-chunk-writes=true (the vanilla default)
@@ -2268,6 +2290,108 @@ func (i *instance) logEscalation(from, to string, requested time.Time, w *stopWa
 		args = append(args, "last_write", w.lastWrite, "since_last_write", now.Sub(w.lastWrite))
 	}
 	i.logger.Warn("graceful stop escalating: the server did not exit", args...)
+}
+
+// stopHandOffCallTimeout bounds the hand-off a stop that starts after
+// HandOffStops makes for itself.
+const stopHandOffCallTimeout = 5 * time.Second
+
+// stopHandOffs is a driver's registry of the stops in flight on its instances
+// (issue #3436). Before that issue the daemon sent a stop's final SIGKILL
+// (`docker stop -t`); now the Worker does, after watching the world, so a Worker
+// that exits mid-stop would leave a hung server running until the next boot's
+// Sweep. HandOffStops closes that gap: it gives each stop in flight to the daemon
+// as `docker stop` with the grace the Worker's own stop had left, and the daemon
+// finishes it whatever becomes of the Worker.
+type stopHandOffs struct {
+	d  *Driver
+	mu sync.Mutex
+	// stops are the stops in flight; closed is set once HandOffStops has run, after
+	// which a stop hands itself off as it registers.
+	stops  map[*inflightStop]struct{}
+	closed bool
+}
+
+// inflightStop is one stop in flight: its server, its container, and killBy, the
+// latest the Worker's own stop would kill it (unix nanoseconds).
+type inflightStop struct {
+	serverID    string
+	containerID string
+	killBy      atomic.Int64
+}
+
+func (s *inflightStop) setKillBy(t time.Time) {
+	s.killBy.Store(t.UnixNano())
+}
+
+// register records a stop starting now. After HandOffStops has run it hands the
+// stop off at once, since nothing else will.
+func (h *stopHandOffs) register(serverID, containerID string, killBy time.Time) *inflightStop {
+	s := &inflightStop{serverID: serverID, containerID: containerID}
+	s.setKillBy(killBy)
+	h.mu.Lock()
+	h.stops[s] = struct{}{}
+	closed := h.closed
+	h.mu.Unlock()
+	if closed {
+		ctx, cancel := context.WithTimeout(context.Background(), stopHandOffCallTimeout)
+		_ = h.handOff(ctx, s)
+		cancel()
+	}
+	return s
+}
+
+func (h *stopHandOffs) unregister(s *inflightStop) {
+	h.mu.Lock()
+	delete(h.stops, s)
+	h.mu.Unlock()
+}
+
+// handOff gives one stop to the daemon: `docker stop` with the grace the Worker's
+// own stop had left (at least 1 s, rounded up to whole seconds, the unit the
+// Engine takes). The daemon then SIGTERMs the container — harmless to a server
+// already shutting down — and SIGKILLs it when that grace runs out.
+func (h *stopHandOffs) handOff(ctx context.Context, s *inflightStop) error {
+	left := time.Unix(0, s.killBy.Load()).Sub(h.d.now())
+	grace := max(time.Duration(math.Ceil(left.Seconds()))*time.Second, time.Second)
+	err := h.d.docker.HandOff(ctx, s.containerID, grace)
+	if err != nil {
+		h.d.logger.Warn("worker shutting down mid-stop: handing the kill to the docker daemon failed; "+
+			"a hung server stays up until the next Worker boot sweeps it",
+			"server_id", s.serverID, "grace", grace, "error", err)
+		return fmt.Errorf("hand off stop of %s: %w", s.serverID, err)
+	}
+	h.d.logger.Warn("worker shutting down mid-stop: the docker daemon now owns the kill",
+		"server_id", s.serverID, "grace", grace)
+	return nil
+}
+
+// HandOffStops implements execution.StopHandOff (issue #3436): it hands every stop
+// in flight to the daemon, in parallel, and makes every later one hand itself off
+// as it starts. It returns once each hand-off has reached the daemon or ctx ends.
+// The stops themselves keep running: while the Worker is still up they may still
+// end the server sooner (on its exit, or after the idle window), and the daemon's
+// kill only lands if they have not.
+func (d *Driver) HandOffStops(ctx context.Context) error {
+	d.handOffs.mu.Lock()
+	d.handOffs.closed = true
+	stops := make([]*inflightStop, 0, len(d.handOffs.stops))
+	for s := range d.handOffs.stops {
+		stops = append(stops, s)
+	}
+	d.handOffs.mu.Unlock()
+
+	errs := make([]error, len(stops))
+	var wg sync.WaitGroup
+	for n, s := range stops {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[n] = d.handOffs.handOff(ctx, s)
+		}()
+	}
+	wg.Wait()
+	return errors.Join(errs...)
 }
 
 // logStopExit records a stop that outlasted the idle window and still ended with
