@@ -18,8 +18,9 @@ name: supply-chain-cooldown
 # `pull_request_target` (not `pull_request`) is required: a Dependabot
 # `pull_request` run gets a read-only token, which cannot post a status or set a
 # label. `pull_request_target` runs the BASE branch's workflow with a writable
-# token; it never checks out or executes PR head code (only reads PR metadata via
-# the API and queries public registries), so there is no pwn-request exposure.
+# token; it never checks out or executes PR head code (only reads PR metadata and
+# manifests as data via the API and queries public registries), so there is no
+# pwn-request exposure.
 # That holds for fork PRs from any author, which this now also runs for.
 
 on:
@@ -54,10 +55,8 @@ jobs:
       # Action versions are pinned to a commit SHA per
       # docs/dev/DEPENDENCIES.md (pinning + 7-day cooldown). Checks out the base
       # branch (the default for pull_request_target) -- trusted workflow code,
-      # never the PR head. The tree is also where the script recovers a container
-      # image's registry host from its pinned FROM / image: reference, so this
-      # must stay a FULL checkout: a sparse one scoped to scripts/ would
-      # reintroduce issue #2506 (a false block -- fail-closed, but confusing).
+      # never the PR head. The script reads changed head manifests through the
+      # GitHub API as data; it does not execute their contents.
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 

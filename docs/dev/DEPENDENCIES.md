@@ -64,15 +64,22 @@ most public-incident timelines.
   `cooldown` setting. The `supply-chain-cooldown` workflow
   (`.github/workflows/supply-chain-cooldown.yml`, driving
   `scripts/supply_chain_cooldown.py`) reads each Dependabot PR's bumped packages
-  from its commit trailer, looks up each release's publish date in the upstream
-  registry (PyPI, npm, `proxy.golang.org`, GitHub Releases for actions and
+  from its commit trailer and validates those targets against the changed
+  manifests at the PR's immutable merge-base and head revisions. It then looks
+  up each validated release's publish date in the upstream registry (PyPI, npm, `proxy.golang.org`, GitHub Releases for actions and
   `ghcr.io` images, Docker Hub for Docker Hub images), and posts a
   `supply-chain-cooldown` commit status: `failure` (plus a `supply-chain-cooldown`
   label) while any release is younger than 7 days, `success` once it ages out.
+  Stale trailers, missing manifest evidence, and unsupported formats fail closed;
+  a stale trailer must be corrected before its PR can pass. The gate reads head
+  manifests through the GitHub API as data, without checking out or executing
+  head code. For pip requirement-only updates it checks the changed numeric
+  version bounds, allowing a widened upper bound without requiring `uv.lock`
+  movement; a changed resolved pin must match the trailer. Actions pinned to a
+  SHA are checked against the target tag's commit, rather than its comment.
   The trailer names a container image without its registry host, so the gate
-  recovers the host from that image's pinned `FROM` / `image:` reference in the
-  checked-out tree — which is why the workflow's checkout step is load-bearing. A
-  daily schedule re-runs it so blocked PRs unblock themselves with no new commit.
+  recovers the host from the changed head manifest's `FROM` / `image:` reference.
+  A daily schedule re-runs it so releases unblock after aging out with no new commit.
   `supply-chain-cooldown` is a required status check on `main` alongside `check`,
   which is what makes it enforceable rather than advisory.
 - Because it is required, the workflow runs for **every** PR, not only
