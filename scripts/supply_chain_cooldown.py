@@ -14,7 +14,9 @@ For a Dependabot PR it:
 1. Reads the bumped packages + versions from the Dependabot commit trailer
    (``updated-dependencies:``) -- one entry per package, so grouped PRs are
    handled -- and the ecosystem from the branch name (``dependabot/<eco>/...``).
-2. Looks up each release's publish date in the upstream registry.
+   Validates the target versions against changed manifests read as data at the
+   immutable merge-base and head revisions; a mismatch fails closed.
+2. Looks up each validated release's publish date in the upstream registry.
 3. Posts a ``supply-chain-cooldown`` commit status on the PR head SHA:
    ``failure`` (+ the ``supply-chain-cooldown`` label) while any release is
    younger than 7 days, ``success`` (label removed) once all have aged out.
@@ -38,11 +40,13 @@ because a PR is blocked -- a blocked PR is a posted status, not a script failure
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import re
 import subprocess
 import sys
+import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -229,9 +233,8 @@ def qualify_docker_image(image: str, sources: Callable[[], list[str]]) -> str:
     below would fall through to Docker Hub -- where uv does not exist -- and
     block a release that is in fact months old (PR #2365). The host is therefore
     recovered from the image's own pin in ``sources()`` (the ``FROM`` / ``image:``
-    lines of the checked-out tree): a version bump rewrites only the tag, so the
-    host pinned there is exactly the one the PR adopts. ``sources`` is a callable
-    so an already-qualified name costs no tree read at all.
+    lines). PR evaluation supplies the changed head manifests read through the
+    API. ``sources`` is a callable so an already-qualified name costs no read.
 
     Matching is a name-anchored search rather than Dockerfile/compose parsing --
     both file kinds write ``[host/]name[:tag|@digest]`` the same way, and the
@@ -318,11 +321,10 @@ def _gh_json(path: str) -> dict:
 def _repo_image_sources() -> list[str]:
     """Text of every file that could pin a container image, for the host lookup.
 
-    The workflow's ``actions/checkout`` step is a load-bearing dependency of this
-    gate, not a convenience: it is what puts these files on disk. Under
-    ``pull_request_target`` that checkout is the BASE branch, never the PR head,
-    so the content read here is trusted -- and a version bump does not move an
-    image between registries, so the base branch's host is still the right one.
+    This is the fallback for standalone release-date callers. PR evaluation
+    first qualifies names from immutable head manifests read through the API.
+    Under ``pull_request_target`` the local checkout is the trusted BASE branch,
+    never the PR head.
     """
     root = Path(__file__).resolve().parent.parent
     # ``.claude`` holds agent worktrees -- whole extra copies of the repo, whose
@@ -340,6 +342,166 @@ def _repo_image_sources() -> list[str]:
             except OSError:
                 continue  # Unreadable file -- a missing host blocks, so this is safe.
     return texts
+
+
+def _pr_manifests(repo: str, pr: int, meta: dict, ecosystem: str) -> list[tuple[str, str, str]]:
+    """Read changed manifests as data at immutable merge-base/head revisions."""
+    files: list[dict] = []
+    page = 1
+    while True:
+        batch = _gh_json(f"repos/{repo}/pulls/{pr}/files?per_page=100&page={page}")
+        files.extend(batch)
+        if len(batch) < 100:
+            break
+        page += 1
+    if len(files) != meta["changed_files"]:
+        raise CooldownError("incomplete PR file listing")
+    base = _gh_json(f"repos/{repo}/compare/{meta['base']['sha']}...{meta['head']['sha']}")
+    base_sha = base["merge_base_commit"]["sha"]
+
+    def read(source_repo: str, path: str, sha: str) -> str:
+        data = _gh_json(f"repos/{source_repo}/contents/{urllib.parse.quote(path)}?ref={sha}")
+        if data.get("type") != "file" or data.get("encoding") != "base64":
+            raise CooldownError(f"cannot read complete manifest: {path}")
+        return base64.b64decode(data["content"]).decode("utf-8")
+
+    manifests: list[tuple[str, str, str]] = []
+    for item in files:
+        path = item["filename"]
+        filename = path.rsplit("/", 1)[-1]
+        relevant = {
+            "docker": filename.startswith("Dockerfile") or filename in ("compose.yaml", "compose.yml"),
+            "pip": filename in ("pyproject.toml", "uv.lock"),
+            "npm": filename == "package-lock.json",
+            "gomod": filename == "go.mod",
+            "github-actions": path.startswith(".github/workflows/") and filename.endswith((".yml", ".yaml")),
+        }[ecosystem]
+        if not relevant or item["status"] == "removed":
+            continue
+        before = "" if item["status"] == "added" else read(
+            repo, item.get("previous_filename", path), base_sha)
+        after = read(meta["head"]["repo"]["full_name"], path, meta["head"]["sha"])
+        manifests.append((path, before, after))
+    return manifests
+
+
+def _manifest_pins(ecosystem: str, text: str, name: str) -> dict[str, str]:
+    """Read pins for one dependency in the repository's current manifest formats."""
+    if ecosystem == "docker":
+        refs = re.findall(r"(?im)^\s*(?:FROM\s+(?:--platform=\S+\s+)?|image:\s*)[\"']?([^\s\"']+)", text)
+        versions = []
+        for ref in refs:
+            image, separator, version = ref.rpartition(":")
+            first = image.split("/", 1)[0]
+            bare = image.split("/", 1)[1] if "/" in image and ("." in first or ":" in first) else image
+            if separator and name in (image, bare):
+                versions.append(version.split("@", 1)[0])
+        return {str(index): version for index, version in enumerate(versions)}
+    if ecosystem == "npm":
+        if not text:
+            return {}
+        return {key: item["version"] for key, item in json.loads(text)["packages"].items()
+                if (key == f"node_modules/{name}" or key.endswith(f"/node_modules/{name}"))
+                and "version" in item}
+    if ecosystem == "pip":
+        canonical = lambda value: re.sub(r"[-_.]+", "-", value).lower()
+        versions = [item["version"] for item in tomllib.loads(text).get("package", [])
+                    if canonical(item["name"]) == canonical(name) and "version" in item]
+        return {str(index): version for index, version in enumerate(versions)}
+    if ecosystem == "gomod":
+        versions = re.findall(r"(?m)^\s*(?:require\s+)?" + re.escape(name) + r"\s+(v\S+)", text)
+        return {str(index): version.removeprefix("v") for index, version in enumerate(versions)}
+    if ecosystem == "github-actions":
+        refs = re.findall(r"(?m)^\s*(?:-\s*)?uses:\s*[\"']?" + re.escape(name) + r"@([^\s#\"']+)", text)
+        return {str(index): ref for index, ref in enumerate(refs)}
+    raise CooldownError(f"unsupported manifest validation: {ecosystem}")
+
+
+def _pip_requirements(text: str, name: str) -> set[str]:
+    data = tomllib.loads(text)
+    project = data.get("project", {})
+    entries = list(project.get("dependencies", []))
+    for group in (*project.get("optional-dependencies", {}).values(),
+                  *data.get("dependency-groups", {}).values()):
+        entries.extend(group)
+    specs = set()
+    for entry in entries:
+        match = re.fullmatch(r"([\w.-]+)(?:\[[^]]+\])?\s*(.+)", entry) if isinstance(entry, str) else None
+        if match and re.sub(r"[-_.]+", "-", match[1]).lower() == re.sub(r"[-_.]+", "-", name).lower():
+            specs.add(match[2])
+    return specs
+
+
+def _numeric_version(version: str) -> tuple[int, ...]:
+    if not re.fullmatch(r"\d+(?:\.\d+)*", version):
+        raise CooldownError(f"unsupported requirement version: {version}")
+    parts = [int(part) for part in version.split(".")]
+    while len(parts) > 1 and parts[-1] == 0:
+        parts.pop()
+    return tuple(parts)
+
+
+def _requirement_admits(spec: str, version: str) -> bool:
+    target = _numeric_version(version)
+    admitted = True
+    for clause in spec.split(","):
+        match = re.fullmatch(r"\s*(>=|<=|==|!=|<|>)\s*(\d+(?:\.\d+)*)\s*", clause)
+        if not match:
+            raise CooldownError(f"unsupported requirement constraint: {spec}")
+        bound = _numeric_version(match[2])
+        admitted &= {">=": target >= bound, "<=": target <= bound, "==": target == bound,
+                     "!=": target != bound, "<": target < bound, ">": target > bound}[match[1]]
+    return admitted
+
+
+def _pip_requirement_update(name: str, version: str, manifests: list[tuple[str, str, str]]) -> bool:
+    for path, before, after in manifests:
+        if not path.endswith("/pyproject.toml"):
+            continue
+        old, new = _pip_requirements(before, name), _pip_requirements(after, name)
+        if old == new:
+            continue
+        for spec in new - old:
+            if not _requirement_admits(spec, version):
+                continue
+            # A raised floor names the target; a widened cap newly admits it.
+            bounds = {_numeric_version(bound) for bound in re.findall(r"(?:>=|==)\s*(\d+(?:\.\d+)*)", spec)}
+            old_bounds = {_numeric_version(bound) for previous in old
+                          for bound in re.findall(r"(?:>=|==)\s*(\d+(?:\.\d+)*)", previous)}
+            if _numeric_version(version) in bounds - old_bounds or not any(
+                _requirement_admits(previous, version) for previous in old
+            ):
+                return True
+    return False
+
+
+def validate_updated_dependencies(
+    ecosystem: str, packages: list[tuple[str, str]], manifests: list[tuple[str, str, str]]
+) -> None:
+    """Reject trailers that disagree with the changed dependency pins."""
+    for name, version in packages:
+        adopted: set[str] = set()
+        for path, before, after in manifests:
+            if ecosystem == "pip" and path.endswith("/pyproject.toml"):
+                continue
+            old = _manifest_pins(ecosystem, before, name)
+            new = _manifest_pins(ecosystem, after, name)
+            adopted.update(value for key, value in new.items() if old.get(key) != value)
+        if not adopted and ecosystem == "pip" and _pip_requirement_update(name, version, manifests):
+            continue
+        target = version.removeprefix("v") if ecosystem == "gomod" else version
+        if ecosystem == "github-actions" and not adopted.intersection(_github_tag_candidates(version)):
+            for tag in _github_tag_candidates(version):
+                try:
+                    target = _gh_json(f"repos/{name}/commits/{urllib.parse.quote(tag, safe='')}")["sha"]
+                    break
+                except subprocess.CalledProcessError:
+                    continue
+        if adopted != {target} and not (
+            ecosystem == "github-actions" and len(adopted) == 1 and
+            adopted.intersection(_github_tag_candidates(version))
+        ):
+            raise CooldownError(f"{name}: trailer {version} disagrees with adopted versions {sorted(adopted)}")
 
 
 def _github_release_date(gh_get: Transport, repo: str, version: str) -> datetime:
@@ -536,11 +698,15 @@ def _evaluate_head(
     if not packages:
         raise CooldownError(f"PR #{pr}: no updated-dependencies trailer found")
 
+    manifests = _pr_manifests(repo, pr, meta, ecosystem)
+    validate_updated_dependencies(ecosystem, packages, manifests)
+
     offenders: list[tuple[str, str, datetime]] = []
     unknown: list[str] = []
     for name, version in packages:
         try:
-            released = release_date(ecosystem, name, version)
+            lookup_name = qualify_docker_image(name, lambda: [after for _, _, after in manifests]) if ecosystem == "docker" else name
+            released = release_date(ecosystem, lookup_name, version)
         except CooldownError as exc:
             unknown.append(str(exc))
             continue
@@ -843,6 +1009,140 @@ def _self_test() -> int:  # noqa: C901 -- a flat table of independent assertions
         globals()["_gh_json"], globals()["set_status"] = saved
     check("human PR outcome", outcome, "skipped: not a Dependabot PR")
     check("human PR status posted", [(s, st) for s, st, _ in posted], [("cafe1234", "success")])
+
+    def validation_case(label: str, eco: str, packages: list[tuple[str, str]],
+                        manifests: list[tuple[str, str, str]], allowed: bool) -> None:
+        try:
+            validate_updated_dependencies(eco, packages, manifests)
+            got = True
+        except CooldownError:
+            got = False
+        check(label, got, allowed)
+
+    validation_case("matching grouped docker", "docker", [("astral-sh/uv", "0.13.1"), ("python", "3.13-slim")],
+                    [("api/Dockerfile", "FROM ghcr.io/astral-sh/uv:0.12.17\nFROM python:3.12-slim\n",
+                      "FROM ghcr.io/astral-sh/uv:0.13.1\nFROM python:3.13-slim\n")], True)
+    validation_case("matching compose", "docker", [("postgres", "18.6")],
+                    [("compose.yaml", "  image: postgres:18.5\n", "  image: postgres:18.6\n")], True)
+    validation_case("matching npm nested lock", "npm", [("@scope/pkg", "2.0.0")],
+                    [("webui/package-lock.json", '{"packages":{"node_modules/@scope/pkg":{"version":"1.0.0"}}}',
+                      '{"packages":{"node_modules/@scope/pkg":{"version":"2.0.0"}}}')], True)
+
+    validation_case("pip widened cap without lock movement", "pip", [("mypy", "2.4.0")],
+                    [("api/pyproject.toml", '[dependency-groups]\ndev = ["mypy>=2.1.0,<2.4"]',
+                      '[dependency-groups]\ndev = ["mypy>=2.1.0,<2.5"]')], True)
+    validation_case("pip stale cap target", "pip", [("mypy", "2.3.0")],
+                    [("api/pyproject.toml", '[dependency-groups]\ndev = ["mypy>=2.1.0,<2.4"]',
+                      '[dependency-groups]\ndev = ["mypy>=2.1.0,<2.5"]')], False)
+    lock_before = '[[package]]\nname = "mypy"\nversion = "2.1.0"\n'
+    lock_after = '[[package]]\nname = "mypy"\nversion = "2.4.0"\n'
+    validation_case("pip regenerated lock", "pip", [("mypy", "2.4.0")],
+                    [("api/uv.lock", lock_before, lock_after)], True)
+    validation_case("pip stale regenerated lock", "pip", [("mypy", "2.3.0")],
+                    [("api/uv.lock", lock_before, lock_after)], False)
+    validation_case("pip raised floor", "pip", [("some_pkg", "2.4.0")],
+                    [("api/pyproject.toml", '[project]\ndependencies = ["Some-Pkg[extra]>=2.1.0,<3"]',
+                      '[project]\ndependencies = ["Some-Pkg[extra]>=2.4.0,<3"]')], True)
+    validation_case("gomod grouped module", "gomod", [("golang.org/x/sys", "0.49.0")],
+                    [("worker/go.mod", "require (\n golang.org/x/sys v0.48.0 // indirect\n)",
+                      "require (\n golang.org/x/sys v0.49.0 // indirect\n)")], True)
+    validation_case("gomod standalone module", "gomod", [("golang.org/x/sys", "v0.49.0")],
+                    [("worker/go.mod", "require golang.org/x/sys v0.48.0\n",
+                      "require golang.org/x/sys v0.49.0\n")], True)
+    validation_case("pip lock disagreement cannot fall back to broad requirement", "pip", [("mypy", "2.3.0")],
+                    [("api/uv.lock", lock_before, lock_after),
+                     ("api/pyproject.toml", '[dependency-groups]\ndev = ["mypy>=2.1.0,<2.3"]',
+                      '[dependency-groups]\ndev = ["mypy>=2.1.0,<2.5"]')], False)
+    validation_case("unsupported pip constraint fails closed", "pip", [("mypy", "2.4.0rc1")],
+                    [("api/pyproject.toml", '[dependency-groups]\ndev = ["mypy>=2.1.0,<2.4"]',
+                      '[dependency-groups]\ndev = ["mypy>=2.1.0,<2.5"]')], False)
+    validation_case("missing adopted pin fails closed", "docker", [("python", "3.13-slim")], [], False)
+    saved_gh = globals()["_gh_json"]
+    globals()["_gh_json"] = lambda path: {"sha": "b" * 40}
+    try:
+        action_manifests = [(".github/workflows/test.yml", "- uses: actions/checkout@" + "a" * 40,
+                             "- uses: actions/checkout@" + "b" * 40 + " # v6.0.0")]
+        validation_case("action verifies SHA instead of comment", "github-actions", [("actions/checkout", "7.0.1")],
+                        action_manifests, True)
+        globals()["_gh_json"] = lambda path: {"sha": "a" * 40}
+        validation_case("action rejects stale target SHA", "github-actions", [("actions/checkout", "6.0.0")],
+                        action_manifests, False)
+    finally:
+        globals()["_gh_json"] = saved_gh
+    validation_case("npm adopts version already pinned elsewhere", "npm", [("pkg", "2.0.0")],
+                    [("webui/package-lock.json", '{"packages":{"node_modules/pkg":{"version":"1.0.0"},"node_modules/other/node_modules/pkg":{"version":"2.0.0"}}}',
+                      '{"packages":{"node_modules/pkg":{"version":"2.0.0"},"node_modules/other/node_modules/pkg":{"version":"2.0.0"}}}')], True)
+    validation_case("pip unchanged floor cannot validate stale cap target", "pip", [("mypy", "2.1.0")],
+                    [("api/pyproject.toml", '[dependency-groups]\ndev = ["mypy>=2.1.0,<2.4"]',
+                      '[dependency-groups]\ndev = ["mypy>=2.1.0,<2.5"]')], False)
+    # Exercise the real status-posting path with immutable API manifest fixtures.
+    saved = {key: globals()[key] for key in
+             ("_gh_json", "set_status", "add_label", "remove_label", "release_date")}
+    requests: list[str] = []
+    lookups: list[tuple[str, str]] = []
+    trailer_version = "0.12.23"
+    security = False
+    incomplete = False
+    paginate = False
+
+    def pr_fixture(path: str) -> object:
+        requests.append(path)
+        if path.endswith("/commits"):
+            trailer = ("updated-dependencies:\n- dependency-name: astral-sh/uv\n"
+                       f"  dependency-version: {trailer_version}\n...")
+            return [{"commit": {"message": trailer}},
+                    {"commit": {"message": "Regenerate lockfile" + (" GHSA-abcd-ef12-3456" if security else "")}}]
+        if "/files?" in path:
+            if paginate and path.endswith("&page=1"):
+                return [{"filename": f"ignored/{index}.txt", "status": "modified"} for index in range(100)]
+            return [] if incomplete else [{"filename": "api/Dockerfile", "status": "modified"}]
+        if "/compare/" in path:
+            return {"merge_base_commit": {"sha": "merge-base"}}
+        if "/contents/" in path:
+            version = "0.13.1" if "ref=head" in path else "0.12.17"
+            return {"type": "file", "encoding": "base64", "content":
+                    base64.b64encode(f"FROM ghcr.io/astral-sh/uv:{version} AS uv\n".encode()).decode()}
+        if path == "repos/owner/repo/pulls/3386":
+            return {"user": {"login": BOT}, "head": {"sha": "head", "ref":
+                    "dependabot/docker/api/docker-group", "repo": {"full_name": "owner/repo"}},
+                    "base": {"sha": "base"}, "changed_files": 101 if paginate else 1, "body": ""}
+        raise AssertionError(f"unexpected gh call: {path}")
+
+    def fixture_release_date(eco: str, name: str, version: str) -> datetime:
+        lookups.append((name, version))
+        return parse_iso("2026-10-14T05:15:30Z" if version == "0.13.1" else "2026-09-01T00:00:00Z")
+
+    globals()["_gh_json"] = pr_fixture
+    globals()["set_status"] = lambda repo, sha, state, description: posted.append((sha, state, description))
+    globals()["add_label"] = lambda *args: None
+    globals()["remove_label"] = lambda *args: None
+    globals()["release_date"] = fixture_release_date
+    try:
+        for label, trailer_version, security, incomplete, paginate, date, expected in (
+            ("stale eligible trailer", "0.12.23", False, False, False, "2026-10-15", "failure"),
+            ("matching fresh target plus regeneration commit", "0.13.1", False, False, False, "2026-10-15", "failure"),
+            ("matching aged target plus regeneration commit", "0.13.1", False, False, False, "2026-10-22", "success"),
+            ("security bypass before manifest reads", "0.12.23", True, False, False, "2026-10-15", "success"),
+            ("paginated manifest listing", "0.13.1", False, False, True, "2026-10-22", "success"),
+            ("incomplete file listing fails closed", "0.13.1", False, True, False, "2026-10-22", "failure"),
+        ):
+            posted.clear()
+            requests.clear()
+            lookups.clear()
+            try:
+                evaluate_pr("owner/repo", 3386, parse_iso(date + "T00:00:00Z"))
+            except CooldownError:
+                pass
+            check(label + " posted status", [(sha, state) for sha, state, _ in posted], [("head", expected)])
+            if security:
+                check(label + " reads", any("/contents/" in path for path in requests), False)
+            elif not incomplete:
+                check(label + " immutable head", "repos/owner/repo/contents/api/Dockerfile?ref=head" in requests, True)
+                check(label + " immutable base", "repos/owner/repo/contents/api/Dockerfile?ref=merge-base" in requests, True)
+                check(label + " registry targets", lookups,
+                      [("ghcr.io/astral-sh/uv", "0.13.1")] if trailer_version == "0.13.1" else [])
+    finally:
+        globals().update(saved)
 
     if failures:
         print("supply_chain_cooldown --self-test FAILED:", file=sys.stderr)
