@@ -66,6 +66,7 @@ jobs:
       - name: Set up uv (caches the uv-managed toolchain)
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
+          version: "0.13.0"
           enable-cache: true
           cache-dependency-glob: api/uv.lock
 
@@ -96,6 +97,9 @@ jobs:
 
       - name: Lint (ruff)
         run: uv run ruff check .
+
+      - name: Lockfile matches the pinned uv version
+        run: uv lock --check
 
       - name: Format check (ruff)
         run: uv run ruff format --check .
@@ -151,6 +155,7 @@ jobs:
       - name: Set up uv (caches the uv-managed toolchain)
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
+          version: "0.13.0"
           enable-cache: true
           cache-dependency-glob: api/uv.lock
 

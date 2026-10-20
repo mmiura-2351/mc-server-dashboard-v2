@@ -200,6 +200,7 @@ API_TEST_EXTRA_ARGS ?=
 
 api-env-check:
 	python3 scripts/check_api_env.py --self-test
+	cd api && uv lock --check
 	cd api && uv run python ../scripts/check_api_env.py
 
 api-benchmark-collection-check: api-env-check
@@ -529,6 +530,8 @@ scripts-test: scripts-test-cheap
 # it. Adding a suite to the deploy lines above is the deliberate way to keep it
 # out of that gate; there is no third place to put one.
 scripts-test-cheap:
+	python3 scripts/check_uv_pins.py --self-test
+	python3 scripts/check_uv_pins.py
 	python3 scripts/supply_chain_cooldown.py --self-test
 	python3 scripts/check_compose_topology.py --self-test
 	bash scripts/test_shell_pipefail.sh

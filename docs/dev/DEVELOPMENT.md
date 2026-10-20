@@ -22,7 +22,7 @@ Install these once on your machine. Toolchain versions are pinned per module
 
 | Tool | For | Install |
 |---|---|---|
-| [uv](https://docs.astral.sh/uv/) | `api/` Python toolchain + dependencies (Python is pinned in `api/.python-version`) | per the uv docs |
+| [uv](https://docs.astral.sh/uv/) 0.13.0 | `api/` Python toolchain + dependencies (Python is pinned in `api/.python-version`) | per the uv docs; select the exact version |
 | [Go](https://go.dev/dl/) 1.27 | `worker/` (pinned in `worker/go.mod`) | per the Go docs |
 | [Node.js](https://nodejs.org/) ≥ 24.15 (+ npm 11) | `webui/` build, lint, and test (pinned in `webui/package.json`) | per the Node.js docs; npm comes bundled |
 | [buf](https://buf.build) 1.70.0 | `proto/` lint + code generation | see [`../../proto/README.md`](../../proto/README.md) |
@@ -36,6 +36,14 @@ warning.
 
 `golangci-lint` and the protoc plugins are **not** installed by hand — `make
 bootstrap` fetches the pinned versions into the gitignored `worker/.bin/`.
+
+`api/pyproject.toml` enforces the exact uv version above through
+`tool.uv.required-version`; a different executable fails before changing the
+lockfile. Docker and every `setup-uv` step use the same version. When Dependabot
+bumps the Docker pin, update these pins and this prerequisite together;
+`scripts/check_uv_pins.py` rejects drift in the local gate and unfiltered CI.
+`uv lock --check` also runs in API lint and CI to validate the committed lock
+with that version without re-resolving upgrades.
 
 ## 2. First-time setup
 
