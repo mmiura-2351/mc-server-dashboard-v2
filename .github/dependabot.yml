@@ -3,6 +3,7 @@ updates:
   # --- Python (api/) ---
   - package-ecosystem: pip
     directory: /api
+    versioning-strategy: increase
     schedule:
       interval: weekly
       day: monday

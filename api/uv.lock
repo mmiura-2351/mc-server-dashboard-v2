@@ -809,16 +809,16 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "grpcio-tools", specifier = ">=1.80.0,<1.85" },
-    { name = "import-linter", specifier = ">=2.11" },
-    { name = "mypy", specifier = ">=2.1.0" },
+    { name = "import-linter", specifier = ">=2.11,<3" },
+    { name = "mypy", specifier = ">=2.1.0,<3" },
     { name = "mypy-protobuf", specifier = ">=5.1.0,<6" },
-    { name = "pytest", specifier = ">=9.0.3" },
-    { name = "pytest-asyncio", specifier = ">=1.3.0,<1.5.0" },
+    { name = "pytest", specifier = ">=9.0.3,<10" },
+    { name = "pytest-asyncio", specifier = ">=1.3.0,<2" },
     { name = "pytest-benchmark", specifier = ">=5.1.0,<6" },
     { name = "pytest-cov", specifier = ">=7.1.0,<8" },
     { name = "pytest-timeout", specifier = ">=2.4.0,<3" },
     { name = "pytest-xdist", specifier = ">=3.6.1,<4" },
-    { name = "ruff", specifier = ">=0.15.14,<0.17.1" },
+    { name = "ruff", specifier = ">=0.15.14,<0.18" },
 ]
 
 [[package]]

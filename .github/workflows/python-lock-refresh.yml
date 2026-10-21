@@ -1,0 +1,62 @@
+name: python-lock-refresh
+
+on:
+  schedule:
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: python-lock-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ secrets.CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Checkout main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.13.0"
+
+      - name: Upgrade eligible resolved versions
+        run: python3 scripts/refresh_python_lock.py --upgrade
+
+      - name: Create or update the lock refresh pull request
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          branch=chore/refresh-python-lock
+          pr=$(gh pr list --head "$branch" --base main --state open --json number --jq '.[0].number // empty')
+          if git diff --quiet -- api/uv.lock; then
+            if [ -n "$pr" ]; then
+              gh pr close "$pr" --comment "The current main branch already contains this lock refresh." --delete-branch
+            fi
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add api/uv.lock
+          git commit -m "chore(deps): refresh Python lockfile"
+          previous=$(git ls-remote origin "refs/heads/$branch" | cut -f1)
+          git push --force-with-lease="refs/heads/$branch:$previous" origin "HEAD:refs/heads/$branch"
+          if [ -z "$pr" ]; then
+            gh pr create --base main --head "$branch" --label dependencies \
+              --title "Refresh Python lockfile" \
+              --body "Upgrade compatible direct and transitive Python dependencies published at least seven days ago. Preserve already-locked fresh security fixes. Review and required checks are required before merging."
+          fi

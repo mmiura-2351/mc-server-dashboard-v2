@@ -7,15 +7,21 @@ on:
       - "api/pyproject.toml"
 
 permissions:
-  contents: write
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: dependabot-uv-lock-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
 
 jobs:
   regenerate:
-    if: startsWith(github.head_ref, 'dependabot/pip/')
+    if: >-
+      startsWith(github.head_ref, 'dependabot/pip/') &&
+      github.event.pull_request.user.login == 'dependabot[bot]' &&
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
-      # Action versions are pinned to a commit SHA per
-      # docs/dev/DEPENDENCIES.md (pinning + 7-day cooldown).
       - name: Generate GitHub App token
         id: app-token
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
@@ -23,26 +29,38 @@ jobs:
           client-id: ${{ secrets.CLIENT_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
 
-      - name: Checkout
+      - name: Checkout pull request manifests
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.head_ref }}
+          ref: ${{ github.event.pull_request.head.sha }}
           token: ${{ steps.app-token.outputs.token }}
+
+      # Run updater code from the trusted base, with PR manifests as data.
+      - name: Checkout trusted updater
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: .automation
+          persist-credentials: false
 
       - name: Set up uv
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           version: "0.13.0"
 
-      - name: Regenerate uv.lock
-        working-directory: api
-        run: uv lock
+      - name: Regenerate uv.lock with the update policy
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: python3 .automation/scripts/refresh_python_lock.py --project api --dependabot-pr "$PR_NUMBER"
 
       - name: Commit and push if changed
+        env:
+          HEAD_BRANCH: ${{ github.head_ref }}
         run: |
           git diff --exit-code api/uv.lock && exit 0
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add api/uv.lock
           git commit -m "chore(deps): regenerate uv.lock"
-          git push
+          git push origin "HEAD:$HEAD_BRANCH"
