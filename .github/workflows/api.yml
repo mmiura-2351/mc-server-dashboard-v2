@@ -8,6 +8,10 @@ on:
       - "proto/mcsd/**"
       - "Makefile"
       - "scripts/check_api_benchmark_collection.py"
+      - "scripts/refresh_python_lock.py"
+      - ".github/dependabot.yml"
+      - ".github/workflows/dependabot-uv-lock.yml"
+      - ".github/workflows/python-lock-refresh.yml"
       - ".github/workflows/api.yml"
   push:
     branches: [main]
@@ -17,6 +21,10 @@ on:
       - "proto/mcsd/**"
       - "Makefile"
       - "scripts/check_api_benchmark_collection.py"
+      - "scripts/refresh_python_lock.py"
+      - ".github/dependabot.yml"
+      - ".github/workflows/dependabot-uv-lock.yml"
+      - ".github/workflows/python-lock-refresh.yml"
       - ".github/workflows/api.yml"
 
 permissions:

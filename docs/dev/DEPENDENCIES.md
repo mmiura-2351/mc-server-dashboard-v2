@@ -42,7 +42,8 @@ How v2 takes on and updates third-party dependencies. This document fixes the
   generated, and from then on committed, only once the module has external
   dependencies; a dependency-free module has only `go.mod`.)
 - Reproducible installs resolve from the lockfile; routine updates regenerate it
-  through the ecosystem's own command: `uv lock` (api), `go get` /
+  through the ecosystem's own command: the policy-aware Python lock refresh
+  (Section 6), `go get` /
   `go mod tidy` (worker, relay), `npm install` / `npm update` (webui).
 
 ## 3. Supply-chain cooldown
@@ -55,11 +56,14 @@ most public-incident timelines.
 - The cooldown applies to **every** ecosystem.
 - It is enforced at the automated-update layer: `.github/dependabot.yml` sets
   `cooldown: {default-days: 7}` on every ecosystem, so Dependabot never opens a
-  version-update PR for a release younger than 7 days. A resolver-side cooldown
-  for `api/` (uv's `exclude-newer` option) is not configured; the cooldown is
-  enforced by Dependabot's `cooldown` setting and by the merge-time
-  `supply-chain-cooldown` status (next bullet). Whether to add a resolver-side
-  cooldown is undecided.
+  version-update PR for a release younger than 7 days. Python's weekly lock
+  refresh and ordinary Dependabot helper resolutions also apply uv's
+  `--exclude-newer` with an exact UTC timestamp seven days before the run. This
+  covers newly selected direct and transitive packages. An already-locked fresh
+  version is retained exactly, so a routine update cannot roll back a reviewed
+  security fix or use that exception to introduce a different young version.
+  Security helper resolutions omit this cutoff. No permanent cutoff is placed
+  in `pyproject.toml`, so security resolutions remain exempt.
 - It is also enforced at **merge time** as a backstop to the opening-side
   `cooldown` setting. The `supply-chain-cooldown` workflow
   (`.github/workflows/supply-chain-cooldown.yml`, driving
@@ -179,16 +183,45 @@ ecosystem entry sets `cooldown: {default-days: 7}`, so Dependabot does not open
 a version-update PR for any release younger than 7 days. Cooldown applies to
 version updates only; security updates bypass it per Section 3.
 
-**`pip` ecosystem and `uv.lock`:** Dependabot updates `pyproject.toml` but does
-not regenerate `uv.lock`. The `dependabot-uv-lock` workflow
-(`.github/workflows/dependabot-uv-lock.yml`) detects this and automatically runs
-`uv lock`, committing the updated lockfile back to the PR branch so that
-`uv sync --locked` in the `api` workflow passes. The workflow pushes using a
-GitHub App token (via `actions/create-github-app-token`) so the resulting commit
-triggers CI; this requires the repository secrets `CLIENT_ID` and `APP_PRIVATE_KEY`
-to be configured for the App. Because Dependabot-triggered workflows cannot
-access regular repository secrets, these two secrets must also be added to the
-**Dependabot secrets** (Settings > Secrets and variables > Dependabot).
+**Python manifest and lock updates:** the `/api` `pip` entry uses
+`versioning-strategy: increase`, so version updates raise the lower bound when
+necessary instead of only widening an upper cap. The `dependabot-uv-lock`
+workflow (`.github/workflows/dependabot-uv-lock.yml`) then regenerates the lock
+with exact uv 0.13.0 through `scripts/refresh_python_lock.py`. Ordinary updates
+apply the resolver cutoff in Section 3; advisory-driven security updates reuse
+the merge gate's security classification and bypass it. The helper runs updater
+code from the PR's trusted base revision against the PR manifests, and pushes
+only the generated lock back to the Dependabot branch.
+
+A separate `python-lock-refresh` workflow runs Mondays at 04:00 UTC and supports
+manual dispatch. It runs the same script with `--upgrade`, advancing compatible
+resolved direct and transitive versions even when no manifest floor changes.
+It creates or updates one `chore/refresh-python-lock` branch and one
+`dependencies` PR; when main already contains the result, it closes the obsolete
+PR. It does not merge PRs. The script normalizes uv's generated cutoff metadata
+through a second uv resolution with every selected registry version fixed, so
+ordinary `uv sync --locked` and `uv lock --check` work without transient flags.
+Run `python3 scripts/refresh_python_lock.py --upgrade` from the root to reproduce
+a routine refresh locally with the pinned uv on PATH. A fresh version already
+present in the lock is retained exactly until it ages out; newly introduced
+versions must satisfy the cutoff. If the constraints cannot be satisfied, the
+job fails instead of publishing a partial update.
+
+Both workflows push using a GitHub App token (via
+`actions/create-github-app-token`) so resulting commits and PRs trigger CI. The
+App needs Contents and Pull requests write access; configure repository secrets
+`CLIENT_ID` and `APP_PRIVATE_KEY`. Because Dependabot-triggered workflows cannot
+access regular repository secrets, add these two secrets to **Dependabot
+secrets** as well (Settings > Secrets and variables > Dependabot).
+
+Native Dependabot uv version and security updates exist. The 2026-10-21
+investigation found that the public updater uses uv 0.12.18/0.12.19 and fails
+this project's exact uv 0.13.0 requirement (owner-authorized fallback in #2807).
+Hosted updater selection was not observed.
+Retain pip plus the exact-version helper until a native update with the required
+version and compatible lock output has been demonstrated. Native branch gating
+and the merge gate's broader unlisted-transitive coverage remain separate work
+(#3465 and #3460); the resolver cutoff here does not replace those merge checks.
 
 **Pins no ecosystem watches:** the `docker` ecosystems read `Dockerfile`s and
 `docker-compose` reads `compose.yaml`, so an image pinned anywhere else is
