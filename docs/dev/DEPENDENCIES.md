@@ -96,6 +96,22 @@ most public-incident timelines.
 When a cooldown bypass is required outside a security update, document the reason
 (advisory link / rationale) in the PR.
 
+**Docker Hub images use the tag's latest push date** (owner decision in #2902).
+The merge-time gate reads `tag_last_pushed`, falling back to `last_updated`,
+rather than the upstream software's release date. A same-version image rebuild
+restarts the 7-day window: changed image artifacts, including base layers,
+should have time for problems to surface even when the software version stays
+the same. Repeated pushes can therefore delay adoption indefinitely, and a PR
+that passed yesterday can fail a later cooldown check. This unpredictable wait
+is an accepted cost of the policy.
+
+The cooldown does not make a tag immutable. A subsequent build or pull can
+resolve the same tag to different bytes without a PR, so passing the gate does
+not guarantee that those later bytes were reviewed or aged for 7 days. Retaining
+this policy accepts that limitation; it does not provide the reproducibility or
+security coverage of digest pinning. The existing CI digest pins in Section 6
+remain separate from these mutable deployment and base-image tags.
+
 ## 4. Security updates
 
 Dependabot alerts and Dependabot security updates are **enabled** for this
