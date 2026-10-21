@@ -258,6 +258,7 @@ class SqlAlchemyPluginRepository(PluginRepository):
         if row is None:
             return None
         source, project_id, version_id, version_num = row
+        assert project_id is not None
         return CatalogProvenance(
             PluginSource(source), project_id, version_id, version_num
         )

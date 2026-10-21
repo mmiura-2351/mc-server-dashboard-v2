@@ -866,6 +866,7 @@ def test_every_route_has_the_limit_the_inventory_says(shared_app: FastAPI) -> No
             "request_too_large",
         ):
             continue
+        assert route.methods is not None
         for method in route.methods:
             overrides[(method, route.path)] = (limit.max_bytes, limit.reason)
 

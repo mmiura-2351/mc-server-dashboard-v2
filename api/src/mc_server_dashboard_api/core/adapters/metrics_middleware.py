@@ -27,6 +27,7 @@ from __future__ import annotations
 import time
 from collections.abc import Awaitable, Callable
 
+from fastapi.routing import APIRoute, APIWebSocketRoute
 from starlette.requests import Request
 from starlette.responses import Response
 
@@ -49,7 +50,9 @@ async def metrics_middleware(
     response = await call_next(request)
     elapsed = time.perf_counter() - start
     route = request.scope.get("route")
-    template = getattr(route, "path", None) or _UNMATCHED
+    template = (
+        route.path if isinstance(route, APIRoute | APIWebSocketRoute) else _UNMATCHED
+    )
     method = request.method if request.method in _ALLOWED_METHODS else _OTHER_METHOD
     http_requests_total.labels(
         method=method, route=template, status=str(response.status_code)
