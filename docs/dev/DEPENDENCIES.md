@@ -98,6 +98,16 @@ When a cooldown bypass is required outside a security update, document the reaso
 
 ## 4. Security updates
 
+Dependabot alerts and Dependabot security updates are **enabled** for this
+repository (owner decision in #2989, applied on 2026-10-21). These are repository
+settings, separate from `.github/dependabot.yml`.
+
+Alerts identify dependencies affected by known advisories. Security updates can
+open advisory-driven PRs when Dependabot can resolve a fix, including lockfile
+updates for supported transitive dependencies. They do not wait for the weekly
+version-update schedule in Section 6. An alert without an automated fix still
+requires manual triage and remediation.
+
 | Trigger | Response |
 |---|---|
 | Security advisory affecting a dependency | Open a patch PR within **1 week**. |
@@ -105,7 +115,9 @@ When a cooldown bypass is required outside a security update, document the reaso
 | High-severity (RCE, auth bypass, etc.) | Patch out-of-band, outside the normal cadence. |
 
 Security work is labeled so it is easy to find, and — as above — is exempt from
-the cooldown.
+the cooldown. Security-update PRs still require review and all required checks
+before merging; enabling automatic PR creation does not authorize automatic
+merges.
 
 ## 5. Exact pinning (exception)
 
@@ -118,8 +130,8 @@ pin explaining why and linking the advisory/issue:
 
 ## 6. Automated updates
 
-Dependabot runs weekly (Monday) for every ecosystem in the repository. The
-configuration lives in `.github/dependabot.yml` and covers:
+Dependabot version updates run weekly (Monday) for every ecosystem in the
+repository. The configuration lives in `.github/dependabot.yml` and covers:
 
 | Ecosystem | Directory | What it covers |
 |---|---|---|
@@ -134,7 +146,7 @@ configuration lives in `.github/dependabot.yml` and covers:
 | `docker` | `/relay` | Base images |
 | `docker-compose` | `/` | Service images in `compose.yaml` |
 
-Grouping and PR rules:
+Version-update grouping and PR rules:
 
 - **Production deps** are grouped into one PR per ecosystem (minor + patch).
 - **Dev deps** are grouped into one PR per ecosystem (minor + patch).
@@ -142,8 +154,9 @@ Grouping and PR rules:
   so each major update is reviewed individually per Section 1, citing the
   upstream migration notes.
 - Open PRs are capped at 5 per ecosystem.
-- All Dependabot PRs carry the `dependencies` label and use the
-  `chore(deps):` commit-message prefix.
+
+All Dependabot PRs carry the `dependencies` label and use the
+`chore(deps):` commit-message prefix.
 
 The 7-day supply-chain cooldown (Section 3) is enforced automatically: every
 ecosystem entry sets `cooldown: {default-days: 7}`, so Dependabot does not open
