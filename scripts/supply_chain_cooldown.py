@@ -16,7 +16,8 @@ For a Dependabot PR it:
    handled -- and the ecosystem from the branch name (``dependabot/<eco>/...``).
    Validates the target versions against changed manifests read as data at the
    immutable merge-base and head revisions; a mismatch fails closed.
-2. Looks up each validated release's publish date in the upstream registry.
+2. Adds newly adopted resolved npm/uv.lock packages, including transitives, and
+   looks up each release's publish date in the upstream registry.
 3. Posts a ``supply-chain-cooldown`` commit status on the PR head SHA:
    ``failure`` (+ the ``supply-chain-cooldown`` label) while any release is
    younger than 7 days, ``success`` (label removed) once all have aged out.
@@ -505,6 +506,77 @@ def validate_updated_dependencies(
             raise CooldownError(f"{name}: trailer {version} disagrees with adopted versions {sorted(adopted)}")
 
 
+def _lockfile_packages(ecosystem: str, text: str) -> set[tuple[str, str, str]]:
+    """Read external name/version/source identities without trusting lock dates."""
+    if not text:
+        return set()
+    packages = set()
+    if ecosystem == "npm":
+        data = json.loads(text)
+        if data.get("lockfileVersion") not in (2, 3) or not isinstance(data.get("packages"), dict):
+            raise CooldownError("unsupported npm lockfile format")
+        local_paths = {item["resolved"] for item in data["packages"].values() if item.get("link")}
+        for path, item in data["packages"].items():
+            if not path or (path in local_paths and "node_modules/" not in path):
+                continue
+            source = item.get("resolved", "")
+            location = urllib.parse.urlsplit(source)
+            if (item.get("link") and not location.scheme and not location.netloc) or (
+                location.scheme == "file" and not location.netloc
+            ):
+                continue
+            if "node_modules/" not in path:
+                raise CooldownError(f"unsupported npm package path: {path}")
+            name = item.get("name", path.rsplit("node_modules/", 1)[1])
+            version = item.get("version")
+            if not isinstance(name, str) or not isinstance(version, str) or not name or not version:
+                raise CooldownError(f"missing npm package identity: {path}")
+            packages.add((name, version, source))
+    else:
+        data = tomllib.loads(text)
+        if data.get("version") != 1 or not isinstance(data.get("package"), list):
+            raise CooldownError("unsupported uv lockfile format")
+        for item in data["package"]:
+            source = item.get("source", {})
+            if len(source) == 1 and set(source) & {"editable", "virtual", "directory", "path"}:
+                location = urllib.parse.urlsplit(next(iter(source.values())))
+                if not location.scheme and not location.netloc:
+                    continue
+            name, version = item.get("name"), item.get("version")
+            if not isinstance(name, str) or not isinstance(version, str) or not name or not version:
+                raise CooldownError("missing uv package identity")
+            registry = source["registry"] if set(source) == {"registry"} else json.dumps(source, sort_keys=True)
+            packages.add((re.sub(r"[-_.]+", "-", name).lower(), version, registry))
+    return packages
+
+
+def newly_resolved_dependencies(ecosystem: str, manifests: list[tuple[str, str, str]]) -> list[tuple[str, str]]:
+    """Include every newly adopted external version in changed npm/uv locks."""
+    if ecosystem not in ("npm", "pip"):
+        return []
+    old: set[tuple[str, str, str]] = set()
+    new: set[tuple[str, str, str]] = set()
+    for path, before, after in manifests:
+        if path.rsplit("/", 1)[-1] != ("package-lock.json" if ecosystem == "npm" else "uv.lock"):
+            continue
+        old.update(_lockfile_packages(ecosystem, before))
+        new.update(_lockfile_packages(ecosystem, after))
+    adopted = set()
+    previous_versions = {(name, version) for name, version, _ in old}
+    for name, version, source in new - old:
+        location = urllib.parse.urlsplit(source)
+        if ecosystem == "npm":
+            public_source = (location.scheme == "https" and location.netloc == "registry.npmjs.org" and
+                             urllib.parse.unquote(location.path).startswith(f"/{name}/-/"))
+        else:
+            public_source = source.rstrip("/") == "https://pypi.org/simple"
+        if not public_source:
+            raise CooldownError(f"cannot verify registry source for {name}@{version}: {source}")
+        if (name, version) not in previous_versions:
+            adopted.add((name, version))
+    return sorted(adopted)
+
+
 def _github_release_date(gh_get: Transport, repo: str, version: str) -> datetime:
     """``published_at`` of ``repo``'s release for ``version`` (tries v-prefix)."""
     for tag in _github_tag_candidates(version):
@@ -696,6 +768,9 @@ def _evaluate_head(
 
     manifests = _pr_manifests(repo, pr, meta, ecosystem)
     validate_updated_dependencies(ecosystem, packages, manifests)
+    if ecosystem == "pip":
+        packages = [(re.sub(r"[-_.]+", "-", name).lower(), version) for name, version in packages]
+    packages = list(dict.fromkeys([*packages, *newly_resolved_dependencies(ecosystem, manifests)]))
 
     offenders: list[tuple[str, str, datetime]] = []
     unknown: list[str] = []
@@ -1072,6 +1147,61 @@ def _self_test() -> int:  # noqa: C901 -- a flat table of independent assertions
     validation_case("pip unchanged floor cannot validate stale cap target", "pip", [("mypy", "2.1.0")],
                     [("api/pyproject.toml", '[dependency-groups]\ndev = ["mypy>=2.1.0,<2.4"]',
                       '[dependency-groups]\ndev = ["mypy>=2.1.0,<2.5"]')], False)
+
+    def npm_lock(entries: dict[str, dict]) -> str:
+        return json.dumps({"lockfileVersion": 3, "packages": entries})
+
+    def npm_package(name: str, version: str) -> dict:
+        return {"version": version, "resolved": f"https://registry.npmjs.org/{name}/-/{name.rsplit('/', 1)[-1]}-{version}.tgz"}
+
+    def uv_package(name: str, version: str, source: str = 'registry = "https://pypi.org/simple"') -> str:
+        return f'[[package]]\nname = "{name}"\nversion = "{version}"\nsource = {{ {source} }}\n'
+
+    def resolved_case(label: str, eco: str, before: str, after: str, expected: object) -> None:
+        filename = "webui/package-lock.json" if eco == "npm" else "api/uv.lock"
+        try:
+            got = newly_resolved_dependencies(eco, [(filename, before, after)])
+        except CooldownError:
+            got = "blocked"
+        check(label, got, expected)
+
+    npm_before = npm_lock({"node_modules/pkg": npm_package("pkg", "1.0.0"),
+                           "node_modules/other/node_modules/pkg": npm_package("pkg", "2.0.0")})
+    resolved_case("npm removed and relocated versions are not new", "npm", npm_before,
+                  npm_lock({"node_modules/pkg": npm_package("pkg", "2.0.0")}), [])
+    resolved_case("npm nested additional version is checked", "npm", npm_before,
+                  npm_lock({"node_modules/pkg": npm_package("pkg", "1.0.0"),
+                            "node_modules/other/node_modules/pkg": npm_package("pkg", "3.0.0")}), [("pkg", "3.0.0")])
+    resolved_case("npm scoped alias uses registry name", "npm", "",
+                  npm_lock({"node_modules/alias": {**npm_package("@scope/pkg", "2.0.0"), "name": "@scope/pkg"}}),
+                  [("@scope/pkg", "2.0.0")])
+    resolved_case("npm root workspace and local archives are excluded", "npm", "", npm_lock({
+        "": {"version": "0.0.0"}, "packages/local": {"name": "local", "version": "1.0.0"},
+        "node_modules/local": {"resolved": "packages/local", "link": True},
+        "node_modules/archive": {"version": "1.0.0", "resolved": "file:../archive.tgz"}}), [])
+    resolved_case("npm missing source fails closed", "npm", "",
+                  npm_lock({"node_modules/pkg": {"version": "1.0.0"}}), "blocked")
+    resolved_case("npm legacy lock fails closed", "npm", "", '{"lockfileVersion": 1, "dependencies": {}}', "blocked")
+    resolved_case("npm public artifact URL changes do not recheck an existing release", "npm",
+                  npm_lock({"node_modules/pkg": npm_package("pkg", "1.0.0")}),
+                  npm_lock({"node_modules/pkg": {**npm_package("pkg", "1.0.0"),
+                                                "resolved": "https://registry.npmjs.org/pkg/-/pkg-1.0.0.tgz?mirror=1"}}), [])
+    uv_before = "version = 1\n" + uv_package("Some_Pkg", "1.0.0") + uv_package("other", "2.0.0")
+    resolved_case("uv canonical unchanged and removed versions are not new", "pip", uv_before,
+                  "version = 1\n" + uv_package("some.pkg", "1.0.0"), [])
+    resolved_case("uv duplicate marker resolutions are checked once", "pip", uv_before,
+                  "version = 1\n" + uv_package("some-pkg", "1.0.0") + uv_package("other", "3.0.0") * 2,
+                  [("other", "3.0.0")])
+    resolved_case("uv local packages are excluded", "pip", "", "version = 1\n" + "".join(
+        uv_package("local", "0.0.0", f'{kind} = "."') for kind in ("editable", "virtual", "directory", "path")), [])
+    resolved_case("uv missing source fails closed", "pip", "", 'version = 1\n[[package]]\nname = "pkg"\nversion = "1"\n', "blocked")
+    resolved_case("uv unsupported lock fails closed", "pip", "", "version = 2\npackage = []", "blocked")
+    resolved_case("uv equivalent public source does not recheck an existing release", "pip",
+                  "version = 1\n" + uv_package("pkg", "1.0.0"),
+                  "version = 1\n" + uv_package("pkg", "1.0.0", 'registry = "https://pypi.org/simple/"'), [])
+    resolved_case("uv changed unsupported source fails closed", "pip",
+                  "version = 1\n" + uv_package("pkg", "1.0.0", 'git = "https://example.com/old"'),
+                  "version = 1\n" + uv_package("pkg", "1.0.0", 'git = "https://example.com/new"'), "blocked")
     # Exercise the real status-posting path with immutable API manifest fixtures.
     saved = {key: globals()[key] for key in
              ("_gh_json", "set_status", "add_label", "remove_label", "release_date")}
@@ -1082,17 +1212,21 @@ def _self_test() -> int:  # noqa: C901 -- a flat table of independent assertions
     security = False
     incomplete = False
     paginate = False
+    graph_manifests: dict[str, tuple[str, str]] | None = None
+    missing_publish_date = False
 
     def pr_fixture(path: str) -> object:
         requests.append(path)
         python_update = branch.startswith(("dependabot/uv/", "dependabot/pip/"))
         if path.endswith("/commits"):
-            name = "ruff" if python_update else "astral-sh/uv"
+            name = "ruff" if python_update else "@scope/direct" if graph_manifests is not None else "astral-sh/uv"
             trailer = (f"updated-dependencies:\n- dependency-name: {name}\n"
                        f"  dependency-version: {trailer_version}\n...")
             return [{"commit": {"message": trailer}},
                     {"commit": {"message": "Regenerate lockfile" + (" GHSA-abcd-ef12-3456" if security else "")}}]
         if "/files?" in path:
+            if graph_manifests is not None:
+                return [{"filename": filename, "status": "modified"} for filename in graph_manifests]
             if paginate and path.endswith("&page=1"):
                 return [{"filename": f"ignored/{index}.txt", "status": "modified"} for index in range(100)]
             if python_update:
@@ -1101,22 +1235,35 @@ def _self_test() -> int:  # noqa: C901 -- a flat table of independent assertions
         if "/compare/" in path:
             return {"merge_base_commit": {"sha": "merge-base"}}
         if "/contents/" in path:
+            if graph_manifests is not None:
+                filename = path.split("/contents/", 1)[1].split("?", 1)[0]
+                text = graph_manifests[filename][1 if "ref=head" in path else 0]
+                return {"type": "file", "encoding": "base64", "content": base64.b64encode(text.encode()).decode()}
             version = "0.13.1" if "ref=head" in path else "0.12.17"
             text = f"FROM ghcr.io/astral-sh/uv:{version} AS uv\n"
             if python_update:
                 version = "0.17.1" if "ref=head" in path else "0.17.0"
                 text = (f'[dependency-groups]\ndev = ["ruff>={version},<0.18"]\n' if "/pyproject.toml?" in path
-                        else f'[[package]]\nname = "ruff"\nversion = "{version}"\n')
+                        else f'version = 1\n[[package]]\nname = "ruff"\nversion = "{version}"\n'
+                             'source = { registry = "https://pypi.org/simple" }\n')
             return {"type": "file", "encoding": "base64", "content":
                     base64.b64encode(text.encode()).decode()}
         if path == "repos/owner/repo/pulls/3386":
             return {"user": {"login": BOT}, "head": {"sha": "head", "ref":
                     branch, "repo": {"full_name": "owner/repo"}},
-                    "base": {"sha": "base"}, "changed_files": 2 if python_update else 101 if paginate else 1, "body": ""}
+                    "base": {"sha": "base"}, "changed_files": len(graph_manifests) if graph_manifests is not None else 2 if python_update else 101 if paginate else 1, "body": ""}
         raise AssertionError(f"unexpected gh call: {path}")
 
     def fixture_release_date(eco: str, name: str, version: str) -> datetime:
         lookups.append((name, version))
+        if graph_manifests is not None:
+            stamp = "2026-10-20T00:00:00Z" if name == "transitive-pkg" else "2026-09-01T00:00:00Z"
+            payload = ({"time": {version: stamp}} if eco == "npm" else
+                       {"releases": {version: [{"upload_time_iso_8601": stamp}]}})
+            if missing_publish_date and name == "transitive-pkg":
+                payload = {}
+            url = _npm_url(name) if eco == "npm" else f"https://pypi.org/pypi/{name}/json"
+            return saved["release_date"](eco, name, version, http_get=http_stub(payload, url), gh_get=boom_gh)
         if eco == "pip":
             def pypi_fixture(url: str) -> dict:
                 check("uv registry URL", url, "https://pypi.org/pypi/ruff/json")
@@ -1190,6 +1337,58 @@ def _self_test() -> int:  # noqa: C901 -- a flat table of independent assertions
                     check(label + f" reads {path} at {revision}",
                           f"repos/owner/repo/contents/{path}?ref={revision}" in requests, True)
             check(label + " registry targets", lookups, [("ruff", "0.17.1")] if trailer_version == "0.17.1" else [])
+
+        for branch, filename, before, after in (
+            ("dependabot/npm_and_yarn/webui/group", "webui/package-lock.json",
+             npm_lock({"": {"name": "webui", "version": "0.0.0"},
+                       "node_modules/@scope/direct": npm_package("@scope/direct", "1.0.0")}),
+             npm_lock({"": {"name": "webui", "version": "0.0.0"},
+                       "node_modules/@scope/direct": npm_package("@scope/direct", "2.0.0"),
+                       "node_modules/transitive-pkg": npm_package("transitive-pkg", "3.0.0")})),
+            ("dependabot/pip/api/group", "api/uv.lock",
+             "version = 1\n" + uv_package("ruff", "1.0.0"),
+             "version = 1\n" + uv_package("ruff", "2.0.0") + uv_package("Transitive_Pkg", "3.0.0")),
+        ):
+            graph_manifests = {filename: (before, after)}
+            trailer_version = "2.0.0"
+            for date, expected in (("2026-10-22", "failure"), ("2026-10-27", "success")):
+                posted.clear()
+                lookups.clear()
+                requests.clear()
+                evaluate_pr("owner/repo", 3386, parse_iso(date + "T00:00:00Z"))
+                label = f"{filename} unlisted transitive at {date}"
+                check(label + " status", [(sha, state) for sha, state, _ in posted], [("head", expected)])
+                check(label + " registry targets", lookups,
+                      [("ruff" if "uv.lock" in filename else "@scope/direct", "2.0.0"), ("transitive-pkg", "3.0.0")])
+                for revision in ("merge-base", "head"):
+                    check(label + " immutable " + revision,
+                          f"repos/owner/repo/contents/{filename}?ref={revision}" in requests, True)
+
+            missing_publish_date = True
+            posted.clear()
+            evaluate_pr("owner/repo", 3386, parse_iso("2026-10-27T00:00:00Z"))
+            check(filename + " missing transitive publish date fails closed", posted[-1][1], "failure")
+            missing_publish_date = False
+
+            graph_manifests = {filename: (before, after.replace("https://registry.npmjs.org/transitive-pkg", "https://example.com/transitive-pkg")
+                                        if filename.endswith(".json") else after.replace(
+                                            'name = "Transitive_Pkg"\nversion = "3.0.0"\nsource = { registry = "https://pypi.org/simple" }',
+                                            'name = "Transitive_Pkg"\nversion = "3.0.0"\nsource = { git = "https://example.com/transitive-pkg" }'))}
+            posted.clear()
+            lookups.clear()
+            try:
+                evaluate_pr("owner/repo", 3386, parse_iso("2026-10-27T00:00:00Z"))
+            except CooldownError:
+                pass
+            check(filename + " unprovable transitive source fails closed", posted[-1][1], "failure")
+            check(filename + " unprovable source skips registry", lookups, [])
+            security = True
+            posted.clear()
+            requests.clear()
+            check(filename + " security exemption", evaluate_pr("owner/repo", 3386, now), "pass: security update")
+            check(filename + " security status", posted[-1][1], "success")
+            check(filename + " security skips manifests", any("/contents/" in path for path in requests), False)
+            security = False
     finally:
         globals().update(saved)
 
