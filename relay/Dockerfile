@@ -9,7 +9,8 @@
 # ---------------------------------------------------------------------------
 # Builder: compile a static binary.
 # ---------------------------------------------------------------------------
-FROM golang:1.27.2 AS builder
+# crypto/x509 security fix: https://pkg.go.dev/vuln/GO-2026-6809 (cooldown exempt).
+FROM golang:1.27.3 AS builder
 
 WORKDIR /src
 

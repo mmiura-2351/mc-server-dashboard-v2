@@ -23,7 +23,7 @@ Install these once on your machine. Toolchain versions are pinned per module
 | Tool | For | Install |
 |---|---|---|
 | [uv](https://docs.astral.sh/uv/) 0.13.0 | `api/` Python toolchain + dependencies (Python is pinned in `api/.python-version`) | per the uv docs; select the exact version |
-| [Go](https://go.dev/dl/) 1.27 | `worker/` (pinned in `worker/go.mod`) | per the Go docs |
+| [Go](https://go.dev/dl/) ≥ 1.27.3 | `worker/` and `relay/` (minimum in each `go.mod`) | per the Go docs |
 | [Node.js](https://nodejs.org/) ≥ 24.15 (+ npm 11) | `webui/` build, lint, and test (pinned in `webui/package.json`) | per the Node.js docs; npm comes bundled |
 | [buf](https://buf.build) 1.70.0 | `proto/` lint + code generation | see [`../../proto/README.md`](../../proto/README.md) |
 | GNU Make | the root unified commands | usually preinstalled; otherwise your OS package manager |
