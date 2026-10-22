@@ -65,6 +65,7 @@ _USER_AGENT = "mcsd-supply-chain-cooldown"
 # used to pick a registry. docker-compose shares docker's registry lookup.
 _ECOSYSTEM_BY_TOKEN = {
     "pip": "pip",
+    "uv": "pip",
     "npm_and_yarn": "npm",
     "github_actions": "github-actions",
     "go_modules": "gomod",
@@ -661,8 +662,7 @@ def evaluate_pr(repo: str, pr: int, now: datetime | None = None) -> str:
         # A human PR adopts no Dependabot-managed pin, so there is nothing to
         # age -- but the context is REQUIRED, and a required status that is
         # never posted wedges the PR forever on a check that cannot arrive.
-        # Post the pass explicitly, same reasoning as the ungated-ecosystem
-        # branch in _evaluate_head.
+        # Post the pass explicitly so the required context is satisfied.
         set_status(repo, sha, "success", "Not a Dependabot PR -- cooldown not applicable.")
         return "skipped: not a Dependabot PR"
     try:
@@ -678,14 +678,6 @@ def _evaluate_head(
 ) -> str:
     branch = meta["head"]["ref"]
     body = meta.get("body") or ""
-    ecosystem = ecosystem_from_branch(branch)
-    if ecosystem is None:
-        # An ungated ecosystem (none configured today): don't wedge the PR on a
-        # required context we cannot evaluate.
-        set_status(repo, sha, "success", f"ecosystem not gated ({branch}).")
-        remove_label(repo, pr)
-        return f"skipped: unrecognized branch {branch}"
-
     commits = _gh_json(f"repos/{repo}/pulls/{pr}/commits")
     messages = [c["commit"]["message"] for c in commits]
 
@@ -693,6 +685,10 @@ def _evaluate_head(
         set_status(repo, sha, "success", "Security update -- cooldown bypassed.")
         remove_label(repo, pr)
         return "pass: security update"
+
+    ecosystem = ecosystem_from_branch(branch)
+    if ecosystem is None:
+        raise CooldownError(f"unrecognized Dependabot ecosystem branch: {branch}")
 
     packages = parse_updated_dependencies(messages)
     if not packages:
@@ -796,6 +792,7 @@ def _self_test() -> int:  # noqa: C901 -- a flat table of independent assertions
 
     # Ecosystem from branch.
     check("eco pip", ecosystem_from_branch("dependabot/pip/api/requests-2.31.0"), "pip")
+    check("eco uv", ecosystem_from_branch("dependabot/uv/api/ruff-0.17.1"), "pip")
     check("eco npm", ecosystem_from_branch("dependabot/npm_and_yarn/webui/dev-abc"), "npm")
     check(
         "eco actions",
@@ -1081,35 +1078,50 @@ def _self_test() -> int:  # noqa: C901 -- a flat table of independent assertions
     requests: list[str] = []
     lookups: list[tuple[str, str]] = []
     trailer_version = "0.12.23"
+    branch = "dependabot/docker/api/docker-group"
     security = False
     incomplete = False
     paginate = False
 
     def pr_fixture(path: str) -> object:
         requests.append(path)
+        python_update = branch.startswith(("dependabot/uv/", "dependabot/pip/"))
         if path.endswith("/commits"):
-            trailer = ("updated-dependencies:\n- dependency-name: astral-sh/uv\n"
+            name = "ruff" if python_update else "astral-sh/uv"
+            trailer = (f"updated-dependencies:\n- dependency-name: {name}\n"
                        f"  dependency-version: {trailer_version}\n...")
             return [{"commit": {"message": trailer}},
                     {"commit": {"message": "Regenerate lockfile" + (" GHSA-abcd-ef12-3456" if security else "")}}]
         if "/files?" in path:
             if paginate and path.endswith("&page=1"):
                 return [{"filename": f"ignored/{index}.txt", "status": "modified"} for index in range(100)]
+            if python_update:
+                return [{"filename": path, "status": "modified"} for path in ("api/pyproject.toml", "api/uv.lock")]
             return [] if incomplete else [{"filename": "api/Dockerfile", "status": "modified"}]
         if "/compare/" in path:
             return {"merge_base_commit": {"sha": "merge-base"}}
         if "/contents/" in path:
             version = "0.13.1" if "ref=head" in path else "0.12.17"
+            text = f"FROM ghcr.io/astral-sh/uv:{version} AS uv\n"
+            if python_update:
+                version = "0.17.1" if "ref=head" in path else "0.17.0"
+                text = (f'[dependency-groups]\ndev = ["ruff>={version},<0.18"]\n' if "/pyproject.toml?" in path
+                        else f'[[package]]\nname = "ruff"\nversion = "{version}"\n')
             return {"type": "file", "encoding": "base64", "content":
-                    base64.b64encode(f"FROM ghcr.io/astral-sh/uv:{version} AS uv\n".encode()).decode()}
+                    base64.b64encode(text.encode()).decode()}
         if path == "repos/owner/repo/pulls/3386":
             return {"user": {"login": BOT}, "head": {"sha": "head", "ref":
-                    "dependabot/docker/api/docker-group", "repo": {"full_name": "owner/repo"}},
-                    "base": {"sha": "base"}, "changed_files": 101 if paginate else 1, "body": ""}
+                    branch, "repo": {"full_name": "owner/repo"}},
+                    "base": {"sha": "base"}, "changed_files": 2 if python_update else 101 if paginate else 1, "body": ""}
         raise AssertionError(f"unexpected gh call: {path}")
 
     def fixture_release_date(eco: str, name: str, version: str) -> datetime:
         lookups.append((name, version))
+        if eco == "pip":
+            def pypi_fixture(url: str) -> dict:
+                check("uv registry URL", url, "https://pypi.org/pypi/ruff/json")
+                return {"releases": {"0.17.1": [{"upload_time_iso_8601": "2026-10-14T05:15:30Z"}]}}
+            return saved["release_date"](eco, name, version, http_get=pypi_fixture, gh_get=boom_gh)
         return parse_iso("2026-10-14T05:15:30Z" if version == "0.13.1" else "2026-09-01T00:00:00Z")
 
     globals()["_gh_json"] = pr_fixture
@@ -1118,6 +1130,22 @@ def _self_test() -> int:  # noqa: C901 -- a flat table of independent assertions
     globals()["remove_label"] = lambda *args: None
     globals()["release_date"] = fixture_release_date
     try:
+        branch = "dependabot/cargo/crate-1.0"
+        posted.clear()
+        requests.clear()
+        lookups.clear()
+        try:
+            evaluate_pr("owner/repo", 3386, now)
+        except CooldownError:
+            pass
+        check("unknown ecosystem posts failure", [(sha, state) for sha, state, _ in posted], [("head", "failure")])
+        check("unknown ecosystem skips registry", lookups, [])
+        check("unknown ecosystem skips manifests", any("/contents/" in path for path in requests), False)
+        security = True
+        posted.clear()
+        check("unknown ecosystem security exemption", evaluate_pr("owner/repo", 3386, now), "pass: security update")
+        check("unknown ecosystem security status", [(sha, state) for sha, state, _ in posted], [("head", "success")])
+        branch = "dependabot/docker/api/docker-group"
         for label, trailer_version, security, incomplete, paginate, date, expected in (
             ("stale eligible trailer", "0.12.23", False, False, False, "2026-10-15", "failure"),
             ("matching fresh target plus regeneration commit", "0.13.1", False, False, False, "2026-10-15", "failure"),
@@ -1141,6 +1169,27 @@ def _self_test() -> int:  # noqa: C901 -- a flat table of independent assertions
                 check(label + " immutable base", "repos/owner/repo/contents/api/Dockerfile?ref=merge-base" in requests, True)
                 check(label + " registry targets", lookups,
                       [("ghcr.io/astral-sh/uv", "0.13.1")] if trailer_version == "0.13.1" else [])
+        incomplete = paginate = security = False
+        for branch, trailer_version, date, expected in (
+            ("dependabot/uv/api/ruff-0.17.1", "0.17.1", "2026-10-15", "failure"),
+            ("dependabot/uv/api/ruff-0.17.1", "0.17.1", "2026-10-22", "success"),
+            ("dependabot/uv/api/ruff-0.17.0", "0.17.0", "2026-10-22", "failure"),
+            ("dependabot/pip/api/ruff-0.17.1", "0.17.1", "2026-10-22", "success"),
+        ):
+            posted.clear()
+            requests.clear()
+            lookups.clear()
+            try:
+                evaluate_pr("owner/repo", 3386, parse_iso(date + "T00:00:00Z"))
+            except CooldownError:
+                pass
+            label = f"{branch} at {date}"
+            check(label + " status", [(sha, state) for sha, state, _ in posted], [("head", expected)])
+            for path in ("api/pyproject.toml", "api/uv.lock"):
+                for revision in ("merge-base", "head"):
+                    check(label + f" reads {path} at {revision}",
+                          f"repos/owner/repo/contents/{path}?ref={revision}" in requests, True)
+            check(label + " registry targets", lookups, [("ruff", "0.17.1")] if trailer_version == "0.17.1" else [])
     finally:
         globals().update(saved)
 
