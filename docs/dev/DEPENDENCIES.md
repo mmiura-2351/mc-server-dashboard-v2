@@ -69,8 +69,18 @@ most public-incident timelines.
   (`.github/workflows/supply-chain-cooldown.yml`, driving
   `scripts/supply_chain_cooldown.py`) reads each Dependabot PR's bumped packages
   from its commit trailer and validates those targets against the changed
-  manifests at the PR's immutable merge-base and head revisions. It then looks
-  up each validated release's publish date in the upstream registry (PyPI, npm, `proxy.golang.org`, GitHub Releases for actions and
+  manifests at the PR's immutable merge-base and head revisions. For npm
+  `package-lock.json` and Python `uv.lock` changes, it also compares the resolved
+  package sets at those revisions and checks every newly adopted external
+  version, including transitive packages absent from the trailer. Root and local
+  packages are excluded; unchanged or removed versions add no checks. Duplicate
+  registry packages are checked once, including canonically equivalent Python
+  names. Newly adopted sources must be identifiable as public npm or PyPI
+  releases; npm tarball URLs must match the declared package name and version
+  before a release can be checked or deduplicated. Unsupported or missing
+  sources fail closed. Other ecosystems retain the validated trailer checks.
+  It then looks up each release's publish date
+  in the upstream registry (PyPI, npm, `proxy.golang.org`, GitHub Releases for actions and
   `ghcr.io` images, Docker Hub for Docker Hub images), and posts a
   `supply-chain-cooldown` commit status: `failure` (plus a `supply-chain-cooldown`
   label) while any release is younger than 7 days, `success` once it ages out.
@@ -236,8 +246,8 @@ Hosted updater selection was not observed.
 Retain pip plus the exact-version helper until a native update with the required
 version and compatible lock output has been demonstrated. Recognizing native
 `uv` branches in the merge gate does not change this migration prerequisite.
-The merge gate's broader unlisted-transitive coverage remains separate work
-(#3460); the resolver cutoff here does not replace those merge checks.
+The resolver cutoff here complements the npm and Python merge-time resolved
+package checks in Section 3.
 
 **Pins no ecosystem watches:** the `docker` ecosystems read `Dockerfile`s and
 `docker-compose` reads `compose.yaml`, so an image pinned anywhere else is
