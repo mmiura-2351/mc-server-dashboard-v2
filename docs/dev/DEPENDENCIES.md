@@ -75,7 +75,10 @@ most public-incident timelines.
   `supply-chain-cooldown` commit status: `failure` (plus a `supply-chain-cooldown`
   label) while any release is younger than 7 days, `success` once it ages out.
   Stale trailers, missing manifest evidence, and unsupported formats fail closed;
-  a stale trailer must be corrected before its PR can pass. The gate reads head
+  unrecognized Dependabot ecosystem branches also fail closed. Native `uv`
+  branches use the same Python manifest, `uv.lock`, and PyPI checks as `pip`.
+  Security updates retain the exemption in Section 4 regardless of ecosystem.
+  A stale trailer must be corrected before its PR can pass. The gate reads head
   manifests through the GitHub API as data, without checking out or executing
   head code. For pip requirement-only updates it checks the changed numeric
   version bounds, allowing a widened upper bound without requiring `uv.lock`
@@ -231,9 +234,10 @@ investigation found that the public updater uses uv 0.12.18/0.12.19 and fails
 this project's exact uv 0.13.0 requirement (owner-authorized fallback in #2807).
 Hosted updater selection was not observed.
 Retain pip plus the exact-version helper until a native update with the required
-version and compatible lock output has been demonstrated. Native branch gating
-and the merge gate's broader unlisted-transitive coverage remain separate work
-(#3465 and #3460); the resolver cutoff here does not replace those merge checks.
+version and compatible lock output has been demonstrated. Recognizing native
+`uv` branches in the merge gate does not change this migration prerequisite.
+The merge gate's broader unlisted-transitive coverage remains separate work
+(#3460); the resolver cutoff here does not replace those merge checks.
 
 **Pins no ecosystem watches:** the `docker` ecosystems read `Dockerfile`s and
 `docker-compose` reads `compose.yaml`, so an image pinned anywhere else is
