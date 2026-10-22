@@ -506,6 +506,7 @@ def _malformed_ids(path: str) -> str:
 def _body_routes(app: FastAPI) -> Iterator[tuple[str, str]]:
     for route in app.routes:
         if isinstance(route, APIRoute):
+            assert route.methods is not None
             for method in sorted(route.methods - _BODYLESS_METHODS):
                 yield method, route.path
 

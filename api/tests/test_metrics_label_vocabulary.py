@@ -46,13 +46,10 @@ router. Clearing means this test owns every label value in the exposition it
 then asserts on, so its result does not depend on what ran before it.
 
 **The** ``<unmatched>`` **collapse is structural, not conventional.** The
-middleware labels ``route`` from ``request.scope["route"]``, and in the installed
-Starlette/FastAPI only ``fastapi.routing.APIRoute.matches`` and
-``APIWebSocketRoute.matches`` ever put a ``route`` key on the child scope
-(``fastapi/routing.py`` lines 807 and 1001). Starlette's ``Mount.matches``
-returns ``endpoint`` but no ``route``, and its plain ``Route.matches`` sets
-neither — so a static-mount path, a plain Starlette route (``/api/openapi.json``)
-and a 404 all leave the key absent and collapse to the literal ``<unmatched>``.
+middleware labels ``route`` from ``request.scope["route"]`` only for an
+``APIRoute`` or ``APIWebSocketRoute``. A static mount, a plain Starlette route
+(``/api/openapi.json``) and a 404 all collapse to the literal ``<unmatched>``,
+even when the framework records a non-API route in the scope.
 The test drives a mount path and a 404, both carrying a UUID, and pins that
 neither raw path reaches the exposition.
 

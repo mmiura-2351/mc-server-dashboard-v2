@@ -5,7 +5,7 @@ import warnings
 
 from mcsd.controlplane.v1 import control_plane_pb2 as mcsd_dot_controlplane_dot_v1_dot_control__plane__pb2
 
-GRPC_GENERATED_VERSION = '1.80.0'
+GRPC_GENERATED_VERSION = '1.81.1'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
@@ -25,7 +25,7 @@ if _version_not_supported:
     )
 
 
-class WorkerServiceStub(object):
+class WorkerServiceStub:
     """WorkerService is the only control-plane service. Workers dial the API and open
     the persistent stream; the API never dials a Worker (Workers have no inbound
     exposure, REQUIREMENTS.md Section 5.1).
@@ -44,7 +44,7 @@ class WorkerServiceStub(object):
                 _registered_method=True)
 
 
-class WorkerServiceServicer(object):
+class WorkerServiceServicer:
     """WorkerService is the only control-plane service. Workers dial the API and open
     the persistent stream; the API never dials a Worker (Workers have no inbound
     exposure, REQUIREMENTS.md Section 5.1).
@@ -75,7 +75,7 @@ def add_WorkerServiceServicer_to_server(servicer, server):
 
 
  # This class is part of an EXPERIMENTAL API.
-class WorkerService(object):
+class WorkerService:
     """WorkerService is the only control-plane service. Workers dial the API and open
     the persistent stream; the API never dials a Worker (Workers have no inbound
     exposure, REQUIREMENTS.md Section 5.1).
