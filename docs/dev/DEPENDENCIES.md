@@ -76,8 +76,10 @@ most public-incident timelines.
   packages are excluded; unchanged or removed versions add no checks. Duplicate
   registry packages are checked once, including canonically equivalent Python
   names. Newly adopted sources must be identifiable as public npm or PyPI
-  releases; unsupported or missing sources fail closed. Other ecosystems retain
-  the validated trailer checks. It then looks up each release's publish date
+  releases; npm tarball URLs must match the declared package name and version
+  before a release can be checked or deduplicated. Unsupported or missing
+  sources fail closed. Other ecosystems retain the validated trailer checks.
+  It then looks up each release's publish date
   in the upstream registry (PyPI, npm, `proxy.golang.org`, GitHub Releases for actions and
   `ghcr.io` images, Docker Hub for Docker Hub images), and posts a
   `supply-chain-cooldown` commit status: `failure` (plus a `supply-chain-cooldown`

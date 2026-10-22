@@ -561,17 +561,18 @@ def newly_resolved_dependencies(ecosystem: str, manifests: list[tuple[str, str, 
             continue
         old.update(_lockfile_packages(ecosystem, before))
         new.update(_lockfile_packages(ecosystem, after))
-    def public_source(name: str, source: str) -> bool:
+    def public_source(name: str, version: str, source: str) -> bool:
         location = urllib.parse.urlsplit(source)
         if ecosystem == "npm":
+            artifact_path = f"/{name}/-/{name.rsplit('/', 1)[-1]}-{version}.tgz"
             return (location.scheme == "https" and location.netloc == "registry.npmjs.org" and
-                    urllib.parse.unquote(location.path).startswith(f"/{name}/-/"))
+                    urllib.parse.unquote(location.path) == artifact_path)
         return source.rstrip("/") == "https://pypi.org/simple"
 
     adopted = set()
-    previous_versions = {(name, version) for name, version, source in old if public_source(name, source)}
+    previous_versions = {(name, version) for name, version, source in old if public_source(name, version, source)}
     for name, version, source in new - old:
-        if not public_source(name, source):
+        if not public_source(name, version, source):
             raise CooldownError(f"cannot verify registry source for {name}@{version}: {source}")
         if (name, version) not in previous_versions:
             adopted.add((name, version))
@@ -1190,6 +1191,12 @@ def _self_test() -> int:  # noqa: C901 -- a flat table of independent assertions
     resolved_case("npm adoption from unknown provenance checks the public release", "npm",
                   npm_lock({"node_modules/pkg": {"version": "1.0.0", "resolved": "https://example.com/pkg.tgz"}}),
                   npm_lock({"node_modules/pkg": npm_package("pkg", "1.0.0")}), [("pkg", "1.0.0")])
+    mismatched_package = {**npm_package("pkg", "9.0.0"), "version": "1.0.0"}
+    resolved_case("npm new package with mismatched artifact fails closed", "npm", "",
+                  npm_lock({"node_modules/pkg": mismatched_package}), "blocked")
+    resolved_case("npm existing declared version with changed artifact fails closed", "npm",
+                  npm_lock({"node_modules/pkg": npm_package("pkg", "1.0.0")}),
+                  npm_lock({"node_modules/pkg": mismatched_package}), "blocked")
     uv_before = "version = 1\n" + uv_package("Some_Pkg", "1.0.0") + uv_package("other", "2.0.0")
     resolved_case("uv canonical unchanged and removed versions are not new", "pip", uv_before,
                   "version = 1\n" + uv_package("some.pkg", "1.0.0"), [])
@@ -1264,7 +1271,8 @@ def _self_test() -> int:  # noqa: C901 -- a flat table of independent assertions
     def fixture_release_date(eco: str, name: str, version: str) -> datetime:
         lookups.append((name, version))
         if graph_manifests is not None:
-            stamp = "2026-10-20T00:00:00Z" if name == "transitive-pkg" else "2026-09-01T00:00:00Z"
+            stamp = ("2026-10-26T00:00:00Z" if name == "transitive-pkg" and version == "9.0.0" else
+                     "2026-10-20T00:00:00Z" if name == "transitive-pkg" else "2026-09-01T00:00:00Z")
             payload = ({"time": {version: stamp}} if eco == "npm" else
                        {"releases": {version: [{"upload_time_iso_8601": stamp}]}})
             if missing_publish_date and name == "transitive-pkg":
@@ -1396,6 +1404,26 @@ def _self_test() -> int:  # noqa: C901 -- a flat table of independent assertions
             check(filename + " security status", posted[-1][1], "success")
             check(filename + " security skips manifests", any("/contents/" in path for path in requests), False)
             security = False
+
+        branch = "dependabot/npm_and_yarn/webui/group"
+        trailer_version = "2.0.0"
+        filename = "webui/package-lock.json"
+        for existing_transitive in (False, True):
+            before_entries = {"node_modules/@scope/direct": npm_package("@scope/direct", "1.0.0")}
+            if existing_transitive:
+                before_entries["node_modules/transitive-pkg"] = npm_package("transitive-pkg", "1.0.0")
+            graph_manifests = {filename: (npm_lock(before_entries), npm_lock({
+                "node_modules/@scope/direct": npm_package("@scope/direct", "2.0.0"),
+                "node_modules/transitive-pkg": {**npm_package("transitive-pkg", "9.0.0"), "version": "1.0.0"}}))}
+            posted.clear()
+            lookups.clear()
+            try:
+                evaluate_pr("owner/repo", 3386, parse_iso("2026-10-27T00:00:00Z"))
+            except CooldownError:
+                pass
+            label = "npm mismatched transitive " + ("existing version" if existing_transitive else "new package")
+            check(label + " status", [(sha, state) for sha, state, _ in posted], [("head", "failure")])
+            check(label + " rejects before registry lookups", lookups, [])
     finally:
         globals().update(saved)
 
