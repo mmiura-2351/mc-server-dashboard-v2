@@ -1,8 +1,7 @@
 module github.com/mmiura-2351/mc-server-dashboard-v2/worker
 
-go 1.27
-
-toolchain go1.27.2
+// Require the crypto/x509 security fix: https://pkg.go.dev/vuln/GO-2026-6809.
+go 1.27.3
 
 require (
 	github.com/BurntSushi/toml v1.6.0
