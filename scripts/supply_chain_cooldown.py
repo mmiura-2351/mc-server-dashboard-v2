@@ -561,16 +561,17 @@ def newly_resolved_dependencies(ecosystem: str, manifests: list[tuple[str, str, 
             continue
         old.update(_lockfile_packages(ecosystem, before))
         new.update(_lockfile_packages(ecosystem, after))
-    adopted = set()
-    previous_versions = {(name, version) for name, version, _ in old}
-    for name, version, source in new - old:
+    def public_source(name: str, source: str) -> bool:
         location = urllib.parse.urlsplit(source)
         if ecosystem == "npm":
-            public_source = (location.scheme == "https" and location.netloc == "registry.npmjs.org" and
-                             urllib.parse.unquote(location.path).startswith(f"/{name}/-/"))
-        else:
-            public_source = source.rstrip("/") == "https://pypi.org/simple"
-        if not public_source:
+            return (location.scheme == "https" and location.netloc == "registry.npmjs.org" and
+                    urllib.parse.unquote(location.path).startswith(f"/{name}/-/"))
+        return source.rstrip("/") == "https://pypi.org/simple"
+
+    adopted = set()
+    previous_versions = {(name, version) for name, version, source in old if public_source(name, source)}
+    for name, version, source in new - old:
+        if not public_source(name, source):
             raise CooldownError(f"cannot verify registry source for {name}@{version}: {source}")
         if (name, version) not in previous_versions:
             adopted.add((name, version))
@@ -1186,6 +1187,9 @@ def _self_test() -> int:  # noqa: C901 -- a flat table of independent assertions
                   npm_lock({"node_modules/pkg": npm_package("pkg", "1.0.0")}),
                   npm_lock({"node_modules/pkg": {**npm_package("pkg", "1.0.0"),
                                                 "resolved": "https://registry.npmjs.org/pkg/-/pkg-1.0.0.tgz?mirror=1"}}), [])
+    resolved_case("npm adoption from unknown provenance checks the public release", "npm",
+                  npm_lock({"node_modules/pkg": {"version": "1.0.0", "resolved": "https://example.com/pkg.tgz"}}),
+                  npm_lock({"node_modules/pkg": npm_package("pkg", "1.0.0")}), [("pkg", "1.0.0")])
     uv_before = "version = 1\n" + uv_package("Some_Pkg", "1.0.0") + uv_package("other", "2.0.0")
     resolved_case("uv canonical unchanged and removed versions are not new", "pip", uv_before,
                   "version = 1\n" + uv_package("some.pkg", "1.0.0"), [])
@@ -1199,6 +1203,9 @@ def _self_test() -> int:  # noqa: C901 -- a flat table of independent assertions
     resolved_case("uv equivalent public source does not recheck an existing release", "pip",
                   "version = 1\n" + uv_package("pkg", "1.0.0"),
                   "version = 1\n" + uv_package("pkg", "1.0.0", 'registry = "https://pypi.org/simple/"'), [])
+    resolved_case("uv adoption from unknown provenance checks the public release", "pip",
+                  "version = 1\n" + uv_package("pkg", "1.0.0", 'git = "https://example.com/pkg"'),
+                  "version = 1\n" + uv_package("pkg", "1.0.0"), [("pkg", "1.0.0")])
     resolved_case("uv changed unsupported source fails closed", "pip",
                   "version = 1\n" + uv_package("pkg", "1.0.0", 'git = "https://example.com/old"'),
                   "version = 1\n" + uv_package("pkg", "1.0.0", 'git = "https://example.com/new"'), "blocked")
