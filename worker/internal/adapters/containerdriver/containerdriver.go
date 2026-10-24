@@ -1942,6 +1942,19 @@ func (i *instance) Stop(ctx context.Context, graceful bool, preFallback ...func(
 		flushed = preFallback[0](flushCtx)
 		flushCancel()
 	}
+	// A flushed world is killed at once, never SIGTERMed: a shutdown save cut short
+	// by the kill would overwrite the regions the flush just wrote. A shutdown
+	// hand-off sends SIGTERM, though, so the two are decided under one lock (issue
+	// #3436 review): either this stop commits to the kill first, and a hand-off
+	// then kills too, or a hand-off got here first and its SIGTERM has started a
+	// save, which then gets the idle/cap rule like any other — the stop escalates
+	// as if the flush had not succeeded.
+	if flushed && !inflight.commitKill() {
+		i.logger.Warn("flush succeeded, but a shutdown hand-off already signalled the server; "+
+			"watching its shutdown save instead of killing it",
+			"server_id", i.spec.ServerID)
+		flushed = false
+	}
 
 	// Once a stop has begun, detach the escalation from the caller's context. The
 	// graceful stop usually runs on a per-server lane whose ctx is the gRPC
@@ -2313,19 +2326,49 @@ type stopHandOffs struct {
 }
 
 // inflightStop is one stop in flight: its server, its container, and killBy, the
-// latest the Worker's own stop would kill it (unix nanoseconds).
+// latest the Worker's own stop would kill it (unix nanoseconds). mu orders the
+// flush-to-kill decision against a hand-off: committed is set when the stop has
+// committed to killing a flushed world at once, handedOff when a hand-off has
+// claimed the stop (commitKill, claimHandOff).
 type inflightStop struct {
 	serverID    string
 	containerID string
 	killBy      atomic.Int64
+	mu          sync.Mutex
+	committed   bool
+	handedOff   bool
+}
+
+// commitKill commits the stop to killing its flushed world at once, unless a
+// hand-off has already signalled the server, in which case it reports false.
+func (s *inflightStop) commitKill() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.handedOff {
+		return false
+	}
+	s.committed = true
+	return true
+}
+
+// claimHandOff claims the stop for a hand-off and reports whether the stop has
+// already committed to an immediate kill, which the hand-off must then match
+// rather than SIGTERM a flushed world.
+func (s *inflightStop) claimHandOff() (killNow bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.handedOff = true
+	return s.committed
 }
 
 func (s *inflightStop) setKillBy(t time.Time) {
 	s.killBy.Store(t.UnixNano())
 }
 
-// register records a stop starting now. After HandOffStops has run it hands the
-// stop off at once, since nothing else will.
+// register records a stop starting now. After HandOffStops has run it also hands
+// the stop off, since nothing else will — in the background, so the stop itself
+// is not delayed and its budget (MaxStopDuration) stays what it is; the hand-off
+// is ordered against the stop's own kill by the stop's lock, not by time.
 func (h *stopHandOffs) register(serverID, containerID string, killBy time.Time) *inflightStop {
 	s := &inflightStop{serverID: serverID, containerID: containerID}
 	s.setKillBy(killBy)
@@ -2334,9 +2377,11 @@ func (h *stopHandOffs) register(serverID, containerID string, killBy time.Time) 
 	closed := h.closed
 	h.mu.Unlock()
 	if closed {
-		ctx, cancel := context.WithTimeout(context.Background(), stopHandOffCallTimeout)
-		_ = h.handOff(ctx, s)
-		cancel()
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), stopHandOffCallTimeout)
+			defer cancel()
+			_ = h.handOff(ctx, s)
+		}()
 	}
 	return s
 }
@@ -2350,8 +2395,21 @@ func (h *stopHandOffs) unregister(s *inflightStop) {
 // handOff gives one stop to the daemon: `docker stop` with the grace the Worker's
 // own stop had left (at least 1 s, rounded up to whole seconds, the unit the
 // Engine takes). The daemon then SIGTERMs the container — harmless to a server
-// already shutting down — and SIGKILLs it when that grace runs out.
+// already shutting down — and SIGKILLs it when that grace runs out. A stop that
+// has committed to killing its flushed world gets that kill instead: a SIGTERM
+// would start the very shutdown save the immediate kill exists to avoid.
 func (h *stopHandOffs) handOff(ctx context.Context, s *inflightStop) error {
+	if s.claimHandOff() {
+		if err := h.d.docker.Kill(ctx, s.containerID); err != nil {
+			h.d.logger.Warn("worker shutting down mid-stop: killing the flushed server failed; "+
+				"the Worker's own kill is still on its way",
+				"server_id", s.serverID, "error", err)
+			return fmt.Errorf("hand off kill of %s: %w", s.serverID, err)
+		}
+		h.d.logger.Warn("worker shutting down mid-stop: the flushed server was killed through the docker daemon",
+			"server_id", s.serverID)
+		return nil
+	}
 	left := time.Unix(0, s.killBy.Load()).Sub(h.d.now())
 	grace := max(time.Duration(math.Ceil(left.Seconds()))*time.Second, time.Second)
 	err := h.d.docker.HandOff(ctx, s.containerID, grace)

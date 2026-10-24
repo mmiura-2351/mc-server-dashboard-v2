@@ -85,7 +85,16 @@ type fakeDocker struct {
 	terminates  int
 	// handOffs records each HandOff (a Worker shutdown giving a stop to the
 	// daemon, issue #3436) with the grace it passed.
-	handOffs   []handOffCall
+	handOffs []handOffCall
+	// handOffSignals models the daemon's `docker stop` sending SIGTERM at once:
+	// each HandOff closes signalled (once). handOffBlock, when set, holds every
+	// HandOff until it is closed, modelling a slow daemon.
+	signalled    chan struct{}
+	signalOnce   sync.Once
+	handOffBlock chan struct{}
+	// beforeKill, when set, runs once at the start of the next Kill, outside the
+	// lock, so a test can interleave a hand-off with the Worker's own kill.
+	beforeKill func()
 	killCalled bool
 	killCalls  int
 	// killNoExit models a container that survives docker kill: Kill records the
@@ -250,8 +259,17 @@ type handOffCall struct {
 // kill lands only once the grace runs out, which no test waits for.
 func (f *fakeDocker) HandOff(_ context.Context, id string, grace time.Duration) error {
 	f.mu.Lock()
+	block := f.handOffBlock
+	f.mu.Unlock()
+	if block != nil {
+		<-block
+	}
+	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.handOffs = append(f.handOffs, handOffCall{id: id, grace: grace})
+	if f.signalled != nil {
+		f.signalOnce.Do(func() { close(f.signalled) })
+	}
 	return nil
 }
 
@@ -300,6 +318,13 @@ func (f *fakeDocker) term(ctx context.Context, id string) error {
 }
 
 func (f *fakeDocker) Kill(_ context.Context, _ string) error {
+	f.mu.Lock()
+	hook := f.beforeKill
+	f.beforeKill = nil
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	f.mu.Lock()
 	f.killCalled = true
 	f.killCalls++
