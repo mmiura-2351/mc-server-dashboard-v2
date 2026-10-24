@@ -36,6 +36,7 @@ import hashlib
 import io
 import logging
 import os
+import posixpath
 import shutil
 import stat
 import tarfile
@@ -2782,10 +2783,13 @@ def _extract_tar_gz_into(archive: Path, dest: Path, max_bytes: int) -> int:
             tarfile.open(archive, mode="r:gz") as tar,
         ):
             for member in tar:
-                # Filtered first, so the decision is on the name the extractor
-                # resolves (``data_filter`` strips a leading slash and admits an
-                # in-tree ``..``), not on the raw member name.
+                # Filtered first (``data_filter`` strips a leading slash and admits
+                # an in-tree ``..``), then renamed to where it lands: both the
+                # reserved decision and the extraction use that normalised name,
+                # so no directory the raw ``..`` path passes through is created
+                # on the way (issue #3433).
                 safe = _plain_member_filter(member, str(dest))
+                safe = safe.replace(name=posixpath.normpath(safe.name), deep=False)
                 if is_reserved_root_member(safe.name):
                     dropped += 1
                     continue

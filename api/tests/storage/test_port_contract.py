@@ -1215,6 +1215,98 @@ async def test_fs_backup_health_ignores_a_member_resolving_onto_the_reserved_nam
     assert report.healthy
 
 
+# Members whose raw name passes THROUGH the reserved root name but lands
+# elsewhere (issue #3433, review round 3): the destination is ordinary, so they
+# restore, but extracting the raw name would create the reserved directory on
+# the way. Each is ``(raw name, is_dir, where it lands)``.
+_THROUGH_RESERVED = [
+    (".mcsd_generation/../server.properties", False, "server.properties"),
+    (".mcsd_generation-cache/../world/level.dat", False, "world/level.dat"),
+    (".mcsd_generation-x/../plugins/", True, "plugins"),
+]
+
+
+@pytest.mark.parametrize(("raw", "is_dir", "lands"), _THROUGH_RESERVED)
+async def test_fs_restore_through_the_reserved_name_creates_no_reserved_entry(
+    raw: str, is_dir: bool, lands: str, tmp_path: Path
+) -> None:
+    """The member is extracted at its normalised destination, so no directory
+    named by the raw path's intermediate components is ever created -- the
+    published set holds no root ``.mcsd_generation*`` entry of any type, while
+    the member itself and a nested same-named entry are restored."""
+
+    import io
+    import tarfile
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        world = tarfile.TarInfo("world")
+        world.type = tarfile.DIRTYPE
+        tar.addfile(world)
+        member = tarfile.TarInfo(raw)
+        if is_dir:
+            member.type = tarfile.DIRTYPE
+            tar.addfile(member)
+        else:
+            member.size = len(b"landed")
+            tar.addfile(member, io.BytesIO(b"landed"))
+        kept = tarfile.TarInfo("world/.mcsd_generation/kept.txt")
+        kept.size = len(b"world data")
+        tar.addfile(kept, io.BytesIO(b"world data"))
+    harness = build_harness("fs", tmp_path)
+    community, server = new_scope()
+    key = await harness.storage.put_backup(community, server, stream_of(buf.getvalue()))
+
+    await harness.storage.restore_backup(community, server, key)
+
+    blob = await drain(harness.storage.open_hydrate_source(community, server))
+    with tarfile.open(fileobj=io.BytesIO(blob), mode="r:*") as tar:
+        members = {m.name.removeprefix("./").rstrip("/"): m for m in tar.getmembers()}
+    roots = {name.split("/")[0] for name in members}
+    assert not any(root.startswith(".mcsd_generation") for root in roots)
+    assert members[lands].isdir() is is_dir
+    files = read_tar(blob)
+    assert files["world/.mcsd_generation/kept.txt"] == b"world data"
+    if not is_dir:
+        assert files[lands] == b"landed"
+
+
+@pytest.mark.parametrize(("raw", "is_dir", "lands"), _THROUGH_RESERVED)
+async def test_object_restore_through_the_reserved_name_creates_no_reserved_entry(
+    raw: str, is_dir: bool, lands: str, tmp_path: Path
+) -> None:
+    """The object backend refuses a ``..`` FILE member as traversal before
+    anything is staged, and stages no directory member at all (a prefix store
+    has none), so neither shape can leave a reserved root entry behind."""
+
+    import io
+    import tarfile
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        member = tarfile.TarInfo(raw)
+        if is_dir:
+            member.type = tarfile.DIRTYPE
+            tar.addfile(member)
+        else:
+            member.size = len(b"landed")
+            tar.addfile(member, io.BytesIO(b"landed"))
+        kept = tarfile.TarInfo("world/.mcsd_generation/kept.txt")
+        kept.size = len(b"world data")
+        tar.addfile(kept, io.BytesIO(b"world data"))
+    harness = build_harness("object", tmp_path)
+    community, server = new_scope()
+    key = await harness.storage.put_backup(community, server, stream_of(buf.getvalue()))
+
+    if not is_dir:
+        with pytest.raises(PathTraversalError):
+            await harness.storage.restore_backup(community, server, key)
+        return
+    await harness.storage.restore_backup(community, server, key)
+    blob = await drain(harness.storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == {"world/.mcsd_generation/kept.txt": b"world data"}
+
+
 async def test_object_restore_refuses_an_aliased_reserved_member(
     tmp_path: Path,
 ) -> None:

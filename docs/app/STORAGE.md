@@ -394,8 +394,12 @@ on both backends, and logs one `WARNING` naming the backup and how many members
 it dropped. "Lands" is decided after the member passes the extraction's safety
 check, on the name as extraction resolves it: the fs extractor strips a leading
 `/` and admits an in-tree `..`, so `/.mcsd_generation/x` and
-`world/../.mcsd_generation/x` are dropped too (the object backend refuses both
-spellings outright as traversal). The fs backup health check shares that
+`world/../.mcsd_generation/x` are dropped too. Every kept member is then
+extracted at that normalised name, so a member such as
+`.mcsd_generation/../server.properties` lands at `server.properties` without
+creating the reserved directory it passes through. The object backend refuses a
+`..` or absolute file member outright as traversal and stages no directory
+members, so neither shape reaches its store. The fs backup health check shares that
 extractor, so it judges exactly what a restore would publish. A nested same-named member is restored as usual. The dropped entries are
 inert anyway — the Worker would skip them on unpack — so dropping them only keeps
 them out of `current/`.
