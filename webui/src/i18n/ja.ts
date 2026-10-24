@@ -617,6 +617,8 @@ export const ja: Record<TranslationKey, string> = {
     "そのファイルは有効なバックアップアーカイブではありません。",
   "backups.error.platformManagedPath":
     "そのアーカイブには server.properties ディレクトリ、または server.properties/ 配下のエントリが含まれています。server.properties はファイルとして管理されるため、該当のエントリを削除するか移動してからアップロードしてください。",
+  "backups.error.reservedName":
+    "そのアーカイブの最上位に、名前が .mcsd_generation で始まるエントリがあります。このような名前はプラットフォームが使用するため予約されています。該当のエントリを削除するか名前を変更してからアップロードしてください。",
   "backups.error.workerUnavailable":
     "現在、バックアップを取得できるサーバーホストがありません。",
   "backups.error.storageUnavailable":
@@ -836,6 +838,8 @@ export const ja: Record<TranslationKey, string> = {
     "server.properties の「{key}」はプラットフォームが管理しているため、この操作では変更できません。",
   "files.error.platformManagedPath":
     "server.properties はプラットフォームが管理しているため、そのパスにディレクトリを置くことはできません。",
+  "files.error.reservedName":
+    "サーバーファイルの最上位では、.mcsd_generation で始まる名前はプラットフォームが使用するため予約されています。別の名前を指定してください。",
   "files.error.unencodableText":
     "このファイルは UTF-8 ではないか、このバージョンの Minecraft が Latin-1 でしか読まないため、Latin-1（ISO-8859-1）で保存します。入力された文字の一部は Latin-1 で表せません。該当する文字を削除してから保存し直してください。",
   "files.error.editTooLarge":
@@ -1089,6 +1093,8 @@ export const ja: Record<TranslationKey, string> = {
     "そのアーカイブは有効なサーバーエクスポートではありません。",
   "serverCreate.import.error.platform_managed_path":
     "そのアーカイブには server.properties/ 配下のファイルが含まれています。server.properties はファイルとして管理されるため、該当のエントリを削除するか移動してからインポートしてください。",
+  "serverCreate.import.error.reserved_name":
+    "そのアーカイブの最上位に、名前が .mcsd_generation で始まるエントリがあります。このような名前はプラットフォームが使用するため予約されています。該当のエントリを削除するか名前を変更してからインポートしてください。",
   // The import assigns the join address itself (issue #3022); see en.ts.
   "serverCreate.import.error.slug_taken":
     "インポート中に、割り当てようとした参加アドレス名を他のサーバーが取得しました。サーバーは作成されていません。もう一度インポートすると別の名前が割り当てられます。",

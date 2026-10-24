@@ -24,6 +24,8 @@ describe("backupErrorPresentation", () => {
     ],
     [422, "invalid_archive", "backups.error.invalidArchive"],
     [422, "platform_managed_path", "backups.error.platformManagedPath"],
+    // A member at the Worker's generation-marker name (issue #3433).
+    [422, "reserved_name", "backups.error.reservedName"],
     [503, "worker_unavailable", "backups.error.workerUnavailable"],
   ] as const)("maps a %i %s to its specific message", (status, reason, key) => {
     expect(backupErrorPresentation(status, reason)).toBe(key);

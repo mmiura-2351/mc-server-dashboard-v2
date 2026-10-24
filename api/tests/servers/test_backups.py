@@ -1267,6 +1267,41 @@ def test_validate_accepts_a_member_under_a_nested_properties_dir() -> None:
     _validate_backup_archive(content, max_entries=10)
 
 
+# --- the generation marker's name is reserved at the root (issue #3433) -----
+#
+# A restore republishes the members verbatim, so a member at the Worker's
+# generation-marker name would plant a Worker-private entry in the store -- as a
+# directory, one that fails every hydrate. Refused before the archive is stored,
+# with the same 422 ``reserved_name`` the files-API doors give.
+
+
+@pytest.mark.parametrize(
+    "member", [".mcsd_generation", ".mcsd_generation/stray.txt", "./.mcsd_generation"]
+)
+def test_validate_rejects_a_member_at_the_reserved_marker_name(member: str) -> None:
+    content = _targz({member: b"X"})
+    with pytest.raises(InvalidFilePathError) as caught:
+        _validate_backup_archive(content, max_entries=10)
+    assert caught.value.reason == "reserved_name"
+
+
+def test_validate_rejects_a_directory_member_at_the_reserved_marker_name() -> None:
+    import tarfile
+
+    info = tarfile.TarInfo(name=".mcsd_generation/")
+    info.type = tarfile.DIRTYPE
+    content = _targz_with_member(info)
+    with pytest.raises(InvalidFilePathError) as caught:
+        _validate_backup_archive(content, max_entries=10)
+    assert caught.value.reason == "reserved_name"
+
+
+def test_validate_accepts_a_nested_marker_name() -> None:
+    content = _targz({"world/.mcsd_generation/stray.txt": b"X"})
+    # No raise.
+    _validate_backup_archive(content, max_entries=10)
+
+
 async def test_upload_rejects_member_under_root_properties_before_storing() -> None:
     server = _at_rest()
     repo = FakeServerRepository()
