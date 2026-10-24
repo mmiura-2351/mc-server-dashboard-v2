@@ -1046,6 +1046,12 @@ async def enable_plugin(
         )
         raise _conflict("server_busy") from exc
     except PluginCacheBlobNotFoundError as exc:
+        # The change is committed before the miss (issue #3437): audit it as the
+        # success path does, since it stands. The audit row has no detail column
+        # to mark the unreconciled working set; the 409 tells the caller.
+        await _record_plugin(
+            recorder, ops.PLUGIN_ENABLE, authorized, community_id, plugin_id
+        )
         raise _jar_missing() from exc
     await _record_plugin(
         recorder, ops.PLUGIN_ENABLE, authorized, community_id, plugin_id
@@ -1108,6 +1114,12 @@ async def disable_plugin(
         )
         raise _conflict("server_busy") from exc
     except PluginCacheBlobNotFoundError as exc:
+        # The change is committed before the miss (issue #3437): audit it as the
+        # success path does, since it stands. The audit row has no detail column
+        # to mark the unreconciled working set; the 409 tells the caller.
+        await _record_plugin(
+            recorder, ops.PLUGIN_DISABLE, authorized, community_id, plugin_id
+        )
         raise _jar_missing() from exc
     await _record_plugin(
         recorder, ops.PLUGIN_DISABLE, authorized, community_id, plugin_id
@@ -1176,6 +1188,12 @@ async def set_plugin_side(
         )
         raise _conflict("server_busy") from exc
     except PluginCacheBlobNotFoundError as exc:
+        # The change is committed before the miss (issue #3437): audit it as the
+        # success path does, since it stands. The audit row has no detail column
+        # to mark the unreconciled working set; the 409 tells the caller.
+        await _record_plugin(
+            recorder, ops.PLUGIN_SET_SIDE, authorized, community_id, plugin_id
+        )
         raise _jar_missing() from exc
     await _record_plugin(
         recorder, ops.PLUGIN_SET_SIDE, authorized, community_id, plugin_id

@@ -821,6 +821,79 @@ describe("ServerPluginsTab error presentation glue", () => {
   });
 });
 
+describe("ServerPluginsTab missing jar over a committed change (#3437)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  // The API commits the change, then misses the cached jar and answers 409
+  // plugin_jar_missing: the list it serves afterwards holds the committed state.
+  function commitThenMissJar(committed: Record<string, unknown>) {
+    let current = plugin(
+      "enabled" in committed
+        ? { enabled: !committed.enabled }
+        : { side: "client" },
+    );
+    mockApi.get.mockImplementation((url: string) => {
+      if (url.endsWith("/plugins/validate")) {
+        return Promise.resolve(EMPTY_VALIDATION);
+      }
+      if (url.endsWith("/plugins/updates")) {
+        return Promise.resolve({ updates: [] });
+      }
+      if (url.endsWith("/plugins")) {
+        return Promise.resolve({ plugins: [current] });
+      }
+      return Promise.resolve({});
+    });
+    mockApi.post.mockImplementation(() => {
+      current = { ...current, ...committed };
+      return Promise.reject(
+        new ApiError(409, { reason: "plugin_jar_missing" }),
+      );
+    });
+  }
+
+  it.each([
+    { action: "plugins.enable", enabled: true, after: "plugins.disable" },
+    { action: "plugins.disable", enabled: false, after: "plugins.enable" },
+  ] as const)(
+    "refetches after $action so the row shows the committed toggle",
+    async ({ action, enabled, after }) => {
+      commitThenMissJar({ enabled });
+      renderTab();
+      fireEvent.click(await screen.findByRole("button", { name: t(action) }));
+
+      expect(
+        await screen.findByText(
+          t("plugins.error.jarMissing").replaceAll("{noun}", "mod"),
+        ),
+      ).toBeInTheDocument();
+      expect(
+        await screen.findByRole("button", { name: t(after) }),
+      ).toBeInTheDocument();
+    },
+  );
+
+  it("refetches after a side change so the row shows the committed side", async () => {
+    commitThenMissJar({ side: "server" });
+    renderTab();
+    const select = await screen.findByLabelText<HTMLSelectElement>("Runs on");
+    fireEvent.change(select, { target: { value: "server" } });
+
+    expect(
+      await screen.findByText(
+        t("plugins.error.jarMissing").replaceAll("{noun}", "mod"),
+      ),
+    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByLabelText<HTMLSelectElement>("Runs on").value).toBe(
+        "server",
+      );
+    });
+  });
+});
+
 describe("Modrinth modal: popular mods on initial open (issue #1351)", () => {
   beforeEach(() => {
     vi.clearAllMocks();

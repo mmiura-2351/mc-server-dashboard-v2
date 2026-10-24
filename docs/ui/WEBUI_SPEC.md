@@ -477,7 +477,9 @@ download (for its first jar, before the headers — nothing changes), and enable
 disable / side when the working set has no file for the plugin and has to be
 rebuilt from the cache. Those three commit the new state first, so it stands:
 the plugin list shows it, the working set holds no file for the plugin, and
-repeating the request is a no-op. Removing the plugin and installing it again
+repeating the request is a no-op. The committed change is audited as the
+operation's success, and the tab refetches its list after the 409 so the row
+shows that state. Removing the plugin and installing it again
 (upload or catalog install) restores its jar.
 
 The `…/{sid}/catalog/*` rows are a separate route family (`catalog.py`) —
