@@ -734,15 +734,26 @@ running, and the cap's remainder once the escalation has started. Docker
 finishes a stop even after the client that sent it has gone (verified on Docker
 29.5.3). So whatever happens to the Worker afterwards, the daemon SIGKILLs a
 server that has not exited when that grace runs out. A stop that starts after
-the hand-off hands itself off at once. One `WARN` line per stop,
-`worker shutting down mid-stop: the docker daemon now owns the kill`, records
-the grace it was given. While the Worker process is still up, its own stop keeps
+the hand-off hands itself off too, in the background, so it is not delayed.
+
+The hand-off never SIGTERMs a world the flush has just written. A stop whose
+flush succeeded is killed at once, because a shutdown save cut short by that
+kill would overwrite the flushed regions. If the stop has already committed to
+that kill, the hand-off asks the daemon to kill too. If the hand-off reaches
+the stop first, its SIGTERM has started a shutdown save, so the stop does not
+kill: it watches that save under the idle window and the cap like any other.
+
+Each hand-off logs one `WARN` line,
+`worker shutting down mid-stop: the docker daemon now owns the kill`, with the
+grace it was given. While the Worker process is still up, its own stop keeps
 running and may still end the server sooner.
 
-Two cases are not covered. A hand-off that fails (the daemon is unreachable, or
-it does not answer within 5 s) is logged, and the server is then left to the
-next Worker boot's sweep. A Worker that is SIGKILLed or crashes runs no shutdown
-at all, so the same sweep is the backstop. A server that keeps running past the
+Some cases are not covered. A hand-off that fails (the daemon is unreachable,
+or it does not answer within 5 s) is logged, and the server is then left to the
+next Worker boot's sweep. So is a stop that starts after the shutdown began if
+the Worker exits before its background hand-off reaches the daemon. A Worker
+that is SIGKILLed or crashes runs no shutdown at all, so the same sweep is the
+backstop. A server that keeps running past the
 hand-off is not lost: its stop's result just never reaches the API, which
 converges the server's row through the reconciler once the Worker reconnects.
 
