@@ -99,6 +99,17 @@ func (f *forgeFakeDocker) Stop(_ context.Context, id string, _ time.Duration) er
 	return nil
 }
 
+// HandOff is a Worker shutdown giving a stop to the daemon (issue #3436); the
+// Forge tests never shut down, so it only answers.
+func (f *forgeFakeDocker) HandOff(context.Context, string, time.Duration) error {
+	return nil
+}
+
+// Terminate is an instance stop's SIGTERM (issue #3436); it behaves as Stop.
+func (f *forgeFakeDocker) Terminate(ctx context.Context, id string) error {
+	return f.Stop(ctx, id, 0)
+}
+
 func (f *forgeFakeDocker) Kill(_ context.Context, id string) error {
 	f.mu.Lock()
 	suppress := f.killNoExitIDs[id]

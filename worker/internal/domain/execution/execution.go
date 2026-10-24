@@ -10,6 +10,7 @@ package execution
 import (
 	"context"
 	"errors"
+	"time"
 )
 
 // ServerState is the observed runtime state of a server instance. It mirrors the
@@ -145,6 +146,24 @@ type InstanceSpec struct {
 	// can happen long after Start returned, which is why the lock travels with the
 	// spec.
 	WorkingSetLock *WorkingSetLock
+	// WorldProgress fingerprints the server's on-disk world for a graceful stop's
+	// wait (issue #3436): a fingerprint that keeps changing between polls is a
+	// shutdown save still writing, so the driver waits instead of escalating to the
+	// next signal. An error means the scan could not tell, which the driver counts
+	// as progress (its hard cap still bounds the wait). Nil gives the driver nothing
+	// to observe: it escalates after its idle window, as if nothing changed.
+	WorldProgress func() (WorldProgress, error)
+}
+
+// WorldProgress is a cheap fingerprint of a world on disk: the count, total size
+// and newest modification time of its region files (issue #3436). Every chunk
+// write moves Newest (and a new chunk also Bytes), so two equal fingerprints mean
+// nothing was written between them. It is built from metadata alone, never file
+// contents.
+type WorldProgress struct {
+	Files  int
+	Bytes  int64
+	Newest time.Time
 }
 
 // StatusEvent is an observed state transition for a server instance. The
@@ -231,6 +250,17 @@ type ExecutionDriver interface { //nolint:revive // documented Port name (FR-EXE
 	Start(ctx context.Context, spec InstanceSpec) (Instance, error)
 }
 
+// StopHandOff is implemented by a driver that escalates a stop from inside the
+// Worker process (issue #3436): once the Worker exits, nothing of its own is left
+// to send the final kill. HandOffStops gives every stop still in flight to the
+// backend instead, so the backend kills the server when the stop's remaining grace
+// runs out even if the Worker is gone by then, and every stop that starts later
+// hands itself off at once. It returns once each hand-off has reached the backend
+// or ctx ends. Manager.Close calls it as the Worker shuts down.
+type StopHandOff interface {
+	HandOffStops(ctx context.Context) error
+}
+
 // Instance is a launched server handle. Its Events channel delivers state
 // transitions including the crash notification (process exit → StateCrashed
 // unless a Stop is in flight). The channel closes when the instance reaches a
@@ -238,10 +268,12 @@ type ExecutionDriver interface { //nolint:revive // documented Port name (FR-EXE
 type Instance interface {
 	// Stop ends the instance. A graceful stop tries the in-band shutdown (RCON
 	// "stop") and falls back to signals; a non-graceful stop forces termination.
-	// It returns once the process has exited or the stop deadline elapsed.
+	// It returns once the process has exited or the stop deadline elapsed. A
+	// graceful stop waits on each step while InstanceSpec.WorldProgress shows the
+	// world still being written (issue #3436).
 	//
 	// preFallback, when supplied, is called always before stop on the graceful
-	// path (before tryRCONStop and before docker stop) so the caller can flush
+	// path (before tryRCONStop and before SIGTERM) so the caller can flush
 	// the live world to disk while the process is still alive. It is NOT called
 	// on a force stop (graceful=false). At most one callback is accepted.
 	// When the callback returns true the world data is fully flushed; Stop then
