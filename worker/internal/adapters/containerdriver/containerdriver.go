@@ -2316,9 +2316,12 @@ func (i *instance) logEscalation(from, to string, requested time.Time, w *stopWa
 	i.logger.Warn("graceful stop escalating: the server did not exit", args...)
 }
 
-// stopHandOffCallTimeout bounds the hand-off a stop that starts after
-// HandOffStops makes for itself.
-const stopHandOffCallTimeout = 5 * time.Second
+// stopHandOffCallTimeout bounds one hand-off request, and stopHandOffRetryInterval
+// is the pause before a failed one is sent again (stopHandOffs.deliver). The
+// timeout is a var so a test can shrink it.
+var stopHandOffCallTimeout = 5 * time.Second
+
+const stopHandOffRetryInterval = time.Second
 
 // stopHandOffs is a driver's registry of the stops in flight on its instances
 // (issue #3436). Before that issue the daemon sent a stop's final SIGKILL
@@ -2379,7 +2382,10 @@ func (s *inflightStop) commitKill() bool {
 // claim is a hand-off's side of the decision. When the Worker has committed to its
 // own kill, the hand-off must match it (kill). Otherwise the hand-off takes the
 // stop with grace, the time the Worker's own stop had left (at least 1 s, rounded
-// up to whole seconds, the unit the Engine takes).
+// up to whole seconds, the unit the Engine takes). The claim is irreversible: a
+// request that fails, times out or may or may not have landed leaves the stop with
+// the daemon, since one that did land may already have started a save the Worker
+// must not then kill (issue #3436 review).
 func (s *inflightStop) claim(now time.Time) (kill bool, grace time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2390,14 +2396,6 @@ func (s *inflightStop) claim(now time.Time) (kill bool, grace time.Duration) {
 	grace = max(time.Duration(math.Ceil(left.Seconds()))*time.Second, time.Second)
 	s.handedOff, s.daemonKillAt = true, now.Add(grace)
 	return false, grace
-}
-
-// release gives the stop back to the Worker after a hand-off that never reached
-// the daemon, so the Worker's own idle/cap rule ends it.
-func (s *inflightStop) release() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.handedOff = false
 }
 
 func (s *inflightStop) daemonKillDue() time.Time {
@@ -2418,12 +2416,8 @@ func (h *stopHandOffs) register(serverID, containerID string, killBy time.Time) 
 	closed := h.closed
 	h.mu.Unlock()
 	if closed {
-		kill, grace := s.claim(h.d.now())
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), stopHandOffCallTimeout)
-			defer cancel()
-			_ = h.send(ctx, s, kill, grace)
-		}()
+		kill, _ := s.claim(h.d.now())
+		go h.deliver(s, kill, make(chan error, 1))
 	}
 	return s
 }
@@ -2434,38 +2428,70 @@ func (h *stopHandOffs) unregister(s *inflightStop) {
 	h.mu.Unlock()
 }
 
-// send carries out a claim. A stop the Worker has committed to killing is killed
-// through the daemon too: a SIGTERM would start a shutdown save that kill would
-// cut short. Any other stop goes to the daemon as `docker stop` with grace; the
-// daemon SIGTERMs it — harmless to a server already shutting down — and SIGKILLs
-// it when grace runs out. A request that fails gives the stop back to the Worker.
-func (h *stopHandOffs) send(ctx context.Context, s *inflightStop, kill bool, grace time.Duration) error {
+// deliver carries out a claim, reporting its first attempt on first (buffered).
+// A stop the Worker has committed to killing is killed through the daemon too: a
+// SIGTERM would start a shutdown save that kill would cut short. Any other stop
+// goes to the daemon as `docker stop` with the grace left until the daemon's kill
+// is due; the daemon SIGTERMs it — harmless to a server already shutting down —
+// and SIGKILLs it when that grace runs out.
+//
+// A `docker stop` that is not confirmed written is sent again every
+// stopHandOffRetryInterval, its grace recomputed against the same due time, until
+// one is written or the due time passes; a repeat on a stopping container is
+// harmless, the daemon still owning the kill. The retries run here, in the
+// background, so they add nothing to the stop or to Close. If none ever lands —
+// the daemon unreachable for the whole window while the Worker shuts down — the
+// stop fails at the due time (awaitHandedOff) and the next Worker boot's Sweep
+// owns the container.
+func (h *stopHandOffs) deliver(s *inflightStop, kill bool, first chan<- error) {
 	if kill {
-		if err := h.d.docker.Kill(ctx, s.containerID); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), stopHandOffCallTimeout)
+		err := h.d.docker.Kill(ctx, s.containerID)
+		cancel()
+		first <- err
+		if err != nil {
 			h.d.logger.Warn("worker shutting down mid-stop: the matching daemon kill failed; "+
 				"the Worker's own kill is still on its way",
 				"server_id", s.serverID, "error", err)
-			return fmt.Errorf("hand off kill of %s: %w", s.serverID, err)
+			return
 		}
 		h.d.logger.Warn("worker shutting down mid-stop: the server the Worker was killing was killed through the docker daemon",
 			"server_id", s.serverID)
-		return nil
+		return
 	}
-	if err := h.d.docker.HandOff(ctx, s.containerID, grace); err != nil {
-		s.release()
-		h.d.logger.Warn("worker shutting down mid-stop: handing the kill to the docker daemon failed; "+
-			"the Worker's own stop keeps it, until the Worker exits",
-			"server_id", s.serverID, "grace", grace, "error", err)
-		return fmt.Errorf("hand off stop of %s: %w", s.serverID, err)
+	due := s.daemonKillDue()
+	for attempt := 1; ; attempt++ {
+		now := h.d.now()
+		grace := max(time.Duration(math.Ceil(due.Sub(now).Seconds()))*time.Second, time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), stopHandOffCallTimeout)
+		err := h.d.docker.HandOff(ctx, s.containerID, grace)
+		cancel()
+		if attempt == 1 {
+			first <- err
+		}
+		if err == nil {
+			h.d.logger.Warn("worker shutting down mid-stop: the docker daemon now owns the kill",
+				"server_id", s.serverID, "grace", grace, "attempt", attempt)
+			return
+		}
+		if !now.Before(due) {
+			h.d.logger.Warn("worker shutting down mid-stop: no hand-off reached the docker daemon before its kill was due; "+
+				"the next Worker boot's sweep owns the container",
+				"server_id", s.serverID, "attempts", attempt, "error", err)
+			return
+		}
+		if attempt == 1 {
+			h.d.logger.Warn("worker shutting down mid-stop: the hand-off to the docker daemon failed; retrying until its kill is due",
+				"server_id", s.serverID, "grace", grace, "error", err)
+		}
+		<-h.d.after(stopHandOffRetryInterval)
 	}
-	h.d.logger.Warn("worker shutting down mid-stop: the docker daemon now owns the kill",
-		"server_id", s.serverID, "grace", grace)
-	return nil
 }
 
 // HandOffStops implements execution.StopHandOff (issue #3436): it hands every stop
 // in flight to the daemon, in parallel, and makes every later one hand itself off
-// as it starts. It returns once each hand-off has reached the daemon or ctx ends.
+// as it starts. It returns once each hand-off's first request has been answered
+// or ctx ends; one that failed keeps retrying in the background (deliver).
 // A stop handed off is the daemon's to end from then on: the Worker's own stop
 // only waits for the exit (awaitHandedOff).
 func (d *Driver) HandOffStops(ctx context.Context) error {
@@ -2477,17 +2503,20 @@ func (d *Driver) HandOffStops(ctx context.Context) error {
 	}
 	d.handOffs.mu.Unlock()
 
-	errs := make([]error, len(stops))
-	var wg sync.WaitGroup
+	firsts := make([]chan error, len(stops))
 	for n, s := range stops {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			kill, grace := s.claim(d.now())
-			errs[n] = d.handOffs.send(ctx, s, kill, grace)
-		}()
+		kill, _ := s.claim(d.now())
+		firsts[n] = make(chan error, 1)
+		go d.handOffs.deliver(s, kill, firsts[n])
 	}
-	wg.Wait()
+	errs := make([]error, len(stops))
+	for n, first := range firsts {
+		select {
+		case errs[n] = <-first:
+		case <-ctx.Done():
+			errs[n] = ctx.Err()
+		}
+	}
 	return errors.Join(errs...)
 }
 

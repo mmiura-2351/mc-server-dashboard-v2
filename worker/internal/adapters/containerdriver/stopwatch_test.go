@@ -3,6 +3,9 @@ package containerdriver
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -40,6 +43,18 @@ func (c *stopClock) After(d time.Duration) <-chan time.Time {
 	ch := make(chan time.Time, 1)
 	c.waiters = append(c.waiters, stopClockWaiter{at: c.now.Add(d), ch: ch})
 	return ch
+}
+
+// waitingFor reports whether a waiter is due at exactly at.
+func (c *stopClock) waitingFor(at time.Time) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, w := range c.waiters {
+		if w.at.Equal(at) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *stopClock) pending() int {
@@ -142,6 +157,13 @@ func startStopRun(t *testing.T, docker *fakeDocker, ctrl execution.ServerControl
 
 // startStopRunWith is startStopRun with the probe and the scan runner given.
 func startStopRunWith(t *testing.T, docker *fakeDocker, ctrl execution.ServerControl, ctrlErr error,
+	probe func() (execution.WorldProgress, error), runScan func(func()), flush func(context.Context) bool) *stopRun {
+	t.Helper()
+	return startStopRunOn(t, docker, ctrl, ctrlErr, probe, runScan, flush)
+}
+
+// startStopRunOn is startStopRunWith over any dockerAPI.
+func startStopRunOn(t *testing.T, docker dockerAPI, ctrl execution.ServerControl, ctrlErr error,
 	probe func() (execution.WorldProgress, error), runScan func(func()), flush func(context.Context) bool) *stopRun {
 	t.Helper()
 	d := New(docker, images(), func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
@@ -718,26 +740,195 @@ func TestStopStartedAfterShutdownHandsItselfOff(t *testing.T) {
 	}
 }
 
-// A hand-off whose request never reaches the daemon gives the stop back to the
-// Worker: nobody else would kill a server that does not exit, so the Worker's own
-// idle window ends it as before.
-func TestFailedHandOffGivesTheStopBack(t *testing.T) {
+// awaitCondition polls cond in real time; the stop's goroutines run concurrently
+// with the test, which advances the fake clock only once they have parked.
+func awaitCondition(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
+}
+
+// handOffAsync runs HandOffStops with a short real-time bound, as Close does with
+// its own, and reports whether it returned within a generous one: a failed or
+// stuck first request must not hold the caller.
+func handOffAsync(t *testing.T, d *Driver) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		_ = d.HandOffStops(ctx)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("HandOffStops held its caller past its context")
+	}
+}
+
+// A hand-off is irreversible (issue #3436 review): one whose request fails after
+// the stop is already waiting on the daemon is retried in the background against
+// the same due time, and the Worker never signals the server again — the failed
+// request may well have reached the daemon. The stop ends when the server exits.
+func TestFailedHandOffIsRetriedAndTheWorkerNeverKills(t *testing.T) {
 	docker := newFakeDocker()
 	docker.stopNoExit = true
-	docker.handOffErr = errors.New("daemon unreachable")
+	release := make(chan struct{})
+	docker.handOffHook = func(n int) error {
+		if n == 0 {
+			<-release
+			return errors.New("daemon hiccup")
+		}
+		return nil
+	}
 	r := startStopRun(t, docker, nil, errors.New("rcon unavailable"), &fakeWorld{})
 	r.awaitWaiting()
+	t0 := r.clock.Now()
 	r.step(testPoll)
-	if err := r.d.HandOffStops(context.Background()); err == nil {
-		t.Fatal("HandOffStops = nil, want the daemon's error")
+	r.step(testPoll) // t = 10 s: the hand-off claims, due at t = 360 s
+	handOffAsync(t, r.d)
+	for range 4 {
+		r.step(testPoll) // t = 30 s: the idle window ends; the daemon owns the kill
 	}
-	elapsed := testPoll
-	for !r.step(testPoll) {
-		if elapsed += testPoll; elapsed > 2*testIdle {
-			t.Fatal("the Worker did not take the stop back after the failed hand-off")
+	due := t0.Add(testCap)
+	awaitCondition(t, "the stop waiting on the daemon", func() bool {
+		return r.clock.waitingFor(due.Add(stopDeadlineGrace))
+	})
+
+	close(release) // the first request fails now
+	awaitCondition(t, "the retry's pause", func() bool { return r.clock.pending() >= 2 })
+	r.clock.advance(stopHandOffRetryInterval)
+	got := awaitHandOffs(t, docker, 1)
+	if want := (handOffCall{id: "container-1", grace: due.Sub(r.clock.Now())}); got[0] != want {
+		t.Fatalf("retried hand-off = %+v, want %+v (the same due time)", got[0], want)
+	}
+	if docker.killWasCalled() || docker.terminateCount() != 1 {
+		t.Fatalf("kill = %v, SIGTERMs = %d; want no Worker signal after the hand-off",
+			docker.killWasCalled(), docker.terminateCount())
+	}
+	docker.exit(143, nil)
+	r.awaitReturn()
+	if r.err != nil || docker.killWasCalled() {
+		t.Fatalf("Stop = %v, kill = %v; want a clean stop", r.err, docker.killWasCalled())
+	}
+}
+
+// When no hand-off request ever reaches the daemon, the stop still never comes
+// back to the Worker: it fails when the daemon's kill is overdue, and the Worker
+// sends no kill — the next boot's Sweep owns the container.
+func TestHandOffThatNeverLandsFailsTheStopAtItsDueTime(t *testing.T) {
+	docker := newFakeDocker()
+	docker.stopNoExit = true
+	docker.handOffHook = func(int) error { return errors.New("daemon unreachable") }
+	r := startStopRun(t, docker, nil, errors.New("rcon unavailable"), &fakeWorld{})
+	r.awaitWaiting()
+	t0 := r.clock.Now()
+	r.step(testPoll)
+	r.step(testPoll) // t = 10 s: the hand-off claims, due at t = 360 s
+	handOffAsync(t, r.d)
+	failAt := t0.Add(testCap + stopDeadlineGrace)
+	for r.clock.Now().Before(t0.Add(30 * time.Second)) {
+		r.clock.advance(testPoll)
+		time.Sleep(time.Millisecond)
+	}
+	awaitCondition(t, "the stop waiting on the daemon", func() bool { return r.clock.waitingFor(failAt) })
+
+	r.clock.advance(failAt.Sub(r.clock.Now()) - testPoll)
+	select {
+	case err := <-r.done:
+		t.Fatalf("Stop returned %v before the daemon's kill was overdue", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	r.clock.advance(testPoll)
+	r.awaitReturn()
+	if r.err == nil {
+		t.Fatal("Stop = nil, want a failed stop: the container was never confirmed gone")
+	}
+	if docker.killWasCalled() {
+		t.Fatal("the Worker killed a stop it had handed off")
+	}
+	if n := docker.handOffAttemptCount(); n < 2 {
+		t.Fatalf("hand-off attempts = %d, want the failed request retried", n)
+	}
+}
+
+// delayedTransport holds every request before sending it, modelling a daemon
+// connection slow enough that the hand-off's own timeout passes first.
+type delayedTransport struct {
+	inner http.RoundTripper
+	delay time.Duration
+}
+
+func (d delayedTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	time.Sleep(d.delay)
+	return d.inner.RoundTrip(r)
+}
+
+// engineHandOff is the fake docker with HandOff going through a real Engine client.
+type engineHandOff struct {
+	*fakeDocker
+	engine *EngineClient
+}
+
+func (e engineHandOff) HandOff(ctx context.Context, id string, grace time.Duration) error {
+	return e.engine.HandOff(ctx, id, grace)
+}
+
+// A hand-off request that times out may still reach the daemon, and here it does,
+// after the flush has completed: had the timeout handed the stop back, the
+// flushed path would SIGKILL the save that late `docker stop` starts. Uncertain
+// delivery counts as delivered, so the Worker never kills, and the request the
+// daemon gets carries the grace of the original due time (issue #3436 review).
+func TestTimedOutHandOffThatLandsLateIsNeverKilled(t *testing.T) {
+	saved := stopHandOffCallTimeout
+	stopHandOffCallTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { stopHandOffCallTimeout = saved })
+
+	got := make(chan string, 4)
+	daemon := startFakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		got <- r.URL.Path + "?" + r.URL.RawQuery
+		w.WriteHeader(http.StatusNoContent)
+	})
+	engine := daemon.client(t)
+	engine.http.Transport = delayedTransport{inner: engine.http.Transport, delay: 300 * time.Millisecond}
+	docker := newFakeDocker()
+	release := make(chan struct{})
+	flushing := make(chan struct{})
+	flush := func(context.Context) bool {
+		close(flushing)
+		<-release
+		return true // the flush settled
+	}
+	r := startStopRunOn(t, engineHandOff{fakeDocker: docker, engine: engine}, nil, errors.New("rcon unavailable"),
+		(&fakeWorld{}).probe, func(f func()) { f() }, flush)
+	<-flushing
+	handOffAsync(t, r.d) // the first request times out, still in flight
+	close(release)       // the flush completes before the request lands
+
+	select {
+	case req := <-got:
+		if want := fmt.Sprintf("/containers/container-1/stop?t=%d", int((defaultFlushTimeout + testCap).Seconds())); !strings.HasSuffix(req, want) {
+			t.Fatalf("daemon got %q, want a request ending %q", req, want)
 		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the late hand-off never reached the daemon")
 	}
-	if r.err != nil || !docker.killWasCalled() {
-		t.Fatalf("Stop = %v, kill = %v; want the Worker's kill after its idle window", r.err, docker.killWasCalled())
+	if r.awaitWaiting() {
+		t.Fatalf("Stop returned %v, kill = %v; want it waiting on the daemon", r.err, docker.killWasCalled())
+	}
+	if docker.killWasCalled() {
+		t.Fatal("the Worker killed a flushed stop whose hand-off was only uncertain")
+	}
+	docker.exit(143, nil)
+	r.awaitReturn()
+	if r.err != nil || docker.killWasCalled() {
+		t.Fatalf("Stop = %v, kill = %v; want a clean stop", r.err, docker.killWasCalled())
 	}
 }

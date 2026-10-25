@@ -93,7 +93,12 @@ type fakeDocker struct {
 	signalOnce   sync.Once
 	handOffBlock chan struct{}
 	// handOffErr, when set, fails every HandOff: the daemon never got the stop.
-	handOffErr error
+	// handOffHook, when set, runs first in every HandOff, outside the lock, with the
+	// attempt's index (from 0); an error it returns fails that attempt.
+	// handOffAttempts counts every HandOff, failed or not.
+	handOffErr      error
+	handOffHook     func(n int) error
+	handOffAttempts int
 	// beforeKill, when set, runs once at the start of the next Kill, outside the
 	// lock, so a test can interleave a hand-off with the Worker's own kill.
 	beforeKill func()
@@ -261,10 +266,16 @@ type handOffCall struct {
 // kill lands only once the grace runs out, which no test waits for.
 func (f *fakeDocker) HandOff(_ context.Context, id string, grace time.Duration) error {
 	f.mu.Lock()
-	block := f.handOffBlock
+	block, hook, n := f.handOffBlock, f.handOffHook, f.handOffAttempts
+	f.handOffAttempts++
 	f.mu.Unlock()
 	if block != nil {
 		<-block
+	}
+	if hook != nil {
+		if err := hook(n); err != nil {
+			return err
+		}
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -276,6 +287,18 @@ func (f *fakeDocker) HandOff(_ context.Context, id string, grace time.Duration) 
 		f.signalOnce.Do(func() { close(f.signalled) })
 	}
 	return nil
+}
+
+func (f *fakeDocker) handOffAttemptCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.handOffAttempts
+}
+
+func (f *fakeDocker) terminateCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.terminates
 }
 
 func (f *fakeDocker) handOffCalls() []handOffCall {
