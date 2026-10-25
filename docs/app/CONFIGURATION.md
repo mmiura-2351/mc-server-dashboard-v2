@@ -688,7 +688,9 @@ written**, and escalates to the next step (SIGTERM, then SIGKILL) only when:
 The Worker checks for writes every 5 s by comparing the count, total size and
 newest modification time of the working set's `.mca` files. It reads metadata
 only, never file contents. A scan that cannot finish counts as a write, so the
-cap bounds it. None of these values is configurable. A hung server writes
+cap bounds it. A SIGTERM request that fails is treated as possibly delivered,
+so the wait after it follows the same rule. None of these values is
+configurable. A hung server writes
 nothing, so it is still killed after about 30 s per step, as with the old fixed
 grace. A forced stop does not watch the world: it escalates after the idle
 window.
