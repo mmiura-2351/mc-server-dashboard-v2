@@ -93,6 +93,17 @@ func (r *stopRun) awaitWaiting() bool {
 	return false
 }
 
+// awaitReturn waits for Stop to return without advancing the clock: the exit
+// alone must end a wait that is parked on a longer timer.
+func (r *stopRun) awaitReturn() {
+	r.t.Helper()
+	select {
+	case r.err = <-r.done:
+	case <-time.After(10 * time.Second):
+		r.t.Fatal("Stop still waiting after the server exited")
+	}
+}
+
 func (r *stopRun) step(d time.Duration) bool {
 	r.t.Helper()
 	r.clock.advance(d)
@@ -443,69 +454,6 @@ func TestShutdownMidStopHandsTheKillToTheDaemon(t *testing.T) {
 	}
 }
 
-// A shutdown that comes while the pre-stop flush is still running hands the stop
-// off with the flush's budget on top of the cap: the Worker's own stop could still
-// run that long.
-func TestShutdownDuringTheFlushHandsOffTheWholeBudget(t *testing.T) {
-	docker := newFakeDocker()
-	release := make(chan struct{})
-	flushing := make(chan struct{})
-	flush := func(context.Context) bool {
-		close(flushing)
-		<-release
-		return true // the hand-off came first, so the stop escalates rather than kill
-	}
-	r := startStopRunWith(t, docker, nil, errors.New("rcon unavailable"), (&fakeWorld{}).probe,
-		func(f func()) { f() }, flush)
-	<-flushing
-
-	if err := r.d.HandOffStops(context.Background()); err != nil {
-		t.Fatalf("HandOffStops: %v", err)
-	}
-	want := handOffCall{id: "container-1", grace: defaultFlushTimeout + testCap}
-	if got := docker.handOffCalls(); len(got) != 1 || got[0] != want {
-		t.Fatalf("hand-offs = %+v, want %+v", got, want)
-	}
-	close(release)
-	select {
-	case r.err = <-r.done:
-	case <-time.After(10 * time.Second):
-		t.Fatal("Stop did not return after the flush")
-	}
-	if r.err != nil {
-		t.Fatalf("Stop: %v", r.err)
-	}
-}
-
-// With no stop in flight a shutdown hands nothing off, and a stop that starts
-// after the shutdown began hands itself off at once: nothing else would.
-func TestStopStartedAfterShutdownHandsItselfOff(t *testing.T) {
-	docker := newFakeDocker()
-	d := New(docker, images(), func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
-		return nil, errors.New("rcon unavailable")
-	}, Options{WorkerID: "w1", StopTimeout: 50 * time.Millisecond, GameBindIP: "0.0.0.0", ReadinessTimeout: 20 * time.Millisecond})
-	inst, err := d.Start(context.Background(), spec())
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	drainTo(t, inst.Events(), execution.StateRunning)
-
-	if err := d.HandOffStops(context.Background()); err != nil {
-		t.Fatalf("HandOffStops: %v", err)
-	}
-	if got := docker.handOffCalls(); len(got) != 0 {
-		t.Fatalf("hand-offs with no stop in flight = %+v, want none", got)
-	}
-
-	if err := inst.Stop(context.Background(), true); err != nil {
-		t.Fatalf("Stop: %v", err)
-	}
-	got := awaitHandOffs(t, docker, 1)
-	if got[0].id != "container-1" || got[0].grace < defaultStopCap-time.Second || got[0].grace > defaultStopCap {
-		t.Fatalf("hand-offs = %+v, want one for container-1 with about the %v cap", got, defaultStopCap)
-	}
-}
-
 // awaitHandOffs waits for n hand-offs: a stop that starts after the shutdown hands
 // itself off in the background.
 func awaitHandOffs(t *testing.T, docker *fakeDocker, n int) []handOffCall {
@@ -519,89 +467,6 @@ func awaitHandOffs(t *testing.T, docker *fakeDocker, n int) []handOffCall {
 	}
 	t.Fatalf("hand-offs = %+v, want %d", docker.handOffCalls(), n)
 	return nil
-}
-
-// A slow daemon does not hold up a stop that starts after the shutdown: its
-// self-hand-off runs beside it, so the stop's own budget (MaxStopDuration, and
-// with it CloseBound) is unchanged (issue #3436 review).
-func TestSelfHandOffDoesNotDelayTheStop(t *testing.T) {
-	docker := newFakeDocker()
-	block := make(chan struct{})
-	docker.handOffBlock = block
-	d := New(docker, images(), func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
-		return nil, errors.New("rcon unavailable")
-	}, Options{WorkerID: "w1", StopTimeout: 50 * time.Millisecond, GameBindIP: "0.0.0.0", ReadinessTimeout: 20 * time.Millisecond})
-	inst, err := d.Start(context.Background(), spec())
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	drainTo(t, inst.Events(), execution.StateRunning)
-	if err := d.HandOffStops(context.Background()); err != nil {
-		t.Fatalf("HandOffStops: %v", err)
-	}
-
-	done := make(chan error, 1)
-	go func() { done <- inst.Stop(context.Background(), true) }()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("Stop: %v", err)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("Stop waited on a hand-off the daemon has not taken yet")
-	}
-	if !docker.terminateCalled() {
-		t.Fatal("the stop did not signal the server while its hand-off was pending")
-	}
-	close(block)
-	awaitHandOffs(t, docker, 1)
-}
-
-// A hand-off that lands while the pre-stop flush is finishing has SIGTERMed the
-// server, so its shutdown save is running: the stop must not then take the
-// flushed path's immediate kill, which would cut that save short over the
-// regions the flush just wrote. It watches the save under the idle/cap rule
-// instead (issue #3436 review).
-func TestHandOffDuringTheFlushKeepsTheSaveUnderTheRule(t *testing.T) {
-	docker := newFakeDocker()
-	docker.stopNoExit = true
-	docker.signalled = make(chan struct{})
-	world := &fakeWorld{}
-	release := make(chan struct{})
-	flushing := make(chan struct{})
-	flush := func(context.Context) bool {
-		close(flushing)
-		<-release
-		return true // the flush settled
-	}
-	r := startStopRunWith(t, docker, nil, errors.New("rcon unavailable"), world.probe, func(f func()) { f() }, flush)
-	<-flushing
-	if err := r.d.HandOffStops(context.Background()); err != nil {
-		t.Fatalf("HandOffStops: %v", err)
-	}
-	<-docker.signalled // the daemon's SIGTERM: the shutdown save starts
-	close(release)
-
-	if r.awaitWaiting() {
-		t.Fatalf("Stop returned %v; kill = %v; want it watching the save the hand-off started",
-			r.err, docker.killWasCalled())
-	}
-	for elapsed := testPoll; elapsed <= 2*testIdle; elapsed += testPoll {
-		world.write()
-		if r.step(testPoll) {
-			t.Fatalf("Stop returned %v after %v of writes, want it waiting", r.err, elapsed)
-		}
-	}
-	if docker.killWasCalled() {
-		t.Fatal("the stop killed a shutdown save the hand-off started")
-	}
-	docker.exit(143, nil)
-	if !r.awaitWaiting() && !r.step(testPoll) {
-		t.Fatal("Stop still waiting after the server exited")
-	}
-	if r.err != nil || docker.killWasCalled() {
-		t.Fatalf("Stop = %v, kill = %v; want a clean stop", r.err, docker.killWasCalled())
-	}
 }
 
 // A hand-off that comes after the stop has committed to killing its flushed world
@@ -666,52 +531,6 @@ func TestHandOffAfterTheFlushNarrowsToTheCap(t *testing.T) {
 	}
 }
 
-// A SIGTERM request that errors after a hand-off has already signalled the server
-// does not end the wait: the shutdown save the hand-off started keeps its
-// idle/cap rule, and the server's own exit ends the stop cleanly (issue #3436
-// review). Before, the error sent the stop straight to the kill, mid-save.
-func TestSIGTERMErrorAfterAHandOffKeepsTheSaveUnderTheRule(t *testing.T) {
-	docker := newFakeDocker()
-	docker.stopErr = errors.New("daemon hiccup")
-	docker.signalled = make(chan struct{})
-	world := &fakeWorld{}
-	release := make(chan struct{})
-	flushing := make(chan struct{})
-	flush := func(context.Context) bool {
-		close(flushing)
-		<-release
-		return true
-	}
-	r := startStopRunWith(t, docker, nil, errors.New("rcon unavailable"), world.probe, func(f func()) { f() }, flush)
-	<-flushing
-	if err := r.d.HandOffStops(context.Background()); err != nil {
-		t.Fatalf("HandOffStops: %v", err)
-	}
-	<-docker.signalled
-	close(release)
-
-	if r.awaitWaiting() {
-		t.Fatalf("Stop returned %v, kill = %v; want it watching the save after the SIGTERM error",
-			r.err, docker.killWasCalled())
-	}
-	if !docker.terminateCalled() {
-		t.Fatal("the stop sent no SIGTERM request")
-	}
-	for elapsed := testPoll; elapsed <= 2*testIdle; elapsed += testPoll {
-		world.write()
-		if r.step(testPoll) {
-			t.Fatalf("Stop returned %v after %v of writes, want it waiting", r.err, elapsed)
-		}
-	}
-	docker.exit(143, nil)
-	if !r.awaitWaiting() && !r.step(testPoll) {
-		t.Fatal("Stop still waiting after the server exited")
-	}
-	if r.err != nil || docker.killWasCalled() {
-		t.Fatalf("Stop = %v, kill = %v; want a clean stop", r.err, docker.killWasCalled())
-	}
-}
-
 // A SIGTERM request that errors with no hand-off and a world nobody writes is
 // escalated after the idle window, not at once: the signal may have landed even
 // though the request failed. This is a deliberate change from the fixed-grace
@@ -734,5 +553,167 @@ func TestSIGTERMErrorKillsAfterTheIdleWindow(t *testing.T) {
 	}
 	if r.err != nil || !docker.killWasCalled() {
 		t.Fatalf("Stop = %v, kill = %v; want the kill after the idle window", r.err, docker.killWasCalled())
+	}
+}
+
+// A shutdown that comes while the pre-stop flush is still running hands the stop
+// off with the flush's budget on top of the cap — the Worker's own stop could
+// still have run that long — and once the flush settles the Worker leaves the
+// stop to the daemon: no immediate kill and no signal of its own, only the wait
+// for the exit (issue #3436 review, one owner per kill).
+func TestHandOffDuringTheFlushLeavesTheStopToTheDaemon(t *testing.T) {
+	docker := newFakeDocker()
+	ctrl := &fakeControl{}
+	release := make(chan struct{})
+	flushing := make(chan struct{})
+	flush := func(context.Context) bool {
+		close(flushing)
+		<-release
+		return true // the flush settled
+	}
+	r := startStopRunWith(t, docker, ctrl, nil, (&fakeWorld{}).probe, func(f func()) { f() }, flush)
+	<-flushing
+	if err := r.d.HandOffStops(context.Background()); err != nil {
+		t.Fatalf("HandOffStops: %v", err)
+	}
+	want := handOffCall{id: "container-1", grace: defaultFlushTimeout + testCap}
+	if got := docker.handOffCalls(); len(got) != 1 || got[0] != want {
+		t.Fatalf("hand-offs = %+v, want %+v", got, want)
+	}
+	close(release)
+
+	if r.awaitWaiting() {
+		t.Fatalf("Stop returned %v, kill = %v; want it waiting for the daemon's stop", r.err, docker.killWasCalled())
+	}
+	for range 4 {
+		if r.step(testIdle) {
+			t.Fatalf("Stop returned %v while the daemon owns the stop", r.err)
+		}
+	}
+	if docker.killWasCalled() || docker.terminateCalled() || ctrl.stopCalled {
+		t.Fatalf("kill = %v, SIGTERM = %v, RCON stop = %v; want no signal from the Worker after the hand-off",
+			docker.killWasCalled(), docker.terminateCalled(), ctrl.stopCalled)
+	}
+	docker.exit(143, nil) // the daemon's SIGTERM ends the server
+	r.awaitReturn()
+	if r.err != nil || docker.killWasCalled() {
+		t.Fatalf("Stop = %v, kill = %v; want a clean stop", r.err, docker.killWasCalled())
+	}
+}
+
+// A hand-off late in the idle window that follows a failed SIGTERM request takes
+// the stop for good: the daemon's `docker stop` carries the cap's remaining grace,
+// and the Worker no longer kills when its idle window runs out — that window
+// started before the daemon's SIGTERM, which may only now have started the save
+// (issue #3436 review).
+func TestLateHandOffAfterAFailedSIGTERMLeavesTheKillToTheDaemon(t *testing.T) {
+	docker := newFakeDocker()
+	docker.stopErr = errors.New("daemon hiccup") // the Worker's SIGTERM never lands
+	r := startStopRun(t, docker, nil, errors.New("rcon unavailable"), &fakeWorld{})
+	r.awaitWaiting()
+	for range 5 {
+		if r.step(testPoll) {
+			t.Fatalf("Stop returned %v inside the idle window", r.err)
+		}
+	}
+
+	if err := r.d.HandOffStops(context.Background()); err != nil {
+		t.Fatalf("HandOffStops: %v", err)
+	}
+	want := handOffCall{id: "container-1", grace: testCap - 5*testPoll}
+	if got := docker.handOffCalls(); len(got) != 1 || got[0] != want {
+		t.Fatalf("hand-offs = %+v, want %+v", got, want)
+	}
+	for elapsed := 6 * testPoll; elapsed <= 4*testIdle; elapsed += testPoll {
+		if r.step(testPoll) {
+			t.Fatalf("Stop returned %v at %v, after the hand-off", r.err, elapsed)
+		}
+	}
+	if docker.killWasCalled() {
+		t.Fatal("the Worker killed a stop it had handed to the daemon")
+	}
+	docker.exit(137, nil) // the daemon's kill, or the server's own exit
+	r.awaitReturn()
+	if r.err != nil || docker.killWasCalled() {
+		t.Fatalf("Stop = %v, kill = %v; want the stop to end on the exit alone", r.err, docker.killWasCalled())
+	}
+}
+
+// A hand-off that lands just as the Worker kills after its idle window matches
+// that kill and sends no `docker stop`: the Worker committed to the kill first, so
+// exactly one owner acts, and the daemon's part is the same kill, never a SIGTERM
+// that would start a save (issue #3436 review).
+func TestHandOffAtTheIdleKillMatchesTheKill(t *testing.T) {
+	docker := newFakeDocker()
+	docker.stopNoExit = true
+	r := startStopRun(t, docker, nil, errors.New("rcon unavailable"), &fakeWorld{})
+	docker.mu.Lock()
+	docker.beforeKill = func() {
+		if err := r.d.HandOffStops(context.Background()); err != nil {
+			t.Errorf("HandOffStops: %v", err)
+		}
+	}
+	docker.mu.Unlock()
+	r.awaitWaiting()
+	elapsed := time.Duration(0)
+	for !r.step(testPoll) {
+		if elapsed += testPoll; elapsed > 2*testIdle {
+			t.Fatal("Stop did not kill after its idle window")
+		}
+	}
+	if r.err != nil {
+		t.Fatalf("Stop: %v", r.err)
+	}
+	if got := docker.handOffCalls(); len(got) != 0 {
+		t.Fatalf("hand-offs = %+v, want no docker stop after the Worker committed to its kill", got)
+	}
+	if docker.killCount() != 2 {
+		t.Fatalf("kills = %d, want the Worker's and the hand-off's matching one", docker.killCount())
+	}
+}
+
+// A stop that starts after the shutdown hands itself off at once: the daemon owns
+// it from the start, so the Worker sends no signal and only waits for the exit.
+// The request goes out in the background, so a slow daemon does not hold the stop
+// and its budget (MaxStopDuration, CloseBound) is unchanged.
+func TestStopStartedAfterShutdownHandsItselfOff(t *testing.T) {
+	docker := newFakeDocker()
+	block := make(chan struct{})
+	docker.handOffBlock = block
+	d := New(docker, images(), func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
+		return nil, errors.New("rcon unavailable")
+	}, Options{WorkerID: "w1", StopTimeout: 50 * time.Millisecond, GameBindIP: "0.0.0.0", ReadinessTimeout: 20 * time.Millisecond})
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+	if err := d.HandOffStops(context.Background()); err != nil {
+		t.Fatalf("HandOffStops: %v", err)
+	}
+	if got := docker.handOffCalls(); len(got) != 0 {
+		t.Fatalf("hand-offs with no stop in flight = %+v, want none", got)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- inst.Stop(context.Background(), true) }()
+	time.Sleep(200 * time.Millisecond) // four idle windows: a Worker that owned the stop would have signalled
+	if docker.terminateCalled() || docker.killWasCalled() {
+		t.Fatalf("SIGTERM = %v, kill = %v; want no signal from the Worker on a handed-off stop",
+			docker.terminateCalled(), docker.killWasCalled())
+	}
+	docker.exit(143, nil) // the daemon has not even answered yet
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Stop: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Stop waited on a hand-off the daemon has not taken yet")
+	}
+	close(block)
+	got := awaitHandOffs(t, docker, 1)
+	if got[0].id != "container-1" || got[0].grace < defaultStopCap-time.Second || got[0].grace > defaultStopCap {
+		t.Fatalf("hand-offs = %+v, want one for container-1 with about the %v cap", got, defaultStopCap)
 	}
 }

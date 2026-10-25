@@ -1942,19 +1942,6 @@ func (i *instance) Stop(ctx context.Context, graceful bool, preFallback ...func(
 		flushed = preFallback[0](flushCtx)
 		flushCancel()
 	}
-	// A flushed world is killed at once, never SIGTERMed: a shutdown save cut short
-	// by the kill would overwrite the regions the flush just wrote. A shutdown
-	// hand-off sends SIGTERM, though, so the two are decided under one lock (issue
-	// #3436 review): either this stop commits to the kill first, and a hand-off
-	// then kills too, or a hand-off got here first and its SIGTERM has started a
-	// save, which then gets the idle/cap rule like any other — the stop escalates
-	// as if the flush had not succeeded.
-	if flushed && !inflight.commitKill() {
-		i.logger.Warn("flush succeeded, but a shutdown hand-off already signalled the server; "+
-			"watching its shutdown save instead of killing it",
-			"server_id", i.spec.ServerID)
-		flushed = false
-	}
 
 	// Once a stop has begun, detach the escalation from the caller's context. The
 	// graceful stop usually runs on a per-server lane whose ctx is the gRPC
@@ -1983,33 +1970,44 @@ func (i *instance) Stop(ctx context.Context, graceful bool, preFallback ...func(
 	// stopTimeout without a write or the stop's cap is reached (stopWatch). Only a
 	// graceful stop observes the world: a forced one escalates after the idle
 	// window, as the fixed grace did.
+	//
+	// ONE OWNER PER KILL (issue #3436 review). A shutdown hand-off (HandOffStops)
+	// gives the stop to the daemon; from then on the Worker sends no RCON stop, no
+	// SIGTERM and no SIGKILL for it, and only waits for the exit (awaitHandedOff).
+	// Each of the Worker's own signals checks that it still owns the stop, and its
+	// SIGKILL commits under the stop's lock first, so a hand-off and that kill
+	// exclude each other: a hand-off that comes after the commit matches it with a
+	// daemon kill, never a SIGTERM. A save started by any SIGTERM is therefore
+	// killed only under the idle/cap rule or by the daemon's own grace.
+	var w *stopWatch
+	reason := ""
 	if !flushed {
 		progress := i.spec.WorldProgress
 		if !graceful {
 			progress = nil
 		}
-		w := i.newStopWatch(progress)
-		reason := ""
-		if graceful && i.tryRCONStop(stopCtx) {
+		w = i.newStopWatch(progress)
+		if graceful && inflight.workerOwns() && i.tryRCONStop(stopCtx) {
 			if reason = w.wait(stopCtx); reason == "" {
 				i.logStopExit(requested)
 				return nil
 			}
-			if reason != stopReasonCap {
+			if reason != stopReasonCap && inflight.workerOwns() {
 				i.logEscalation("rcon stop", "SIGTERM", requested, w, reason)
 			}
 		}
 		if reason != stopReasonCap {
 			// A SIGTERM request that errors does not prove no SIGTERM landed — the
-			// daemon may have delivered it and failed the reply, and a shutdown
-			// hand-off may have signalled the server already — so a save may be
-			// running either way. The wait therefore follows the same idle/cap rule
-			// whatever the request returned (issue #3436 review); a server that
-			// writes nothing is still killed after the idle window.
-			if err := i.docker.Terminate(stopCtx, id); err != nil {
-				i.logger.Warn("stop: the SIGTERM request failed; waiting out the idle window "+
-					"in case it was delivered or a save is already running",
-					"server_id", i.spec.ServerID, "error", err)
+			// daemon may have delivered it and failed the reply — so a save may be
+			// running either way, and the wait follows the same idle/cap rule
+			// whatever the request returned; a server that writes nothing is still
+			// killed after the idle window.
+			if inflight.workerOwns() {
+				if err := i.docker.Terminate(stopCtx, id); err != nil {
+					i.logger.Warn("stop: the SIGTERM request failed; waiting out the idle window "+
+						"in case it was delivered or a save is already running",
+						"server_id", i.spec.ServerID, "error", err)
+				}
 			}
 			w.restartIdle()
 			if reason = w.wait(stopCtx); reason == "" {
@@ -2017,22 +2015,29 @@ func (i *instance) Stop(ctx context.Context, graceful bool, preFallback ...func(
 				return nil
 			}
 		}
-		// The stop is escalating to a direct kill, which is exactly the case where
-		// Minecraft's shutdown save may be cut short: the world is left partly saved
-		// and the stop-leg snapshot may capture unpadded (live-format) regions
-		// (issue #927). The one line says why (idle or cap), how long the stop had
-		// run and when the world was last written, so a partial save traces back to
-		// it. A forced stop (graceful=false) skips RCON by design, so "graceful stop"
-		// would misdescribe it.
-		if graceful {
-			i.logEscalation("graceful stop", "kill", requested, w, reason)
-		} else {
-			i.logger.Warn("forced stop; killing container directly",
-				"server_id", i.spec.ServerID, "idle_window", i.stopTimeout, "reason", reason)
-		}
-	} else {
+	}
+	// The Worker's own kill. A flushed world is killed at once, never SIGTERMed: a
+	// shutdown save cut short by the kill would overwrite the regions the flush just
+	// wrote. Every kill commits first, and a stop a hand-off already owns is left to
+	// the daemon.
+	if !inflight.commitKill() {
+		return i.awaitHandedOff(inflight, requested, prior)
+	}
+	// The stop is escalating to a direct kill, which is exactly the case where
+	// Minecraft's shutdown save may be cut short: the world is left partly saved and
+	// the stop-leg snapshot may capture unpadded (live-format) regions (issue #927).
+	// The one line says why (idle or cap), how long the stop had run and when the
+	// world was last written, so a partial save traces back to it. A forced stop
+	// (graceful=false) skips RCON by design, so "graceful stop" would misdescribe it.
+	switch {
+	case flushed:
 		i.logger.Info("flush succeeded; terminating container",
 			"server_id", i.spec.ServerID)
+	case graceful:
+		i.logEscalation("graceful stop", "kill", requested, w, reason)
+	default:
+		i.logger.Warn("forced stop; killing container directly",
+			"server_id", i.spec.ServerID, "idle_window", i.stopTimeout, "reason", reason)
 	}
 
 	// Use a detached context for the kill call so it is never starved by
@@ -2332,49 +2337,79 @@ type stopHandOffs struct {
 }
 
 // inflightStop is one stop in flight: its server, its container, and killBy, the
-// latest the Worker's own stop would kill it (unix nanoseconds). mu orders the
-// flush-to-kill decision against a hand-off: committed is set when the stop has
-// committed to killing a flushed world at once, handedOff when a hand-off has
-// claimed the stop (commitKill, claimHandOff).
+// latest the Worker's own stop would kill it (unix nanoseconds). mu decides who
+// owns the kill (issue #3436 review): killing is set when the Worker has
+// committed to its own SIGKILL, handedOff when a hand-off gave the stop to the
+// daemon, whose kill is due at daemonKillAt. The two exclude each other.
 type inflightStop struct {
-	serverID    string
-	containerID string
-	killBy      atomic.Int64
-	mu          sync.Mutex
-	committed   bool
-	handedOff   bool
-}
-
-// commitKill commits the stop to killing its flushed world at once, unless a
-// hand-off has already signalled the server, in which case it reports false.
-func (s *inflightStop) commitKill() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.handedOff {
-		return false
-	}
-	s.committed = true
-	return true
-}
-
-// claimHandOff claims the stop for a hand-off and reports whether the stop has
-// already committed to an immediate kill, which the hand-off must then match
-// rather than SIGTERM a flushed world.
-func (s *inflightStop) claimHandOff() (killNow bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.handedOff = true
-	return s.committed
+	serverID     string
+	containerID  string
+	killBy       atomic.Int64
+	mu           sync.Mutex
+	killing      bool
+	handedOff    bool
+	daemonKillAt time.Time
 }
 
 func (s *inflightStop) setKillBy(t time.Time) {
 	s.killBy.Store(t.UnixNano())
 }
 
+// workerOwns reports whether the Worker may still signal the server itself: true
+// until a hand-off gives the stop to the daemon.
+func (s *inflightStop) workerOwns() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.handedOff
+}
+
+// commitKill commits the Worker to its own SIGKILL, unless a hand-off already gave
+// the stop to the daemon, in which case it reports false and the Worker must not
+// kill.
+func (s *inflightStop) commitKill() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.handedOff {
+		return false
+	}
+	s.killing = true
+	return true
+}
+
+// claim is a hand-off's side of the decision. When the Worker has committed to its
+// own kill, the hand-off must match it (kill). Otherwise the hand-off takes the
+// stop with grace, the time the Worker's own stop had left (at least 1 s, rounded
+// up to whole seconds, the unit the Engine takes).
+func (s *inflightStop) claim(now time.Time) (kill bool, grace time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.killing {
+		return true, 0
+	}
+	left := time.Unix(0, s.killBy.Load()).Sub(now)
+	grace = max(time.Duration(math.Ceil(left.Seconds()))*time.Second, time.Second)
+	s.handedOff, s.daemonKillAt = true, now.Add(grace)
+	return false, grace
+}
+
+// release gives the stop back to the Worker after a hand-off that never reached
+// the daemon, so the Worker's own idle/cap rule ends it.
+func (s *inflightStop) release() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.handedOff = false
+}
+
+func (s *inflightStop) daemonKillDue() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.daemonKillAt
+}
+
 // register records a stop starting now. After HandOffStops has run it also hands
-// the stop off, since nothing else will — in the background, so the stop itself
-// is not delayed and its budget (MaxStopDuration) stays what it is; the hand-off
-// is ordered against the stop's own kill by the stop's lock, not by time.
+// the stop off, since nothing else will: the claim is taken here, so the Worker
+// never signals the server itself, and the request goes out in the background, so
+// the stop is not delayed and its budget (MaxStopDuration) stays what it is.
 func (h *stopHandOffs) register(serverID, containerID string, killBy time.Time) *inflightStop {
 	s := &inflightStop{serverID: serverID, containerID: containerID}
 	s.setKillBy(killBy)
@@ -2383,10 +2418,11 @@ func (h *stopHandOffs) register(serverID, containerID string, killBy time.Time) 
 	closed := h.closed
 	h.mu.Unlock()
 	if closed {
+		kill, grace := s.claim(h.d.now())
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), stopHandOffCallTimeout)
 			defer cancel()
-			_ = h.handOff(ctx, s)
+			_ = h.send(ctx, s, kill, grace)
 		}()
 	}
 	return s
@@ -2398,30 +2434,27 @@ func (h *stopHandOffs) unregister(s *inflightStop) {
 	h.mu.Unlock()
 }
 
-// handOff gives one stop to the daemon: `docker stop` with the grace the Worker's
-// own stop had left (at least 1 s, rounded up to whole seconds, the unit the
-// Engine takes). The daemon then SIGTERMs the container — harmless to a server
-// already shutting down — and SIGKILLs it when that grace runs out. A stop that
-// has committed to killing its flushed world gets that kill instead: a SIGTERM
-// would start the very shutdown save the immediate kill exists to avoid.
-func (h *stopHandOffs) handOff(ctx context.Context, s *inflightStop) error {
-	if s.claimHandOff() {
+// send carries out a claim. A stop the Worker has committed to killing is killed
+// through the daemon too: a SIGTERM would start a shutdown save that kill would
+// cut short. Any other stop goes to the daemon as `docker stop` with grace; the
+// daemon SIGTERMs it — harmless to a server already shutting down — and SIGKILLs
+// it when grace runs out. A request that fails gives the stop back to the Worker.
+func (h *stopHandOffs) send(ctx context.Context, s *inflightStop, kill bool, grace time.Duration) error {
+	if kill {
 		if err := h.d.docker.Kill(ctx, s.containerID); err != nil {
-			h.d.logger.Warn("worker shutting down mid-stop: killing the flushed server failed; "+
+			h.d.logger.Warn("worker shutting down mid-stop: the matching daemon kill failed; "+
 				"the Worker's own kill is still on its way",
 				"server_id", s.serverID, "error", err)
 			return fmt.Errorf("hand off kill of %s: %w", s.serverID, err)
 		}
-		h.d.logger.Warn("worker shutting down mid-stop: the flushed server was killed through the docker daemon",
+		h.d.logger.Warn("worker shutting down mid-stop: the server the Worker was killing was killed through the docker daemon",
 			"server_id", s.serverID)
 		return nil
 	}
-	left := time.Unix(0, s.killBy.Load()).Sub(h.d.now())
-	grace := max(time.Duration(math.Ceil(left.Seconds()))*time.Second, time.Second)
-	err := h.d.docker.HandOff(ctx, s.containerID, grace)
-	if err != nil {
+	if err := h.d.docker.HandOff(ctx, s.containerID, grace); err != nil {
+		s.release()
 		h.d.logger.Warn("worker shutting down mid-stop: handing the kill to the docker daemon failed; "+
-			"a hung server stays up until the next Worker boot sweeps it",
+			"the Worker's own stop keeps it, until the Worker exits",
 			"server_id", s.serverID, "grace", grace, "error", err)
 		return fmt.Errorf("hand off stop of %s: %w", s.serverID, err)
 	}
@@ -2433,9 +2466,8 @@ func (h *stopHandOffs) handOff(ctx context.Context, s *inflightStop) error {
 // HandOffStops implements execution.StopHandOff (issue #3436): it hands every stop
 // in flight to the daemon, in parallel, and makes every later one hand itself off
 // as it starts. It returns once each hand-off has reached the daemon or ctx ends.
-// The stops themselves keep running: while the Worker is still up they may still
-// end the server sooner (on its exit, or after the idle window), and the daemon's
-// kill only lands if they have not.
+// A stop handed off is the daemon's to end from then on: the Worker's own stop
+// only waits for the exit (awaitHandedOff).
 func (d *Driver) HandOffStops(ctx context.Context) error {
 	d.handOffs.mu.Lock()
 	d.handOffs.closed = true
@@ -2451,11 +2483,37 @@ func (d *Driver) HandOffStops(ctx context.Context) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			errs[n] = d.handOffs.handOff(ctx, s)
+			kill, grace := s.claim(d.now())
+			errs[n] = d.handOffs.send(ctx, s, kill, grace)
 		}()
 	}
 	wg.Wait()
 	return errors.Join(errs...)
+}
+
+// awaitHandedOff waits out a stop a shutdown hand-off gave to the daemon (issue
+// #3436 review): the Worker sends no signal of its own any more, so the stop ends
+// when the container exits — by itself or by the daemon's kill — and fails, like a
+// kill the container survived, once that kill is overdue by stopDeadlineGrace.
+// The wait is no longer than the Worker's own stop would have been: the daemon's
+// grace is what that stop had left.
+func (i *instance) awaitHandedOff(s *inflightStop, requested time.Time, prior execution.ServerState) error {
+	wait := max(s.daemonKillDue().Add(stopDeadlineGrace).Sub(i.now()), 0)
+	select {
+	case <-i.exited:
+		i.logStopExit(requested)
+		return nil
+	case <-i.after(wait):
+	}
+	i.mu.Lock()
+	if i.exitObserved {
+		i.mu.Unlock()
+		return nil
+	}
+	i.stopping = false
+	i.state = prior
+	i.mu.Unlock()
+	return fmt.Errorf("containerdriver: container still running %s after its stop was handed to the daemon", wait)
 }
 
 // logStopExit records a stop that outlasted the idle window and still ended with
