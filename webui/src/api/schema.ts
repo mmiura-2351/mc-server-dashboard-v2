@@ -652,7 +652,9 @@ export interface paths {
          *     with no ``server.properties`` at all is refused with 409
          *     ``server_properties_missing`` before the commit (issue #2623) — republishing a
          *     port-only file would drop ``rcon.password`` and leave the control plane unable
-         *     to quiesce, stop, query, or send commands to the server. A storage failure
+         *     to quiesce, stop, query, or send commands to the server. If the file vanishes
+         *     after that check, the deferred write answers the same 409 over a committed
+         *     port change, which is audited as a success (issue #3448). A storage failure
          *     during the rewrite itself is 503 ``seed_failed``; that write is deferred to
          *     after the commit (#1705), so the row carries the new port while the file does
          *     not, and the retry direction is to re-issue the rewrite.
