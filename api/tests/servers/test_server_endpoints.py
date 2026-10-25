@@ -57,6 +57,7 @@ from mc_server_dashboard_api.servers.api.servers import (
 )
 from mc_server_dashboard_api.servers.application.manage_server import (
     BedrockJoinability,
+    CreateServer,
     ReadServer,
     UpdateServer,
 )
@@ -84,7 +85,6 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerPropertiesMissingError,
     UnknownServerTypeError,
     UnsupportedEditionError,
-    WorkingSetSeedFailedError,
 )
 from mc_server_dashboard_api.servers.domain.memory_limit import (
     MEMORY_LIMIT_CONFIG_KEY,
@@ -122,6 +122,7 @@ from tests.servers.fakes import (
     FakeFileStore,
     FakePluginRepository,
     FakeUnitOfWork,
+    FakeVersionValidator,
 )
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
@@ -246,7 +247,7 @@ def _app(
     *,
     member: bool,
     allow: bool,
-    create: _FakeUseCase | None = None,
+    create: _FakeUseCase | CreateServer | None = None,
     read: _FakeUseCase | None = None,
     list_: _FakeUseCase | None = None,
     update: _FakeUseCase | UpdateServer | None = None,
@@ -664,16 +665,44 @@ def test_create_in_a_concurrently_deleted_community_is_404() -> None:
     assert resp.json()["reason"] == "not_found"
 
 
-def test_create_seed_failed_is_503() -> None:
+def test_create_seed_failed_is_503_and_audits_the_committed_row() -> None:
+    # Seeding runs after the row commits (issue #243), so the server exists despite
+    # the 503. That change stands, so it is audited as a success (issue #3483).
+    community = uuid.uuid4()
+    uow = FakeUnitOfWork()
+    recorder = RecordingAuditRecorder()
     app = _app(
         member=True,
         allow=True,
-        create=_FakeUseCase(error=WorkingSetSeedFailedError("server-id")),
+        create=CreateServer(
+            uow=uow,
+            clock=FakeClock(_NOW),
+            version_validator=FakeVersionValidator(),
+            file_store=FakeFileStore(fail_write=True),
+            port_range=PortRange(start=25565, end=25664),
+        ),
+        recorder=recorder,
     )
-    client = _client(app)
-    resp = client.post(f"/api/communities/{uuid.uuid4()}/servers", json=_create_body())
+    resp = _client(app).post(
+        f"/api/communities/{community}/servers", json=_create_body()
+    )
     assert resp.status_code == 503
     assert resp.json()["reason"] == "seed_failed"
+    assert uow.commits == 1
+    [server_id] = uow.servers.by_id
+    assert [
+        (e.operation, e.outcome, e.community_id, e.target_type, e.target_id)
+        for e in recorder.events
+    ] == [
+        (
+            ops.SERVER_CREATE,
+            Outcome.SUCCESS,
+            community,
+            ops.TARGET_SERVER,
+            server_id.value,
+        )
+    ]
+    assert recorder.events[0].actor_id is not None
 
 
 def test_create_game_port_out_of_schema_bound_is_422() -> None:
@@ -954,19 +983,35 @@ def test_update_game_port_properties_missing_is_409() -> None:
     assert resp.json()["reason"] == "server_properties_missing"
 
 
-def test_update_game_port_seed_failure_is_503() -> None:
+def test_update_game_port_seed_failure_is_503_and_audits_the_change() -> None:
+    # The server.properties rewrite is deferred to after the commit (#1705), so the
+    # new port stands despite the 503 and is audited as a success (issue #3483).
+    community = uuid.uuid4()
+    server_id = uuid.uuid4()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server_entity(community_id=community, server_id=server_id))
+    file_store = FakeFileStore(fail_write=True)
+    file_store.files["server.properties"] = b"server-port=25565\nrcon.password=tok\n"
+    recorder = RecordingAuditRecorder()
     app = _app(
         member=True,
         allow=True,
-        update=_FakeUseCase(error=WorkingSetSeedFailedError("server-id")),
+        update=_real_update(uow, file_store=file_store),
+        recorder=recorder,
     )
-    client = _client(app)
-    resp = client.patch(
-        f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
+    resp = _client(app).patch(
+        f"/api/communities/{community}/servers/{server_id}",
         json={"game_port": 25570},
     )
     assert resp.status_code == 503
     assert resp.json()["reason"] == "seed_failed"
+    assert uow.commits == 1
+    assert uow.servers.by_id[ServerId(server_id)].game_port == 25570
+    assert [
+        (e.operation, e.outcome, e.community_id, e.target_type, e.target_id)
+        for e in recorder.events
+    ] == [(ops.SERVER_UPDATE, Outcome.SUCCESS, community, ops.TARGET_SERVER, server_id)]
+    assert recorder.events[0].actor_id is not None
 
 
 class _VanishingPropertiesStore(FakeFileStore):
