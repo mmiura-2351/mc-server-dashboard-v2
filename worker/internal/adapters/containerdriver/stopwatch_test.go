@@ -665,3 +665,74 @@ func TestHandOffAfterTheFlushNarrowsToTheCap(t *testing.T) {
 		t.Fatalf("hand-offs = %+v, want %+v (the cap from the escalation's start)", got, want)
 	}
 }
+
+// A SIGTERM request that errors after a hand-off has already signalled the server
+// does not end the wait: the shutdown save the hand-off started keeps its
+// idle/cap rule, and the server's own exit ends the stop cleanly (issue #3436
+// review). Before, the error sent the stop straight to the kill, mid-save.
+func TestSIGTERMErrorAfterAHandOffKeepsTheSaveUnderTheRule(t *testing.T) {
+	docker := newFakeDocker()
+	docker.stopErr = errors.New("daemon hiccup")
+	docker.signalled = make(chan struct{})
+	world := &fakeWorld{}
+	release := make(chan struct{})
+	flushing := make(chan struct{})
+	flush := func(context.Context) bool {
+		close(flushing)
+		<-release
+		return true
+	}
+	r := startStopRunWith(t, docker, nil, errors.New("rcon unavailable"), world.probe, func(f func()) { f() }, flush)
+	<-flushing
+	if err := r.d.HandOffStops(context.Background()); err != nil {
+		t.Fatalf("HandOffStops: %v", err)
+	}
+	<-docker.signalled
+	close(release)
+
+	if r.awaitWaiting() {
+		t.Fatalf("Stop returned %v, kill = %v; want it watching the save after the SIGTERM error",
+			r.err, docker.killWasCalled())
+	}
+	if !docker.terminateCalled() {
+		t.Fatal("the stop sent no SIGTERM request")
+	}
+	for elapsed := testPoll; elapsed <= 2*testIdle; elapsed += testPoll {
+		world.write()
+		if r.step(testPoll) {
+			t.Fatalf("Stop returned %v after %v of writes, want it waiting", r.err, elapsed)
+		}
+	}
+	docker.exit(143, nil)
+	if !r.awaitWaiting() && !r.step(testPoll) {
+		t.Fatal("Stop still waiting after the server exited")
+	}
+	if r.err != nil || docker.killWasCalled() {
+		t.Fatalf("Stop = %v, kill = %v; want a clean stop", r.err, docker.killWasCalled())
+	}
+}
+
+// A SIGTERM request that errors with no hand-off and a world nobody writes is
+// escalated after the idle window, not at once: the signal may have landed even
+// though the request failed. This is a deliberate change from the fixed-grace
+// stop, which killed as soon as its `docker stop` call errored.
+func TestSIGTERMErrorKillsAfterTheIdleWindow(t *testing.T) {
+	docker := newFakeDocker()
+	docker.stopErr = errors.New("daemon hiccup")
+	r := startStopRun(t, docker, nil, errors.New("rcon unavailable"), &fakeWorld{})
+	if r.awaitWaiting() {
+		t.Fatalf("Stop returned %v at once after the SIGTERM error, kill = %v; want the idle window first",
+			r.err, docker.killWasCalled())
+	}
+	for idle := testPoll; idle < testIdle; idle += testPoll {
+		if r.step(testPoll) {
+			t.Fatalf("Stop returned %v after %v idle, want the full %v", r.err, idle, testIdle)
+		}
+	}
+	if !r.step(testPoll) {
+		t.Fatalf("Stop still waiting %v after the SIGTERM error", testIdle)
+	}
+	if r.err != nil || !docker.killWasCalled() {
+		t.Fatalf("Stop = %v, kill = %v; want the kill after the idle window", r.err, docker.killWasCalled())
+	}
+}

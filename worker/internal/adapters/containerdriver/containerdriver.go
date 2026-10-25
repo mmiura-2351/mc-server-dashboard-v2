@@ -2000,14 +2000,21 @@ func (i *instance) Stop(ctx context.Context, graceful bool, preFallback ...func(
 			}
 		}
 		if reason != stopReasonCap {
+			// A SIGTERM request that errors does not prove no SIGTERM landed — the
+			// daemon may have delivered it and failed the reply, and a shutdown
+			// hand-off may have signalled the server already — so a save may be
+			// running either way. The wait therefore follows the same idle/cap rule
+			// whatever the request returned (issue #3436 review); a server that
+			// writes nothing is still killed after the idle window.
 			if err := i.docker.Terminate(stopCtx, id); err != nil {
-				reason = stopReasonSignalFailed
-			} else {
-				w.restartIdle()
-				if reason = w.wait(stopCtx); reason == "" {
-					i.logStopExit(requested)
-					return nil
-				}
+				i.logger.Warn("stop: the SIGTERM request failed; waiting out the idle window "+
+					"in case it was delivered or a save is already running",
+					"server_id", i.spec.ServerID, "error", err)
+			}
+			w.restartIdle()
+			if reason = w.wait(stopCtx); reason == "" {
+				i.logStopExit(requested)
+				return nil
 			}
 		}
 		// The stop is escalating to a direct kill, which is exactly the case where
@@ -2122,10 +2129,9 @@ func (i *instance) stopDeadline() time.Duration {
 
 // Why a stop wait gave up on the server exiting by itself (stopWatch.wait).
 const (
-	stopReasonIdle         = "idle"
-	stopReasonCap          = "cap"
-	stopReasonDeadline     = "deadline"
-	stopReasonSignalFailed = "sigterm_failed"
+	stopReasonIdle     = "idle"
+	stopReasonCap      = "cap"
+	stopReasonDeadline = "deadline"
 )
 
 // stopWatch applies a stop's escalation rule (issue #3436): wait while the world's
