@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import datetime as dt
 import io
+import json
 import uuid
 import zipfile
 from collections.abc import AsyncIterator
@@ -63,9 +64,13 @@ from mc_server_dashboard_api.identity.application.authenticate_request import (
 )
 from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.servers.application.export_import import (
+    EXPORT_FORMAT_VERSION,
+    EXPORT_METADATA_FILENAME,
+    ImportServer,
     ServerExport,
     export_download_grant_resource,
 )
+from mc_server_dashboard_api.servers.application.manage_server import CreateServer
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     CommunityNotFoundError,
@@ -78,8 +83,8 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerNotFoundError,
     SlugAlreadyTakenError,
     SlugExhaustedError,
-    WorkingSetSeedFailedError,
 )
+from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId as ServersCommunityId,
 )
@@ -93,6 +98,9 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 from tests.audit.fakes import RecordingAuditRecorder
 from tests.client_utils import enter_client
 from tests.identity.fakes import FakeClock, FakeUnitOfWork, make_user
+from tests.servers.fakes import FakeClock as ServersFakeClock
+from tests.servers.fakes import FakeFileStore, FakeVersionValidator
+from tests.servers.fakes import FakeUnitOfWork as ServersFakeUnitOfWork
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 
@@ -235,7 +243,7 @@ def _app(
     subject: User | None = None,
     export: _FakeExport | None = None,
     resolve_export: _FakeResolveExport | None = None,
-    import_: _FakeImport | None = None,
+    import_: _FakeImport | ImportServer | None = None,
     recorder: RecordingAuditRecorder | None = None,
 ) -> object:
     global _clock, _tokens, _user
@@ -1023,21 +1031,88 @@ def test_import_oversized_is_413() -> None:
     assert resp.status_code == 413
 
 
-def test_import_seed_failure_is_503() -> None:
+class _FailingWorldWriteStore(FakeFileStore):
+    """Takes create's seed writes, then fails publishing the archive's world."""
+
+    async def write_file(
+        self,
+        *,
+        community_id: ServersCommunityId,
+        server_id: ServerId,
+        rel_path: str,
+        content: bytes,
+    ) -> None:
+        if rel_path.startswith("world/"):
+            raise RuntimeError("forced storage write failure")
+        await super().write_file(
+            community_id=community_id,
+            server_id=server_id,
+            rel_path=rel_path,
+            content=content,
+        )
+
+
+def test_import_seed_failure_is_503_and_audits_the_committed_row() -> None:
+    # The archive is published after the row commits (issue #274), so the server
+    # exists despite the 503. That change stands, so it is audited as a success
+    # (issue #3483).
+    community = uuid.uuid4()
+    uow = ServersFakeUnitOfWork()
+    file_store = _FailingWorldWriteStore()
+    recorder = RecordingAuditRecorder()
     app = _app(
         member=True,
         allow=True,
-        import_=_FakeImport(error=WorkingSetSeedFailedError("x")),
+        import_=ImportServer(
+            create_server=CreateServer(
+                uow=uow,
+                clock=ServersFakeClock(_NOW),
+                version_validator=FakeVersionValidator(),
+                file_store=file_store,
+                port_range=PortRange(start=25565, end=25664),
+            ),
+            file_store=file_store,
+        ),
+        recorder=recorder,
     )
-    client = _client(app)
-    files, data = _zip_upload()
-    resp = client.post(
-        f"/api/communities/{uuid.uuid4()}/servers/import",
-        files=files,
-        data=data,
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, mode="w") as zf:
+        zf.writestr(
+            EXPORT_METADATA_FILENAME,
+            json.dumps(
+                {
+                    "format": EXPORT_FORMAT_VERSION,
+                    "name": "exported-name",
+                    "mc_edition": "java",
+                    "mc_version": "1.21.1",
+                    "server_type": "vanilla",
+                    "exported_at": _NOW.isoformat(),
+                }
+            ),
+        )
+        zf.writestr("world/level.dat", b"level")
+    resp = _client(app).post(
+        f"/api/communities/{community}/servers/import",
+        files={"file": ("server.zip", buf.getvalue(), "application/zip")},
+        data={"name": "imported"},
     )
     assert resp.status_code == 503
     assert resp.json()["reason"] == "seed_failed"
+    assert uow.commits == 1
+    [server_id] = uow.servers.by_id
+    assert [
+        (e.operation, e.outcome, e.community_id, e.target_type, e.target_id)
+        for e in recorder.events
+    ] == [
+        (
+            ops.SERVER_IMPORT,
+            Outcome.SUCCESS,
+            community,
+            ops.TARGET_SERVER,
+            server_id.value,
+        )
+    ]
+    assert recorder.events[0].actor_id == _user.id.value
 
 
 # --- the archive's path rejections reach the wire (issue #2869) -------------

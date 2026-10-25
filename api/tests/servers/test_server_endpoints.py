@@ -22,6 +22,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from mc_server_dashboard_api.audit.domain import operations as ops
+from mc_server_dashboard_api.audit.domain.events import Outcome
 from mc_server_dashboard_api.community.adapters.permission_checker import (
     RepositoryMembershipVisibility,
     RoleGrantPermissionChecker,
@@ -38,6 +40,7 @@ from mc_server_dashboard_api.community.domain.value_objects import (
     UserId,
 )
 from mc_server_dashboard_api.dependencies import (
+    get_audit_recorder,
     get_bedrock_joinability,
     get_create_server,
     get_current_user,
@@ -54,6 +57,7 @@ from mc_server_dashboard_api.servers.api.servers import (
 )
 from mc_server_dashboard_api.servers.application.manage_server import (
     BedrockJoinability,
+    CreateServer,
     ReadServer,
     UpdateServer,
 )
@@ -81,7 +85,6 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerPropertiesMissingError,
     UnknownServerTypeError,
     UnsupportedEditionError,
-    WorkingSetSeedFailedError,
 )
 from mc_server_dashboard_api.servers.domain.memory_limit import (
     MEMORY_LIMIT_CONFIG_KEY,
@@ -110,6 +113,7 @@ from mc_server_dashboard_api.servers.domain.version_validator import (
 from mc_server_dashboard_api.servers.domain.version_validator import (
     UnknownVersionError as CatalogUnknownVersionError,
 )
+from tests.audit.fakes import RecordingAuditRecorder
 from tests.client_utils import enter_client
 from tests.community.fakes import FakeAuthzUnitOfWork
 from tests.identity.fakes import make_user
@@ -118,6 +122,7 @@ from tests.servers.fakes import (
     FakeFileStore,
     FakePluginRepository,
     FakeUnitOfWork,
+    FakeVersionValidator,
 )
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
@@ -242,13 +247,14 @@ def _app(
     *,
     member: bool,
     allow: bool,
-    create: _FakeUseCase | None = None,
+    create: _FakeUseCase | CreateServer | None = None,
     read: _FakeUseCase | None = None,
     list_: _FakeUseCase | None = None,
     update: _FakeUseCase | UpdateServer | None = None,
     delete: _FakeUseCase | None = None,
     join_config: JoinHostnameConfig | None = None,
     bedrock: BedrockJoinability | None = None,
+    recorder: RecordingAuditRecorder | None = None,
 ) -> object:
     app = _shared_app
     app.dependency_overrides.clear()
@@ -269,6 +275,8 @@ def _app(
         app.dependency_overrides[get_delete_server] = lambda: delete
     if join_config is not None:
         app.dependency_overrides[get_join_hostname_config] = lambda: join_config
+    if recorder is not None:
+        app.dependency_overrides[get_audit_recorder] = lambda: recorder
     # Always overridden (never a live DB in this fake-only suite): no plugins by
     # default, i.e. no server is Geyser-enabled unless a test seeds one.
     app.dependency_overrides[get_bedrock_joinability] = lambda: (
@@ -657,16 +665,44 @@ def test_create_in_a_concurrently_deleted_community_is_404() -> None:
     assert resp.json()["reason"] == "not_found"
 
 
-def test_create_seed_failed_is_503() -> None:
+def test_create_seed_failed_is_503_and_audits_the_committed_row() -> None:
+    # Seeding runs after the row commits (issue #243), so the server exists despite
+    # the 503. That change stands, so it is audited as a success (issue #3483).
+    community = uuid.uuid4()
+    uow = FakeUnitOfWork()
+    recorder = RecordingAuditRecorder()
     app = _app(
         member=True,
         allow=True,
-        create=_FakeUseCase(error=WorkingSetSeedFailedError("server-id")),
+        create=CreateServer(
+            uow=uow,
+            clock=FakeClock(_NOW),
+            version_validator=FakeVersionValidator(),
+            file_store=FakeFileStore(fail_write=True),
+            port_range=PortRange(start=25565, end=25664),
+        ),
+        recorder=recorder,
     )
-    client = _client(app)
-    resp = client.post(f"/api/communities/{uuid.uuid4()}/servers", json=_create_body())
+    resp = _client(app).post(
+        f"/api/communities/{community}/servers", json=_create_body()
+    )
     assert resp.status_code == 503
     assert resp.json()["reason"] == "seed_failed"
+    assert uow.commits == 1
+    [server_id] = uow.servers.by_id
+    assert [
+        (e.operation, e.outcome, e.community_id, e.target_type, e.target_id)
+        for e in recorder.events
+    ] == [
+        (
+            ops.SERVER_CREATE,
+            Outcome.SUCCESS,
+            community,
+            ops.TARGET_SERVER,
+            server_id.value,
+        )
+    ]
+    assert recorder.events[0].actor_id is not None
 
 
 def test_create_game_port_out_of_schema_bound_is_422() -> None:
@@ -934,7 +970,9 @@ def test_update_game_port_properties_missing_is_409() -> None:
     app = _app(
         member=True,
         allow=True,
-        update=_FakeUseCase(error=ServerPropertiesMissingError("server-id")),
+        update=_FakeUseCase(
+            error=ServerPropertiesMissingError("server-id", committed=False)
+        ),
     )
     client = _client(app)
     resp = client.patch(
@@ -945,19 +983,109 @@ def test_update_game_port_properties_missing_is_409() -> None:
     assert resp.json()["reason"] == "server_properties_missing"
 
 
-def test_update_game_port_seed_failure_is_503() -> None:
+def test_update_game_port_seed_failure_is_503_and_audits_the_change() -> None:
+    # The server.properties rewrite is deferred to after the commit (#1705), so the
+    # new port stands despite the 503 and is audited as a success (issue #3483).
+    community = uuid.uuid4()
+    server_id = uuid.uuid4()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server_entity(community_id=community, server_id=server_id))
+    file_store = FakeFileStore(fail_write=True)
+    file_store.files["server.properties"] = b"server-port=25565\nrcon.password=tok\n"
+    recorder = RecordingAuditRecorder()
     app = _app(
         member=True,
         allow=True,
-        update=_FakeUseCase(error=WorkingSetSeedFailedError("server-id")),
+        update=_real_update(uow, file_store=file_store),
+        recorder=recorder,
     )
-    client = _client(app)
-    resp = client.patch(
-        f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
+    resp = _client(app).patch(
+        f"/api/communities/{community}/servers/{server_id}",
         json={"game_port": 25570},
     )
     assert resp.status_code == 503
     assert resp.json()["reason"] == "seed_failed"
+    assert uow.commits == 1
+    assert uow.servers.by_id[ServerId(server_id)].game_port == 25570
+    assert [
+        (e.operation, e.outcome, e.community_id, e.target_type, e.target_id)
+        for e in recorder.events
+    ] == [(ops.SERVER_UPDATE, Outcome.SUCCESS, community, ops.TARGET_SERVER, server_id)]
+    assert recorder.events[0].actor_id is not None
+
+
+class _VanishingPropertiesStore(FakeFileStore):
+    """Serves server.properties to the pre-commit check, then reports it gone."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.files["server.properties"] = b"server-port=25565\nrcon.password=tok\n"
+
+    async def read_file(
+        self, *, community_id: ServersCommunityId, server_id: ServerId, rel_path: str
+    ) -> bytes:
+        content = await super().read_file(
+            community_id=community_id, server_id=server_id, rel_path=rel_path
+        )
+        if rel_path == "server.properties":
+            del self.files[rel_path]
+        return content
+
+
+def test_update_game_port_properties_vanishing_after_commit_is_audited() -> None:
+    # The file passes the pre-commit check and is gone by the deferred rewrite
+    # (#1705), so the port change is committed before the 409 (issue #3448). It
+    # stands, so it is audited as the success path audits it; the audit row has
+    # no detail column to mark the unwritten file, and the 409 tells the caller.
+    community = uuid.uuid4()
+    server_id = uuid.uuid4()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server_entity(community_id=community, server_id=server_id))
+    recorder = RecordingAuditRecorder()
+    app = _app(
+        member=True,
+        allow=True,
+        update=_real_update(uow, file_store=_VanishingPropertiesStore()),
+        recorder=recorder,
+    )
+    resp = _client(app).patch(
+        f"/api/communities/{community}/servers/{server_id}",
+        json={"game_port": 25570},
+    )
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "server_properties_missing"
+    assert uow.commits == 1
+    assert uow.servers.by_id[ServerId(server_id)].game_port == 25570
+    assert [
+        (e.operation, e.outcome, e.community_id, e.target_type, e.target_id)
+        for e in recorder.events
+    ] == [(ops.SERVER_UPDATE, Outcome.SUCCESS, community, ops.TARGET_SERVER, server_id)]
+    assert recorder.events[0].actor_id is not None
+
+
+def test_update_game_port_properties_missing_before_commit_is_not_audited() -> None:
+    # The pre-commit check refuses (issue #2623), so nothing changed and nothing
+    # is audited -- the event is for a committed change only (issue #3448).
+    community = uuid.uuid4()
+    server_id = uuid.uuid4()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server_entity(community_id=community, server_id=server_id))
+    recorder = RecordingAuditRecorder()
+    app = _app(
+        member=True,
+        allow=True,
+        update=_real_update(uow, file_store=FakeFileStore()),
+        recorder=recorder,
+    )
+    resp = _client(app).patch(
+        f"/api/communities/{community}/servers/{server_id}",
+        json={"game_port": 25570},
+    )
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "server_properties_missing"
+    assert uow.commits == 0
+    assert uow.servers.by_id[ServerId(server_id)].game_port is None
+    assert recorder.events == []
 
 
 def test_update_game_port_out_of_schema_bound_is_422() -> None:
@@ -1007,11 +1135,13 @@ def test_update_permission_denied_is_403_with_permission_member() -> None:
     assert body["permission"] == "server:update"
 
 
-def _real_update(uow: FakeUnitOfWork) -> UpdateServer:
+def _real_update(
+    uow: FakeUnitOfWork, *, file_store: FakeFileStore | None = None
+) -> UpdateServer:
     return UpdateServer(
         uow=uow,
         clock=FakeClock(_NOW),
-        file_store=FakeFileStore(),
+        file_store=file_store if file_store is not None else FakeFileStore(),
         port_range=PortRange(start=25565, end=25664),
     )
 

@@ -499,7 +499,16 @@ async def create_server(
         # The row committed but seeding the working set failed (issue #243). The
         # server is left in a degraded-but-repairable state (the files API can
         # write the missing eula.txt/server.properties); the use case WARN-logged
-        # it. Surface a mapped 503 rather than an unmapped 500.
+        # it. Surface a mapped 503 rather than an unmapped 500. The row stands, so
+        # it is audited as the success path does (issue #3483); the 503 tells the
+        # caller the seeding failed.
+        await _record(
+            recorder,
+            ops.SERVER_CREATE,
+            authorized,
+            community_id,
+            uuid.UUID(exc.server_id),
+        )
         raise _service_unavailable("seed_failed") from exc
     await _record(
         recorder, ops.SERVER_CREATE, authorized, community_id, server.id.value
@@ -632,7 +641,16 @@ async def import_server(
     except WorkingSetSeedFailedError as exc:
         # The row committed but publishing the working set failed mid-way: the
         # server is degraded-but-repairable via the files API (same posture as
-        # create's seeding failure, #243/#252). Surface a mapped 503.
+        # create's seeding failure, #243/#252). Surface a mapped 503. Every raise
+        # of this error on import follows the create commit, so the row stands and
+        # is audited as the success path does (issue #3483).
+        await _record(
+            recorder,
+            ops.SERVER_IMPORT,
+            authorized,
+            community_id,
+            uuid.UUID(exc.server_id),
+        )
         raise _service_unavailable("seed_failed") from exc
     await _record(
         recorder, ops.SERVER_IMPORT, authorized, community_id, server.id.value
@@ -1000,7 +1018,9 @@ async def update_server(
     with no ``server.properties`` at all is refused with 409
     ``server_properties_missing`` before the commit (issue #2623) — republishing a
     port-only file would drop ``rcon.password`` and leave the control plane unable
-    to quiesce, stop, query, or send commands to the server. A storage failure
+    to quiesce, stop, query, or send commands to the server. If the file vanishes
+    after that check, the deferred write answers the same 409 over a committed
+    port change, which is audited as a success (issue #3448). A storage failure
     during the rewrite itself is 503 ``seed_failed``; that write is deferred to
     after the commit (#1705), so the row carries the new port while the file does
     not, and the retry direction is to re-issue the rewrite.
@@ -1064,7 +1084,13 @@ async def update_server(
         # not a 422 (the request shape is fine). Normally raised by the pre-commit
         # check, so the row still holds its old port; the same 409 also covers the
         # narrow race where the file vanishes before the deferred write, and there
-        # the committed row already carries the new port.
+        # the committed row already carries the new port. That change stands, so
+        # it is audited as the success path does (issue #3448); the audit row has
+        # no detail column to mark the unwritten file, and the 409 tells the caller.
+        if exc.committed:
+            await _record(
+                recorder, ops.SERVER_UPDATE, authorized, community_id, server_id
+            )
         raise _conflict("server_properties_missing") from exc
     except ServerNameAlreadyExistsError as exc:
         raise _conflict("server_name_exists") from exc
@@ -1078,7 +1104,9 @@ async def update_server(
         # Rewriting server.properties for the port change hit a storage failure,
         # surfaced as a mapped 503 (issue #311). That write is deferred to after
         # the commit (#1705), so the row already carries the new port while the
-        # file does not; re-issuing the update rewrites the file.
+        # file does not; re-issuing the update rewrites the file. The committed
+        # change stands, so it is audited as the success path does (issue #3483).
+        await _record(recorder, ops.SERVER_UPDATE, authorized, community_id, server_id)
         raise _service_unavailable("seed_failed") from exc
     await _record(
         recorder, ops.SERVER_UPDATE, authorized, community_id, server.id.value
