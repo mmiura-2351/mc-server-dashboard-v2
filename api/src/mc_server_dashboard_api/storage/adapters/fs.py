@@ -1320,14 +1320,19 @@ class FsStorage(Storage):
             # branch a retried delete lands in (the symlink is unlinked the instant
             # final.tar.gz is durable, below), so it must never re-pack — it only GCs
             # any leftover working-set tree, leaving exactly backups/ + the (possibly
-            # already-written) final archive + the generation marker. Idempotent. The
-            # marker is KEPT: an earlier attempt already advanced it before unlinking
-            # ``current`` (below), and removing it would lower the generation (issue
-            # #3434).
+            # already-written) final archive + the generation marker. The marker is
+            # KEPT: removing it would lower the generation (issue #3434).
+            #
+            # It is ADVANCED here too (issue #3439), with no publisher now that
+            # ``current`` is gone: a server that never published reaches this branch
+            # on its first delete, and an upload whose guard read its generation must
+            # still fail the commit re-check, or that first publish lands on a server
+            # being deleted. A retry advances it again, which never lowers it.
             for sub in ("snapshots", "incoming", "versions"):
                 _rmtree(server_root / sub)
             _rmtree(server_root / "current")
-            self._drop_publisher(server_root)
+            server_root.mkdir(parents=True, exist_ok=True)
+            self._bump_marker(server_root, None)
             return
         # Pack to a temp sibling first, then atomically rename into place: the tree
         # is removed ONLY after a complete final.tar.gz exists, so a pack failure
@@ -1396,8 +1401,7 @@ class FsStorage(Storage):
         No Worker produced the pruned (empty) store, so a surviving row's next
         publish — whose base is the 0 an empty hydrate reports — must not be refused
         as a different-publisher stale publish. The generation is rewritten
-        unchanged, never lowered (issue #3434). A no-op when no claim is recorded,
-        including a never-published server, which has no marker to create.
+        unchanged, never lowered (issue #3434). A no-op when no claim is recorded.
         """
 
         generation, publisher = self._read_marker(server_root)

@@ -1436,13 +1436,21 @@ async def test_prune_drops_working_set_but_keeps_backups(
     assert await harness.storage.list_backups(community, server) == [key]
 
 
-async def test_prune_without_published_snapshot_is_a_noop(
+async def test_prune_without_published_snapshot_advances_generation(
     harness: StorageHarness,
 ) -> None:
+    # Issue #3439: a never-published store has nothing to pack, but the prune still
+    # advances the generation so a first upload whose guard read 0 fails its commit
+    # re-check. A retried delete advances it again: never lowered, never a raise.
     community, server = new_scope()
-    await harness.storage.prune_to_final_snapshot(community, server)  # no raise
+    await harness.storage.prune_to_final_snapshot(community, server)
     with pytest.raises(NotFoundError):
         await drain(harness.storage.open_hydrate_source(community, server))
+    assert await harness.storage.current_generation(community, server) == 1
+    assert await harness.storage.current_publisher(community, server) is None
+
+    await harness.storage.prune_to_final_snapshot(community, server)
+    assert await harness.storage.current_generation(community, server) == 2
 
 
 async def test_prune_after_restore_still_drops_working_set(

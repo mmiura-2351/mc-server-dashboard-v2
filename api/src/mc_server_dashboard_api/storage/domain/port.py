@@ -401,8 +401,10 @@ class WorkingSetStore(abc.ABC):
         Packing is mandatory and fail-closed: if the pack fails the working-set tree
         is left intact and the error propagates, so a failed delete never silently
         loses the latest state. A server with no published snapshot has nothing to
-        pack and is a no-op (idempotent). The retained tar.gz uses the same codec as
-        a backup archive (Section 2), so an operator can re-import it.
+        pack, but its generation is still advanced (issue #3439), so a racing first
+        upload fails its commit re-check like any other; a retry advances it again.
+        The retained tar.gz uses the same codec as a backup archive (Section 2), so
+        an operator can re-import it.
 
         Crash-retry safety: the pointer (object) / ``current`` symlink (fs) — the one
         marker that says the working set is still live and re-packable — is

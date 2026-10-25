@@ -1079,12 +1079,21 @@ class ObjectStorage(Storage):
                 await _delete_prefix(client, server_prefix + "snapshots/")
                 await _delete_prefix(client, server_prefix + "incoming/")
                 await _delete_prefix(client, server_prefix + "versions/")
+                if snapshot_prefix is None:
+                    # The GC-only branch ADVANCES the generation too (issue #3439),
+                    # with no publisher now that the pointer is gone: a server that
+                    # never published lands here on its first delete, and an upload
+                    # whose guard read its generation must still fail the commit
+                    # re-check, or that first publish lands on a server being
+                    # deleted. A retry advances it again, which never lowers it.
+                    await self._bump_generation(client, server_prefix, None)
+                    return
                 # With the pointer gone, drop the publisher claim: no Worker produced
                 # the pruned (empty) store, so a surviving row's next publish — whose
                 # base is the 0 an empty hydrate reports — must not be refused as a
                 # different-publisher stale publish. The generation is rewritten
                 # unchanged, never lowered (#3434); nothing is written when no claim
-                # is recorded, including for a never-published server.
+                # is recorded.
                 generation, publisher = await self._read_marker(client, server_prefix)
                 if publisher is not None:
                     await client.put_object(

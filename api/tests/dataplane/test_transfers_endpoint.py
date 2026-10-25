@@ -734,6 +734,62 @@ def test_snapshot_refused_when_delete_prunes_store_during_upload_window(
     storage.current_generation = real_current_generation  # type: ignore[method-assign]
 
 
+def _fs_storage(tmp_path: Path) -> Storage:
+    return FsStorage(tmp_path)
+
+
+def _object_storage(tmp_path: Path) -> Storage:
+    del tmp_path
+    return ObjectStorage(fake_s3_factory(FakeS3Store()))
+
+
+@pytest.mark.parametrize(
+    "make_storage", [_fs_storage, _object_storage], ids=["fs", "object"]
+)
+def test_first_upload_refused_when_delete_prunes_never_published_store(
+    tmp_path: Path, make_storage: Callable[[Path], Storage]
+) -> None:
+    # Issue #3439: the never-published twin of the test above. The first upload's
+    # guard reads generation 0, then a delete prunes the store before the commit. The
+    # prune must fence that commit exactly as it does for a published store, or the
+    # first publish lands on a server being deleted.
+    worker = str(uuid.uuid4())
+    client, _ = _setup(tmp_path)
+    storage = make_storage(tmp_path)
+    _shared_app.dependency_overrides[get_storage] = lambda: storage
+    community, server = _scope()
+    c, s = CommunityId(community), ServerId(server)
+
+    real_current_generation = storage.current_generation
+    pruned = False
+
+    async def _hooked_current_generation(
+        community_id: CommunityId, server_id: ServerId
+    ) -> int:
+        nonlocal pruned
+        value = await real_current_generation(community_id, server_id)
+        if not pruned:
+            pruned = True
+            await storage.prune_to_final_snapshot(c, s)
+        return value
+
+    storage.current_generation = _hooked_current_generation  # type: ignore[method-assign]
+
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"),
+            content=_tar_bytes({"k": b"first"}),
+            headers={
+                **_auth(),
+                "X-Working-Set-Base-Generation": "0",
+                "X-Worker-Id": worker,
+            },
+        )
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "deleted_during_upload"
+    assert resp.json()["base_generation"] == 0
+
+
 class _PointerRemovalFailed(Exception):
     """The injected failure of a prune's live-pointer removal."""
 
