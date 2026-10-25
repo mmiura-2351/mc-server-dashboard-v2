@@ -661,6 +661,8 @@ export const en = {
   // (issue #3037).
   "backups.error.platformManagedPath":
     "That archive contains a server.properties directory or an entry under server.properties/, but the platform keeps a plain file at that path. Remove or move that entry and upload again.",
+  "backups.error.reservedName":
+    "That archive has a top-level entry whose name starts with .mcsd_generation. Such names are reserved for the platform. Remove or rename that entry and upload again.",
   "backups.error.workerUnavailable":
     "No server host is available to take the backup right now.",
   "backups.error.storageUnavailable":
@@ -882,6 +884,8 @@ export const en = {
     "“{key}” in server.properties is managed by the platform; this operation would change it.",
   "files.error.platformManagedPath":
     "server.properties is managed by the platform; a directory cannot stand at that path.",
+  "files.error.reservedName":
+    "Names starting with .mcsd_generation are reserved for the platform at the top level of the server's files. Choose another name.",
   // A save into a file read as latin-1: it is not UTF-8, or it is a pre-1.20
   // server's server.properties (issue #2851).
   "files.error.unencodableText":
@@ -1162,6 +1166,8 @@ export const en = {
   // is the one the operator can see and delete.
   "serverCreate.import.error.platform_managed_path":
     "That archive stores a file under server.properties/, but the platform keeps a plain file at that path. Remove or move that entry and import again.",
+  "serverCreate.import.error.reserved_name":
+    "That archive has a top-level entry whose name starts with .mcsd_generation. Such names are reserved for the platform. Remove or rename that entry and import again.",
   // The import assigns the join address itself, so a 409 here is never the
   // operator's input: another server claimed that address between the import
   // picking it and the row committing (issue #3022). Nothing was created, and a

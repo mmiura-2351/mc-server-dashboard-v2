@@ -369,6 +369,41 @@ persists as a `.dir` marker throughout the working-set lifecycle rather than as 
 true directory entry. On both backends `make_dir` bumps the generation marker
 (Section 4.4), so the store generation stays in lockstep across adapters.
 
+**The Worker's generation-marker name is reserved at the root.** The Worker
+stamps `.mcsd_generation` in the working-set root on every hydrate and treats
+every root entry whose name starts with `.mcsd_generation` as its own: a
+snapshot leaves such entries out, and a hydrate does not unpack them. So no
+operator entry may be created there, and the application refuses one above this
+Port on every door that writes into `current/`: the files-API write (running too,
+where it would overwrite the live marker), make-dir, upload and its archive
+members, a rename's destination, a rollback (a version retained before the
+guard included), a server import (directory-only members too) and a backup
+upload — each a
+`422` `reserved_name` (issue #3433). Only the root name is reserved; a
+same-named entry deeper in the tree is ordinary user data. Reads, deletes and a
+rename *away* stay open, so an entry planted before the guard can be cleared
+while the server is stopped. Before the Worker skipped these members on
+unpack, such an entry as a directory took the marker's name and made every
+hydrate, and so every start, fail on the marker write.
+
+Restoring a backup **already stored** — one created or uploaded before the name
+was reserved — is not refused for such an entry: refusing would leave that backup
+unrestorable. Instead `restore_backup` leaves out every archive member that
+lands at, or under, a root name starting `.mcsd_generation` before publication,
+on both backends, and logs one `WARNING` naming the backup and how many members
+it dropped. "Lands" is decided after the member passes the extraction's safety
+check, on the name as extraction resolves it: the fs extractor strips a leading
+`/` and admits an in-tree `..`, so `/.mcsd_generation/x` and
+`world/../.mcsd_generation/x` are dropped too. Every kept member is then
+extracted at that normalised name, so a member such as
+`.mcsd_generation/../server.properties` lands at `server.properties` without
+creating the reserved directory it passes through. The object backend refuses a
+`..` or absolute file member outright as traversal and stages no directory
+members, so neither shape reaches its store. The fs backup health check shares that
+extractor, so it judges exactly what a restore would publish. A nested same-named member is restored as usual. The dropped entries are
+inert anyway — the Worker would skip them on unpack — so dropping them only keeps
+them out of `current/`.
+
 ### 3.5 File version retention / rollback
 
 Serve versioned edits (FR-FILE-3). See Section 5 for the retention scheme.

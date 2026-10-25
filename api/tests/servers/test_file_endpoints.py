@@ -1011,6 +1011,26 @@ def test_rollback_malformed_version_id_is_422() -> None:
     assert resp.json()["reason"] == "invalid_version_id"
 
 
+def test_rollback_forwards_the_path_refusal_reason() -> None:
+    # A rollback to a reserved root path (issue #3433) answers the reason the
+    # other doors give, not a blanket invalid_path.
+    app = _app(
+        member=True,
+        allow=True,
+        rollback=_FakeUseCase(
+            error=InvalidFilePathError(".mcsd_generation", reason="reserved_name")
+        ),
+    )
+    client = _client(app)
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/rollback"),
+        params={"path": ".mcsd_generation"},
+        json={"version_id": "v1"},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "reserved_name"
+
+
 # --- upload ----------------------------------------------------------------
 
 

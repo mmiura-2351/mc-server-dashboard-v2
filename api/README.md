@@ -9,7 +9,9 @@ quadrant layout (Section 2).
 ## Prerequisites
 
 - [uv](https://docs.astral.sh/uv/) — manages the Python toolchain and
-  dependencies. The Python version is pinned in `.python-version`.
+  dependencies. Use the exact version required by `tool.uv.required-version`
+  in `pyproject.toml` (see [development prerequisites](../docs/dev/DEVELOPMENT.md)).
+  The Python version is pinned in `.python-version`.
 
 ## Setup
 

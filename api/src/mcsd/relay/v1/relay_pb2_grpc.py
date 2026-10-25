@@ -5,7 +5,7 @@ import warnings
 
 from mcsd.relay.v1 import relay_pb2 as mcsd_dot_relay_dot_v1_dot_relay__pb2
 
-GRPC_GENERATED_VERSION = '1.80.0'
+GRPC_GENERATED_VERSION = '1.81.1'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
@@ -25,7 +25,7 @@ if _version_not_supported:
     )
 
 
-class RelayServiceStub(object):
+class RelayServiceStub:
     """RelayService is the gRPC service the relay calls on the API. All three RPCs
     are unary (RELAY.md Section 6): the relay has no persistent stream and no
     command inbox; every call is relay-initiated.
@@ -59,7 +59,7 @@ class RelayServiceStub(object):
                 _registered_method=True)
 
 
-class RelayServiceServicer(object):
+class RelayServiceServicer:
     """RelayService is the gRPC service the relay calls on the API. All three RPCs
     are unary (RELAY.md Section 6): the relay has no persistent stream and no
     command inbox; every call is relay-initiated.
@@ -140,7 +140,7 @@ def add_RelayServiceServicer_to_server(servicer, server):
 
 
  # This class is part of an EXPERIMENTAL API.
-class RelayService(object):
+class RelayService:
     """RelayService is the gRPC service the relay calls on the API. All three RPCs
     are unary (RELAY.md Section 6): the relay has no persistent stream and no
     command inbox; every call is relay-initiated.

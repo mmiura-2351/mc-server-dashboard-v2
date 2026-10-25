@@ -66,6 +66,9 @@ const IMPORT_ERROR_KEY: Record<string, TranslationKey> = {
   // member, a zip cannot (`_zip_entries` skips directory entries), so here the
   // offending entry is always a file the operator can find and delete.
   platform_managed_path: "serverCreate.import.error.platform_managed_path",
+  // A member at the Worker's generation-marker name, refused before the row is
+  // created (issue #3433).
+  reserved_name: "serverCreate.import.error.reserved_name",
   // Reachable from import (issue #3022: the join address is auto-assigned, and
   // a racer can take it between the assignment and the commit that inserts the
   // row). It asks for a retry rather than pointing at a field the operator

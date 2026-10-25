@@ -13,6 +13,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     JarKey,
     RelPath,
     VersionId,
+    is_reserved_root_member,
 )
 
 
@@ -109,3 +110,36 @@ def test_versionid_accepts_valid_ids(vid: str) -> None:
 def test_versionid_rejects_path_traversal_and_invalid_chars(bad: str) -> None:
     with pytest.raises(ValueError):
         VersionId(bad)
+
+
+# --- the reserved generation-marker root name (issue #3433) ----------------
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        ".mcsd_generation",
+        ".mcsd_generation/",
+        ".mcsd_generation/stray.txt",
+        "./.mcsd_generation-cache",
+        "/.mcsd_generation/stray.txt",
+        "world/../.mcsd_generation/stray.txt",
+    ],
+)
+def test_a_member_landing_on_the_reserved_root_name_is_reserved(name: str) -> None:
+    assert is_reserved_root_member(name)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "world/.mcsd_generation/kept.txt",
+        ".mcsd_generation/../server.properties",
+        "server.properties",
+        "../.mcsd_generation",
+        ".",
+        "/",
+    ],
+)
+def test_a_member_landing_elsewhere_is_not_reserved(name: str) -> None:
+    assert not is_reserved_root_member(name)

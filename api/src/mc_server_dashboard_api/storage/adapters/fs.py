@@ -34,7 +34,9 @@ import errno
 import functools
 import hashlib
 import io
+import logging
 import os
+import posixpath
 import shutil
 import stat
 import tarfile
@@ -86,6 +88,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     ServerId,
     SnapshotId,
     VersionId,
+    is_reserved_root_member,
     is_version_ring_member,
 )
 from mc_server_dashboard_api.storage.integrity.archive import (
@@ -98,6 +101,8 @@ from mc_server_dashboard_api.storage.integrity.region import (
 )
 
 # Read/stream chunk size for hydrate / JAR egress.
+_LOG = logging.getLogger(__name__)
+
 _CHUNK = 1024 * 1024
 _DEFAULT_VERSION_RETENTION = 10
 # Age threshold below which a spool temp file is left alone by the sweep (issue
@@ -1158,9 +1163,10 @@ class FsStorage(Storage):
         # the same active-staging lease for the life of the operation (issue #183).
         self._register_staging(staging)
         try:
-            await asyncio.to_thread(
+            dropped = await asyncio.to_thread(
                 _extract_tar_gz_into, archive, staging, self._max_restore_bytes
             )
+            _warn_dropped_reserved_members(dropped, key)
             # Restore-direction integrity gate (issue #743): walk the extracted
             # staging for structurally corrupt ``.mca`` region files (issue #738)
             # BEFORE publishing it into ``current``. A backup predating the create
@@ -2736,7 +2742,19 @@ def _write_tar_gz(directory: Path, archive: Path) -> None:
             _add_plain(tar, directory, child)
 
 
-def _extract_tar_gz_into(archive: Path, dest: Path, max_bytes: int) -> None:
+def _warn_dropped_reserved_members(dropped: int, key: BackupKey) -> None:
+    """Say how many reserved root members a restore left out (issue #3433)."""
+
+    if dropped:
+        _LOG.warning(
+            "restore of backup %s dropped %d archive member(s) at the reserved "
+            "generation-marker name .mcsd_generation*",
+            key.value,
+            dropped,
+        )
+
+
+def _extract_tar_gz_into(archive: Path, dest: Path, max_bytes: int) -> int:
     """Extract a restore ``tar.gz`` into ``dest``, traversal-safe and size-bounded.
 
     :func:`_plain_member_filter` refuses unsafe and link members. On top of it, the
@@ -2750,30 +2768,47 @@ def _extract_tar_gz_into(archive: Path, dest: Path, max_bytes: int) -> None:
     framing — raises :class:`ArchiveUnreadableError` (issue #3230). So does one
     holding a member the filter refuses (issue #3371): it reads, but nothing can
     be restored from it, override or not, which is the verdict that error models.
+
+    A member at, or under, the reserved generation-marker root name is left out
+    and counted (issue #3433): a backup stored before the name was reserved can
+    carry one, and refusing it would leave that backup unrestorable. Returns how
+    many members were left out.
     """
 
     total = 0
+    dropped = 0
     try:
         with (
             archive_read_errors_as_unreadable(),
             tarfile.open(archive, mode="r:gz") as tar,
         ):
             for member in tar:
-                total = _extract_member_capped(tar, member, dest, total, max_bytes)
+                # Filtered first (``data_filter`` strips a leading slash and admits
+                # an in-tree ``..``), then renamed to where it lands: both the
+                # reserved decision and the extraction use that normalised name,
+                # so no directory the raw ``..`` path passes through is created
+                # on the way (issue #3433).
+                safe = _plain_member_filter(member, str(dest))
+                safe = safe.replace(name=posixpath.normpath(safe.name), deep=False)
+                if is_reserved_root_member(safe.name):
+                    dropped += 1
+                    continue
+                total = _extract_member_capped(tar, safe, dest, total, max_bytes)
     except tarfile.FilterError as exc:
         raise ArchiveUnreadableError(
             f"archive holds a member that cannot be restored: {exc}"
         ) from exc
+    return dropped
 
 
 def _extract_member_capped(
     tar: tarfile.TarFile,
-    member: tarfile.TarInfo,
+    safe: tarfile.TarInfo,
     dest: Path,
     total: int,
     max_bytes: int,
 ) -> int:
-    """Extract one member under the ingest filter, counting drained file bytes.
+    """Extract one already-filtered member, counting drained file bytes.
 
     A file member's body is drained in bounded chunks and written out; the running
     decompressed total is checked after every chunk so a single high-ratio member
@@ -2781,9 +2816,9 @@ def _extract_member_capped(
     hand bypasses ``extractall``, so the member's sanitized mode/mtime are reapplied
     afterwards. A directory member carries no body, so it extracts through the
     filter with no contribution to the count. Returns the updated running total.
+    ``safe`` has passed :func:`_plain_member_filter` already.
     """
 
-    safe = _plain_member_filter(member, str(dest))
     if not safe.isfile():
         tar.extract(safe, dest, filter="data")
         return total

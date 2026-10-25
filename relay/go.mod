@@ -1,8 +1,7 @@
 module github.com/mmiura-2351/mc-server-dashboard-v2/relay
 
-go 1.27
-
-toolchain go1.27.2
+// Require the crypto/x509 security fix: https://pkg.go.dev/vuln/GO-2026-6809.
+go 1.27.3
 
 // The relay's mcsd.relay.v1 Go stubs are generated into internal/genproto by a
 // dedicated buf template (proto/buf.gen.relay.yaml, run by `make proto-gen`):
@@ -11,7 +10,7 @@ toolchain go1.27.2
 require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/google/uuid v1.6.0
-	github.com/prometheus/client_golang v1.24.1
+	github.com/prometheus/client_golang v1.25.0
 	github.com/prometheus/client_model v0.6.3
 	github.com/quic-go/quic-go v0.63.0
 	google.golang.org/grpc v1.84.0
@@ -23,8 +22,8 @@ require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
-	github.com/prometheus/common v0.70.1 // indirect
-	github.com/prometheus/procfs v0.21.1 // indirect
+	github.com/prometheus/common v0.72.0 // indirect
+	github.com/prometheus/procfs v0.22.0 // indirect
 	golang.org/x/crypto v0.57.0 // indirect
 	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect

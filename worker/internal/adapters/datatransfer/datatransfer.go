@@ -693,6 +693,16 @@ func unpackTar(r io.Reader, destDir string) error {
 			return err
 		}
 
+		// Leave out every root member the snapshot walk leaves out (walkInto): a
+		// root entry named with the generation marker's prefix is Worker-private
+		// by name, never part of the world (issue #3433). A stored working set can
+		// still hold one — planted at rest before the API reserved the name — and
+		// unpacked as a directory it took the marker's name, so the marker write
+		// below failed with EISDIR and every hydrate failed with it.
+		if isRootGenerationMarkerMember(header.Name) {
+			continue
+		}
+
 		switch header.Typeflag {
 		case tar.TypeDir:
 			if err := os.MkdirAll(target, 0o750); err != nil {
@@ -715,6 +725,15 @@ func unpackTar(r io.Reader, destDir string) error {
 			continue
 		}
 	}
+}
+
+// isRootGenerationMarkerMember reports whether a tar member lies at or under a
+// root entry whose name starts with the generation marker's — the same prefix
+// match walkInto excludes from a snapshot. Called only on a name safeJoin
+// accepted, so there is no ".." component to clean away.
+func isRootGenerationMarkerMember(name string) bool {
+	first, _, _ := strings.Cut(path.Clean(filepath.ToSlash(name)), "/")
+	return strings.HasPrefix(first, scratchformat.GenerationMarkerFile)
 }
 
 // writeFile creates target, copies the member body into it, and fsyncs the

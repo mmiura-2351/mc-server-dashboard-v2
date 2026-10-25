@@ -8,6 +8,10 @@ on:
       - "proto/mcsd/**"
       - "Makefile"
       - "scripts/check_api_benchmark_collection.py"
+      - "scripts/refresh_python_lock.py"
+      - ".github/dependabot.yml"
+      - ".github/workflows/dependabot-uv-lock.yml"
+      - ".github/workflows/python-lock-refresh.yml"
       - ".github/workflows/api.yml"
   push:
     branches: [main]
@@ -17,6 +21,10 @@ on:
       - "proto/mcsd/**"
       - "Makefile"
       - "scripts/check_api_benchmark_collection.py"
+      - "scripts/refresh_python_lock.py"
+      - ".github/dependabot.yml"
+      - ".github/workflows/dependabot-uv-lock.yml"
+      - ".github/workflows/python-lock-refresh.yml"
       - ".github/workflows/api.yml"
 
 permissions:
@@ -64,8 +72,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up uv (caches the uv-managed toolchain)
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
+          version: "0.13.0"
           enable-cache: true
           cache-dependency-glob: api/uv.lock
 
@@ -96,6 +105,9 @@ jobs:
 
       - name: Lint (ruff)
         run: uv run ruff check .
+
+      - name: Lockfile matches the pinned uv version
+        run: uv lock --check
 
       - name: Format check (ruff)
         run: uv run ruff format --check .
@@ -149,8 +161,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up uv (caches the uv-managed toolchain)
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
+          version: "0.13.0"
           enable-cache: true
           cache-dependency-glob: api/uv.lock
 

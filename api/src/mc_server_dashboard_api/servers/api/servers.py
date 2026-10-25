@@ -550,6 +550,11 @@ async def import_server(
     behind. Only the ROOT name is guarded: a nested
     ``backups/server.properties/…`` member is ordinary user data.
 
+    **The generation marker's name is reserved (issue #3433).** A member at a
+    root name starting ``.mcsd_generation`` — the Worker's generation marker — or
+    under one is 422 ``reserved_name``, refused before the row is created rather
+    than dropped. A same-named member deeper in the tree is ordinary user data.
+
     A racer taking the auto-assigned game port or slug between the assignment and
     the commit that inserts the row is 409 ``port_taken`` / ``slug_taken``, and an
     exhausted slug retry budget is 503 ``slug_exhausted`` (issue #3022) — the same

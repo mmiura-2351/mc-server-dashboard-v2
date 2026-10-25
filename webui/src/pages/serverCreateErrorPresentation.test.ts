@@ -72,6 +72,8 @@ describe("serverImportErrorPresentation", () => {
       "platform_managed_path",
       "serverCreate.import.error.platform_managed_path",
     ],
+    // A member at the Worker's generation-marker name (issue #3433).
+    [422, "reserved_name", "serverCreate.import.error.reserved_name"],
     [409, "slug_taken", "serverCreate.import.error.slug_taken"],
   ] as const)(
     "toasts a %i %s with the import message",

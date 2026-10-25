@@ -49,6 +49,10 @@ export function backupErrorPresentation(
       // path (issue #2869): a verdict about the archive's contents, so the
       // generic toast would hide the one member the user has to remove.
       return "backups.error.platformManagedPath";
+    case "reserved_name":
+      // A member at the Worker's generation-marker name (issue #3433): like
+      // the case above, the user has to find and remove that one entry.
+      return "backups.error.reservedName";
     case "worker_unavailable":
       return "backups.error.workerUnavailable";
     case "storage_unavailable":

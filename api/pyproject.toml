@@ -18,7 +18,9 @@ dependencies = [
     # next minor; 1.x+/2.x cap the next major (docs/dev/DEPENDENCIES.md Section 1). All
     # versions respect the 7-day cooldown (Section 3): released on/before
     # 2026-05-28 as of this change.
-    "fastapi>=0.136.3,<0.143",          # 2026-05-23
+    # FastAPI 0.137 introduces effective route contexts that break pre-body
+    # authorization and prefixed metrics; migrate those integrations in #3470.
+    "fastapi>=0.136.3,<0.137",          # 2026-05-23
     "uvicorn>=0.48.0,<0.55",            # 2026-05-24
     # Structured-concurrency primitives. Already in the tree through Starlette,
     # which cancels a streaming response through an anyio cancel scope when the
@@ -96,26 +98,21 @@ dependencies = [
 ]
 
 [dependency-groups]
-# Dev / tooling dependencies: kept current, no upper bound
-# (docs/dev/DEPENDENCIES.md Section 1). Versions respect the 7-day
-# supply-chain cooldown (Section 3) at the time they were added.
+# Dev / tooling ranges cap unreviewed major versions (DEPENDENCIES.md Section 1).
+# Automated resolutions apply the 7-day cooldown, except for security updates.
 dev = [
-    # ruff 0.15.15 (2026-05-28) is inside the 7-day cooldown as of this
-    # change; cap below it. Lift the cap once it ages out (Section 3).
-    "ruff>=0.15.14,<0.16.11",
-    "mypy>=2.1.0",
-    "pytest>=9.0.3",
-    "import-linter>=2.11",
+    # Keep the reviewed ruff 0.17 line; later 0.x lines need explicit review.
+    "ruff>=0.15.14,<0.18",
+    "mypy>=2.1.0,<3",
+    "pytest>=9.0.3,<10",
+    "import-linter>=2.11,<3",
     # Control-plane codegen. grpcio-tools bundles protoc + the python/grpc
     # generators; mypy-protobuf adds .pyi type stubs. Both pinned outside the
     # cooldown (grpcio-tools 1.80.0 2026-03-30; mypy-protobuf 5.1.0 2026-04-28).
     "grpcio-tools>=1.80.0,<1.85",
     "mypy-protobuf>=5.1.0,<6",
     # Async test support for pytest (async DB-probe + endpoint tests).
-    # 1.4.0 (2026-05-26) is inside the 7-day cooldown as of this change; cap
-    # below it. 1.3.0 (2025-11-10) is outside. Lift the cap once it ages out
-    # (Section 3).
-    "pytest-asyncio>=1.3.0,<1.5.0",
+    "pytest-asyncio>=1.3.0,<2",
     # Suite-wide timeout safety net (#158): an unbounded await (e.g. a
     # wrongly-accepted gRPC session hanging call.code() forever, PR #153 review)
     # would otherwise hang the whole run. 2.4.0 (2025-05-05) is well outside the
@@ -140,6 +137,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.uv]
+# Match Docker and CI to preserve the lock format when re-locking (#3320).
+required-version = "==0.13.0"
 # Security override: force setuptools past PYSEC-2026-3447 (fixed in 83.0.0).
 # setuptools is transitive (via grpcio-tools), so it is pinned here as a
 # resolution constraint rather than a direct dependency. Security fixes bypass

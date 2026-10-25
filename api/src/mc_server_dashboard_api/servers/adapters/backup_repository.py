@@ -110,6 +110,7 @@ class SqlAlchemyBackupRepository(BackupRepository):
         count, total_bytes, unknown, newest, oldest = (
             await self._session.execute(stmt)
         ).one()
+        assert total_bytes is not None
         return BackupStatistics(
             count=count,
             total_bytes=int(total_bytes),

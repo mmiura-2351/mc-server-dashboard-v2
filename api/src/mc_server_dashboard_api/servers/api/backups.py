@@ -985,6 +985,11 @@ async def upload_backup(
     before the archive is stored, as 422 ``platform_managed_path`` — the same
     answer the files-API doors give. Only the ROOT name is guarded: a nested
     ``backups/server.properties/…`` member is ordinary user data.
+
+    **The generation marker's name is reserved (issue #3433).** A member at a
+    root name starting ``.mcsd_generation`` — the Worker's generation marker — or
+    under one is 422 ``reserved_name``, refused before the archive is stored. A
+    same-named member deeper in the tree is ordinary user data.
     """
 
     content = await _read_capped_upload(file)
