@@ -22,12 +22,16 @@ same condition would produce:
 - ``4419`` — the access token the socket was opened with has expired (mid-stream
   only; see below);
 - ``1013`` — the standard Try Again Later: a database read failed on a
-  transient database error, or got no answer within
-  :data:`~mc_server_dashboard_api.dependencies.WS_DATABASE_TIMEOUT_SECONDS`
-  (#3313, #3426). At the handshake (authentication or the gate) the socket is
-  refused with it before accept; mid-stream a re-check, a status snapshot or a
-  community-stream membership lookup that fails this way closes with it.
-  Either is logged as one WARNING line; any other error still propagates.
+  transient database error, or got no answer in time (#3313, #3426). At the
+  handshake the socket is refused with it before accept, and so it is once the
+  handshake's one deadline,
+  :data:`~mc_server_dashboard_api.dependencies.WS_HANDSHAKE_DEADLINE_SECONDS`,
+  has passed — shared by the authentication and the gate, and re-checked at
+  accept (#3440). Mid-stream a re-check, a status snapshot or a
+  community-stream membership lookup that fails, or gets no answer within
+  :data:`~mc_server_dashboard_api.dependencies.WS_DATABASE_TIMEOUT_SECONDS`,
+  closes with it. Either is logged as one WARNING line; any other error still
+  propagates.
 
 The socket lives no longer than the access token it was opened with (#1862):
 that token is its only credential, so at the instant it would stop
@@ -96,6 +100,7 @@ from mc_server_dashboard_api.community.domain.value_objects import (
 from mc_server_dashboard_api.dependencies import (
     ServerCommunityLookup,
     WsDatabaseUnavailableError,
+    WsHandshakeDeadline,
     WsReauthentication,
     get_current_user_ws,
     get_list_servers,
@@ -104,7 +109,9 @@ from mc_server_dashboard_api.dependencies import (
     get_read_server,
     get_real_time_events,
     get_server_community_lookup,
+    get_ws_handshake_deadline,
     get_ws_reauthentication,
+    log_handshake_deadline_passed,
     ws_accept_subprotocol,
     ws_database_read,
 )
@@ -197,6 +204,7 @@ async def server_events(
     community_id: uuid.UUID,
     server_id: uuid.UUID,
     authentication: Annotated[Authentication | None, Depends(get_current_user_ws)],
+    handshake: Annotated[WsHandshakeDeadline, Depends(get_ws_handshake_deadline)],
     reauthenticate: Annotated[WsReauthentication, Depends(get_ws_reauthentication)],
     visibility: Annotated[MembershipVisibility, Depends(get_membership_visibility)],
     checker: Annotated[PermissionChecker, Depends(get_permission_checker)],
@@ -221,6 +229,7 @@ async def server_events(
     denied = await _unless_unavailable(
         functools.partial(authorize, auth_user=_auth_user(authentication)),
         outcome="handshake refused",
+        deadline=handshake,
     )
     if denied is not None:
         await websocket.close(code=denied)
@@ -234,7 +243,8 @@ async def server_events(
         await websocket.close(code=_CLOSE_BAD_REQUEST)
         return
 
-    await websocket.accept(subprotocol=ws_accept_subprotocol(websocket))
+    if not await _accept(websocket, handshake):
+        return
     # The bus is keyed by the worker-reported server id string (the UUID's text
     # form, as it arrives on the control-plane stream).
     subscription = bus.subscribe(server_id=str(server_id), streams=streams)
@@ -274,6 +284,7 @@ async def community_events(
     websocket: WebSocket,
     community_id: uuid.UUID,
     authentication: Annotated[Authentication | None, Depends(get_current_user_ws)],
+    handshake: Annotated[WsHandshakeDeadline, Depends(get_ws_handshake_deadline)],
     reauthenticate: Annotated[WsReauthentication, Depends(get_ws_reauthentication)],
     visibility: Annotated[MembershipVisibility, Depends(get_membership_visibility)],
     checker: Annotated[PermissionChecker, Depends(get_permission_checker)],
@@ -315,12 +326,14 @@ async def community_events(
     denied = await _unless_unavailable(
         functools.partial(authorize, auth_user=_auth_user(authentication)),
         outcome="handshake refused",
+        deadline=handshake,
     )
     if denied is not None:
         await websocket.close(code=denied)
         return
 
-    await websocket.accept(subprotocol=ws_accept_subprotocol(websocket))
+    if not await _accept(websocket, handshake):
+        return
     subscription = bus.subscribe_all(
         streams=frozenset({EventStream.STATUS, EventStream.NOTIFICATION})
     )
@@ -357,6 +370,22 @@ async def community_events(
         )
     finally:
         await subscription.aclose()
+
+
+async def _accept(websocket: WebSocket, handshake: WsHandshakeDeadline) -> bool:
+    """Accept the socket, or refuse it ``1013`` if its handshake ran out of time.
+
+    The deadline is re-checked here, right before accept, because a phase can
+    answer just as it passes (#3440): by then the server may have dropped the
+    connection, and accepting it would be accepting a dead handshake.
+    """
+
+    if handshake.expired():
+        log_handshake_deadline_passed("handshake refused")
+        await websocket.close(code=_CLOSE_TRY_AGAIN_LATER)
+        return False
+    await websocket.accept(subprotocol=ws_accept_subprotocol(websocket))
+    return True
 
 
 async def _client_gone(websocket: WebSocket) -> None:
@@ -626,18 +655,21 @@ def _auth_user(authentication: Authentication) -> AuthUser:
 
 
 async def _unless_unavailable(
-    check: Callable[[], Awaitable[int | None]], *, outcome: str
+    check: Callable[[], Awaitable[int | None]],
+    *,
+    outcome: str,
+    deadline: WsHandshakeDeadline,
 ) -> int | None:
-    """Run an access ``check``; return its close code, or ``1013`` on an outage.
+    """Run the handshake's access ``check``; return its close code, or ``1013``.
 
-    A database that cannot answer — a transient failure, or no answer within
-    the bound — says nothing about the user's access, so it is no denial code
-    (#3313, #3426; :func:`ws_database_read` logs it). Any other error
-    propagates. ``outcome`` names what the ``1013`` does.
+    A database that cannot answer — a transient failure, or no answer before
+    the handshake's ``deadline`` — says nothing about the user's access, so it
+    is no denial code (#3313, #3426, #3440; :func:`ws_database_read` logs it).
+    Any other error propagates. ``outcome`` names what the ``1013`` does.
     """
 
     try:
-        return await ws_database_read(check, outcome=outcome)
+        return await ws_database_read(check, outcome=outcome, deadline=deadline)
     except WsDatabaseUnavailableError:
         return _CLOSE_TRY_AGAIN_LATER
 

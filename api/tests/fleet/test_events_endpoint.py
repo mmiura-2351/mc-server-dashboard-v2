@@ -40,12 +40,14 @@ from mc_server_dashboard_api.community.domain.value_objects import (
 )
 from mc_server_dashboard_api.core.adapters.database import create_engine
 from mc_server_dashboard_api.dependencies import (
+    WsHandshakeDeadline,
     _build_token_service,
     get_current_user_ws,
     get_membership_visibility,
     get_permission_checker,
     get_read_server,
     get_real_time_events,
+    get_ws_handshake_deadline,
     get_ws_reauthentication,
 )
 from mc_server_dashboard_api.fleet.adapters.real_time_events import (
@@ -1544,7 +1546,7 @@ def test_handshake_authentication_with_no_answer_refuses_1013(
     after the browser abandoned it.
     """
 
-    monkeypatch.setattr(dependencies_module, "WS_DATABASE_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(dependencies_module, "WS_HANDSHAKE_DEADLINE_SECONDS", 0.1)
     monkeypatch.setattr(dependencies_module, "_authenticate_ws", _no_answer)
     app = _shared_app
     app.dependency_overrides.clear()  # the real get_current_user_ws
@@ -1566,12 +1568,131 @@ class _NoAnswerVisibility(MembershipVisibility):
 def test_handshake_authorization_with_no_answer_refuses_1013(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    monkeypatch.setattr(dependencies_module, "WS_DATABASE_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(dependencies_module, "WS_HANDSHAKE_DEADLINE_SECONDS", 0.1)
     app = _app()
     app.dependency_overrides[get_membership_visibility] = _NoAnswerVisibility  # type: ignore[attr-defined]
     with caplog.at_level(logging.WARNING):
         _assert_rejected(app, 1013)
     _assert_one_line(caplog)
+
+
+# --- one deadline for the whole handshake (#3440) ---------------------------
+
+
+class _SlowVisibility(MembershipVisibility):
+    """A member, answered ``seconds`` late."""
+
+    def __init__(self, seconds: float) -> None:
+        self._seconds = seconds
+
+    async def is_member(self, *, user_id: UserId, community_id: CommunityId) -> bool:
+        await asyncio.sleep(self._seconds)
+        return True
+
+
+def test_handshake_phases_together_past_the_deadline_are_refused_before_accept(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The authentication and the gate share one budget, not one bound each.
+
+    Each phase answers well within the bound on one read, but the two
+    together outlast the handshake's deadline: the server would already have
+    dropped the connection, so it must not be accepted.
+    """
+
+    monkeypatch.setattr(dependencies_module, "WS_HANDSHAKE_DEADLINE_SECONDS", 0.3)
+    user = make_user()
+
+    async def _slow_authentication(_websocket: object) -> Authentication:
+        await asyncio.sleep(0.2)
+        return make_authentication(user)
+
+    monkeypatch.setattr(dependencies_module, "_authenticate_ws", _slow_authentication)
+    app = _app()
+    del app.dependency_overrides[get_current_user_ws]  # type: ignore[attr-defined]
+    app.dependency_overrides[get_membership_visibility] = lambda: _SlowVisibility(0.2)  # type: ignore[attr-defined]
+
+    with caplog.at_level(logging.WARNING):
+        _assert_rejected(app, 1013)
+    _assert_one_line(caplog)
+
+
+class _FakeClock:
+    """A monotonic clock that moves only when a test moves it."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class _ClockedVisibility(MembershipVisibility):
+    """A member, answered once ``clock`` has moved ``seconds`` on."""
+
+    def __init__(self, clock: _FakeClock, seconds: float) -> None:
+        self._clock = clock
+        self._seconds = seconds
+
+    async def is_member(self, *, user_id: UserId, community_id: CommunityId) -> bool:
+        self._clock.now += self._seconds
+        return True
+
+
+class _ClockedChecker(PermissionChecker):
+    """Allows, once ``clock`` has moved ``seconds`` on."""
+
+    def __init__(self, clock: _FakeClock, seconds: float) -> None:
+        self._clock = clock
+        self._seconds = seconds
+
+    async def can(
+        self, *, user: AuthUser, operation: Permission, resource: ResourceRef
+    ) -> bool:
+        self._clock.now += self._seconds
+        return True
+
+
+def _app_on_clock(
+    clock: _FakeClock, *, membership_seconds: float, permission_seconds: float
+) -> object:
+    app = _app()
+    app.dependency_overrides[get_ws_handshake_deadline] = lambda: WsHandshakeDeadline(  # type: ignore[attr-defined]
+        clock() + dependencies_module.WS_HANDSHAKE_DEADLINE_SECONDS, clock
+    )
+    app.dependency_overrides[get_membership_visibility] = lambda: _ClockedVisibility(  # type: ignore[attr-defined]
+        clock, membership_seconds
+    )
+    app.dependency_overrides[get_permission_checker] = lambda: _ClockedChecker(  # type: ignore[attr-defined]
+        clock, permission_seconds
+    )
+    return app
+
+
+def test_a_phase_answering_at_the_deadline_is_refused_before_accept(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Accept re-checks the deadline: a gate that answered too late is refused."""
+
+    deadline = dependencies_module.WS_HANDSHAKE_DEADLINE_SECONDS
+    app = _app_on_clock(
+        _FakeClock(), membership_seconds=deadline - 1.0, permission_seconds=1.0
+    )
+
+    with caplog.at_level(logging.WARNING):
+        _assert_rejected(app, 1013)
+    _assert_one_line(caplog)
+
+
+def test_a_handshake_within_the_deadline_is_accepted() -> None:
+    deadline = dependencies_module.WS_HANDSHAKE_DEADLINE_SECONDS
+    app = _app_on_clock(
+        _FakeClock(), membership_seconds=deadline - 1.0, permission_seconds=0.9
+    )
+    client = _client(app)
+
+    with client.websocket_connect(_url(uuid.uuid4(), uuid.uuid4())) as ws:
+        _skip_snapshot(ws)
 
 
 class _SnapshotFails(_FakeReadServer):

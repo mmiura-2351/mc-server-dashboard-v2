@@ -11,8 +11,10 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
+import time
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from functools import lru_cache, partial
 from typing import Annotated, Any, NamedTuple
 
@@ -1189,17 +1191,57 @@ def ws_accept_subprotocol(websocket: WebSocket) -> str | None:
     return None
 
 
-# How long one database read of an events socket may take before the socket is
-# refused or closed ``1013`` (#3313, #3426): the handshake's authentication and
-# gate, and the relay's re-checks, snapshots and membership lookups. Each is a
-# few indexed queries that answer in milliseconds; one still waiting after this
-# long is waiting on a frozen database. The bound is per read, so a handshake's
-# authentication and gate together can take up to twice it. Unbounded, a
-# handshake would outlast the client giving up (and be accepted, dead, once the
-# database thaws), and an open socket would deliver nothing for as long as the
+# How long one database read of an open events socket may take before the
+# socket is closed ``1013`` (#3313, #3426): the relay's re-checks, snapshots and
+# membership lookups. Each is a few indexed queries that answer in
+# milliseconds; one still waiting after this long is waiting on a frozen
+# database. Unbounded, an open socket would deliver nothing for as long as the
 # freeze lasts. It bounds the wait, not the abandoned read's cleanup
-# (:func:`ws_database_read`).
+# (:func:`ws_database_read`). The reads before accept are bounded by
+# :data:`WS_HANDSHAKE_DEADLINE_SECONDS` instead.
 WS_DATABASE_TIMEOUT_SECONDS = 10.0
+
+# How long an events socket's handshake may take, from its start to accept,
+# before it is refused ``1013`` (#3440). Every database read before accept —
+# the authentication, then the gate — shares this one budget, and the accept
+# re-checks it. It must stay below the server's own bound on an unfinished
+# handshake: uvicorn's websockets ``open_timeout``, 10 s by default and not
+# overridden by ``serve.py``. Above it, the server drops a slow handshake before
+# the app can refuse it, and the app may still accept a connection the server
+# has already given up on.
+WS_HANDSHAKE_DEADLINE_SECONDS = 8.0
+
+
+@dataclass(frozen=True)
+class WsHandshakeDeadline:
+    """The instant an events socket's handshake runs out of time (#3440).
+
+    ``expires_at`` is on ``clock``, a monotonic clock in seconds.
+    """
+
+    expires_at: float
+    clock: Callable[[], float] = time.monotonic
+
+    def remaining(self) -> float:
+        """The seconds left before the deadline, never negative."""
+
+        return max(0.0, self.expires_at - self.clock())
+
+    def expired(self) -> bool:
+        """Whether the deadline has passed."""
+
+        return self.clock() >= self.expires_at
+
+
+def get_ws_handshake_deadline() -> WsHandshakeDeadline:
+    """Start the deadline of an events socket's handshake (#3440).
+
+    Resolved once per connection — FastAPI caches a dependency for the
+    connection — and first by :func:`get_current_user_ws`, so the deadline
+    starts as the handshake does and every phase before accept shares it.
+    """
+
+    return WsHandshakeDeadline(time.monotonic() + WS_HANDSHAKE_DEADLINE_SECONDS)
 
 
 class WsDatabaseUnavailableError(Exception):
@@ -1209,11 +1251,17 @@ class WsDatabaseUnavailableError(Exception):
     """
 
 
-async def ws_database_read[T](read: Callable[[], Awaitable[T]], *, outcome: str) -> T:
+async def ws_database_read[T](
+    read: Callable[[], Awaitable[T]],
+    *,
+    outcome: str,
+    deadline: WsHandshakeDeadline | None = None,
+) -> T:
     """Await an events socket's database ``read``, bounded and outage-aware.
 
     A transient database failure, or no answer within
-    :data:`WS_DATABASE_TIMEOUT_SECONDS`, raises
+    :data:`WS_DATABASE_TIMEOUT_SECONDS` — or, for a read before accept, before
+    the handshake's ``deadline`` (#3440) — raises
     :class:`WsDatabaseUnavailableError` after one WARNING line with no
     traceback: an outage says nothing about the user's access and is not a bug
     (#3313). Any other error propagates. ``outcome`` names what the ``1013``
@@ -1229,19 +1277,23 @@ async def ws_database_read[T](read: Callable[[], Awaitable[T]], *, outcome: str)
     for a database that stays unreachable can be indefinitely.
     """
 
+    timeout = WS_DATABASE_TIMEOUT_SECONDS if deadline is None else deadline.remaining()
     task = asyncio.ensure_future(read())
     try:
-        done, _pending = await asyncio.wait({task}, timeout=WS_DATABASE_TIMEOUT_SECONDS)
+        done, _pending = await asyncio.wait({task}, timeout=timeout)
     except BaseException:
         _abandon(task)
         raise
     if not done:
         _abandon(task)
-        _logger.warning(
-            "events socket %s (1013): no answer within %g s",
-            outcome,
-            WS_DATABASE_TIMEOUT_SECONDS,
-        )
+        if deadline is None:
+            _logger.warning(
+                "events socket %s (1013): no answer within %g s",
+                outcome,
+                WS_DATABASE_TIMEOUT_SECONDS,
+            )
+        else:
+            log_handshake_deadline_passed(outcome)
         raise WsDatabaseUnavailableError
     try:
         return task.result()
@@ -1282,7 +1334,20 @@ def _forget_abandoned(task: asyncio.Future[Any]) -> None:
         task.exception()
 
 
-async def get_current_user_ws(websocket: WebSocket) -> Authentication | None:
+def log_handshake_deadline_passed(outcome: str) -> None:
+    """Log the one WARNING line of a handshake out of time (#3440)."""
+
+    _logger.warning(
+        "events socket %s (1013): the %g s handshake deadline passed",
+        outcome,
+        WS_HANDSHAKE_DEADLINE_SECONDS,
+    )
+
+
+async def get_current_user_ws(
+    websocket: WebSocket,
+    deadline: Annotated[WsHandshakeDeadline, Depends(get_ws_handshake_deadline)],
+) -> Authentication | None:
     """The authentication behind a WebSocket handshake, or ``None``.
 
     Returns ``None`` for a missing/malformed/expired token rather than raising:
@@ -1292,8 +1357,8 @@ async def get_current_user_ws(websocket: WebSocket) -> Authentication | None:
     token's expiry, at which the route ends the session (#1862).
 
     The one exception is a database that cannot answer while loading the user
-    — a transient failure (#3313) or no answer within
-    :data:`WS_DATABASE_TIMEOUT_SECONDS` (#3426): it says nothing about the
+    — a transient failure (#3313) or no answer before the handshake's
+    ``deadline`` (#3426, #3440): it says nothing about the
     token, so it is not ``None`` (``4401``) but a refusal with ``1013`` (Try
     Again Later), logged as one line rather than surfacing as an
     unhandled-exception traceback. It is raised as ``WebSocketException``,
@@ -1303,7 +1368,9 @@ async def get_current_user_ws(websocket: WebSocket) -> Authentication | None:
 
     try:
         return await ws_database_read(
-            partial(_authenticate_ws, websocket), outcome="handshake refused"
+            partial(_authenticate_ws, websocket),
+            outcome="handshake refused",
+            deadline=deadline,
         )
     except WsDatabaseUnavailableError:
         raise WebSocketException(code=status.WS_1013_TRY_AGAIN_LATER) from None

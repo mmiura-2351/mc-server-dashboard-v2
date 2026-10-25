@@ -43,12 +43,14 @@ from mc_server_dashboard_api.community.domain.value_objects import (
     UserId,
 )
 from mc_server_dashboard_api.dependencies import (
+    WsHandshakeDeadline,
     get_current_user_ws,
     get_list_servers,
     get_membership_visibility,
     get_permission_checker,
     get_real_time_events,
     get_server_community_lookup,
+    get_ws_handshake_deadline,
     get_ws_reauthentication,
 )
 from mc_server_dashboard_api.fleet.adapters.real_time_events import (
@@ -737,6 +739,7 @@ async def test_client_gone_during_the_membership_lookup_ends_the_relay_quietly()
             socket,  # type: ignore[arg-type]
             community,
             authentication=make_authentication(user),
+            handshake=get_ws_handshake_deadline(),
             reauthenticate=_Account(user),
             visibility=_FakeVisibility(member=True),
             checker=_FakeChecker(allow=True),
@@ -755,6 +758,38 @@ async def test_client_gone_during_the_membership_lookup_ends_the_relay_quietly()
 
     await asyncio.wait_for(handler, timeout=5)
     assert [json.loads(text)["stream"] for text in socket.sent] == ["snapshot"]
+
+
+# --- one deadline for the whole handshake (#3440) ---------------------------
+
+
+def test_a_gate_answering_at_the_deadline_is_refused_before_accept(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Accept re-checks the handshake deadline: a late gate is refused."""
+
+    now = 0.0
+    deadline = dependencies_module.WS_HANDSHAKE_DEADLINE_SECONDS
+
+    class _LateVisibility(MembershipVisibility):
+        async def is_member(
+            self, *, user_id: UserId, community_id: CommunityId
+        ) -> bool:
+            nonlocal now
+            now = deadline  # the clock reaches the deadline as the gate answers
+            return True
+
+    app = _app()
+    app.dependency_overrides[get_ws_handshake_deadline] = lambda: WsHandshakeDeadline(  # type: ignore[attr-defined]
+        deadline, lambda: now
+    )
+    app.dependency_overrides[get_membership_visibility] = _LateVisibility  # type: ignore[attr-defined]
+
+    with caplog.at_level(logging.WARNING):
+        _assert_rejected(app, 1013)
+    records = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(records) == 1, [r.getMessage() for r in records]
+    assert records[0].exc_info is None
 
 
 # --- a membership lookup the database cannot answer (#3426) ----------------
