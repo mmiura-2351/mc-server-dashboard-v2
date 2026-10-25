@@ -11,6 +11,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import {
+  ApiError,
   api,
   isUploadAbortError,
   postFormWithProgress,
@@ -151,6 +152,11 @@ export function ServerPluginsTab({
 
   const onError = (error: unknown) => {
     if (onForbidden(error)) return;
+    // An enable / disable / side change is committed before the jar miss
+    // (#3437): refetch so the row shows the state that stands.
+    if (error instanceof ApiError && error.reason === "plugin_jar_missing") {
+      refresh();
+    }
     showToast(tn(pluginErrorPresentation(error)), "error");
   };
 

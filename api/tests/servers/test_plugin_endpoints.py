@@ -1244,19 +1244,40 @@ class _MissingJarRig:
         assert plugin is not None
         return plugin
 
+    def assert_audited(self, recorder: RecordingAuditRecorder, operation: str) -> None:
+        # The committed change is audited as the success path audits it (issue
+        # #3437), although the response is the 409: the trail must not lose a
+        # change that stands. The audit row has no detail column, so the event is
+        # the plain success one.
+        assert [
+            (e.operation, e.outcome, e.community_id, e.target_type, e.target_id)
+            for e in recorder.events
+        ] == [
+            (
+                operation,
+                Outcome.SUCCESS,
+                self.server.community_id.value,
+                ops.TARGET_PLUGIN,
+                self.plugin_id.value,
+            )
+        ]
+        assert recorder.events[0].actor_id is not None
+
 
 @pytest.mark.parametrize(
-    ("enabled", "action"), [(False, "/enable"), (True, "/disable")]
+    ("enabled", "action", "operation"),
+    [(False, "/enable", ops.PLUGIN_ENABLE), (True, "/disable", ops.PLUGIN_DISABLE)],
 )
 async def test_toggle_whose_jar_is_missing_everywhere_is_409(
-    enabled: bool, action: str
+    enabled: bool, action: str, operation: str
 ) -> None:
     # The working-set file is gone too, so the reconcile falls back to the cache
     # (issue #1331) and misses there (issue #3323). The toggle is already
     # committed by then, which is what the 409 has to say -- a 404 would tell
     # the client the plugin does not exist while its new state stands.
     rig = _MissingJarRig(enabled=enabled, side="both")
-    app = _app(member=True, allow=True)
+    recorder = RecordingAuditRecorder()
+    app = _app(member=True, allow=True, recorder=recorder)
     app.dependency_overrides[get_toggle_plugin] = lambda: rig.toggle  # type: ignore[attr-defined]
 
     resp = _client(app).post(rig.url(action))
@@ -1265,13 +1286,15 @@ async def test_toggle_whose_jar_is_missing_everywhere_is_409(
     assert resp.json()["reason"] == "plugin_jar_missing"
     assert "plugin-cache" not in resp.text
     assert (await rig.recorded()).enabled is not enabled
+    rig.assert_audited(recorder, operation)
 
 
 async def test_set_side_whose_jar_is_missing_from_the_cache_is_409() -> None:
     # An enabled client-only mod has no working-set file, so moving it to the
     # server side materializes straight from the cache, after the commit.
     rig = _MissingJarRig(enabled=True, side="client")
-    app = _app(member=True, allow=True)
+    recorder = RecordingAuditRecorder()
+    app = _app(member=True, allow=True, recorder=recorder)
     app.dependency_overrides[get_set_plugin_side] = lambda: rig.set_side  # type: ignore[attr-defined]
 
     resp = _client(app).post(rig.url("/side"), json={"side": "server"})
@@ -1280,3 +1303,4 @@ async def test_set_side_whose_jar_is_missing_from_the_cache_is_409() -> None:
     assert resp.json()["reason"] == "plugin_jar_missing"
     assert "plugin-cache" not in resp.text
     assert (await rig.recorded()).side == "server"
+    rig.assert_audited(recorder, ops.PLUGIN_SET_SIDE)
