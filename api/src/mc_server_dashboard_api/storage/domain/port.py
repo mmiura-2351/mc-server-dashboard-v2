@@ -268,7 +268,9 @@ class WorkingSetStore(abc.ABC):
         parent, then reclaim the superseded snapshot. After return, ``current/``
         reflects the complete transfer or the prior copy — never a partial. Refuses
         an un-signalled-complete transfer with
-        :class:`~.errors.IncompleteTransferError`.
+        :class:`~.errors.IncompleteTransferError`, except that staging a concurrent
+        delete's prune removed is refused with :class:`~.errors.PrunedStoreError`
+        (issue #3477).
 
         Bumps and returns the per-server working-set GENERATION (issue #763): a
         monotonically increasing counter the adapter persists alongside the server's
