@@ -202,7 +202,15 @@ class ServerPropertiesMissingError(ServerError):
     gracefully, query, or send console commands to it (issue #2623). The edge maps
     this to 409 ``server_properties_missing`` -- working-set state that is not what
     the platform expects, the same posture as ``eula_not_accepted``.
+
+    ``committed`` says whether the change the rewrite served was already committed
+    when the file turned out missing (issue #3448): the edge audits a committed
+    change, since it stands despite the 409.
     """
+
+    def __init__(self, server_id: str, *, committed: bool) -> None:
+        super().__init__(server_id)
+        self.committed = committed
 
 
 class EulaNotAcceptedError(ServerError):

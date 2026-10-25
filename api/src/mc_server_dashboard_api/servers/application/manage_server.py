@@ -697,7 +697,7 @@ class UpdateServer:
                     # file never written, and the retry would then no-op into a
                     # 200 because the port already matches.
                     await self._read_properties(
-                        community_id=community_id, server_id=server_id
+                        community_id=community_id, server_id=server_id, committed=False
                     )
                     pending_port = game_port
                     server.game_port = game_port
@@ -734,7 +734,7 @@ class UpdateServer:
             return server
 
     async def _read_properties(
-        self, *, community_id: CommunityId, server_id: ServerId
+        self, *, community_id: CommunityId, server_id: ServerId, committed: bool
     ) -> bytes:
         """Read the at-rest ``server.properties``, refusing when it is absent.
 
@@ -751,7 +751,9 @@ class UpdateServer:
                 rel_path=_PROPERTIES_REL_PATH,
             )
         except ServerFileNotFoundError as exc:
-            raise ServerPropertiesMissingError(str(server_id.value)) from exc
+            raise ServerPropertiesMissingError(
+                str(server_id.value), committed=committed
+            ) from exc
 
     async def _rewrite_server_port(
         self,
@@ -776,7 +778,7 @@ class UpdateServer:
         """
 
         current = await self._read_properties(
-            community_id=community_id, server_id=server_id
+            community_id=community_id, server_id=server_id, committed=True
         )
         try:
             await self.file_store.write_file(

@@ -2022,12 +2022,13 @@ async def test_update_game_port_refuses_when_properties_absent() -> None:
     server = _server(community_id=community, game_port=25565)
     uow.servers.seed(server)
     file_store = FakeFileStore()
-    with pytest.raises(ServerPropertiesMissingError):
+    with pytest.raises(ServerPropertiesMissingError) as excinfo:
         await _updater(uow, file_store=file_store)(
             community_id=community,
             server_id=server.id,
             game_port=25570,
         )
+    assert excinfo.value.committed is False
     assert file_store.writes == []
     assert uow.commits == 0
     assert uow.servers.by_id[server.id].game_port == 25565
@@ -2063,14 +2064,17 @@ async def test_update_game_port_refuses_when_properties_vanishes_after_the_check
             return content
 
     file_store = _VanishingFileStore()
-    with pytest.raises(ServerPropertiesMissingError):
+    with pytest.raises(ServerPropertiesMissingError) as excinfo:
         await _updater(uow, file_store=file_store)(
             community_id=community,
             server_id=server.id,
             game_port=25570,
         )
-    # Nothing was republished from an empty file.
+    # Nothing was republished from an empty file. The port change is committed
+    # by then, which the error says so the edge audits it (issue #3448).
     assert file_store.writes == []
+    assert uow.commits == 1
+    assert excinfo.value.committed is True
 
 
 async def test_update_game_port_preserves_rcon_password() -> None:
