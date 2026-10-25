@@ -758,16 +758,24 @@ Each hand-off logs one `WARN` line,
 `worker shutting down mid-stop: the docker daemon now owns the kill`, with the
 grace it was given.
 
-Some cases are not covered. A hand-off whose request fails (the daemon is
-unreachable, or it does not answer within 5 s) is logged and gives the stop
-back to the Worker, whose own idle window and cap then end it while the Worker
-lives. If the Worker exits first, the next Worker boot's sweep is the backstop.
-The same applies to a stop that starts after the shutdown began, when the
-Worker exits before its background hand-off reaches the daemon. A Worker that is
-SIGKILLed or crashes runs no shutdown at all, so the same sweep is the backstop.
-A server that keeps running past the hand-off is not lost: its stop's result
-just never reaches the API, which converges the server's row through the
-reconciler once the Worker reconnects.
+**A hand-off cannot be undone.** A hand-off request that fails, times out, or
+whose delivery is uncertain still leaves the stop with the daemon: a request
+that did land may already have started a shutdown save, which the Worker must
+not then kill. So the Worker re-sends `docker stop` every second in the
+background, each time with the grace left until the same due time, until one
+request is confirmed written to the daemon or the due time passes. A repeated
+`docker stop` on a container that is already stopping is harmless; the daemon
+still owns the kill. The retries add nothing to the stop or to the Worker's
+shutdown.
+
+Some cases are not covered. If no request ever reaches the daemon (it stays
+unreachable for the whole window while the Worker shuts down), the stop fails
+10 s after its due time and the Worker sends no kill. The next Worker boot's
+sweep then owns the container. The sweep is also the backstop when the Worker
+exits before a retry lands, and when a Worker is SIGKILLed or crashes, since
+neither runs a shutdown. A server that keeps running past the hand-off is not
+lost: its stop's result just never reaches the API, which converges the
+server's row through the reconciler once the Worker reconnects.
 
 #### Per-server memory limit: per-driver guarantee
 
