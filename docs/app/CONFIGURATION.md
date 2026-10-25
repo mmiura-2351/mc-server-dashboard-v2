@@ -198,7 +198,7 @@ marks keys with no default.
 | `control.command_timeout_seconds` | `30` | | Deadline for a dispatched `ApiCommand` to be answered by a `CommandResult`; an unanswered command is treated as a failure (CONTROL_PLANE.md Section 4.2). It governs every dispatched command except those with their own budget: a start's hydrate (`hydrate_timeout_seconds`), every snapshot (`snapshot_timeout_seconds`), a stop (`stop_timeout_seconds`), and a restart (`stop_timeout_seconds + command_timeout_seconds`). Must be positive. See the reconciler grace floor below.³ |
 | `control.hydrate_timeout_seconds` | `600` | | Separate, longer deadline for the **hydrate** phase of a start: pulling a large world's working set routinely outlasts `command_timeout_seconds`, so the hydrate trigger gets its own budget instead of forcing the global command timeout up (which would loosen every command it governs and widen the duplicate-start window). Only the start's hydrate dispatch uses it. Must be positive. See the reconciler grace floor below.³ |
 | `control.snapshot_timeout_seconds` | `600` | | Separate, longer deadline for the **final snapshot** a graceful stop captures. The stop holds the server's assignment until this snapshot settles (closing the stop→re-place generation race), so the dispatch must span a full working-set upload (minutes for a large world); under `command_timeout_seconds` it would time out and release the assignment mid-upload, reopening the race. Every snapshot dispatch uses it — the periodic cadence snapshot and an on-demand backup as well as the stop's final snapshot. Must be positive. A snapshot **timeout** holds the assignment (not just a cancel), recovered by the stale-stop arm, so it co-bounds the reconciler grace floor below via `grace_seconds > snapshot_timeout_seconds` — at stock values dominated by the duplicate-start term, but binding when raised above `hydrate_timeout_seconds + command_timeout_seconds`.³ |
-| `control.stop_timeout_seconds` | `600` | | Separate, longer deadline for the **stop** command's worker round-trip. A graceful stop does an in-container save (RCON `save-all`) and the worker's docker-stop escalation (RCON wait → SIGTERM grace → SIGKILL), which on a slow/CPU-starved host or a large world routinely outlasts `command_timeout_seconds`; under it the dispatch times out and the API returns **503** for a stop the worker actually completes, wedging the row at `(stopped, stopped, assigned)` until the reconciler's stale-stop arm clears it and silently losing the stop-leg final snapshot. A **restart** runs this same graceful stop leg and then relaunches the server inside one dispatch, so it is governed by `stop_timeout_seconds + command_timeout_seconds` (the stop leg plus the start command's budget; derived, not a separate setting). Under `command_timeout_seconds` alone a restart of a responsive server, whose pre-stop flush settles for up to 60 s, timed out mid-stop and answered **503** for a restart the worker went on to complete. The restart budget is not a term of the grace floor below: the reconciler never replays a restart, and a start it re-dispatches while one is in flight is refused `BUSY` by the worker. Must be positive. Kept below `reconciler.grace_seconds` so the reconciler never replays a stop still legitimately in flight — it is the THIRD term of the grace floor below.³ |
+| `control.stop_timeout_seconds` | `600` | | Separate, longer deadline for the **stop** command's worker round-trip. A graceful stop does an in-container save (RCON `save-all`, up to 90 s) and the worker's stop escalation (RCON `stop` → SIGTERM → SIGKILL, each wait lasting while the server's shutdown save keeps writing, up to a 360 s cap — Section 6.3), worst case 550 s including the save-on restore that follows a failed stop, which on a slow/CPU-starved host or a large world routinely outlasts `command_timeout_seconds`; keep this key above that 550 s worst case, or a stop the worker completes can still answer **503**; under it the dispatch times out and the API returns **503** for a stop the worker actually completes, wedging the row at `(stopped, stopped, assigned)` until the reconciler's stale-stop arm clears it and silently losing the stop-leg final snapshot. A **restart** runs this same graceful stop leg and then relaunches the server inside one dispatch, so it is governed by `stop_timeout_seconds + command_timeout_seconds` (the stop leg plus the start command's budget; derived, not a separate setting). Under `command_timeout_seconds` alone a restart of a responsive server, whose pre-stop flush settles for up to 60 s, timed out mid-stop and answered **503** for a restart the worker went on to complete. The restart budget is not a term of the grace floor below: the reconciler never replays a restart, and a start it re-dispatches while one is in flight is refused `BUSY` by the worker. Must be positive. Kept below `reconciler.grace_seconds` so the reconciler never replays a stop still legitimately in flight — it is the THIRD term of the grace floor below.³ |
 
 **The bind is one mechanism, and it is these two keys.** The container image's
 entry command passes no `--host` / `--port` of its own: it runs the API's entry
@@ -394,7 +394,7 @@ already is running. To bring the server back sooner, stop it and start it again.
 |---|---|---|---|
 | `reconciler.interval_seconds` | `60` | | Loop resolution: how often the reconciler scans for diverged servers. Must be positive. |
 | `reconciler.grace_seconds` | `660` | | How long a divergence must persist (measured from the last Worker report) before it is acted on, so the normal in-flight lifecycle path has time to converge first. Must be positive and `> max(control.hydrate_timeout_seconds + control.command_timeout_seconds, control.snapshot_timeout_seconds, control.stop_timeout_seconds)` (the start round-trip budget, the held stop-snapshot budget, and the stop dispatch budget); below the floor the reconciler can re-dispatch a first start before it settles (risking a duplicate live instance), clear a still-healthy final-snapshot hold mid-upload (reopening the stop→re-place race), or replay a stale stop before its first round-trip settles — a `WARN` fires on boot. The stock default (660) satisfies the stock floor (`max(600 + 30, 600, 600) = 630`). |
-| `reconciler.held_start_grace_seconds` | `90` | | The SHORTER grace applied only to a `redispatch_start` whose assigned Worker is connected AND already holds a fresh-enough working set, so the start skips hydrate and is command-only. The long hydrate-based `grace_seconds` is pure dead waiting there, and the cross-worker duplicate-live-instance race cannot occur on a re-dispatch to the same already-connected Worker (its double-start guard rejects a second live start). All other paths keep the full `grace_seconds`. Must be positive and `> control.command_timeout_seconds` (the start command round-trip budget — the hydrate budget in the `grace_seconds` floor does not apply to a command-only start); below the floor the reconciler can re-dispatch a held start before its command round-trip settles and race the in-flight start — a `WARN` fires on boot. The stock default (90) satisfies the stock floor (30). One divergence waits longer than either start grace: a `redispatch_start` at a row observed `stopping` waits at least the restart budget (`control.stop_timeout_seconds + control.command_timeout_seconds`, 630 at stock values) from that report. `desired=running` with `observed=stopping` is a restart's stop leg (or the Worker's own retry of one that failed), which runs up to ~250 s and during which a start cannot succeed: on the restart's own session it queues behind the restart in the Worker's per-server command lane until the dispatch times out after `control.command_timeout_seconds` (a failure that counts toward the backoff), and on a new session after a reconnect, or against a failed-stop orphan, it is refused `BUSY`. Past the budget the start is re-dispatched as usual. The lapse is permission to retry, not proof that the Worker finished — its stop is detached from the API's dispatch and runs on its own deadlines — and the retry stays safe because of that same lane serialisation plus the Worker's reservation and failed-stop-orphan guards. Derived, not a separate key. |
+| `reconciler.held_start_grace_seconds` | `90` | | The SHORTER grace applied only to a `redispatch_start` whose assigned Worker is connected AND already holds a fresh-enough working set, so the start skips hydrate and is command-only. The long hydrate-based `grace_seconds` is pure dead waiting there, and the cross-worker duplicate-live-instance race cannot occur on a re-dispatch to the same already-connected Worker (its double-start guard rejects a second live start). All other paths keep the full `grace_seconds`. Must be positive and `> control.command_timeout_seconds` (the start command round-trip budget — the hydrate budget in the `grace_seconds` floor does not apply to a command-only start); below the floor the reconciler can re-dispatch a held start before its command round-trip settles and race the in-flight start — a `WARN` fires on boot. The stock default (90) satisfies the stock floor (30). One divergence waits longer than either start grace: a `redispatch_start` at a row observed `stopping` waits at least the restart budget (`control.stop_timeout_seconds + control.command_timeout_seconds`, 630 at stock values) from that report. `desired=running` with `observed=stopping` is a restart's stop leg (or the Worker's own retry of one that failed), which runs up to ~550 s (Section 6.3) and during which a start cannot succeed: on the restart's own session it queues behind the restart in the Worker's per-server command lane until the dispatch times out after `control.command_timeout_seconds` (a failure that counts toward the backoff), and on a new session after a reconnect, or against a failed-stop orphan, it is refused `BUSY`. Past the budget the start is re-dispatched as usual. The lapse is permission to retry, not proof that the Worker finished — its stop is detached from the API's dispatch and runs on its own deadlines — and the retry stays safe because of that same lane serialisation plus the Worker's reservation and failed-stop-orphan guards. Derived, not a separate key. |
 | `reconciler.refused_stop_grace_seconds` | `30` | | The SHORTER grace applied only to a `redispatch_stop` whose last stop dispatch the Worker **refused**. The only term of the `grace_seconds` floor that governs this path is `> control.stop_timeout_seconds` (never replay a stop whose first dispatch may still be running), and a returned refusal *is* that round trip ending — so the protection is satisfied by the answer rather than by waiting, and it has **no floor of its own**. Without it a server the operator asked to stop keeps running, and accepting players, for ~11-12 min after a refusal the API already knows about. `BUSY` does not count as a refusal (it is the Worker reporting that something else *is* in flight for the id), the refusal must still be the most recent thing known about the row (a newer intent commit or Worker report supersedes it), and it is not persisted — a stop divergence with no recorded refusal, including every one that survives an API restart, keeps the full `grace_seconds`. Must be positive. |
 | `reconciler.backoff_base_seconds` | `30` | | Base of the per-server exponential backoff after a failed re-dispatch; the wait doubles per consecutive failure. A start the Worker refuses `BUSY` is not a failure for this purpose — the id is only not free yet, and the same start is accepted once the Worker settles — so it neither counts toward nor clears the backoff and is retried on the next tick. That refusal is what a start meets after a reconnect (a reservation held by a command from the previous session) or over a failed-stop orphan; a start that queues behind an in-flight command on the same session times out instead, which is an ordinary failure and does back off. Must be positive. |
 | `reconciler.backoff_max_seconds` | `3600` | | Cap on the per-server backoff wait. Also doubles as the slack past `next_eligible_at` that keeps crash-loop damping alive across a slow (modded) boot's `starting` window. Must be positive, `>=` `backoff_base_seconds`, and `>= 600` (a smaller slack lets a still-diverged server expire and reset its failure count, re-arming the boot-crash loop). |
@@ -671,6 +671,111 @@ server's container behind, but because it force-removes *running* containers too
 a graceful Worker restart while servers are up kills those live servers — this is
 the deliberate stateless-worker posture (the Worker adopts no prior state; the
 API observes the resulting state via the Worker's reconnect/status).
+
+#### Stopping a server: a progress-aware grace
+
+A graceful stop first flushes the world over RCON (`save-off`, `save-all`, then
+a wait for the region files to settle; up to 90 s). If that flush succeeds the
+container is killed outright, since the world is already on disk. Otherwise the
+Worker asks the server to stop — RCON `stop`, or SIGTERM straight away when RCON
+cannot be opened — and Minecraft runs its own shutdown save. Each wait after
+`stop` and after SIGTERM lasts **as long as the world's region files keep being
+written**, and escalates to the next step (SIGTERM, then SIGKILL) only when:
+
+- the region files have gone **30 s** without a write (the idle window), or
+- **360 s** have passed since the stop began escalating (the cap).
+
+The Worker checks for writes every 5 s by comparing the count, total size and
+newest modification time of the working set's `.mca` files. It reads metadata
+only, never file contents. A scan that cannot finish counts as a write, so the
+cap bounds it. A SIGTERM request that fails is treated as possibly delivered,
+so the wait after it follows the same rule. None of these values is
+configurable. A hung server writes
+nothing, so it is still killed after about 30 s per step, as with the old fixed
+grace. A forced stop does not watch the world: it escalates after the idle
+window.
+
+**Why stops can take minutes.** Minecraft's `sync-chunk-writes=true` (the
+vanilla default) opens region files with `O_DSYNC`. Every chunk the shutdown
+save writes then waits for the disk. On a host whose synchronous 4 KiB writes
+took ~124 ms, a small vanilla 1.20.1 world (12 MB) needed 85–143 s to save,
+both freshly generated and reloaded. The old 30 s grace SIGKILLed it mid-save
+(issue #3436). Vanilla 1.20.1 logs nothing during this save, because its log4j
+shutdown hook stops the logger first. A silent console therefore does not mean
+the server is not saving.
+
+**A kill can leave a partial save.** When the idle window or the cap ends a
+save, some chunks are written and others are not. The Worker logs one `WARN`
+line per escalation, `graceful stop escalating: the server did not exit`, with
+the reason (`idle` or `cap`), the time since the stop was requested and the time
+of the last write it saw. A stop that outlasts the idle window and still ends
+with the server exiting by itself is logged at `INFO` with its duration.
+
+The driver's worst case for one stop is 90 s (flush) + 360 s (cap) + 10 s
+(deadline grace for the RCON and SIGTERM calls) + 30 s (kill call) + 30 s (kill
+confirm) = **520 s**. A stop that fails then has the Worker restore auto-save
+over RCON (up to 30 s), so the full round trip of a `StopServer` is at most
+**550 s**. Every budget that waits on it still covers that at its default:
+
+| Budget | Default | Covers |
+|---|---|---|
+| API `control.stop_timeout_seconds` (Section 5.1) | 600 s | the 550 s stop round trip, with 50 s to spare |
+| API restart budget (`stop_timeout_seconds + command_timeout_seconds`) | 630 s | the same stop leg, then the relaunch |
+| API `reconciler.grace_seconds` (Section 5.6) | 660 s | above its 630 s floor, so a stop still in flight is never replayed |
+| Worker `stop_grace_period` (`compose.yaml`) | 600 s | `Manager.Close`'s 550 s worst case: a retry stop it joins, then the same restore |
+
+A test (`TestComposeWorkerStopGraceCoversClose`, `worker/cmd/worker`) fails if
+the compose value ever falls below the Worker's computed bound.
+
+**When the Worker shuts down mid-stop.** The final SIGKILL is the Worker's to
+send, and an operator's stop is not one the Worker's shutdown waits for (only a
+retry stop is). So at shutdown, before anything else, the Worker hands every
+stop still in flight to the Docker daemon. It sends `docker stop` with the grace
+that stop had left: up to the flush budget plus the cap while the flush is
+running, and the cap's remainder once the escalation has started. Docker
+finishes a stop even after the client that sent it has gone (verified on Docker
+29.5.3). So whatever happens to the Worker afterwards, the daemon SIGKILLs a
+server that has not exited when that grace runs out. A stop that starts after
+the hand-off is handed off as it starts, with the request sent in the
+background so the stop is not delayed.
+
+**Each kill has one owner.** Once a stop is handed off, the daemon owns its
+kill. The Worker sends no RCON `stop`, no SIGTERM and no SIGKILL for that stop
+again, and only waits for the container to exit, at most until the daemon's
+kill is due plus 10 s. Before each SIGKILL of its own (after the idle window,
+at the cap, or right after a successful flush), the Worker commits to it under
+the stop's lock. A hand-off that comes after that commit asks the daemon to
+kill too, and never to SIGTERM. So a shutdown save started by any SIGTERM is
+cut short only by the idle window, the cap, or the daemon's own grace after a
+hand-off. In particular, a world the flush has just written is never SIGTERMed
+by the hand-off.
+
+The cost of this rule is accepted: after a hand-off, a hung server is killed
+when the daemon's grace runs out, not after a 30 s idle window. That only
+happens while the Worker is shutting down, and it is still within the cap.
+
+Each hand-off logs one `WARN` line,
+`worker shutting down mid-stop: the docker daemon now owns the kill`, with the
+grace it was given.
+
+**A hand-off cannot be undone.** A hand-off request that fails, times out, or
+whose delivery is uncertain still leaves the stop with the daemon: a request
+that did land may already have started a shutdown save, which the Worker must
+not then kill. So the Worker re-sends `docker stop` every second in the
+background, each time with the grace left until the same due time, until one
+request is confirmed written to the daemon or the due time passes. A repeated
+`docker stop` on a container that is already stopping is harmless; the daemon
+still owns the kill. The retries add nothing to the stop or to the Worker's
+shutdown.
+
+Some cases are not covered. If no request ever reaches the daemon (it stays
+unreachable for the whole window while the Worker shuts down), the stop fails
+10 s after its due time and the Worker sends no kill. The next Worker boot's
+sweep then owns the container. The sweep is also the backstop when the Worker
+exits before a retry lands, and when a Worker is SIGKILLed or crashes, since
+neither runs a shutdown. A server that keeps running past the hand-off is not
+lost: its stop's result just never reaches the API, which converges the
+server's row through the reconciler once the Worker reconnects.
 
 #### Per-server memory limit: per-driver guarantee
 

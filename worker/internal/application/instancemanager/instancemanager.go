@@ -572,9 +572,10 @@ func (m *Manager) goBackground(fn func()) bool {
 // long between SIGTERM and SIGKILL, and the two numbers are a pair: change this
 // bound and the compose value is wrong, and vice versa.
 //
-// The bound is roughly 280 s. A retry stop already inside inst.Stop costs
+// The bound is 550 s (CloseBound). A retry stop already inside inst.Stop costs
 // flushTimeout + stopDeadline + the kill call + the post-kill exit confirmation +
-// restoreSaveTimeout (90 + 100 + 30 + 30 + 30 s at the containerdriver defaults).
+// restoreSaveTimeout (90 + 370 + 30 + 30 + 30 s at the containerdriver defaults;
+// stopDeadline is the progress-aware stop's 360 s cap plus 10 s, issue #3436).
 // Those last three ADD rather than share: the kill runs on a context detached from
 // stopDeadline so it reaches the daemon even when the earlier phases consumed the
 // whole budget, and waitExitDone honours no context at all. The one reclaim id in
@@ -585,7 +586,7 @@ func (m *Manager) goBackground(fn func()) bool {
 // it:
 //
 //   - reserved, orphans and converging are in-memory and die with the process
-//     either way — at 10 s or at 280 s.
+//     either way — at 10 s or at 550 s.
 //   - a reclaim cut anywhere in its per-id body leaves <scratch>/<id> on disk, and
 //     that dir IS the advertisement that re-offers the id: the held-set scans
 //     report it, the API re-derives unknown_held_server_ids from that report, and
@@ -615,7 +616,9 @@ func (m *Manager) goBackground(fn func()) bool {
 // returns, at any value. Closing that one is a change to the lanes, not to this
 // timer (#3168) — though the auto-save half of it is already covered, because the
 // drain above is keyed on the outstanding save-off rather than on which lane
-// issued it.
+// issued it, and so is its kill: Close hands every stop in flight, joined or not,
+// to the driver's backend first (StopHandOff, issue #3436), so the daemon still
+// SIGKILLs a server that never finishes after the Worker is gone.
 //
 // TWO CASES REMAIN UNCOVERED, by the drain and by the timer alike, because neither
 // is a shutdown: a host power loss inside the bracket, and the MC server crashing
@@ -634,6 +637,16 @@ func (m *Manager) Close() {
 	m.mu.Lock()
 	m.closed = true
 	m.mu.Unlock()
+	// Hand every stop still in flight to its backend FIRST (issue #3436). A driver
+	// that escalates a stop from inside this process would otherwise take the final
+	// SIGKILL down with it: an operator stop rides a session lane nothing joins
+	// (#3168), so the Worker can exit seconds into it, and a hung server would stay
+	// up until the next boot's Sweep. The hand-off runs beside the rest of Close and
+	// is bounded by stopHandOffTimeout, so it adds nothing to CloseBound; Close
+	// returns only once it is done, so the request reaches the daemon before the
+	// process exits.
+	handOffs := m.handOffStops()
+	defer handOffs.Wait()
 	m.stopBackground()
 	// Settle the outstanding save-off debts BESIDE the join, never in front of it
 	// (issue #3166). Started here, each restore overlaps the escalation Close is
@@ -663,7 +676,7 @@ func (m *Manager) Close() {
 	// THE WHOLE ADDED LATENCY OF THIS CHANGE IS THAT ONE BOUND, paid once however
 	// many servers are draining, and only when a server does not answer.
 	//
-	// Close's ~280 s worst case is therefore unchanged, and so is the compose value
+	// Close's 550 s worst case is therefore unchanged, and so is the compose value
 	// paired with it: 5 s is well inside the restoreSaveTimeout leg that bound already
 	// counts. What CAN get slower is the best case — a quiesced stop that resolves in
 	// the same instant leaves no join for its restore to hide behind, so a Close that
@@ -973,6 +986,45 @@ func (m *Manager) recordGenerationIfUnchanged(ctx context.Context, ref *workingD
 // deadline so the call cannot hang the goroutine forever.
 const restoreSaveTimeout = 30 * time.Second
 
+// stopHandOffTimeout bounds the hand-off Close asks of each driver (issue #3436):
+// one Engine API request per stop in flight, which a healthy daemon receives in
+// milliseconds. It runs beside Close's join, so it never lengthens CloseBound.
+const stopHandOffTimeout = 5 * time.Second
+
+// handOffStops starts, for each driver that implements execution.StopHandOff, the
+// hand-off of its stops in flight, and returns the group to join. A failure is
+// logged: the stop goes on in this process for as long as it lives, and the next
+// boot's Sweep is the backstop.
+func (m *Manager) handOffStops() *sync.WaitGroup {
+	var wg sync.WaitGroup
+	for name, d := range m.drivers {
+		h, ok := d.(execution.StopHandOff)
+		if !ok {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), stopHandOffTimeout)
+			defer cancel()
+			if err := h.HandOffStops(ctx); err != nil {
+				m.logger.Warn("shutdown: could not hand every stop in flight to the driver's backend",
+					"driver", name, "error", err)
+			}
+		}()
+	}
+	return &wg
+}
+
+// CloseBound is Manager.Close's worst case on a driver whose longest stop is
+// maxStop: a retry stop already inside inst.Stop, then the save-on restore a
+// failed stop runs after it (restoreSaveTimeout). compose.yaml's
+// stop_grace_period on the Worker must cover it (issues #2934, #3436); a test in
+// cmd/worker pins that against containerdriver.MaxStopDuration.
+func CloseBound(maxStop time.Duration) time.Duration {
+	return maxStop + restoreSaveTimeout
+}
+
 // closingSaveOnTimeout bounds the SAME RCON call when Close issues it for a stop
 // bracket still outstanding at shutdown (issue #3166). It is deliberately far
 // shorter than restoreSaveTimeout above, and the reason is what the two budgets
@@ -997,7 +1049,7 @@ const restoreSaveTimeout = 30 * time.Second
 // default grace, so the drain can never be what an unconfigured deployment is
 // SIGKILLed for. It is also the WHOLE of the latency this change can add to a
 // shutdown: Close's restores run concurrently, so a drain of any size costs at most
-// this once, and Close's ~280 s worst case — which compose's stop_grace_period is
+// this once, and Close's 550 s worst case — which compose's stop_grace_period is
 // sized for — is untouched, since 5 s is well inside the restoreSaveTimeout leg that
 // bound already counts.
 //
@@ -1627,11 +1679,13 @@ func (m *Manager) flushBeforeStopWithDriver(ctx context.Context, serverID, drive
 	if errors.Is(err, execution.ErrServerPropertiesUnreadable) {
 		// RCON's credentials are in the refused file, so there is nothing to dial.
 		// The stop is not failed for it and the API is not told (issue #3347). The
-		// driver falls back to its stop signal, and the server may be killed before
-		// its own shutdown save completes (issue #3436), so the WARN promises none.
+		// driver falls back to its stop signal and waits while the server's own
+		// shutdown save keeps writing, but a server killed after the idle window or at
+		// the cap is left with a partial save (issue #3436), so the WARN promises none.
 		m.logger.Warn("stop flush: server.properties is not a regular file or is too large, so RCON cannot be opened; "+
-			"skipping the final save-all and falling back to a stop signal, which may end the server before "+
-			"its own shutdown save completes: changes since the last autosave can be lost",
+			"skipping the final save-all and falling back to a stop signal: the server's own shutdown save is "+
+			"waited for while it keeps writing, but a server killed after the idle window or at the cap is left "+
+			"with a partial save",
 			"server_id", serverID, "error", err)
 		return false
 	}
@@ -1998,6 +2052,29 @@ func (m *Manager) settleWorkingSet(ctx context.Context, serverID, workingDir str
 	}
 }
 
+// worldProgress is the probe a graceful stop's wait polls (issue #3436,
+// InstanceSpec.WorldProgress): the count, total size and newest mtime of the
+// working set's .mca files. It comes from the settle-wait's own scan, so it reads
+// metadata alone and walks a running server's tree the way that scan does, and an
+// incomplete or failed scan is an error the driver counts as progress.
+func (m *Manager) worldProgress(root string) func() (execution.WorldProgress, error) {
+	return func() (execution.WorldProgress, error) {
+		state, err := m.scanRegion(root)
+		if err != nil {
+			return execution.WorldProgress{}, err
+		}
+		var p execution.WorldProgress
+		for _, f := range state {
+			p.Files++
+			p.Bytes += f.size
+			if f.modTime.After(p.Newest) {
+				p.Newest = f.modTime
+			}
+		}
+		return p, nil
+	}
+}
+
 // regionState is a region file's identity for settle detection: its path mapped to
 // (mtime, size). Two scans are equal when every file matches on both.
 type regionState map[string]struct {
@@ -2272,6 +2349,9 @@ func (m *Manager) launchReserved(ctx context.Context, cmd session.Command, drive
 		CPUMillis: cmd.CPUMillis,
 		// What the driver holds while it re-owns the working set (workingSetLocks).
 		WorkingSetLock: m.workingSetLock(cmd.ServerID),
+		// What a graceful stop watches to tell a shutdown save still writing from a
+		// hung server (issue #3436).
+		WorldProgress: m.worldProgress(workingDir),
 	})
 	if err != nil {
 		m.release(cmd.ServerID)
@@ -2329,7 +2409,7 @@ func (m *Manager) handleStop(ctx context.Context, cmd session.Command, graceful 
 		// A lifecycle command is already reserved in flight for this id (issue #780):
 		// most importantly, a DETACHED stop from a dropped stream's lane is still
 		// confirming termination — takeStoppableReserve evicted the instance and holds
-		// the reservation across inst.Stop (up to ~3x stopTimeout). A re-sent StopServer
+		// the reservation across inst.Stop (up to the stop cap). A re-sent StopServer
 		// on the reconnected stream must NOT get SERVER_NOT_FOUND here: that makes the
 		// API converge observed=stopped and unassign while the old process is still
 		// alive and writing, after which a re-placed start's HydrateTrigger would clobber

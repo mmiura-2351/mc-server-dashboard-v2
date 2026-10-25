@@ -77,8 +77,31 @@ type fakeDocker struct {
 	// stopped records the ids passed to Stop (in order), and stopErr forces a Stop
 	// failure. Used by the Sweep tests to assert the graceful-stop-before-remove
 	// ordering for running orphans (issue #336).
-	stopped    []string
-	stopErr    error
+	stopped []string
+	stopErr error
+	// daemonStops counts Stop calls (`docker stop`, daemon-side SIGKILL) and
+	// terminates Terminate calls (SIGTERM alone) (issue #3436).
+	daemonStops int
+	terminates  int
+	// handOffs records each HandOff (a Worker shutdown giving a stop to the
+	// daemon, issue #3436) with the grace it passed.
+	handOffs []handOffCall
+	// handOffSignals models the daemon's `docker stop` sending SIGTERM at once:
+	// each HandOff closes signalled (once). handOffBlock, when set, holds every
+	// HandOff until it is closed, modelling a slow daemon.
+	signalled    chan struct{}
+	signalOnce   sync.Once
+	handOffBlock chan struct{}
+	// handOffErr, when set, fails every HandOff: the daemon never got the stop.
+	// handOffHook, when set, runs first in every HandOff, outside the lock, with the
+	// attempt's index (from 0); an error it returns fails that attempt.
+	// handOffAttempts counts every HandOff, failed or not.
+	handOffErr      error
+	handOffHook     func(n int) error
+	handOffAttempts int
+	// beforeKill, when set, runs once at the start of the next Kill, outside the
+	// lock, so a test can interleave a hand-off with the Worker's own kill.
+	beforeKill func()
 	killCalled bool
 	killCalls  int
 	// killNoExit models a container that survives docker kill: Kill records the
@@ -215,6 +238,88 @@ func (f *fakeDocker) Start(_ context.Context, _ string) error {
 }
 
 func (f *fakeDocker) Stop(ctx context.Context, id string, _ time.Duration) error {
+	f.mu.Lock()
+	f.daemonStops++
+	f.mu.Unlock()
+	return f.term(ctx, id)
+}
+
+// Terminate shares Stop's behaviour fields: both are the SIGTERM a stop sends, the
+// Sweep's through `docker stop` and an instance's through the kill endpoint (issue
+// #3436), so stopCalled, stopNoExit, stopErr and the rest model either. Which of
+// the two was used is counted apart (daemonStops, terminates), since only the kill
+// endpoint leaves the SIGKILL to the driver.
+func (f *fakeDocker) Terminate(ctx context.Context, id string) error {
+	f.mu.Lock()
+	f.terminates++
+	f.mu.Unlock()
+	return f.term(ctx, id)
+}
+
+// handOffCall is one recorded HandOff.
+type handOffCall struct {
+	id    string
+	grace time.Duration
+}
+
+// HandOff records the hand-off and leaves the container as it is: the daemon's
+// kill lands only once the grace runs out, which no test waits for.
+func (f *fakeDocker) HandOff(_ context.Context, id string, grace time.Duration) error {
+	f.mu.Lock()
+	block, hook, n := f.handOffBlock, f.handOffHook, f.handOffAttempts
+	f.handOffAttempts++
+	f.mu.Unlock()
+	if block != nil {
+		<-block
+	}
+	if hook != nil {
+		if err := hook(n); err != nil {
+			return err
+		}
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.handOffErr != nil {
+		return f.handOffErr
+	}
+	f.handOffs = append(f.handOffs, handOffCall{id: id, grace: grace})
+	if f.signalled != nil {
+		f.signalOnce.Do(func() { close(f.signalled) })
+	}
+	return nil
+}
+
+func (f *fakeDocker) handOffAttemptCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.handOffAttempts
+}
+
+func (f *fakeDocker) terminateCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.terminates
+}
+
+func (f *fakeDocker) handOffCalls() []handOffCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]handOffCall(nil), f.handOffs...)
+}
+
+func (f *fakeDocker) daemonStopCalled() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.daemonStops > 0
+}
+
+func (f *fakeDocker) terminateCalled() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.terminates > 0
+}
+
+func (f *fakeDocker) term(ctx context.Context, id string) error {
 	deadline, hasDeadline := ctx.Deadline()
 	f.mu.Lock()
 	f.stopCalled = true
@@ -241,6 +346,13 @@ func (f *fakeDocker) Stop(ctx context.Context, id string, _ time.Duration) error
 }
 
 func (f *fakeDocker) Kill(_ context.Context, _ string) error {
+	f.mu.Lock()
+	hook := f.beforeKill
+	f.beforeKill = nil
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	f.mu.Lock()
 	f.killCalled = true
 	f.killCalls++
@@ -1902,8 +2014,8 @@ func TestGracefulStopFlushTrueSkipsRCONAndDockerStop(t *testing.T) {
 	if !strings.Contains(logged, "flush succeeded; terminating container") {
 		t.Fatalf("expected 'flush succeeded' info log; got %q", logged)
 	}
-	if strings.Contains(logged, "graceful stop timed out") {
-		t.Fatalf("flush-success path must not log 'graceful stop timed out'; got %q", logged)
+	if strings.Contains(logged, "graceful stop escalating") {
+		t.Fatalf("flush-success path must not log 'graceful stop escalating'; got %q", logged)
 	}
 }
 
@@ -1983,7 +2095,7 @@ func TestStopDeadlineStartsAfterFlush(t *testing.T) {
 	if !ok {
 		t.Fatal("docker stop was never called with a deadline")
 	}
-	full := 3*stopTimeout + stopDeadlineGrace
+	full := defaultStopCap + stopDeadlineGrace
 	if budget < full-slack {
 		t.Fatalf("docker stop arrived with %v of its %v budget after a %v flush; "+
 			"the flush was charged to the stop deadline", budget, full, flushTimeout)
@@ -2158,7 +2270,7 @@ func TestGracefulStopEscalatesToKill(t *testing.T) {
 		t.Fatal("expected docker kill escalation")
 	}
 	logged := buf.String()
-	if !strings.Contains(logged, "graceful stop timed out; escalating to kill") ||
+	if !strings.Contains(logged, "graceful stop escalating") || !strings.Contains(logged, "to=kill") ||
 		!strings.Contains(logged, spec().ServerID) {
 		t.Fatalf("expected a WARN escalation log naming the server id; got %q", logged)
 	}
@@ -2166,7 +2278,7 @@ func TestGracefulStopEscalatesToKill(t *testing.T) {
 
 // A forced stop (graceful=false) that escalates to a kill logs the FORCED-stop
 // WARN, not the graceful one: a forced stop skips the clean shutdown by design, so
-// "graceful stop timed out" would misdescribe it (#927 diagnostic accuracy).
+// "graceful stop escalating" would misdescribe it (#927 diagnostic accuracy).
 func TestForcedStopEscalatesToKillWithForcedMessage(t *testing.T) {
 	var buf syncBuffer
 	docker := newFakeDocker()
@@ -2200,7 +2312,7 @@ func TestForcedStopEscalatesToKillWithForcedMessage(t *testing.T) {
 		!strings.Contains(logged, spec().ServerID) {
 		t.Fatalf("expected a forced-stop WARN naming the server id; got %q", logged)
 	}
-	if strings.Contains(logged, "graceful stop timed out") {
+	if strings.Contains(logged, "graceful stop escalating") {
 		t.Fatalf("forced stop must not log the graceful-timeout message; got %q", logged)
 	}
 }
