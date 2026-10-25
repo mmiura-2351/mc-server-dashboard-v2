@@ -700,6 +700,21 @@ class FsStorage(Storage):
             fs_handle.community_id, fs_handle.server_id, fs_handle.transfer_id
         )
         if not staging.is_dir():
+            # A concurrent delete's prune removes ``incoming/`` with the rest of the
+            # working set, so a staging area gone at commit can be that delete rather
+            # than an incomplete transfer (issue #3477). Name it as the commit
+            # re-check does; the staging is already gone, so only the lease remains.
+            if expected_base is not None:
+                pruned = await asyncio.to_thread(
+                    self._pruned_generation,
+                    fs_handle.community_id,
+                    fs_handle.server_id,
+                    expected_base,
+                )
+                if pruned is not None:
+                    self._release_staging(staging)
+                    fs_handle.consumed = True
+                    raise PrunedStoreError(expected_base, pruned)
             raise IncompleteTransferError("no completed staging area to publish")
         # The "proven complete" gate (STORAGE.md Section 4.1): an empty staging area
         # is not a publishable transfer, so an empty staged dir is refused here too,
@@ -748,6 +763,26 @@ class FsStorage(Storage):
         self._release_staging(staging)
         fs_handle.consumed = True
         return generation
+
+    def _pruned_generation(
+        self, community_id: CommunityId, server_id: ServerId, expected_base: int
+    ) -> int | None:
+        """The store generation if a prune ran since ``expected_base``, else None.
+
+        The prune signature of the commit re-check in ``_publish_and_bump`` (issues
+        #921, #3434): the generation moved and no ``current`` symlink is left. Read
+        under the server lock the prune holds for its whole run, so a prune in flight
+        is observed either complete or not at all.
+        """
+
+        with self._server_lock(community_id, server_id):
+            current = self._read_generation(self._server_root(community_id, server_id))
+            if (
+                current != expected_base
+                and not self._current_link(community_id, server_id).is_symlink()
+            ):
+                return current
+        return None
 
     def _publish_and_bump(
         self,

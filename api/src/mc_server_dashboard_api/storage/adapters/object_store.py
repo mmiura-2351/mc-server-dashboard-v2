@@ -848,6 +848,22 @@ class ObjectStorage(Storage):
         async with self._client_factory() as client:
             staged = await client.list_objects(incoming)
             if not staged:
+                # A concurrent delete's prune deletes ``incoming/`` with the rest of
+                # the working set, so an empty staging prefix can be that delete
+                # rather than an empty transfer (issue #3477). Name it with the prune
+                # signature of the commit re-check below (issues #921, #3434), read
+                # under the server lock the prune holds for its whole run.
+                if expected_base is not None:
+                    async with self._server_lock(h.community_id, h.server_id):
+                        current = await self._read_generation(client, server_prefix)
+                        pruned = (
+                            current != expected_base
+                            and await self._read_pointer(client, server_prefix) is None
+                        )
+                    if pruned:
+                        self._release_staging(incoming)
+                        h.consumed = True
+                        raise PrunedStoreError(expected_base, current)
                 # The "proven complete" gate (Section 4.1): an empty staging area is
                 # not a publishable transfer. The end-of-stream + manifest/size
                 # integrity check is part of the data-plane contract (epic #8); this

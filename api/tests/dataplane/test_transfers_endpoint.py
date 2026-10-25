@@ -12,10 +12,12 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import shutil
 import tarfile
 import uuid
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from pathlib import Path
+from typing import cast
 
 import pytest
 from fastapi import FastAPI
@@ -29,12 +31,14 @@ from mc_server_dashboard_api.dependencies import (
     get_transfer_semaphore,
     get_worker_credential,
 )
-from mc_server_dashboard_api.storage.adapters.fs import FsStorage
+from mc_server_dashboard_api.storage.adapters.fs import FsStorage, _FsSnapshotHandle
 from mc_server_dashboard_api.storage.adapters.object_store import (
     _POINTER,
     ObjectStorage,
+    _delete_prefix,
+    _ObjectSnapshotHandle,
 )
-from mc_server_dashboard_api.storage.domain.port import Storage
+from mc_server_dashboard_api.storage.domain.port import SnapshotHandle, Storage
 from mc_server_dashboard_api.storage.domain.value_objects import (
     CommunityId,
     RelPath,
@@ -788,6 +792,137 @@ def test_first_upload_refused_when_delete_prunes_never_published_store(
     assert resp.status_code == 409
     assert resp.json()["reason"] == "deleted_during_upload"
     assert resp.json()["base_generation"] == 0
+
+
+def _post_snapshot_with_hook(
+    tmp_path: Path,
+    storage: Storage,
+    *,
+    published: bool,
+    after_write: Callable[
+        [Storage, SnapshotHandle, CommunityId, ServerId], Awaitable[None]
+    ],
+) -> tuple[int, dict[str, object]]:
+    """POST a snapshot, running ``after_write`` once the body is staged.
+
+    The hook lands after the guard and the staging stream and before the commit,
+    inside the upload window.
+    """
+
+    worker = str(uuid.uuid4())
+    client, _ = _setup(tmp_path)
+    _shared_app.dependency_overrides[get_storage] = lambda: storage
+    community, server = _scope()
+    c, s = CommunityId(community), ServerId(server)
+
+    async def _publish_first() -> None:
+        handle = await storage.begin_snapshot(c, s)
+
+        async def _stream() -> AsyncIterator[bytes]:
+            yield _tar_bytes({"k": b"snap"})
+
+        await storage.write_snapshot(handle, _stream())
+        await storage.commit_snapshot(handle, publisher=worker)
+
+    if published:
+        asyncio.run(_publish_first())
+    base = asyncio.run(storage.current_generation(c, s))
+
+    real_write_snapshot = storage.write_snapshot
+
+    async def _hooked_write_snapshot(
+        handle: SnapshotHandle, stream: AsyncIterator[bytes]
+    ) -> None:
+        await real_write_snapshot(handle, stream)
+        await after_write(storage, handle, c, s)
+
+    storage.write_snapshot = _hooked_write_snapshot  # type: ignore[method-assign]
+
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"),
+            content=_tar_bytes({"k": b"in-flight"}),
+            headers={
+                **_auth(),
+                "X-Working-Set-Base-Generation": str(base),
+                "X-Worker-Id": worker,
+            },
+        )
+    return resp.status_code, resp.json()
+
+
+async def _prune(
+    storage: Storage, handle: SnapshotHandle, c: CommunityId, s: ServerId
+) -> None:
+    del handle
+    await storage.prune_to_final_snapshot(c, s)
+
+
+@pytest.mark.parametrize("published", [True, False], ids=["published", "unpublished"])
+@pytest.mark.parametrize(
+    "make_storage", [_fs_storage, _object_storage], ids=["fs", "object"]
+)
+def test_upload_refused_when_delete_prunes_its_staging(
+    tmp_path: Path, make_storage: Callable[[Path], Storage], published: bool
+) -> None:
+    # Issue #3477: a delete's prune that lands after the body is staged removes the
+    # staging area (incoming/) along with the working set. The commit then finds no
+    # staging to publish. That is the concurrent delete, not an empty upload, so it
+    # must answer the same 409 ``deleted_during_upload`` as the commit re-check.
+    storage = make_storage(tmp_path)
+
+    status_code, body = _post_snapshot_with_hook(
+        tmp_path, storage, published=published, after_write=_prune
+    )
+
+    assert status_code == 409
+    assert body["reason"] == "deleted_during_upload"
+    assert body["base_generation"] == (1 if published else 0)
+    # The commit consumed the handle without an endpoint abort: no lease may leak.
+    assert storage._active_staging == set()  # type: ignore[attr-defined]
+
+
+async def _drop_fs_staging(
+    storage: Storage, handle: SnapshotHandle, c: CommunityId, s: ServerId
+) -> None:
+    transfer_id = cast(_FsSnapshotHandle, handle).transfer_id
+    shutil.rmtree(cast(FsStorage, storage)._staging_dir(c, s, transfer_id))
+
+
+async def _drop_object_staging(
+    storage: Storage, handle: SnapshotHandle, c: CommunityId, s: ServerId
+) -> None:
+    object_storage = cast(ObjectStorage, storage)
+    transfer_id = cast(_ObjectSnapshotHandle, handle).transfer_id
+    incoming = object_storage._incoming_prefix(c, s, transfer_id)
+    async with object_storage._client_factory() as client:
+        await _delete_prefix(client, incoming)
+
+
+@pytest.mark.parametrize("published", [True, False], ids=["published", "unpublished"])
+@pytest.mark.parametrize(
+    ("make_storage", "drop_staging"),
+    [(_fs_storage, _drop_fs_staging), (_object_storage, _drop_object_staging)],
+    ids=["fs", "object"],
+)
+def test_upload_with_missing_staging_and_no_prune_stays_empty_snapshot(
+    tmp_path: Path,
+    make_storage: Callable[[Path], Storage],
+    drop_staging: Callable[
+        [Storage, SnapshotHandle, CommunityId, ServerId], Awaitable[None]
+    ],
+    published: bool,
+) -> None:
+    # Control for the test above (issue #3477): staging that is gone at commit while
+    # the store was NOT pruned is still the empty/incomplete transfer, ``400``.
+    storage = make_storage(tmp_path)
+
+    status_code, body = _post_snapshot_with_hook(
+        tmp_path, storage, published=published, after_write=drop_staging
+    )
+
+    assert status_code == 400
+    assert body["reason"] == "empty_snapshot"
 
 
 class _PointerRemovalFailed(Exception):
