@@ -249,7 +249,10 @@ server's world files keep being written, and escalates after an idle window or
 at a hard cap (issue #3436). Since the Worker, not Docker, now sends the final
 SIGKILL, a Worker that shuts down mid-stop first hands each stop in flight back
 to the Docker daemon as `docker stop` with the grace it had left (the driver's
-`StopHandOff`), so the kill still lands after the Worker exits. A `StopServer`
+`StopHandOff`), so the kill still lands after the Worker exits. Each kill has
+one owner: once a stop is handed off, the Worker never signals it again and only
+waits for the exit, and a hand-off that comes after the Worker has committed to
+its own kill matches it with a daemon kill rather than a SIGTERM. A `StopServer`
 round trip is at most 550 s, inside the API's 600 s stop budget and the Worker's
 600 s shutdown grace in `compose.yaml` (values, the derivation and the test that
 pins them in [`CONFIGURATION.md`](CONFIGURATION.md) Section 6.3).

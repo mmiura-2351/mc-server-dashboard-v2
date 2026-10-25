@@ -92,6 +92,8 @@ type fakeDocker struct {
 	signalled    chan struct{}
 	signalOnce   sync.Once
 	handOffBlock chan struct{}
+	// handOffErr, when set, fails every HandOff: the daemon never got the stop.
+	handOffErr error
 	// beforeKill, when set, runs once at the start of the next Kill, outside the
 	// lock, so a test can interleave a hand-off with the Worker's own kill.
 	beforeKill func()
@@ -266,6 +268,9 @@ func (f *fakeDocker) HandOff(_ context.Context, id string, grace time.Duration) 
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.handOffErr != nil {
+		return f.handOffErr
+	}
 	f.handOffs = append(f.handOffs, handOffCall{id: id, grace: grace})
 	if f.signalled != nil {
 		f.signalOnce.Do(func() { close(f.signalled) })

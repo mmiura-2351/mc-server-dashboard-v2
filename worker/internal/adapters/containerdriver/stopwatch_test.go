@@ -717,3 +717,27 @@ func TestStopStartedAfterShutdownHandsItselfOff(t *testing.T) {
 		t.Fatalf("hand-offs = %+v, want one for container-1 with about the %v cap", got, defaultStopCap)
 	}
 }
+
+// A hand-off whose request never reaches the daemon gives the stop back to the
+// Worker: nobody else would kill a server that does not exit, so the Worker's own
+// idle window ends it as before.
+func TestFailedHandOffGivesTheStopBack(t *testing.T) {
+	docker := newFakeDocker()
+	docker.stopNoExit = true
+	docker.handOffErr = errors.New("daemon unreachable")
+	r := startStopRun(t, docker, nil, errors.New("rcon unavailable"), &fakeWorld{})
+	r.awaitWaiting()
+	r.step(testPoll)
+	if err := r.d.HandOffStops(context.Background()); err == nil {
+		t.Fatal("HandOffStops = nil, want the daemon's error")
+	}
+	elapsed := testPoll
+	for !r.step(testPoll) {
+		if elapsed += testPoll; elapsed > 2*testIdle {
+			t.Fatal("the Worker did not take the stop back after the failed hand-off")
+		}
+	}
+	if r.err != nil || !docker.killWasCalled() {
+		t.Fatalf("Stop = %v, kill = %v; want the Worker's kill after its idle window", r.err, docker.killWasCalled())
+	}
+}

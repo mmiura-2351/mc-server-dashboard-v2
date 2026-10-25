@@ -736,28 +736,38 @@ running, and the cap's remainder once the escalation has started. Docker
 finishes a stop even after the client that sent it has gone (verified on Docker
 29.5.3). So whatever happens to the Worker afterwards, the daemon SIGKILLs a
 server that has not exited when that grace runs out. A stop that starts after
-the hand-off hands itself off too, in the background, so it is not delayed.
+the hand-off is handed off as it starts, with the request sent in the
+background so the stop is not delayed.
 
-The hand-off never SIGTERMs a world the flush has just written. A stop whose
-flush succeeded is killed at once, because a shutdown save cut short by that
-kill would overwrite the flushed regions. If the stop has already committed to
-that kill, the hand-off asks the daemon to kill too. If the hand-off reaches
-the stop first, its SIGTERM has started a shutdown save, so the stop does not
-kill: it watches that save under the idle window and the cap like any other.
+**Each kill has one owner.** Once a stop is handed off, the daemon owns its
+kill. The Worker sends no RCON `stop`, no SIGTERM and no SIGKILL for that stop
+again, and only waits for the container to exit, at most until the daemon's
+kill is due plus 10 s. Before each SIGKILL of its own (after the idle window,
+at the cap, or right after a successful flush), the Worker commits to it under
+the stop's lock. A hand-off that comes after that commit asks the daemon to
+kill too, and never to SIGTERM. So a shutdown save started by any SIGTERM is
+cut short only by the idle window, the cap, or the daemon's own grace after a
+hand-off. In particular, a world the flush has just written is never SIGTERMed
+by the hand-off.
+
+The cost of this rule is accepted: after a hand-off, a hung server is killed
+when the daemon's grace runs out, not after a 30 s idle window. That only
+happens while the Worker is shutting down, and it is still within the cap.
 
 Each hand-off logs one `WARN` line,
 `worker shutting down mid-stop: the docker daemon now owns the kill`, with the
-grace it was given. While the Worker process is still up, its own stop keeps
-running and may still end the server sooner.
+grace it was given.
 
-Some cases are not covered. A hand-off that fails (the daemon is unreachable,
-or it does not answer within 5 s) is logged, and the server is then left to the
-next Worker boot's sweep. So is a stop that starts after the shutdown began if
-the Worker exits before its background hand-off reaches the daemon. A Worker
-that is SIGKILLed or crashes runs no shutdown at all, so the same sweep is the
-backstop. A server that keeps running past the
-hand-off is not lost: its stop's result just never reaches the API, which
-converges the server's row through the reconciler once the Worker reconnects.
+Some cases are not covered. A hand-off whose request fails (the daemon is
+unreachable, or it does not answer within 5 s) is logged and gives the stop
+back to the Worker, whose own idle window and cap then end it while the Worker
+lives. If the Worker exits first, the next Worker boot's sweep is the backstop.
+The same applies to a stop that starts after the shutdown began, when the
+Worker exits before its background hand-off reaches the daemon. A Worker that is
+SIGKILLed or crashes runs no shutdown at all, so the same sweep is the backstop.
+A server that keeps running past the hand-off is not lost: its stop's result
+just never reaches the API, which converges the server's row through the
+reconciler once the Worker reconnects.
 
 #### Per-server memory limit: per-driver guarantee
 
