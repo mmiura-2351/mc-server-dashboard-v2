@@ -932,3 +932,74 @@ func TestTimedOutHandOffThatLandsLateIsNeverKilled(t *testing.T) {
 		t.Fatalf("Stop = %v, kill = %v; want a clean stop", r.err, docker.killWasCalled())
 	}
 }
+
+// startDeliver claims a stop due in 5 s on a fake clock and runs its delivery,
+// returning the clock, the first attempt's result and the delivery's end.
+func startDeliver(t *testing.T, docker *fakeDocker) (*stopClock, chan error, chan struct{}) {
+	t.Helper()
+	d := New(docker, images(), nil, Options{WorkerID: "w1", GameBindIP: "0.0.0.0"})
+	clock := newStopClock()
+	d.now, d.after = clock.Now, clock.After
+	s := &inflightStop{serverID: "s1", containerID: "container-1"}
+	s.setKillBy(clock.Now().Add(5 * time.Second))
+	kill, _ := s.claim(clock.Now())
+	first, done := make(chan error, 1), make(chan struct{})
+	go func() {
+		d.handOffs.deliver(s, kill, first)
+		close(done)
+	}()
+	return clock, first, done
+}
+
+func isClosed(ch chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
+}
+
+// A hand-off request that fails after the daemon's kill came due starts no other:
+// the due time is read after the call, not before it (issue #3436 review). A late
+// `docker stop` would only lengthen what the stop has already given up on.
+func TestHandOffSendsNothingAfterTheDueTimePassedDuringACall(t *testing.T) {
+	docker := newFakeDocker()
+	release := make(chan struct{})
+	docker.handOffHook = func(n int) error {
+		if n == 0 {
+			<-release
+		}
+		return errors.New("daemon hiccup")
+	}
+	clock, first, done := startDeliver(t, docker)
+	awaitCondition(t, "the first request", func() bool { return docker.handOffAttemptCount() == 1 })
+	clock.advance(10 * time.Second) // the call outlasts the due time
+	close(release)
+	if err := <-first; err == nil {
+		t.Fatal("first attempt = nil, want its error")
+	}
+	awaitCondition(t, "the delivery to end or pause", func() bool { return isClosed(done) || clock.pending() > 0 })
+	clock.advance(stopHandOffRetryInterval)
+	awaitCondition(t, "the delivery to end", func() bool { return isClosed(done) })
+	if n := docker.handOffAttemptCount(); n != 1 {
+		t.Fatalf("hand-off attempts = %d, want 1: none may start once the kill is due", n)
+	}
+}
+
+// Nor does one whose retry pause runs past the due time: the time is read again
+// before each request.
+func TestHandOffSendsNothingAfterTheDueTimePassedDuringThePause(t *testing.T) {
+	docker := newFakeDocker()
+	docker.handOffHook = func(int) error { return errors.New("daemon unreachable") }
+	clock, first, done := startDeliver(t, docker)
+	if err := <-first; err == nil {
+		t.Fatal("first attempt = nil, want its error")
+	}
+	awaitCondition(t, "the retry pause", func() bool { return clock.pending() > 0 })
+	clock.advance(10 * time.Second) // the pause ends after the due time
+	awaitCondition(t, "the delivery to end", func() bool { return isClosed(done) })
+	if n := docker.handOffAttemptCount(); n != 1 {
+		t.Fatalf("hand-off attempts = %d, want 1: none may start once the kill is due", n)
+	}
+}

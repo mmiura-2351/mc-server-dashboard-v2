@@ -2460,11 +2460,25 @@ func (h *stopHandOffs) deliver(s *inflightStop, kill bool, first chan<- error) {
 		return
 	}
 	due := s.daemonKillDue()
+	gaveUp := func(attempts int, err error) {
+		h.d.logger.Warn("worker shutting down mid-stop: no hand-off reached the docker daemon before its kill was due; "+
+			"the next Worker boot's sweep owns the container",
+			"server_id", s.serverID, "attempts", attempts, "error", err)
+	}
+	var err error
 	for attempt := 1; ; attempt++ {
+		// The time is read right before each request, and again after a failed
+		// one: no request starts once the daemon's kill is due, however long the
+		// last call or pause took (issue #3436 review). The first always goes out;
+		// its claim was just made, at least 1 s before the due time.
 		now := h.d.now()
+		if attempt > 1 && !now.Before(due) {
+			gaveUp(attempt-1, err)
+			return
+		}
 		grace := max(time.Duration(math.Ceil(due.Sub(now).Seconds()))*time.Second, time.Second)
 		ctx, cancel := context.WithTimeout(context.Background(), stopHandOffCallTimeout)
-		err := h.d.docker.HandOff(ctx, s.containerID, grace)
+		err = h.d.docker.HandOff(ctx, s.containerID, grace)
 		cancel()
 		if attempt == 1 {
 			first <- err
@@ -2474,10 +2488,8 @@ func (h *stopHandOffs) deliver(s *inflightStop, kill bool, first chan<- error) {
 				"server_id", s.serverID, "grace", grace, "attempt", attempt)
 			return
 		}
-		if !now.Before(due) {
-			h.d.logger.Warn("worker shutting down mid-stop: no hand-off reached the docker daemon before its kill was due; "+
-				"the next Worker boot's sweep owns the container",
-				"server_id", s.serverID, "attempts", attempt, "error", err)
+		if !h.d.now().Before(due) {
+			gaveUp(attempt, err)
 			return
 		}
 		if attempt == 1 {
