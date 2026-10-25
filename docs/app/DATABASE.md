@@ -868,6 +868,24 @@ never rolls back or raises into the operation. Append-only.
 | `outcome` | text | `success` / `denied` / `error` (CHECK enum) |
 | `created_at` | timestamptz | the event time |
 
+**A committed change is audited as `success` even when the response is an
+error because a follow-up step failed.** Some routes commit their change and
+then write the working set. If that later write fails, the route answers an
+error, but the change stands. The route still records the event its success
+path records, with outcome `success`. The row has no detail column, so the
+event cannot say that the follow-up failed. The error response tells the
+caller. Routes that follow this rule:
+
+- plugin enable, disable, and side change answering 409 `plugin_jar_missing`
+  (#3437);
+- a port change answering 409 `server_properties_missing` because the file
+  vanished after the pre-commit check (#3448);
+- server create, import, and update answering 503 `seed_failed` (#3483).
+
+A failure raised before the commit records no event, since nothing changed.
+Backup restore is the exception: its post-publish seed failure (503
+`seed_failed`) records `error`.
+
 **No foreign keys on purpose.** `actor_id`, `community_id`, and `target_id` are
 deliberately *not* FKs: an audit trail must outlive the entities it describes
 (deleting a user or Community must not erase the record of what they did, and must

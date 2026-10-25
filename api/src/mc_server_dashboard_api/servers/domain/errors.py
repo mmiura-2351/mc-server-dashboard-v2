@@ -100,7 +100,15 @@ class WorkingSetSeedFailedError(ServerError):
     A start raises it too, when it cannot regenerate a player file a group change
     left stale (issue #3223). Nothing has committed there: the start is refused
     before its desired-state flip, and retrying it makes the write again.
+
+    ``server_id`` names the server the failed write was for, so the create and
+    import edges can audit the row they committed but never got back (issue
+    #3483).
     """
+
+    def __init__(self, server_id: str) -> None:
+        super().__init__(server_id)
+        self.server_id = server_id
 
 
 class InvalidSnapshotIntervalError(ServerError):
