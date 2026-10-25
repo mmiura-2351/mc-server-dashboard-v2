@@ -22,6 +22,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from mc_server_dashboard_api.audit.domain import operations as ops
+from mc_server_dashboard_api.audit.domain.events import Outcome
 from mc_server_dashboard_api.community.adapters.permission_checker import (
     RepositoryMembershipVisibility,
     RoleGrantPermissionChecker,
@@ -38,6 +40,7 @@ from mc_server_dashboard_api.community.domain.value_objects import (
     UserId,
 )
 from mc_server_dashboard_api.dependencies import (
+    get_audit_recorder,
     get_bedrock_joinability,
     get_create_server,
     get_current_user,
@@ -110,6 +113,7 @@ from mc_server_dashboard_api.servers.domain.version_validator import (
 from mc_server_dashboard_api.servers.domain.version_validator import (
     UnknownVersionError as CatalogUnknownVersionError,
 )
+from tests.audit.fakes import RecordingAuditRecorder
 from tests.client_utils import enter_client
 from tests.community.fakes import FakeAuthzUnitOfWork
 from tests.identity.fakes import make_user
@@ -249,6 +253,7 @@ def _app(
     delete: _FakeUseCase | None = None,
     join_config: JoinHostnameConfig | None = None,
     bedrock: BedrockJoinability | None = None,
+    recorder: RecordingAuditRecorder | None = None,
 ) -> object:
     app = _shared_app
     app.dependency_overrides.clear()
@@ -269,6 +274,8 @@ def _app(
         app.dependency_overrides[get_delete_server] = lambda: delete
     if join_config is not None:
         app.dependency_overrides[get_join_hostname_config] = lambda: join_config
+    if recorder is not None:
+        app.dependency_overrides[get_audit_recorder] = lambda: recorder
     # Always overridden (never a live DB in this fake-only suite): no plugins by
     # default, i.e. no server is Geyser-enabled unless a test seeds one.
     app.dependency_overrides[get_bedrock_joinability] = lambda: (
@@ -934,7 +941,9 @@ def test_update_game_port_properties_missing_is_409() -> None:
     app = _app(
         member=True,
         allow=True,
-        update=_FakeUseCase(error=ServerPropertiesMissingError("server-id")),
+        update=_FakeUseCase(
+            error=ServerPropertiesMissingError("server-id", committed=False)
+        ),
     )
     client = _client(app)
     resp = client.patch(
@@ -958,6 +967,80 @@ def test_update_game_port_seed_failure_is_503() -> None:
     )
     assert resp.status_code == 503
     assert resp.json()["reason"] == "seed_failed"
+
+
+class _VanishingPropertiesStore(FakeFileStore):
+    """Serves server.properties to the pre-commit check, then reports it gone."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.files["server.properties"] = b"server-port=25565\nrcon.password=tok\n"
+
+    async def read_file(
+        self, *, community_id: ServersCommunityId, server_id: ServerId, rel_path: str
+    ) -> bytes:
+        content = await super().read_file(
+            community_id=community_id, server_id=server_id, rel_path=rel_path
+        )
+        if rel_path == "server.properties":
+            del self.files[rel_path]
+        return content
+
+
+def test_update_game_port_properties_vanishing_after_commit_is_audited() -> None:
+    # The file passes the pre-commit check and is gone by the deferred rewrite
+    # (#1705), so the port change is committed before the 409 (issue #3448). It
+    # stands, so it is audited as the success path audits it; the audit row has
+    # no detail column to mark the unwritten file, and the 409 tells the caller.
+    community = uuid.uuid4()
+    server_id = uuid.uuid4()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server_entity(community_id=community, server_id=server_id))
+    recorder = RecordingAuditRecorder()
+    app = _app(
+        member=True,
+        allow=True,
+        update=_real_update(uow, file_store=_VanishingPropertiesStore()),
+        recorder=recorder,
+    )
+    resp = _client(app).patch(
+        f"/api/communities/{community}/servers/{server_id}",
+        json={"game_port": 25570},
+    )
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "server_properties_missing"
+    assert uow.commits == 1
+    assert uow.servers.by_id[ServerId(server_id)].game_port == 25570
+    assert [
+        (e.operation, e.outcome, e.community_id, e.target_type, e.target_id)
+        for e in recorder.events
+    ] == [(ops.SERVER_UPDATE, Outcome.SUCCESS, community, ops.TARGET_SERVER, server_id)]
+    assert recorder.events[0].actor_id is not None
+
+
+def test_update_game_port_properties_missing_before_commit_is_not_audited() -> None:
+    # The pre-commit check refuses (issue #2623), so nothing changed and nothing
+    # is audited -- the event is for a committed change only (issue #3448).
+    community = uuid.uuid4()
+    server_id = uuid.uuid4()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server_entity(community_id=community, server_id=server_id))
+    recorder = RecordingAuditRecorder()
+    app = _app(
+        member=True,
+        allow=True,
+        update=_real_update(uow, file_store=FakeFileStore()),
+        recorder=recorder,
+    )
+    resp = _client(app).patch(
+        f"/api/communities/{community}/servers/{server_id}",
+        json={"game_port": 25570},
+    )
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "server_properties_missing"
+    assert uow.commits == 0
+    assert uow.servers.by_id[ServerId(server_id)].game_port is None
+    assert recorder.events == []
 
 
 def test_update_game_port_out_of_schema_bound_is_422() -> None:
@@ -1007,11 +1090,13 @@ def test_update_permission_denied_is_403_with_permission_member() -> None:
     assert body["permission"] == "server:update"
 
 
-def _real_update(uow: FakeUnitOfWork) -> UpdateServer:
+def _real_update(
+    uow: FakeUnitOfWork, *, file_store: FakeFileStore | None = None
+) -> UpdateServer:
     return UpdateServer(
         uow=uow,
         clock=FakeClock(_NOW),
-        file_store=FakeFileStore(),
+        file_store=file_store if file_store is not None else FakeFileStore(),
         port_range=PortRange(start=25565, end=25664),
     )
 
