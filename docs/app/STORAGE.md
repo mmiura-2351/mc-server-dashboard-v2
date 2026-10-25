@@ -207,13 +207,15 @@ state, `DeleteServer` retains **exactly two** artifacts under the server directo
    (Section 2, generation marker). Packing is
    **fail-closed**: if it fails, the working set is left intact and the delete fails,
    so a deletion never silently loses the latest state. A server that never published
-   a snapshot has no `final.tar.gz`. The pack deliberately **bypasses the `.mca`
+   a snapshot has no `final.tar.gz`, but its generation marker is still advanced, so
+   a first upload racing the delete is refused at commit like any other (issue
+   #3439). The pack deliberately **bypasses the `.mca`
    integrity gate** (the gate applied to `create_backup_from_current`): a corrupt
    server must still be deletable, so torn regions are packed as-is.
 
 Everything else for the server is removed; after the prune the server directory
-holds only `backups/<newest-id>.tar.gz` (if any), `final.tar.gz` and the
-`generation` marker (both if published) — no `snapshots/`, `incoming/`,
+holds only `backups/<newest-id>.tar.gz` (if any), `final.tar.gz` (if published)
+and the `generation` marker — no `snapshots/`, `incoming/`,
 `versions/`, or `current` pointer remain. Nothing removes the server directory
 after a successful delete, so the few-byte marker is retained with the archives
 until an operator reclaims the directory. The retained archives are unreferenced orphans by design (not the bug the
