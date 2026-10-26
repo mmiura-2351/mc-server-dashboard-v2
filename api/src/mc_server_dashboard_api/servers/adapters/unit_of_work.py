@@ -9,8 +9,9 @@ A commit also publishes the status events of the observed-state writes it made
 durable, and a rollback — of the transaction or of a savepoint — discards the
 ones it undid (issue #3212): the servers repository stages one per changed row,
 so a use case that writes ``observed_state`` cannot forget the live frame, and
-no frame precedes its commit. A unit of work built without the bus refuses to
-commit such a write rather than drop its frame.
+no frame precedes its commit. A ``desired_state`` change stages one the same
+way (issue #3428). A unit of work built without the bus refuses to commit such
+a write rather than drop its frame.
 """
 
 from __future__ import annotations

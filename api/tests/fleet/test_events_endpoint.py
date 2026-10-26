@@ -65,7 +65,10 @@ from mc_server_dashboard_api.identity.application.authenticate_request import (
 )
 from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.servers.domain.errors import ServerNotFoundError
-from mc_server_dashboard_api.servers.domain.value_objects import ObservedState
+from mc_server_dashboard_api.servers.domain.value_objects import (
+    DesiredState,
+    ObservedState,
+)
 from tests.client_utils import enter_client
 from tests.identity.fakes import make_authentication, make_user
 
@@ -90,29 +93,35 @@ class _FakeChecker(PermissionChecker):
 
 @dataclass(frozen=True)
 class _FakeServer:
-    """The slice of the ``Server`` entity the endpoint reads (its observed state)."""
+    """The slice of the ``Server`` entity the endpoint reads (its two states)."""
 
     observed_state: ObservedState
+    desired_state: DesiredState
 
 
 class _FakeReadServer:
     """Stands in for ReadServer: the ownership check and the snapshot read.
 
     ``found`` decides the ownership check (cross-community -> not found); a found
-    server reports ``state`` as its observed state, which the on-subscribe
-    snapshot frame carries (#1795).
+    server reports ``state`` as its observed state and ``desired`` as its desired
+    state, which the on-subscribe snapshot frame carries (#1795, #3428).
     """
 
     def __init__(
-        self, *, found: bool, state: ObservedState = ObservedState.RUNNING
+        self,
+        *,
+        found: bool,
+        state: ObservedState = ObservedState.RUNNING,
+        desired: DesiredState = DesiredState.RUNNING,
     ) -> None:
         self._found = found
         self.state = state
+        self.desired = desired
 
     async def __call__(self, **_kwargs: object) -> object:
         if not self._found:
             raise ServerNotFoundError("x")
-        return _FakeServer(observed_state=self.state)
+        return _FakeServer(observed_state=self.state, desired_state=self.desired)
 
 
 class _Account:
@@ -345,7 +354,7 @@ def test_slow_consumer_receives_a_gap_frame_then_a_fresh_snapshot() -> None:
         third = ws.receive_json()
     assert first["stream"] == "gap"
     assert second["stream"] == "snapshot"
-    assert second["payload"] == {"state": "running"}
+    assert second["payload"] == {"state": "running", "desired_state": "running"}
     assert third["payload"] == {"state": "3"}
 
 
@@ -474,16 +483,20 @@ def _await_subscribers(bus: InProcessRealTimeEvents, server: str, count: int) ->
     assert bus.subscriber_count(server) == count
 
 
-def test_status_subscription_opens_with_a_snapshot_of_the_observed_state() -> None:
+def test_status_subscription_opens_with_a_snapshot_of_both_states() -> None:
+    # The desired state rides the snapshot beside the observed one (#3428), so
+    # a client that missed an intent change converges on it too.
     bus = InProcessRealTimeEvents()
     community, server = uuid.uuid4(), uuid.uuid4()
-    read_server = _FakeReadServer(found=True, state=ObservedState.CRASHED)
+    read_server = _FakeReadServer(
+        found=True, state=ObservedState.CRASHED, desired=DesiredState.STOPPED
+    )
     app = _app(bus=bus, read_server=read_server)
     client = _client(app)
     with client.websocket_connect(_url(community, server)) as ws:
         frame = ws.receive_json()
     assert frame["stream"] == "snapshot"
-    assert frame["payload"] == {"state": "crashed"}
+    assert frame["payload"] == {"state": "crashed", "desired_state": "stopped"}
     assert frame["ts"].endswith("Z")
 
 
@@ -495,8 +508,9 @@ def test_snapshot_wire_text_is_the_compact_frame_shape() -> None:
     with client.websocket_connect(_url(community, server)) as ws:
         text = ws.receive_text()
     ts = json.loads(text)["ts"]
-    assert (
-        text == f'{{"stream":"snapshot","ts":"{ts}","payload":{{"state":"running"}}}}'
+    assert text == (
+        f'{{"stream":"snapshot","ts":"{ts}",'
+        '"payload":{"state":"running","desired_state":"running"}}'
     )
 
 

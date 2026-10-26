@@ -52,8 +52,10 @@ class RealTimeEvent:
 
     The payload mirrors the corresponding wire event's fields (e.g. a status
     change carries ``state``/``detail``; a log line carries ``line``/``stream``);
-    the adapter maps the proto to this shape at the transport edge. A ``GAP``
-    event carries an empty payload.
+    the adapter maps the proto to this shape at the transport edge. A STATUS
+    event the API publishes for a change of a server's intent carries
+    ``desired_state`` alone (issue #3428). A ``GAP`` event carries an empty
+    payload.
 
     ``emitted_at`` is the Worker's authoritative clock reading for the event
     (``WorkerMessage.emitted_at``), so a queued subscriber sees the true event
