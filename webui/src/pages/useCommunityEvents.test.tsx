@@ -52,8 +52,23 @@ function notificationFrame(serverId: string, title: string, detail: string) {
   });
 }
 
-function serverRow(id: string, observed_state: string) {
-  return { id, observed_state };
+function intentFrame(serverId: string, desiredState: string) {
+  return JSON.stringify({
+    stream: "status",
+    ts: "t",
+    payload: { desired_state: desiredState },
+    server_id: serverId,
+  });
+}
+
+function serverRow(
+  id: string,
+  observed_state: string,
+  desired_state?: string,
+): { id: string; observed_state: string; desired_state?: string } {
+  return desired_state === undefined
+    ? { id, observed_state }
+    : { id, observed_state, desired_state };
 }
 
 let degradedSeen = false;
@@ -115,6 +130,39 @@ describe("useCommunityEvents", () => {
     });
     expect(queryClient.getQueryData(serversKey(CID))).toEqual([
       { id: "s1", observed_state: "running" },
+    ]);
+  });
+
+  it("patches the cached server's desired_state on an intent frame (#3428)", () => {
+    const { queryClient } = setup([serverRow("s1", "stopped", "stopped")]);
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(intentFrame("s1", "running"));
+    });
+    expect(queryClient.getQueryData(serversKey(CID))).toEqual([
+      serverRow("s1", "stopped", "running"),
+    ]);
+  });
+
+  it("patches every cached server's desired_state from a snapshot (#3428)", () => {
+    const { queryClient } = setup([serverRow("s1", "running", "running")]);
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        JSON.stringify({
+          stream: "snapshot",
+          ts: "t",
+          payload: {
+            servers: [
+              { server_id: "s1", state: "crashed", desired_state: "stopped" },
+            ],
+          },
+          server_id: null,
+        }),
+      );
+    });
+    expect(queryClient.getQueryData(serversKey(CID))).toEqual([
+      serverRow("s1", "crashed", "stopped"),
     ]);
   });
 
@@ -517,6 +565,27 @@ describe("useCommunityEvents with REST reads in flight (#3213)", () => {
     });
     await respond([serverRow("s1", "unknown")]);
     expect(cached()).toEqual([{ id: "s1", observed_state: "unknown" }]);
+  });
+
+  it("orders the observed state and the intent against a read separately (#3428)", async () => {
+    // The status frame predates the read, so the read supersedes it; the
+    // intent frame arrives while the read is in flight, so it stays on top.
+    const { queryClient, respond, cached } = setupDeferred();
+    act(() => {
+      MockWebSocket.last().open();
+    });
+    await respond([serverRow("s1", "stopped", "stopped")]);
+    act(() => {
+      MockWebSocket.last().message(statusFrame("s1", "running"));
+    });
+    act(() => {
+      queryClient.invalidateQueries({ queryKey: serversKey(CID) });
+    });
+    act(() => {
+      MockWebSocket.last().message(intentFrame("s1", "stopped"));
+    });
+    await respond([serverRow("s1", "unknown", "running")]);
+    expect(cached()).toEqual([serverRow("s1", "unknown", "stopped")]);
   });
 });
 

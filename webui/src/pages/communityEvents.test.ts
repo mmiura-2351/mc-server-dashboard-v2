@@ -20,6 +20,7 @@ import {
   backoffDelayMs,
   CommunityEventsClient,
   parseCommunityFrame,
+  type StatusEvent,
 } from "./communityEvents.ts";
 
 const CID = "c1";
@@ -42,7 +43,18 @@ function gapFrame() {
   });
 }
 
-function snapshotFrame(servers: { server_id: string; state: string }[]) {
+function intentFrame(serverId: string, desiredState: string) {
+  return JSON.stringify({
+    stream: "status",
+    ts: "2026-06-06T00:00:00Z",
+    payload: { desired_state: desiredState },
+    server_id: serverId,
+  });
+}
+
+function snapshotFrame(
+  servers: { server_id: string; state: string; desired_state?: string }[],
+) {
   return JSON.stringify({
     stream: "snapshot",
     ts: "2026-06-06T00:00:00Z",
@@ -112,6 +124,27 @@ describe("parseCommunityFrame", () => {
     });
   });
 
+  it("parses the intent a status frame carries (#3428)", () => {
+    expect(parseCommunityFrame(intentFrame("s1", "running"))).toEqual({
+      kind: "status",
+      serverId: "s1",
+      desiredState: "running",
+    });
+  });
+
+  it("parses each snapshot entry's desired state (#3428)", () => {
+    expect(
+      parseCommunityFrame(
+        snapshotFrame([
+          { server_id: "s1", state: "crashed", desired_state: "running" },
+        ]),
+      ),
+    ).toEqual({
+      kind: "snapshot",
+      servers: [{ serverId: "s1", state: "crashed", desiredState: "running" }],
+    });
+  });
+
   it("parses an empty snapshot (a community with no servers)", () => {
     expect(parseCommunityFrame(snapshotFrame([]))).toEqual({
       kind: "snapshot",
@@ -178,6 +211,16 @@ describe("parseCommunityFrame", () => {
         JSON.stringify({ stream: "status", server_id: "s1" }),
       ),
     ).toBeNull();
+    // A status frame setting neither state is malformed.
+    expect(
+      parseCommunityFrame(
+        JSON.stringify({
+          stream: "status",
+          server_id: "s1",
+          payload: { detail: "x" },
+        }),
+      ),
+    ).toBeNull();
   });
 });
 
@@ -222,11 +265,7 @@ describe("CommunityEventsClient", () => {
     return { client, ...cb };
   }
 
-  function callbacks(
-    overrides: {
-      onStatus?: (e: { serverId: string; state: string }) => void;
-    } = {},
-  ) {
+  function callbacks(overrides: { onStatus?: (e: StatusEvent) => void } = {}) {
     const onStatus = vi.fn(overrides.onStatus);
     const onGap = vi.fn();
     const onNotification = vi.fn();
@@ -273,6 +312,19 @@ describe("CommunityEventsClient", () => {
 
     MockWebSocket.last().message(statusFrame("s1", "running"));
     expect(onStatus).toHaveBeenCalledWith({ serverId: "s1", state: "running" });
+    client.close();
+  });
+
+  it("fires onStatus with the intent an intent frame carries", () => {
+    const { client, onStatus } = makeClient();
+    client.start();
+    MockWebSocket.last().open();
+
+    MockWebSocket.last().message(intentFrame("s1", "stopped"));
+    expect(onStatus).toHaveBeenCalledWith({
+      serverId: "s1",
+      desiredState: "stopped",
+    });
     client.close();
   });
 

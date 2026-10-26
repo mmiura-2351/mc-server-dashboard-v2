@@ -221,18 +221,28 @@ export function useServerEvents(
     setStatusReason("");
     const key = serverKey(communityId, serverId);
 
-    // The live state not yet superseded by a REST read, stamped with when it
-    // was received (#3213).
-    let live: { state: string; at: number } | null = null;
+    // The live observed and desired states not yet superseded by a REST
+    // read, each stamped with when it was received (#3213). The two are
+    // stamped apart, as different frames carry them (#3428).
+    let observed: { value: string; at: number } | null = null;
+    let desired: { value: string; at: number } | null = null;
 
-    // Patch the detail query so the header pill updates live (no refetch).
+    // Patch the detail query so the header pill and controls update live (no
+    // refetch).
     const patch = () => {
-      if (live === null) {
+      if (observed === null && desired === null) {
         return;
       }
-      const { state } = live;
+      const state = observed?.value;
+      const intent = desired?.value;
       queryClient.setQueryData<ServerResponse>(key, (current) =>
-        current === undefined ? current : { ...current, observed_state: state },
+        current === undefined
+          ? current
+          : {
+              ...current,
+              ...(state !== undefined && { observed_state: state }),
+              ...(intent !== undefined && { desired_state: intent }),
+            },
       );
     };
 
@@ -244,15 +254,23 @@ export function useServerEvents(
       queryClient,
       key,
       (readStartedAt) => {
-        if (live !== null && live.at < readStartedAt) {
-          live = null;
+        if (observed !== null && observed.at < readStartedAt) {
+          observed = null;
+        }
+        if (desired !== null && desired.at < readStartedAt) {
+          desired = null;
         }
         patch();
       },
     );
 
+    const applyDesired = (state: string) => {
+      desired = { value: state, at: stamp() };
+      patch();
+    };
+
     const applyState = (state: string) => {
-      live = { state, at: stamp() };
+      observed = { value: state, at: stamp() };
       patch();
       // Once the server settles at rest there is no metrics stream (SPEC
       // 7.2); drop the windowed samples so the strip falls back to the idle
@@ -269,13 +287,23 @@ export function useServerEvents(
 
     const onFrame = (frame: ServerFrame) => {
       if (frame.kind === "status") {
-        applyState(frame.state);
-        setStatusDetail(frame.detail);
-        setStatusReason(frame.reason);
-        detailState = frame.state;
+        // A change of the server's intent (#3428) says nothing about its
+        // observed state, so the crash detail stands.
+        if (frame.desiredState !== undefined) {
+          applyDesired(frame.desiredState);
+        }
+        if (frame.state !== undefined) {
+          applyState(frame.state);
+          setStatusDetail(frame.detail);
+          setStatusReason(frame.reason);
+          detailState = frame.state;
+        }
         return;
       }
       if (frame.kind === "snapshot") {
+        if (frame.desiredState !== undefined) {
+          applyDesired(frame.desiredState);
+        }
         applyState(frame.state);
         if (frame.state !== detailState) {
           setStatusDetail("");

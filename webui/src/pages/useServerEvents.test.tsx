@@ -310,6 +310,51 @@ describe("useServerEvents", () => {
     });
   });
 
+  it("patches the detail query desired_state on an intent frame (#3428)", () => {
+    const { queryClient } = setup();
+    queryClient.setQueryData(serverKey(CID, SID), {
+      id: SID,
+      observed_state: "crashed",
+      desired_state: "stopped",
+    });
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        frame("status", { state: "crashed", detail: "exit 1" }),
+      );
+      MockWebSocket.last().message(
+        frame("status", { desired_state: "running" }),
+      );
+    });
+    expect(queryClient.getQueryData(serverKey(CID, SID))).toEqual({
+      id: SID,
+      observed_state: "crashed",
+      desired_state: "running",
+    });
+    // The intent says nothing about the crash: its detail still stands.
+    expect(state.statusDetail).toBe("exit 1");
+  });
+
+  it("patches the detail query desired_state from a snapshot frame (#3428)", () => {
+    const { queryClient } = setup();
+    queryClient.setQueryData(serverKey(CID, SID), {
+      id: SID,
+      observed_state: "running",
+      desired_state: "running",
+    });
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        frame("snapshot", { state: "stopped", desired_state: "stopped" }),
+      );
+    });
+    expect(queryClient.getQueryData(serverKey(CID, SID))).toEqual({
+      id: SID,
+      observed_state: "stopped",
+      desired_state: "stopped",
+    });
+  });
+
   it("clears windowed metrics when a snapshot shows the server at rest", () => {
     setup();
     act(() => {

@@ -2615,6 +2615,35 @@ describe("ServerDetailPage Overview live streams", () => {
     ).not.toBeInTheDocument();
   });
 
+  // The issue #3428 repro on the detail page: the server is started from
+  // another tab, then crashes; the stream carries the new intent, so the page
+  // offers the running/crashed controls without a reload.
+  it("follows an intent changed elsewhere when the server then crashes", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ observed_state: "stopped", desired_state: "stopped" }),
+    );
+    renderPage();
+    await screen.findByText("survival");
+
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        serverFrame("status", { desired_state: "running" }),
+      );
+      MockWebSocket.last().message(
+        serverFrame("status", { state: "crashed", detail: "" }),
+      );
+    });
+
+    expect(
+      screen.getByText(t("serverDetail.crashBanner.autoRestart")),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Stop/ })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: t("serverDetail.restart") }),
+    ).not.toBeInTheDocument();
+  });
+
   // A crash after an operator stop: Start (labelled Restart) is accepted, so the
   // banner keeps sending the operator to it.
   it("keeps the Restart guidance for a crash under a stopped intent", async () => {
