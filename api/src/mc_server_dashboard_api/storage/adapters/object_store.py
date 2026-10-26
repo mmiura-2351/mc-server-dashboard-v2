@@ -931,7 +931,10 @@ class ObjectStorage(Storage):
                 # directory and refuse when a dimension that still has regions lost
                 # SOME of them (partial loss). A full-dimension delete (all regions
                 # gone) is allowed; first publish (no pointer) has no prior set, so
-                # nothing is flagged. Name-only — no bodies.
+                # nothing is flagged. Name-only — no bodies. ``restore_backup`` does
+                # not run this gate (issue #3446): a restore is an operator-chosen
+                # rollback to a complete backup, which legitimately holds fewer
+                # regions than the world it replaces.
                 prior_prefix = await self._read_pointer(client, server_prefix)
                 if prior_prefix is not None:
                     prior_objs = await client.list_objects(prior_prefix)

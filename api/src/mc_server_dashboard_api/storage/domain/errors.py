@@ -278,6 +278,10 @@ class MissingRegionsError(StorageError):
     dimension is the documented override path for an intentional shrink; only a
     partial loss is refused, leaving ``current`` untouched (last-known-good, #703).
 
+    Only a snapshot commit is gated. A backup restore is not (issue #3446): it is an
+    operator-chosen rollback to a complete backup, which legitimately holds fewer
+    regions than the world it replaces.
+
     Carries the structured :class:`~...integrity.region.MissingRegionReport` so a
     caller can surface *which* directories lost *which* region files.
     """

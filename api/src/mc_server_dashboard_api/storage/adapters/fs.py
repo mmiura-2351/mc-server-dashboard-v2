@@ -747,6 +747,7 @@ class FsStorage(Storage):
                 staging,
                 publisher,
                 expected_base,
+                gate_missing_regions=True,
             )
         except (StaleGenerationError, MissingRegionsError):
             # StaleGenerationError: the store advanced past the guard's base during
@@ -791,6 +792,8 @@ class FsStorage(Storage):
         staging: Path,
         publisher: str | None,
         expected_base: int | None = None,
+        *,
+        gate_missing_regions: bool,
     ) -> int:
         """Publish the snapshot, then bump and return the generation (issue #763).
 
@@ -816,6 +819,9 @@ class FsStorage(Storage):
         validated against. Holding the lock across the re-check, the pointer flip, and
         the bump is what closes the window: an edit cannot land between the re-check
         and the flip. ``None`` skips the re-check (no base claim).
+
+        ``gate_missing_regions`` selects whether the missing-region gate runs: a
+        snapshot commit passes ``True``, a backup restore ``False`` (issue #3446).
         """
 
         # Make the staged tree's file data durable BEFORE acquiring the lock and
@@ -846,15 +852,19 @@ class FsStorage(Storage):
             # inside its locked section; the fs adapter must match.
             # ``check_missing_regions`` is a sync directory-entry scan;
             # ``_publish_and_bump`` runs on a worker thread, so calling it directly
-            # is correct.
-            try:
-                prior = self._current_dir(community_id, server_id)
-            except NotFoundError:
-                prior = None
-            if prior is not None:
-                missing = check_missing_regions(staging, prior)
-                if not missing.complete:
-                    raise MissingRegionsError(missing)
+            # is correct. A restore skips the gate (issue #3446): it is an
+            # operator-chosen rollback to a complete backup, which legitimately
+            # holds fewer regions than the world it replaces, while the gate exists
+            # to catch a snapshot that silently lost regions.
+            if gate_missing_regions:
+                try:
+                    prior = self._current_dir(community_id, server_id)
+                except NotFoundError:
+                    prior = None
+                if prior is not None:
+                    missing = check_missing_regions(staging, prior)
+                    if not missing.complete:
+                        raise MissingRegionsError(missing)
             old_snapshot = self._publish(community_id, server_id, staging)
             generation = self._read_generation(server_root) + 1
             self._write_marker(server_root, generation, publisher)
@@ -1234,6 +1244,7 @@ class FsStorage(Storage):
                 server_id,
                 staging,
                 RESTORE_PUBLISHER,
+                gate_missing_regions=False,
             )
             return report
         except BaseException:
