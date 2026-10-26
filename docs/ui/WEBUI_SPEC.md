@@ -315,8 +315,8 @@ Global resource pack library (not community-scoped) and per-server assignment.
 
 | Path | Notes |
 |---|---|
-| `WS /communities/{cid}/servers/{sid}/events?streams=status,log,metrics,notification` | Typed frames `{stream, ts, payload}`. `status`: `{state, detail, reason}` (`reason`: the crash reason the Worker classified — `forge_install_failed` / `forge_install_out_of_memory` / `forge_install_java_incompatible` — or `""`; CONTROL_PLANE.md Section 6) · `log`: `{line, stream}` · `metrics`: `{cpu_millis, memory_bytes, player_count}` · `notification`: `{kind, title, detail}` (operator notice) · `gap`: client fell behind (always delivered) · `snapshot`: `{state}` (see below). |
-| `WS /communities/{cid}/events` | Community-wide **status + notification** firehose; frames carry `server_id`. `snapshot`: `{servers: [{server_id, state}]}` with `server_id: null` (see below). |
+| `WS /communities/{cid}/servers/{sid}/events?streams=status,log,metrics,notification` | Typed frames `{stream, ts, payload}`. `status`: `{state, detail, reason}` for an observed transition (`reason`: the crash reason the Worker classified — `forge_install_failed` / `forge_install_out_of_memory` / `forge_install_java_incompatible` — or `""`; CONTROL_PLANE.md Section 6), or `{desired_state}` for a change of the server's intent (see below) · `log`: `{line, stream}` · `metrics`: `{cpu_millis, memory_bytes, player_count}` · `notification`: `{kind, title, detail}` (operator notice) · `gap`: client fell behind (always delivered) · `snapshot`: `{state, desired_state}` (see below). |
+| `WS /communities/{cid}/events` | Community-wide **status + notification** firehose; frames carry `server_id`. `snapshot`: `{servers: [{server_id, state, desired_state}]}` with `server_id: null` (see below). |
 
 Missed frames are never replayed (delivery is best-effort), so a connection
 that carries status opens with a **`snapshot`** frame and gets a fresh one
@@ -324,7 +324,8 @@ right after a `gap` frame when status frames were dropped since the previous
 such check (a gap that dropped only other streams cost no status and is not
 followed by one; neither is a gap whose status losses happened while the
 previous gap was being delivered, since that gap's snapshot already covers
-them): the persisted observed state of the stream's scope — the server for the per-server stream (only when `status` is among the
+them): the persisted observed and desired states of the stream's scope, read
+together from each server's row — the server for the per-server stream (only when `status` is among the
 subscribed streams), every server of the community for the community stream.
 Its `ts` is the time the snapshot was read. It has no `detail` or `reason`, which
 only a live `status` transition carries. A client applies it like status frames, and
@@ -340,6 +341,16 @@ session drops and for each in-flight server at API startup, and the state a
 lifecycle operation converges from a command's outcome (CONTROL_PLANE.md
 Section 6). Those API-originated frames have an empty `detail` and `reason`. A
 write that leaves the state as it was publishes nothing.
+
+Every change of a server's desired state publishes a `status` frame
+`{desired_state}` too, after the write that made it commits: a start, stop or
+drain from any session, a start the API reverts after its dispatch failed,
+and the reconciler's own starts and stops, which go through the same
+operations. A write under an unchanged intent (a restart) publishes nothing.
+The frame carries no `state`: an intent change is not an observation, and a
+client keeps the observed state it holds. A client applies each `status` frame
+by setting the fields it carries, so another tab's dashboard offers the
+actions of the current intent without a reload (#3428).
 
 Ordering: the subscription is registered before the snapshot is read, so every
 status transition published from then on reaches the subscriber's buffer.
@@ -960,7 +971,9 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   flight, it is re-applied when the response lands, unless the request of the
   attempt that produced the response (retries included) started after the
   frame arrived — then the response is the newer truth (it can carry a change
-  no frame announced). The dashboard reconciles the server set the same way:
+  no frame announced). The observed and the desired state are ordered against
+  a read separately, as different frames carry them. The dashboard reconciles
+  the server set the same way:
   a live server missing from the landed list, or a listed server missing from
   a newer snapshot, triggers one list refetch.
 

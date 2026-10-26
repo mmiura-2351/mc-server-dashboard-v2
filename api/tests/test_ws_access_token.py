@@ -132,7 +132,10 @@ def _events_app() -> FastAPI:
     from mc_server_dashboard_api.fleet.adapters.real_time_events import (
         InProcessRealTimeEvents,
     )
-    from mc_server_dashboard_api.servers.domain.value_objects import ObservedState
+    from mc_server_dashboard_api.servers.domain.value_objects import (
+        DesiredState,
+        ObservedState,
+    )
     from tests.identity.fakes import make_authentication
 
     app = create_app()
@@ -151,6 +154,7 @@ def _events_app() -> FastAPI:
 
     class _FoundServer:
         observed_state = ObservedState.STOPPED
+        desired_state = DesiredState.STOPPED
 
     class _Found:
         async def __call__(self, **_kw: object) -> object:

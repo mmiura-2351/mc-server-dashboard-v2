@@ -83,17 +83,23 @@ from mc_server_dashboard_api.servers.adapters.server_state_sink import (
 from mc_server_dashboard_api.servers.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork as ServersUnitOfWork,
 )
-from mc_server_dashboard_api.servers.application.lifecycle import StartServer
+from mc_server_dashboard_api.servers.application.lifecycle import (
+    StartServer,
+    StopServer,
+)
 from mc_server_dashboard_api.servers.application.manage_server import (
     CreateServer,
     ListServers,
     ReadServer,
 )
+from mc_server_dashboard_api.servers.domain.control_plane import (
+    WorkerUnavailableError,
+)
 from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId as ServersCommunityId,
 )
-from mc_server_dashboard_api.servers.domain.value_objects import WorkerId
+from mc_server_dashboard_api.servers.domain.value_objects import ServerId, WorkerId
 from tests.client_utils import enter_client
 from tests.identity.fakes import make_authentication, make_user
 from tests.integration.migrate import downgrade_base, upgrade_head
@@ -294,7 +300,9 @@ async def _seed_started_server(
             config={},
         )
         await StartServer(
-            uow=ServersUnitOfWork(create_session_factory(engine)),
+            uow=ServersUnitOfWork(
+                create_session_factory(engine), InProcessRealTimeEvents()
+            ),
             control_plane=FakeControlPlane(place_to=WorkerId(worker)),
             clock=FakeClock(_NOW),
             jar_provisioner=FakeJarProvisioner(),
@@ -434,6 +442,132 @@ async def test_community_stream_converges_when_the_worker_drops_mid_snapshot_rea
     with _client(app).websocket_connect(url) as ws:
         states = _states_until_race_over(ws, server)
     assert states == ["unknown", "running", "unknown"]
+
+
+# --- the desired state over the real graph (issue #3428) ---------------------
+
+
+class _StopDuringSnapshotRead:
+    """The real read use case, raced by a stop committed from elsewhere.
+
+    On the relay's snapshot read, and before that read reaches the database, a
+    real StopServer commits ``desired=stopped`` through a unit of work wired to
+    the relay's bus; its Worker never answers, so the intent is the stop's only
+    write. The snapshot then reads the new intent, and the intent's own frame,
+    published during the read, is delivered after it. A closing notification
+    marks the end of the race for the test to read up to.
+    """
+
+    def __init__(
+        self,
+        use_case: type[ReadServer] | type[ListServers],
+        *,
+        db_url: str,
+        bus: InProcessRealTimeEvents,
+        community: CommunityId,
+        server: uuid.UUID,
+        snapshot_read: int,
+    ) -> None:
+        self._use_case = use_case
+        self._db_url = db_url
+        self._bus = bus
+        self._community = ServersCommunityId(community.value)
+        self._server = server
+        self._snapshot_read = snapshot_read
+        self._reads = 0
+
+    async def __call__(self, **kwargs: Any) -> Any:
+        self._reads += 1
+        engine = create_async_engine(self._db_url)
+        try:
+            factory = create_session_factory(engine)
+            if self._reads == self._snapshot_read:
+                with pytest.raises(WorkerUnavailableError):
+                    await StopServer(
+                        uow=ServersUnitOfWork(factory, self._bus),
+                        control_plane=FakeControlPlane(unavailable_kinds={"stop"}),
+                        clock=FakeClock(_NOW),
+                    )(community_id=self._community, server_id=ServerId(self._server))
+                self._bus.publish(
+                    server_id=str(self._server),
+                    event=notification_event(kind="race_over", title="race over"),
+                )
+            return await self._use_case(uow=ServersUnitOfWork(factory))(**kwargs)
+        finally:
+            await engine.dispose()
+
+
+def _frames_until_race_over(ws: Any) -> list[dict[str, Any]]:
+    frames: list[dict[str, Any]] = []
+    while (frame := ws.receive_json())["stream"] != "notification":
+        frames.append(frame)
+    return frames
+
+
+async def test_server_stream_carries_the_desired_state_snapshot_and_change(
+    _database: str,
+) -> None:
+    user = make_user()
+    community = await _seed_member(_database, user.id.value)
+    server = await _seed_started_server(_database, community, uuid.uuid4())
+    bus = InProcessRealTimeEvents()
+    app = _app(user, bus)
+    read_server = _StopDuringSnapshotRead(
+        ReadServer,
+        db_url=_database,
+        bus=bus,
+        community=community,
+        server=server,
+        snapshot_read=2,  # the first read is the accept-time authorization gate
+    )
+    app.dependency_overrides[get_read_server] = lambda: read_server  # type: ignore[attr-defined]
+    url = f"/api/communities/{community.value}/servers/{server}/events"
+    with _client(app).websocket_connect(url) as ws:
+        frames = _frames_until_race_over(ws)
+    assert [(frame["stream"], frame["payload"]) for frame in frames] == [
+        ("snapshot", {"state": "stopped", "desired_state": "stopped"}),
+        ("status", {"desired_state": "stopped"}),
+    ]
+
+
+async def test_community_stream_carries_the_desired_state_snapshot_and_change(
+    _database: str,
+) -> None:
+    user = make_user()
+    community = await _seed_member(_database, user.id.value)
+    server = await _seed_started_server(_database, community, uuid.uuid4())
+    bus = InProcessRealTimeEvents()
+    app = _app(user, bus, lookup={str(server): community.value})
+    list_servers = _StopDuringSnapshotRead(
+        ListServers,
+        db_url=_database,
+        bus=bus,
+        community=community,
+        server=server,
+        snapshot_read=1,
+    )
+    app.dependency_overrides[get_list_servers] = lambda: list_servers  # type: ignore[attr-defined]
+    url = f"/api/communities/{community.value}/events"
+    with _client(app).websocket_connect(url) as ws:
+        frames = _frames_until_race_over(ws)
+    assert [
+        (frame["stream"], frame["server_id"], frame["payload"]) for frame in frames
+    ] == [
+        (
+            "snapshot",
+            None,
+            {
+                "servers": [
+                    {
+                        "server_id": str(server),
+                        "state": "stopped",
+                        "desired_state": "stopped",
+                    }
+                ]
+            },
+        ),
+        ("status", str(server), {"desired_state": "stopped"}),
+    ]
 
 
 # --- mid-stream re-authentication over the real graph (issue #3227) ----------

@@ -26,6 +26,9 @@ from mc_server_dashboard_api.community.domain.value_objects import (
 )
 from mc_server_dashboard_api.community.domain.value_objects import CommunityName
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
+from mc_server_dashboard_api.fleet.adapters.real_time_events import (
+    InProcessRealTimeEvents,
+)
 from mc_server_dashboard_api.servers.adapters.unit_of_work import SqlAlchemyUnitOfWork
 from mc_server_dashboard_api.servers.domain.backup_repository import BackupRepository
 from mc_server_dashboard_api.servers.domain.group_repository import GroupRepository
@@ -83,7 +86,9 @@ def _sql_harness(
 ) -> RepositoryHarness[RepositoryT]:
     @asynccontextmanager
     async def _open() -> AsyncIterator[RepositoryTransaction[RepositoryT]]:
-        async with SqlAlchemyUnitOfWork(session_factory) as uow:
+        async with SqlAlchemyUnitOfWork(
+            session_factory, InProcessRealTimeEvents()
+        ) as uow:
             yield RepositoryTransaction(repository=repository(uow), commit=uow.commit)
 
     return RepositoryHarness(open=_open)

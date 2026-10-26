@@ -57,7 +57,8 @@ gets a ``gap`` frame and keeps the newest events. Nothing else depends on a
 subscriber, so a closed socket never affects the control plane or REST.
 
 Missed events are never replayed, so every status subscription opens with a
-``snapshot`` frame of the persisted observed state of its scope, and gets a
+``snapshot`` frame of the persisted observed and desired states of its scope
+(#3428), and gets a
 fresh one right after every ``gap`` frame whose overflow dropped status events
 (#1795): a (re)connecting or overflowed client converges from the stream
 alone, whatever its own resync discipline. The snapshot is read after the
@@ -797,9 +798,10 @@ async def _server_snapshot(
 ) -> str | None:
     """Encode the per-server status snapshot frame, or ``None`` if the server is gone.
 
-    ``{stream: "snapshot", ts, payload: {state}}`` — the persisted observed state
-    the REST server read reports. There is no ``detail``: it rides only a live
-    status transition and is not persisted.
+    ``{stream: "snapshot", ts, payload: {state, desired_state}}`` — the persisted
+    observed and desired states the REST server read reports, read from the one
+    row (#3428). There is no ``detail``: it rides only a live status transition
+    and is not persisted.
     """
 
     try:
@@ -809,16 +811,23 @@ async def _server_snapshot(
         )
     except ServerNotFoundError:
         return None
-    return _snapshot_text({"state": server.observed_state.value})
+    return _snapshot_text(
+        {
+            "state": server.observed_state.value,
+            "desired_state": server.desired_state.value,
+        }
+    )
 
 
 async def _community_snapshot(
     *, list_servers: ListServers, community_id: uuid.UUID
 ) -> str:
-    """Encode the community status snapshot frame: every server's observed state.
+    """Encode the community status snapshot frame: every server's two states.
 
-    ``{stream: "snapshot", ts, payload: {servers: [{server_id, state}]}, server_id:
-    null}`` — the community frame shape, server-agnostic like the GAP marker. The
+    ``{stream: "snapshot", ts, payload: {servers: [{server_id, state,
+    desired_state}]}, server_id: null}`` — each server's observed and desired
+    states, read by the one list query (#3428) — the community frame shape,
+    server-agnostic like the GAP marker. The
     list is the community's whole server set, exactly what the stream's
     community-level ``server:read`` gate already lets the subscriber see (the
     REST servers list under the same gate), so a client can also reconcile
@@ -828,7 +837,11 @@ async def _community_snapshot(
     servers = await list_servers(community_id=ServersCommunityId(community_id))
     payload: dict[str, object] = {
         "servers": [
-            {"server_id": str(server.id.value), "state": server.observed_state.value}
+            {
+                "server_id": str(server.id.value),
+                "state": server.observed_state.value,
+                "desired_state": server.desired_state.value,
+            }
             for server in servers
         ]
     }

@@ -6,6 +6,10 @@ state change from a live ``status`` frame. Before issue #3212 only a Worker's
 reset and the lifecycle use cases' own convergence writes committed silently,
 and a client kept the pre-write state until its next snapshot.
 
+Every ``desired_state`` change does too (#3428): a dashboard that never
+learned of a start or stop made elsewhere offered the actions of the old
+intent.
+
 Each test drives one write path over a real PostgreSQL row through the real
 adapters -- the repository, the unit of work, the control-plane state sink --
 with a subscriber attached to the real in-process bus, and asserts the frame
@@ -54,8 +58,10 @@ from mc_server_dashboard_api.servers.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork as ServersUnitOfWork,
 )
 from mc_server_dashboard_api.servers.application.lifecycle import (
+    RestartServer,
     StartServer,
     StopServer,
+    StopServersAssignedToWorker,
 )
 from mc_server_dashboard_api.servers.application.manage_server import CreateServer
 from mc_server_dashboard_api.servers.application.startup_reset import (
@@ -70,6 +76,7 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
+    DesiredState,
     ObservedState,
     WorkerId,
 )
@@ -201,9 +208,10 @@ class _World:
         return self.bus.subscribe_all(streams=_STATUS)
 
     def assert_published_after_commit(self) -> None:
-        """No status event was published over an uncommitted observed-state write.
+        """No status event was published over an uncommitted state write.
 
-        The journal reads ``write`` (an UPDATE of ``observed_state``), ``commit``
+        The journal reads ``write`` (an UPDATE of ``observed_state`` or
+        ``desired_state``), ``commit``
         and ``publish`` in the order they happened; a ``publish`` whose nearest
         earlier DB activity is a ``write`` announced a state no reader could see.
         """
@@ -226,7 +234,9 @@ async def world() -> AsyncIterator[_World]:
     locking_selects: list[str] = []
 
     def _on_execute(_conn: object, _cursor: object, statement: str, *_: object) -> None:
-        if statement.startswith("UPDATE") and "observed_state=" in statement:
+        if statement.startswith("UPDATE") and (
+            "observed_state=" in statement or "desired_state=" in statement
+        ):
             journal.append("write")
         if statement.startswith("SELECT") and "FOR UPDATE" in statement:
             locking_selects.append(statement)
@@ -264,6 +274,12 @@ async def _received(subscription: EventSubscription) -> list[RealTimeEvent]:
 
 def _status(state: str, *, detail: str = "", reason: str = "") -> dict[str, object]:
     return {"state": state, "detail": detail, "reason": reason}
+
+
+def _intent(desired: str) -> dict[str, object]:
+    """The payload of the status frame a ``desired_state`` change publishes."""
+
+    return {"desired_state": desired}
 
 
 async def _states(subscription: EventSubscription) -> list[tuple[str | None, object]]:
@@ -453,7 +469,8 @@ async def test_start_converging_on_an_already_running_instance_publishes_running
     )(community_id=world.community, server_id=server.id)
 
     assert [event.payload for event in await _received(watching)] == [
-        _status("running")
+        _intent("running"),
+        _status("running"),
     ]
     assert await world.observed(server) is ObservedState.RUNNING
     world.assert_published_after_commit()
@@ -490,17 +507,19 @@ async def test_confirmed_stop_publishes_stopped(world: _World) -> None:
     )
 
     assert [event.payload for event in await _received(watching)] == [
-        _status("stopped")
+        _intent("stopped"),
+        _status("stopped"),
     ]
     world.assert_published_after_commit()
 
 
-async def test_confirmed_stop_after_the_workers_stopped_report_publishes_nothing(
+async def test_confirmed_stop_after_the_workers_stopped_report_publishes_only_intent(
     world: _World,
 ) -> None:
     """The ordinary stop: the Worker's ``stopped`` frame already announced it.
 
-    The confirmed-stop write then changes no state, so it repeats no frame.
+    The confirmed-stop write then changes no state, so it repeats no frame;
+    only the stop intent is new.
     """
 
     worker = uuid.uuid4()
@@ -511,7 +530,9 @@ async def test_confirmed_stop_after_the_workers_stopped_report_publishes_nothing
         community_id=world.community, server_id=server.id
     )
 
-    assert await _received(watching) == []
+    assert [event.payload for event in await _received(watching)] == [
+        _intent("stopped")
+    ]
 
 
 async def test_stop_of_an_instance_the_worker_forgot_publishes_stopped(
@@ -530,15 +551,16 @@ async def test_stop_of_an_instance_the_worker_forgot_publishes_stopped(
     )(community_id=world.community, server_id=server.id)
 
     assert [event.payload for event in await _received(watching)] == [
-        _status("stopped")
+        _intent("stopped"),
+        _status("stopped"),
     ]
     world.assert_published_after_commit()
 
 
-async def test_stop_of_a_crashed_instance_leaves_the_crash_and_publishes_nothing(
+async def test_stop_of_a_crashed_instance_leaves_the_crash_and_publishes_intent(
     world: _World,
 ) -> None:
-    """The same release keeps ``crashed`` standing: nothing changed, no frame."""
+    """The same release keeps ``crashed`` standing: only the intent changed."""
 
     worker = uuid.uuid4()
     server = await world.server("survival", worker=worker, reported="crashed")
@@ -550,7 +572,9 @@ async def test_stop_of_a_crashed_instance_leaves_the_crash_and_publishes_nothing
         )
     )(community_id=world.community, server_id=server.id)
 
-    assert await _received(watching) == []
+    assert [event.payload for event in await _received(watching)] == [
+        _intent("stopped")
+    ]
     assert await world.observed(server) is ObservedState.CRASHED
 
 
@@ -577,6 +601,202 @@ async def test_releasing_a_stop_wedged_at_stopping_publishes_unknown(
     ]
     assert await world.observed(server) is ObservedState.UNKNOWN
     world.assert_published_after_commit()
+
+
+# --- desired_state writes: the intent frame (issue #3428) --------------------
+
+
+async def test_start_publishes_its_intent_on_the_server_and_community_streams(
+    world: _World,
+) -> None:
+    """Another tab's dashboard learns the server is now meant to run.
+
+    The per-server stream subscribes to the server's topic and the community
+    stream to the firehose; both receive the frame, after the commit.
+    """
+
+    server = await world.server("survival")
+    watching = world.watch(server)
+    firehose = world.bus.subscribe_all(streams=_STATUS)
+
+    await world.start_server(FakeControlPlane(place_to=WorkerId(uuid.uuid4())))(
+        community_id=world.community, server_id=server.id
+    )
+
+    assert await _received(watching) == [
+        RealTimeEvent(stream=EventStream.STATUS, payload=_intent("running"))
+    ]
+    assert [
+        (event.server_id, event.payload) for event in await _received(firehose)
+    ] == [(str(server.id.value), _intent("running"))]
+    world.assert_published_after_commit()
+
+
+async def test_stop_publishes_its_intent_on_the_server_and_community_streams(
+    world: _World,
+) -> None:
+    worker = uuid.uuid4()
+    server = await world.server("survival", worker=worker, reported="running")
+    watching = world.watch(server)
+    firehose = world.bus.subscribe_all(streams=_STATUS)
+
+    # The Worker never answers, so the stop intent is the only write.
+    with pytest.raises(WorkerUnavailableError):
+        await world.stop_server(FakeControlPlane(unavailable_kinds={"stop"}))(
+            community_id=world.community, server_id=server.id
+        )
+
+    assert [event.payload for event in await _received(watching)] == [
+        _intent("stopped")
+    ]
+    assert [
+        (event.server_id, event.payload) for event in await _received(firehose)
+    ] == [(str(server.id.value), _intent("stopped"))]
+    world.assert_published_after_commit()
+
+
+async def test_drain_publishes_a_stopped_intent_for_each_server_it_flips(
+    world: _World,
+) -> None:
+    worker = uuid.uuid4()
+    a = await world.server("a", worker=worker, reported="running")
+    b = await world.server("b", worker=worker, reported="running")
+    await world.server("elsewhere", worker=uuid.uuid4(), reported="running")
+    watching = world.watch_all()
+
+    await StopServersAssignedToWorker(uow=world.uow(), clock=world.clock)(
+        worker_id=WorkerId(worker)
+    )
+
+    received = [(event.server_id, event.payload) for event in await _received(watching)]
+    assert sorted(received, key=str) == sorted(
+        [
+            (str(a.id.value), _intent("stopped")),
+            (str(b.id.value), _intent("stopped")),
+        ],
+        key=str,
+    )
+    world.assert_published_after_commit()
+
+
+async def test_compensated_start_publishes_the_reverted_intent(world: _World) -> None:
+    """A dispatch failure before the start was sent reverts the intent."""
+
+    server = await world.server("survival")
+    watching = world.watch(server)
+
+    with pytest.raises(WorkerUnavailableError):
+        await world.start_server(
+            FakeControlPlane(
+                place_to=WorkerId(uuid.uuid4()), unavailable_kinds={"hydrate"}
+            )
+        )(community_id=world.community, server_id=server.id)
+
+    assert [event.payload for event in await _received(watching)] == [
+        _intent("running"),
+        _intent("stopped"),
+    ]
+    world.assert_published_after_commit()
+
+
+async def test_only_a_write_that_changes_the_intent_publishes_one(
+    world: _World,
+) -> None:
+    """A restart rewrites the row under the same running intent: no frame.
+
+    The stop that follows does change it, so exactly its frame arrives.
+    """
+
+    worker = uuid.uuid4()
+    server = await world.server("survival", worker=worker, reported="running")
+    watching = world.watch(server)
+
+    await RestartServer(
+        uow=world.uow(), control_plane=FakeControlPlane(), clock=world.clock
+    )(community_id=world.community, server_id=server.id)
+    with pytest.raises(WorkerUnavailableError):
+        await world.stop_server(FakeControlPlane(unavailable_kinds={"stop"}))(
+            community_id=world.community, server_id=server.id
+        )
+
+    assert [event.payload for event in await _received(watching)] == [
+        _intent("stopped")
+    ]
+
+
+async def _write_running_intent(uow: ServersUnitOfWork, server: Server) -> None:
+    row = await uow.servers.get_by_id(server.id)
+    assert row is not None
+    row.desired_state = DesiredState.RUNNING
+    assert await uow.servers.update_lifecycle(row, expected_from=DesiredState.STOPPED)
+
+
+async def test_rolled_back_intent_write_publishes_nothing(world: _World) -> None:
+    """Only the committed write of the two announces itself."""
+
+    server = await world.server("survival")
+    watching = world.watch(server)
+
+    async with world.uow() as uow:
+        await _write_running_intent(uow, server)
+        # Left without a commit: the unit of work rolls back.
+    async with world.uow() as uow:
+        await _write_running_intent(uow, server)
+        await uow.commit()
+
+    assert [event.payload for event in await _received(watching)] == [
+        _intent("running")
+    ]
+
+
+async def test_intent_write_whose_commit_fails_publishes_nothing(
+    world: _World,
+) -> None:
+    """Only the write whose commit succeeded announces itself."""
+
+    server = await world.server("survival")
+
+    class _CommitFails(AsyncSession):
+        async def commit(self) -> None:
+            raise OSError("connection lost at commit")
+
+    failing = ServersUnitOfWork(
+        async_sessionmaker(world.engine, expire_on_commit=False, class_=_CommitFails),
+        world.bus,
+    )
+    watching = world.watch(server)
+
+    with pytest.raises(OSError, match="connection lost"):
+        async with failing as uow:
+            await _write_running_intent(uow, server)
+            await uow.commit()
+    async with world.uow() as uow:
+        await _write_running_intent(uow, server)
+        await uow.commit()
+
+    assert [event.payload for event in await _received(watching)] == [
+        _intent("running")
+    ]
+
+
+async def test_unit_of_work_without_the_bus_refuses_to_commit_an_intent_write(
+    world: _World,
+) -> None:
+    server = await world.server("survival")
+
+    uow = ServersUnitOfWork(create_session_factory(world.engine))
+    with pytest.raises(StatusEventsNotWiredError):
+        async with uow:
+            row = await uow.servers.get_by_id(server.id)
+            assert row is not None
+            row.desired_state = DesiredState.RUNNING
+            await uow.servers.update_lifecycle(row, expected_from=DesiredState.STOPPED)
+            await uow.commit()
+
+    async with world.uow() as uow:
+        row = await uow.servers.get_by_id(server.id)
+    assert row is not None
+    assert row.desired_state is DesiredState.STOPPED
 
 
 # --- The unit of work: nothing is published for a write that did not commit --

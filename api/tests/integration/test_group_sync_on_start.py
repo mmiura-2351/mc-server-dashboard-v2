@@ -30,6 +30,9 @@ from mc_server_dashboard_api.community.domain.value_objects import (
 )
 from mc_server_dashboard_api.community.domain.value_objects import CommunityName
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
+from mc_server_dashboard_api.fleet.adapters.real_time_events import (
+    InProcessRealTimeEvents,
+)
 from mc_server_dashboard_api.servers.adapters.file_store import StorageFileStoreAdapter
 from mc_server_dashboard_api.servers.adapters.store_generation import (
     StorageGenerationReader,
@@ -146,7 +149,7 @@ class _World:
         self.server_id = server_id
 
     def uow(self) -> ServersUnitOfWork:
-        return ServersUnitOfWork(self.factory)
+        return ServersUnitOfWork(self.factory, InProcessRealTimeEvents())
 
     async def generation(self) -> int:
         return await self.storage.current_generation(

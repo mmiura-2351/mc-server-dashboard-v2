@@ -693,7 +693,9 @@ def get_set_worker_drain(
         registry=registry,
         stopper=ServersAssignedServerStopper(
             stop_servers=StopServersAssignedToWorker(
-                uow=ServersUnitOfWork(session_factory),
+                uow=ServersUnitOfWork(
+                    session_factory, request.app.state.real_time_events
+                ),
                 clock=ServersSystemClock(),
             )
         ),

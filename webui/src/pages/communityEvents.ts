@@ -26,10 +26,25 @@ import {
 // Re-exported for the existing tests / callers that import it from here.
 export { backoffDelayMs };
 
-/** A STATUS frame from the community stream (`_community_frame` in events.py). */
+/**
+ * A STATUS frame from the community stream (`_community_frame` in events.py).
+ * It sets the server state fields it carries: an observed transition carries
+ * `state`, a change of the server's intent carries `desiredState` (#3428).
+ */
 export interface StatusEvent {
   serverId: string;
+  state?: string;
+  desiredState?: string;
+}
+
+/**
+ * One server of the status snapshot: its observed state and, when the API
+ * reports it, its desired state (#3428).
+ */
+export interface SnapshotEntry {
+  serverId: string;
   state: string;
+  desiredState?: string;
 }
 
 /**
@@ -48,20 +63,20 @@ export interface NotificationEvent {
 
 /**
  * A parsed community-stream frame: a routable STATUS, a NOTIFICATION, the
- * status SNAPSHOT (every server's observed state, sent on subscribe and after
- * every gap that dropped status, #1795), or the GAP marker.
+ * status SNAPSHOT (every server's observed and desired state, sent on
+ * subscribe and after every gap that dropped status, #1795), or the GAP marker.
  */
 export type CommunityFrame =
   | ({ kind: "status" } & StatusEvent)
   | ({ kind: "notification" } & NotificationEvent)
-  | { kind: "snapshot"; servers: StatusEvent[] }
+  | { kind: "snapshot"; servers: SnapshotEntry[] }
   | { kind: "gap" };
 
 export interface CommunityEventsCallbacks {
   /** A parsed STATUS frame for a known server in this community. */
   onStatus: (event: StatusEvent) => void;
-  /** The status snapshot: the observed state of every server in the community. */
-  onSnapshot: (servers: StatusEvent[]) => void;
+  /** The status snapshot: the states of every server in the community. */
+  onSnapshot: (servers: SnapshotEntry[]) => void;
   /** A parsed NOTIFICATION frame (operator notice, e.g. a schedule failure). */
   onNotification: (event: NotificationEvent) => void;
   /** The stream fell behind and dropped frames (slow-client overflow). */
@@ -116,11 +131,19 @@ export function parseCommunityFrame(raw: string): CommunityFrame | null {
   if (typeof payload !== "object" || payload === null) {
     return null;
   }
-  const state = (payload as { state?: unknown }).state;
-  if (typeof state !== "string") {
+  const { state, desired_state } = payload as {
+    state?: unknown;
+    desired_state?: unknown;
+  };
+  if (typeof state !== "string" && typeof desired_state !== "string") {
     return null;
   }
-  return { kind: "status", serverId: server_id, state };
+  return {
+    kind: "status",
+    serverId: server_id,
+    ...(typeof state === "string" && { state }),
+    ...(typeof desired_state === "string" && { desiredState: desired_state }),
+  };
 }
 
 /**
@@ -156,9 +179,9 @@ function parseNotification(
 }
 
 /**
- * Parse a SNAPSHOT frame's `{servers: [{server_id, state}]}` payload. A
- * malformed entry rejects the whole frame: a partial snapshot would misreport
- * the community's server set.
+ * Parse a SNAPSHOT frame's `{servers: [{server_id, state, desired_state}]}`
+ * payload. A malformed entry rejects the whole frame: a partial snapshot would
+ * misreport the community's server set.
  */
 function parseSnapshot(payload: unknown): CommunityFrame | null {
   if (typeof payload !== "object" || payload === null) {
@@ -168,16 +191,21 @@ function parseSnapshot(payload: unknown): CommunityFrame | null {
   if (!Array.isArray(servers)) {
     return null;
   }
-  const parsed: StatusEvent[] = [];
+  const parsed: SnapshotEntry[] = [];
   for (const entry of servers) {
-    const { server_id, state } = (entry ?? {}) as {
+    const { server_id, state, desired_state } = (entry ?? {}) as {
       server_id?: unknown;
       state?: unknown;
+      desired_state?: unknown;
     };
     if (typeof server_id !== "string" || typeof state !== "string") {
       return null;
     }
-    parsed.push({ serverId: server_id, state });
+    parsed.push({
+      serverId: server_id,
+      state,
+      ...(typeof desired_state === "string" && { desiredState: desired_state }),
+    });
   }
   return { kind: "snapshot", servers: parsed };
 }
@@ -220,7 +248,8 @@ export class CommunityEventsClient {
             });
             return;
           }
-          callbacks.onStatus({ serverId: frame.serverId, state: frame.state });
+          const { kind: _kind, ...event } = frame;
+          callbacks.onStatus(event);
         },
         onOpen: callbacks.onOpen,
         onDown: callbacks.onDown,

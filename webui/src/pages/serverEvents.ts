@@ -24,13 +24,16 @@ import { EventsSocketClient, wsOrigin } from "./eventsSocket.ts";
 export type Stream = "status" | "log" | "metrics";
 
 /**
- * A parsed status frame: the latest observed state + optional crash detail.
- * `reason` names a crash the Worker classified (e.g. `forge_install_failed`,
- * issue #1093); it is empty for an unclassified crash and for every other state.
+ * A parsed status frame. It sets the server state fields it carries: an
+ * observed transition carries `state` + optional crash detail, a change of the
+ * server's intent carries `desiredState` alone (#3428). `reason` names a crash
+ * the Worker classified (e.g. `forge_install_failed`, issue #1093); it is empty
+ * for an unclassified crash and for every other state.
  */
 export interface StatusFrame {
   kind: "status";
-  state: string;
+  state?: string;
+  desiredState?: string;
   detail: string;
   reason: string;
 }
@@ -53,12 +56,14 @@ export interface MetricsFrame {
 /**
  * The status snapshot the API sends on subscribe and after every gap that
  * dropped status frames (#1795):
- * the server's persisted observed state. No `detail` or `reason` — they ride
- * only a live status transition and are not persisted.
+ * the server's persisted observed state and, when the API reports it, its
+ * desired state (#3428). No `detail` or `reason` — they ride only a live
+ * status transition and are not persisted.
  */
 export interface SnapshotFrame {
   kind: "snapshot";
   state: string;
+  desiredState?: string;
 }
 
 /** A gap marker: the client fell behind and missed events (best-effort). */
@@ -121,24 +126,36 @@ export function parseServerFrame(raw: string): ServerFrame | null {
     return null;
   }
   if (stream === "status") {
-    const { state, detail, reason } = payload as {
+    const { state, desired_state, detail, reason } = payload as {
       state?: unknown;
+      desired_state?: unknown;
       detail?: unknown;
       reason?: unknown;
     };
-    if (typeof state !== "string") {
+    if (typeof state !== "string" && typeof desired_state !== "string") {
       return null;
     }
     return {
       kind: "status",
-      state,
+      ...(typeof state === "string" && { state }),
+      ...(typeof desired_state === "string" && { desiredState: desired_state }),
       detail: typeof detail === "string" ? detail : "",
       reason: typeof reason === "string" ? reason : "",
     };
   }
   if (stream === "snapshot") {
-    const { state } = payload as { state?: unknown };
-    return typeof state === "string" ? { kind: "snapshot", state } : null;
+    const { state, desired_state } = payload as {
+      state?: unknown;
+      desired_state?: unknown;
+    };
+    if (typeof state !== "string") {
+      return null;
+    }
+    return {
+      kind: "snapshot",
+      state,
+      ...(typeof desired_state === "string" && { desiredState: desired_state }),
+    };
   }
   if (stream === "log") {
     const { line, stream: src } = payload as {

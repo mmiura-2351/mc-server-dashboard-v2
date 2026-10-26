@@ -38,6 +38,9 @@ from mc_server_dashboard_api.community.domain.value_objects import (
 )
 from mc_server_dashboard_api.community.domain.value_objects import CommunityName
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
+from mc_server_dashboard_api.fleet.adapters.real_time_events import (
+    InProcessRealTimeEvents,
+)
 from mc_server_dashboard_api.servers.adapters import (
     lifecycle_lock as lifecycle_lock_mod,
 )
@@ -209,7 +212,9 @@ async def test_start_blocks_until_restore_releases_the_lock(
         lifecycle_lock=lock,
     )
     start = StartServer(
-        uow=ServersUnitOfWork(create_session_factory(engine)),
+        uow=ServersUnitOfWork(
+            create_session_factory(engine), InProcessRealTimeEvents()
+        ),
         control_plane=FakeControlPlane(place_to=WorkerId(uuid.uuid4())),
         clock=_FixedClock(),
         jar_provisioner=FakeJarProvisioner(),

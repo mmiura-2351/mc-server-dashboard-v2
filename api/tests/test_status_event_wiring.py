@@ -2,7 +2,8 @@
 
 Every ``observed_state`` write stages its status event in the servers
 repository, and the unit of work publishes it after the commit -- on the bus it
-was built with (issue #3212). The guarantee is enforced at runtime: a unit of
+was built with (issue #3212); so does every ``desired_state`` change (issue
+#3428). The guarantee is enforced at runtime: a unit of
 work built without the bus refuses to commit such a write
 (``StatusEventsNotWiredError``, pinned in
 ``tests/integration/test_observed_state_status_events.py``).
@@ -25,8 +26,14 @@ from pathlib import Path
 
 _SRC = Path(__file__).resolve().parent.parent / "src" / "mc_server_dashboard_api"
 
-# The use cases that write ``observed_state`` through their unit of work.
-_WRITERS = {"StartServer", "StopServer", "ResetUnverifiableObservedStates"}
+# The use cases that write ``observed_state`` or ``desired_state`` through their
+# unit of work (the latter since issue #3428).
+_WRITERS = {
+    "StartServer",
+    "StopServer",
+    "StopServersAssignedToWorker",
+    "ResetUnverifiableObservedStates",
+}
 
 # The names the servers unit of work is constructed under.
 _UNITS_OF_WORK = {"ServersUnitOfWork", "SqlAlchemyUnitOfWork"}

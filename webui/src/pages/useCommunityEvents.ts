@@ -3,7 +3,8 @@
  *
  * Wires the framework-free {@link CommunityEventsClient} into the dashboard:
  * STATUS frames patch the per-community servers-list query cache in place
- * (`setQueryData`) so a card's pill updates without a refetch; a frame for a
+ * (`setQueryData`) so a card's pill updates without a refetch, and so do its
+ * actions when the server's intent changes elsewhere (#3428); a frame for a
  * server not in the loaded list (created after load) triggers one list refetch
  * to pick it up. While the socket is down it falls back to polling the servers
  * list every 10s (status only) and reports `degraded` so the dashboard can show
@@ -33,11 +34,18 @@ import { useToast } from "../components/Toast.tsx";
 import {
   CommunityEventsClient,
   type NotificationEvent,
+  type SnapshotEntry,
   type StatusEvent,
 } from "./communityEvents.ts";
 import { observeRestResponses, stamp } from "./restReads.ts";
 
 type ServerResponse = components["schemas"]["ServerResponse"];
+
+/** A live state value, stamped with when it was received (#3213). */
+type Stamped = { value: string; at: number };
+
+/** The state fields a live write sets on a cached server. */
+type Fields = Partial<Pick<ServerResponse, "observed_state" | "desired_state">>;
 
 /** Poll interval while degraded (WEBUI_SPEC.md 6.2: 10s status-only polling). */
 const POLL_INTERVAL_MS = 10000;
@@ -61,9 +69,12 @@ export function useCommunityEvents(communityId: string): boolean {
     const key = serversKey(communityId);
     let pollTimer: ReturnType<typeof setInterval> | null = null;
 
-    // The live states not yet superseded by a REST read, each stamped with
-    // when it was received (#3213).
-    const live = new Map<string, { state: string; at: number }>();
+    // The live observed and desired states not yet superseded by a REST
+    // read, each stamped with when it was received (#3213). The two are
+    // stamped apart, as different frames carry them (#3428): a read can
+    // supersede one and not the other.
+    const observed = new Map<string, Stamped>();
+    const desired = new Map<string, Stamped>();
     // The latest snapshot's server set, until a REST read supersedes it.
     let members: { ids: Set<string>; at: number } | null = null;
 
@@ -71,33 +82,45 @@ export function useCommunityEvents(communityId: string): boolean {
       queryClient.invalidateQueries({ queryKey: key });
     };
 
-    // Write every live state over the cached list.
-    const patch = () => {
-      if (live.size === 0) {
-        return;
+    // The fields of each server's live states, to write over a REST response.
+    const live = (id: string): Fields | null => {
+      const state = observed.get(id);
+      const intent = desired.get(id);
+      if (state === undefined && intent === undefined) {
+        return null;
       }
-      queryClient.setQueryData<ServerResponse[]>(key, (servers) =>
-        servers?.map((s) => {
-          const entry = live.get(s.id);
-          return entry === undefined
-            ? s
-            : { ...s, observed_state: entry.state };
-        }),
-      );
+      return {
+        ...(state !== undefined && { observed_state: state.value }),
+        ...(intent !== undefined && { desired_state: intent.value }),
+      };
     };
 
-    // Apply the live states to the cached list and reconcile its server set:
-    // a live server it lacks was created after its read, a listed server a
+    // Write `fields` over the cached list and reconcile its server set: a
+    // live server it lacks was created after its read, a listed server a
     // newer snapshot lacks was deleted since — either way one refetch loads
     // the current set. Deferred until the list has loaded.
-    const reconcile = () => {
+    //
+    // A REST response or a snapshot replaces every state, so all live states
+    // are written over it; a status frame writes only the fields it carries,
+    // so it never rewrites a state another write (the optimistic transition
+    // `useLifecycleMutation` puts in the cache, #3428) set since.
+    const reconcile = (fields: (id: string) => Fields | null) => {
       const current = queryClient.getQueryData<ServerResponse[]>(key);
       if (current === undefined) {
         return;
       }
-      patch();
+      if (current.some((s) => fields(s.id) !== null)) {
+        queryClient.setQueryData<ServerResponse[]>(key, (servers) =>
+          servers?.map((s) => {
+            const update = fields(s.id);
+            return update === null ? s : { ...s, ...update };
+          }),
+        );
+      }
       const listed = new Set(current.map((s) => s.id));
-      const created = [...live.keys()].some((id) => !listed.has(id));
+      const created = [...observed.keys(), ...desired.keys()].some(
+        (id) => !listed.has(id),
+      );
       const deleted =
         members !== null && current.some((s) => !members?.ids.has(s.id));
       if (created || deleted) {
@@ -109,15 +132,17 @@ export function useCommunityEvents(communityId: string): boolean {
       queryClient,
       key,
       (readStartedAt) => {
-        for (const [id, entry] of live) {
-          if (entry.at < readStartedAt) {
-            live.delete(id);
+        for (const live of [observed, desired]) {
+          for (const [id, entry] of live) {
+            if (entry.at < readStartedAt) {
+              live.delete(id);
+            }
           }
         }
         if (members !== null && members.at < readStartedAt) {
           members = null;
         }
-        reconcile();
+        reconcile(live);
       },
     );
 
@@ -136,21 +161,39 @@ export function useCommunityEvents(communityId: string): boolean {
       pollTimer = setInterval(refetch, POLL_INTERVAL_MS);
     };
 
+    // A status frame sets the states it carries: an observed transition, or
+    // a change of the server's intent (#3428).
     const applyStatus = (event: StatusEvent) => {
-      live.set(event.serverId, { state: event.state, at: stamp() });
-      reconcile();
+      const at = stamp();
+      if (event.state !== undefined) {
+        observed.set(event.serverId, { value: event.state, at });
+      }
+      if (event.desiredState !== undefined) {
+        desired.set(event.serverId, { value: event.desiredState, at });
+      }
+      const carried: Fields = {
+        ...(event.state !== undefined && { observed_state: event.state }),
+        ...(event.desiredState !== undefined && {
+          desired_state: event.desiredState,
+        }),
+      };
+      reconcile((id) => (id === event.serverId ? carried : null));
     };
 
-    // The snapshot is every server's current state and the community's whole
+    // The snapshot is every server's current states and the community's whole
     // server set (#1795): it replaces the live states and the membership.
-    const applySnapshot = (servers: StatusEvent[]) => {
+    const applySnapshot = (servers: SnapshotEntry[]) => {
       const at = stamp();
-      live.clear();
+      observed.clear();
+      desired.clear();
       for (const s of servers) {
-        live.set(s.serverId, { state: s.state, at });
+        observed.set(s.serverId, { value: s.state, at });
+        if (s.desiredState !== undefined) {
+          desired.set(s.serverId, { value: s.desiredState, at });
+        }
       }
-      members = { ids: new Set(live.keys()), at };
-      reconcile();
+      members = { ids: new Set(observed.keys()), at };
+      reconcile(live);
     };
 
     // Resync gate (#1723): true only until the socket's first connect outcome.

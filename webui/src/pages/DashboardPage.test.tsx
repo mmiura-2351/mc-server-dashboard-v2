@@ -555,6 +555,50 @@ describe("DashboardPage live status", () => {
     expect(mockApi.get).toHaveBeenCalledTimes(1);
   });
 
+  // The issue #3428 repro: the server is started from another tab, then
+  // crashes. The card learns the new intent from the stream, so it offers the
+  // running/crashed actions without a reload.
+  it("follows an intent changed elsewhere when the server then crashes", async () => {
+    mockApi.get.mockResolvedValue([
+      server({ observed_state: "stopped", desired_state: "stopped" }),
+    ]);
+    renderPage();
+    await screen.findByText("survival");
+
+    act(() => {
+      const socket = MockWebSocket.last();
+      socket.open();
+      socket.message({
+        stream: "status",
+        ts: "t",
+        payload: { desired_state: "running" },
+        server_id: "s1",
+      });
+      socket.message({
+        stream: "status",
+        ts: "t",
+        payload: { state: "crashed", detail: "", reason: "" },
+        server_id: "s1",
+      });
+    });
+
+    // The query cache notifies its observers asynchronously.
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: t("dashboard.stop") }),
+      ).toBeEnabled(),
+    );
+    const restartButtons = screen.getAllByRole("button", {
+      name: t("dashboard.restart"),
+    });
+    expect(restartButtons).toHaveLength(2);
+    for (const button of restartButtons) {
+      expect(button).toBeDisabled();
+    }
+    // Patched in place: no second list fetch.
+    expect(mockApi.get).toHaveBeenCalledTimes(1);
+  });
+
   it("shows the live-degraded indicator on WS failure", async () => {
     mockApi.get.mockResolvedValue([server({ observed_state: "running" })]);
     renderPage();

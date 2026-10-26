@@ -10,6 +10,7 @@ import { clearAccessToken, setAccessToken } from "../auth/tokenStore.ts";
 import { installMockWebSocket, MockWebSocket } from "../test/mockWebSocket.ts";
 import { stampedQueryFn } from "./restReads.ts";
 import { serverKey } from "./serverKey.ts";
+import { transitionalState } from "./useLifecycleMutation.ts";
 import type { LogEntry } from "./useServerEvents.ts";
 import {
   METRICS_WINDOW,
@@ -307,6 +308,94 @@ describe("useServerEvents", () => {
     expect(queryClient.getQueryData(serverKey(CID, SID))).toEqual({
       id: SID,
       observed_state: "stopped",
+    });
+  });
+
+  it("patches the detail query desired_state on an intent frame (#3428)", () => {
+    const { queryClient } = setup();
+    queryClient.setQueryData(serverKey(CID, SID), {
+      id: SID,
+      observed_state: "crashed",
+      desired_state: "stopped",
+    });
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        frame("status", { state: "crashed", detail: "exit 1" }),
+      );
+      MockWebSocket.last().message(
+        frame("status", { desired_state: "running" }),
+      );
+    });
+    expect(queryClient.getQueryData(serverKey(CID, SID))).toEqual({
+      id: SID,
+      observed_state: "crashed",
+      desired_state: "running",
+    });
+    // The intent says nothing about the crash: its detail still stands.
+    expect(state.statusDetail).toBe("exit 1");
+  });
+
+  // An intent frame sets only the desired state: it does not rewrite the pill
+  // `useLifecycleMutation.onMutate` wrote over the snapshot's observed state
+  // while the request is open.
+  it.each([
+    ["start", "stopped", "running"],
+    ["stop", "running", "stopped"],
+  ] as const)(
+    "keeps the optimistic %s pill under an intent frame (#3428)",
+    (action, from, intent) => {
+      const { queryClient } = setup();
+      queryClient.setQueryData(serverKey(CID, SID), {
+        id: SID,
+        observed_state: from,
+        desired_state: from,
+      });
+      act(() => {
+        MockWebSocket.last().open();
+        MockWebSocket.last().message(
+          frame("snapshot", { state: from, desired_state: from }),
+        );
+      });
+      act(() => {
+        queryClient.setQueryData(serverKey(CID, SID), {
+          id: SID,
+          observed_state: transitionalState(action),
+          desired_state: from,
+        });
+      });
+
+      act(() => {
+        MockWebSocket.last().message(
+          frame("status", { desired_state: intent }),
+        );
+      });
+
+      expect(queryClient.getQueryData(serverKey(CID, SID))).toEqual({
+        id: SID,
+        observed_state: transitionalState(action),
+        desired_state: intent,
+      });
+    },
+  );
+
+  it("patches the detail query desired_state from a snapshot frame (#3428)", () => {
+    const { queryClient } = setup();
+    queryClient.setQueryData(serverKey(CID, SID), {
+      id: SID,
+      observed_state: "running",
+      desired_state: "running",
+    });
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        frame("snapshot", { state: "stopped", desired_state: "stopped" }),
+      );
+    });
+    expect(queryClient.getQueryData(serverKey(CID, SID))).toEqual({
+      id: SID,
+      observed_state: "stopped",
+      desired_state: "stopped",
     });
   });
 

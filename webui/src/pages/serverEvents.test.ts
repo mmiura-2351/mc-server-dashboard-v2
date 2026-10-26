@@ -98,8 +98,30 @@ describe("parseServerFrame", () => {
     });
   });
 
+  it("parses the intent a status frame carries (#3428)", () => {
+    expect(
+      parseServerFrame(frame("status", { desired_state: "running" })),
+    ).toEqual({
+      kind: "status",
+      desiredState: "running",
+      detail: "",
+      reason: "",
+    });
+  });
+
+  it("parses the desired state a snapshot frame carries (#3428)", () => {
+    expect(
+      parseServerFrame(
+        frame("snapshot", { state: "crashed", desired_state: "running" }),
+      ),
+    ).toEqual({ kind: "snapshot", state: "crashed", desiredState: "running" });
+  });
+
   it("drops a snapshot frame without a state", () => {
     expect(parseServerFrame(frame("snapshot", {}))).toBeNull();
+    expect(
+      parseServerFrame(frame("snapshot", { desired_state: "running" })),
+    ).toBeNull();
   });
 
   it("parses a gap marker (no payload required)", () => {

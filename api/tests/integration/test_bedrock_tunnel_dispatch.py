@@ -160,7 +160,7 @@ async def _create_running_server(
         server_type="paper",
         config={},
     )
-    async with ServersUnitOfWork(factory) as uow:
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         loaded = await uow.servers.get_by_id(server.id)
         assert loaded is not None
         loaded.bedrock_port = bedrock_port

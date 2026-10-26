@@ -67,6 +67,7 @@ from mc_server_dashboard_api.identity.application.authenticate_request import (
 )
 from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.servers.domain.value_objects import (
+    DesiredState,
     ObservedState,
     ServerId,
 )
@@ -104,10 +105,11 @@ class _FakeLookup:
 
 @dataclass(frozen=True)
 class _FakeServer:
-    """The slice of the ``Server`` entity the snapshot reads (id + observed state)."""
+    """The slice of the ``Server`` entity the snapshot reads (id + both states)."""
 
     id: ServerId
     observed_state: ObservedState
+    desired_state: DesiredState = DesiredState.RUNNING
 
 
 class _FakeListServers:
@@ -430,13 +432,19 @@ def test_community_frame_wire_text_is_the_exact_compact_json() -> None:
 
 
 def test_stream_opens_with_a_snapshot_of_every_community_server() -> None:
+    # Each entry carries the desired state beside the observed one (#3428), so
+    # a client that missed an intent change converges on it too.
     bus = InProcessRealTimeEvents()
     community = uuid.uuid4()
     server_a, server_b = uuid.uuid4(), uuid.uuid4()
     servers = _FakeListServers(
         [
             _FakeServer(id=ServerId(server_a), observed_state=ObservedState.RUNNING),
-            _FakeServer(id=ServerId(server_b), observed_state=ObservedState.STOPPED),
+            _FakeServer(
+                id=ServerId(server_b),
+                observed_state=ObservedState.CRASHED,
+                desired_state=DesiredState.STOPPED,
+            ),
         ]
     )
     app = _app(bus=bus, list_servers=servers)
@@ -447,8 +455,16 @@ def test_stream_opens_with_a_snapshot_of_every_community_server() -> None:
     assert frame["server_id"] is None
     assert frame["payload"] == {
         "servers": [
-            {"server_id": str(server_a), "state": "running"},
-            {"server_id": str(server_b), "state": "stopped"},
+            {
+                "server_id": str(server_a),
+                "state": "running",
+                "desired_state": "running",
+            },
+            {
+                "server_id": str(server_b),
+                "state": "crashed",
+                "desired_state": "stopped",
+            },
         ]
     }
     assert frame["ts"].endswith("Z")
@@ -467,8 +483,8 @@ def test_snapshot_wire_text_is_the_compact_community_frame_shape() -> None:
     ts = json.loads(text)["ts"]
     assert text == (
         f'{{"stream":"snapshot","ts":"{ts}",'
-        f'"payload":{{"servers":[{{"server_id":"{server}","state":"running"}}]}},'
-        '"server_id":null}'
+        f'"payload":{{"servers":[{{"server_id":"{server}","state":"running",'
+        '"desired_state":"running"}]},"server_id":null}'
     )
 
 
@@ -504,7 +520,9 @@ def test_gap_is_followed_by_a_fresh_snapshot() -> None:
     assert first["stream"] == "gap"
     assert second["stream"] == "snapshot"
     assert second["payload"] == {
-        "servers": [{"server_id": str(server), "state": "running"}]
+        "servers": [
+            {"server_id": str(server), "state": "running", "desired_state": "running"}
+        ]
     }
     assert third["payload"] == {"state": "3"}
 

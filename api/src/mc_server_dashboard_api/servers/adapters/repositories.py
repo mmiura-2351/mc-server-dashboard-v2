@@ -65,7 +65,9 @@ def _to_server(row: ServerModel) -> Server:
 
 
 class StatusEventsNotWiredError(RuntimeError):
-    """An observed-state write is about to commit with no bus to publish it on.
+    """A state write is about to commit with no bus to publish it on.
+
+    An observed-state write, or a ``desired_state`` change (issue #3428).
 
     A programming error at the composition root, not a runtime condition: the
     owner of the commit was built without the real-time event bus, so the
@@ -80,22 +82,23 @@ def require_status_events_wired(
     """Refuse to commit staged status events that nobody could publish.
 
     Called right before the commit by every owner of one. An owner that writes
-    no observed state stages nothing and needs no bus; one that does must have
-    been given a bus — a real one with no subscribers where none are wanted.
+    neither observed nor desired state stages nothing and needs no bus; one that
+    does must have been given a bus — a real one with no subscribers where none
+    are wanted.
     """
 
     if real_time_events is None and repository.staged_status_event_count():
         raise StatusEventsNotWiredError(
-            "an observed-state write is being committed by a unit of work or "
-            "state sink built without the real-time event bus; pass it the bus "
-            "so the status frame is published"
+            "a state write is being committed by a unit of work or state sink "
+            "built without the real-time event bus; pass it the bus so the "
+            "status frame is published"
         )
 
 
 def publish_status_events(
     repository: SqlAlchemyServerRepository, real_time_events: RealTimeEvents | None
 ) -> None:
-    """Publish the status events of ``repository``'s committed observed-state writes.
+    """Publish the status events of ``repository``'s committed state writes.
 
     Called right after the commit of the session ``repository`` writes through,
     by every owner of such a commit: the unit of work and the control-plane
@@ -117,8 +120,9 @@ class SqlAlchemyServerRepository(ServerRepository):
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
-        # The status events of the observed-state writes this repository has
-        # executed and its session has not committed yet, as (server id, event).
+        # The status events of the observed-state writes and desired-state
+        # changes this repository has executed and its session has not
+        # committed yet, as (server id, event).
         # Whoever commits the session hands them to :func:`publish_status_events`
         # afterwards; a rollback hands them to nobody (issue #3212).
         self._staged_status_events: list[tuple[str, RealTimeEvent]] = []
@@ -280,7 +284,22 @@ class SqlAlchemyServerRepository(ServerRepository):
         result = await self._session.execute(stmt)
         # An UPDATE returns a CursorResult, whose rowcount is the matched count;
         # the compare-and-set matched a row iff it equals 1 (the lost race is 0).
-        return cast("CursorResult[Any]", result).rowcount == 1
+        applied = cast("CursorResult[Any]", result).rowcount == 1
+        # The one place ``desired_state`` changes (issue #3428): stage the frame
+        # that tells live subscribers the new intent, published by whoever
+        # commits the session, like an observed-state write's. A write under an
+        # unchanged intent (a restart, a re-placement) has nothing to announce.
+        if applied and server.desired_state is not expected_from:
+            self._staged_status_events.append(
+                (
+                    str(server.id.value),
+                    RealTimeEvent(
+                        stream=EventStream.STATUS,
+                        payload={"desired_state": server.desired_state.value},
+                    ),
+                )
+            )
+        return applied
 
     async def record_observed_state(
         self,
