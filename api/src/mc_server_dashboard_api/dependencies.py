@@ -1204,11 +1204,12 @@ WS_DATABASE_TIMEOUT_SECONDS = 10.0
 # How long an events socket's handshake may take, from its start to accept,
 # before it is refused ``1013`` (#3440). Every database read before accept —
 # the authentication, then the gate — shares this one budget, and the accept
-# re-checks it. It must stay below the server's own bound on an unfinished
-# handshake: uvicorn's websockets ``open_timeout``, 10 s by default and not
-# overridden by ``serve.py``. Above it, the server drops a slow handshake before
-# the app can refuse it, and the app may still accept a connection the server
-# has already given up on.
+# re-checks it. It is the app's own bound on the handshake before accept, kept
+# below the 10 s ``open_timeout`` of uvicorn's legacy ``websockets`` backend
+# (``ws="websockets"``), so the refusal reaches the client before that backend
+# drops the connection, and the app never accepts a connection it has already
+# given up on. The backend ``serve.py``'s ``ws="auto"`` selects today,
+# websockets-sansio, has no such server-side open timeout.
 WS_HANDSHAKE_DEADLINE_SECONDS = 8.0
 
 

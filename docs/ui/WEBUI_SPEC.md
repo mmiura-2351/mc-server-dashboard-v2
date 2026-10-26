@@ -378,9 +378,11 @@ one WARNING line, no traceback. At the handshake the socket is refused with it
 before accept, like the denials above, so a browser sees a failed handshake.
 The whole handshake, authentication and the gate together, has one 8 s
 deadline, re-checked right before accept: a handshake that runs out of time
-is refused and never accepted. The deadline stays below the server's own 10 s
-limit on an unfinished handshake, so the server does not drop the connection
-before the API refuses it. Mid-stream, with a 10 s bound on each read, the
+is refused and never accepted. The deadline is the API's own bound on the
+handshake. It is kept below the 10 s open timeout of uvicorn's legacy
+`websockets` backend, so the refusal arrives before that backend drops the
+connection. The backend the API selects today (websockets-sansio) has no such
+server-side open timeout. Mid-stream, with a 10 s bound on each read, the
 same applies to the
 status snapshot, the community stream's per-server membership lookup and the
 re-check below. Any other error is not masked.
