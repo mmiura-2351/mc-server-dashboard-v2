@@ -523,7 +523,9 @@ class BackupStore(abc.ABC):
         staging is refused with :class:`~.errors.IntegrityCheckError` (carrying the
         report) and ``current`` is left untouched (last-known-good, #703). With
         ``force=True`` the operator override publishes the corrupt working set
-        anyway (better a deliberate corrupt restore than none, #703).
+        anyway (better a deliberate corrupt restore than none, #703). The
+        missing-region gate does not apply (issue #3446): a backup is a complete set
+        that legitimately holds fewer regions than the world it replaces.
 
         Returns the :class:`~...integrity.region.WorkingSetReport` of the extracted
         working set either way (healthy on a clean restore, non-healthy on a forced

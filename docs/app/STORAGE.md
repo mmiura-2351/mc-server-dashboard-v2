@@ -620,7 +620,11 @@ has.
 The gate fires when a staged set dropped **some-but-not-all** region files of a
 dimension that still exists — Minecraft would silently regenerate the missing
 chunks as fresh empty terrain, so the gate fail-closes rather than publish a
-silently-holed world. There are two legitimate causes and one corruption cause:
+silently-holed world. Only a snapshot publish is gated: a backup restore is an
+operator-chosen rollback to a complete set, which legitimately holds fewer
+regions than the world it replaces, so it skips the gate on both backends
+(Section 3.3 `restore_backup` row). There are two legitimate causes and one
+corruption cause:
 
 - **Intentional world shrink (delete a whole dimension).** Deleting *all* region
   files of a dir is a full-dimension delete and is **allowed** — only a partial

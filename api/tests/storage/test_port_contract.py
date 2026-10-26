@@ -613,6 +613,53 @@ async def test_commit_allows_full_dimension_delete(harness: StorageHarness) -> N
     assert read_tar(blob) == after
 
 
+async def test_restore_of_a_backup_with_fewer_regions_bypasses_the_missing_region_gate(
+    harness: StorageHarness,
+) -> None:
+    """A restore is an operator-chosen rollback, so it is not refused for holding
+    fewer regions than ``current/`` (issue #3446).
+
+    The missing-region gate (issue #854) catches a snapshot that silently lost
+    regions; an older backup legitimately lacks the regions generated after it was
+    taken. The restore publishes exactly the backup's set, with none of the newer
+    regions left behind, and later snapshots are still gated against that set.
+    """
+
+    community, server = new_scope()
+    backup = {
+        "world/region/r.0.0.mca": healthy_region_bytes(),
+        "world/region/r.0.1.mca": healthy_region_bytes(),
+        "world/poi/r.0.0.mca": healthy_region_bytes(),
+    }
+    await harness.publish(community, server, backup)
+    key = await harness.storage.create_backup_from_current(community, server)
+    # The world grows after the backup: each dimension gains regions while keeping
+    # some, so going back to the backup is the shape the gate refuses on a snapshot.
+    await harness.publish(
+        community,
+        server,
+        {
+            **backup,
+            "world/region/r.1.0.mca": healthy_region_bytes(),
+            "world/poi/r.0.1.mca": healthy_region_bytes(),
+            "world/poi/r.1.0.mca": healthy_region_bytes(),
+        },
+    )
+
+    await harness.storage.restore_backup(community, server, key)
+
+    blob = await drain(harness.storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == backup
+
+    # The gate still guards snapshots, now against the restored set.
+    dropped = dict(backup)
+    del dropped["world/region/r.0.1.mca"]
+    handle = await harness.storage.begin_snapshot(community, server)
+    await harness.storage.write_snapshot(handle, tar_stream(dropped))
+    with pytest.raises(MissingRegionsError):
+        await harness.storage.commit_snapshot(handle)
+
+
 async def test_running_source_publish_then_backup_create_succeeds(
     harness: StorageHarness,
 ) -> None:
