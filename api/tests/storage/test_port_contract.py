@@ -651,13 +651,22 @@ async def test_restore_of_a_backup_with_fewer_regions_bypasses_the_missing_regio
     blob = await drain(harness.storage.open_hydrate_source(community, server))
     assert read_tar(blob) == backup
 
-    # The gate still guards snapshots, now against the restored set.
+    # The gate still guards snapshots, now against the restored set: the loss
+    # report names only the region this snapshot dropped, none the restore removed.
     dropped = dict(backup)
     del dropped["world/region/r.0.1.mca"]
     handle = await harness.storage.begin_snapshot(community, server)
     await harness.storage.write_snapshot(handle, tar_stream(dropped))
-    with pytest.raises(MissingRegionsError):
+    with pytest.raises(MissingRegionsError) as excinfo:
         await harness.storage.commit_snapshot(handle)
+    assert [(f.directory, f.lost) for f in excinfo.value.report.partial_loss] == [
+        (Path("world/region"), ("r.0.1.mca",))
+    ]
+
+    # A snapshot identical to the restored backup publishes cleanly.
+    await harness.publish(community, server, backup)
+    blob = await drain(harness.storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == backup
 
 
 async def test_running_source_publish_then_backup_create_succeeds(
