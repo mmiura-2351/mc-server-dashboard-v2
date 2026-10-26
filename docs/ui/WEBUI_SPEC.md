@@ -372,14 +372,18 @@ honored for non-browser clients. Close codes mirror REST: 4400 bad `streams`,
 4401 unauthenticated, 4403 forbidden, 4404 not found / not a member.
 A database read the socket cannot get answered — a transient database error
 (refused or lost connection, exhausted pool, server starting up or shutting
-down), or no answer within 10 s (a frozen database) — is none of those: the
+down), or no answer in time (a frozen database) — is none of those: the
 socket is closed with the standard **1013** (Try Again Later) and the API logs
 one WARNING line, no traceback. At the handshake the socket is refused with it
 before accept, like the denials above, so a browser sees a failed handshake.
-Authentication and the gate each have their own 10 s bound, so a handshake can
-take up to about 20 s in all, but a phase that times out is refused rather
-than accepted once the database thaws, after the browser gave up. Mid-stream
-the same applies to the
+The whole handshake, authentication and the gate together, has one 8 s
+deadline, re-checked right before accept: a handshake that runs out of time
+is refused and never accepted. The deadline is the API's own bound on the
+handshake. It is kept below the 10 s open timeout of uvicorn's legacy
+`websockets` backend, so the refusal arrives before that backend drops the
+connection. The backend the API selects today (websockets-sansio) has no such
+server-side open timeout. Mid-stream, with a 10 s bound on each read, the
+same applies to the
 status snapshot, the community stream's per-server membership lookup and the
 re-check below. Any other error is not masked.
 Delivery is best-effort; REST keeps working if the socket dies (FR-MON-4).
