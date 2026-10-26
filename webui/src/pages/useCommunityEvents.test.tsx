@@ -11,6 +11,7 @@ import { ToastProvider } from "../components/Toast.tsx";
 import { installMockWebSocket, MockWebSocket } from "../test/mockWebSocket.ts";
 import { stampedQueryFn } from "./restReads.ts";
 import { serversKey, useCommunityEvents } from "./useCommunityEvents.ts";
+import { transitionalState } from "./useLifecycleMutation.ts";
 
 const CID = "c1";
 
@@ -49,6 +50,21 @@ function notificationFrame(serverId: string, title: string, detail: string) {
     ts: "t",
     payload: { kind: "schedule_failed", title, detail },
     server_id: serverId,
+  });
+}
+
+function snapshotWithIntent(servers: [string, string, string][]) {
+  return JSON.stringify({
+    stream: "snapshot",
+    ts: "t",
+    payload: {
+      servers: servers.map(([server_id, state, desired_state]) => ({
+        server_id,
+        state,
+        desired_state,
+      })),
+    },
+    server_id: null,
   });
 }
 
@@ -143,6 +159,47 @@ describe("useCommunityEvents", () => {
       serverRow("s1", "stopped", "running"),
     ]);
   });
+
+  // A frame sets only the fields it carries: neither an intent frame nor
+  // another server's frame rewrites the pill `useLifecycleMutation.onMutate`
+  // wrote over the snapshot's observed state while the request is open.
+  it.each([
+    ["start", "stopped", "running"],
+    ["stop", "running", "stopped"],
+  ] as const)(
+    "keeps the optimistic %s pill under an intent frame (#3428)",
+    (action, from, intent) => {
+      const { queryClient } = setup([
+        serverRow("s1", from, from),
+        serverRow("s2", "running", "running"),
+      ]);
+      act(() => {
+        MockWebSocket.last().open();
+        MockWebSocket.last().message(
+          snapshotWithIntent([
+            ["s1", from, from],
+            ["s2", "running", "running"],
+          ]),
+        );
+      });
+      act(() => {
+        queryClient.setQueryData(serversKey(CID), [
+          serverRow("s1", transitionalState(action), from),
+          serverRow("s2", "running", "running"),
+        ]);
+      });
+
+      act(() => {
+        MockWebSocket.last().message(intentFrame("s1", intent));
+        MockWebSocket.last().message(statusFrame("s2", "crashed"));
+      });
+
+      expect(queryClient.getQueryData(serversKey(CID))).toEqual([
+        serverRow("s1", transitionalState(action), intent),
+        serverRow("s2", "crashed", "running"),
+      ]);
+    },
+  );
 
   it("patches every cached server's desired_state from a snapshot (#3428)", () => {
     const { queryClient } = setup([serverRow("s1", "running", "running")]);

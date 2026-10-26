@@ -227,22 +227,19 @@ export function useServerEvents(
     let observed: { value: string; at: number } | null = null;
     let desired: { value: string; at: number } | null = null;
 
-    // Patch the detail query so the header pill and controls update live (no
-    // refetch).
-    const patch = () => {
-      if (observed === null && desired === null) {
+    // Patch `fields` into the detail query so the header pill and controls
+    // update live (no refetch). A frame patches only the field it carries, so
+    // an intent frame never rewrites the optimistic transition
+    // `useLifecycleMutation` put in the cache (#3428); a REST response gets
+    // every live state written back over it.
+    const patch = (
+      fields: Partial<Pick<ServerResponse, "observed_state" | "desired_state">>,
+    ) => {
+      if (Object.keys(fields).length === 0) {
         return;
       }
-      const state = observed?.value;
-      const intent = desired?.value;
       queryClient.setQueryData<ServerResponse>(key, (current) =>
-        current === undefined
-          ? current
-          : {
-              ...current,
-              ...(state !== undefined && { observed_state: state }),
-              ...(intent !== undefined && { desired_state: intent }),
-            },
+        current === undefined ? current : { ...current, ...fields },
       );
     };
 
@@ -260,18 +257,21 @@ export function useServerEvents(
         if (desired !== null && desired.at < readStartedAt) {
           desired = null;
         }
-        patch();
+        patch({
+          ...(observed !== null && { observed_state: observed.value }),
+          ...(desired !== null && { desired_state: desired.value }),
+        });
       },
     );
 
     const applyDesired = (state: string) => {
       desired = { value: state, at: stamp() };
-      patch();
+      patch({ desired_state: state });
     };
 
     const applyState = (state: string) => {
       observed = { value: state, at: stamp() };
-      patch();
+      patch({ observed_state: state });
       // Once the server settles at rest there is no metrics stream (SPEC
       // 7.2); drop the windowed samples so the strip falls back to the idle
       // copy instead of freezing the last numbers forever.

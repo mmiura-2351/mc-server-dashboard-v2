@@ -44,6 +44,9 @@ type ServerResponse = components["schemas"]["ServerResponse"];
 /** A live state value, stamped with when it was received (#3213). */
 type Stamped = { value: string; at: number };
 
+/** The state fields a live write sets on a cached server. */
+type Fields = Partial<Pick<ServerResponse, "observed_state" | "desired_state">>;
+
 /** Poll interval while degraded (WEBUI_SPEC.md 6.2: 10s status-only polling). */
 const POLL_INTERVAL_MS = 10000;
 
@@ -79,37 +82,41 @@ export function useCommunityEvents(communityId: string): boolean {
       queryClient.invalidateQueries({ queryKey: key });
     };
 
-    // Write every live state over the cached list.
-    const patch = () => {
-      if (observed.size === 0 && desired.size === 0) {
-        return;
+    // The fields of each server's live states, to write over a REST response.
+    const live = (id: string): Fields | null => {
+      const state = observed.get(id);
+      const intent = desired.get(id);
+      if (state === undefined && intent === undefined) {
+        return null;
       }
-      queryClient.setQueryData<ServerResponse[]>(key, (servers) =>
-        servers?.map((s) => {
-          const state = observed.get(s.id);
-          const intent = desired.get(s.id);
-          if (state === undefined && intent === undefined) {
-            return s;
-          }
-          return {
-            ...s,
-            ...(state !== undefined && { observed_state: state.value }),
-            ...(intent !== undefined && { desired_state: intent.value }),
-          };
-        }),
-      );
+      return {
+        ...(state !== undefined && { observed_state: state.value }),
+        ...(intent !== undefined && { desired_state: intent.value }),
+      };
     };
 
-    // Apply the live states to the cached list and reconcile its server set:
-    // a live server it lacks was created after its read, a listed server a
+    // Write `fields` over the cached list and reconcile its server set: a
+    // live server it lacks was created after its read, a listed server a
     // newer snapshot lacks was deleted since — either way one refetch loads
     // the current set. Deferred until the list has loaded.
-    const reconcile = () => {
+    //
+    // A REST response or a snapshot replaces every state, so all live states
+    // are written over it; a status frame writes only the fields it carries,
+    // so it never rewrites a state another write (the optimistic transition
+    // `useLifecycleMutation` puts in the cache, #3428) set since.
+    const reconcile = (fields: (id: string) => Fields | null) => {
       const current = queryClient.getQueryData<ServerResponse[]>(key);
       if (current === undefined) {
         return;
       }
-      patch();
+      if (current.some((s) => fields(s.id) !== null)) {
+        queryClient.setQueryData<ServerResponse[]>(key, (servers) =>
+          servers?.map((s) => {
+            const update = fields(s.id);
+            return update === null ? s : { ...s, ...update };
+          }),
+        );
+      }
       const listed = new Set(current.map((s) => s.id));
       const created = [...observed.keys(), ...desired.keys()].some(
         (id) => !listed.has(id),
@@ -135,7 +142,7 @@ export function useCommunityEvents(communityId: string): boolean {
         if (members !== null && members.at < readStartedAt) {
           members = null;
         }
-        reconcile();
+        reconcile(live);
       },
     );
 
@@ -164,7 +171,13 @@ export function useCommunityEvents(communityId: string): boolean {
       if (event.desiredState !== undefined) {
         desired.set(event.serverId, { value: event.desiredState, at });
       }
-      reconcile();
+      const carried: Fields = {
+        ...(event.state !== undefined && { observed_state: event.state }),
+        ...(event.desiredState !== undefined && {
+          desired_state: event.desiredState,
+        }),
+      };
+      reconcile((id) => (id === event.serverId ? carried : null));
     };
 
     // The snapshot is every server's current states and the community's whole
@@ -180,7 +193,7 @@ export function useCommunityEvents(communityId: string): boolean {
         }
       }
       members = { ids: new Set(observed.keys()), at };
-      reconcile();
+      reconcile(live);
     };
 
     // Resync gate (#1723): true only until the socket's first connect outcome.
