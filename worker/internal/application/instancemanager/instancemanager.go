@@ -304,15 +304,17 @@ type Manager struct {
 	// pendingSaveOn names the servers a pre-stop flush MAY have disabled auto-save on
 	// and whose stop has not resolved yet — the save-off bracket
 	// flushBeforeStopWithDriver opens and only a confirmed termination (nothing to
-	// restore) or restoreSaveOnAfterFailedStop (the survivor) closes. It holds the
+	// restore) or a SUCCESSFUL restoreSaveOnAfterFailedStop (the survivor) closes; a
+	// failed restore leaves it open for the next stop attempt and for Close (issue
+	// #3485). It holds the
 	// RCON target the restore needs, because by then the instance is evicted from
 	// startCmds and controlTargetFor would answer empty (issue #2021).
 	//
 	// "MAY have" is the honest tense at both ends, and both are deliberate. The entry
 	// is written BEFORE save-off goes on the wire, because rcon.Execute writes the
 	// command and only then waits for a reply, so a failed round trip does not mean
-	// the server did not run it; and it is removed only once attemptStop has done
-	// whatever its outcome calls for, never before the restore that outcome triggers.
+	// the server did not run it; and it is removed only once a restore has succeeded
+	// or termination is confirmed, never before the restore a failed stop triggers.
 	// Both ends err towards one redundant, idempotent save-on rather than towards a
 	// surviving world that saves nothing.
 	//
@@ -1833,12 +1835,17 @@ func (m *Manager) restoreSaveOn(ctx context.Context, serverID string, ctrl execu
 // escalation still in flight (issue #3166). The two are independent and both
 // idempotent — this one runs whenever the graceful stop failed, whether or not the
 // shutdown already pre-empted it.
+//
+// Only a restore that succeeds settles the debt. A failed one leaves the ledger
+// entry in place, so a retry stop whose own flush cannot reach save-off still
+// restores, and Close still drains it (issue #3485).
 func (m *Manager) restoreSaveOnAfterFailedStop(ctx context.Context, serverID, driverName, mcVersion string) {
 	if err := m.dialAndSaveOn(ctx, restoreSaveTimeout, serverID, driverName, mcVersion); err != nil {
 		m.logger.Error("failed stop: auto-save NOT restored; surviving server is running with auto-save disabled",
 			"server_id", serverID, "driver", driverName, "error", err)
 		return
 	}
+	m.clearPendingSaveOn(serverID)
 	m.logger.Warn("stop failed with the server possibly still alive; re-enabled auto-save on the survivor",
 		"server_id", serverID)
 }
@@ -1930,7 +1937,8 @@ func (m *Manager) dialAndSaveOn(ctx context.Context, timeout time.Duration, serv
 //
 //	For every save-off this manager writes, exactly one of these restores it:
 //	  - the lane, when attemptStop's outcome calls for restoreSaveOnAfterFailedStop;
-//	    the entry is cleared only after that has run, so the clear cannot race it;
+//	    the entry is cleared only once that has succeeded, so the clear cannot race
+//	    it, and a failed one leaves the entry for a later attempt or Close;
 //	  - a Close drain, and only after the write has RETURNED, so the restore can
 //	    never precede the save-off it undoes.
 //	A save-off is never written for a bracket the seal refused, and no bracket is
@@ -1982,14 +1990,21 @@ func (m *Manager) markPendingSaveOn(serverID, driverName, mcVersion string) (cha
 	return written, true
 }
 
-// clearPendingSaveOn forgets serverID's outstanding save-off, because its stop has
-// resolved: the server is either gone (nothing to restore) or about to reach
-// restoreSaveOnAfterFailedStop. Without it a later Close would dial a server whose
-// stop confirmed termination long ago.
+// clearPendingSaveOn forgets serverID's outstanding save-off, because a save-on
+// restored it. Without it a later Close or retry stop would restore it again.
 func (m *Manager) clearPendingSaveOn(serverID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.pendingSaveOn, serverID)
+}
+
+// hasPendingSaveOn reports whether a save-off may still be in effect on serverID:
+// one was issued and no save-on has restored it yet (issue #3485).
+func (m *Manager) hasPendingSaveOn(serverID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.pendingSaveOn[serverID]
+	return ok
 }
 
 // takePendingSaveOn hands Close the whole outstanding set and empties it, so the
@@ -3000,13 +3015,12 @@ func (m *Manager) attemptStop(ctx context.Context, serverID string, inst executi
 		}
 	}
 	err := inst.Stop(ctx, graceful, preFallback)
-	// The flush's save-off is settled only once this call has done whatever the
-	// stop's outcome calls for: a confirmed termination leaves nobody to restore it
-	// for, and a failure reaches restoreSaveOnAfterFailedStop below. DEFERRED rather
-	// than placed here, so the clear can never precede that restore — Close joins no
-	// command lane, so a drain landing in between would find an empty map and let the
-	// process exit under a survivor with auto-save still off (issue #3166).
-	defer m.clearPendingSaveOn(serverID)
+	// The flush's save-off stays in pendingSaveOn until it is settled: a confirmed
+	// termination below leaves nobody to restore it for, and a failure keeps it until
+	// restoreSaveOnAfterFailedStop succeeds. A restore that fails leaves it for the next
+	// attempt and for Close (issue #3485). Never cleared before that restore — Close
+	// joins no command lane, so a drain landing in between would find an empty map and
+	// let the process exit under a survivor with auto-save still off (issue #3166).
 	if err != nil {
 		// Record the orphan and hand it to a converger, so the Worker keeps working
 		// the stop on its own instead of waiting for an operator to notice (issue
@@ -3030,21 +3044,25 @@ func (m *Manager) attemptStop(ctx context.Context, serverID string, inst executi
 		if m.bedrock != nil {
 			m.bedrock.Close(serverID)
 		}
-		// The graceful path issued save-off before the flush; because the stop
-		// failed, the server may still be alive with auto-save disabled. Re-enable
-		// it so player progress is not silently lost (issue #2021). A flush that
-		// never issued save-off — RCON could not be dialed, or the ledger was sealed —
-		// left auto-save on, so there is nothing to restore (issue #3485).
-		if saveOffSent {
+		// A save-off this attempt or an earlier one issued may still be in effect,
+		// and because the stop failed the server may still be alive with auto-save
+		// disabled. Re-enable it so player progress is not silently lost (issue
+		// #2021). The ledger carries an earlier attempt's save-off whose restore
+		// failed; saveOffSent covers this attempt's when Close has already taken
+		// its entry. With neither, no save-off is outstanding — no flush reached it
+		// (RCON could not be dialed, or the ledger was sealed), or its restore
+		// already succeeded — so there is nothing to restore (issue #3485).
+		if saveOffSent || m.hasPendingSaveOn(serverID) {
 			m.restoreSaveOnAfterFailedStop(ctx, serverID, driverName, mcVersion)
 		} else if graceful {
-			m.logger.Info("failed stop: save-off was never sent, so auto-save is still enabled; nothing to restore",
+			m.logger.Info("failed stop: no save-off is outstanding on this server, so auto-save is still enabled; nothing to restore",
 				"server_id", serverID)
 		}
 		return err
 	}
 	m.mu.Lock()
 	delete(m.orphans, serverID)
+	delete(m.pendingSaveOn, serverID)
 	m.mu.Unlock()
 	if m.bedrock != nil {
 		m.bedrock.Close(serverID)
@@ -4072,6 +4090,9 @@ func (m *Manager) forgetOrphanIf(serverID string, inst execution.Instance) bool 
 	defer m.mu.Unlock()
 	if e, ok := m.orphans[serverID]; ok && e.inst == inst {
 		delete(m.orphans, serverID)
+		// The process is gone, so a save-off left outstanding on it has nobody
+		// left to restore it for (issue #3485).
+		delete(m.pendingSaveOn, serverID)
 		return true
 	}
 	return false

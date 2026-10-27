@@ -631,6 +631,58 @@ func TestFailedStopKeepsTheDebtUntilItsRestoreRan(t *testing.T) {
 	}
 }
 
+// A failed-stop restore that fails leaves the save-off in effect on the survivor,
+// so the debt must stay in the ledger for Close to settle at shutdown (issue
+// #3485).
+func TestCloseRestoresSaveOnAfterTheFailedStopRestoreFailed(t *testing.T) {
+	rec := &saveOnRecorder{}
+	d := &flushOrphanDriver{stopAfter: 1}
+	var dials atomic.Int32
+	m := newSaveOnManager(t, d, func(ctx context.Context, serverID, driver, mcVersion string) (execution.ServerControl, error) {
+		if dials.Add(1) == 2 { // dial 1 is the flush's; dial 2 is the failed-stop restore's
+			return nil, errors.New("rcon unreachable")
+		}
+		return rec.open(ctx, serverID, driver, mcVersion)
+	})
+	closeWithTest(t, m)
+	seedScratch(t, m, s1)
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	if res := m.Handle(context.Background(),
+		session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"}); res.Success {
+		t.Fatalf("stop = %+v, want failure (driver could not confirm termination)", res)
+	}
+	if rec.hasFor(s1, "save-on") {
+		t.Fatalf("s1 rcon lines = %v, want no save-on before Close: the failed-stop restore could not dial", rec.allFor(s1))
+	}
+
+	m.Close()
+	if !rec.hasFor(s1, "save-on") {
+		t.Fatalf("s1 rcon lines = %v, want Close to restore the save-off the failed-stop restore left in effect", rec.allFor(s1))
+	}
+}
+
+// A failed-stop orphan that exits on its own takes its outstanding save-off with
+// it: a debt kept past that would have a later Close or stop dial a server that is
+// gone (issue #3485).
+func TestOrphanExitSettlesItsOutstandingSaveOff(t *testing.T) {
+	m := newSaveOnManager(t, &flushOrphanDriver{}, (&saveOnRecorder{}).open)
+	closeWithTest(t, m)
+	inst := newFakeInstance(s1)
+	m.mu.Lock()
+	m.orphans[s1] = orphanEntry{inst: inst, driver: "container"}
+	m.pendingSaveOn[s1] = saveOnTarget{driver: "container", written: make(chan struct{})}
+	m.mu.Unlock()
+
+	if !m.forgetOrphanIf(s1, inst) {
+		t.Fatal("forgetOrphanIf did not retire the orphan")
+	}
+	if m.hasPendingSaveOn(s1) {
+		t.Fatal("the save-off outlived the orphan's exit; nothing is left to restore it for")
+	}
+}
+
 // THE LEDGER IS READ MORE THAN ONCE, because a stop already dispatched can open its
 // bracket AFTER the first read. The flush's own RCON dial stands between the command
 // and its save-off, and that dial is a TCP connect plus an AUTH handshake — up to
