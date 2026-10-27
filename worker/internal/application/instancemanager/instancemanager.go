@@ -1674,7 +1674,12 @@ func (m *Manager) quiesceRunning(ctx context.Context, serverID, workingDir strin
 // restoreSaveOnAfterFailedStop, and a Worker that starts closing before either
 // happens settles the debt itself rather than leaving it to the next boot (issue
 // #3166).
-func (m *Manager) flushBeforeStopWithDriver(ctx context.Context, serverID, driverName, mcVersion string) bool {
+//
+// saveOffSent reports whether this flush issued save-off, and so whether a failed
+// stop has auto-save to restore (issue #3485). It counts the command as soon as it
+// is issued, whatever the round trip returns: a reply that was lost does not mean
+// the server did not run it (#3310).
+func (m *Manager) flushBeforeStopWithDriver(ctx context.Context, serverID, driverName, mcVersion string) (flushed, saveOffSent bool) {
 	raw, err := m.openControl(ctx, serverID, driverName, mcVersion)
 	if errors.Is(err, execution.ErrServerPropertiesUnreadable) {
 		// RCON's credentials are in the refused file, so there is nothing to dial.
@@ -1687,12 +1692,12 @@ func (m *Manager) flushBeforeStopWithDriver(ctx context.Context, serverID, drive
 			"waited for while it keeps writing, but a server killed after the idle window or at the cap is left "+
 			"with a partial save",
 			"server_id", serverID, "error", err)
-		return false
+		return false, false
 	}
 	if err != nil {
 		m.logger.Warn("stop flush: open rcon failed; stopping without a final save",
 			"server_id", serverID, "error", err)
-		return false
+		return false, false
 	}
 	// Wrap in resilientControl (#919/#1040): a save-off failure poisons the rcon
 	// connection, so save-all on the same client returns ErrConnBroken instantly.
@@ -1737,6 +1742,7 @@ func (m *Manager) flushBeforeStopWithDriver(ctx context.Context, serverID, drive
 		m.logger.Warn("stop flush: worker is closing; skipping save-off so auto-save cannot be left disabled",
 			"server_id", serverID)
 	} else {
+		saveOffSent = true
 		_, err := ctrl.Execute(ctx, "save-off")
 		// Close the edge the moment the write is back, before anything is done with its
 		// outcome: a shutdown restore for this id is holding on it, and what it needs to
@@ -1753,14 +1759,14 @@ func (m *Manager) flushBeforeStopWithDriver(ctx context.Context, serverID, drive
 	if _, err := ctrl.Execute(ctx, "save-all"); err != nil {
 		m.logger.Warn("stop flush: save-all failed; stopping without a final save",
 			"server_id", serverID, "error", err)
-		return false
+		return false, saveOffSent
 	}
 	if !m.settleWorkingSet(ctx, serverID, filepath.Join(m.scratchDir, serverID)) {
 		m.logger.Warn("stop flush: working set did not settle within budget; stopping anyway",
 			"server_id", serverID)
-		return false
+		return false, saveOffSent
 	}
-	return true
+	return true, saveOffSent
 }
 
 // restoreSaveOn re-enables auto-save after a running-server snapshot quiesce.
@@ -2983,9 +2989,14 @@ func (m *Manager) takeStoppableReserve(serverID string) (execution.Instance, str
 // RCON identically (issues #1712, #3116).
 func (m *Manager) attemptStop(ctx context.Context, serverID string, inst execution.Instance, graceful bool, driverName, mcVersion string) error {
 	var preFallback func(context.Context) bool
+	// saveOffSent is whether THIS attempt's flush issued save-off. The driver calls
+	// preFallback synchronously inside Stop, so it is settled once Stop returns.
+	saveOffSent := false
 	if graceful {
 		preFallback = func(flushCtx context.Context) bool {
-			return m.flushBeforeStopWithDriver(flushCtx, serverID, driverName, mcVersion)
+			flushed, sent := m.flushBeforeStopWithDriver(flushCtx, serverID, driverName, mcVersion)
+			saveOffSent = sent
+			return flushed
 		}
 	}
 	err := inst.Stop(ctx, graceful, preFallback)
@@ -3021,9 +3032,14 @@ func (m *Manager) attemptStop(ctx context.Context, serverID string, inst executi
 		}
 		// The graceful path issued save-off before the flush; because the stop
 		// failed, the server may still be alive with auto-save disabled. Re-enable
-		// it so player progress is not silently lost (issue #2021).
-		if graceful {
+		// it so player progress is not silently lost (issue #2021). A flush that
+		// never issued save-off — RCON could not be dialed, or the ledger was sealed —
+		// left auto-save on, so there is nothing to restore (issue #3485).
+		if saveOffSent {
 			m.restoreSaveOnAfterFailedStop(ctx, serverID, driverName, mcVersion)
+		} else if graceful {
+			m.logger.Info("failed stop: save-off was never sent, so auto-save is still enabled; nothing to restore",
+				"server_id", serverID)
 		}
 		return err
 	}
