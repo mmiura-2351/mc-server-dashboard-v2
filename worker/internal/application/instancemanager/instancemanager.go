@@ -335,14 +335,23 @@ type Manager struct {
 	// one lane no timer can, the operator stop that Runner.serve abandons without
 	// waiting (#3168).
 	pendingSaveOn map[string]saveOnTarget
-	// saveOffInEffect names the servers a save-off may still be in effect on: a
-	// flush issued one (marked with its pendingSaveOn entry, before the write) and
-	// no save-on has restored it since. It is the restore DECISION, where
-	// pendingSaveOn is the restore JOB: Close takes the job out of the ledger, but
-	// taking it settles nothing, so a stop still in flight must still see the
-	// debt. Only clearPendingSaveOn removes it — a successful failed-stop restore
-	// or a confirmed termination (issue #3485).
-	saveOffInEffect map[string]bool
+	// unsettledSaveOff maps each server a save-off may still be in effect on to the
+	// GENERATION of its latest one: a flush issued it (marked with its pendingSaveOn
+	// entry, before the write) and nothing has settled it since. It is the restore
+	// DECISION, where pendingSaveOn is the restore JOB: Close takes the job out of
+	// the ledger, but taking it settles nothing, so a stop still in flight must
+	// still see the debt (issue #3485).
+	//
+	// A save-on settles the generations up to the one it covers, whichever path
+	// issued it — a failed-stop restore covers the generation current when it
+	// starts, a Close restore its entry's — so an older Close success can never
+	// settle a newer save-off, while the save-off it did restore stops counting. A
+	// confirmed termination settles everything. A settled server is dropped, so the
+	// map holds only servers with a save-off in effect. Generations come from
+	// saveOffSeq, which is manager-wide and never reused, so a drained target can
+	// never be mistaken for a later save-off on the same server.
+	unsettledSaveOff map[string]uint64
+	saveOffSeq       uint64
 	// saveOnSealed forbids any further entry in pendingSaveOn. Close sets it in the
 	// same critical section as its LAST read of the ledger, which is what makes that
 	// read final: a flush either lands its mark before the seal and is in the map
@@ -506,7 +515,7 @@ func New(drivers map[string]execution.ExecutionDriver, scratchDir string, region
 		orphanProbeMaxInterval: defaultOrphanProbeMaxInterval,
 		converging:             map[string]bool{},
 		pendingSaveOn:          map[string]saveOnTarget{},
-		saveOffInEffect:        map[string]bool{},
+		unsettledSaveOff:       map[string]uint64{},
 		closingSaveOnTimeout:   closingSaveOnTimeout,
 	}
 	m.shutdown, m.stopBackground = context.WithCancel(context.Background())
@@ -1839,16 +1848,17 @@ func (m *Manager) restoreSaveOn(ctx context.Context, serverID string, ctrl execu
 // idempotent — this one runs whenever the graceful stop failed, whether or not the
 // shutdown already pre-empted it.
 //
-// Only a restore that succeeds settles the debt. A failed one leaves the ledger
-// entry in place, so a retry stop whose own flush cannot reach save-off still
-// restores, and Close still drains it (issue #3485).
-func (m *Manager) restoreSaveOnAfterFailedStop(ctx context.Context, serverID, driverName, mcVersion string) {
+// gen is the save-off generation current when the restore starts. Only a restore
+// that succeeds settles it. A failed one leaves the ledger entry in place, so a
+// retry stop whose own flush cannot reach save-off still restores, and Close still
+// drains it (issue #3485).
+func (m *Manager) restoreSaveOnAfterFailedStop(ctx context.Context, serverID, driverName, mcVersion string, gen uint64) {
 	if err := m.dialAndSaveOn(ctx, restoreSaveTimeout, serverID, driverName, mcVersion); err != nil {
 		m.logger.Error("failed stop: auto-save NOT restored; surviving server is running with auto-save disabled",
 			"server_id", serverID, "driver", driverName, "error", err)
 		return
 	}
-	m.clearPendingSaveOn(serverID)
+	m.settleSaveOff(serverID, gen)
 	m.logger.Warn("stop failed with the server possibly still alive; re-enabled auto-save on the survivor",
 		"server_id", serverID)
 }
@@ -1899,7 +1909,7 @@ func (m *Manager) restoreSaveOnWhileClosing(serverID string, target saveOnTarget
 		// A stop lane may have settled the save-off meanwhile — its own restore
 		// succeeded, or the process is confirmed gone — and then there is nothing
 		// left disabled to report (issue #3485).
-		if !m.saveOffMayBeInEffect(serverID) {
+		if m.unsettledSaveOffGen(serverID) == 0 {
 			m.logger.Info("worker closing: save-on did not reach the server, but its save-off was already settled by its stop; nothing to restore",
 				"server_id", serverID, "driver", target.driver, "error", err)
 			return
@@ -1908,6 +1918,7 @@ func (m *Manager) restoreSaveOnWhileClosing(serverID string, target saveOnTarget
 			"server_id", serverID, "driver", target.driver, "error", err)
 		return
 	}
+	m.settleSaveOff(serverID, target.gen)
 	m.logger.Warn("worker closing: re-enabled auto-save on a server whose stop is still in flight",
 		"server_id", serverID)
 }
@@ -1973,6 +1984,8 @@ type saveOnTarget struct {
 	driver    string
 	mcVersion string
 	written   chan struct{}
+	// gen is the save-off generation this entry restores (see unsettledSaveOff).
+	gen uint64
 }
 
 // markPendingSaveOn records that serverID's pre-stop flush is about to disable
@@ -1997,32 +2010,39 @@ func (m *Manager) markPendingSaveOn(serverID, driverName, mcVersion string) (cha
 		return nil, false
 	}
 	written := make(chan struct{})
-	m.pendingSaveOn[serverID] = saveOnTarget{driver: driverName, mcVersion: mcVersion, written: written}
-	m.saveOffInEffect[serverID] = true
+	m.saveOffSeq++
+	m.pendingSaveOn[serverID] = saveOnTarget{driver: driverName, mcVersion: mcVersion, written: written, gen: m.saveOffSeq}
+	m.unsettledSaveOff[serverID] = m.saveOffSeq
 	return written, true
 }
 
-// clearPendingSaveOnLocked settles serverID's outstanding save-off, because a save-on
-// restored it or the process is confirmed gone. Without it a later Close or retry
-// stop would restore it again. The caller must hold m.mu.
+// clearPendingSaveOnLocked settles every save-off on serverID, because the process
+// is confirmed gone. Without it a later Close or retry stop would dial a server
+// that no longer exists. The caller must hold m.mu.
 func (m *Manager) clearPendingSaveOnLocked(serverID string) {
 	delete(m.pendingSaveOn, serverID)
-	delete(m.saveOffInEffect, serverID)
+	delete(m.unsettledSaveOff, serverID)
 }
 
-// clearPendingSaveOn is clearPendingSaveOnLocked for a caller not holding m.mu.
-func (m *Manager) clearPendingSaveOn(serverID string) {
+// settleSaveOff records that a save-on restored serverID's save-offs up to
+// generation gen. A newer save-off, and its ledger entry, stay outstanding.
+func (m *Manager) settleSaveOff(serverID string, gen uint64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.clearPendingSaveOnLocked(serverID)
+	if g, ok := m.unsettledSaveOff[serverID]; ok && g <= gen {
+		delete(m.unsettledSaveOff, serverID)
+	}
+	if e, ok := m.pendingSaveOn[serverID]; ok && e.gen <= gen {
+		delete(m.pendingSaveOn, serverID)
+	}
 }
 
-// saveOffMayBeInEffect reports whether a save-off may still be in effect on
-// serverID: one was issued and nothing has settled it since (issue #3485).
-func (m *Manager) saveOffMayBeInEffect(serverID string) bool {
+// unsettledSaveOffGen returns the generation of the latest save-off that may still
+// be in effect on serverID, or 0 when none is (issue #3485).
+func (m *Manager) unsettledSaveOffGen(serverID string) uint64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.saveOffInEffect[serverID]
+	return m.unsettledSaveOff[serverID]
 }
 
 // takePendingSaveOn hands Close the whole outstanding set and empties it, so the
@@ -3060,13 +3080,13 @@ func (m *Manager) attemptStop(ctx context.Context, serverID string, inst executi
 		// A save-off this attempt or an earlier one issued may still be in effect,
 		// and because the stop failed the server may still be alive with auto-save
 		// disabled. Re-enable it so player progress is not silently lost (issue
-		// #2021). The decision reads saveOffInEffect, not the ledger: Close may have
-		// taken the entry, and that settles nothing. With no save-off in effect —
-		// no flush reached one (RCON could not be dialed, or the ledger was sealed),
-		// or its restore already succeeded — there is nothing to restore (issue
-		// #3485).
-		if m.saveOffMayBeInEffect(serverID) {
-			m.restoreSaveOnAfterFailedStop(ctx, serverID, driverName, mcVersion)
+		// #2021). The decision reads unsettledSaveOff, not the ledger: Close may have
+		// taken the entry, and only its successful save-on settles it. With no
+		// save-off in effect — no flush reached one (RCON could not be dialed, or the
+		// ledger was sealed), or a save-on already restored it — there is nothing to
+		// restore (issue #3485).
+		if gen := m.unsettledSaveOffGen(serverID); gen != 0 {
+			m.restoreSaveOnAfterFailedStop(ctx, serverID, driverName, mcVersion, gen)
 		} else if graceful {
 			m.logger.Info("failed stop: no save-off is outstanding on this server, so auto-save is still enabled; nothing to restore",
 				"server_id", serverID)
