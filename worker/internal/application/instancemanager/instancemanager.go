@@ -1854,6 +1854,13 @@ func (m *Manager) restoreSaveOn(ctx context.Context, serverID string, ctrl execu
 // drains it (issue #3485).
 func (m *Manager) restoreSaveOnAfterFailedStop(ctx context.Context, serverID, driverName, mcVersion string, gen uint64) {
 	if err := m.dialAndSaveOn(ctx, restoreSaveTimeout, serverID, driverName, mcVersion); err != nil {
+		// A Close restore may have settled the save-off while this dial was in
+		// flight, and then there is nothing left disabled to report (issue #3485).
+		if m.unsettledSaveOffGen(serverID) == 0 {
+			m.logger.Info("failed stop: save-on did not reach the server, but its save-off was already settled; nothing to restore",
+				"server_id", serverID, "driver", driverName, "error", err)
+			return
+		}
 		m.logger.Error("failed stop: auto-save NOT restored; surviving server is running with auto-save disabled",
 			"server_id", serverID, "driver", driverName, "error", err)
 		return
