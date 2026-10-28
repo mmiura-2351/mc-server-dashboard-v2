@@ -1148,6 +1148,7 @@ class UploadBackup:
     max_bytes: int = MAX_UPLOAD_BYTES
     max_entries: int = MAX_ARCHIVE_ENTRIES
     max_decompressed_bytes: int = MAX_DECOMPRESSED_BYTES
+    lifecycle_lock: LifecycleLock = NullLifecycleLock()
 
     async def __call__(
         self,
@@ -1157,9 +1158,8 @@ class UploadBackup:
         content: bytes,
         created_by: uuid.UUID | None = None,
     ) -> Backup:
-        async with self.uow:
-            await _load(self.uow, community_id, server_id)
-
+        # The checks below are verdicts about the body alone, so they run before
+        # the lock and never extend its hold.
         if len(content) > self.max_bytes:
             raise FileTooLargeError(str(len(content)))
         _validate_backup_archive(
@@ -1168,39 +1168,50 @@ class UploadBackup:
             max_decompressed_bytes=self.max_decompressed_bytes,
         )
 
-        # Commit the metadata row BEFORE writing the archive (#1707): same
-        # ordering rationale as CreateBackup — a dangling row is detectable and
-        # self-healing, an orphaned archive is not.
-        storage_ref = uuid.uuid4().hex
-        backup = Backup(
-            id=BackupId.new(),
-            server_id=server_id,
-            storage_ref=storage_ref,
-            size_bytes=len(content),
-            source=BackupSource.UPLOADED,
-            # An off-host archive bypasses the create-direction integrity gate, so
-            # its structural health is unknown until the sweep (#744) checks it (#742).
-            health=BackupHealth.UNKNOWN,
-            created_by=created_by,
-            created_at=self.clock.now(),
-        )
-        async with self.uow:
-            await self.uow.backups.add(backup)
-            await self.uow.commit()
-        # If the store write fails, compensate by deleting the committed row.
-        try:
-            await self.backup_store.store(
-                community_id=community_id,
-                server_id=server_id,
-                stream=_chunked(content),
-                storage_ref=storage_ref,
-            )
-        except Exception:
+        # Hold the per-server lifecycle lock across the server check, the row
+        # commit and the archive write, as CreateBackup does (issue #3219). Without
+        # it a DeleteServer / DeleteBackup landing between the commit and the write
+        # removes the row, and the write then lands an archive no delete saw while
+        # this returns a backup that no longer exists. The body is already fully
+        # received, so the lock never waits on the client's network.
+        async with self.lifecycle_lock.hold(server_id):
             async with self.uow:
-                await self.uow.backups.delete(backup.id)
+                await _load(self.uow, community_id, server_id)
+
+            # Commit the metadata row BEFORE writing the archive (#1707): same
+            # ordering rationale as CreateBackup — a dangling row is detectable and
+            # self-healing, an orphaned archive is not.
+            storage_ref = uuid.uuid4().hex
+            backup = Backup(
+                id=BackupId.new(),
+                server_id=server_id,
+                storage_ref=storage_ref,
+                size_bytes=len(content),
+                source=BackupSource.UPLOADED,
+                # An off-host archive bypasses the create-direction integrity gate,
+                # so its structural health is unknown until the sweep (#744) checks
+                # it (#742).
+                health=BackupHealth.UNKNOWN,
+                created_by=created_by,
+                created_at=self.clock.now(),
+            )
+            async with self.uow:
+                await self.uow.backups.add(backup)
                 await self.uow.commit()
-            raise
-        return backup
+            # If the store write fails, compensate by deleting the committed row.
+            try:
+                await self.backup_store.store(
+                    community_id=community_id,
+                    server_id=server_id,
+                    stream=_chunked(content),
+                    storage_ref=storage_ref,
+                )
+            except Exception:
+                async with self.uow:
+                    await self.uow.backups.delete(backup.id)
+                    await self.uow.commit()
+                raise
+            return backup
 
 
 @dataclass(frozen=True)
