@@ -118,13 +118,13 @@ def main(argv: list[str]) -> int:
         return 1
     print(
         f"servers scanned: {summary.servers_scanned}\n"
-        f"servers skipped (busy; re-run the sweep to check them): "
-        f"{summary.servers_skipped_busy}\n"
         f"backups healthy: {summary.backups_healthy}\n"
         f"backups quarantined (corrupt world): {summary.backups_quarantined}\n"
         f"backups unreadable (archive bytes unproducible): "
         f"{summary.backups_unreadable}\n"
         f"backups dangling: {summary.backups_dangling}\n"
+        f"backups skipped (server busy; re-run the sweep to check them): "
+        f"{summary.backups_skipped_busy}\n"
         f"snapshots scanned: {summary.snapshots_scanned}\n"
         f"snapshots flagged: {summary.snapshots_flagged}\n"
         f"snapshots not examined (backend does not fsck snapshots at rest): "
