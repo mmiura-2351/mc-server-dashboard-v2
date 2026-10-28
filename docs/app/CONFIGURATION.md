@@ -398,7 +398,16 @@ at once instead of after the grace window, re-sending the stop (honouring
 `?force=true`) or taking the final snapshot and releasing the Worker. A server
 with no Worker assigned, or one still running on a Worker that is disconnected
 (the reconnect owns it), has nothing to converge, and its `stop` answers
-`409 invalid_transition`.
+`409 invalid_transition`. Skipping the wait means two stop flows for one server
+could otherwise overlap — the original stop's final snapshot, another operator
+stop, the reconciler, the late result of an abandoned snapshot — and one flow's
+snapshot outcome must never release the Worker while another flow's upload is
+still running. So each flow that snapshots and then releases holds a per-server
+exclusion for the whole of it. A `stop` that finds one in flight answers
+`409 transition_conflict` without doing anything, the reconciler skips the server
+for that tick, and a late result leaves the release to the flow in flight. The
+exclusion is in-process, which suffices because the API is a single instance
+(REQUIREMENTS.md NFR-SCALE-1).
 
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
