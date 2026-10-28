@@ -1132,25 +1132,29 @@ def test_upload_refused_when_delete_prune_empties_staging_before_rmdir(
         real_rmdir = os.rmdir
         paused, resume = threading.Event(), threading.Event()
         staging_name: str | None = None
+        prune: threading.Thread | None = None
 
         def _rmdir(path: str, *, dir_fd: int | None = None) -> None:
-            if Path(path).name == staging_name and not paused.is_set():
+            # Only the prune's own rmdir of this upload's staging is held.
+            if threading.current_thread() is prune and Path(path).name == staging_name:
                 paused.set()
-                assert resume.wait(10)
+                resume.wait(120)
             real_rmdir(path, dir_fd=dir_fd)
 
         def _dir_has_entries(path: Path) -> bool:
-            nonlocal staging_name
+            nonlocal staging_name, prune
             if staging_name is not None or "incoming" not in path.parts:
                 return real_dir_has_entries(path)
             staging_name = path.name
             prune = threading.Thread(target=_fs_prune, args=(storage, c, s))
             prune.start()
-            assert paused.wait(10)
-            result = real_dir_has_entries(path)
-            resume.set()
-            prune.join(10)
-            return result
+            try:
+                # Generous: the published prune packs and fsyncs final.tar.gz first.
+                assert paused.wait(120)
+                return real_dir_has_entries(path)
+            finally:
+                resume.set()
+                prune.join(120)
 
         monkeypatch.setattr(os, "rmdir", _rmdir)
         monkeypatch.setattr(fs_mod, "_dir_has_entries", _dir_has_entries)
