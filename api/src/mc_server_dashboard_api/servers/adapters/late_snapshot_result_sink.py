@@ -30,6 +30,9 @@ from mc_server_dashboard_api.fleet.domain.late_snapshot_sink import (
 from mc_server_dashboard_api.fleet.domain.real_time_events import RealTimeEvents
 from mc_server_dashboard_api.servers.adapters.unit_of_work import SqlAlchemyUnitOfWork
 from mc_server_dashboard_api.servers.application.lifecycle import StopServer
+from mc_server_dashboard_api.servers.application.stop_convergence import (
+    StopConvergenceGuard,
+)
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.control_plane import ControlPlane
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId, WorkerId
@@ -67,6 +70,7 @@ class ServersLateSnapshotResultSink(LateSnapshotResultSink):
         *,
         control_plane: ControlPlane,
         clock: Clock,
+        stop_convergence: StopConvergenceGuard,
         real_time_events: RealTimeEvents | None = None,
     ) -> None:
         # A fresh UnitOfWork is built per call so the servicer (no request UoW) never
@@ -81,6 +85,9 @@ class ServersLateSnapshotResultSink(LateSnapshotResultSink):
         # that use case (issue #3212), so an observed-state write it makes is
         # published; the clear this sink runs today writes none.
         self._real_time_events = real_time_events
+        # The process-wide stop-convergence exclusion (issue #3491): a late result
+        # must not release while another flow's snapshot of the server is in flight.
+        self._stop_convergence = stop_convergence
 
     async def clear_held_assignment_on_late_snapshot(
         self, *, server_id: str, worker_id: str, succeeded: bool, message: str | None
@@ -93,6 +100,7 @@ class ServersLateSnapshotResultSink(LateSnapshotResultSink):
             uow=SqlAlchemyUnitOfWork(self._session_factory, self._real_time_events),
             control_plane=self._control_plane,
             clock=self._clock,
+            stop_convergence=self._stop_convergence,
         )
         await stop_server.clear_assignment_after_late_snapshot(
             server_id=ServerId(parsed),

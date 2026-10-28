@@ -1297,10 +1297,12 @@ async def test_failed_stop_left_at_stopping_recovered_by_reconciler(
     of its failure paths restore the pre-stop state WITHOUT emitting, so no terminal
     report ever follows a stop that failed after that emission. The row is left at
     (stopped, stopping, assigned), which before the fix matched no arm of
-    ``list_reconcilable``. Nor could an operator escape it: ``StopServer`` and
-    ``RestartServer`` refuse (desired is already stopped), ``StartServer`` 409s on
+    ``list_reconcilable``. Nor could an operator escape it then: ``StopServer`` and
+    ``RestartServer`` refused (desired is already stopped), ``StartServer`` 409s on
     ``require_unassigned``, and ``is_at_rest()`` is false so every file/backup
-    operation 409s "unsettled". The recovery is a real retry of the stop.
+    operation 409s "unsettled". The recovery is a real retry of the stop — which,
+    since issue #3491, an operator ``StopServer`` also runs at once instead of
+    waiting for the reconciler's grace.
     """
 
     clock = _AdvancingClock(_NOW)

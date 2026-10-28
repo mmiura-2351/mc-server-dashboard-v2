@@ -99,6 +99,9 @@ from mc_server_dashboard_api.servers.application.command_dispatch import (
 from mc_server_dashboard_api.servers.application.groups import (
     regenerate_pending_group_files,
 )
+from mc_server_dashboard_api.servers.application.stop_convergence import (
+    StopConvergenceGuard,
+)
 from mc_server_dashboard_api.servers.application.stop_dispatch_refusals import (
     StopDispatchRefusals,
 )
@@ -1265,9 +1268,25 @@ class StopServer:
     # sites that never reach the reconciler need not wire it; an unwired site simply
     # records into a journal nobody reads, and the replay keeps the full grace.
     stop_refusals: StopDispatchRefusals = field(default_factory=StopDispatchRefusals)
+    # The per-server exclusion every snapshot-then-release flow holds (issue #3491,
+    # ``stop_convergence.py``). Process-wide in production — every construction
+    # site wires the one app-state instance; the private default only serves the
+    # call sites (unit tests) that never run two flows at once.
+    stop_convergence: StopConvergenceGuard = field(default_factory=StopConvergenceGuard)
 
     async def __call__(
         self, *, community_id: CommunityId, server_id: ServerId, force: bool = False
+    ) -> Server:
+        # Held from before the desired flip to the release, so a stop that finds
+        # another stop convergence in flight for the server refuses (409) without
+        # flipping, dispatching or releasing anything (issue #3491).
+        with self.stop_convergence.claim(server_id):
+            return await self._stop(
+                community_id=community_id, server_id=server_id, force=force
+            )
+
+    async def _stop(
+        self, *, community_id: CommunityId, server_id: ServerId, force: bool
     ) -> Server:
         owed: str | None = None
         async with self.uow:
@@ -1296,11 +1315,11 @@ class StopServer:
             # The same replay the reconciler sends, with the operator's ``force``.
             # The desired flip, and with it the placement-load decrement, already
             # happened on the stop that set this intent, so neither is repeated.
-            return await self.redispatch_stop(
+            return await self._redispatch_stop(
                 community_id=community_id, server_id=server_id, force=force
             )
         if owed == "clear_stale_assignment":
-            return await self.clear_stale_assignment(
+            return await self._clear_stale_assignment(
                 community_id=community_id, server_id=server_id
             )
 
@@ -1746,6 +1765,20 @@ class StopServer:
     async def redispatch_stop(
         self, *, community_id: CommunityId, server_id: ServerId, force: bool = False
     ) -> Server:
+        """``_redispatch_stop`` under the server's stop-convergence exclusion.
+
+        Raises ``LifecycleTransitionConflictError`` without dispatching when another
+        stop convergence for the server is in flight (issue #3491).
+        """
+
+        with self.stop_convergence.claim(server_id):
+            return await self._redispatch_stop(
+                community_id=community_id, server_id=server_id, force=force
+            )
+
+    async def _redispatch_stop(
+        self, *, community_id: CommunityId, server_id: ServerId, force: bool
+    ) -> Server:
         """Re-send the stop command to an assigned, desired-stopped server.
 
         The reconciler's stale-intent path (issue #101): the stop intent committed
@@ -1817,6 +1850,20 @@ class StopServer:
         return server
 
     async def clear_stale_assignment(
+        self, *, community_id: CommunityId, server_id: ServerId
+    ) -> Server:
+        """``_clear_stale_assignment`` under the stop-convergence exclusion.
+
+        Raises ``LifecycleTransitionConflictError`` without dispatching or releasing
+        when another stop convergence for the server is in flight (issue #3491).
+        """
+
+        with self.stop_convergence.claim(server_id):
+            return await self._clear_stale_assignment(
+                community_id=community_id, server_id=server_id
+            )
+
+    async def _clear_stale_assignment(
         self, *, community_id: CommunityId, server_id: ServerId
     ) -> Server:
         """Release a stop wedged at (stopped, stopped|unknown|crashed|stopping,
@@ -2049,6 +2096,41 @@ class StopServer:
         return server
 
     async def clear_assignment_after_late_snapshot(
+        self,
+        *,
+        server_id: ServerId,
+        worker_id: WorkerId,
+        succeeded: bool,
+        message: str | None,
+    ) -> None:
+        """``_clear_assignment_after_late_snapshot``, unless a flow is converging.
+
+        The late result is of a snapshot whose flow has already given up the
+        stop-convergence exclusion. If another flow holds it now, that flow has its
+        own snapshot in flight over the same scratch, and only its outcome may
+        release the assignment (issue #3491): this result is logged and dropped
+        rather than waited on, since it arrives on the Worker's inbound stream.
+        Otherwise the release runs under the exclusion, so no flow starts mid-way.
+        """
+
+        if self.stop_convergence.in_flight(server_id):
+            _LOG.info(
+                "late final-snapshot result for server %s from worker %s left "
+                "unapplied: another stop convergence for the server is in flight, "
+                "and its own snapshot outcome decides the release (issue #3491)",
+                server_id.value,
+                worker_id.value,
+            )
+            return
+        with self.stop_convergence.claim(server_id):
+            await self._clear_assignment_after_late_snapshot(
+                server_id=server_id,
+                worker_id=worker_id,
+                succeeded=succeeded,
+                message=message,
+            )
+
+    async def _clear_assignment_after_late_snapshot(
         self,
         *,
         server_id: ServerId,

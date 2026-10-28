@@ -257,7 +257,10 @@ from mc_server_dashboard_api.servers.application.stop_dispatch_refusals import (
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.control_plane import ControlPlane
 from mc_server_dashboard_api.servers.domain.entities import Server
-from mc_server_dashboard_api.servers.domain.errors import CommandDispatchError
+from mc_server_dashboard_api.servers.domain.errors import (
+    CommandDispatchError,
+    LifecycleTransitionConflictError,
+)
 from mc_server_dashboard_api.servers.domain.store_generation import (
     StoreGenerationReader,
 )
@@ -534,6 +537,22 @@ class RunReconcilerTick:
                 _LOG.info(
                     "reconcile action %s refused busy for server %s; "
                     "retrying next tick",
+                    action,
+                    server.id.value,
+                )
+                return
+            if action in (
+                "redispatch_stop",
+                "clear_stale_assignment",
+            ) and isinstance(exc, LifecycleTransitionConflictError):
+                # Another stop convergence for the server — an operator stop, which
+                # skips the grace this tick waited out — is in flight and holds the
+                # per-server exclusion (issue #3491). Its own snapshot outcome
+                # decides the release, so this tick neither queues behind it nor
+                # counts a failure; the next tick finds the row settled or owed.
+                _LOG.info(
+                    "reconcile action %s skipped for server %s: another stop "
+                    "convergence is in flight",
                     action,
                     server.id.value,
                 )

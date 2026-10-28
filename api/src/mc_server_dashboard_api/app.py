@@ -192,6 +192,9 @@ from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
 from mc_server_dashboard_api.servers.application.startup_reset import (
     ResetUnverifiableObservedStates,
 )
+from mc_server_dashboard_api.servers.application.stop_convergence import (
+    StopConvergenceGuard,
+)
 from mc_server_dashboard_api.servers.application.stop_dispatch_refusals import (
     StopDispatchRefusals,
 )
@@ -755,6 +758,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # the reconciler that reads it, to tell a stop the Worker ANSWERED apart from
         # one that may never have been sent and so may still be in flight.
         app.state.stop_dispatch_refusals = StopDispatchRefusals()
+        # Process-wide per-server exclusion over the stop convergence flows (issue
+        # #3491): every StopServer — HTTP, schedule runner, reconciler, and the
+        # late-snapshot sink — shares it, so one flow's release cannot land while
+        # another flow's final snapshot of the same server is still uploading.
+        app.state.stop_convergence = StopConvergenceGuard()
         # Shared control-plane command-routing state: the servicer registers
         # sessions and resolves results on it; the GrpcControlPlane adapter
         # dispatches through it. The lifecycle use cases reach it via the adapter.
@@ -827,6 +835,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ),
                 clock=ServersSystemClock(),
                 real_time_events=real_time_events,
+                stop_convergence=app.state.stop_convergence,
             )
         )
         logging.getLogger(__name__).info(
@@ -1012,6 +1021,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         clock=ServersSystemClock(),
                         bedrock_tunnel_sync=bedrock_tunnel_syncer,
                         stop_refusals=app.state.stop_dispatch_refusals,
+                        stop_convergence=app.state.stop_convergence,
                     ),
                     restart_server=RestartServer(
                         uow=ServersUnitOfWork(create_session_factory(engine)),
@@ -1132,6 +1142,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     clock=ServersSystemClock(),
                     bedrock_tunnel_sync=bedrock_tunnel_syncer,
                     stop_refusals=app.state.stop_dispatch_refusals,
+                    stop_convergence=app.state.stop_convergence,
                 ),
                 control_plane=reconciler_control_plane,
                 store_generation=StorageGenerationReader(storage=storage),
