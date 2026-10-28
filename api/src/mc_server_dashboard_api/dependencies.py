@@ -2503,6 +2503,7 @@ def get_upload_backup(
         uow=ServersUnitOfWork(session_factory),
         backup_store=backup_store,
         clock=ServersSystemClock(),
+        lifecycle_lock=get_lifecycle_lock(request),
     )
 
 
