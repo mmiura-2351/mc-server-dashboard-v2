@@ -12,8 +12,11 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import os
 import shutil
 import tarfile
+import tempfile
+import threading
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from pathlib import Path
@@ -38,7 +41,10 @@ from mc_server_dashboard_api.storage.adapters.object_store import (
     _delete_prefix,
     _ObjectSnapshotHandle,
 )
-from mc_server_dashboard_api.storage.domain.errors import NotFoundError
+from mc_server_dashboard_api.storage.domain.errors import (
+    NotFoundError,
+    SnapshotHandleError,
+)
 from mc_server_dashboard_api.storage.domain.port import SnapshotHandle, Storage
 from mc_server_dashboard_api.storage.domain.value_objects import (
     CommunityId,
@@ -941,7 +947,12 @@ _Race = Callable[[CommunityId, ServerId], None]
 
 
 def _post_racing_snapshot(
-    tmp_path: Path, storage: Storage, *, published: bool, race: _Race
+    tmp_path: Path,
+    storage: Storage,
+    *,
+    published: bool,
+    race: _Race,
+    files: dict[str, bytes] = _RACE_FILES,
 ) -> tuple[int, dict[str, object]]:
     """POST a snapshot once ``race`` has hooked the step its vanish lands in."""
 
@@ -968,7 +979,7 @@ def _post_racing_snapshot(
     with client:
         resp = client.post(
             _url(community, server, "snapshot"),
-            content=_tar_bytes(_RACE_FILES),
+            content=_tar_bytes(files),
             headers={
                 **_auth(),
                 "X-Working-Set-Base-Generation": str(base),
@@ -1003,6 +1014,8 @@ def _fs_step_target(step: str) -> tuple[object, str]:
     import mc_server_dashboard_api.storage.integrity.region as region_mod
 
     return {
+        # write_snapshot creates its spool inside the staging it just checked.
+        "spool_create": (tempfile, "mkstemp"),
         # write_snapshot reopens its spool by path to extract it.
         "spool_reopen": (fs_mod, "_extract_tar_into"),
         # The commit's lock-free steps after its is_dir() check.
@@ -1016,23 +1029,44 @@ def _fs_race(
     monkeypatch: pytest.MonkeyPatch, storage: FsStorage, step: str, vanish: _FsVanish
 ) -> _Race:
     def _install(c: CommunityId, s: ServerId) -> None:
+        if step == "staging_check":
+            # Between begin_snapshot and write_snapshot's staging check.
+            real_begin = storage.begin_snapshot
+
+            async def _begin(cc: CommunityId, ss: ServerId) -> SnapshotHandle:
+                handle = await real_begin(cc, ss)
+                await asyncio.to_thread(vanish, storage, c, s)
+                return handle
+
+            monkeypatch.setattr(storage, "begin_snapshot", _begin)
+            return
         target, name = _fs_step_target(step)
         real = getattr(target, name)
         fired = False
 
-        def _hooked(path: Path, *args: object) -> object:
+        def _hooked(*args: object, **kwargs: object) -> object:
             nonlocal fired
+            path = Path(str(args[0] if args else kwargs["dir"]))
             if not fired and "incoming" in path.parts:
                 fired = True
                 vanish(storage, c, s)
-            return real(path, *args)
+            return real(*args, **kwargs)
 
         monkeypatch.setattr(target, name, _hooked)
 
     return _install
 
 
-_FS_STEPS = ["spool_reopen", "dir_has_entries", "check_working_set", "fsync_tree"]
+# Each step with the error its missing staging raises when no prune ran.
+_FS_STEP_ERRORS: dict[str, type[BaseException]] = {
+    "staging_check": SnapshotHandleError,
+    "spool_create": FileNotFoundError,
+    "spool_reopen": FileNotFoundError,
+    "dir_has_entries": FileNotFoundError,
+    "check_working_set": FileNotFoundError,
+    "fsync_tree": FileNotFoundError,
+}
+_FS_STEPS = list(_FS_STEP_ERRORS)
 
 
 @pytest.mark.parametrize("published", [True, False], ids=["published", "unpublished"])
@@ -1078,7 +1112,73 @@ def test_upload_with_fs_staging_gone_mid_step_and_no_prune_keeps_error(
 
     assert status_code == 500
     assert body["reason"] == "internal_error"
-    assert _unhandled_error(caplog) is FileNotFoundError
+    assert _unhandled_error(caplog) is _FS_STEP_ERRORS[step]
+
+
+@pytest.mark.parametrize("published", [True, False], ids=["published", "unpublished"])
+def test_upload_refused_when_delete_prune_empties_staging_before_rmdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, published: bool
+) -> None:
+    # Issue #3481: the real prune is paused just before it removes the emptied
+    # staging directory, so the commit's empty check sees an existing, empty
+    # staging rather than a missing one. That is still the concurrent delete, not
+    # an empty upload: 409, not 400 ``empty_snapshot``.
+    import mc_server_dashboard_api.storage.adapters.fs as fs_mod
+
+    storage = FsStorage(tmp_path)
+
+    def _install(c: CommunityId, s: ServerId) -> None:
+        real_dir_has_entries = fs_mod._dir_has_entries
+        real_rmdir = os.rmdir
+        paused, resume = threading.Event(), threading.Event()
+        staging_name: str | None = None
+
+        def _rmdir(path: str, *, dir_fd: int | None = None) -> None:
+            if Path(path).name == staging_name and not paused.is_set():
+                paused.set()
+                assert resume.wait(10)
+            real_rmdir(path, dir_fd=dir_fd)
+
+        def _dir_has_entries(path: Path) -> bool:
+            nonlocal staging_name
+            if staging_name is not None or "incoming" not in path.parts:
+                return real_dir_has_entries(path)
+            staging_name = path.name
+            prune = threading.Thread(target=_fs_prune, args=(storage, c, s))
+            prune.start()
+            assert paused.wait(10)
+            result = real_dir_has_entries(path)
+            resume.set()
+            prune.join(10)
+            return result
+
+        monkeypatch.setattr(os, "rmdir", _rmdir)
+        monkeypatch.setattr(fs_mod, "_dir_has_entries", _dir_has_entries)
+
+    status_code, body = _post_racing_snapshot(
+        tmp_path, storage, published=published, race=_install
+    )
+
+    assert status_code == 409
+    assert body["reason"] == "deleted_during_upload"
+    assert body["base_generation"] == (1 if published else 0)
+    assert storage._active_staging == set()
+
+
+@pytest.mark.parametrize("published", [True, False], ids=["published", "unpublished"])
+def test_genuinely_empty_upload_stays_empty_snapshot(
+    tmp_path: Path, published: bool
+) -> None:
+    # Control for the test above (issue #3481): an empty upload with no prune is
+    # still refused as ``400 empty_snapshot``.
+    storage = FsStorage(tmp_path)
+
+    status_code, body = _post_racing_snapshot(
+        tmp_path, storage, published=published, race=lambda c, s: None, files={}
+    )
+
+    assert status_code == 400
+    assert body["reason"] == "empty_snapshot"
 
 
 _ObjectVanish = Callable[[ObjectStorage, CommunityId, ServerId], Awaitable[None]]

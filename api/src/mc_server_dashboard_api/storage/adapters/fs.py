@@ -671,7 +671,11 @@ class FsStorage(Storage):
         staging = self._staging_dir(
             fs_handle.community_id, fs_handle.server_id, fs_handle.transfer_id
         )
+        # A concurrent delete's prune removes ``incoming/`` with the rest of the
+        # working set, so staging gone before or while the spool is created can be
+        # that delete (issue #3481).
         if not staging.is_dir():
+            await self._refuse_if_pruned(fs_handle, staging, expected_base)
             raise SnapshotHandleError("snapshot staging area is gone")
         # Spool the incoming tar to a temp file in the staging dir (disk, bounded
         # RAM — never the whole working set in memory), then stream-extract it.
@@ -680,9 +684,10 @@ class FsStorage(Storage):
         # is used rather than an os.pipe->thread bridge: it keeps RAM bounded just
         # the same with far simpler code, and the bytes land on the same disk the
         # extraction targets anyway.
-        fd, spool_name = await asyncio.to_thread(
-            tempfile.mkstemp, dir=str(staging), prefix=".snapshot.", suffix=".tar"
-        )
+        async with self._refusing_pruned_staging(fs_handle, staging, expected_base):
+            fd, spool_name = await asyncio.to_thread(
+                tempfile.mkstemp, dir=str(staging), prefix=".snapshot.", suffix=".tar"
+            )
         spool = Path(spool_name)
         try:
             with os.fdopen(fd, "wb") as out:
@@ -727,6 +732,9 @@ class FsStorage(Storage):
         async with self._refusing_pruned_staging(fs_handle, staging, expected_base):
             has_entries = await asyncio.to_thread(_dir_has_entries, staging)
         if not has_entries:
+            # The prune empties the staging before it removes the directory, so an
+            # empty staging can be that delete caught midway (issue #3481).
+            await self._refuse_if_pruned(fs_handle, staging, expected_base)
             raise IncompleteTransferError("no staged files to publish")
         # Content-integrity gate (issue #739): on top of the proven-complete byte
         # gate, walk the staged working set for structurally corrupt ``.mca`` region

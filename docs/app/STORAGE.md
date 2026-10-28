@@ -454,9 +454,11 @@ while the store shows the prune signature (generation moved past the guard's bas
 no live `current`) is refused as `PrunedStoreError` instead, the same
 `409 deleted_during_upload` as the commit re-check. The same holds when the
 prune removes the spool, staging directory or staged objects while a lock-free
-step still reads them: the fs extraction reopening its spool, and the commit's
-empty check, integrity gate, fsync or object copy. A missing file or object
-without the prune signature stays the error it was.
+step still reads them: the fs write's staging check, spool creation and spool
+reopen, and the commit's empty check (including a staging the prune has emptied
+but not yet removed), integrity gate, fsync or object copy. A missing file or
+object without the prune signature stays the error it was, and an empty upload
+without it stays `empty_snapshot`.
 
 ### 4.2 What "single atomic step" means per backend family
 
