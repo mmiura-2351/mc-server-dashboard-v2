@@ -681,7 +681,9 @@ running containers at once, so a boot waits at most one cap (plus 10 s of
 deadline grace, a 30 s kill call and the remove), not one cap per container.
 Each kill logs one `WARN` line,
 `sweep: the orphan did not exit after SIGTERM; killing it`, with the same
-fields as a stop's escalation. A container with no working-set mount at `/data`
+fields as a stop's escalation. If the Worker is told to shut down during the
+sweep, it sends no kill: it logs a `WARN` that it is abandoning the stop, and
+the container keeps running until the next boot's sweep. A container with no working-set mount at `/data`
 has no world to watch. It gets the old fixed 30 s `docker stop` instead, which
 can cut a slow save short, and the sweep logs a `WARN` saying so.
 
