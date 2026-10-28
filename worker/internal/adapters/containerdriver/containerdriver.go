@@ -234,17 +234,9 @@ type Driver struct {
 	images      *ImageSelector
 	openControl controlFunc
 	workerID    string
-	stopTimeout time.Duration
-	// stopCap and stopPoll are a graceful stop's hard cap and world-poll interval,
-	// and now and after its clock (issue #3436). They are fields so a test can drive
-	// the stop's wait with a fake clock; production keeps the defaults New sets.
-	stopCap  time.Duration
-	stopPoll time.Duration
-	now      func() time.Time
-	after    func(time.Duration) <-chan time.Time
-	// runScan runs a stop's world scan off the wait's goroutine (stopWatch); a test
-	// runs it inline to keep the fake clock deterministic.
-	runScan func(func())
+	// stopRule is a stop's escalation rule and clock (issue #3436), which every
+	// instance copies and the startup Sweep applies to a running orphan.
+	stopRule
 	// flushTimeout bounds the pre-stop flush (issue #2622).
 	flushTimeout time.Duration
 	gameBindIP   string
@@ -311,16 +303,18 @@ func New(docker dockerAPI, images *ImageSelector, openControl controlFunc, opts 
 	}
 	runAsUID, runAsGID := resolveRunAs(opts.RunAsUID, opts.RunAsGID, os.Getuid(), os.Getgid())
 	d := &Driver{
-		docker:           docker,
-		images:           images,
-		openControl:      openControl,
-		workerID:         opts.WorkerID,
-		stopTimeout:      timeout,
-		stopCap:          defaultStopCap,
-		stopPoll:         defaultStopPollInterval,
-		now:              time.Now,
-		after:            time.After,
-		runScan:          func(f func()) { go f() },
+		docker:      docker,
+		images:      images,
+		openControl: openControl,
+		workerID:    opts.WorkerID,
+		stopRule: stopRule{
+			stopTimeout: timeout,
+			stopCap:     defaultStopCap,
+			stopPoll:    defaultStopPollInterval,
+			now:         time.Now,
+			after:       time.After,
+			runScan:     func(f func()) { go f() },
+		},
 		flushTimeout:     flushTimeout,
 		gameBindIP:       gameBindIP,
 		network:          opts.Network,
@@ -401,12 +395,7 @@ func (d *Driver) Start(ctx context.Context, spec execution.InstanceSpec) (execut
 		createFn:         d.createServerContainer,
 		openControl:      d.openControl,
 		rconHost:         d.RconHost(spec.ServerID),
-		stopTimeout:      d.stopTimeout,
-		stopCap:          d.stopCap,
-		stopPoll:         d.stopPoll,
-		now:              d.now,
-		after:            d.after,
-		runScan:          d.runScan,
+		stopRule:         d.stopRule,
 		handOffs:         d.handOffs,
 		flushTimeout:     d.flushTimeout,
 		readinessTimeout: d.readinessTimeout,
@@ -1041,15 +1030,9 @@ type instance struct {
 	// rconHost is the host the graceful-stop RCON connection dials: empty for the
 	// host loopback, the container name when a user-defined network is configured.
 	rconHost string
-	// stopTimeout is the stop's idle window, stopCap its hard cap, stopPoll how
-	// often its wait fingerprints the world, and now/after its clock (issue #3436;
+	// stopRule is the stop's escalation rule and clock, the driver's (issue #3436;
 	// see stopWatch).
-	stopTimeout time.Duration
-	stopCap     time.Duration
-	stopPoll    time.Duration
-	now         func() time.Time
-	after       func(time.Duration) <-chan time.Time
-	runScan     func(func())
+	stopRule
 	// handOffs is the driver's registry of stops in flight (HandOffStops).
 	handOffs *stopHandOffs
 	// flushTimeout bounds the pre-stop flush preFallback (issue #2622).
@@ -1986,7 +1969,7 @@ func (i *instance) Stop(ctx context.Context, graceful bool, preFallback ...func(
 		if !graceful {
 			progress = nil
 		}
-		w = i.newStopWatch(progress)
+		w = newStopWatch(i.stopRule, i.exited, progress)
 		if graceful && inflight.workerOwns() && i.tryRCONStop(stopCtx) {
 			if reason = w.wait(stopCtx); reason == "" {
 				i.logStopExit(requested)
@@ -2132,6 +2115,23 @@ func (i *instance) stopDeadline() time.Duration {
 	return i.stopCap + stopDeadlineGrace
 }
 
+// stopRule is a stop's escalation rule and its clock (issue #3436): the idle
+// window (stopTimeout), the hard cap (stopCap) and how often the wait fingerprints
+// the world (stopPoll), with now and after as its clock. An instance's stop and the
+// startup Sweep's stop of a running orphan apply the same rule (issue #3445). The
+// clock and runScan are fields so a test can drive a wait on a fake clock;
+// production keeps the defaults New sets.
+type stopRule struct {
+	stopTimeout time.Duration
+	stopCap     time.Duration
+	stopPoll    time.Duration
+	now         func() time.Time
+	after       func(time.Duration) <-chan time.Time
+	// runScan runs a stop's world scan off the wait's goroutine (stopWatch); a test
+	// runs it inline to keep the fake clock deterministic.
+	runScan func(func())
+}
+
 // Why a stop wait gave up on the server exiting by itself (stopWatch.wait).
 const (
 	stopReasonIdle     = "idle"
@@ -2154,7 +2154,9 @@ const (
 // outstanding. So the cap and the stop deadline fire whatever the probe does, at
 // most one scan timeout late, and a stop leaks at most one stalled scan.
 type stopWatch struct {
-	i *instance
+	rule stopRule
+	// exited is closed once the container has exited.
+	exited <-chan struct{}
 	// probe fingerprints the world (InstanceSpec.WorldProgress); nil observes
 	// nothing, so the wait escalates after the idle window.
 	probe func() (execution.WorldProgress, error)
@@ -2180,9 +2182,9 @@ type stopScan struct {
 // newStopWatch starts a watch now and starts the baseline scan, which the first
 // poll takes; nothing waits for it here, so a stalled scan never delays the step
 // the caller takes next.
-func (i *instance) newStopWatch(probe func() (execution.WorldProgress, error)) *stopWatch {
-	now := i.now()
-	w := &stopWatch{i: i, probe: probe, start: now, idleFrom: now}
+func newStopWatch(rule stopRule, exited <-chan struct{}, probe func() (execution.WorldProgress, error)) *stopWatch {
+	now := rule.now()
+	w := &stopWatch{rule: rule, exited: exited, probe: probe, start: now, idleFrom: now}
 	w.startScan()
 	return w
 }
@@ -2194,7 +2196,7 @@ func (w *stopWatch) startScan() {
 	}
 	ch := make(chan stopScan, 1)
 	probe := w.probe
-	w.i.runScan(func() {
+	w.rule.runScan(func() {
 		p, err := probe()
 		ch <- stopScan{progress: p, err: err}
 	})
@@ -2204,7 +2206,7 @@ func (w *stopWatch) startScan() {
 // restartIdle gives the next step its full idle window: a server that has just
 // been sent SIGTERM gets stopTimeout to show it is saving.
 func (w *stopWatch) restartIdle() {
-	w.idleFrom = w.i.now()
+	w.idleFrom = w.rule.now()
 }
 
 // wait blocks until the container exits (returning "") or the rule gives up,
@@ -2213,11 +2215,11 @@ func (w *stopWatch) restartIdle() {
 func (w *stopWatch) wait(ctx context.Context) string {
 	for {
 		select {
-		case <-w.i.exited:
+		case <-w.exited:
 			return ""
 		case <-ctx.Done():
 			return stopReasonDeadline
-		case <-w.i.after(w.i.stopPollInterval()):
+		case <-w.rule.after(w.rule.stopPollInterval()):
 		}
 		if w.probe != nil {
 			written, ended, reason := w.observe(ctx)
@@ -2225,20 +2227,20 @@ func (w *stopWatch) wait(ctx context.Context) string {
 				return reason
 			}
 			if written {
-				now := w.i.now()
+				now := w.rule.now()
 				w.lastWrite, w.idleFrom = now, now
 			}
 		}
-		now := w.i.now()
+		now := w.rule.now()
 		select {
-		case <-w.i.exited:
+		case <-w.exited:
 			return ""
 		default:
 		}
-		if now.Sub(w.start) >= w.i.stopCap {
+		if now.Sub(w.start) >= w.rule.stopCap {
 			return stopReasonCap
 		}
-		if now.Sub(w.idleFrom) >= w.i.stopTimeout {
+		if now.Sub(w.idleFrom) >= w.rule.stopTimeout {
 			return stopReasonIdle
 		}
 	}
@@ -2259,11 +2261,11 @@ func (w *stopWatch) observe(ctx context.Context) (written, ended bool, reason st
 	select {
 	case r := <-w.scan:
 		return w.take(r), false, ""
-	case <-w.i.exited:
+	case <-w.exited:
 		return false, true, ""
 	case <-ctx.Done():
 		return false, true, stopReasonDeadline
-	case <-w.i.after(w.i.stopScanTimeout()):
+	case <-w.rule.after(w.rule.stopScanTimeout()):
 		return true, false, ""
 	}
 }
@@ -2291,14 +2293,14 @@ func (w *stopWatch) take(r stopScan) bool {
 
 // stopPollInterval is how often a stop's wait polls: defaultStopPollInterval
 // unless the idle window is shorter, so the window is never overshot by a poll.
-func (i *instance) stopPollInterval() time.Duration {
-	return min(i.stopPoll, i.stopTimeout)
+func (r stopRule) stopPollInterval() time.Duration {
+	return min(r.stopPoll, r.stopTimeout)
 }
 
 // stopScanTimeout is how long a poll waits for its scan before counting it
 // unknown: one poll interval, which also bounds how late the cap can fire.
-func (i *instance) stopScanTimeout() time.Duration {
-	return i.stopPollInterval()
+func (r stopRule) stopScanTimeout() time.Duration {
+	return r.stopPollInterval()
 }
 
 // logEscalation records one escalation step at WARN (issue #3436): the step it
