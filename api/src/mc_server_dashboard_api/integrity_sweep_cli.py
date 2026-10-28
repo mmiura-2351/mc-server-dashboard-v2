@@ -40,6 +40,7 @@ from mc_server_dashboard_api.core.adapters.database import (
 from mc_server_dashboard_api.servers.adapters.backup_store import (
     StorageBackupStoreAdapter,
 )
+from mc_server_dashboard_api.servers.adapters.lifecycle_lock import PgLifecycleLock
 from mc_server_dashboard_api.servers.adapters.unit_of_work import SqlAlchemyUnitOfWork
 from mc_server_dashboard_api.servers.application.integrity_sweep import (
     IntegritySweep,
@@ -69,6 +70,10 @@ async def run(*, server_id: ServerId | None) -> SweepSummary:
             audit=LoggingAuditRecorder(
                 SqlAlchemyAuditWriter(session_factory, clock=AuditSystemClock())
             ),
+            # The same per-server advisory lock the API's backup creation holds
+            # (issue #3220): keyed on the server id in PostgreSQL, so it serializes
+            # this process against the API's.
+            lifecycle_lock=PgLifecycleLock(engine=engine),
         )
         return await sweep(server_id=server_id)
     finally:
@@ -113,6 +118,8 @@ def main(argv: list[str]) -> int:
         return 1
     print(
         f"servers scanned: {summary.servers_scanned}\n"
+        f"servers skipped (busy; re-run the sweep to check them): "
+        f"{summary.servers_skipped_busy}\n"
         f"backups healthy: {summary.backups_healthy}\n"
         f"backups quarantined (corrupt world): {summary.backups_quarantined}\n"
         f"backups unreadable (archive bytes unproducible): "

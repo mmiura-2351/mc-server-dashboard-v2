@@ -22,6 +22,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import ServerId
 
 _EMPTY = SweepSummary(
     servers_scanned=0,
+    servers_skipped_busy=0,
     backups_healthy=0,
     backups_quarantined=0,
     backups_unreadable=0,
@@ -49,6 +50,25 @@ def test_main_prints_the_not_examined_snapshot_count(
     out = capsys.readouterr().out
     assert "snapshots scanned: 0" in out
     assert "snapshots not examined (backend does not fsck snapshots at rest): 3" in out
+
+
+def test_main_prints_the_busy_skipped_server_count(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A server skipped because its lifecycle lock was busy (issue #3220) is
+    reported apart from the scanned ones, so the operator knows to re-run."""
+
+    summary = replace(_EMPTY, servers_scanned=2, servers_skipped_busy=1)
+
+    async def _fake_run(*, server_id: ServerId | None) -> SweepSummary:
+        return summary
+
+    monkeypatch.setattr(integrity_sweep_cli, "run", _fake_run)
+    assert integrity_sweep_cli.main([]) == 0
+
+    out = capsys.readouterr().out
+    assert "servers scanned: 2" in out
+    assert "servers skipped (busy; re-run the sweep to check them): 1" in out
 
 
 def test_main_with_no_args_sweeps_every_server(monkeypatch: pytest.MonkeyPatch) -> None:

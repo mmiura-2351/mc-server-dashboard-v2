@@ -11,9 +11,11 @@ the same classification (idempotent).
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import logging
 import uuid
+from collections.abc import AsyncIterator
 
 import pytest
 
@@ -34,6 +36,11 @@ from mc_server_dashboard_api.servers.domain.backup import (
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupStorageUnavailableError,
+    ServerBusyError,
+)
+from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
+    LifecycleLock,
+    NullLifecycleLock,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -47,6 +54,7 @@ from tests.audit.fakes import RecordingAuditRecorder
 from tests.servers.fakes import (
     FakeBackupArchiveStore,
     FakeBackupRepository,
+    FakeLifecycleLock,
     FakeServerRepository,
     FakeUnitOfWork,
 )
@@ -86,8 +94,26 @@ def _backup(server_id: ServerId, storage_ref: str, *, health: BackupHealth) -> B
     )
 
 
+class _BusyLifecycleLock(LifecycleLock):
+    """A lifecycle lock another operation holds past the wait budget for
+    ``busy`` servers: ``hold`` raises ``ServerBusyError`` for them, exactly as
+    the real lock does once its bounded acquire gives up."""
+
+    def __init__(self, busy: set[ServerId]) -> None:
+        self.busy = busy
+
+    @contextlib.asynccontextmanager
+    async def hold(self, server_id: ServerId) -> AsyncIterator[None]:
+        if server_id in self.busy:
+            raise ServerBusyError(str(server_id.value))
+        yield
+
+
 def _wire(
-    *, servers: list[Server], backups: list[Backup]
+    *,
+    servers: list[Server],
+    backups: list[Backup],
+    lifecycle_lock: LifecycleLock = NullLifecycleLock(),
 ) -> tuple[
     IntegritySweep, FakeUnitOfWork, FakeBackupArchiveStore, RecordingAuditRecorder
 ]:
@@ -102,7 +128,9 @@ def _wire(
     for backup in backups:
         store.archives.add(backup.storage_ref)
     audit = RecordingAuditRecorder()
-    sweep = IntegritySweep(uow=uow, backup_store=store, audit=audit)
+    sweep = IntegritySweep(
+        uow=uow, backup_store=store, audit=audit, lifecycle_lock=lifecycle_lock
+    )
     return sweep, uow, store, audit
 
 
@@ -397,3 +425,72 @@ async def test_rerunning_is_idempotent() -> None:
         second.snapshots_scanned,
         second.snapshots_flagged,
     )
+
+
+async def test_dangling_row_is_still_condemned_under_the_lifecycle_lock() -> None:
+    """Holding the lifecycle lock (issue #3220) only rules out a publication in
+    flight; a row whose archive is missing with nothing publishing it is a real
+    dangling row and still gets the UNREADABLE verdict and its audit."""
+
+    sid = ServerId.new()
+    dangling = _backup(sid, "gone", health=BackupHealth.HEALTHY)
+    lock = FakeLifecycleLock()
+    sweep, uow, store, audit = _wire(
+        servers=[_server(sid)], backups=[dangling], lifecycle_lock=lock
+    )
+    store.archives.discard("gone")
+
+    summary = await sweep()
+
+    assert lock.events == [(sid, "acquire"), (sid, "release")]
+    assert uow.backups.by_id[dangling.id].health is BackupHealth.UNREADABLE
+    assert summary.backups_dangling == 1
+    marks = [e for e in audit.events if e.operation == BACKUP_MARK_UNREADABLE]
+    assert [e.target_id for e in marks] == [dangling.id.value]
+
+
+async def test_busy_server_is_skipped_without_a_verdict_and_the_sweep_goes_on(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A server whose lifecycle lock stays held past the wait budget (a backup
+    being published, a restore, ...) is skipped for this run (issue #3220): no
+    verdict, no audit, logged at INFO and counted apart, while the other servers
+    are still swept. Judging its rows mid-publication is exactly the false
+    "dangling" verdict the lock exists to prevent."""
+
+    busy = ServerId.new()
+    free = ServerId.new()
+    # Every row on the busy server would be condemned if it were examined.
+    pending = _backup(busy, "pending", health=BackupHealth.HEALTHY)
+    corrupt = _backup(busy, "bad", health=BackupHealth.UNKNOWN)
+    other = _backup(free, "ok", health=BackupHealth.UNKNOWN)
+    sweep, uow, store, audit = _wire(
+        servers=[_server(busy), _server(free)],
+        backups=[pending, corrupt, other],
+        lifecycle_lock=_BusyLifecycleLock({busy}),
+    )
+    store.archives.discard("pending")
+    store.corrupt_refs.add("bad")
+    store.current_corrupt[busy] = 1
+
+    with caplog.at_level(logging.INFO):
+        summary = await sweep()
+
+    assert uow.backups.by_id[pending.id].health is BackupHealth.HEALTHY
+    assert uow.backups.by_id[corrupt.id].health is BackupHealth.UNKNOWN
+    assert uow.backups.by_id[other.id].health is BackupHealth.HEALTHY
+    assert audit.events == []
+    assert summary.servers_scanned == 1
+    assert summary.servers_skipped_busy == 1
+    assert summary.backups_healthy == 1
+    assert summary.backups_dangling == 0
+    assert summary.backups_quarantined == 0
+    assert summary.snapshots_flagged == 0
+    skipped = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.INFO
+        and str(busy.value) in r.getMessage()
+        and "busy" in r.getMessage()
+    ]
+    assert skipped
