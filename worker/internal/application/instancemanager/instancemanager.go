@@ -2124,8 +2124,20 @@ func (m *Manager) settleWorkingSet(ctx context.Context, serverID, workingDir str
 // metadata alone and walks a running server's tree the way that scan does, and an
 // incomplete or failed scan is an error the driver counts as progress.
 func (m *Manager) worldProgress(root string) func() (execution.WorldProgress, error) {
+	return worldProgressOf(m.scanRegion, root)
+}
+
+// WorldProgress is worldProgress over the settle scan itself, for a caller with no
+// Manager: the startup Sweep, which runs before one exists, watches a running
+// orphan's world with it (issue #3445).
+func WorldProgress(root string) func() (execution.WorldProgress, error) {
+	return worldProgressOf(scanRegionState, root)
+}
+
+// worldProgressOf builds the world-progress probe for root from scan.
+func worldProgressOf(scan func(root string) (regionState, error), root string) func() (execution.WorldProgress, error) {
 	return func() (execution.WorldProgress, error) {
-		state, err := m.scanRegion(root)
+		state, err := scan(root)
 		if err != nil {
 			return execution.WorldProgress{}, err
 		}

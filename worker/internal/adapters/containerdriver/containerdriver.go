@@ -58,9 +58,10 @@ import (
 // defaultStopTimeout is a stop's idle window (issue #3436): once the server has
 // been asked to stop (RCON "stop", then SIGTERM), the driver escalates to the
 // next step only after the server's world files have gone this long without a
-// write — a server still writing its shutdown save keeps its grace. It is also
-// the grace the startup Sweep's `docker stop` gives an orphan and the wait for a
-// SIGKILLed container to be confirmed gone.
+// write — a server still writing its shutdown save keeps its grace. The startup
+// Sweep stops a running orphan by the same rule (issue #3445). It is also the
+// grace of the Sweep's fixed `docker stop` for an orphan whose working set it
+// cannot find, and the wait for a SIGKILLed container to be confirmed gone.
 const defaultStopTimeout = 30 * time.Second
 
 // defaultStopCap bounds how long a graceful stop may keep waiting on a server
@@ -216,6 +217,12 @@ type Options struct {
 	// stopping without restore would leave the server permanently save-off. Empty
 	// skips the save-on (the pre-fix behavior).
 	ScratchDir string
+	// WorldProgress builds the world-progress probe for the working set at
+	// workingDir (execution.InstanceSpec.WorldProgress). The startup Sweep watches a
+	// running orphan's world with it, so a shutdown save still writing keeps its
+	// grace (issue #3445). Nil leaves the sweep nothing to watch: it stops every
+	// running orphan with the fixed StopTimeout grace.
+	WorldProgress func(workingDir string) func() (execution.WorldProgress, error)
 	// RunAsUID and RunAsGID are the uid:gid every container the driver creates runs
 	// as, and the owner it hands the working set to before each create (issue
 	// #2600). The Worker's wiring always sets them from driver.container.user, which
@@ -256,6 +263,9 @@ type Driver struct {
 	readinessTimeout time.Duration
 	// sweepCallMargin bounds each startup-Sweep daemon call (issue #338).
 	sweepCallMargin time.Duration
+	// worldProgress builds the probe the startup Sweep watches a running orphan's
+	// world with (Options.WorldProgress, issue #3445); nil when none is wired.
+	worldProgress func(workingDir string) func() (execution.WorldProgress, error)
 	// imagePullTimeout bounds a lazy base-image pull (issue #904).
 	imagePullTimeout time.Duration
 	// logger records the lazy base-image pull at INFO (issue #904).
@@ -326,6 +336,7 @@ func New(docker dockerAPI, images *ImageSelector, openControl controlFunc, opts 
 		conflictDeadline: conflictDeadline,
 		readinessTimeout: readinessTimeout,
 		sweepCallMargin:  sweepCallMargin,
+		worldProgress:    opts.WorldProgress,
 		imagePullTimeout: defaultImagePullTimeout,
 		logger:           logger,
 	}
@@ -829,24 +840,33 @@ const containerStateRunning = "running"
 // worker-id label scope it to this Worker's own containers so it never touches
 // unrelated ones.
 //
-// A RUNNING orphan is stopped gracefully first — `docker stop` with the driver's
-// StopTimeout grace, SIGTERM then SIGKILL inside the daemon — so the MC server's
-// shutdown hook saves the world before the container goes away; a plain
-// force-remove would SIGKILL it and lose unsaved data (issue #336). A stop
-// failure does not leak the container: the remove runs regardless, and the stop
-// error is surfaced in the joined result. Exited/created orphans are
-// force-removed directly (no graceful stop). Removal/stop errors for individual
-// containers are returned joined so the caller can log them, but a partial sweep
-// does not block startup.
+// A RUNNING orphan is stopped gracefully first, so the MC server's shutdown hook
+// saves the world before the container goes away; a plain force-remove would
+// SIGKILL it and lose unsaved data (issue #336). The stop follows the same rule as
+// a graceful stop of a tracked server (issue #3445, stopWatch): SIGTERM, then a
+// wait that lasts while the orphan's world keeps being written, and a SIGKILL only
+// once the world has gone the idle window without a write or the stop's cap has
+// passed. The world is the working set bind-mounted at the container's working
+// directory (Container.WorkingDir). An orphan whose working set cannot be found,
+// or a driver with no WorldProgress, gets the fixed StopTimeout grace of a
+// `docker stop` instead, with a WARN, since that grace can cut a slow save short.
 //
-// Each daemon call runs under a per-call deadline derived from ctx so a wedged
-// daemon cannot block worker startup indefinitely (issue #338): the startup Sweep
-// is invoked with context.Background() and the EngineClient has no http.Client
+// The orphans are swept concurrently, so a boot with several saving orphans waits
+// one cap rather than one per orphan. A stop failure does not leak the container:
+// the remove runs regardless, and the stop error is surfaced in the joined result.
+// Exited/created orphans are force-removed directly (no graceful stop).
+// Removal/stop errors for individual containers are returned joined so the caller
+// can log them, but a partial sweep does not block startup.
+//
+// Each daemon call runs under a deadline derived from ctx so a wedged daemon
+// cannot block worker startup indefinitely (issue #338): the startup Sweep is
+// invoked with context.Background() and the EngineClient has no http.Client
 // timeout, so without these bounds a hung daemon would hang startup forever. The
-// graceful stop gets StopTimeout + a margin (the daemon needs the full grace to
-// escalate to SIGKILL); list/remove get the margin alone. A healthy daemon
-// answers each call well inside its deadline, so the bound never fires on the
-// success path.
+// watched stop runs under the stop's cap plus stopDeadlineGrace and its kill under
+// stopKillCallTimeout; the fixed-grace stop gets StopTimeout + a margin (the
+// daemon needs the full grace to escalate to SIGKILL); list/remove get the margin
+// alone. A healthy daemon answers each call well inside its deadline, so the bound
+// never fires on the success path.
 func (d *Driver) Sweep(ctx context.Context) error {
 	listCtx, cancel := context.WithTimeout(ctx, d.sweepCallMargin)
 	containers, err := d.docker.List(listCtx, labelWorkerID, d.workerID)
@@ -854,38 +874,83 @@ func (d *Driver) Sweep(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("containerdriver: list orphans: %w", err)
 	}
-	var errs []error
-	for _, c := range containers {
-		if c.State == containerStateRunning {
-			// Best-effort save-on (issue #1710): a worker crash mid-snapshot may have
-			// left auto-save disabled via the quiesce bracket's save-off. Issuing save-on
-			// before stop ensures the MC server's shutdown hook (triggered by the SIGTERM
-			// from docker stop) can auto-save the world. Failure is logged and does not
-			// block the stop — the pre-fix behavior was no save-on at all.
-			d.sweepSaveOn(ctx, c.Name, c.Labels[labelMCVersion])
+	errs := make([]error, len(containers))
+	var wg sync.WaitGroup
+	for n, c := range containers {
+		wg.Go(func() { errs[n] = d.sweepContainer(ctx, c) })
+	}
+	wg.Wait()
+	return errors.Join(errs...)
+}
 
-			// This bare docker.Stop is the orphan-sweep stop leg observed in the #927
-			// incident (a redeploy sweep stopped a running 26.x server, then the stop-leg
-			// snapshot found unpadded regions). The daemon-internal SIGTERM→SIGKILL
-			// escalation here is NOT directly observable — unlike the supervised stop in
-			// instance.Stop, which emits a WARN on its explicit kill fallback (see
-			// Instance.Stop). An elapsed-time/exit-code(137) escalation heuristic at this
-			// site is deferred (#927).
-			stopCtx, cancel := context.WithTimeout(ctx, d.stopTimeout+d.sweepCallMargin)
-			err := d.docker.Stop(stopCtx, c.ID, d.stopTimeout)
-			cancel()
-			if err != nil {
-				errs = append(errs, fmt.Errorf("stop %s (%s): %w", c.Name, c.ID, err))
-			}
-		}
-		removeCtx, cancel := context.WithTimeout(ctx, d.sweepCallMargin)
-		err := d.docker.Remove(removeCtx, c.ID)
-		cancel()
-		if err != nil {
-			errs = append(errs, fmt.Errorf("remove %s (%s): %w", c.Name, c.ID, err))
+// sweepContainer stops one orphan if it is running, then removes it.
+func (d *Driver) sweepContainer(ctx context.Context, c Container) error {
+	var errs []error
+	if c.State == containerStateRunning {
+		// Best-effort save-on (issue #1710): a worker crash mid-snapshot may have
+		// left auto-save disabled via the quiesce bracket's save-off. Issuing save-on
+		// before stop ensures the MC server's shutdown hook (triggered by the SIGTERM)
+		// can auto-save the world. Failure is logged and does not block the stop — the
+		// pre-fix behavior was no save-on at all.
+		d.sweepSaveOn(ctx, c.Name, c.Labels[labelMCVersion])
+		if err := d.sweepStop(ctx, c); err != nil {
+			errs = append(errs, fmt.Errorf("stop %s (%s): %w", c.Name, c.ID, err))
 		}
 	}
+	removeCtx, cancel := context.WithTimeout(ctx, d.sweepCallMargin)
+	err := d.docker.Remove(removeCtx, c.ID)
+	cancel()
+	if err != nil {
+		errs = append(errs, fmt.Errorf("remove %s (%s): %w", c.Name, c.ID, err))
+	}
 	return errors.Join(errs...)
+}
+
+// sweepStop stops a running orphan under the graceful stop's rule (issue #3445):
+// SIGTERM, a wait while its world keeps being written (stopWatch), and a SIGKILL
+// at the idle window or the cap. Without a working set to watch it falls back to
+// a fixed-grace `docker stop`.
+//
+// The kill this stop sends after the idle window or at the cap is the case where
+// the orphan's shutdown save is cut short, which can leave the stop-leg snapshot
+// unpadded (live-format) regions (issue #927), so it is logged at WARN with why
+// and when the world was last written.
+func (d *Driver) sweepStop(ctx context.Context, c Container) error {
+	if c.WorkingDir == "" || d.worldProgress == nil {
+		d.logger.Warn("sweep: no working set to watch for this orphan; stopping it with the fixed grace, "+
+			"which can cut a shutdown save short",
+			"container", c.Name, "grace", d.stopTimeout)
+		stopCtx, cancel := context.WithTimeout(ctx, d.stopTimeout+d.sweepCallMargin)
+		defer cancel()
+		return d.docker.Stop(stopCtx, c.ID, d.stopTimeout)
+	}
+	stopCtx, cancel := context.WithTimeout(ctx, d.stopCap+stopDeadlineGrace)
+	defer cancel()
+	exited := make(chan struct{})
+	go func() {
+		// A Wait that errors says nothing about the exit; the rule still ends the
+		// wait at the idle window or the cap.
+		if _, err := d.docker.Wait(stopCtx, c.ID); err == nil {
+			close(exited)
+		}
+	}()
+	requested := d.now()
+	w := newStopWatch(d.stopRule, exited, d.worldProgress(c.WorkingDir))
+	// A SIGTERM request that errors does not prove no SIGTERM landed, so the wait
+	// follows the same rule whatever it returned (as in instance.Stop).
+	termErr := d.docker.Terminate(stopCtx, c.ID)
+	reason := w.wait(stopCtx)
+	if reason == "" {
+		return nil
+	}
+	d.logger.Warn("sweep: the orphan did not exit after SIGTERM; killing it",
+		append([]any{"container", c.Name}, w.escalationArgs(requested, reason)...)...)
+	killCtx, killCancel := context.WithTimeout(ctx, stopKillCallTimeout)
+	defer killCancel()
+	if err := d.docker.Kill(killCtx, c.ID); err != nil {
+		return errors.Join(termErr, fmt.Errorf("kill: %w", err))
+	}
+	return termErr
 }
 
 // sweepSaveOn issues a best-effort RCON save-on to a running orphan container
@@ -2307,15 +2372,21 @@ func (r stopRule) stopScanTimeout() time.Duration {
 // leaves and the one it takes, why (idle or cap), how long since the stop was
 // requested, and when the world was last seen written.
 func (i *instance) logEscalation(from, to string, requested time.Time, w *stopWatch, reason string) {
-	now := i.now()
-	args := []any{"server_id", i.spec.ServerID, "from", from, "to", to, "reason", reason,
-		"elapsed", now.Sub(requested), "idle_window", i.stopTimeout, "cap", i.stopCap}
+	i.logger.Warn("graceful stop escalating: the server did not exit",
+		append([]any{"server_id", i.spec.ServerID, "from", from, "to", to}, w.escalationArgs(requested, reason)...)...)
+}
+
+// escalationArgs are the log fields every stop escalation carries: why the wait
+// gave up (idle or cap), how long since the stop was requested, the rule's values,
+// and when the world was last seen written.
+func (w *stopWatch) escalationArgs(requested time.Time, reason string) []any {
+	now := w.rule.now()
+	args := []any{"reason", reason, "elapsed", now.Sub(requested),
+		"idle_window", w.rule.stopTimeout, "cap", w.rule.stopCap}
 	if w.lastWrite.IsZero() {
-		args = append(args, "last_write", "none observed")
-	} else {
-		args = append(args, "last_write", w.lastWrite, "since_last_write", now.Sub(w.lastWrite))
+		return append(args, "last_write", "none observed")
 	}
-	i.logger.Warn("graceful stop escalating: the server did not exit", args...)
+	return append(args, "last_write", w.lastWrite, "since_last_write", now.Sub(w.lastWrite))
 }
 
 // stopHandOffCallTimeout bounds one hand-off request, and stopHandOffRetryInterval
