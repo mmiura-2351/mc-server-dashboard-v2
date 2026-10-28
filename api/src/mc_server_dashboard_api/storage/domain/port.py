@@ -246,11 +246,22 @@ class WorkingSetStore(abc.ABC):
         """Start an incoming snapshot transfer (allocate ``incoming/<id>/`` staging)."""
 
     @abc.abstractmethod
-    async def write_snapshot(self, handle: SnapshotHandle, stream: ByteStream) -> None:
+    async def write_snapshot(
+        self,
+        handle: SnapshotHandle,
+        stream: ByteStream,
+        *,
+        expected_base: int | None = None,
+    ) -> None:
         """Stream the Worker's working set into staging only — never ``current/``.
 
         May be called incrementally; each chunk lands under the handle's staging
         area. ``current/`` is untouched until :meth:`commit_snapshot`.
+
+        ``expected_base`` is the base the caller will pass to :meth:`commit_snapshot`.
+        Staging that a concurrent delete's prune removed while it was being written
+        is refused with :class:`~.errors.PrunedStoreError` (issue #3481), which
+        consumes the handle.
         """
 
     @abc.abstractmethod
@@ -269,8 +280,8 @@ class WorkingSetStore(abc.ABC):
         reflects the complete transfer or the prior copy — never a partial. Refuses
         an un-signalled-complete transfer with
         :class:`~.errors.IncompleteTransferError`, except that staging a concurrent
-        delete's prune removed is refused with :class:`~.errors.PrunedStoreError`
-        (issue #3477).
+        delete's prune removed, before the commit or during its lock-free steps, is
+        refused with :class:`~.errors.PrunedStoreError` (issues #3477, #3481).
 
         Bumps and returns the per-server working-set GENERATION (issue #763): a
         monotonically increasing counter the adapter persists alongside the server's

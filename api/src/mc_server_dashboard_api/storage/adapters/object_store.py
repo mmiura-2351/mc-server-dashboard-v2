@@ -56,7 +56,7 @@ import threading
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable
-from contextlib import AbstractAsyncContextManager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import TracebackType
@@ -812,7 +812,16 @@ class ObjectStorage(Storage):
         )
         return _ObjectSnapshotHandle(community_id, server_id, transfer_id)
 
-    async def write_snapshot(self, handle: SnapshotHandle, stream: ByteStream) -> None:
+    async def write_snapshot(
+        self,
+        handle: SnapshotHandle,
+        stream: ByteStream,
+        *,
+        expected_base: int | None = None,
+    ) -> None:
+        # ``expected_base`` is unused: unlike the fs spool, nothing here reads the
+        # staging back, so a prune mid-stream surfaces at commit (issue #3481).
+        del expected_base
         h = _as_object_handle(handle)
         if h.consumed:
             raise SnapshotHandleError("snapshot handle already committed or aborted")
@@ -850,20 +859,8 @@ class ObjectStorage(Storage):
             if not staged:
                 # A concurrent delete's prune deletes ``incoming/`` with the rest of
                 # the working set, so an empty staging prefix can be that delete
-                # rather than an empty transfer (issue #3477). Name it with the prune
-                # signature of the commit re-check below (issues #921, #3434), read
-                # under the server lock the prune holds for its whole run.
-                if expected_base is not None:
-                    async with self._server_lock(h.community_id, h.server_id):
-                        current = await self._read_generation(client, server_prefix)
-                        pruned = (
-                            current != expected_base
-                            and await self._read_pointer(client, server_prefix) is None
-                        )
-                    if pruned:
-                        self._release_staging(incoming)
-                        h.consumed = True
-                        raise PrunedStoreError(expected_base, current)
+                # rather than an empty transfer (issue #3477).
+                await self._refuse_if_pruned(client, h, incoming, expected_base)
                 # The "proven complete" gate (Section 4.1): an empty staging area is
                 # not a publishable transfer. The end-of-stream + manifest/size
                 # integrity check is part of the data-plane contract (epic #8); this
@@ -878,7 +875,12 @@ class ObjectStorage(Storage):
             # one at a time (bounded per-member, like the backup builder). The single
             # region rule set (issue #927): a 26.x world's unpadded tail is not a tear,
             # on any source — the byte-precise check still catches realistic tears.
-            report = await self._check_staged_regions(client, incoming, staged)
+            # This read and the copy below run outside the server lock, so the same
+            # prune can delete the staged objects under them (issue #3481).
+            async with self._refusing_pruned_staging(
+                client, h, incoming, expected_base
+            ):
+                report = await self._check_staged_regions(client, incoming, staged)
             if not report.healthy:
                 await _delete_prefix(client, incoming)
                 self._release_staging(incoming)
@@ -888,9 +890,12 @@ class ObjectStorage(Storage):
             # lock (issue #920): the copy is the publish's long pole (minutes for a
             # big world) and touches nothing live, so it must not hold the per-server
             # lock and block every in-place edit for that long.
-            new_prefix = await self._copy_into_snapshot(
-                client, h.community_id, h.server_id, incoming, staged
-            )
+            async with self._refusing_pruned_staging(
+                client, h, incoming, expected_base
+            ):
+                new_prefix = await self._copy_into_snapshot(
+                    client, h.community_id, h.server_id, incoming, staged
+                )
             # Take the server lock (issue #899) for the stale re-check, the
             # missing-region prior read, the pointer flip, and the generation bump —
             # the same lock an in-place edit takes for its mutate+bump. Holding it
@@ -973,6 +978,59 @@ class ObjectStorage(Storage):
         self._release_staging(incoming)
         h.consumed = True
         return generation
+
+    @asynccontextmanager
+    async def _refusing_pruned_staging(
+        self,
+        client: S3Client,
+        h: _ObjectSnapshotHandle,
+        incoming: str,
+        expected_base: int | None,
+    ) -> AsyncIterator[None]:
+        """Name a lock-free step's vanished staging as the delete that removed it.
+
+        A :class:`NotFoundError` from a step that reads the staged objects becomes
+        :class:`PrunedStoreError` when a prune ran (issue #3481); any other missing
+        object propagates unchanged.
+        """
+
+        try:
+            yield
+        except NotFoundError:
+            await self._refuse_if_pruned(client, h, incoming, expected_base)
+            raise
+
+    async def _refuse_if_pruned(
+        self,
+        client: S3Client,
+        h: _ObjectSnapshotHandle,
+        incoming: str,
+        expected_base: int | None,
+    ) -> None:
+        """Raise :class:`PrunedStoreError` if a prune ran since ``expected_base``.
+
+        The prune signature of the commit re-check (issues #921, #3434): the
+        generation moved and no pointer is left. Read under the server lock the
+        prune holds for its whole run, so a prune in flight is observed either
+        complete or not at all. The prune already deleted the staged objects, so
+        the staging lease is released and the handle is consumed, and the edge
+        answers without an abort. ``expected_base=None`` never matches.
+        """
+
+        if expected_base is None:
+            return
+        server_prefix = self._server_prefix(h.community_id, h.server_id)
+        async with self._server_lock(h.community_id, h.server_id):
+            current = await self._read_generation(client, server_prefix)
+            pruned = (
+                current != expected_base
+                and await self._read_pointer(client, server_prefix) is None
+            )
+        if not pruned:
+            return
+        self._release_staging(incoming)
+        h.consumed = True
+        raise PrunedStoreError(expected_base, current)
 
     async def abort_snapshot(self, handle: SnapshotHandle) -> None:
         h = _as_object_handle(handle)
