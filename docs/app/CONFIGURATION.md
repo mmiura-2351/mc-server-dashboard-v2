@@ -402,12 +402,17 @@ with no Worker assigned, or one still running on a Worker that is disconnected
 could otherwise overlap — the original stop's final snapshot, another operator
 stop, the reconciler, the late result of an abandoned snapshot — and one flow's
 snapshot outcome must never release the Worker while another flow's upload is
-still running. So each flow that snapshots and then releases holds a per-server
-exclusion for the whole of it. A `stop` that finds one in flight answers
-`409 transition_conflict` without doing anything, the reconciler skips the server
-for that tick, and a late result leaves the release to the flow in flight. The
-exclusion is in-process, which suffices because the API is a single instance
-(REQUIREMENTS.md NFR-SCALE-1).
+still running. So a server's stop convergence counts as in flight while a stop
+flow is running for it, while a release one started is still landing (even after
+its caller was cancelled), or while a final snapshot of it still awaits its
+result (even one whose caller gave up). A `stop` that finds it in flight answers
+`409 transition_conflict` without doing anything, and the reconciler skips the
+server for that tick. A late snapshot result releases only if nothing else is in
+flight; otherwise whatever is still in flight, or a later tick, converges the
+server. Nothing stays in flight for ever: a final snapshot stops counting once its
+result arrives, or once the Worker's session ends, so a result that never comes
+still leaves the reconciler free to converge. The tracking is in-process, which
+suffices because the API is a single instance (REQUIREMENTS.md NFR-SCALE-1).
 
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
