@@ -26,14 +26,17 @@ artifacts of every server (or a single server) and persists/surfaces the result:
 
 Backup creation commits the metadata row before it writes the archive, so a row
 can be visible while its archive does not exist yet (issue #3220). The backup half
-therefore runs under the server's lifecycle lock, which ``CreateBackup`` holds
+checks each backup under the server's lifecycle lock, which ``CreateBackup`` holds
 across that row commit and archive write: the sweep waits out a publication in
-flight instead of condemning its archive as missing. A server whose lock stays
-busy past the lock's wait budget is skipped for this run — no verdict, no audit —
-and counted as ``servers_skipped_busy`` so the operator knows to re-run the sweep
-for it. The snapshot half needs no lock: ``current`` is published by an atomic
-swap and the fsck holds a reader lease on the snapshot it walks (#1702), so it
-never sees a half-published snapshot.
+flight instead of condemning its archive as missing. The lock is taken per backup,
+not per server, so a heavy pass never blocks a start, restore or backup for more
+than one archive check; inside it the row is re-read, since it may have been
+deleted since the listing. A backup whose lock stays busy past the lock's wait
+budget is skipped for this run — no verdict, no audit — and counted as
+``backups_skipped_busy`` so the operator knows to re-run the sweep; the server's
+other backups and its snapshot are still checked. The snapshot half needs no
+lock: ``current`` is published by an atomic swap and the fsck holds a reader lease
+on the snapshot it walks (#1702), so it never sees a half-published snapshot.
 
 A quarantined backup, an unreadable backup and a flagged snapshot each emit an
 audit entry. The pass is
@@ -48,8 +51,10 @@ who invoked it (``None`` when run headless).
 
 from __future__ import annotations
 
+import enum
 import logging
 import uuid
+from collections import Counter
 from dataclasses import dataclass
 
 from mc_server_dashboard_api.audit.domain.events import AuditEvent, Outcome
@@ -100,9 +105,9 @@ class SweepSummary:
     ``snapshots_scanned`` is the point: "scanned: N, flagged: 0" is a verdict, and
     a backend that examines nothing must not be able to produce one.
 
-    ``servers_skipped_busy`` counts servers left unexamined because another
-    lifecycle operation held their lock past its wait budget (issue #3220); they
-    are not in ``servers_scanned``, and re-running the sweep checks them.
+    ``backups_skipped_busy`` counts backups left unexamined because another
+    lifecycle operation held their server's lock past its wait budget (issue
+    #3220); they got no verdict, and re-running the sweep checks them.
 
     The three condemned-backup counts are kept apart because an operator acts on
     them differently: ``backups_quarantined`` is a structurally corrupt world
@@ -114,14 +119,24 @@ class SweepSummary:
     """
 
     servers_scanned: int
-    servers_skipped_busy: int
     backups_healthy: int
     backups_quarantined: int
     backups_unreadable: int
     backups_dangling: int
+    backups_skipped_busy: int
     snapshots_scanned: int
     snapshots_flagged: int
     snapshots_not_examined: int
+
+
+class _BackupOutcome(enum.Enum):
+    """What the sweep did with one backup row; tallied into the summary."""
+
+    HEALTHY = enum.auto()
+    QUARANTINED = enum.auto()
+    UNREADABLE = enum.auto()
+    DANGLING = enum.auto()
+    SKIPPED_BUSY = enum.auto()
 
 
 @dataclass(frozen=True)
@@ -131,8 +146,8 @@ class IntegritySweep:
     Enumerates servers via the repository (all servers, or one when ``server_id`` is
     passed), and for each: re-checks its backups into the ``health`` column and
     fscks its published snapshot (audit/log only). ``actor_id`` attributes the audit
-    entries to the operator who ran the command. The backup check of each server
-    runs under that server's ``lifecycle_lock`` (issue #3220).
+    entries to the operator who ran the command. Each backup check runs under its
+    server's ``lifecycle_lock`` (issue #3220).
     """
 
     uow: UnitOfWork
@@ -144,40 +159,13 @@ class IntegritySweep:
         self, *, server_id: ServerId | None = None, actor_id: uuid.UUID | None = None
     ) -> SweepSummary:
         servers = await self._servers_to_scan(server_id)
-        servers_skipped_busy = 0
-        backups_healthy = 0
-        backups_quarantined = 0
-        backups_unreadable = 0
-        backups_dangling = 0
+        backups = Counter[_BackupOutcome]()
         snapshots_scanned = 0
         snapshots_flagged = 0
         snapshots_not_examined = 0
         for server in servers:
             _LOG.info("integrity sweep: scanning server %s", server.id.value)
-            try:
-                async with self.lifecycle_lock.hold(server.id):
-                    (
-                        healthy,
-                        quarantined,
-                        unreadable,
-                        dangling,
-                    ) = await self._sweep_backups(server, actor_id)
-            except ServerBusyError:
-                # Another lifecycle operation (a backup being published, a restore,
-                # ...) holds the server; its rows may be mid-publication, so no
-                # verdict is safe now (issue #3220). Skip it rather than fail the
-                # pass; a re-run checks it.
-                _LOG.info(
-                    "integrity sweep: server %s is busy (another lifecycle operation "
-                    "holds it); skipped this run, re-run the sweep to check it",
-                    server.id.value,
-                )
-                servers_skipped_busy += 1
-                continue
-            backups_healthy += healthy
-            backups_quarantined += quarantined
-            backups_unreadable += unreadable
-            backups_dangling += dangling
+            backups.update(await self._sweep_backups(server, actor_id))
             scanned, flagged, not_examined = await self._sweep_snapshot(
                 server, actor_id
             )
@@ -185,28 +173,27 @@ class IntegritySweep:
             snapshots_flagged += flagged
             snapshots_not_examined += not_examined
         summary = SweepSummary(
-            servers_scanned=len(servers) - servers_skipped_busy,
-            servers_skipped_busy=servers_skipped_busy,
-            backups_healthy=backups_healthy,
-            backups_quarantined=backups_quarantined,
-            backups_unreadable=backups_unreadable,
-            backups_dangling=backups_dangling,
+            servers_scanned=len(servers),
+            backups_healthy=backups[_BackupOutcome.HEALTHY],
+            backups_quarantined=backups[_BackupOutcome.QUARANTINED],
+            backups_unreadable=backups[_BackupOutcome.UNREADABLE],
+            backups_dangling=backups[_BackupOutcome.DANGLING],
+            backups_skipped_busy=backups[_BackupOutcome.SKIPPED_BUSY],
             snapshots_scanned=snapshots_scanned,
             snapshots_flagged=snapshots_flagged,
             snapshots_not_examined=snapshots_not_examined,
         )
         _LOG.info(
-            "integrity sweep done: %d servers, %d skipped busy, %d backups healthy, "
-            "%d quarantined "
+            "integrity sweep done: %d servers, %d backups healthy, %d quarantined "
             "(corrupt world), %d unreadable (archive bytes unproducible), "
-            "%d dangling, %d snapshots scanned, %d flagged, %d not examined "
-            "(backend walks no snapshot at rest)",
+            "%d dangling, %d skipped busy, %d snapshots scanned, %d flagged, "
+            "%d not examined (backend walks no snapshot at rest)",
             summary.servers_scanned,
-            summary.servers_skipped_busy,
             summary.backups_healthy,
             summary.backups_quarantined,
             summary.backups_unreadable,
             summary.backups_dangling,
+            summary.backups_skipped_busy,
             summary.snapshots_scanned,
             summary.snapshots_flagged,
             summary.snapshots_not_examined,
@@ -222,81 +209,111 @@ class IntegritySweep:
 
     async def _sweep_backups(
         self, server: Server, actor_id: uuid.UUID | None
-    ) -> tuple[int, int, int, int]:
+    ) -> Counter[_BackupOutcome]:
         async with self.uow:
             backups = await self.uow.backups.list_for_server(server.id)
-        healthy = 0
-        quarantined = 0
-        unreadable = 0
-        dangling = 0
-        for backup in backups:
+        outcomes = Counter[_BackupOutcome]()
+        for listed in backups:
+            # The lifecycle lock per backup (issue #3220): ``CreateBackup`` holds it
+            # from its row commit to its archive write, so under it a row is never
+            # seen mid-publication. Per backup rather than per server, so the lock
+            # is never held across more than one archive check.
             try:
-                corrupt_count = await self.backup_store.check_backup_health(
-                    community_id=server.community_id,
-                    server_id=server.id,
-                    storage_ref=backup.storage_ref,
-                )
-            except BackupNotFoundError:
-                # No archive at all: nothing to restore, override or not, so it
-                # gets the same verdict as bytes the store cannot produce (#2374).
-                _LOG.warning(
-                    "integrity sweep: backup %s has no archive (dangling row); "
-                    "marking unreadable",
-                    backup.id.value,
-                )
-                await self._condemn(server, backup, BackupHealth.UNREADABLE, actor_id)
-                dangling += 1
-                continue
-            except BackupUnreadableError:
-                # The archive exists but the store cannot produce its bytes (#2371):
-                # UNREADABLE, not QUARANTINED (#2374) — "the bytes are gone" cannot
-                # be force-restored the way a corrupt world can, and it points at
-                # storage damage rather than at the world.
-                _LOG.warning(
-                    "integrity sweep: backup %s archive could not be read back "
-                    "(the store cannot produce its bytes); marking unreadable",
-                    backup.id.value,
-                )
-                await self._condemn(server, backup, BackupHealth.UNREADABLE, actor_id)
-                unreadable += 1
-                continue
-            except BackupStorageUnavailableError:
-                # An outage is no verdict about THIS archive (#2371), and re-running
-                # the pass against a down store would quarantine nothing correctly.
-                # Stop instead of misclassifying, naming the row the pass died on so
-                # the operator can resume from a known point; the CLI turns this into
-                # a clean failure rather than a traceback.
-                # ``exc_info`` is load-bearing, not decoration: the object client
-                # translates ANY body-read failure to a storage error, so the
-                # aiohttp/botocore error naming the actual fault survives only in the
-                # ``__cause__`` chain. Without the traceback here an operator sees
-                # "the store could not serve the read" at every surface and never
-                # why — which is what would make that broad catch a black hole.
-                _LOG.error(
-                    "integrity sweep: aborting at backup %s on server %s — the "
-                    "object store could not serve the archive read. No verdict was "
-                    "written for it; re-run the sweep once the store is healthy.",
-                    backup.id.value,
+                async with self.lifecycle_lock.hold(server.id):
+                    # Re-read under the lock: the row may have been deleted (or
+                    # re-judged) since the listing.
+                    async with self.uow:
+                        backup = await self.uow.backups.get_by_id(listed.id)
+                    if backup is None:
+                        _LOG.info(
+                            "integrity sweep: backup %s was deleted during the "
+                            "sweep; nothing to check",
+                            listed.id.value,
+                        )
+                        continue
+                    outcomes[await self._check_backup(server, backup, actor_id)] += 1
+            except ServerBusyError:
+                # Another lifecycle operation (a backup being published, a restore,
+                # ...) held the server past the lock's wait budget; this row may be
+                # mid-publication, so no verdict is safe now. Skip it rather than
+                # fail the pass; a re-run checks it.
+                _LOG.info(
+                    "integrity sweep: backup %s skipped, server %s is busy (another "
+                    "lifecycle operation holds it); re-run the sweep to check it",
+                    listed.id.value,
                     server.id.value,
-                    exc_info=True,
                 )
-                raise
-            health = BackupHealth.QUARANTINED if corrupt_count else BackupHealth.HEALTHY
-            _LOG.info(
-                "integrity sweep: backup %s -> %s (%d corrupt region files)",
-                backup.id.value,
-                health.value,
-                corrupt_count,
+                outcomes[_BackupOutcome.SKIPPED_BUSY] += 1
+        return outcomes
+
+    async def _check_backup(
+        self, server: Server, backup: Backup, actor_id: uuid.UUID | None
+    ) -> _BackupOutcome:
+        """Probe one backup's archive and persist (and audit) its verdict."""
+
+        try:
+            corrupt_count = await self.backup_store.check_backup_health(
+                community_id=server.community_id,
+                server_id=server.id,
+                storage_ref=backup.storage_ref,
             )
-            if health is BackupHealth.QUARANTINED:
-                await self._condemn(server, backup, health, actor_id)
-                quarantined += 1
-            else:
-                async with self.uow:
-                    await self.uow.backups.update_health(backup.id, health)
-                    await self.uow.commit()
-                healthy += 1
-        return healthy, quarantined, unreadable, dangling
+        except BackupNotFoundError:
+            # No archive at all: nothing to restore, override or not, so it
+            # gets the same verdict as bytes the store cannot produce (#2374).
+            _LOG.warning(
+                "integrity sweep: backup %s has no archive (dangling row); "
+                "marking unreadable",
+                backup.id.value,
+            )
+            await self._condemn(server, backup, BackupHealth.UNREADABLE, actor_id)
+            return _BackupOutcome.DANGLING
+        except BackupUnreadableError:
+            # The archive exists but the store cannot produce its bytes (#2371):
+            # UNREADABLE, not QUARANTINED (#2374) — "the bytes are gone" cannot
+            # be force-restored the way a corrupt world can, and it points at
+            # storage damage rather than at the world.
+            _LOG.warning(
+                "integrity sweep: backup %s archive could not be read back "
+                "(the store cannot produce its bytes); marking unreadable",
+                backup.id.value,
+            )
+            await self._condemn(server, backup, BackupHealth.UNREADABLE, actor_id)
+            return _BackupOutcome.UNREADABLE
+        except BackupStorageUnavailableError:
+            # An outage is no verdict about THIS archive (#2371), and re-running
+            # the pass against a down store would quarantine nothing correctly.
+            # Stop instead of misclassifying, naming the row the pass died on so
+            # the operator can resume from a known point; the CLI turns this into
+            # a clean failure rather than a traceback.
+            # ``exc_info`` is load-bearing, not decoration: the object client
+            # translates ANY body-read failure to a storage error, so the
+            # aiohttp/botocore error naming the actual fault survives only in the
+            # ``__cause__`` chain. Without the traceback here an operator sees
+            # "the store could not serve the read" at every surface and never
+            # why — which is what would make that broad catch a black hole.
+            _LOG.error(
+                "integrity sweep: aborting at backup %s on server %s — the "
+                "object store could not serve the archive read. No verdict was "
+                "written for it; re-run the sweep once the store is healthy.",
+                backup.id.value,
+                server.id.value,
+                exc_info=True,
+            )
+            raise
+        health = BackupHealth.QUARANTINED if corrupt_count else BackupHealth.HEALTHY
+        _LOG.info(
+            "integrity sweep: backup %s -> %s (%d corrupt region files)",
+            backup.id.value,
+            health.value,
+            corrupt_count,
+        )
+        if health is BackupHealth.QUARANTINED:
+            await self._condemn(server, backup, health, actor_id)
+            return _BackupOutcome.QUARANTINED
+        async with self.uow:
+            await self.uow.backups.update_health(backup.id, health)
+            await self.uow.commit()
+        return _BackupOutcome.HEALTHY
 
     async def _condemn(
         self,
