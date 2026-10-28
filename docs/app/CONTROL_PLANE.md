@@ -297,8 +297,8 @@ nothing held would make the API hydrate every server on that Worker). A Worker
 that reports nothing held, or one
 that does not set the field, always hydrates. The
 API answers `RegisterAck`: the `heartbeat_interval` it expects,
-the `transfer_deadline` that bounds one data-plane transfer Worker-side
-(Section 5.2), and `unknown_held_server_ids` — the subset of `held_servers` whose
+the `transfer_deadline` that bounds a hydrate download and a whole snapshot
+command Worker-side (Section 5.2), and `unknown_held_server_ids` — the subset of `held_servers` whose
 server the API has since deleted while the scratch was live. The Worker
 reclaims the `.hydrate-<id>-*` leftovers and then the scratch dir for
 each listed id but does **not** reclaim `.displaced-<id>` trees (retained for
@@ -564,8 +564,8 @@ because B advanced and snapshotted it).
 
 ### 5.2 Worker-side transfer deadline
 
-The Worker bounds each data-plane transfer (the snapshot upload and the hydrate
-download) with a per-transfer context deadline carried in `RegisterAck.transfer_deadline`
+The Worker bounds each hydrate download, and each snapshot command as a whole,
+with a context deadline carried in `RegisterAck.transfer_deadline`
 (Section 4.1). Without it a transfer would have no deadline at all — the
 HTTP client carries no timeout and the trigger's context none either — so a
 stalled upload could outlive the API's `snapshot_timeout_seconds` indefinitely,
@@ -573,12 +573,36 @@ the case the API-side snapshot-timeout hold (CONFIGURATION.md Section 5.1,
 `control.snapshot_timeout_seconds`) recovers from. The bound
 structurally closes it: once it fires Worker-side, no late publish can exist.
 
+For a `SnapshotTrigger` the deadline runs from the start of the command and
+covers every phase: the quiesce of a running server, the pre-pack region fsck,
+the pack and the upload. A running server's snapshot also owes the save-on
+restore, which runs on its own 30 s budget detached from the deadline, so that
+auto-save comes back even after the deadline fired. The Worker keeps that 30 s
+back from the other phases, which end 30 s before the deadline, so the command
+answers within `transfer_deadline`, restore included. A phase that runs out the
+deadline fails the command with `TRANSFER_FAILED`; a partial archive is removed,
+and a stopped server's scratch is kept as on any failed snapshot, so a final
+snapshot loses nothing to it.
+
+The pack and the fsck check the deadline as they walk the working set, so a slow
+one stops at its next file. A system call that does not return, such as a read
+of a file on stuck storage, cannot be interrupted. The Worker abandons it: the
+command answers at the deadline while the stuck call's goroutine stays blocked.
+Once the call returns, that goroutine stops at its next step. An abandoned fsck
+only reads. An abandoned pack writes only through its archive's descriptor and
+never by path, and the archive's name is removed when the pack is abandoned.
+Nothing the goroutine does can therefore reach the archive of a later attempt,
+which is always a new file. The goroutine keeps its descriptors, and the
+unlinked archive's disk space, until the stuck call returns.
+
 The API derives the deadline as `max(hydrate_timeout_seconds, snapshot_timeout_seconds)
-+ margin`, so it is always **>=** the API budget. The API-side dispatch timeout
++ margin`, with a margin of 60 s, so it is always **>=** the API budget, and a
+running snapshot's phases, which end 30 s early, still get at least
+`snapshot_timeout_seconds`. The API-side dispatch timeout
 therefore fires first on a genuinely slow-but-healthy transfer; the Worker bound
 is the cleanup backstop, not the primary deadline, and never kills a transfer the
 API still considers in flight. A non-positive or unset value leaves the transfer
-unbounded.
+and the snapshot command unbounded.
 
 ---
 

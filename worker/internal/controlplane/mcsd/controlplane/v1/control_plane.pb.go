@@ -1091,13 +1091,14 @@ type RegisterAck struct {
 	// window (CONFIGURATION.md Section 5.1 control.heartbeat_timeout_seconds,
 	// FR-WRK-2).
 	HeartbeatInterval *durationpb.Duration `protobuf:"bytes,2,opt,name=heartbeat_interval,json=heartbeatInterval,proto3" json:"heartbeat_interval,omitempty"`
-	// transfer_deadline bounds a single data-plane transfer (the snapshot upload
-	// and the hydrate download) Worker-side. The API derives it from its own
+	// transfer_deadline bounds the hydrate download and the whole snapshot
+	// command (quiesce, fsck, pack, upload and save-on restore, #3511)
+	// Worker-side. The API derives it from its own
 	// hydrate/snapshot budgets plus a small margin, so it is always >= the API
 	// budget: the API-side timeout fires first and this Worker bound is the
 	// cleanup backstop that structurally closes the unbounded-upload case (an
 	// upload outliving snapshot_timeout_seconds indefinitely, #874/#869). The
-	// Worker applies it as a per-transfer context deadline; a non-positive or
+	// Worker applies it as a per-command context deadline; a non-positive or
 	// unset value (an older API) leaves the transfer unbounded as before.
 	TransferDeadline *durationpb.Duration `protobuf:"bytes,4,opt,name=transfer_deadline,json=transferDeadline,proto3" json:"transfer_deadline,omitempty"`
 	// unknown_held_server_ids is the subset of Register.held_servers whose server

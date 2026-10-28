@@ -51,8 +51,8 @@ type HeldServer struct {
 // RegisterAck is the API's answer to a Register (CONTROL_PLANE.md Section 4.1).
 type RegisterAck struct {
 	HeartbeatInterval time.Duration
-	// TransferDeadline bounds a single data-plane transfer (snapshot upload /
-	// hydrate download) Worker-side (issue #874). The API derives it from its
+	// TransferDeadline bounds a hydrate download and a whole snapshot command
+	// Worker-side (issues #874, #3511). The API derives it from its
 	// hydrate/snapshot budgets plus a margin, so it is always >= the API budget:
 	// the API-side timeout fires first and this is the cleanup backstop that
 	// closes the unbounded-upload case (#869). A non-positive value (an older

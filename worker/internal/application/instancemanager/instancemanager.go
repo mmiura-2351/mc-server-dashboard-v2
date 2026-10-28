@@ -776,6 +776,30 @@ func (m *Manager) transferContext(ctx context.Context) (context.Context, context
 	return context.WithTimeout(ctx, d)
 }
 
+// snapshotContext derives the one deadline a snapshot command runs under (issue
+// #3511): the transfer deadline the API advertised in RegisterAck, measured from the
+// command's start, so the quiesce, the pre-pack fsck, the pack and the upload share
+// it. Before, it bounded only the pack and upload, and the pack ignored it, so a
+// stuck pack or fsck held the command past it while heartbeats kept the session up.
+//
+// A running server's snapshot also owes the save-on restore, which runs detached
+// from this context on its own restoreSaveTimeout so that auto-save comes back even
+// after the deadline fired. That budget is held back from the phases, which end
+// restoreSaveTimeout early: the command then answers within the deadline, restore
+// included. The phases keep at least the API's snapshot_timeout_seconds, since the
+// API adds a margin of 60 s to it and the restore takes 30 s of that. With no
+// deadline set the command is unbounded, as transferContext leaves a transfer.
+func (m *Manager) snapshotContext(ctx context.Context, running bool) (context.Context, context.CancelFunc) {
+	d := time.Duration(m.transferDeadlineNanos.Load())
+	if d <= 0 {
+		return context.WithCancel(ctx)
+	}
+	if running {
+		d -= restoreSaveTimeout
+	}
+	return context.WithTimeout(ctx, d)
+}
+
 // WithWorkerID sets this Worker's own id, stamped on a snapshot publish so the
 // API's publish-time generation guard can distinguish a same-Worker re-publish
 // from a different-Worker stale publish (issue #847 bug 3).
@@ -1170,6 +1194,11 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 	if hook := m.snapshotAfterRunningCheck; hook != nil {
 		hook(cmd.ServerID)
 	}
+	// One deadline bounds the whole command from here (issue #3511): the quiesce, the
+	// pre-pack fsck, the pack and the upload all run under cmdCtx, and the save-on
+	// restore fits inside it (snapshotContext).
+	cmdCtx, cancel := m.snapshotContext(ctx, running)
+	defer cancel()
 	workingDir := filepath.Join(m.scratchDir, cmd.ServerID)
 	// restore re-enables auto-save after the quiesce. Declared here so it is
 	// accessible after the if/else for the explicit restore() call between pack and
@@ -1253,12 +1282,12 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		// (datatransfer.unpackAndSwap step (2)) — an ungated sweep then deletes THAT
 		// hydrate's recovery copy. Same-stream overlap is excluded by the per-server FIFO
 		// lanes as above. Cross-stream is bounded by a ctx asymmetry: the upload runs on
-		// transferContext, derived from the stream's serveCtx, so a stream drop cancels the
-		// in-flight upload and the snapshot fails before any sweep. Only the post-upload
-		// tail was exposed — and the new stream must meanwhile reconnect, register, and
-		// download+unpack a whole working set to reach its displace. PackSnapshot ignores
-		// ctx, which is why the torn-capture case above stays wide while this one was
-		// narrow to begin with.
+		// the command's context (snapshotContext), derived from the stream's serveCtx, so a
+		// stream drop cancels the in-flight upload and the snapshot fails before any sweep.
+		// Only the post-upload tail was exposed — and the new stream must meanwhile
+		// reconnect, register, and download+unpack a whole working set to reach its
+		// displace. PackSnapshot ignored ctx until issue #3511, which is why the
+		// torn-capture case above was wide while this one was narrow to begin with.
 		//
 		// What made it worth closing rather than accepting is what the snapshot's success
 		// does NOT prove. It publishes the state as of its PACK, not the tree the sweep
@@ -1292,7 +1321,7 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		var quiesced bool
 		var rawRestore func()
 		var openErr error
-		quiesced, rawRestore, openErr = m.quiesceRunning(ctx, cmd.ServerID, workingDir)
+		quiesced, rawRestore, openErr = m.quiesceRunning(cmdCtx, cmd.ServerID, workingDir)
 		var once sync.Once
 		restore = func() { once.Do(rawRestore) }
 		defer restore()
@@ -1422,7 +1451,14 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 	// corruption but best-effort on a fsck I/O error
 	// — an error reading the set must not wedge the snapshot, so it is logged and the
 	// transfer proceeds (the API gate remains the correctness guarantee).
-	if report, err := m.checkWorkingSet(ctx, cmd.ServerID, workingDir, running); err != nil {
+	//
+	// The fsck runs under the command's deadline (issue #3511). One that runs it out
+	// fails the command rather than proceeding: nothing is left of the budget to pack
+	// and upload with.
+	if report, err := m.checkWorkingSet(cmdCtx, cmd.ServerID, workingDir, running); cmdCtx.Err() != nil {
+		return fail(cmd.CommandID, session.CommandErrorTransferFailed,
+			fmt.Sprintf("instancemanager: snapshot pre-pack region fsck: %v", cmdCtx.Err()))
+	} else if err != nil {
 		m.logger.Warn("snapshot pre-pack region fsck failed; proceeding without it",
 			"server_id", cmd.ServerID, "error", err)
 	} else if !report.Healthy() {
@@ -1440,12 +1476,6 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 	// hydrated set, or one whose marker the read refuses, issue #3336) leaves the guard
 	// to compare against the store's current value.
 	baseGeneration := recordedGeneration(workingDir, cmd.ServerID, m.logger)
-	// Bound the pack+upload with the per-transfer deadline (issue #874): without it
-	// the upload has no deadline at all and could outlive the API's snapshot_timeout
-	// indefinitely (#869). The bound is the API budget + a margin (the ack value),
-	// so the API-side timeout fires first and this is the cleanup backstop.
-	transferCtx, cancel := m.transferContext(ctx)
-	defer cancel()
 
 	if running {
 		// Running-server snapshot (issue #1710): split pack from upload so save-on is
@@ -1453,7 +1483,7 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		// completes. The upload reads only the spool file and does not need the server
 		// quiesced. A multi-GB upload can take minutes; keeping auto-save disabled for
 		// that entire window risked permanent save-off on a worker crash mid-upload.
-		spoolPath, cleanup, err := m.transfer.PackSnapshot(transferCtx, workingDir)
+		spoolPath, cleanup, err := m.transfer.PackSnapshot(cmdCtx, workingDir)
 		if err != nil {
 			return fail(cmd.CommandID, session.CommandErrorTransferFailed,
 				fmt.Sprintf("instancemanager: snapshot pack: %v", err))
@@ -1463,7 +1493,7 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		// being read, so auto-save can safely resume. The deferred restore() is still
 		// in place as a safety net for early returns above this point.
 		restore()
-		gen, err := m.transfer.UploadSnapshot(transferCtx, cmd.TransferURL, cmd.TransferToken, spoolPath, baseGeneration, m.workerID)
+		gen, err := m.transfer.UploadSnapshot(cmdCtx, cmd.TransferURL, cmd.TransferToken, spoolPath, baseGeneration, m.workerID)
 		if err != nil {
 			return fail(cmd.CommandID, session.CommandErrorTransferFailed,
 				fmt.Sprintf("instancemanager: snapshot upload: %v", err))
@@ -1517,7 +1547,7 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 	} else {
 		// Stopped-id snapshot: the set is at rest, no quiesce bracket needed. Use the
 		// combined Snapshot (pack+upload) — there is no save-off to release between them.
-		_, err := m.transfer.Snapshot(transferCtx, cmd.TransferURL, cmd.TransferToken, workingDir, baseGeneration, m.workerID)
+		_, err := m.transfer.Snapshot(cmdCtx, cmd.TransferURL, cmd.TransferToken, workingDir, baseGeneration, m.workerID)
 		if err != nil {
 			return fail(cmd.CommandID, session.CommandErrorTransferFailed,
 				fmt.Sprintf("instancemanager: snapshot: %v", err))
@@ -1562,12 +1592,12 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 // last corrupt report) so a cancelled snapshot is not misclassified as corruption.
 func (m *Manager) checkWorkingSet(ctx context.Context, serverID, workingDir string, running bool) (regioncheck.Report, error) {
 	if !running {
-		return m.regions.CheckWorkingSet(workingDir)
+		return m.regions.CheckWorkingSet(ctx, workingDir)
 	}
 	var report regioncheck.Report
 	for attempt := 1; ; attempt++ {
 		var err error
-		report, err = m.regions.CheckWorkingSet(workingDir)
+		report, err = m.regions.CheckWorkingSet(ctx, workingDir)
 		if err != nil || report.Healthy() || attempt >= snapshotFsckAttempts {
 			return report, err
 		}
@@ -1577,8 +1607,7 @@ func (m *Manager) checkWorkingSet(ctx context.Context, serverID, workingDir stri
 		case <-ctx.Done():
 			// A cancelled/timed-out snapshot must not surface the last (corrupt) report
 			// with a nil error — that would misclassify the cancel as "N/N region files
-			// corrupt". Return ctx.Err() so the caller routes it through the best-effort
-			// branch (logged, transfer not forced) instead.
+			// corrupt". Return ctx.Err(); the caller fails the command on it (issue #3511).
 			return report, ctx.Err()
 		case <-time.After(m.fsckRetryDelay):
 		}

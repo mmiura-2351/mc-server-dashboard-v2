@@ -703,13 +703,14 @@ class RegisterAck(_message.Message):
 
     @_builtins.property
     def transfer_deadline(self) -> _duration_pb2.Duration:
-        """transfer_deadline bounds a single data-plane transfer (the snapshot upload
-        and the hydrate download) Worker-side. The API derives it from its own
+        """transfer_deadline bounds the hydrate download and the whole snapshot
+        command (quiesce, fsck, pack, upload and save-on restore, #3511)
+        Worker-side. The API derives it from its own
         hydrate/snapshot budgets plus a small margin, so it is always >= the API
         budget: the API-side timeout fires first and this Worker bound is the
         cleanup backstop that structurally closes the unbounded-upload case (an
         upload outliving snapshot_timeout_seconds indefinitely, #874/#869). The
-        Worker applies it as a per-transfer context deadline; a non-positive or
+        Worker applies it as a per-command context deadline; a non-positive or
         unset value (an older API) leaves the transfer unbounded as before.
         """
 
