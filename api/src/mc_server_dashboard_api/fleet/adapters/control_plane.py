@@ -439,6 +439,24 @@ class ControlPlaneState:
         self._late_snapshots.pop(command_id, None)
         return True
 
+    def final_snapshot_outstanding(self, server_id: str) -> bool:
+        """Whether a final snapshot of ``server_id`` still awaits its result.
+
+        True while one is in flight for a waiting caller (``_snapshot_servers``)
+        or was abandoned by its caller and may still report late
+        (``_late_snapshots``). Both maps drop an entry exactly when no result can
+        follow any more: the result arrived, the Worker's session ended or was
+        superseded, or the command was dropped unsent as stale. A server's stop
+        convergence counts as in flight while this holds (issue #3491), so one
+        flow's release cannot land under another flow's unsettled upload.
+        """
+
+        return any(
+            sid == server_id
+            for records in (self._snapshot_servers, self._late_snapshots)
+            for _, sid in records.values()
+        )
+
     def outbound_for(self, worker_id: WorkerId) -> asyncio.Queue[pb.ApiMessage] | None:
         return self._outbound.get(worker_id)
 

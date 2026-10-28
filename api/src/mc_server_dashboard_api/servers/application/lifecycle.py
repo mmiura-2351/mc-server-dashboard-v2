@@ -1513,8 +1513,10 @@ class StopServer:
         # ``record_observed_state`` UPDATE, so a dropped write no longer drops the
         # unassign with it).
         if not upload_may_be_live:
-            await asyncio.shield(
-                self._clear_held_assignment(server, worker_id, server_id)
+            # Shielded through the guard (issue #3491), so a cancelled caller's
+            # release keeps the server in flight until it lands.
+            await self.stop_convergence.shield(
+                server_id, self._clear_held_assignment(server, worker_id, server_id)
             )
 
     async def _release_after_final_snapshot(
@@ -1636,8 +1638,10 @@ class StopServer:
             worker_id=worker_id, community_id=community_id, server_id=server_id
         )
         if at_rest_under_us and not upload_may_be_live:
-            await asyncio.shield(
-                self._clear_held_assignment(server, worker_id, server_id)
+            # Shielded through the guard (issue #3491), so a cancelled caller's
+            # release keeps the server in flight until it lands.
+            await self.stop_convergence.shield(
+                server_id, self._clear_held_assignment(server, worker_id, server_id)
             )
 
     async def _clear_held_assignment(
@@ -2103,21 +2107,24 @@ class StopServer:
         succeeded: bool,
         message: str | None,
     ) -> None:
-        """``_clear_assignment_after_late_snapshot``, unless a flow is converging.
+        """``_clear_assignment_after_late_snapshot``, unless anything is in flight.
 
-        The late result is of a snapshot whose flow has already given up the
-        stop-convergence exclusion. If another flow holds it now, that flow has its
-        own snapshot in flight over the same scratch, and only its outcome may
-        release the assignment (issue #3491): this result is logged and dropped
-        rather than waited on, since it arrives on the Worker's inbound stream.
-        Otherwise the release runs under the exclusion, so no flow starts mid-way.
+        The late result is of a snapshot whose flow has already given up its
+        claim, and the control plane consumed the snapshot's command record before
+        this runs. If the server is still in flight — another flow's claim, a
+        shielded release, or another outstanding final snapshot — then some other
+        upload over the same scratch may be unsettled, and only its own settling
+        (or a later reconciler tick) may release the assignment (issue #3491).
+        This result is then logged and dropped, not waited on, since it arrives on
+        the Worker's inbound stream. Otherwise the release runs under a claim, so
+        no flow starts mid-way.
         """
 
         if self.stop_convergence.in_flight(server_id):
             _LOG.info(
                 "late final-snapshot result for server %s from worker %s left "
-                "unapplied: another stop convergence for the server is in flight, "
-                "and its own snapshot outcome decides the release (issue #3491)",
+                "unapplied: another stop convergence or final snapshot for the "
+                "server is still in flight, and it decides the release (issue #3491)",
                 server_id.value,
                 worker_id.value,
             )

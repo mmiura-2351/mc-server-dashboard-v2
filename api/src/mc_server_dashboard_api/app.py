@@ -758,15 +758,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # the reconciler that reads it, to tell a stop the Worker ANSWERED apart from
         # one that may never have been sent and so may still be in flight.
         app.state.stop_dispatch_refusals = StopDispatchRefusals()
-        # Process-wide per-server exclusion over the stop convergence flows (issue
-        # #3491): every StopServer — HTTP, schedule runner, reconciler, and the
-        # late-snapshot sink — shares it, so one flow's release cannot land while
-        # another flow's final snapshot of the same server is still uploading.
-        app.state.stop_convergence = StopConvergenceGuard()
         # Shared control-plane command-routing state: the servicer registers
         # sessions and resolves results on it; the GrpcControlPlane adapter
         # dispatches through it. The lifecycle use cases reach it via the adapter.
         control_plane_state = ControlPlaneState()
+        # Process-wide per-server exclusion over the stop convergence flows (issue
+        # #3491): every StopServer — HTTP, schedule runner, reconciler, and the
+        # late-snapshot sink — shares it, so one flow's release cannot land while
+        # another flow's final snapshot of the same server is still unsettled. The
+        # outstanding final snapshots are the control-plane state's own records.
+        app.state.stop_convergence = StopConvergenceGuard(
+            outstanding=lambda server_id: (
+                control_plane_state.final_snapshot_outstanding(str(server_id.value))
+            )
+        )
         app.state.control_plane = GrpcControlPlane(
             control_plane_state,
             clock=FleetSystemClock(),
