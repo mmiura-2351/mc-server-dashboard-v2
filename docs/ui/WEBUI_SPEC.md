@@ -105,7 +105,7 @@ Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 | GET / HEAD | `…/{sid}/export` | ZIP export (download). Accepts the Bearer access token, or a `?grant=` download grant so the browser can stream a multi-GB export straight to disk, or the `HttpOnly` download cookie a redemption sets so an interrupted transfer can be retried. The response declares `Cache-Control: no-store` under every credential. `HEAD` is the metadata probe: the same gate and the same headers with no body — including no `Content-Length`, since the zip is built incrementally and the `GET` declares none either — and it neither builds the zip nor records a `server:export` audit event. |
 | POST | `…/{sid}/export/download-grant` | Mint that grant: `{download_url, expires_at}`, `Cache-Control: no-store`. Same `file:read` gate as the export, and the same pre-flight — a running server is 409 `server_unsettled` and no grant is issued; `auth.token.download_grant_ttl_seconds`, 30 s by default (AUTH_API.md Section 3). |
 | GET / PATCH / DELETE | `…/{sid}` | Read / update (name, config, game_port) / delete. Every PATCH edit needs `server:update`. `backup_interval_hours` is not a config key; a PATCH carrying it is `422` (`retired_config_key`; DATABASE.md Section 7) — backup cadence is a `backup` schedule. A `config` breaking the blob's bounds is a `422` naming the rule it broke, the same four reasons create answers with — `config_invalid_shape` / `config_null_value` / `config_lone_surrogate` / `config_too_large` (rules and limits: DATABASE.md Section 7). A `game_port` change against a server whose `server.properties` is missing is a `409` (`server_properties_missing`): the rewrite preserves the file's other keys, so it refuses rather than republish one without `rcon.password`. |
-| POST | `…/{sid}/start` · `/stop?force=` · `/restart` | Lifecycle. Stop supports force. |
+| POST | `…/{sid}/start` · `/stop?force=` · `/restart` | Lifecycle. Stop supports force. A stop of a server already `desired=stopped` but still assigned to a Worker (a drained server still running, a stop left half-done) is accepted and converges it at once, as the reconciler would after its grace window; with no Worker assigned it is `409 invalid_transition`. |
 | POST | `…/{sid}/command` | RCON line → `{output}`. `line` is at most 1,446 UTF-8 bytes (`422`; "Console lines" below). |
 | GET | `…/{sid}/files?path=&list=` | Read file (base64) or list directory (entries + `truncated`). |
 | PUT / DELETE | `…/{sid}/files?path=` | Write (base64, versioned) / delete. The root `server.properties` is guarded on **every** files-API write path — `PUT`, `DELETE`, either end of a rename, an upload (direct or archive member), and a rollback: an operation that would change or drop a platform-managed key — `server-port`, the RCON triple, the resource-pack keys — is a `422` (`platform_managed_key`) naming it in the `key` member. The guard is over the keys, not the filename: editing the file's other keys is unaffected, and a root `server.properties` that carries none of those keys still deletes and still renames away. A `PUT` to a path **under** that name is a `422` (`platform_managed_path`) instead — the write creates the name as a directory, which the key guard cannot see and the platform's writes cannot survive. A `PUT` to a root name starting `.mcsd_generation` — the Worker's generation marker — or under one is a `422` (`reserved_name`), running or at rest; a `DELETE` of such an entry stays allowed, so one planted before the guard can be removed while the server is stopped. |
@@ -289,7 +289,7 @@ Execution backend: `container` (the only backend provided).
 | GET | `/versions/jar-pool/stats` `[A]` · POST `/versions/jar-pool/gc` `[A]` | JAR pool size / garbage collection. |
 | GET | `/ports/available?count=` · `/ports/check/{port}` | Free-port discovery / conflict check. |
 | GET | `/workers` `[A]` | Fleet list: status, capabilities (drivers, max_servers, cpu/mem), assigned_count, heartbeat. |
-| PUT / DELETE | `/workers/{wid}/drain` `[A]` | Set / clear drain. Set MARKS the worker's running servers `desired=stopped` and returns `servers_stopped` (the count marked, not yet stopped); the reconciler then stops each + takes the final snapshot ASYNCHRONOUSLY (after the grace window, ~120s default, + a tick) and only while the worker stays connected — keep the worker up until convergence, or stops+snapshots defer to a reconnect that never happens in a decommission. Confirm convergence PER SERVER (each reaching `observed=stopped` and unassigned), NOT by assigned load: drain decrements the load synchronously, so it drops to 0 before any stop runs. Clear only re-enables placement (does not restart them; un-draining before convergence transiently oversubscribes the worker). |
+| PUT / DELETE | `/workers/{wid}/drain` `[A]` | Set / clear drain. Set MARKS the worker's running servers `desired=stopped` and returns `servers_stopped` (the count marked, not yet stopped); the reconciler then stops each + takes the final snapshot ASYNCHRONOUSLY (after the grace window, ~120s default, + a tick) and only while the worker stays connected — keep the worker up until convergence, or stops+snapshots defer to a reconnect that never happens in a decommission. Confirm convergence PER SERVER (each reaching `observed=stopped` and unassigned), NOT by assigned load: drain decrements the load synchronously, so it drops to 0 before any stop runs. An operator stop of such a server skips the wait and stops it at once (`…/{sid}/stop`). Clear only re-enables placement (does not restart them; un-draining before convergence transiently oversubscribes the worker). |
 | GET | `/audit` `[A]` | Global audit (`community`, `operation`, `actor`, `since`, `until`, `limit`, `offset`). |
 | GET | `/communities/{cid}/audit` | Community-scoped audit (same filters minus `community`). |
 | GET | `/backups/statistics` `[A]` | Global backup statistics. |
@@ -654,8 +654,11 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 - Controls: Start / Stop (dropdown: graceful · force) / Restart / Export /
   Delete — each disabled by state machine (e.g. Start hidden while running)
   and permission. A server crashed under a running intent offers Stop only:
-  Start and Restart are hidden, since the API refuses both there. The dashboard
-  card quick actions follow the same rule and disable them.
+  Start and Restart are hidden, since the API refuses both there. Under a
+  stopped intent Stop is offered exactly while a Worker is still assigned — a
+  drained server still running, or a stop left half-done — since the API then
+  converges it at once, and refuses it with no Worker assigned. The dashboard
+  card quick actions follow the same rules and disable them.
 - Metrics strip: CPU / memory / players from the `metrics` stream (sparkline,
   last N samples, client-side only).
 - Log tail: last ~200 lines, link to Console tab.
@@ -1058,8 +1061,10 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   the API's rendering of a dispatch that timed out or lost the Worker session,
   where the generic "wait a moment and try again" invites a retry of an
   intent that already stands. On stop it is unambiguous: `StopServer` can only
-  raise it from the dispatch itself, which runs *after* `desired_state=stopped`
-  is committed and the placement load decremented, and nothing is compensated. On
+  raise it from a dispatch, which runs *after* `desired_state=stopped`
+  is committed and the placement load decremented, and nothing is compensated —
+  the stop itself, or, converging a server already desired-stopped, the final
+  snapshot that precedes releasing its Worker. On
   restart `desired_state=running` stands, exactly as for `command_failed`. The
   wording is deliberately *not* the pending pair above: a refusal was reported by
   a host that answered, so those messages can say what the server did, while a

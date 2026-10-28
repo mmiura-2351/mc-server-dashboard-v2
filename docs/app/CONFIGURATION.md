@@ -390,6 +390,16 @@ whether the Worker still holds a working set at least as fresh as the store:
 Until the restart, a `start` answers `409 invalid_transition`, because the intent
 already is running. To bring the server back sooner, stop it and start it again.
 
+The stop side needs no such detour. A server whose intent is already stopped but
+which is still assigned to a Worker — a drained Worker's server still running, or
+a stop left half-done (`stopping`, `unknown`, or `stopped`/`crashed` still
+assigned) — accepts an operator `stop`: it runs that server's reconciler action
+at once instead of after the grace window, re-sending the stop (honouring
+`?force=true`) or taking the final snapshot and releasing the Worker. A server
+with no Worker assigned, or one still running on a Worker that is disconnected
+(the reconnect owns it), has nothing to converge, and its `stop` answers
+`409 invalid_transition`.
+
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
 | `reconciler.interval_seconds` | `60` | | Loop resolution: how often the reconciler scans for diverged servers. Must be positive. |
