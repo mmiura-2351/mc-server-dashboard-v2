@@ -38,6 +38,7 @@ from mc_server_dashboard_api.storage.adapters.object_store import (
     _delete_prefix,
     _ObjectSnapshotHandle,
 )
+from mc_server_dashboard_api.storage.domain.errors import NotFoundError
 from mc_server_dashboard_api.storage.domain.port import SnapshotHandle, Storage
 from mc_server_dashboard_api.storage.domain.value_objects import (
     CommunityId,
@@ -831,9 +832,12 @@ def _post_snapshot_with_hook(
     real_write_snapshot = storage.write_snapshot
 
     async def _hooked_write_snapshot(
-        handle: SnapshotHandle, stream: AsyncIterator[bytes]
+        handle: SnapshotHandle,
+        stream: AsyncIterator[bytes],
+        *,
+        expected_base: int | None = None,
     ) -> None:
-        await real_write_snapshot(handle, stream)
+        await real_write_snapshot(handle, stream, expected_base=expected_base)
         await after_write(storage, handle, c, s)
 
     storage.write_snapshot = _hooked_write_snapshot  # type: ignore[method-assign]
@@ -923,6 +927,244 @@ def test_upload_with_missing_staging_and_no_prune_stays_empty_snapshot(
 
     assert status_code == 400
     assert body["reason"] == "empty_snapshot"
+
+
+# Issue #3481: a delete's prune that lands inside one of the upload's own lock-free
+# I/O steps, rather than between the stream and the commit as in #3477. Each race
+# hook runs its vanish once, the first time the hooked step touches the upload's
+# staging, and then lets the real step run against what is left.
+
+# A file and an (empty, healthy) region, so every per-file step has staging to touch.
+_RACE_FILES = {"k": b"in-flight", "region/r.0.0.mca": bytes(8192)}
+
+_Race = Callable[[CommunityId, ServerId], None]
+
+
+def _post_racing_snapshot(
+    tmp_path: Path, storage: Storage, *, published: bool, race: _Race
+) -> tuple[int, dict[str, object]]:
+    """POST a snapshot once ``race`` has hooked the step its vanish lands in."""
+
+    worker = str(uuid.uuid4())
+    client, _ = _setup(tmp_path)
+    _shared_app.dependency_overrides[get_storage] = lambda: storage
+    community, server = _scope()
+    c, s = CommunityId(community), ServerId(server)
+
+    async def _publish_first() -> None:
+        handle = await storage.begin_snapshot(c, s)
+
+        async def _stream() -> AsyncIterator[bytes]:
+            yield _tar_bytes({"k": b"snap"})
+
+        await storage.write_snapshot(handle, _stream())
+        await storage.commit_snapshot(handle, publisher=worker)
+
+    if published:
+        asyncio.run(_publish_first())
+    base = asyncio.run(storage.current_generation(c, s))
+    race(c, s)
+
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"),
+            content=_tar_bytes(_RACE_FILES),
+            headers={
+                **_auth(),
+                "X-Working-Set-Base-Generation": str(base),
+                "X-Worker-Id": worker,
+            },
+        )
+    return resp.status_code, resp.json()
+
+
+def _unhandled_error(caplog: pytest.LogCaptureFixture) -> type[BaseException]:
+    """The type of the one exception the edge logged as unhandled (the 500)."""
+
+    [error] = [r.exc_info[1] for r in caplog.records if r.exc_info]
+    assert error is not None
+    return type(error)
+
+
+_FsVanish = Callable[[FsStorage, CommunityId, ServerId], None]
+
+
+def _fs_prune(storage: FsStorage, c: CommunityId, s: ServerId) -> None:
+    # The hooked steps run on a worker thread, as the real prune does.
+    storage._prune_to_final_snapshot(c, s)
+
+
+def _fs_drop_incoming(storage: FsStorage, c: CommunityId, s: ServerId) -> None:
+    shutil.rmtree(storage._server_root(c, s) / "incoming")
+
+
+def _fs_step_target(step: str) -> tuple[object, str]:
+    import mc_server_dashboard_api.storage.adapters.fs as fs_mod
+    import mc_server_dashboard_api.storage.integrity.region as region_mod
+
+    return {
+        # write_snapshot reopens its spool by path to extract it.
+        "spool_reopen": (fs_mod, "_extract_tar_into"),
+        # The commit's lock-free steps after its is_dir() check.
+        "dir_has_entries": (fs_mod, "_dir_has_entries"),
+        "check_working_set": (region_mod, "check_region_file"),
+        "fsync_tree": (fs_mod, "_fsync_dir"),
+    }[step]
+
+
+def _fs_race(
+    monkeypatch: pytest.MonkeyPatch, storage: FsStorage, step: str, vanish: _FsVanish
+) -> _Race:
+    def _install(c: CommunityId, s: ServerId) -> None:
+        target, name = _fs_step_target(step)
+        real = getattr(target, name)
+        fired = False
+
+        def _hooked(path: Path, *args: object) -> object:
+            nonlocal fired
+            if not fired and "incoming" in path.parts:
+                fired = True
+                vanish(storage, c, s)
+            return real(path, *args)
+
+        monkeypatch.setattr(target, name, _hooked)
+
+    return _install
+
+
+_FS_STEPS = ["spool_reopen", "dir_has_entries", "check_working_set", "fsync_tree"]
+
+
+@pytest.mark.parametrize("published", [True, False], ids=["published", "unpublished"])
+@pytest.mark.parametrize("step", _FS_STEPS)
+def test_upload_refused_when_delete_prunes_fs_staging_mid_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, step: str, published: bool
+) -> None:
+    # Issue #3481: the prune removes incoming/<id>/ (spool included) while the upload
+    # is still using it. That is the concurrent delete, so it answers the same 409
+    # ``deleted_during_upload`` as the commit re-check, not a 500.
+    storage = FsStorage(tmp_path)
+
+    status_code, body = _post_racing_snapshot(
+        tmp_path,
+        storage,
+        published=published,
+        race=_fs_race(monkeypatch, storage, step, _fs_prune),
+    )
+
+    assert status_code == 409
+    assert body["reason"] == "deleted_during_upload"
+    assert body["base_generation"] == (1 if published else 0)
+    assert storage._active_staging == set()
+
+
+@pytest.mark.parametrize("step", _FS_STEPS)
+def test_upload_with_fs_staging_gone_mid_step_and_no_prune_keeps_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    step: str,
+) -> None:
+    # Control for the test above (issue #3481): staging that vanishes while the
+    # store was NOT pruned is still an unexpected missing file, a 500.
+    storage = FsStorage(tmp_path)
+
+    status_code, body = _post_racing_snapshot(
+        tmp_path,
+        storage,
+        published=True,
+        race=_fs_race(monkeypatch, storage, step, _fs_drop_incoming),
+    )
+
+    assert status_code == 500
+    assert body["reason"] == "internal_error"
+    assert _unhandled_error(caplog) is FileNotFoundError
+
+
+_ObjectVanish = Callable[[ObjectStorage, CommunityId, ServerId], Awaitable[None]]
+
+
+async def _object_prune(storage: ObjectStorage, c: CommunityId, s: ServerId) -> None:
+    await storage.prune_to_final_snapshot(c, s)
+
+
+async def _object_drop_incoming(
+    storage: ObjectStorage, c: CommunityId, s: ServerId
+) -> None:
+    async with storage._client_factory() as client:
+        await _delete_prefix(client, storage._server_prefix(c, s) + "incoming/")
+
+
+def _object_race(
+    monkeypatch: pytest.MonkeyPatch,
+    storage: ObjectStorage,
+    method: str,
+    vanish: _ObjectVanish,
+) -> _Race:
+    def _install(c: CommunityId, s: ServerId) -> None:
+        real = getattr(FakeS3Client, method)
+        fired = False
+
+        async def _hooked(self: FakeS3Client, key: str, *args: object) -> object:
+            nonlocal fired
+            if not fired and "/incoming/" in key:
+                fired = True
+                await vanish(storage, c, s)
+            return await real(self, key, *args)
+
+        monkeypatch.setattr(FakeS3Client, method, _hooked)
+
+    return _install
+
+
+# The commit's lock-free reads of the staged objects: the region gate reads each
+# staged region body, and _copy_into_snapshot copies every staged object.
+_OBJECT_STEPS = ["get_object", "copy_object"]
+
+
+@pytest.mark.parametrize("published", [True, False], ids=["published", "unpublished"])
+@pytest.mark.parametrize("method", _OBJECT_STEPS)
+def test_upload_refused_when_delete_prunes_staged_objects_mid_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, method: str, published: bool
+) -> None:
+    # Issue #3481: the object twin of the fs test above. The prune deletes the
+    # staged objects while the commit reads or copies them outside the lock.
+    storage = ObjectStorage(fake_s3_factory(FakeS3Store()))
+
+    status_code, body = _post_racing_snapshot(
+        tmp_path,
+        storage,
+        published=published,
+        race=_object_race(monkeypatch, storage, method, _object_prune),
+    )
+
+    assert status_code == 409
+    assert body["reason"] == "deleted_during_upload"
+    assert body["base_generation"] == (1 if published else 0)
+    assert storage._active_staging == set()
+
+
+@pytest.mark.parametrize("method", _OBJECT_STEPS)
+def test_upload_with_staged_objects_gone_and_no_prune_keeps_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    method: str,
+) -> None:
+    # Control for the test above (issue #3481): staged objects that vanish while
+    # the store was NOT pruned are still an unexpected missing object, a 500.
+    storage = ObjectStorage(fake_s3_factory(FakeS3Store()))
+
+    status_code, body = _post_racing_snapshot(
+        tmp_path,
+        storage,
+        published=True,
+        race=_object_race(monkeypatch, storage, method, _object_drop_incoming),
+    )
+
+    assert status_code == 500
+    assert body["reason"] == "internal_error"
+    assert _unhandled_error(caplog) is NotFoundError
 
 
 class _PointerRemovalFailed(Exception):
