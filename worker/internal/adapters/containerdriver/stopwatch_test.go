@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -81,11 +82,12 @@ func (c *stopClock) advance(d time.Duration) {
 // stopRun is one Stop driven on the fake clock: step advances the clock by one
 // poll and reports whether Stop has returned.
 type stopRun struct {
-	t     *testing.T
-	d     *Driver
-	clock *stopClock
-	done  chan error
-	err   error
+	t      *testing.T
+	d      *Driver
+	clock  *stopClock
+	done   chan error
+	err    error
+	logged *syncBuffer
 }
 
 // awaitWaiting blocks until Stop is parked on the fake clock or has returned,
@@ -129,16 +131,51 @@ func (r *stopRun) step(d time.Duration) bool {
 type fakeWorld struct {
 	writes atomic.Int64
 	fail   atomic.Bool
+	// newest is the last writeAt's time in Unix nanoseconds, the fingerprint's
+	// newest mtime once set; until then the write count stands in for it.
+	newest atomic.Int64
 }
 
 func (w *fakeWorld) write() { w.writes.Add(1) }
+
+// writeAt is a write whose file mtime is at.
+func (w *fakeWorld) writeAt(at time.Time) {
+	w.newest.Store(at.UnixNano())
+	w.write()
+}
 
 func (w *fakeWorld) probe() (execution.WorldProgress, error) {
 	if w.fail.Load() {
 		return execution.WorldProgress{}, errors.New("scan could not finish")
 	}
 	n := w.writes.Load()
-	return execution.WorldProgress{Files: 1, Bytes: n, Newest: time.Unix(n, 0)}, nil
+	newest := time.Unix(n, 0)
+	if ns := w.newest.Load(); ns != 0 {
+		newest = time.Unix(0, ns)
+	}
+	return execution.WorldProgress{Files: 1, Bytes: n, Newest: newest}, nil
+}
+
+// loggedSinceLastWrite is the since_last_write field of the one logged line that
+// contains msg.
+func loggedSinceLastWrite(t *testing.T, logged, msg string) time.Duration {
+	t.Helper()
+	for _, line := range strings.Split(logged, "\n") {
+		if !strings.Contains(line, msg) {
+			continue
+		}
+		_, field, ok := strings.Cut(line, " since_last_write=")
+		if !ok {
+			t.Fatalf("line %q carries no since_last_write", line)
+		}
+		since, err := time.ParseDuration(strings.Fields(field)[0])
+		if err != nil {
+			t.Fatalf("since_last_write in %q: %v", line, err)
+		}
+		return since
+	}
+	t.Fatalf("no line %q in the log %q", msg, logged)
+	return 0
 }
 
 const (
@@ -166,9 +203,11 @@ func startStopRunWith(t *testing.T, docker *fakeDocker, ctrl execution.ServerCon
 func startStopRunOn(t *testing.T, docker dockerAPI, ctrl execution.ServerControl, ctrlErr error,
 	probe func() (execution.WorldProgress, error), runScan func(func()), flush func(context.Context) bool) *stopRun {
 	t.Helper()
+	logged := &syncBuffer{}
 	d := New(docker, images(), func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
 		return ctrl, ctrlErr
-	}, Options{WorkerID: "w1", StopTimeout: testIdle, GameBindIP: "0.0.0.0", ReadinessTimeout: 20 * time.Millisecond})
+	}, Options{WorkerID: "w1", StopTimeout: testIdle, GameBindIP: "0.0.0.0", ReadinessTimeout: 20 * time.Millisecond,
+		Logger: slog.New(slog.NewTextHandler(logged, nil))})
 	clock := newStopClock()
 	d.now, d.after, d.runScan = clock.Now, clock.After, runScan
 	if d.stopPoll != testPoll || d.stopCap != testCap {
@@ -181,7 +220,7 @@ func startStopRunOn(t *testing.T, docker dockerAPI, ctrl execution.ServerControl
 		t.Fatalf("Start: %v", err)
 	}
 	drainTo(t, inst.Events(), execution.StateRunning)
-	r := &stopRun{t: t, d: d, clock: clock, done: make(chan error, 1)}
+	r := &stopRun{t: t, d: d, clock: clock, done: make(chan error, 1), logged: logged}
 	go func() { r.done <- inst.Stop(context.Background(), true, flush) }()
 	return r
 }
@@ -268,6 +307,49 @@ func TestStopKillsAtTheCap(t *testing.T) {
 	}
 	if r.err != nil || !docker.killWasCalled() {
 		t.Fatalf("Stop = %v, kill = %v; want the kill at the cap", r.err, docker.killWasCalled())
+	}
+}
+
+// The cap's kill WARN gives the time the world was last seen written: the newest
+// mtime of the last scan that changed, not the poll that saw it, and never a
+// failed scan, which keeps the wait alive but is no write (issue #3515). Before,
+// the last poll that counted as progress stood in for it, so since_last_write
+// read ~0 at a cap reached through failed scans.
+func TestStopCapLogsTheLastObservedWrite(t *testing.T) {
+	docker := newFakeDocker()
+	docker.stopNoExit = true
+	world := &fakeWorld{}
+	r := startStopRun(t, docker, nil, errors.New("rcon unavailable"), world)
+	r.awaitWaiting()
+	start := r.clock.Now()
+
+	// Writes every 3 s, off the poll's beat, for 200 s; then every scan fails.
+	const writeEvery = 3 * time.Second
+	last := time.Time{}
+	next := start.Add(time.Second)
+	for {
+		if r.clock.Now().Sub(start) < 200*time.Second {
+			for poll := r.clock.Now().Add(testPoll); !next.After(poll); next = next.Add(writeEvery) {
+				world.writeAt(next)
+				last = next
+			}
+		} else {
+			world.fail.Store(true)
+		}
+		if r.step(testPoll) {
+			break
+		}
+		if r.clock.Now().Sub(start) > 2*testCap {
+			t.Fatal("Stop still waiting past twice the cap")
+		}
+	}
+	if got := r.clock.Now().Sub(start); r.err != nil || !docker.killWasCalled() || got != testCap {
+		t.Fatalf("Stop = %v, kill = %v at %v; want the kill at the %v cap", r.err, docker.killWasCalled(), got, testCap)
+	}
+
+	since := loggedSinceLastWrite(t, r.logged.String(), "graceful stop escalating")
+	if want := r.clock.Now().Sub(last); since != want {
+		t.Fatalf("since_last_write = %v, want %v: the time since the last write the scans saw", since, want)
 	}
 }
 
