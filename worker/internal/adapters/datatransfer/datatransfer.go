@@ -194,20 +194,57 @@ func SweepSnapshotSpools(scratchRoot string) {
 // directory; the upload reads only the spool (issue #1710). A crash before the
 // cleanup leaks the spool; SweepSnapshotSpools reclaims such leftovers at startup
 // (issue #787).
-func (c *Client) PackSnapshot(_ context.Context, srcDir string) (string, func(), error) {
+//
+// The pack ends no later than ctx (issue #3511): it is the snapshot command's
+// deadline, and the command must answer by it. The walk checks ctx before every
+// write into the spool, so a slow pack stops at the next one. A system call that
+// does not return — an open or read of a file on stuck storage — cannot be
+// interrupted, so the walk runs on its own goroutine and is abandoned there:
+// PackSnapshot returns ctx's error at once and removes the spool's name. The
+// abandoned walk writes only through the spool's descriptor, never by path, and
+// its first write after the stuck call returns fails on ctx, so it ends without
+// adding to the archive; the bytes it wrote before sit in an unlinked file whose
+// space is freed when the walk closes it. A later attempt creates a new spool
+// (O_EXCL), so nothing the abandoned walk does can reach it.
+func (c *Client) PackSnapshot(ctx context.Context, srcDir string) (string, func(), error) {
+	if err := ctx.Err(); err != nil {
+		return "", func() {}, fmt.Errorf("datatransfer: pack: %w", err)
+	}
 	spool, err := os.CreateTemp(filepath.Dir(srcDir), snapshotSpoolPrefix+"*.tar")
 	if err != nil {
 		return "", func() {}, fmt.Errorf("datatransfer: create snapshot spool: %w", err)
 	}
 	spoolPath := spool.Name()
-	if err := packTar(srcDir, spool, c.logger); err != nil {
+	done := make(chan error, 1)
+	go func() {
+		err := packTar(srcDir, ctxWriter{ctx: ctx, w: spool}, c.logger)
 		_ = spool.Close()
+		done <- err
+	}()
+	select {
+	case err = <-done:
+	case <-ctx.Done():
+		err = ctx.Err()
+	}
+	if err != nil {
 		_ = os.Remove(spoolPath)
 		return "", func() {}, fmt.Errorf("datatransfer: pack: %w", err)
 	}
-	_ = spool.Close()
 	cleanup := func() { _ = os.Remove(spoolPath) }
 	return spoolPath, cleanup, nil
+}
+
+// ctxWriter refuses every write once ctx is done, so a pack stops at its deadline.
+type ctxWriter struct {
+	ctx context.Context
+	w   io.Writer
+}
+
+func (cw ctxWriter) Write(p []byte) (int, error) {
+	if err := cw.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return cw.w.Write(p)
 }
 
 // UploadSnapshot streams the tar spool file at spoolPath to url, declaring

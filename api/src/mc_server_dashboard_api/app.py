@@ -239,7 +239,9 @@ _CONFIG_FILE_ENV = "MCD_API_CONFIG_FILE"
 # transfer deadline advertised in RegisterAck (issue #874). It keeps the Worker
 # bound strictly above the API budget so the API-side dispatch timeout always
 # fires first and the Worker bound stays a cleanup backstop, never the primary
-# deadline that could kill a transfer the API still considers in flight.
+# deadline that could kill a transfer the API still considers in flight. It must
+# also exceed the 30 s the Worker holds back from a running snapshot's phases for
+# its save-on restore (CONTROL_PLANE.md Section 5.2, issue #3511).
 _TRANSFER_DEADLINE_MARGIN_SECONDS = 60
 
 # How often the game_session retention prune loop wakes (RELAY.md Section 8, issue
