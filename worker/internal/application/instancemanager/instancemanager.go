@@ -1646,7 +1646,7 @@ func (m *Manager) quiesceRunning(ctx context.Context, serverID, workingDir strin
 		if _, err := ctrl.Execute(ctx, "save-all"); err != nil {
 			m.logger.Warn("snapshot save-all failed", "server_id", serverID, "error", err)
 			quiesced = false
-		} else if !m.settleWorkingSet(ctx, serverID, workingDir) {
+		} else if !m.settleWorkingSet(ctx, settleForSnapshot, serverID, workingDir) {
 			quiesced = false
 		}
 	}
@@ -1775,7 +1775,7 @@ func (m *Manager) flushBeforeStopWithDriver(ctx context.Context, serverID, drive
 			"server_id", serverID, "error", err)
 		return false
 	}
-	if !m.settleWorkingSet(ctx, serverID, filepath.Join(m.scratchDir, serverID)) {
+	if !m.settleWorkingSet(ctx, settleForStop, serverID, filepath.Join(m.scratchDir, serverID)) {
 		m.logger.Warn("stop flush: working set did not settle within budget; stopping anyway",
 			"server_id", serverID)
 		return false
@@ -2087,8 +2087,9 @@ func (m *Manager) drainPendingSaveOn(seal bool) map[string]saveOnTarget {
 // treated as "not yet settled" and retried within the budget rather than aborting,
 // and so is a scan that met an entry swapped under it (errSettleUncertain): only
 // two consecutive complete scans can settle. The budget-exhausted WARN counts the
-// uncertain scans, so a refusal caused by entries changing under the scan says so.
-func (m *Manager) settleWorkingSet(ctx context.Context, serverID, workingDir string) bool {
+// uncertain scans, so a refusal caused by entries changing under the scan says so,
+// and it is prefixed with caller, the operation that ran the wait (issue #3445).
+func (m *Manager) settleWorkingSet(ctx context.Context, caller, serverID, workingDir string) bool {
 	deadline := time.Now().Add(m.settleBudget)
 	uncertain := 0
 	scan := func() (regionState, error) {
@@ -2110,7 +2111,7 @@ func (m *Manager) settleWorkingSet(ctx context.Context, serverID, workingDir str
 			return true
 		}
 		if time.Now().After(deadline) {
-			m.logger.Warn("snapshot quiesce: working set did not settle within budget; refusing",
+			m.logger.Warn(caller+": working set did not settle within budget",
 				"server_id", serverID, "budget", m.settleBudget, "uncertain_scans", uncertain)
 			return false
 		}
@@ -2118,14 +2119,32 @@ func (m *Manager) settleWorkingSet(ctx context.Context, serverID, workingDir str
 	}
 }
 
+// The operations that run settleWorkingSet, which its timeout WARN names.
+const (
+	settleForStop     = "stop flush"
+	settleForSnapshot = "snapshot quiesce"
+)
+
 // worldProgress is the probe a graceful stop's wait polls (issue #3436,
 // InstanceSpec.WorldProgress): the count, total size and newest mtime of the
 // working set's .mca files. It comes from the settle-wait's own scan, so it reads
 // metadata alone and walks a running server's tree the way that scan does, and an
 // incomplete or failed scan is an error the driver counts as progress.
 func (m *Manager) worldProgress(root string) func() (execution.WorldProgress, error) {
+	return worldProgressOf(m.scanRegion, root)
+}
+
+// WorldProgress is worldProgress over the settle scan itself, for a caller with no
+// Manager: the startup Sweep, which runs before one exists, watches a running
+// orphan's world with it (issue #3445).
+func WorldProgress(root string) func() (execution.WorldProgress, error) {
+	return worldProgressOf(scanRegionState, root)
+}
+
+// worldProgressOf builds the world-progress probe for root from scan.
+func worldProgressOf(scan func(root string) (regionState, error), root string) func() (execution.WorldProgress, error) {
 	return func() (execution.WorldProgress, error) {
-		state, err := m.scanRegion(root)
+		state, err := scan(root)
 		if err != nil {
 			return execution.WorldProgress{}, err
 		}
