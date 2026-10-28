@@ -24,6 +24,17 @@ artifacts of every server (or a single server) and persists/surfaces the result:
   reports its snapshots as **not examined** rather than counting them scanned and
   clean (#2377).
 
+Backup creation commits the metadata row before it writes the archive, so a row
+can be visible while its archive does not exist yet (issue #3220). The backup half
+therefore runs under the server's lifecycle lock, which ``CreateBackup`` holds
+across that row commit and archive write: the sweep waits out a publication in
+flight instead of condemning its archive as missing. A server whose lock stays
+busy past the lock's wait budget is skipped for this run — no verdict, no audit —
+and counted as ``servers_skipped_busy`` so the operator knows to re-run the sweep
+for it. The snapshot half needs no lock: ``current`` is published by an atomic
+swap and the fsck holds a reader lease on the snapshot it walks (#1702), so it
+never sees a half-published snapshot.
+
 A quarantined backup, an unreadable backup and a flagged snapshot each emit an
 audit entry. The pass is
 heavy (a full read per archive), so it logs per-backup progress. It is idempotent:
@@ -60,6 +71,11 @@ from mc_server_dashboard_api.servers.domain.errors import (
     BackupNotFoundError,
     BackupStorageUnavailableError,
     BackupUnreadableError,
+    ServerBusyError,
+)
+from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
+    LifecycleLock,
+    NullLifecycleLock,
 )
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.servers.domain.value_objects import (
@@ -84,6 +100,10 @@ class SweepSummary:
     ``snapshots_scanned`` is the point: "scanned: N, flagged: 0" is a verdict, and
     a backend that examines nothing must not be able to produce one.
 
+    ``servers_skipped_busy`` counts servers left unexamined because another
+    lifecycle operation held their lock past its wait budget (issue #3220); they
+    are not in ``servers_scanned``, and re-running the sweep checks them.
+
     The three condemned-backup counts are kept apart because an operator acts on
     them differently: ``backups_quarantined`` is a structurally corrupt world
     (``QUARANTINED``, still force-restorable), ``backups_unreadable`` is an archive
@@ -94,6 +114,7 @@ class SweepSummary:
     """
 
     servers_scanned: int
+    servers_skipped_busy: int
     backups_healthy: int
     backups_quarantined: int
     backups_unreadable: int
@@ -110,17 +131,20 @@ class IntegritySweep:
     Enumerates servers via the repository (all servers, or one when ``server_id`` is
     passed), and for each: re-checks its backups into the ``health`` column and
     fscks its published snapshot (audit/log only). ``actor_id`` attributes the audit
-    entries to the operator who ran the command.
+    entries to the operator who ran the command. The backup check of each server
+    runs under that server's ``lifecycle_lock`` (issue #3220).
     """
 
     uow: UnitOfWork
     backup_store: BackupArchiveStore
     audit: AuditRecorder
+    lifecycle_lock: LifecycleLock = NullLifecycleLock()
 
     async def __call__(
         self, *, server_id: ServerId | None = None, actor_id: uuid.UUID | None = None
     ) -> SweepSummary:
         servers = await self._servers_to_scan(server_id)
+        servers_skipped_busy = 0
         backups_healthy = 0
         backups_quarantined = 0
         backups_unreadable = 0
@@ -130,12 +154,26 @@ class IntegritySweep:
         snapshots_not_examined = 0
         for server in servers:
             _LOG.info("integrity sweep: scanning server %s", server.id.value)
-            (
-                healthy,
-                quarantined,
-                unreadable,
-                dangling,
-            ) = await self._sweep_backups(server, actor_id)
+            try:
+                async with self.lifecycle_lock.hold(server.id):
+                    (
+                        healthy,
+                        quarantined,
+                        unreadable,
+                        dangling,
+                    ) = await self._sweep_backups(server, actor_id)
+            except ServerBusyError:
+                # Another lifecycle operation (a backup being published, a restore,
+                # ...) holds the server; its rows may be mid-publication, so no
+                # verdict is safe now (issue #3220). Skip it rather than fail the
+                # pass; a re-run checks it.
+                _LOG.info(
+                    "integrity sweep: server %s is busy (another lifecycle operation "
+                    "holds it); skipped this run, re-run the sweep to check it",
+                    server.id.value,
+                )
+                servers_skipped_busy += 1
+                continue
             backups_healthy += healthy
             backups_quarantined += quarantined
             backups_unreadable += unreadable
@@ -147,7 +185,8 @@ class IntegritySweep:
             snapshots_flagged += flagged
             snapshots_not_examined += not_examined
         summary = SweepSummary(
-            servers_scanned=len(servers),
+            servers_scanned=len(servers) - servers_skipped_busy,
+            servers_skipped_busy=servers_skipped_busy,
             backups_healthy=backups_healthy,
             backups_quarantined=backups_quarantined,
             backups_unreadable=backups_unreadable,
@@ -157,11 +196,13 @@ class IntegritySweep:
             snapshots_not_examined=snapshots_not_examined,
         )
         _LOG.info(
-            "integrity sweep done: %d servers, %d backups healthy, %d quarantined "
+            "integrity sweep done: %d servers, %d skipped busy, %d backups healthy, "
+            "%d quarantined "
             "(corrupt world), %d unreadable (archive bytes unproducible), "
             "%d dangling, %d snapshots scanned, %d flagged, %d not examined "
             "(backend walks no snapshot at rest)",
             summary.servers_scanned,
+            summary.servers_skipped_busy,
             summary.backups_healthy,
             summary.backups_quarantined,
             summary.backups_unreadable,
