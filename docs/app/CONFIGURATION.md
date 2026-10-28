@@ -409,10 +409,14 @@ result (even one whose caller gave up). A `stop` that finds it in flight answers
 `409 transition_conflict` without doing anything, and the reconciler skips the
 server for that tick. A late snapshot result releases only if nothing else is in
 flight; otherwise whatever is still in flight, or a later tick, converges the
-server. Nothing stays in flight for ever: a final snapshot stops counting once its
-result arrives, or once the Worker's session ends, so a result that never comes
-still leaves the reconciler free to converge. The tracking is in-process, which
-suffices because the API is a single instance (REQUIREMENTS.md NFR-SCALE-1).
+server. A final snapshot stops counting once its result arrives, or once the
+Worker's session ends or is replaced by a reconnect, so a result lost with a
+session still leaves the reconciler free to converge. The Worker bounds the
+snapshot's upload (`transfer_deadline`, CONTROL_PLANE.md Section 5.2) but not the
+packing before it, so a Worker that stays connected but never finishes packing
+keeps the server in flight until its session ends. The tracking is in-process,
+which suffices because the API is a single instance (REQUIREMENTS.md
+NFR-SCALE-1).
 
 | Key | Default | Secret | Meaning |
 |---|---|---|---|

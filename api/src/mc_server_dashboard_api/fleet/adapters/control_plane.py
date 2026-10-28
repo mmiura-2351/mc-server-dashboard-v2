@@ -209,21 +209,26 @@ class ControlPlaneState:
         Worker's outbound stream. ``session`` is recorded as the current owner so
         :meth:`fail_worker_pending` can ignore a stale session's teardown.
 
-        Any promoted late-snapshot records from a PRIOR session are swept here
-        (issue #891): a new session for the same worker supersedes the old one, and
-        ``fail_worker_pending`` is session-guarded, so a stale session's delayed
-        teardown skips the sweep on a fast reconnect. The old session's upload died
-        with its ctx (no late result will arrive to consume the record), so dropping
-        it on the superseding session keeps the map from accreting.
+        Every command a PRIOR session of the worker still tracks is retired here,
+        exactly as that session's disconnect would (issue #891, issue #3491): a new
+        session supersedes the old one, and ``fail_worker_pending`` is
+        session-guarded, so the old session's delayed teardown skips it on a fast
+        reconnect. Its commands' results can no longer arrive — the old stream is
+        gone and its uploads died with its ctx — so their waiting callers fail now
+        with :class:`WorkerNotConnectedError`, and their snapshot records go with
+        them: an in-flight one can then never be promoted to a late-snapshot record
+        nothing would consume, which would hold the server's stop convergence in
+        flight for as long as the new session lives. Every command still tracked
+        for the worker at this point belongs to a prior session, because a dispatch
+        reads the current queue and registers its command without yielding.
         """
 
         if session < self._latest_opened.get(worker_id, session):
             raise StaleSessionError(worker_id.value, session)
         self._latest_opened[worker_id] = session
-        for command_id in [
-            cid for cid, (wid, _) in self._late_snapshots.items() if wid == worker_id
-        ]:
-            del self._late_snapshots[command_id]
+        self._retire_worker_commands(
+            worker_id, WorkerNotConnectedError(worker_id.value)
+        )
         queue: asyncio.Queue[pb.ApiMessage] = asyncio.Queue()
         self._outbound[worker_id] = queue
         self._sessions[worker_id] = session
@@ -402,6 +407,13 @@ class ControlPlaneState:
 
         if self._sessions.get(worker_id) != session:
             return
+        self._retire_worker_commands(worker_id, error)
+
+    def _retire_worker_commands(
+        self, worker_id: WorkerId, error: BaseException
+    ) -> None:
+        """Fail and forget every command tracked for one ended worker session."""
+
         for command_id in [
             cid for cid, (wid, _) in self._pending.items() if wid == worker_id
         ]:
@@ -413,9 +425,10 @@ class ControlPlaneState:
             if not future.done():
                 future.set_exception(error)
         # Drop any already-promoted late-snapshot records for this worker too: its
-        # session ended, so no late result will arrive to consume them. Keyed by a
-        # unique command_id, a leftover entry is harmless, but clearing it here keeps
-        # the map from accreting one entry per disconnect-after-timeout (issue #891).
+        # session ended, so no late result will arrive to consume them. Clearing
+        # them keeps the map from accreting one entry per disconnect-after-timeout
+        # (issue #891), and a leftover would hold the server's stop convergence in
+        # flight for good (issue #3491).
         for command_id in [
             cid for cid, (wid, _) in self._late_snapshots.items() if wid == worker_id
         ]:

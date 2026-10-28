@@ -28,12 +28,18 @@ A flow that finds the server in flight does not queue behind it. An operator sto
 gets ``LifecycleTransitionConflictError`` (409 ``transition_conflict``), and the
 reconciler skips the row for the tick. A late result whose own command record is
 already consumed releases only if nothing else is in flight; otherwise the flow
-still in flight, or a later reconciler tick, converges the row. Every path ends:
-an outstanding record is dropped when its result arrives, when the Worker's
-session ends or is superseded, or when the command is dropped unsent as stale.
-On a live session a result always comes, because the Worker bounds every transfer
-(CONTROL_PLANE.md Section 5.2). Once nothing is in flight, the reconciler's
-stale-stop arm converges a still-held row.
+still in flight, or a later reconciler tick, converges the row. An outstanding
+record is dropped when its result arrives, when the Worker's session ends or is
+superseded (a superseding session fails the old one's commands, so none of them
+can linger), or when the command is dropped unsent as stale. Once nothing is in
+flight, the reconciler's stale-stop arm converges a still-held row.
+
+What this does NOT guarantee is that a result arrives in bounded time on a live
+session. The Worker bounds the snapshot's upload with ``transfer_deadline``
+(CONTROL_PLANE.md Section 5.2), but not the whole command: the pre-pack check and
+the pack itself run outside that deadline. So a Worker that keeps heartbeating but
+never finishes packing holds the server in flight, refusing operator stops and
+reconciler ticks for it, until its session ends.
 
 In-process, deliberately. The API is a single instance (REQUIREMENTS.md
 NFR-SCALE-1), and the state the flows coordinate on is already in this process
