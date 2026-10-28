@@ -53,6 +53,10 @@ type fakeTransfer struct {
 	// error the blocked transfer observed so a test can assert it was the deadline.
 	blockUntilCtxDone bool
 	gotCtxErr         error
+	// blockPack, when set, makes PackSnapshot block until the passed context is done
+	// and then return ctx.Err(), modeling a pack stuck past the snapshot command's
+	// deadline (issue #3511); gotCtxErr captures that error.
+	blockPack bool
 	// duringUpload, when set, runs inside UploadSnapshot with the working dir the
 	// preceding PackSnapshot was given — after the pack, before the caller's
 	// post-upload tail (recordGenerationIfUnchanged -> sweepDisplaced). It models a
@@ -77,12 +81,22 @@ func (f *fakeTransfer) Hydrate(ctx context.Context, _, _, workingDir string) (ui
 	return f.gen, f.err
 }
 
-func (f *fakeTransfer) PackSnapshot(_ context.Context, workingDir string) (string, func(), error) {
+func (f *fakeTransfer) PackSnapshot(ctx context.Context, workingDir string) (string, func(), error) {
+	f.mu.Lock()
+	block := f.blockPack
+	f.mu.Unlock()
+	if block {
+		<-ctx.Done()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.packs = append(f.packs, workingDir)
 	if f.seq != nil {
 		*f.seq = append(*f.seq, "pack")
+	}
+	if block {
+		f.gotCtxErr = ctx.Err()
+		return "", func() {}, ctx.Err()
 	}
 	if f.packErr != nil {
 		return "", func() {}, f.packErr
