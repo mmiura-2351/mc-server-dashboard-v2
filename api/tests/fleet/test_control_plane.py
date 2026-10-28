@@ -1401,3 +1401,42 @@ async def test_skipped_stale_final_snapshot_drops_late_record() -> None:
     # nowhere.
     await state.resolve("cmd-1", worker, _failed_transfer_result())
     assert sink.calls == []
+
+
+async def test_final_snapshot_outstanding_until_no_result_can_follow() -> None:
+    # Issue #3491: a server's stop convergence stays in flight while a final
+    # snapshot of it awaits a result, whether its caller still waits or abandoned
+    # it. The record ends exactly when no result can follow any more.
+    state = ControlPlaneState()
+    owner = WorkerId(_WORKER)
+    state.open_session(owner, 1)
+
+    state.register_pending("periodic", owner)  # untracked: not a final snapshot
+    assert not state.final_snapshot_outstanding(_SERVER)
+
+    state.register_pending("cmd-1", owner, snapshot_server_id=_SERVER)
+    assert state.final_snapshot_outstanding(_SERVER)  # caller waiting
+    assert not state.final_snapshot_outstanding("another-server")
+    state.discard_pending("cmd-1")
+    assert state.final_snapshot_outstanding(_SERVER)  # abandoned, may report late
+    assert state.discard_if_stale("cmd-1")
+    assert not state.final_snapshot_outstanding(_SERVER)  # dropped unsent
+
+    state.register_pending("cmd-2", owner, snapshot_server_id=_SERVER)
+    state.discard_pending("cmd-2")
+    state.fail_worker_pending(owner, 1, RuntimeError("session ended"))
+    assert not state.final_snapshot_outstanding(_SERVER)  # session gone
+
+
+async def test_final_snapshot_outstanding_ends_when_its_result_is_consumed() -> None:
+    state = ControlPlaneState()
+    owner = WorkerId(_WORKER)
+
+    state.register_pending("cmd-1", owner, snapshot_server_id=_SERVER)
+    await state.resolve("cmd-1", owner, _failed_transfer_result())
+    assert not state.final_snapshot_outstanding(_SERVER)
+
+    state.register_pending("cmd-2", owner, snapshot_server_id=_SERVER)
+    state.discard_pending("cmd-2")
+    await state.resolve("cmd-2", owner, _failed_transfer_result())  # late result
+    assert not state.final_snapshot_outstanding(_SERVER)

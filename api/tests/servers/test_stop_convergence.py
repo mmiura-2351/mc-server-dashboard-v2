@@ -14,11 +14,25 @@ of work over one shared repository, as in production.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime as dt
 import uuid
 
 import pytest
 
+from mc_server_dashboard_api.fleet.adapters.control_plane import (
+    ControlPlaneState,
+    GrpcControlPlane,
+)
+from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
+from mc_server_dashboard_api.fleet.domain.control_plane import WorkerNotConnectedError
+from mc_server_dashboard_api.fleet.domain.late_snapshot_sink import (
+    LateSnapshotResultSink,
+)
+from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId as FleetWorkerId
+from mc_server_dashboard_api.servers.adapters.control_plane import (
+    FleetControlPlaneAdapter,
+)
 from mc_server_dashboard_api.servers.application.lifecycle import StopServer
 from mc_server_dashboard_api.servers.application.reconciler import RunReconcilerTick
 from mc_server_dashboard_api.servers.application.stop_convergence import (
@@ -30,6 +44,7 @@ from mc_server_dashboard_api.servers.application.stop_dispatch_refusals import (
 from mc_server_dashboard_api.servers.domain.control_plane import (
     CommandOutcome,
     CommandStatus,
+    ControlPlane,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
@@ -44,6 +59,9 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerType,
     WorkerId,
 )
+from mcsd.controlplane.v1 import control_plane_pb2 as pb
+from tests.fleet.fakes import FakeClock as FleetFakeClock
+from tests.fleet.fakes import make_worker
 from tests.servers.fakes import (
     FakeClock,
     FakeControlPlane,
@@ -116,7 +134,7 @@ def _server(*, desired: DesiredState, observed: ObservedState) -> Server:
 
 
 def _stop_server(
-    repo: FakeServerRepository, cp: FakeControlPlane, guard: StopConvergenceGuard
+    repo: FakeServerRepository, cp: ControlPlane, guard: StopConvergenceGuard
 ) -> StopServer:
     return StopServer(
         uow=FakeUnitOfWork(servers=repo),
@@ -281,3 +299,217 @@ async def test_late_result_releases_when_no_flow_is_converging() -> None:
 
     assert _assigned(repo, server) is None
     assert not guard.in_flight(server.id)
+
+
+class _HeldFirstClear(FakeServerRepository):
+    """The first assignment clear waits on ``finish``; later ones run at once."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._gate = asyncio.Event()
+        self.first_started = asyncio.Event()
+        self.first_done = asyncio.Event()
+        self._clears = 0
+
+    def finish(self) -> None:
+        self._gate.set()
+
+    async def clear_assignment_after_final_snapshot(
+        self, server_id: ServerId, worker_id: WorkerId
+    ) -> bool:
+        self._clears += 1
+        if self._clears > 1:
+            return await super().clear_assignment_after_final_snapshot(
+                server_id, worker_id
+            )
+        self.first_started.set()
+        await self._gate.wait()
+        cleared = await super().clear_assignment_after_final_snapshot(
+            server_id, worker_id
+        )
+        self.first_done.set()
+        return cleared
+
+
+async def test_retry_refuses_while_a_cancelled_callers_release_is_running() -> None:
+    # Stop A's final snapshot failed (scratch retained) and A is inside its
+    # shielded assignment clear when its caller is cancelled. The clear keeps
+    # running, so a retry B that uploaded now would have the assignment released
+    # under its upload. B must be refused until A's release has landed.
+    server = _server(desired=DesiredState.STOPPED, observed=ObservedState.RUNNING)
+    repo = _HeldFirstClear()
+    repo.seed(server)
+    guard = StopConvergenceGuard()
+    cp = FakeControlPlane(outcomes={"snapshot": _FAILED})
+    first = asyncio.create_task(
+        _stop_server(repo, cp, guard)(
+            community_id=server.community_id, server_id=server.id
+        )
+    )
+    await repo.first_started.wait()
+    first.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await first
+
+    with pytest.raises(LifecycleTransitionConflictError):
+        await _stop_server(repo, cp, guard)(
+            community_id=server.community_id, server_id=server.id
+        )
+
+    assert [k for k, _, _ in cp.dispatched] == ["stop", "snapshot"]
+    assert _assigned(repo, server) == server.assigned_worker_id
+    repo.finish()
+    await repo.first_done.wait()
+    await asyncio.sleep(0)  # let the shielded task's done-callback run
+    assert _assigned(repo, server) is None
+    assert not guard.in_flight(server.id)
+
+
+class _Worker:
+    """One connected Worker behind the real control-plane state and adapter.
+
+    The final-snapshot commands the flows dispatch land on its outbound queue,
+    and its late results go through the state's real late-result routing into a
+    ``StopServer`` sharing the flows' repository and guard, as the production
+    sink does.
+    """
+
+    def __init__(self, repo: FakeServerRepository, server: Server) -> None:
+        assert server.assigned_worker_id is not None
+        self.fleet_id = FleetWorkerId(str(server.assigned_worker_id.value))
+        self.registry = InMemoryWorkerRegistry(
+            clock=FleetFakeClock(_NOW), heartbeat_timeout=dt.timedelta(seconds=30)
+        )
+        self.session = self.registry.register(
+            make_worker(worker_id=self.fleet_id.value, at=_NOW)
+        )
+        self.state = ControlPlaneState(late_snapshot_sink=_Sink(self, repo))
+        self.queue = self.state.open_session(self.fleet_id, self.session)
+        self.guard = StopConvergenceGuard(
+            outstanding=lambda sid: self.state.final_snapshot_outstanding(
+                str(sid.value)
+            )
+        )
+        self.cp = FleetControlPlaneAdapter(
+            registry=self.registry,
+            control_plane=GrpcControlPlane(
+                self.state, clock=FleetFakeClock(_NOW), timeout_seconds=30
+            ),
+            data_plane_base_url="http://data-plane.test",
+            worker_credential="test-credential",
+        )
+
+    async def next_command(self) -> str:
+        message = await asyncio.wait_for(self.queue.get(), timeout=1)
+        return message.correlation_id
+
+    async def report_failed(self, command_id: str) -> None:
+        await self.state.resolve(
+            command_id,
+            self.fleet_id,
+            pb.CommandResult(
+                success=False,
+                error=pb.CommandError(code=pb.COMMAND_ERROR_CODE_TRANSFER_FAILED),
+            ),
+        )
+
+    def disconnect(self) -> None:
+        self.registry.mark_disconnected(self.fleet_id, self.session)
+        self.state.fail_worker_pending(
+            self.fleet_id, self.session, WorkerNotConnectedError(self.fleet_id.value)
+        )
+
+
+class _Sink(LateSnapshotResultSink):
+    def __init__(self, worker: _Worker, repo: FakeServerRepository) -> None:
+        self._worker = worker
+        self._repo = repo
+
+    async def clear_held_assignment_on_late_snapshot(
+        self, *, server_id: str, worker_id: str, succeeded: bool, message: str | None
+    ) -> None:
+        await _stop_server(
+            self._repo, self._worker.cp, self._worker.guard
+        ).clear_assignment_after_late_snapshot(
+            server_id=ServerId(uuid.UUID(server_id)),
+            worker_id=WorkerId(uuid.UUID(worker_id)),
+            succeeded=succeeded,
+            message=message,
+        )
+
+
+async def _abandon_a_final_snapshot(
+    repo: FakeServerRepository, server: Server, worker: _Worker
+) -> str:
+    """Run a stop until its final snapshot is delivered, then cancel its caller."""
+
+    caller = asyncio.create_task(
+        _stop_server(repo, worker.cp, worker.guard)(
+            community_id=server.community_id, server_id=server.id
+        )
+    )
+    command_id = await worker.next_command()
+    caller.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await caller
+    return command_id
+
+
+async def test_retry_refuses_while_an_abandoned_final_snapshot_is_outstanding() -> None:
+    # Stop A's caller is abandoned after its final snapshot reached the Worker, so
+    # no caller holds the claim. A retry B allowed to upload now could be released
+    # under by A's late result (the Worker may start B's retry over A's retained
+    # scratch before the API consumes A's result), so B is refused without
+    # dispatching. Then A's own late result, with nothing else in flight, releases.
+    server = _server(desired=DesiredState.STOPPED, observed=ObservedState.STOPPED)
+    repo = FakeServerRepository()
+    repo.seed(server)
+    worker = _Worker(repo, server)
+    abandoned = await _abandon_a_final_snapshot(repo, server, worker)
+
+    with pytest.raises(LifecycleTransitionConflictError):
+        await asyncio.wait_for(
+            _stop_server(repo, worker.cp, worker.guard)(
+                community_id=server.community_id, server_id=server.id
+            ),
+            timeout=1,
+        )
+
+    assert worker.queue.empty()  # B dispatched nothing
+    assert _assigned(repo, server) == server.assigned_worker_id
+    await worker.report_failed(abandoned)
+    assert _assigned(repo, server) is None
+
+
+async def test_a_lost_final_snapshot_result_still_converges() -> None:
+    # Stop A is abandoned and its result never arrives: the Worker's session ends
+    # instead. While the snapshot is outstanding the reconciler leaves the row
+    # alone; once the session's end drops the record, its stale-stop arm releases.
+    server = _server(desired=DesiredState.STOPPED, observed=ObservedState.STOPPED)
+    repo = FakeServerRepository()
+    repo.seed(server)
+    worker = _Worker(repo, server)
+    reconciler = RunReconcilerTick(
+        uow=FakeUnitOfWork(servers=repo),
+        make_start_server=lambda: pytest.fail("no start is owed"),
+        make_stop_server=lambda: _stop_server(repo, worker.cp, worker.guard),
+        control_plane=worker.cp,
+        store_generation=FakeStoreGenerationReader(),
+        clock=FakeClock(_NOW),
+        stop_refusals=StopDispatchRefusals(),
+        grace_seconds=60,
+        held_start_grace_seconds=10,
+        refused_stop_grace_seconds=5,
+        restart_timeout_seconds=120,
+        backoff_base_seconds=30,
+        backoff_max_seconds=3600,
+    )
+    await _abandon_a_final_snapshot(repo, server, worker)
+
+    await asyncio.wait_for(reconciler.tick(), timeout=1)
+    assert worker.queue.empty()
+    assert _assigned(repo, server) == server.assigned_worker_id
+
+    worker.disconnect()
+    await asyncio.wait_for(reconciler.tick(), timeout=1)
+    assert _assigned(repo, server) is None
