@@ -1440,3 +1440,24 @@ async def test_final_snapshot_outstanding_ends_when_its_result_is_consumed() -> 
     state.discard_pending("cmd-2")
     await state.resolve("cmd-2", owner, _failed_transfer_result())  # late result
     assert not state.final_snapshot_outstanding(_SERVER)
+
+
+async def test_reconnect_retires_the_superseded_sessions_commands() -> None:
+    # Issue #3491: a final snapshot still in flight when a reconnect replaces its
+    # session can never be answered. It must fail now, like a disconnect, and its
+    # record must not survive to be promoted when its caller later gives up, or it
+    # would count as outstanding for as long as the new session lives.
+    state = ControlPlaneState()
+    owner = WorkerId(_WORKER)
+    state.open_session(owner, 1)
+    old = state.register_pending("old", owner, snapshot_server_id=_SERVER)
+
+    state.open_session(owner, 2)
+
+    assert isinstance(old.exception(), WorkerNotConnectedError)
+    assert not state.final_snapshot_outstanding(_SERVER)
+    state.discard_pending("old")  # the old caller's timeout or cancellation
+    assert not state.final_snapshot_outstanding(_SERVER)
+    # The new session's own final snapshot keeps counting.
+    state.register_pending("new", owner, snapshot_server_id=_SERVER)
+    assert state.final_snapshot_outstanding(_SERVER)

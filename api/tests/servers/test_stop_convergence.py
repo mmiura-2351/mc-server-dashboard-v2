@@ -45,6 +45,7 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
     CommandOutcome,
     CommandStatus,
     ControlPlane,
+    WorkerUnavailableError,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
@@ -374,7 +375,13 @@ class _Worker:
     sink does.
     """
 
-    def __init__(self, repo: FakeServerRepository, server: Server) -> None:
+    def __init__(
+        self,
+        repo: FakeServerRepository,
+        server: Server,
+        *,
+        snapshot_timeout_seconds: float | None = None,
+    ) -> None:
         assert server.assigned_worker_id is not None
         self.fleet_id = FleetWorkerId(str(server.assigned_worker_id.value))
         self.registry = InMemoryWorkerRegistry(
@@ -397,6 +404,7 @@ class _Worker:
             ),
             data_plane_base_url="http://data-plane.test",
             worker_credential="test-credential",
+            snapshot_timeout_seconds=snapshot_timeout_seconds,
         )
 
     async def next_command(self) -> str:
@@ -412,6 +420,19 @@ class _Worker:
                 error=pb.CommandError(code=pb.COMMAND_ERROR_CODE_TRANSFER_FAILED),
             ),
         )
+
+    async def report_ok(self, command_id: str) -> None:
+        await self.state.resolve(
+            command_id, self.fleet_id, pb.CommandResult(success=True)
+        )
+
+    def reconnect(self) -> None:
+        """The Worker opens a new session that replaces (and outlives) the old one."""
+
+        self.session = self.registry.register(
+            make_worker(worker_id=self.fleet_id.value, at=_NOW)
+        )
+        self.queue = self.state.open_session(self.fleet_id, self.session)
 
     def disconnect(self) -> None:
         self.registry.mark_disconnected(self.fleet_id, self.session)
@@ -513,3 +534,81 @@ async def test_a_lost_final_snapshot_result_still_converges() -> None:
     worker.disconnect()
     await asyncio.wait_for(reconciler.tick(), timeout=1)
     assert _assigned(repo, server) is None
+
+
+def _ticker(repo: FakeServerRepository, worker: _Worker) -> RunReconcilerTick:
+    return RunReconcilerTick(
+        uow=FakeUnitOfWork(servers=repo),
+        make_start_server=lambda: pytest.fail("no start is owed"),
+        make_stop_server=lambda: _stop_server(repo, worker.cp, worker.guard),
+        control_plane=worker.cp,
+        store_generation=FakeStoreGenerationReader(),
+        clock=FakeClock(_NOW),
+        stop_refusals=StopDispatchRefusals(),
+        grace_seconds=60,
+        held_start_grace_seconds=10,
+        refused_stop_grace_seconds=5,
+        restart_timeout_seconds=120,
+        backoff_base_seconds=30,
+        backoff_max_seconds=3600,
+    )
+
+
+async def test_reconnect_before_the_old_callers_timeout_does_not_hold_for_good() -> (
+    None
+):
+    # Stop A's final snapshot is in flight when the Worker reconnects, and the new
+    # session stays up. Its old session can never answer, so the snapshot must
+    # not stay outstanding past A's deadline: the row has to converge without
+    # another reconnect.
+    server = _server(desired=DesiredState.STOPPED, observed=ObservedState.STOPPED)
+    repo = FakeServerRepository()
+    repo.seed(server)
+    worker = _Worker(repo, server, snapshot_timeout_seconds=0.05)
+    caller = asyncio.create_task(
+        _stop_server(repo, worker.cp, worker.guard)(
+            community_id=server.community_id, server_id=server.id
+        )
+    )
+    await worker.next_command()
+
+    worker.reconnect()
+    with contextlib.suppress(WorkerUnavailableError):
+        await asyncio.wait_for(caller, timeout=1)
+    await asyncio.wait_for(_ticker(repo, worker).tick(), timeout=1)
+
+    assert not worker.guard.in_flight(server.id)
+    assert _assigned(repo, server) is None
+
+
+async def test_reconnect_before_the_old_callers_cancellation_does_not_hold() -> None:
+    # As above, but A's caller is cancelled after the reconnect. A later operator
+    # stop then converges the row on the new session, whose own outstanding
+    # snapshot still refuses a further stop until its result arrives.
+    server = _server(desired=DesiredState.STOPPED, observed=ObservedState.STOPPED)
+    repo = FakeServerRepository()
+    repo.seed(server)
+    worker = _Worker(repo, server)
+    first = asyncio.create_task(
+        _stop_server(repo, worker.cp, worker.guard)(
+            community_id=server.community_id, server_id=server.id
+        )
+    )
+    await worker.next_command()
+    worker.reconnect()
+    first.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await first
+    assert _assigned(repo, server) == server.assigned_worker_id
+
+    retry = await _abandon_a_final_snapshot(repo, server, worker)
+    with pytest.raises(LifecycleTransitionConflictError):
+        await _stop_server(repo, worker.cp, worker.guard)(
+            community_id=server.community_id, server_id=server.id
+        )
+    assert worker.queue.empty()
+    assert _assigned(repo, server) == server.assigned_worker_id
+
+    await worker.report_ok(retry)
+    assert _assigned(repo, server) is None
+    assert not worker.guard.in_flight(server.id)
