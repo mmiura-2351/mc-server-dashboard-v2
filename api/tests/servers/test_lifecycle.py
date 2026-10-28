@@ -2888,6 +2888,175 @@ async def test_stop_when_already_stopped_is_conflict() -> None:
         )
 
 
+# --- stop of a row already desired=stopped but still assigned (issue #3491) ---
+#
+# An operator stop runs, now, the per-row convergence the reconciler runs once its
+# grace lapses: the same action selection, the same use cases, no grace wait.
+
+
+async def test_stop_desired_stopped_still_running_dispatches_stop_now() -> None:
+    # The drain shape: drain flipped desired=stopped (and decremented the load) but
+    # left the stop itself to the reconciler. The operator's stop sends it now and
+    # converges the row exactly like ``redispatch_stop`` -- no second decrement.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane()
+    use_case = StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+
+    result = await use_case(
+        community_id=CommunityId(community), server_id=ServerId(server_id), force=True
+    )
+
+    assert [k for k, _, _ in cp.dispatched] == ["stop", "snapshot"]
+    assert cp.stop_force is True
+    assert cp.decremented == []
+    assert result.desired_state is DesiredState.STOPPED
+    assert result.observed_state is ObservedState.STOPPED
+    assert result.assigned_worker_id is None
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.observed_state is ObservedState.STOPPED
+    assert stored.assigned_worker_id is None
+
+
+async def test_stop_desired_stopped_unknown_connected_converges_via_release() -> None:
+    # Issue #3486's shape: (stopped, unknown, assigned) on a connected Worker that
+    # no longer holds the instance. The reconciler's tick would redispatch the stop,
+    # get SERVER_NOT_FOUND, take the final snapshot, then release; so does this.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.UNKNOWN,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(
+        outcomes={"stop": CommandOutcome(status=CommandStatus.SERVER_NOT_FOUND)}
+    )
+    use_case = StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+
+    result = await use_case(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert [k for k, _, _ in cp.dispatched] == ["stop", "snapshot"]
+    assert cp.decremented == []
+    assert result.assigned_worker_id is None
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.observed_state is ObservedState.STOPPED
+    assert stored.assigned_worker_id is None
+
+
+async def test_stop_desired_stopped_stopped_assigned_takes_the_release_leg() -> None:
+    # (stopped, stopped, assigned): the reconciler's clear_stale_assignment arm --
+    # final snapshot then release, no stop dispatch.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.STOPPED,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane()
+    use_case = StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+
+    result = await use_case(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert [k for k, _, _ in cp.dispatched] == ["snapshot"]
+    assert result.assigned_worker_id is None
+    assert uow.servers.by_id[ServerId(server_id)].assigned_worker_id is None
+
+
+async def test_stop_desired_stopped_unknown_disconnected_releases_offline() -> None:
+    # The Worker is gone: nobody to command, so the reconciler's DB-only release.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.UNKNOWN,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(connected={WorkerId(worker): False})
+    use_case = StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+
+    result = await use_case(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert cp.dispatched == []
+    assert result.assigned_worker_id is None
+    assert uow.servers.by_id[ServerId(server_id)].assigned_worker_id is None
+
+
+async def test_stop_desired_stopped_running_on_disconnected_worker_is_conflict() -> (
+    None
+):
+    # The reconciler skips this row (the reconnect owns it), so there is no
+    # convergence to expedite: the stop stays an invalid transition.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(connected={WorkerId(worker): False})
+    use_case = StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+
+    with pytest.raises(InvalidLifecycleTransitionError):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+    assert cp.dispatched == []
+
+
+async def test_stop_desired_stopped_running_unassigned_is_conflict() -> None:
+    community, server_id, _ = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.RUNNING,
+        )
+    )
+    cp = FakeControlPlane()
+    use_case = StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+
+    with pytest.raises(InvalidLifecycleTransitionError):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+    assert cp.dispatched == []
+
+
 async def test_stop_lost_race_is_conflict_without_dispatch_or_count() -> None:
     # Loaded as running+assigned (in-memory check passes), but a concurrent stop
     # commits stopped before our compare-and-set. The CAS matches no row, so we

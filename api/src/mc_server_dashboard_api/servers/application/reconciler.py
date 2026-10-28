@@ -249,6 +249,7 @@ from mc_server_dashboard_api.servers.application.command_dispatch import (
 from mc_server_dashboard_api.servers.application.lifecycle import (
     StartServer,
     StopServer,
+    stopped_intent_action,
 )
 from mc_server_dashboard_api.servers.application.stop_dispatch_refusals import (
     StopDispatchRefusals,
@@ -500,51 +501,9 @@ class RunReconcilerTick:
             ):
                 return None  # disconnected: reconnect rebuild owns it
             return "redispatch_start"
-        # desired=stopped: list_reconcilable returns observed=running (stop never
-        # delivered), observed=stopped+assigned (a stop wedged mid final-snapshot,
-        # issue #847 bug 2), observed=unknown+assigned (a stop interrupted
-        # mid-flight, issue #1599), observed=crashed+assigned (the process died
-        # on its own under a stop intent, issue #2439), and
-        # observed=stopping+assigned (a stop whose dispatch failed after the worker
-        # emitted stopping, issue #2452).
-        if server.assigned_worker_id is None:
-            return None
-        if server.observed_state in (ObservedState.STOPPED, ObservedState.CRASHED):
-            # The process is gone either way, so the owed work is the RELEASE half
-            # of the stop path, not another stop dispatch: re-drive the final
-            # snapshot (if the Worker is connected, issues #1004/#2439) then clear
-            # the assignment. It runs even when the Worker is gone — the snapshot is
-            # skipped but the clear proceeds, exactly the crash case it recovers.
-            # A stop dispatch would only take the long way round for
-            # observed=crashed: the Worker forgot the crashed instance, so it
-            # answers SERVER_NOT_FOUND — which since issue #2448 runs this same
-            # snapshot-then-release leg rather than dropping the crash-window world.
-            return "clear_stale_assignment"
-        if server.observed_state in (ObservedState.UNKNOWN, ObservedState.STOPPING):
-            # Issue #1599 (unknown): an API restart or worker disconnect interrupted
-            # a stop mid-flight. Issue #2452 (stopping): the stop's DISPATCH failed
-            # after the worker emitted stopping on entry to its Stop, and neither of
-            # the worker's Stop failure paths emits again, so no terminal report
-            # follows. Both leave a wedge whose owed work is the same: if the worker
-            # is connected, redispatch the stop — for #2452 that retries the stop for
-            # real (reaching the orphan branch of the worker's takeStoppableReserve,
-            # which is also what retires the worker-side orphan record). If the
-            # worker is gone there is nobody to command, so clear the assignment
-            # (DB-only, same as the stopped wedge) — for #2452 that also converges
-            # observed to unknown, so the released row is at rest instead of
-            # stranded at (stopped, stopping, unassigned). No final snapshot on
-            # either: the process may still be alive, so there is no settled
-            # working set.
-            if not self.control_plane.is_worker_connected(
-                worker_id=server.assigned_worker_id
-            ):
-                return "clear_stale_assignment"
-            return "redispatch_stop"
-        if not self.control_plane.is_worker_connected(
-            worker_id=server.assigned_worker_id
-        ):
-            return None
-        return "redispatch_stop"
+        # desired=stopped: the selection an operator stop of the same row also runs
+        # (issue #3491), so the two cannot drift apart.
+        return stopped_intent_action(server, self.control_plane)
 
     async def _run(
         self,

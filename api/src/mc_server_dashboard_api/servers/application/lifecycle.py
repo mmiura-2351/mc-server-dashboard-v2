@@ -268,6 +268,58 @@ async def _load(
     return server
 
 
+def stopped_intent_action(server: Server, control_plane: ControlPlane) -> str | None:
+    """The convergence a ``desired=stopped`` row is owed, or ``None`` for none.
+
+    ``"redispatch_stop"`` or ``"clear_stale_assignment"`` — the :class:`StopServer`
+    method that converges the row. The one selection both callers share: the
+    reconciler, which runs it once the row's grace has lapsed, and an operator
+    stop of an already-stopped-intent row (issue #3491), which runs it now.
+    """
+
+    # The reconciler's list_reconcilable returns observed=running (stop never
+    # delivered), observed=stopped+assigned (a stop wedged mid final-snapshot,
+    # issue #847 bug 2), observed=unknown+assigned (a stop interrupted
+    # mid-flight, issue #1599), observed=crashed+assigned (the process died
+    # on its own under a stop intent, issue #2439), and
+    # observed=stopping+assigned (a stop whose dispatch failed after the worker
+    # emitted stopping, issue #2452).
+    if server.assigned_worker_id is None:
+        return None
+    if server.observed_state in (ObservedState.STOPPED, ObservedState.CRASHED):
+        # The process is gone either way, so the owed work is the RELEASE half
+        # of the stop path, not another stop dispatch: re-drive the final
+        # snapshot (if the Worker is connected, issues #1004/#2439) then clear
+        # the assignment. It runs even when the Worker is gone — the snapshot is
+        # skipped but the clear proceeds, exactly the crash case it recovers.
+        # A stop dispatch would only take the long way round for
+        # observed=crashed: the Worker forgot the crashed instance, so it
+        # answers SERVER_NOT_FOUND — which since issue #2448 runs this same
+        # snapshot-then-release leg rather than dropping the crash-window world.
+        return "clear_stale_assignment"
+    if server.observed_state in (ObservedState.UNKNOWN, ObservedState.STOPPING):
+        # Issue #1599 (unknown): an API restart or worker disconnect interrupted
+        # a stop mid-flight. Issue #2452 (stopping): the stop's DISPATCH failed
+        # after the worker emitted stopping on entry to its Stop, and neither of
+        # the worker's Stop failure paths emits again, so no terminal report
+        # follows. Both leave a wedge whose owed work is the same: if the worker
+        # is connected, redispatch the stop — for #2452 that retries the stop for
+        # real (reaching the orphan branch of the worker's takeStoppableReserve,
+        # which is also what retires the worker-side orphan record). If the
+        # worker is gone there is nobody to command, so clear the assignment
+        # (DB-only, same as the stopped wedge) — for #2452 that also converges
+        # observed to unknown, so the released row is at rest instead of
+        # stranded at (stopped, stopping, unassigned). No final snapshot on
+        # either: the process may still be alive, so there is no settled
+        # working set.
+        if not control_plane.is_worker_connected(worker_id=server.assigned_worker_id):
+            return "clear_stale_assignment"
+        return "redispatch_stop"
+    if not control_plane.is_worker_connected(worker_id=server.assigned_worker_id):
+        return None
+    return "redispatch_stop"
+
+
 @dataclass(frozen=True)
 class StartServer:
     """Place and start a server (server:start, FR-SRV-2).
@@ -1217,22 +1269,40 @@ class StopServer:
     async def __call__(
         self, *, community_id: CommunityId, server_id: ServerId, force: bool = False
     ) -> Server:
+        owed: str | None = None
         async with self.uow:
             server = await _load(self.uow, community_id, server_id)
             if server.desired_state is DesiredState.STOPPED:
-                raise InvalidLifecycleTransitionError(str(server_id.value))
-            if server.assigned_worker_id is None:
-                # Desired-running with no assigned Worker is inconsistent; there
-                # is nothing to command. Treat as a transition conflict.
-                raise InvalidLifecycleTransitionError(str(server_id.value))
-            worker_id = server.assigned_worker_id
-            applied = await _mark_stopped(self.uow, server, at=self.clock.now())
-            if not applied:
-                # A concurrent transition already moved the row out of running.
-                # Abort before dispatch or the placement-load decrement so the
-                # lost race does not double-decrement the count (FR-SRV-2).
-                raise LifecycleTransitionConflictError(str(server_id.value))
-            await self.uow.commit()
+                # Already a stop intent (issue #3491): the convergence the
+                # reconciler runs for this row once its grace lapses, run now.
+                owed = stopped_intent_action(server, self.control_plane)
+                if owed is None:
+                    raise InvalidLifecycleTransitionError(str(server_id.value))
+            else:
+                if server.assigned_worker_id is None:
+                    # Desired-running with no assigned Worker is inconsistent; there
+                    # is nothing to command. Treat as a transition conflict.
+                    raise InvalidLifecycleTransitionError(str(server_id.value))
+                worker_id = server.assigned_worker_id
+                applied = await _mark_stopped(self.uow, server, at=self.clock.now())
+                if not applied:
+                    # A concurrent transition already moved the row out of running.
+                    # Abort before dispatch or the placement-load decrement so the
+                    # lost race does not double-decrement the count (FR-SRV-2).
+                    raise LifecycleTransitionConflictError(str(server_id.value))
+                await self.uow.commit()
+
+        if owed == "redispatch_stop":
+            # The same replay the reconciler sends, with the operator's ``force``.
+            # The desired flip, and with it the placement-load decrement, already
+            # happened on the stop that set this intent, so neither is repeated.
+            return await self.redispatch_stop(
+                community_id=community_id, server_id=server_id, force=force
+            )
+        if owed == "clear_stale_assignment":
+            return await self.clear_stale_assignment(
+                community_id=community_id, server_id=server_id
+            )
 
         # Decrement the placement load symmetrically with StartServer's
         # increment, right after desired flips to stopped. This keeps the
@@ -1674,7 +1744,7 @@ class StopServer:
         return False
 
     async def redispatch_stop(
-        self, *, community_id: CommunityId, server_id: ServerId
+        self, *, community_id: CommunityId, server_id: ServerId, force: bool = False
     ) -> Server:
         """Re-send the stop command to an assigned, desired-stopped server.
 
@@ -1687,6 +1757,10 @@ class StopServer:
         to the crash and is rebuilt from the authoritative tally on reconnect — so
         decrementing again would drive the count below the true running total. A
         failed dispatch raises so the caller retries on a later tick.
+
+        An operator stop of the same row runs this too, without the reconciler's
+        grace wait (issue #3491); ``force`` is that caller's, the reconciler's
+        replay is always graceful.
 
         On a CONFIRMED stop (success, or SERVER_NOT_FOUND meaning no live instance
         remains) the final snapshot is taken and THEN the assignment is cleared, so
@@ -1706,7 +1780,7 @@ class StopServer:
 
         self.stop_refusals.forget(server_id)
         outcome = await self.control_plane.stop(
-            worker_id=worker_id, server_id=server_id
+            worker_id=worker_id, server_id=server_id, force=force
         )
         if not outcome.success and outcome.status is not CommandStatus.SERVER_NOT_FOUND:
             # Keep the verdict current across the reconciler's own retries (issue
