@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,10 +28,19 @@ import (
 // time. A command that blocks (a FIFO opened without O_NONBLOCK) would otherwise
 // hang the suite; nothing here depends on how fast the answer is, only that there
 // is one, so the budget is far beyond what a loaded host needs.
+//
+// Failing never leaves the command running (issue #3479). It runs on the test's
+// context, which is cancelled as the test ends, and a cleanup waits for it to
+// return. That cleanup is registered after every package seam the test swapped,
+// so it runs before they are restored, and before the manager is closed. A
+// command blocked on what the test planted is freed by releaseWhenTheTestEnds,
+// which runs ahead of every cleanup.
 func handleWithin(t *testing.T, m *Manager, cmd session.Command) session.CommandResult {
 	t.Helper()
 	done := make(chan session.CommandResult, 1)
-	go func() { done <- m.Handle(context.Background(), cmd) }()
+	var running sync.WaitGroup
+	running.Go(func() { done <- m.Handle(t.Context(), cmd) })
+	t.Cleanup(running.Wait)
 	select {
 	case res := <-done:
 		return res
@@ -47,11 +57,26 @@ func plantFifo(t *testing.T, path string) {
 	if err := unix.Mkfifo(path, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
+	releaseWhenTheTestEnds(t, func() {
 		if fd, err := unix.Open(path, unix.O_RDWR|unix.O_NONBLOCK|unix.O_CLOEXEC, 0); err == nil {
 			_ = unix.Close(fd)
 		}
 	})
+}
+
+// releaseWhenTheTestEnds runs release as soon as the test's context is cancelled,
+// which is before any cleanup runs, and makes the test's cleanup wait for it. A
+// plain cleanup would not do: handleWithin's cleanup waits for a blocked command,
+// and runs before a cleanup registered earlier, so it would wait forever on a
+// release that comes after it.
+func releaseWhenTheTestEnds(t *testing.T, release func()) {
+	t.Helper()
+	released := make(chan struct{})
+	context.AfterFunc(t.Context(), func() {
+		defer close(released)
+		release()
+	})
+	t.Cleanup(func() { <-released })
 }
 
 // workingRoot creates and returns the working-set root of server s1.
@@ -145,7 +170,7 @@ func TestReadFileRefusesAFifoWithoutBlocking(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(func() { _ = writer.Close() })
+		releaseWhenTheTestEnds(t, func() { _ = writer.Close() })
 		if _, err := writer.WriteString("from the server"); err != nil {
 			t.Fatal(err)
 		}

@@ -2012,6 +2012,7 @@ def get_stop_server(
         clock=ServersSystemClock(),
         bedrock_tunnel_sync=get_bedrock_tunnel_sync(request),
         stop_refusals=request.app.state.stop_dispatch_refusals,
+        stop_convergence=request.app.state.stop_convergence,
     )
 
 

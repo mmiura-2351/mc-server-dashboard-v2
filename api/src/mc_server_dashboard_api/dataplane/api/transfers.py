@@ -517,7 +517,9 @@ async def publish_snapshot(
         handle = await storage.begin_snapshot(*scope)
         counter = _ByteCounter(request.stream(), declared=content_length)
         try:
-            await storage.write_snapshot(handle, counter.stream())
+            await storage.write_snapshot(
+                handle, counter.stream(), expected_base=expected_base
+            )
             if counter.count != content_length:
                 # The transfer was truncated (or over-long): refuse to publish. Storage
                 # only made staging authoritative on commit, so an abort leaves the
