@@ -660,12 +660,22 @@ class FsStorage(Storage):
     ) -> Path:
         return self._server_root(community_id, server_id) / "incoming" / transfer_id
 
-    async def write_snapshot(self, handle: SnapshotHandle, stream: ByteStream) -> None:
+    async def write_snapshot(
+        self,
+        handle: SnapshotHandle,
+        stream: ByteStream,
+        *,
+        expected_base: int | None = None,
+    ) -> None:
         fs_handle = _as_fs_handle(handle)
         staging = self._staging_dir(
             fs_handle.community_id, fs_handle.server_id, fs_handle.transfer_id
         )
+        # A concurrent delete's prune removes ``incoming/`` with the rest of the
+        # working set, so staging gone before or while the spool is created can be
+        # that delete (issue #3481).
         if not staging.is_dir():
+            await self._refuse_if_pruned(fs_handle, staging, expected_base)
             raise SnapshotHandleError("snapshot staging area is gone")
         # Spool the incoming tar to a temp file in the staging dir (disk, bounded
         # RAM — never the whole working set in memory), then stream-extract it.
@@ -674,15 +684,19 @@ class FsStorage(Storage):
         # is used rather than an os.pipe->thread bridge: it keeps RAM bounded just
         # the same with far simpler code, and the bytes land on the same disk the
         # extraction targets anyway.
-        fd, spool_name = await asyncio.to_thread(
-            tempfile.mkstemp, dir=str(staging), prefix=".snapshot.", suffix=".tar"
-        )
+        async with self._refusing_pruned_staging(fs_handle, staging, expected_base):
+            fd, spool_name = await asyncio.to_thread(
+                tempfile.mkstemp, dir=str(staging), prefix=".snapshot.", suffix=".tar"
+            )
         spool = Path(spool_name)
         try:
             with os.fdopen(fd, "wb") as out:
                 async for chunk in stream:
                     await asyncio.to_thread(out.write, chunk)
-            await asyncio.to_thread(_extract_tar_into, spool, staging)
+            # The extraction reopens the spool by path, which a concurrent delete's
+            # prune can have removed with the rest of ``incoming/`` (issue #3481).
+            async with self._refusing_pruned_staging(fs_handle, staging, expected_base):
+                await asyncio.to_thread(_extract_tar_into, spool, staging)
         finally:
             await asyncio.to_thread(spool.unlink, missing_ok=True)
 
@@ -703,19 +717,11 @@ class FsStorage(Storage):
             # A concurrent delete's prune removes ``incoming/`` with the rest of the
             # working set, so a staging area gone at commit can be that delete rather
             # than an incomplete transfer (issue #3477). Name it as the commit
-            # re-check does; the staging is already gone, so only the lease remains.
-            if expected_base is not None:
-                pruned = await asyncio.to_thread(
-                    self._pruned_generation,
-                    fs_handle.community_id,
-                    fs_handle.server_id,
-                    expected_base,
-                )
-                if pruned is not None:
-                    self._release_staging(staging)
-                    fs_handle.consumed = True
-                    raise PrunedStoreError(expected_base, pruned)
+            # re-check does.
+            await self._refuse_if_pruned(fs_handle, staging, expected_base)
             raise IncompleteTransferError("no completed staging area to publish")
+        # The steps below run outside the server lock, so the same prune can remove
+        # the staging while they read it (issue #3481); each one names that delete.
         # The "proven complete" gate (STORAGE.md Section 4.1): an empty staging area
         # is not a publishable transfer, so an empty staged dir is refused here too,
         # matching the object adapter. The end-of-stream completeness check (the
@@ -723,7 +729,12 @@ class FsStorage(Storage):
         # edge (STORAGE.md Section 8, issue #106): the snapshot endpoint verifies the
         # match and aborts the staging area on a mismatch, so commit is only reached
         # for a transfer proven complete.
-        if not await asyncio.to_thread(_dir_has_entries, staging):
+        async with self._refusing_pruned_staging(fs_handle, staging, expected_base):
+            has_entries = await asyncio.to_thread(_dir_has_entries, staging)
+        if not has_entries:
+            # The prune empties the staging before it removes the directory, so an
+            # empty staging can be that delete caught midway (issue #3481).
+            await self._refuse_if_pruned(fs_handle, staging, expected_base)
             raise IncompleteTransferError("no staged files to publish")
         # Content-integrity gate (issue #739): on top of the proven-complete byte
         # gate, walk the staged working set for structurally corrupt ``.mca`` region
@@ -733,22 +744,25 @@ class FsStorage(Storage):
         # (last-known-good, #703). The single region rule set (issue #927): a
         # non-4096-aligned tail is the normal on-disk shape of a 26.x world, not a
         # tear, on any source — the byte-precise check still catches realistic tears.
-        report = await asyncio.to_thread(check_working_set, staging)
+        async with self._refusing_pruned_staging(fs_handle, staging, expected_base):
+            report = await asyncio.to_thread(check_working_set, staging)
         if not report.healthy:
             await asyncio.to_thread(_rmtree, staging)
             self._release_staging(staging)
             fs_handle.consumed = True
             raise IntegrityCheckError(report)
         try:
-            generation = await asyncio.to_thread(
-                self._publish_and_bump,
-                fs_handle.community_id,
-                fs_handle.server_id,
-                staging,
-                publisher,
-                expected_base,
-                gate_missing_regions=True,
-            )
+            # ``_publish_and_bump`` fsyncs the staged tree before it takes the lock.
+            async with self._refusing_pruned_staging(fs_handle, staging, expected_base):
+                generation = await asyncio.to_thread(
+                    self._publish_and_bump,
+                    fs_handle.community_id,
+                    fs_handle.server_id,
+                    staging,
+                    publisher,
+                    expected_base,
+                    gate_missing_regions=True,
+                )
         except (StaleGenerationError, MissingRegionsError):
             # StaleGenerationError: the store advanced past the guard's base during
             # the upload window (issue #899). MissingRegionsError: the staged set lost
@@ -764,6 +778,48 @@ class FsStorage(Storage):
         self._release_staging(staging)
         fs_handle.consumed = True
         return generation
+
+    @contextlib.asynccontextmanager
+    async def _refusing_pruned_staging(
+        self, fs_handle: _FsSnapshotHandle, staging: Path, expected_base: int | None
+    ) -> AsyncIterator[None]:
+        """Name a lock-free step's vanished staging as the delete that removed it.
+
+        A ``FileNotFoundError`` from a step that reads the upload's spool or staging
+        becomes :class:`PrunedStoreError` when a prune ran (issue #3481); any other
+        missing file propagates unchanged.
+        """
+
+        try:
+            yield
+        except FileNotFoundError:
+            await self._refuse_if_pruned(fs_handle, staging, expected_base)
+            raise
+
+    async def _refuse_if_pruned(
+        self, fs_handle: _FsSnapshotHandle, staging: Path, expected_base: int | None
+    ) -> None:
+        """Raise :class:`PrunedStoreError` if a prune ran since ``expected_base``.
+
+        The delete wins: whatever an in-flight step recreated under the staging is
+        discarded, the staging lease is released and the handle is consumed, so the
+        edge answers without an abort. ``expected_base=None`` never matches.
+        """
+
+        if expected_base is None:
+            return
+        pruned = await asyncio.to_thread(
+            self._pruned_generation,
+            fs_handle.community_id,
+            fs_handle.server_id,
+            expected_base,
+        )
+        if pruned is None:
+            return
+        await asyncio.to_thread(_rmtree, staging)
+        self._release_staging(staging)
+        fs_handle.consumed = True
+        raise PrunedStoreError(expected_base, pruned)
 
     def _pruned_generation(
         self, community_id: CommunityId, server_id: ServerId, expected_base: int
