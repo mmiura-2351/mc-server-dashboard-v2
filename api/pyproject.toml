@@ -138,7 +138,7 @@ build-backend = "hatchling.build"
 
 [tool.uv]
 # Match Docker and CI to preserve the lock format when re-locking (#3320).
-required-version = "==0.13.0"
+required-version = "==0.13.5"
 # Security override: force setuptools past PYSEC-2026-3447 (fixed in 83.0.0).
 # setuptools is transitive (via grpcio-tools), so it is pinned here as a
 # resolution constraint rather than a direct dependency. Security fixes bypass
