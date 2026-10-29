@@ -99,6 +99,9 @@ from mc_server_dashboard_api.servers.application.command_dispatch import (
 from mc_server_dashboard_api.servers.application.groups import (
     regenerate_pending_group_files,
 )
+from mc_server_dashboard_api.servers.application.stop_convergence import (
+    StopConvergenceGuard,
+)
 from mc_server_dashboard_api.servers.application.stop_dispatch_refusals import (
     StopDispatchRefusals,
 )
@@ -266,6 +269,58 @@ async def _load(
     if server is None or server.community_id != community_id:
         raise ServerNotFoundError(str(server_id.value))
     return server
+
+
+def stopped_intent_action(server: Server, control_plane: ControlPlane) -> str | None:
+    """The convergence a ``desired=stopped`` row is owed, or ``None`` for none.
+
+    ``"redispatch_stop"`` or ``"clear_stale_assignment"`` — the :class:`StopServer`
+    method that converges the row. The one selection both callers share: the
+    reconciler, which runs it once the row's grace has lapsed, and an operator
+    stop of an already-stopped-intent row (issue #3491), which runs it now.
+    """
+
+    # The reconciler's list_reconcilable returns observed=running (stop never
+    # delivered), observed=stopped+assigned (a stop wedged mid final-snapshot,
+    # issue #847 bug 2), observed=unknown+assigned (a stop interrupted
+    # mid-flight, issue #1599), observed=crashed+assigned (the process died
+    # on its own under a stop intent, issue #2439), and
+    # observed=stopping+assigned (a stop whose dispatch failed after the worker
+    # emitted stopping, issue #2452).
+    if server.assigned_worker_id is None:
+        return None
+    if server.observed_state in (ObservedState.STOPPED, ObservedState.CRASHED):
+        # The process is gone either way, so the owed work is the RELEASE half
+        # of the stop path, not another stop dispatch: re-drive the final
+        # snapshot (if the Worker is connected, issues #1004/#2439) then clear
+        # the assignment. It runs even when the Worker is gone — the snapshot is
+        # skipped but the clear proceeds, exactly the crash case it recovers.
+        # A stop dispatch would only take the long way round for
+        # observed=crashed: the Worker forgot the crashed instance, so it
+        # answers SERVER_NOT_FOUND — which since issue #2448 runs this same
+        # snapshot-then-release leg rather than dropping the crash-window world.
+        return "clear_stale_assignment"
+    if server.observed_state in (ObservedState.UNKNOWN, ObservedState.STOPPING):
+        # Issue #1599 (unknown): an API restart or worker disconnect interrupted
+        # a stop mid-flight. Issue #2452 (stopping): the stop's DISPATCH failed
+        # after the worker emitted stopping on entry to its Stop, and neither of
+        # the worker's Stop failure paths emits again, so no terminal report
+        # follows. Both leave a wedge whose owed work is the same: if the worker
+        # is connected, redispatch the stop — for #2452 that retries the stop for
+        # real (reaching the orphan branch of the worker's takeStoppableReserve,
+        # which is also what retires the worker-side orphan record). If the
+        # worker is gone there is nobody to command, so clear the assignment
+        # (DB-only, same as the stopped wedge) — for #2452 that also converges
+        # observed to unknown, so the released row is at rest instead of
+        # stranded at (stopped, stopping, unassigned). No final snapshot on
+        # either: the process may still be alive, so there is no settled
+        # working set.
+        if not control_plane.is_worker_connected(worker_id=server.assigned_worker_id):
+            return "clear_stale_assignment"
+        return "redispatch_stop"
+    if not control_plane.is_worker_connected(worker_id=server.assigned_worker_id):
+        return None
+    return "redispatch_stop"
 
 
 @dataclass(frozen=True)
@@ -1213,26 +1268,60 @@ class StopServer:
     # sites that never reach the reconciler need not wire it; an unwired site simply
     # records into a journal nobody reads, and the replay keeps the full grace.
     stop_refusals: StopDispatchRefusals = field(default_factory=StopDispatchRefusals)
+    # The per-server exclusion every snapshot-then-release flow holds (issue #3491,
+    # ``stop_convergence.py``). Process-wide in production — every construction
+    # site wires the one app-state instance; the private default only serves the
+    # call sites (unit tests) that never run two flows at once.
+    stop_convergence: StopConvergenceGuard = field(default_factory=StopConvergenceGuard)
 
     async def __call__(
         self, *, community_id: CommunityId, server_id: ServerId, force: bool = False
     ) -> Server:
+        # Held from before the desired flip to the release, so a stop that finds
+        # another stop convergence in flight for the server refuses (409) without
+        # flipping, dispatching or releasing anything (issue #3491).
+        with self.stop_convergence.claim(server_id):
+            return await self._stop(
+                community_id=community_id, server_id=server_id, force=force
+            )
+
+    async def _stop(
+        self, *, community_id: CommunityId, server_id: ServerId, force: bool
+    ) -> Server:
+        owed: str | None = None
         async with self.uow:
             server = await _load(self.uow, community_id, server_id)
             if server.desired_state is DesiredState.STOPPED:
-                raise InvalidLifecycleTransitionError(str(server_id.value))
-            if server.assigned_worker_id is None:
-                # Desired-running with no assigned Worker is inconsistent; there
-                # is nothing to command. Treat as a transition conflict.
-                raise InvalidLifecycleTransitionError(str(server_id.value))
-            worker_id = server.assigned_worker_id
-            applied = await _mark_stopped(self.uow, server, at=self.clock.now())
-            if not applied:
-                # A concurrent transition already moved the row out of running.
-                # Abort before dispatch or the placement-load decrement so the
-                # lost race does not double-decrement the count (FR-SRV-2).
-                raise LifecycleTransitionConflictError(str(server_id.value))
-            await self.uow.commit()
+                # Already a stop intent (issue #3491): the convergence the
+                # reconciler runs for this row once its grace lapses, run now.
+                owed = stopped_intent_action(server, self.control_plane)
+                if owed is None:
+                    raise InvalidLifecycleTransitionError(str(server_id.value))
+            else:
+                if server.assigned_worker_id is None:
+                    # Desired-running with no assigned Worker is inconsistent; there
+                    # is nothing to command. Treat as a transition conflict.
+                    raise InvalidLifecycleTransitionError(str(server_id.value))
+                worker_id = server.assigned_worker_id
+                applied = await _mark_stopped(self.uow, server, at=self.clock.now())
+                if not applied:
+                    # A concurrent transition already moved the row out of running.
+                    # Abort before dispatch or the placement-load decrement so the
+                    # lost race does not double-decrement the count (FR-SRV-2).
+                    raise LifecycleTransitionConflictError(str(server_id.value))
+                await self.uow.commit()
+
+        if owed == "redispatch_stop":
+            # The same replay the reconciler sends, with the operator's ``force``.
+            # The desired flip, and with it the placement-load decrement, already
+            # happened on the stop that set this intent, so neither is repeated.
+            return await self._redispatch_stop(
+                community_id=community_id, server_id=server_id, force=force
+            )
+        if owed == "clear_stale_assignment":
+            return await self._clear_stale_assignment(
+                community_id=community_id, server_id=server_id
+            )
 
         # Decrement the placement load symmetrically with StartServer's
         # increment, right after desired flips to stopped. This keeps the
@@ -1424,8 +1513,10 @@ class StopServer:
         # ``record_observed_state`` UPDATE, so a dropped write no longer drops the
         # unassign with it).
         if not upload_may_be_live:
-            await asyncio.shield(
-                self._clear_held_assignment(server, worker_id, server_id)
+            # Shielded through the guard (issue #3491), so a cancelled caller's
+            # release keeps the server in flight until it lands.
+            await self.stop_convergence.shield(
+                server_id, self._clear_held_assignment(server, worker_id, server_id)
             )
 
     async def _release_after_final_snapshot(
@@ -1547,8 +1638,10 @@ class StopServer:
             worker_id=worker_id, community_id=community_id, server_id=server_id
         )
         if at_rest_under_us and not upload_may_be_live:
-            await asyncio.shield(
-                self._clear_held_assignment(server, worker_id, server_id)
+            # Shielded through the guard (issue #3491), so a cancelled caller's
+            # release keeps the server in flight until it lands.
+            await self.stop_convergence.shield(
+                server_id, self._clear_held_assignment(server, worker_id, server_id)
             )
 
     async def _clear_held_assignment(
@@ -1674,7 +1767,21 @@ class StopServer:
         return False
 
     async def redispatch_stop(
-        self, *, community_id: CommunityId, server_id: ServerId
+        self, *, community_id: CommunityId, server_id: ServerId, force: bool = False
+    ) -> Server:
+        """``_redispatch_stop`` under the server's stop-convergence exclusion.
+
+        Raises ``LifecycleTransitionConflictError`` without dispatching when another
+        stop convergence for the server is in flight (issue #3491).
+        """
+
+        with self.stop_convergence.claim(server_id):
+            return await self._redispatch_stop(
+                community_id=community_id, server_id=server_id, force=force
+            )
+
+    async def _redispatch_stop(
+        self, *, community_id: CommunityId, server_id: ServerId, force: bool
     ) -> Server:
         """Re-send the stop command to an assigned, desired-stopped server.
 
@@ -1687,6 +1794,10 @@ class StopServer:
         to the crash and is rebuilt from the authoritative tally on reconnect — so
         decrementing again would drive the count below the true running total. A
         failed dispatch raises so the caller retries on a later tick.
+
+        An operator stop of the same row runs this too, without the reconciler's
+        grace wait (issue #3491); ``force`` is that caller's, the reconciler's
+        replay is always graceful.
 
         On a CONFIRMED stop (success, or SERVER_NOT_FOUND meaning no live instance
         remains) the final snapshot is taken and THEN the assignment is cleared, so
@@ -1706,7 +1817,7 @@ class StopServer:
 
         self.stop_refusals.forget(server_id)
         outcome = await self.control_plane.stop(
-            worker_id=worker_id, server_id=server_id
+            worker_id=worker_id, server_id=server_id, force=force
         )
         if not outcome.success and outcome.status is not CommandStatus.SERVER_NOT_FOUND:
             # Keep the verdict current across the reconciler's own retries (issue
@@ -1743,6 +1854,20 @@ class StopServer:
         return server
 
     async def clear_stale_assignment(
+        self, *, community_id: CommunityId, server_id: ServerId
+    ) -> Server:
+        """``_clear_stale_assignment`` under the stop-convergence exclusion.
+
+        Raises ``LifecycleTransitionConflictError`` without dispatching or releasing
+        when another stop convergence for the server is in flight (issue #3491).
+        """
+
+        with self.stop_convergence.claim(server_id):
+            return await self._clear_stale_assignment(
+                community_id=community_id, server_id=server_id
+            )
+
+    async def _clear_stale_assignment(
         self, *, community_id: CommunityId, server_id: ServerId
     ) -> Server:
         """Release a stop wedged at (stopped, stopped|unknown|crashed|stopping,
@@ -1975,6 +2100,44 @@ class StopServer:
         return server
 
     async def clear_assignment_after_late_snapshot(
+        self,
+        *,
+        server_id: ServerId,
+        worker_id: WorkerId,
+        succeeded: bool,
+        message: str | None,
+    ) -> None:
+        """``_clear_assignment_after_late_snapshot``, unless anything is in flight.
+
+        The late result is of a snapshot whose flow has already given up its
+        claim, and the control plane consumed the snapshot's command record before
+        this runs. If the server is still in flight — another flow's claim, a
+        shielded release, or another outstanding final snapshot — then some other
+        upload over the same scratch may be unsettled, and only its own settling
+        (or a later reconciler tick) may release the assignment (issue #3491).
+        This result is then logged and dropped, not waited on, since it arrives on
+        the Worker's inbound stream. Otherwise the release runs under a claim, so
+        no flow starts mid-way.
+        """
+
+        if self.stop_convergence.in_flight(server_id):
+            _LOG.info(
+                "late final-snapshot result for server %s from worker %s left "
+                "unapplied: another stop convergence or final snapshot for the "
+                "server is still in flight, and it decides the release (issue #3491)",
+                server_id.value,
+                worker_id.value,
+            )
+            return
+        with self.stop_convergence.claim(server_id):
+            await self._clear_assignment_after_late_snapshot(
+                server_id=server_id,
+                worker_id=worker_id,
+                succeeded=succeeded,
+                message=message,
+            )
+
+    async def _clear_assignment_after_late_snapshot(
         self,
         *,
         server_id: ServerId,

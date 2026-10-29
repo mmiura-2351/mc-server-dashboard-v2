@@ -259,7 +259,11 @@ describe("DashboardPage permission-gated actions", () => {
   it("disables an action that does not apply to the current state", async () => {
     // Stopped server: stop does not apply even though it is permitted.
     mockApi.get.mockResolvedValue([
-      server({ observed_state: "stopped", desired_state: "stopped" }),
+      server({
+        observed_state: "stopped",
+        desired_state: "stopped",
+        assigned_worker_id: null,
+      }),
     ]);
     renderPage();
 
@@ -449,6 +453,41 @@ describe("DashboardPage lifecycle actions", () => {
     for (const button of restartButtons) {
       expect(button).toBeDisabled();
     }
+  });
+
+  // A drained server keeps running under a stopped intent until stopped; the
+  // API's stop converges it now while a Worker is still assigned, and 409s
+  // once none is (issue #3491).
+  it("enables Stop under a stopped intent exactly while a worker is assigned", async () => {
+    mockApi.get.mockResolvedValue([
+      server({
+        id: "s1",
+        name: "alpha",
+        observed_state: "running",
+        desired_state: "stopped",
+      }),
+      server({
+        id: "s2",
+        name: "bravo",
+        observed_state: "running",
+        desired_state: "stopped",
+        assigned_worker_id: null,
+      }),
+    ]);
+    renderPage();
+
+    const alpha = (await screen.findByText("alpha")).closest(
+      ".server-card",
+    ) as HTMLElement;
+    const bravo = screen
+      .getByText("bravo")
+      .closest(".server-card") as HTMLElement;
+    expect(
+      within(alpha).getByRole("button", { name: t("dashboard.stop") }),
+    ).toBeEnabled();
+    expect(
+      within(bravo).getByRole("button", { name: t("dashboard.stop") }),
+    ).toBeDisabled();
   });
 
   it("drives only the clicked row through the optimistic lifecycle", async () => {

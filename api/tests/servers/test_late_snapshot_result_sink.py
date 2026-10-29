@@ -29,6 +29,9 @@ from mc_server_dashboard_api.servers.adapters import (
 from mc_server_dashboard_api.servers.adapters.late_snapshot_result_sink import (
     ServersLateSnapshotResultSink,
 )
+from mc_server_dashboard_api.servers.application.stop_convergence import (
+    StopConvergenceGuard,
+)
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -52,7 +55,10 @@ def _exploding_factory() -> NoReturn:  # pragma: no cover - asserts it never ope
 def _sink() -> ServersLateSnapshotResultSink:
     factory = cast(async_sessionmaker[AsyncSession], _exploding_factory)
     return ServersLateSnapshotResultSink(
-        factory, control_plane=FakeControlPlane(), clock=FakeClock(_NOW)
+        factory,
+        control_plane=FakeControlPlane(),
+        clock=FakeClock(_NOW),
+        stop_convergence=StopConvergenceGuard(),
     )
 
 

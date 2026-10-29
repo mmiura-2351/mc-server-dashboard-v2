@@ -188,6 +188,11 @@ type Container struct {
 	// Labels are the container's labels, the ones labels() attached at create.
 	// The sweep reads the Minecraft version from them (issue #3116).
 	Labels map[string]string
+	// WorkingDir is the host directory bind-mounted at the container's working
+	// directory (containerWorkDir): the server's working set, whose world the sweep
+	// watches while it stops the container (issue #3445). Empty when the container
+	// has no such mount.
+	WorkingDir string
 }
 
 // ContainerInfo is the subset of a container inspection the driver needs to

@@ -356,6 +356,32 @@ func TestEngineClientHandOffReturnsOnceTheDaemonHasTheRequest(t *testing.T) {
 	}
 }
 
+// The sweep watches an orphan's world while it stops it (issue #3445), so List
+// carries the host directory bind-mounted at the container's working directory,
+// and nothing for a container without that mount.
+func TestEngineClientListReadsTheWorkingDirMount(t *testing.T) {
+	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{"Id": "a", "Names": []string{"/mcsd-s1"}, "State": "running", "Mounts": []map[string]any{
+				{"Type": "volume", "Source": "/var/lib/docker/volumes/x", "Destination": "/cache"},
+				{"Type": "bind", "Source": "/scratch/s1", "Destination": containerWorkDir},
+			}},
+			{"Id": "b", "Names": []string{"/mcsd-s2"}, "State": "running", "Mounts": []map[string]any{
+				{"Type": "volume", "Source": "/var/lib/docker/volumes/y", "Destination": containerWorkDir},
+			}},
+		})
+	})
+	c := d.client(t)
+
+	got, err := c.List(context.Background(), labelWorkerID, "w1")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(got) != 2 || got[0].WorkingDir != "/scratch/s1" || got[1].WorkingDir != "" {
+		t.Fatalf("List = %+v, want s1's bind at %s and nothing for s2's volume", got, containerWorkDir)
+	}
+}
+
 func TestEngineClientListFiltersByLabel(t *testing.T) {
 	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode([]map[string]any{
