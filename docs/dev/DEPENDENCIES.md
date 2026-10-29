@@ -212,7 +212,7 @@ version updates only; security updates bypass it per Section 3.
 `versioning-strategy: increase`, so version updates raise the lower bound when
 necessary instead of only widening an upper cap. The `dependabot-uv-lock`
 workflow (`.github/workflows/dependabot-uv-lock.yml`) then regenerates the lock
-with exact uv 0.13.0 through `scripts/refresh_python_lock.py`. Ordinary updates
+with exact uv 0.13.5 through `scripts/refresh_python_lock.py`. Ordinary updates
 apply the resolver cutoff in Section 3; advisory-driven security updates reuse
 the merge gate's security classification and bypass it. The helper runs updater
 code from the PR's trusted base revision against the PR manifests, and pushes
@@ -241,7 +241,7 @@ secrets** as well (Settings > Secrets and variables > Dependabot).
 
 Native Dependabot uv version and security updates exist. The 2026-10-21
 investigation found that the public updater uses uv 0.12.18/0.12.19 and fails
-this project's exact uv 0.13.0 requirement (owner-authorized fallback in #2807).
+the project's then-required exact uv 0.13.0 (owner-authorized fallback in #2807).
 Hosted updater selection was not observed.
 Retain pip plus the exact-version helper until a native update with the required
 version and compatible lock output has been demonstrated. Recognizing native

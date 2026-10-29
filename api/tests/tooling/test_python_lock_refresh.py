@@ -111,7 +111,7 @@ def project(tmp_path: Path) -> Iterator[Path]:
     project.mkdir()
     (project / "pyproject.toml").write_text(
         '[project]\nname="fixture"\nversion="0"\nrequires-python=">=3.11"\n'
-        'dependencies=["direct>=1,<2"]\n[tool.uv]\nrequired-version="==0.13.0"\n'
+        'dependencies=["direct>=1,<2"]\n[tool.uv]\nrequired-version="==0.13.5"\n'
         "[[tool.uv.index]]\ndefault=true\n"
         f'url="http://127.0.0.1:{server.server_port}/simple"\n'
     )
