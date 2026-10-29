@@ -464,7 +464,11 @@ describe("ServerDetailPage lifecycle controls", () => {
 
   it("shows start (only) on a stopped server", async () => {
     mockApi.get.mockResolvedValue(
-      server({ observed_state: "stopped", desired_state: "stopped" }),
+      server({
+        observed_state: "stopped",
+        desired_state: "stopped",
+        assigned_worker_id: null,
+      }),
     );
     renderPage();
 
@@ -472,6 +476,34 @@ describe("ServerDetailPage lifecycle controls", () => {
     expect(
       screen.getByRole("button", { name: t("serverDetail.start") }),
     ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Stop/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  // A drained server keeps running under a stopped intent; the API's stop
+  // converges it now while a Worker is still assigned (issue #3491).
+  it("offers Stop for a server still running under a stopped intent", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ observed_state: "running", desired_state: "stopped" }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    expect(screen.getByRole("button", { name: /Stop/ })).toBeEnabled();
+  });
+
+  it("hides Stop under a stopped intent once no worker is assigned", async () => {
+    mockApi.get.mockResolvedValue(
+      server({
+        observed_state: "running",
+        desired_state: "stopped",
+        assigned_worker_id: null,
+      }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
     expect(
       screen.queryByRole("button", { name: /Stop/ }),
     ).not.toBeInTheDocument();
@@ -2648,7 +2680,11 @@ describe("ServerDetailPage Overview live streams", () => {
   // banner keeps sending the operator to it.
   it("keeps the Restart guidance for a crash under a stopped intent", async () => {
     mockApi.get.mockResolvedValue(
-      server({ observed_state: "crashed", desired_state: "stopped" }),
+      server({
+        observed_state: "crashed",
+        desired_state: "stopped",
+        assigned_worker_id: null,
+      }),
     );
     renderPage();
     await screen.findByText("survival");

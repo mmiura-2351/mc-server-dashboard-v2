@@ -390,6 +390,34 @@ whether the Worker still holds a working set at least as fresh as the store:
 Until the restart, a `start` answers `409 invalid_transition`, because the intent
 already is running. To bring the server back sooner, stop it and start it again.
 
+The stop side needs no such detour. A server whose intent is already stopped but
+which is still assigned to a Worker — a drained Worker's server still running, or
+a stop left half-done (`stopping`, `unknown`, or `stopped`/`crashed` still
+assigned) — accepts an operator `stop`: it runs that server's reconciler action
+at once instead of after the grace window, re-sending the stop (honouring
+`?force=true`) or taking the final snapshot and releasing the Worker. A server
+with no Worker assigned, or one still running on a Worker that is disconnected
+(the reconnect owns it), has nothing to converge, and its `stop` answers
+`409 invalid_transition`. Skipping the wait means two stop flows for one server
+could otherwise overlap — the original stop's final snapshot, another operator
+stop, the reconciler, the late result of an abandoned snapshot — and one flow's
+snapshot outcome must never release the Worker while another flow's upload is
+still running. So a server's stop convergence counts as in flight while a stop
+flow is running for it, while a release one started is still landing (even after
+its caller was cancelled), or while a final snapshot of it still awaits its
+result (even one whose caller gave up). A `stop` that finds it in flight answers
+`409 transition_conflict` without doing anything, and the reconciler skips the
+server for that tick. A late snapshot result releases only if nothing else is in
+flight; otherwise whatever is still in flight, or a later tick, converges the
+server. A final snapshot stops counting once its result arrives, or once the
+Worker's session ends or is replaced by a reconnect, so a result lost with a
+session still leaves the reconciler free to converge. The Worker bounds the
+snapshot's upload (`transfer_deadline`, CONTROL_PLANE.md Section 5.2) but not the
+packing before it, so a Worker that stays connected but never finishes packing
+keeps the server in flight until its session ends. The tracking is in-process,
+which suffices because the API is a single instance (REQUIREMENTS.md
+NFR-SCALE-1).
+
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
 | `reconciler.interval_seconds` | `60` | | Loop resolution: how often the reconciler scans for diverged servers. Must be positive. |
