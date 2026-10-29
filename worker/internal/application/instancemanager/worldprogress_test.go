@@ -58,6 +58,24 @@ func TestStartedSpecCarriesTheWorldProgressProbe(t *testing.T) {
 	}
 }
 
+// The startup Sweep runs before any Manager exists and watches an orphan's world
+// with the same probe (issue #3445): WorldProgress fingerprints the region files
+// under the working set it is given.
+func TestWorldProgressFingerprintsAWorkingSetWithoutAManager(t *testing.T) {
+	root := t.TempDir()
+	probe := WorldProgress(root)
+
+	empty, err := probe()
+	if err != nil || empty.Files != 0 {
+		t.Fatalf("probe over a world with no region file = %+v, %v; want no files", empty, err)
+	}
+	settleWrite(t, filepath.Join(root, "world", "region", "r.0.0.mca"), "chunk")
+	written, err := probe()
+	if err != nil || written.Files != 1 || written.Bytes != int64(len("chunk")) {
+		t.Fatalf("probe after a region file was written = %+v, %v; want 1 file of %d bytes", written, err, len("chunk"))
+	}
+}
+
 // A scan that cannot finish is reported, not papered over with a fingerprint the
 // driver would read as "nothing written".
 func TestWorldProgressReportsAFailedScan(t *testing.T) {

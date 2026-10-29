@@ -3,9 +3,12 @@ package instancemanager
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -904,6 +907,192 @@ func TestFailedStopSaveOnDialFailureStillReturnsStopFailure(t *testing.T) {
 	retry := m.Handle(context.Background(), session.Command{CommandID: "stop2", ServerID: s1, Kind: "StopServer"})
 	if !retry.Success {
 		t.Fatalf("retry stop = %+v, want success (orphan must still be reachable)", retry)
+	}
+}
+
+// autoSaveDisabledErrors returns the ERROR records claiming a server is running
+// with auto-save disabled.
+func autoSaveDisabledErrors(h *syncSlogHandler) []slog.Record {
+	var out []slog.Record
+	for _, r := range h.snapshot() {
+		if r.Level == slog.LevelError && strings.Contains(r.Message, "auto-save disabled") {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// A failed graceful stop whose flush could not dial RCON never sent save-off, so
+// auto-save was never disabled: there is nothing to restore, and an ERROR saying
+// the survivor runs with auto-save disabled would be false (issue #3485).
+func TestFailedStopWhoseFlushNeverDialedSkipsTheRestore(t *testing.T) {
+	d := &flushOrphanDriver{stopAfter: 1}
+	var dials atomic.Int32
+	h := &syncSlogHandler{}
+	m := New(map[string]execution.ExecutionDriver{"container": d}, t.TempDir(), regionfsck.Checker{},
+		func(_ context.Context, _, _, _ string) (execution.ServerControl, error) {
+			dials.Add(1)
+			return nil, errors.New("rcon unreachable")
+		}).WithLogger(slog.New(h))
+	m.settlePollInterval = 0
+	closeWithTest(t, m)
+
+	seedScratch(t, m, s1)
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	if res := m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"}); res.Success {
+		t.Fatalf("stop = %+v, want failure", res)
+	}
+
+	if got := dials.Load(); got != 1 {
+		t.Fatalf("rcon dials = %d, want 1 (the flush only): no save-off was sent, so no restore may be attempted", got)
+	}
+	if recs := autoSaveDisabledErrors(h); len(recs) != 0 {
+		t.Fatalf("logged %v, want no auto-save-disabled ERROR: save-off was never sent", recs)
+	}
+}
+
+// A failed graceful stop whose save-off was sent and acknowledged, and whose
+// restore then cannot reach the server, still reports the survivor as running with
+// auto-save disabled: that is the case the ERROR exists for (issues #2021, #3485).
+func TestFailedStopWhoseSaveOffLandedLogsTheErrorWhenTheRestoreFails(t *testing.T) {
+	d := &flushOrphanDriver{stopAfter: 1}
+	var dials atomic.Int32
+	h := &syncSlogHandler{}
+	m := New(map[string]execution.ExecutionDriver{"container": d}, t.TempDir(), regionfsck.Checker{},
+		func(_ context.Context, _, _, _ string) (execution.ServerControl, error) {
+			if dials.Add(1) == 1 {
+				return &fakeControl{reply: "ok"}, nil
+			}
+			return nil, errors.New("rcon unreachable")
+		}).WithLogger(slog.New(h))
+	m.settlePollInterval = 0
+	closeWithTest(t, m)
+
+	seedScratch(t, m, s1)
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	if res := m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"}); res.Success {
+		t.Fatalf("stop = %+v, want failure", res)
+	}
+
+	if got := dials.Load(); got != 2 {
+		t.Fatalf("rcon dials = %d, want 2 (the flush, then the restore)", got)
+	}
+	if recs := autoSaveDisabledErrors(h); len(recs) != 1 {
+		t.Fatalf("auto-save-disabled ERRORs = %v, want exactly one: save-off landed and the restore failed", recs)
+	}
+}
+
+// A save-off that was written but whose reply was lost may still have run, so a
+// failed stop after it must restore auto-save exactly as after an acknowledged one
+// (issues #3310, #3485).
+func TestFailedStopWhoseSaveOffReplyWasLostRestoresAutoSave(t *testing.T) {
+	d := &flushOrphanDriver{stopAfter: 1}
+	var seq []string
+	var dials atomic.Int32
+	m := New(map[string]execution.ExecutionDriver{"container": d}, t.TempDir(), regionfsck.Checker{},
+		func(_ context.Context, _, _, _ string) (execution.ServerControl, error) {
+			if dials.Add(1) == 1 {
+				// The fake records the line before failing: the command went out and
+				// its reply was lost, which poisons the connection.
+				return &fakeControl{reply: "ok", seq: &seq, poison: true,
+					failLines: map[string]error{"save-off": errors.New("reply lost")}}, nil
+			}
+			return &fakeControl{reply: "ok", seq: &seq}, nil
+		})
+	m.settlePollInterval = 0
+	closeWithTest(t, m)
+
+	seedScratch(t, m, s1)
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	if res := m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"}); res.Success {
+		t.Fatalf("stop = %+v, want failure", res)
+	}
+
+	if len(seq) == 0 || seq[len(seq)-1] != "save-on" {
+		t.Fatalf("rcon lines = %v, want save-on last: a save-off whose reply was lost may have disabled auto-save", seq)
+	}
+}
+
+// scriptedDials is an openControl whose n-th dial is reachable when steps[n] is
+// true; dials past the script repeat its last step. Reachable controls record
+// their lines into seq.
+type scriptedDials struct {
+	mu    sync.Mutex
+	steps []bool
+	n     int
+	seq   []string
+}
+
+func (s *scriptedDials) open(context.Context, string, string, string) (execution.ServerControl, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	step := s.steps[min(s.n, len(s.steps)-1)]
+	s.n++
+	if !step {
+		return nil, errors.New("rcon unreachable")
+	}
+	return &fakeControl{reply: "ok", seq: &s.seq}, nil
+}
+
+func (s *scriptedDials) lines() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.seq...)
+}
+
+// A save-off whose failed-stop restore failed is still in effect on the survivor,
+// so a retry stop must restore it even when its own flush cannot dial RCON, and
+// keep the ERROR when that restore fails too (issue #3485). The orphan may come
+// from a StopServer or from RestartServer's stop leg; both reach the same retry.
+func TestRetryStopRestoresASaveOffWhoseEarlierRestoreFailed(t *testing.T) {
+	for _, origin := range []string{"StopServer", "RestartServer"} {
+		for _, reachable := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/restore_reachable=%t", origin, reachable), func(t *testing.T) {
+				// Dials: the first flush (save-off sent), its restore (fails), the
+				// retry's flush (fails), then the retry's restore.
+				dials := &scriptedDials{steps: []bool{true, false, false, reachable}}
+				d := &flushOrphanDriver{stopAfter: 2} // both stops fail
+				h := &syncSlogHandler{}
+				m := New(map[string]execution.ExecutionDriver{"container": d}, t.TempDir(), regionfsck.Checker{},
+					dials.open).WithLogger(slog.New(h))
+				m.settlePollInterval = 0
+				closeWithTest(t, m)
+
+				seedScratch(t, m, s1)
+				if res := m.Handle(context.Background(), startCmd()); !res.Success {
+					t.Fatalf("seed running instance: %+v", res)
+				}
+				if res := m.Handle(context.Background(), session.Command{CommandID: "first", ServerID: s1, Kind: origin}); res.Success {
+					t.Fatalf("%s = %+v, want failure", origin, res)
+				}
+				if res := m.Handle(context.Background(), session.Command{CommandID: "retry", ServerID: s1, Kind: "StopServer"}); res.Success {
+					t.Fatalf("retry stop = %+v, want failure", res)
+				}
+
+				dials.mu.Lock()
+				n := dials.n
+				dials.mu.Unlock()
+				if n != 4 {
+					t.Fatalf("rcon dials = %d, want 4: the retry must attempt the restore the first stop could not complete", n)
+				}
+				wantErrors := 1
+				if !reachable {
+					wantErrors = 2
+				}
+				if recs := autoSaveDisabledErrors(h); len(recs) != wantErrors {
+					t.Fatalf("auto-save-disabled ERRORs = %v, want %d", recs, wantErrors)
+				}
+				if lines := dials.lines(); reachable && (len(lines) == 0 || lines[len(lines)-1] != "save-on") {
+					t.Fatalf("rcon lines = %v, want save-on last once RCON is back", lines)
+				}
+			})
+		}
 	}
 }
 

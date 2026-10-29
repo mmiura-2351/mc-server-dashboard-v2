@@ -43,6 +43,7 @@ from mc_server_dashboard_api.dependencies import (
 from mc_server_dashboard_api.servers.application.lifecycle import (
     SendServerCommand,
     StartServer,
+    StopServer,
 )
 from mc_server_dashboard_api.servers.domain.control_plane import (
     MAX_CONSOLE_LINE_BYTES,
@@ -420,6 +421,72 @@ def test_stop_force_true_forwards_to_use_case() -> None:
     resp = client.post(_url(community, uuid.uuid4(), "stop"), params={"force": "true"})
     assert resp.status_code == 200
     assert stop.kwargs["force"] is True
+
+
+# --- stop of a row already desired=stopped (issue #3491) ---------------------
+
+
+def _desired_stopped(
+    community: uuid.UUID, observed: ObservedState, *, assigned: bool
+) -> Server:
+    return dataclasses.replace(
+        _server(community),
+        desired_state=DesiredState.STOPPED,
+        observed_state=observed,
+        assigned_worker_id=WorkerId(uuid.uuid4()) if assigned else None,
+    )
+
+
+def _post_real_stop(server: Server, cp: FakeControlPlane) -> httpx2.Response:
+    uow = FakeUnitOfWork()
+    uow.servers.seed(server)
+    use_case = StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+    app = _app(member=True, allow=True)
+    _shared_app.dependency_overrides[get_stop_server] = lambda: use_case
+    return _client(app).post(_url(server.community_id.value, server.id.value, "stop"))
+
+
+def test_stop_on_a_drained_still_running_server_stops_it_now() -> None:
+    # A drain left (stopped, running, assigned) for the reconciler; the operator's
+    # stop no longer 409s but dispatches the stop immediately.
+    server = _desired_stopped(uuid.uuid4(), ObservedState.RUNNING, assigned=True)
+    cp = FakeControlPlane()
+
+    resp = _post_real_stop(server, cp)
+
+    assert resp.status_code == 200
+    assert [k for k, _, _ in cp.dispatched] == ["stop", "snapshot"]
+    assert resp.json()["observed_state"] == "stopped"
+    assert resp.json()["assigned_worker_id"] is None
+
+
+def test_stop_on_stopped_unknown_assigned_converges_like_the_reconciler() -> None:
+    # The Worker answers SERVER_NOT_FOUND: final snapshot, then release.
+    server = _desired_stopped(uuid.uuid4(), ObservedState.UNKNOWN, assigned=True)
+    cp = FakeControlPlane(
+        outcomes={
+            "stop": CommandOutcome(
+                status=worker_status("StopServer", "instance_stopped")
+            )
+        }
+    )
+
+    resp = _post_real_stop(server, cp)
+
+    assert resp.status_code == 200
+    assert [k for k, _, _ in cp.dispatched] == ["stop", "snapshot"]
+    assert resp.json()["assigned_worker_id"] is None
+
+
+def test_stop_on_an_unassigned_desired_stopped_server_is_still_409() -> None:
+    server = _desired_stopped(uuid.uuid4(), ObservedState.STOPPED, assigned=False)
+    cp = FakeControlPlane()
+
+    resp = _post_real_stop(server, cp)
+
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "invalid_transition"
+    assert cp.dispatched == []
 
 
 def test_restart_not_running_is_409_with_reason() -> None:

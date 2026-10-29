@@ -70,6 +70,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ObservedState,
 )
 from tests.client_utils import enter_client
+from tests.fleet.conftest import publish_burst_on_app_loop, publish_on_app_loop
 from tests.identity.fakes import make_authentication, make_user
 
 
@@ -244,7 +245,9 @@ def test_status_event_is_delivered_as_a_frame() -> None:
     client = _client(app)
     with client.websocket_connect(_url(community, server)) as ws:
         _skip_snapshot(ws)
-        bus.publish(
+        publish_on_app_loop(
+            client,
+            bus,
             server_id=str(server),
             event=RealTimeEvent(
                 stream=EventStream.STATUS, payload={"state": "running"}
@@ -263,11 +266,15 @@ def test_log_and_metrics_events_are_delivered() -> None:
     client = _client(app)
     with client.websocket_connect(_url(community, server)) as ws:
         _skip_snapshot(ws)
-        bus.publish(
+        publish_on_app_loop(
+            client,
+            bus,
             server_id=str(server),
             event=RealTimeEvent(stream=EventStream.LOG, payload={"line": "hi"}),
         )
-        bus.publish(
+        publish_on_app_loop(
+            client,
+            bus,
             server_id=str(server),
             event=RealTimeEvent(stream=EventStream.METRICS, payload={"cpu_millis": 1}),
         )
@@ -284,11 +291,15 @@ def test_streams_query_filters_delivered_events() -> None:
     client = _client(app)
     with client.websocket_connect(_url(community, server, streams="status")) as ws:
         _skip_snapshot(ws)
-        bus.publish(
+        publish_on_app_loop(
+            client,
+            bus,
             server_id=str(server),
             event=RealTimeEvent(stream=EventStream.LOG, payload={"line": "x"}),
         )
-        bus.publish(
+        publish_on_app_loop(
+            client,
+            bus,
             server_id=str(server),
             event=RealTimeEvent(
                 stream=EventStream.STATUS, payload={"state": "running"}
@@ -307,7 +318,9 @@ def test_notification_stream_is_subscribable_and_delivered() -> None:
     with client.websocket_connect(
         _url(community, server, streams="notification")
     ) as ws:
-        bus.publish(
+        publish_on_app_loop(
+            client,
+            bus,
             server_id=str(server),
             event=notification_event(
                 kind="schedule_failed",
@@ -336,18 +349,22 @@ def test_slow_consumer_receives_a_gap_frame_then_a_fresh_snapshot() -> None:
     with client.websocket_connect(_url(community, server)) as ws:
         _skip_snapshot(ws)
         read_server.state = ObservedState.RUNNING
-        for i in range(3):
-            bus.publish(
-                server_id=str(server),
-                event=RealTimeEvent(
-                    stream=EventStream.STATUS, payload={"state": str(i)}
-                ),
-            )
+        publish_burst_on_app_loop(
+            client,
+            bus,
+            server_id=str(server),
+            events=[
+                RealTimeEvent(stream=EventStream.STATUS, payload={"state": str(i)})
+                for i in range(3)
+            ],
+        )
         first = ws.receive_json()
         second = ws.receive_json()
         # The retained status frames predate the snapshot and are superseded
         # by it; live delivery resumes with the next transition.
-        bus.publish(
+        publish_on_app_loop(
+            client,
+            bus,
             server_id=str(server),
             event=RealTimeEvent(stream=EventStream.STATUS, payload={"state": "3"}),
         )
@@ -397,18 +414,19 @@ def test_buffered_status_older_than_the_post_gap_snapshot_is_discarded() -> None
     client = _client(app)
     with client.websocket_connect(_url(community, server, "status,log")) as ws:
         _skip_snapshot(ws)
-        for _ in range(2):
-            bus.publish(
-                server_id=str(server),
-                event=RealTimeEvent(
-                    stream=EventStream.STATUS, payload={"state": "running"}
-                ),
-            )
-        # The later write, as the snapshot read will see it.
+        # The later write, as the snapshot read will see it. The snapshot is
+        # read only once the burst below has overflowed the buffer.
         read_server.state = ObservedState.UNKNOWN
-        bus.publish(
+        running = RealTimeEvent(stream=EventStream.STATUS, payload={"state": "running"})
+        publish_burst_on_app_loop(
+            client,
+            bus,
             server_id=str(server),
-            event=RealTimeEvent(stream=EventStream.LOG, payload={"line": "end"}),
+            events=[
+                running,
+                running,
+                RealTimeEvent(stream=EventStream.LOG, payload={"line": "end"}),
+            ],
         )
         frames = _drain_until_log(ws, "end")
     assert "gap" in [frame["stream"] for frame in frames]
@@ -438,12 +456,18 @@ def test_gap_that_dropped_no_status_reads_no_snapshot() -> None:
     client = _client(app)
     with client.websocket_connect(_url(community, server, "status,log")) as ws:
         _skip_snapshot(ws)
-        for i in range(20):
-            bus.publish(
-                server_id=str(server),
-                event=RealTimeEvent(stream=EventStream.LOG, payload={"line": str(i)}),
-            )
-        bus.publish(
+        publish_burst_on_app_loop(
+            client,
+            bus,
+            server_id=str(server),
+            events=[
+                RealTimeEvent(stream=EventStream.LOG, payload={"line": str(i)})
+                for i in range(20)
+            ],
+        )
+        publish_on_app_loop(
+            client,
+            bus,
             server_id=str(server),
             event=RealTimeEvent(stream=EventStream.LOG, payload={"line": "end"}),
         )
@@ -461,11 +485,15 @@ def test_gap_on_a_stream_without_status_sends_no_snapshot() -> None:
     client = _client(app)
     with client.websocket_connect(_url(community, server, streams="log")) as ws:
         _await_subscribers(bus, str(server), 1)
-        for i in range(3):
-            bus.publish(
-                server_id=str(server),
-                event=RealTimeEvent(stream=EventStream.LOG, payload={"line": str(i)}),
-            )
+        publish_burst_on_app_loop(
+            client,
+            bus,
+            server_id=str(server),
+            events=[
+                RealTimeEvent(stream=EventStream.LOG, payload={"line": str(i)})
+                for i in range(3)
+            ],
+        )
         first = ws.receive_json()
         second = ws.receive_json()
     assert first["stream"] == "gap"
@@ -523,7 +551,9 @@ def test_no_snapshot_without_the_status_stream() -> None:
     client = _client(app)
     with client.websocket_connect(_url(community, server, streams="log")) as ws:
         _await_subscribers(bus, str(server), 1)
-        bus.publish(
+        publish_on_app_loop(
+            client,
+            bus,
             server_id=str(server),
             event=RealTimeEvent(stream=EventStream.LOG, payload={"line": "hi"}),
         )
@@ -599,7 +629,9 @@ def test_frame_ts_uses_worker_emitted_at() -> None:
     emitted = dt.datetime(2026, 6, 3, 12, 0, 0, tzinfo=dt.timezone.utc)
     with client.websocket_connect(_url(community, server)) as ws:
         _skip_snapshot(ws)
-        bus.publish(
+        publish_on_app_loop(
+            client,
+            bus,
             server_id=str(server),
             event=RealTimeEvent(
                 stream=EventStream.STATUS,
@@ -621,7 +653,9 @@ def test_frame_ts_falls_back_to_receive_time_when_unset() -> None:
     before = dt.datetime.now(dt.timezone.utc)
     with client.websocket_connect(_url(community, server)) as ws:
         _skip_snapshot(ws)
-        bus.publish(
+        publish_on_app_loop(
+            client,
+            bus,
             server_id=str(server),
             event=RealTimeEvent(
                 stream=EventStream.STATUS, payload={"state": "running"}
@@ -652,7 +686,9 @@ def test_frame_wire_text_is_the_exact_compact_json() -> None:
     emitted = dt.datetime(2026, 6, 3, 12, 0, 0, tzinfo=dt.timezone.utc)
     with client.websocket_connect(_url(community, server)) as ws:
         _skip_snapshot(ws)
-        bus.publish(
+        publish_on_app_loop(
+            client,
+            bus,
             server_id=str(server),
             event=RealTimeEvent(
                 stream=EventStream.LOG,
@@ -697,7 +733,9 @@ def test_frame_is_encoded_once_for_many_subscribers(
         # one's snapshot is sent only after it is.
         for ws in (ws1, ws2, ws3):
             _skip_snapshot(ws)
-        bus.publish(
+        publish_on_app_loop(
+            client,
+            bus,
             server_id=str(server),
             event=RealTimeEvent(
                 stream=EventStream.STATUS, payload={"state": "running"}
@@ -759,7 +797,9 @@ def test_omitted_streams_subscribes_to_all() -> None:
     with client.websocket_connect(url) as ws:
         _skip_snapshot(ws)
         for stream, payload in cases:
-            bus.publish(
+            publish_on_app_loop(
+                client,
+                bus,
                 server_id=str(server),
                 event=RealTimeEvent(stream=stream, payload=payload),
             )
@@ -813,7 +853,9 @@ def test_mid_stream_revocation_closes_with_policy_code(
         with client.websocket_connect(_url(community, server)) as ws:
             _skip_snapshot(ws)
             # A frame published before the flip is still delivered.
-            bus.publish(
+            publish_on_app_loop(
+                client,
+                bus,
                 server_id=str(server),
                 event=RealTimeEvent(
                     stream=EventStream.STATUS, payload={"state": "running"}
@@ -867,7 +909,9 @@ def test_mid_stream_revocation_closes_despite_busy_stream(
             # timeout would reset on every iteration. The client reads each frame
             # so the server loop progresses without send-buffer back-pressure.
             for i in range(30):
-                bus.publish(
+                publish_on_app_loop(
+                    client,
+                    bus,
                     server_id=str(server),
                     event=RealTimeEvent(
                         stream=EventStream.STATUS, payload={"state": str(i)}
@@ -901,7 +945,9 @@ def test_deactivated_user_is_closed_4401_at_the_next_reauthorization(
             _skip_snapshot(ws)
             # Several re-authorizations pass while the account is active.
             time.sleep(0.2)
-            bus.publish(
+            publish_on_app_loop(
+                client,
+                bus,
                 server_id=str(server),
                 event=RealTimeEvent(
                     stream=EventStream.STATUS, payload={"state": "running"}
@@ -969,7 +1015,9 @@ def test_socket_closes_4419_when_the_access_token_expires(
         with client.websocket_connect(_url(community, server)) as ws:
             _skip_snapshot(ws)
             # A frame published while the token is still valid is delivered.
-            bus.publish(
+            publish_on_app_loop(
+                client,
+                bus,
                 server_id=str(server),
                 event=RealTimeEvent(
                     stream=EventStream.STATUS, payload={"state": "running"}
@@ -1019,7 +1067,9 @@ def test_token_expiry_closes_despite_busy_stream() -> None:
         with client.websocket_connect(_url(community, server)) as ws:
             _skip_snapshot(ws)
             for i in range(30):
-                bus.publish(
+                publish_on_app_loop(
+                    client,
+                    bus,
                     server_id=str(server),
                     event=RealTimeEvent(
                         stream=EventStream.STATUS, payload={"state": str(i)}
@@ -1132,7 +1182,9 @@ def test_client_sent_data_is_ignored_and_delivery_continues() -> None:
     with client.websocket_connect(_url(community, server)) as ws:
         _skip_snapshot(ws)
         ws.send_text("ping")
-        bus.publish(
+        publish_on_app_loop(
+            client,
+            bus,
             server_id=str(server),
             event=RealTimeEvent(
                 stream=EventStream.STATUS, payload={"state": "running"}

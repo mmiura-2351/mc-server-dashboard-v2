@@ -134,11 +134,17 @@ export function statePill(state: ObservedState): PillSpec {
  * Worker holds no live instance, so the API refuses it (409
  * `server_not_running`) and the reconciler restarts the server on its own
  * (issue #3419).
+ *
+ * Under a stopped intent, stop applies exactly while a Worker is still
+ * `assigned`: the API then runs the convergence the reconciler would (a drain
+ * still running, or a stop left half-done), and refuses it with no Worker
+ * (issue #3491).
  */
 export function actionApplies(
   action: "start" | "stop" | "restart",
   state: ObservedState,
   desired?: string,
+  assigned?: boolean,
 ): boolean {
   if (isTransitional(state)) {
     return false;
@@ -146,6 +152,9 @@ export function actionApplies(
   if (action === "start") {
     if (desired === "running") return false;
     return state === "stopped" || state === "crashed" || state === "unknown";
+  }
+  if (action === "stop" && desired === "stopped") {
+    return assigned === true;
   }
   // stop / restart
   if (desired === "running" && state === "unknown") {

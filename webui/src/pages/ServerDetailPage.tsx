@@ -526,7 +526,12 @@ function Controls({
             </button>
           )}
         {can("server:stop", { serverId: server.id }) &&
-          actionApplies("stop", state, desired) && (
+          actionApplies(
+            "stop",
+            state,
+            desired,
+            server.assigned_worker_id !== null,
+          ) && (
             <StopControl
               disabled={pending}
               onStop={(force) =>
