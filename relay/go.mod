@@ -12,7 +12,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/prometheus/client_golang v1.25.0
 	github.com/prometheus/client_model v0.6.3
-	github.com/quic-go/quic-go v0.63.0
+	github.com/quic-go/quic-go v0.64.1
 	google.golang.org/grpc v1.84.0
 	google.golang.org/protobuf v1.36.12
 )
