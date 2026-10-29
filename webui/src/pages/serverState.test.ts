@@ -118,6 +118,16 @@ describe("actionApplies", () => {
     expect(actionApplies("stop", "running", "running")).toBe(true);
     expect(actionApplies("restart", "running", "running")).toBe(true);
   });
+
+  // Under a stopped intent the API runs the reconciler's convergence for a row
+  // still assigned to a Worker, and refuses (409) one with no Worker (#3491).
+  it("stop under desired=stopped applies exactly while a worker is assigned", () => {
+    for (const state of ["running", "stopped", "crashed", "unknown"] as const) {
+      expect(actionApplies("stop", state, "stopped", true)).toBe(true);
+      expect(actionApplies("stop", state, "stopped", false)).toBe(false);
+    }
+    expect(actionApplies("stop", "stopping", "stopped", true)).toBe(false);
+  });
 });
 
 describe("atRest", () => {

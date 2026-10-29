@@ -3,6 +3,9 @@ package instancemanager
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -628,6 +631,456 @@ func TestFailedStopKeepsTheDebtUntilItsRestoreRan(t *testing.T) {
 	m.mu.Unlock()
 	if stillOutstanding {
 		t.Fatal("the outstanding save-off outlived the stop that settled it; a later Close would dial a server whose stop is long resolved")
+	}
+}
+
+// A failed-stop restore that fails leaves the save-off in effect on the survivor,
+// so the debt must stay in the ledger for Close to settle at shutdown (issue
+// #3485).
+func TestCloseRestoresSaveOnAfterTheFailedStopRestoreFailed(t *testing.T) {
+	rec := &saveOnRecorder{}
+	d := &flushOrphanDriver{stopAfter: 1}
+	var dials atomic.Int32
+	m := newSaveOnManager(t, d, func(ctx context.Context, serverID, driver, mcVersion string) (execution.ServerControl, error) {
+		if dials.Add(1) == 2 { // dial 1 is the flush's; dial 2 is the failed-stop restore's
+			return nil, errors.New("rcon unreachable")
+		}
+		return rec.open(ctx, serverID, driver, mcVersion)
+	})
+	closeWithTest(t, m)
+	seedScratch(t, m, s1)
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	if res := m.Handle(context.Background(),
+		session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"}); res.Success {
+		t.Fatalf("stop = %+v, want failure (driver could not confirm termination)", res)
+	}
+	if rec.hasFor(s1, "save-on") {
+		t.Fatalf("s1 rcon lines = %v, want no save-on before Close: the failed-stop restore could not dial", rec.allFor(s1))
+	}
+
+	m.Close()
+	if !rec.hasFor(s1, "save-on") {
+		t.Fatalf("s1 rcon lines = %v, want Close to restore the save-off the failed-stop restore left in effect", rec.allFor(s1))
+	}
+}
+
+// dialScript is an openControl whose n-th dial (0-based) fails with results[n]
+// (nil answers; dials past the script repeat its last entry) and, when holds[n] is
+// set, parks until that channel closes. Every dial announces its index on entered.
+type dialScript struct {
+	rec     *saveOnRecorder
+	mu      sync.Mutex
+	results []error
+	holds   map[int]chan struct{}
+	n       int
+	entered chan int
+}
+
+func newDialScript(rec *saveOnRecorder, results ...error) *dialScript {
+	return &dialScript{rec: rec, results: results, holds: map[int]chan struct{}{}, entered: make(chan int, 32)}
+}
+
+func (d *dialScript) open(_ context.Context, serverID, _, _ string) (execution.ServerControl, error) {
+	d.mu.Lock()
+	i := d.n
+	d.n++
+	err := d.results[min(i, len(d.results)-1)]
+	hold := d.holds[i]
+	d.mu.Unlock()
+	d.entered <- i
+	if hold != nil {
+		<-hold
+	}
+	if err != nil {
+		return nil, err
+	}
+	return recordedControl{rec: d.rec, serverID: serverID}, nil
+}
+
+func (d *dialScript) dials() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.n
+}
+
+// awaitDial waits until the i-th dial has been entered.
+func (d *dialScript) awaitDial(t *testing.T, i int) {
+	t.Helper()
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case got := <-d.entered:
+			if got >= i {
+				return
+			}
+		case <-deadline:
+			t.Fatalf("rcon dial %d was never entered (dials so far: %d)", i, d.dials())
+		}
+	}
+}
+
+// logged counts the records at level whose message contains substr.
+func logged(h *syncSlogHandler, level slog.Level, substr string) int {
+	n := 0
+	for _, r := range h.snapshot() {
+		if r.Level == level && strings.Contains(r.Message, substr) {
+			n++
+		}
+	}
+	return n
+}
+
+// parkedRetryInstance fails its first Stop at once and parks its second — the
+// converger's retry — after the flush, until released; both stops fail.
+type parkedRetryInstance struct {
+	*fakeInstance
+	calls        atomic.Int32
+	retryEntered chan struct{}
+	release      chan struct{}
+	releaseOnce  sync.Once
+}
+
+func (i *parkedRetryInstance) Stop(ctx context.Context, graceful bool, preFallback ...func(context.Context) bool) error {
+	if graceful && len(preFallback) > 0 && preFallback[0] != nil {
+		_ = preFallback[0](ctx)
+	}
+	if i.calls.Add(1) > 1 {
+		i.retryEntered <- struct{}{}
+		<-i.release
+	}
+	return errors.New("driver: process survived kill")
+}
+
+func (i *parkedRetryInstance) releaseRetry() { i.releaseOnce.Do(func() { close(i.release) }) }
+
+type parkedRetryDriver struct{ inst *parkedRetryInstance }
+
+func (d *parkedRetryDriver) Start(_ context.Context, spec execution.InstanceSpec) (execution.Instance, error) {
+	d.inst = &parkedRetryInstance{
+		fakeInstance: newFakeInstance(spec.ServerID),
+		retryEntered: make(chan struct{}, 1),
+		release:      make(chan struct{}),
+	}
+	return d.inst, nil
+}
+
+// Close taking a save-off out of the ledger does not settle it. The first stop's
+// save-off outlives its failed restore; the converger's retry cannot dial for its
+// flush; Close takes the entry while that retry is parked, and its restore fails.
+// The retry, which Close is still joining, must then attempt the restore itself —
+// recovering if RCON is back, reporting the ERROR if not (issue #3485).
+func TestRetryInFlightRestoresASaveOffCloseFailedToRestore(t *testing.T) {
+	for _, reachable := range []bool{true, false} {
+		t.Run(fmt.Sprintf("restore_reachable=%t", reachable), func(t *testing.T) {
+			rec := &saveOnRecorder{}
+			unreachable := errors.New("rcon unreachable")
+			last := unreachable
+			if reachable {
+				last = nil
+			}
+			// Dials: first flush (save-off), its restore, the retry's flush, Close's
+			// restore, the retry's restore.
+			dials := newDialScript(rec, nil, unreachable, unreachable, unreachable, last)
+			d := &parkedRetryDriver{}
+			h := &syncSlogHandler{}
+			m := newSaveOnManager(t, d, dials.open).WithLogger(slog.New(h))
+			shrinkOrphanConverger(m)
+			seedScratch(t, m, s1)
+			if res := m.Handle(context.Background(), startCmd()); !res.Success {
+				t.Fatalf("seed running instance: %+v", res)
+			}
+			inst := d.inst
+			t.Cleanup(func() { inst.releaseRetry(); m.Close() })
+
+			if res := m.Handle(context.Background(),
+				session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"}); res.Success {
+				t.Fatalf("stop = %+v, want failure", res)
+			}
+			awaitEnter(t, inst.retryEntered)
+
+			closed := make(chan struct{})
+			go func() { m.Close(); close(closed) }()
+			dials.awaitDial(t, 3) // Close's restore
+			inst.releaseRetry()
+			select {
+			case <-closed:
+			case <-time.After(5 * time.Second):
+				t.Fatal("Close did not return once the retry was released")
+			}
+
+			if got := dials.dials(); got != 5 {
+				t.Fatalf("rcon dials = %d, want 5: the retry must attempt the restore Close could not complete", got)
+			}
+			if n := logged(h, slog.LevelInfo, "no save-off is outstanding"); n != 0 {
+				t.Fatalf("logged %d 'no save-off is outstanding' INFOs, want none: the save-off was never restored", n)
+			}
+			laneErrors := logged(h, slog.LevelError, "failed stop: auto-save NOT restored")
+			if reachable {
+				if !rec.hasFor(s1, "save-on") {
+					t.Fatalf("s1 rcon lines = %v, want save-on once RCON is back", rec.allFor(s1))
+				}
+				if laneErrors != 1 { // the first stop's restore only
+					t.Fatalf("failed-stop ERRORs = %d, want 1 (the first stop's)", laneErrors)
+				}
+			} else if laneErrors != 2 {
+				t.Fatalf("failed-stop ERRORs = %d, want 2: the retry's restore failed too", laneErrors)
+			}
+		})
+	}
+}
+
+// awaitLogged waits until a record at level containing substr has been logged.
+func awaitLogged(t *testing.T, h *syncSlogHandler, level slog.Level, substr string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if logged(h, level, substr) > 0 {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("no %v record containing %q was logged", level, substr)
+}
+
+// The reverse outcome: Close's restore of the inherited save-off SUCCEEDS while
+// the retry is parked. That save-on settles the save-off it restored, so the
+// retry — whose stop and restore dial then fail — has nothing left to restore and
+// must not report auto-save as disabled (issue #3485).
+func TestRetryInFlightDoesNotReportASaveOffCloseRestored(t *testing.T) {
+	rec := &saveOnRecorder{}
+	unreachable := errors.New("rcon unreachable")
+	// Dials: first flush (save-off), its restore, the retry's flush, Close's
+	// restore, and anything after.
+	dials := newDialScript(rec, nil, unreachable, unreachable, nil, unreachable)
+	d := &parkedRetryDriver{}
+	h := &syncSlogHandler{}
+	m := newSaveOnManager(t, d, dials.open).WithLogger(slog.New(h))
+	shrinkOrphanConverger(m)
+	seedScratch(t, m, s1)
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	inst := d.inst
+	t.Cleanup(func() { inst.releaseRetry(); m.Close() })
+
+	if res := m.Handle(context.Background(),
+		session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"}); res.Success {
+		t.Fatalf("stop = %+v, want failure", res)
+	}
+	awaitEnter(t, inst.retryEntered)
+
+	closed := make(chan struct{})
+	go func() { m.Close(); close(closed) }()
+	awaitLogged(t, h, slog.LevelWarn, "worker closing: re-enabled auto-save")
+	if n := logged(h, slog.LevelError, "auto-save disabled"); n != 1 {
+		t.Fatalf("auto-save-disabled ERRORs before the retry resumed = %d, want 1 (the first stop's)", n)
+	}
+	inst.releaseRetry()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return once the retry was released")
+	}
+
+	if n := logged(h, slog.LevelError, "auto-save disabled"); n != 1 {
+		t.Fatalf("auto-save-disabled ERRORs = %d, want 1: none may follow Close's successful restore", n)
+	}
+}
+
+// Close's restore of the inherited save-off succeeds while the retry's own restore
+// is already dialing. When that dial then fails, the save-off it was restoring is
+// settled, so the retry must not report auto-save as disabled (issue #3485).
+func TestRetryRestoreFailingAfterCloseRestoredReportsNoDisabledAutoSave(t *testing.T) {
+	rec := &saveOnRecorder{}
+	unreachable := errors.New("rcon unreachable")
+	// Dials: first flush (save-off), its restore, the retry's flush, Close's
+	// restore (held, then answers), the retry's restore (held, then fails).
+	dials := newDialScript(rec, nil, unreachable, unreachable, nil, unreachable)
+	closeRestore, retryRestore := make(chan struct{}), make(chan struct{})
+	dials.holds[3], dials.holds[4] = closeRestore, retryRestore
+	var releaseClose, releaseRetry sync.Once
+	d := &parkedRetryDriver{}
+	h := &syncSlogHandler{}
+	m := newSaveOnManager(t, d, dials.open).WithLogger(slog.New(h))
+	m.closingSaveOnTimeout = time.Minute
+	shrinkOrphanConverger(m)
+	seedScratch(t, m, s1)
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	inst := d.inst
+	t.Cleanup(func() {
+		releaseClose.Do(func() { close(closeRestore) })
+		releaseRetry.Do(func() { close(retryRestore) })
+		inst.releaseRetry()
+		m.Close()
+	})
+
+	if res := m.Handle(context.Background(),
+		session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"}); res.Success {
+		t.Fatalf("stop = %+v, want failure", res)
+	}
+	awaitEnter(t, inst.retryEntered)
+
+	closed := make(chan struct{})
+	go func() { m.Close(); close(closed) }()
+	dials.awaitDial(t, 3) // Close's restore, held
+	inst.releaseRetry()
+	dials.awaitDial(t, 4) // the retry's restore, held
+	releaseClose.Do(func() { close(closeRestore) })
+	awaitLogged(t, h, slog.LevelWarn, "worker closing: re-enabled auto-save")
+	releaseRetry.Do(func() { close(retryRestore) })
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return once both restores were released")
+	}
+
+	if n := logged(h, slog.LevelError, "auto-save disabled"); n != 1 {
+		t.Fatalf("auto-save-disabled ERRORs = %d, want 1 (the first stop's): Close had restored auto-save before the retry's restore failed", n)
+	}
+}
+
+// An older Close success cannot settle a newer save-off. Close takes the first
+// stop's entry and dials; meanwhile the retry writes a NEWER save-off and parks.
+// Close's save-on then lands, settling only the save-off it restored, so the
+// retry's failed stop must still restore the newer one — and report the survivor
+// as running with auto-save disabled when that restore fails (issue #3485).
+func TestCloseSuccessDoesNotSettleANewerSaveOff(t *testing.T) {
+	rec := &saveOnRecorder{}
+	unreachable := errors.New("rcon unreachable")
+	// Dials: first flush (save-off), its restore, the retry's flush (held until
+	// Close has taken the older entry), Close's restore (held until the retry has
+	// written its save-off), the retry's restore, and Close's sealing pass.
+	dials := newDialScript(rec, nil, unreachable, nil, nil, unreachable)
+	retryFlush, closeRestore := make(chan struct{}), make(chan struct{})
+	dials.holds[2], dials.holds[3] = retryFlush, closeRestore
+	var releaseFlush, releaseRestore sync.Once
+	d := &parkedRetryDriver{}
+	h := &syncSlogHandler{}
+	m := newSaveOnManager(t, d, dials.open).WithLogger(slog.New(h))
+	m.closingSaveOnTimeout = time.Minute
+	shrinkOrphanConverger(m)
+	seedScratch(t, m, s1)
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	inst := d.inst
+	t.Cleanup(func() {
+		releaseFlush.Do(func() { close(retryFlush) })
+		releaseRestore.Do(func() { close(closeRestore) })
+		inst.releaseRetry()
+		m.Close()
+	})
+
+	if res := m.Handle(context.Background(),
+		session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"}); res.Success {
+		t.Fatalf("stop = %+v, want failure", res)
+	}
+	dials.awaitDial(t, 2) // the retry's flush, held
+
+	closed := make(chan struct{})
+	go func() { m.Close(); close(closed) }()
+	dials.awaitDial(t, 3) // Close's restore of the older entry, held
+	releaseFlush.Do(func() { close(retryFlush) })
+	awaitEnter(t, inst.retryEntered) // the newer save-off is written
+	releaseRestore.Do(func() { close(closeRestore) })
+	awaitLogged(t, h, slog.LevelWarn, "worker closing: re-enabled auto-save")
+	inst.releaseRetry()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return once the retry was released")
+	}
+
+	if n := rec.count("save-off"); n != 2 {
+		t.Fatalf("save-offs = %d, want 2: the retry must have written a newer one; rcon lines = %v", n, rec.all())
+	}
+	if n := logged(h, slog.LevelError, "failed stop: auto-save NOT restored"); n != 2 {
+		t.Fatalf("failed-stop ERRORs = %d, want 2: the retry's restore of its newer save-off failed", n)
+	}
+}
+
+// A stop lane that restores auto-save while Close's restore of the same save-off
+// is still dialing leaves nothing disabled, so Close's failed dial must not report
+// the server as running with auto-save disabled (issue #3485).
+func TestCloseReportsNoDisabledAutoSaveTheStopAlreadyRestored(t *testing.T) {
+	rec := &saveOnRecorder{}
+	// Dials: the flush (save-off), Close's restore (held, then fails), the lane's
+	// restore.
+	dials := newDialScript(rec, nil, errors.New("rcon unreachable"), nil)
+	closeDial := make(chan struct{})
+	dials.holds[1] = closeDial
+	d := &flushGatedDriver{}
+	h := &syncSlogHandler{}
+	m := newSaveOnManager(t, d, dials.open).WithLogger(slog.New(h))
+	m.closingSaveOnTimeout = time.Minute
+	seedScratch(t, m, s1)
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	inst := d.inst
+	var releaseClose sync.Once
+	t.Cleanup(func() { inst.releaseStop(); releaseClose.Do(func() { close(closeDial) }); m.Close() })
+
+	stopped := make(chan session.CommandResult, 1)
+	go func() {
+		stopped <- m.Handle(context.Background(),
+			session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"})
+	}()
+	awaitEnter(t, inst.stopEntered)
+
+	closed := make(chan struct{})
+	go func() { m.Close(); close(closed) }()
+	dials.awaitDial(t, 1) // Close's restore, now held
+
+	inst.releaseStop()
+	select {
+	case res := <-stopped:
+		if res.Success {
+			t.Fatalf("stop = %+v, want failure", res)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the operator stop did not return once released")
+	}
+	if !rec.hasFor(s1, "save-on") {
+		t.Fatalf("s1 rcon lines = %v, want the lane's restore to have landed", rec.allFor(s1))
+	}
+
+	releaseClose.Do(func() { close(closeDial) })
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return")
+	}
+	if n := logged(h, slog.LevelError, "auto-save disabled"); n != 0 {
+		t.Fatalf("logged %d auto-save-disabled ERRORs, want none: the stop had already restored auto-save", n)
+	}
+}
+
+// A failed-stop orphan that exits on its own takes its outstanding save-off with
+// it: a debt kept past that would have a later Close or stop dial a server that is
+// gone (issue #3485).
+func TestOrphanExitSettlesItsOutstandingSaveOff(t *testing.T) {
+	m := newSaveOnManager(t, &flushOrphanDriver{}, (&saveOnRecorder{}).open)
+	closeWithTest(t, m)
+	inst := newFakeInstance(s1)
+	m.mu.Lock()
+	m.orphans[s1] = orphanEntry{inst: inst, driver: "container"}
+	m.mu.Unlock()
+	written, _ := m.markPendingSaveOn(s1, "container", "1.21")
+	close(written)
+
+	if !m.forgetOrphanIf(s1, inst) {
+		t.Fatal("forgetOrphanIf did not retire the orphan")
+	}
+	m.mu.Lock()
+	_, entry := m.pendingSaveOn[s1]
+	m.mu.Unlock()
+	if entry || m.unsettledSaveOffGen(s1) != 0 {
+		t.Fatal("the save-off outlived the orphan's exit; nothing is left to restore it for")
 	}
 }
 

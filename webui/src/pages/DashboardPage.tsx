@@ -952,7 +952,12 @@ function Action({ action, server, state, pending, can, onRun }: ActionProps) {
   }
   const disabled =
     pending ||
-    !actionApplies(action, state, normalizeState(server.desired_state));
+    !actionApplies(
+      action,
+      state,
+      normalizeState(server.desired_state),
+      server.assigned_worker_id !== null,
+    );
   return (
     <button
       type="button"

@@ -402,6 +402,11 @@ func (c *EngineClient) List(ctx context.Context, labelKey, labelValue string) ([
 		Names  []string          `json:"Names"`
 		State  string            `json:"State"`
 		Labels map[string]string `json:"Labels"`
+		Mounts []struct {
+			Type        string `json:"Type"`
+			Source      string `json:"Source"`
+			Destination string `json:"Destination"`
+		} `json:"Mounts"`
 	}
 	if err := c.do(ctx, http.MethodGet, "/containers/json", q, nil, &raw); err != nil {
 		return nil, err
@@ -412,7 +417,15 @@ func (c *EngineClient) List(ctx context.Context, labelKey, labelValue string) ([
 		if len(r.Names) > 0 {
 			name = r.Names[0]
 		}
-		out = append(out, Container{ID: r.ID, Name: name, State: r.State, Labels: r.Labels})
+		// The working set is the bind the driver mounts at containerWorkDir
+		// (issue #3445).
+		workingDir := ""
+		for _, m := range r.Mounts {
+			if m.Type == "bind" && m.Destination == containerWorkDir {
+				workingDir = m.Source
+			}
+		}
+		out = append(out, Container{ID: r.ID, Name: name, State: r.State, Labels: r.Labels, WorkingDir: workingDir})
 	}
 	return out, nil
 }
