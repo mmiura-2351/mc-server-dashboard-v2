@@ -119,7 +119,7 @@ func settleFor(t *testing.T, root string, budget time.Duration, h *capturingSlog
 	t.Helper()
 	m := newManager(t, &fakeDriver{}, nil).WithLogger(slog.New(h))
 	m.settleBudget = budget
-	return m.settleWorkingSet(context.Background(), s1, root)
+	return m.settleWorkingSet(context.Background(), settleForSnapshot, s1, root)
 }
 
 func always(int) bool { return true }
@@ -430,7 +430,7 @@ func TestSettleWorkingSetNeedsTwoCompleteScans(t *testing.T) {
 		return state, err
 	}
 
-	if !m.settleWorkingSet(context.Background(), s1, root) {
+	if !m.settleWorkingSet(context.Background(), settleForSnapshot, s1, root) {
 		t.Fatal("settleWorkingSet = false")
 	}
 	if scans != 4 {
@@ -455,10 +455,67 @@ func TestSettleWorkingSetSettlesAfterARegionFileIsDeleted(t *testing.T) {
 		return state, err
 	}
 
-	if !m.settleWorkingSet(context.Background(), s1, root) {
+	if !m.settleWorkingSet(context.Background(), settleForSnapshot, s1, root) {
 		t.Fatal("settleWorkingSet = false after a region file was deleted once")
 	}
 	if scans != 3 {
 		t.Fatalf("scans = %d, want 3 (the deletion, then two agreeing scans)", scans)
+	}
+}
+
+// settleTimeoutWarns runs run on a manager whose world never settles within a
+// short budget and returns the messages of the WARNs it logged.
+func settleTimeoutWarns(t *testing.T, run func(m *Manager)) []string {
+	t.Helper()
+	h := &capturingSlogHandler{}
+	m := newManager(t, &fakeDriver{}, &fakeControl{reply: "ok"}).WithLogger(slog.New(h))
+	m.settleBudget = 10 * time.Millisecond
+	m.settlePollInterval = time.Millisecond
+	var calls int64
+	m.scanRegion = func(string) (regionState, error) {
+		calls++
+		return regionState{"r.0.0.mca": {modTime: time.Unix(0, 0), size: calls}}, nil
+	}
+	run(m)
+	var warns []string
+	for _, r := range h.records {
+		if r.Level == slog.LevelWarn {
+			warns = append(warns, r.Message)
+		}
+	}
+	return warns
+}
+
+// The settle-wait serves two callers, and its timeout WARN names the one that ran
+// it (issue #3445): a stop's flush used to log "snapshot quiesce: ... refusing",
+// which sent an operator reading a stop's log to the snapshot path.
+func TestSettleTimeoutWarnNamesItsCaller(t *testing.T) {
+	for _, tc := range []struct {
+		caller, other string
+		run           func(m *Manager)
+	}{
+		{"stop flush", "snapshot quiesce", func(m *Manager) {
+			m.flushBeforeStopWithDriver(context.Background(), s1, "container", "")
+		}},
+		{"snapshot quiesce", "stop flush", func(m *Manager) {
+			_, restore, _ := m.quiesceRunning(context.Background(), s1, t.TempDir())
+			restore()
+		}},
+	} {
+		t.Run(tc.caller, func(t *testing.T) {
+			warns := settleTimeoutWarns(t, tc.run)
+			named := false
+			for _, w := range warns {
+				if strings.HasPrefix(w, tc.other) {
+					t.Fatalf("WARN %q names %s, but %s ran the settle-wait", w, tc.other, tc.caller)
+				}
+				if strings.HasPrefix(w, tc.caller+": ") && strings.Contains(w, "did not settle within budget") {
+					named = true
+				}
+			}
+			if !named {
+				t.Fatalf("WARNs = %q, want the settle timeout named %q", warns, tc.caller)
+			}
+		})
 	}
 }

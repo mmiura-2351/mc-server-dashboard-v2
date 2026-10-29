@@ -25,6 +25,7 @@ skipped otherwise (TESTING.md Section 5).
 from __future__ import annotations
 
 import datetime as dt
+import functools
 import os
 import time
 import uuid
@@ -230,6 +231,24 @@ def _client(app: object) -> TestClient:
     return enter_client(TestClient(app))  # type: ignore[arg-type]
 
 
+def _publish(
+    client: TestClient,
+    bus: InProcessRealTimeEvents,
+    *,
+    server_id: str,
+    event: RealTimeEvent,
+) -> None:
+    """Publish ``event`` on the app's event loop, as the real publishers do.
+
+    The TestClient runs the app on its portal's loop in another thread, and the
+    bus's delivery is bound to that loop (``asyncio.Event``): a publish from the
+    test thread neither wakes the relay nor is safe against it.
+    """
+
+    assert client.portal is not None
+    client.portal.call(functools.partial(bus.publish, server_id=server_id, event=event))
+
+
 async def test_community_events_real_graph_accepts_and_delivers(
     _database: str,
 ) -> None:
@@ -243,7 +262,9 @@ async def test_community_events_real_graph_accepts_and_delivers(
         # The on-subscribe snapshot (#1795) is read through the real
         # ``get_list_servers`` -- the community has no servers yet.
         snapshot = ws.receive_json()
-        bus.publish(
+        _publish(
+            client,
+            bus,
             server_id=str(server),
             event=RealTimeEvent(
                 stream=EventStream.STATUS, payload={"state": "running"}
@@ -619,7 +640,9 @@ async def test_deactivated_user_is_closed_4401_at_the_next_reauthorization(
         ) as ws:
             assert ws.receive_json()["stream"] == "snapshot"
             time.sleep(0.6)  # several re-authorizations of the active account
-            bus.publish(
+            _publish(
+                client,
+                bus,
                 server_id=str(server),
                 event=RealTimeEvent(
                     stream=EventStream.STATUS, payload={"state": "running"}

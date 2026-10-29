@@ -700,6 +700,19 @@ a graceful Worker restart while servers are up kills those live servers — this
 the deliberate stateless-worker posture (the Worker adopts no prior state; the
 API observes the resulting state via the Worker's reconnect/status).
 
+The sweep stops a running container the way a graceful stop does (next
+section). It sends SIGTERM and waits while the server's shutdown save keeps
+writing the world. It sends SIGKILL only after the same 30 s idle window or the
+same 360 s cap. The world it watches is the working set bind-mounted at the
+container's `/data`, read from the container's mounts. The sweep stops all
+running containers at once, so a boot waits at most one cap (plus 10 s of
+deadline grace, a 30 s kill call and the remove), not one cap per container.
+Each kill logs one `WARN` line,
+`sweep: the orphan did not exit after SIGTERM; killing it`, with the same
+fields as a stop's escalation. A container with no working-set mount at `/data`
+has no world to watch. It gets the old fixed 30 s `docker stop` instead, which
+can cut a slow save short, and the sweep logs a `WARN` saying so.
+
 #### Stopping a server: a progress-aware grace
 
 A graceful stop first flushes the world over RCON (`save-off`, `save-all`, then
