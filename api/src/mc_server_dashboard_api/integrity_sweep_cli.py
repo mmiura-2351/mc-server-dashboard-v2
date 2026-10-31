@@ -40,6 +40,7 @@ from mc_server_dashboard_api.core.adapters.database import (
 from mc_server_dashboard_api.servers.adapters.backup_store import (
     StorageBackupStoreAdapter,
 )
+from mc_server_dashboard_api.servers.adapters.lifecycle_lock import PgLifecycleLock
 from mc_server_dashboard_api.servers.adapters.unit_of_work import SqlAlchemyUnitOfWork
 from mc_server_dashboard_api.servers.application.integrity_sweep import (
     IntegritySweep,
@@ -69,6 +70,10 @@ async def run(*, server_id: ServerId | None) -> SweepSummary:
             audit=LoggingAuditRecorder(
                 SqlAlchemyAuditWriter(session_factory, clock=AuditSystemClock())
             ),
+            # The same per-server advisory lock the API's backup creation holds
+            # (issue #3220): keyed on the server id in PostgreSQL, so it serializes
+            # this process against the API's.
+            lifecycle_lock=PgLifecycleLock(engine=engine),
         )
         return await sweep(server_id=server_id)
     finally:
@@ -118,6 +123,8 @@ def main(argv: list[str]) -> int:
         f"backups unreadable (archive bytes unproducible): "
         f"{summary.backups_unreadable}\n"
         f"backups dangling: {summary.backups_dangling}\n"
+        f"backups skipped (server busy; re-run the sweep to check them): "
+        f"{summary.backups_skipped_busy}\n"
         f"snapshots scanned: {summary.snapshots_scanned}\n"
         f"snapshots flagged: {summary.snapshots_flagged}\n"
         f"snapshots not examined (backend does not fsck snapshots at rest): "
