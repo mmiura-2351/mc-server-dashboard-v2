@@ -34,9 +34,13 @@ than one archive check; inside it the row is re-read, since it may have been
 deleted since the listing. A backup whose lock stays busy past the lock's wait
 budget is skipped for this run — no verdict, no audit — and counted as
 ``backups_skipped_busy`` so the operator knows to re-run the sweep; the server's
-other backups and its snapshot are still checked. The snapshot half needs no
-lock: ``current`` is published by an atomic swap and the fsck holds a reader lease
-on the snapshot it walks (#1702), so it never sees a half-published snapshot.
+other backups and its snapshot are still checked. The snapshot half takes no
+lifecycle lock: it has no row-before-archive window, since ``current`` is published
+by an atomic swap. The fsck holds a reader lease on the snapshot it walks (#1702),
+but that lease is per-process: it stops this process's own publishes from
+reclaiming the snapshot mid-walk, not another process's, so a CLI walk is not
+protected against a concurrent API publish reclaiming it (see the cross-process
+snapshot lease issue).
 
 A quarantined backup, an unreadable backup and a flagged snapshot each emit an
 audit entry. The pass is
