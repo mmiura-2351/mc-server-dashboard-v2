@@ -131,6 +131,8 @@ func (r *stopRun) step(d time.Duration) bool {
 type fakeWorld struct {
 	writes atomic.Int64
 	fail   atomic.Bool
+	// empty makes a scan succeed with no region files: no write timestamp.
+	empty atomic.Bool
 	// newest is the last writeAt's time in Unix nanoseconds, the fingerprint's
 	// newest mtime once set; until then the write count stands in for it.
 	newest atomic.Int64
@@ -147,6 +149,9 @@ func (w *fakeWorld) writeAt(at time.Time) {
 func (w *fakeWorld) probe() (execution.WorldProgress, error) {
 	if w.fail.Load() {
 		return execution.WorldProgress{}, errors.New("scan could not finish")
+	}
+	if w.empty.Load() {
+		return execution.WorldProgress{}, nil
 	}
 	n := w.writes.Load()
 	newest := time.Unix(n, 0)
@@ -350,6 +355,75 @@ func TestStopCapLogsTheLastObservedWrite(t *testing.T) {
 	since := loggedSinceLastWrite(t, r.logged.String(), "graceful stop escalating")
 	if want := r.clock.Now().Sub(last); since != want {
 		t.Fatalf("since_last_write = %v, want %v: the time since the last write the scans saw", since, want)
+	}
+}
+
+// A write whose mtime is ahead of the Worker's clock (a clock correction, or a
+// planted timestamp) is logged at the poll that saw it, flagged, never as a
+// negative age; the idle window still runs from that poll (issue #3515 review).
+func TestStopLogsAFutureMtimeAtItsPollFlagged(t *testing.T) {
+	docker := newFakeDocker()
+	docker.stopNoExit = true
+	world := &fakeWorld{}
+	r := startStopRun(t, docker, nil, errors.New("rcon unavailable"), world)
+	r.awaitWaiting()
+	r.step(testPoll) // takes the baseline
+	start := r.clock.Now()
+
+	world.writeAt(start.Add(time.Hour))
+	r.step(testPoll)
+	observed := r.clock.Now()
+	for !r.step(testPoll) {
+		if r.clock.Now().Sub(observed) > testIdle {
+			t.Fatalf("no kill %v after the write", r.clock.Now().Sub(observed))
+		}
+	}
+	if got := r.clock.Now().Sub(observed); r.err != nil || !docker.killWasCalled() || got != testIdle {
+		t.Fatalf("Stop = %v, kill = %v %v after the write; want the idle kill at %v", r.err, docker.killWasCalled(), got, testIdle)
+	}
+
+	logged := r.logged.String()
+	if since := loggedSinceLastWrite(t, logged, "graceful stop escalating"); since != testIdle {
+		t.Fatalf("since_last_write = %v, want %v: the time since the poll that saw the future mtime", since, testIdle)
+	}
+	if !strings.Contains(logged, "last_write_mtime_in_future=true") {
+		t.Fatalf("log = %q, want the future mtime flagged", logged)
+	}
+}
+
+// A scan that finds no region files changes the fingerprint but carries no write
+// time, so the write seen before it stays the last one logged (issue #3515
+// review); the change still restarts the idle window.
+func TestStopKeepsTheLastWriteAcrossAnEmptyScan(t *testing.T) {
+	docker := newFakeDocker()
+	docker.stopNoExit = true
+	world := &fakeWorld{}
+	r := startStopRun(t, docker, nil, errors.New("rcon unavailable"), world)
+	r.awaitWaiting()
+	r.step(testPoll) // takes the baseline
+	start := r.clock.Now()
+
+	written := start.Add(2 * time.Second)
+	world.writeAt(written)
+	r.step(testPoll)
+	world.empty.Store(true)
+	r.step(testPoll)
+	emptied := r.clock.Now()
+	for !r.step(testPoll) {
+		if r.clock.Now().Sub(emptied) > testIdle {
+			t.Fatalf("no kill %v after the empty scan", r.clock.Now().Sub(emptied))
+		}
+	}
+	if got := r.clock.Now().Sub(emptied); r.err != nil || !docker.killWasCalled() || got != testIdle {
+		t.Fatalf("Stop = %v, kill = %v %v after the empty scan; want the idle kill at %v", r.err, docker.killWasCalled(), got, testIdle)
+	}
+
+	logged := r.logged.String()
+	if want := r.clock.Now().Sub(written); loggedSinceLastWrite(t, logged, "graceful stop escalating") != want {
+		t.Fatalf("log = %q, want since_last_write=%v: the write seen before the empty scan", logged, want)
+	}
+	if strings.Contains(logged, "last_write_mtime_in_future") {
+		t.Fatalf("log = %q, want no future-mtime flag", logged)
 	}
 }
 

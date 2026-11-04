@@ -2238,10 +2238,13 @@ type stopWatch struct {
 	// counted as progress or the last escalation step), and lastWrite the newest
 	// mtime of the last scan that changed (zero if none): when the world was last
 	// seen written. A failed or unanswered scan keeps the wait alive but is no
-	// write, so it leaves lastWrite alone (issue #3515).
-	start     time.Time
-	idleFrom  time.Time
-	lastWrite time.Time
+	// write, and a changed scan with no mtime (no region files) has no write time,
+	// so both leave lastWrite alone (issue #3515). An mtime ahead of the clock
+	// cannot be aged, so the poll that saw it stands in, with lastWriteFuture set.
+	start           time.Time
+	idleFrom        time.Time
+	lastWrite       time.Time
+	lastWriteFuture bool
 	// scan carries the outstanding scan's result, nil when none is in flight. The
 	// first result taken is the baseline the later ones are compared with.
 	scan      chan stopScan
@@ -2365,8 +2368,12 @@ func (w *stopWatch) take(r stopScan) bool {
 	}
 	changed := !w.havePrev || r.progress != w.prev
 	w.prev, w.havePrev = r.progress, true
-	if changed {
-		w.lastWrite = r.progress.Newest
+	if changed && !r.progress.Newest.IsZero() {
+		now := w.rule.now()
+		w.lastWrite, w.lastWriteFuture = r.progress.Newest, r.progress.Newest.After(now)
+		if w.lastWriteFuture {
+			w.lastWrite = now
+		}
 	}
 	return changed
 }
@@ -2401,7 +2408,11 @@ func (w *stopWatch) escalationArgs(requested time.Time, reason string) []any {
 	if w.lastWrite.IsZero() {
 		return append(args, "last_write", "none observed")
 	}
-	return append(args, "last_write", w.lastWrite, "since_last_write", now.Sub(w.lastWrite))
+	args = append(args, "last_write", w.lastWrite, "since_last_write", now.Sub(w.lastWrite))
+	if w.lastWriteFuture {
+		args = append(args, "last_write_mtime_in_future", true)
+	}
+	return args
 }
 
 // stopHandOffCallTimeout bounds one hand-off request, and stopHandOffRetryInterval
