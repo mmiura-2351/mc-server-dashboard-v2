@@ -372,7 +372,9 @@ async def publish_snapshot(
     base_generation: Annotated[
         int | None, Header(alias=_BASE_GENERATION_HEADER)
     ] = None,
-    publisher: Annotated[str | None, Header(alias=_WORKER_ID_HEADER)] = None,
+    publisher_header: Annotated[
+        uuid.UUID | None, Header(alias=_WORKER_ID_HEADER)
+    ] = None,
 ) -> None:
     """Stage and atomically publish the Worker's working set (snapshot, FR-DATA-4).
 
@@ -452,6 +454,9 @@ async def publish_snapshot(
         raise problem(status.HTTP_411_LENGTH_REQUIRED, "content_length_required")
     if content_length > _MAX_SNAPSHOT_BYTES:
         raise problem(status.HTTP_413_CONTENT_TOO_LARGE, "snapshot_too_large")
+    # Canonical form, so the publisher compares equal to the assigned worker id
+    # (read back from a uuid column) however the Worker's id is spelled (#3542).
+    publisher = None if publisher_header is None else str(publisher_header)
 
     async with transfer_semaphore:
         scope = (CommunityId(community_id), ServerId(server_id))

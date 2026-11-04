@@ -2199,6 +2199,41 @@ def test_snapshot_commit_fenced_when_assignment_moved_during_upload(
     assert _read_tar(asyncio.run(_read())) == {"k": b"g1"}
 
 
+def test_snapshot_non_canonical_publisher_matches_the_assigned_worker(
+    tmp_path: Path,
+) -> None:
+    # Issue #3542: a hand-configured Worker id may spell its UUID non-canonically,
+    # while the assignment is read back canonically from the uuid column. The
+    # header is canonicalised, so the commit fence sees the same Worker.
+    import asyncio
+
+    worker = str(uuid.uuid4())
+
+    client, storage = _setup(tmp_path, assigned_worker_id=worker)
+    community, server = _scope()
+    asyncio.run(_publish(storage, community, server, {"k": b"g1"}, publisher=worker))
+    current = asyncio.run(
+        storage.current_generation(CommunityId(community), ServerId(server))
+    )
+
+    body = _tar_bytes({"world/level.dat": b"from-upper"})
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"),
+            content=body,
+            headers={
+                **_auth(),
+                "X-Working-Set-Base-Generation": str(current),
+                "X-Worker-Id": worker.upper(),
+            },
+        )
+    assert resp.status_code == 204
+    assert (
+        asyncio.run(storage.current_publisher(CommunityId(community), ServerId(server)))
+        == worker
+    )
+
+
 def test_snapshot_late_publish_after_clear_with_no_replacement_still_lands(
     tmp_path: Path,
 ) -> None:
