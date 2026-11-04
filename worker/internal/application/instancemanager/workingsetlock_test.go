@@ -196,15 +196,23 @@ func handleInBackground(ctx context.Context, t *testing.T, m *Manager, cmd sessi
 	return done
 }
 
+// The budgets receiveWithin is given. Nothing here depends on how fast a step is,
+// only that it happens. A step that writes nothing gets handleWithin's budget; one
+// that publishes an edit fsyncs a file and its directory, which under artificial
+// disk load has taken longer than a minute, so it gets within's (issue #3354).
+const (
+	quickBudget = 30 * time.Second
+	writeBudget = 5 * time.Minute
+)
+
 // receiveWithin returns what ch delivers, and fails the test when nothing has
-// arrived in time. Nothing here depends on how fast, only that it happens, so the
-// budget is handleWithin's.
-func receiveWithin[T any](t *testing.T, what string, ch <-chan T) T {
+// arrived within budget.
+func receiveWithin[T any](t *testing.T, what string, ch <-chan T, budget time.Duration) T {
 	t.Helper()
 	select {
 	case v := <-ch:
 		return v
-	case <-time.After(30 * time.Second):
+	case <-time.After(budget):
 		t.Fatalf("%s did not happen in time", what)
 		var zero T
 		return zero
@@ -234,11 +242,11 @@ func TestEditFileWaitsForAHandOverAndThenPublishes(t *testing.T) {
 	lock, waiting := walkInProgress(t, m)
 	done := handleInBackground(t.Context(), t, m, editMotd())
 
-	receiveWithin(t, "the edit's wait", waiting)
+	receiveWithin(t, "the edit's wait", waiting, quickBudget)
 	assertEditNotWritten(t, m, target)
 	lock.Unlock()
 
-	if res := receiveWithin(t, "the edit's answer", done); !res.Success {
+	if res := receiveWithin(t, "the edit's answer", done, writeBudget); !res.Success {
 		t.Fatalf("EditFile = %+v, want success once the walk was done", res)
 	}
 	if got, err := os.ReadFile(target); err != nil || string(got) != "motd=new" {
@@ -255,10 +263,10 @@ func TestEditFileGivesUpWaitingWhenItsCommandIsCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	done := handleInBackground(ctx, t, m, editMotd())
 
-	receiveWithin(t, "the edit's wait", waiting)
+	receiveWithin(t, "the edit's wait", waiting, quickBudget)
 	cancel()
 
-	res := receiveWithin(t, "the edit's answer", done)
+	res := receiveWithin(t, "the edit's answer", done, quickBudget)
 	if res.Success || res.ErrorCode != session.CommandErrorInternal || !strings.Contains(res.ErrorMessage, context.Canceled.Error()) {
 		t.Fatalf("EditFile = %+v, want it failed for the cancelled wait", res)
 	}
@@ -303,10 +311,10 @@ func TestHydrateStampIsSkippedWhenItsCommandIsCancelledWhileWaiting(t *testing.T
 	ctx, cancel := context.WithCancel(t.Context())
 	done := handleInBackground(ctx, t, m, hydrateCmd())
 
-	receiveWithin(t, "the stamp's wait", waiting)
+	receiveWithin(t, "the stamp's wait", waiting, quickBudget)
 	cancel()
 
-	if res := receiveWithin(t, "the hydrate's answer", done); !res.Success || res.HeldGeneration != nil {
+	if res := receiveWithin(t, "the hydrate's answer", done, quickBudget); !res.Success || res.HeldGeneration != nil {
 		t.Fatalf("HydrateTrigger = %+v, want success declaring no generation", res)
 	}
 	if _, err := os.Lstat(generationMarkerPath(m, s1)); !os.IsNotExist(err) {
@@ -324,10 +332,10 @@ func TestRunningSnapshotStampIsSkippedWhenItsCommandIsCancelledWhileWaiting(t *t
 	ctx, cancel := context.WithCancel(t.Context())
 	done := handleInBackground(ctx, t, m, snapshotCmd())
 
-	receiveWithin(t, "the stamp's wait", waiting)
+	receiveWithin(t, "the stamp's wait", waiting, quickBudget)
 	cancel()
 
-	if res := receiveWithin(t, "the snapshot's answer", done); !res.Success || res.HeldGeneration != nil {
+	if res := receiveWithin(t, "the snapshot's answer", done, quickBudget); !res.Success || res.HeldGeneration != nil {
 		t.Fatalf("SnapshotTrigger = %+v, want success declaring no generation", res)
 	}
 	if got := readGeneration(dir); got != 0 {
