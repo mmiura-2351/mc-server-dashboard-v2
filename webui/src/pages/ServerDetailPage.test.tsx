@@ -493,6 +493,20 @@ describe("ServerDetailPage lifecycle controls", () => {
     expect(screen.getByRole("button", { name: /Stop/ })).toBeEnabled();
   });
 
+  // The API restarts only under a running intent and refuses a stopped one
+  // (409 invalid_transition) even while the process still runs (issue #3502).
+  it("hides Restart for a server still running under a stopped intent", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ observed_state: "running", desired_state: "stopped" }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    expect(
+      screen.queryByRole("button", { name: t("serverDetail.restart") }),
+    ).not.toBeInTheDocument();
+  });
+
   it("hides Stop under a stopped intent once no worker is assigned", async () => {
     mockApi.get.mockResolvedValue(
       server({

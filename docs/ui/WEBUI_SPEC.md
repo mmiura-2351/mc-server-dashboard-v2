@@ -657,8 +657,11 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   Start and Restart are hidden, since the API refuses both there. Under a
   stopped intent Stop is offered exactly while a Worker is still assigned — a
   drained server still running, or a stop left half-done — since the API then
-  converges it at once, and refuses it with no Worker assigned. The dashboard
-  card quick actions follow the same rules and disable them.
+  converges it at once, and refuses it with no Worker assigned. Restart needs a
+  running intent: under a stopped intent it is hidden even while the process
+  still runs (a drain's grace window), since the API refuses it there
+  (`409 invalid_transition`). The dashboard card quick actions follow the same
+  rules and disable them.
 - Metrics strip: CPU / memory / players from the `metrics` stream (sparkline,
   last N samples, client-side only).
 - Log tail: last ~200 lines, link to Console tab.

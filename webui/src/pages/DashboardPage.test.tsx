@@ -490,6 +490,43 @@ describe("DashboardPage lifecycle actions", () => {
     ).toBeDisabled();
   });
 
+  // The API restarts only under a running intent and refuses a stopped one
+  // (409 invalid_transition) even while the process still runs (issue #3502).
+  it("disables Restart under a stopped intent and enables it under a running one", async () => {
+    mockApi.get.mockResolvedValue([
+      server({
+        id: "s1",
+        name: "alpha",
+        observed_state: "running",
+        desired_state: "stopped",
+      }),
+      server({
+        id: "s2",
+        name: "bravo",
+        observed_state: "running",
+        desired_state: "stopped",
+        assigned_worker_id: null,
+      }),
+      server({ id: "s3", name: "charlie", observed_state: "running" }),
+    ]);
+    renderPage();
+
+    const card = async (name: string) =>
+      (await screen.findByText(name)).closest(".server-card") as HTMLElement;
+    for (const name of ["alpha", "bravo"]) {
+      expect(
+        within(await card(name)).getByRole("button", {
+          name: t("dashboard.restart"),
+        }),
+      ).toBeDisabled();
+    }
+    expect(
+      within(await card("charlie")).getByRole("button", {
+        name: t("dashboard.restart"),
+      }),
+    ).toBeEnabled();
+  });
+
   it("drives only the clicked row through the optimistic lifecycle", async () => {
     // The transition state machine itself is covered in
     // useLifecycleMutation.test.tsx; this pins the dashboard's wiring: the row's

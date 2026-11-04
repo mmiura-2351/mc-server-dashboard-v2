@@ -138,7 +138,9 @@ export function statePill(state: ObservedState): PillSpec {
  * Under a stopped intent, stop applies exactly while a Worker is still
  * `assigned`: the API then runs the convergence the reconciler would (a drain
  * still running, or a stop left half-done), and refuses it with no Worker
- * (issue #3491).
+ * (issue #3491). Restart never applies there: the API restarts only under a
+ * running intent and refuses a stopped one (409 `invalid_transition`), even
+ * while the process still runs, as in a drain's grace window (issue #3502).
  */
 export function actionApplies(
   action: "start" | "stop" | "restart",
@@ -155,6 +157,9 @@ export function actionApplies(
   }
   if (action === "stop" && desired === "stopped") {
     return assigned === true;
+  }
+  if (action === "restart" && desired === "stopped") {
+    return false;
   }
   // stop / restart
   if (desired === "running" && state === "unknown") {
