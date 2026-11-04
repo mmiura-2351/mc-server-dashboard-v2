@@ -715,6 +715,7 @@ def get_set_worker_drain(
         drain_store=SqlAlchemyWorkerDrainStore(
             session_factory, clock=FleetSystemClock()
         ),
+        locks=request.app.state.worker_drain_locks,
     )
 
 

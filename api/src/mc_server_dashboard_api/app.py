@@ -69,6 +69,9 @@ from mc_server_dashboard_api.fleet.adapters.relay_state import (
 )
 from mc_server_dashboard_api.fleet.api import events as server_events
 from mc_server_dashboard_api.fleet.api import workers
+from mc_server_dashboard_api.fleet.application.set_worker_drain import (
+    WorkerDrainLocks,
+)
 from mc_server_dashboard_api.fleet.domain.value_objects import (
     WorkerId as FleetWorkerId,
 )
@@ -780,6 +783,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             drained=drained,
         )
         app.state.worker_registry = registry
+        # Process-wide per-Worker serialisation of drain toggles (issue #3535):
+        # every request-scoped SetWorkerDrain shares it.
+        app.state.worker_drain_locks = WorkerDrainLocks()
         # Process-wide record of which servers' last stop dispatch the Worker refused
         # (issue #2478). Shared by every StopServer that dispatches a stop — the HTTP
         # path, the schedule runner, and the reconciler's own replay — because it is

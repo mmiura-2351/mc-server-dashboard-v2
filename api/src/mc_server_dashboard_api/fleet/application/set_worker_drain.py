@@ -53,7 +53,8 @@ avoid it.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import asyncio
+from dataclasses import dataclass, field
 
 from mc_server_dashboard_api.fleet.domain.assigned_server_stopper import (
     AssignedServerStopper,
@@ -63,11 +64,29 @@ from mc_server_dashboard_api.fleet.domain.registry import WorkerRegistry
 from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId
 
 
+@dataclass
+class WorkerDrainLocks:
+    """One lock per Worker id, shared by every drain toggle in the process.
+
+    A toggle holds its Worker's lock across the drain record's write, session exit
+    included, AND the registry update, so two overlapping toggles cannot apply
+    their record changes in one order and their registry changes in the other. In
+    process, deliberately: the API is a single instance (REQUIREMENTS.md
+    NFR-SCALE-1) and the registry it orders against is in this process anyway.
+    """
+
+    _locks: dict[WorkerId, asyncio.Lock] = field(default_factory=dict)
+
+    def for_worker(self, worker_id: WorkerId) -> asyncio.Lock:
+        return self._locks.setdefault(worker_id, asyncio.Lock())
+
+
 @dataclass(frozen=True)
 class SetWorkerDrain:
     registry: WorkerRegistry
     stopper: AssignedServerStopper
     drain_store: WorkerDrainStore
+    locks: WorkerDrainLocks
 
     async def __call__(self, *, worker_id: WorkerId, draining: bool) -> int | None:
         """Toggle the drain flag and, on drain, mark assigned servers stopped.
@@ -88,7 +107,11 @@ class SetWorkerDrain:
         record is deleted before the flag clears, for the same reason. The
         decrements come last, after the flag rather than before it, so no interval
         advertises freed capacity on a Worker still eligible for placement (see
-        :meth:`_shed_placement_load`).
+        :meth:`_shed_placement_load`). If the record write fails, the decrements
+        still run for the stops that committed, and the Worker stays undrained.
+
+        Toggles of one Worker run one at a time under its :class:`WorkerDrainLocks`
+        lock, so the record and the flag always end at the same toggle's intent.
 
         The registry lookup is what answers the unknown Worker, so the later
         :meth:`WorkerRegistry.set_draining` needs no second check: a registration is
@@ -97,15 +120,21 @@ class SetWorkerDrain:
 
         if self.registry.get(worker_id) is None:
             return None
-        if not draining:
-            await self.drain_store.undrain(worker_id)
-            self.registry.set_draining(worker_id, False)
-            return 0
-        stopped_ids = await self.stopper.stop_assigned(worker_id)
-        await self.drain_store.drain(worker_id)
-        self.registry.set_draining(worker_id, True)
-        self._shed_placement_load(worker_id, stopped_ids)
-        return len(stopped_ids)
+        async with self.locks.for_worker(worker_id):
+            if not draining:
+                await self.drain_store.undrain(worker_id)
+                self.registry.set_draining(worker_id, False)
+                return 0
+            stopped_ids = await self.stopper.stop_assigned(worker_id)
+            try:
+                await self.drain_store.drain(worker_id)
+                self.registry.set_draining(worker_id, True)
+            finally:
+                # The stops have committed whatever the record write does, so their
+                # load is shed even when it fails: a retry finds those servers
+                # already stopped and could never shed it again.
+                self._shed_placement_load(worker_id, stopped_ids)
+            return len(stopped_ids)
 
     def _shed_placement_load(self, worker_id: WorkerId, server_ids: list[str]) -> None:
         """Drop each stopped server from the Worker's placement load.

@@ -24,7 +24,10 @@ from mc_server_dashboard_api.fleet.adapters.assigned_server_stopper import (
     ServersAssignedServerStopper,
 )
 from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
-from mc_server_dashboard_api.fleet.application.set_worker_drain import SetWorkerDrain
+from mc_server_dashboard_api.fleet.application.set_worker_drain import (
+    SetWorkerDrain,
+    WorkerDrainLocks,
+)
 from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId
 from mc_server_dashboard_api.servers.application.lifecycle import (
     StopServersAssignedToWorker,
@@ -63,6 +66,7 @@ def _drain_use_case(registry: InMemoryWorkerRegistry) -> SetWorkerDrain:
             )
         ),
         drain_store=FakeWorkerDrainStore(),
+        locks=WorkerDrainLocks(),
     )
 
 
