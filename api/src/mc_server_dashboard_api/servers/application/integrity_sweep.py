@@ -39,8 +39,7 @@ lifecycle lock: it has no row-before-archive window, since ``current`` is publis
 by an atomic swap. The fsck holds a reader lease on the snapshot it walks (#1702),
 but that lease is per-process: it stops this process's own publishes from
 reclaiming the snapshot mid-walk, not another process's, so a CLI walk is not
-protected against a concurrent API publish reclaiming it (see the cross-process
-snapshot lease issue).
+protected against a concurrent API publish reclaiming it (#3537).
 
 A quarantined backup, an unreadable backup and a flagged snapshot each emit an
 audit entry. The pass is
