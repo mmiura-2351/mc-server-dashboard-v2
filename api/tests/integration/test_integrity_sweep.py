@@ -398,13 +398,13 @@ async def test_sweep_waits_out_a_backup_publication_instead_of_condemning_it(
     assert audit.events == []
 
 
-async def test_cli_sweep_completes_on_a_single_connection_pool(
+async def test_cli_sweep_completes_on_the_smallest_accepted_pool(
     engine: AsyncEngine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The CLI sweep works at the smallest accepted pool (``pool_size=1``,
-    ``max_overflow=0``). The lifecycle lock pins its connection for the whole
-    hold while the sweep reads and writes the row, so a lock drawing from that
-    pool would leave the sweep waiting for a connection that never frees (the
+    """The CLI sweep works at the smallest accepted pool (``pool_size=2``,
+    ``max_overflow=0``; issue #3536). The lifecycle lock pins its connection for
+    the whole hold while the sweep reads and writes the row; the CLI gives the
+    lock its own engine, so the sweep's work keeps the whole configured pool (the
     review of issue #3220)."""
 
     assert _DB_URL is not None
@@ -418,7 +418,7 @@ async def test_cli_sweep_completes_on_a_single_connection_pool(
         await uow.backups.add(row)
         await uow.commit()
     monkeypatch.setenv("MCD_API_DATABASE__URL", _DB_URL)
-    monkeypatch.setenv("MCD_API_DATABASE__POOL_SIZE", "1")
+    monkeypatch.setenv("MCD_API_DATABASE__POOL_SIZE", "2")
     monkeypatch.setenv("MCD_API_DATABASE__MAX_OVERFLOW", "0")
     monkeypatch.setenv("MCD_API_STORAGE__BACKEND", "fs")
     monkeypatch.setenv("MCD_API_STORAGE__FS__ROOT", str(tmp_path))
