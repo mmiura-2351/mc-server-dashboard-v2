@@ -658,8 +658,9 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   stopped intent Stop is offered exactly while a Worker is still assigned — a
   drained server still running, or a stop left half-done — since the API then
   converges it at once, and refuses it with no Worker assigned. Restart needs a
-  running intent: under a stopped intent it is hidden even while the process
-  still runs (a drain's grace window), since the API refuses it there
+  running intent and an assigned Worker: it is hidden under a stopped intent
+  even while the process still runs (a drain's grace window), and whenever no
+  Worker is assigned, since the API refuses it in both cases
   (`409 invalid_transition`). The dashboard card quick actions follow the same
   rules and disable them.
 - Metrics strip: CPU / memory / players from the `metrics` stream (sparkline,

@@ -139,6 +139,15 @@ describe("actionApplies", () => {
     }
     expect(actionApplies("restart", "running", "running", true)).toBe(true);
   });
+
+  // The API also refuses a restart of a row no Worker is assigned to, under a
+  // running intent too (409 invalid_transition, #3502).
+  it("restart under desired=running applies only while a worker is assigned", () => {
+    for (const state of ["running", "unknown"] as const) {
+      expect(actionApplies("restart", state, "running", true)).toBe(true);
+      expect(actionApplies("restart", state, "running", false)).toBe(false);
+    }
+  });
 });
 
 describe("atRest", () => {

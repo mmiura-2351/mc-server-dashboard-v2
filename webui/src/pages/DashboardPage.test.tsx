@@ -492,7 +492,7 @@ describe("DashboardPage lifecycle actions", () => {
 
   // The API restarts only under a running intent and refuses a stopped one
   // (409 invalid_transition) even while the process still runs (issue #3502).
-  it("disables Restart under a stopped intent and enables it under a running one", async () => {
+  it("disables Restart under a stopped intent or with no worker, enables it otherwise", async () => {
     mockApi.get.mockResolvedValue([
       server({
         id: "s1",
@@ -508,12 +508,19 @@ describe("DashboardPage lifecycle actions", () => {
         assigned_worker_id: null,
       }),
       server({ id: "s3", name: "charlie", observed_state: "running" }),
+      server({
+        id: "s4",
+        name: "delta",
+        observed_state: "running",
+        assigned_worker_id: null,
+      }),
     ]);
     renderPage();
 
     const card = async (name: string) =>
       (await screen.findByText(name)).closest(".server-card") as HTMLElement;
-    for (const name of ["alpha", "bravo"]) {
+    // delta: the API also refuses a restart with no Worker assigned.
+    for (const name of ["alpha", "bravo", "delta"]) {
       expect(
         within(await card(name)).getByRole("button", {
           name: t("dashboard.restart"),

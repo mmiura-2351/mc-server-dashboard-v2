@@ -507,6 +507,19 @@ describe("ServerDetailPage lifecycle controls", () => {
     ).not.toBeInTheDocument();
   });
 
+  // The API also refuses a restart with no Worker assigned (issue #3502).
+  it("hides Restart for a running intent once no worker is assigned", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ observed_state: "running", assigned_worker_id: null }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    expect(
+      screen.queryByRole("button", { name: t("serverDetail.restart") }),
+    ).not.toBeInTheDocument();
+  });
+
   it("hides Stop under a stopped intent once no worker is assigned", async () => {
     mockApi.get.mockResolvedValue(
       server({

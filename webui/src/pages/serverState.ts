@@ -140,7 +140,9 @@ export function statePill(state: ObservedState): PillSpec {
  * still running, or a stop left half-done), and refuses it with no Worker
  * (issue #3491). Restart never applies there: the API restarts only under a
  * running intent and refuses a stopped one (409 `invalid_transition`), even
- * while the process still runs, as in a drain's grace window (issue #3502).
+ * while the process still runs, as in a drain's grace window. It refuses a
+ * restart with no Worker assigned the same way, under either intent
+ * (issue #3502).
  */
 export function actionApplies(
   action: "start" | "stop" | "restart",
@@ -158,7 +160,7 @@ export function actionApplies(
   if (action === "stop" && desired === "stopped") {
     return assigned === true;
   }
-  if (action === "restart" && desired === "stopped") {
+  if (action === "restart" && (desired === "stopped" || assigned === false)) {
     return false;
   }
   // stop / restart
