@@ -47,7 +47,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 from mc_server_dashboard_api.servers.domain.value_objects import (
     WorkerId as ServersWorkerId,
 )
-from tests.fleet.fakes import FakeClock, make_worker
+from tests.fleet.fakes import FakeClock, FakeWorkerDrainStore, make_worker
 from tests.servers.fakes import FakeClock as ServersFakeClock
 from tests.servers.fakes import (
     FakeControlPlane,
@@ -101,8 +101,16 @@ def _stopper(uow: FakeUnitOfWork) -> ServersAssignedServerStopper:
     )
 
 
-def _use_case(registry: InMemoryWorkerRegistry, uow: FakeUnitOfWork) -> SetWorkerDrain:
-    return SetWorkerDrain(registry=registry, stopper=_stopper(uow))
+def _use_case(
+    registry: InMemoryWorkerRegistry,
+    uow: FakeUnitOfWork,
+    drain_store: FakeWorkerDrainStore | None = None,
+) -> SetWorkerDrain:
+    return SetWorkerDrain(
+        registry=registry,
+        stopper=_stopper(uow),
+        drain_store=FakeWorkerDrainStore() if drain_store is None else drain_store,
+    )
 
 
 def _status(registry: InMemoryWorkerRegistry, worker_id: WorkerId) -> WorkerStatus:
@@ -353,13 +361,93 @@ async def test_drain_marks_draining_only_after_the_stops_commit() -> None:
     worker_id = WorkerId(str(_WORKER_UUID))
     stopper = _RecordingStopper(registry)
 
-    count = await SetWorkerDrain(registry=registry, stopper=stopper)(
-        worker_id=worker_id, draining=True
-    )
+    count = await SetWorkerDrain(
+        registry=registry, stopper=stopper, drain_store=FakeWorkerDrainStore()
+    )(worker_id=worker_id, draining=True)
 
     assert count == 0
     assert stopper.status_during_stop is WorkerStatus.ONLINE
     assert _status(registry, worker_id) is WorkerStatus.DRAINING
+
+
+async def test_drain_and_undrain_persist_the_intent() -> None:
+    # Drain intent is durable (issue #3535): PUT records the Worker in the drain
+    # store and DELETE clears it, each idempotently.
+    store = FakeWorkerDrainStore()
+    use_case = _use_case(_registry(), FakeUnitOfWork(), store)
+    worker_id = WorkerId(str(_WORKER_UUID))
+
+    await use_case(worker_id=worker_id, draining=True)
+    await use_case(worker_id=worker_id, draining=True)
+    assert store.ids == {worker_id}
+
+    await use_case(worker_id=worker_id, draining=False)
+    await use_case(worker_id=worker_id, draining=False)
+    assert store.ids == set()
+
+
+async def test_drain_of_unknown_worker_persists_nothing() -> None:
+    store = FakeWorkerDrainStore()
+
+    result = await _use_case(_registry(), FakeUnitOfWork(), store)(
+        worker_id=WorkerId("ghost"), draining=True
+    )
+
+    assert result is None
+    assert store.ids == set()
+
+
+async def test_drain_does_not_mark_draining_when_persisting_fails() -> None:
+    # The drain record commits before the in-memory flag flips: a failed write
+    # leaves the registry ONLINE, so the live view never shows a drain an API
+    # restart would forget.
+    store = FakeWorkerDrainStore()
+    store.fail = True
+    registry = _registry()
+    worker_id = WorkerId(str(_WORKER_UUID))
+
+    with pytest.raises(RuntimeError, match="forced drain store failure"):
+        await _use_case(registry, FakeUnitOfWork(), store)(
+            worker_id=worker_id, draining=True
+        )
+
+    assert _status(registry, worker_id) is WorkerStatus.ONLINE
+
+
+async def test_undrain_keeps_draining_when_persisting_fails() -> None:
+    store = FakeWorkerDrainStore()
+    registry = _registry()
+    worker_id = WorkerId(str(_WORKER_UUID))
+    use_case = _use_case(registry, FakeUnitOfWork(), store)
+    await use_case(worker_id=worker_id, draining=True)
+    store.fail = True
+
+    with pytest.raises(RuntimeError, match="forced drain store failure"):
+        await use_case(worker_id=worker_id, draining=False)
+
+    assert _status(registry, worker_id) is WorkerStatus.DRAINING
+    assert store.ids == {worker_id}
+
+
+async def test_drain_does_not_persist_when_the_stop_fails() -> None:
+    # The stops commit first: a failed stop pass records no drain, so a restart
+    # cannot bring back a draining Worker whose servers are still desired=running.
+    store = FakeWorkerDrainStore()
+    uow = _FailingCommitUnitOfWork()
+    uow.servers.seed(
+        _server(
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_uuid=_WORKER_UUID,
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="forced commit failure"):
+        await _use_case(_registry(), uow, store)(
+            worker_id=WorkerId(str(_WORKER_UUID)), draining=True
+        )
+
+    assert store.ids == set()
 
 
 async def test_drain_converges_through_reconciler_with_final_snapshot() -> None:

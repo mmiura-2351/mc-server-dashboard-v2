@@ -30,7 +30,7 @@ from mc_server_dashboard_api.servers.application.lifecycle import (
     StopServersAssignedToWorker,
 )
 from tests.client_utils import enter_client
-from tests.fleet.fakes import FakeClock, make_worker
+from tests.fleet.fakes import FakeClock, FakeWorkerDrainStore, make_worker
 from tests.identity.fakes import make_user
 from tests.servers.fakes import FakeClock as ServersFakeClock
 from tests.servers.fakes import FakeUnitOfWork
@@ -62,6 +62,7 @@ def _drain_use_case(registry: InMemoryWorkerRegistry) -> SetWorkerDrain:
                 uow=FakeUnitOfWork(), clock=ServersFakeClock(_T0)
             )
         ),
+        drain_store=FakeWorkerDrainStore(),
     )
 
 
