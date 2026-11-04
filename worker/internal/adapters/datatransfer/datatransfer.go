@@ -195,17 +195,12 @@ func SweepSnapshotSpools(scratchRoot string) {
 // cleanup leaks the spool; SweepSnapshotSpools reclaims such leftovers at startup
 // (issue #787).
 //
-// The pack ends no later than ctx (issue #3511): it is the snapshot command's
-// deadline, and the command must answer by it. The walk checks ctx before every
-// write into the spool, so a slow pack stops at the next one. A system call that
-// does not return — an open or read of a file on stuck storage — cannot be
-// interrupted, so the walk runs on its own goroutine and is abandoned there:
-// PackSnapshot returns ctx's error at once and removes the spool's name. The
-// abandoned walk writes only through the spool's descriptor, never by path, and
-// its first write after the stuck call returns fails on ctx, so it ends without
-// adding to the archive; the bytes it wrote before sit in an unlinked file whose
-// space is freed when the walk closes it. A later attempt creates a new spool
-// (O_EXCL), so nothing the abandoned walk does can reach it.
+// The pack stops early once ctx is done (issue #3511): every write into the spool
+// checks ctx, so a pack past the snapshot command's deadline fails at its next
+// write and removes the spool instead of reading the rest of the working set. A
+// system call that does not return is not bounded here; the snapshot command
+// answers at its deadline whatever the pack is blocked on
+// (instancemanager.handleSnapshot).
 func (c *Client) PackSnapshot(ctx context.Context, srcDir string) (string, func(), error) {
 	if err := ctx.Err(); err != nil {
 		return "", func() {}, fmt.Errorf("datatransfer: pack: %w", err)
@@ -215,21 +210,12 @@ func (c *Client) PackSnapshot(ctx context.Context, srcDir string) (string, func(
 		return "", func() {}, fmt.Errorf("datatransfer: create snapshot spool: %w", err)
 	}
 	spoolPath := spool.Name()
-	done := make(chan error, 1)
-	go func() {
-		err := packTar(srcDir, ctxWriter{ctx: ctx, w: spool}, c.logger)
+	if err := packTar(srcDir, ctxWriter{ctx: ctx, w: spool}, c.logger); err != nil {
 		_ = spool.Close()
-		done <- err
-	}()
-	select {
-	case err = <-done:
-	case <-ctx.Done():
-		err = ctx.Err()
-	}
-	if err != nil {
 		_ = os.Remove(spoolPath)
 		return "", func() {}, fmt.Errorf("datatransfer: pack: %w", err)
 	}
+	_ = spool.Close()
 	cleanup := func() { _ = os.Remove(spoolPath) }
 	return spoolPath, cleanup, nil
 }

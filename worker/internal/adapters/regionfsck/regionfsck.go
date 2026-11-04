@@ -241,29 +241,14 @@ type Checker struct{}
 
 var _ regioncheck.Checker = Checker{}
 
-// CheckWorkingSet runs the package-level CheckWorkingSet on root, returning no
-// later than ctx (issue #3511). The walk checks ctx before every entry, so a slow
-// check stops at the next one. A system call that does not return — an open or
-// read of a file on stuck storage — cannot be interrupted, so the walk runs on its
-// own goroutine and is abandoned there: this returns ctx's error at once. The
-// abandoned walk only reads, and it ends at its next entry once the stuck call
-// returns.
+// CheckWorkingSet runs the package-level CheckWorkingSet on root, stopping early
+// once ctx is done (issue #3511): the walk checks ctx before every entry, so a
+// check past the snapshot command's deadline returns ctx's error at its next one
+// instead of scanning the rest of the working set. A system call that does not
+// return is not bounded here; the snapshot command answers at its deadline
+// whatever the check is blocked on (instancemanager.handleSnapshot).
 func (Checker) CheckWorkingSet(ctx context.Context, root string) (regioncheck.Report, error) {
-	type result struct {
-		report regioncheck.Report
-		err    error
-	}
-	done := make(chan result, 1)
-	go func() {
-		report, err := checkWorkingSet(ctx, root)
-		done <- result{report, err}
-	}()
-	select {
-	case r := <-done:
-		return r.report, r.err
-	case <-ctx.Done():
-		return regioncheck.Report{}, ctx.Err()
-	}
+	return checkWorkingSet(ctx, root)
 }
 
 // CheckWorkingSet walks root recursively and validates every *.mca file beneath

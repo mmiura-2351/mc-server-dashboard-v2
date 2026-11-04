@@ -575,25 +575,56 @@ structurally closes it: once it fires Worker-side, no late publish can exist.
 
 For a `SnapshotTrigger` the deadline runs from the start of the command and
 covers every phase: the quiesce of a running server, the pre-pack region fsck,
-the pack and the upload. A running server's snapshot also owes the save-on
-restore, which runs on its own 30 s budget detached from the deadline, so that
-auto-save comes back even after the deadline fired. The Worker keeps that 30 s
-back from the other phases, which end 30 s before the deadline, so the command
-answers within `transfer_deadline`, restore included. A phase that runs out the
-deadline fails the command with `TRANSFER_FAILED`; a partial archive is removed,
-and a stopped server's scratch is kept as on any failed snapshot, so a final
-snapshot loses nothing to it.
+the pack, the upload and the post-upload tail. The command always answers by the
+deadline, whatever its work is blocked on. The work runs on its own goroutine and
+the command waits for it or for the deadline, whichever comes first, so a system
+call stuck on the working set's storage cannot hold the answer. That covers an
+open, read or unlink in the pack or fsck, the settle scan, the working-set and
+generation-marker reads, and the upload's open. Such a call cannot be
+interrupted, so the work is **abandoned** rather than waited for. The pack and
+the fsck also check the deadline as they walk the working set, so work that is
+merely slow stops at its next file instead of running on.
 
-The pack and the fsck check the deadline as they walk the working set, so a slow
-one stops at its next file. A system call that does not return, such as a read
-of a file on stuck storage, cannot be interrupted. The Worker abandons it: the
-command answers at the deadline while the stuck call's goroutine stays blocked.
-Once the call returns, that goroutine stops at its next step. An abandoned fsck
-only reads. An abandoned pack writes only through its archive's descriptor and
-never by path, and the archive's name is removed when the pack is abandoned.
-Nothing the goroutine does can therefore reach the archive of a later attempt,
-which is always a new file. The goroutine keeps its descriptors, and the
-unlinked archive's disk space, until the stuck call returns.
+On the deadline the command answers `TRANSFER_FAILED`, with one exception. If
+the upload had already published, the answer is a success that declares no
+`held_generation`. The API then records nothing in its held inventory and
+treats the result like any other successful snapshot. That costs at most one
+hydrate, and the publish it reports did happen.
+
+A running server's snapshot also owes the save-on restore. The restore runs on
+its own 30 s budget, detached from the deadline, so that auto-save comes back
+even after the deadline fired. The Worker keeps that 30 s back from the other
+phases, which end 30 s before the deadline, so the command answers within
+`transfer_deadline`, restore included. When the work is abandoned after save-off
+may have gone out, the command issues save-on itself within that 30 s. The
+abandoned work's own later save-on is harmless, since save-on is idempotent.
+Both restores reconnect with the RCON address and password the quiesce
+resolved. Neither reads `server.properties` again, because that file sits on
+the storage that may be stuck.
+
+Abandoned work keeps the server's claim until its blocked call returns and it
+exits:
+
+- **Stopped server (the final snapshot).** The work keeps the id's reservation.
+  A `StartServer`, `HydrateTrigger` or `SnapshotTrigger` for the id answers
+  `BUSY` until then (Section 7, `command_in_flight`), so nothing replaces the
+  scratch it may still read.
+- **Running server.** The work takes no reservation (Section 7.1, issue #829
+  item 4), so a `StopServer` or `RestartServer` still proceeds over a stuck
+  snapshot. Only a second `SnapshotTrigger` for the id answers `BUSY` until the
+  work exits (`running_snapshot_in_flight` in the contract table): a second
+  save-off would interleave with the stuck work's late save-on.
+
+Once the command has answered a failure, the abandoned work deletes nothing and
+writes no marker. It skips the generation-marker stamp, the displaced-tree
+sweep and the scratch GC, even if its upload later publishes. A failed final
+snapshot therefore keeps its scratch, as any failed snapshot does. The work
+removes only its own spool. The spool's name is unique and stays taken until
+that removal, so the removal cannot touch another attempt's file.
+
+The residual is what the blocked call itself holds. Until it returns, the
+abandoned work keeps its file descriptors, its spool's disk space, and the
+claim above. Worker shutdown (`Close`) does not wait for abandoned work.
 
 The API derives the deadline as `max(hydrate_timeout_seconds, snapshot_timeout_seconds)
 + margin`, with a margin of 60 s, so it is always **>=** the API budget, and a
@@ -695,7 +726,7 @@ classes a Worker can hit:
 |---|---|
 | `SERVER_NOT_FOUND` | The target server is unknown to this Worker (no live instance: stop/restart/command on a not-running server, a missing file target, or a stopped-id snapshot whose scratch holds no working set — already GC'd after a published final snapshot, emptied out of band, or never hydrated; that predicate is the working set's CONTENT, so a directory holding only the generation marker is refused too, there being nothing to capture). On a LAUNCH it is the same statement about the working set rather than about an instance: the API issues a `HydrateTrigger` before every start that needs one, so a working set the Worker cannot show at launch means the API skipped the hydrate — its held-working-set inventory said this Worker holds a generation at least as fresh as the store — over a set the Worker does not actually hold. Launching would boot the server into an empty directory and the next snapshot would publish that, so the launch is refused instead. The predicate is the presence of the generation marker `.mcsd_generation` (exactly that name, as a regular file; the `.mcsd_generation-*` temps of an interrupted write do not count, and neither does a link or anything else planted at the name, which the Worker reads as generation 0 — [`SECURITY.md`](SECURITY.md) Section 6), not the existence of the directory: the marker is the Worker's held-claim token, so a scratch emptied in place has lost the claim the skipped hydrate relied on and is refused like an absent one. A directory holding ONLY the marker passes — that is what a 204 "nothing published yet" hydrate leaves, and booting a fresh world out of it is the contract. The guard covers both launches: on a `StartServer` the API answers it by re-launching WITH a full hydrate, and on a `RestartServer` it is reached on the relaunch, after the restart's own stop confirmed, so the server is left down and the reconciler's re-dispatched start takes that same replay — the recovery is stop → hydrate → start. All these cases carry one shared phrase in the message, which is how the API tells them from any other `SERVER_NOT_FOUND`; the phrase and the Worker's exact text are declared in the contract table's `messages` (Section 7.1), not restated here. Where a command's precondition is "this server is running", the code means the Worker holds neither an instance nor a **failed-stop orphan** for the id: the orphan answers `INVALID_STATE` or `BUSY` instead, per the split below. |
 | `INVALID_STATE` | The command is invalid for the current **settled** state: start or hydrate a running server, or a restart, console command, relay tunnel dial or Bedrock tunnel open over a server with a failed-stop orphan pending termination. The orphan is a process this Worker could not confirm dead, so it may still be alive holding its port and writing its world; reporting it as not-running would tell the operator a live server is down. Those four verbs are refused for **what the state is** and are never carried out later, so naming the state is the honest answer — unlike start / hydrate / stopped-id snapshot over the same orphan, which will succeed once it converges and therefore answer `BUSY`. Two commands are deliberately exempt from the orphan refusal entirely: `StopServer` *takes* the orphan and re-attempts the driver Stop (the path that resolves it on demand), and `CloseBedrockTunnel` takes no running check at all, so a tunnel that outlived its server can still be torn down. |
-| `BUSY` | The command was refused without being applied because the server's id is not free yet, and the refusal is **not** a statement about a settled state: either another mutating lifecycle command is already in flight (the reservation race) or the Worker holds a failed-stop orphan it is still converging. In both cases the outcome is not yet known and **this same command will be accepted once the Worker settles**, so the API keeps the assignment/intent and retries on a later tick rather than converging an observed state. For the same reason the reconciler does not count a `BUSY`-refused start toward that server's backoff, and it does not re-dispatch a start at all while the row still reports a restart's stop leg (`desired=running`, `observed=stopping`) inside the restart budget (CONFIGURATION.md Section 5.6). Note where `BUSY` is actually met: a command arriving on the **same session** as an in-flight command for that server is not refused but queued behind it (the Worker runs one server's commands serially per session), so the reservation refusal is seen on a new session after a reconnect, and the orphan refusal on any session. Answering `INVALID_STATE` for the orphan would wedge the reconciler: the API reads `INVALID_STATE` on a start as "already running", so a refusal over an orphan whose process is already **dead** would manufacture a permanent false `observed=running` — a converged row is settled, so the reconciler would never re-select it and no `StatusChange` would ever come. The Worker converges the orphan itself — it probes the instance's real liveness on a backoff, retries the stop while it is alive, retires the record and reports `stopped` once it is confirmed gone, and reports `SERVER_STATE_UNKNOWN` while the backend cannot answer — which is what makes the `BUSY` promise true. The record also clears on its own if the process exits, via the instance's status pump. |
+| `BUSY` | The command was refused without being applied because the server's id is not free yet, and the refusal is **not** a statement about a settled state: either another mutating lifecycle command is already in flight (the reservation race) or the Worker holds a failed-stop orphan it is still converging. In both cases the outcome is not yet known and **this same command will be accepted once the Worker settles**, so the API keeps the assignment/intent and retries on a later tick rather than converging an observed state. For the same reason the reconciler does not count a `BUSY`-refused start toward that server's backoff, and it does not re-dispatch a start at all while the row still reports a restart's stop leg (`desired=running`, `observed=stopping`) inside the restart budget (CONFIGURATION.md Section 5.6). Note where `BUSY` is actually met: a command arriving on the **same session** as an in-flight command for that server is not refused but queued behind it (the Worker runs one server's commands serially per session), so the reservation refusal is seen on a new session after a reconnect, and the orphan refusal on any session. The exception is a snapshot abandoned at its deadline (Section 5.2): it answers but keeps its claim until its blocked work exits, so that claim's refusal is met on the same session too. For a stopped id the claim is the reservation; for a running id it is the running-snapshot mark, which only a second `SnapshotTrigger` consults. Answering `INVALID_STATE` for the orphan would wedge the reconciler: the API reads `INVALID_STATE` on a start as "already running", so a refusal over an orphan whose process is already **dead** would manufacture a permanent false `observed=running` — a converged row is settled, so the reconciler would never re-select it and no `StatusChange` would ever come. The Worker converges the orphan itself — it probes the instance's real liveness on a backoff, retries the stop while it is alive, retires the record and reports `stopped` once it is confirmed gone, and reports `SERVER_STATE_UNKNOWN` while the backend cannot answer — which is what makes the `BUSY` promise true. The record also clears on its own if the process exits, via the instance's status pump. |
 | `DRIVER_UNAVAILABLE` | The requested execution driver is not offered by this Worker. |
 | `FILE_ACCESS_DENIED` | A file path was rejected. A refining `file_access_reason` (Section 7.2) splits the distinct conditions so the API maps each to an honest HTTP reason instead of one blanket `invalid_path`. |
 | `TRANSFER_FAILED` | A hydrate/snapshot data-plane transfer failed. |

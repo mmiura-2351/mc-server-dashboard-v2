@@ -227,6 +227,21 @@ type Manager struct {
 	// belongs to the manager under test -- mirroring scanRegion above.
 	snapshotAfterRunningCheck func(serverID string)
 
+	// readWorkingDir lists a stopped id's working dir for the snapshot's
+	// working-set guard, and readGeneration reads the marker the snapshot declares
+	// as its base generation. Both are defaulted in New (os.ReadDir,
+	// recordedGeneration) so a test can stall them where storage would (issue
+	// #3511), mirroring scanRegion above.
+	readWorkingDir func(dir string) ([]os.DirEntry, error)
+	readGeneration func(workingDir, serverID string, log *slog.Logger) uint64
+
+	// snapshotContextHook, when non-nil, replaces snapshotContext so a test can end a
+	// snapshot command's deadline at a chosen moment instead of by the clock, and
+	// snapshotBodyExited, when non-nil, runs once a snapshot's body has exited and
+	// released the id (issue #3511). Production leaves both nil.
+	snapshotContextHook func(ctx context.Context, running bool) (context.Context, context.CancelFunc)
+	snapshotBodyExited  func(serverID string)
+
 	// orphanProbeInterval / orphanProbeMaxInterval are the failed-stop-orphan
 	// converger's probe cadence and its exponential-backoff cap (issue #2475).
 	// They are fields (not consts) so tests can shrink them to milliseconds,
@@ -396,11 +411,18 @@ type Manager struct {
 	//     over a still-live process.
 	//   - SnapshotTrigger: only the STOPPED-id path (the set is at rest and the API
 	//     has typically unassigned), to block a racing hydrate from rewriting the dir
-	//     mid-pack. A running-id snapshot does NOT reserve: a live instance already
-	//     blocks reserve(), and its save-off bracket is the quiesce.
+	//     mid-pack, until the snapshot's body exits — which can be after the command
+	//     answered at its deadline (issue #3511). A running-id snapshot does NOT
+	//     reserve: a live instance already blocks reserve(), and its save-off bracket
+	//     is the quiesce.
 	// The file handlers (ReadFile / EditFile / ListFiles) act atomically on individual
 	// files and take no reservation.
 	reserved map[string]bool
+	// runningSnapshots marks a running id whose snapshot body is still alive (issue
+	// #3511). It refuses a second running SnapshotTrigger for the id with BUSY, and
+	// nothing else: a running snapshot takes no reservation (above), so a stop or a
+	// restart still proceeds over a body that is stuck. The body clears it on exit.
+	runningSnapshots map[string]bool
 
 	// workingSetLocks holds each server id's working-set lock (workingSetLock), which
 	// keeps the Worker's own renames out of the driver's hand-over walk (issue #3371).
@@ -497,6 +519,9 @@ func New(drivers map[string]execution.ExecutionDriver, scratchDir string, region
 		settlePollInterval: defaultSettlePollInterval,
 		settleBudget:       defaultSettleBudget,
 		scanRegion:         scanRegionState,
+		readWorkingDir:     os.ReadDir,
+		readGeneration:     recordedGeneration,
+		runningSnapshots:   map[string]bool{},
 		instances:          map[string]execution.Instance{},
 		startCmds:          map[string]session.Command{},
 		orphans:            map[string]orphanEntry{},
@@ -774,6 +799,111 @@ func (m *Manager) transferContext(ctx context.Context) (context.Context, context
 		return context.WithCancel(ctx)
 	}
 	return context.WithTimeout(ctx, d)
+}
+
+// snapshotAttempt is what a snapshot command's body shares with its handler (issue
+// #3511). Exactly one of commit (the body, once its upload has published) and
+// abandon (the handler, once the deadline passed) wins. Neither holds mu across
+// any I/O, so the handler never waits on a blocked body here.
+//
+// An abandoned body does no destructive tail: no generation-marker stamp, no
+// displaced-tree sweep, no scratch GC. The command answered a failure, so the
+// scratch stays as on any failed snapshot, and the tail would otherwise run after
+// the API had moved on. A committed body finishes its tail under its claim.
+type snapshotAttempt struct {
+	mu        sync.Mutex
+	committed bool
+	abandoned bool
+	// dial reconnects RCON with the credentials the quiesce resolved; it is set
+	// just before save-off goes out, so the handler can restore save-on itself.
+	dial func(context.Context) (execution.ServerControl, error)
+}
+
+// commit reports whether the body still owns the attempt, marking it committed.
+func (a *snapshotAttempt) commit() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.abandoned {
+		return false
+	}
+	a.committed = true
+	return true
+}
+
+// abandon marks the attempt abandoned unless the body already committed it, and
+// reports whether it had.
+func (a *snapshotAttempt) abandon() (committed bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.committed {
+		return true
+	}
+	a.abandoned = true
+	return false
+}
+
+// saveOffSent records how to restore save-on once save-off may have been applied.
+func (a *snapshotAttempt) saveOffSent(dial func(context.Context) (execution.ServerControl, error)) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.dial = dial
+}
+
+// saveOnDial returns the dial recorded by saveOffSent, or nil if save-off never
+// went out.
+func (a *snapshotAttempt) saveOnDial() func(context.Context) (execution.ServerControl, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.dial
+}
+
+// skipAbandonedTail ends a body whose upload published after its command had
+// already answered a failure (issue #3511): the tail is skipped, and the result
+// goes nowhere.
+func (m *Manager) skipAbandonedTail(cmd session.Command) session.CommandResult {
+	m.logger.Warn("abandoned snapshot published after its command answered; skipping the marker stamp, the displaced-tree sweep and the scratch GC",
+		"server_id", cmd.ServerID)
+	return fail(cmd.CommandID, session.CommandErrorTransferFailed,
+		"instancemanager: snapshot published after its command was abandoned")
+}
+
+// restoreSaveOnAbandoned re-enables auto-save on a running server whose snapshot
+// was abandoned at its deadline after save-off may have gone out (issue #3511).
+// The body is blocked, so the handler issues save-on itself, on a fresh connection
+// dialed with the quiesce's credentials: no read of server.properties, which sits
+// on the storage that may be stuck. It waits at most restoreSaveTimeout, the share
+// snapshotContext held back for it. The body's own restore may follow later;
+// save-on is idempotent.
+func (m *Manager) restoreSaveOnAbandoned(serverID string, dial func(context.Context) (execution.ServerControl, error)) {
+	restoreCtx, cancel := context.WithTimeout(context.Background(), restoreSaveTimeout)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		ctrl, err := dial(restoreCtx)
+		if err != nil {
+			done <- err
+			return
+		}
+		defer func() { _ = ctrl.Close() }()
+		_, err = ctrl.Execute(restoreCtx, "save-on")
+		done <- err
+	}()
+	var err error
+	select {
+	case err = <-done:
+	case <-restoreCtx.Done():
+		err = restoreCtx.Err()
+	}
+	if err != nil {
+		m.logger.Error("snapshot save-on NOT restored after the snapshot was abandoned; server left with auto-save disabled",
+			"server_id", serverID, "error", err)
+	}
+}
+
+// redialer is a ServerControl that reconnects with the credentials it was opened
+// with (rcon.Client.Redial) instead of reading server.properties again.
+type redialer interface {
+	Redial(ctx context.Context) (execution.ServerControl, error)
 }
 
 // snapshotContext derives the one deadline a snapshot command runs under (issue
@@ -1186,7 +1316,19 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 	}
 	m.mu.Lock()
 	_, running := m.instances[cmd.ServerID]
+	inFlight := running && m.runningSnapshots[cmd.ServerID]
+	if running && !inFlight {
+		m.runningSnapshots[cmd.ServerID] = true
+	}
 	m.mu.Unlock()
+	if inFlight {
+		// The body of an earlier snapshot of this running server is still alive: it
+		// was abandoned at its deadline and is blocked on storage, or it is a
+		// cross-stream duplicate still running (issue #3511). A second quiesce would
+		// interleave its save-off with that body's late save-on, so this one waits.
+		return fail(cmd.CommandID, session.CommandErrorBusy,
+			"instancemanager: a snapshot of this running server is still in flight")
+	}
 	// The running flag is read outside any reservation, so a start can register an
 	// instance between here and the stopped path's reserve() below; the contract
 	// table records what that race emits, and this seam is how the test enters it
@@ -1194,11 +1336,83 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 	if hook := m.snapshotAfterRunningCheck; hook != nil {
 		hook(cmd.ServerID)
 	}
-	// One deadline bounds the whole command from here (issue #3511): the quiesce, the
-	// pre-pack fsck, the pack and the upload all run under cmdCtx, and the save-on
-	// restore fits inside it (snapshotContext).
-	cmdCtx, cancel := m.snapshotContext(ctx, running)
+	release := func() {
+		m.mu.Lock()
+		delete(m.runningSnapshots, cmd.ServerID)
+		m.mu.Unlock()
+	}
+	if !running {
+		// Stopped-id snapshot: the set is at rest and the API has typically already
+		// unassigned (a graceful stop snapshots after unassign, so a user start can
+		// re-place this id on the same Worker concurrently). Reserve the id for the
+		// pack so a racing HydrateTrigger (or start) cannot rewrite the working dir
+		// while it is mid-fsck/tar — a mixed capture whose .mca files are each valid
+		// would slip past the #749 integrity gate (the snapshot×hydrate cross-race the
+		// #780 review confirmed). A reservation already held by such a racing command
+		// rejects with BUSY. Running-id snapshots stay reservation-free: a
+		// running instance already blocks reserve(), and the save-off bracket below is
+		// their quiesce. The body releases it when it exits, which can be after this
+		// command has answered (issue #3511).
+		if ok, code, msg := m.reserve(cmd.ServerID); !ok {
+			return fail(cmd.CommandID, code, msg)
+		}
+		release = func() { m.release(cmd.ServerID) }
+	}
+	// One deadline bounds the whole command (issue #3511, snapshotContext). The body
+	// runs on its own goroutine and this handler answers at the deadline whatever the
+	// body is blocked on: a stalled read, open, unlink or upload on the working set's
+	// storage cannot be interrupted, so it is abandoned rather than waited for. The
+	// abandoned body keeps the id's claim until it exits — the reservation of a
+	// stopped id, the runningSnapshots mark of a running one — and skips its
+	// destructive tail (snapshotAttempt). Close does not wait for it.
+	newContext := m.snapshotContext
+	if hook := m.snapshotContextHook; hook != nil {
+		newContext = hook
+	}
+	cmdCtx, cancel := newContext(ctx, running)
 	defer cancel()
+	att := &snapshotAttempt{}
+	done := make(chan session.CommandResult, 1)
+	go func() {
+		res := m.snapshotBody(ctx, cmdCtx, cmd, running, att)
+		release()
+		if hook := m.snapshotBodyExited; hook != nil {
+			hook(cmd.ServerID)
+		}
+		done <- res
+	}()
+	select {
+	case res := <-done:
+		return res
+	case <-cmdCtx.Done():
+	}
+	select {
+	case res := <-done:
+		return res
+	default:
+	}
+	if att.abandon() {
+		// The upload had already published when the deadline passed: the store holds
+		// this capture, so the answer is a success. It declares no generation (issue
+		// #2481), since the marker stamp has not landed; the API then records nothing
+		// in its held inventory, which can only cost a hydrate. The body finishes its
+		// tail under its claim.
+		m.logger.Warn("snapshot deadline passed after the upload published; answering success and letting the attempt finish",
+			"server_id", cmd.ServerID)
+		return session.CommandResult{CommandID: cmd.CommandID, Success: true}
+	}
+	if dial := att.saveOnDial(); dial != nil {
+		m.restoreSaveOnAbandoned(cmd.ServerID, dial)
+	}
+	m.logger.Warn("snapshot abandoned at its deadline; the attempt keeps the server's claim until its blocked call returns",
+		"server_id", cmd.ServerID, "error", cmdCtx.Err())
+	return fail(cmd.CommandID, session.CommandErrorTransferFailed,
+		fmt.Sprintf("instancemanager: snapshot abandoned at its deadline: %v", cmdCtx.Err()))
+}
+
+// snapshotBody is a snapshot command's work, run off the handler's goroutine
+// (handleSnapshot). ctx is the request's context, cmdCtx the command's deadline.
+func (m *Manager) snapshotBody(ctx, cmdCtx context.Context, cmd session.Command, running bool, att *snapshotAttempt) session.CommandResult {
 	workingDir := filepath.Join(m.scratchDir, cmd.ServerID)
 	// restore re-enables auto-save after the quiesce. Declared here so it is
 	// accessible after the if/else for the explicit restore() call between pack and
@@ -1321,7 +1535,7 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		var quiesced bool
 		var rawRestore func()
 		var openErr error
-		quiesced, rawRestore, openErr = m.quiesceRunning(cmdCtx, cmd.ServerID, workingDir)
+		quiesced, rawRestore, openErr = m.quiesceRunning(cmdCtx, cmd.ServerID, workingDir, att)
 		var once sync.Once
 		restore = func() { once.Do(rawRestore) }
 		defer restore()
@@ -1346,21 +1560,6 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 			return fail(cmd.CommandID, session.CommandErrorTransferFailed,
 				"instancemanager: snapshot refused: quiesce_unavailable (could not quiesce running world)")
 		}
-	} else {
-		// Stopped-id snapshot: the set is at rest and the API has typically already
-		// unassigned (a graceful stop snapshots after unassign, so a user start can
-		// re-place this id on the same Worker concurrently). Reserve the id for the
-		// pack so a racing HydrateTrigger (or start) cannot rewrite the working dir
-		// while it is mid-fsck/tar — a mixed capture whose .mca files are each valid
-		// would slip past the #749 integrity gate (the snapshot×hydrate cross-race the
-		// #780 review confirmed). A reservation already held by such a racing command
-		// rejects with BUSY. Running-id snapshots stay reservation-free: a
-		// running instance already blocks reserve(), and the save-off bracket above is
-		// their quiesce. Released on every return below.
-		if ok, code, msg := m.reserve(cmd.ServerID); !ok {
-			return fail(cmd.CommandID, code, msg)
-		}
-		defer m.release(cmd.ServerID)
 	}
 
 	if !running {
@@ -1424,7 +1623,7 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		// #2843). It is kept verbatim for the emptied and marker-only shapes too: the
 		// prose is a shade imprecise there, but the discriminator is exact — the same
 		// trade the launch guard made.
-		entries, err := os.ReadDir(workingDir)
+		entries, err := m.readWorkingDir(workingDir)
 		if err != nil && !os.IsNotExist(err) {
 			return fail(cmd.CommandID, session.CommandErrorTransferFailed,
 				fmt.Sprintf("instancemanager: snapshot: read working dir: %v", err))
@@ -1475,7 +1674,7 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 	// can refuse the publish if the store advanced past it. 0 (an unknown/never-
 	// hydrated set, or one whose marker the read refuses, issue #3336) leaves the guard
 	// to compare against the store's current value.
-	baseGeneration := recordedGeneration(workingDir, cmd.ServerID, m.logger)
+	baseGeneration := m.readGeneration(workingDir, cmd.ServerID, m.logger)
 
 	if running {
 		// Running-server snapshot (issue #1710): split pack from upload so save-on is
@@ -1497,6 +1696,9 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		if err != nil {
 			return fail(cmd.CommandID, session.CommandErrorTransferFailed,
 				fmt.Sprintf("instancemanager: snapshot upload: %v", err))
+		}
+		if !att.commit() {
+			return m.skipAbandonedTail(cmd)
 		}
 		// Record the NEW generation the publish produced (issue #763): the scratch we
 		// just pushed is the source of this store generation, so its local generation
@@ -1551,6 +1753,9 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		if err != nil {
 			return fail(cmd.CommandID, session.CommandErrorTransferFailed,
 				fmt.Sprintf("instancemanager: snapshot: %v", err))
+		}
+		if !att.commit() {
+			return m.skipAbandonedTail(cmd)
 		}
 		// Stopped-id snapshot succeeded: this is the post-stop FINAL snapshot (or a
 		// snapshot of an at-rest set). The working set is now captured authoritatively
@@ -1639,33 +1844,42 @@ func (m *Manager) checkWorkingSet(ctx context.Context, serverID, workingDir stri
 // detached from ctx (carrying restoreSaveTimeout) so a cancelled or timed-out
 // request still re-enables auto-save. Because the rcon client poisons its
 // connection on ANY Execute error (a failed/timed-out save-all leaves the same
-// client returning ErrConnBroken), the restore redials a fresh connection via
-// openControl and retries save-on once if the first attempt fails — otherwise a
+// client returning ErrConnBroken), the restore redials a fresh connection — with
+// the credentials this open resolved, when the connection can (issue #3511) — and
+// retries save-on once if the first attempt fails — otherwise a
 // running server would be left with auto-save permanently OFF (#694 hard
 // requirement). A final failure is logged loudly: auto-save stuck off is
 // operator-actionable.
-func (m *Manager) quiesceRunning(ctx context.Context, serverID, workingDir string) (bool, func(), error) {
+func (m *Manager) quiesceRunning(ctx context.Context, serverID, workingDir string, att *snapshotAttempt) (bool, func(), error) {
 	driverName, mcVersion := m.controlTargetFor(serverID)
 	raw, err := m.openControl(ctx, serverID, driverName, mcVersion)
 	if err != nil {
 		m.logger.Warn("snapshot quiesce: open rcon failed", "server_id", serverID, "error", err)
 		return false, func() {}, err
 	}
+	// Every redial of this bracket reuses the credentials the open just resolved
+	// when the connection offers that (issue #3511): server.properties lives on the
+	// working set's storage, and a read stuck there must not hold the save-on.
+	dial := func(dialCtx context.Context) (execution.ServerControl, error) {
+		if r, ok := raw.(redialer); ok {
+			return r.Redial(dialCtx)
+		}
+		return m.openControl(dialCtx, serverID, driverName, mcVersion)
+	}
 	// Wrap in resilientControl (#919): a mid-bracket Execute error poisons the
 	// rcon connection, so save-all after a timed-out save-off (or save-on after
 	// a timed-out save-all) would return ErrConnBroken instantly. The wrapper
 	// auto-redials so the bracket's trailing commands still reach the server.
 	ctrl := &resilientControl{
-		inner: raw,
-		dial: func(dialCtx context.Context) (execution.ServerControl, error) {
-			return m.openControl(dialCtx, serverID, driverName, mcVersion)
-		},
+		inner:    raw,
+		dial:     dial,
 		logger:   m.logger,
 		serverID: serverID,
 	}
 
 	saveOff := true
 	quiesced := true
+	att.saveOffSent(dial)
 	if _, err := ctrl.Execute(ctx, "save-off"); err != nil {
 		m.logger.Warn("snapshot save-off failed; snapshot will not be quiesced",
 			"server_id", serverID, "error", err)
@@ -1685,7 +1899,7 @@ func (m *Manager) quiesceRunning(ctx context.Context, serverID, workingDir strin
 		if !saveOff {
 			return
 		}
-		m.restoreSaveOn(ctx, serverID, ctrl)
+		m.restoreSaveOn(ctx, serverID, ctrl, dial)
 	}, nil
 }
 
@@ -1817,11 +2031,12 @@ func (m *Manager) flushBeforeStopWithDriver(ctx context.Context, serverID, drive
 // so a cancelled/timed-out snapshot still re-enables auto-save. The save-all/settle
 // step may have failed and poisoned ctrl's connection (the rcon client marks the
 // connection broken on any Execute error), so a save-on on the same ctrl can return
-// ErrConnBroken instantly; on any failure it redials a fresh RCON connection via
-// openControl and retries save-on once with a short backoff inside the timeout, so
+// ErrConnBroken instantly; on any failure it redials a fresh RCON connection with
+// dial (quiesceRunning's: the open's own credentials where the connection can
+// reuse them, issue #3511) and retries save-on once with a short backoff inside the timeout, so
 // a running server is never left with auto-save permanently OFF (#694). A final
 // failure is logged loudly — auto-save stuck off is operator-actionable.
-func (m *Manager) restoreSaveOn(ctx context.Context, serverID string, ctrl execution.ServerControl) {
+func (m *Manager) restoreSaveOn(ctx context.Context, serverID string, ctrl execution.ServerControl, dial func(context.Context) (execution.ServerControl, error)) {
 	restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restoreSaveTimeout)
 	defer cancel()
 
@@ -1843,8 +2058,7 @@ func (m *Manager) restoreSaveOn(ctx context.Context, serverID string, ctrl execu
 	case <-time.After(m.fsckRetryDelay):
 	}
 
-	driverName, mcVersion := m.controlTargetFor(serverID)
-	fresh, err := m.openControl(restoreCtx, serverID, driverName, mcVersion)
+	fresh, err := dial(restoreCtx)
 	if err != nil {
 		m.logger.Error("snapshot save-on NOT restored; redial failed, server left with auto-save disabled",
 			"server_id", serverID, "error", err)
