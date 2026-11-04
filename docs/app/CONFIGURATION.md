@@ -298,7 +298,8 @@ Only the keys for the selected `storage.backend` are read; the rest are ignored
 publish behaviour (REQUIREMENTS.md FR-DATA-6) live in STORAGE.md.
 
 **Connection-pool sizing and the lifecycle lock.** Every at-rest-gated
-operation (restore, delete, the file mutations, update, create-backup) and every
+operation (restore, delete, the file mutations, update, create-backup, and
+upload-backup) and every
 `StartServer` flip holds a *per-server* advisory lock on a **dedicated** pool
 connection for the operation's duration — a long gated op (a minutes-long
 restore/delete pack) thus pins one connection on top of the connection its own
