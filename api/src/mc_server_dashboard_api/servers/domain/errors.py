@@ -460,7 +460,8 @@ class BackupUnreadableError(ServerError):
     (issue #2374). The restore use case raises it too, for a backup already
     recorded ``UNREADABLE`` — refused before any read, ``force`` or not — and for
     one whose archive the restore itself fails to read back (issue #3230) or
-    finds holding a member the store will not extract (issue #3371).
+    finds holding a member the store will not extract (issues #3371, #3237) or
+    inflating past the decompressed-size cap (issue #3237).
 
     Distinct from :class:`BackupCorruptError` (the archived *world* is structurally
     corrupt — the bytes are all there, the contents are bad) and from

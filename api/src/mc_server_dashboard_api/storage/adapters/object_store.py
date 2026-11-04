@@ -50,6 +50,7 @@ import hashlib
 import io
 import json
 import logging
+import os
 import tarfile
 import tempfile
 import threading
@@ -1547,40 +1548,59 @@ class ObjectStorage(Storage):
         # returned ``WorkingSetReport`` is therefore always empty here — a sound
         # archive is "healthy" and an unproducible one raises ArchiveUnreadableError,
         # which is a verdict about the bytes, not about the world inside them.
+        #
+        # Bytes the store can produce can still hold nothing a restore can stage
+        # (issue #3237): a member escaping the prefix, or members inflating past
+        # the decompressed-size cap. So the read that proves the archive is
+        # spooled, and the spool is walked the way restore walks it, discarding
+        # the bytes — ArchiveUnreadableError / ArchiveTooLargeError, as restore.
         backup_key = self._backup_key(community_id, server_id, key)
         async with self._client_factory() as client:
             declared = await client.head_object(backup_key)
             if declared is None:
                 raise NotFoundError(f"backup not found: {key.value}")
-            probe = await self._probe_archive(client, backup_key, declared)
-            if probe.ended_at is not None:
-                probe = await self._reprobe_short_body(
-                    client, backup_key, declared, probe.ended_at
-                )
-            if probe.defect is not None:
-                raise ArchiveUnreadableError(
-                    f"backup archive {key.value} could not be read back: {probe.defect}"
-                )
+            fd, name = await asyncio.to_thread(
+                tempfile.mkstemp, prefix=".fsck.", suffix=".tar.gz"
+            )
+            os.close(fd)
+            spool = Path(name)
+            try:
+                probe = await self._probe_archive(client, backup_key, declared, spool)
+                if probe.ended_at is not None:
+                    probe = await self._reprobe_short_body(
+                        client, backup_key, declared, probe.ended_at, spool
+                    )
+                if probe.defect is not None:
+                    raise ArchiveUnreadableError(
+                        f"backup archive {key.value} could not be read back: "
+                        f"{probe.defect}"
+                    )
+                await _drain_restorable_members(spool, self._max_restore_bytes)
+            finally:
+                await asyncio.to_thread(spool.unlink, missing_ok=True)
         return WorkingSetReport()
 
     async def _probe_archive(
-        self, client: S3Client, backup_key: str, declared: int
+        self, client: S3Client, backup_key: str, declared: int, spool: Path
     ) -> _ArchiveProbe:
         """Stream the stored archive once, proving it can be produced (issue #2371).
 
         Reads the SAME object the download/restore path reads, checking both that
         the store delivers exactly the ``declared`` bytes its ``HEAD`` promised and
         that those bytes decompress to a well-formed gzip end. The decompressed
-        output is discarded as it is produced: nothing is staged to disk, nothing
-        is buffered whole.
+        output is discarded as it is produced, nothing is buffered whole, and the
+        bytes read are written to ``spool`` (replacing what an earlier read left
+        there) for the member walk that follows a sound read (issue #3237).
         """
 
         gzip_probe = GzipReadProbe()
         read = 0
         try:
-            async for chunk in await client.get_object(backup_key):
-                read += len(chunk)
-                gzip_probe.feed(chunk)
+            with open(spool, "wb") as out:
+                async for chunk in await client.get_object(backup_key):
+                    read += len(chunk)
+                    gzip_probe.feed(chunk)
+                    await asyncio.to_thread(out.write, chunk)
             if read < declared:
                 # A body that simply STOPPED early, with no transport error — some
                 # store/proxy combination can end the response cleanly. This is the
@@ -1611,7 +1631,12 @@ class ObjectStorage(Storage):
         return _ArchiveProbe()
 
     async def _reprobe_short_body(
-        self, client: S3Client, backup_key: str, declared: int, first_end: int
+        self,
+        client: S3Client,
+        backup_key: str,
+        declared: int,
+        first_end: int,
+        spool: Path,
     ) -> _ArchiveProbe:
         """Classify a body that ended short of its declared length (#2371, #2381).
 
@@ -1656,7 +1681,7 @@ class ObjectStorage(Storage):
         # Let a momentary fault clear before re-reading, so a blip has the chance to
         # come back as a complete read rather than a second short one.
         await asyncio.sleep(_REPROBE_BACKOFF_S)
-        second = await self._probe_archive(client, backup_key, declared)
+        second = await self._probe_archive(client, backup_key, declared, spool)
         if second.ended_at is None:
             return second
         # Both delivered bytes, or neither did: only a mixed pair is an outage.
@@ -2513,7 +2538,9 @@ async def _archive_file_member_streams(
 
     An archive whose bytes cannot be read back — truncated, or damaged gzip / tar
     framing — raises :class:`ArchiveUnreadableError` (issue #3230), from the
-    member walk or from a member's chunk stream.
+    member walk or from a member's chunk stream. So does one holding a file
+    member that escapes the prefix (issue #3237): it reads, but nothing can be
+    restored from it, override or not, matching the fs extraction.
 
     With ``dropped``, a member landing at or under the reserved generation-marker
     root name — of any type — is not yielded but its name appended (issue #3433).
@@ -2532,8 +2559,9 @@ async def _archive_file_member_streams(
             if member.isfile():
                 pure = PurePosixPath(member.name)
                 if pure.is_absolute() or ".." in pure.parts:
-                    raise PathTraversalError(
-                        f"tar member escapes the server prefix: {member.name!r}"
+                    raise ArchiveUnreadableError(
+                        "archive holds a member that cannot be restored: tar "
+                        f"member escapes the server prefix: {member.name!r}"
                     )
             # Decided after the traversal check, on the name the member resolves
             # to, so an absolute or ``..`` file member is refused, not dropped.
@@ -2548,6 +2576,20 @@ async def _archive_file_member_streams(
             yield member.name, _fileobj_parts(member_file)
     finally:
         await asyncio.to_thread(tar.close)
+
+
+async def _drain_restorable_members(spool: Path, max_bytes: int) -> None:
+    """Walk the spooled ``tar.gz`` as restore does, discarding the bytes (#3237).
+
+    The same member stream and decompressed-size budget as ``restore_backup``, so
+    the health check refuses exactly what a restore would: an unsafe or unreadable
+    member (:class:`ArchiveUnreadableError`), or a bomb (:class:`ArchiveTooLargeError`).
+    """
+
+    budget = _RestoreBudget(max_bytes)
+    async for _name, parts in _archive_file_member_streams(spool, "r|gz", dropped=[]):
+        async for _chunk in budget.count(parts):
+            pass
 
 
 async def _fileobj_parts(member_file: Any) -> AsyncIterator[bytes]:
