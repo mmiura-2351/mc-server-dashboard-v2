@@ -907,8 +907,10 @@ caller. Routes that follow this rule:
 - server create, import, and update answering 503 `seed_failed` (#3483).
 
 A failure raised before the commit records no event, since nothing changed.
-Backup restore is the exception: its post-publish seed failure (503
-`seed_failed`) records `error`.
+Backup restore is the exception: its post-publish failures (503 `seed_failed`,
+503 `plugin_reconcile_incomplete`) record `error`. When the published backup was
+a forced corrupt one, that `error` is recorded as `backup:force_restore`, not
+`backup:restore` (#3269).
 
 **No foreign keys on purpose.** `actor_id`, `community_id`, and `target_id` are
 deliberately *not* FKs: an audit trail must outlive the entities it describes

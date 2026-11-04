@@ -552,7 +552,9 @@ async def restore_backup(
     set that IS restored — retrying the restore heals both: ``seed_failed`` when
     the platform-managed ``server.properties`` keys could not be re-applied
     (#2621), ``plugin_reconcile_incomplete`` when the restored plugin directory
-    could not be read, leaving the plugin rows unreconciled (#3221).
+    could not be read, leaving the plugin rows unreconciled (#3221). Either is
+    audited ``error``, under ``backup:force_restore`` when a forced corrupt backup
+    was the one published (#3269).
     """
 
     try:
@@ -651,14 +653,13 @@ async def restore_backup(
         # resource-pack values, so the file may bind a stale port. Same posture as
         # the create and port-PATCH seeding failures: a mapped 503 the caller
         # retries (re-running the restore heals it), never an unmapped 500.
-        await _record_failure(
+        await _record_post_publication_failure(
             recorder,
-            ops.BACKUP_RESTORE,
-            Outcome.ERROR,
             authorized,
             community_id,
+            server_id,
             backup_id,
-            target_type=ops.TARGET_BACKUP,
+            forced_corrupt_count=exc.forced_corrupt_count,
         )
         raise _service_unavailable("seed_failed") from exc
     except PluginReconcileIncompleteError as exc:
@@ -669,28 +670,20 @@ async def restore_backup(
         # describe the pre-restore working set are current, so it is a mapped 503
         # the caller retries (the reconciliation is idempotent; re-running the
         # restore completes it).
-        await _record_failure(
+        await _record_post_publication_failure(
             recorder,
-            ops.BACKUP_RESTORE,
-            Outcome.ERROR,
             authorized,
             community_id,
+            server_id,
             backup_id,
-            target_type=ops.TARGET_BACKUP,
+            forced_corrupt_count=exc.forced_corrupt_count,
         )
         raise _service_unavailable("plugin_reconcile_incomplete") from exc
     if result.forced_corrupt:
         # An operator forced the restore of a known-corrupt backup over the gate
         # (#703): it published. Log and audit the deliberate corrupt restore under a
         # distinct operation so it is queryable apart from a routine restore.
-        _logger.warning(
-            "backup force-restore: operator %s published known-corrupt backup %s "
-            "for server %s (%d corrupt region file(s))",
-            authorized.user_id.value,
-            backup_id,
-            server_id,
-            result.corrupt_count,
-        )
+        _log_force_restore(authorized, server_id, backup_id, result.corrupt_count)
         await _record(
             recorder, ops.BACKUP_FORCE_RESTORE, authorized, community_id, backup_id
         )
@@ -1221,6 +1214,53 @@ async def _record_failure(
             target_type=target_type,
             target_id=target_id,
         )
+    )
+
+
+def _log_force_restore(
+    authorized: AuthUser,
+    server_id: uuid.UUID,
+    backup_id: uuid.UUID,
+    corrupt_count: int,
+) -> None:
+    _logger.warning(
+        "backup force-restore: operator %s published known-corrupt backup %s "
+        "for server %s (%d corrupt region file(s))",
+        authorized.user_id.value,
+        backup_id,
+        server_id,
+        corrupt_count,
+    )
+
+
+async def _record_post_publication_failure(
+    recorder: AuditRecorder,
+    authorized: AuthUser,
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    backup_id: uuid.UUID,
+    *,
+    forced_corrupt_count: int,
+) -> None:
+    """Audit a restore that published, then failed a follow-up step.
+
+    A forced corrupt backup is published whatever failed after it, so who forced
+    it is recorded under ``backup:force_restore`` (issue #3269); any other restore
+    under ``backup:restore``. Either way the outcome is the request's ``error``.
+    """
+
+    operation = ops.BACKUP_RESTORE
+    if forced_corrupt_count > 0:
+        _log_force_restore(authorized, server_id, backup_id, forced_corrupt_count)
+        operation = ops.BACKUP_FORCE_RESTORE
+    await _record_failure(
+        recorder,
+        operation,
+        Outcome.ERROR,
+        authorized,
+        community_id,
+        backup_id,
+        target_type=ops.TARGET_BACKUP,
     )
 
 

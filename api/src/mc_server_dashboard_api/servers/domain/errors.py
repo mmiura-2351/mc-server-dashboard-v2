@@ -104,7 +104,13 @@ class WorkingSetSeedFailedError(ServerError):
     ``server_id`` names the server the failed write was for, so the create and
     import edges can audit the row they committed but never got back (issue
     #3483).
+
+    A restore raises it after the publish; ``forced_corrupt_count`` is then the
+    corrupt count of a forced corrupt backup it published, so the edge still
+    audits the force-restore (issue #3269). It is ``0`` everywhere else.
     """
+
+    forced_corrupt_count: int = 0
 
     def __init__(self, server_id: str) -> None:
         super().__init__(server_id)
@@ -662,7 +668,14 @@ class PluginReconcileIncompleteError(ServerError):
     of a read that never happened; they may now describe the pre-restore working
     set. The edge maps this to 503 ``plugin_reconcile_incomplete``: the
     reconciliation is idempotent, so re-running the restore completes it.
+
+    A listed jar whose read fails the same way leaves the reconciliation just as
+    partial (issue #3269). ``forced_corrupt_count`` is the corrupt count of a
+    forced corrupt backup the restore published, ``0`` for any other, so the edge
+    still audits the force-restore.
     """
+
+    forced_corrupt_count: int = 0
 
 
 class PluginCacheBlobNotFoundError(ServerError):

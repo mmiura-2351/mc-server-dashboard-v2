@@ -649,6 +649,8 @@ export const en = {
   "backups.error.notStopped": "Stop the server before restoring a backup.",
   "backups.error.unreadable":
     "This backup's file could not be read back from storage, so it cannot be restored.",
+  "backups.error.restoreIncomplete":
+    "The backup was restored, but a follow-up step did not complete. Please retry the restore.",
   "backups.error.unsettled":
     "The server is starting or stopping — try again once it is fully stopped or running.",
   "backups.error.invalidArchive": "That file is not a valid backup archive.",

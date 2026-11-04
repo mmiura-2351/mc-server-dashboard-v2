@@ -388,7 +388,10 @@ class RestoreBackup:
     Both post-publication steps run for EVERY restore that published, a forced
     corrupt one included (issue #3222): a corrupt world region says nothing about
     the jars beside it. A restored plugin directory that cannot be listed raises
-    :class:`PluginReconcileIncompleteError` with the rows untouched (issue #3221).
+    :class:`PluginReconcileIncompleteError` with the rows untouched (issue #3221),
+    and so does a listed jar that cannot be read (issue #3269). Either failure
+    carries the corrupt count of a forced corrupt backup that published, so the
+    edge audits the force-restore whatever failed after it.
     """
 
     uow: UnitOfWork
@@ -455,20 +458,26 @@ class RestoreBackup:
                 # corrupt restore. Quarantine BEFORE the properties re-apply, so a
                 # failure there cannot leave a known-corrupt backup unmarked.
                 await self._mark_health(backup_id, BackupHealth.QUARANTINED)
-            await self._reapply_platform_properties(
-                community_id=community_id, server_id=server_id, server=server
-            )
-            # Reconcile plugin rows against the restored filesystem (#1336).
-            if self.file_store is not None:
-                await _reconcile_plugins(
-                    uow=self.uow,
-                    file_store=self.file_store,
-                    cache=self.cache,
-                    clock=self.clock,
-                    community_id=community_id,
-                    server_id=server_id,
-                    server=server,
+            try:
+                await self._reapply_platform_properties(
+                    community_id=community_id, server_id=server_id, server=server
                 )
+                # Reconcile plugin rows against the restored filesystem (#1336).
+                if self.file_store is not None:
+                    await _reconcile_plugins(
+                        uow=self.uow,
+                        file_store=self.file_store,
+                        cache=self.cache,
+                        clock=self.clock,
+                        community_id=community_id,
+                        server_id=server_id,
+                        server=server,
+                    )
+            except (WorkingSetSeedFailedError, PluginReconcileIncompleteError) as exc:
+                # The corrupt backup is published whatever failed after it, so
+                # the edge must still audit the force-restore (issue #3269).
+                exc.forced_corrupt_count = corrupt_count
+                raise
             return RestoreResult(
                 forced_corrupt=corrupt_count > 0, corrupt_count=corrupt_count
             )
@@ -553,7 +562,8 @@ async def _reconcile_plugins(
        Updated with new checksums and re-parsed manifest metadata.
 
     Errors during ghost ingestion or manifest parsing for a single file are
-    logged and skipped (the restore must not fail for a bad jar).
+    logged and skipped (the restore must not fail for a bad jar). A listed jar
+    gone by its read (the typed miss) is skipped too.
 
     The listing of the content directory is the evidence every step above rests
     on, so only the typed miss (:class:`ServerFileNotFoundError`) reads as "no
@@ -561,6 +571,9 @@ async def _reconcile_plugins(
     error — raises :class:`PluginReconcileIncompleteError` before a single row is
     touched (issue #3221): treating an unread directory as an empty one deleted
     every tracked row, provenance included, while the jars were still there.
+    A listed jar whose read fails any other way raises it too (issue #3269): the
+    jar is not known to be bad, only unread, so skipping it would report a partial
+    reconciliation as complete. The transaction is discarded, not committed.
     """
 
     try:
@@ -617,14 +630,13 @@ async def _reconcile_plugins(
         for jar_path in sorted(disk_jars):
             if jar_path in db_by_path:
                 continue
-            try:
-                jar_bytes = await file_store.read_file(
-                    community_id=community_id,
-                    server_id=server_id,
-                    rel_path=jar_path,
-                )
-            except Exception:  # noqa: BLE001
-                _LOG.warning("plugin reconcile: could not read %s; skipping", jar_path)
+            jar_bytes = await _read_listed_jar(
+                file_store,
+                community_id=community_id,
+                server_id=server_id,
+                rel_path=jar_path,
+            )
+            if jar_bytes is None:
                 continue
             try:
                 # In a savepoint, so a refused INSERT (a racing install taking
@@ -655,13 +667,13 @@ async def _reconcile_plugins(
         for plugin in db_plugins:
             if plugin.rel_path not in disk_jars:
                 continue  # Already deleted as orphan.
-            try:
-                jar_bytes = await file_store.read_file(
-                    community_id=community_id,
-                    server_id=server_id,
-                    rel_path=plugin.rel_path,
-                )
-            except Exception:  # noqa: BLE001
+            jar_bytes = await _read_listed_jar(
+                file_store,
+                community_id=community_id,
+                server_id=server_id,
+                rel_path=plugin.rel_path,
+            )
+            if jar_bytes is None:
                 continue
             new_checksum = hashlib.sha512(jar_bytes).hexdigest()
             if new_checksum == plugin.checksum_sha512:
@@ -691,6 +703,36 @@ async def _reconcile_plugins(
 
         if changed:
             await uow.commit()
+
+
+async def _read_listed_jar(
+    file_store: FileStore,
+    *,
+    community_id: CommunityId,
+    server_id: ServerId,
+    rel_path: str,
+) -> bytes | None:
+    """Read a jar the listing named; ``None`` if it is gone by now (issue #3269).
+
+    Any other failure is a read that never happened, not a bad jar, so it raises
+    :class:`PluginReconcileIncompleteError`, as a failed listing does (#3221).
+    """
+
+    try:
+        return await file_store.read_file(
+            community_id=community_id, server_id=server_id, rel_path=rel_path
+        )
+    except ServerFileNotFoundError:
+        _LOG.warning("plugin reconcile: %s is gone; skipping", rel_path)
+        return None
+    except Exception as exc:
+        _LOG.warning(
+            "plugin reconcile: could not read %s after a restore; plugin rows "
+            "left unreconciled",
+            rel_path,
+            extra={"server_id": str(server_id.value)},
+        )
+        raise PluginReconcileIncompleteError(str(server_id.value)) from exc
 
 
 async def _ingest_ghost(

@@ -642,6 +642,46 @@ def test_restore_incomplete_plugin_reconcile_is_503_with_reason() -> None:
     assert recorder.events[0].target_type == ops.TARGET_BACKUP
 
 
+def _forced_corrupt(
+    error: WorkingSetSeedFailedError | PluginReconcileIncompleteError,
+) -> Exception:
+    # The use case tags a post-publication failure with the corrupt count of the
+    # forced backup it had already published (issue #3269).
+    error.forced_corrupt_count = 2
+    return error
+
+
+@pytest.mark.parametrize(
+    ("error", "reason"),
+    [
+        (_forced_corrupt(WorkingSetSeedFailedError("x")), "seed_failed"),
+        (
+            _forced_corrupt(PluginReconcileIncompleteError("x")),
+            "plugin_reconcile_incomplete",
+        ),
+    ],
+)
+def test_forced_corrupt_restore_failing_after_publication_records_force_restore(
+    error: Exception, reason: str
+) -> None:
+    # A forced corrupt backup was published before the follow-up step failed
+    # (issue #3269): who force-published it is recorded under the distinct
+    # backup:force_restore operation, with the failed request's ERROR outcome,
+    # not as a routine backup:restore.
+    use_case = _FakeUseCase(error=error)
+    recorder = RecordingAuditRecorder()
+    app = _app(member=True, allow=True, restore=use_case, recorder=recorder)
+    client = _client(app)
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/restore?force=true")
+    )
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == reason
+    assert [e.operation for e in recorder.events] == [ops.BACKUP_FORCE_RESTORE]
+    assert recorder.events[0].outcome is Outcome.ERROR
+    assert recorder.events[0].target_type == ops.TARGET_BACKUP
+
+
 def test_restore_with_force_query_param_passes_force_true() -> None:
     use_case = _FakeUseCase(result=RestoreResult(forced_corrupt=True, corrupt_count=2))
     recorder = RecordingAuditRecorder()
