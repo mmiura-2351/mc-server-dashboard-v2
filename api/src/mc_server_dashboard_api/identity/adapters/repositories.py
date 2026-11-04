@@ -203,23 +203,25 @@ class SqlAlchemyUserRepository(UserRepository):
 
     async def set_active(
         self, user_id: UserId, *, active: bool, updated_at: dt.datetime
-    ) -> None:
+    ) -> bool:
         stmt = (
             update(UserModel)
             .where(UserModel.id == user_id.value)
             .values(active=active, updated_at=updated_at)
         )
-        await self._session.execute(stmt)
+        result = cast(CursorResult[Any], await self._session.execute(stmt))
+        return result.rowcount > 0
 
     async def set_platform_admin(
         self, user_id: UserId, *, is_platform_admin: bool, updated_at: dt.datetime
-    ) -> None:
+    ) -> bool:
         stmt = (
             update(UserModel)
             .where(UserModel.id == user_id.value)
             .values(is_platform_admin=is_platform_admin, updated_at=updated_at)
         )
-        await self._session.execute(stmt)
+        result = cast(CursorResult[Any], await self._session.execute(stmt))
+        return result.rowcount > 0
 
     async def delete(self, user_id: UserId) -> None:
         stmt = delete(UserModel).where(UserModel.id == user_id.value)

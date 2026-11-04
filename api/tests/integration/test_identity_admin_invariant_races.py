@@ -61,7 +61,10 @@ from mc_server_dashboard_api.identity.domain.entities import (
     REVOKED_ROTATED,
     RefreshToken,
 )
-from mc_server_dashboard_api.identity.domain.errors import LastPlatformAdminError
+from mc_server_dashboard_api.identity.domain.errors import (
+    LastPlatformAdminError,
+    UserNotFoundError,
+)
 from mc_server_dashboard_api.identity.domain.value_objects import (
     RefreshTokenId,
     RotationChainId,
@@ -113,15 +116,15 @@ class _PausingUserRepository(SqlAlchemyUserRepository):
 
     async def set_active(
         self, user_id: UserId, *, active: bool, updated_at: dt.datetime
-    ) -> None:
+    ) -> bool:
         await self._pause.hold()
-        await super().set_active(user_id, active=active, updated_at=updated_at)
+        return await super().set_active(user_id, active=active, updated_at=updated_at)
 
     async def set_platform_admin(
         self, user_id: UserId, *, is_platform_admin: bool, updated_at: dt.datetime
-    ) -> None:
+    ) -> bool:
         await self._pause.hold()
-        await super().set_platform_admin(
+        return await super().set_platform_admin(
             user_id, is_platform_admin=is_platform_admin, updated_at=updated_at
         )
 
@@ -271,10 +274,13 @@ async def _interleave(
     outcomes = await asyncio.wait_for(
         asyncio.gather(first, *tasks, return_exceptions=True), SETTLE_TIMEOUT
     )
-    # A refusal is the only acceptable failure: anything else (a deadlock, a
-    # serialization error) is a bug in the lock order.
+    # A refusal is the only acceptable failure -- the last-admin guard, or a
+    # write whose target a competitor deleted (#3247): anything else (a
+    # deadlock, a serialization error) is a bug in the lock order.
     for outcome in outcomes:
-        if outcome is not None and not isinstance(outcome, LastPlatformAdminError):
+        if outcome is not None and not isinstance(
+            outcome, (LastPlatformAdminError, UserNotFoundError)
+        ):
             raise outcome
     return list(outcomes)
 
@@ -325,13 +331,16 @@ async def test_grant_racing_a_non_admin_reducer_cannot_leave_zero_admins(
     # would remove the last active admin.
     admin, plain = await _seed_admin_and_user(engine)
 
-    await _interleave(
+    outcomes = await _interleave(
         engine,
         _Step(_REDUCERS[paused], plain),
         [_Step(_grant, plain), _Step(_REDUCERS[removal], admin)],
     )
 
     assert await _active_admins(engine) >= 1
+    # A grant that waited for the account's deletion finds it gone (#3247).
+    if paused in ("admin-delete", "delete-account"):
+        assert isinstance(outcomes[1], UserNotFoundError)
 
 
 @pytest.mark.parametrize("competing", list(_REDUCERS), ids=list(_REDUCERS))
