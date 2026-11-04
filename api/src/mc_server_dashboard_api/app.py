@@ -705,6 +705,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             max_overflow=settings.database.max_overflow,
         )
         app.state.engine = engine
+        # The data-plane assignment fence reads the server row while holding the
+        # storage per-server publish lock (issue #3544), so it gets its own
+        # connection rather than a slot in the pool that operations waiting on
+        # that lock can hold. One is enough: each read is a single short query.
+        assignment_fence_engine = create_engine(
+            settings.database.url, pool_size=1, max_overflow=0
+        )
+        app.state.assignment_fence_engine = assignment_fence_engine
         app.state.settings = settings
         app.state.storage = storage
         app.state.resource_pack_store = resource_pack_store
@@ -1308,6 +1316,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     await snapshot_task
             if grpc_server is not None:
                 await grpc_server.stop(grace=None)
+            await assignment_fence_engine.dispose()
             await engine.dispose()
 
     # The entire HTTP API is namespaced under ``/api`` (issue #498) so it can
