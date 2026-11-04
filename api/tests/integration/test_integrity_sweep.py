@@ -11,6 +11,8 @@ genuinely reflects the on-disk verdict.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import datetime as dt
 import os
 import uuid
@@ -20,6 +22,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
+from mc_server_dashboard_api import integrity_sweep_cli
 from mc_server_dashboard_api.audit.adapters.clock import SystemClock as AuditSystemClock
 from mc_server_dashboard_api.audit.adapters.recorder import LoggingAuditRecorder
 from mc_server_dashboard_api.audit.adapters.writer import SqlAlchemyAuditWriter
@@ -32,20 +35,29 @@ from mc_server_dashboard_api.community.domain.value_objects import (
 )
 from mc_server_dashboard_api.community.domain.value_objects import CommunityName
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
+from mc_server_dashboard_api.servers.adapters import (
+    lifecycle_lock as lifecycle_lock_mod,
+)
 from mc_server_dashboard_api.servers.adapters.backup_store import (
     StorageBackupStoreAdapter,
 )
+from mc_server_dashboard_api.servers.adapters.lifecycle_lock import PgLifecycleLock
 from mc_server_dashboard_api.servers.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork as ServersUnitOfWork,
 )
+from mc_server_dashboard_api.servers.application.backups import CreateBackup
 from mc_server_dashboard_api.servers.application.integrity_sweep import IntegritySweep
 from mc_server_dashboard_api.servers.application.manage_server import CreateServer
+from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
+    SnapshotServer,
+)
 from mc_server_dashboard_api.servers.domain.backup import (
     Backup,
     BackupHealth,
     BackupId,
     BackupSource,
 )
+from mc_server_dashboard_api.servers.domain.lifecycle_lock import LifecycleLock
 from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
@@ -55,9 +67,11 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
 from mc_server_dashboard_api.storage.domain.value_objects import (
     ServerId as StorageServerId,
 )
+from tests.audit.fakes import RecordingAuditRecorder
 from tests.integration.migrate import downgrade_base, upgrade_head
 from tests.servers.fakes import (
     FakeClock,
+    FakeControlPlane,
     FakeFileStore,
     FakeVersionValidator,
 )
@@ -282,3 +296,136 @@ async def test_sweep_persists_unreadable_for_a_row_with_no_archive(
         fetched = await uow.backups.get_by_id(dangling_row.id)
     assert fetched is not None and fetched.health is BackupHealth.UNREADABLE
     assert summary.backups_dangling == 1
+
+
+class _GatedArchiveStore(StorageBackupStoreAdapter):
+    """Parks ``CreateBackup`` after its metadata commit, before the archive write.
+
+    That is the publication window of issue #3220: the ``healthy`` row is visible
+    while its archive does not exist yet.
+    """
+
+    def __init__(self, *, storage: FsStorage) -> None:
+        super().__init__(storage=storage)
+        self.row_committed = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def create_from_current(
+        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+    ) -> None:
+        self.row_committed.set()
+        await self.release.wait()
+        await super().create_from_current(
+            community_id=community_id, server_id=server_id, storage_ref=storage_ref
+        )
+
+
+class _ObservedLifecycleLock(LifecycleLock):
+    """The real advisory lock, flagging the moment a caller starts acquiring it."""
+
+    def __init__(self, inner: PgLifecycleLock) -> None:
+        self.inner = inner
+        self.acquiring = asyncio.Event()
+
+    @contextlib.asynccontextmanager
+    async def hold(self, server_id: ServerId) -> AsyncIterator[None]:
+        self.acquiring.set()
+        async with self.inner.hold(server_id):
+            yield
+
+
+async def test_sweep_waits_out_a_backup_publication_instead_of_condemning_it(
+    engine: AsyncEngine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sweep that starts inside CreateBackup's row-before-archive window must
+    not judge the pending archive missing (issue #3220). Both take the server's
+    real advisory lock, so the sweep waits for the publication and then finds the
+    archive sound: the persisted health stays ``healthy``, agreeing with the
+    Backup the creation returned, and no condemnation audit is emitted."""
+
+    # Pin the ordering, not the wait budget: a slow host must not turn the waiting
+    # sweep into a busy skip (which has its own unit test).
+    monkeypatch.setattr(lifecycle_lock_mod, "_ACQUIRE_BUDGET_SECONDS", 600.0)
+    community, server = await _seed_server(engine)
+    factory = create_session_factory(engine)
+    storage = FsStorage(tmp_path)
+    await _publish(
+        storage, community, server, {"world/region/r.0.0.mca": healthy_region_bytes()}
+    )
+    lock = PgLifecycleLock(engine=engine)
+    gated = _GatedArchiveStore(storage=storage)
+    create = CreateBackup(
+        uow=ServersUnitOfWork(factory),
+        backup_store=gated,
+        snapshot_server=SnapshotServer(
+            uow=ServersUnitOfWork(factory), control_plane=FakeControlPlane()
+        ),
+        clock=FakeClock(_NOW),
+        lifecycle_lock=lock,
+    )
+    audit = RecordingAuditRecorder()
+    sweep_lock = _ObservedLifecycleLock(lock)
+    sweep = IntegritySweep(
+        uow=ServersUnitOfWork(factory),
+        backup_store=StorageBackupStoreAdapter(storage=storage),
+        audit=audit,
+        lifecycle_lock=sweep_lock,
+    )
+
+    create_task = asyncio.create_task(
+        create(community_id=community, server_id=server, source=BackupSource.MANUAL)
+    )
+    await gated.row_committed.wait()
+    sweep_task = asyncio.create_task(sweep(server_id=server))
+    # Resume the publication only once the sweep is acquiring the lock the
+    # creation still holds, so the sweep reached the row inside the window. A
+    # sweep that never asks for the lock finishes first and fails here.
+    acquiring = asyncio.create_task(sweep_lock.acquiring.wait())
+    await asyncio.wait({acquiring, sweep_task}, return_when=asyncio.FIRST_COMPLETED)
+    assert sweep_lock.acquiring.is_set()
+    assert not sweep_task.done()
+
+    gated.release.set()
+    created = await create_task
+    summary = await sweep_task
+
+    async with ServersUnitOfWork(factory) as uow:
+        persisted = await uow.backups.get_by_id(created.id)
+    assert created.health is BackupHealth.HEALTHY
+    assert persisted is not None and persisted.health is BackupHealth.HEALTHY
+    assert summary.backups_healthy == 1
+    assert summary.backups_dangling == 0
+    assert audit.events == []
+
+
+async def test_cli_sweep_completes_on_a_single_connection_pool(
+    engine: AsyncEngine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CLI sweep works at the smallest accepted pool (``pool_size=1``,
+    ``max_overflow=0``). The lifecycle lock pins its connection for the whole
+    hold while the sweep reads and writes the row, so a lock drawing from that
+    pool would leave the sweep waiting for a connection that never frees (the
+    review of issue #3220)."""
+
+    assert _DB_URL is not None
+    community, server = await _seed_server(engine)
+    storage = FsStorage(tmp_path)
+    ref = await _put_backup(
+        storage, community, server, {"world/region/r.0.0.mca": healthy_region_bytes()}
+    )
+    row = _backup(server, ref)
+    async with ServersUnitOfWork(create_session_factory(engine)) as uow:
+        await uow.backups.add(row)
+        await uow.commit()
+    monkeypatch.setenv("MCD_API_DATABASE__URL", _DB_URL)
+    monkeypatch.setenv("MCD_API_DATABASE__POOL_SIZE", "1")
+    monkeypatch.setenv("MCD_API_DATABASE__MAX_OVERFLOW", "0")
+    monkeypatch.setenv("MCD_API_STORAGE__BACKEND", "fs")
+    monkeypatch.setenv("MCD_API_STORAGE__FS__ROOT", str(tmp_path))
+
+    summary = await integrity_sweep_cli.run(server_id=server)
+
+    assert summary.backups_healthy == 1
+    async with ServersUnitOfWork(create_session_factory(engine)) as uow:
+        fetched = await uow.backups.get_by_id(row.id)
+    assert fetched is not None and fetched.health is BackupHealth.HEALTHY
