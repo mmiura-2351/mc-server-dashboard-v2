@@ -12,6 +12,7 @@ genuinely reflects the on-disk verdict.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime as dt
 import os
 import uuid
@@ -21,6 +22,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
+from mc_server_dashboard_api import integrity_sweep_cli
 from mc_server_dashboard_api.audit.adapters.clock import SystemClock as AuditSystemClock
 from mc_server_dashboard_api.audit.adapters.recorder import LoggingAuditRecorder
 from mc_server_dashboard_api.audit.adapters.writer import SqlAlchemyAuditWriter
@@ -55,6 +57,7 @@ from mc_server_dashboard_api.servers.domain.backup import (
     BackupId,
     BackupSource,
 )
+from mc_server_dashboard_api.servers.domain.lifecycle_lock import LifecycleLock
 from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
@@ -317,6 +320,20 @@ class _GatedArchiveStore(StorageBackupStoreAdapter):
         )
 
 
+class _ObservedLifecycleLock(LifecycleLock):
+    """The real advisory lock, flagging the moment a caller starts acquiring it."""
+
+    def __init__(self, inner: PgLifecycleLock) -> None:
+        self.inner = inner
+        self.acquiring = asyncio.Event()
+
+    @contextlib.asynccontextmanager
+    async def hold(self, server_id: ServerId) -> AsyncIterator[None]:
+        self.acquiring.set()
+        async with self.inner.hold(server_id):
+            yield
+
+
 async def test_sweep_waits_out_a_backup_publication_instead_of_condemning_it(
     engine: AsyncEngine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -347,11 +364,12 @@ async def test_sweep_waits_out_a_backup_publication_instead_of_condemning_it(
         lifecycle_lock=lock,
     )
     audit = RecordingAuditRecorder()
+    sweep_lock = _ObservedLifecycleLock(lock)
     sweep = IntegritySweep(
         uow=ServersUnitOfWork(factory),
         backup_store=StorageBackupStoreAdapter(storage=storage),
         audit=audit,
-        lifecycle_lock=lock,
+        lifecycle_lock=sweep_lock,
     )
 
     create_task = asyncio.create_task(
@@ -359,9 +377,12 @@ async def test_sweep_waits_out_a_backup_publication_instead_of_condemning_it(
     )
     await gated.row_committed.wait()
     sweep_task = asyncio.create_task(sweep(server_id=server))
-    # The sweep must be waiting on the lock, not judging the row. Load only
-    # lengthens the wait, so this window cannot turn red on a slow host.
-    await asyncio.sleep(0.5)
+    # Resume the publication only once the sweep is acquiring the lock the
+    # creation still holds, so the sweep reached the row inside the window. A
+    # sweep that never asks for the lock finishes first and fails here.
+    acquiring = asyncio.create_task(sweep_lock.acquiring.wait())
+    await asyncio.wait({acquiring, sweep_task}, return_when=asyncio.FIRST_COMPLETED)
+    assert sweep_lock.acquiring.is_set()
     assert not sweep_task.done()
 
     gated.release.set()
@@ -375,3 +396,36 @@ async def test_sweep_waits_out_a_backup_publication_instead_of_condemning_it(
     assert summary.backups_healthy == 1
     assert summary.backups_dangling == 0
     assert audit.events == []
+
+
+async def test_cli_sweep_completes_on_a_single_connection_pool(
+    engine: AsyncEngine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CLI sweep works at the smallest accepted pool (``pool_size=1``,
+    ``max_overflow=0``). The lifecycle lock pins its connection for the whole
+    hold while the sweep reads and writes the row, so a lock drawing from that
+    pool would leave the sweep waiting for a connection that never frees (the
+    review of issue #3220)."""
+
+    assert _DB_URL is not None
+    community, server = await _seed_server(engine)
+    storage = FsStorage(tmp_path)
+    ref = await _put_backup(
+        storage, community, server, {"world/region/r.0.0.mca": healthy_region_bytes()}
+    )
+    row = _backup(server, ref)
+    async with ServersUnitOfWork(create_session_factory(engine)) as uow:
+        await uow.backups.add(row)
+        await uow.commit()
+    monkeypatch.setenv("MCD_API_DATABASE__URL", _DB_URL)
+    monkeypatch.setenv("MCD_API_DATABASE__POOL_SIZE", "1")
+    monkeypatch.setenv("MCD_API_DATABASE__MAX_OVERFLOW", "0")
+    monkeypatch.setenv("MCD_API_STORAGE__BACKEND", "fs")
+    monkeypatch.setenv("MCD_API_STORAGE__FS__ROOT", str(tmp_path))
+
+    summary = await integrity_sweep_cli.run(server_id=server)
+
+    assert summary.backups_healthy == 1
+    async with ServersUnitOfWork(create_session_factory(engine)) as uow:
+        fetched = await uow.backups.get_by_id(row.id)
+    assert fetched is not None and fetched.health is BackupHealth.HEALTHY

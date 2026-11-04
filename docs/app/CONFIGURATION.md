@@ -313,6 +313,11 @@ duration. Size the pool with that headroom in mind:
 - Each **bounded waiter** (~5 s timeout) pins **one** connection while it waits.
 - Normal request traffic uses additional connections concurrently.
 
+The operator-run integrity sweep (`integrity_sweep_cli`) takes the same per-server
+lock around each backup check, but on its own one-connection engine rather than
+from this pool, so it works at any accepted pool size and opens one database
+connection beyond it.
+
 A reasonable sizing formula: `pool_size + max_overflow ≥ (expected concurrent gated ops) + (expected peak waiters) + (normal concurrent request traffic)`. The shipped defaults (`pool_size=5`, `max_overflow=10`) give a ceiling of 15, adequate for a deployment with a handful of simultaneous gated operations. Raise `pool_size` (permanent connections) first; `max_overflow` adds burst headroom at the cost of connection churn.
 
 ### 5.3 Authentication: tokens and password hashing
