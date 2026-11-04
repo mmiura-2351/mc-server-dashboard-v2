@@ -16,8 +16,10 @@ import "context"
 // normal return value, reported in the Report; an error is reserved for a real I/O
 // failure while walking or reading. An absent root is an empty, healthy Report.
 //
-// The check returns no later than ctx (issue #3511): once ctx is done it returns
-// ctx's error and no Report, even while a system call of its walk is stuck.
+// The check stops cooperatively once ctx is done (issue #3511): it returns ctx's
+// error and no Report at its next entry. It does not interrupt a system call that
+// is stuck; the snapshot command that runs it answers at its deadline regardless
+// and abandons the check (instancemanager.handleSnapshot).
 type Checker interface {
 	CheckWorkingSet(ctx context.Context, root string) (Report, error)
 }

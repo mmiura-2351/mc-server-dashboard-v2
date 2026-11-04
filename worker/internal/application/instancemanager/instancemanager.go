@@ -236,11 +236,14 @@ type Manager struct {
 	readGeneration func(workingDir, serverID string, log *slog.Logger) uint64
 
 	// snapshotContextHook, when non-nil, replaces snapshotContext so a test can end a
-	// snapshot command's deadline at a chosen moment instead of by the clock, and
-	// snapshotBodyExited, when non-nil, runs once a snapshot's body has exited and
-	// released the id (issue #3511). Production leaves both nil.
+	// snapshot command's deadline at a chosen moment instead of by the clock.
+	// snapshotBodyExited runs once a snapshot's body has exited, and
+	// snapshotReleased once its attempt has released the id's claim, which also
+	// waits for the handler's recovery work (issue #3511). Production leaves all
+	// three nil.
 	snapshotContextHook func(ctx context.Context, running bool) (context.Context, context.CancelFunc)
 	snapshotBodyExited  func(serverID string)
+	snapshotReleased    func(serverID string)
 
 	// orphanProbeInterval / orphanProbeMaxInterval are the failed-stop-orphan
 	// converger's probe cadence and its exponential-backoff cap (issue #2475).
@@ -810,13 +813,42 @@ func (m *Manager) transferContext(ctx context.Context) (context.Context, context
 // displaced-tree sweep, no scratch GC. The command answered a failure, so the
 // scratch stays as on any failed snapshot, and the tail would otherwise run after
 // the API had moved on. A committed body finishes its tail under its claim.
+//
+// The attempt also owns the id's claim (issue #3511 review): the stopped id's
+// reservation or the running id's runningSnapshots mark. Two holders keep it, the
+// body and the handler's recovery work, and release runs when the last of them
+// drops. A handler-owned save-on restore that outlives the body therefore still
+// keeps a second running snapshot out, so its save-on cannot land inside that
+// snapshot's quiesce.
 type snapshotAttempt struct {
 	mu        sync.Mutex
 	committed bool
 	abandoned bool
-	// dial reconnects RCON with the credentials the quiesce resolved; it is set
-	// just before save-off goes out, so the handler can restore save-on itself.
-	dial func(context.Context) (execution.ServerControl, error)
+	// dial reconnects RCON with the credentials the quiesce resolved. It is set
+	// just before save-off goes out: a save-off written to the wire whose reply is
+	// lost may have been applied (the policy of issue #3485), so from then on a
+	// save-on is owed until the body's restore confirms one.
+	dial     func(context.Context) (execution.ServerControl, error)
+	restored bool
+	holds    int
+	release  func()
+}
+
+// newSnapshotAttempt returns an attempt held by its body and its handler; release
+// runs once both have dropped it.
+func newSnapshotAttempt(release func()) *snapshotAttempt {
+	return &snapshotAttempt{holds: 2, release: release}
+}
+
+// drop gives up one holder's share of the claim, releasing it with the last.
+func (a *snapshotAttempt) drop() {
+	a.mu.Lock()
+	a.holds--
+	last := a.holds == 0
+	a.mu.Unlock()
+	if last {
+		a.release()
+	}
 }
 
 // commit reports whether the body still owns the attempt, marking it committed.
@@ -849,11 +881,21 @@ func (a *snapshotAttempt) saveOffSent(dial func(context.Context) (execution.Serv
 	a.dial = dial
 }
 
-// saveOnDial returns the dial recorded by saveOffSent, or nil if save-off never
-// went out.
-func (a *snapshotAttempt) saveOnDial() func(context.Context) (execution.ServerControl, error) {
+// saveOnRestored records that the body's own restore confirmed a save-on.
+func (a *snapshotAttempt) saveOnRestored() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.restored = true
+}
+
+// owedSaveOn returns the dial to restore save-on with when save-off may have gone
+// out and the body has not confirmed a save-on since, or nil.
+func (a *snapshotAttempt) owedSaveOn() func(context.Context) (execution.ServerControl, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.restored {
+		return nil
+	}
 	return a.dial
 }
 
@@ -867,18 +909,30 @@ func (m *Manager) skipAbandonedTail(cmd session.Command) session.CommandResult {
 		"instancemanager: snapshot published after its command was abandoned")
 }
 
-// restoreSaveOnAbandoned re-enables auto-save on a running server whose snapshot
-// was abandoned at its deadline after save-off may have gone out (issue #3511).
-// The body is blocked, so the handler issues save-on itself, on a fresh connection
-// dialed with the quiesce's credentials: no read of server.properties, which sits
-// on the storage that may be stuck. It waits at most restoreSaveTimeout, the share
-// snapshotContext held back for it. The body's own restore may follow later;
-// save-on is idempotent.
-func (m *Manager) restoreSaveOnAbandoned(serverID string, dial func(context.Context) (execution.ServerControl, error)) {
+// finishAttempt is the handler's last duty to an attempt (issue #3511): it
+// restores save-on if one is owed, then drops the handler's share of the claim.
+//
+// A save-on is owed when save-off may have gone out and the body has not
+// confirmed a save-on since. That covers the body abandoned at the deadline, and
+// equally a body that answered first after losing the save-off's reply, whose own
+// restore skips a save-off it saw fail. The handler then issues save-on on a fresh
+// connection dialed with the quiesce's credentials: no read of server.properties,
+// which sits on the storage that may be stuck. It waits at most
+// restoreSaveTimeout, the share snapshotContext held back for it. The restore
+// keeps the handler's share of the claim until it has finished, even past that
+// wait, so no second running snapshot starts under it. A later save-on from the
+// body is harmless: save-on is idempotent.
+func (m *Manager) finishAttempt(serverID string, att *snapshotAttempt) {
+	dial := att.owedSaveOn()
+	if dial == nil {
+		att.drop()
+		return
+	}
 	restoreCtx, cancel := context.WithTimeout(context.Background(), restoreSaveTimeout)
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
+		defer att.drop()
 		ctrl, err := dial(restoreCtx)
 		if err != nil {
 			done <- err
@@ -895,7 +949,7 @@ func (m *Manager) restoreSaveOnAbandoned(serverID string, dial func(context.Cont
 		err = restoreCtx.Err()
 	}
 	if err != nil {
-		m.logger.Error("snapshot save-on NOT restored after the snapshot was abandoned; server left with auto-save disabled",
+		m.logger.Error("snapshot save-on NOT restored for a save-off that may have been applied; server left with auto-save disabled",
 			"server_id", serverID, "error", err)
 	}
 }
@@ -1362,48 +1416,59 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 	// runs on its own goroutine and this handler answers at the deadline whatever the
 	// body is blocked on: a stalled read, open, unlink or upload on the working set's
 	// storage cannot be interrupted, so it is abandoned rather than waited for. The
-	// abandoned body keeps the id's claim until it exits — the reservation of a
-	// stopped id, the runningSnapshots mark of a running one — and skips its
-	// destructive tail (snapshotAttempt). Close does not wait for it.
+	// attempt keeps the id's claim — the reservation of a stopped id, the
+	// runningSnapshots mark of a running one — until both the body has exited and
+	// the handler's save-on recovery has finished, and an abandoned body skips its
+	// destructive tail (snapshotAttempt). Close does not wait for either.
 	newContext := m.snapshotContext
 	if hook := m.snapshotContextHook; hook != nil {
 		newContext = hook
 	}
 	cmdCtx, cancel := newContext(ctx, running)
 	defer cancel()
-	att := &snapshotAttempt{}
+	att := newSnapshotAttempt(func() {
+		release()
+		if hook := m.snapshotReleased; hook != nil {
+			hook(cmd.ServerID)
+		}
+	})
 	done := make(chan session.CommandResult, 1)
 	go func() {
 		res := m.snapshotBody(ctx, cmdCtx, cmd, running, att)
-		release()
 		if hook := m.snapshotBodyExited; hook != nil {
 			hook(cmd.ServerID)
 		}
+		att.drop()
 		done <- res
 	}()
+	var res session.CommandResult
+	finished := false
 	select {
-	case res := <-done:
-		return res
+	case res = <-done:
+		finished = true
 	case <-cmdCtx.Done():
+		select {
+		case res = <-done:
+			finished = true
+		default:
+		}
 	}
-	select {
-	case res := <-done:
+	if finished {
+		m.finishAttempt(cmd.ServerID, att)
 		return res
-	default:
 	}
 	if att.abandon() {
-		// The upload had already published when the deadline passed: the store holds
-		// this capture, so the answer is a success. It declares no generation (issue
-		// #2481), since the marker stamp has not landed; the API then records nothing
-		// in its held inventory, which can only cost a hydrate. The body finishes its
-		// tail under its claim.
+		// The commit flag won: the upload had returned a publish before the deadline
+		// passed, so the answer is a success. It declares no generation (issue #2481),
+		// since the marker stamp has not landed; the API then records nothing in its
+		// held inventory, which can only cost a hydrate. The body finishes its tail
+		// under its claim.
 		m.logger.Warn("snapshot deadline passed after the upload published; answering success and letting the attempt finish",
 			"server_id", cmd.ServerID)
+		m.finishAttempt(cmd.ServerID, att)
 		return session.CommandResult{CommandID: cmd.CommandID, Success: true}
 	}
-	if dial := att.saveOnDial(); dial != nil {
-		m.restoreSaveOnAbandoned(cmd.ServerID, dial)
-	}
+	m.finishAttempt(cmd.ServerID, att)
 	m.logger.Warn("snapshot abandoned at its deadline; the attempt keeps the server's claim until its blocked call returns",
 		"server_id", cmd.ServerID, "error", cmdCtx.Err())
 	return fail(cmd.CommandID, session.CommandErrorTransferFailed,
@@ -1899,7 +1964,9 @@ func (m *Manager) quiesceRunning(ctx context.Context, serverID, workingDir strin
 		if !saveOff {
 			return
 		}
-		m.restoreSaveOn(ctx, serverID, ctrl, dial)
+		if m.restoreSaveOn(ctx, serverID, ctrl, dial) {
+			att.saveOnRestored()
+		}
 	}, nil
 }
 
@@ -2036,13 +2103,13 @@ func (m *Manager) flushBeforeStopWithDriver(ctx context.Context, serverID, drive
 // reuse them, issue #3511) and retries save-on once with a short backoff inside the timeout, so
 // a running server is never left with auto-save permanently OFF (#694). A final
 // failure is logged loudly — auto-save stuck off is operator-actionable.
-func (m *Manager) restoreSaveOn(ctx context.Context, serverID string, ctrl execution.ServerControl, dial func(context.Context) (execution.ServerControl, error)) {
+func (m *Manager) restoreSaveOn(ctx context.Context, serverID string, ctrl execution.ServerControl, dial func(context.Context) (execution.ServerControl, error)) bool {
 	restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restoreSaveTimeout)
 	defer cancel()
 
 	_, err := ctrl.Execute(restoreCtx, "save-on")
 	if err == nil {
-		return
+		return true
 	}
 	m.logger.Warn("snapshot save-on failed on the quiesce connection; redialing",
 		"server_id", serverID, "error", err)
@@ -2054,7 +2121,7 @@ func (m *Manager) restoreSaveOn(ctx context.Context, serverID string, ctrl execu
 	case <-restoreCtx.Done():
 		m.logger.Error("snapshot save-on NOT restored; server left with auto-save disabled",
 			"server_id", serverID, "error", restoreCtx.Err())
-		return
+		return false
 	case <-time.After(m.fsckRetryDelay):
 	}
 
@@ -2062,13 +2129,15 @@ func (m *Manager) restoreSaveOn(ctx context.Context, serverID string, ctrl execu
 	if err != nil {
 		m.logger.Error("snapshot save-on NOT restored; redial failed, server left with auto-save disabled",
 			"server_id", serverID, "error", err)
-		return
+		return false
 	}
 	defer func() { _ = fresh.Close() }()
 	if _, err := fresh.Execute(restoreCtx, "save-on"); err != nil {
 		m.logger.Error("snapshot save-on NOT restored after redial; server left with auto-save disabled",
 			"server_id", serverID, "error", err)
+		return false
 	}
+	return true
 }
 
 // restoreSaveOnAfterFailedStop re-enables auto-save on a server whose graceful

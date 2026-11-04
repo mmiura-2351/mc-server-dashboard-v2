@@ -3,6 +3,7 @@ package instancemanager
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -44,12 +45,13 @@ func (s *stall) wait() {
 
 func (s *stall) unblock() { s.open.Do(func() { close(s.release) }) }
 
-// awaitSnapshotBodyExit returns a channel that receives once per snapshot body
-// that has exited and released its claim.
-func awaitSnapshotBodyExit(m *Manager) <-chan struct{} {
-	exited := make(chan struct{}, 8)
-	m.snapshotBodyExited = func(string) { exited <- struct{}{} }
-	return exited
+// awaitSnapshotReleased returns a channel that receives once per snapshot attempt
+// that has released its claim: its body has exited and the command's recovery
+// work has finished.
+func awaitSnapshotReleased(m *Manager) <-chan struct{} {
+	released := make(chan struct{}, 8)
+	m.snapshotReleased = func(string) { released <- struct{}{} }
+	return released
 }
 
 // snapshotExpiry replaces the snapshot command's deadline with one the test ends:
@@ -124,7 +126,7 @@ func abandonStoppedSnapshot(t *testing.T, m *Manager, st *stall) {
 	t.Helper()
 	dir := seedScratch(t, m, s1)
 	displaced := seedDisplaced(t, m, s1)
-	exited := awaitSnapshotBodyExit(m)
+	exited := awaitSnapshotReleased(m)
 	expire := snapshotExpiry(t, m)
 
 	done := goHandle(m, snapshotCmd())
@@ -238,23 +240,24 @@ func newRunningManager(t *testing.T, ctrl *redialControl, tr *fakeTransfer) *Man
 }
 
 // abandonRunningSnapshot runs s1's snapshot until st is entered, ends its
-// deadline, and checks that the command answered a failure with save-on restored
-// over a redialed connection. While the body is held a second snapshot is BUSY and
+// deadline, and checks that the command answered a failure with save-on restored:
+// by the body before it stalled (after the pack), or else by the command over a
+// redialed connection. While the body is held a second snapshot is BUSY and
 // a stop still proceeds. Once released, the body stamps no marker and sweeps no
 // displaced tree.
 func abandonRunningSnapshot(t *testing.T, m *Manager, ctrl *redialControl, st *stall) {
 	t.Helper()
 	dir := filepath.Join(m.scratchDir, s1)
 	displaced := seedDisplaced(t, m, s1)
-	exited := awaitSnapshotBodyExit(m)
+	exited := awaitSnapshotReleased(m)
 	expire := snapshotExpiry(t, m)
 
 	done := goHandle(m, snapshotCmd())
 	awaitEnter(t, st.entered)
 	expire()
 	assertFailed(t, awaitAnswer(t, done))
-	if !containsLine(ctrl.redialedLines(), "save-on") {
-		t.Fatalf("redialed rcon lines = %v, want save-on restored by the command", ctrl.redialedLines())
+	if !containsLine(ctrl.lines, "save-on") && !containsLine(ctrl.redialedLines(), "save-on") {
+		t.Fatalf("rcon lines = %v, redialed %v; want save-on restored", ctrl.lines, ctrl.redialedLines())
 	}
 	assertBusy(t, m, snapshotCmd())
 	if res := m.Handle(context.Background(), session.Command{CommandID: "stop", ServerID: s1, Kind: "StopServer"}); !res.Success {
@@ -330,7 +333,7 @@ func TestRunningSnapshotCommittedBeforeTheDeadlineAnswersSuccess(t *testing.T) {
 	if !lock.TryLock() {
 		t.Fatal("the working-set lock is already held")
 	}
-	exited := awaitSnapshotBodyExit(m)
+	exited := awaitSnapshotReleased(m)
 	expire := snapshotExpiry(t, m)
 
 	done := goHandle(m, snapshotCmd())
@@ -354,7 +357,7 @@ func TestStoppedSnapshotAnswersAtTheTransferDeadline(t *testing.T) {
 	st := newStall(t)
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(&fakeTransfer{stallSnapshot: st.wait})
 	seedScratch(t, m, s1)
-	exited := awaitSnapshotBodyExit(m)
+	exited := awaitSnapshotReleased(m)
 	m.SetTransferDeadline(100 * time.Millisecond)
 	assertFailed(t, awaitAnswer(t, goHandle(m, snapshotCmd())))
 	st.unblock()
@@ -368,9 +371,91 @@ func TestRunningSnapshotAnswersWithinTheTransferDeadline(t *testing.T) {
 	ctrl := &redialControl{fakeControl: &fakeControl{reply: "ok"}}
 	st := newStall(t)
 	m := newRunningManager(t, ctrl, &fakeTransfer{stallPack: st.wait})
-	exited := awaitSnapshotBodyExit(m)
+	exited := awaitSnapshotReleased(m)
 	m.SetTransferDeadline(restoreSaveTimeout + 100*time.Millisecond)
 	assertFailed(t, awaitAnswer(t, goHandle(m, snapshotCmd())))
 	st.unblock()
 	awaitEnter(t, exited)
+}
+
+// heldRedialControl is a redialControl whose reconnect is held until released.
+type heldRedialControl struct {
+	*redialControl
+	held *stall
+}
+
+func (c *heldRedialControl) Redial(ctx context.Context) (execution.ServerControl, error) {
+	c.held.wait()
+	return c.redialControl.Redial(ctx)
+}
+
+// The command's own save-on recovery keeps the running-snapshot mark until it has
+// finished, even after the body exited (issue #3511 review). Otherwise a second
+// snapshot could send its save-off and then meet the first attempt's late save-on
+// in the middle of its quiesce. Here the recovery dial is held, the body exits,
+// and a second snapshot from another context is BUSY until the dial completes.
+func TestRunningSnapshotMarkCoversTheCommandsSaveOnRecovery(t *testing.T) {
+	dialHeld := newStall(t)
+	ctrl := &heldRedialControl{redialControl: &redialControl{fakeControl: &fakeControl{reply: "ok"}}, held: dialHeld}
+	packHeld := newStall(t)
+	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(&fakeTransfer{gen: 7, stallPack: packHeld.wait})
+	m.fsckRetryDelay = 0
+	startRunning(t, m)
+	bodyExited := make(chan struct{}, 8)
+	m.snapshotBodyExited = func(string) { bodyExited <- struct{}{} }
+	released := awaitSnapshotReleased(m)
+	expire := snapshotExpiry(t, m)
+
+	first := goHandle(m, snapshotCmd())
+	awaitEnter(t, packHeld.entered)
+	expire()
+	awaitEnter(t, dialHeld.entered)
+	packHeld.unblock()
+	awaitEnter(t, bodyExited)
+	assertBusy(t, m, snapshotCmd())
+
+	dialHeld.unblock()
+	assertFailed(t, awaitAnswer(t, first))
+	awaitEnter(t, released)
+	if res := awaitAnswer(t, goHandle(m, snapshotCmd())); !res.Success {
+		t.Fatalf("SnapshotTrigger once the recovery finished = %+v, want it admitted", res)
+	}
+}
+
+// lostReplyControl applies save-off and then loses its reply: the line is recorded,
+// the reply is held until released, and the round trip then fails the way one cut
+// off by the deadline does.
+type lostReplyControl struct {
+	*redialControl
+	reply *stall
+}
+
+func (c *lostReplyControl) Execute(ctx context.Context, line string) (string, error) {
+	out, err := c.redialControl.Execute(ctx, line)
+	if line != "save-off" {
+		return out, err
+	}
+	c.reply.wait()
+	return "", fmt.Errorf("rcon: read length: %w", context.DeadlineExceeded)
+}
+
+// A save-off whose reply was lost may have been applied, so a save-on is owed
+// even when the body's result reaches the command first (issue #3511 review): the
+// body's own restore skips a save-off it saw fail, so the command restores it.
+// The body wins the race deterministically here, as the deadline never ends.
+func TestRunningSnapshotRestoresASaveOffWhoseReplyWasLost(t *testing.T) {
+	reply := newStall(t)
+	ctrl := &lostReplyControl{redialControl: &redialControl{fakeControl: &fakeControl{reply: "ok"}}, reply: reply}
+	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(&fakeTransfer{gen: 7})
+	startRunning(t, m)
+	released := awaitSnapshotReleased(m)
+
+	done := goHandle(m, snapshotCmd())
+	awaitEnter(t, reply.entered)
+	reply.unblock()
+	assertFailed(t, awaitAnswer(t, done))
+	awaitEnter(t, released)
+	if !containsLine(ctrl.redialedLines(), "save-on") {
+		t.Fatalf("redialed rcon lines = %v, want save-on restored for the save-off that may have landed", ctrl.redialedLines())
+	}
 }

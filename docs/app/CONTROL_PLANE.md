@@ -570,8 +570,10 @@ with a context deadline carried in `RegisterAck.transfer_deadline`
 HTTP client carries no timeout and the trigger's context none either — so a
 stalled upload could outlive the API's `snapshot_timeout_seconds` indefinitely,
 the case the API-side snapshot-timeout hold (CONFIGURATION.md Section 5.1,
-`control.snapshot_timeout_seconds`) recovers from. The bound
-structurally closes it: once it fires Worker-side, no late publish can exist.
+`control.snapshot_timeout_seconds`) recovers from. The bound closes it on the
+Worker's side: the command answers by the deadline. It does not rule out a late
+publish. An upload that was blocked when the command answered can still complete
+afterwards, and that case is supported (below).
 
 For a `SnapshotTrigger` the deadline runs from the start of the command and
 covers every phase: the quiesce of a running server, the pre-pack region fsck,
@@ -585,25 +587,49 @@ interrupted, so the work is **abandoned** rather than waited for. The pack and
 the fsck also check the deadline as they walk the working set, so work that is
 merely slow stops at its next file instead of running on.
 
-On the deadline the command answers `TRANSFER_FAILED`, with one exception. If
-the upload had already published, the answer is a success that declares no
-`held_generation`. The API then records nothing in its held inventory and
-treats the result like any other successful snapshot. That costs at most one
-hydrate, and the publish it reports did happen.
+On the deadline the command answers `TRANSFER_FAILED`, with one exception. The
+work marks the attempt committed as soon as its upload has returned a publish,
+and the command marks it abandoned at the deadline; whichever comes first wins.
+If the commit won, the answer is a success that declares no `held_generation`.
+The API then records nothing in its held inventory and treats the result like
+any other successful snapshot. That costs at most one hydrate, and the publish
+it reports did happen. A success therefore means the commit mark won, not merely
+that the store published. A publish can also land without the mark: an upload
+the API has already accepted while the work is still blocked, for instance a
+stopped server's combined pack and upload stuck in its spool cleanup. The command
+then answers `TRANSFER_FAILED` for a snapshot that did publish. That late
+publish is supported. The Worker stamps no marker and declares nothing for it,
+so the held inventory can only understate, and the publish-time generation guard
+(issue #847) judges it like any other publish.
 
 A running server's snapshot also owes the save-on restore. The restore runs on
 its own 30 s budget, detached from the deadline, so that auto-save comes back
 even after the deadline fired. The Worker keeps that 30 s back from the other
 phases, which end 30 s before the deadline, so the command answers within
-`transfer_deadline`, restore included. When the work is abandoned after save-off
-may have gone out, the command issues save-on itself within that 30 s. The
-abandoned work's own later save-on is harmless, since save-on is idempotent.
-Both restores reconnect with the RCON address and password the quiesce
-resolved. Neither reads `server.properties` again, because that file sits on
-the storage that may be stuck.
+`transfer_deadline`, restore included.
 
-Abandoned work keeps the server's claim until its blocked call returns and it
-exits:
+The command restores save-on itself, within that 30 s, whenever a save-on is
+still owed when it answers. One is owed once save-off has been written to the
+wire, until the work's own restore confirms a save-on. A save-off whose reply
+was lost may have been applied (the same rule a failed stop follows, issue
+#3485), and the work's own restore skips a save-off it saw fail. So the command
+restores both when the work is abandoned and when the work answered first after
+losing that reply. Both restores reconnect with the RCON address and password
+the quiesce resolved. Neither reads `server.properties` again, because that file
+sits on the storage that may be stuck.
+
+The abandoned work may send its own save-on later. That is harmless to the
+server's own state, since save-on is idempotent, and it is kept clear of a second
+snapshot (below). It is **not** kept clear of a `StopServer` or `RestartServer`,
+which proceed over the stuck work: a late save-on can re-enable auto-save in the
+middle of that stop's pre-stop flush, undoing its save-off, so the flush may not
+settle. That is an accepted residual. The flush is best-effort (CONFIGURATION.md
+Section 6.3), and the stop proceeds without it.
+
+The attempt keeps the server's claim until both its work has exited, which for
+abandoned work means its blocked call has returned, and the command's own save-on
+restore has finished. The restore may run past the command's answer, if its
+dial is slow, and it holds the claim until it is done:
 
 - **Stopped server (the final snapshot).** The work keeps the id's reservation.
   A `StartServer`, `HydrateTrigger` or `SnapshotTrigger` for the id answers
@@ -612,8 +638,8 @@ exits:
 - **Running server.** The work takes no reservation (Section 7.1, issue #829
   item 4), so a `StopServer` or `RestartServer` still proceeds over a stuck
   snapshot. Only a second `SnapshotTrigger` for the id answers `BUSY` until the
-  work exits (`running_snapshot_in_flight` in the contract table): a second
-  save-off would interleave with the stuck work's late save-on.
+  claim is released (`running_snapshot_in_flight` in the contract table): a
+  second save-off would interleave with the first attempt's late save-on.
 
 Once the command has answered a failure, the abandoned work deletes nothing and
 writes no marker. It skips the generation-marker stamp, the displaced-tree

@@ -311,7 +311,7 @@ func driveRow(t *testing.T, row contractRow) session.CommandResult {
 		m := newContractManager(t, &fakeDriver{})
 		m.transfer = &fakeTransfer{stallPack: held.wait}
 		startRunning(t, m)
-		exited := awaitSnapshotBodyExit(m)
+		exited := awaitSnapshotReleased(m)
 		first := goHandle(m, session.Command{CommandID: "first", ServerID: serverID, Kind: "SnapshotTrigger"})
 		awaitEnter(t, held.entered)
 		defer func() {

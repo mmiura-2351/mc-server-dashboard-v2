@@ -552,10 +552,11 @@ func TestSnapshotTriggerRunningServerSaveOnRunsWhenContextCancelled(t *testing.T
 // When save-off fails the running world is NOT quiesced, so the periodic snapshot
 // is refused fail-closed (quiesce_unavailable, #907) rather than packing the live
 // world — that unquiesced pack is exactly what produced the 35/35 torn-read false
-// positives. No upload happens, and no save-on is issued (auto-save was never
-// disabled, so re-enabling it would be wrong). save-all is also NOT attempted after
-// a failed save-off: the real rcon client has already poisoned its connection, so
-// it would be a guaranteed ErrConnBroken. The next tick retries.
+// positives. No upload happens. save-all is NOT attempted after a failed save-off:
+// the real rcon client has already poisoned its connection, so it would be a
+// guaranteed ErrConnBroken. The next tick retries. A save-on IS issued: a save-off
+// written to the wire whose reply is lost may have been applied (issue #3485's
+// policy, adopted for the snapshot in issue #3511), and save-on is idempotent.
 func TestSnapshotTriggerRunningServerSaveOffFailureRefusesQuiesceUnavailable(t *testing.T) {
 	ctrl := &fakeControl{err: errors.New("rcon: read length: EOF")}
 	tr := &fakeTransfer{}
@@ -578,8 +579,8 @@ func TestSnapshotTriggerRunningServerSaveOffFailureRefusesQuiesceUnavailable(t *
 	if containsLine(ctrl.lines, "save-all") {
 		t.Fatalf("rcon lines = %v, want no save-all attempted after save-off failed", ctrl.lines)
 	}
-	if containsLine(ctrl.lines, "save-on") {
-		t.Fatalf("rcon lines = %v, want no save-on when save-off never succeeded", ctrl.lines)
+	if !containsLine(ctrl.lines, "save-on") {
+		t.Fatalf("rcon lines = %v, want a save-on for the save-off that may have landed", ctrl.lines)
 	}
 }
 
@@ -698,7 +699,7 @@ func TestSnapshotTriggerUploadExceedingDeadlineAborts(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
 	m.SetTransferDeadline(20 * time.Millisecond)
 	seedScratch(t, m, s1) // an at-rest working set; absent is refused (#1713)
-	exited := awaitSnapshotBodyExit(m)
+	exited := awaitSnapshotReleased(m)
 
 	res := m.Handle(context.Background(), snapshotCmd())
 	if res.Success || res.ErrorCode != session.CommandErrorTransferFailed {
@@ -742,7 +743,7 @@ func TestSnapshotTriggerWithoutDeadlineRunsUnbounded(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
 	seedScratch(t, m, s1) // an at-rest working set; absent is refused (#1713)
 	// No SetTransferDeadline call: the bound is 0 (unbounded).
-	exited := awaitSnapshotBodyExit(m)
+	exited := awaitSnapshotReleased(m)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan session.CommandResult, 1)
