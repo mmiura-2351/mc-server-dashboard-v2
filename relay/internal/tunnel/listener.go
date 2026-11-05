@@ -18,7 +18,8 @@ import (
 )
 
 // dialHandshakeDeadline bounds how long a tunnel connection has to send its
-// handshake line before it is dropped (RELAY.md Section 5).
+// handshake line, and to accept the "OK\n" acknowledgement, before it is
+// dropped (RELAY.md Section 5).
 const dialHandshakeDeadline = 5 * time.Second
 
 // maxHandshakeBytes hard-caps the pre-auth handshake read on the
@@ -157,12 +158,16 @@ func readHandshake(conn net.Conn) (string, bool) {
 
 // ConfirmAndAttach writes the "OK\n" acknowledgement to a delivered tunnel
 // connection, after which the player goroutine splices. It is the player side's
-// step (the waiter), separated so the listener only routes. A write error
-// closes the connection.
+// step (the waiter), separated so the listener only routes. The write is
+// bounded by dialHandshakeDeadline so a Worker that stops reading cannot pin
+// the caller; a write error (including the deadline) closes the connection. The
+// write deadline is cleared on success so the splice can install its own.
 func ConfirmAndAttach(conn net.Conn) error {
+	_ = conn.SetWriteDeadline(time.Now().Add(dialHandshakeDeadline))
 	if _, err := conn.Write([]byte("OK\n")); err != nil {
 		_ = conn.Close()
 		return errors.New("tunnel: write OK ack failed")
 	}
+	_ = conn.SetWriteDeadline(time.Time{})
 	return nil
 }

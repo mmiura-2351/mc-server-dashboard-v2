@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -197,5 +198,61 @@ func TestServeTransientRetryStopsOnCancel(t *testing.T) {
 	err := l.Serve(ctx)
 	if err != nil {
 		t.Errorf("Serve returned %v on ctx cancel, want nil", err)
+	}
+}
+
+// TestConfirmAndAttachNonReadingPeerTimesOut pins the "OK\n" ack's write
+// deadline (issue #3287): a Worker that stops reading must not pin the player
+// goroutine. net.Pipe is unbuffered, so a peer that never reads blocks every
+// write just as a full socket buffer does.
+func TestConfirmAndAttachNonReadingPeerTimesOut(t *testing.T) {
+	t.Parallel()
+	worker, relay := net.Pipe()
+	defer func() { _ = worker.Close() }()
+
+	done := make(chan error, 1)
+	go func() { done <- ConfirmAndAttach(relay) }()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("ConfirmAndAttach succeeded against a peer that never reads")
+		}
+	case <-time.After(dialHandshakeDeadline + 2*time.Second):
+		_ = relay.Close()
+		t.Fatal("ConfirmAndAttach did not return within its write deadline")
+	}
+}
+
+// writeDeadlineRecorder records the last write deadline set on the wrapped
+// connection.
+type writeDeadlineRecorder struct {
+	net.Conn
+	last atomic.Pointer[time.Time]
+}
+
+func (c *writeDeadlineRecorder) SetWriteDeadline(t time.Time) error {
+	c.last.Store(&t)
+	return c.Conn.SetWriteDeadline(t)
+}
+
+// TestConfirmAndAttachClearsWriteDeadline proves a successful ack leaves no
+// write deadline behind for the splice, which installs its own (issue #3287).
+func TestConfirmAndAttachClearsWriteDeadline(t *testing.T) {
+	worker, relay := net.Pipe()
+	defer func() { _ = worker.Close() }()
+	conn := &writeDeadlineRecorder{Conn: relay}
+	defer func() { _ = conn.Close() }()
+
+	go func() { _, _ = io.ReadFull(worker, make([]byte, 3)) }()
+	if err := ConfirmAndAttach(conn); err != nil {
+		t.Fatalf("ConfirmAndAttach: %v", err)
+	}
+	d := conn.last.Load()
+	if d == nil {
+		t.Fatal("ConfirmAndAttach set no write deadline")
+	}
+	if !d.IsZero() {
+		t.Errorf("write deadline %v left set after the ack", *d)
 	}
 }

@@ -269,7 +269,8 @@ The relay matches the token against its table of waiting player connections
 (consuming it — tokens are single-use), responds with `"OK\n"`, and starts the
 splice. Unknown, expired, or replayed tokens: the relay closes the connection
 without a response. Tunnel connections that send nothing within 5 s are
-dropped.
+dropped, as are ones that do not read the `"OK\n"` within 5 s or the replayed
+client bytes after it within another 5 s.
 
 Idle policy: the splice enforces progress deadlines per direction — a 5-minute
 idle read timeout and a 1-minute write-stall timeout. If no bytes arrive

@@ -110,9 +110,10 @@ func (l *Listener) Addr() net.Addr { return l.ln.Addr() }
 // established splice is closed at that moment (splice.Splice) and its handler
 // returns through its normal path, recording the session End, while a handler
 // that has not spliced yet gives up its ctx-bound waits (ResolveJoin, the
-// dial-back) and is left to finish its bounded I/O — the pre-route read and
-// the Login Disconnect write. The timeout bounds that teardown; it is not a
-// window in which an established session is kept alive (issue #3169).
+// dial-back, the pre-splice tunnel writes) and is left to finish its bounded
+// I/O — the pre-route read and the Login Disconnect write. The timeout bounds
+// that teardown; it is not a window in which an established session is kept
+// alive (issue #3169).
 func (l *Listener) Drain(timeout time.Duration) bool {
 	done := make(chan struct{})
 	go func() {
@@ -322,15 +323,9 @@ func (l *Listener) fetchStatusThroughTunnel(ctx context.Context, hs mc.Handshake
 	}
 	defer func() { _ = tconn.Close() }()
 
-	if err := tunnel.ConfirmAndAttach(tconn); err != nil {
-		return "", false
-	}
 	// Replay the buffered handshake, then send a fresh Status Request, then read
 	// the Status Response.
-	if _, err := tconn.Write(hs.Raw); err != nil {
-		return "", false
-	}
-	if _, err := tconn.Write(mc.StatusRequestPacket()); err != nil {
+	if !writePreSplice(ctx, tconn, hs.Raw, mc.StatusRequestPacket()) {
 		return "", false
 	}
 	_ = tconn.SetReadDeadline(time.Now().Add(preRouteDeadline))
@@ -392,22 +387,9 @@ func (l *Listener) spliceLogin(ctx context.Context, conn net.Conn, r *bufio.Read
 		l.disconnect(conn, "Could not reach the server — please try again shortly.")
 		return
 	}
-	if err := tunnel.ConfirmAndAttach(tconn); err != nil {
-		_ = conn.Close()
-		return
-	}
 	// Replay the buffered handshake + Login Start so the server sees a pristine
 	// client byte stream (RELAY.md Section 4).
-	if _, err := tconn.Write(hs.Raw); err != nil {
-		_ = tconn.Close()
-		_ = conn.Close()
-		return
-	}
-	if _, err := tconn.Write(login.Raw); err != nil {
-		_ = tconn.Close()
-		_ = conn.Close()
-		return
-	}
+	replay := [][]byte{hs.Raw, login.Raw}
 	// Forward any client bytes already pulled into the bufio buffer past the Login
 	// Start (a client that pipelined more before the splice). Reading from conn
 	// directly in the splice would strand them. Vanilla clients wait for the
@@ -415,11 +397,11 @@ func (l *Listener) spliceLogin(ctx context.Context, conn net.Conn, r *bufio.Read
 	// must not drop pipelined bytes.
 	if n := r.Buffered(); n > 0 {
 		buffered, _ := r.Peek(n)
-		if _, err := tconn.Write(buffered); err != nil {
-			_ = tconn.Close()
-			_ = conn.Close()
-			return
-		}
+		replay = append(replay, buffered)
+	}
+	if !writePreSplice(ctx, tconn, replay...) {
+		_ = conn.Close()
+		return
 	}
 
 	// serverID is the API's server identifier from the ResolveJoin decision; the
@@ -435,6 +417,34 @@ func (l *Listener) spliceLogin(ctx context.Context, conn net.Conn, r *bufio.Read
 	defer l.metrics.GameActiveSessionEnd()
 
 	splice.Splice(ctx, conn, tconn)
+}
+
+// writePreSplice sends a delivered tunnel connection everything the relay
+// writes before the splice (or the status read): the "OK\n" ack, bounded by
+// tunnel.ConfirmAndAttach's own deadline, then each of replay under a
+// preRouteDeadline write deadline, so a Worker that stops reading cannot pin
+// the handler. Cancelling ctx closes tconn, so a shutdown does not wait out
+// either deadline (issue #3287). On success the write deadline is cleared,
+// leaving the splice's own deadlines in charge; on failure tconn is closed.
+func writePreSplice(ctx context.Context, tconn net.Conn, replay ...[]byte) bool {
+	stop := context.AfterFunc(ctx, func() { _ = tconn.Close() })
+	err := tunnel.ConfirmAndAttach(tconn)
+	if err == nil {
+		_ = tconn.SetWriteDeadline(time.Now().Add(preRouteDeadline))
+		for _, b := range replay {
+			if _, err = tconn.Write(b); err != nil {
+				break
+			}
+		}
+	}
+	// stop reports false once ctx has closed tconn: even if every write landed,
+	// the connection is gone.
+	if !stop() || err != nil {
+		_ = tconn.Close()
+		return false
+	}
+	_ = tconn.SetWriteDeadline(time.Time{})
+	return true
 }
 
 // awaitTunnel registers a waiter for token and blocks until the Worker dials
