@@ -117,7 +117,10 @@ from mc_server_dashboard_api.servers.domain.errors import (
     WorkingSetSeedFailedError,
 )
 from mc_server_dashboard_api.servers.domain.file_store import FileStore
-from mc_server_dashboard_api.servers.domain.lifecycle_lock import LifecycleLock
+from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
+    LifecycleLock,
+    NullLifecycleLock,
+)
 from mc_server_dashboard_api.servers.domain.plugin import ServerPlugin
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId as ServerCommunityId,
@@ -777,6 +780,8 @@ def _force_restore_through_the_route(
     server_id: uuid.UUID,
     backups: FakeBackupRepository | None = None,
     plugins: FakePluginRepository | None = None,
+    lifecycle_lock: LifecycleLock | None = None,
+    force: bool = True,
 ) -> tuple[httpx2.Response, RecordingAuditRecorder, FakeBackupRepository, Backup]:
     servers = FakeServerRepository()
     servers.seed(_stopped_server(community_id, server_id))
@@ -786,6 +791,7 @@ def _force_restore_through_the_route(
     use_case = RestoreBackup(
         uow=ServersFakeUnitOfWork(servers=servers, backups=backups, plugins=plugins),
         backup_store=backup_store,
+        lifecycle_lock=lifecycle_lock or NullLifecycleLock(),
         file_store=file_store,
         cache=FakePluginCacheStore(),
         clock=ServersFakeClock(_NOW),
@@ -793,8 +799,9 @@ def _force_restore_through_the_route(
     recorder = RecordingAuditRecorder()
     app = _app(member=True, allow=True, restore=use_case, recorder=recorder)
     client = enter_client(TestClient(app, raise_server_exceptions=False))  # type: ignore[arg-type]
+    query = "?force=true" if force else ""
     resp = client.post(
-        _url(community_id, server_id, f"/{backup.id.value}/restore?force=true")
+        _url(community_id, server_id, f"/{backup.id.value}/restore{query}")
     )
     return resp, recorder, backups, backup
 
@@ -827,6 +834,61 @@ def test_a_failure_after_a_forced_corrupt_publish_records_force_restore(
 
     assert resp.status_code == status
     assert [e.operation for e in recorder.events] == [ops.BACKUP_FORCE_RESTORE]
+    assert recorder.events[0].outcome is Outcome.ERROR
+
+
+class _UnlockFailingLifecycleLock(LifecycleLock):
+    """A lock whose release fails, as ``pg_advisory_unlock`` on a lost connection."""
+
+    @contextlib.asynccontextmanager
+    async def _hold(self) -> AsyncIterator[None]:
+        try:
+            yield
+        finally:
+            raise OSError("connection to the lock's database was lost")
+
+    def hold(self, server_id: ServerId) -> contextlib.AbstractAsyncContextManager[None]:
+        return self._hold()
+
+
+@pytest.mark.parametrize(
+    ("corrupt", "fail_properties", "status", "operation"),
+    [
+        # The forced corrupt publish otherwise succeeded: the lock's release is
+        # the only failure, still after the publish.
+        (True, False, 500, ops.BACKUP_FORCE_RESTORE),
+        # The properties step already failed: that failure stays the answer,
+        # with the lock's release failure behind it.
+        (True, True, 503, ops.BACKUP_FORCE_RESTORE),
+        # A healthy publish keeps the routine operation.
+        (False, False, 500, ops.BACKUP_RESTORE),
+    ],
+)
+def test_a_lock_release_failure_after_the_publish_keeps_the_restore_audit(
+    corrupt: bool, fail_properties: bool, status: int, operation: str
+) -> None:
+    # The lifecycle lock is released after the post-publish steps; a release
+    # that fails is still a failure after the publish (issue #3269), so it must
+    # neither escape unaudited nor replace the step failure that preceded it.
+    if corrupt:
+        archive = _corrupt_fake_archive()
+    else:
+        archive = FakeBackupArchiveStore()
+        archive.archives.add("ref")
+    resp, recorder, _, _ = _force_restore_through_the_route(
+        backup_store=archive,
+        file_store=FakeFileStore(fail_write=fail_properties),
+        storage_ref="ref",
+        community_id=uuid.uuid4(),
+        server_id=uuid.uuid4(),
+        lifecycle_lock=_UnlockFailingLifecycleLock(),
+        force=corrupt,
+    )
+
+    assert resp.status_code == status
+    if fail_properties:
+        assert resp.json()["reason"] == "seed_failed"
+    assert [e.operation for e in recorder.events] == [operation]
     assert recorder.events[0].outcome is Outcome.ERROR
 
 

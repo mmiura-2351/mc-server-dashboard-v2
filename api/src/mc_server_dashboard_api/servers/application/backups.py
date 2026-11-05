@@ -391,10 +391,10 @@ class RestoreBackup:
     the jars beside it. A restored plugin directory that cannot be listed raises
     :class:`PluginReconcileIncompleteError` with the rows untouched (issue #3221),
     and so does a listed jar that cannot be read (issue #3269). Any failure after
-    the publish — the quarantine write included — surfaces as
-    :class:`BackupRestoreIncompleteError`, wrapping the step's own error and
-    carrying the corrupt count of a forced corrupt backup that published, so the
-    edge audits the force-restore whatever failed after it.
+    the publish — the quarantine write and the lifecycle lock's release included —
+    surfaces as :class:`BackupRestoreIncompleteError`, wrapping the step's own
+    error and carrying the corrupt count of a forced corrupt backup that
+    published, so the edge audits the force-restore whatever failed after it.
     """
 
     uow: UnitOfWork
@@ -424,56 +424,80 @@ class RestoreBackup:
         # desired=running must serialize with this restore, not race the
         # ``current`` republish underneath it. The lock spans the two transactions
         # the at-rest check and the (re)publish straddle.
-        async with self.lifecycle_lock.hold(server_id):
-            async with self.uow:
-                server = await _load(self.uow, community_id, server_id)
-                backup = await self.uow.backups.get_by_id(backup_id)
-                if backup is None or backup.server_id != server_id:
-                    raise BackupNotFoundError(str(backup_id.value))
-                if backup.health is BackupHealth.UNREADABLE:
-                    raise BackupUnreadableError(str(backup_id.value))
-                storage_ref = backup.storage_ref
-            if not server.is_at_rest():
-                raise ServerNotStoppedError(str(server_id.value))
-            try:
-                corrupt_count = await self.backup_store.restore(
-                    community_id=community_id,
-                    server_id=server_id,
-                    storage_ref=storage_ref,
-                    force=force,
+        # The corrupt count once Storage has published (``None`` before): the
+        # lock's release on exit comes after the publish, so a release that fails
+        # is a post-publish failure too and keeps the restore's identity (issue
+        # #3269) -- it never replaces a step failure already on its way out.
+        published: int | None = None
+        incomplete: BackupRestoreIncompleteError | None = None
+        try:
+            async with self.lifecycle_lock.hold(server_id):
+                async with self.uow:
+                    server = await _load(self.uow, community_id, server_id)
+                    backup = await self.uow.backups.get_by_id(backup_id)
+                    if backup is None or backup.server_id != server_id:
+                        raise BackupNotFoundError(str(backup_id.value))
+                    if backup.health is BackupHealth.UNREADABLE:
+                        raise BackupUnreadableError(str(backup_id.value))
+                    storage_ref = backup.storage_ref
+                if not server.is_at_rest():
+                    raise ServerNotStoppedError(str(server_id.value))
+                try:
+                    corrupt_count = await self.backup_store.restore(
+                        community_id=community_id,
+                        server_id=server_id,
+                        storage_ref=storage_ref,
+                        force=force,
+                    )
+                except BackupCorruptError:
+                    # Refused restore (corrupt, no force): quarantine the backup so an
+                    # operator sees it is corrupt, then re-raise for the edge to surface
+                    # and audit. ``current`` was left untouched by Storage.
+                    await self._mark_health(backup_id, BackupHealth.QUARANTINED)
+                    raise
+                except BackupUnreadableError:
+                    # The restore was the read that found the archive's bytes gone
+                    # (issue #3230). Record the verdict the sweep would have, so the
+                    # next attempt is refused up front instead of re-reading the
+                    # archive; a sweep that later reads it back sound revises it.
+                    await self._mark_health(backup_id, BackupHealth.UNREADABLE)
+                    raise
+                published = corrupt_count
+                # Published: the restored working set stands whatever fails from here
+                # on, so every later step's failure carries the restore's identity —
+                # above all a forced corrupt one, which the edge must still audit as
+                # the force-restore it was (issue #3269).
+                try:
+                    await self._after_publish(
+                        community_id=community_id,
+                        server_id=server_id,
+                        server=server,
+                        backup_id=backup_id,
+                        corrupt_count=corrupt_count,
+                    )
+                except Exception as exc:
+                    incomplete = BackupRestoreIncompleteError(
+                        str(server_id.value),
+                        cause=exc,
+                        forced_corrupt_count=corrupt_count,
+                    )
+                    raise incomplete from exc
+                return RestoreResult(
+                    forced_corrupt=corrupt_count > 0, corrupt_count=corrupt_count
                 )
-            except BackupCorruptError:
-                # Refused restore (corrupt, no force): quarantine the backup so an
-                # operator sees it is corrupt, then re-raise for the edge to surface
-                # and audit. ``current`` was left untouched by Storage.
-                await self._mark_health(backup_id, BackupHealth.QUARANTINED)
+        except Exception as exc:
+            if published is None or exc is incomplete:
                 raise
-            except BackupUnreadableError:
-                # The restore was the read that found the archive's bytes gone
-                # (issue #3230). Record the verdict the sweep would have, so the
-                # next attempt is refused up front instead of re-reading the
-                # archive; a sweep that later reads it back sound revises it.
-                await self._mark_health(backup_id, BackupHealth.UNREADABLE)
-                raise
-            # Published: the restored working set stands whatever fails from here
-            # on, so every later step's failure carries the restore's identity —
-            # above all a forced corrupt one, which the edge must still audit as
-            # the force-restore it was (issue #3269).
-            try:
-                await self._after_publish(
-                    community_id=community_id,
-                    server_id=server_id,
-                    server=server,
-                    backup_id=backup_id,
-                    corrupt_count=corrupt_count,
+            if incomplete is not None:
+                _LOG.warning(
+                    "releasing the lifecycle lock after an incomplete restore failed",
+                    exc_info=exc,
+                    extra={"server_id": str(server_id.value)},
                 )
-            except Exception as exc:
-                raise BackupRestoreIncompleteError(
-                    str(server_id.value), cause=exc, forced_corrupt_count=corrupt_count
-                ) from exc
-            return RestoreResult(
-                forced_corrupt=corrupt_count > 0, corrupt_count=corrupt_count
-            )
+                raise incomplete
+            raise BackupRestoreIncompleteError(
+                str(server_id.value), cause=exc, forced_corrupt_count=published
+            ) from exc
 
     async def _after_publish(
         self,
