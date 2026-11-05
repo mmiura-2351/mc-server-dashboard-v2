@@ -16,6 +16,7 @@ import os
 import tempfile
 import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 )
 from mc_server_dashboard_api.storage.adapters import object_store
 from mc_server_dashboard_api.storage.adapters.object_store import ObjectStorage
+from mc_server_dashboard_api.storage.domain.errors import ArchiveUnreadableError
 from mc_server_dashboard_api.storage.domain.value_objects import (
     BackupKey,
 )
@@ -61,7 +63,7 @@ from tests.servers.fakes import (
     FakeUnitOfWork,
 )
 from tests.storage.fake_s3 import FakeS3Store, fake_s3_factory
-from tests.storage.helpers import stream_of, tar_bytes
+from tests.storage.helpers import malicious_tar_with_escape, stream_of, tar_bytes
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 
@@ -236,3 +238,131 @@ async def test_a_spool_io_fault_is_unavailable_not_a_verdict(
 
     assert backups.by_id[backup.id].health is BackupHealth.HEALTHY
     assert all(not Path(name).exists() for _fd, name in created)
+
+
+async def test_a_spool_is_removed_through_repeated_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancelled after the spool exists, while the only executor worker is busy,
+    then cancelled again while its removal is still queued: the removal runs
+    once the worker frees up, so the spool does not outlive the check."""
+
+    loop = asyncio.get_running_loop()
+    executor = ThreadPoolExecutor(max_workers=1)
+    loop.set_default_executor(executor)
+    storage = ObjectStorage(fake_s3_factory(FakeS3Store()))
+    server = _server()
+    backup = await _stored_backup(storage, server)
+    created = _spy_spools(monkeypatch)
+    probing = asyncio.Event()
+
+    async def _stalled_probe(*_args: Any, **_kwargs: Any) -> object:
+        probing.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(ObjectStorage, "_probe_archive", _stalled_probe)
+    check = asyncio.ensure_future(
+        storage.check_backup_health(
+            StorageCommunityId(server.community_id.value),
+            StorageServerId(server.id.value),
+            BackupKey(backup.storage_ref),
+        )
+    )
+    await probing.wait()
+    [(_fd, name)] = created
+    worker_free = threading.Event()
+    occupied = loop.run_in_executor(executor, worker_free.wait, 10)
+
+    check.cancel()
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert not check.done()  # its removal is queued behind the busy worker
+    check.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await check
+
+    worker_free.set()
+    await occupied
+    for _ in range(200):
+        if not os.path.exists(name):
+            break
+        await asyncio.sleep(0.01)
+    assert not os.path.exists(name)
+
+
+def _failing_spool_unlink(
+    monkeypatch: pytest.MonkeyPatch, created: list[tuple[int, str]]
+) -> None:
+    """Make removing a spool raise EIO; every other unlink behaves normally."""
+
+    real_unlink = Path.unlink
+
+    def _unlink(self: Path, missing_ok: bool = False) -> None:
+        if any(str(self) == name for _fd, name in created):
+            raise OSError(errno.EIO, "injected unlink fault")
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", _unlink)
+
+
+def _remove_left_spools(
+    monkeypatch: pytest.MonkeyPatch, created: list[tuple[int, str]]
+) -> None:
+    """Undo the injected fault and remove the spools it kept on disk."""
+
+    monkeypatch.undo()
+    for _fd, name in created:
+        Path(name).unlink(missing_ok=True)
+
+
+async def test_a_spool_removal_fault_after_a_sound_check_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The check itself succeeded, so the transient cleanup fault is the outcome:
+    store-unavailable at the seam, the sweep stops, the health is unchanged."""
+
+    storage = ObjectStorage(fake_s3_factory(FakeS3Store()))
+    server = _server()
+    backup = await _stored_backup(storage, server)
+    servers = FakeServerRepository()
+    servers.seed(server)
+    backups = FakeBackupRepository()
+    backups.seed(backup)
+    sweep = IntegritySweep(
+        uow=FakeUnitOfWork(servers=servers, backups=backups),
+        backup_store=StorageBackupStoreAdapter(storage=storage),
+        audit=RecordingAuditRecorder(),
+    )
+    created = _spy_spools(monkeypatch)
+    _failing_spool_unlink(monkeypatch, created)
+
+    try:
+        with pytest.raises(BackupStorageUnavailableError):
+            await sweep()
+        assert backups.by_id[backup.id].health is BackupHealth.HEALTHY
+    finally:
+        _remove_left_spools(monkeypatch, created)
+
+
+async def test_a_spool_removal_fault_keeps_the_pending_archive_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The archive verdict is already propagating when the cleanup fails: the
+    cleanup fault is logged, and the verdict is what the caller sees."""
+
+    storage = ObjectStorage(fake_s3_factory(FakeS3Store()))
+    server = _server()
+    community = StorageCommunityId(server.community_id.value)
+    scope = StorageServerId(server.id.value)
+    key = await storage.put_backup(
+        community, scope, stream_of(gzip.compress(malicious_tar_with_escape()))
+    )
+    created = _spy_spools(monkeypatch)
+    _failing_spool_unlink(monkeypatch, created)
+
+    try:
+        with pytest.raises(ArchiveUnreadableError):
+            await storage.check_backup_health(community, scope, key)
+    finally:
+        _remove_left_spools(monkeypatch, created)

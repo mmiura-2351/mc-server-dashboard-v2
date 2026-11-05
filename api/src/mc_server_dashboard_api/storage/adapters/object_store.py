@@ -57,7 +57,7 @@ import threading
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import TracebackType
@@ -1577,8 +1577,11 @@ class ObjectStorage(Storage):
                     )
                 with _translating_io_faults():
                     await _drain_restorable_members(spool, self._max_restore_bytes)
-            finally:
-                await asyncio.to_thread(spool.unlink, missing_ok=True)
+            except BaseException:
+                # The pending error, not a cleanup fault, is what the caller sees.
+                await _discard_spool(spool, raise_fault=False)
+                raise
+            await _discard_spool(spool, raise_fault=True)
         return WorkingSetReport()
 
     async def _probe_archive(
@@ -2454,6 +2457,39 @@ async def _create_spool(prefix: str, suffix: str) -> Path:
     except asyncio.CancelledError:
         made.add_done_callback(_unlink_orphaned_spool)
         raise
+
+
+# Spool removals still running after their caller stopped waiting (issue #3237):
+# the strong reference keeps a cancelled health check's removal alive to the end.
+_SPOOL_DISPOSALS: set[asyncio.Future[None]] = set()
+
+
+def _spool_disposal_done(disposal: asyncio.Future[None]) -> None:
+    _SPOOL_DISPOSALS.discard(disposal)
+    if not disposal.cancelled() and (exc := disposal.exception()) is not None:
+        _LOG.warning("could not remove a backup health-check spool: %s", exc)
+
+
+async def _discard_spool(spool: Path, *, raise_fault: bool) -> None:
+    """Remove ``spool`` off the loop, surviving cancellation (issue #3237).
+
+    The removal runs as its own shielded task, so cancelling the caller — once or
+    repeatedly, even while the removal is still queued for an executor worker —
+    stops only the wait, never the removal. A failed removal is logged. With
+    ``raise_fault`` it is also raised, a transient fault translated by the fs
+    errno policy; without it the caller already has an error propagating, which
+    a cleanup fault must not replace.
+    """
+
+    disposal = asyncio.ensure_future(asyncio.to_thread(spool.unlink, missing_ok=True))
+    _SPOOL_DISPOSALS.add(disposal)
+    disposal.add_done_callback(_spool_disposal_done)
+    if not raise_fault:
+        with suppress(OSError):
+            await asyncio.shield(disposal)
+        return
+    with _translating_io_faults():
+        await asyncio.shield(disposal)
 
 
 async def _spool_object(client: S3Client, key: str, prefix: str, suffix: str) -> Path:
