@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -75,6 +76,7 @@ func markerPlants() []markerPlant {
 			if err := unix.Mkfifo(path, 0o600); err != nil {
 				t.Fatal(err)
 			}
+			releaseFifoWhenTheTestEnds(t, path)
 			return ""
 		}},
 		{"directory", func(t *testing.T, path string) string {
@@ -121,18 +123,45 @@ func markerPlants() []markerPlant {
 // loaded host. The marker write fsyncs twice: under a parallel `make check` a
 // touch that cannot block has taken longer than five seconds, and under
 // artificial disk load longer than a minute (issue #3354).
+//
+// Failing never leaves fn running (issue #3510). A cleanup waits for it to
+// return, and it is registered after the manager's Close, so it runs before it. A
+// command fn runs must run on t.Context(), which is cancelled as the test ends; a
+// touch blocked on the planted FIFO is freed by releaseFifoWhenTheTestEnds.
 func within(t *testing.T, what string, fn func()) {
 	t.Helper()
 	done := make(chan struct{})
-	go func() {
+	var running sync.WaitGroup
+	running.Go(func() {
 		defer close(done)
 		fn()
-	}()
+	})
+	t.Cleanup(running.Wait)
 	select {
 	case <-done:
 	case <-time.After(5 * time.Minute):
 		t.Fatalf("%s blocked", what)
 	}
+}
+
+// releaseFifoWhenTheTestEnds opens both ends of the FIFO at path at once as soon
+// as the test's context is cancelled, so a touch a regression left blocked on it
+// returns; and it makes the test's cleanup wait for that. A plain cleanup would
+// not do: within's cleanup waits for the blocked touch, and runs before a cleanup
+// registered earlier, so it would wait forever on a release that comes after it.
+//
+// It duplicates releaseWhenTheTestEnds from PR #3509 (files_plant_test.go), under
+// another name so that both build once merged; the two can then be consolidated.
+func releaseFifoWhenTheTestEnds(t *testing.T, path string) {
+	t.Helper()
+	released := make(chan struct{})
+	context.AfterFunc(t.Context(), func() {
+		defer close(released)
+		if fd, err := unix.Open(path, unix.O_RDWR|unix.O_NONBLOCK|unix.O_CLOEXEC, 0); err == nil {
+			_ = unix.Close(fd)
+		}
+	})
+	t.Cleanup(func() { <-released })
 }
 
 func assertUntouched(t *testing.T, outside string) {
@@ -300,7 +329,7 @@ func TestStartRefusedWhenTheMarkerIsNotARegularFile(t *testing.T) {
 			plant.plant(t, filepath.Join(dir, generationFile))
 
 			var res session.CommandResult
-			within(t, "the launch guard", func() { res = m.Handle(context.Background(), startCmd()) })
+			within(t, "the launch guard", func() { res = m.Handle(t.Context(), startCmd()) })
 
 			if res.Success || res.ErrorCode != session.CommandErrorServerNotFound ||
 				!strings.Contains(res.ErrorMessage, "working dir absent") {
@@ -336,7 +365,7 @@ func TestRunningSnapshotDeclaresNoBaseForAPlantedMarkerAndRestampsIt(t *testing.
 			outside := plant.plant(t, marker)
 
 			var res session.CommandResult
-			within(t, "the snapshot", func() { res = m.Handle(context.Background(), snapshotCmd()) })
+			within(t, "the snapshot", func() { res = m.Handle(t.Context(), snapshotCmd()) })
 
 			if !res.Success {
 				t.Fatalf("SnapshotTrigger = %+v, want success", res)

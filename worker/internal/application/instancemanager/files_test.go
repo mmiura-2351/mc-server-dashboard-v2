@@ -536,7 +536,7 @@ func TestFileCommandsRefuseASymlinkedWorkingSetRoot(t *testing.T) {
 		{CommandID: "c4", ServerID: s1, Kind: "ListFiles", Path: "."},
 		{CommandID: "c5", ServerID: s1, Kind: "ListFiles", Path: "sub"},
 	} {
-		res := handleWithin(t, m, cmd)
+		res := handleWithin(t, m, cmd, quickBudget)
 		// O_DIRECTORY|O_NOFOLLOW reports a link as ENOTDIR, so the reason is not
 		// pinned; the refusal is.
 		if res.Success || res.ErrorCode != session.CommandErrorFileAccessDenied {

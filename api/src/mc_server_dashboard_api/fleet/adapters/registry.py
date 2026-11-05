@@ -12,7 +12,9 @@ watchdog coroutine in ``grpc_server.py`` (issue #1600).
 Drain intent outlives connections: the registry remembers which worker ids an
 operator has drained, so a re-registration of a drained id comes back DRAINING
 rather than silently dropping the operator's intent when the Go agent
-auto-reconnects. Only the DELETE drain endpoint clears that intent.
+auto-reconnects. Only the DELETE drain endpoint clears that intent. The intent is
+also persisted (``WorkerDrainStore``, issue #3535), and the wiring seeds
+``drained`` from it at startup so it outlives an API restart too.
 
 The adapter is shared across concurrent stream handlers on one event loop; its
 operations are synchronous, non-blocking dict mutations, so no lock is required
@@ -39,7 +41,13 @@ from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId
 class InMemoryWorkerRegistry(WorkerRegistry):
     """Process-local :class:`WorkerRegistry` keyed by worker id."""
 
-    def __init__(self, *, clock: Clock, heartbeat_timeout: dt.timedelta) -> None:
+    def __init__(
+        self,
+        *,
+        clock: Clock,
+        heartbeat_timeout: dt.timedelta,
+        drained: frozenset[WorkerId] = frozenset(),
+    ) -> None:
         self._clock = clock
         self._timeout = heartbeat_timeout
         self._workers: dict[WorkerId, Worker] = {}
@@ -82,8 +90,9 @@ class InMemoryWorkerRegistry(WorkerRegistry):
         self._reserved: dict[WorkerId, dict[str, int]] = {}
         # Worker ids an operator has drained. This outlives connections so the
         # drain intent survives the Go agent's automatic reconnect; only the
-        # DELETE drain endpoint clears it (FR-WRK-5).
-        self._drained: set[WorkerId] = set()
+        # DELETE drain endpoint clears it (FR-WRK-5). Seeded from the persisted
+        # drain records at startup so it survives an API restart (issue #3535).
+        self._drained: set[WorkerId] = set(drained)
         # The working sets each connected Worker holds in its persistent scratch,
         # mapped to the GENERATION each is at (issue #763). Seeded from what the
         # Worker advertised at its current registration and REPLACED on every

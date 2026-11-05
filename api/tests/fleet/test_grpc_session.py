@@ -337,6 +337,79 @@ async def test_non_uuid_worker_id_is_rejected(harness: _Harness) -> None:
     assert harness.registry.list_workers() == []
 
 
+# A hand-configured worker id may spell its UUID non-canonically (issue #3542); the
+# API keys the Worker by the canonical lowercase-hyphenated form, the form every
+# stored reference (assigned_worker_id, drain) carries.
+_CANONICAL_ID = "abcdef01-2345-6789-abcd-ef0123456789"
+_UPPER_ID = _CANONICAL_ID.upper()
+_HYPHENLESS_ID = _CANONICAL_ID.replace("-", "")
+
+
+@pytest.mark.parametrize("spelling", [_UPPER_ID, _HYPHENLESS_ID])
+async def test_non_canonical_worker_id_is_keyed_canonically(
+    harness: _Harness, spelling: str
+) -> None:
+    stub = await harness.start()
+    call = stub.Session(metadata=_auth(_CREDENTIAL))
+    await call.write(_register_message(worker_id=spelling))
+    await call.read()  # ack
+
+    assert [w.id for w in harness.registry.list_workers()] == [WorkerId(_CANONICAL_ID)]
+    await call.done_writing()
+
+
+async def test_non_canonical_worker_id_matches_canonical_assignments() -> None:
+    # The tally reads assigned_worker_id (a uuid column), so it is keyed canonically.
+    sink = FakeServerStateSink(
+        running_ids={_CANONICAL_ID: {"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"}}
+    )
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+    )
+    try:
+        stub = await h.start()
+        call = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call.write(_register_message(worker_id=_UPPER_ID))
+        await call.read()  # ack
+
+        for _ in range(100):
+            snapshots = h.registry.list_workers()
+            if snapshots and snapshots[0].assigned_count == 1:
+                break
+            await asyncio.sleep(0.01)
+
+        assert sink.counted_for == [_CANONICAL_ID]
+        assert h.registry.list_workers()[0].assigned_count == 1
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
+async def test_reconnect_with_other_spelling_is_the_same_drained_worker(
+    harness: _Harness,
+) -> None:
+    stub = await harness.start()
+    call_a = stub.Session(metadata=_auth(_CREDENTIAL))
+    await call_a.write(_register_message(worker_id=_UPPER_ID))
+    await call_a.read()  # ack
+    # The drain is recorded under the canonical id, as the REST surface keys it.
+    assert harness.registry.set_draining(WorkerId(_CANONICAL_ID), True)
+    await call_a.done_writing()
+    while await call_a.read() is not aio.EOF:
+        pass
+
+    call_b = stub.Session(metadata=_auth(_CREDENTIAL))
+    await call_b.write(_register_message(worker_id=_HYPHENLESS_ID))
+    await call_b.read()  # ack
+
+    snapshots = harness.registry.list_workers()
+    assert [w.id for w in snapshots] == [WorkerId(_CANONICAL_ID)]
+    assert snapshots[0].status is WorkerStatus.DRAINING
+    await call_b.done_writing()
+
+
 async def test_heartbeat_refreshes_liveness(harness: _Harness) -> None:
     stub = await harness.start()
     call = stub.Session(metadata=_auth(_CREDENTIAL))

@@ -915,6 +915,9 @@ func (d *Driver) sweepContainer(ctx context.Context, c Container) error {
 // the orphan's shutdown save is cut short, which can leave the stop-leg snapshot
 // unpadded (live-format) regions (issue #927), so it is logged at WARN with why
 // and when the world was last written.
+//
+// A Worker that shuts down mid-sweep cancels ctx, and the stop is abandoned with
+// no kill: the orphan keeps running until the next boot's sweep (issue #3515).
 func (d *Driver) sweepStop(ctx context.Context, c Container) error {
 	if c.WorkingDir == "" || d.worldProgress == nil {
 		d.logger.Warn("sweep: no working set to watch for this orphan; stopping it with the fixed grace, "+
@@ -942,6 +945,12 @@ func (d *Driver) sweepStop(ctx context.Context, c Container) error {
 	reason := w.wait(stopCtx)
 	if reason == "" {
 		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		d.logger.Warn("sweep: the worker is shutting down; abandoning the orphan's stop without a kill, "+
+			"so it keeps running until the next boot's sweep",
+			"container", c.Name, "elapsed", d.now().Sub(requested))
+		return errors.Join(termErr, fmt.Errorf("stop abandoned: %w", err))
 	}
 	d.logger.Warn("sweep: the orphan did not exit after SIGTERM; killing it",
 		append([]any{"container", c.Name}, w.escalationArgs(requested, reason)...)...)
@@ -2225,11 +2234,17 @@ type stopWatch struct {
 	// probe fingerprints the world (InstanceSpec.WorldProgress); nil observes
 	// nothing, so the wait escalates after the idle window.
 	probe func() (execution.WorldProgress, error)
-	// start is the cap's origin, idleFrom the idle window's (the last write seen or
-	// the last escalation step), and lastWrite the last write seen (zero if none).
-	start     time.Time
-	idleFrom  time.Time
-	lastWrite time.Time
+	// start is the cap's origin, idleFrom the idle window's (the last poll that
+	// counted as progress or the last escalation step), and lastWrite the newest
+	// mtime of the last scan that changed (zero if none): when the world was last
+	// seen written. A failed or unanswered scan keeps the wait alive but is no
+	// write, and a changed scan with no mtime (no region files) has no write time,
+	// so both leave lastWrite alone (issue #3515). An mtime ahead of the clock
+	// cannot be aged, so the poll that saw it stands in, with lastWriteFuture set.
+	start           time.Time
+	idleFrom        time.Time
+	lastWrite       time.Time
+	lastWriteFuture bool
 	// scan carries the outstanding scan's result, nil when none is in flight. The
 	// first result taken is the baseline the later ones are compared with.
 	scan      chan stopScan
@@ -2292,8 +2307,7 @@ func (w *stopWatch) wait(ctx context.Context) string {
 				return reason
 			}
 			if written {
-				now := w.rule.now()
-				w.lastWrite, w.idleFrom = now, now
+				w.idleFrom = w.rule.now()
 			}
 		}
 		now := w.rule.now()
@@ -2336,8 +2350,9 @@ func (w *stopWatch) observe(ctx context.Context) (written, ended bool, reason st
 }
 
 // take consumes the outstanding scan's result and reports whether the world
-// changed since the previous one. The first result is the baseline (no change); a
-// failed scan cannot tell, so it counts as a write.
+// changed since the previous one, recording a change's newest mtime as lastWrite.
+// The first result is the baseline (no change); a failed scan cannot tell, so it
+// counts as a write.
 func (w *stopWatch) take(r stopScan) bool {
 	w.scan = nil
 	if !w.baselined {
@@ -2353,6 +2368,13 @@ func (w *stopWatch) take(r stopScan) bool {
 	}
 	changed := !w.havePrev || r.progress != w.prev
 	w.prev, w.havePrev = r.progress, true
+	if changed && !r.progress.Newest.IsZero() {
+		now := w.rule.now()
+		w.lastWrite, w.lastWriteFuture = r.progress.Newest, r.progress.Newest.After(now)
+		if w.lastWriteFuture {
+			w.lastWrite = now
+		}
+	}
 	return changed
 }
 
@@ -2386,7 +2408,11 @@ func (w *stopWatch) escalationArgs(requested time.Time, reason string) []any {
 	if w.lastWrite.IsZero() {
 		return append(args, "last_write", "none observed")
 	}
-	return append(args, "last_write", w.lastWrite, "since_last_write", now.Sub(w.lastWrite))
+	args = append(args, "last_write", w.lastWrite, "since_last_write", now.Sub(w.lastWrite))
+	if w.lastWriteFuture {
+		args = append(args, "last_write_mtime_in_future", true)
+	}
+	return args
 }
 
 // stopHandOffCallTimeout bounds one hand-off request, and stopHandOffRetryInterval

@@ -110,6 +110,8 @@ type sweepRun struct {
 	docker *sweepDocker
 	done   chan error
 	err    error
+	// cancel cancels the Sweep's context: the Worker is shutting down.
+	cancel context.CancelFunc
 	// watched is how many orphans the run waits on: a step is over once each of
 	// them is parked on the clock again.
 	watched int
@@ -137,8 +139,10 @@ func startSweep(t *testing.T, docker *sweepDocker, worlds map[string]*fakeWorld,
 		t.Fatalf("driver idle/poll/cap = %v/%v/%v, want the production %v/%v/%v",
 			d.stopTimeout, d.stopPoll, d.stopCap, testIdle, testPoll, testCap)
 	}
-	r := &sweepRun{t: t, clock: docker.clock, docker: docker, done: make(chan error, 1), watched: len(worlds)}
-	go func() { r.done <- d.Sweep(context.Background()) }()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	r := &sweepRun{t: t, clock: docker.clock, docker: docker, done: make(chan error, 1), cancel: cancel, watched: len(worlds)}
+	go func() { r.done <- d.Sweep(ctx) }()
 	return r
 }
 
@@ -295,6 +299,86 @@ func TestSweepStopsOrphansConcurrentlyUnderOneCap(t *testing.T) {
 	}
 	if len(docker.removed) != 2 {
 		t.Fatalf("removed = %v, want both orphans", docker.removed)
+	}
+}
+
+// A Worker told to shut down mid-sweep cancels the Sweep's context, and the
+// sweep abandons the orphan's stop: no kill is sent, so the orphan keeps running
+// until the next boot's sweep. The WARN says so; before issue #3515 it claimed a
+// kill with reason=deadline.
+func TestSweepCancelledMidWaitAbandonsTheStopWithoutAKill(t *testing.T) {
+	clock := newStopClock()
+	docker := newSweepDocker(clock, orphan("s1", "/scratch/s1"))
+	world := &fakeWorld{}
+	logged := &syncBuffer{}
+	r := startSweep(t, docker, map[string]*fakeWorld{"/scratch/s1": world}, slog.New(slog.NewTextHandler(logged, nil)))
+
+	if r.awaitParked() {
+		t.Fatalf("Sweep returned before waiting: %v", r.err)
+	}
+	world.write()
+	if r.step() {
+		t.Fatalf("Sweep returned while the world was still written: %v", r.err)
+	}
+	r.cancel()
+	r.awaitReturn()
+
+	if r.err == nil {
+		t.Fatal("Sweep = nil, want an error: the abandoned orphan was never proven stopped")
+	}
+	if kills := docker.killed(); len(kills) != 0 {
+		t.Fatalf("kills = %v, want none: the Worker is shutting down", kills)
+	}
+	out := logged.String()
+	if strings.Contains(out, "killing it") || strings.Contains(out, "reason=deadline") {
+		t.Fatalf("log = %q, want no kill claimed and no reason=deadline", out)
+	}
+	if !strings.Contains(out, "level=WARN") || !strings.Contains(out, "shutting down") ||
+		!strings.Contains(out, "mcsd-s1") {
+		t.Fatalf("log = %q, want a WARN that the stop of mcsd-s1 was abandoned because the Worker is shutting down", out)
+	}
+}
+
+// The cap's kill WARN gives the time the orphan's world was last written, the
+// newest mtime its scans saw (issue #3515). Before, it gave the last poll that saw
+// a change, so an orphan writing every 3 s, which every 5 s poll sees, read a
+// since_last_write of ~0.
+func TestSweepCapKillLogsTheLastObservedWrite(t *testing.T) {
+	clock := newStopClock()
+	docker := newSweepDocker(clock, orphan("s1", "/scratch/s1"))
+	world := &fakeWorld{}
+	logged := &syncBuffer{}
+	r := startSweep(t, docker, map[string]*fakeWorld{"/scratch/s1": world}, slog.New(slog.NewTextHandler(logged, nil)))
+	start := clock.Now()
+
+	if r.awaitParked() {
+		t.Fatalf("Sweep returned before waiting: %v", r.err)
+	}
+	// Writes every 3 s, off the poll's beat, until the kill.
+	const writeEvery = 3 * time.Second
+	last := time.Time{}
+	next := start.Add(time.Second)
+	for {
+		for poll := clock.Now().Add(testPoll); !next.After(poll); next = next.Add(writeEvery) {
+			world.writeAt(next)
+			last = next
+		}
+		if r.step() {
+			break
+		}
+		if clock.Now().Sub(start) > 2*testCap {
+			t.Fatal("the orphan was not killed by twice the cap")
+		}
+	}
+
+	at, ok := docker.killed()["s1"]
+	if !ok || at.Sub(start) != testCap {
+		t.Fatalf("kills = %v, want s1 killed at the %v cap", docker.killed(), testCap)
+	}
+	since := loggedSinceLastWrite(t, logged.String(), "killing it")
+	if want := at.Sub(last); since != want || since <= 0 || since > writeEvery {
+		t.Fatalf("since_last_write = %v, want %v: the time since the last write, within one %v write interval",
+			since, want, writeEvery)
 	}
 }
 
