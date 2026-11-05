@@ -192,18 +192,25 @@ is a retry of a launch that evidently died: the dispatch succeeds (the Worker
 launches the container) but the process crashes again, so it is counted as a
 failure and backs off, damping the boot-crash loop (#343).
 
-A server read converged also clears its entry (issue #3303), however it got there:
-a restart completing by itself, an operator's fix, a dispatch that failed only by
-losing its response. Otherwise a later, unrelated divergence would start from the
-old failure count, up to ``backoff_max_seconds``. Converged means settled, not
-merely absent or skipped: ``desired=running`` observed ``running`` on its assigned
-Worker, or ``desired=stopped`` released and at rest. A converged row is never a
-``list_reconcilable`` candidate, so each tick also reads the row of every server
-holding an entry that the candidate set left out. Because each crash cycle transits
-through ``starting`` (when the row briefly drops out of ``list_reconcilable``), the
-entry must NOT be cleared just because the server is momentarily absent, or the
-failure count would reset every cycle and never grow. A boot crash never reads
-``running``: the Worker holds ``starting`` until the server reports readiness. A
+A server that stays converged also clears its entry (issue #3303), however it got
+there: a restart completing by itself, an operator's fix, a dispatch that failed
+only by losing its response. Otherwise a later, unrelated divergence would start
+from the old failure count, up to ``backoff_max_seconds``. Converged means settled,
+not merely absent or skipped: ``desired=running`` observed ``running`` on its
+assigned Worker, or ``desired=stopped`` released and at rest. A converged row is
+never a ``list_reconcilable`` candidate, so each tick also reads the row of every
+server holding an entry that the candidate set left out. The entry is forgotten
+only once consecutive ticks have read the row settled for at least the window the
+entry last applied: a server must stay healthy as long as it was backed off.
+Reading it settled once is not enough, because a server that crashes some time
+after reaching ``running`` would then restart from the base on every cycle. Any
+tick that finds the row a candidate or unsettled restarts that count. The mark is
+kept in the entry rather than derived from ``observed_at``, which every Worker
+report rewrites, including a same-state report such as the status resync on each
+new session, and which says nothing about when a stopped row was released. Because
+each crash cycle transits through ``starting`` (when the row briefly drops out of
+``list_reconcilable``), the entry must NOT be cleared just because the server is
+momentarily absent, or the failure count would reset every cycle and never grow. A
 row skipped by a guard or a grace window, or a stop still converging, keeps its
 entry too. Entries whose row is never read settled (a deleted server) are
 time-expired: dropped once ``now`` is past ``next_eligible_at`` by
@@ -322,6 +329,10 @@ _MAX_CONCURRENT_ACTIONS = 4
 class _Backoff:
     failures: int
     next_eligible_at: dt.datetime
+    # The window this entry last applied, and the first tick of the current
+    # unbroken run of ticks that read the row settled (issue #3303).
+    delay: dt.timedelta
+    settled_since: dt.datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -371,14 +382,12 @@ class RunReconcilerTick:
             # A converged row is never a candidate, so read each server holding a
             # backoff entry that the candidate set left out (issue #3303).
             listed = {server.id for server in candidates}
-            tracked = [
-                await self.uow.servers.get_by_id(server_id)
+            tracked = {
+                server_id: await self.uow.servers.get_by_id(server_id)
                 for server_id in list(self._attempts)
                 if server_id not in listed
-            ]
-        for server in tracked:
-            if server is not None and _is_settled(server):
-                self._attempts.pop(server.id, None)
+            }
+        self._forgive_settled(tracked, now)
         self._expire_stale(now)
         # Dispatch the per-server actions concurrently, capped (#871), so one slow
         # redispatch no longer head-of-line blocks the rest of the fleet. Each
@@ -408,6 +417,23 @@ class RunReconcilerTick:
                     server.id.value,
                     exc_info=result,
                 )
+
+    def _forgive_settled(
+        self, tracked: dict[ServerId, Server | None], now: dt.datetime
+    ) -> None:
+        # Forget an entry once its row has read settled for as long as the window
+        # it last applied (issue #3303). A candidate, an unsettled row or a missing
+        # one breaks the run, so a crash loop whose uptime is shorter than its
+        # backoff keeps escalating even when a tick catches it running.
+        for server_id, attempt in list(self._attempts.items()):
+            server = tracked.get(server_id)
+            if server is None or not _is_settled(server):
+                attempt.settled_since = None
+                continue
+            if attempt.settled_since is None:
+                attempt.settled_since = now
+            if now - attempt.settled_since >= attempt.delay:
+                del self._attempts[server_id]
 
     def _expire_stale(self, now: dt.datetime) -> None:
         # Time-based expiry for entries whose row is never read settled (``tick`` clears
@@ -688,11 +714,12 @@ class RunReconcilerTick:
     def _record_failure(self, server_id: ServerId, now: dt.datetime) -> None:
         previous = self._attempts.get(server_id)
         failures = (previous.failures if previous is not None else 0) + 1
-        delay = min(
-            self.backoff_base_seconds * (2 ** (failures - 1)),
-            self.backoff_max_seconds,
+        delay = dt.timedelta(
+            seconds=min(
+                self.backoff_base_seconds * (2 ** (failures - 1)),
+                self.backoff_max_seconds,
+            )
         )
         self._attempts[server_id] = _Backoff(
-            failures=failures,
-            next_eligible_at=now + dt.timedelta(seconds=delay),
+            failures=failures, next_eligible_at=now + delay, delay=delay
         )
