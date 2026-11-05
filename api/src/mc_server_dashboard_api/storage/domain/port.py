@@ -366,6 +366,21 @@ class WorkingSetStore(abc.ABC):
         """
 
     @abc.abstractmethod
+    async def settled_generation(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> int:
+        """Return the generation once no publish of the server is in progress (#3552).
+
+        :meth:`current_generation`, read under the per-server lock that
+        :meth:`commit_snapshot` holds from its ``publisher_fence`` to its bump, so
+        it waits for a publish that has passed its fence. A caller that has
+        committed a state the fence refuses — another Worker assigned — before
+        this read sees every publish the fence let through. A publish whose fence
+        has not run yet is refused. The skip-hydrate decision reads the
+        generation this way.
+        """
+
+    @abc.abstractmethod
     async def current_publisher(
         self, community_id: CommunityId, server_id: ServerId
     ) -> str | None:

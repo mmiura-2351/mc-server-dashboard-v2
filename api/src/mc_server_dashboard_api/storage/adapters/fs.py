@@ -1384,6 +1384,21 @@ class FsStorage(Storage):
         server_root = self._server_root(community_id, server_id)
         return await asyncio.to_thread(self._read_generation, server_root)
 
+    async def settled_generation(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> int:
+        # The server lock is a thread lock, so it is taken on a worker thread, never
+        # on the event loop: a publish holding it awaits its fence on the loop.
+        return await asyncio.to_thread(
+            self._settled_generation, community_id, server_id
+        )
+
+    def _settled_generation(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> int:
+        with self._server_lock(community_id, server_id):
+            return self._read_generation(self._server_root(community_id, server_id))
+
     async def current_publisher(
         self, community_id: CommunityId, server_id: ServerId
     ) -> str | None:

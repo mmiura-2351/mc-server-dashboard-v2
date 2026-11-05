@@ -1066,6 +1066,12 @@ class ObjectStorage(Storage):
         async with self._client_factory() as client:
             return await self._read_generation(client, server_prefix)
 
+    async def settled_generation(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> int:
+        async with self._server_lock(community_id, server_id):
+            return await self.current_generation(community_id, server_id)
+
     async def current_publisher(
         self, community_id: CommunityId, server_id: ServerId
     ) -> str | None:
