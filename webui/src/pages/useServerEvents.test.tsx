@@ -1,6 +1,7 @@
 import {
   QueryClient,
   QueryClientProvider,
+  type QueryFunction,
   useQuery,
 } from "@tanstack/react-query";
 import { act, render } from "@testing-library/react";
@@ -679,6 +680,13 @@ describe("useServerEvents", () => {
 
 type Detail = { id: string; observed_state: string };
 
+function LiveProbe({ queryFn }: { queryFn: QueryFunction<Detail> }) {
+  // The page's order: the events hook, then the detail query.
+  state = useServerEvents(CID, SID);
+  useQuery({ queryKey: serverKey(CID, SID), queryFn });
+  return null;
+}
+
 /**
  * A detail query whose REST responses the test resolves by hand, so a response
  * can land after a WS frame that is newer than its read (#3213).
@@ -698,16 +706,10 @@ function setupDeferred({ retry = false }: { retry?: number | false } = {}) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry, retryDelay: 1000 } },
   });
-  function LiveProbe() {
-    // The page's order: the events hook, then the detail query.
-    state = useServerEvents(CID, SID);
-    useQuery({ queryKey: serverKey(CID, SID), queryFn });
-    return null;
-  }
   const wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
   );
-  render(<LiveProbe />, { wrapper });
+  render(<LiveProbe queryFn={queryFn} />, { wrapper });
   // Resolve the oldest outstanding REST read with `observed_state`.
   const respond = async (observed_state: string) => {
     const attempt = pending.shift();

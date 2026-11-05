@@ -20,9 +20,10 @@ vi.mock("react", async (importOriginal) => {
 // Import after the mock is set up.
 const { lazyRetry } = await import("./lazyRetry.ts");
 
+const Comp = () => null;
+
 describe("lazyRetry", () => {
   it("resolves on first attempt when the import succeeds", async () => {
-    const Comp = () => null;
     const factory = vi.fn().mockResolvedValue({ default: Comp });
 
     lazyRetry(factory);
@@ -33,7 +34,6 @@ describe("lazyRetry", () => {
   });
 
   it("retries once on failure then resolves", async () => {
-    const Comp = () => null;
     const factory = vi
       .fn()
       .mockRejectedValueOnce(new Error("network error"))
