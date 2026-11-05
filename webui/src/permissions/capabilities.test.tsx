@@ -138,21 +138,21 @@ describe("can() resolution against the fetched set", () => {
   });
 });
 
-describe("per-community cache isolation", () => {
-  function Switcher() {
-    const { communityId, setCommunityId } = useActiveCommunity();
-    const can = useCan();
-    return (
-      <div>
-        <span data-testid="cid">{communityId ?? "none"}</span>
-        <span data-testid="start">{String(can("server:start"))}</span>
-        <button type="button" onClick={() => setCommunityId("c2")}>
-          to-c2
-        </button>
-      </div>
-    );
-  }
+function IsolationSwitcher() {
+  const { communityId, setCommunityId } = useActiveCommunity();
+  const can = useCan();
+  return (
+    <div>
+      <span data-testid="cid">{communityId ?? "none"}</span>
+      <span data-testid="start">{String(can("server:start"))}</span>
+      <button type="button" onClick={() => setCommunityId("c2")}>
+        to-c2
+      </button>
+    </div>
+  );
+}
 
+describe("per-community cache isolation", () => {
   it("fetches and caches each community's set separately", async () => {
     fetchMock.mockImplementation((url: string) => {
       if (url === "/api/communities") {
@@ -172,7 +172,7 @@ describe("per-community cache isolation", () => {
       return Promise.resolve(jsonResponse({ permissions: [], grants: [] }));
     });
 
-    render(wrap(<Switcher />, newClient()));
+    render(wrap(<IsolationSwitcher />, newClient()));
 
     await waitFor(() =>
       expect(screen.getByTestId("start")).toHaveTextContent("true"),
@@ -199,26 +199,38 @@ describe("per-community cache isolation", () => {
   });
 });
 
-describe("selection reconciliation when the active community vanishes", () => {
-  function Switcher() {
-    const { communityId, setCommunityId, communities } = useActiveCommunity();
-    return (
-      <div>
-        <span data-testid="cid">{communityId ?? "none"}</span>
-        {/* The loaded list, so a test can wait for a specific refetch to land
-            before asserting what the selection did. */}
-        <span data-testid="list">
-          {communities === undefined
-            ? "loading"
-            : communities.map((c) => c.id).join(",") || "empty"}
-        </span>
-        <button type="button" onClick={() => setCommunityId("c2")}>
-          to-c2
-        </button>
-      </div>
-    );
-  }
+function ReconciliationSwitcher() {
+  const { communityId, setCommunityId, communities } = useActiveCommunity();
+  return (
+    <div>
+      <span data-testid="cid">{communityId ?? "none"}</span>
+      {/* The loaded list, so a test can wait for a specific refetch to land
+          before asserting what the selection did. */}
+      <span data-testid="list">
+        {communities === undefined
+          ? "loading"
+          : communities.map((c) => c.id).join(",") || "empty"}
+      </span>
+      <button type="button" onClick={() => setCommunityId("c2")}>
+        to-c2
+      </button>
+    </div>
+  );
+}
 
+function NullSetter() {
+  const { communityId, setCommunityId } = useActiveCommunity();
+  return (
+    <div>
+      <span data-testid="cid">{communityId ?? "none"}</span>
+      <button type="button" onClick={() => setCommunityId(null)}>
+        clear
+      </button>
+    </div>
+  );
+}
+
+describe("selection reconciliation when the active community vanishes", () => {
   it("falls back to the first community when the selected one disappears from the list", async () => {
     let communitiesResponse = [
       { id: "c1", name: "First" },
@@ -232,7 +244,7 @@ describe("selection reconciliation when the active community vanishes", () => {
     });
 
     const client = newClient();
-    render(wrap(<Switcher />, client));
+    render(wrap(<ReconciliationSwitcher />, client));
 
     // Wait for the default to be selected.
     await waitFor(() =>
@@ -273,7 +285,7 @@ describe("selection reconciliation when the active community vanishes", () => {
     });
 
     const client = newClient();
-    render(wrap(<Switcher />, client));
+    render(wrap(<ReconciliationSwitcher />, client));
 
     await waitFor(() =>
       expect(screen.getByTestId("cid")).toHaveTextContent("c1"),
@@ -311,7 +323,7 @@ describe("selection reconciliation when the active community vanishes", () => {
     });
 
     const client = newClient();
-    render(wrap(<Switcher />, client));
+    render(wrap(<ReconciliationSwitcher />, client));
 
     await waitFor(() =>
       expect(screen.getByTestId("cid")).toHaveTextContent("c1"),
@@ -365,7 +377,7 @@ describe("selection reconciliation when the active community vanishes", () => {
     });
 
     const client = newClient();
-    render(wrap(<Switcher />, client));
+    render(wrap(<ReconciliationSwitcher />, client));
 
     await waitFor(() =>
       expect(screen.getByTestId("cid")).toHaveTextContent("c1"),
@@ -407,7 +419,7 @@ describe("selection reconciliation when the active community vanishes", () => {
     });
 
     const client = newClient();
-    render(wrap(<Switcher />, client));
+    render(wrap(<ReconciliationSwitcher />, client));
 
     await waitFor(() =>
       expect(screen.getByTestId("cid")).toHaveTextContent("c1"),
@@ -458,7 +470,7 @@ describe("selection reconciliation when the active community vanishes", () => {
       return jsonResponse({ permissions: [], grants: [] });
     });
 
-    render(wrap(<Switcher />, newClient()));
+    render(wrap(<ReconciliationSwitcher />, newClient()));
 
     // Selection made before any list has loaded: nothing can confirm it absent.
     act(() => {
@@ -489,18 +501,6 @@ describe("selection reconciliation when the active community vanishes", () => {
       return Promise.resolve(jsonResponse({ permissions: [], grants: [] }));
     });
 
-    function NullSetter() {
-      const { communityId, setCommunityId } = useActiveCommunity();
-      return (
-        <div>
-          <span data-testid="cid">{communityId ?? "none"}</span>
-          <button type="button" onClick={() => setCommunityId(null)}>
-            clear
-          </button>
-        </div>
-      );
-    }
-
     render(wrap(<NullSetter />, newClient()));
 
     await waitFor(() =>
@@ -519,32 +519,32 @@ describe("selection reconciliation when the active community vanishes", () => {
   });
 });
 
-describe("re-fetch on 403", () => {
-  function ForbiddenProbe() {
-    const onForbidden = useOnForbidden();
-    const { communityId } = useActiveCommunity();
-    const can = useCan();
-    return (
-      <div>
-        <span data-testid="cid">{communityId ?? "none"}</span>
-        <span data-testid="start">{String(can("server:start"))}</span>
-        <button
-          type="button"
-          onClick={() =>
-            onForbidden(
-              new ApiError(403, {
-                reason: "forbidden",
-                permission: "server:start",
-              }),
-            )
-          }
-        >
-          forbid
-        </button>
-      </div>
-    );
-  }
+function ForbiddenProbe() {
+  const onForbidden = useOnForbidden();
+  const { communityId } = useActiveCommunity();
+  const can = useCan();
+  return (
+    <div>
+      <span data-testid="cid">{communityId ?? "none"}</span>
+      <span data-testid="start">{String(can("server:start"))}</span>
+      <button
+        type="button"
+        onClick={() =>
+          onForbidden(
+            new ApiError(403, {
+              reason: "forbidden",
+              permission: "server:start",
+            }),
+          )
+        }
+      >
+        forbid
+      </button>
+    </div>
+  );
+}
 
+describe("re-fetch on 403", () => {
   it("re-fetches the active community's capabilities after a 403", async () => {
     let permCallCount = 0;
     fetchMock.mockImplementation((url: string) => {

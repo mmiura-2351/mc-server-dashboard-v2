@@ -24,13 +24,16 @@ from mc_server_dashboard_api.fleet.adapters.assigned_server_stopper import (
     ServersAssignedServerStopper,
 )
 from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
-from mc_server_dashboard_api.fleet.application.set_worker_drain import SetWorkerDrain
+from mc_server_dashboard_api.fleet.application.set_worker_drain import (
+    SetWorkerDrain,
+    WorkerDrainLocks,
+)
 from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId
 from mc_server_dashboard_api.servers.application.lifecycle import (
     StopServersAssignedToWorker,
 )
 from tests.client_utils import enter_client
-from tests.fleet.fakes import FakeClock, make_worker
+from tests.fleet.fakes import FakeClock, FakeWorkerDrainStore, make_worker
 from tests.identity.fakes import make_user
 from tests.servers.fakes import FakeClock as ServersFakeClock
 from tests.servers.fakes import FakeUnitOfWork
@@ -62,6 +65,8 @@ def _drain_use_case(registry: InMemoryWorkerRegistry) -> SetWorkerDrain:
                 uow=FakeUnitOfWork(), clock=ServersFakeClock(_T0)
             )
         ),
+        drain_store=FakeWorkerDrainStore(),
+        locks=WorkerDrainLocks(),
     )
 
 

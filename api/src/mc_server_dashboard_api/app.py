@@ -53,6 +53,9 @@ from mc_server_dashboard_api.fleet.adapters.control_plane import (
     ControlPlaneState,
     GrpcControlPlane,
 )
+from mc_server_dashboard_api.fleet.adapters.drain_store import (
+    SqlAlchemyWorkerDrainStore,
+)
 from mc_server_dashboard_api.fleet.adapters.grpc_server import make_grpc_server
 from mc_server_dashboard_api.fleet.adapters.real_time_events import (
     InProcessRealTimeEvents,
@@ -66,6 +69,12 @@ from mc_server_dashboard_api.fleet.adapters.relay_state import (
 )
 from mc_server_dashboard_api.fleet.api import events as server_events
 from mc_server_dashboard_api.fleet.api import workers
+from mc_server_dashboard_api.fleet.application.set_worker_drain import (
+    WorkerDrainLocks,
+)
+from mc_server_dashboard_api.fleet.domain.value_objects import (
+    WorkerId as FleetWorkerId,
+)
 from mc_server_dashboard_api.http_body_limit import RequestBodyLimitMiddleware
 from mc_server_dashboard_api.http_problem import (
     install_problem_handlers,
@@ -758,10 +767,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 port_range=bedrock_range,
                 clock=ServersSystemClock(),
             )()
+        # Drain intent outlives an API restart (issue #3535): seed the registry
+        # with the persisted drained set before the gRPC server below can accept
+        # a registration, so a drained Worker re-registers DRAINING. Workers
+        # register only over the control plane, so with it disabled there is
+        # nothing to restore.
+        drained: frozenset[FleetWorkerId] = frozenset()
+        if settings.control.enabled:
+            drained = await SqlAlchemyWorkerDrainStore(
+                create_session_factory(engine), clock=FleetSystemClock()
+            ).drained()
         registry = InMemoryWorkerRegistry(
-            clock=FleetSystemClock(), heartbeat_timeout=heartbeat_timeout
+            clock=FleetSystemClock(),
+            heartbeat_timeout=heartbeat_timeout,
+            drained=drained,
         )
         app.state.worker_registry = registry
+        # Process-wide per-Worker serialisation of drain toggles (issue #3535):
+        # every request-scoped SetWorkerDrain shares it.
+        app.state.worker_drain_locks = WorkerDrainLocks()
         # Process-wide record of which servers' last stop dispatch the Worker refused
         # (issue #2478). Shared by every StopServer that dispatches a stop — the HTTP
         # path, the schedule runner, and the reconciler's own replay — because it is
