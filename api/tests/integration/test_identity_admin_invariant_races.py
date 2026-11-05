@@ -246,9 +246,16 @@ class _Step:
 
 
 async def _interleave(
-    engine: AsyncEngine, paused: _Step, competitors: Sequence[_Step]
+    engine: AsyncEngine,
+    paused: _Step,
+    competitors: Sequence[_Step],
+    *,
+    deleted: UserId | None = None,
 ) -> list[BaseException | None]:
     """Pause ``paused`` before its write, settle each competitor, then resume.
+
+    ``deleted`` is the target the paused step deletes, if it is a deletion: a
+    competitor acting on that target may find it gone (#3247).
 
     Returns each step's outcome (``None`` or the exception it raised), paused
     step first.
@@ -275,13 +282,19 @@ async def _interleave(
         asyncio.gather(first, *tasks, return_exceptions=True), SETTLE_TIMEOUT
     )
     # A refusal is the only acceptable failure -- the last-admin guard, or a
-    # write whose target a competitor deleted (#3247): anything else (a
-    # deadlock, a serialization error) is a bug in the lock order.
-    for outcome in outcomes:
-        if outcome is not None and not isinstance(
-            outcome, (LastPlatformAdminError, UserNotFoundError)
+    # competitor's write on the target the paused step deleted (#3247):
+    # anything else (a deadlock, a serialization error) is a bug in the lock
+    # order, and a missing user anywhere else is a wrong 404.
+    for step, outcome in zip([paused, *competitors], outcomes, strict=True):
+        if outcome is None or isinstance(outcome, LastPlatformAdminError):
+            continue
+        if (
+            isinstance(outcome, UserNotFoundError)
+            and step is not paused
+            and step.target == deleted
         ):
-            raise outcome
+            continue
+        raise outcome
     return list(outcomes)
 
 
@@ -330,17 +343,25 @@ async def test_grant_racing_a_non_admin_reducer_cannot_leave_zero_admins(
     # from its unlocked read (a non-admin, so nothing to protect), resuming it
     # would remove the last active admin.
     admin, plain = await _seed_admin_and_user(engine)
+    deletes = paused in ("admin-delete", "delete-account")
 
     outcomes = await _interleave(
         engine,
         _Step(_REDUCERS[paused], plain),
         [_Step(_grant, plain), _Step(_REDUCERS[removal], admin)],
+        deleted=plain if deletes else None,
     )
 
+    # The paused step acts on a non-admin, so it is never refused. The grant
+    # waits for it, then writes -- unless the account is gone by then (#3247).
+    # The removal started before the grant committed, so it still sees the
+    # admin as the last one and is refused.
+    assert [None if outcome is None else type(outcome) for outcome in outcomes] == [
+        None,
+        UserNotFoundError if deletes else None,
+        LastPlatformAdminError,
+    ]
     assert await _active_admins(engine) >= 1
-    # A grant that waited for the account's deletion finds it gone (#3247).
-    if paused in ("admin-delete", "delete-account"):
-        assert isinstance(outcomes[1], UserNotFoundError)
 
 
 @pytest.mark.parametrize("competing", list(_REDUCERS), ids=list(_REDUCERS))
