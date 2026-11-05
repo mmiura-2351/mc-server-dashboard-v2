@@ -10,9 +10,11 @@ orphan-prefix sweep (lease-aware, keyed off the live pointer).
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import io
 import json
+import logging
 import tarfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -21,6 +23,7 @@ from typing import Any
 
 import pytest
 
+import mc_server_dashboard_api.storage.adapters.object_store as object_store_mod
 from mc_server_dashboard_api.storage.adapters.failure_seam import (
     CrashAt,
     InjectedCrash,
@@ -40,6 +43,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
     ArchiveTooLargeError,
     IntegrityCheckError,
     MissingRegionsError,
+    ObjectStoreUnavailableError,
     PathTraversalError,
     PrunedStoreError,
     StaleGenerationError,
@@ -1351,3 +1355,134 @@ async def test_commit_pruned_store_error_identifies_concurrent_delete(
 
     with pytest.raises(PrunedStoreError):
         await storage.commit_snapshot(handle, expected_base=base)
+
+
+async def _commit_racing_prune(
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeS3Store,
+    storage: ObjectStorage,
+    *,
+    fail_cleanup: bool = False,
+) -> tuple[CommunityId, ServerId, list[str]]:
+    """Drive issue #3512's interleaving of a commit's copy with a delete's prune.
+
+    The prune deletes ``snapshots/`` while the commit's first staged object is still
+    being copied; that copy then lands, the prune deletes ``incoming/``, and the
+    commit's next copy finds its source gone. Returns the scope and the keys the
+    commit wrote under ``snapshots/``. ``fail_cleanup`` makes deleting those keys
+    fail, as a broken store would.
+    """
+
+    community, server = new_scope()
+    await _publish(storage, community, server, {"f": b"v1"})
+    base = await storage.current_generation(community, server)
+    handle = await storage.begin_snapshot(community, server)
+    await storage.write_snapshot(handle, tar_stream({"a": b"A", "b": b"B"}))
+
+    incoming = _server_prefix(community, server) + "incoming/"
+    prune_reached_incoming = asyncio.Event()
+    copy_landed = asyncio.Event()
+    incoming_deleted = asyncio.Event()
+    copied: list[str] = []
+
+    real_delete_prefix = object_store_mod._delete_prefix
+
+    async def _delete_prefix(client: S3Client, prefix: str) -> None:
+        if prefix == incoming:
+            prune_reached_incoming.set()
+            await copy_landed.wait()
+            await real_delete_prefix(client, prefix)
+            incoming_deleted.set()
+            return
+        await real_delete_prefix(client, prefix)
+
+    real_copy = FakeS3Client.copy_object
+
+    async def _copy_object(self: FakeS3Client, src_key: str, dst_key: str) -> None:
+        if not copied:
+            await prune_reached_incoming.wait()
+            await real_copy(self, src_key, dst_key)
+            copied.append(dst_key)
+            copy_landed.set()
+            await incoming_deleted.wait()
+            return
+        await real_copy(self, src_key, dst_key)
+        copied.append(dst_key)
+
+    real_delete_object = FakeS3Client.delete_object
+
+    async def _delete_object(self: FakeS3Client, key: str) -> None:
+        if fail_cleanup and key in copied:
+            raise ObjectStoreUnavailableError(f"object store delete failed: {key}")
+        await real_delete_object(self, key)
+
+    monkeypatch.setattr(object_store_mod, "_delete_prefix", _delete_prefix)
+    monkeypatch.setattr(FakeS3Client, "copy_object", _copy_object)
+    monkeypatch.setattr(FakeS3Client, "delete_object", _delete_object)
+
+    commit = asyncio.create_task(storage.commit_snapshot(handle, expected_base=base))
+    await storage.prune_to_final_snapshot(community, server)
+    with pytest.raises(PrunedStoreError):
+        await commit
+    assert storage._active_staging == set()
+    monkeypatch.undo()
+    return community, server, copied
+
+
+def _snapshot_keys(
+    store: FakeS3Store, community: CommunityId, server: ServerId
+) -> list[str]:
+    snapshots = _server_prefix(community, server) + "snapshots/"
+    return [k for k in store.objects if k.startswith(snapshots)]
+
+
+async def test_copy_failing_after_prune_removes_the_objects_it_copied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Issue #3512: the object the in-flight copy wrote after the prune deleted
+    # snapshots/ is removed with the failed copy, not stranded for a pruned server.
+    # The commit still answers the prune (409 deleted_during_upload) and releases
+    # its staging lease.
+    store, storage = _store_and_storage()
+
+    community, server, copied = await _commit_racing_prune(monkeypatch, store, storage)
+
+    assert len(copied) == 1
+    assert _snapshot_keys(store, community, server) == []
+
+
+async def test_copy_cleanup_failure_keeps_the_original_error(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Issue #3512: a cleanup that fails is logged and left to the sweep; it never
+    # replaces the error the copy raised (asserted by the helper).
+    store, storage = _store_and_storage()
+
+    with caplog.at_level(logging.WARNING, logger=object_store_mod.__name__):
+        community, server, copied = await _commit_racing_prune(
+            monkeypatch, store, storage, fail_cleanup=True
+        )
+
+    assert _snapshot_keys(store, community, server) == copied
+    [record] = [r for r in caplog.records if r.name == object_store_mod.__name__]
+    assert record.exc_info is not None
+    assert isinstance(record.exc_info[1], ObjectStoreUnavailableError)
+
+
+async def test_sweep_reclaims_a_copy_leftover_of_a_pruned_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Issue #3512 backstop: a copy whose cleanup failed leaves its objects under
+    # snapshots/ of a server the prune left with no pointer. Nothing names that
+    # prefix, so the sweep reclaims it.
+    store, storage = _store_and_storage()
+    community, server, copied = await _commit_racing_prune(
+        monkeypatch, store, storage, fail_cleanup=True
+    )
+    assert _snapshot_keys(store, community, server) == copied
+    assert _server_prefix(community, server) + _POINTER not in store.objects
+
+    await storage.sweep()
+
+    assert _snapshot_keys(store, community, server) == []
+    assert _server_prefix(community, server) + "final.tar.gz" in store.objects
