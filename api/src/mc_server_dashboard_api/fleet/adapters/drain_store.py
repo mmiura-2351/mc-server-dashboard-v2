@@ -52,4 +52,5 @@ class SqlAlchemyWorkerDrainStore(WorkerDrainStore):
     async def drained(self) -> frozenset[WorkerId]:
         async with self._session_factory() as session:
             rows = await session.scalars(select(WorkerDrainModel.worker_id))
-            return frozenset(WorkerId(str(worker_id)) for worker_id in rows)
+            # The canonical form, the one registration keys a Worker by (#3542).
+            return frozenset(WorkerId.parse(str(worker_id)) for worker_id in rows)
