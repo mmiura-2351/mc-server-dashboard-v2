@@ -15,7 +15,9 @@ Divergence matrix (per candidate, after a grace window has lapsed):
   ``{starting, running}`` -> re-dispatch the start (hydrate-then-start). Guarded
   to observed-not-running because the Worker's instance manager rejects a
   double-start with ``INVALID_STATE``; we only replay when the Worker is not
-  already running it.
+  already running it. ``restarting`` is in the wire and DB set of observed states
+  but has no producer today (no Worker driver emits it and no API path writes it),
+  so a row in that state is treated as not running.
 - ``desired=running``, no assigned Worker (compensation-failure orphan) -> run
   the normal placement + dispatch path. Assignment stickiness invariant (issue
   #101): once ``place_and_start`` has SENT a start command for this server it KEEPS
@@ -75,7 +77,7 @@ Divergence matrix (per candidate, after a grace window has lapsed):
   no terminal report follows a failed stop. ``starting`` and ``restarting`` stay
   excluded for reasons of their own: a launch under a stop intent really does
   settle (to ``running``/``crashed``, landing on an arm above), and ``restarting``
-  is never emitted by any Worker driver.
+  has no producer (see the first arm).
 - Disconnected Worker -> skip (``desired=running`` side only):
   ``observed=unknown`` is expected while the Worker is gone, and the reconnect
   assignment rebuild owns that case (FR-WRK-4). The orphan path has no assigned
@@ -188,16 +190,26 @@ the divergence itself is still durable in the DB. A successful action clears the
 entry — except a start re-dispatched at a server still observed ``crashed``, which
 is a retry of a launch that evidently died: the dispatch succeeds (the Worker
 launches the container) but the process crashes again, so it is counted as a
-failure and backs off, damping the boot-crash loop (#343). Because each crash
-cycle transits through ``starting`` (when the row briefly drops out of
-``list_reconcilable``), the entry must NOT be cleared just because the server is
-momentarily absent, or the failure count would reset every cycle and never grow.
-Entries are therefore time-expired, not membership-cleaned: an entry is dropped
-only once ``now`` is past ``next_eligible_at`` by ``backoff_max_seconds`` of slack
-— so a genuinely healed server (which stops refreshing its entry) expires quietly,
-while a still-flapping server re-arrives and refreshes ``next_eligible_at`` long
-before then, so its backoff keeps growing up to ``backoff_max_seconds``. The map
-still does not grow without bound.
+failure and backs off, damping the boot-crash loop (#343).
+
+A server read converged also clears its entry (issue #3303), however it got there:
+a restart completing by itself, an operator's fix, a dispatch that failed only by
+losing its response. Otherwise a later, unrelated divergence would start from the
+old failure count, up to ``backoff_max_seconds``. Converged means settled, not
+merely absent or skipped: ``desired=running`` observed ``running`` on its assigned
+Worker, or ``desired=stopped`` released and at rest. A converged row is never a
+``list_reconcilable`` candidate, so each tick also reads the row of every server
+holding an entry that the candidate set left out. Because each crash cycle transits
+through ``starting`` (when the row briefly drops out of ``list_reconcilable``), the
+entry must NOT be cleared just because the server is momentarily absent, or the
+failure count would reset every cycle and never grow. A boot crash never reads
+``running``: the Worker holds ``starting`` until the server reports readiness. A
+row skipped by a guard or a grace window, or a stop still converging, keeps its
+entry too. Entries whose row is never read settled (a deleted server) are
+time-expired: dropped once ``now`` is past ``next_eligible_at`` by
+``backoff_max_seconds`` of slack, while a still-flapping server re-arrives and
+refreshes ``next_eligible_at`` long before then, so its backoff keeps growing up to
+``backoff_max_seconds``. The map does not grow without bound.
 
 A start the Worker refuses ``BUSY`` is neither a failure nor a success for this
 purpose (issue #3209): the entry is left exactly as it was. ``BUSY`` says the id is
@@ -284,6 +296,18 @@ _NOT_RUNNING = (
     ObservedState.UNKNOWN,
 )
 
+
+def _is_settled(server: Server) -> bool:
+    """Whether the row is converged: nothing is owed and nothing is in flight."""
+
+    if server.desired_state is DesiredState.RUNNING:
+        return (
+            server.observed_state is ObservedState.RUNNING
+            and server.assigned_worker_id is not None
+        )
+    return server.assigned_worker_id is None and server.is_at_rest()
+
+
 # Cap on how many per-server actions dispatch concurrently in one tick (#871).
 # Small and constant: enough to stop one slow redispatch (a ~600s hydrate or a
 # stop-side final snapshot) head-of-line blocking the rest of the fleet, but low
@@ -344,6 +368,17 @@ class RunReconcilerTick:
         now = self.clock.now()
         async with self.uow:
             candidates = await self.uow.servers.list_reconcilable()
+            # A converged row is never a candidate, so read each server holding a
+            # backoff entry that the candidate set left out (issue #3303).
+            listed = {server.id for server in candidates}
+            tracked = [
+                await self.uow.servers.get_by_id(server_id)
+                for server_id in list(self._attempts)
+                if server_id not in listed
+            ]
+        for server in tracked:
+            if server is not None and _is_settled(server):
+                self._attempts.pop(server.id, None)
         self._expire_stale(now)
         # Dispatch the per-server actions concurrently, capped (#871), so one slow
         # redispatch no longer head-of-line blocks the rest of the fleet. Each
@@ -375,15 +410,15 @@ class RunReconcilerTick:
                 )
 
     def _expire_stale(self, now: dt.datetime) -> None:
-        # Time-based expiry so the map does not grow without bound, WITHOUT
-        # membership-based cleanup. A crash-looping server flaps observed
+        # Time-based expiry for entries whose row is never read settled (``tick`` clears
+        # those), so the map does not grow without bound, WITHOUT membership-based
+        # cleanup. A crash-looping server flaps observed
         # crashed -> starting -> crashed; while starting it drops out of
         # list_reconcilable, so a membership check ("absent now") would erase its
         # backoff every cycle and reset the failure count — defeating the
         # exponential growth (#343). Instead an entry survives until well past its
         # own next-eligible instant: a flapping server re-arrives long before then
-        # and refreshes next_eligible_at (keeping its count), while a genuinely
-        # healed server stops refreshing and its entry quietly expires. The slack
+        # and refreshes next_eligible_at (keeping its count). The slack
         # (backoff_max_seconds) comfortably exceeds the longest plausible absence
         # of a still-diverged server (a slow modded boot sitting in starting).
         expired = [

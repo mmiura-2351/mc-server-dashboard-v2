@@ -1321,10 +1321,10 @@ async def test_crash_loop_flapping_through_starting_keeps_backoff_growing() -> N
     )
 
 
-async def test_healed_server_backoff_entry_expires() -> None:
-    # A server that crash-looped then genuinely healed (stays observed=running, so
-    # absent from list_reconcilable) must have its backoff entry dropped once enough
-    # time has lapsed, so the in-memory map does not grow without bound.
+async def test_unread_backoff_entry_expires() -> None:
+    # An entry whose row the tick never reads converged (here: the server was
+    # deleted) must still be dropped once enough time has lapsed, so the in-memory
+    # map does not grow without bound.
     uow = FakeUnitOfWork()
     server = _server(
         desired=DesiredState.RUNNING,
@@ -1340,8 +1340,7 @@ async def test_healed_server_backoff_entry_expires() -> None:
     entry = reconciler._attempts[server.id]
     assert entry.failures == 1
 
-    # It heals: observed=running, absent from list_reconcilable from now on.
-    uow.servers.by_id[server.id].observed_state = ObservedState.RUNNING
+    del uow.servers.by_id[server.id]
 
     # Just before next_eligible_at + backoff_max slack: entry still retained.
     expiry = entry.next_eligible_at + dt.timedelta(seconds=3600)
@@ -1353,6 +1352,164 @@ async def test_healed_server_backoff_entry_expires() -> None:
     clock.set(expiry)
     await reconciler.tick()
     assert server.id not in reconciler._attempts
+
+
+async def test_self_converged_server_backs_off_from_the_base_again() -> None:
+    # Issue #3303: a server that converges with no reconcile action of its own (a
+    # restart completing by itself, an operator's fix) must not carry its failure
+    # count into a later, unrelated divergence. Once a tick reads it converged, its
+    # entry is gone, so the next divergence is acted on at once and its first failure
+    # arms the base backoff, not a doubled one.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.UNKNOWN,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(status=CommandStatus.INTERNAL, message="boom")
+    )
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock)
+    stored = uow.servers.by_id[server.id]
+
+    await reconciler.tick()  # fail 1 -> 30s
+    clock.set(_NOW + dt.timedelta(seconds=31))
+    await reconciler.tick()  # fail 2 -> 60s, eligible again at +91s
+    assert reconciler._attempts[server.id].failures == 2
+
+    # It converges on its own: the tick takes no action and forgets the history.
+    stored.observed_state = ObservedState.RUNNING
+    dispatched = len(cp.dispatched)
+    clock.set(_NOW + dt.timedelta(seconds=40))
+    await reconciler.tick()
+    assert len(cp.dispatched) == dispatched
+    assert server.id not in reconciler._attempts
+
+    # A later divergence, still inside the old 60s window: acted on now, and its
+    # failure is the first, at the base backoff.
+    later = _NOW + dt.timedelta(seconds=50)
+    stored.observed_state = ObservedState.CRASHED
+    stored.observed_at = later - dt.timedelta(seconds=_GRACE + 1)
+    clock.set(later)
+    await reconciler.tick()
+    assert len(cp.dispatched) == dispatched + 1
+    assert reconciler._attempts[server.id].failures == 1
+    assert reconciler._attempts[server.id].next_eligible_at == later + dt.timedelta(
+        seconds=30
+    )
+
+
+async def test_released_stopped_server_forgets_its_backoff() -> None:
+    # Issue #3303, stop side: a stop that failed and was then converged elsewhere
+    # (an operator stop releasing the row) is settled once the row is unassigned and
+    # at rest; its entry must not survive into the server's next divergence.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.RUNNING,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(status=CommandStatus.INTERNAL, message="boom")
+    )
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock)
+
+    await reconciler.tick()  # stop fails -> entry
+    assert reconciler._attempts[server.id].failures == 1
+
+    stored = uow.servers.by_id[server.id]
+    stored.observed_state = ObservedState.STOPPED
+    stored.assigned_worker_id = None
+    clock.set(_NOW + dt.timedelta(seconds=10))
+    await reconciler.tick()
+    assert server.id not in reconciler._attempts
+
+
+async def test_persistent_start_failure_still_escalates() -> None:
+    # Issue #3303 must not reset a server that never converges: a start that keeps
+    # failing is re-read diverged every tick and its backoff keeps doubling.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.UNKNOWN,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(status=CommandStatus.INTERNAL, message="boom")
+    )
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock)
+
+    at = _NOW
+    for failures, delay in ((1, 30), (2, 60), (3, 120)):
+        clock.set(at)
+        await reconciler.tick()
+        entry = reconciler._attempts[server.id]
+        assert entry.failures == failures
+        assert entry.next_eligible_at == at + dt.timedelta(seconds=delay)
+        at = entry.next_eligible_at
+
+
+@pytest.mark.parametrize(
+    ("desired", "observed", "worker", "connected", "fresh_report"),
+    [
+        # A launch still in flight: absent from list_reconcilable, not settled.
+        (DesiredState.RUNNING, ObservedState.STARTING, _WORKER, True, False),
+        # Skipped by the disconnected-Worker guard.
+        (DesiredState.RUNNING, ObservedState.UNKNOWN, _WORKER, False, False),
+        # A stop still converging (assignment not released), inside its grace.
+        (DesiredState.STOPPED, ObservedState.STOPPED, _WORKER, True, True),
+        # A stop owed to a Worker that is gone and still running the server.
+        (DesiredState.STOPPED, ObservedState.RUNNING, _WORKER, False, False),
+        # Released, but not at rest.
+        (DesiredState.STOPPED, ObservedState.STOPPING, None, True, False),
+    ],
+)
+async def test_skipped_unsettled_row_keeps_its_backoff(
+    desired: DesiredState,
+    observed: ObservedState,
+    worker: WorkerId | None,
+    connected: bool,
+    fresh_report: bool,
+) -> None:
+    # Issue #3303 clears an entry only for a row read converged. A row the tick
+    # merely skips, or does not list, has not settled, so its count must survive.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.UNKNOWN,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(status=CommandStatus.INTERNAL, message="boom")
+    )
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock)
+    await reconciler.tick()  # start fails -> entry
+    entry = reconciler._attempts[server.id]
+
+    later = _NOW + dt.timedelta(seconds=40)  # past the 30s backoff
+    stored = uow.servers.by_id[server.id]
+    stored.desired_state = desired
+    stored.observed_state = observed
+    stored.assigned_worker_id = worker
+    stored.observed_at = (
+        later - dt.timedelta(seconds=1)
+        if fresh_report
+        else later - dt.timedelta(seconds=_GRACE + 1)
+    )
+    cp._connected[_WORKER] = connected
+    dispatched = len(cp.dispatched)
+    clock.set(later)
+    await reconciler.tick()
+    assert len(cp.dispatched) == dispatched
+    assert reconciler._attempts[server.id] == entry
 
 
 async def test_unknown_observed_with_connected_worker_redispatches_start() -> None:
