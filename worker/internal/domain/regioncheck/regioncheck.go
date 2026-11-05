@@ -7,14 +7,21 @@
 // It depends on the standard library only (docs/app/ARCHITECTURE.md Section 2).
 package regioncheck
 
+import "context"
+
 // Checker structurally validates every .mca region file under a working set.
 //
 // Run it only against a quiesced working set: on a live world the read races the
 // server's write and a healthy region false-positives as corrupt. Corruption is a
 // normal return value, reported in the Report; an error is reserved for a real I/O
 // failure while walking or reading. An absent root is an empty, healthy Report.
+//
+// The check stops cooperatively once ctx is done (issue #3511): it returns ctx's
+// error and no Report at its next entry. It does not interrupt a system call that
+// is stuck; the snapshot command that runs it answers at its deadline regardless
+// and abandons the check (instancemanager.handleSnapshot).
 type Checker interface {
-	CheckWorkingSet(root string) (Report, error)
+	CheckWorkingSet(ctx context.Context, root string) (Report, error)
 }
 
 // Reason is a machine-readable reason a region file failed the structural check.

@@ -18,15 +18,22 @@ fake to assert the lock is taken at all and spans the right scope.
 from __future__ import annotations
 
 import datetime as dt
+import io
+import tarfile
 import uuid
+from types import SimpleNamespace
 
 import pytest
+from sqlalchemy.ext.asyncio import create_async_engine
 
+from mc_server_dashboard_api.dependencies import get_upload_backup
+from mc_server_dashboard_api.servers.adapters.lifecycle_lock import PgLifecycleLock
 from mc_server_dashboard_api.servers.application.backups import (
     CreateBackup,
     DeleteBackup,
     PruneScheduledBackups,
     RestoreBackup,
+    UploadBackup,
 )
 from mc_server_dashboard_api.servers.application.files import (
     DeleteFile,
@@ -491,6 +498,45 @@ async def test_create_backup_takes_lock_around_its_work() -> None:
     )(community_id=_COMMUNITY, server_id=server.id, source=BackupSource.MANUAL)
 
     _assert_around(lock.events, server.id, "create-archive")
+
+
+def _targz() -> bytes:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        info = tarfile.TarInfo(name="server.properties")
+        info.size = 3
+        tar.addfile(info, io.BytesIO(b"k=v"))
+    return buf.getvalue()
+
+
+async def test_upload_backup_takes_lock_around_its_work() -> None:
+    # Issue #3219: the row commit and the archive publication run under the lock,
+    # so a DeleteServer / DeleteBackup cannot remove the row between the two and
+    # leave the publication writing into a deleted backup (or server).
+    server, repo, lock = _seeded()
+    archive = FakeBackupArchiveStore()
+    archive.events = lock.events
+    backups = FakeBackupRepository()
+    backups.events = lock.events
+    await UploadBackup(
+        uow=FakeUnitOfWork(servers=repo, backups=backups),
+        backup_store=archive,
+        clock=FakeClock(_NOW),
+        lifecycle_lock=lock,
+    )(community_id=_COMMUNITY, server_id=server.id, content=_targz())
+
+    _assert_around(lock.events, server.id, "add-row", "store-archive")
+
+
+def test_upload_backup_factory_injects_the_shared_lifecycle_lock() -> None:
+    # The production wiring (issue #3219): a NullLifecycleLock default here would
+    # leave the upload unserialized against DeleteServer in the deployed app.
+    engine = create_async_engine("postgresql+asyncpg://u:p@localhost/db")
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(engine=engine)))
+
+    upload = get_upload_backup(request, FakeBackupArchiveStore())  # type: ignore[arg-type]
+
+    assert isinstance(upload.lifecycle_lock, PgLifecycleLock)
 
 
 # --- Group file-sync use cases (issue #1222) --------------------------------

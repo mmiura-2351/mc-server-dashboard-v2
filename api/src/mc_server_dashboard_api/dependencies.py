@@ -121,6 +121,12 @@ from mc_server_dashboard_api.download_cookie import (
 from mc_server_dashboard_api.fleet.adapters.assigned_server_stopper import (
     ServersAssignedServerStopper,
 )
+from mc_server_dashboard_api.fleet.adapters.clock import (
+    SystemClock as FleetSystemClock,
+)
+from mc_server_dashboard_api.fleet.adapters.drain_store import (
+    SqlAlchemyWorkerDrainStore,
+)
 from mc_server_dashboard_api.fleet.application.list_workers import ListWorkers
 from mc_server_dashboard_api.fleet.application.set_worker_drain import SetWorkerDrain
 from mc_server_dashboard_api.fleet.domain.control_plane import (
@@ -599,13 +605,20 @@ def get_assigned_worker_lookup(request: Request) -> AssignedWorkerLookup:
     Returns the ``assigned_worker_id`` value (as a string) when the server
     exists and belongs to the given community, or ``None`` when the server is
     unknown, belongs to a different community, or has no assignment.
+
+    Reads through the app's dedicated assignment-fence engine, not the shared
+    pool (issue #3544): the snapshot commit runs this lookup while it holds the
+    storage per-server publish lock, and a lifecycle operation can hold the
+    shared pool's connections while it waits on that lock (a start holds its
+    lifecycle-lock and unit-of-work connections across a storage write).
     """
 
     from mc_server_dashboard_api.servers.domain.value_objects import (
         ServerId as ServersServerId,
     )
 
-    session_factory = create_session_factory(get_engine(request))
+    engine: AsyncEngine = request.app.state.assignment_fence_engine
+    session_factory = create_session_factory(engine)
 
     async def _lookup(community_id: uuid.UUID, server_id: uuid.UUID) -> str | None:
         async with ServersUnitOfWork(session_factory) as uow:
@@ -699,6 +712,10 @@ def get_set_worker_drain(
                 clock=ServersSystemClock(),
             )
         ),
+        drain_store=SqlAlchemyWorkerDrainStore(
+            session_factory, clock=FleetSystemClock()
+        ),
+        locks=request.app.state.worker_drain_locks,
     )
 
 
@@ -2503,6 +2520,7 @@ def get_upload_backup(
         uow=ServersUnitOfWork(session_factory),
         backup_store=backup_store,
         clock=ServersSystemClock(),
+        lifecycle_lock=get_lifecycle_lock(request),
     )
 
 

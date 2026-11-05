@@ -486,6 +486,8 @@ durable data. With a single API instance (NFR-SCALE-1) a durable worker table
 adds nothing the registry does not provide, while creating a DB ↔ registry sync
 liability (stale rows, write-through on every heartbeat). Accordingly the registry
 is in-memory and `server.assigned_worker_id` is a plain nullable uuid with no FK.
+The one Worker fact that is operator intent rather than runtime state, drain, is
+persisted on its own in `worker_drain` (below).
 
 *Possible later shape.* A later design that needs registrations to survive API
 restarts, or wants cross-instance visibility, can add a `worker` table by
@@ -503,6 +505,28 @@ would be, roughly:
 >
 > This table is **not** part of the schema; it documents a possible later shape
 > only.
+
+### `worker_drain`
+
+The Workers an operator has drained (FR-WRK-5). One row per drained Worker id.
+
+| Column | Type | Notes |
+|---|---|---|
+| `worker_id` | uuid PK | the drained Worker's id (registration admits only UUIDs, [`CONFIGURATION.md`](CONFIGURATION.md) Section 6.1 `worker.id`); **no FK**, since there is no `worker` table |
+| `drained_at` | timestamptz | when the Worker was first drained; a repeated drain keeps it |
+
+*Rationale.* Drain is the operator's decommissioning intent, durable in the same
+way a server's `desired_state` is, so it must survive an API restart; the
+registry alone kept it across a Worker reconnect only (issue #3535). The row is
+the intent, not a Worker record: liveness, capabilities, and the drain flag the
+registry reports stay in memory. `PUT /workers/{wid}/drain` inserts the row
+(idempotently) and `DELETE` removes it, each committing before the registry's
+flag changes. At startup the API loads every row into the registry before the
+control-plane gRPC server accepts a registration, so a drained Worker that
+re-registers after a restart comes back `draining` and stays excluded from
+placement. A row whose Worker never returns (a decommissioned host) stays and is
+inert: the drain endpoints answer `404` for a Worker that is not registered, so
+it can only be cleared once that Worker has registered with the running API.
 
 ### Player groups
 
