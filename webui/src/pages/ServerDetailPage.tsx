@@ -543,7 +543,12 @@ function Controls({
             />
           )}
         {can("server:restart", { serverId: server.id }) &&
-          actionApplies("restart", state, desired) && (
+          actionApplies(
+            "restart",
+            state,
+            desired,
+            server.assigned_worker_id !== null,
+          ) && (
             <button
               type="button"
               className="btn"

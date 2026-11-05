@@ -9,6 +9,7 @@ never imports the generated stubs.
 from __future__ import annotations
 
 import enum
+import uuid
 from dataclasses import dataclass
 
 from mc_server_dashboard_api.fleet.domain.errors import InvalidWorkerIdError
@@ -29,6 +30,21 @@ class WorkerId:
     def __post_init__(self) -> None:
         if not self.value or not self.value.strip():
             raise InvalidWorkerIdError("worker id must be a non-empty string")
+
+    @classmethod
+    def parse(cls, raw: str) -> WorkerId:
+        """Parse an externally supplied id into its canonical UUID form.
+
+        Every stored reference to a Worker (``assigned_worker_id`` is a uuid column)
+        reads back lowercase-hyphenated, so an id arriving from outside — the
+        Register message, a REST path — is canonicalised once at that edge; any
+        spelling of the same UUID then names the same Worker (issue #3542).
+        """
+
+        try:
+            return cls(str(uuid.UUID(raw)))
+        except ValueError as exc:
+            raise InvalidWorkerIdError("worker id must be a UUID") from exc
 
 
 @dataclass(frozen=True)

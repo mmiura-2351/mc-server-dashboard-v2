@@ -298,7 +298,8 @@ Only the keys for the selected `storage.backend` are read; the rest are ignored
 publish behaviour (REQUIREMENTS.md FR-DATA-6) live in STORAGE.md.
 
 **Connection-pool sizing and the lifecycle lock.** Every at-rest-gated
-operation (restore, delete, the file mutations, update, create-backup) and every
+operation (restore, delete, the file mutations, update, create-backup, and
+upload-backup) and every
 `StartServer` flip holds a *per-server* advisory lock on a **dedicated** pool
 connection for the operation's duration — a long gated op (a minutes-long
 restore/delete pack) thus pins one connection on top of the connection its own
@@ -312,6 +313,15 @@ duration. Size the pool with that headroom in mind:
   gated operation (the lock acquire + the op itself).
 - Each **bounded waiter** (~5 s timeout) pins **one** connection while it waits.
 - Normal request traffic uses additional connections concurrently.
+
+Because a gated operation's lock and its unit-of-work each need a connection,
+`pool_size + max_overflow` must be at least `2`; a smaller pool would deadlock
+every gated operation until `pool_timeout`, so loading rejects it.
+
+The operator-run integrity sweep (`integrity_sweep_cli`) takes the same per-server
+lock around each backup check, but on its own one-connection engine rather than
+from this pool, so it works at any accepted pool size and opens one database
+connection beyond it.
 
 A reasonable sizing formula: `pool_size + max_overflow ≥ (expected concurrent gated ops) + (expected peak waiters) + (normal concurrent request traffic)`. The shipped defaults (`pool_size=5`, `max_overflow=10`) give a ceiling of 15, adequate for a deployment with a handful of simultaneous gated operations. Raise `pool_size` (permanent connections) first; `max_overflow` adds burst headroom at the cost of connection churn.
 
@@ -627,7 +637,7 @@ can run**, and **where its scratch space is**.
 | `api.tls.insecure` | `false` | | When `true`, dial the control channel in plaintext (no TLS). Local/dev only; the Worker logs a `WARN` at startup. Required to opt out of TLS when `api.tls.ca_file` is unset. |
 | `api.tls.client_cert_file` | — | | **Reserved; not implemented.** Path to the Worker's client certificate for an mTLS control channel. The API does not verify client certificates (server-side TLS only; `api.credential` authenticates the Worker), so this key is reserved, unused; it is documented so the config shape admits mTLS without renaming. Must be set together with `api.tls.client_key_file` (or neither); a half-configured pair fails config validation, naming the missing half. |
 | `api.tls.client_key_file` | — | secret | **Reserved; not implemented.** Path to the Worker's client private key (mTLS). Reserved, unused (see `api.tls.client_cert_file`). |
-| `worker.id` | *(auto)* | | Stable identifier the Worker registers under. **Must be a UUID**: the API persists a server's assigned worker as a UUID column, so registration rejects a non-UUID id with `INVALID_ARGUMENT` (and the Worker fails config load if an explicit `worker.id` is not a UUID). When unset, the Worker generates a UUIDv4 on first boot, persists it at `<worker.scratch_dir>/worker-id` (mode `0600`), and reuses it on later restarts so identity stays stable. A Worker that loses its persisted id (a wiped scratch dir) registers as a brand-new Worker; rows still assigned to the old id are orphaned and recovered via the disconnect/mark-unknown path (servers restart cleanly on hydrate). |
+| `worker.id` | *(auto)* | | Stable identifier the Worker registers under. **Must be a UUID**: the API persists a server's assigned worker as a UUID column, so registration rejects a non-UUID id with `INVALID_ARGUMENT` (and the Worker fails config load if an explicit `worker.id` is not a UUID). The API accepts any spelling Python's `uuid.UUID` parses (uppercase, no hyphens, braces, a `urn:uuid:` prefix) and canonicalises it to the lowercase-hyphenated form at registration, so the Worker still matches its stored assignments and drain (issue #3542); the shipped Worker itself accepts an explicit `worker.id` only in the 36-character hyphenated form (either case). When unset, the Worker generates a UUIDv4 on first boot, persists it at `<worker.scratch_dir>/worker-id` (mode `0600`), and reuses it on later restarts so identity stays stable. A Worker that loses its persisted id (a wiped scratch dir) registers as a brand-new Worker; rows still assigned to the old id are orphaned and recovered via the disconnect/mark-unknown path (servers restart cleanly on hydrate). |
 
 ¹ `api.tls.ca_file` is required **unless** `api.tls.insecure=true`; a blank value
 counts as unset (the secret-blank rule of Section 3, which the Worker applies to
@@ -709,7 +719,9 @@ running containers at once, so a boot waits at most one cap (plus 10 s of
 deadline grace, a 30 s kill call and the remove), not one cap per container.
 Each kill logs one `WARN` line,
 `sweep: the orphan did not exit after SIGTERM; killing it`, with the same
-fields as a stop's escalation. A container with no working-set mount at `/data`
+fields as a stop's escalation. If the Worker is told to shut down during the
+sweep, it sends no kill: it logs a `WARN` that it is abandoning the stop, and
+the container keeps running until the next boot's sweep. A container with no working-set mount at `/data`
 has no world to watch. It gets the old fixed 30 s `docker stop` instead, which
 can cut a slow save short, and the sweep logs a `WARN` saying so.
 

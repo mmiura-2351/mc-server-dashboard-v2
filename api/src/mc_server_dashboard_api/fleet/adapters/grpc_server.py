@@ -41,7 +41,6 @@ import asyncio
 import datetime as dt
 import hmac
 import logging
-import uuid
 from collections.abc import AsyncIterator
 
 import grpc
@@ -619,11 +618,12 @@ class WorkerSessionServicer(WorkerServiceServicer):
         # (assigned_worker_id), and the servers/fleet seam bridges str <-> UUID
         # at registration. Enforce the format here so a non-UUID worker id is
         # rejected loudly instead of silently breaking observed-state and
-        # assignment tracking downstream (issue #99).
+        # assignment tracking downstream (issue #99). The id is keyed in its
+        # canonical form, so a non-canonical spelling still matches its stored
+        # assignments and drain (issue #3542).
         try:
-            worker_id = WorkerId(register.worker_id)
-            uuid.UUID(register.worker_id)
-        except (InvalidWorkerIdError, ValueError):
+            worker_id = WorkerId.parse(register.worker_id)
+        except InvalidWorkerIdError:
             await context.abort(
                 grpc.StatusCode.INVALID_ARGUMENT,
                 "worker id must be a UUID (CONFIGURATION.md worker.id)",

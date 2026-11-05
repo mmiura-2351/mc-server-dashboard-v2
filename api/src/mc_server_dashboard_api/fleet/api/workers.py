@@ -47,6 +47,7 @@ from mc_server_dashboard_api.dependencies import (
 )
 from mc_server_dashboard_api.fleet.application.list_workers import ListWorkers
 from mc_server_dashboard_api.fleet.application.set_worker_drain import SetWorkerDrain
+from mc_server_dashboard_api.fleet.domain.errors import InvalidWorkerIdError
 from mc_server_dashboard_api.fleet.domain.registry import WorkerSnapshot
 from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId
 from mc_server_dashboard_api.http_datetime import UtcDatetime
@@ -111,6 +112,16 @@ def _to_response(snapshot: WorkerSnapshot) -> WorkerResponse:
     )
 
 
+def _parse_worker_id(raw: str) -> WorkerId:
+    # Canonicalised like the registration id, so any spelling of the UUID names
+    # the same Worker (issue #3542). A non-UUID names no Worker (registration
+    # refuses one), so it is the same 404 as an unknown id.
+    try:
+        return WorkerId.parse(raw)
+    except InvalidWorkerIdError:
+        raise problem(status.HTTP_404_NOT_FOUND, "not_found") from None
+
+
 @router.get("/workers", dependencies=[Depends(require_platform_admin)])
 async def list_workers(
     use_case: Annotated[ListWorkers, Depends(get_list_workers)],
@@ -125,7 +136,8 @@ async def set_worker_drain(
     user: Annotated[User, Depends(require_platform_admin)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> DrainResponse:
-    servers_stopped = await use_case(worker_id=WorkerId(worker_id), draining=True)
+    wid = _parse_worker_id(worker_id)
+    servers_stopped = await use_case(worker_id=wid, draining=True)
     if servers_stopped is None:
         raise problem(status.HTTP_404_NOT_FOUND, "not_found")
     await recorder.record(
@@ -134,7 +146,7 @@ async def set_worker_drain(
             outcome=Outcome.SUCCESS,
             actor_id=user.id.value,
             target_type=ops.TARGET_WORKER,
-            target_id=uuid.UUID(worker_id),
+            target_id=uuid.UUID(wid.value),
         )
     )
     return DrainResponse(servers_stopped=servers_stopped)
@@ -150,7 +162,8 @@ async def clear_worker_drain(
     user: Annotated[User, Depends(require_platform_admin)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> None:
-    if await use_case(worker_id=WorkerId(worker_id), draining=False) is None:
+    wid = _parse_worker_id(worker_id)
+    if await use_case(worker_id=wid, draining=False) is None:
         raise problem(status.HTTP_404_NOT_FOUND, "not_found")
     await recorder.record(
         AuditEvent(
@@ -158,6 +171,6 @@ async def clear_worker_drain(
             outcome=Outcome.SUCCESS,
             actor_id=user.id.value,
             target_type=ops.TARGET_WORKER,
-            target_id=uuid.UUID(worker_id),
+            target_id=uuid.UUID(wid.value),
         )
     )

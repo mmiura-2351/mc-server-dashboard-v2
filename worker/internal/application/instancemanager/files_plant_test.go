@@ -3,13 +3,13 @@ package instancemanager
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -24,10 +24,11 @@ import (
 // root in the shipped topology, and both commands run on the server's command lane.
 // They run on a real filesystem as whatever user runs the suite.
 
-// handleWithin runs one command and fails the test when it has not answered in
-// time. A command that blocks (a FIFO opened without O_NONBLOCK) would otherwise
-// hang the suite; nothing here depends on how fast the answer is, only that there
-// is one, so the budget is far beyond what a loaded host needs.
+// handleWithin runs one command and fails the test when it has not answered
+// within budget. A command that blocks (a FIFO opened without O_NONBLOCK) would
+// otherwise hang the suite; nothing here depends on how fast the answer is, only
+// that there is one. A command that writes nothing gets quickBudget; one that
+// reaches an edit's fsyncs gets writeBudget (issue #3538).
 //
 // Failing never leaves the command running (issue #3479). It runs on the test's
 // context, which is cancelled as the test ends, and a cleanup waits for it to
@@ -35,19 +36,10 @@ import (
 // so it runs before they are restored, and before the manager is closed. A
 // command blocked on what the test planted is freed by releaseWhenTheTestEnds,
 // which runs ahead of every cleanup.
-func handleWithin(t *testing.T, m *Manager, cmd session.Command) session.CommandResult {
+func handleWithin(t *testing.T, m *Manager, cmd session.Command, budget time.Duration) session.CommandResult {
 	t.Helper()
-	done := make(chan session.CommandResult, 1)
-	var running sync.WaitGroup
-	running.Go(func() { done <- m.Handle(t.Context(), cmd) })
-	t.Cleanup(running.Wait)
-	select {
-	case res := <-done:
-		return res
-	case <-time.After(30 * time.Second):
-		t.Fatalf("%s %q blocked", cmd.Kind, cmd.Path)
-		return session.CommandResult{}
-	}
+	return receiveWithin(t, fmt.Sprintf("%s %q's answer", cmd.Kind, cmd.Path),
+		handleInBackground(t.Context(), t, m, cmd), budget)
 }
 
 // plantFifo puts a FIFO at path. When the test ends it opens both ends at once, so
@@ -157,7 +149,7 @@ func TestReadFileRefusesAFifoWithoutBlocking(t *testing.T) {
 		m := newManager(t, &fakeDriver{}, nil)
 		plantFifo(t, filepath.Join(workingRoot(t, m), "pipe"))
 
-		res := handleWithin(t, m, session.Command{CommandID: "c1", ServerID: s1, Kind: "ReadFile", Path: "pipe"})
+		res := handleWithin(t, m, session.Command{CommandID: "c1", ServerID: s1, Kind: "ReadFile", Path: "pipe"}, quickBudget)
 
 		assertDenied(t, res, session.FileAccessReasonUnspecified)
 	})
@@ -175,7 +167,7 @@ func TestReadFileRefusesAFifoWithoutBlocking(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		res := handleWithin(t, m, session.Command{CommandID: "c1", ServerID: s1, Kind: "ReadFile", Path: "pipe"})
+		res := handleWithin(t, m, session.Command{CommandID: "c1", ServerID: s1, Kind: "ReadFile", Path: "pipe"}, quickBudget)
 
 		assertDenied(t, res, session.FileAccessReasonUnspecified)
 	})
@@ -194,7 +186,7 @@ func TestReadFileRefusesASocket(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = l.Close() })
 
-	res := handleWithin(t, m, session.Command{CommandID: "c1", ServerID: s1, Kind: "ReadFile", Path: "sock"})
+	res := handleWithin(t, m, session.Command{CommandID: "c1", ServerID: s1, Kind: "ReadFile", Path: "sock"}, quickBudget)
 
 	assertDenied(t, res, session.FileAccessReasonUnspecified)
 }
@@ -247,7 +239,7 @@ func TestReadFileJudgesALeafSwappedInAfterResolution(t *testing.T) {
 				tc.swapIn(t, leaf, outside)
 			})
 
-			res := handleWithin(t, m, session.Command{CommandID: "c1", ServerID: s1, Kind: "ReadFile", Path: "config/app.yml"})
+			res := handleWithin(t, m, session.Command{CommandID: "c1", ServerID: s1, Kind: "ReadFile", Path: "config/app.yml"}, quickBudget)
 
 			assertDenied(t, res, tc.want)
 		})
@@ -273,7 +265,7 @@ func TestReadFileOfAFileGrownPastTheCapStopsAtTheCap(t *testing.T) {
 
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
-	res := handleWithin(t, m, session.Command{CommandID: "c1", ServerID: s1, Kind: "ReadFile", Path: "latest.log"})
+	res := handleWithin(t, m, session.Command{CommandID: "c1", ServerID: s1, Kind: "ReadFile", Path: "latest.log"}, quickBudget)
 	runtime.ReadMemStats(&after)
 
 	assertDenied(t, res, session.FileAccessReasonPayloadTooLarge)
@@ -290,7 +282,7 @@ func TestReadFileAtTheCapReturnsEveryByte(t *testing.T) {
 	want := bytes.Repeat([]byte("0123456789abcdef"), MaxFileBytes/16)
 	writeWorkingFile(t, m, s1, "big.bin", want)
 
-	res := handleWithin(t, m, session.Command{CommandID: "c1", ServerID: s1, Kind: "ReadFile", Path: "big.bin"})
+	res := handleWithin(t, m, session.Command{CommandID: "c1", ServerID: s1, Kind: "ReadFile", Path: "big.bin"}, quickBudget)
 
 	if !res.Success || !bytes.Equal(res.FileContent, want) {
 		t.Fatalf("ReadFile at the cap: success=%v code=%v, %d bytes; want all %d", res.Success, res.ErrorCode, len(res.FileContent), len(want))
@@ -359,7 +351,7 @@ func editOverAPlant(t *testing.T, m *Manager, p editPlant, plantName string) {
 	res := handleWithin(t, m, session.Command{
 		CommandID: "c1", ServerID: s1, Kind: "EditFile",
 		Path: "server.properties", Content: []byte("motd=new"),
-	})
+	}, writeBudget)
 
 	if !res.Success {
 		t.Fatalf("EditFile result = %+v, want success", res)
@@ -448,7 +440,7 @@ func TestEditFileRetriesUnderAnotherNameWhenItsStagedNameIsTaken(t *testing.T) {
 		res := handleWithin(t, m, session.Command{
 			CommandID: "c1", ServerID: s1, Kind: "EditFile",
 			Path: "server.properties", Content: []byte("motd=new"),
-		})
+		}, writeBudget)
 
 		if !res.Success {
 			t.Fatalf("EditFile result = %+v, want success", res)
@@ -480,7 +472,7 @@ func TestEditFileGivesUpWhenEveryStagedNameIsTaken(t *testing.T) {
 		res := handleWithin(t, m, session.Command{
 			CommandID: "c1", ServerID: s1, Kind: "EditFile",
 			Path: "server.properties", Content: []byte("motd=new"),
-		})
+		}, quickBudget)
 
 		if res.Success || res.ErrorCode != session.CommandErrorInternal {
 			t.Fatalf("EditFile result = %+v, want an internal failure", res)
@@ -508,7 +500,7 @@ func TestEditFileRemovesItsTempWhenItFails(t *testing.T) {
 
 		res := handleWithin(t, m, session.Command{
 			CommandID: "c1", ServerID: s1, Kind: "EditFile", Path: "server.properties", Content: []byte("motd=new"),
-		})
+		}, quickBudget)
 
 		if res.Success {
 			t.Fatal("EditFile succeeded, want a failure")
@@ -547,7 +539,7 @@ func TestEditFileStagesItsFileOutsideTheWorkingSet(t *testing.T) {
 
 		res := handleWithin(t, m, session.Command{
 			CommandID: "c1", ServerID: s1, Kind: "EditFile", Path: "server.properties", Content: []byte("motd=new"),
-		})
+		}, writeBudget)
 
 		if !res.Success {
 			t.Fatalf("EditFile result = %+v, want success", res)
@@ -573,7 +565,7 @@ func TestEditFileFailsWhenTheUnnamedFileCannotBeCreated(t *testing.T) {
 
 	res := handleWithin(t, m, session.Command{
 		CommandID: "c1", ServerID: s1, Kind: "EditFile", Path: "server.properties", Content: []byte("motd=new"),
-	})
+	}, quickBudget)
 
 	if res.Success || res.ErrorCode != session.CommandErrorInternal {
 		t.Fatalf("EditFile result = %+v, want an internal failure", res)
@@ -618,7 +610,7 @@ func TestEditFileRefusesADirectorySwappedInAtTheTarget(t *testing.T) {
 
 	res := handleWithin(t, m, session.Command{
 		CommandID: "c1", ServerID: s1, Kind: "EditFile", Path: "server.properties", Content: []byte("motd=new"),
-	})
+	}, writeBudget)
 
 	assertDenied(t, res, session.FileAccessReasonIsADirectory)
 	if st := lstat(t, target); st.Mode&unix.S_IFMT != unix.S_IFDIR {
@@ -638,7 +630,7 @@ func TestEditFileReplacesTheTargetNameWithoutOpeningIt(t *testing.T) {
 
 		res := handleWithin(t, m, session.Command{
 			CommandID: "c1", ServerID: s1, Kind: "EditFile", Path: "server.properties", Content: []byte("motd=new"),
-		})
+		}, writeBudget)
 
 		if !res.Success {
 			t.Fatalf("EditFile result = %+v, want success", res)
@@ -660,7 +652,7 @@ func TestEditFileReplacesTheTargetNameWithoutOpeningIt(t *testing.T) {
 
 		res := handleWithin(t, m, session.Command{
 			CommandID: "c1", ServerID: s1, Kind: "EditFile", Path: "server.properties", Content: []byte("motd=new"),
-		})
+		}, writeBudget)
 
 		if !res.Success {
 			t.Fatalf("EditFile result = %+v, want success", res)
@@ -704,7 +696,7 @@ func TestEditFileResultIsUnchangedForALegitimateEdit(t *testing.T) {
 
 			res := handleWithin(t, m, session.Command{
 				CommandID: "c1", ServerID: s1, Kind: "EditFile", Path: tc.path, Content: content,
-			})
+			}, writeBudget)
 
 			if want := (session.CommandResult{CommandID: "c1", Success: true}); res.CommandID != want.CommandID ||
 				!res.Success || res.ErrorCode != want.ErrorCode || res.ErrorMessage != "" ||
@@ -727,7 +719,7 @@ func TestEditFileResultIsUnchangedForALegitimateEdit(t *testing.T) {
 			}
 			assertNoEditTemp(t, m, filepath.Dir(full), "")
 
-			read := handleWithin(t, m, session.Command{CommandID: "c2", ServerID: s1, Kind: "ReadFile", Path: tc.path})
+			read := handleWithin(t, m, session.Command{CommandID: "c2", ServerID: s1, Kind: "ReadFile", Path: tc.path}, quickBudget)
 			if !read.Success || !bytes.Equal(read.FileContent, content) {
 				t.Fatalf("ReadFile after the edit = %+v, want the edit back", read)
 			}
