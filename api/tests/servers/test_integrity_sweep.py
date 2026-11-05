@@ -11,9 +11,12 @@ the same classification (idempotent).
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import logging
 import uuid
+from collections.abc import AsyncIterator
+from dataclasses import replace
 
 import pytest
 
@@ -34,6 +37,11 @@ from mc_server_dashboard_api.servers.domain.backup import (
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupStorageUnavailableError,
+    ServerBusyError,
+)
+from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
+    LifecycleLock,
+    NullLifecycleLock,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -47,6 +55,7 @@ from tests.audit.fakes import RecordingAuditRecorder
 from tests.servers.fakes import (
     FakeBackupArchiveStore,
     FakeBackupRepository,
+    FakeLifecycleLock,
     FakeServerRepository,
     FakeUnitOfWork,
 )
@@ -86,8 +95,47 @@ def _backup(server_id: ServerId, storage_ref: str, *, health: BackupHealth) -> B
     )
 
 
+class _BusyLifecycleLock(LifecycleLock):
+    """A lifecycle lock another operation holds past the wait budget on the
+    ``busy`` acquisitions (1-based): ``hold`` raises ``ServerBusyError`` for them,
+    exactly as the real lock does once its bounded acquire gives up."""
+
+    def __init__(self, busy: set[int]) -> None:
+        self.busy = busy
+        self.acquisitions = 0
+
+    @contextlib.asynccontextmanager
+    async def hold(self, server_id: ServerId) -> AsyncIterator[None]:
+        self.acquisitions += 1
+        if self.acquisitions in self.busy:
+            raise ServerBusyError(str(server_id.value))
+        yield
+
+
+class _DeletingLifecycleLock(LifecycleLock):
+    """A lifecycle lock whose first acquisition comes after a ``DeleteBackup``
+    removed ``backup`` (archive first, then row) between the sweep's listing and
+    its check."""
+
+    def __init__(
+        self, uow: FakeUnitOfWork, store: FakeBackupArchiveStore, backup: Backup
+    ) -> None:
+        self.uow = uow
+        self.store = store
+        self.backup = backup
+
+    @contextlib.asynccontextmanager
+    async def hold(self, server_id: ServerId) -> AsyncIterator[None]:
+        self.store.archives.discard(self.backup.storage_ref)
+        self.uow.backups.by_id.pop(self.backup.id, None)
+        yield
+
+
 def _wire(
-    *, servers: list[Server], backups: list[Backup]
+    *,
+    servers: list[Server],
+    backups: list[Backup],
+    lifecycle_lock: LifecycleLock = NullLifecycleLock(),
 ) -> tuple[
     IntegritySweep, FakeUnitOfWork, FakeBackupArchiveStore, RecordingAuditRecorder
 ]:
@@ -102,7 +150,9 @@ def _wire(
     for backup in backups:
         store.archives.add(backup.storage_ref)
     audit = RecordingAuditRecorder()
-    sweep = IntegritySweep(uow=uow, backup_store=store, audit=audit)
+    sweep = IntegritySweep(
+        uow=uow, backup_store=store, audit=audit, lifecycle_lock=lifecycle_lock
+    )
     return sweep, uow, store, audit
 
 
@@ -397,3 +447,93 @@ async def test_rerunning_is_idempotent() -> None:
         second.snapshots_scanned,
         second.snapshots_flagged,
     )
+
+
+async def test_dangling_row_is_still_condemned_under_the_lifecycle_lock() -> None:
+    """Holding the lifecycle lock (issue #3220) only rules out a publication in
+    flight; a row whose archive is missing with nothing publishing it is a real
+    dangling row and still gets the UNREADABLE verdict and its audit."""
+
+    sid = ServerId.new()
+    dangling = _backup(sid, "gone", health=BackupHealth.HEALTHY)
+    lock = FakeLifecycleLock()
+    sweep, uow, store, audit = _wire(
+        servers=[_server(sid)], backups=[dangling], lifecycle_lock=lock
+    )
+    store.archives.discard("gone")
+
+    summary = await sweep()
+
+    assert lock.events == [(sid, "acquire"), (sid, "release")]
+    assert uow.backups.by_id[dangling.id].health is BackupHealth.UNREADABLE
+    assert summary.backups_dangling == 1
+    marks = [e for e in audit.events if e.operation == BACKUP_MARK_UNREADABLE]
+    assert [e.target_id for e in marks] == [dangling.id.value]
+
+
+async def test_busy_backup_is_skipped_while_the_rest_of_the_server_is_swept(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The lock is taken per backup (issue #3220). A backup whose lock stays held
+    past the wait budget (a publication in flight, a restore, ...) is skipped for
+    this run: no verdict, no audit, logged at INFO and counted apart. The server's
+    other backups still get verdicts and its snapshot is still checked. Judging
+    the row mid-publication is exactly the false "dangling" verdict the lock
+    exists to prevent."""
+
+    sid = ServerId.new()
+    # Newest first, so the sweep reaches it on the first (busy) acquisition. It
+    # would be condemned as dangling if it were examined.
+    pending = replace(
+        _backup(sid, "pending", health=BackupHealth.HEALTHY),
+        created_at=_NOW + dt.timedelta(hours=1),
+    )
+    corrupt = _backup(sid, "bad", health=BackupHealth.UNKNOWN)
+    sound = _backup(sid, "ok", health=BackupHealth.UNKNOWN)
+    sweep, uow, store, audit = _wire(
+        servers=[_server(sid)],
+        backups=[pending, corrupt, sound],
+        lifecycle_lock=_BusyLifecycleLock({1}),
+    )
+    store.archives.discard("pending")
+    store.corrupt_refs.add("bad")
+    store.current_corrupt[sid] = 1
+
+    with caplog.at_level(logging.INFO):
+        summary = await sweep()
+
+    assert uow.backups.by_id[pending.id].health is BackupHealth.HEALTHY
+    assert uow.backups.by_id[corrupt.id].health is BackupHealth.QUARANTINED
+    assert uow.backups.by_id[sound.id].health is BackupHealth.HEALTHY
+    assert [e.target_id for e in audit.events] == [corrupt.id.value, sid.value]
+    assert summary.backups_skipped_busy == 1
+    assert summary.backups_dangling == 0
+    assert summary.backups_quarantined == 1
+    assert summary.backups_healthy == 1
+    assert summary.snapshots_flagged == 1
+    skipped = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.INFO
+        and str(pending.id.value) in r.getMessage()
+        and "busy" in r.getMessage()
+    ]
+    assert skipped
+
+
+async def test_backup_deleted_before_its_lock_is_taken_gets_no_verdict() -> None:
+    """The row is re-read under the lock (issue #3220): a backup deleted between
+    the listing and the check is gone, not dangling, so it gets no verdict and no
+    audit."""
+
+    sid = ServerId.new()
+    doomed = _backup(sid, "doomed", health=BackupHealth.HEALTHY)
+    sweep, uow, store, audit = _wire(servers=[_server(sid)], backups=[doomed])
+    sweep = replace(sweep, lifecycle_lock=_DeletingLifecycleLock(uow, store, doomed))
+
+    summary = await sweep()
+
+    assert doomed.id not in uow.backups.by_id
+    assert audit.events == []
+    assert summary.backups_dangling == 0
+    assert summary.backups_healthy == 0

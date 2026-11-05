@@ -91,14 +91,14 @@ class UserRepository(abc.ABC):
     @abc.abstractmethod
     async def set_active(
         self, user_id: UserId, *, active: bool, updated_at: dt.datetime
-    ) -> None:
-        """Set the account lifecycle flag (issue #278)."""
+    ) -> bool:
+        """Set the account lifecycle flag (issue #278); return whether a row matched."""
 
     @abc.abstractmethod
     async def set_platform_admin(
         self, user_id: UserId, *, is_platform_admin: bool, updated_at: dt.datetime
-    ) -> None:
-        """Set the platform-admin flag (FR-AUTH-6)."""
+    ) -> bool:
+        """Set the platform-admin flag (FR-AUTH-6); return whether a row matched."""
 
     @abc.abstractmethod
     async def delete(self, user_id: UserId) -> None:
