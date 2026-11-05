@@ -1340,7 +1340,24 @@ way restore does, discarding the bytes: bytes the store can produce can still ho
 nothing restore can stage. A file member escaping the prefix raises
 `ArchiveUnreadableError`, and members inflating past the restore decompressed-size
 cap raise `ArchiveTooLargeError`, as in restore. It does not stage members or
-region-fsck — that stays fs-only, above. An archive the store
+region-fsck — that stays fs-only, above.
+
+The spool has an operational cost that operators on this backend must provision
+for:
+
+- **Location.** Python's default temp directory (`TMPDIR`, normally `/tmp`) in
+  the API process, which is not a storage volume.
+- **Size.** About one full compressed archive per concurrent health check, with
+  no explicit cap. The decompressed-size cap does not bound it: the member walk
+  runs only after the whole archive has been downloaded into the spool.
+- **CPU.** The member walk decompresses the archive a second time, after the
+  gzip probe.
+
+A transient fault on the spool (the fs errno policy's set, such as `EIO`) is
+`StorageUnavailableError`: the sweep stops with no verdict written, exactly as for
+a store outage, and the fault never reaches the short-body classification, so it
+cannot mark an intact archive unreadable. `ENOSPC` / `EDQUOT` on the spool stay
+the raw resource error that policy keeps them as. An archive the store
 cannot reproduce raises `ArchiveUnreadableError`, which the servers seam
 translates to `BackupUnreadableError` and the sweep records as `UNREADABLE` — a
 verdict of its own, not the structural `QUARANTINED` — so the stored health, the

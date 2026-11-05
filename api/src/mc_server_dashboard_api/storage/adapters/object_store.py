@@ -69,6 +69,7 @@ from mc_server_dashboard_api.storage.adapters.failure_seam import (
     FailureSeam,
     PublishPhase,
 )
+from mc_server_dashboard_api.storage.adapters.fs import _translating_io_faults
 from mc_server_dashboard_api.storage.domain.errors import (
     ArchiveTooLargeError,
     ArchiveUnreadableError,
@@ -1554,16 +1555,15 @@ class ObjectStorage(Storage):
         # the decompressed-size cap. So the read that proves the archive is
         # spooled, and the spool is walked the way restore walks it, discarding
         # the bytes — ArchiveUnreadableError / ArchiveTooLargeError, as restore.
+        # The spool is local disk, not the store: a transient fault on it is the
+        # fs errno policy's StorageUnavailableError, raised past the short-body
+        # classifier so it can never condemn the archive.
         backup_key = self._backup_key(community_id, server_id, key)
         async with self._client_factory() as client:
             declared = await client.head_object(backup_key)
             if declared is None:
                 raise NotFoundError(f"backup not found: {key.value}")
-            fd, name = await asyncio.to_thread(
-                tempfile.mkstemp, prefix=".fsck.", suffix=".tar.gz"
-            )
-            os.close(fd)
-            spool = Path(name)
+            spool = await _create_spool(".fsck.", ".tar.gz")
             try:
                 probe = await self._probe_archive(client, backup_key, declared, spool)
                 if probe.ended_at is not None:
@@ -1575,7 +1575,8 @@ class ObjectStorage(Storage):
                         f"backup archive {key.value} could not be read back: "
                         f"{probe.defect}"
                     )
-                await _drain_restorable_members(spool, self._max_restore_bytes)
+                with _translating_io_faults():
+                    await _drain_restorable_members(spool, self._max_restore_bytes)
             finally:
                 await asyncio.to_thread(spool.unlink, missing_ok=True)
         return WorkingSetReport()
@@ -1590,13 +1591,16 @@ class ObjectStorage(Storage):
         that those bytes decompress to a well-formed gzip end. The decompressed
         output is discarded as it is produced, nothing is buffered whole, and the
         bytes read are written to ``spool`` (replacing what an earlier read left
-        there) for the member walk that follows a sound read (issue #3237).
+        there) for the member walk that follows a sound read (issue #3237). A
+        local fault on the spool raises ``StorageUnavailableError`` — the base, not
+        the ``ObjectStoreUnavailableError`` caught below — so it never reaches the
+        short-body classification.
         """
 
         gzip_probe = GzipReadProbe()
         read = 0
         try:
-            with open(spool, "wb") as out:
+            with _translating_io_faults(), open(spool, "wb") as out:
                 async for chunk in await client.get_object(backup_key):
                     read += len(chunk)
                     gzip_probe.feed(chunk)
@@ -2417,6 +2421,39 @@ async def _spool_stream(
         spool.unlink(missing_ok=True)
         raise
     return spool
+
+
+def _make_spool(prefix: str, suffix: str) -> Path:
+    """Create an empty temp file, closing its fd before returning (issue #3237)."""
+
+    fd, name = tempfile.mkstemp(prefix=prefix, suffix=suffix)
+    os.close(fd)
+    return Path(name)
+
+
+def _unlink_orphaned_spool(made: asyncio.Future[Path]) -> None:
+    """Remove a spool whose creator was cancelled before it could own it."""
+
+    if not made.cancelled() and made.exception() is None:
+        made.result().unlink(missing_ok=True)
+
+
+async def _create_spool(prefix: str, suffix: str) -> Path:
+    """Create a temp spool off the loop, reclaiming it if the caller is cancelled.
+
+    A cancel during the await does not stop the worker thread: the file it goes
+    on to create would be owned by no one. The thread closes the fd itself, and a
+    cancelled caller hands the still-running creation a callback that removes the
+    file once it exists (issue #3237).
+    """
+
+    made = asyncio.get_running_loop().run_in_executor(None, _make_spool, prefix, suffix)
+    try:
+        with _translating_io_faults():
+            return await asyncio.shield(made)
+    except asyncio.CancelledError:
+        made.add_done_callback(_unlink_orphaned_spool)
+        raise
 
 
 async def _spool_object(client: S3Client, key: str, prefix: str, suffix: str) -> Path:
