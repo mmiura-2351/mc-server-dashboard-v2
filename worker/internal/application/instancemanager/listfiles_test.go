@@ -81,7 +81,7 @@ func TestListFilesReportsTheKindOfSpecialEntries(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res := handleWithin(t, m, session.Command{CommandID: "c1", ServerID: s1, Kind: "ListFiles", Path: "."})
+	res := handleWithin(t, m, session.Command{CommandID: "c1", ServerID: s1, Kind: "ListFiles", Path: "."}, quickBudget)
 	if !res.Success {
 		t.Fatalf("ListFiles result = %+v, want success", res)
 	}

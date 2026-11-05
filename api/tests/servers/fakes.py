@@ -1061,7 +1061,7 @@ class FakeServerRepository(ServerRepository):
 class FakeBackupRepository(BackupRepository):
     def __init__(self) -> None:
         self.by_id: dict[BackupId, Backup] = {}
-        # Ordered log of the metadata-row deletions, in the same shape
+        # Ordered log of the metadata-row adds and deletions, in the same shape
         # FakeLifecycleLock records; see FakeBackupArchiveStore.events.
         self.events: list[tuple[ServerId, str]] = []
         # Ordered log of the ids ``get_by_id`` was called for, so a test can pin
@@ -1079,6 +1079,7 @@ class FakeBackupRepository(BackupRepository):
         self.by_id[backup.id] = self._copy(backup)
 
     async def add(self, backup: Backup) -> None:
+        self.events.append((backup.server_id, "add-row"))
         self.by_id[backup.id] = self._copy(backup)
 
     async def get_by_id(self, backup_id: BackupId) -> Backup | None:
@@ -2175,6 +2176,7 @@ class FakeBackupArchiveStore(BackupArchiveStore):
         stream: AsyncIterator[bytes],
         storage_ref: str,
     ) -> None:
+        self.events.append((server_id, "store-archive"))
         data = b"".join([chunk async for chunk in stream])
         self.archives.add(storage_ref)
         self.bytes_by_ref[storage_ref] = data

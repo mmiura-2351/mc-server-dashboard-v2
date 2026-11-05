@@ -128,6 +128,26 @@ describe("actionApplies", () => {
     }
     expect(actionApplies("stop", "stopping", "stopped", true)).toBe(false);
   });
+
+  // The API restarts only a row whose desired state is running, and refuses
+  // a stopped intent (409 invalid_transition) even while the process still
+  // runs, as in a drain's grace window (#3502).
+  it("restart does not apply under desired=stopped, assigned or not", () => {
+    for (const state of ["running", "stopped", "crashed", "unknown"] as const) {
+      expect(actionApplies("restart", state, "stopped", true)).toBe(false);
+      expect(actionApplies("restart", state, "stopped", false)).toBe(false);
+    }
+    expect(actionApplies("restart", "running", "running", true)).toBe(true);
+  });
+
+  // The API also refuses a restart of a row no Worker is assigned to, under a
+  // running intent too (409 invalid_transition, #3502).
+  it("restart under desired=running applies only while a worker is assigned", () => {
+    for (const state of ["running", "unknown"] as const) {
+      expect(actionApplies("restart", state, "running", true)).toBe(true);
+      expect(actionApplies("restart", state, "running", false)).toBe(false);
+    }
+  });
 });
 
 describe("atRest", () => {

@@ -14,7 +14,10 @@ cases and authorization Ports faked (NFR-TEST-1, no database). Verifies:
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
+import io
+import tarfile
 import uuid
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Protocol, cast
@@ -71,6 +74,7 @@ from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.servers.application.backups import (
     ListedBackup,
     RestoreResult,
+    UploadBackup,
     download_grant_resource,
 )
 from mc_server_dashboard_api.servers.domain.backup import (
@@ -96,10 +100,12 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidFilePathError,
     InvalidRetentionPolicyError,
     PluginReconcileIncompleteError,
+    ServerBusyError,
     ServerNotFoundError,
     ServerNotStoppedError,
     WorkingSetSeedFailedError,
 )
+from mc_server_dashboard_api.servers.domain.lifecycle_lock import LifecycleLock
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId as ServerCommunityId,
 )
@@ -109,6 +115,9 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 from tests.audit.fakes import RecordingAuditRecorder
 from tests.client_utils import enter_client
 from tests.identity.fakes import FakeClock, FakeUnitOfWork, make_user
+from tests.servers.fakes import FakeBackupArchiveStore
+from tests.servers.fakes import FakeClock as ServersFakeClock
+from tests.servers.fakes import FakeUnitOfWork as ServersFakeUnitOfWork
 
 if TYPE_CHECKING:
     from mc_server_dashboard_api.servers.application.backups import DownloadBackup
@@ -2047,6 +2056,44 @@ def test_upload_storage_unavailable_is_503_with_reason() -> None:
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "/upload"), files=_multipart())
     assert resp.status_code == 503
     assert resp.json()["reason"] == "storage_unavailable"
+
+
+class _HeldLifecycleLock(LifecycleLock):
+    """A server lock another lifecycle operation holds past the acquire budget.
+
+    Gives up the way PgLifecycleLock's bounded acquire does (issue #876).
+    """
+
+    def hold(self, server_id: ServerId) -> contextlib.AbstractAsyncContextManager[None]:
+        raise ServerBusyError(str(server_id.value))
+
+
+def _valid_archive() -> bytes:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        info = tarfile.TarInfo(name="server.properties")
+        info.size = 3
+        tar.addfile(info, io.BytesIO(b"k=v"))
+    return buf.getvalue()
+
+
+def test_upload_while_the_server_lock_is_held_is_409_server_busy() -> None:
+    # The upload takes the lifecycle lock (issue #3219), so a long delete,
+    # restore or backup holding it surfaces the same retryable 409 the other
+    # backup routes give, not a 500.
+    upload = UploadBackup(
+        uow=ServersFakeUnitOfWork(),
+        backup_store=FakeBackupArchiveStore(),
+        clock=ServersFakeClock(_NOW),
+        lifecycle_lock=_HeldLifecycleLock(),
+    )
+    app = _app(member=True, allow=True)
+    cast(FastAPI, app).dependency_overrides[get_upload_backup] = lambda: upload
+    client = _client(app)
+    files = {"file": ("backup.tar.gz", _valid_archive(), "application/gzip")}
+    resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "/upload"), files=files)
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "server_busy"
 
 
 def test_upload_unknown_server_is_404() -> None:
