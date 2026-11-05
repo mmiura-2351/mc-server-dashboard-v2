@@ -57,8 +57,10 @@ from mc_server_dashboard_api.dependencies import (
     get_transfer_semaphore,
     get_worker_credential,
 )
+from mc_server_dashboard_api.fleet.domain.errors import InvalidWorkerIdError
+from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId
 from mc_server_dashboard_api.http_body_limit import request_body_limit
-from mc_server_dashboard_api.http_problem import problem
+from mc_server_dashboard_api.http_problem import problem, validation_problem
 from mc_server_dashboard_api.storage.domain.errors import (
     IncompleteTransferError,
     IntegrityCheckError,
@@ -352,6 +354,31 @@ async def _jar_member(
     return _tar_member_bytes(_JAR_RELPATH, data)
 
 
+def _canonical_publisher(raw: str | None) -> str | None:
+    """The ``X-Worker-Id`` in its canonical form (issue #3542).
+
+    Parsed exactly as registration parses the Worker's id, so every spelling a
+    Worker can register under compares equal to the assigned worker id (read back
+    from a uuid column). A value registration would refuse is a 422 in the shape
+    of the framework's own header validation.
+    """
+
+    if raw is None:
+        return None
+    try:
+        return WorkerId.parse(raw).value
+    except InvalidWorkerIdError:
+        raise validation_problem(
+            [
+                {
+                    "loc": ["header", _WORKER_ID_HEADER],
+                    "msg": "worker id must be a UUID",
+                    "type": "uuid_parsing",
+                }
+            ]
+        ) from None
+
+
 @router.post(
     "/communities/{community_id}/servers/{server_id}/snapshot",
     status_code=status.HTTP_204_NO_CONTENT,
@@ -372,9 +399,7 @@ async def publish_snapshot(
     base_generation: Annotated[
         int | None, Header(alias=_BASE_GENERATION_HEADER)
     ] = None,
-    publisher_header: Annotated[
-        uuid.UUID | None, Header(alias=_WORKER_ID_HEADER)
-    ] = None,
+    publisher_header: Annotated[str | None, Header(alias=_WORKER_ID_HEADER)] = None,
 ) -> None:
     """Stage and atomically publish the Worker's working set (snapshot, FR-DATA-4).
 
@@ -450,13 +475,11 @@ async def publish_snapshot(
     EOF, an entry past EOF, a severed prefix).
     """
 
+    publisher = _canonical_publisher(publisher_header)
     if content_length is None:
         raise problem(status.HTTP_411_LENGTH_REQUIRED, "content_length_required")
     if content_length > _MAX_SNAPSHOT_BYTES:
         raise problem(status.HTTP_413_CONTENT_TOO_LARGE, "snapshot_too_large")
-    # Canonical form, so the publisher compares equal to the assigned worker id
-    # (read back from a uuid column) however the Worker's id is spelled (#3542).
-    publisher = None if publisher_header is None else str(publisher_header)
 
     async with transfer_semaphore:
         scope = (CommunityId(community_id), ServerId(server_id))
