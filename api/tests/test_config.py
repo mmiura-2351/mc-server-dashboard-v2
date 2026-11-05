@@ -1086,6 +1086,39 @@ def test_snapshot_min_equal_to_default_is_accepted(
     assert settings.snapshot.min_interval_seconds == 300
 
 
+def test_database_pool_below_two_connections_fails_fast(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A lifecycle-locked operation holds the lock on one pooled connection and
+    # opens its unit of work on another; a one-connection pool deadlocks it
+    # until ``pool_timeout`` (issue #3536).
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(tmp_path, "[database]\npool_size = 1\nmax_overflow = 0\n")
+    with pytest.raises(ValidationError) as excinfo:
+        load_settings(config_file=cfg)
+    message = str(excinfo.value)
+    assert "database.pool_size" in message
+    assert "database.max_overflow" in message
+    assert ">= 2" in message
+
+
+@pytest.mark.parametrize(
+    ("pool_size", "max_overflow"),
+    [pytest.param(1, 1, id="overflow-second"), pytest.param(2, 0, id="pool-second")],
+)
+def test_database_pool_of_two_connections_is_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pool_size: int, max_overflow: int
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(
+        tmp_path,
+        f"[database]\npool_size = {pool_size}\nmax_overflow = {max_overflow}\n",
+    )
+    settings = load_settings(config_file=cfg)
+    assert settings.database.pool_size == pool_size
+    assert settings.database.max_overflow == max_overflow
+
+
 def test_token_access_ttl_not_below_refresh_fails_fast(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

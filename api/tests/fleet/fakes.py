@@ -16,6 +16,7 @@ from __future__ import annotations
 import datetime as dt
 
 from mc_server_dashboard_api.fleet.domain.clock import Clock
+from mc_server_dashboard_api.fleet.domain.drain_store import WorkerDrainStore
 from mc_server_dashboard_api.fleet.domain.entities import Worker
 from mc_server_dashboard_api.fleet.domain.real_time_events import (
     EventStream,
@@ -41,6 +42,27 @@ class FakeClock(Clock):
 
     def now(self) -> dt.datetime:
         return self._now
+
+
+class FakeWorkerDrainStore(WorkerDrainStore):
+    """In-memory drain record; ``fail`` makes every write raise, as a failed commit."""
+
+    def __init__(self) -> None:
+        self.ids: set[WorkerId] = set()
+        self.fail = False
+
+    async def drain(self, worker_id: WorkerId) -> None:
+        if self.fail:
+            raise RuntimeError("forced drain store failure")
+        self.ids.add(worker_id)
+
+    async def undrain(self, worker_id: WorkerId) -> None:
+        if self.fail:
+            raise RuntimeError("forced drain store failure")
+        self.ids.discard(worker_id)
+
+    async def drained(self) -> frozenset[WorkerId]:
+        return frozenset(self.ids)
 
 
 class FakeServerStateSink(ServerStateSink):

@@ -15,6 +15,7 @@ from __future__ import annotations
 from mc_server_dashboard_api.audit.adapters import models as _audit_models
 from mc_server_dashboard_api.community.adapters import models as _community_models
 from mc_server_dashboard_api.core.adapters.database import Base
+from mc_server_dashboard_api.fleet.adapters import models as _fleet_models
 from mc_server_dashboard_api.identity.adapters import models as _identity_models
 from mc_server_dashboard_api.servers.adapters import backup_models as _backup_models
 from mc_server_dashboard_api.servers.adapters import (
@@ -42,6 +43,7 @@ _ = (
     _resource_pack_models,
     _schedule_models,
     _audit_models,
+    _fleet_models,
 )
 
 target_metadata = Base.metadata

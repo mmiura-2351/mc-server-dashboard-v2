@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -66,7 +67,7 @@ func TestEditFileHoldsTheWorkingSetLockWhileItPublishes(t *testing.T) {
 
 	res := handleWithin(t, m, session.Command{
 		CommandID: "c1", ServerID: s1, Kind: "EditFile", Path: "server.properties", Content: []byte("motd=new"),
-	})
+	}, writeBudget)
 
 	if !res.Success {
 		t.Fatalf("EditFile = %+v, want success", res)
@@ -100,7 +101,7 @@ func TestEditFileReleasesTheWorkingSetLockWhenItFails(t *testing.T) {
 
 	res := handleWithin(t, m, session.Command{
 		CommandID: "c1", ServerID: s1, Kind: "EditFile", Path: "world", Content: []byte("x"),
-	})
+	}, quickBudget)
 
 	if res.Success {
 		t.Fatalf("EditFile = %+v, want the directory refused", res)
@@ -181,6 +182,44 @@ func walkInProgress(t *testing.T, m *Manager) (*execution.WorkingSetLock, <-chan
 	return lock, waiting
 }
 
+// handleInBackground starts m.Handle(ctx, cmd) and returns where its result
+// arrives. ctx must derive from t.Context(), so a test that fails while the walk
+// still holds the lock ends the command's wait; a cleanup, registered after the
+// manager's Close and so run before it, waits for the command to return (issue
+// #3510).
+func handleInBackground(ctx context.Context, t *testing.T, m *Manager, cmd session.Command) <-chan session.CommandResult {
+	t.Helper()
+	done := make(chan session.CommandResult, 1)
+	var running sync.WaitGroup
+	running.Go(func() { done <- m.Handle(ctx, cmd) })
+	t.Cleanup(running.Wait)
+	return done
+}
+
+// The budgets receiveWithin and handleWithin are given. Nothing here depends on
+// how fast a step is, only that it happens. A step that writes nothing gets 30 s;
+// one that reaches an edit's fsyncs (its file, and once published its
+// directories), which under artificial disk load have taken longer than a minute,
+// gets within's (issue #3354).
+const (
+	quickBudget = 30 * time.Second
+	writeBudget = 5 * time.Minute
+)
+
+// receiveWithin returns what ch delivers, and fails the test when nothing has
+// arrived within budget.
+func receiveWithin[T any](t *testing.T, what string, ch <-chan T, budget time.Duration) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(budget):
+		t.Fatalf("%s did not happen in time", what)
+		var zero T
+		return zero
+	}
+}
+
 func editMotd() session.Command {
 	return session.Command{
 		CommandID: "c1", ServerID: s1, Kind: "EditFile", Path: "server.properties", Content: []byte("motd=new"),
@@ -202,14 +241,13 @@ func TestEditFileWaitsForAHandOverAndThenPublishes(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	target := writeWorkingFile(t, m, s1, "server.properties", []byte("motd=old"))
 	lock, waiting := walkInProgress(t, m)
-	done := make(chan session.CommandResult, 1)
-	go func() { done <- m.Handle(context.Background(), editMotd()) }()
+	done := handleInBackground(t.Context(), t, m, editMotd())
 
-	<-waiting
+	receiveWithin(t, "the edit's wait", waiting, quickBudget)
 	assertEditNotWritten(t, m, target)
 	lock.Unlock()
 
-	if res := <-done; !res.Success {
+	if res := receiveWithin(t, "the edit's answer", done, writeBudget); !res.Success {
 		t.Fatalf("EditFile = %+v, want success once the walk was done", res)
 	}
 	if got, err := os.ReadFile(target); err != nil || string(got) != "motd=new" {
@@ -223,14 +261,13 @@ func TestEditFileGivesUpWaitingWhenItsCommandIsCancelled(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	target := writeWorkingFile(t, m, s1, "server.properties", []byte("motd=old"))
 	lock, waiting := walkInProgress(t, m)
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan session.CommandResult, 1)
-	go func() { done <- m.Handle(ctx, editMotd()) }()
+	ctx, cancel := context.WithCancel(t.Context())
+	done := handleInBackground(ctx, t, m, editMotd())
 
-	<-waiting
+	receiveWithin(t, "the edit's wait", waiting, quickBudget)
 	cancel()
 
-	res := <-done
+	res := receiveWithin(t, "the edit's answer", done, quickBudget)
 	if res.Success || res.ErrorCode != session.CommandErrorInternal || !strings.Contains(res.ErrorMessage, context.Canceled.Error()) {
 		t.Fatalf("EditFile = %+v, want it failed for the cancelled wait", res)
 	}
@@ -254,13 +291,13 @@ func TestEditFileWaitIsBoundedSoAStopBehindItIsHandled(t *testing.T) {
 	walkInProgress(t, m)
 	m.workingSetLockWait = time.Millisecond
 
-	res := handleWithin(t, m, editMotd())
+	res := handleWithin(t, m, editMotd(), quickBudget)
 
 	if res.Success || !strings.Contains(res.ErrorMessage, context.DeadlineExceeded.Error()) {
 		t.Fatalf("EditFile = %+v, want it failed once the wait ran out", res)
 	}
 	assertEditNotWritten(t, m, target)
-	stop := handleWithin(t, m, session.Command{CommandID: "stop", ServerID: s1, Kind: "StopServer"})
+	stop := handleWithin(t, m, session.Command{CommandID: "stop", ServerID: s1, Kind: "StopServer"}, quickBudget)
 	if !stop.Success {
 		t.Fatalf("StopServer after the edit = %+v, want it handled", stop)
 	}
@@ -272,14 +309,13 @@ func TestEditFileWaitIsBoundedSoAStopBehindItIsHandled(t *testing.T) {
 func TestHydrateStampIsSkippedWhenItsCommandIsCancelledWhileWaiting(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(&fakeTransfer{gen: 11})
 	_, waiting := walkInProgress(t, m)
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan session.CommandResult, 1)
-	go func() { done <- m.Handle(ctx, hydrateCmd()) }()
+	ctx, cancel := context.WithCancel(t.Context())
+	done := handleInBackground(ctx, t, m, hydrateCmd())
 
-	<-waiting
+	receiveWithin(t, "the stamp's wait", waiting, quickBudget)
 	cancel()
 
-	if res := <-done; !res.Success || res.HeldGeneration != nil {
+	if res := receiveWithin(t, "the hydrate's answer", done, quickBudget); !res.Success || res.HeldGeneration != nil {
 		t.Fatalf("HydrateTrigger = %+v, want success declaring no generation", res)
 	}
 	if _, err := os.Lstat(generationMarkerPath(m, s1)); !os.IsNotExist(err) {
@@ -294,14 +330,13 @@ func TestRunningSnapshotStampIsSkippedWhenItsCommandIsCancelledWhileWaiting(t *t
 		t.Fatalf("start = %+v, want success", res)
 	}
 	_, waiting := walkInProgress(t, m)
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan session.CommandResult, 1)
-	go func() { done <- m.Handle(ctx, snapshotCmd()) }()
+	ctx, cancel := context.WithCancel(t.Context())
+	done := handleInBackground(ctx, t, m, snapshotCmd())
 
-	<-waiting
+	receiveWithin(t, "the stamp's wait", waiting, quickBudget)
 	cancel()
 
-	if res := <-done; !res.Success || res.HeldGeneration != nil {
+	if res := receiveWithin(t, "the snapshot's answer", done, quickBudget); !res.Success || res.HeldGeneration != nil {
 		t.Fatalf("SnapshotTrigger = %+v, want success declaring no generation", res)
 	}
 	if got := readGeneration(dir); got != 0 {

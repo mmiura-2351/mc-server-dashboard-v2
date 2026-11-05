@@ -208,6 +208,37 @@ def test_cleared_drain_does_not_resurrect_on_reregistration() -> None:
     assert registry.list_workers()[0].status is WorkerStatus.ONLINE
 
 
+def test_restored_drain_applies_on_first_registration() -> None:
+    # The wiring seeds the registry with the persisted drained set at startup
+    # (issue #3535), so a Worker registering for the first time after an API
+    # restart comes back DRAINING and stays out of placement.
+    registry = InMemoryWorkerRegistry(
+        clock=FakeClock(_T0),
+        heartbeat_timeout=_TIMEOUT,
+        drained=frozenset({WorkerId("worker-1")}),
+    )
+
+    registry.register(make_worker(at=_T0))
+
+    assert registry.list_workers()[0].status is WorkerStatus.DRAINING
+    assert registry.candidates_for_placement() == []
+
+
+def test_restored_drain_can_be_cleared() -> None:
+    registry = InMemoryWorkerRegistry(
+        clock=FakeClock(_T0),
+        heartbeat_timeout=_TIMEOUT,
+        drained=frozenset({WorkerId("worker-1")}),
+    )
+    first = registry.register(make_worker(at=_T0))
+    registry.set_draining(WorkerId("worker-1"), False)
+    registry.mark_disconnected(WorkerId("worker-1"), first)
+
+    registry.register(make_worker(at=_T0))
+
+    assert registry.list_workers()[0].status is WorkerStatus.ONLINE
+
+
 def test_draining_survives_heartbeat() -> None:
     clock = FakeClock(_T0)
     registry = _registry(clock)
