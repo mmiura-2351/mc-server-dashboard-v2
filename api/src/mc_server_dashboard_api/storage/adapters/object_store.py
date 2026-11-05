@@ -78,6 +78,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
     ObjectStoreUnavailableError,
     PathTraversalError,
     PrunedStoreError,
+    PublisherFencedError,
     SnapshotHandleError,
     StaleGenerationError,
 )
@@ -89,6 +90,7 @@ from mc_server_dashboard_api.storage.domain.port import (
     HydrateSource,
     JarPoolEntry,
     JarPoolStats,
+    PublisherFence,
     SnapshotHandle,
     Storage,
     WorkingSetView,
@@ -848,6 +850,7 @@ class ObjectStorage(Storage):
         *,
         publisher: str | None = None,
         expected_base: int | None = None,
+        publisher_fence: PublisherFence | None = None,
     ) -> int:
         h = _as_object_handle(handle)
         if h.consumed:
@@ -953,6 +956,16 @@ class ObjectStorage(Storage):
                         self._release_staging(incoming)
                         h.consumed = True
                         raise MissingRegionsError(missing)
+                # The publisher fence (issue #3544), immediately before the flip:
+                # the caller's view can change while the copy above stalls.
+                if publisher_fence is not None and not await publisher_fence():
+                    await _delete_prefix(client, new_prefix)
+                    await _delete_prefix(client, incoming)
+                    self._release_staging(incoming)
+                    h.consumed = True
+                    raise PublisherFencedError(
+                        "the publisher fence refused the publish"
+                    )
                 old_prefix = await self._flip_pointer(
                     client, h.community_id, h.server_id, new_prefix
                 )

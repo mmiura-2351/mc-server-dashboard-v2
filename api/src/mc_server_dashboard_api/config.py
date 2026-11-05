@@ -314,6 +314,20 @@ class DatabaseSettings(_Section):
     # boots an engine that cannot connect. Reject it at load (#939).
     _nonblank_url = field_validator("url")(_require_nonblank)
 
+    @model_validator(mode="after")
+    def _enforce_lifecycle_lock_headroom(self) -> DatabaseSettings:
+        # A lifecycle-gated operation holds its lock on one pooled connection and
+        # opens its unit of work on another, so a one-connection pool deadlocks it
+        # until ``pool_timeout`` (issue #3536). Reject at load
+        # (CONFIGURATION.md Section 5.2, fail-fast).
+        if self.pool_size + self.max_overflow < 2:
+            raise ValueError(
+                "database.pool_size + database.max_overflow must be >= 2: a "
+                "lifecycle-locked operation needs one connection for the lock and "
+                "one for its unit of work"
+            )
+        return self
+
 
 class StorageFsSettings(_Section):
     """Filesystem-backend settings (CONFIGURATION.md Section 5.2).

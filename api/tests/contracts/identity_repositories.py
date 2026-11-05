@@ -241,7 +241,7 @@ class UserRepositoryContract:
             await transaction.commit()
 
         async with user_repository_harness.open() as transaction:
-            await transaction.repository.set_active(
+            deactivate_matched = await transaction.repository.set_active(
                 user.id, active=False, updated_at=later
             )
             await transaction.commit()
@@ -249,13 +249,14 @@ class UserRepositoryContract:
             deactivated = await transaction.repository.get_by_id(user.id)
 
         async with user_repository_harness.open() as transaction:
-            await transaction.repository.set_platform_admin(
+            grant_matched = await transaction.repository.set_platform_admin(
                 user.id, is_platform_admin=True, updated_at=later
             )
             await transaction.commit()
         async with user_repository_harness.open() as transaction:
             granted = await transaction.repository.get_by_id(user.id)
 
+        assert (deactivate_matched, grant_matched) == (True, True)
         assert deactivated is not None
         assert deactivated.active is False
         assert deactivated.is_platform_admin is False
@@ -271,16 +272,55 @@ class UserRepositoryContract:
     ) -> None:
         user = _user()
         async with user_repository_harness.open() as transaction:
-            await transaction.repository.set_active(
+            deactivated = await transaction.repository.set_active(
                 user.id, active=False, updated_at=_NOW
             )
-            await transaction.repository.set_platform_admin(
+            granted = await transaction.repository.set_platform_admin(
                 user.id, is_platform_admin=True, updated_at=_NOW
             )
             await transaction.commit()
 
         async with user_repository_harness.open() as transaction:
             assert await transaction.repository.get_by_id(user.id) is None
+        assert (deactivated, granted) == (False, False)
+
+    async def test_lock_with_active_admins_returns_target_and_active_admin_count(
+        self, user_repository_harness: RepositoryHarness[UserRepository]
+    ) -> None:
+        async with user_repository_harness.open() as transaction:
+            empty = await transaction.repository.lock_with_active_admins(UserId.new())
+
+        admin = replace(_user("admin", "admin@example.com"), is_platform_admin=True)
+        other_admin = replace(
+            _user("other-admin", "other-admin@example.com"), is_platform_admin=True
+        )
+        inactive_admin = replace(
+            _user("inactive-admin", "inactive-admin@example.com"),
+            is_platform_admin=True,
+            active=False,
+        )
+        member = _user("member", "member@example.com")
+        inactive_member = replace(
+            _user("inactive-member", "inactive-member@example.com"), active=False
+        )
+        users = (admin, other_admin, inactive_admin, member, inactive_member)
+        async with user_repository_harness.open() as transaction:
+            for user in users:
+                await transaction.repository.add(user)
+            await transaction.commit()
+
+        async with user_repository_harness.open() as transaction:
+            locked = [
+                await transaction.repository.lock_with_active_admins(user.id)
+                for user in users
+            ]
+            missing = await transaction.repository.lock_with_active_admins(UserId.new())
+
+        # The count is the active admins only; an inactive admin target is
+        # returned but never counted.
+        assert empty == (None, 0)
+        assert locked == [(user, 2) for user in users]
+        assert missing == (None, 2)
 
     async def test_username_and_email_are_unique_for_add_and_update_profile(
         self, user_repository_harness: RepositoryHarness[UserRepository]
