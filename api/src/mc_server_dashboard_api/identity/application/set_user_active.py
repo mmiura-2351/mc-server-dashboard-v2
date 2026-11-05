@@ -60,9 +60,12 @@ class SetUserActive:
                 if user.is_platform_admin and user.active and active_admins <= 1:
                     raise LastPlatformAdminError(str(target_id.value))
 
-            await self.uow.users.set_active(
+            # A reactivation's read holds no lock, so its row may be gone by now
+            # (#3247).
+            if not await self.uow.users.set_active(
                 user.id, active=active, updated_at=self.clock.now()
-            )
+            ):
+                raise UserNotFoundError(str(target_id.value))
             if not active:
                 # Revoke every session so the deactivation takes effect on the
                 # refresh path immediately, not only on access-token expiry.
