@@ -694,8 +694,9 @@ the API relays it to subscribers and does not persist it.
 
 `ServerState` enumerates the observed states. REQUIREMENTS.md FR-SRV-4 names
 running / stopped / starting / crashed; the contract adds the transient
-`STOPPING` and `RESTARTING` states the lifecycle commands pass through, so a
-client sees an accurate live state during a transition. The `ServerState` enum
+`STOPPING` state a stop passes through, so a client sees an accurate live state
+during a transition, and `RESTARTING`, which no Worker emits today (a restart
+reports the states of its stop and its relaunch). The `ServerState` enum
 is the full set of values a Worker can report; the API caches the last-reported
 value in `observed_state` ([`DATABASE.md`](DATABASE.md)), whose value set this
 enum mirrors exactly.

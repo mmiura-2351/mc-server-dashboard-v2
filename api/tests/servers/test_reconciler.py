@@ -1321,10 +1321,10 @@ async def test_crash_loop_flapping_through_starting_keeps_backoff_growing() -> N
     )
 
 
-async def test_healed_server_backoff_entry_expires() -> None:
-    # A server that crash-looped then genuinely healed (stays observed=running, so
-    # absent from list_reconcilable) must have its backoff entry dropped once enough
-    # time has lapsed, so the in-memory map does not grow without bound.
+async def test_unsettled_absent_backoff_entry_expires() -> None:
+    # An entry whose row stays out of the candidate set without ever reading
+    # settled (here: stuck in starting) must still be dropped once enough time has
+    # lapsed, so the in-memory map does not grow without bound.
     uow = FakeUnitOfWork()
     server = _server(
         desired=DesiredState.RUNNING,
@@ -1340,8 +1340,7 @@ async def test_healed_server_backoff_entry_expires() -> None:
     entry = reconciler._attempts[server.id]
     assert entry.failures == 1
 
-    # It heals: observed=running, absent from list_reconcilable from now on.
-    uow.servers.by_id[server.id].observed_state = ObservedState.RUNNING
+    uow.servers.by_id[server.id].observed_state = ObservedState.STARTING
 
     # Just before next_eligible_at + backoff_max slack: entry still retained.
     expiry = entry.next_eligible_at + dt.timedelta(seconds=3600)
@@ -1353,6 +1352,322 @@ async def test_healed_server_backoff_entry_expires() -> None:
     clock.set(expiry)
     await reconciler.tick()
     assert server.id not in reconciler._attempts
+
+
+async def test_deleted_server_backoff_entry_is_dropped_at_once() -> None:
+    # A deleted row can never diverge again, so the next tick that finds it gone
+    # drops its entry instead of waiting for the time expiry.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.CRASHED,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock)
+
+    await reconciler.tick()  # crash counted -> entry created
+    assert server.id in reconciler._attempts
+
+    del uow.servers.by_id[server.id]
+    clock.set(_NOW + dt.timedelta(seconds=10))
+    await reconciler.tick()
+    assert server.id not in reconciler._attempts
+
+
+async def test_convergence_just_before_expiry_still_needs_a_full_settled_window() -> (
+    None
+):
+    # Review of #3557: the time expiry must not cut a settled run short. A row
+    # that converges just before its entry's expiry instant and crashes again
+    # inside the window still escalates instead of starting from the base.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.UNKNOWN,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(status=CommandStatus.INTERNAL, message="boom")
+    )
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock)
+    stored = uow.servers.by_id[server.id]
+
+    await reconciler.tick()  # fail 1 -> 30s; expiry instant at +3630s
+    assert reconciler._attempts[server.id].failures == 1
+
+    # The Worker drops away; the skipped row keeps its entry.
+    cp._connected[_WORKER] = False
+    clock.set(_NOW + dt.timedelta(seconds=1000))
+    await reconciler.tick()
+
+    # It converges 10s before the expiry instant and is still settled at it.
+    stored.observed_state = ObservedState.RUNNING
+    cp._connected[_WORKER] = True
+    clock.set(_NOW + dt.timedelta(seconds=3620))
+    await reconciler.tick()
+    clock.set(_NOW + dt.timedelta(seconds=3630))
+    await reconciler.tick()
+    assert reconciler._attempts[server.id].failures == 1
+
+    # It crashes 11s into the settled run, well inside the 30s window. Ticking
+    # every 10s, the crash is acted on once its grace lapses, and the entry must
+    # survive the ticks in between.
+    crashed_at = _NOW + dt.timedelta(seconds=3631)
+    stored.observed_state = ObservedState.CRASHED
+    stored.observed_at = crashed_at
+    dispatched = len(cp.dispatched)
+    at = _NOW + dt.timedelta(seconds=3640)
+    while len(cp.dispatched) == dispatched:
+        clock.set(at)
+        await reconciler.tick()
+        assert server.id in reconciler._attempts
+        at += dt.timedelta(seconds=10)
+    acted = at - dt.timedelta(seconds=10)
+    assert acted - crashed_at >= dt.timedelta(seconds=_GRACE)
+    entry = reconciler._attempts[server.id]
+    assert entry.failures == 2
+    assert entry.next_eligible_at == acted + dt.timedelta(seconds=60)
+
+
+async def test_server_settled_for_its_backoff_starts_from_the_base_again() -> None:
+    # Issue #3303: a server that converges with no reconcile action of its own (a
+    # restart completing by itself, an operator's fix) must not carry its failure
+    # count into a later, unrelated divergence. Once ticks have read it settled for
+    # as long as the window its entry last applied, the entry is gone, so the next
+    # divergence's first failure arms the base backoff, not a doubled one.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.UNKNOWN,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(status=CommandStatus.INTERNAL, message="boom")
+    )
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock)
+    stored = uow.servers.by_id[server.id]
+
+    await reconciler.tick()  # fail 1 -> 30s
+    clock.set(_NOW + dt.timedelta(seconds=31))
+    await reconciler.tick()  # fail 2 -> 60s
+    assert reconciler._attempts[server.id].failures == 2
+
+    # It converges on its own. The tick takes no action; the history is kept
+    # until the row has stayed settled for the 60s window the entry last applied.
+    stored.observed_state = ObservedState.RUNNING
+    dispatched = len(cp.dispatched)
+    settled = _NOW + dt.timedelta(seconds=40)
+    clock.set(settled)
+    await reconciler.tick()
+    clock.set(settled + dt.timedelta(seconds=59))
+    await reconciler.tick()
+    assert reconciler._attempts[server.id].failures == 2
+    clock.set(settled + dt.timedelta(seconds=60))
+    await reconciler.tick()
+    assert len(cp.dispatched) == dispatched
+    assert server.id not in reconciler._attempts
+
+    # A later divergence: its failure is the first, at the base backoff.
+    later = settled + dt.timedelta(seconds=70)
+    stored.observed_state = ObservedState.CRASHED
+    stored.observed_at = later - dt.timedelta(seconds=_GRACE + 1)
+    clock.set(later)
+    await reconciler.tick()
+    assert len(cp.dispatched) == dispatched + 1
+    assert reconciler._attempts[server.id].failures == 1
+    assert reconciler._attempts[server.id].next_eligible_at == later + dt.timedelta(
+        seconds=30
+    )
+
+
+async def test_crash_loop_seen_running_mid_cycle_still_escalates() -> None:
+    # Issue #3303 must not undo the crash-loop damping (#343) for a server that
+    # reaches running and crashes again sooner than its backoff: one tick reading it
+    # running is not enough to forgive the history, and the crash that follows
+    # breaks the settled run, so every cycle still doubles the window.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.CRASHED,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock)
+    stored = uow.servers.by_id[server.id]
+
+    at = _NOW
+    for failures, delay in ((1, 30), (2, 60), (3, 120)):
+        clock.set(at)
+        await reconciler.tick()  # restart dispatched, crash counted
+        entry = reconciler._attempts[server.id]
+        assert entry.failures == failures
+        assert entry.next_eligible_at == at + dt.timedelta(seconds=delay)
+        # It boots and a tick reads it running, then it crashes before the
+        # window it was backed off for has passed.
+        stored.observed_state = ObservedState.RUNNING
+        clock.set(at + dt.timedelta(seconds=10))
+        await reconciler.tick()
+        at = entry.next_eligible_at
+        stored.observed_state = ObservedState.CRASHED
+        stored.observed_at = at - dt.timedelta(seconds=_GRACE + 1)
+
+
+async def test_settled_run_restarts_when_a_tick_reads_the_row_unsettled() -> None:
+    # Issue #3303: the settled time must be one unbroken run. A tick that reads the
+    # row unsettled in between (here: back in starting) starts the count over, so
+    # two short healthy spells do not add up to the window.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.CRASHED,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock)
+    stored = uow.servers.by_id[server.id]
+
+    await reconciler.tick()  # crash counted -> 30s window
+    stored.observed_state = ObservedState.RUNNING
+    clock.set(_NOW + dt.timedelta(seconds=10))
+    await reconciler.tick()  # settled run starts
+    stored.observed_state = ObservedState.STARTING
+    clock.set(_NOW + dt.timedelta(seconds=30))
+    await reconciler.tick()  # unsettled: run broken
+    stored.observed_state = ObservedState.RUNNING
+    clock.set(_NOW + dt.timedelta(seconds=35))
+    await reconciler.tick()  # a new run starts
+    clock.set(_NOW + dt.timedelta(seconds=64))
+    await reconciler.tick()  # 29s into it, 54s since the first: kept
+    assert reconciler._attempts[server.id].failures == 1
+    clock.set(_NOW + dt.timedelta(seconds=65))
+    await reconciler.tick()  # 30s into the run: forgiven
+    assert server.id not in reconciler._attempts
+
+
+async def test_released_stopped_server_forgets_its_backoff() -> None:
+    # Issue #3303, stop side: a stop that failed and was then converged elsewhere
+    # (an operator stop releasing the row) is settled once the row is unassigned and
+    # at rest; after the entry's window its history must not survive into the
+    # server's next divergence.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.RUNNING,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(status=CommandStatus.INTERNAL, message="boom")
+    )
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock)
+
+    await reconciler.tick()  # stop fails -> entry, 30s
+    assert reconciler._attempts[server.id].failures == 1
+
+    stored = uow.servers.by_id[server.id]
+    stored.observed_state = ObservedState.STOPPED
+    stored.assigned_worker_id = None
+    clock.set(_NOW + dt.timedelta(seconds=10))
+    await reconciler.tick()
+    assert server.id in reconciler._attempts
+    clock.set(_NOW + dt.timedelta(seconds=40))
+    await reconciler.tick()
+    assert server.id not in reconciler._attempts
+
+
+async def test_persistent_start_failure_still_escalates() -> None:
+    # Issue #3303 must not reset a server that never converges: a start that keeps
+    # failing is re-read diverged every tick and its backoff keeps doubling.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.UNKNOWN,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(status=CommandStatus.INTERNAL, message="boom")
+    )
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock)
+
+    at = _NOW
+    for failures, delay in ((1, 30), (2, 60), (3, 120)):
+        clock.set(at)
+        await reconciler.tick()
+        entry = reconciler._attempts[server.id]
+        assert entry.failures == failures
+        assert entry.next_eligible_at == at + dt.timedelta(seconds=delay)
+        at = entry.next_eligible_at
+
+
+@pytest.mark.parametrize(
+    ("desired", "observed", "worker", "connected", "fresh_report"),
+    [
+        # A launch still in flight: absent from list_reconcilable, not settled.
+        (DesiredState.RUNNING, ObservedState.STARTING, _WORKER, True, False),
+        # Skipped by the disconnected-Worker guard.
+        (DesiredState.RUNNING, ObservedState.UNKNOWN, _WORKER, False, False),
+        # A stop still converging (assignment not released), inside its grace.
+        (DesiredState.STOPPED, ObservedState.STOPPED, _WORKER, True, True),
+        # A stop owed to a Worker that is gone and still running the server.
+        (DesiredState.STOPPED, ObservedState.RUNNING, _WORKER, False, False),
+        # Released, but not at rest.
+        (DesiredState.STOPPED, ObservedState.STOPPING, None, True, False),
+    ],
+)
+async def test_skipped_unsettled_row_keeps_its_backoff(
+    desired: DesiredState,
+    observed: ObservedState,
+    worker: WorkerId | None,
+    connected: bool,
+    fresh_report: bool,
+) -> None:
+    # Issue #3303 clears an entry only for a row read converged. A row the tick
+    # merely skips, or does not list, has not settled, so its count must survive.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.UNKNOWN,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(status=CommandStatus.INTERNAL, message="boom")
+    )
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock)
+    await reconciler.tick()  # start fails -> entry
+    entry = reconciler._attempts[server.id]
+
+    later = _NOW + dt.timedelta(seconds=40)  # past the 30s backoff
+    stored = uow.servers.by_id[server.id]
+    stored.desired_state = desired
+    stored.observed_state = observed
+    stored.assigned_worker_id = worker
+    stored.observed_at = (
+        later - dt.timedelta(seconds=1)
+        if fresh_report
+        else later - dt.timedelta(seconds=_GRACE + 1)
+    )
+    cp._connected[_WORKER] = connected
+    dispatched = len(cp.dispatched)
+    clock.set(later)
+    await reconciler.tick()
+    assert len(cp.dispatched) == dispatched
+    assert reconciler._attempts[server.id] == entry
 
 
 async def test_unknown_observed_with_connected_worker_redispatches_start() -> None:
