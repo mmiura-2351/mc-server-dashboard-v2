@@ -867,12 +867,12 @@ const containerStateRunning = "running"
 // daemon needs the full grace to escalate to SIGKILL); list/remove get the margin
 // alone. A healthy daemon answers each call well inside its deadline, so the bound
 // never fires on the success path.
-func (d *Driver) Sweep(ctx context.Context) error {
+func (d *Driver) Sweep(ctx context.Context) ([]string, error) {
 	listCtx, cancel := context.WithTimeout(ctx, d.sweepCallMargin)
 	containers, err := d.docker.List(listCtx, labelWorkerID, d.workerID)
 	cancel()
 	if err != nil {
-		return fmt.Errorf("containerdriver: list orphans: %w", err)
+		return nil, fmt.Errorf("containerdriver: list orphans: %w", err)
 	}
 	errs := make([]error, len(containers))
 	var wg sync.WaitGroup
@@ -880,7 +880,7 @@ func (d *Driver) Sweep(ctx context.Context) error {
 		wg.Go(func() { errs[n] = d.sweepContainer(ctx, c) })
 	}
 	wg.Wait()
-	return errors.Join(errs...)
+	return nil, errors.Join(errs...)
 }
 
 // sweepContainer stops one orphan if it is running, then removes it.

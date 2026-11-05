@@ -2847,7 +2847,7 @@ func TestSweepRemovesWorkerContainers(t *testing.T) {
 	docker.listResult = []Container{{ID: "a", Name: "/mcsd-s1"}, {ID: "b", Name: "/mcsd-s2"}}
 	d := newTestDriver(docker, nil, nil)
 
-	if err := d.Sweep(context.Background()); err != nil {
+	if _, err := d.Sweep(context.Background()); err != nil {
 		t.Fatalf("Sweep: %v", err)
 	}
 	if len(docker.removed) != 2 {
@@ -2863,7 +2863,7 @@ func TestSweepGracefullyStopsRunningContainerBeforeRemove(t *testing.T) {
 	docker.listResult = []Container{{ID: "a", Name: "/mcsd-s1", State: "running"}}
 	d := newTestDriver(docker, nil, nil)
 
-	if err := d.Sweep(context.Background()); err != nil {
+	if _, err := d.Sweep(context.Background()); err != nil {
 		t.Fatalf("Sweep: %v", err)
 	}
 	if len(docker.stopped) != 1 || docker.stopped[0] != "a" {
@@ -2881,7 +2881,7 @@ func TestSweepRemovesExitedContainerWithoutStop(t *testing.T) {
 	docker.listResult = []Container{{ID: "a", Name: "/mcsd-s1", State: "exited"}}
 	d := newTestDriver(docker, nil, nil)
 
-	if err := d.Sweep(context.Background()); err != nil {
+	if _, err := d.Sweep(context.Background()); err != nil {
 		t.Fatalf("Sweep: %v", err)
 	}
 	if len(docker.stopped) != 0 {
@@ -2901,7 +2901,7 @@ func TestSweepStopFailureStillRemovesAndSurfaces(t *testing.T) {
 	docker.stopErr = errors.New("stop boom")
 	d := newTestDriver(docker, nil, nil)
 
-	err := d.Sweep(context.Background())
+	_, err := d.Sweep(context.Background())
 	if err == nil {
 		t.Fatal("expected Sweep to surface the stop failure")
 	}
@@ -2919,7 +2919,7 @@ func TestSweepListError(t *testing.T) {
 	docker.listErr = errors.New("list failed")
 	d := newTestDriver(docker, nil, nil)
 
-	if err := d.Sweep(context.Background()); err == nil {
+	if _, err := d.Sweep(context.Background()); err == nil {
 		t.Fatal("expected Sweep to return the list error")
 	}
 }
@@ -2937,7 +2937,10 @@ func TestSweepBoundsWedgedStop(t *testing.T) {
 	d := newTestDriver(docker, nil, nil)
 
 	done := make(chan error, 1)
-	go func() { done <- d.Sweep(context.Background()) }()
+	go func() {
+		_, err := d.Sweep(context.Background())
+		done <- err
+	}()
 
 	select {
 	case err := <-done:
@@ -2972,7 +2975,7 @@ func TestSweepIssuesSaveOnToRunningOrphanBeforeStop(t *testing.T) {
 		SweepCallMargin: 50 * time.Millisecond,
 	})
 
-	if err := d.Sweep(context.Background()); err != nil {
+	if _, err := d.Sweep(context.Background()); err != nil {
 		t.Fatalf("Sweep: %v", err)
 	}
 	// save-on must have been issued via RCON.
@@ -3015,7 +3018,7 @@ func TestSweepSaveOnDialsWithTheContainersMinecraftVersion(t *testing.T) {
 		SweepCallMargin: 50 * time.Millisecond,
 	})
 
-	if err := d.Sweep(context.Background()); err != nil {
+	if _, err := d.Sweep(context.Background()); err != nil {
 		t.Fatalf("Sweep: %v", err)
 	}
 
@@ -3043,7 +3046,7 @@ func TestSweepSaveOnFailureStillStopsAndRemoves(t *testing.T) {
 		Logger:          slog.New(slog.DiscardHandler),
 	})
 
-	if err := d.Sweep(context.Background()); err != nil {
+	if _, err := d.Sweep(context.Background()); err != nil {
 		t.Fatalf("Sweep: %v", err)
 	}
 	// The stop and remove must still proceed despite save-on failure.

@@ -277,7 +277,7 @@ func buildInstanceManager(ctx context.Context, cfg config.Config, logger *slog.L
 			// kills those live servers. That is the deliberate M1 stateless-worker
 			// posture (no hydration yet; the API sees the resulting state on
 			// reconnect/status).
-			if err := cd.Sweep(ctx); err != nil {
+			if _, err := cd.Sweep(ctx); err != nil {
 				// A failed sweep is logged, not fatal: leftover containers block the
 				// affected servers' restart but must not stop the Worker from serving.
 				// It does, however, leave quiescence UNPROVEN: an orphan may still be
