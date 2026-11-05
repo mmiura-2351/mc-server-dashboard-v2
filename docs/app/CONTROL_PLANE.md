@@ -332,6 +332,27 @@ staying transient so the backoff-reconnect path (Section 4.4) retries it. So the
 operator-visible signal for a Worker that will not register is the terminal
 status code.
 
+Once the API has acknowledged a registration, the Worker re-reports what it holds: a
+`StatusChange` for each live instance at its current state, and
+`SERVER_STATE_UNKNOWN` for each failed-stop orphan (Section 6). The first such resync
+after a Worker **boot** also reports `STOPPED` for each server whose container the
+startup orphan sweep removed — an exited container left by a stop the previous process
+handed to the daemon at shutdown, or a server container still running after the
+previous process was killed, which the sweep stopped. Nothing else tells the API about those servers, so without the
+report their rows kept the state from before the restart (`unknown` under a stop,
+`running` under a crash) until the reconciler's slow path. Only a container the sweep
+actually removed counts, so a sweep that fails — which is non-fatal — reports only the
+servers it finished, never one whose container may still be running. A swept server the
+Worker holds again by the time of the resync (a live instance, an orphan, an in-flight
+command) is reported by that state instead. The report is made once per boot: a
+session that ends before its `RegisterAck` keeps it for the next session, and a plain
+reconnect without a reboot sends none. It is an ordinary `StatusChange` from the
+assigned Worker: under `desired=stopped` it moves the row to `stopped`, and the final
+snapshot and release of the assignment stay with the stop convergence that settles any
+`(stopped, stopped, assigned)` row; under `desired=running` it is a divergence like any
+other unexpected stop, which the reconciler restarts after its grace (CONFIGURATION.md
+Section 5.6).
+
 ### 4.2 Steady state
 
 ```
@@ -709,6 +730,11 @@ producers, and the wire value exists for the second:
   it neither observed a clean exit nor can it see the process (a failed-stop
   orphan under an unreachable daemon). Reporting `STOPPED` or `RUNNING` there
   would be a guess the API would cache as fact.
+
+The inferred `unknown` lasts until the Worker reports again: after a reconnect it
+re-reports every server it holds, and after a restart it reports `STOPPED` for each
+server whose container its boot sweep removed (Section 4.1). A server the Worker
+neither holds nor swept gets no report and stays `unknown` for the reconciler.
 
 The ingest maps every value in this enum onto the persisted state; only
 `SERVER_STATE_UNSPECIFIED` (the proto zero value) is dropped.
