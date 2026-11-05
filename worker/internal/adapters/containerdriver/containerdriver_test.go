@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -125,6 +126,9 @@ type fakeDocker struct {
 	// removeErrs, when non-empty, scripts per-call Remove results for the loop
 	// (the last entry repeats once exhausted); empty falls back to removeErr.
 	removeErrs []error
+	// removeErrFor fails the Remove of the named container id, whatever the order
+	// the calls arrive in (the sweep removes its orphans concurrently).
+	removeErrFor map[string]error
 	// removeCtxErrs records ctx.Err() at each Remove call, so a test can assert a
 	// cleanup Remove was issued on a live context rather than the already-cancelled
 	// command context (issue #1715).
@@ -402,6 +406,9 @@ func (f *fakeDocker) Remove(ctx context.Context, id string) error {
 	defer f.mu.Unlock()
 	f.removed = append(f.removed, id)
 	f.removeCtxErrs = append(f.removeCtxErrs, ctx.Err())
+	if err, ok := f.removeErrFor[id]; ok {
+		return err
+	}
 	if len(f.removeErrs) > 0 {
 		err := f.removeErrs[0]
 		if len(f.removeErrs) > 1 {
@@ -2910,6 +2917,85 @@ func TestSweepStopFailureStillRemovesAndSurfaces(t *testing.T) {
 	}
 	if len(docker.removed) != 1 || docker.removed[0] != "a" {
 		t.Fatalf("removed = %v, want [a] (the container must not leak)", docker.removed)
+	}
+}
+
+// Sweep reports the server of every container it removed (issues #3486, #3514):
+// an exited one a stop handed to the daemon left behind, and a running orphan it
+// stopped. The Worker reports those servers stopped once it is registered, so it
+// reads each id from the container's server-id label, the server's own id.
+func TestSweepReportsTheServersWhoseContainersItRemoved(t *testing.T) {
+	docker := newFakeDocker()
+	docker.listResult = []Container{
+		{ID: "a", Name: "/mcsd-s1", State: "exited", Labels: map[string]string{labelServerID: "s1"}},
+		{ID: "b", Name: "/mcsd-s2", State: "running", Labels: map[string]string{labelServerID: "s2"}},
+	}
+	d := newTestDriver(docker, nil, nil)
+
+	swept, err := d.Sweep(context.Background())
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	slices.Sort(swept)
+	if !slices.Equal(swept, []string{"s1", "s2"}) {
+		t.Fatalf("swept = %v, want [s1 s2]", swept)
+	}
+}
+
+// A sweep that fails is not fatal, so what it reports must still be true: only a
+// container it actually removed names a server that is stopped. One whose remove
+// failed may still be running, and is left out rather than guessed at.
+func TestSweepReportsOnlyTheContainersItRemoved(t *testing.T) {
+	docker := newFakeDocker()
+	docker.listResult = []Container{
+		{ID: "a", Name: "/mcsd-s1", State: "running", Labels: map[string]string{labelServerID: "s1"}},
+		{ID: "b", Name: "/mcsd-s2", State: "running", Labels: map[string]string{labelServerID: "s2"}},
+	}
+	docker.removeErrFor = map[string]error{"b": errors.New("remove boom")}
+	d := newTestDriver(docker, nil, nil)
+
+	swept, err := d.Sweep(context.Background())
+	if err == nil {
+		t.Fatal("expected Sweep to surface the remove failure")
+	}
+	if !slices.Equal(swept, []string{"s1"}) {
+		t.Fatalf("swept = %v, want [s1] (s2's container was not removed)", swept)
+	}
+}
+
+// A running orphan whose graceful stop failed is still force-removed, and a
+// removed container runs nothing: its server is reported with the stop error.
+func TestSweepReportsAnOrphanRemovedAfterAFailedStop(t *testing.T) {
+	docker := newFakeDocker()
+	docker.listResult = []Container{{ID: "a", Name: "/mcsd-s1", State: "running", Labels: map[string]string{labelServerID: "s1"}}}
+	docker.stopErr = errors.New("stop boom")
+	d := newTestDriver(docker, nil, nil)
+
+	swept, err := d.Sweep(context.Background())
+	if err == nil {
+		t.Fatal("expected Sweep to surface the stop failure")
+	}
+	if !slices.Equal(swept, []string{"s1"}) {
+		t.Fatalf("swept = %v, want [s1]", swept)
+	}
+}
+
+// A Forge server mid-install leaves two containers under one server id; the
+// server is reported once.
+func TestSweepReportsAServerOnceForItsInstallAndLaunchContainers(t *testing.T) {
+	docker := newFakeDocker()
+	docker.listResult = []Container{
+		{ID: "a", Name: "/mcsd-s1-install", State: "exited", Labels: map[string]string{labelServerID: "s1"}},
+		{ID: "b", Name: "/mcsd-s1", State: "exited", Labels: map[string]string{labelServerID: "s1"}},
+	}
+	d := newTestDriver(docker, nil, nil)
+
+	swept, err := d.Sweep(context.Background())
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if !slices.Equal(swept, []string{"s1"}) {
+		t.Fatalf("swept = %v, want [s1]", swept)
 	}
 }
 
