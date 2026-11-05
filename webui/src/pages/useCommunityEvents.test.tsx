@@ -1,6 +1,7 @@
 import {
   QueryClient,
   QueryClientProvider,
+  type QueryFunction,
   useQuery,
 } from "@tanstack/react-query";
 import { act, render, screen } from "@testing-library/react";
@@ -492,6 +493,13 @@ describe("useCommunityEvents", () => {
 
 type Row = ReturnType<typeof serverRow>;
 
+function LiveProbe({ queryFn }: { queryFn: QueryFunction<Row[]> }) {
+  // The page's order: the events hook, then the list query.
+  degradedSeen = useCommunityEvents(CID);
+  useQuery({ queryKey: serversKey(CID), queryFn });
+  return null;
+}
+
 /**
  * A servers-list query whose REST responses the test resolves by hand, so a
  * response can land after a WS frame that is newer than its read (#3213).
@@ -511,18 +519,12 @@ function setupDeferred({ retry = false }: { retry?: number | false } = {}) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry, retryDelay: 1000 } },
   });
-  function LiveProbe() {
-    // The page's order: the events hook, then the list query.
-    degradedSeen = useCommunityEvents(CID);
-    useQuery({ queryKey: serversKey(CID), queryFn });
-    return null;
-  }
   const wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={queryClient}>
       <ToastProvider>{children}</ToastProvider>
     </QueryClientProvider>
   );
-  render(<LiveProbe />, { wrapper });
+  render(<LiveProbe queryFn={queryFn} />, { wrapper });
   // Resolve the oldest outstanding REST read with `rows`.
   const respond = async (rows: Row[]) => {
     const attempt = pending.shift();

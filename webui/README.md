@@ -32,16 +32,16 @@ Installs the toolchain from the committed `package-lock.json`.
 
 Run from this directory (`webui/`):
 
-| Task | Command |
-|---|---|
-| Dev server | `npm run dev` |
-| Build | `npm run build` |
-| Test | `npm run test` |
-| Lint | `npm run lint` |
-| Format (apply) | `npm run format` |
-| Type check | `npm run typecheck` |
-| All gates | `npm run check` |
-| Regenerate API client | `npm run openapi` |
+| Task                  | Command             |
+| --------------------- | ------------------- |
+| Dev server            | `npm run dev`       |
+| Build                 | `npm run build`     |
+| Test                  | `npm run test`      |
+| Lint                  | `npm run lint`      |
+| Format (apply)        | `npm run format`    |
+| Type check            | `npm run typecheck` |
+| All gates             | `npm run check`     |
+| Regenerate API client | `npm run openapi`   |
 
 `npm run check` aggregates lint + typecheck + test + build; the repo-root
 `make check` runs the same gates through the granular `webui-lint`,

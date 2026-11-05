@@ -67,6 +67,16 @@ function LocationProbe() {
   return <span data-testid="url">{`${pathname}${search}`}</span>;
 }
 
+// A probe that records every (communityId, communities) pair it observes
+// across renders. If the provider exposes a frame where communities are
+// loaded but communityId is still null, this probe captures it (issue #2014).
+function CommunityProbe() {
+  const { communityId, communities } = useActiveCommunity();
+  const log = useRef<Array<{ id: string | null; len: number | undefined }>>([]);
+  log.current.push({ id: communityId, len: communities?.length });
+  return <span data-testid="community-log">{JSON.stringify(log.current)}</span>;
+}
+
 function renderAt(path: string) {
   renderApp({ path, extras: <LocationProbe /> });
 }
@@ -286,20 +296,6 @@ describe("App route guards", () => {
 
   it("never flashes NoCommunityPage while the default community resolves", async () => {
     signedInWith([{ id: "alpha", name: "Alpha" }]);
-
-    // A probe that records every (communityId, communities) pair it observes
-    // across renders. If the provider exposes a frame where communities are
-    // loaded but communityId is still null, this probe captures it (issue #2014).
-    function CommunityProbe() {
-      const { communityId, communities } = useActiveCommunity();
-      const log = useRef<Array<{ id: string | null; len: number | undefined }>>(
-        [],
-      );
-      log.current.push({ id: communityId, len: communities?.length });
-      return (
-        <span data-testid="community-log">{JSON.stringify(log.current)}</span>
-      );
-    }
 
     renderApp({
       path: "/",
