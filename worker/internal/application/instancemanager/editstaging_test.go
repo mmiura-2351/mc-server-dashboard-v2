@@ -129,7 +129,7 @@ func TestEditFileSyncsBothDirectoriesAfterThePublish(t *testing.T) {
 
 			res := handleWithin(t, m, session.Command{
 				CommandID: "c1", ServerID: s1, Kind: "EditFile", Path: "sub/server.properties", Content: []byte("motd=new"),
-			})
+			}, writeBudget)
 
 			if !res.Success {
 				t.Fatalf("EditFile result = %+v, want success", res)

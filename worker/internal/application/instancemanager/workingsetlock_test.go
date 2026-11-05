@@ -67,7 +67,7 @@ func TestEditFileHoldsTheWorkingSetLockWhileItPublishes(t *testing.T) {
 
 	res := handleWithin(t, m, session.Command{
 		CommandID: "c1", ServerID: s1, Kind: "EditFile", Path: "server.properties", Content: []byte("motd=new"),
-	})
+	}, writeBudget)
 
 	if !res.Success {
 		t.Fatalf("EditFile = %+v, want success", res)
@@ -101,7 +101,7 @@ func TestEditFileReleasesTheWorkingSetLockWhenItFails(t *testing.T) {
 
 	res := handleWithin(t, m, session.Command{
 		CommandID: "c1", ServerID: s1, Kind: "EditFile", Path: "world", Content: []byte("x"),
-	})
+	}, quickBudget)
 
 	if res.Success {
 		t.Fatalf("EditFile = %+v, want the directory refused", res)
@@ -196,10 +196,11 @@ func handleInBackground(ctx context.Context, t *testing.T, m *Manager, cmd sessi
 	return done
 }
 
-// The budgets receiveWithin is given. Nothing here depends on how fast a step is,
-// only that it happens. A step that writes nothing gets handleWithin's budget; one
-// that publishes an edit fsyncs a file and its directory, which under artificial
-// disk load has taken longer than a minute, so it gets within's (issue #3354).
+// The budgets receiveWithin and handleWithin are given. Nothing here depends on
+// how fast a step is, only that it happens. A step that writes nothing gets 30 s;
+// one that reaches an edit's fsyncs (its file, and once published its
+// directories), which under artificial disk load have taken longer than a minute,
+// gets within's (issue #3354).
 const (
 	quickBudget = 30 * time.Second
 	writeBudget = 5 * time.Minute
@@ -290,13 +291,13 @@ func TestEditFileWaitIsBoundedSoAStopBehindItIsHandled(t *testing.T) {
 	walkInProgress(t, m)
 	m.workingSetLockWait = time.Millisecond
 
-	res := handleWithin(t, m, editMotd())
+	res := handleWithin(t, m, editMotd(), quickBudget)
 
 	if res.Success || !strings.Contains(res.ErrorMessage, context.DeadlineExceeded.Error()) {
 		t.Fatalf("EditFile = %+v, want it failed once the wait ran out", res)
 	}
 	assertEditNotWritten(t, m, target)
-	stop := handleWithin(t, m, session.Command{CommandID: "stop", ServerID: s1, Kind: "StopServer"})
+	stop := handleWithin(t, m, session.Command{CommandID: "stop", ServerID: s1, Kind: "StopServer"}, quickBudget)
 	if !stop.Success {
 		t.Fatalf("StopServer after the edit = %+v, want it handled", stop)
 	}
