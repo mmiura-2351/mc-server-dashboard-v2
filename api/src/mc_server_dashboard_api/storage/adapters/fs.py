@@ -63,6 +63,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
     PathOccupiedError,
     PathTraversalError,
     PrunedStoreError,
+    PublisherFencedError,
     SnapshotHandleError,
     StaleGenerationError,
     StorageUnavailableError,
@@ -76,6 +77,7 @@ from mc_server_dashboard_api.storage.domain.port import (
     HydrateSource,
     JarPoolEntry,
     JarPoolStats,
+    PublisherFence,
     SnapshotHandle,
     Storage,
     WorkingSetView,
@@ -706,6 +708,7 @@ class FsStorage(Storage):
         *,
         publisher: str | None = None,
         expected_base: int | None = None,
+        publisher_fence: PublisherFence | None = None,
     ) -> int:
         fs_handle = _as_fs_handle(handle)
         if fs_handle.consumed:
@@ -751,6 +754,11 @@ class FsStorage(Storage):
             self._release_staging(staging)
             fs_handle.consumed = True
             raise IntegrityCheckError(report)
+        fence: Callable[[], bool] | None = None
+        if publisher_fence is not None:
+            fence = functools.partial(
+                _fence_from_thread, publisher_fence, asyncio.get_running_loop()
+            )
         try:
             # ``_publish_and_bump`` fsyncs the staged tree before it takes the lock.
             async with self._refusing_pruned_staging(fs_handle, staging, expected_base):
@@ -762,13 +770,16 @@ class FsStorage(Storage):
                     publisher,
                     expected_base,
                     gate_missing_regions=True,
+                    fence=fence,
                 )
-        except (StaleGenerationError, MissingRegionsError):
+        except (StaleGenerationError, MissingRegionsError, PublisherFencedError):
             # StaleGenerationError: the store advanced past the guard's base during
             # the upload window (issue #899). MissingRegionsError: the staged set lost
             # regions from a dimension that still has some (issue #854, moved under the
-            # lock by #921). Discard the staging exactly as the other refusal paths do
-            # (the prior ``current`` keeps the newer/good copy, no bump) and re-raise.
+            # lock by #921). PublisherFencedError: the fence refused the publisher
+            # under the lock (issue #3544). Discard the staging exactly as the other
+            # refusal paths do (the prior ``current`` keeps the newer/good copy, no
+            # bump) and re-raise.
             await asyncio.to_thread(_rmtree, staging)
             self._release_staging(staging)
             fs_handle.consumed = True
@@ -850,6 +861,7 @@ class FsStorage(Storage):
         expected_base: int | None = None,
         *,
         gate_missing_regions: bool,
+        fence: Callable[[], bool] | None = None,
     ) -> int:
         """Publish the snapshot, then bump and return the generation (issue #763).
 
@@ -878,6 +890,10 @@ class FsStorage(Storage):
 
         ``gate_missing_regions`` selects whether the missing-region gate runs: a
         snapshot commit passes ``True``, a backup restore ``False`` (issue #3446).
+
+        ``fence`` is the commit's publisher fence (issue #3544), called under the
+        lock immediately before the publish; ``False`` raises
+        :class:`PublisherFencedError`.
         """
 
         # Make the staged tree's file data durable BEFORE acquiring the lock and
@@ -921,6 +937,8 @@ class FsStorage(Storage):
                     missing = check_missing_regions(staging, prior)
                     if not missing.complete:
                         raise MissingRegionsError(missing)
+            if fence is not None and not fence():
+                raise PublisherFencedError("the publisher fence refused the publish")
             old_snapshot = self._publish(community_id, server_id, staging)
             generation = self._read_generation(server_root) + 1
             self._write_marker(server_root, generation, publisher)
@@ -2341,6 +2359,20 @@ def _fsync_dir(path: Path) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def _fence_from_thread(fence: PublisherFence, loop: asyncio.AbstractEventLoop) -> bool:
+    """Await the commit's publisher fence on ``loop`` from a worker thread.
+
+    The per-server lock is a thread lock held on that worker thread, so the fence
+    runs on the event loop while the thread waits for its answer (issue #3544).
+    Safe because no code acquires that lock on the event loop thread.
+    """
+
+    async def _check() -> bool:
+        return await fence()
+
+    return asyncio.run_coroutine_threadsafe(_check(), loop).result()
 
 
 def _fsync_tree(root: Path) -> None:

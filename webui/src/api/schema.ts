@@ -2244,9 +2244,11 @@ export interface paths {
          *     worker's base now lags). A commit-time fence re-reads the assignment AFTER the
          *     upload stream and refuses when the publisher is NOT the currently-assigned worker
          *     (409 ``publisher_not_assigned``): this prevents a late commit from a re-placed
-         *     worker from wedging the new session. The fence is permissive when no worker is
-         *     assigned (``None``): the held-assignment final-snapshot window and the post-clear
-         *     no-replacement case must still land.
+         *     worker from wedging the new session. The commit runs the same fence again under
+         *     the per-server publish lock, immediately before the publish (issue #3544), so a
+         *     commit that stalls past a release and re-placement is refused there too. The
+         *     fence is permissive when no worker is assigned (``None``): the held-assignment
+         *     final-snapshot window and the post-clear no-replacement case must still land.
          *
          *     The content-integrity gate uses the single region rule set (issue #927): a
          *     non-4096-aligned tail is the normal on-disk shape of a 26.x world, not a tear, on

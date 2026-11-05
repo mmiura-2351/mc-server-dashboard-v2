@@ -2333,6 +2333,191 @@ def test_snapshot_late_publish_after_clear_with_no_replacement_still_lands(
     assert _read_tar(asyncio.run(_read())) == {"world/level.dat": b"final-from-a"}
 
 
+# --- the assignment fence under the publish lock (issue #3544) ----------------
+# The commit's slow step before the publish lock (the fs staging fsync, the
+# object copy) runs after the pre-commit fence passed. Each stall hook runs
+# ``during_stall`` once, inside that step, standing in for the release of the
+# publisher's hold and the re-placement that land while it stalls.
+
+_Stall = Callable[[pytest.MonkeyPatch, Callable[[], None]], None]
+
+
+def _stall_fs_fsync(
+    monkeypatch: pytest.MonkeyPatch, during_stall: Callable[[], None]
+) -> None:
+    import mc_server_dashboard_api.storage.adapters.fs as fs_mod
+
+    real_fsync_tree = fs_mod._fsync_tree
+
+    def _fsync_tree(root: Path) -> None:
+        during_stall()
+        real_fsync_tree(root)
+
+    monkeypatch.setattr(fs_mod, "_fsync_tree", _fsync_tree)
+
+
+def _stall_object_copy(
+    monkeypatch: pytest.MonkeyPatch, during_stall: Callable[[], None]
+) -> None:
+    real_copy_object = FakeS3Client.copy_object
+    fired = False
+
+    async def _copy_object(self: FakeS3Client, src_key: str, dst_key: str) -> None:
+        nonlocal fired
+        if not fired and "/incoming/" in src_key:
+            fired = True
+            during_stall()
+        await real_copy_object(self, src_key, dst_key)
+
+    monkeypatch.setattr(FakeS3Client, "copy_object", _copy_object)
+
+
+async def _staging_left(storage: Storage, c: CommunityId, s: ServerId) -> list[str]:
+    """Staged bytes, or snapshots no pointer names, left under the server."""
+
+    if isinstance(storage, FsStorage):
+        incoming = storage._server_root(c, s) / "incoming"
+        return sorted(p.name for p in incoming.iterdir()) if incoming.is_dir() else []
+    object_storage = cast(ObjectStorage, storage)
+    server_prefix = object_storage._server_prefix(c, s)
+    async with object_storage._client_factory() as client:
+        live = await object_storage._read_pointer(client, server_prefix)
+        objects = await client.list_objects(server_prefix)
+    return [
+        o.key
+        for o in objects
+        if "/incoming/" in o.key
+        or ("/snapshots/" in o.key and (live is None or not o.key.startswith(live)))
+    ]
+
+
+def _post_snapshot_reassigned_mid_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    storage: Storage,
+    stall: _Stall,
+    *,
+    publisher: str,
+    assigned_after_stall: str,
+) -> tuple[int, dict[str, object], CommunityId, ServerId]:
+    """POST ``publisher``'s snapshot, reassigning the server while its commit stalls."""
+
+    client, _ = _setup(tmp_path)
+    _shared_app.dependency_overrides[get_storage] = lambda: storage
+    assigned = publisher
+
+    async def _assigned(_c: uuid.UUID, _s: uuid.UUID) -> str | None:
+        return assigned
+
+    _shared_app.dependency_overrides[get_assigned_worker_lookup] = lambda: _assigned
+    community, server = _scope()
+    c, s = CommunityId(community), ServerId(server)
+
+    async def _publish_first() -> None:
+        handle = await storage.begin_snapshot(c, s)
+
+        async def _stream() -> AsyncIterator[bytes]:
+            yield _tar_bytes({"k": b"snap"})
+
+        await storage.write_snapshot(handle, _stream())
+        await storage.commit_snapshot(handle, publisher=publisher)
+
+    asyncio.run(_publish_first())
+
+    def _reassign() -> None:
+        nonlocal assigned
+        assigned = assigned_after_stall
+
+    stall(monkeypatch, _reassign)
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"),
+            content=_tar_bytes({"k": b"in-flight"}),
+            headers={
+                **_auth(),
+                "X-Working-Set-Base-Generation": "1",
+                "X-Worker-Id": publisher,
+            },
+        )
+    return resp.status_code, resp.json() if resp.content else {}, c, s
+
+
+async def _hydrate(storage: Storage, c: CommunityId, s: ServerId) -> dict[str, bytes]:
+    return _read_tar(
+        b"".join([chunk async for chunk in storage.open_hydrate_source(c, s)])
+    )
+
+
+@pytest.mark.parametrize(
+    ("make_storage", "stall"),
+    [(_fs_storage, _stall_fs_fsync), (_object_storage, _stall_object_copy)],
+    ids=["fs", "object"],
+)
+def test_commit_refused_when_server_is_re_placed_while_it_stalls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_storage: Callable[[Path], Storage],
+    stall: _Stall,
+) -> None:
+    # Issue #3544: A's upload passes the pre-commit fence, then its commit stalls
+    # before the publish lock. Meanwhile A's hold is released and the server is
+    # placed on B, which hydrates generation 1. The base re-check alone would
+    # still pass (a hydrate does not move the generation), so the fence under the
+    # lock must refuse A, or generation 2 would land under B's session.
+    storage = make_storage(tmp_path)
+    worker_a, worker_b = str(uuid.uuid4()), str(uuid.uuid4())
+
+    status_code, body, c, s = _post_snapshot_reassigned_mid_commit(
+        tmp_path,
+        monkeypatch,
+        storage,
+        stall,
+        publisher=worker_a,
+        assigned_after_stall=worker_b,
+    )
+
+    assert status_code == 409
+    assert body["reason"] == "publisher_not_assigned"
+    assert asyncio.run(storage.current_generation(c, s)) == 1
+    assert asyncio.run(storage.current_publisher(c, s)) == worker_a
+    assert asyncio.run(_hydrate(storage, c, s)) == {"k": b"snap"}
+    # The refused commit discarded its staging and released its lease.
+    assert storage._active_staging == set()  # type: ignore[attr-defined]
+    assert asyncio.run(_staging_left(storage, c, s)) == []
+
+
+@pytest.mark.parametrize(
+    ("make_storage", "stall"),
+    [(_fs_storage, _stall_fs_fsync), (_object_storage, _stall_object_copy)],
+    ids=["fs", "object"],
+)
+def test_commit_publishes_when_assignment_holds_while_it_stalls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_storage: Callable[[Path], Storage],
+    stall: _Stall,
+) -> None:
+    # Control for the test above (issue #3544): the same stall with A still the
+    # assigned worker publishes generation 2.
+    storage = make_storage(tmp_path)
+    worker_a = str(uuid.uuid4())
+
+    status_code, _, c, s = _post_snapshot_reassigned_mid_commit(
+        tmp_path,
+        monkeypatch,
+        storage,
+        stall,
+        publisher=worker_a,
+        assigned_after_stall=worker_a,
+    )
+
+    assert status_code == 204
+    assert asyncio.run(storage.current_generation(c, s)) == 2
+    assert asyncio.run(_hydrate(storage, c, s)) == {"k": b"in-flight"}
+    assert storage._active_staging == set()  # type: ignore[attr-defined]
+    assert asyncio.run(_staging_left(storage, c, s)) == []
+
+
 # --- hydrate send deadline (issue #1822) --------------------------------------
 
 
