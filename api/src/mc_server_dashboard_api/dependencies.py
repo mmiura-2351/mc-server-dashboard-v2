@@ -121,6 +121,12 @@ from mc_server_dashboard_api.download_cookie import (
 from mc_server_dashboard_api.fleet.adapters.assigned_server_stopper import (
     ServersAssignedServerStopper,
 )
+from mc_server_dashboard_api.fleet.adapters.clock import (
+    SystemClock as FleetSystemClock,
+)
+from mc_server_dashboard_api.fleet.adapters.drain_store import (
+    SqlAlchemyWorkerDrainStore,
+)
 from mc_server_dashboard_api.fleet.application.list_workers import ListWorkers
 from mc_server_dashboard_api.fleet.application.set_worker_drain import SetWorkerDrain
 from mc_server_dashboard_api.fleet.domain.control_plane import (
@@ -706,6 +712,10 @@ def get_set_worker_drain(
                 clock=ServersSystemClock(),
             )
         ),
+        drain_store=SqlAlchemyWorkerDrainStore(
+            session_factory, clock=FleetSystemClock()
+        ),
+        locks=request.app.state.worker_drain_locks,
     )
 
 
