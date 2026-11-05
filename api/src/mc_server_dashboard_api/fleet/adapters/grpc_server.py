@@ -271,6 +271,21 @@ class WorkerSessionServicer(WorkerServiceServicer):
         self._control_plane = control_plane
         self._state_sink = state_sink
         self._real_time_events = real_time_events
+        # Session teardowns still in flight, held so a teardown that outlives its
+        # cancelled RPC task is neither garbage-collected nor cut off at shutdown
+        # (issue #3555, :meth:`drain_teardowns`).
+        self._teardowns: set[asyncio.Future[None]] = set()
+
+    async def drain_teardowns(self) -> None:
+        """Wait for every Session teardown still in flight (issue #3555).
+
+        A teardown can outlive its RPC task, so stopping the gRPC server does not
+        wait for it. The app calls this after the server stops and before it
+        disposes the engine the teardown writes through.
+        """
+
+        while self._teardowns:
+            await asyncio.wait(set(self._teardowns))
 
     async def _watch_liveness(self, worker_id: WorkerId, session: SessionToken) -> None:
         """Poll worker liveness and return when heartbeats lapse (issue #1600).
@@ -398,63 +413,94 @@ class WorkerSessionServicer(WorkerServiceServicer):
                 outbound_get.cancel()
             reader.cancel()
             watchdog.cancel()
-            # Retrieve the reader's outcome so a transport error it raised is not
-            # logged as an unretrieved task exception; a cancellation is expected.
-            # A genuine terminal error (e.g. a transport drop, or an unexpected
-            # error escaping the handler) is logged at warning with the worker id
-            # so the cause is not silently lost (issue #776).
-            try:
-                await reader
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                _LOG.warning(
-                    "worker session reader ended with an error",
-                    extra={"worker_id": worker_id.value},
-                    exc_info=True,
-                )
-            try:
-                await watchdog
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                _LOG.warning(
-                    "watchdog raised unexpectedly",
-                    extra={"worker_id": worker_id.value},
-                    exc_info=True,
-                )
-            # Fail this worker's in-flight commands immediately: its outbound
-            # stream is gone, so they can never be answered. Awaiters get a typed
-            # WorkerNotConnectedError now instead of riding the full timeout.
-            # Guarded by this Session's token so a stale teardown after a
-            # reconnect does not fail the NEW session's in-flight futures
-            # (CONTROL_PLANE.md Section 4.4). Runs before close_session, which
-            # drops this worker's session record.
-            self._control_plane.fail_worker_pending(
-                worker_id, session, WorkerNotConnectedError(worker_id.value)
+            # The rest of the teardown runs in a task this servicer owns, shielded
+            # from the RPC task (issue #3555). gRPC cancels the RPC task when the
+            # peer's transport dies, and that cancel can land after the inbound
+            # EOF has already started this teardown; awaited here, it would cut
+            # the mark-unknown write and the log line, with only a DEBUG trace.
+            teardown = asyncio.ensure_future(
+                self._teardown(worker_id, session, outbound, reader, watchdog)
             )
-            self._control_plane.close_session(worker_id, outbound)
-            # Pass this Session's token so a delayed teardown only offlines the
-            # Worker if it has not reconnected on a newer Session (Section 4.4).
-            self._registry.mark_disconnected(worker_id, session)
-            # Guard the bulk observed=unknown write with this Session's token too:
-            # the write deliberately bypasses the per-server monotonic guard, so a
-            # stale teardown after a reconnect would otherwise clobber the NEW
-            # session's live server states (issue #775, CONTROL_PLANE.md 4.4).
-            # There is an accepted one-roundtrip TOCTOU window here: a reconnect
-            # on a newer Session could win the is_current_session check between
-            # this read and the bulk unknown-write below, so the write could
-            # still clobber the NEW session's live states with unknown. The
-            # window is judged acceptable (PR #802 review): it is bounded to a
-            # single observation and the reconciler self-heals — the live worker
-            # re-reports its servers' states on its next StatusChange, restoring
-            # them. Closing it fully would need the write itself to be guarded by
-            # the session token atomically, which is not worth the complexity.
-            if self._registry.is_current_session(worker_id, session):
+            self._teardowns.add(teardown)
+            teardown.add_done_callback(self._teardowns.discard)
+            await asyncio.shield(teardown)
+
+    async def _teardown(
+        self,
+        worker_id: WorkerId,
+        session: SessionToken,
+        outbound: asyncio.Queue[pb.ApiMessage],
+        reader: asyncio.Future[None],
+        watchdog: asyncio.Future[None],
+    ) -> None:
+        """Finish a Session whose stream ended (FR-WRK-4, CONTROL_PLANE.md 4.4)."""
+
+        # Retrieve the reader's outcome so a transport error it raised is not
+        # logged as an unretrieved task exception; a cancellation is expected.
+        # A genuine terminal error (e.g. a transport drop, or an unexpected
+        # error escaping the handler) is logged at warning with the worker id
+        # so the cause is not silently lost (issue #776).
+        try:
+            await reader
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            _LOG.warning(
+                "worker session reader ended with an error",
+                extra={"worker_id": worker_id.value},
+                exc_info=True,
+            )
+        try:
+            await watchdog
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            _LOG.warning(
+                "watchdog raised unexpectedly",
+                extra={"worker_id": worker_id.value},
+                exc_info=True,
+            )
+        # Fail this worker's in-flight commands immediately: its outbound
+        # stream is gone, so they can never be answered. Awaiters get a typed
+        # WorkerNotConnectedError now instead of riding the full timeout.
+        # Guarded by this Session's token so a stale teardown after a
+        # reconnect does not fail the NEW session's in-flight futures
+        # (CONTROL_PLANE.md Section 4.4). Runs before close_session, which
+        # drops this worker's session record.
+        self._control_plane.fail_worker_pending(
+            worker_id, session, WorkerNotConnectedError(worker_id.value)
+        )
+        self._control_plane.close_session(worker_id, outbound)
+        # Pass this Session's token so a delayed teardown only offlines the
+        # Worker if it has not reconnected on a newer Session (Section 4.4).
+        self._registry.mark_disconnected(worker_id, session)
+        # Guard the bulk observed=unknown write with this Session's token too:
+        # the write deliberately bypasses the per-server monotonic guard, so a
+        # stale teardown after a reconnect would otherwise clobber the NEW
+        # session's live server states (issue #775, CONTROL_PLANE.md 4.4).
+        # There is an accepted one-roundtrip TOCTOU window here: a reconnect
+        # on a newer Session could win the is_current_session check between
+        # this read and the bulk unknown-write below, so the write could
+        # still clobber the NEW session's live states with unknown. The
+        # window is judged acceptable (PR #802 review): it is bounded to a
+        # single observation and the reconciler self-heals — the live worker
+        # re-reports its servers' states on its next StatusChange, restoring
+        # them. Closing it fully would need the write itself to be guarded by
+        # the session token atomically, which is not worth the complexity.
+        if self._registry.is_current_session(worker_id, session):
+            # Logged here rather than raised: once the RPC's cancel has broken
+            # the shield, nothing awaits this task's outcome.
+            try:
                 await self._state_sink.mark_worker_servers_unknown(
                     worker_id=worker_id.value
                 )
-            _LOG.info("worker disconnected", extra={"worker_id": worker_id.value})
+            except Exception:
+                _LOG.error(
+                    "failed to mark the disconnected worker's servers unknown",
+                    extra={"worker_id": worker_id.value},
+                    exc_info=True,
+                )
+        _LOG.info("worker disconnected", extra={"worker_id": worker_id.value})
 
     async def _read_inbound(
         self,
@@ -796,12 +842,14 @@ def make_grpc_server(
     cert_file: str | None = None,
     key_file: str | None = None,
     insecure: bool = False,
-) -> aio.Server:
+) -> tuple[aio.Server, WorkerSessionServicer]:
     """Build (but do not start) the control-plane gRPC server bound to host:port.
 
     The listener serves over TLS when ``cert_file``/``key_file`` are given, else
     plaintext when ``insecure`` is set (NFR-SEC-1). The required-unless-insecure
-    rule is enforced at the edge before this is called.
+    rule is enforced at the edge before this is called. The servicer is returned
+    too, so shutdown can wait for its Session teardowns
+    (:meth:`WorkerSessionServicer.drain_teardowns`).
     """
 
     server = aio.server(options=_server_options(heartbeat_timeout))
@@ -823,4 +871,4 @@ def make_grpc_server(
         key_file=key_file,
         insecure=insecure,
     )
-    return server
+    return server, servicer

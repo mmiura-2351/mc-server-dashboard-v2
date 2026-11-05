@@ -65,7 +65,7 @@ def _make_server(
     key_file: str | None = None,
     insecure: bool = False,
 ) -> aio.Server:
-    return make_grpc_server(
+    server, _ = make_grpc_server(
         registry=InMemoryWorkerRegistry(
             clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT
         ),
@@ -82,6 +82,7 @@ def _make_server(
         key_file=key_file,
         insecure=insecure,
     )
+    return server
 
 
 async def test_tls_server_accepts_tls_client(

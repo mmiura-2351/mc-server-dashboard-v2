@@ -412,6 +412,16 @@ each connect is a clean registration, matching the stateless, replaceable nature
 of Workers (REQUIREMENTS.md Section 5.1, FR-WRK-4). The API's record of desired
 state is authoritative and drives any catch-up commands after a reconnect.
 
+**Teardown.** When a `Session` ends, the API fails the Worker's in-flight
+commands, marks the Worker offline, and marks its servers' observed state
+`unknown`. Each step is guarded by the ending Session's token: a stale
+teardown, for a Worker that has already re-registered on a newer Session,
+leaves that Worker online and its servers' states untouched. The teardown runs
+in a task the API owns, not in the RPC task. When a Worker's transport dies,
+gRPC reports the end of the inbound stream and cancels the RPC separately, and
+the cancel can arrive while the teardown is already writing. The teardown
+finishes regardless, and API shutdown waits for any teardown still running.
+
 ---
 
 ## 5. Commands (API to Worker)

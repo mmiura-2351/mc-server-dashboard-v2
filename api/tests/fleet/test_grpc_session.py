@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import datetime as dt
+import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -106,6 +107,7 @@ class _Harness:
         self.state_sink = state_sink or FakeServerStateSink()
         self.control_plane = control_plane or ControlPlaneState()
         self.real_time_events = real_time_events or RecordingRealTimeEvents()
+        self.servicer: WorkerSessionServicer | None = None
         self._server: aio.Server | None = None
         self._port: int | None = None
         self._channels: list[aio.Channel] = []
@@ -125,6 +127,7 @@ class _Harness:
         add_WorkerServiceServicer_to_server(servicer, server)
         self._port = server.add_insecure_port("127.0.0.1:0")
         await server.start()
+        self.servicer = servicer
         self._server = server
         return await self.new_stub()
 
@@ -1717,5 +1720,225 @@ async def test_clean_eof_drains_queued_messages() -> None:
             (server_b, _WORKER_ID, "stopped"),
             (server_c, _WORKER_ID, "starting"),
         ]
+    finally:
+        await h.stop()
+
+
+# ---------------------------------------------------------------------------
+# Teardown under a late RPC cancel (issue #3555)
+# ---------------------------------------------------------------------------
+
+_GRPC_SERVER_LOGGER = "mc_server_dashboard_api.fleet.adapters.grpc_server"
+_SERVER_ID = "11111111-1111-1111-1111-111111111111"
+
+
+def _disconnect_logs(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.getMessage() == "worker disconnected"]
+
+
+class _BlockingUnknownSink(FakeServerStateSink):
+    """Holds ``mark_worker_servers_unknown`` until ``release`` is set.
+
+    It also captures the gRPC RPC task, from the registration-time assignment
+    rebuild that runs inside it, so a test can wait for that task to end.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.rpc_task: asyncio.Task[Any] | None = None
+
+    async def running_assignment_ids(self, *, worker_id: str) -> dict[str, int]:
+        self.rpc_task = asyncio.current_task()
+        return await super().running_assignment_ids(worker_id=worker_id)
+
+    async def mark_worker_servers_unknown(self, *, worker_id: str) -> None:
+        self.entered.set()
+        await self.release.wait()
+        await super().mark_worker_servers_unknown(worker_id=worker_id)
+
+
+async def _cancel_rpc_mid_teardown(h: _Harness, sink: _BlockingUnknownSink) -> None:
+    """Drive a Session into its teardown, then let gRPC cancel the RPC task.
+
+    When a Worker's transport dies, gRPC core completes two operations on their
+    own: the pending read fails, which the inbound iterator reports as a clean
+    EOF, and the close-on-server op reports a cancel, which cancels the RPC task.
+    When the EOF is handled first, the cancel lands inside the teardown. The
+    half-close is that EOF; the client cancel is that late cancel, delivered
+    while the teardown is held inside ``mark_worker_servers_unknown``.
+    """
+
+    stub = await h.start()
+    call = stub.Session(metadata=_auth(_CREDENTIAL))
+    await call.write(_register_message())
+    await call.read()  # ack
+    await call.done_writing()
+    await asyncio.wait_for(sink.entered.wait(), timeout=5)
+    call.cancel()
+    assert sink.rpc_task is not None
+    done, _ = await asyncio.wait({sink.rpc_task}, timeout=5)
+    assert done, "gRPC should have cancelled and finished the RPC task"
+
+
+async def test_rpc_cancel_mid_teardown_still_marks_servers_unknown(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Issue #3555: the cancel used to interrupt the mark-unknown write and skip
+    # the log line, and gRPC logged the CancelledError only at DEBUG. The
+    # Worker's servers then kept their last observed state while it was down.
+    caplog.set_level(logging.INFO, logger=_GRPC_SERVER_LOGGER)
+    sink = _BlockingUnknownSink()
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+    )
+    try:
+        await _cancel_rpc_mid_teardown(h, sink)
+
+        sink.release.set()
+        for _ in range(200):
+            if sink.unknown_for and _disconnect_logs(caplog):
+                break
+            await asyncio.sleep(0.01)
+
+        assert sink.unknown_for == [_WORKER_ID]
+        assert len(_disconnect_logs(caplog)) == 1
+        assert h.registry.list_workers()[0].status is WorkerStatus.OFFLINE
+    finally:
+        sink.release.set()
+        await h.stop()
+
+
+async def test_drain_teardowns_waits_for_a_teardown_its_rpc_left_behind() -> None:
+    # The teardown outlives its cancelled RPC task, so the app awaits it at
+    # shutdown, before disposing the engine it writes through.
+    sink = _BlockingUnknownSink()
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+    )
+    try:
+        await _cancel_rpc_mid_teardown(h, sink)
+        assert h.servicer is not None
+        drain = asyncio.ensure_future(h.servicer.drain_teardowns())
+        await asyncio.sleep(0.05)
+        assert not drain.done(), "the teardown is still held in the sink"
+
+        sink.release.set()
+        await asyncio.wait_for(drain, timeout=5)
+
+        assert sink.unknown_for == [_WORKER_ID]
+    finally:
+        sink.release.set()
+        await h.stop()
+
+
+async def test_cancelled_stale_teardown_does_not_mark_servers_unknown(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The teardown that survives the RPC cancel must still apply the issue #775
+    # guard, and at the point it writes rather than when the RPC ended: Session
+    # A is still current when its RPC is cancelled, and Worker B replaces it
+    # while A's teardown is still settling its reader.
+    caplog.set_level(logging.INFO, logger=_GRPC_SERVER_LOGGER)
+    entered = asyncio.Event()
+    unwinding = asyncio.Event()
+    release = asyncio.Event()
+
+    class _SlowUnwindSink(FakeServerStateSink):
+        """A status write whose cancellation takes until ``release`` to unwind."""
+
+        async def record_observed_state(
+            self, *, server_id: str, worker_id: str, state: str, **frame: Any
+        ) -> bool:
+            entered.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                unwinding.set()
+                await release.wait()
+                raise
+            return await super().record_observed_state(
+                server_id=server_id, worker_id=worker_id, state=state, **frame
+            )
+
+    sink = _SlowUnwindSink()
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+    )
+    try:
+        stub = await h.start()
+        call_a = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call_a.write(_register_message())
+        await call_a.read()  # ack
+        await call_a.write(_status_message(_SERVER_ID, pb.SERVER_STATE_RUNNING))
+        await asyncio.wait_for(entered.wait(), timeout=5)
+
+        # The RPC is cancelled while A is current; its teardown cancels the
+        # reader and waits for the held status write to unwind.
+        call_a.cancel()
+        await asyncio.wait_for(unwinding.wait(), timeout=5)
+
+        call_b = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call_b.write(_register_message())
+        await call_b.read()  # ack: B is now the current Session
+
+        release.set()
+        for _ in range(200):
+            if _disconnect_logs(caplog):
+                break
+            await asyncio.sleep(0.01)
+
+        assert len(_disconnect_logs(caplog)) == 1, "A's teardown should finish"
+        assert sink.unknown_for == []
+        assert h.registry.list_workers()[0].status is WorkerStatus.ONLINE
+        await call_b.done_writing()
+    finally:
+        release.set()
+        await h.stop()
+
+
+async def test_failed_mark_unknown_is_logged_and_the_teardown_finishes(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The teardown catches and logs its own write failure: once the RPC's cancel
+    # has broken the shield, nothing else awaits the teardown's outcome, so a
+    # raised error would vanish (issue #3555).
+    caplog.set_level(logging.INFO, logger=_GRPC_SERVER_LOGGER)
+
+    class _FailingUnknownSink(FakeServerStateSink):
+        async def mark_worker_servers_unknown(self, *, worker_id: str) -> None:
+            raise RuntimeError("observed-state sink unavailable")
+
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=_FailingUnknownSink(),
+    )
+    try:
+        stub = await h.start()
+        call = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call.write(_register_message())
+        await call.read()  # ack
+        await call.done_writing()
+        await _drain_to_eof(call)
+        assert h.servicer is not None
+        await h.servicer.drain_teardowns()
+
+        failures = [
+            r
+            for r in caplog.records
+            if r.getMessage()
+            == "failed to mark the disconnected worker's servers unknown"
+        ]
+        assert len(failures) == 1
+        assert failures[0].levelno == logging.ERROR
+        assert len(_disconnect_logs(caplog)) == 1
     finally:
         await h.stop()
