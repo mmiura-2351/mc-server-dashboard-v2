@@ -212,11 +212,15 @@ each crash cycle transits through ``starting`` (when the row briefly drops out o
 ``list_reconcilable``), the entry must NOT be cleared just because the server is
 momentarily absent, or the failure count would reset every cycle and never grow. A
 row skipped by a guard or a grace window, or a stop still converging, keeps its
-entry too. Entries whose row is never read settled (a deleted server) are
-time-expired: dropped once ``now`` is past ``next_eligible_at`` by
+entry too. A deleted server's entry is dropped on the first tick that finds the row
+gone. Every other entry is time-expired: dropped once ``now`` is past the later of
+``next_eligible_at`` and the last tick that read the row settled by
 ``backoff_max_seconds`` of slack, while a still-flapping server re-arrives and
 refreshes ``next_eligible_at`` long before then, so its backoff keeps growing up to
-``backoff_max_seconds``. The map does not grow without bound.
+``backoff_max_seconds``. A settled read counts as re-arriving too, so an entry in a
+settled run never expires, and neither does one whose run a crash has just broken:
+only a full settled window forgives the history. The map does not grow without
+bound.
 
 A start the Worker refuses ``BUSY`` is neither a failure nor a success for this
 purpose (issue #3209): the entry is left exactly as it was. ``BUSY`` says the id is
@@ -329,10 +333,12 @@ _MAX_CONCURRENT_ACTIONS = 4
 class _Backoff:
     failures: int
     next_eligible_at: dt.datetime
-    # The window this entry last applied, and the first tick of the current
-    # unbroken run of ticks that read the row settled (issue #3303).
+    # The window this entry last applied, the first tick of the current unbroken
+    # run of ticks that read the row settled, and the last tick that read it
+    # settled (issue #3303).
     delay: dt.timedelta
     settled_since: dt.datetime | None = None
+    last_settled_at: dt.datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -422,23 +428,32 @@ class RunReconcilerTick:
         self, tracked: dict[ServerId, Server | None], now: dt.datetime
     ) -> None:
         # Forget an entry once its row has read settled for as long as the window
-        # it last applied (issue #3303). A candidate, an unsettled row or a missing
-        # one breaks the run, so a crash loop whose uptime is shorter than its
-        # backoff keeps escalating even when a tick catches it running.
+        # it last applied (issue #3303). A candidate or an unsettled row breaks the
+        # run, so a crash loop whose uptime is shorter than its backoff keeps
+        # escalating even when a tick catches it running. A deleted row can never
+        # diverge again, so its entry goes at once.
         for server_id, attempt in list(self._attempts.items()):
+            if server_id in tracked and tracked[server_id] is None:
+                del self._attempts[server_id]
+                continue
             server = tracked.get(server_id)
             if server is None or not _is_settled(server):
                 attempt.settled_since = None
                 continue
             if attempt.settled_since is None:
                 attempt.settled_since = now
+            attempt.last_settled_at = now
             if now - attempt.settled_since >= attempt.delay:
                 del self._attempts[server_id]
 
     def _expire_stale(self, now: dt.datetime) -> None:
-        # Time-based expiry for entries whose row is never read settled (``tick`` clears
-        # those), so the map does not grow without bound, WITHOUT membership-based
-        # cleanup. A crash-looping server flaps observed
+        # Time-based expiry for entries whose row is neither settled nor deleted
+        # (``_forgive_settled`` owns both), so the map does not grow without bound,
+        # WITHOUT membership-based cleanup. The slack runs from the later of
+        # next_eligible_at and the last settled read: a settled read is the server
+        # re-arriving, so an entry in a settled run never expires, and neither does
+        # one whose run a crash just broke, which would otherwise forgive the
+        # history before a full settled window. A crash-looping server flaps observed
         # crashed -> starting -> crashed; while starting it drops out of
         # list_reconcilable, so a membership check ("absent now") would erase its
         # backoff every cycle and reset the failure count — defeating the
@@ -451,7 +466,11 @@ class RunReconcilerTick:
             server_id
             for server_id, attempt in self._attempts.items()
             if now
-            >= attempt.next_eligible_at + dt.timedelta(seconds=self.backoff_max_seconds)
+            >= max(
+                attempt.next_eligible_at,
+                attempt.last_settled_at or attempt.next_eligible_at,
+            )
+            + dt.timedelta(seconds=self.backoff_max_seconds)
         ]
         for server_id in expired:
             del self._attempts[server_id]
