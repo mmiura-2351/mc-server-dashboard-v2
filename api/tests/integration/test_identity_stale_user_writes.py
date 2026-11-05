@@ -9,7 +9,8 @@ cannot reactivate an account deactivated after it read it. (A deactivation reads
 its target under lock, #3239, so a grant cannot commit between its read and its
 write.) The password change additionally
 compares the hash it verified against, so a stale change cannot replace a password
-that changed since.
+that changed since. A grant or reactivation whose target is deleted after its
+read matches no row and reports the user missing instead of success (#3247).
 
 Runs only when ``MCD_TEST_DATABASE_URL`` is set (a real PostgreSQL); skipped
 otherwise (TESTING.md Section 5), mirroring ``test_identity_repositories.py``.
@@ -48,7 +49,10 @@ from mc_server_dashboard_api.identity.application.update_profile import (
     UpdateProfile,
 )
 from mc_server_dashboard_api.identity.domain.entities import User
-from mc_server_dashboard_api.identity.domain.errors import InvalidCredentialsError
+from mc_server_dashboard_api.identity.domain.errors import (
+    InvalidCredentialsError,
+    UserNotFoundError,
+)
 from mc_server_dashboard_api.identity.domain.password_policy import PasswordPolicy
 from mc_server_dashboard_api.identity.domain.value_objects import UserId, Username
 from tests.identity.fakes import FakeClock, StubHasher, make_user
@@ -145,6 +149,12 @@ async def _load(factory: async_sessionmaker[AsyncSession], user_id: UserId) -> U
         user = await uow.users.get_by_id(user_id)
     assert user is not None
     return user
+
+
+async def _delete(factory: async_sessionmaker[AsyncSession], user_id: UserId) -> None:
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.users.delete(user_id)
+        await uow.commit()
 
 
 async def _stale_rename(
@@ -286,3 +296,48 @@ async def test_stale_password_change_is_refused_after_a_concurrent_change(
 
     persisted = await _load(factory, target.id)
     assert persisted.password_hash == f"hashed::{_NEW}"
+
+
+async def test_grant_to_a_user_deleted_after_the_read_is_not_found(
+    engine: AsyncEngine,
+) -> None:
+    factory = create_session_factory(engine)
+    target = make_user(username="target", email="target@example.com")
+    await _seed(factory, target)
+
+    pause = _Pause()
+    grant = SetPlatformAdmin(
+        uow=_PausingUnitOfWork(factory, pause), clock=FakeClock(_NOW)
+    )
+    stale = asyncio.create_task(grant(target_id=target.id, grant=True))
+    await pause.read_done.wait()
+    await _delete(factory, target.id)
+    pause.resume.set()
+
+    with pytest.raises(UserNotFoundError):
+        await stale
+
+
+async def test_reactivation_of_a_user_deleted_after_the_read_is_not_found(
+    engine: AsyncEngine,
+) -> None:
+    factory = create_session_factory(engine)
+    actor = make_user(
+        username="actor", email="actor@example.com", is_platform_admin=True
+    )
+    target = make_user(username="target", email="target@example.com", active=False)
+    await _seed(factory, actor, target)
+
+    pause = _Pause()
+    reactivate = SetUserActive(
+        uow=_PausingUnitOfWork(factory, pause), clock=FakeClock(_NOW)
+    )
+    stale = asyncio.create_task(
+        reactivate(actor_id=actor.id, target_id=target.id, active=True)
+    )
+    await pause.read_done.wait()
+    await _delete(factory, target.id)
+    pause.resume.set()
+
+    with pytest.raises(UserNotFoundError):
+        await stale
