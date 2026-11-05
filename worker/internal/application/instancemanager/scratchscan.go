@@ -1,6 +1,7 @@
 package instancemanager
 
 import (
+	"context"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -200,7 +201,7 @@ func heldGeneration(workingDir, serverID string, regions regioncheck.Checker, qu
 		}
 		return gen
 	}
-	report, err := regions.CheckWorkingSet(workingDir)
+	report, err := regions.CheckWorkingSet(context.Background(), workingDir)
 	if err != nil {
 		if log != nil {
 			log.Warn("held-set region fsck failed; advertising recorded generation",

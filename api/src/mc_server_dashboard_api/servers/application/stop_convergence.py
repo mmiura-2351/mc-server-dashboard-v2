@@ -34,12 +34,12 @@ superseded (a superseding session fails the old one's commands, so none of them
 can linger), or when the command is dropped unsent as stale. Once nothing is in
 flight, the reconciler's stale-stop arm converges a still-held row.
 
-What this does NOT guarantee is that a result arrives in bounded time on a live
-session. The Worker bounds the snapshot's upload with ``transfer_deadline``
-(CONTROL_PLANE.md Section 5.2), but not the whole command: the pre-pack check and
-the pack itself run outside that deadline. So a Worker that keeps heartbeating but
-never finishes packing holds the server in flight, refusing operator stops and
-reconciler ticks for it, until its session ends.
+A result does arrive in bounded time on a live session. The Worker answers a
+snapshot command by ``transfer_deadline`` (CONTROL_PLANE.md Section 5.2) whatever
+its work is blocked on, abandoning work stuck on storage. So a final snapshot
+holds the server in flight for at most that long, not until the session ends.
+That answer does not rule out a late publish: an abandoned upload can still land
+after a failure result.
 
 In-process, deliberately. The API is a single instance (REQUIREMENTS.md
 NFR-SCALE-1), and the state the flows coordinate on is already in this process
